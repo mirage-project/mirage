@@ -284,7 +284,7 @@ int TaskRegister::register_paged_attention_task(
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
+  code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc->input_ptrs[3],");
@@ -1021,129 +1021,130 @@ int TaskRegister::register_paged_attention_hopper_task(
   int const num_pages = (max_seq_len + page_size - 1) / page_size;
   int const num_head_group = qkv_stride / head_dim / (num_q_heads_per_kv + 2);
 
-  code.e("using TMA_Q = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $, $, "
-         "$, $, $, $, $, $, $, true>;",
-         B,
-         M,
-         S,
-         max_tokens,         /* GMEM_DEPTH */
-         qkv_rows,           /* GMEM_ROW   */
-         head_dim,           /* GMEM_COL   */
-         max_tokens,         /* SMEM_DEPTH */
-         num_q_heads_per_kv, /* SMEM_ROW   */
-         TMA_CP_ASYNC_SIZE,  /* SMEM_COL   */
-         qkv_stride,         /* GMEM_STRIDE_DEPTH */
-         head_dim,           /* GMEM_STRIDE_ROW   */
-         1,                  /* GMEM_STRIDE_COL   */
-         1,                  /* SMEM_REPEAT_ROW   */
-         smem_repeat_col,    /* SMEM_REPEAT_COL   */
-         q_smem_stride       /* SMEM_STRIDE       */
-  );
+  // code.e("using TMA_Q = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $, $,
+  // "
+  //        "$, $, $, $, $, $, $, true>;",
+  //        B,
+  //        M,
+  //        S,
+  //        max_tokens,         /* GMEM_DEPTH */
+  //        qkv_rows,           /* GMEM_ROW   */
+  //        head_dim,           /* GMEM_COL   */
+  //        max_tokens,         /* SMEM_DEPTH */
+  //        num_q_heads_per_kv, /* SMEM_ROW   */
+  //        TMA_CP_ASYNC_SIZE,  /* SMEM_COL   */
+  //        qkv_stride,         /* GMEM_STRIDE_DEPTH */
+  //        head_dim,           /* GMEM_STRIDE_ROW   */
+  //        1,                  /* GMEM_STRIDE_COL   */
+  //        1,                  /* SMEM_REPEAT_ROW   */
+  //        smem_repeat_col,    /* SMEM_REPEAT_COL   */
+  //        q_smem_stride       /* SMEM_STRIDE       */
+  // );
 
-  code.e("using TMA_KV = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $, $, "
-         "$, $, $, $, $, $, $, true>;",
-         B,
-         M,
-         S,
-         max_tokens,               /* GMEM_DEPTH */
-         qkv_rows,                 /* GMEM_ROW   */
-         head_dim,                 /* GMEM_COL   */
-         max_tokens,               /* SMEM_DEPTH */
-         1,                        /* SMEM_ROW   */
-         TMA_CP_ASYNC_SIZE,        /* SMEM_COL   */
-         qkv_stride,               /* GMEM_STRIDE_DEPTH */
-         head_dim,                 /* GMEM_STRIDE_ROW   */
-         1,                        /* GMEM_STRIDE_COL   */
-         1,                        /* SMEM_REPEAT_ROW   */
-         smem_repeat_col,          /* SMEM_REPEAT_COL   */
-         non_cached_kv_smem_stride /* SMEM_STRIDE       */
-  );
+  // code.e("using TMA_KV = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $,
+  // $, "
+  //        "$, $, $, $, $, $, $, true>;",
+  //        B,
+  //        M,
+  //        S,
+  //        max_tokens,               /* GMEM_DEPTH */
+  //        qkv_rows,                 /* GMEM_ROW   */
+  //        head_dim,                 /* GMEM_COL   */
+  //        max_tokens,               /* SMEM_DEPTH */
+  //        1,                        /* SMEM_ROW   */
+  //        TMA_CP_ASYNC_SIZE,        /* SMEM_COL   */
+  //        qkv_stride,               /* GMEM_STRIDE_DEPTH */
+  //        head_dim,                 /* GMEM_STRIDE_ROW   */
+  //        1,                        /* GMEM_STRIDE_COL   */
+  //        1,                        /* SMEM_REPEAT_ROW   */
+  //        smem_repeat_col,          /* SMEM_REPEAT_COL   */
+  //        non_cached_kv_smem_stride /* SMEM_STRIDE       */
+  // );
 
-  code.e("using TMA_PAGED_KV_CACHE = kernel::tma::tma_4d<bfloat16, $, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, $, $, $, $, $, true>;",
-         B,
-         M,
-         S,
-         num_pages,                             /* GMEM_OUTERMOST_ */
-         page_size,                             /* GMEM_DEPTH   */
-         num_head_group,                        /* GMEM_ROW   */
-         head_dim,                              /* GMEM_COL   */
-         1,                                     /* SMEM_OUTERMOST_ */
-         KV_TILE_SIZE,                          /* SMEM_DEPTH   */
-         num_q_heads_per_kv,                    /* SMEM_ROW   */
-         TMA_CP_ASYNC_SIZE,                     /* SMEM_COL   */
-         page_size * head_dim * num_head_group, /* GMEM_STRIDE_OUTERMOST_ */
-         page_size * head_dim,                  /* GMEM_STRIDE_DEPTH */
-         head_dim,                              /* GMEM_STRIDE_ROW   */
-         1,                                     /* GMEM_STRIDE_COL   */
-         1,                                     /* SMEM_REPEAT_ROW   */
-         smem_repeat_col,                       /* SMEM_REPEAT_COL   */
-         kv_smem_stride                         /* SMEM_STRIDE       */
-  );
+  // code.e("using TMA_PAGED_KV_CACHE = kernel::tma::tma_4d<bfloat16, $, $, $,
+  // $, "
+  //        "$, $, $, $, $, $, $, $, $, $, $, $, $, $, true>;",
+  //        B,
+  //        M,
+  //        S,
+  //        num_pages,                             /* GMEM_OUTERMOST_ */
+  //        page_size,                             /* GMEM_DEPTH   */
+  //        num_head_group,                        /* GMEM_ROW   */
+  //        head_dim,                              /* GMEM_COL   */
+  //        1,                                     /* SMEM_OUTERMOST_ */
+  //        KV_TILE_SIZE,                          /* SMEM_DEPTH   */
+  //        num_q_heads_per_kv,                    /* SMEM_ROW   */
+  //        TMA_CP_ASYNC_SIZE,                     /* SMEM_COL   */
+  //        page_size * head_dim * num_head_group, /* GMEM_STRIDE_OUTERMOST_ */
+  //        page_size * head_dim,                  /* GMEM_STRIDE_DEPTH */
+  //        head_dim,                              /* GMEM_STRIDE_ROW   */
+  //        1,                                     /* GMEM_STRIDE_COL   */
+  //        1,                                     /* SMEM_REPEAT_ROW   */
+  //        smem_repeat_col,                       /* SMEM_REPEAT_COL   */
+  //        kv_smem_stride                         /* SMEM_STRIDE       */
+  // );
 
-  code.e("using TMA_OUTPUT = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, true>;",
-         B,
-         M,
-         S,
-         max_tokens,
-         num_q_heads_per_kv * num_head_group,
-         head_dim,
-         max_tokens,
-         num_q_heads_per_kv,
-         TMA_CP_ASYNC_SIZE,
-         head_dim * num_head_group * num_head_group,
-         head_dim,
-         1,
-         1,
-         smem_repeat_col,
-         max_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE);
+  // code.e("using TMA_OUTPUT = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $,
+  // "
+  //        "$, $, $, $, $, $, $, $, $, true>;",
+  //        B,
+  //        M,
+  //        S,
+  //        max_tokens,
+  //        num_q_heads_per_kv * num_head_group,
+  //        head_dim,
+  //        max_tokens,
+  //        num_q_heads_per_kv,
+  //        TMA_CP_ASYNC_SIZE,
+  //        head_dim * num_head_group * num_head_group,
+  //        head_dim,
+  //        1,
+  //        1,
+  //        smem_repeat_col,
+  //        max_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE);
 
-  code.e("TMA_Q  tma_q "
-         "(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]));");
-  code.e("TMA_KV tma_k "
-         "(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][1]));");
-  code.e("TMA_KV tma_v "
-         "(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][2]));");
+  // code.e("TMA_Q  tma_q "
+  //        "(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]));");
+  // code.e("TMA_KV tma_k "
+  //        "(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][1]));");
+  // code.e("TMA_KV tma_v "
+  //        "(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][2]));");
 
-  code.e("TMA_PAGED_KV_CACHE "
-         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
-         "desc_ptrs[1][0]));");
-  code.e("TMA_PAGED_KV_CACHE "
-         "tma_paged_v_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
-         "desc_ptrs[2][0]));");
+  // code.e("TMA_PAGED_KV_CACHE "
+  //        "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
+  //        "desc_ptrs[1][0]));");
+  // code.e("TMA_PAGED_KV_CACHE "
+  //        "tma_paged_v_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
+  //        "desc_ptrs[2][0]));");
 
-  code.e("TMA_OUTPUT "
-         "tma_output(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs["
-         "0][0]));");
+  // code.e("TMA_OUTPUT "
+  //        "tma_output(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs["
+  //        "0][0]));");
 
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
-         "$, $, $, $, "
-         "TMA_Q, TMA_KV, TMA_PAGED_KV_CACHE, "
-         "TMA_OUTPUT, $>(",
+         "$, $, $, $, $, "
+         "$, $, $, $>(",
          num_q_heads_per_kv, /* NUM_QO_HEADS               */
          1,                  /* NUM_KV_HEADS               */
+         num_kv_heads,       /* NUM_QO_GROUPS              */
          kv_stride,          /* KV_CACHE_STRIDE            */
          qkv_stride,         /* QKV_STRIDE                 */
          output_size,        /* O_STRIDE (= num_q_heads*head_dim) */
          head_dim,           /* HEAD_DIM                   */
-         max_seq_len,        /* MAX_SEQ_LEN                */
-         page_size,          /* PAGE_SIZE                  */
-         max_tokens          /* MAX_TOKENS                 */
+         -1,          /* SEQ_LEN (not used for non-split KV tasks)          */
+         max_seq_len, /* MAX_SEQ_LEN                */
+         page_size,   /* PAGE_SIZE                  */
+         max_tokens,  /* MAX_TOKENS                 */
+         "false",     /* PARTITION_KV               */
+         1            /* NUM_KV_CHUNKS              */
   );
-  code.e("    tma_q,");
-  code.e("    tma_k,");
-  code.e("    tma_v,");
-  code.e("    tma_paged_k_cache,");
-  code.e("    tma_paged_v_cache,");
-  code.e("    tma_output,");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
+  code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0); // qk_norm
   code.e("    $,", params[3] > 0); // rope
   code.e("    task_desc->input_ptrs[3],");
@@ -1154,7 +1155,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    1e-6f,");
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    task_desc->head_group);");
+  code.e("    nullptr,"); // lse, not used for non-split KV tasks
+  code.e("    0);");      // kv_idx, not used for non-split KV tasks
 
   return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
 }
@@ -1968,7 +1970,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
+  code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc->input_ptrs[3],");
@@ -2363,7 +2365,7 @@ int TaskRegister::register_moe_linear_sm100_task(
   code.e("    mRoutingIndices,");
   code.e("    mMask,");
   code.e("    mOutput,");
-  code.e("    task_desc->expert_offset);");
+  code.e("    task_desc->task_metadata.expert_offset);");
   if (w13_linear) {
     return register_task_variant(TASK_MOE_W13_LINEAR_SM100, code.to_string());
   } else {
@@ -2649,7 +2651,7 @@ int TaskRegister::register_moe_linear_sm90_task(
   code.e("    mRoutingIndices,");
   code.e("    mMask,");
   code.e("    mOutput,");
-  code.e("    task_desc->expert_offset);");
+  code.e("    task_desc->task_metadata.expert_offset);");
   if (w13_linear) {
     return register_task_variant(TASK_MOE_W13_LINEAR_SM90, code.to_string());
   } else {
@@ -2807,6 +2809,237 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(
   code.e(");");
 
   return register_task_variant(TASK_SPLITK_LINEAR_SWAPAB_HOPPER,
+                               code.to_string());
+}
+
+int TaskRegister::register_paged_attention_split_kv_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_q_heads
+  // params[1]: num_kv_heads
+  // params[2]: qk_norm
+  // params[3]: rotary_emd
+  // params[4]: max_seq_len
+  // params[5]: page_size
+  // params[6]: num_kv_chunks
+  assert(params.size() == 7);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 2;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 3); // lse
+  assert(output_ops[1]->output_tensors[0].num_dims == 3); // output_tmp
+
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int head_dim = input_ops[1]->output_tensors[0].dim[3];
+  int output_size = head_dim * num_q_heads;
+  int kv_stride = head_dim * num_kv_heads;
+  int max_seq_len = params[4];
+  int page_size = params[5];
+  int num_kv_chunks = params[6];
+  // Assert that k_cache has the same head_dim
+  assert(input_ops[1]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
+  assert(input_ops[2]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
+  int max_tokens = input_ops[0]->dtensor.dim[0];
+  constexpr int SEQ_LEN_PER_BLOCK = 256;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::multitoken_paged_attention_split_kv_task_impl<bfloat16, $, "
+         "$, $, $, $, $, "
+         "$, $, $, $, $, $, $>(",
+         num_q_heads / num_kv_heads,
+         1,
+         num_kv_heads,
+         kv_stride,
+         qkv_stride,
+         output_size * num_kv_chunks, // o_stride should consider num_kv_chunks
+         head_dim,
+         SEQ_LEN_PER_BLOCK,
+         max_seq_len,
+         page_size,
+         max_tokens,
+         "true", // PARTITION_KV
+         num_kv_chunks);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $,", params[2] > 0);
+  code.e("    $,", params[3] > 0);
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->input_ptrs[4],");
+  code.e("    task_desc->input_ptrs[5],");
+  code.e("    task_desc->input_ptrs[6],");
+  code.e("    1e-6f,");
+  code.e("    1e-6f,");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->task_metadata.kv_idx);");
+  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_qo_heads_per_kv
+  // params[1]: head_dim
+  // params[2]: max_seq_len
+  // params[3]: page_size
+  // params[4]: num_kv_heads
+  assert(params.size() == 5);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int output_size = output_ops[0]->dtensor.dim[1];
+  int num_q_heads_per_kv = params[0];
+  int head_dim = params[1];
+  int max_seq_len = params[2];
+  int page_size = params[3];
+  int num_kv_heads = params[4];
+
+  int max_tokens = input_ops[0]->dtensor.dim[0];
+  constexpr int SEQ_LEN_PER_BLOCK = 256;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+
+  code.e("kernel::merge_splitkv<bfloat16, $, $, $, $, $, $, "
+         "$, $, $>(",
+         num_q_heads_per_kv,
+         1,
+         num_kv_heads,
+         head_dim,
+         max_tokens,
+         true,
+         (max_seq_len / SEQ_LEN_PER_BLOCK),
+         SEQ_LEN_PER_BLOCK,
+         page_size);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->task_metadata.merge_task_offset);");
+  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_paged_attention_split_kv_hopper_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_q_heads
+  // params[1]: num_kv_heads
+  // params[2]: qk_norm
+  // params[3]: rotary_emd
+  // params[4]: max_seq_len
+  // params[5]: page_size
+  // params[6]: num_kv_chunks
+  assert(params.size() == 7);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 2;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 3); // lse
+  assert(output_ops[1]->output_tensors[0].num_dims == 3); // output_tmp
+
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int head_dim = input_ops[1]->output_tensors[0].dim[3];
+  int output_size = head_dim * num_q_heads;
+  int kv_stride = head_dim * num_kv_heads;
+  int max_seq_len = params[4];
+  int page_size = params[5];
+  int num_kv_chunks = params[6];
+  // Assert that k_cache has the same head_dim
+  assert(input_ops[1]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
+  assert(input_ops[2]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
+  int max_tokens = input_ops[0]->dtensor.dim[0];
+  constexpr int SEQ_LEN_PER_BLOCK = 256;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, "
+         "$, $, $, $, $, "
+         "$, $, $, $, $, $, $>(",
+         num_q_heads / num_kv_heads, /* NUM_QO_HEADS */
+         1,                          /* NUM_KV_HEADS */
+         num_kv_heads,               /* NUM_QO_GROUPS */
+         kv_stride,                  /* KV_CACHE_STRIDE */
+         qkv_stride,                 /* QKV_STRIDE */
+         output_size *
+             num_kv_chunks, /* O_STRIDE (should consider num_kv_chunks) */
+         head_dim,          /* HEAD_DIM */
+         SEQ_LEN_PER_BLOCK, /* SEQ_LEN */
+         max_seq_len,       /* MAX_SEQ_LEN */
+         page_size,         /* PAGE_SIZE */
+         max_tokens,        /* MAX_TOKENS */
+         "true",            /* PARTITION_KV */
+         num_kv_chunks);    /* NUM_KV_CHUNKS */
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $,", params[2] > 0);
+  code.e("    $,", params[3] > 0);
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->input_ptrs[4],");
+  code.e("    task_desc->input_ptrs[5],");
+  code.e("    task_desc->input_ptrs[6],");
+  code.e("    1e-6f,");
+  code.e("    1e-6f,");
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[1],"); // output_tmp
+  code.e("    task_desc->output_ptrs[0],"); // lse
+  code.e("    task_desc->task_metadata.kv_idx);");
+  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER,
                                code.to_string());
 }
 

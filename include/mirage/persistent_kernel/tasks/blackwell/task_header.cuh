@@ -1,5 +1,7 @@
 // Ampere task impls
 #include "tasks/ampere/embedding.cuh"
+#include "tasks/ampere/merge_splitkv.cuh"
+#include "tasks/ampere/multitoken_paged_attention_split_kv.cuh"
 #include "tasks/ampere/silu_mul.cuh"
 // Hopper task impls
 #include "tasks/cute/hopper/gemm_ws.cuh"
