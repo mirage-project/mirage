@@ -506,7 +506,7 @@ __global__ void multitoken_paged_attention_wrapper(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -563,7 +563,7 @@ void launch_multitoken_paged_attention(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -728,7 +728,7 @@ void multitoken_paged_attention(
     torch::Tensor paged_kv_indptr_buffer,
     torch::Tensor paged_kv_indices_buffer,
     torch::Tensor paged_kv_last_page_len_buffer,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     torch::optional<torch::Tensor> q_norm_weight = torch::nullopt,
@@ -1666,10 +1666,7 @@ __global__ void sampling_from_logits_test_wrapper(DType *logits,
                                                   uint64_t philox_seed,
                                                   uint64_t philox_offset,
                                                   int batch_size) {
-  kernel::sampling_from_logits_kernel<BLOCK_THREADS,
-                                      VEC_SIZE,
-                                      DType,
-                                      IdType>(
+  kernel::sampling_from_logits_kernel<BLOCK_THREADS, VEC_SIZE, DType, IdType>(
       logits, output, vocab_size, philox_seed, philox_offset, batch_size);
 }
 

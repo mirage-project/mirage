@@ -73,6 +73,22 @@ using namespace kernel;
   } while (0)
 #endif
 
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t err = call;                                                    \
+    if (err != cudaSuccess) {                                                  \
+      fprintf(stderr,                                                          \
+              "CUDA error at %s:%d: %s\n",                                     \
+              __FILE__,                                                        \
+              __LINE__,                                                        \
+              cudaGetErrorString(err));                                        \
+      exit(1);                                                                 \
+    }                                                                          \
+  } while (0)
+#endif
+
+// #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
@@ -176,7 +192,7 @@ __device__ __forceinline__ bool
   int page_queue_tail = *config.page_queue_tail;
   // Step 1: finalize previous batch
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       // Step 1.1: move output_tokens to tokens
       int step = config.step[request_id];
@@ -223,7 +239,7 @@ __device__ __forceinline__ bool
   int num_reqs = 0, num_tokens = 0;
   num_pages = 0;
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       int kv_indptr = config.paged_kv_indptr_buffer[i];
       int num_old_pages = config.paged_kv_indptr_buffer[i + 1] - kv_indptr;
@@ -1114,13 +1130,18 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
+    // if (ft.task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 || ft.task_type
+    // == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
+    //   printf("ft.kv_idx %d\n", ft.kv_idx);
+    //   printf("ft.merge_task_offset %d\n", ft.merge_task_offset);
+    // }
     // Reinterpret part of TaskDesc to save xfer_size information
     if (ft.task_type == TASK_NVSHMEM_COPY) {
       int size_in_bytes = 2;
       for (int i = 0; i < ft.inputs[0].num_dims; i++) {
         size_in_bytes *= ft.inputs[0].dim[i];
       }
-      task_desc.xfer_size_in_bytes = size_in_bytes;
+      task_desc.task_metadata.xfer_size_in_bytes = size_in_bytes;
     }
     all_tasks.push_back(task_desc);
   }

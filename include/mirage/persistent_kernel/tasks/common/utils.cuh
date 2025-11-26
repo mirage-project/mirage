@@ -76,6 +76,16 @@ __device__ __forceinline__ float ptx_exp2(float x) {
   return y;
 }
 
+/*!
+ * \brief Wrapper of PTX lg2.approx instruction, which computes log2(x)
+ * \param x input
+ */
+__forceinline__ __device__ float ptx_log2(float x) {
+  float y;
+  asm volatile("lg2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+}
+
 static __device__ __forceinline__ int lane_id() {
   return threadIdx.x & 0x1f;
 }
