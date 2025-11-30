@@ -1347,7 +1347,21 @@ class PersistentKernel:
         stream = kwargs.get("default_stream", None)
         if stream is None:
            stream = torch.cuda.current_stream()
-        self.launch_func(stream)
+        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
+        stream_ptr = 0
+        if hasattr(stream, "cuda_stream"):
+            try:
+                stream_ptr = int(stream.cuda_stream)
+            except Exception:
+                try:
+                    stream_ptr = int(stream.cuda_stream.value)
+                except Exception as e:
+                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
+        elif isinstance(stream, int):
+            stream_ptr = stream
+        else:
+            raise ValueError("Invalid stream object")
+        self.launch_func(stream_ptr)
         if self.profiler_tensor is not None:
             from .profiler_persistent import export_to_perfetto_trace
             
