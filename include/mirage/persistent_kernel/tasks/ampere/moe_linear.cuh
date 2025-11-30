@@ -31,7 +31,7 @@
 
 #define WARM_UP 0
 
-#define DEBUG_EXPERT_IDX 3
+#define DEBUG_EXPERT_IDX 95
 
 constexpr int log2_constexpr(int n, int p = 0) {
   return (n <= 1) ? p : log2_constexpr(n >> 1, p + 1);
@@ -308,7 +308,7 @@ __device__ __forceinline__ void
   // (128,8,64):(12288,1536,_1)
   // TODO(Wenqin): try to use NUM_TOPK as first dim for the output later.
   Tensor D = make_tensor(make_gmem_ptr((T *)d_output),
-                         make_shape(NUM_EXPERTS, BATCH_SIZE, OUTPUT_SIZE),
+                         make_shape(NUM_TOPK, BATCH_SIZE, OUTPUT_SIZE),
                          make_stride(BATCH_SIZE * OUTPUT_STRIDE, OUTPUT_STRIDE, Int<1>{}));
   // (128,8,64):(12288,1536,_1)
   Tensor R = make_tensor(make_gmem_ptr((T *)d_residual),
@@ -363,6 +363,9 @@ __device__ __forceinline__ void
     // if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
     //   printf("expert_idx: %d, expert_offset: %d\n", expert_idx, expert_offset);
     // }
+    // if(blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+    //   printf("expert_idx: %d, expert_offset: %d, first scalar: %f\n", expert_idx, expert_offset, float(B(expert_idx, 0, 0)));
+    // }
 #pragma unroll
     for (int m_iter = 0; m_iter < LoopM; ++m_iter) {
       // int m_iter = 0;
@@ -390,8 +393,16 @@ __device__ __forceinline__ void
             make_tile(Int<kTileN>{}, Int<kTileK>{}),
             make_coord(n_iter, _)); // (kTileN, kTileK, n, k)
                                     // (_64,_128,16):(2048,_1,_128)
+        // if(m_iter == 0 &&
+        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+        //   printf("for gB, expert_idx: %d, first scalar: %f\n", expert_idx, float(gB(0,0,0)));
+        // }
         Tensor gD = local_tile(
-            D(expert_idx, _, _),
+            // TODO(Wenqin): the gD at here is not what the real D we would
+            // like to store data, it's just a logical tensor for us to get the
+            // layout, we will use D to store the final data, maybe try to fix
+            // it later.
+            D(0, _, _),
             make_tile(Int<kTileM>{}, Int<kTileN>{}),
             make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
                                         // (_16,_64):(1536,_1)
@@ -421,12 +432,12 @@ __device__ __forceinline__ void
 
         auto cta_coord = make_coord(
             n_iter, m_iter, _); // make_coord(m_iter,_) / make_coord(n_iter,_)
-        // (_64,_128,16):(_1@1,_1@2,_128@2)
+        // ArithTuple(42,0,_0) o (_64,_128,16):(_1@1,_1@2,_128@2)
         // NOTE: it should be keep same shape as gB
         auto cta_cB = local_tile(cB(expert_idx, _, _),
                                   make_tile(Int<kTileN>{}, Int<kTileK>{}),
                                   make_coord(n_iter, _)); // same as gB
-        // (_16,_64):(_1@1,_1@2)
+        // ArithTuple(42,0,0) o (_16,_64):(_1@1,_1@2)
         auto cta_cC = local_tile(cC(expert_idx, _, _),
                                   make_tile(Int<kTileM>{}, Int<kTileN>{}),
                                   make_coord(m_iter, n_iter)); // same as gD
@@ -512,7 +523,9 @@ __device__ __forceinline__ void
 
         CUTE_UNROLL
         for (int i = 0; i < size<0>(tCpC); ++i) {
-          // TODO(Wenqin): figure it out later.
+          // TODO(Wenqin): the predicate just works for a group for 8(each 
+          // thread load 8 elements) * 128 (threads) = 1024 elements? because
+          // there is not fine-granularity control?
           tCpC(i, 0) =
               elem_less(tCcC(i, 0, 0), shape(D(0,_, _))); // Remove first dim for experts in D became (BATCH_SIZE, OUTPUT_SIZE)
         }
@@ -606,8 +619,10 @@ __device__ __forceinline__ void
                                   // use 1, placeholder
             make_stride(Int<1>{}, Int<0>{}) // broadcast to K
         );
-        // TODO(Wenqin): the predicate just works for a group for 8(each thread load 8 elements) * 128 (threads) = 1024 elements?
-        // because there is not fine-granularity control?
+        
+        // TODO(Wenqin): we don't use tBpB anymore, we need to add some
+        // static_assert for this, or introduce tBpB again and fix some
+        // correctness issue.
         // (_8,_1):(_1,_0)
         auto tBpB = make_tensor<bool>(make_shape(size<1>(tBcB), Int<1>{}),
                                       make_stride(Int<1>{}, Int<0>{}));
@@ -623,7 +638,16 @@ __device__ __forceinline__ void
         for (int in = 0; in < size<0>(tBpB); ++in) {
           tBpB(in, 0) =
               elem_less(get<0>(tBcB(0, in, 0, 0)), shape<0>(B(0, _, _))); // n < N ?
+          // if(m_iter == 0 &&
+          //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+          //   printf("in: %d, get<0>(tBcB(0, in, 0, 0): %d, shape<0>(B(0, _, _)): %d\n", in, get<0>(tBcB(0, in, 0, 0)), shape<0>(B(0, _, _)));
+          // }
         }
+        // if(m_iter == 0 &&
+        //       n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+        //   PRINT(tBcB);
+        //   PRINT(tBcB(0, 0, 0, 0));
+        // }
 
 #if DEBUG_LOG
         if(activated_expert_offset == expert_offset &&
@@ -648,6 +672,14 @@ __device__ __forceinline__ void
         int ismem_read_stage = 0;
         int ismem_write_stage = 0;
 
+        // if(m_iter == 0 &&
+        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+        //   printf("before load, for tBsB, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBsB(0,0,0,0)));
+        //   for (int in = 0; in < size<0>(tBpB); ++in) {
+        //     printf("tBpB(%d, 0): %d\n", in, int(tBpB(in, 0)));
+        //   }
+        // }
+
       // warm up
 #pragma unroll
         for (int istage = 0; istage < kStage - 1; ++istage) {
@@ -663,8 +695,7 @@ __device__ __forceinline__ void
                         tApA,
                         tAgA_copy(_, _, _, istage),
                         tAsA_copy(_, _, _, istage));
-          cute::copy_if(g2s_tiled_copy_b,
-                        tBpB,
+          cute::copy(g2s_tiled_copy_b,
                         tBgB_copy(_, _, _, istage),
                         tBsB_copy(_, _, _, istage));
           cp_async_fence();
@@ -688,26 +719,41 @@ __device__ __forceinline__ void
         constexpr int ntile = REDUCTION_SIZE / kTileK; // 2048 / 128 = 16 tiles for the whole K dim reduction
         constexpr int nk = size<2>(tCrA);              // 8 iteartions inside a tile
 
-        // printf("11111\n");
-        if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
-          printf("expert: %d's regs for A:\n", expert_idx);
-          for (int i = 0; i < cute::size<0>(tCrA_view.layout()); i++) {
-            auto v = tCrA_view(i, 0, ik);      // load element
-            float fv = float(v);    // convert half/bfloat16 to float
-            printf("%.4f ", fv);
-          }
-          printf("\n");
-        }
+        // if(m_iter == 0 &&
+        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+        //   printf("for tBsB, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBsB(0,0,0,0)));
+        // }
 
-        if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
-          printf("expert: %d's regs for B:\n", expert_idx);
-          for (int i = 0; i < cute::size<0>(tCrB_view.layout()); i++) {
-            auto v = tCrB_view(i, 0, ik);      // load element
-            float fv = float(v);    // convert half/bfloat16 to float
-            printf("%.4f ", fv);
-          }
-          printf("\n");
-        }
+        // if(m_iter == 0 &&
+        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+        //   printf("for tBsB_copy, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBsB_copy(0,0,0,0)));
+        // }
+
+        // if(m_iter == 0 &&
+        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
+        //   printf("for tBgB_copy, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBgB_copy(0,0,0,0)));
+        // }
+
+        // printf("11111\n");
+        // if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
+        //   printf("expert: %d's regs for A:\n", expert_idx);
+        //   for (int i = 0; i < cute::size<0>(tCrA_view.layout()); i++) {
+        //     auto v = tCrA_view(i, 0, ik);      // load element
+        //     float fv = float(v);    // convert half/bfloat16 to float
+        //     printf("%.4f ", fv);
+        //   }
+        //   printf("\n");
+        // }
+
+        // if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
+        //   printf("expert: %d's regs for B:\n", expert_idx);
+        //   for (int i = 0; i < cute::size<0>(tCrB_view.layout()); i++) {
+        //     auto v = tCrB_view(i, 0, ik);      // load element
+        //     float fv = float(v);    // convert half/bfloat16 to float
+        //     printf("%.4f ", fv);
+        //   }
+        //   printf("\n");
+        // }
 
 #pragma unroll 1
         for (int itile = 0; itile < ntile; ++itile) {
@@ -725,8 +771,7 @@ __device__ __forceinline__ void
                               tApA,
                               tAgA_copy(_, _, _, itile_to_read),
                               tAsA_copy(_, _, _, ismem_write_stage));
-                cute::copy_if(g2s_tiled_copy_b,
-                              tBpB,
+                cute::copy(g2s_tiled_copy_b,
                               tBgB_copy(_, _, _, itile_to_read),
                               tBsB_copy(_, _, _, ismem_write_stage));
 
@@ -754,6 +799,12 @@ __device__ __forceinline__ void
             cute::copy(s2r_tiled_copy_b,
                       tBsB(_, _, ik_next, ismem_read_stage),
                       tCrB_view(_, _, ik_next));
+            
+            // if(expert_idx == 95) {
+            //   if(float(tCrB(0, 0, ik)) != 95) {
+            //     printf("reg is %f\n", float(tCrB(0, 0, ik)));
+            //   }
+            // }
 
             cute::gemm(tiled_mma, tCrD, tCrA(_, _, ik), tCrB(_, _, ik), tCrD);
           } // ik
@@ -820,11 +871,14 @@ __device__ __forceinline__ void
         // cute::copy_if(s2g_tiled_copy_c, tCpC_ep, tCsC_s2g(_, _, _, 0), tCgC_s2g);
         constexpr int write_back_batch_size = kTileM < BATCH_SIZE ? kTileM : BATCH_SIZE;
         for(int i = threadIdx.x; i < write_back_batch_size * OUTPUT_SIZE; i += NUM_THREADS) {
-          const int b = i / OUTPUT_SIZE;
+          const int t = i / OUTPUT_SIZE;
           const int o = i % OUTPUT_SIZE;
 
-          if(tRoutingIndex(b) != 0) {
-            gD(b, o) = sC(b, o, 0);
+          if(tRoutingIndex(t) != 0) {
+            // Last 0 in sC just for pipeline stag, it should always be 0 in
+            // sC, because we just store one stage in pipeline.
+            // gD(b, o) = sC(b, o, 0);
+            D(tRoutingIndex(t) - 1, t, o) = sC(t, o, 0);
           }
         }
         // TODO(Wenqin): do we really need the below sync?

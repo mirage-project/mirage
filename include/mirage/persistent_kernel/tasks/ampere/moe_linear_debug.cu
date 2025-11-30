@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     std::vector<bfloat16> h_matrix_A(m * k);
     std::vector<bfloat16> h_matrix_B(experts_size * k * n);
     std::vector<bfloat16> h_residual(experts_size * m * n);
-    std::vector<bfloat16> h_output_matrix(experts_size * m * n);
+    std::vector<bfloat16> h_output_matrix(activate_experts_size * m * n);
 
     // Initialize host data (Example with dummy values)
     // for (size_t i = 0; i < h_matrix_A.size(); ++i) {
@@ -91,7 +91,8 @@ int main(int argc, char** argv) {
 
     for (int mm = 0; mm < m; mm ++) {
       for (int kk = 0; kk < k; kk ++) {
-        h_matrix_A[mm*k + kk] = __float2bfloat16(mm);
+        // h_matrix_A[mm*k + kk] = __float2bfloat16(mm);
+        h_matrix_A[mm*k + kk] = __float2bfloat16(1);
       }
     }
 
@@ -99,6 +100,9 @@ int main(int argc, char** argv) {
       for (int nn = 0; nn < n; nn ++) {
         for (int kk = 0; kk < k; kk ++) {
           h_matrix_B[e*n*k + nn*k + kk] = __float2bfloat16(e);
+          // if(e == 95 && nn == 0 && kk == 0) {
+          //   printf("expert 95 initialized as: %f\n", float(h_matrix_B[e*n*k + nn*k + kk]));
+          // }
         }
       }
     }
@@ -248,11 +252,11 @@ int main(int argc, char** argv) {
     }
 
     
-    printf("Output for some token in experts %d:\n", DEBUG_EXPERT_IDX);
+    printf("Some outputs for first activated expert in tokens:\n");
     for(int i = 0; i < m; i ++) {
       printf("token %d: ", i);
       for(int j = 0; j < 4; j ++) {
-        printf("%.4f, ", __bfloat162float(h_output_matrix[DEBUG_EXPERT_IDX*m*n + i*n + j]));
+        printf("%.4f, ", __bfloat162float(h_output_matrix[i*n + j]));
       }
       printf("\n");
     }
