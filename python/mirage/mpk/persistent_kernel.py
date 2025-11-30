@@ -147,8 +147,8 @@ def get_compile_command(
         # each host thread as default stream instead of using the same 
         # legacy stream for all host threads
         # This is important in multi-threaded environment.
-        "--default-stream",
-        "per-thread",
+        # "--default-stream",
+        # "per-thread",
         file_name,
         "-O3",
         # Use following flags when debugging
@@ -157,7 +157,7 @@ def get_compile_command(
         # "-G",
         # "--ptxas-options=-v",
         # "-Xptxas=-v",
-        # "-lineinfo",
+        "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",

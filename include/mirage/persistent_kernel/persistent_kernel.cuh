@@ -1264,6 +1264,13 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                             cudaStreamNonBlocking);
   cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream,
                             cudaStreamNonBlocking);
+  // Create events
+  cudaEventCreateWithFlags(&global_runtime_config.prepare_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.worker_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
+                           cudaEventDisableTiming);
 
   init_request_resources();
 #ifdef USE_NVSHMEM
@@ -1284,7 +1291,7 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     int end_of_task_graph_event_pos = global_runtime_config.num_events - 1;
     prepare_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                      dim3(128, 1, 1),
-                     default_stream>>>(global_runtime_config,
+                     0 /*smem*/, default_stream>>>(global_runtime_config,
                                         end_of_task_graph_event_pos);
     // cudaStreamSynchronize(NULL);
     cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
@@ -1399,6 +1406,9 @@ extern "C" void finalize_persistent_kernel() {
   nvshmem_finalize();
 #endif
   // Free worker and scheduler streams
+  cudaEventDestroy(global_runtime_config.prepare_done_event);
+  cudaEventDestroy(global_runtime_config.worker_done_event);
+  cudaEventDestroy(global_runtime_config.scheduler_done_event);
   cudaStreamDestroy(global_runtime_config.worker_stream);
   cudaStreamDestroy(global_runtime_config.scheduler_stream);
 }
