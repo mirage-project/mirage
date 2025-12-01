@@ -1355,7 +1355,7 @@ void launch_moe_linear(void const *input_ptr,
 
 #define MOE_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE)                                 \
   case BATCH_SIZE:                                                             \
-    switch (output.size(1)) {                                                  \
+    switch (output.size(2)) {                                                  \
       MOE_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64)                              \
       default:                                                                 \
         printf("Unsupported output size in test: %zu\n", output.size(1));      \

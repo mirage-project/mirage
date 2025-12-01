@@ -3,7 +3,7 @@ import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
 
-g = torch.Generator(device="cuda").manual_seed(12)
+torch.cuda.manual_seed_all(0)
 
 reduction_sizes = [2048]
 output_sizes = [64]
@@ -33,8 +33,6 @@ for reduction_size in reduction_sizes:
         expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
         torch_out = torch.zeros((batch_size, num_topk, output_size), device="cuda", dtype=torch.bfloat16)
         for i, expert_idx in enumerate(expert_hit):
-            if (i+expert_offset) % expert_stride != 0:
-                continue
             # print(f"idx: {i}, expert_idx: {expert_idx.item()}")
             expert_w = w[expert_idx].squeeze(0)
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
@@ -68,6 +66,20 @@ for reduction_size in reduction_sizes:
             residual = None
 
         runtime_kernel.moe_linear(x, w, residual, output, mpk_routing_indices, mpk_expert_mask)
+        print("output(4,5,20):")
+        print(output[4,5,20])
+        print("torch_out(4,5,20):")
+        print(torch_out[4,5,20])
+
+        print("output(0,0,0):")
+        print(output[0,0,0])
+        print("torch_out(0,0,0):")
+        print(torch_out[0,0,0])
+
+        print("output(7,0,0):")
+        print(output[7,0,0])
+        print("torch_out(7,0,0):")
+        print(torch_out[7,0,0])
         
         torch.testing.assert_close(
             output,
@@ -77,20 +89,20 @@ for reduction_size in reduction_sizes:
         )
         print("Test passed!")
 
-        # Warm-up
-        for _ in range(16):
-            runtime_kernel.moe_linear(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
+        # # Warm-up
+        # for _ in range(16):
+        #     runtime_kernel.moe_linear(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
 
-        torch.cuda.synchronize()
-        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-            enable_timing=True
-        )
-        repetitions = 1000
-        starter.record()
-        for rep in range(repetitions):
-            runtime_kernel.moe_linear(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
-        ender.record()
-        torch.cuda.synchronize()
-        total_time = starter.elapsed_time(ender)
-        avg_time = total_time / repetitions
-        print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+        # torch.cuda.synchronize()
+        # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+        #     enable_timing=True
+        # )
+        # repetitions = 1000
+        # starter.record()
+        # for rep in range(repetitions):
+        #     runtime_kernel.moe_linear(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
+        # ender.record()
+        # torch.cuda.synchronize()
+        # total_time = starter.elapsed_time(ender)
+        # avg_time = total_time / repetitions
+        # print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
