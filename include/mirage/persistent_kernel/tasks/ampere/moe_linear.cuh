@@ -10,6 +10,9 @@
 #include <cute/tensor.hpp>
 #include <type_traits>
 
+// Comment below out when building unit test for MPK.
+// using bfloat16 = __nv_bfloat16;
+
 #define MOE_NUM_THREADS 128
 #define DEBUG_LOG 0
 
@@ -306,10 +309,9 @@ __device__ __forceinline__ void
                          make_shape(NUM_EXPERTS, OUTPUT_SIZE, REDUCTION_SIZE),
                          make_stride(OUTPUT_STRIDE * REDUCTION_SIZE, REDUCTION_SIZE, Int<1>{}));
   // (128,8,64):(12288,1536,_1)
-  // TODO(Wenqin): try to use NUM_TOPK as first dim for the output later.
   Tensor D = make_tensor(make_gmem_ptr((T *)d_output),
-                         make_shape(NUM_TOPK, BATCH_SIZE, OUTPUT_SIZE),
-                         make_stride(BATCH_SIZE * OUTPUT_STRIDE, OUTPUT_STRIDE, Int<1>{}));
+                         make_shape(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE),
+                         make_stride(NUM_TOPK * OUTPUT_STRIDE, OUTPUT_STRIDE, Int<1>{}));
   // (128,8,64):(12288,1536,_1)
   Tensor R = make_tensor(make_gmem_ptr((T *)d_residual),
                          make_shape(NUM_EXPERTS, BATCH_SIZE, OUTPUT_SIZE),
@@ -346,7 +348,7 @@ __device__ __forceinline__ void
   // create identity tensors for predicate
   auto cA = make_identity_tensor(shape(A)); // (m,k) -> (m,k)
   auto cB = make_identity_tensor(shape(B)); // (num_experts,n,k) -> (num_experts,n,k)
-  auto cC = make_identity_tensor(shape(D)); // (num_experts,m,n) -> (num_experts,m,n)
+  auto cC = make_identity_tensor(shape(D)); // (m,num_topk,n) -> (m,num_topk,n)
 
   int num_activated_experts =
       mMask(NUM_EXPERTS); // last element stores num activated experts
@@ -402,7 +404,7 @@ __device__ __forceinline__ void
             // like to store data, it's just a logical tensor for us to get the
             // layout, we will use D to store the final data, maybe try to fix
             // it later.
-            D(0, _, _),
+            D(_, 0, _),
             make_tile(Int<kTileM>{}, Int<kTileN>{}),
             make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
                                         // (_16,_64):(1536,_1)
@@ -527,7 +529,7 @@ __device__ __forceinline__ void
           // thread load 8 elements) * 128 (threads) = 1024 elements? because
           // there is not fine-granularity control?
           tCpC(i, 0) =
-              elem_less(tCcC(i, 0, 0), shape(D(0,_, _))); // Remove first dim for experts in D became (BATCH_SIZE, OUTPUT_SIZE)
+              elem_less(tCcC(i, 0, 0), shape(D(_, 0, _))); // Remove first dim for experts in D became (BATCH_SIZE, OUTPUT_SIZE)
         }
 
         if (!NOBIAS) {
@@ -878,7 +880,7 @@ __device__ __forceinline__ void
             // Last 0 in sC just for pipeline stag, it should always be 0 in
             // sC, because we just store one stage in pipeline.
             // gD(b, o) = sC(b, o, 0);
-            D(tRoutingIndex(t) - 1, t, o) = sC(t, o, 0);
+            D(t, tRoutingIndex(t) - 1, o) = sC(t, o, 0);
           }
         }
         // TODO(Wenqin): do we really need the below sync?
