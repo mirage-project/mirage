@@ -10,7 +10,7 @@
 #include <cute/tensor.hpp>
 #include <type_traits>
 
-#define NUM_THREADS 128
+#define MOE_NUM_THREADS 128
 #define DEBUG_LOG 0
 
 #define PRINT(x) do { \
@@ -37,8 +37,6 @@ constexpr int log2_constexpr(int n, int p = 0) {
   return (n <= 1) ? p : log2_constexpr(n >> 1, p + 1);
 }
 
-using bfloat16 = __nv_bfloat16;
-
 constexpr int batch_size = 8;
 constexpr int experts_size = 128;
 constexpr int activate_experts_size = 8;
@@ -52,7 +50,7 @@ const int n = 1536;
 const int expert_stride = 5;
 
 
-namespace config {
+namespace moe_config {
 template <typename T_,
           int BATCH_SIZE_,
           int OUTPUT_SIZE_,
@@ -66,7 +64,7 @@ template <typename T_,
 struct GemmConfig;
 }
 
-namespace config {
+namespace moe_config {
 
 using namespace cute;
 
@@ -200,7 +198,9 @@ struct GemmConfig {
       cute::max(shm_size_AB, shm_size_C) * sizeof(T);
 };
 
-} // namespace config
+} // namespace moe_config
+
+namespace kernel {
 
 template <typename T,
           int BATCH_SIZE,
@@ -214,17 +214,17 @@ template <typename T,
           bool NOBIAS,
           int PIPE_MAX = 3>
 __device__ __forceinline__ void
-    moe_kernel(void const *input_ptr,
+    moe_linear_kernel(void const *input_ptr,
                 void const *weight_ptr,
                 void const *residual_ptr,
                 void *output_ptr,
-                void const *expert_routing,
-                void const *expert_mask,
+                void const *expert_routing_ptr,
+                void const *expert_mask_ptr,
               int expert_offset) {
   constexpr int TILE_SIZE = 128;
   constexpr int kSmemLayoutCBatch = 1;
 
-  using Config = config::GemmConfig<T,
+  using Config = moe_config::GemmConfig<T,
                                     BATCH_SIZE,
                                     OUTPUT_SIZE,
                                     REDUCTION_SIZE,
@@ -271,8 +271,8 @@ __device__ __forceinline__ void
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  int const *__restrict__ d_expert_routing = static_cast<int const*>(expert_routing);
-  int const *__restrict__ d_expert_mask = static_cast<int const*>(expert_mask);
+  int const *__restrict__ d_expert_routing = static_cast<int const*>(expert_routing_ptr);
+  int const *__restrict__ d_expert_mask = static_cast<int const*>(expert_mask_ptr);
 
   // Below advance don't need in real MPK.
   int expert_offset_bid = blockIdx.y; // blockIdx.y is the real block id for offset inside an expert weight
@@ -870,7 +870,7 @@ __device__ __forceinline__ void
         // use the predicate, try to find a suitable way later.
         // cute::copy_if(s2g_tiled_copy_c, tCpC_ep, tCsC_s2g(_, _, _, 0), tCgC_s2g);
         constexpr int write_back_batch_size = kTileM < BATCH_SIZE ? kTileM : BATCH_SIZE;
-        for(int i = threadIdx.x; i < write_back_batch_size * OUTPUT_SIZE; i += NUM_THREADS) {
+        for(int i = threadIdx.x; i < write_back_batch_size * OUTPUT_SIZE; i += MOE_NUM_THREADS) {
           const int t = i / OUTPUT_SIZE;
           const int o = i % OUTPUT_SIZE;
 
@@ -887,3 +887,5 @@ __device__ __forceinline__ void
     } // m_iter
   }
 }
+
+} // namespace kernel

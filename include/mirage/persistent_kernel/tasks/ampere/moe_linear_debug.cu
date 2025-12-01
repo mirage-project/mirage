@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <unordered_set>
 
+using bfloat16 = __nv_bfloat16;
+
 #include "./moe_linear.cuh"
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE, int REDUCTION_SIZE>
@@ -22,7 +24,7 @@ __global__ void moe_kernel_wrapper(void const *input_ptr,
                                       void *output_ptr,
                                       void const *expert_routing,
                                       void const *expert_mask) {
-  moe_kernel<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, REDUCTION_SIZE, experts_size, activate_experts_size, expert_stride, true, true>(
+  moe_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, REDUCTION_SIZE, experts_size, activate_experts_size, expert_stride, true, true>(
       input_ptr, weight_ptr, residual_ptr, output_ptr, expert_routing, expert_mask, blockIdx.x);
 }
 
