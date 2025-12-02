@@ -10,9 +10,6 @@
 #include <cute/tensor.hpp>
 #include <type_traits>
 
-// Comment below out when building unit test for MPK.
-// using bfloat16 = __nv_bfloat16;
-
 #define MOE_NUM_THREADS 128
 #define DEBUG_LOG 0
 
@@ -38,33 +35,6 @@
 
 constexpr int log2_constexpr(int n, int p = 0) {
   return (n <= 1) ? p : log2_constexpr(n >> 1, p + 1);
-}
-
-constexpr int batch_size = 8;
-constexpr int experts_size = 128;
-constexpr int activate_experts_size = 8;
-
-// Matrix dimensions
-const int m = batch_size;
-const int k = 2048;
-// const int n = 4096;
-const int n = 1536;
-
-const int expert_stride = 5;
-
-
-namespace moe_config {
-template <typename T_,
-          int BATCH_SIZE_,
-          int OUTPUT_SIZE_,
-          int REDUCTION_SIZE_,
-          int kTileM_,
-          int kTileN_,
-          int kTileK_,
-          int kStage_,
-          int kSmemLayoutCBatch_,
-          typename ComputeType>
-struct GemmConfig;
 }
 
 namespace moe_config {
@@ -224,6 +194,8 @@ __device__ __forceinline__ void
                 void const *expert_routing_ptr,
                 void const *expert_mask_ptr,
               int expert_offset) {
+  // TODO(Wenqin): We don't use pBtB for this kernel right now, so we should make the OUTPUT_STRIDE is multiple of OUTPUT_SIZE.
+  static_assert(OUTPUT_STRIDE % OUTPUT_SIZE == 0);
   constexpr int TILE_SIZE = 128;
   constexpr int kSmemLayoutCBatch = 1;
 
@@ -277,12 +249,14 @@ __device__ __forceinline__ void
   int const *__restrict__ d_expert_routing = static_cast<int const*>(expert_routing_ptr);
   int const *__restrict__ d_expert_mask = static_cast<int const*>(expert_mask_ptr);
 
+  
+#ifdef MIRAGE_UNIT_TEST
   // Below advance don't need in real MPK.
   int expert_offset_bid = blockIdx.y; // blockIdx.y is the real block id for offset inside an expert weight
   d_weight += OUTPUT_SIZE * REDUCTION_SIZE * expert_offset_bid;
   d_residual += OUTPUT_SIZE * expert_offset_bid;
   d_output += OUTPUT_SIZE * expert_offset_bid;
-
+#endif
   // expert_offset = blockIdx.x;
 
 

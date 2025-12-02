@@ -6,7 +6,7 @@ torch.set_printoptions(sci_mode=False)
 torch.cuda.manual_seed_all(0)
 
 reduction_sizes = [2048]
-output_sizes = [64]
+output_sizes = [64, 1536]
 batch_size = 8
 num_experts = 128
 num_topk = 8
@@ -76,19 +76,19 @@ for reduction_size in reduction_sizes:
         print("Test passed!")
 
         # Warm-up
-        for _ in range(16):
-            runtime_kernel.moe_linear(x, w, residual, output, mpk_routing_indices, mpk_expert_mask)
+        # for _ in range(16):
+        #     runtime_kernel.moe_linear(x, w, residual, output, mpk_routing_indices, mpk_expert_mask)
 
-        torch.cuda.synchronize()
-        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-            enable_timing=True
-        )
-        repetitions = 1000
-        starter.record()
-        for rep in range(repetitions):
-            runtime_kernel.moe_linear(x, w, residual, output, mpk_routing_indices, mpk_expert_mask)
-        ender.record()
-        torch.cuda.synchronize()
-        total_time = starter.elapsed_time(ender)
-        avg_time = total_time / repetitions
-        print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+        # torch.cuda.synchronize()
+        # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+        #     enable_timing=True
+        # )
+        # repetitions = 1000
+        # starter.record()
+        # for rep in range(repetitions):
+        #     runtime_kernel.moe_linear(x, w, residual, output, mpk_routing_indices, mpk_expert_mask)
+        # ender.record()
+        # torch.cuda.synchronize()
+        # total_time = starter.elapsed_time(ender)
+        # avg_time = total_time / repetitions
+        # print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")

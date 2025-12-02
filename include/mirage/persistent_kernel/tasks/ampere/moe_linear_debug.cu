@@ -13,7 +13,23 @@
 #include <algorithm>
 #include <unordered_set>
 
+constexpr int batch_size = 8;
+constexpr int experts_size = 128;
+constexpr int activate_experts_size = 8;
+
+#define MIRAGE_UNIT_TEST 1
+
 #include "./moe_linear.cuh"
+
+// Matrix dimensions
+const int m = batch_size;
+const int k = 2048;
+// const int n = 4096;
+const int n = 1536;
+
+const int expert_stride = 5;
+
+using bfloat16 = __nv_bfloat16;
 
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE, int REDUCTION_SIZE>
