@@ -183,16 +183,15 @@ template <typename T,
           int NUM_EXPERTS,
           int NUM_TOPK,
           int EXPERT_STRIDE,
-          bool W13_LINEAR,
           bool NOBIAS,
           int PIPE_MAX = 3>
 __device__ __forceinline__ void
     moe_linear_kernel(void const *input_ptr,
                 void const *weight_ptr,
                 void const *residual_ptr,
-                void *output_ptr,
                 void const *expert_routing_ptr,
                 void const *expert_mask_ptr,
+                void *output_ptr,
               int expert_offset) {
   // TODO(Wenqin): We don't use pBtB for this kernel right now, so we should make the OUTPUT_STRIDE is multiple of OUTPUT_SIZE.
   static_assert(OUTPUT_STRIDE % OUTPUT_SIZE == 0);
@@ -236,6 +235,7 @@ __device__ __forceinline__ void
 
   extern __shared__ char smem[];
 
+  // To make the start of shared memory aligned.
   T *shm_data = (T *)((reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);
 
   T *Ashm = shm_data;
@@ -257,22 +257,6 @@ __device__ __forceinline__ void
   d_residual += OUTPUT_SIZE * expert_offset_bid;
   d_output += OUTPUT_SIZE * expert_offset_bid;
 #endif
-  // expert_offset = blockIdx.x;
-
-
-  // auto bM = cute::tile_size<0>(
-  //     TiledMMA); // MMA Tile M. We'll use 1 MMAs per MMA Tile M.
-  // auto bN = cute::tile_size<1>(
-  //     TiledMMA); // MMA Tile N. We'll use 1 MMAs per MMA Tile N.
-  // auto bK = cute::tile_size<2>(TiledMMA) *
-  //           cute::Int<4>{}; // MMA Tile K. We'll use 4 MMAs per MMA Tile K. For
-  //                           // 16b types, wgmma has K16.
-
-  // auto mma_tiler = cute::make_shape(bM, bN, bK); // (MMA_M, MMA_N, MMA_K)
-  // auto cd_tiler =
-  //     cute::make_shape(bN, bM, bK); // (MmaTile_N, MmaTile_M, MmaTile_K)
-  // auto output_tiler =
-  //     cute::make_shape(bN, bM, NUM_TOPK); // (MmaTile_N, MmaTile_M, NUM_TOPK)
 
   // (8,2048):(2048,_1)
   Tensor A = make_tensor(make_gmem_ptr((T *)d_input),
@@ -311,14 +295,6 @@ __device__ __forceinline__ void
   PRINT(mMask);
 #endif //DEBUG_LOG
 
-
-//   cute::Tensor gA = cute::local_tile(
-//       A, mma_tiler, mma_coord, cute::Step<cute::_1, cute::X, cute::_1>{});
-//   cute::Tensor gB = cute::local_tile(
-//       B, mma_tiler, mma_coord, cute::Step<cute::X, cute::_1, cute::_1>{});
-//   cute::Tensor gBias = cute::local_tile(
-//       R, cd_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
-
   // create identity tensors for predicate
   auto cA = make_identity_tensor(shape(A)); // (m,k) -> (m,k)
   auto cB = make_identity_tensor(shape(B)); // (num_experts,n,k) -> (num_experts,n,k)
@@ -333,20 +309,9 @@ __device__ __forceinline__ void
         activated_expert_offset += EXPERT_STRIDE) {
     int32_t expert_idx = mMask[activated_expert_offset];
     cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
-    // if(blockIdx.y == 0) {
-    //   printf("expert_idx: %d\n", expert_idx);
-    // }
-    // if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
-    //   printf("expert_idx: %d, expert_offset: %d\n", expert_idx, expert_offset);
-    // }
-    // if(blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-    //   printf("expert_idx: %d, expert_offset: %d, first scalar: %f\n", expert_idx, expert_offset, float(B(expert_idx, 0, 0)));
-    // }
 #pragma unroll
     for (int m_iter = 0; m_iter < LoopM; ++m_iter) {
-      // int m_iter = 0;
-      // int n_iter = 0;
-      // // slice the tensor to small one which is used for current thread block.
+      // slice the tensor to small one which is used for current thread block.
       Tensor gA = local_tile(
           A,
           make_tile(Int<kTileM>{}, Int<kTileK>{}),
@@ -369,10 +334,6 @@ __device__ __forceinline__ void
             make_tile(Int<kTileN>{}, Int<kTileK>{}),
             make_coord(n_iter, _)); // (kTileN, kTileK, n, k)
                                     // (_64,_128,16):(2048,_1,_128)
-        // if(m_iter == 0 &&
-        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-        //   printf("for gB, expert_idx: %d, first scalar: %f\n", expert_idx, float(gB(0,0,0)));
-        // }
         Tensor gD = local_tile(
             // TODO(Wenqin): the gD at here is not what the real D we would
             // like to store data, it's just a logical tensor for us to get the
@@ -614,16 +575,7 @@ __device__ __forceinline__ void
         for (int in = 0; in < size<0>(tBpB); ++in) {
           tBpB(in, 0) =
               elem_less(get<0>(tBcB(0, in, 0, 0)), shape<0>(B(0, _, _))); // n < N ?
-          // if(m_iter == 0 &&
-          //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-          //   printf("in: %d, get<0>(tBcB(0, in, 0, 0): %d, shape<0>(B(0, _, _)): %d\n", in, get<0>(tBcB(0, in, 0, 0)), shape<0>(B(0, _, _)));
-          // }
         }
-        // if(m_iter == 0 &&
-        //       n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-        //   PRINT(tBcB);
-        //   PRINT(tBcB(0, 0, 0, 0));
-        // }
 
 #if DEBUG_LOG
         if(activated_expert_offset == expert_offset &&
@@ -648,21 +600,9 @@ __device__ __forceinline__ void
         int ismem_read_stage = 0;
         int ismem_write_stage = 0;
 
-        // if(m_iter == 0 &&
-        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-        //   printf("before load, for tBsB, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBsB(0,0,0,0)));
-        //   for (int in = 0; in < size<0>(tBpB); ++in) {
-        //     printf("tBpB(%d, 0): %d\n", in, int(tBpB(in, 0)));
-        //   }
-        // }
-
       // warm up
 #pragma unroll
         for (int istage = 0; istage < kStage - 1; ++istage) {
-          // cute::copy(g2s_tiled_copy_a, tAgA_copy(_, _, _, istage),
-          //           tAsA_copy(_, _, _, istage));
-          // cute::copy(g2s_tiled_copy_b, tBgB_copy(_, _, _, istage),
-          //           tBsB_copy(_, _, _, istage));
           // TODO(Wenqin): we don't use mRoutingIndices here, because we will use it as predicate later 
           // when we store the content back to GMEM, but is it a better solution if we just load valid
           // data at here? it may reduce the total data we load, but we may need some branches here,
@@ -695,42 +635,6 @@ __device__ __forceinline__ void
         constexpr int ntile = REDUCTION_SIZE / kTileK; // 2048 / 128 = 16 tiles for the whole K dim reduction
         constexpr int nk = size<2>(tCrA);              // 8 iteartions inside a tile
 
-        // if(m_iter == 0 &&
-        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-        //   printf("for tBsB, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBsB(0,0,0,0)));
-        // }
-
-        // if(m_iter == 0 &&
-        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-        //   printf("for tBsB_copy, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBsB_copy(0,0,0,0)));
-        // }
-
-        // if(m_iter == 0 &&
-        //     n_iter == 0 && blockIdx.y == 0 && expert_idx == 95 && threadIdx.x == 0) {
-        //   printf("for tBgB_copy, expert_idx: %d, first scalar: %f\n", expert_idx, float(tBgB_copy(0,0,0,0)));
-        // }
-
-        // printf("11111\n");
-        // if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
-        //   printf("expert: %d's regs for A:\n", expert_idx);
-        //   for (int i = 0; i < cute::size<0>(tCrA_view.layout()); i++) {
-        //     auto v = tCrA_view(i, 0, ik);      // load element
-        //     float fv = float(v);    // convert half/bfloat16 to float
-        //     printf("%.4f ", fv);
-        //   }
-        //   printf("\n");
-        // }
-
-        // if(blockIdx.y == 0 && expert_idx == DEBUG_EXPERT_IDX && threadIdx.x == 0) {
-        //   printf("expert: %d's regs for B:\n", expert_idx);
-        //   for (int i = 0; i < cute::size<0>(tCrB_view.layout()); i++) {
-        //     auto v = tCrB_view(i, 0, ik);      // load element
-        //     float fv = float(v);    // convert half/bfloat16 to float
-        //     printf("%.4f ", fv);
-        //   }
-        //   printf("\n");
-        // }
-
 #pragma unroll 1
         for (int itile = 0; itile < ntile; ++itile) {
 #pragma unroll
@@ -739,10 +643,6 @@ __device__ __forceinline__ void
 
             if (ik == 0) {
               if (itile_to_read < ntile) {
-                // cute::copy(g2s_tiled_copy_a, tAgA_copy(_, _, _, itile_to_read),
-                //           tAsA_copy(_, _, _, ismem_write_stage));
-                // cute::copy(g2s_tiled_copy_b, tBgB_copy(_, _, _, itile_to_read),
-                //           tBsB_copy(_, _, _, ismem_write_stage));
                 cute::copy_if(g2s_tiled_copy_a,
                               tApA,
                               tAgA_copy(_, _, _, itile_to_read),
@@ -775,12 +675,6 @@ __device__ __forceinline__ void
             cute::copy(s2r_tiled_copy_b,
                       tBsB(_, _, ik_next, ismem_read_stage),
                       tCrB_view(_, _, ik_next));
-            
-            // if(expert_idx == 95) {
-            //   if(float(tCrB(0, 0, ik)) != 95) {
-            //     printf("reg is %f\n", float(tCrB(0, 0, ik)));
-            //   }
-            // }
 
             cute::gemm(tiled_mma, tCrD, tCrA(_, _, ik), tCrB(_, _, ik), tCrD);
           } // ik

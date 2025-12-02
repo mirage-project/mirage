@@ -65,7 +65,7 @@ for reduction_size in reduction_sizes:
         if not has_residual:
             residual = None
 
-        runtime_kernel.moe_linear(x, w, residual, output, mpk_routing_indices, mpk_expert_mask)
+        runtime_kernel.moe_linear(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
         
         torch.testing.assert_close(
             output,

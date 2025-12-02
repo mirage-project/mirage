@@ -1307,21 +1307,20 @@ void linear(torch::Tensor input,
 #endif
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE, int REDUCTION_SIZE,int NUM_EXPERTS, int NUM_TOPK, int EXPERT_STRIDE,
-          bool W13_LINEAR = true,
           bool NOBIAS = true>
 __global__ void moe_linear_kernel_wrapper(void const *input_ptr,
                                       void const *weight_ptr,
                                       void const *residual_ptr,
-                                      void *output_ptr,
                                       void const *expert_routing_ptr,
-                                      void const *expert_mask_ptr) {
-  moe_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_STRIDE, W13_LINEAR, NOBIAS>(
+                                      void const *expert_mask_ptr,
+                                      void *output_ptr) {
+  moe_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_STRIDE, NOBIAS>(
       input_ptr,
       weight_ptr,
       residual_ptr,
-      output_ptr,
       expert_routing_ptr,
       expert_mask_ptr,
+      output_ptr,
       blockIdx.x);
 }
 
@@ -1329,9 +1328,9 @@ template <typename T, int BATCH_SIZE, int OUTPUT_STRIDE, int REDUCTION_SIZE,int 
 void launch_moe_linear(void const *input_ptr,
                    void const *weight_ptr,
                    void const *residual_ptr,
-                   void *output_ptr,
                    void const *expert_routing_ptr,
-                   void const *expert_mask_ptr) {
+                   void const *expert_mask_ptr,
+                   void *output_ptr) {
   static_assert(OUTPUT_STRIDE % 64 == 0);
   dim3 grid_dim(EXPERT_STRIDE, OUTPUT_STRIDE / 64, 1);
   dim3 block_dim(128, 1, 1);
@@ -1344,14 +1343,14 @@ void launch_moe_linear(void const *input_ptr,
 
   moe_linear_kernel_wrapper<T, BATCH_SIZE, 64, OUTPUT_STRIDE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_STRIDE>
       <<<grid_dim, block_dim, smem_size>>>(
-          input_ptr, weight_ptr, residual_ptr, output_ptr, expert_routing_ptr, expert_mask_ptr);
+          input_ptr, weight_ptr, residual_ptr, expert_routing_ptr, expert_mask_ptr, output_ptr);
 }
 
 // TODO: For the test we only support reducation size as 2048, expert_size as 128 and activate_expert_size as 8 and expert_stride as 5.
 #define MOE_LINEAR_DISPATCH_OUTPUT_STRIDE(BATCH_SIZE, OUTPUT_STRIDE)                   \
   case OUTPUT_STRIDE:                                                            \
     launch_moe_linear<bfloat16, BATCH_SIZE, OUTPUT_STRIDE, 2048, 128, 8, 5>(                    \
-        input_ptr, weight_ptr, residual_ptr, output_ptr, expert_routing_ptr, expert_mask_ptr);                      \
+        input_ptr, weight_ptr, residual_ptr, expert_routing_ptr, expert_mask_ptr, output_ptr);                      \
     break;
 
 #define MOE_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE)                                 \
@@ -1368,9 +1367,9 @@ void launch_moe_linear(void const *input_ptr,
 void moe_linear(torch::Tensor input,
             torch::Tensor weight,
             c10::optional<at::Tensor> residual,
-            torch::Tensor output,
             torch::Tensor expert_routing,
-            torch::Tensor expert_mask) {
+            torch::Tensor expert_mask,
+            torch::Tensor output) {
 
   void const *input_ptr = input.data_ptr();
   void const *weight_ptr = weight.data_ptr();

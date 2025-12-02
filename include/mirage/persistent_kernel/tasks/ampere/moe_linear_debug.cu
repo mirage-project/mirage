@@ -36,20 +36,20 @@ template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE, int RE
 __global__ void moe_kernel_wrapper(void const *input_ptr,
                                       void const *weight_ptr,
                                       void const *residual_ptr,
-                                      void *output_ptr,
                                       void const *expert_routing,
-                                      void const *expert_mask) {
-  kernel::moe_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, REDUCTION_SIZE, experts_size, activate_experts_size, expert_stride, true, true>(
-      input_ptr, weight_ptr, residual_ptr, output_ptr, expert_routing, expert_mask, blockIdx.x);
+                                      void const *expert_mask,
+                                      void *output_ptr) {
+  kernel::moe_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, REDUCTION_SIZE, experts_size, activate_experts_size, expert_stride, true>(
+      input_ptr, weight_ptr, residual_ptr, expert_routing, expert_mask, output_ptr, blockIdx.x);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_moe(void const *input_ptr,
                             void const *weight_ptr,
                             void const *residual_ptr,
-                            void *output_ptr,
                             void const *expert_routing,
-                            void const *expert_mask) {
+                            void const *expert_mask,
+                            void *output_ptr) {
   constexpr int grid_x = expert_stride;
   constexpr int grid_y = 24;
   dim3 grid_dim(grid_x, grid_y, 1);
@@ -64,7 +64,7 @@ void launch_moe(void const *input_ptr,
 
   moe_kernel_wrapper<T, BATCH_SIZE, output_size, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(
-          input_ptr, weight_ptr, residual_ptr, output_ptr, expert_routing, expert_mask);
+          input_ptr, weight_ptr, residual_ptr, expert_routing, expert_mask, output_ptr);
 }
 
 #define CUDA_CHECK(call) do { \
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     // Warmup
 #if WARM_UP
     for (int i = 0; i < 10; ++i) {
-        launch_moe<bfloat16, batch_size, n, k>(d_matrix_A, d_matrix_B, d_residual, d_output_matrix, d_expert_routing, d_expert_mask);
+        launch_moe<bfloat16, batch_size, n, k>(d_matrix_A, d_matrix_B, d_residual, d_expert_routing, d_expert_mask, d_output_matrix);
     }
 #endif
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventCreate(&stop));
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < iters; ++i) {
-        launch_moe<bfloat16, batch_size, n, k>(d_matrix_A, d_matrix_B, d_residual, d_output_matrix, d_expert_routing, d_expert_mask);
+        launch_moe<bfloat16, batch_size, n, k>(d_matrix_A, d_matrix_B, d_residual, d_expert_routing, d_expert_mask, d_output_matrix);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
