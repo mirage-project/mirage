@@ -13,21 +13,23 @@
 #define MOE_NUM_THREADS 128
 #define DEBUG_LOG 0
 
-#define PRINT(x) do { \
-    if(thread0()) { \
-      printf("%s:", #x); \
-      cute::print(x); \
-      printf("\n"); \
-    } \
-} while(0)
+#define PRINT(x)                                                               \
+  do {                                                                         \
+    if (thread0()) {                                                           \
+      printf("%s:", #x);                                                       \
+      cute::print(x);                                                          \
+      printf("\n");                                                            \
+    }                                                                          \
+  } while (0)
 
-#define PRINT_LAYOUT(x) do { \
-  if(thread0()) { \
-    printf("%s:", #x); \
-    cute::print_layout(x); \
-    printf("\n"); \
-  } \
-} while(0)
+#define PRINT_LAYOUT(x)                                                        \
+  do {                                                                         \
+    if (thread0()) {                                                           \
+      printf("%s:", #x);                                                       \
+      cute::print_layout(x);                                                   \
+      printf("\n");                                                            \
+    }                                                                          \
+  } while (0)
 
 #define WARM_UP 0
 
@@ -90,7 +92,9 @@ struct GemmConfig {
   static constexpr int kMmaEURepeatM = 1;
   static constexpr int kMmaEURepeatN = 4;
   static constexpr int kMmaEURepeatK = 1;
-  static constexpr int N_REG_REPEAT = kTileN / (kMmaEURepeatN * 8); // 8 means 8 in m16n8k16, we just process 8 cols in n dim.
+  static constexpr int N_REG_REPEAT =
+      kTileN / (kMmaEURepeatN *
+                8); // 8 means 8 in m16n8k16, we just process 8 cols in n dim.
   using mma_atom_shape = mma_traits::Shape_MNK;
   static constexpr int kMmaPM = 1 * kMmaEURepeatM * get<0>(mma_atom_shape{});
   static constexpr int kMmaPN =
@@ -110,7 +114,8 @@ struct GemmConfig {
   //   LayoutA_TV: ((_4,_8),(_2,_2,_2)):((_32,_1),(_16,_8,_128))
   //   LayoutB_TV: ((_4,_8),(_2,_2)):((_16,_1),(_8,_64))
   //   LayoutC_TV: ((_4,_8),(_2,_2)):((_32,_1),(_16,_8))
-  // The shape a stride for TV(thread value) is the offset/address in register, not in shared memory, all of them are col-majority.
+  // The shape a stride for TV(thread value) is the offset/address in register,
+  // not in shared memory, all of them are col-majority.
 
   using g2s_copy_op = SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>;
   using g2s_copy_traits = Copy_Traits<g2s_copy_op>;
@@ -119,12 +124,10 @@ struct GemmConfig {
       decltype(make_tiled_copy(g2s_copy_atom{},
                                make_layout(make_shape(Int<8>{}, Int<16>{}),
                                            make_stride(Int<16>{}, Int<1>{})),
-                              // TODO(Wenqin): maybe we can not use 'Int<8>` below? it should be related to BATCH_SIZE?
+                               // TODO(Wenqin): maybe we can not use 'Int<8>`
+                               // below? it should be related to BATCH_SIZE?
                                make_layout(make_shape(Int<1>{}, Int<8>{}))));
   using G2SCopyB = G2SCopyA;
-  // The G2SCopyA is just in logical space with col-majority shape, it means how each load data in
-  // logical coordinate, but not related to the real physical space, CUTE May adjact the load when
-  // it really do the load with real physical tensor (col-majority or row-majority).
 
   using s2r_copy_op = SM75_U32x4_LDSM_N;
   using s2r_copy_traits = Copy_Traits<s2r_copy_op>;
@@ -139,12 +142,11 @@ struct GemmConfig {
   using SmemLayoutC = decltype(tile_to_shape(
       SmemLayoutAtomC{},
       make_shape(Int<kMmaPM>{}, Int<kMmaPN>{}, Int<kSmemLayoutCBatch>{})));
-  // static_assert(size<0>(SmemLayoutA{}) * size<1>(SmemLayoutA{}) >=
-  //                   size(SmemLayoutC{}),
-  //               "C shared memory request is large than A's one pipe");
-  static_assert(size<0>(SmemLayoutB{}) * size<1>(SmemLayoutB{}) >=
+  // We will use a stage in A for C, so we should keep it not small than C
+  // usage.
+  static_assert(size<0>(SmemLayoutA{}) * size<1>(SmemLayoutA{}) >=
                     size(SmemLayoutC{}),
-                "C shared memory request is large than B's one pipe");
+                "C shared memory request is large than A's one pipe");
 
   using R2SCopyAtomC = Copy_Atom<UniversalCopy<int>, T>;
   using S2GCopyAtomC = Copy_Atom<UniversalCopy<cute::uint128_t>, T>;
@@ -153,7 +155,7 @@ struct GemmConfig {
                                make_layout(make_shape(Int<16>{}, Int<8>{}),
                                            make_stride(Int<8>{}, Int<1>{})),
                                make_layout(make_shape(Int<1>{}, Int<8>{}))));
-  
+
   using G2SCopyR =
       decltype(make_tiled_copy(S2GCopyAtomC{},
                                make_layout(make_shape(Int<16>{}, Int<8>{}),
@@ -187,27 +189,28 @@ template <typename T,
           int PIPE_MAX = 3>
 __device__ __forceinline__ void
     moe_linear_kernel(void const *input_ptr,
-                void const *weight_ptr,
-                void const *residual_ptr,
-                void const *expert_routing_ptr,
-                void const *expert_mask_ptr,
-                void *output_ptr,
-              int expert_offset) {
-  // TODO(Wenqin): We don't use pBtB for this kernel right now, so we should make the OUTPUT_STRIDE is multiple of OUTPUT_SIZE.
+                      void const *weight_ptr,
+                      void const *residual_ptr,
+                      void const *expert_routing_ptr,
+                      void const *expert_mask_ptr,
+                      void *output_ptr,
+                      int expert_offset) {
+  // TODO(Wenqin): We don't use pBtB for this kernel right now, so we should
+  // make the OUTPUT_STRIDE is multiple of OUTPUT_SIZE.
   static_assert(OUTPUT_STRIDE % OUTPUT_SIZE == 0);
   constexpr int TILE_SIZE = 128;
   constexpr int kSmemLayoutCBatch = 1;
 
   using Config = moe_config::GemmConfig<T,
-                                    BATCH_SIZE,
-                                    OUTPUT_SIZE,
-                                    REDUCTION_SIZE,
-                                    16,
-                                    128,
-                                    TILE_SIZE,
-                                    PIPE_MAX,
-                                    kSmemLayoutCBatch,
-                                    float>;
+                                        BATCH_SIZE,
+                                        OUTPUT_SIZE,
+                                        REDUCTION_SIZE,
+                                        16,
+                                        128,
+                                        TILE_SIZE,
+                                        PIPE_MAX,
+                                        kSmemLayoutCBatch,
+                                        float>;
 
   using namespace cute;
 
@@ -224,12 +227,11 @@ __device__ __forceinline__ void
   using S2GCopyAtomC = typename Config::S2GCopyAtomC;
   using S2GCopyC = typename Config::S2GCopyC;
   using G2SCopyR = typename Config::G2SCopyR;
-  
 
   constexpr int kTileM = Config::kTileM; // 16
   constexpr int kTileN = Config::kTileN; // 64
-  constexpr int LoopM = Config::LoopM; // 1
-  constexpr int LoopN = Config::LoopN; // 1
+  constexpr int LoopM = Config::LoopM;   // 1
+  constexpr int LoopN = Config::LoopN;   // 1
   constexpr int kTileK = Config::kTileK; // 128
   constexpr int kStage = Config::kStage; // 8
 
@@ -246,13 +248,15 @@ __device__ __forceinline__ void
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  int const *__restrict__ d_expert_routing = static_cast<int const*>(expert_routing_ptr);
-  int const *__restrict__ d_expert_mask = static_cast<int const*>(expert_mask_ptr);
+  int const *__restrict__ d_expert_routing =
+      static_cast<int const *>(expert_routing_ptr);
+  int const *__restrict__ d_expert_mask =
+      static_cast<int const *>(expert_mask_ptr);
 
-  
 #ifdef MIRAGE_UNIT_TEST
   // Below advance don't need in real MPK.
-  int expert_offset_bid = blockIdx.y; // blockIdx.y is the real block id for offset inside an expert weight
+  int expert_offset_bid = blockIdx.y; // blockIdx.y is the real block id for
+                                      // offset inside an expert weight
   d_weight += OUTPUT_SIZE * REDUCTION_SIZE * expert_offset_bid;
   d_residual += OUTPUT_SIZE * expert_offset_bid;
   d_output += OUTPUT_SIZE * expert_offset_bid;
@@ -263,27 +267,30 @@ __device__ __forceinline__ void
                          make_shape(BATCH_SIZE, REDUCTION_SIZE),
                          make_stride(REDUCTION_SIZE, Int<1>{}));
   // (128,64,2048):(3145728,2048,_1)
-  Tensor B = make_tensor(make_gmem_ptr((T *)d_weight),
-                         make_shape(NUM_EXPERTS, OUTPUT_SIZE, REDUCTION_SIZE),
-                         make_stride(OUTPUT_STRIDE * REDUCTION_SIZE, REDUCTION_SIZE, Int<1>{}));
+  Tensor B = make_tensor(
+      make_gmem_ptr((T *)d_weight),
+      make_shape(NUM_EXPERTS, OUTPUT_SIZE, REDUCTION_SIZE),
+      make_stride(OUTPUT_STRIDE * REDUCTION_SIZE, REDUCTION_SIZE, Int<1>{}));
+  // (8,8,64):(12288,1536,_1)
+  Tensor D = make_tensor(
+      make_gmem_ptr((T *)d_output),
+      make_shape(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE),
+      make_stride(NUM_TOPK * OUTPUT_STRIDE, OUTPUT_STRIDE, Int<1>{}));
   // (128,8,64):(12288,1536,_1)
-  Tensor D = make_tensor(make_gmem_ptr((T *)d_output),
-                         make_shape(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE),
-                         make_stride(NUM_TOPK * OUTPUT_STRIDE, OUTPUT_STRIDE, Int<1>{}));
-  // (128,8,64):(12288,1536,_1)
-  Tensor R = make_tensor(make_gmem_ptr((T *)d_residual),
-                         make_shape(NUM_EXPERTS, BATCH_SIZE, OUTPUT_SIZE),
-                         make_stride(BATCH_SIZE * OUTPUT_STRIDE, OUTPUT_STRIDE, Int<1>{}));
+  Tensor R = make_tensor(
+      make_gmem_ptr((T *)d_residual),
+      make_shape(NUM_EXPERTS, BATCH_SIZE, OUTPUT_SIZE),
+      make_stride(BATCH_SIZE * OUTPUT_STRIDE, OUTPUT_STRIDE, Int<1>{}));
 
   // (128,8):(8,_1)
   Tensor mRoutingIndices = make_tensor(make_gmem_ptr((int *)d_expert_routing),
-                         make_shape(NUM_EXPERTS, BATCH_SIZE),
-                         make_stride(BATCH_SIZE, Int<1>{}));
+                                       make_shape(NUM_EXPERTS, BATCH_SIZE),
+                                       make_stride(BATCH_SIZE, Int<1>{}));
 
   // (129):(_1)
   Tensor mMask = make_tensor(make_gmem_ptr((int *)d_expert_mask),
-                         make_shape(NUM_EXPERTS + 1),
-                         make_stride(Int<1>{}));
+                             make_shape(NUM_EXPERTS + 1),
+                             make_stride(Int<1>{}));
 
 #if DEBUG_LOG
   PRINT(A);
@@ -293,20 +300,21 @@ __device__ __forceinline__ void
 
   PRINT(mRoutingIndices);
   PRINT(mMask);
-#endif //DEBUG_LOG
+#endif // DEBUG_LOG
 
   // create identity tensors for predicate
   auto cA = make_identity_tensor(shape(A)); // (m,k) -> (m,k)
-  auto cB = make_identity_tensor(shape(B)); // (num_experts,n,k) -> (num_experts,n,k)
+  auto cB =
+      make_identity_tensor(shape(B)); // (num_experts,n,k) -> (num_experts,n,k)
   auto cC = make_identity_tensor(shape(D)); // (m,num_topk,n) -> (m,num_topk,n)
 
-  int num_activated_experts =
+  int const num_activated_experts =
       mMask(NUM_EXPERTS); // last element stores num activated experts
 
 #pragma unroll 1
   for (int activated_expert_offset = expert_offset;
-        activated_expert_offset < num_activated_experts;
-        activated_expert_offset += EXPERT_STRIDE) {
+       activated_expert_offset < num_activated_experts;
+       activated_expert_offset += EXPERT_STRIDE) {
     int32_t expert_idx = mMask[activated_expert_offset];
     cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
 #pragma unroll
@@ -315,25 +323,25 @@ __device__ __forceinline__ void
       Tensor gA = local_tile(
           A,
           make_tile(Int<kTileM>{}, Int<kTileK>{}),
-          make_coord(
-              m_iter,
-              _)); // (kTileM, kTileK, m, k) (_16,_128,16):(2048,_1,_128)
+          make_coord(m_iter,
+                     _)); // (kTileM, kTileK, m, k) (_16,_128,16):(2048,_1,_128)
       auto cta_cA = local_tile( // (_16,_128,16):(_1@0,_1@1,_128@1)
-          cA, make_tile(Int<kTileM>{}, Int<kTileK>{}), make_coord(m_iter, _));
+          cA,
+          make_tile(Int<kTileM>{}, Int<kTileK>{}),
+          make_coord(m_iter, _));
 #if DEBUG_LOG
-      if(activated_expert_offset == expert_offset &&
-          m_iter == 0) {
+      if (activated_expert_offset == expert_offset && m_iter == 0) {
         PRINT(gA);
         PRINT(cta_cA);
       }
-#endif //DEBUG_LOG
+#endif // DEBUG_LOG
 #pragma unroll
       for (int n_iter = 0; n_iter < LoopN; ++n_iter) {
-        Tensor gB = local_tile(
-            B(expert_idx, _, _),
-            make_tile(Int<kTileN>{}, Int<kTileK>{}),
-            make_coord(n_iter, _)); // (kTileN, kTileK, n, k)
-                                    // (_64,_128,16):(2048,_1,_128)
+        Tensor gB =
+            local_tile(B(expert_idx, _, _),
+                       make_tile(Int<kTileN>{}, Int<kTileK>{}),
+                       make_coord(n_iter, _)); // (kTileN, kTileK, n, k)
+                                               // (_64,_128,16):(2048,_1,_128)
         Tensor gD = local_tile(
             // TODO(Wenqin): the gD at here is not what the real D we would
             // like to store data, it's just a logical tensor for us to get the
@@ -342,15 +350,14 @@ __device__ __forceinline__ void
             D(_, 0, _),
             make_tile(Int<kTileM>{}, Int<kTileN>{}),
             make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
-                                        // (_16,_64):(1536,_1)
-        Tensor gR = local_tile(
-            R(expert_idx, _, _),
-            make_tile(Int<kTileM>{}, Int<kTileN>{}),
-            make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
-                                        // (_16,_64):(1536,_1)
+                                         // (_16,_64):(12288,_1)
+        Tensor gR =
+            local_tile(R(expert_idx, _, _),
+                       make_tile(Int<kTileM>{}, Int<kTileN>{}),
+                       make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
+                                                    // (_16,_64):(1536,_1)
 #if DEBUG_LOG
-        if(activated_expert_offset == expert_offset &&
-            m_iter == 0 &&
+        if (activated_expert_offset == expert_offset && m_iter == 0 &&
             n_iter == 0) {
           PRINT(gB);
           PRINT(gD);
@@ -359,29 +366,28 @@ __device__ __forceinline__ void
 #endif
         // shared memory
         // ((_8,_2),(_64,_2),(_1,_3)):((_64,_512),(_1,_1024),(_0,_2048))
-        auto sA =
-            make_tensor(make_smem_ptr(Ashm),
-                        SmemLayoutA{}); // (kTileM, kTileK, kStage) (_16,_128,_3)
+        auto sA = make_tensor(
+            make_smem_ptr(Ashm),
+            SmemLayoutA{}); // (kTileM, kTileK, kStage) (_16,_128,_3)
         // ((_8,_8),(_64,_2),(_1,_3)):((_64,_512),(_1,_4096),(_0,_8192))
-        auto sB =
-            make_tensor(make_smem_ptr(Bshm),
-                        SmemLayoutB{}); // (kTileN, kTileK, kStage) (_64,_128,_3)
+        auto sB = make_tensor(
+            make_smem_ptr(Bshm),
+            SmemLayoutB{}); // (kTileN, kTileK, kStage) (_64,_128,_3)
 
         auto cta_coord = make_coord(
             n_iter, m_iter, _); // make_coord(m_iter,_) / make_coord(n_iter,_)
         // ArithTuple(42,0,_0) o (_64,_128,16):(_1@1,_1@2,_128@2)
         // NOTE: it should be keep same shape as gB
         auto cta_cB = local_tile(cB(expert_idx, _, _),
-                                  make_tile(Int<kTileN>{}, Int<kTileK>{}),
-                                  make_coord(n_iter, _)); // same as gB
+                                 make_tile(Int<kTileN>{}, Int<kTileK>{}),
+                                 make_coord(n_iter, _)); // same as gB
         // ArithTuple(42,0,0) o (_16,_64):(_1@1,_1@2)
         auto cta_cC = local_tile(cC(expert_idx, _, _),
-                                  make_tile(Int<kTileM>{}, Int<kTileN>{}),
-                                  make_coord(m_iter, n_iter)); // same as gD
+                                 make_tile(Int<kTileM>{}, Int<kTileN>{}),
+                                 make_coord(m_iter, n_iter)); // same as gD
 
 #if DEBUG_LOG
-        if(activated_expert_offset == expert_offset &&
-            m_iter == 0 &&
+        if (activated_expert_offset == expert_offset && m_iter == 0 &&
             n_iter == 0) {
           PRINT(sA);
           PRINT(sB);
@@ -392,7 +398,6 @@ __device__ __forceinline__ void
         const int idx = threadIdx.x;
 
         TiledMMA tiled_mma;
-        // TODO(Wenqin): what will happen when idx is greater than 32 for tensor A???
         auto thr_mma = tiled_mma.get_slice(idx);
         // ((_2,_2,_2),_1,_8):((_1,_2,_4),_0,_8)
         auto tCrA = thr_mma.partition_fragment_A(
@@ -405,8 +410,7 @@ __device__ __forceinline__ void
             gD); // (MMA, MMA_M, MMA_N) ((_2,_2),_1,_2):((_1,_2),_0,_4)
 
 #if DEBUG_LOG
-        if(activated_expert_offset == expert_offset &&
-            m_iter == 0 &&
+        if (activated_expert_offset == expert_offset && m_iter == 0 &&
             n_iter == 0) {
           // PRINT(tiled_mma);
           PRINT(thr_mma);
@@ -425,10 +429,12 @@ __device__ __forceinline__ void
 
         S2GCopyC s2g_tiled_copy_c;
         auto s2g_thr_copy_c = s2g_tiled_copy_c.get_thread_slice(idx);
+        // ((_8,_1),_1,_1):((_1,_0),_0,_0)
         auto tCgR_s2g = s2g_thr_copy_c.partition_D(gR); // gR in global memory
+        // ((_8,_1),_1,_1):((_1,_0),_0,_0)
         auto tCsR_s2g =
             s2g_thr_copy_c.partition_S(sR_init); // sR_init in shared memory
-        // ((_8,_1),_1,_1):((_1@2,_0),_0,_0)
+        // ArithTuple(42,0,0) o ((_8,_1),_1,_1):((_1@2,_0),_0,_0)
         auto tCcC = s2g_thr_copy_c.partition_S(cta_cC);
 
         G2SCopyR g2s_tiled_copy_r;
@@ -437,10 +443,8 @@ __device__ __forceinline__ void
         auto tCpC = make_tensor<bool>(make_shape(size<0>(tCcC), Int<1>{}),
                                       make_stride(Int<1>{}, Int<0>{}));
 
-
 #if DEBUG_LOG
-        if(activated_expert_offset == expert_offset &&
-            m_iter == 0 &&
+        if (activated_expert_offset == expert_offset && m_iter == 0 &&
             n_iter == 0) {
           // PRINT(tiled_mma);
           PRINT(R2SCopyAtomC{});
@@ -460,16 +464,18 @@ __device__ __forceinline__ void
 
         CUTE_UNROLL
         for (int i = 0; i < size<0>(tCpC); ++i) {
-          // TODO(Wenqin): the predicate just works for a group for 8(each 
+          // TODO(Wenqin): the predicate just works for a group for 8(each
           // thread load 8 elements) * 128 (threads) = 1024 elements? because
           // there is not fine-granularity control?
           tCpC(i, 0) =
-              elem_less(tCcC(i, 0, 0), shape(D(_, 0, _))); // Remove first dim for experts in D became (BATCH_SIZE, OUTPUT_SIZE)
+              elem_less(tCcC(i, 0, 0),
+                        shape(D(_, 0, _))); // Remove first dim for experts in D
+                                            // became (BATCH_SIZE, OUTPUT_SIZE)
         }
 
         if (!NOBIAS) {
-          // TODO(Wenqin): The variable named with "s2g", but what we actually do here is "g2s",
-          // figure the load shape from GMEM to SMEM and SMEM to registers later.
+          // TODO(Wenqin): The variable named with "s2g", but what we actually
+          // do here is "g2s", maybe we should rename it for reusing code.
           cute::copy_if(g2s_tiled_copy_r, tCpC, tCgR_s2g, tCsR_s2g);
           __syncthreads();
           // load residual to accumulator registers
@@ -486,26 +492,29 @@ __device__ __forceinline__ void
         auto s2r_tiled_copy_a = make_tiled_copy_A(S2RCopyAtomA{}, tiled_mma);
         auto s2r_thr_copy_a = s2r_tiled_copy_a.get_slice(idx);
         // ((_8,_1),_1,((_2,_2),_2),(_1,_3)):((_1,_0),_0,((16,32),_1024),(_0,_2048))
-        // To partition the physical layout for the shared memory to make it match what each thread want.
-        auto tAsA = s2r_thr_copy_a.partition_S(
-            sA); // ? (CPY, CPY_M, CPY_K, kStage) ((_8,_1),_1,((_2,_2),_2),(_1,_3))
+        // To partition the physical layout for the shared memory to make it
+        // match what each thread want.
+        auto tAsA =
+            s2r_thr_copy_a.partition_S(sA); // ? (CPY, CPY_M, CPY_K, kStage)
+                                            // ((_8,_1),_1,((_2,_2),_2),(_1,_3))
         // ((_8,_1),_1,_8):((_1,_0),_0,_8)
-        // A logical for registers, retile_D make it match the shared memory source layout.
+        // A logical for registers, retile_D make it match the shared memory
+        // source layout.
         auto tCrA_view = s2r_thr_copy_a.retile_D(
             tCrA); // ? (CPY, CPY_M, CPY_K) ((_8,_1),_1,_8)
 
         auto s2r_tiled_copy_b = make_tiled_copy_B(S2RCopyAtomB{}, tiled_mma);
         auto s2r_thr_copy_b = s2r_tiled_copy_b.get_slice(idx);
         // ((_8,_1),_1,((_2,_2),_2),(_1,_3)):((_1,_0),_0,((16,32),_4096),(_0,_8192))
-        auto tBsB = s2r_thr_copy_b.partition_S(
-            sB); // ? (CPY, CPY_N, CPY_K, kStage) ((_8,_1),_1,((_2,_2),_2),(_1,_3))
+        auto tBsB =
+            s2r_thr_copy_b.partition_S(sB); // ? (CPY, CPY_N, CPY_K, kStage)
+                                            // ((_8,_1),_1,((_2,_2),_2),(_1,_3))
         // (((_4,_2),_1),_1,_8):(((_1,_32),_0),_0,_4)
         auto tCrB_view = s2r_thr_copy_b.retile_D(
             tCrB); // ? (CPY, CPY_N, CPY_K) (((_4,_2),_1),_1,_8)
 
 #if DEBUG_LOG
-        if(activated_expert_offset == expert_offset &&
-            m_iter == 0 &&
+        if (activated_expert_offset == expert_offset && m_iter == 0 &&
             n_iter == 0) {
           PRINT(s2r_tiled_copy_a);
           PRINT(s2r_thr_copy_a);
@@ -521,17 +530,18 @@ __device__ __forceinline__ void
         G2SCopyA g2s_tiled_copy_a;
         auto g2s_thr_copy_a = g2s_tiled_copy_a.get_slice(idx);
         // ((_8,_1),_2,_1,16):((_1,_0),16384,_0,_128)
-        // partition gA with tile for (16, 128), so CPY is 8 for each thread, 
-        // CPY_M is 2 (2*8=16, we need to copy 16 rows, but 128 threads could juts copy 8 row in one iteration)
-        // CPY_K is 1, because we don't need to repeat in K dim
-        // k is 16 because 16*128=2048, so there is 16 tiles.
+        // partition gA with tile for (16, 128), so CPY is 8 for each thread,
+        // CPY_M is 2 (2*8=16, we need to copy 16 rows, but 128 threads could
+        // juts copy 8 row in one iteration) CPY_K is 1, because we don't need
+        // to repeat in K dim k is 16 because 16*128=2048, so there is 16 tiles.
         auto tAgA_copy = g2s_thr_copy_a.partition_S(
             gA); // (CPY, CPY_M, CPY_K, k) ((_8,_1),_2,_1,16)
         // ((_8,_1),_2,_1,(_1,_3)):((_1,_0),_512,_0,(_0,_2048))
         auto tAsA_copy = g2s_thr_copy_a.partition_D(
             sA); // (CPY, CPY_M, CPY_K, kStage) ((_8,_1),_2,_1,(_1,_3))
         // ((_8,_1),_2,_1,16):((_1@1,_0),_8@0,_0,_128@1)
-        auto tAcA = g2s_thr_copy_a.partition_S(cta_cA); // (CPY, CPY_M, CPY_K, k) ((_8,_1),_2,_1,16)
+        auto tAcA = g2s_thr_copy_a.partition_S(
+            cta_cA); // (CPY, CPY_M, CPY_K, k) ((_8,_1),_2,_1,16)
 
         G2SCopyB g2s_tiled_copy_b;
         auto g2s_thr_copy_b = g2s_tiled_copy_b.get_slice(idx);
@@ -546,20 +556,22 @@ __device__ __forceinline__ void
         // In N dim, it will repeat 8 times
         // In K dim, it will not repeat
         // In k stage, it have 16 stages
-        auto tBcB = g2s_thr_copy_b.partition_S(cta_cB); // (CPY, CPY_N, CPY_K, k) ((_8,_1),_8,_1,16)
+        auto tBcB = g2s_thr_copy_b.partition_S(
+            cta_cB); // (CPY, CPY_N, CPY_K, k) ((_8,_1),_8,_1,16)
         // only do predicate on m / n dimension, k dimension use stride-0
         // broadcast
         // (_2,_1):(_1,_0)
         auto tApA = make_tensor<bool>(
             make_shape(size<1>(tAcA),
-                      Int<1>{}), // size: M sub-dimension per thread, K dimension
-                                  // use 1, placeholder
+                       Int<1>{}), // size: M sub-dimension per thread, K
+                                  // dimension use 1, placeholder
             make_stride(Int<1>{}, Int<0>{}) // broadcast to K
         );
-        
+
         // TODO(Wenqin): we don't use tBpB anymore, we need to add some
-        // static_assert for this, or introduce tBpB again and fix some
-        // correctness issue.
+        // static_assert for this, or introduce tBpB again which could help us
+        // to make the kernel works in more cases (OUTPUT_STRIDE % OUTPUT_SIZE
+        // != 0)?
         // (_8,_1):(_1,_0)
         auto tBpB = make_tensor<bool>(make_shape(size<1>(tBcB), Int<1>{}),
                                       make_stride(Int<1>{}, Int<0>{}));
@@ -573,13 +585,12 @@ __device__ __forceinline__ void
         }
         CUTE_UNROLL
         for (int in = 0; in < size<0>(tBpB); ++in) {
-          tBpB(in, 0) =
-              elem_less(get<0>(tBcB(0, in, 0, 0)), shape<0>(B(0, _, _))); // n < N ?
+          tBpB(in, 0) = elem_less(get<0>(tBcB(0, in, 0, 0)),
+                                  shape<0>(B(0, _, _))); // n < N ?
         }
 
 #if DEBUG_LOG
-        if(activated_expert_offset == expert_offset &&
-            m_iter == 0 &&
+        if (activated_expert_offset == expert_offset && m_iter == 0 &&
             n_iter == 0) {
           PRINT(g2s_tiled_copy_a);
           PRINT(g2s_thr_copy_a);
@@ -600,40 +611,42 @@ __device__ __forceinline__ void
         int ismem_read_stage = 0;
         int ismem_write_stage = 0;
 
-      // warm up
+        // warm up
 #pragma unroll
         for (int istage = 0; istage < kStage - 1; ++istage) {
-          // TODO(Wenqin): we don't use mRoutingIndices here, because we will use it as predicate later 
-          // when we store the content back to GMEM, but is it a better solution if we just load valid
-          // data at here? it may reduce the total data we load, but we may need some branches here,
-          // that's a trade-off.
+          // TODO(Wenqin): we don't use mRoutingIndices here, because we will
+          // use it as predicate later when we store the content back to GMEM,
+          // but is it a better solution if we just load valid data at here? it
+          // may reduce the total data we load, but we may need some branches
+          // here, that's a trade-off.
           cute::copy_if(g2s_tiled_copy_a,
                         tApA,
                         tAgA_copy(_, _, _, istage),
                         tAsA_copy(_, _, _, istage));
           cute::copy(g2s_tiled_copy_b,
-                        tBgB_copy(_, _, _, istage),
-                        tBsB_copy(_, _, _, istage));
+                     tBgB_copy(_, _, _, istage),
+                     tBsB_copy(_, _, _, istage));
           cp_async_fence();
 
           ++itile_to_read;
           ++ismem_write_stage;
         }
 
-        // TODO: cp_async_wait later?
         cp_async_wait<kStage - 2>();
         __syncthreads();
 
         int ik = 0;
         cute::copy(s2r_tiled_copy_a,
-                  tAsA(_, _, ik, ismem_read_stage),
-                  tCrA_view(_, _, ik));
+                   tAsA(_, _, ik, ismem_read_stage),
+                   tCrA_view(_, _, ik));
         cute::copy(s2r_tiled_copy_b,
-                  tBsB(_, _, ik, ismem_read_stage),
-                  tCrB_view(_, _, ik));
+                   tBsB(_, _, ik, ismem_read_stage),
+                   tCrB_view(_, _, ik));
 
-        constexpr int ntile = REDUCTION_SIZE / kTileK; // 2048 / 128 = 16 tiles for the whole K dim reduction
-        constexpr int nk = size<2>(tCrA);              // 8 iteartions inside a tile
+        constexpr int ntile =
+            REDUCTION_SIZE /
+            kTileK; // 2048 / 128 = 16 tiles for the whole K dim reduction
+        constexpr int nk = size<2>(tCrA); // 8 iteartions inside a tile
 
 #pragma unroll 1
         for (int itile = 0; itile < ntile; ++itile) {
@@ -648,8 +661,8 @@ __device__ __forceinline__ void
                               tAgA_copy(_, _, _, itile_to_read),
                               tAsA_copy(_, _, _, ismem_write_stage));
                 cute::copy(g2s_tiled_copy_b,
-                              tBgB_copy(_, _, _, itile_to_read),
-                              tBsB_copy(_, _, _, ismem_write_stage));
+                           tBgB_copy(_, _, _, itile_to_read),
+                           tBsB_copy(_, _, _, ismem_write_stage));
 
                 ++itile_to_read;
                 ismem_write_stage = (ismem_write_stage + 1) % kStage;
@@ -659,7 +672,7 @@ __device__ __forceinline__ void
             }
 
             if (ik == nk - 1) {
-              if(ntile - itile > 2) {
+              if (ntile - itile > 2) {
                 cp_async_wait<kStage - 2>();
               } else {
                 cp_async_wait<0>();
@@ -670,53 +683,55 @@ __device__ __forceinline__ void
             }
 
             cute::copy(s2r_tiled_copy_a,
-                      tAsA(_, _, ik_next, ismem_read_stage),
-                      tCrA_view(_, _, ik_next));
+                       tAsA(_, _, ik_next, ismem_read_stage),
+                       tCrA_view(_, _, ik_next));
             cute::copy(s2r_tiled_copy_b,
-                      tBsB(_, _, ik_next, ismem_read_stage),
-                      tCrB_view(_, _, ik_next));
+                       tBsB(_, _, ik_next, ismem_read_stage),
+                       tCrB_view(_, _, ik_next));
 
             cute::gemm(tiled_mma, tCrD, tCrA(_, _, ik), tCrB(_, _, ik), tCrD);
           } // ik
-        }   // itile
+        } // itile
 
-        // NOTE: We don't need data in SMEM for A and B anymore, so we could just reuse them for C.
+        // NOTE: We don't need data in SMEM for A and B anymore, so we could
+        // just reuse them for C.
         // ((_16,_1),(_64,_1),(_1,_1)):((_64,_0),(_1,_0),(_0,_0))
-        auto sC = make_tensor(sA(_, _, ismem_read_stage).data(),
-                              SmemLayoutC{}); // ((_16,_1),(_64,_1),(_1,_1)):((_64,_0),(_1,_0),(_0,_0))
+        auto sC = make_tensor(
+            sA(_, _, ismem_read_stage).data(),
+            SmemLayoutC{}); // ((_16,_1),(_64,_1),(_1,_1)):((_64,_0),(_1,_0),(_0,_0))
 
-        // ((_2,_4),_1,_1):((_1,_2),_0,_0)
+        // [32b] ((_2,_4),_1,_1):((_1,_2),_0,_0)
         auto tCrC_r2s = r2s_thr_copy_c.retile_S(
             tCrD); // (CPY, CPY_M, CPY_N) ((_2,_4),_1,_1):((_1,_2),_0,_0)
         // ((_2,(_2,_2)),_1,_1,(_1,_1)):((_1,(_512,32)),_0,_0,(_0,_0))
-        // That's not a TV layout, but a tensor layout to describe where the register should be stored in,
-        // it seems like a row-major tensor.
+        // That's not a TV layout, but a tensor layout to describe where the
+        // register should be stored in, it seems like a row-major tensor.
         auto tCsC_r2s = r2s_thr_copy_c.partition_D(
             sC); // (CPY, _1, _1, pipe)
-                // ((_2,(_2,_2)),_1,_1,(_1,_1)):((_1,(_512,32)),_0,_0,(_0,_0))`
+                 // ((_2,(_2,_2)),_1,_1,(_1,_1)):((_1,(_512,32)),_0,_0,(_0,_0))`
 
         // ((_8,_1),_1,_1,(_1,_1)):((_1,_0),_0,_0,(_0,_0))
         auto tCsC_s2g = s2g_thr_copy_c.partition_S(
-            sC); // (CPY, _1, _1, pipe) ((_8,_1),_1,_1,(_1,_1)):((_1,_0),_0,_0,(_0,_0))
+            sC); // (CPY, _1, _1, pipe)
+                 // ((_8,_1),_1,_1,(_1,_1)):((_1,_0),_0,_0,(_0,_0))
         // ((_8,_1),_1,_1):((_1,_0),_0,_0)
         auto tCgC_s2g = s2g_thr_copy_c.partition_D(
             gD); // (CPY, CPY_M, CPY_N) ((_8,_1),_1,_1):((_1,_0),_0,_0)
 
         // (_8,_1):(_1,_0)
         auto tCpC_ep = make_tensor<bool>(make_shape(size<0>(tCcC), Int<1>{}),
-                                        make_stride(Int<1>{}, Int<0>{}));
+                                         make_stride(Int<1>{}, Int<0>{}));
         CUTE_UNROLL
         for (int i = 0; i < size<0>(tCpC_ep); ++i) {
           tCpC_ep(i, 0) = elem_less(tCcC(i, 0, 0), shape(D));
         }
 
-        // ((_2,_4),_1,_1):((_1,_2),_0,_0)
+        // [16b] ((_2,_4),_1,_1):((_1,_2),_0,_0)
         auto tC_tmp =
             make_tensor_like<T>(tCrC_r2s); // ((_2,_8),_1,_1):((_1,_2),_0,_0)
 
 #if DEBUG_LOG
-        if(activated_expert_offset == expert_offset &&
-            m_iter == 0 &&
+        if (activated_expert_offset == expert_offset && m_iter == 0 &&
             n_iter == 0) {
           PRINT(sC);
           PRINT(tCrC_r2s);
@@ -728,31 +743,41 @@ __device__ __forceinline__ void
         }
 #endif
 
-
-
+        // NOTE: That's not a real copy, just convert data type from fp32 to
+        // bf16 in registers.
         cute::copy(tCrC_r2s, tC_tmp);
 
         cute::copy(r2s_tiled_copy_c, tC_tmp, tCsC_r2s(_, _, _, 0));
         // ((_2,_4),_1,_1) -> ((_2,(_2,_2)),_1,_1)
         __syncthreads();
 
-        // We couldn't use s2g_tiled_copy_c copy here, because its granularity is too big for use to
-        // use the predicate, try to find a suitable way later.
-        // cute::copy_if(s2g_tiled_copy_c, tCpC_ep, tCsC_s2g(_, _, _, 0), tCgC_s2g);
-        constexpr int write_back_batch_size = kTileM < BATCH_SIZE ? kTileM : BATCH_SIZE;
-        for(int i = threadIdx.x; i < write_back_batch_size * OUTPUT_SIZE; i += MOE_NUM_THREADS) {
-          const int t = i / OUTPUT_SIZE;
-          const int o = i % OUTPUT_SIZE;
+        // We couldn't use s2g_tiled_copy_c copy here, because its granularity
+        // is too big for use to use the predicate, try to find a suitable way
+        // later. cute::copy_if(s2g_tiled_copy_c, tCpC_ep, tCsC_s2g(_, _, _, 0),
+        // tCgC_s2g);
+        constexpr int write_back_batch_size =
+            kTileM < BATCH_SIZE ? kTileM : BATCH_SIZE;
+        for (int i = threadIdx.x; i < write_back_batch_size * OUTPUT_SIZE;
+             i += MOE_NUM_THREADS) {
+          int const t = i / OUTPUT_SIZE;
+          int const o = i % OUTPUT_SIZE;
 
-          if(tRoutingIndex(t) != 0) {
+          if (tRoutingIndex(t) != 0) {
             // Last 0 in sC just for pipeline stag, it should always be 0 in
             // sC, because we just store one stage in pipeline.
-            // gD(b, o) = sC(b, o, 0);
             D(t, tRoutingIndex(t) - 1, o) = sC(t, o, 0);
           }
         }
-        // TODO(Wenqin): do we really need the below sync?
-        __syncthreads();
+        // TODO: Given we will reuse the (last stage + 1) shared memory of A for
+        // C, under such a scenario, if the (last stage + 1) of A is the first
+        // pipeline, we should add a sync when LoopN > 1 or LoopM > 1, maybe we
+        // could remove the sync by selecting a suitable pipe slot to reuse for
+        // C later.
+        constexpr bool need_sync_after_writeback =
+            (LoopN > 1 || LoopM > 1) && ((ntile + 1) % PIPE_MAX == 0);
+        if (need_sync_after_writeback) {
+          __syncthreads();
+        }
       } // n_iter
     } // m_iter
   }

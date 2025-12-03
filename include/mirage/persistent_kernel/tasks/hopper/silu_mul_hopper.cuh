@@ -15,6 +15,11 @@
 #pragma once
 #include "../common/utils.cuh"
 #include "../common/worker_config.h"
+
+#ifdef MIRAGE_UNIT_TEST
+// When building unit test, the macro is missed.
+constexpr int CONSUMER_NUM_THREADS = 128;
+#endif
 namespace kernel {
 
 template <typename T,
@@ -24,23 +29,22 @@ template <typename T,
           int O_STRIDE>
 __device__ __forceinline__ void silu_mul_task_impl_hopper(
     void const *input_ptr, void *output_ptr, int num_active_tokens) {
-  // TODO(Wenqin): it seems there are some build error, so commented out.
-  // if (threadIdx.x >= CONSUMER_NUM_THREADS) {
-  //   return;
-  // }
+  if (threadIdx.x >= CONSUMER_NUM_THREADS) {
+    return;
+  }
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_mul = static_cast<T const *>(input_ptr) + OUTPUT_SIZE;
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
-// #pragma unroll
-//   for (int i = threadIdx.x; i < num_active_tokens * OUTPUT_SIZE;
-//        i += CONSUMER_NUM_THREADS) {
-//     int batch_idx = i / OUTPUT_SIZE;
-//     int offset = i % OUTPUT_SIZE;
-//     float input_val = float(d_input[batch_idx * I_STRIDE + offset]);
-//     T mul_val = d_mul[batch_idx * I_STRIDE + offset];
-//     d_output[batch_idx * O_STRIDE + offset] =
-//         T(input_val / (1.0f + expf(-input_val))) * mul_val;
-//   }
+#pragma unroll
+  for (int i = threadIdx.x; i < num_active_tokens * OUTPUT_SIZE;
+       i += CONSUMER_NUM_THREADS) {
+    int batch_idx = i / OUTPUT_SIZE;
+    int offset = i % OUTPUT_SIZE;
+    float input_val = float(d_input[batch_idx * I_STRIDE + offset]);
+    T mul_val = d_mul[batch_idx * I_STRIDE + offset];
+    d_output[batch_idx * O_STRIDE + offset] =
+        T(input_val / (1.0f + expf(-input_val))) * mul_val;
+  }
 }
 
 } // namespace kernel
