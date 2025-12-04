@@ -18,3 +18,4 @@
 #include "mul_sum_add_sm100.cuh"
 #include "tensor_init.cuh"
 #include "topk_softmax_sm100.cuh"
+#include "mixed_attention_sm100.cuh"
