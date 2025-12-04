@@ -115,7 +115,7 @@ __global__ void init_kernel(RuntimeConfig config) {
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
     // initialize metadata
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_MULTI_TURN)
     for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
@@ -369,6 +369,83 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config,
   } else { // iteration_num == 0
     return true;
   }
+}
+#endif
+
+#ifdef MODE_MULTI_TURN
+__device__ __forceinline__ bool
+    prepare_next_batch(RuntimeConfig const &config) {
+  bool can_continue = true;
+  // Pass 1: Check conditions and update history
+  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+    int request_id = config.request_ids[i];
+    if (request_id != -1) {
+      int step = config.step[request_id];
+      int qo_indptr = config.qo_indptr_buffer[i];
+      int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
+
+      for (int j = 0; j < num_tokens; j++) {
+        long long token = config.output_tokens[qo_indptr + j];
+        if (step + j + 1 < config.max_seq_length) {
+          config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
+              token;
+        }
+        if (token == config.eos_token_id) {
+          printf("[prepare_next_batch] EOS token detected for request %d!\n", request_id);
+          can_continue = false;
+        }
+      }
+      config.step[request_id] = step + num_tokens;
+      config.paged_kv_last_page_len_buffer[i] =
+          (step + num_tokens) % MPK_PAGE_SIZE;
+
+      if (config.paged_kv_last_page_len_buffer[i] == 0) {
+        printf("[prepare_next_batch] A page is full for request %d!\n", request_id);
+        can_continue = false;
+      }
+      if (step + num_tokens >= config.max_seq_length) {
+        printf("[prepare_next_batch] Step exceeds max_seq_length for request %d!\n", request_id);
+        can_continue = false;
+      }
+    }
+  }
+
+  // Pass 2: Update qo_indptr and input_tokens for the NEXT step (Decode: 1 token)
+  int num_input_tokens = 0;
+  if (can_continue) {
+    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      int request_id = config.request_ids[i];
+      // Update the start pointer for this request
+      config.qo_indptr_buffer[i] = num_input_tokens;
+      
+      if (request_id != -1) {
+        // Retrieve the last generated token to serve as input for the next step
+        // Note: step was incremented in Pass 1, so we look at step - 1
+        int current_step = config.step[request_id];
+        long long last_token = config.tokens[request_id * MPK_MAX_SEQ_LENGTH + current_step - 1];
+        
+        config.input_tokens[num_input_tokens] = last_token;
+        num_input_tokens++;
+      }
+    }
+    // Set the end pointer for the last request
+    config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS] = num_input_tokens;
+  }
+
+  printf("[prepare_next_batch] can_continue: %d\n", can_continue);
+  printf("[prepare_next_batch] num_input_tokens: %d\n", num_input_tokens);
+  printf("[prepare_next_batch] qo_indptr_buffer: ");
+  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS + 1; i++) {
+    printf("%d ", config.qo_indptr_buffer[i]);
+  }
+  printf("\n");
+  printf("[prepare_next_batch] input_tokens: ");
+  for (int i = 0; i < num_input_tokens; i++) {
+    printf("%lld ", config.input_tokens[i]);
+  }
+  printf("\n");
+
+  return can_continue;
 }
 #endif
 
@@ -1119,9 +1196,11 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   int npes = 1;
 #endif
 
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_MULTI_TURN)
   global_runtime_config.request_ids =
       gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
+#endif
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) 
   global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
   global_runtime_config.page_queue =
       gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
@@ -1379,7 +1458,7 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_MULTI_TURN)
   gpu_free(global_runtime_config.next_request_id);
   gpu_free(global_runtime_config.page_queue);
   gpu_free(global_runtime_config.page_queue_head);

@@ -1311,7 +1311,7 @@ class PersistentKernel:
         output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        if self.mode == "online_notoken" or self.mode == "online" or self.mode == "multi_turn":
+        if self.mode == "online_notoken" or self.mode == "online" or self.mode == "online_multi_turn":
             # We will init for multiple times so the output directory should be permanent
             tempdir = "./permanent_output_dir/"
         else:

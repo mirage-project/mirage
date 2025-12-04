@@ -420,6 +420,9 @@ class MPK:
             #return the last hidden state
             return self.model_builder.returned_hidden_state
         
+        if self.persistent_kernel.mode == "online_multi_turn":
+            return self.tokens
+        
     def decode(self, ids: torch.Tensor):
         return self.model_builder.decode(ids)
     

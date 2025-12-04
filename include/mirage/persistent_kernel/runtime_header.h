@@ -27,19 +27,36 @@ constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 #endif
 
-#if MPK_TARGET_CC >= 90
-constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
-#elif MPK_TARGET_CC >= 86
-constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
-#elif MPK_TARGET_CC >= 80
-constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    160 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
-// Have to be 160 for vllm compatibility, or program will get stuck
+#if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
+  #if MPK_TARGET_CC >= 90
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      220 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  // Have to be 220 for vllm compatibility, or program will stuck
+  #elif MPK_TARGET_CC >= 86
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  #elif MPK_TARGET_CC >= 80
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      160 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  // Have to be 160 for vllm compatibility, or program will stuck
+  #else
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  #endif
 #else
-constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  #if MPK_TARGET_CC >= 90
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  #elif MPK_TARGET_CC >= 86
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  #elif MPK_TARGET_CC >= 80
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  #else
+  constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+      163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+  #endif
 #endif
 
 typedef unsigned long long int TaskId;
@@ -261,8 +278,9 @@ struct RuntimeConfig {
   int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
+  // TODO: Some resources are not used in some modes
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
-    defined(MODE_ONLINE_NOTOKEN)
+    defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
   int *prompt_length;     // Metadata for online/offline serving
   int *request_ids;       // Metadata for online/offline serving
   int *page_queue;        // Metadata for online/offline serving
