@@ -1,5 +1,6 @@
 #include "runtime_header.h"
 #include "tasks/ampere/task_header.cuh"
+#include "tasks/blackwell/task_header.cuh"
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -15,6 +16,9 @@ using kernel::multitoken_paged_attention_task_impl;
 // using kernel::norm_linear_task_impl;
 // using kernel::paged_attention_task_impl;
 using kernel::rotary_embedding;
+using kernel::sampling_from_logits_kernel;
+using kernel::SAMPLING_REDUCE_ALGO;
+using kernel::SamplingDataAndIndex;
 // using kernel::silu_mul_linear_task_impl;
 // using kernel::single_batch_decoding_kernel;
 // using kernel::single_batch_extend_kernel;
@@ -502,7 +506,7 @@ __global__ void multitoken_paged_attention_wrapper(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -559,7 +563,7 @@ void launch_multitoken_paged_attention(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -724,7 +728,7 @@ void multitoken_paged_attention(
     torch::Tensor paged_kv_indptr_buffer,
     torch::Tensor paged_kv_indices_buffer,
     torch::Tensor paged_kv_last_page_len_buffer,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     torch::optional<torch::Tensor> q_norm_weight = torch::nullopt,
@@ -1067,9 +1071,9 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
     case 256:                                                                  \
       DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(256);                         \
       break;                                                                   \
-    case 1600:                                                                 \
-      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                        \
-      break;                                                                   \
+    /* case 1600: Commented out - HEAD_DIM=1600 violates norm.cuh assertion */ \
+    /*   DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                  */ \
+    /*   break; */                                                             \
     default:                                                                   \
       printf("Unsupported head dim in test: %zu\n", head_dim);                 \
       break;                                                                   \
@@ -1649,6 +1653,58 @@ void rope(torch::Tensor input,
 }
 #endif
 
+// Sampling from Logits
+
+// Wrapper __global__ kernel that calls the __device__ function
+template <uint32_t BLOCK_THREADS,
+          uint32_t VEC_SIZE,
+          typename DType,
+          typename IdType>
+__global__ void sampling_from_logits_test_wrapper(DType *logits,
+                                                  IdType *output,
+                                                  uint32_t vocab_size,
+                                                  uint64_t philox_seed,
+                                                  uint64_t philox_offset,
+                                                  int batch_size) {
+  kernel::sampling_from_logits_kernel<BLOCK_THREADS, VEC_SIZE, DType, IdType>(
+      logits, output, vocab_size, philox_seed, philox_offset, batch_size);
+}
+
+void sampling_from_logits(torch::Tensor logits,
+                          torch::Tensor output,
+                          int64_t seed) {
+  void const *logits_ptr = logits.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  uint32_t batch_size = logits.size(0);
+  uint32_t vocab_size = logits.size(1);
+
+  if (vocab_size == 50257) {
+    dim3 grid_dim(1, 1, 1); // Single block processes all batches
+    dim3 block_dim(256, 1, 1);
+    size_t smem_size =
+        sizeof(typename cub::BlockReduce<SamplingDataAndIndex<float, int>,
+                                         256,
+                                         SAMPLING_REDUCE_ALGO>::TempStorage);
+
+    sampling_from_logits_test_wrapper<256, 4, float, int>
+        <<<grid_dim, block_dim, smem_size>>>((float *)logits_ptr,
+                                             (int *)output_ptr,
+                                             vocab_size,
+                                             seed,      // philox_seed
+                                             0,         // philox_offset
+                                             batch_size // batch_size
+        );
+  } else {
+    printf("Unsupported vocab size in sampling test: %u\n", vocab_size);
+  }
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("Sampling kernel error: %s\n", cudaGetErrorString(err));
+  }
+}
+
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1696,6 +1752,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multitoken_paged_attention",
         &multitoken_paged_attention,
         "Multitoken Paged Attention");
+  m.def("sampling_from_logits",
+        &sampling_from_logits,
+        "Sampling from Logits kernel");
   // m.def("rms_norm", &rms_norm, "Window RMSNorm");
   // m.def("rope", &rope, "RoPE kernel");
 }

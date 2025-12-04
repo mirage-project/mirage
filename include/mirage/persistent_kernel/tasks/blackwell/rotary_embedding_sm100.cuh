@@ -29,11 +29,10 @@ __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
                                                        T const *sin_ptr,
                                                        int token_offset = 0) {
   static_assert(HEAD_DIM < NUM_THREADS || HEAD_DIM % NUM_THREADS == 0);
-  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
   constexpr int ROTARY_PARTICIPATING_THREADS =
       (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
   cutlass::arch::NamedBarrier wg_barrier_rotary(ROTARY_PARTICIPATING_THREADS,
-                                                /*bar-id*/ 7);
+                                                /*bar-id*/ 6);
   if (threadIdx.x < NUM_THREADS) {
 #pragma unroll
     for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {

@@ -230,9 +230,9 @@ class KNGraph:
             strides = reversed(strides)
         else:
             assert len(dims) == len(strides)
-            assert check_stride(dims, strides, "row-major") | check_stride(
-                dims, strides, "column-major"
-            )
+            # assert check_stride(dims, strides, "row-major") | check_stride(
+            #     dims, strides, "column-major"
+            # )
         return self.cygraph.new_input(dims, tuple(strides), dtype)
 
     def mark_output(self, A: DTensor, strides: tuple = None):

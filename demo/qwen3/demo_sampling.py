@@ -5,35 +5,29 @@ import torch
 import torch.distributed as dist
 import argparse
 import os
+import random
 
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
-def grid_for_linear_layer(size, with_residual=False):
-    # linear with residual layers tend to be more memory-bound compared to linear layers (without residual), so we use larger grid size for it.
-    # since the WGMMA M=64, we use 64 as the partitioned output size for linear with residual layers.
-    if with_residual:
-        if size % 64 == 0:
-            # Note this stands for the number of grids, where each block process 64 output size.
-            return size // 64
-    # Special case for the lm_head, where the output size is too large, we partition it to 256 output size.
-    if size >= 100_000:
+def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
+    # 96 and 64 are enough to cover all Qwen3 model? Please update the method
+    # if you meet any incompatibility.
+    if size % 64 == 0 and not use_cutlass_kernel:
+        # TODO(Wenqin): If we set OUTPUT_SIZE too much for PTX linear kernel,
+        # there is some regression.
+        return size // 64
+    if size / 96 > 400:
+        # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
+        # cutlass version will output unexpect result (not same out put for
+        # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
+        assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
         return size // 256
-    # For linear without residual, we partitioned them to the number of worker SMs
-    if size % 128 == 0:
-        return 128
-    elif size % 96 == 0:
-        return 96
-    elif size % 64 == 0:
-        return 64
-
-def grid_for_rmsnorm_layer(size):
-    if size % 128 == 0:
-        return 128
     if size % 96 == 0:
         return 96
     elif size % 64 == 0:
         return 64
+    
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -52,7 +46,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
-    parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
+    parser.add_argument("--max-num-batched-requests", default=4, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
@@ -98,7 +92,6 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
-    parser.add_argument("--split-kv-cache", action="store_true", help="Use split-kv cache")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -136,10 +129,10 @@ if __name__ == "__main__":
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    total_num_requests = args.max_num_batched_requests
+    total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
@@ -216,7 +209,6 @@ if __name__ == "__main__":
         head_dim = model.config.head_dim
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
         fused_outdim_2 = 2 * intermediate_size
-        num_kv_cache_chunks = max(1, args.max_seq_length // 256)
 
         if args.profiling:
             profiler_tensor = torch.zeros(
@@ -268,7 +260,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
-            use_cutlass_kernel=args.use_cutlass_kernel,
+            use_cutlass_kernel=args.use_cutlass_kernel
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -306,20 +298,6 @@ if __name__ == "__main__":
             dims=(args.max_num_batched_tokens, fused_outdim_1 // world_size), # [6, 6144]
             dtype=mi.bfloat16,
             name="attn_in",
-            io_category="cuda_tensor",
-        )
-        lse = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads, num_local_kv_heads),
-            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads),
-            dtype=mi.float32,
-            name="lse",
-            io_category="cuda_tensor",
-        )
-        attn_out_tmp = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim, num_local_kv_heads),
-            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim),
-            dtype=mi.bfloat16,
-            name="attn_out_tmp",
             io_category="cuda_tensor",
         )
         attn_out = mpk.new_tensor(
@@ -376,33 +354,14 @@ if __name__ == "__main__":
             name="argmax_in",
             io_category="cuda_tensor",
         )
-        argmax_part_value = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
-            dtype=mi.bfloat16,
-            name="argmax_part_value",
-            io_category="cuda_tensor",
-        )
-        argmax_part_index = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
-            dtype=mi.int64,
-            name="argmax_part_index",
-            io_category="cuda_tensor",
-        )
         argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
-        #argmax_out = mpk.new_tensor(
-        #    dims=(args.max_num_batched_tokens, 1),
-        #    dtype=mi.int64,
-        #    name="argmax_out",
-        #    io_category="cuda_tensor",
-        #)
-
         # add spec tokens layer
         if spec_decode_config:
             spec_tokens = mpk.draft_forward_layer_dispatcher(
                 spec_decode_config = spec_decode_config, 
                 tokens = all_tokens,
                 grid_dim=(96, 1, 1),
-                block_dim=(256, 1, 1),
+                block_dim=(128, 1, 1),
             )
             x = spec_tokens
         # Add Embed
@@ -416,7 +375,7 @@ if __name__ == "__main__":
             output=y, 
             # grid_dim=(max_factor_leq_n(hidden_size, 96 // args.max_num_batched_tokens), total_tokens_per_iter, 1), 
             grid_dim=(1, 1, 1), 
-            block_dim=(256, 1, 1),
+            block_dim=(128, 1, 1),
             input_source=1,
         )
         x = y
@@ -446,15 +405,23 @@ if __name__ == "__main__":
                 weight=w_norm,
                 output=rmsnorm_out,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-                block_dim=(256, 1, 1),
+                block_dim=(128, 1, 1),
             )
             mpk.linear_layer(
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
-                grid_dim=(grid_for_linear_layer(w_qkv.dim(0), with_residual=False), 1, 1),
-                block_dim=(256, 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0), args.use_cutlass_kernel), 1, 1),
+                block_dim=(128, 1, 1),
             )
+            #mpk.rmsnorm_linear_layer(
+            #    input=x,
+            #    weight_norm=w_norm,
+            #    weight_linear=w_qkv,
+            #    output=attn_in,
+            #    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
             # add attention
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
@@ -480,31 +447,7 @@ if __name__ == "__main__":
                     sin_pos_embed=sin_pos_embed,
                     output=attn_out,
                     grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
-                    block_dim=(256, 1, 1),
-                )
-            elif args.split_kv_cache:
-                mpk.paged_attention_split_kv_layer(
-                    input=attn_in,
-                    k_cache=k_cache,
-                    v_cache=v_cache,
-                    q_norm=w_q_norm,
-                    k_norm=w_k_norm,
-                    cos_pos_embed=cos_pos_embed,
-                    sin_pos_embed=sin_pos_embed,
-                    lse=lse,
-                    output=attn_out_tmp,
-                    attention_params=(num_local_q_heads, num_kv_cache_chunks),
-                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, num_kv_cache_chunks),
-                    block_dim=(256, 1, 1),
-                )
-
-                mpk.paged_attention_split_kv_merge_layer(
-                    lse=lse,
-                    output_tmp=attn_out_tmp,
-                    output=attn_out,
-                    attention_params=(num_local_q_heads, head_dim),
-                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
-                    block_dim=(256, 1, 1),
+                    block_dim=(128, 1, 1),
                 )
             else:
                 mpk.paged_attention_layer(
@@ -528,8 +471,8 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(grid_for_linear_layer(w.dim(0), with_residual=True), 1, 1),
-                block_dim=(256, 1, 1),
+                grid_dim=(hidden_size // 64, 1, 1),
+                block_dim=(128, 1, 1),
             )
             # reset residual input as x
             x = attn_proj_out
@@ -540,7 +483,7 @@ if __name__ == "__main__":
                     buffer=allreduce_buf,
                     output=attn_allreduce_out,
                     grid_dim=(hidden_size // 64, 1, 1),
-                    block_dim=(256, 1, 1),
+                    block_dim=(128, 1, 1),
                 )
                 x = attn_allreduce_out
             # add rmsnorm_linear layer
@@ -554,7 +497,7 @@ if __name__ == "__main__":
             w_up_proj = mpk.attach_input(
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
-            rmsnorm_num_tasks = grid_for_rmsnorm_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
+            rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0), args.use_cutlass_kernel)
             w_gatedup = mpk.shuffle_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 shuffled_dim=0,
@@ -566,20 +509,28 @@ if __name__ == "__main__":
                 weight=w_norm,
                 output=rmsnorm_out,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-                block_dim=(256, 1, 1),
+                block_dim=(128, 1, 1),
             )
             mpk.linear_layer(
                 input=rmsnorm_out,
                 weight=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(grid_for_linear_layer(w_gatedup.dim(0), with_residual=False), 1, 1),
-                block_dim=(256, 1, 1),
+                grid_dim=(rmsnorm_num_tasks, 1, 1),
+                block_dim=(128, 1, 1),
             )
+            #mpk.rmsnorm_linear_layer(
+            #    input=x,
+            #    weight_norm=w_norm,
+            #    weight_linear=w_gatedup,
+            #    output=mlp_mid,
+            #    grid_dim=(rmsnorm_num_tasks, 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
             mpk.silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
                 grid_dim=(rmsnorm_num_tasks//2, 1, 1),
-                block_dim=(256, 1, 1),
+                block_dim=(128, 1, 1),
             )
             # add silu_mul_linear layer
             w = mpk.attach_input(
@@ -590,8 +541,8 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=mlp_out,
-                grid_dim=(grid_for_linear_layer(w.dim(0), with_residual=True), 1, 1),
-                block_dim=(256, 1, 1),
+                grid_dim=(hidden_size // 64, 1, 1),
+                block_dim=(128, 1, 1),
             )
             # reset residual input as x
             x = mlp_out
@@ -601,7 +552,7 @@ if __name__ == "__main__":
                     buffer=allreduce_buf,
                     output=mlp_final,
                     grid_dim=(hidden_size // 64, 1, 1),
-                    block_dim=(256, 1, 1),
+                    block_dim=(128, 1, 1),
                 )
                 x = mlp_final
 
@@ -615,35 +566,31 @@ if __name__ == "__main__":
             weight=w_norm,
             output=rmsnorm_out,
             grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-            block_dim=(256, 1, 1),
+            block_dim=(128, 1, 1),
         )
         mpk.linear_layer(
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_linear_layer(w_proj.dim(0), with_residual=False), 1, 1),
-            block_dim=(256, 1, 1),
+            grid_dim=(mpk.num_workers, 1, 1),
+            block_dim=(128, 1, 1),
         )
-        # add argmax layer
-        if spec_decode_config and spec_decode_config.method == "promptlookup":
-            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-                                       spec_decode_config.spec_length + 1, 
-                                       1)
-            argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
-        else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
-            argmax_reduce_grid_dim = (1, 1, 1)
-        mpk.argmax_partial_layer(
-            input=argmax_in,
-            output=(argmax_part_value, argmax_part_index),
-            grid_dim=argmax_partial_grid_dim,
-            block_dim=(256, 1, 1),
-        )
-        mpk.argmax_reduce_layer(
-            input=(argmax_part_value, argmax_part_index),
+        #mpk.rmsnorm_linear_layer(
+        #    input=x,
+        #    weight_norm=w_norm,
+        #    weight_linear=w_proj,
+        #    output=argmax_in,
+        #    grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+        #    block_dim=(128, 1, 1),
+        #)
+
+        # Add sampling layer
+        mpk.sampling_sm100_layer(
+            logits=argmax_in,
             output=argmax_out,
-            grid_dim=argmax_reduce_grid_dim,
+            grid_dim=(args.max_num_batched_tokens, 1, 1),
             block_dim=(256, 1, 1),
+            seed=random.randint(0, 2**31 - 1),
         )
         if spec_decode_config:
             verify_out = mpk.verify_layer_dispatcher(
@@ -651,7 +598,7 @@ if __name__ == "__main__":
                 spec_tokens = spec_tokens,
                 target_output = argmax_out,
                 grid_dim = (1, 1, 1),
-                block_dim = (256, 1, 1),
+                block_dim = (128, 1, 1),
             )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
@@ -667,7 +614,8 @@ if __name__ == "__main__":
     warmup = 0
     output_len = 512
     if not args.use_mirage:
-        for cur_pos in range(prompt_lengths[0], prompt_lengths[0] + output_len):
+        prompt_len= prompt_lengths[0].item()
+        for cur_pos in range(prompt_len, prompt_len + output_len):
             step.fill_(cur_pos - 1)
             input_ids = tokens[:, prev_pos:cur_pos]
             cos_embeddings = position_embeddings[0][:, prev_pos:cur_pos]
@@ -684,7 +632,7 @@ if __name__ == "__main__":
             prev_pos = cur_pos
             if next_token == model.config.eos_token_id:
                 break
-            if cur_pos == prompt_lengths[0] + warmup:
+            if cur_pos == prompt_len + warmup:
                 torch.cuda.synchronize()
                 starter.record()
 
@@ -698,7 +646,7 @@ if __name__ == "__main__":
         print(response)
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_lengths[0], cur_pos - prompt_lengths[0], run_time / (cur_pos - prompt_lengths[0])
+                prompt_len, cur_pos - prompt_len, run_time / (cur_pos - prompt_len)
             )
         )
     else:
@@ -730,6 +678,9 @@ if __name__ == "__main__":
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
+        
+        if total_num_requests > 1:
+            print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
 
         print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)

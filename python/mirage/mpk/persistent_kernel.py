@@ -108,7 +108,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass"}
+valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
 
 def get_compile_command(
     mpk,
@@ -189,6 +189,8 @@ def get_compile_command(
         flags = flags + ["-DMODE_ONLINE_NOTOKEN"]
     elif mpk.mode == "onepass":
         flags = flags + ["-DMODE_ONEPASS"]
+    elif mpk.mode == "online_multi_turn":
+        flags = flags + ["-DMODE_MULTI_TURN"]
     else:
         raise ValueError(f"Invalid persistent kernel mode: {mpk.mode}")
 
@@ -337,9 +339,9 @@ class PersistentKernel:
         io_category: str = "cuda_tensor",
     ) -> DTensor:
         # Assert a row-major layout
-        if strides is not None:
-            for d in range(len(dims) - 1):
-                assert strides[d] == strides[d + 1] * dims[d + 1]
+        # if strides is not None:
+        #     for d in range(len(dims) - 1):
+        #         assert strides[d] == strides[d + 1] * dims[d + 1]
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
@@ -644,6 +646,136 @@ class PersistentKernel:
             self.kn_graph.register_task(tb_graph, "paged_attention_sm100", params)
         else:
             self.kn_graph.register_task(tb_graph, "paged_attention", params)
+
+    
+    def paged_attention_split_kv_layer(
+        self,
+        input: DTensor,
+        k_cache: DTensor,
+        v_cache: DTensor,
+        q_norm: DTensor,
+        k_norm: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        lse: DTensor,
+        output: DTensor,
+        attention_params: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
+        assert k_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
+        assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
+        assert k_cache.dim(0) == self.max_num_pages
+        assert v_cache.dim(0) == self.max_num_pages
+        assert k_cache.dim(1) == self.page_size
+        assert v_cache.dim(1) == self.page_size
+        assert output.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv * head_dim / world_size, num_kv_heads)
+        assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
+
+        head_dim = k_cache.dim(3)
+        num_kv_heads = k_cache.dim(2)
+        num_q_heads = attention_params[0]
+        num_kv_chunks = attention_params[1]
+        
+        rotary_embed = 0
+        if cos_pos_embed is not None or sin_pos_embed is not None:
+            assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert cos_pos_embed.dim(1) == head_dim
+            assert sin_pos_embed.dim(1) == head_dim
+            rotary_embed = 1
+        qk_norm = 0
+        if q_norm is not None or k_norm is not None:
+            assert q_norm.num_dims == 1  # (head_dim)
+            assert k_norm.num_dims == 1  # (head_dim)
+            qk_norm = 1
+            assert q_norm.dim(0) == head_dim
+            assert k_norm.dim(0) == head_dim
+
+        # params[0]: num_q_heads
+        # params[1]: num_kv_heads
+        # params[2]: qk_norm
+        # params[3]: rotary_embed
+        # params[4]: max_seq_len
+        # params[5]: page_size
+        # params[6]: num_kv_chunks
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size, num_kv_chunks]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        assert grid_dim[0] == self.max_num_batched_requests
+        assert grid_dim[1] == num_kv_heads
+        tb_graph.new_input(input, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(lse, (-1, 2, 1), -1, True)
+        tb_graph.new_input(output, (-1, 2, 1), -1, True)
+        self.kn_graph.customized(
+            [
+                input,
+                k_cache,
+                v_cache,
+                q_norm,
+                k_norm,
+                cos_pos_embed,
+                sin_pos_embed,
+                lse,
+                output,
+            ],
+            tb_graph,
+        )
+        if self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "paged_attention_split_kv_sm100", params)
+        elif self.target_cc == 90:
+            self.kn_graph.register_task(tb_graph, "paged_attention_split_kv_hopper", params)
+        else:
+            raise ValueError(f"Unsupported target CC: {self.target_cc}")
+
+    def paged_attention_split_kv_merge_layer(
+        self,
+        lse: DTensor,
+        output_tmp: DTensor,
+        output: DTensor,
+        attention_params: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
+        assert output_tmp.num_dims == 3  # (num_tokens, num_chunks, hidden_size / world_size)
+        assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
+
+        num_q_heads = attention_params[0]
+        head_dim = attention_params[1]
+        num_qo_heads_per_kv = num_q_heads / grid_dim[1]
+        num_kv_heads = grid_dim[1]
+        # params[0]: num_qo_heads_per_kv
+        # params[1]: head_dim
+        # params[2]: max_seq_len
+        # params[3]: page_size
+        # params[4]: num_kv_heads
+        params = [num_qo_heads_per_kv, head_dim, self.max_seq_length, self.page_size, num_kv_heads]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(lse, (-1, 2, -1), -1, True)
+        tb_graph.new_input(output_tmp, (-1, 2, -1), -1, True)
+        tb_graph.new_input(output, (-1, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                lse,
+                output_tmp,
+                output,
+            ],
+            tb_graph,
+        )
+        if self.target_cc == 100 or self.target_cc == 90:
+            self.kn_graph.register_task(tb_graph, "paged_attention_split_kv_merge_sm100", params)
+        else:
+            raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
     # MoE Layers
     def tensor_init_layer(
@@ -941,6 +1073,27 @@ class PersistentKernel:
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "silu_mul" if self.target_cc == 90 else "silu_mul")
 
+    def identity_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        dependent_tensor: DTensor = None,
+    ):
+        # TODO: Add support from kn_graph
+        last_dim = 0
+        assert input.num_dims == output.num_dims
+        for i in range(input.num_dims):
+            assert input.dim(i) == output.dim(i)
+            last_dim = i
+        assert last_dim == 1 or last_dim == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (last_dim, -1, -1), 1, True)
+        tb_graph.new_input(output, (last_dim, -1, -1), 1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "identity")
+
     def silu_mul_linear_with_residual_layer(
         self,
         input: DTensor,
@@ -1025,7 +1178,27 @@ class PersistentKernel:
             self.kn_graph.register_task(
                 tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
             )
-        
+
+    def sampling_sm100_layer(
+        self,
+        logits: DTensor,      # [batch_size, vocab_size]
+        output: DTensor,      # [batch_size, 1]
+        grid_dim: tuple,
+        block_dim: tuple,
+        seed: int = 42,
+    ):
+        """Sampling from logits using Gumbel-Max trick for stochastic token generation."""
+        assert logits.num_dims == 2      # (batch_size, vocab_size)
+        assert output.num_dims == 2      # (batch_size, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([logits, output], tb_graph)
+
+        # Register task with seed parameter
+        self.kn_graph.register_task(tb_graph, "sampling_sm100", [seed])
+
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
         # Currently assume that input/output
@@ -1160,7 +1333,7 @@ class PersistentKernel:
         output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        if self.mode == "online_notoken" or self.mode == "online":
+        if self.mode == "online_notoken" or self.mode == "online" or self.mode == "multi_turn":
             # We will init for multiple times so the output directory should be permanent
             tempdir = "./permanent_output_dir/"
         else:
@@ -1182,8 +1355,8 @@ class PersistentKernel:
             
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
-            shutil.copy(cuda_code_path, os.path.join(output_dir, "test.cu"))
-            shutil.copy(json_file_path, os.path.join(output_dir, "task_graph.json"))
+            shutil.copy(cuda_code_path, os.path.join(output_dir, f"test_rank{self.mpi_rank}.cu"))
+            shutil.copy(json_file_path, os.path.join(output_dir, f"task_graph_rank{self.mpi_rank}.json"))
 
         cc = shutil.which("nvcc")
         if cc is None:

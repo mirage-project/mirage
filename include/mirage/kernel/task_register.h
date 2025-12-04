@@ -45,6 +45,8 @@ public:
                            bool with_residual);
   int register_silu_mul_task(threadblock::Graph const &bgraph,
                              std::vector<int> const &params);
+  int register_identity_task(threadblock::Graph const &bgraph,
+                             std::vector<int> const &params);
   int register_silu_mul_linear_with_residual_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_argmax_partial_task(threadblock::Graph const &bgraph,
@@ -84,6 +86,8 @@ public:
       threadblock::Graph const &bgraph,
       std::vector<int> const &params,
       bool with_residual);
+  int register_paged_attention_split_kv_hopper_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   // SM100 tasks
   int register_splitk_linear_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params,
@@ -97,6 +101,8 @@ public:
                                          std::vector<int> const &params);
   int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
+  int register_sampling_sm100_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
   int register_tensor_init_task(threadblock::Graph const &bgraph,
                                 std::vector<int> const &params);
   int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
@@ -108,6 +114,10 @@ public:
                                  std::vector<int> const &params);
   int register_moe_mul_sum_add_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
+  int register_paged_attention_split_kv_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_paged_attention_split_kv_merge_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   // SM100 tasks end
   int register_task_variant(TaskType type, std::string const &code);
 
