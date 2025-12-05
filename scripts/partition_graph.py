@@ -1,16 +1,18 @@
 import torch
 from itertools import combinations as comb
 import time
+import os
 import mirage as mi
 import json
 import numpy as np
 import warnings
 from op import Operator
 from build_computation_graph import get_computation_graph
-import os
-from generate_dag import solve_partitions, cost_function
+from utils import to_kernel_graph
+from generate_dag import solve_partitions
 from graph_splitter import process_operator_graph
 from build_dataset import augment_partitions
+from gnn_xgboost import GNNXGBoost
 from cost_model.in_ctx_partition import InCtxPartitioner
 # from visualize_augs import visualize_partition, compare_augmentations
 import concurrent.futures
@@ -31,6 +33,19 @@ CAST_ID_TO_DTYPE = {
     14: torch.complex64,
     15: torch.complex128,
 }
+
+def is_connected(nodes, adj):
+  if len(nodes) <= 1: return True
+  visited = set([nodes[0]])
+  queue = [nodes[0]]
+  while queue:
+    node = queue.pop(0)
+    for next_node in nodes:
+      if next_node not in visited and (adj[node][next_node] or adj[next_node][node]):
+        visited.add(next_node)
+        queue.append(next_node)
+  return len(visited) == len(nodes)
+
 
 def check_subgraph_exceeds_mirage_constraint(sg_dict, max_mirage_ops):
     """
@@ -230,69 +245,6 @@ def partition_graph_with_sampling(model,
 
     return augmented_subgraphs, unique_operators
 
-
-
-
-def function_map(graph, func, inputs, kwargs={}):
-    match func.fn:
-        case "MatMul": return graph.matmul(*inputs, **kwargs)
-        case "ReduceSum": return graph.reduction(*inputs, **kwargs)
-        case "Exp": return graph.exp(*inputs, **kwargs)
-        case "Gelu": return graph.gelu(*inputs, **kwargs)
-        case "Relu": return graph.relu(*inputs, **kwargs)
-        case "Clip": return graph.clamp(*inputs, **kwargs)
-        case "Add": return graph.add(*inputs, **kwargs)
-        case "Mul": return graph.mul(*inputs, **kwargs)
-        case "Div": return graph.div(*inputs, **kwargs)
-        case "Reciprocal": return graph.div(*inputs, **kwargs)
-        case "Sqrt": return graph.sqrt(*inputs, **kwargs)
-        case "Pow": return graph.pow(*inputs, **kwargs)
-        case "Square": return graph.square(inputs[0], **kwargs)
-        case "RMSNormalization": return graph.rms_norm(*inputs, **kwargs) # Onnx doesn't support different normalized shape
-        case _: 
-            raise NotImplementedError(f"{func.fn} not implemented")
-
-# Take in an adjacency list formatted subgraph and generate a mirage kernel graph
-def to_kernel_graph(subgraph, output_ids=[]):
-    graph = mi.new_kernel_graph()
-    dims = []
-    # stores output tensors of operations + their reference counts based on ID
-    intermediates = {}
-    for op, _ in subgraph.items():
-        inputs = []
-        for (shape, tensor_id) in op.input_tensor_shapes:
-            if tensor_id not in intermediates:
-                dims.append((shape, "V"))
-                new_input = graph.new_input(dims=shape, dtype=mi.float16)
-                inputs.append(new_input)
-                # Record this input tensor in intermediates to avoid duplicates
-                intermediates[tensor_id] = [new_input, 0]
-            else:
-                inputs.append(intermediates[tensor_id][0])
-                intermediates[tensor_id][1] += 1
-        for arg, value in op.additional_params.items():
-            if arg == "arg0":
-                shape = shape = op.output_tensor_shapes[0][0]
-                dims = [(shape, "C", value)] + dims
-                inputs = [graph.new_input(dims=shape, dtype=mi.float16)] + inputs
-            elif arg == "arg1":
-                shape = shape = op.output_tensor_shapes[0][0]
-                dims.append((shape, "C", value))
-                inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
-            else:
-                assert False, f"Unknown additional param {arg} for op {op.name} with fn {op.fn}"
-        
-        kwargs = op.kwargs
-        res = function_map(graph, op, inputs, kwargs)
-        if type(res) == list:
-            for i, tensor in enumerate(res):
-                intermediates[op.output_tensor_shapes[i][1]] = [tensor, 0]
-        else:
-            intermediates[op.output_tensor_shapes[0][1]] = [res, 0]
-    for out_id in output_ids:
-        graph.mark_output(intermediates[out_id][0])
-    return graph, dims
-        
 # def generate_all_kernels(model, dummy_inputs, root_dir, dataset_name, min_num_ops=2, max_num_ops=4, aug_factor=5, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set()):
 #     subgraphs, _ = partition_graph_with_sampling(model, dummy_inputs, min_num_ops, max_num_ops, aug_factor, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 #     kernel_input_dims = []
@@ -657,6 +609,7 @@ def partition_graph_with_dp(model,
                           dummy_input, 
                           IGNORE_OPS, 
                           UNSUPPORTED_OPS,
+                          cost_model,
                           max_nodes_per_partition=4,
                           max_mirage_ops=9,
                           dry_run=False,
@@ -670,8 +623,7 @@ def partition_graph_with_dp(model,
         
     Returns:
         HybridModel: Executable model with hybrid Mirage+PyTorch execution
-    """
-    
+    """    
     print("Building computation graph...")
     unique_operators = {}
     operators, tensor_id_to_name = get_computation_graph(model, dummy_input, unique_operators, "onnx")
@@ -705,6 +657,25 @@ def partition_graph_with_dp(model,
     print("Applying dynamic programming partitioning to large Mirage subgraphs...")
     print("="*60)
     
+    print(f"Initializing cost model: {cost_model}")
+    if cost_model == "gnn-xgboost":
+        cm = GNNXGBoost(
+            encoder_ckpt="/home/kitao/projects/mirage/scripts/cost_model/models/11_25_exec_time_gine_best_full_lr3e-03.pt",
+            encoder_cfg={"hidden": 128, "layers": 8, "dropout": 0.2},
+            xgb_model_path="/home/kitao/projects/mirage/scripts/cost_model/models/11_25_exec_time_xgb_best_xgb.json"
+        )
+    elif cost_model == "dnn-abacus":
+        raise NotImplementedError("DNNAbacus support not available")
+    else:
+        raise NotImplementedError(f"Cost model not implemented: {cost_model}")
+        
+    def cost_function(nodes, adj=None):
+        nodes_idx = [i for _, i in nodes]
+        nodes = [op for op, _ in nodes]
+        if adj is not None and not is_connected(nodes_idx, adj):
+            return float('inf')
+        return cm(nodes)
+
     fine_grained_partitions = []
     
     for sg_id, (sg_dict, sg_type) in enumerate(subgraphs):
@@ -715,6 +686,7 @@ def partition_graph_with_dp(model,
             ops_list = [op for op in sorted_ops if op in sg_dict] 
             n = len(ops_list)
             adj = np.zeros((n, n), dtype=int)
+            ops_idx_list = [(op, i) for i, op in enumerate(ops_list)]
             
             # Build adjacency matrix
             for i, op in enumerate(ops_list):
@@ -726,7 +698,7 @@ def partition_graph_with_dp(model,
             # Apply DAG partitioning with connectivity constraint
             def cost_function_with_adj(nodes):
                 return cost_function(nodes, adj)
-            partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj, max_mirage_ops)
+            partition_boundaries = solve_partitions(ops_idx_list, cost_function_with_adj, max_nodes_per_partition, adj, max_mirage_ops)
             
             # Convert partitions to subgraphs
             for p_id, boundary in enumerate(partition_boundaries):

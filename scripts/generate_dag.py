@@ -16,7 +16,6 @@ def generate_dag(n: int):
         adj[j][i] = 1
   return adj
 
-
 def count_subgraph_inputs(nodes, adj):
   """
   Count the number of input tensors to a subgraph.
@@ -27,10 +26,9 @@ def count_subgraph_inputs(nodes, adj):
   for node in nodes:
     # Check all incoming edges to this node
     for i in range(adj.shape[0]):
-      if i not in nodes_set and adj[i][node] == 1:
+      if i not in nodes_set and adj[i][node[1]] == 1:
         input_count += 1
   return input_count
-
 
 def count_subgraph_outputs(nodes, adj):
   """
@@ -42,10 +40,9 @@ def count_subgraph_outputs(nodes, adj):
   for node in nodes:
     # Check all outgoing edges from this node
     for j in range(adj.shape[0]):
-      if j not in nodes_set and adj[node][j] == 1:
+      if j not in nodes_set and adj[node[1]][j] == 1:
         output_count += 1
   return output_count
-
 
 def satisfies_mirage_constraint(nodes, adj, max_mirage_ops):
   """
@@ -56,7 +53,6 @@ def satisfies_mirage_constraint(nodes, adj, max_mirage_ops):
   num_outputs = count_subgraph_outputs(nodes, adj)
   return num_inputs + num_outputs + num_operators <= max_mirage_ops
 
-
 def solve_partitions(topological_sort, cf, max_nodes_in_partition, adj, max_mirage_ops):
   dp = []
   for i in range(len(topological_sort)):
@@ -66,8 +62,6 @@ def solve_partitions(topological_sort, cf, max_nodes_in_partition, adj, max_mira
   partitions = solve_helper(topological_sort, cf, max_nodes_in_partition, 0, dp, adj, max_mirage_ops)[2][::-1]
   return partitions
 
-
-
 def find_partition(node, partitions):
   # print("node", node, partitions)
   for i in range(len(partitions)):
@@ -75,7 +69,6 @@ def find_partition(node, partitions):
     if node >= partitions[i]:
        return i
   return len(partitions) - 1
-
 
 def find_dependent_partitions(partition_start, partition_end, partitions, adj):
   # print(partition_start, partition_end)
@@ -104,8 +97,6 @@ def find_dependent_costs(partition_start, partition_end, partitions, adj, dp):
   dependent_costs = [dp[partition_starts[i]][partition_lengths[i]][0] for i in range(len(dependent_partitions))]
   return max(dependent_costs) if dependent_costs else 0
 
-
-
 def solve_helper(topological_sort, cf, max_nodes_in_partition, i, dp, adj, max_mirage_ops):
   if i == len(topological_sort):
       return 0, 0, []
@@ -117,36 +108,13 @@ def solve_helper(topological_sort, cf, max_nodes_in_partition, i, dp, adj, max_m
           if not satisfies_mirage_constraint(nodes, adj, max_mirage_ops):
               dp[i][j] = (float('inf'), float('inf'), [])
           else:
-              local_cost = cost_function(nodes, adj)
+              local_cost = cf(nodes)
               _, _, partitions = solve_helper(topological_sort, cf, max_nodes_in_partition, i+j+1, dp, adj, max_mirage_ops)
               dependent_costs = find_dependent_costs(i, i + j + 1, partitions, adj, dp)
               dp[i][j] = (local_cost + dependent_costs, local_cost, partitions + [i + j + 1])
               # print(find_dependent_costs(i, i + j + 1, partitions, adj, dp))
       costs.append((dp[i][j]))
   return min(costs)
-
-def is_connected(nodes, adj):
-  if len(nodes) <= 1: return True
-  visited = set([nodes[0]])
-  queue = [nodes[0]]
-  while queue:
-    node = queue.pop(0)
-    for next_node in nodes:
-      if next_node not in visited and (adj[node][next_node] or adj[next_node][node]):
-        visited.add(next_node)
-        queue.append(next_node)
-  return len(visited) == len(nodes)
-
-
-def cost_function(nodes, adj=None): 
-  if adj is not None and not is_connected(nodes, adj):
-    return float('inf')
-  mod = 6 - sum(nodes) % 6
-  # mod = 6 - len(nodes)
-  # print(len(nodes))
-  log = math.log(len(nodes))
-  # print(f"Mod: {mod}, Log: {log}")  # Debugging purposes
-  return  mod + log
 
 def contract_by_group(G):
     group_to_nodes = defaultdict(set)
@@ -165,38 +133,38 @@ def contract_by_group(G):
             H.add_edge(group_u, group_v)
     return H
 
-def render_graph(adj: np.ndarray):
+# def render_graph(adj: np.ndarray):
 
-  # setup base graph
-  graph = nx.from_numpy_array(adj, create_using=nx.DiGraph)
-  for layer, nodes in enumerate(nx.topological_generations(graph)):
-      for node in nodes:
-          graph.nodes[node]["layer"] = layer
-  topo_order = list(nx.topological_sort(graph))
-  partitions = solve_partitions(topo_order, cost_function, 6, adj, max_mirage_ops=100)
+#   # setup base graph
+#   graph = nx.from_numpy_array(adj, create_using=nx.DiGraph)
+#   for layer, nodes in enumerate(nx.topological_generations(graph)):
+#       for node in nodes:
+#           graph.nodes[node]["layer"] = layer
+#   topo_order = list(nx.topological_sort(graph))
+#   partitions = solve_partitions(topo_order, cost_function, 6, adj, max_mirage_ops=100)
   
-  pos = nx.multipartite_layout(graph, subset_key="layer")
-  colors = []
-  for i in range(adj.shape[0]):
-    partition_index = 0
-    for partition in partitions:
-      if i > partition: partition_index += 1
-    graph.nodes[i]["group"] = partition_index
-    colors.append(partition_index)
-  #setup contracted graph
-  contracted = contract_by_group(graph)
-  colors_contracted = [i for i in contracted.nodes()]
-  fig, ax = plt.subplots(1, 2)
-  for layer, nodes in enumerate(nx.topological_generations(contracted)):
-      for node in nodes:
-          contracted.nodes[node]["layer"] = layer
-  # Compute the multipartite_layout using the "layer" node attribute
-  pos_cont = nx.multipartite_layout(contracted, subset_key="layer")
-  nx.draw_networkx(graph, pos=pos, ax=ax[0], node_color=colors, node_size=20, with_labels=False, width=0.1, cmap=plt.cm.tab20)
-  nx.draw_networkx(contracted, pos = pos_cont, ax = ax[1], node_color=colors_contracted, cmap=plt.cm.tab20, width=0.2)
-  # ax[].set_title("DAG layout in topological order")
-  fig.tight_layout()
-  plt.show()
+#   pos = nx.multipartite_layout(graph, subset_key="layer")
+#   colors = []
+#   for i in range(adj.shape[0]):
+#     partition_index = 0
+#     for partition in partitions:
+#       if i > partition: partition_index += 1
+#     graph.nodes[i]["group"] = partition_index
+#     colors.append(partition_index)
+#   #setup contracted graph
+#   contracted = contract_by_group(graph)
+#   colors_contracted = [i for i in contracted.nodes()]
+#   fig, ax = plt.subplots(1, 2)
+#   for layer, nodes in enumerate(nx.topological_generations(contracted)):
+#       for node in nodes:
+#           contracted.nodes[node]["layer"] = layer
+#   # Compute the multipartite_layout using the "layer" node attribute
+#   pos_cont = nx.multipartite_layout(contracted, subset_key="layer")
+#   nx.draw_networkx(graph, pos=pos, ax=ax[0], node_color=colors, node_size=20, with_labels=False, width=0.1, cmap=plt.cm.tab20)
+#   nx.draw_networkx(contracted, pos = pos_cont, ax = ax[1], node_color=colors_contracted, cmap=plt.cm.tab20, width=0.2)
+#   # ax[].set_title("DAG layout in topological order")
+#   fig.tight_layout()
+#   plt.show()
 
-np.random.seed(1)
-render_graph(generate_dag(50))
+# np.random.seed(1)
+# render_graph(generate_dag(50))
