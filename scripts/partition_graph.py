@@ -660,9 +660,9 @@ def partition_graph_with_dp(model,
     print(f"Initializing cost model: {cost_model}")
     if cost_model == "gnn-xgboost":
         cm = GNNXGBoost(
-            encoder_ckpt="/home/kitao/projects/mirage/scripts/cost_model/models/11_25_exec_time_gine_best_full_lr3e-03.pt",
+            encoder_ckpt="cost_model/models/11_25_exec_time_gine_best_full_lr3e-03.pt",
             encoder_cfg={"hidden": 128, "layers": 8, "dropout": 0.2},
-            xgb_model_path="/home/kitao/projects/mirage/scripts/cost_model/models/11_25_exec_time_xgb_best_xgb.json"
+            xgb_model_path="cost_model/models/11_25_exec_time_xgb_best_xgb.json"
         )
     elif cost_model == "dnn-abacus":
         raise NotImplementedError("DNNAbacus support not available")
