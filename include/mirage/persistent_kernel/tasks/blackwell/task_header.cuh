@@ -12,6 +12,7 @@
 #include "tasks/hopper/multitoken_paged_attention_hopper.cuh"
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
+#include "tasks/hopper/rotary_embedding_hopper.cuh"
 // Blackwell task impls
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
