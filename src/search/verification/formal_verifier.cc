@@ -321,16 +321,6 @@ std::vector<std::string>
           tensor_exprs.emplace(op->output_tensors[0].guid, "(sqrt " + a + ")");
           break;
         }
-        case type::KNOperatorType::KN_SQUARE_OP: {
-          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
-          tensor_exprs.emplace(op->output_tensors[0].guid, square(a));
-          break;
-        }
-        case type::KNOperatorType::KN_SQRT_OP: {
-          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
-          tensor_exprs.emplace(op->output_tensors[0].guid, sqrt(a));
-          break;
-        }
         case type::TBOperatorType::TB_SILU_OP: {
           std::string a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, "(silu " + a + ")");
@@ -405,16 +395,6 @@ std::vector<std::string>
         case type::KNOperatorType::KN_SQRT_OP: {
           std::string a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, "(sqrt " + a + ")");
-          break;
-        }
-        case type::KNOperatorType::KN_SQUARE_OP: {
-          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
-          tensor_exprs.emplace(op->output_tensors[0].guid, square(a));
-          break;
-        }
-        case type::KNOperatorType::KN_SQRT_OP: {
-          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
-          tensor_exprs.emplace(op->output_tensors[0].guid, sqrt(a));
           break;
         }
         case type::KNOperatorType::KN_MATMUL_OP: {
