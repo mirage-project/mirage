@@ -44,8 +44,6 @@ class SimpleClassifierMix(nn.Module):
         
         return x
     
-
-
 class SplitModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(SplitModel, self).__init__()
@@ -63,8 +61,6 @@ class SplitModel(nn.Module):
         x = torch.cat((x1, x2), dim=1)
         x = self.fc_out(x)
         return x
-
-
 
 """
 Prints a representation of the computational graph
