@@ -3,8 +3,7 @@ from torch import nn
 from PIL import Image
 import requests
 import torchvision.transforms as transforms
-from partition_graph import partition_graph, generate_all_augmented_kernels
-from build_computation_graph import get_computation_graph
+from ..partition_graph import partition_graph, generate_all_augmented_kernels
 
 # Control which model to use
 MODEL_TYPE = "transformers_clip_text"  # Options: "transformers_clip", "transformers_clip_text"   

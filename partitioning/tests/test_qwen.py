@@ -2,9 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torchtune.models import qwen2_5
-from partition_graph import partition_graph, to_kernel_graph, generate_all_augmented_kernels, partition_graph_with_sampling
-from build_computation_graph import get_computation_graph
-from op import Operator, Graph
+from ..partition_graph import partition_graph, to_kernel_graph, generate_all_augmented_kernels, partition_graph_with_sampling
 import mirage as mi
 import time
 
