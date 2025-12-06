@@ -1,10 +1,7 @@
-
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch
-import torch.nn as nn
 
 class TestMLP(nn.Module):
     def __init__(self):
@@ -88,8 +85,8 @@ class TransformerBlock(nn.Module):
 
 class TestTransformer(nn.Module):
     """Simplified large transformer for inference benchmarking (RMSNorm)."""
-    def __init__(self, vocab_size=16384, max_seq_len=2048,
-                 d_model=4096, n_heads=32, n_layers=1, ff_mult=4):
+    def __init__(self, vocab_size=16384, max_seq_len=1024,
+                 d_model=8192, n_heads=8, n_layers=1, ff_mult=4):
         super().__init__()
         self.vocab_size = vocab_size
         self.tok_emb = nn.Embedding(vocab_size, d_model, dtype=torch.float16)

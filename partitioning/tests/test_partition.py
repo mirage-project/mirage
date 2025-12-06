@@ -7,13 +7,17 @@ import argparse
 import cProfile, pstats
 import time
 import torch
+import sys
+from pathlib import Path
 torch.set_num_threads(1)        # intra-op CPU threads
 torch.set_num_interop_threads(1)  # inter-op CPU threads
 
 import torch.nn as nn
 from torch.profiler import profile, ProfilerActivity, record_function
 
-from partition_graph import HybridModel, partition_graph_with_dp, partition_graph_with_in_ctx_partitions
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from runtime import HybridModel, partition_graph_with_dp
 from testing_models import TestMLP, TestTransformer
 
 # for test_mlp
@@ -29,7 +33,7 @@ NUM_BENCH_ITERS = 100
 NUM_BENCH_WARMUP = 10
 
 IGNORE_OPS = set()
-UNSUPPORTED_OPS = {"Constant", "Identity", "Unsqueeze", "Abs", "Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike", "Tanh"}
+UNSUPPORTED_OPS = {"ReduceSum", "Constant", "Identity", "Unsqueeze", "Abs", "Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike", "Tanh"}
 
 model_name_to_class = {
     "test-mlp": TestMLP,
@@ -89,9 +93,7 @@ def _benchmark_model(model: nn.Module | HybridModel,
 
     return avg_ms
 
-
-def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_model: str = "dp", model_name: str = "gpt-oss:120b",
-                      max_nodes_per_partition: int = 4, max_mirage_ops: int = 9, scale: float = 1.0, test_model_name: str = "test-transformer"):
+def test_hybrid_model(dry_run: bool = True, cost_model: str = "gnn-xgboost", max_nodes_per_partition: int = 4, max_mirage_ops: int = 9, test_model_name: str = "test-transformer"):
     assert torch.cuda.is_available(), "HybridModel test requires a CUDA-capable GPU."
     # Slightly improve backend perf variability on GPU
     torch.backends.cudnn.benchmark = True
@@ -104,21 +106,16 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
     print(f"Testing HybridModel (dry_run={dry_run}, cost_model='{cost_model}')")
     print(f"{'='*60}\n")
 
-    # Select partitioner based on cost model
-    if cost_model == "dp":
-        hybrid_model = partition_graph_with_dp(
-            model,
-            dummy_input,
-            max_nodes_per_partition=max_nodes_per_partition,
-            max_mirage_ops=max_mirage_ops,
-            IGNORE_OPS=IGNORE_OPS,
-            UNSUPPORTED_OPS=UNSUPPORTED_OPS,
-            dry_run=dry_run
-        )
-    elif cost_model == "in_ctx":
-        raise ValueError("in_ctx is deprecated")
-    else:
-        raise ValueError("Invalid cost_model. Use 'dp' or 'in_ctx'.")
+    hybrid_model = partition_graph_with_dp(
+        model,
+        dummy_input,
+        IGNORE_OPS=IGNORE_OPS,
+        UNSUPPORTED_OPS=UNSUPPORTED_OPS,
+        cost_model=cost_model,
+        max_nodes_per_partition=max_nodes_per_partition,
+        max_mirage_ops=max_mirage_ops,
+        dry_run=dry_run
+    )
 
     # Test execution and numerical correctness
     print(f"\n{'='*60}")
@@ -198,10 +195,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test HybridModel and benchmark speedup.")
     parser.add_argument(
         "--cost-model",
-        choices=["dp", "in_ctx"],
+        choices=["gnn-xgboost", "dnn-abacus"],
         required=True,
-        help="Which cost model to use for partitioning: 'dp' uses partition_graph_with_dp, "
-             "'in_ctx' uses partition_graph_with_in_ctx_partitions."
+        help="Which cost model to use for partitioning."
     )
     parser.add_argument(
         "--test-model-name",
@@ -209,12 +205,6 @@ if __name__ == "__main__":
         required=True,
         choices=["test-mlp", "test-transformer"],
         help="Name of the model to use for testing: 'test-mlp' or 'test-transformer'."
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="gpt-oss:120b",
-        help="Name of the model to use for in-context partitioning (if cost_model='in_ctx')."
     )
     parser.add_argument(
         "--max-nodes-per-partition",
@@ -229,30 +219,11 @@ if __name__ == "__main__":
         help="Maximum number of kernel ops for Mirage superoptimization."
     )
     parser.add_argument(
-        "--scale",
-        type=float,
-        default=1.0,
-        help="Scale factor for in-context partitioning (if cost_model='in_ctx')."
-    )
-    parser.add_argument(
-        "--dataset-root",
-        type=str,
-        default="/home/kitao/projects/mirage/dataset/09_29_25",
-        help="Path to the dataset root for in-context partitioning (if cost_model='in_ctx')."
-    )
-    parser.add_argument(
-        "--mirage-root",
-        type=str,
-        default="/home/kitao/projects/mirage/src/search/",
-        help="Path to the Mirage root for in-context partitioning (if cost_model='in_ctx')."
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="If set, do a dry run (skip compiling/allocating heavy kernels if your partitioner supports it)."
     )
     args = parser.parse_args()
 
-    test_hybrid_model(dry_run=args.dry_run, cost_model=args.cost_model, model_name=args.model_name,
-                      max_nodes_per_partition=args.max_nodes_per_partition, max_mirage_ops=args.max_mirage_ops, scale=args.scale, mirage_root=args.mirage_root,
-                      dataset_root=args.dataset_root, test_model_name=args.test_model_name)
+    test_hybrid_model(dry_run=args.dry_run, cost_model=args.cost_model, test_model_name=args.test_model_name,
+                      max_nodes_per_partition=args.max_nodes_per_partition, max_mirage_ops=args.max_mirage_ops)

@@ -11,18 +11,6 @@ import numpy as np
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-class SimpleClassifier(nn.Module):
-    def __init__(self, input_size=784, hidden_size=128, num_classes=2):
-        super(SimpleClassifier, self).__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, num_classes)
-        )
-        
-    def forward(self, x):
-        return self.layers(x)
-
 class SimpleClassifierMix(nn.Module):
     def __init__(self, input_size=784, hidden_size=128, num_classes=2):
         super(SimpleClassifierMix, self).__init__()
@@ -248,52 +236,6 @@ def parse_onnx_model(model, unique_operators):
             else:
                 dummy_const_operator = Operator(name=output_name, fn="Constant")
                 operators[node.name].output_ops.append(dummy_const_operator)
-    
-    # TODO: rather than doing the following to reassign tensor shapes, what about inserting reshape
-    # ops in the graph instead.
-
-    # pass to reassign tensor shapes
-    # def reshape_tensor_pass(op, succ_shape, visited):
-    #     if op.fn == "Reshape":
-    #         return
-    #     if not op.output_tensor_shapes:
-    #         return
-    #     if id(op) in visited:
-    #         return
-    #     visited.add(id(op))
-        
-    #     if op.fn == "MatMul":
-    #         succ_shape_tuple, _ = succ_shape  # Extract shape, ignore tensor_id
-    #         batch_dims = succ_shape_tuple[:-2]
-            
-    #         left_old_shape, left_tensor_id = op.input_tensor_shapes[0]
-    #         left_shape = (batch_dims + left_old_shape[-2:], left_tensor_id)
-    #         op.input_tensor_shapes[0] = left_shape
-    #         reshape_tensor_pass(op.input_ops[0], left_shape, visited)
-
-    #         right_old_shape, right_tensor_id = op.input_tensor_shapes[1]
-    #         right_shape = (batch_dims + right_old_shape[-2:], right_tensor_id)
-    #         op.input_tensor_shapes[1] = right_shape
-    #         reshape_tensor_pass(op.input_ops[1], right_shape, visited)
-    #     else:
-    #         new_shape, _ = succ_shape  # Extract shape, ignore tensor_id
-    #         for i in range(len(op.input_tensor_shapes)):
-    #             _, tensor_id = op.input_tensor_shapes[i]
-    #             op.input_tensor_shapes[i] = (new_shape, tensor_id)
-    #         op.output_tensor_shapes[0] = succ_shape
-            
-    #         for pred in op.input_ops:
-    #             # since we must have visited this node before during topological traversal,
-    #             # we know what the input and output shapes are the same
-    #             # Propagate with predecessor's own output (preserving its tensor_id)
-    #             if pred.output_tensor_shapes:
-    #                 reshape_tensor_pass(pred, pred.output_tensor_shapes[0], visited)
-
-    # visited = set()
-    # for node in model.graph.node: # ensure topological order
-    #     op = operators[node.name]
-    #     shape = op.output_tensor_shapes[0]
-    #     reshape_tensor_pass(op, shape, visited)
     
     # pass to expand softmax to constituent components
     def expand_softmax_pass(op):
@@ -534,22 +476,6 @@ def parse_onnx_model(model, unique_operators):
     return operators, tensor_id_to_name
 
 def test_cfg():
-    # model = SimpleClassifier()
-    # model.to(device)
-    # batch_size = 2
-    # input_size = 784  
-    # dummy_input = torch.randn(batch_size, input_size, device=device)
-
-    # torch.onnx.export(
-    #     model,    
-    #     dummy_input,              
-    #     "scripts/onnx/my_model.onnx", 
-    #     input_names=["input"], 
-    #     dynamo=True                  
-    # )
-
-
-
     model = SimpleClassifierMix()
     model.to(device)
     batch_size = 2
@@ -578,51 +504,11 @@ def test_cfg():
 
     dummy_input = torch.randn(1, input_dim)  # Batch size 1, feature size 8
 
-    # onnx_path = "scripts/onnx/split_model.onnx"
-    # torch.onnx.export(
-    #     model, 
-    #     dummy_input, 
-    #     onnx_path,
-    #     input_names=["input"],
-    #     output_names=["output"],
-    #     dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},  # Allows dynamic batch size
-    #     dynamo = True
-    # )
-
     """Trying using a smaller model"""
     model = onnx.load('scripts/onnx/my_model.onnx')
     # model = onnx.load('scripts/onnx/split_model.onnx')
 
     parse_onnx_model(model)
-
-
-    """Trying using BERT"""
-
-    # device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-    # bert_model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
-    # bert_model.to(device)
-    # dummy_input_ids = torch.randint(0, 30522, (2, 128)).to(device)
-    # dummy_attention_mask = torch.ones((2, 128), requires_grad=True).to(device)
-    # dummy_labels = torch.tensor([0, 1], dtype=torch.long).to(device)
-
-    # dummy_outputs = bert_model(input_ids=dummy_input_ids, attention_mask=dummy_attention_mask, labels=dummy_labels)
-    # dummy_loss = dummy_outputs.loss
-
-
-    # torch.onnx.export(
-    #     bert_model,    
-    #     (dummy_input_ids, dummy_attention_mask),              
-    #     "scripts/onnx/bert_model.onnx", 
-    #     input_names=["input_ids", "attention_mask"],
-    #     output_names=["logits"],
-    #     dynamo=True                  
-    # )
-
-# bert_model = onnx.load('scripts/onnx/bert_model.onnx')
-
-# parse_onnx_model(bert_model)
-
 
 def get_computation_graph(model, dummy_input, unique_operators, method):
     match method:
@@ -632,8 +518,6 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
             
             onnx_path = "scripts/onnx/integrate_test.onnx"
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-
-            # dynamic_axes = {name: {0: "batch_size"} for name in model.get_input_names() + model.get_output_names()}
 
             torch.onnx.export(
                 model,
@@ -647,12 +531,7 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
             inferred_model = onnx.load("scripts/onnx/inferred_model.onnx")
             operators, tensor_id_to_name = parse_onnx_model(inferred_model, unique_operators)
 
-            # for k, v in operators.items():
-            #     print(k, " input ops: ", [(inp.name, inp.fn) for inp in v.input_ops])
-            #     print(k, " output ops: ", [(out.name, out.fn) for out in v.output_ops])
-
             return operators, tensor_id_to_name
         case _:
             print("Unsupported method for build_graph")
             return None
-    

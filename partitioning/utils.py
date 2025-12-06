@@ -63,4 +63,20 @@ def to_kernel_graph(subgraph, output_ids=[]):
         for _, tsr_cnt in intermediates.items():
             if tsr_cnt[1] == 0: graph.mark_output(tsr_cnt[0])
     return graph, dims
-        
+
+def time_kernels(kernels, input_dims, device, iterations=1):
+    times = []
+    for kernel, dims in zip(kernels, input_dims):
+        total_time = 0
+        for _ in range(iterations):
+            inputs = []
+            for dim in dims:
+                if (dim[1] == "V"):
+                    inputs.append(torch.randn(dim[0], requires_grad=True).to(device))
+                elif (dim[1] == "C"):
+                    inputs.append(torch.full(dim[0], dim[2]).to(device))
+            start = time.time()
+            _ = kernel(inputs=inputs)
+            total_time += time.time() - start
+        times.append(total_time / iterations)
+    return times

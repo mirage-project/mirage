@@ -3,7 +3,6 @@ from collections import deque, defaultdict
 from typing import Dict, List, Set, Optional, Any, Tuple
 import json
 from build_computation_graph import get_computation_graph
-# from partition_graph import get_partitions, to_kernel_graph, time_kernels
 
 def _shallow_copy_adjacency(partition: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Create a shallow copy of adjacency list."""
@@ -476,95 +475,3 @@ def _apply_parameter_perturbation(node):
     # RMSNormalization - perturb epsilon
     elif op_type == 'RMSNormalization':
         node.kwargs['epsilon'] = random.choice([1e-5, 1e-6, 1e-7, 1e-8])
-    
-
-
-# def partition_graph_with_sampling(model, 
-#                                  dummy_input, 
-#                                  min_num_ops=2, 
-#                                  max_num_ops=4, 
-#                                  augmentation_factor=5,
-#                                  UNSUPPORTED_OPS=set(), 
-#                                  COMPOSITE_OPS=dict(), 
-#                                  IGNORE_OPS=set()):
-#     """
-#     Generate augmented dataset using only valid partitions as seeds.
-    
-#     Args:
-#         model: The model to analyze
-#         dummy_input: Dummy input for the model
-#         min_num_ops: Minimum number of operations in a partition
-#         max_num_ops: Maximum number of operations in a partition
-#         augmentation_factor: Number of variations to create per valid partition
-#         UNSUPPORTED_OPS: Set of unsupported operations
-#         COMPOSITE_OPS: Dictionary of composite operations
-#         IGNORE_OPS: Set of operations to ignore
-        
-#     Returns:
-#         Tuple of (augmented_subgraphs, unique_operators)
-#     """
-    
-#     # Get the computation graph
-#     unique_operators = {}
-#     operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
-
-#     # Get valid partitions (already in adjacency list format)
-#     valid_partitions = []
-#     for _, op_node in operators.items():
-#         get_partitions(op_node, min_num_ops, max_num_ops, valid_partitions, 
-#                       UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
-    
-#     print(f"Found {len(valid_partitions)} valid partitions")
-#     # plt = visualize_partition(valid_partitions[0], "Example Valid Partition", "printed_partition0")
-
-
-#     # Augment the valid partitions
-#     augmented_subgraphs = augment_partitions(
-#         valid_partitions=valid_partitions,
-#         all_operators=operators,
-#         augmentation_factor=augmentation_factor,
-#         perturbation_strategies=['expand', 'contract'],
-#         max_size = max_num_ops
-#     )
-#     for i, subgraph in enumerate(augmented_subgraphs):
-#         print(f"Subgraph {i}: {len(subgraph)} operators")
-#     print(f"Generated {len(augmented_subgraphs)} total subgraphs (including originals)")
-#     print(f"Augmentation ratio: {len(augmented_subgraphs) / len(valid_partitions):.1f}x")
-
-
-#     print("Generating kernels from augmented subgraphs")
-#     kernel_input_dims = []
-#     all_kernels = []
-#     hashes = set()
-#     performance = {}
-#     dataset_name = "augmented_dataset_timed"
-#     for i, subgraph in enumerate(augmented_subgraphs[:5]):
-#         kernel_graph, dims = to_kernel_graph(subgraph)
-        
-#         # check for duplicate subgraphs
-#         graph_hash = kernel_graph.get_owner_independent_hash()
-#         if graph_hash in hashes:
-#             continue
-#         hashes.add(graph_hash)
-        
-#         # save original mugraph
-#         kernel_graph.to_json(f"original_{graph_hash}.json")
-        
-#         try:
-#             print(f"Superoptimizing {graph_hash}")
-#             optimized_graph, best_perf = kernel_graph.superoptimize()
-#         except Exception as e:
-#             print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
-#             continue
-
-#         performance[graph_hash] = best_perf
-#         optimized_graph.to_json(f"optimized_{graph_hash}.json")
-#         all_kernels.append(optimized_graph)
-#         kernel_input_dims.append(dims)
-#         print(f"Done {i}/{len(augmented_subgraphs)}")
-#     if dataset_name is not None:
-#         json.dump(performance, open(f"{dataset_name}_performance.json", "w"))
-#     else:
-#         json.dump(performance, open("performance.json", "w"))
-#     return all_kernels, kernel_input_dims
-
