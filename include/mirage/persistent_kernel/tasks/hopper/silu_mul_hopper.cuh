@@ -16,10 +16,6 @@
 #include "../common/utils.cuh"
 #include "../common/worker_config.h"
 
-#ifdef MIRAGE_UNIT_TEST
-// When building unit test, the macro is missed.
-constexpr int CONSUMER_NUM_THREADS = 128;
-#endif
 namespace kernel {
 
 template <typename T,
