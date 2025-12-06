@@ -67,6 +67,7 @@ KNInputOp::KNInputOp(Graph *_graph,
                      int3 _input_map)
     : KNOperator(_graph, mirage::type::KN_INPUT_OP), input_strides(strides),
       input_map(_input_map) {
+  assert(dims.size() == strides.size());
   DTensor tensor;
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {
@@ -92,6 +93,22 @@ KNInputOp::operator json() const {
               {"input_tensors", input_tensors},
               {"output_tensors", output_tensors}};
 }
+
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
+bool KNInputOp::fingerprint(void) {
+  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+  type::FPType value = 0;
+  for (int device_id = 0; device_id < kgraph->gpu_dim.x; ++device_id) {
+    type::FPType *fp_ptr = reinterpret_cast<type::FPType *>(
+        dmm->fp_base_ptr[device_id] + output_tensors[0].fp_offset);
+    for (size_t i = 0; i < output_tensors[0].num_elements(); ++i) {
+      fp_ptr[i] = value;
+      value = (value + 1) % config::FP_PQ;
+    }
+  }
+  return true;
+}
+#endif
 
 } // namespace kernel
 } // namespace mirage

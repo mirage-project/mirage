@@ -46,13 +46,19 @@ void Transpiler::resolve_tb_fusion() {
             dynamic_cast<tb::TBInputOp *>(prev_op)->forloop_dim == -1) {
           continue;
         }
-        // Do not fuse with FORLOOP_ACCUM_NO_RED_OP since the accum is
-        // performed within the loop body while the current operator is
-        // outside the loop Do not fuse with input op since we may perform
-        // chunked or async input ops
+        // Do not fuse with
+        // FORLOOP_ACCUM_NO_RED_OP,FORLOOP_ACCUM_NO_RED_RESCALE_OP, or
+        // FORLOOP_ACCUM_MAX_OP since the accum is performed within the loop
+        // body while the current operator is outside the loop Do not fuse with
+        // input op since we may perform chunked or async input ops Do not fuse
+        // with reduction max ops since they have two outputs
         if (num_consumers.at(input0.guid) == 1 &&
             prev_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_OP &&
-            prev_op->op_type != type::TB_INPUT_OP) {
+            prev_op->op_type != type::TB_INPUT_OP &&
+            prev_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP &&
+            prev_op->op_type != type::TB_FORLOOP_ACCUM_MAX_OP &&
+            !(prev_op->op_type >= type::TB_REDUCTION_0_MAX_OP &&
+              prev_op->op_type <= type::TB_REDUCTION_2_MAX_OP)) {
           is_fused_with_prev[op] = true;
           is_fused_with_next[prev_op] = true;
         }

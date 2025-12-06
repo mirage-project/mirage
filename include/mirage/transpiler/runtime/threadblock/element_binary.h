@@ -11,12 +11,14 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementBinaryOpType { ADD, MUL, DIV, POW };
+enum class ElementBinaryOpType { ADD, SUB, MUL, DIV, POW };
 
 template <typename T, ElementBinaryOpType OP>
 static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
   if constexpr (OP == ElementBinaryOpType::ADD) {
     return a + b;
+  } else if constexpr (OP == ElementBinaryOpType::SUB) {
+    return a - b;
   } else if constexpr (OP == ElementBinaryOpType::MUL) {
     return a * b;
   } else if constexpr (OP == ElementBinaryOpType::DIV) {
@@ -52,6 +54,8 @@ template <typename T,
 class ElementBinaryKernel {
 public:
   using Numel = decltype(cute::size(DstLayout{}));
+  using Src0Numel = decltype(cute::size(Src0Layout{}));
+  using Src1Numel = decltype(cute::size(Src1Layout{}));
 
   using DstCoord2Src0Coord =
       typename DstCoord2SrcCoordGetter<DstLayout, Src0Layout>::Result;
@@ -74,12 +78,16 @@ public:
                                              int thread_idx,
                                              float const *epilogue_scalars) {
     constexpr auto numel = Numel{}.value;
+    constexpr auto src0_numel = Src0Numel{}.value;
+    constexpr auto src1_numel = Src1Numel{}.value;
     auto dst_layout = DstLayout{};
     auto src0_layout_dst_coord = DstCoord2Src0PhyPos{};
     auto src1_layout_dst_coord = DstCoord2Src1PhyPos{};
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
-      int64_t src0_phy_pos = src0_layout_dst_coord(elem_idx);
-      int64_t src1_phy_pos = src1_layout_dst_coord(elem_idx);
+      // int64_t src0_phy_pos = src0_layout_dst_coord(elem_idx);
+      // int64_t src1_phy_pos = src1_layout_dst_coord(elem_idx);
+      int64_t src0_phy_pos = src0_layout_dst_coord(elem_idx % src0_numel);
+      int64_t src1_phy_pos = src1_layout_dst_coord(elem_idx % src1_numel);
       int64_t dst_phy_pos = dst_layout(elem_idx);
       T res = perform_element_binary_op<T, OP>(src0[src0_phy_pos],
                                                src1[src1_phy_pos]);

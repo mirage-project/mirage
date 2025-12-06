@@ -1,7 +1,11 @@
 cmake>=3.24
 cython>=0.28
-z3-solver==4.14
-# torch>=2.0
+z3-solver==4.15
+torch>=2.4
+accelerate==1.8.0
 numpy
 graphviz
 tqdm
+transformers==4.53.0
+protobuf==3.20.0
+tg4perfetto==0.0.4

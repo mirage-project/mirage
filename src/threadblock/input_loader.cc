@@ -22,8 +22,10 @@ namespace threadblock {
 STensor Graph::new_input(mirage::kernel::DTensor const &dtensor,
                          int3 input_map,
                          int forloop_dim,
-                         mirage::layout::SmemLayout layout) {
-  TBOperator *op = create_input_op(dtensor, input_map, forloop_dim, layout);
+                         mirage::layout::SmemLayout layout,
+                         bool store_in_dmem) {
+  TBOperator *op =
+      create_input_op(dtensor, input_map, forloop_dim, layout, store_in_dmem);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
@@ -32,8 +34,14 @@ STensor Graph::new_input(mirage::kernel::DTensor const &dtensor,
 STensor *Graph::new_input(mirage::kernel::DTensor const *dtensor,
                           int3 input_map,
                           int forloop_dim,
-                          mirage::layout::SmemLayout layout) {
-  TBOperator *op = create_input_op(*dtensor, input_map, forloop_dim, layout);
+                          mirage::layout::SmemLayout layout,
+                          bool store_in_dmem) {
+  TBOperator *op = create_input_op(
+      dtensor == nullptr ? kernel::DTensor::EMPTY_TENSOR : *dtensor,
+      input_map,
+      forloop_dim,
+      layout,
+      store_in_dmem);
   assert(op != nullptr);
   operators.push_back(op);
   return &op->output_tensors[0];
@@ -42,8 +50,10 @@ STensor *Graph::new_input(mirage::kernel::DTensor const *dtensor,
 TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
                                    int3 input_map,
                                    int forloop_dim,
-                                   mirage::layout::SmemLayout layout) {
-  TBInputOp *op = new TBInputOp(this, dtensor, input_map, forloop_dim, layout);
+                                   mirage::layout::SmemLayout layout,
+                                   bool store_in_dmem) {
+  TBInputOp *op = new TBInputOp(
+      this, dtensor, input_map, forloop_dim, layout, store_in_dmem);
 
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
@@ -59,7 +69,8 @@ TBInputOp::TBInputOp(Graph *_graph,
                      mirage::kernel::DTensor const &_dtensor,
                      int3 _input_map,
                      int _forloop_dim,
-                     mirage::layout::SmemLayout _layout)
+                     mirage::layout::SmemLayout _layout,
+                     bool store_in_dmem)
     : TBOperator(_graph, mirage::type::TB_INPUT_OP), dtensor(_dtensor),
       input_map(_input_map), forloop_dim(_forloop_dim) {
   STensor tensor;
@@ -102,6 +113,7 @@ TBInputOp::TBInputOp(Graph *_graph,
   tensor.owner_ts_idx = 0;
   tensor.guid = STensor::next_guid++;
   tensor.after_accum = false;
+  tensor.store_in_dmem = store_in_dmem;
   tensor.smem_offset = bgraph->allocate_fingerprint(tensor);
   output_tensors.push_back(tensor);
 }

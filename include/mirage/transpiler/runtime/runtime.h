@@ -37,6 +37,7 @@ extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
   static bool inited = false;
   if (!inited) {
     _init();
+    inited = true;
   }
   _execute_mugraph(input_tensors, output_tensors, buf, stream, profiler_buffer);
 }

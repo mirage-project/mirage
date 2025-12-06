@@ -24,7 +24,6 @@ class KNMatmulOp : public mirage::kernel::KNOperator {
 public:
   KNMatmulOp(Graph *_graph, DTensor const &A, DTensor const &B);
   ~KNMatmulOp();
-  bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;
 
   operator json() const override;
@@ -32,20 +31,5 @@ public:
 
 void from_json(json const &j, KNMatmulOp &op);
 
-class MatmulKey {
-public:
-  MatmulKey(DTensor const &A, DTensor const &B);
-  bool operator==(MatmulKey const &b) const;
-  DTensor operand_a;
-  DTensor operand_b;
-};
-
 } // namespace kernel
 } // namespace mirage
-
-namespace std {
-template <>
-struct hash<mirage::kernel::MatmulKey> {
-  size_t operator()(mirage::kernel::MatmulKey const &) const;
-};
-} // namespace std

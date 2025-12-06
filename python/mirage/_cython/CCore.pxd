@@ -20,7 +20,7 @@ from libcpp cimport bool
 
 ctypedef unsigned long int size_t
 
-cdef extern from "vector_types.h":
+cdef extern from "mirage/vector_types.h":
     ctypedef struct dim3:
         unsigned int x
         unsigned int y
@@ -33,14 +33,22 @@ cdef extern from "vector_types.h":
 cdef extern from "mirage/type.h" namespace "mirage::type":
     # This must be consistent with mirage/type.h
     cdef enum DataType:
-        DT_INT4 = 920,
+        DT_FLOAT4 = 920,
+        DT_INT4 = 925,
+        DT_UINT4 = 926,
         DT_FLOAT8 = 930,
         DT_INT8 = 935,
-        DT_BFLOAT16 = 940,
-        DT_FLOAT16 = 941,
-        DT_UINT16 = 945,
+        DT_UINT8 = 936,
+        DT_FLOAT16 = 940,
+        DT_BFLOAT16 = 941,
+        DT_INT16 = 945,
+        DT_UINT16 = 946,
         DT_FLOAT32 = 950,
+        DT_INT32 = 955,
+        DT_UINT32 = 956,
         DT_DOUBLE = 960,
+        DT_INT64 = 965,
+        DT_UINT64 = 966,
         DT_UNKNOWN = 999,
     cdef enum TBEpilogueType:
         TB_EPILOGUE_NONE = 3100,
@@ -110,7 +118,8 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_ADD_OP = 2200,
         TB_MUL_OP = 2201,
         TB_DIV_OP = 2202,
-        TB_POW_OP = 2203,
+        TB_SUB_OP = 2203,
+        TB_POW_OP = 2204,
         # Reduction and Normalization
         TB_REDUCTION_FIRST_OP_ID = 2300,
         TB_REDUCTION_0_OP = 2301,
@@ -119,6 +128,9 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_REDUCTION_0_TO_DIMX_OP = 2304,
         TB_REDUCTION_1_TO_DIMX_OP = 2305,
         TB_REDUCTION_2_TO_DIMX_OP = 2306,
+        TB_REDUCTION_0_MAX_OP = 2307,
+        TB_REDUCTION_1_MAX_OP = 2308,
+        TB_REDUCTION_2_MAX_OP = 2309,
         TB_REDUCTION_LAST_OP_ID = 2349,
         TB_RMS_NORM_OP = 2350,
         # Concat
@@ -141,6 +153,9 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_FORLOOP_ACCUM_RED_LD_MEAN_OP = 2502,
         TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
         TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
+        TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP = 2505,
+        TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP = 2506,
+        TB_FORLOOP_ACCUM_MAX_OP = 2507,
         TB_FORLOOP_ACCUM_LAST_OP = 2599,
         TB_CUSTOMIZED_OP = 2999
 
@@ -168,6 +183,11 @@ cdef extern from "mirage/kernel/device_tensor.h" namespace "mirage::kernel":
         #void *data_ptr
         int owner_ts_idx
 
+cdef extern from "mirage/kernel/runtime.h" namespace "mirage::runtime":
+    ctypedef struct TaskGraphResult:
+        string cuda_code
+        string json_file
+
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
 
     cdef cppclass CppKNOperator "mirage::kernel::KNOperator":
@@ -182,7 +202,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void get_bgraph(CppTBGraph** bgraph)
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
-        CppKNGraph()
+        CppKNGraph(dim3 gpu_dim, bool disable_fingerprint)
         CppDTensor* new_input_ptr(vector[int] dims,
                                   vector[size_t] strides,
                                   DataType data_type,
@@ -212,6 +232,26 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
         size_t get_owner_independent_hash() const
+        # Persistent kernel functions
+        void attach_torch_tensor(const CppDTensor *input,
+                                 void *torch_data_ptr,
+                                 const char *name)
+        void attach_cuda_tensor(const CppDTensor *input,
+                                const char *name)
+        void attach_nvshmem_tensor(const CppDTensor *input,
+                                   const char *name)
+        CppDTensor* fuse_tensors(vector[const CppDTensor*] inputs,
+                                 int fused_dim,
+                                 int num_groups,
+                                 const char *name)
+        CppDTensor* shuffle_tensors(vector[const CppDTensor*] inputs,
+                                 int shuffled_dim,
+                                 int num_groups,
+                                 const char *name)
+        void register_task(const char *task_type,
+                           vector[int] params)
+        TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id)
+
         vector[CppKNOperator*] operators
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
@@ -247,9 +287,10 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    int reduction_dimx)
 
         CppSTensor* new_input(const CppDTensor* dtensor,
-                           int3 input_map,
-                           int forloop_dim,
-                           SmemLayout layout)
+                             int3 input_map,
+                             int forloop_dim,
+                             SmemLayout layout,
+                             bool store_in_dmem)
         CppDTensor* new_output(const CppSTensor* stensor,
                             int3 output_map,
                             int forloop_dim,
@@ -263,19 +304,27 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppSTensor* clamp(const CppSTensor *A, float min_val, float max_val)
         CppSTensor* square(const CppSTensor *A)
         CppSTensor* sqrt(const CppSTensor *A)
+        CppSTensor* mul_scalar(const CppSTensor *A, float scalar)
         CppSTensor* add(const CppSTensor *A,
                      const CppSTensor *B)
         CppSTensor* mul(const CppSTensor *A,
                      const CppSTensor *B)
         CppSTensor* div(const CppSTensor *A,
                      const CppSTensor *B)
+        CppSTensor* sub(const CppSTensor *A,
+                     const CppSTensor *B)
         CppSTensor* reduction(const CppSTensor *A, int dim)
+        vector[CppSTensor*] reduction_max(const CppSTensor *A, int dim)
         CppSTensor* rms_norm(const CppSTensor *A)
         CppSTensor* concat(const CppSTensor *A,
                         const CppSTensor *B,
                         int dim)
         CppSTensor* forloop_accum(const CppSTensor *A,
                                TBOperatorType optype)
+        CppSTensor* forloop_accum_rescale(const CppSTensor *A,
+                               const CppSTensor *B,
+                               TBOperatorType optype)
+        CppSTensor* forloop_accum_max(const CppSTensor *A)
         dim3 grid_dim
         dim3 block_dim
         int forloop_range
@@ -293,6 +342,7 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
         unsigned int z
 
     cdef int cython_search(const CppKNGraph *input_graph,
+                           const char *backend,
                            int max_num_new_graphs,
                            CppKNGraph** new_graphs,
                            vector[MInt3] imaps,
@@ -303,7 +353,8 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            vector[int] franges,
                            const char * filename,
                            bool verbose,
-                           const char * default_config)
+                           const char * default_config,
+                           bool is_formal_verified)
     
     cdef void cython_to_json(const CppKNGraph *input_graph,
                              const char *filename)
@@ -316,6 +367,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         int num_producer_wgs;
         int pipeline_stages;
         bool profiling;
+        bool enable_online_softmax;
     ctypedef struct OutputTensorDirective:
         size_t alloc_size
         vector[int] shape

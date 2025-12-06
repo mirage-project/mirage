@@ -104,6 +104,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
+      case mirage::type::TB_SUB_OP:
       case mirage::type::TB_POW_OP:
       // Reduction
       case mirage::type::TB_REDUCTION_0_OP:
@@ -112,6 +113,9 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_2_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_0_MAX_OP:
+      case mirage::type::TB_REDUCTION_1_MAX_OP:
+      case mirage::type::TB_REDUCTION_2_MAX_OP:
       // Normalization
       case mirage::type::TB_RMS_NORM_OP:
       // Concat
@@ -119,6 +123,10 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_CONCAT_1_OP:
       case mirage::type::TB_CONCAT_2_OP: {
         for (size_t i = 0; i < op->output_tensors.size(); i++) {
+          // Do not store in smem when store_in_demm is set
+          if (op->output_tensors[i].store_in_dmem) {
+            continue;
+          }
           usage += op->output_tensors[i].size();
         }
         break;
@@ -144,6 +152,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // we will inline accumulation but need to perform
         // a redue_sum
         assert(op->output_tensors.size() == 1);
+        // don't allow offloading for accumulators
+        assert(!op->output_tensors[0].store_in_dmem);
         usage += op->output_tensors[0].size();
         break;
       }
@@ -151,6 +161,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // we will inline accumulation but need to perform
         // a reduction
         assert(op->output_tensors.size() == 1);
+        // don't allow offloading for accumulators
+        assert(!op->output_tensors[0].store_in_dmem);
         usage += op->output_tensors[0].size();
         break;
       }
@@ -171,6 +183,27 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // we will inline accumulation but need to perform
         // a reduuction_to_dimx
         assert(op->output_tensors.size() == 1);
+        // don't allow offloading for accumulators
+        assert(!op->output_tensors[0].store_in_dmem);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_MAX_OP: {
+        assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
         break;
       }
@@ -186,6 +219,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
   return usage;
 }
 
+#ifdef MIRAGE_BACKEND_USE_CUDA
 NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
   NewKernelParams params;
   params.num_operators = operators.size();
@@ -507,6 +541,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_MUL_OP:
       case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_SUB_OP:
       case mirage::type::TB_POW_OP: {
         assert(operators[i]->input_tensors.size() == 2);
         assert(operators[i]->output_tensors.size() == 1);
@@ -701,6 +736,8 @@ KernelParams Graph::get_kernel_params() {
   return params;
 }
 
+#endif
+
 int Graph::get_smem_size_with_pipeline() const {
   int ret = smem_offset;
   // For pipelining, we use double buffers for all input loaders
@@ -804,6 +841,7 @@ void from_json(json const &j, Graph &graph) {
       case type::TBOperatorType::TB_ADD_OP:
       case type::TBOperatorType::TB_MUL_OP:
       case type::TBOperatorType::TB_DIV_OP:
+      case type::TBOperatorType::TB_SUB_OP:
       case type::TBOperatorType::TB_POW_OP: {
         STensor const &output = graph.elementbinary(
             get_tensor_from_guid(
@@ -862,6 +900,25 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
             op_type);
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        STensor const &output = graph.forloop_accum_rescale(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            get_tensor_from_guid(
+                op.at("input_tensors")[1].at("guid").get<int>()),
+            op_type);
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_MAX_OP: {
+        STensor const &output = graph.forloop_accum_max(get_tensor_from_guid(
+            op.at("input_tensors")[0].at("guid").get<int>()));
         guid_mapping[output.guid] =
             op.at("output_tensors")[0].at("guid").get<int>();
         break;

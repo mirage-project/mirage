@@ -31,6 +31,11 @@ typedef int64_t GuidType;
 // only to be used in create_op in search.cc
 inline std::unordered_map<std::string, float> CLAMP_MIN_MAX;
 
+enum BackendType {
+  BT_CUDA = 0,
+  BT_NKI = 1,
+};
+
 enum DataType {
   // 1-bit types
   // range: 900-909
@@ -38,25 +43,34 @@ enum DataType {
   // range: 910-919
   // 4-bit types
   // range: 920-929
-  DT_INT4 = 920,
+  DT_FLOAT4 = 920,
+  DT_INT4 = 925,
+  DT_UINT4 = 926,
   // 8-bit types
   // range(float types): 930-934
   // range(int types): 935-939
   DT_FLOAT8 = 930,
   DT_INT8 = 935,
+  DT_UINT8 = 936,
   // 16-bit types
   // range(float types): 940-944
   // range(int types): 945-949
-  DT_BFLOAT16 = 940,
-  DT_FLOAT16 = 941,
-  DT_UINT16 = 945,
+  DT_FLOAT16 = 940,
+  DT_BFLOAT16 = 941,
+  DT_INT16 = 945,
+  DT_UINT16 = 946,
   // 32-bit types
   // range(float type): 950-954
   // range(int type): 955-959
   DT_FLOAT32 = 950,
+  DT_INT32 = 955,
+  DT_UINT32 = 956,
   // 64-bit types
   // range(float types): 960-964
+  // range(int type): 965-969
   DT_DOUBLE = 960,
+  DT_INT64 = 965,
+  DT_UINT64 = 966,
   DT_UNKNOWN = 999,
 };
 
@@ -172,7 +186,8 @@ enum TBOperatorType {
   TB_ADD_OP = 2200,
   TB_MUL_OP = 2201,
   TB_DIV_OP = 2202,
-  TB_POW_OP = 2203,
+  TB_SUB_OP = 2203,
+  TB_POW_OP = 2204,
   // Reduction and Normalization
   TB_REDUCTION_FIRST_OP_ID = 2300,
   TB_REDUCTION_0_OP = 2301,
@@ -181,6 +196,9 @@ enum TBOperatorType {
   TB_REDUCTION_0_TO_DIMX_OP = 2304,
   TB_REDUCTION_1_TO_DIMX_OP = 2305,
   TB_REDUCTION_2_TO_DIMX_OP = 2306,
+  TB_REDUCTION_0_MAX_OP = 2307,
+  TB_REDUCTION_1_MAX_OP = 2308,
+  TB_REDUCTION_2_MAX_OP = 2309,
   TB_REDUCTION_LAST_OP_ID = 2349,
   TB_RMS_NORM_OP = 2350,
   // Concat & Split
@@ -203,6 +221,9 @@ enum TBOperatorType {
   TB_FORLOOP_ACCUM_RED_LD_MEAN_OP = 2502,
   TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
   TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
+  TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP = 2505,
+  TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP = 2506,
+  TB_FORLOOP_ACCUM_MAX_OP = 2507,
   TB_FORLOOP_ACCUM_LAST_OP = 2599,
   TB_CUSTOMIZED_OP = 2999
 };
@@ -227,6 +248,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_ADD_OP, "tb_add_op"},
         {TB_MUL_OP, "tb_mul_op"},
         {TB_DIV_OP, "tb_div_op"},
+        {TB_SUB_OP, "tb_sub_op"},
         {TB_POW_OP, "tb_pow_op"},
         {TB_REDUCTION_FIRST_OP_ID, "tb_reduction_first_op_id"},
         {TB_REDUCTION_0_OP, "tb_reduction_0_op"},
@@ -235,6 +257,9 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_REDUCTION_0_TO_DIMX_OP, "tb_reduction_0_to_dimx_op"},
         {TB_REDUCTION_1_TO_DIMX_OP, "tb_reduction_1_to_dimx_op"},
         {TB_REDUCTION_2_TO_DIMX_OP, "tb_reduction_2_to_dimx_op"},
+        {TB_REDUCTION_0_MAX_OP, "tb_reduction_0_max_op"},
+        {TB_REDUCTION_1_MAX_OP, "tb_reduction_1_max_op"},
+        {TB_REDUCTION_2_MAX_OP, "tb_reduction_2_max_op"},
         {TB_REDUCTION_LAST_OP_ID, "tb_reduction_last_op_id"},
         {TB_RMS_NORM_OP, "tb_rms_norm_op"},
         {TB_CONCAT_FIRST_OP_ID, "tb_concat_first_op_id"},
@@ -254,6 +279,11 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_FORLOOP_ACCUM_RED_LD_RMS_OP, "tb_forloop_accum_red_ld_rms_op"},
         {TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
          "tb_forloop_accum_redtox_ld_sum_op"},
+        {TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP,
+         "tb_forloop_accum_nored_rescale_op"},
+        {TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP,
+         "tb_forloop_accum_red_ld_sum_rescale_op"},
+        {TB_FORLOOP_ACCUM_MAX_OP, "tb_forloop_accum_max_op"},
         {TB_FORLOOP_ACCUM_LAST_OP, "tb_forloop_accum_last_op"},
         {TB_CUSTOMIZED_OP, "tb_customized_op"},
     })
@@ -275,6 +305,15 @@ enum TBEpilogueType {
   TB_EPILOGUE_ALLTOALL = 3102,
   TB_EPILOGUE_INVALID = 3199,
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(TBEpilogueType,
+                             {
+                                 {TB_EPILOGUE_NONE, "tb_epilogue_none"},
+                                 {TB_EPILOGUE_ALLREDUCE,
+                                  "tb_epilogue_allreduce"},
+                                 {TB_EPILOGUE_ALLTOALL, "tb_epilogue_alltoall"},
+                                 {TB_EPILOGUE_INVALID, "tb_epilogue_invalid"},
+                             })
 
 } // namespace type
 } // namespace mirage

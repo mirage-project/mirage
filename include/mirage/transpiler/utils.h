@@ -16,13 +16,13 @@
 
 #include "mirage/type.h"
 #include <cassert>
-#include <cute/layout.hpp>
+// #include <cute/layout.hpp>
 #include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
 
-using namespace cute;
+// using namespace cute;
 
 namespace mirage {
 namespace transpiler {
@@ -37,6 +37,13 @@ inline static std::string my_to_string(T const &value) {
 template <>
 [[maybe_unused]] std::string my_to_string(char const *const &value) {
   return std::string(value);
+}
+
+template <>
+[[maybe_unused]] std::string my_to_string(void *const &value) {
+  std::ostringstream oss;
+  oss << value;
+  return oss.str();
 }
 
 template <>
@@ -195,6 +202,7 @@ static constexpr int V100 = 70;
 static constexpr int T4 = 75;
 static constexpr int A100 = 80;
 static constexpr int H100 = 90;
+static constexpr int B200 = 100;
 } // namespace GPU_CC
 
 // A handy iterator class for combining two iterators

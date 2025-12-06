@@ -1,0 +1,14 @@
+name: "General"
+description: "Create a general issue"
+title: "[General] - Brief Description"
+labels: ["question"]
+
+body:
+  - type: textarea
+    id: general_description
+    attributes:
+      label: "Description"
+      description: "Provide a detailed description of your issue."
+      placeholder: "Enter your description here..."
+    validations:
+      required: true

@@ -12,6 +12,8 @@ static inline cudaDataType_t data_t2cuda_data_type_t() {
   } else if (std::is_same_v<T, nv_bfloat16> ||
              std::is_same_v<T, cute::bfloat16_t>) {
     return CUDA_R_16BF;
+  } else if (std::is_same_v<T, float>) {
+    return CUDA_R_32F;
   } else {
     assert(false);
   }
