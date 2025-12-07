@@ -2,9 +2,9 @@ import torch
 from itertools import combinations as comb
 import os
 import json
-from build_computation_graph import get_computation_graph
-from utils import to_kernel_graph
-from build_dataset import augment_partitions
+from partitioning.build_computation_graph import get_computation_graph
+from partitioning.utils import to_kernel_graph
+from partitioning.build_dataset import augment_partitions
 import concurrent.futures
 
 def copy_subgraph(subgraph):

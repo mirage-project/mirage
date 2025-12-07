@@ -2,7 +2,7 @@ import random
 from collections import deque, defaultdict
 from typing import Dict, List, Set, Optional, Any, Tuple
 import json
-from build_computation_graph import get_computation_graph
+from partitioning.build_computation_graph import get_computation_graph
 
 def _shallow_copy_adjacency(partition: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Create a shallow copy of adjacency list."""

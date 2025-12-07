@@ -2,10 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torchtune.models import llama3_2
-from partition_graph import generate_all_augmented_kernels
-from build_computation_graph import get_computation_graph
-from graph_splitter import process_operator_graph
-from op import Operator, Graph
+from ..partition_graph import generate_all_augmented_kernels
 import mirage as mi
 import time
 

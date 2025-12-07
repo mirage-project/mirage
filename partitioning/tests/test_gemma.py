@@ -2,8 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torchtune.models import gemma
-from partition_graph import partition_graph, generate_all_augmented_kernels
-from build_computation_graph import get_computation_graph
+from ..partition_graph import partition_graph, generate_all_augmented_kernels
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
