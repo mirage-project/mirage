@@ -15,6 +15,7 @@
 
 #if MIRAGE_USE_CUTLASS_KERNEL
 #include "linear_cutlass.cuh"
+#include "moe_linear.cuh"
 #else
 #include "linear.cuh"
 #endif // MIRAGE_USE_CUTLASS_KERNEL
