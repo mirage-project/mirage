@@ -104,7 +104,7 @@ input_configs = [
 generate_all_augmented_kernels(
     input_configs=input_configs,
     model=wrapped_model,
-    root_dir="/home/ayushkum/ayushkum/mirage/scripts/dataset",
+    root_dir="dataset/",
     dataset_name="gemma",
     min_num_ops=2,
     max_num_ops=4,

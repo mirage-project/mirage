@@ -161,7 +161,8 @@ def parse_onnx_model(model, unique_operators):
             kwargs["axis"] = node.attribute[0].i
         elif node.op_type == "Cast" or node.op_type == "CastLike":
             # data type to cast to https://github.com/dmlc/tensorboard/blob/master/tensorboard/src/onnx.proto?utm_source=chatgpt.com
-            kwargs["to"] = node.attribute[0].i
+            if node.attribute:
+                kwargs["to"] = node.attribute[0].i
         elif node.op_type == "Constant":
             attr = node.attribute[0]
             if attr.type == onnx.AttributeProto.TENSOR:
