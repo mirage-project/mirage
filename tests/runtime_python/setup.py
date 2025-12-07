@@ -41,6 +41,8 @@ setup(
                     '-gencode=arch=compute_80,code=sm_80',
                     '-gencode=arch=compute_90a,code=sm_90a',
                     '-gencode=arch=compute_100,code=sm_100',
+                    '-DMIRAGE_UNIT_TEST',
+                    "-DMIRAGE_GRACE_HOPPER"
                 ]
             }
         )

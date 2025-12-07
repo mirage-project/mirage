@@ -12,6 +12,7 @@ using kernel::embedding_kernel;
 // using kernel::find_ngram_global_kernel;
 // using kernel::find_ngram_partial_kernel;
 using kernel::linear_kernel;
+using kernel::moe_linear_kernel;
 using kernel::multitoken_paged_attention_task_impl;
 // using kernel::norm_linear_task_impl;
 // using kernel::paged_attention_task_impl;
@@ -1305,6 +1306,139 @@ void linear(torch::Tensor input,
 }
 #endif
 
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int OUTPUT_STRIDE,
+          int REDUCTION_SIZE,
+          int NUM_EXPERTS,
+          int NUM_TOPK,
+          int EXPERT_STRIDE,
+          bool NOBIAS = true>
+__global__ void moe_linear_kernel_wrapper(void const *input_ptr,
+                                          void const *weight_ptr,
+                                          void const *residual_ptr,
+                                          void const *expert_routing_ptr,
+                                          void const *expert_mask_ptr,
+                                          void *output_ptr) {
+  moe_linear_kernel<T,
+                    BATCH_SIZE,
+                    OUTPUT_SIZE,
+                    OUTPUT_STRIDE,
+                    REDUCTION_SIZE,
+                    NUM_EXPERTS,
+                    NUM_TOPK,
+                    EXPERT_STRIDE,
+                    NOBIAS>(input_ptr,
+                            weight_ptr,
+                            residual_ptr,
+                            expert_routing_ptr,
+                            expert_mask_ptr,
+                            output_ptr,
+                            blockIdx.x);
+}
+
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_STRIDE,
+          int REDUCTION_SIZE,
+          int NUM_EXPERTS,
+          int NUM_TOPK,
+          int EXPERT_STRIDE>
+void launch_moe_linear(void const *input_ptr,
+                       void const *weight_ptr,
+                       void const *residual_ptr,
+                       void const *expert_routing_ptr,
+                       void const *expert_mask_ptr,
+                       void *output_ptr) {
+  static_assert(OUTPUT_STRIDE % 64 == 0);
+  dim3 grid_dim(EXPERT_STRIDE, OUTPUT_STRIDE / 64, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 96 * 1024;
+
+  cudaFuncSetAttribute(moe_linear_kernel_wrapper<T,
+                                                 BATCH_SIZE,
+                                                 64,
+                                                 OUTPUT_STRIDE,
+                                                 REDUCTION_SIZE,
+                                                 NUM_EXPERTS,
+                                                 NUM_TOPK,
+                                                 EXPERT_STRIDE>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  moe_linear_kernel_wrapper<T,
+                            BATCH_SIZE,
+                            64,
+                            OUTPUT_STRIDE,
+                            REDUCTION_SIZE,
+                            NUM_EXPERTS,
+                            NUM_TOPK,
+                            EXPERT_STRIDE>
+      <<<grid_dim, block_dim, smem_size>>>(input_ptr,
+                                           weight_ptr,
+                                           residual_ptr,
+                                           expert_routing_ptr,
+                                           expert_mask_ptr,
+                                           output_ptr);
+}
+
+// TODO: For the test we only support reducation size as 2048, expert_size as
+// 128 and activate_expert_size as 8 and expert_stride as 5.
+#define MOE_LINEAR_DISPATCH_OUTPUT_STRIDE(BATCH_SIZE, OUTPUT_STRIDE)           \
+  case OUTPUT_STRIDE:                                                          \
+    launch_moe_linear<bfloat16, BATCH_SIZE, OUTPUT_STRIDE, 2048, 128, 8, 5>(   \
+        input_ptr,                                                             \
+        weight_ptr,                                                            \
+        residual_ptr,                                                          \
+        expert_routing_ptr,                                                    \
+        expert_mask_ptr,                                                       \
+        output_ptr);                                                           \
+    break;
+
+#define MOE_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE)                             \
+  case BATCH_SIZE:                                                             \
+    switch (output.size(2)) {                                                  \
+      MOE_LINEAR_DISPATCH_OUTPUT_STRIDE(BATCH_SIZE, 64)                        \
+      MOE_LINEAR_DISPATCH_OUTPUT_STRIDE(BATCH_SIZE, 1536)                      \
+      default:                                                                 \
+        printf("Unsupported output stride size in test: %zu\n",                \
+               output.size(2));                                                \
+        break;                                                                 \
+    }                                                                          \
+    break;
+
+void moe_linear(torch::Tensor input,
+                torch::Tensor weight,
+                c10::optional<at::Tensor> residual,
+                torch::Tensor expert_routing,
+                torch::Tensor expert_mask,
+                torch::Tensor output) {
+
+  void const *input_ptr = input.data_ptr();
+  void const *weight_ptr = weight.data_ptr();
+  bool has_residual = residual.has_value();
+  void const *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
+  void *output_ptr = output.data_ptr();
+  void const *expert_routing_ptr = expert_routing.data_ptr();
+  void const *expert_mask_ptr = expert_mask.data_ptr();
+
+  switch (input.size(0)) {
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(1)
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(2)
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(4)
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(8)
+    default:
+      printf("Unsupported batch size in test: %zu\n", input.size(0));
+      break;
+  }
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
 // Embedding Kernel
 template <typename T, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>
 __global__ void embedding_kernel_wrapper(void const *input_ptr,
@@ -1711,6 +1845,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
   // m.def("embedding", &embedding, "Embedding kernel");
   // m.def("linear", &linear, "Linear kernel");
+  m.def("moe_linear", &moe_linear, "MOE linear kernel");
   // m.def("argmax", &argmax, "Argmax kernel");
   // m.def("verify", &verify, "Target verification kernel");
   // m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
