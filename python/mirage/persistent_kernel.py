@@ -957,7 +957,9 @@ class PersistentKernel:
         tb_graph.new_input(input, (-1, -1, -1), 1, True)
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
-        tb_graph.new_input(output, (1, -1, -1), -1, True)
+
+        is_output_row_major = 1 if self.world_size == 1 else 0
+        tb_graph.new_input(output, (1, -1, -1), -1, True, is_row_major=is_output_row_major)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
 
         if self.target_cc == 100:
@@ -974,7 +976,8 @@ class PersistentKernel:
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
         elif self.target_cc == 80:
-            self.kn_graph.register_task(tb_graph, "linear_with_residual")
+            params = [is_output_row_major]
+            self.kn_graph.register_task(tb_graph, "linear_with_residual", params)
         else:
             assert False
 
@@ -992,10 +995,11 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size)
         # params[0]: num_gpus
         # params[1]: my_gpu_id
+        is_row_major = False
         params = [self.world_size, self.mpi_rank]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (1, -1, -1), -1, True)
-        tb_graph.new_input(buffer, (2, -1, -1), -1, True)
+        tb_graph.new_input(input, (1, -1, -1), -1, True, is_row_major=is_row_major)
+        tb_graph.new_input(buffer, (2, -1, -1), -1, True, is_row_major=is_row_major)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, buffer, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "allreduce", params)
@@ -1377,7 +1381,7 @@ class PersistentKernel:
                         f"Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
                     )
             else:
-                NVSHMEM_LIB_PATH = "/usr/lib/"
+                MPI_LIB_PATH = "/usr/lib/"
                 lib_file_path = os.path.join(MPI_LIB_PATH, "libmpi.so")
                 if not os.path.exists(lib_file_path):
                     raise RuntimeError(

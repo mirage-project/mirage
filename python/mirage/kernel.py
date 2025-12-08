@@ -228,12 +228,27 @@ class KNGraph:
                 strides.append(total_elements)
                 total_elements *= d
             strides = reversed(strides)
+            is_row_major = True
         else:
             assert len(dims) == len(strides)
+            # Check row or column major layout
+            if check_stride(dims, strides, "row-major"):
+                is_row_major = True
+            elif check_stride(dims, strides, "column-major"):
+                is_row_major = False
+            else:
+                assert len(dims) > 2
+                # TODO(ZP): We only check the last two dimensions now, try to generalize it later
+                if strides[-1] == 1:
+                    is_row_major = True
+                elif strides[-2] == 1:
+                    is_row_major = False
+                else:
+                    raise ValueError("Unsupported stride pattern for layout detection")
             # assert check_stride(dims, strides, "row-major") | check_stride(
             #     dims, strides, "column-major"
             # )
-        return self.cygraph.new_input(dims, tuple(strides), dtype)
+        return self.cygraph.new_input(dims, tuple(strides), dtype, is_row_major)
 
     def mark_output(self, A: DTensor, strides: tuple = None):
         return self.cygraph.mark_output(A, strides)

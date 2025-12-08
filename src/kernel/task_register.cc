@@ -499,12 +499,17 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
 int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
                                        bool with_residual) {
-  assert(params.size() == 0);
-  int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
+  if (with_residual) {
+    assert(params.size() == 1);
+  } else {
+    assert(params.size() == 0);
+  }
+  int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0, residual_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = with_residual ? 3 : 2;
   int num_outputs = 1;
+  int output_row_major = with_residual ? params[0] : 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -524,15 +529,35 @@ int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = output_row_major == 1 ? 
+    static_cast<int>(kn_input_op->input_strides[0]) : 
+    static_cast<int>(kn_input_op->input_strides[1]);
+  if (with_residual) {
+    // get residual stride
+    kn_input_op =
+        static_cast<kn::KNInputOp *>(input_ops[2]->dtensor.owner_op);
+    residual_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  }
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
-         batch_size,
-         output_size,
-         reduction_size,
-         output_stride);
+  if (output_row_major == 1) {
+    // output is row major
+    code.e("kernel::linear_kernel_row<bfloat16, $, $, $, $>(",
+          batch_size,
+          output_size,
+          reduction_size,
+          output_stride);
+  } else {
+    // output is col major
+    code.e("kernel::linear_kernel_col<bfloat16, $, $, $, $, $, $>(",
+          batch_size,
+          output_size,
+          reduction_size,
+          output_stride,
+          residual_stride,
+          3);
+  }
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   if (with_residual) {
@@ -635,7 +660,6 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
   int num_outputs = 1;
-
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -645,6 +669,10 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
+  bool use_row_major =
+      (input_ops[0]->dtensor.layout == layout::DmemRowMajor);
+  // Currently only support col major
+  assert(!use_row_major);
   // For now, the memory partition of the input[0] results in a strided
   // 2D tensor, which cannot be directly transferred by a single nvshmem
   // memput. So we use for loop to iterate over the first dim and transfer each
@@ -661,12 +689,10 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   // get output stride
   assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  kn::KNInputOp *kn_input_op = static_cast<kn::KNInputOp *>(
+    output_ops[0]->dtensor.owner_op);
   int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  assert(input_stride == output_stride);
+
   // Register nvshmem copy task (allgather)
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
@@ -677,26 +703,25 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
       "static_cast<int>(get_event_gpu_id(task_desc->trigger_event));");
   c.e("assert(gpu_id < runtime_config.num_gpus);");
   c.e("assert(gpu_id != runtime_config.my_gpu_id);");
-  c.e("for (int i = 0; i < $; i++) {", batch_size);
-  c.e("  nvshmemx_putmem_signal_block(");
-  c.e("      reinterpret_cast<char*>(task_desc->output_ptrs[0]) + i * $ * "
-      "sizeof(bfloat16),",
-      input_stride);
-  c.e("      reinterpret_cast<char*>(task_desc->input_ptrs[0]) + i * $ * "
-      "sizeof(bfloat16),",
-      output_stride);
-  c.e("      task_desc->task_metadata.xfer_size_in_bytes / $,", batch_size);
-  c.e("      reinterpret_cast<uint64_t "
+  // Column major
+  c.e("nvshmemx_putmem_signal_block(");
+  c.e("    reinterpret_cast<char*>(task_desc->output_ptrs[0]),");
+  c.e("    reinterpret_cast<char*>(task_desc->input_ptrs[0]),");
+  c.e("    task_desc->task_metadata.xfer_size_in_bytes,");
+  c.e("    reinterpret_cast<uint64_t "
       "*>(&runtime_config.all_event_counters[event_index]),");
-  c.e("      1 /*signal*/,");
-  c.e("      NVSHMEM_SIGNAL_ADD,");
-  c.e("      gpu_id);");
-  c.e("}");
+  c.e("    1 /*signal*/,");
+  c.e("    NVSHMEM_SIGNAL_ADD,");
+  c.e("    gpu_id);");
   register_task_variant(TASK_NVSHMEM_COPY, c.to_string());
   // Register reduction kernel
+
   mirage::transpiler::CodeKeeper code;
+  std::string kernel_name = "kernel::reduction_kernel_";
+  kernel_name += use_row_major ? "row" : "col";
+  kernel_name += "<bfloat16, $, $, $, $, $>(";
   code.inc_indent();
-  code.e("kernel::reduction_kernel<bfloat16, $, $, $, $, $>(",
+  code.e(kernel_name,
          params[0],
          params[1],
          batch_size,

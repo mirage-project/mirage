@@ -444,6 +444,13 @@ cdef class DTensor:
                 return None
             else:
                 return convert_ctype_to_dtype(self.c_ptr.data_type)
+    
+    property layout:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.layout
 
     def __cinit__(self, tensor):
         self._set_tensor(tensor)
@@ -689,7 +696,7 @@ cdef class CyKNGraph:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
             self.p_kgraph = <CppKNGraph*>(ptr)
 
-    def new_input(self, tuple dims, tuple strides, dtype : dtype = float16):
+    def new_input(self, tuple dims, tuple strides, dtype : dtype = float16, is_row_major : bool = True):
         cdef vector[int] cdims
         cdef vector[size_t] cstrides
         cdims.resize(len(dims))
@@ -700,7 +707,9 @@ cdef class CyKNGraph:
             cstrides[i] = strides[i]
 
         c_type = convert_dtype_to_ctype(dtype)
-        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, c_type, DmemRowMajor)
+        # TODO: We should hack here to allow ColMajor
+        dmem_layout = DmemRowMajor if is_row_major else DmemColumnMajor
+        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, c_type, dmem_layout)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
@@ -1019,7 +1028,7 @@ cdef class CyTBGraph:
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
     
-    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim, bool store_in_dmem = False):
+    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim, bool store_in_dmem = False, bool is_row_major = True):
         assert len(input_map) == 3, "input_map must be of length 3"
         cdef int3 c_input_map
         c_input_map.x = input_map[0]
@@ -1028,7 +1037,8 @@ cdef class CyTBGraph:
         cdef CppDTensor* dtensor_cptr = NULL
         if dtensor is not None:
             dtensor_cptr = dtensor.c_ptr
-        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor_cptr, c_input_map, forloop_dim, SmemRowMajor, store_in_dmem)
+        layout = SmemRowMajor if is_row_major else SmemColumnMajor
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor_cptr, c_input_map, forloop_dim, layout, store_in_dmem)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

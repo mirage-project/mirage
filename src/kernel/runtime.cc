@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/operator.h"
 #include "mirage/kernel/task_register.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/utils/json_utils.h"
@@ -213,6 +214,7 @@ void register_mugraph(
     }
     // Specical handling for ALLREDUCE
     if (task_type == TASK_ALLREDUCE) {
+      // TODO(Zepeng) Coalesce allgather tasks into a single massive task
       // Shouldn't have AllReduce when num_gpus == 1
       assert(num_gpus > 1);
       assert(input_ops.size() == 2);
@@ -264,14 +266,14 @@ void register_mugraph(
                 TensorDesc desc;
                 assert(input_ops[0]->output_tensors.size() == 1);
                 tb::STensor stensor = input_ops[0]->output_tensors[0];
+                // Strides info comes from kernel input op
+                kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
+                    input_ops[0]->dtensor.owner_op);
                 desc.num_dims = stensor.num_dims;
                 desc.data_type = stensor.data_type;
                 for (int d = stensor.num_dims - 1; d >= 0; d--) {
                   desc.dim[d] = stensor.dim[d];
-                  desc.stride[d] = (d == stensor.num_dims - 1)
-                                       ? 1
-                                       : desc.stride[d + 1] *
-                                             input_ops[0]->dtensor.dim[d + 1];
+                  desc.stride[d] = kernel_input_op->input_strides[d];
                 }
                 task.inputs[task.num_inputs++] = desc;
               }
@@ -280,14 +282,13 @@ void register_mugraph(
                 TensorDesc desc;
                 assert(input_ops[1]->output_tensors.size() == 1);
                 tb::STensor stensor = input_ops[1]->output_tensors[0];
+                kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
+                    input_ops[1]->dtensor.owner_op);
                 desc.num_dims = stensor.num_dims;
                 desc.data_type = stensor.data_type;
                 for (int d = stensor.num_dims - 1; d >= 0; d--) {
                   desc.dim[d] = stensor.dim[d];
-                  desc.stride[d] = (d == stensor.num_dims - 1)
-                                       ? 1
-                                       : desc.stride[d + 1] *
-                                             input_ops[1]->dtensor.dim[d + 1];
+                  desc.stride[d] = kernel_input_op->input_strides[d];
                 }
                 task.outputs[task.num_outputs++] = desc;
               }
@@ -299,7 +300,6 @@ void register_mugraph(
         }   // for bid.y
       }     // for bid.x
       // (zepeng) The for loop to transfer strided tensor using nvshmem (hacky)
-      int for_loop = input_ops[0]->dtensor.dim[0];
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -309,7 +309,7 @@ void register_mugraph(
             event_desc_1.first_task_id = all_tasks.size();
             event_desc_1.last_task_id = all_tasks.size() + 1;
             // event_desc_1.num_triggers = num_gpus - 1;
-            event_desc_1.num_triggers = (num_gpus - 1) * for_loop;
+            event_desc_1.num_triggers = num_gpus - 1;
             assert(ag_pre_task_map.find(bid) != ag_pre_task_map.end());
             std::map<int, TaskId> pre_tasks = ag_pre_task_map.find(bid)->second;
             for (auto const &t : pre_tasks) {
@@ -323,14 +323,13 @@ void register_mugraph(
             for (int i = 0; i < 2; i++) {
               TensorDesc desc;
               tb::STensor stensor = input_ops[i]->output_tensors[0];
+              kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
+                  input_ops[i]->dtensor.owner_op);
               desc.num_dims = stensor.num_dims;
               desc.data_type = stensor.data_type;
               for (int d = stensor.num_dims - 1; d >= 0; d--) {
                 desc.dim[d] = stensor.dim[d];
-                desc.stride[d] =
-                    (d == stensor.num_dims - 1)
-                        ? 1
-                        : desc.stride[d + 1] * input_ops[1]->dtensor.dim[d + 1];
+                desc.stride[d] = kernel_input_op->input_strides[d];
               }
               task.inputs[task.num_inputs++] = desc;
             }
@@ -338,16 +337,15 @@ void register_mugraph(
             {
               TensorDesc desc;
               tb::STensor stensor = output_ops[0]->output_tensors[0];
+              kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
+                  output_ops[0]->dtensor.owner_op);
               desc.num_dims = stensor.num_dims;
               desc.data_type = stensor.data_type;
               for (int d = stensor.num_dims - 1; d >= 0; d--) {
                 desc.dim[d] = stensor.dim[d];
-                desc.stride[d] = (d == stensor.num_dims - 1)
-                                     ? 1
-                                     : desc.stride[d + 1] *
-                                           output_ops[0]->dtensor.dim[d + 1];
+                desc.stride[d] = kernel_input_op->input_strides[d];
               }
-              task.inputs[task.num_outputs++] = desc;
+              task.outputs[task.num_outputs++] = desc;
               all_tasks.push_back(task);
               // Update current task map
               cur_task_map[bid] = all_tasks.size() - 1;
@@ -401,15 +399,14 @@ void register_mugraph(
             TensorDesc desc;
             assert(input->output_tensors.size() == 1);
             tb::STensor stensor = input->output_tensors[0];
+            kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
+                input->dtensor.owner_op);
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
             // Assume always partition head group on gridDim.y dimension
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
               desc.dim[d] = stensor.dim[d];
-              desc.stride[d] =
-                  (d == stensor.num_dims - 1)
-                      ? 1
-                      : desc.stride[d + 1] * input->dtensor.dim[d + 1];
+              desc.stride[d] = kernel_input_op->input_strides[d];
             }
             task.inputs[task.num_inputs++] = desc;
           }
@@ -418,14 +415,13 @@ void register_mugraph(
             TensorDesc desc;
             assert(output->output_tensors.size() == 1);
             tb::STensor stensor = output->output_tensors[0];
+            kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
+                  output->dtensor.owner_op);
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
               desc.dim[d] = stensor.dim[d];
-              desc.stride[d] =
-                  (d == stensor.num_dims - 1)
-                      ? 1
-                      : desc.stride[d + 1] * output->dtensor.dim[d + 1];
+              desc.stride[d] = kernel_input_op->input_strides[d];
             }
             task.outputs[task.num_outputs++] = desc;
           }
@@ -574,11 +570,6 @@ bool sanity_check(mirage::kernel::Graph const &graph,
         // event_pos 0 is the end of task graph event
         if (event_pos == 0) {
           continue;
-        }
-        // These events counts are manually adjusted. Each task of nvshmem cpy
-        // will update BS times of event counter, not just once.
-        if (desc.task_type == runtime::TASK_NVSHMEM_COPY) {
-          event_counts[event_pos] -= desc.inputs[0].dim[0] - 1;
         }
         assert(event_counts[event_pos] > 0);
         event_counts[event_pos]--;
@@ -927,6 +918,7 @@ TaskGraphResult print_task_graph(
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
             // To perform allreduce, we first launch (num_gpus-1) tasks for
             // allgather
+            // TODO(Zepeng) Coalesce allgather tasks into a single massive task
             for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
@@ -1115,6 +1107,7 @@ TaskGraphResult print_task_graph(
           {"expert_offset", task_desc.task_metadata.expert_offset},
           {"kv_idx", task_desc.task_metadata.kv_idx},
           {"merge_task_offset", task_desc.task_metadata.merge_task_offset}};
+      // Prepare inputs for the current task
       for (int i = 0; i < task_desc.num_inputs; i++) {
         if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
           json json_dims = json::array();
@@ -1265,6 +1258,7 @@ TaskGraphResult print_task_graph(
               {"strides", json_strides}});
         }
       }
+      // Prepare outputs for the current task
       for (int i = 0; i < task_desc.num_outputs; i++) {
         off_t offset = 0;
         int3 output_map = output_ops[i]->input_map;

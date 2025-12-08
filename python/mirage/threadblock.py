@@ -11,8 +11,9 @@ class TBGraph:
         input_map: tuple,
         forloop_dim: int,
         store_in_dmem: bool = False,
+        is_row_major: bool = True,
     ):
-        return self.cygraph.new_input(dtensor, input_map, forloop_dim, store_in_dmem)
+        return self.cygraph.new_input(dtensor, input_map, forloop_dim, store_in_dmem, is_row_major)
 
     def new_output(self, stensor: STensor, output_map: tuple, forloop_dim: int = -1):
         return self.cygraph.new_output(stensor, output_map, forloop_dim)

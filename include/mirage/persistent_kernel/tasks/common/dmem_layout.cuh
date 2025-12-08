@@ -52,6 +52,42 @@ struct dmem_row {
 };
 
 template <typename T, size_t ROW, size_t COL, size_t STRIDE>
+struct dmem_col {
+  T *base_ptr;
+
+  __device__ __forceinline__ dmem_col(T *ptr) : base_ptr(ptr) {}
+  __device__ __forceinline__ void set_ptr(T *ptr) {
+    base_ptr = ptr;
+  }
+
+  __device__ __forceinline__ T *operator()(size_t logical_idx_row,
+                                           size_t logical_idx_col) {
+    size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
+    // assert(logical_idx < (ROW*COL));
+    return &base_ptr[logical_idx];
+  }
+
+  __device__ __forceinline__ size_t offset(size_t logical_idx_row,
+                                           size_t logical_idx_col) {
+    size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
+    // assert(logical_idx < (ROW*COL));
+    return logical_idx;
+  }
+
+  __device__ __forceinline__ T &at(size_t logical_idx) {
+    // assert(logical_idx < (ROW*COL));
+    return base_ptr[logical_idx];
+  }
+  __device__ __forceinline__ T &at(size_t logical_idx_row,
+                                   size_t logical_idx_col) {
+
+    size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
+    // assert(logical_idx < (ROW*COL));
+    return base_ptr[logical_idx];
+  }
+};
+
+template <typename T, size_t ROW, size_t COL, size_t STRIDE>
 struct dmem_row_const {
   T const *base_ptr;
 
