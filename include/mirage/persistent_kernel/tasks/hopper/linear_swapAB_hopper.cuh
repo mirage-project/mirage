@@ -45,7 +45,8 @@ __device__ __forceinline__ void
     linear_swapAB_kernel_hopper(const TMA_A &tma_a,
                                 const TMA_B &tma_b,
                                 const TMA_OUT &tma_out,
-                                const TMA_RESIDUAL *tma_residual = nullptr) {
+                                const TMA_RESIDUAL *tma_residual = nullptr,
+                                bool add_residual/*used in multi-GPU*/ = true) {
 
   constexpr int TILE_SIZE =
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
@@ -229,15 +230,17 @@ __device__ __forceinline__ void
       if (lane_idx == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
 
         if constexpr (HAS_RESIDUAL) {
-          wait(residual_done[slot_residual], phase_residual ^ 1);
-          residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
-                                                      OUTPUT_TMA_TILE_SIZE);
-          set_barrier_transaction_bytes(residual_barrier[slot_residual],
-                                        TMA_TRANS_BYTES_RESIDUAL);
-          tma_residual->tma_cp_async(
-              residual_barrier[slot_residual],
-              residual_smem(0, 0),
-              {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
+          if (add_residual) {
+            wait(residual_done[slot_residual], phase_residual ^ 1);
+            residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
+                                                        OUTPUT_TMA_TILE_SIZE);
+            set_barrier_transaction_bytes(residual_barrier[slot_residual],
+                                          TMA_TRANS_BYTES_RESIDUAL);
+            tma_residual->tma_cp_async(
+                residual_barrier[slot_residual],
+                residual_smem(0, 0),
+                {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
+            }
         }
       }
 #pragma unroll 1
@@ -317,11 +320,13 @@ __device__ __forceinline__ void
       int slot_residual;
       int phase_residual;
       if constexpr (HAS_RESIDUAL) {
-        slot_residual = output_atom_idx % Kstages;
-        phase_residual = output_atom_idx / Kstages & 1;
-        wait(residual_barrier[slot_residual], phase_residual);
-        residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
-                                                    OUTPUT_TMA_TILE_SIZE);
+        if (add_residual) {
+          slot_residual = output_atom_idx % Kstages;
+          phase_residual = output_atom_idx / Kstages & 1;
+          wait(residual_barrier[slot_residual], phase_residual);
+          residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
+                                                      OUTPUT_TMA_TILE_SIZE);
+        }
       }
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
@@ -335,10 +340,12 @@ __device__ __forceinline__ void
         int row = ((warp_idx & 3) << 4) + ((i & 1) << 3) + (lane_idx >> 2);
         int col = ((i >> 1) << 3) + ((lane_idx & 3) << 1);
         if constexpr (HAS_RESIDUAL) {
-          mm_output_smem.at(col, row) =
-              bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
-          mm_output_smem.at(col + 1, row) =
-              bfloat16(s_frag[(i << 1) + 1]) + residual_smem.at(col + 1, row);
+          if (add_residual) {
+            mm_output_smem.at(col, row) =
+                bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
+            mm_output_smem.at(col + 1, row) =
+                bfloat16(s_frag[(i << 1) + 1]) + residual_smem.at(col + 1, row);
+          }
         } else {
           mm_output_smem.at(col, row) = bfloat16(s_frag[i << 1]);
           mm_output_smem.at(col + 1, row) = bfloat16(s_frag[(i << 1) + 1]);
@@ -366,7 +373,9 @@ __device__ __forceinline__ void
 
         store_commit_group();
         if constexpr (HAS_RESIDUAL) {
-          arrive(residual_done[slot_residual], 1);
+          if (add_residual) {
+            arrive(residual_done[slot_residual], 1);
+          }
         }
       }
     }
