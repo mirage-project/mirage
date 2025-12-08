@@ -73,21 +73,6 @@ using namespace kernel;
   } while (0)
 #endif
 
-#ifndef CUDA_CHECK
-#define CUDA_CHECK(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr,                                                          \
-              "CUDA error at %s:%d: %s\n",                                     \
-              __FILE__,                                                        \
-              __LINE__,                                                        \
-              cudaGetErrorString(err));                                        \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
-#endif
-
 // #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
