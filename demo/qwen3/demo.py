@@ -159,10 +159,10 @@ if __name__ == "__main__":
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
-            # load_model(
-            #     model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
-            # )
-            model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            load_model(
+                model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
+            )
+            # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
@@ -359,12 +359,14 @@ if __name__ == "__main__":
         )
         attn_proj_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
+            strides=(1, args.max_num_batched_tokens) if world_size > 1 else None,
             dtype=mi.bfloat16,
             name="attn_proj_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         allreduce_buf = mpk.new_tensor(
             dims=(world_size, args.max_num_batched_tokens, hidden_size),
+            strides=(args.max_num_batched_tokens * hidden_size, 1, args.max_num_batched_tokens) if world_size > 1 else None,
             dtype=mi.bfloat16,
             name="all_reduce_buf",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
@@ -389,6 +391,7 @@ if __name__ == "__main__":
         )
         mlp_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
+            strides=(1, args.max_num_batched_tokens) if world_size > 1 else None,
             dtype=mi.bfloat16,
             name="mlp_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
