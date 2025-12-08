@@ -142,7 +142,7 @@ template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
           int OUTPUT_STRIDE>
-__device__ __forceinline__ void reduction_kernel(void const *input_ptr,
+__device__ __forceinline__ void reduction_kernel_row(void const *input_ptr,
                                                  void const *buf_ptr,
                                                  void *output_ptr) {
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
@@ -162,6 +162,47 @@ __device__ __forceinline__ void reduction_kernel(void const *input_ptr,
       }
     }
     d_output[batch * OUTPUT_STRIDE + offset] = static_cast<T>(accum);
+  }
+}
+
+// Assume that input/buffer/output have the same stride
+/** 
+ * (BATCH_SIZE, OUTPUT_SIZE): the shape of the assigned tensor
+ * OUTPUT_STRIDE: The stride of the inner dimension of the assigned tensor,
+ *                and also the size of the inner dim of the full dtensor.
+ */
+template <typename T,
+          int NUM_GPUS,
+          int MY_GPU_ID,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int OUTPUT_STRIDE>
+__device__ __forceinline__ void reduction_kernel_col(void const *input_ptr,
+                                                 void const *buf_ptr,
+                                                 void *output_ptr) {
+  // Input is of shape (BATCH_SIZE, OUTPUT_SIZE)
+  //             stride (1, BATCH_SIZE)
+  // Buffer is of shape (NUM_GPUS, BATCH_SIZE, OUTPUT_SIZE)
+  //             stride (BATCH_SIZE*OUTPUT_STRIDE, 1, BATCH_SIZE)
+  // Output is of shape (BATCH_SIZE, OUTPUT_SIZE)
+  //              stride (OUTPUT_STRIDE, 1)
+  T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
+  T const *__restrict__ d_buffer = static_cast<T const *>(buf_ptr);
+  T *__restrict__ d_output = static_cast<T *>(output_ptr);
+  for (int idx = threadIdx.x; idx < OUTPUT_SIZE * BATCH_SIZE;
+       idx += blockDim.x) {
+    float accum = 0.0;
+    int batch = idx / OUTPUT_SIZE;
+    int offset = idx % OUTPUT_SIZE;
+    for (int i = 0; i < NUM_GPUS; i++) {
+      if (i == MY_GPU_ID) {
+        accum += static_cast<float>(d_input[batch * 1 + offset * BATCH_SIZE]);
+      } else {
+        accum += static_cast<float>(d_buffer[i * BATCH_SIZE * OUTPUT_STRIDE +
+                                             batch * 1 + offset * BATCH_SIZE]);
+      }
+    }
+    d_output[batch * OUTPUT_STRIDE + offset * 1] = static_cast<T>(accum);
   }
 }
 
