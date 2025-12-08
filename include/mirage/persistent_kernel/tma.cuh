@@ -545,9 +545,20 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int const output_size = tensor_desc.dim[1];
         int const output_stride = (tensor_desc.stride[0]);
         int const output_tma_cp_size = output_size < 64 ? output_size : 64;
-        uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size),
-                                  static_cast<uint64_t>(output_size)};
-        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
+        uint64_t gmem_shape[2];
+        uint64_t gmem_stride[2];
+        if (task_desc.task_type == TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER) {
+          // TODO(Zepeng): Hacky for col-major output
+          gmem_shape[0] = static_cast<uint64_t>(output_size);
+          gmem_shape[1] = static_cast<uint64_t>(batch_size);
+          gmem_stride[0] = 1;
+          gmem_stride[1] = static_cast<uint64_t>(batch_size);
+        } else {
+          gmem_shape[0] = static_cast<uint64_t>(batch_size);
+          gmem_shape[1] = static_cast<uint64_t>(output_size);
+          gmem_stride[0] = 1;
+          gmem_stride[1] = static_cast<uint64_t>(output_stride);
+        }
         uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size),
                                   static_cast<uint32_t>(output_tma_cp_size)};
         size_t smem_repeat_col = 1;

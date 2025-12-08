@@ -1227,9 +1227,10 @@ int TaskRegister::register_linear_swapAB_hopper_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool with_residual) {
+  bool is_output_row_major = true;
   if (with_residual) {
     assert(params.size() == 1);
-    with_residual = params[0] == 1;
+    is_output_row_major = params[0] == 1;
   } else {
     assert(params.size() == 0);
   }
@@ -1358,14 +1359,15 @@ int TaskRegister::register_linear_swapAB_hopper_task(
 
   code.e(
       "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
-      "TMA_OUT, $, $, $>(",
+      "TMA_OUT, $, $, $, $>(",
       batch_size,
       output_size,
       reduction_size,
       Kstages,
       with_residual ? "TMA_RESIDUAL" : "void",
       output_stride,
-      "false" /*SplitK*/);
+      "false" /*SplitK*/,
+      is_output_row_major ? "true" : "false");
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    tma_out, ");

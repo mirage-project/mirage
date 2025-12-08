@@ -40,7 +40,8 @@ template <typename T,
           typename TMA_OUT,
           typename TMA_RESIDUAL = void,
           int OUTPUT_STRIDE = OUTPUT_SIZE,
-          bool SplitK = false>
+          bool SplitK = false,
+          bool OUTPUT_ROW_MAJOR = true>
 __device__ __forceinline__ void linear_swapAB_kernel_hopper(
     const TMA_A &tma_a,
     const TMA_B &tma_b,
@@ -202,8 +203,10 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
       initialize_barrier(weight_barrier[i], 1);
       initialize_barrier(compute_done[i], 1);
       if constexpr (HAS_RESIDUAL) {
-        initialize_barrier(residual_barrier[i], 1);
-        initialize_barrier(residual_done[i], 1);
+        if (add_residual) {
+          initialize_barrier(residual_barrier[i], 1);
+          initialize_barrier(residual_done[i], 1);
+        }
       }
     }
   }
@@ -218,7 +221,9 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
       prefetch_tma_descriptor(tma_b.desc_ptr);
       prefetch_tma_descriptor(tma_out.desc_ptr);
       if constexpr (HAS_RESIDUAL) {
-        prefetch_tma_descriptor(tma_residual->desc_ptr);
+        if (add_residual) {
+          prefetch_tma_descriptor(tma_residual->desc_ptr);
+        }
       }
     }
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
@@ -340,16 +345,30 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
       for (uint32_t i = 0; i < (SMEM_M_SIZE >> 2); i++) {
         int row = ((warp_idx & 3) << 4) + ((i & 1) << 3) + (lane_idx >> 2);
         int col = ((i >> 1) << 3) + ((lane_idx & 3) << 1);
-        if constexpr (HAS_RESIDUAL) {
-          if (add_residual) {
-            mm_output_smem.at(col, row) =
-                bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
-            mm_output_smem.at(col + 1, row) =
-                bfloat16(s_frag[(i << 1) + 1]) + residual_smem.at(col + 1, row);
+        if constexpr (OUTPUT_ROW_MAJOR) {
+          if constexpr (HAS_RESIDUAL) {
+            if (add_residual) {
+              mm_output_smem.at(col, row) =
+                  bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
+              mm_output_smem.at(col + 1, row) =
+                  bfloat16(s_frag[(i << 1) + 1]) + residual_smem.at(col + 1, row);
+            }
+          } else {
+            mm_output_smem.at(col, row) = bfloat16(s_frag[i << 1]);
+            mm_output_smem.at(col + 1, row) = bfloat16(s_frag[(i << 1) + 1]);
           }
         } else {
-          mm_output_smem.at(col, row) = bfloat16(s_frag[i << 1]);
-          mm_output_smem.at(col + 1, row) = bfloat16(s_frag[(i << 1) + 1]);
+          if constexpr (HAS_RESIDUAL) {
+            if (add_residual) {
+              mm_output_smem.at(row, col) =
+                  bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
+              mm_output_smem.at(row, col + 1) =
+                  bfloat16(s_frag[(i << 1) + 1]) + residual_smem.at(col + 1, row);
+            }
+          } else {
+            mm_output_smem.at(row, col) = bfloat16(s_frag[i << 1]);
+            mm_output_smem.at(row, col + 1) = bfloat16(s_frag[(i << 1) + 1]);
+          }
         }
       }
 
