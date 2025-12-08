@@ -41,12 +41,12 @@ template <typename T,
           typename TMA_RESIDUAL = void,
           int OUTPUT_STRIDE = OUTPUT_SIZE,
           bool SplitK = false>
-__device__ __forceinline__ void
-    linear_swapAB_kernel_hopper(const TMA_A &tma_a,
-                                const TMA_B &tma_b,
-                                const TMA_OUT &tma_out,
-                                const TMA_RESIDUAL *tma_residual = nullptr,
-                                bool add_residual/*used in multi-GPU*/ = true) {
+__device__ __forceinline__ void linear_swapAB_kernel_hopper(
+    const TMA_A &tma_a,
+    const TMA_B &tma_b,
+    const TMA_OUT &tma_out,
+    const TMA_RESIDUAL *tma_residual = nullptr,
+    bool add_residual /*used in multi-GPU*/ = true) {
 
   constexpr int TILE_SIZE =
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
@@ -232,7 +232,8 @@ __device__ __forceinline__ void
         if constexpr (HAS_RESIDUAL) {
           if (add_residual) {
             wait(residual_done[slot_residual], phase_residual ^ 1);
-            residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
+            residual_smem.set_ptr(shared_residual + slot_residual *
+                                                        SMEM_M_SIZE *
                                                         OUTPUT_TMA_TILE_SIZE);
             set_barrier_transaction_bytes(residual_barrier[slot_residual],
                                           TMA_TRANS_BYTES_RESIDUAL);
@@ -240,7 +241,7 @@ __device__ __forceinline__ void
                 residual_barrier[slot_residual],
                 residual_smem(0, 0),
                 {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
-            }
+          }
         }
       }
 #pragma unroll 1

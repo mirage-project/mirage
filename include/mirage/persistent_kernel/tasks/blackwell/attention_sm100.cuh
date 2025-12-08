@@ -20,9 +20,9 @@
 // #include "../element_binary.cuh"
 // #include "../element_unary.cuh"
 // #include "../reduction.cuh"
-#include "tasks/hopper/rotary_embedding_hopper.cuh"
 #include "rotary_embedding_sm100.cuh"
 #include "tasks/ampere/smem_layout.cuh"
+#include "tasks/hopper/rotary_embedding_hopper.cuh"
 // #include "../utils.cuh"
 
 #include <cutlass/arch/barrier.h>
@@ -400,15 +400,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         }
         if (kv_tokens_to_process > 0) {
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
-                token_idx++) {
+               token_idx++) {
             // k rope
-            rotary_embedding_hopper<T,
-                                    KVSmem,
-                                    1,
-                                    1,
-                                    HEAD_DIM,
-                                    128,
-                                    6>(
+            rotary_embedding_hopper<T, KVSmem, 1, 1, HEAD_DIM, 128, 6>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + first_kv_token_to_process) * HEAD_DIM,
