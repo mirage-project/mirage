@@ -5,6 +5,7 @@ import subprocess
 import shutil
 import sys
 import sysconfig
+from typing import Optional
 
 from .core import *
 from .kernel import get_key_paths, KNGraph, TBGraph
@@ -457,7 +458,7 @@ class PersistentKernel:
             tb_graph,
         )
         self.kn_graph.register_task(tb_graph, "attention", params)
-        
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]
