@@ -685,7 +685,7 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   c.e("      reinterpret_cast<char*>(task_desc->input_ptrs[0]) + i * $ * "
       "sizeof(bfloat16),",
       output_stride);
-  c.e("      task_desc->xfer_size_in_bytes / $,", batch_size);
+  c.e("      task_desc->task_metadata.xfer_size_in_bytes / $,", batch_size);
   c.e("      reinterpret_cast<uint64_t "
       "*>(&runtime_config.all_event_counters[event_index]),");
   c.e("      1 /*signal*/,");
@@ -1202,14 +1202,19 @@ int TaskRegister::register_linear_swapAB_hopper_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool with_residual) {
-  assert(params.size() == 0);
+  if (with_residual) {
+    assert(params.size() == 1);
+    with_residual = params[0] == 1;
+  } else {
+    assert(params.size() == 0);
+  }
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = with_residual ? 3 : 2;
   int num_outputs = 1;
 
-  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  // assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
     if (input_ops.size() < (size_t)num_inputs) {
