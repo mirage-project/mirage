@@ -37,7 +37,7 @@ template <typename T_,
           int REDUCTION_SIZE,
           int O_STRIDE = OUTPUT_SIZE,
           int PIPE_MAX = 3>
-__device__ __noinline__ void linear_kernel(void const *input_ptr,
+__device__ __noinline__ void linear_kernel_row(void const *input_ptr,
                                            void const *weight_ptr,
                                            void const *residual_ptr,
                                            void *output_ptr,
