@@ -1,3 +1,9 @@
+"""Graph partitioning utilities for extracting and optimizing computation subgraphs.
+
+This module provides functionality to partition computation graphs into smaller subgraphs,
+generate augmented datasets, and superoptimize kernel graphs using Mirage.
+"""
+
 import torch
 from itertools import combinations as comb
 import os
@@ -8,12 +14,28 @@ from partitioning.build_dataset import augment_partitions
 import concurrent.futures
 
 def copy_subgraph(subgraph):
+    """Create a deep copy of a subgraph adjacency list.
+    
+    Args:
+        subgraph: Dict mapping operator nodes to lists of their output operators
+        
+    Returns:
+        Deep copy of the subgraph
+    """
     new_subgraph = {}
     for from_op, to_ops in subgraph.items():
         new_subgraph[from_op] = to_ops.copy()
     return new_subgraph
 
 def contains_4D_tensors(op_node):
+    """Check if an operator node has any input or output tensors with >3 dimensions.
+    
+    Args:
+        op_node: Operator node to check
+        
+    Returns:
+        True if any tensor has more than 3 dimensions, False otherwise
+    """
     for shape, _ in op_node.input_tensor_shapes:
         if len(shape) > 3:
             return True
@@ -23,6 +45,17 @@ def contains_4D_tensors(op_node):
     return False
 
 def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
+    """Generate valid subgraph partitions starting from an operator node.
+    
+    Args:
+        op_node: Starting operator node
+        min_num_ops: Minimum operations required in a partition
+        max_num_ops: Maximum operations allowed in a partition
+        all_subgraphs: List to append valid subgraphs to
+        UNSUPPORTED_OPS: Set of unsupported operator types
+        COMPOSITE_OPS: Dict mapping composite ops to their operation count
+        IGNORE_OPS: Set of operator types to ignore
+    """
     if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
         # handle non-matching shapes
         op_needs_broadcast = False
@@ -39,6 +72,20 @@ def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED
             get_partitions_helper(op_node, {op_node: []}, num_ops, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
 def get_partitions_helper(op_node, curr_subgraph, num_ops, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
+    """Recursively explore graph to find valid partitions via DFS with combinatorial branching.
+    
+    Args:
+        op_node: Current operator node being processed
+        curr_subgraph: Current subgraph being built (adjacency list)
+        num_ops: Current operation count in the subgraph
+        min_num_ops: Minimum operations required
+        max_num_ops: Maximum operations allowed
+        visited: Set of visited operator IDs
+        all_subgraphs: List to collect valid subgraphs
+        UNSUPPORTED_OPS: Set of unsupported operator types
+        COMPOSITE_OPS: Dict mapping composite ops to operation counts
+        IGNORE_OPS: Set of operator types to ignore
+    """
     # if it is a composite operator, return a subgraph with only that one operator
     if id(op_node.name) in visited:
         return
@@ -108,9 +155,23 @@ def partition_graph(model,
                     dummy_input, 
                     min_num_ops=2, 
                     max_num_ops=4, 
-                    UNSUPPORTED_OPS=set(), # these are operators not supported by Mirage
+                    UNSUPPORTED_OPS=set(), 
                     COMPOSITE_OPS=dict(),
-                    IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
+                    IGNORE_OPS=set()):
+    """Partition a model's computation graph into valid subgraphs.
+    
+    Args:
+        model: PyTorch model to partition
+        dummy_input: Sample input for tracing the model
+        min_num_ops: Minimum operations per partition (default: 2)
+        max_num_ops: Maximum operations per partition (default: 4)
+        UNSUPPORTED_OPS: Set of unsupported operator types
+        COMPOSITE_OPS: Dict mapping composite ops to operation counts
+        IGNORE_OPS: Set of operators that perform no tensor operations
+        
+    Returns:
+        Tuple of (all_subgraphs, unique_operators)
+    """
     unique_operators = {}
     operators, _ = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
@@ -173,6 +234,28 @@ def partition_graph_with_sampling(model,
     return augmented_subgraphs, unique_operators
 
 def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name, min_num_ops=2, max_num_ops=4, aug_factor=5, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set(), timeout_minutes=5):
+    """Generate and superoptimize augmented kernel graphs across multiple input configurations.
+    
+    Processes subgraphs from various input shapes, converts to kernel graphs, deduplicates,
+    and runs superoptimization with timeout handling. Saves original/optimized graphs and
+    performance metrics to disk.
+    
+    Args:
+        input_configs: List of (batch_size, seq_len) tuples for input variations
+        model: PyTorch model to process
+        root_dir: Directory to save kernel graphs and performance data
+        dataset_name: Name prefix for performance JSON file
+        min_num_ops: Minimum operations per partition (default: 2)
+        max_num_ops: Maximum operations per partition (default: 4)
+        aug_factor: Augmentation factor for generating variations (default: 5)
+        UNSUPPORTED_OPS: Set of unsupported operator types
+        COMPOSITE_OPS: Set of composite operator types
+        IGNORE_OPS: Set of operators to ignore
+        timeout_minutes: Superoptimization timeout in minutes (default: 5)
+        
+    Returns:
+        Tuple of (all_kernels, kernel_input_dims) for successfully optimized graphs
+    """
     # Collect subgraphs from all input configurations
     all_subgraphs = []
     for batch_size, seq_len in input_configs:

@@ -1,3 +1,19 @@
+"""Build and parse computational graphs from neural network models.
+
+This module provides functionality to convert PyTorch models into computational graphs
+by exporting to ONNX format and parsing the resulting graph structure. It supports:
+
+- Parsing ONNX models into operator graphs with shape information
+- Expanding high-level operations (Softmax, ReduceMean, Sigmoid, Neg) into primitives
+- Inserting broadcast operations for shape compatibility
+- Building computation graphs for model partitioning and optimization
+
+Main functions:
+    - get_computation_graph: Convert a model to a computational graph
+    - parse_onnx_model: Parse ONNX representation into operator graph
+    - print_computational_graph: Visualize graph structure
+"""
+
 import torch
 from torch import nn
 import pickle
@@ -6,12 +22,13 @@ import onnx
 from onnx import shape_inference
 from partitioning.op import Operator
 import torch.nn.functional as F
-# import custom_onnx_operators
 import numpy as np
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 class SimpleClassifierMix(nn.Module):
+    """Simple neural network classifier with mixed supported and unsupported operations."""
+    
     def __init__(self, input_size=784, hidden_size=128, num_classes=2):
         super(SimpleClassifierMix, self).__init__()
         
@@ -23,6 +40,7 @@ class SimpleClassifierMix(nn.Module):
         self.dropout = nn.Dropout(0.2)  
         
     def forward(self, x):
+        """Forward pass through the classifier."""
         x = self.linear1(x)  
         x = F.relu(x)  
         x = self.dropout(x)  
@@ -33,6 +51,8 @@ class SimpleClassifierMix(nn.Module):
         return x
     
 class SplitModel(nn.Module):
+    """Neural network that splits input and processes through parallel paths."""
+    
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(SplitModel, self).__init__()
         self.fc1 = nn.Linear(input_dim // 2, hidden_dim)
@@ -40,6 +60,7 @@ class SplitModel(nn.Module):
         self.fc_out = nn.Linear(hidden_dim * 2, output_dim)
 
     def forward(self, x):
+        """Forward pass that splits input, processes in parallel, and concatenates results."""
         x1, x2 = torch.split(x, x.shape[1] // 2, dim=1)
         x = torch.cat((x1, x2), dim=1)
 
@@ -50,10 +71,8 @@ class SplitModel(nn.Module):
         x = self.fc_out(x)
         return x
 
-"""
-Prints a representation of the computational graph
-"""
 def print_computational_graph(root_node, indent=0, visited=None):
+    """Print a hierarchical representation of the computational graph."""
     if visited is None:
         visited = set()
     
@@ -92,10 +111,8 @@ def print_computational_graph(root_node, indent=0, visited=None):
         # for op in root_node.input_ops:
         #     print_computational_graph(op, indent + 2, visited)
 
-"""
-Parse ONNX representation of model and build operator graph
-"""
 def parse_onnx_model(model, unique_operators):
+    """Parse ONNX model and construct operator graph with shape information."""
     shape_value_dict = {}
     for initializer in model.graph.initializer:
         shape_value_dict[initializer.name] = tuple(initializer.dims)
@@ -240,6 +257,7 @@ def parse_onnx_model(model, unique_operators):
     
     # pass to expand softmax to constituent components
     def expand_softmax_pass(op):
+        """Expand Softmax operation into Exp, ReduceSum, and Div operations."""
         if op.fn != "Softmax":
             return
 
@@ -297,6 +315,7 @@ def parse_onnx_model(model, unique_operators):
 
     # pass to expand reduce mean to constituent components
     def expand_reduce_mean_pass(op):
+        """Expand ReduceMean operation into ReduceSum and Div operations."""
         if op.fn != "ReduceMean":   
             return
 
@@ -345,6 +364,7 @@ def parse_onnx_model(model, unique_operators):
         del operators[op.name]
     
     def expand_sigmoid_pass(op):
+        """Expand Sigmoid operation into Exp, Add, and Div operations."""
         if op.fn != "Sigmoid":
             return
         
@@ -398,6 +418,7 @@ def parse_onnx_model(model, unique_operators):
         del operators[op.name]
     
     def expand_neg_pass(op):
+        """Expand Neg operation into Mul operation with -1."""
         if op.fn != "Neg":
             return
         
@@ -431,11 +452,13 @@ def parse_onnx_model(model, unique_operators):
         del operators[op.name]
     
     def expand_reciprocal_pass(op):
+        """Add reciprocal parameter (1.0) to Reciprocal operations."""
         if op.fn != "Reciprocal":
             return
         op.additional_params = {"arg0": 1.0}
     
     def insert_broadcast_pass(op):
+        """Insert Expand operations to broadcast tensors with mismatched shapes."""
         if op.fn in ["MatMul", "Gemm", "ReduceSum", "Expand", "Gather", "Transpose", "Unsqueeze", "Reshape"]:
             return
         for i, (shape, _) in enumerate(op.input_tensor_shapes):
@@ -477,6 +500,7 @@ def parse_onnx_model(model, unique_operators):
     return operators, tensor_id_to_name
 
 def test_cfg():
+    """Test computation graph building with sample models."""
     model = SimpleClassifierMix()
     model.to(device)
     batch_size = 2
@@ -512,6 +536,7 @@ def test_cfg():
     parse_onnx_model(model)
 
 def get_computation_graph(model, dummy_input, unique_operators, method):
+    """Build computation graph from model using specified method (currently supports 'onnx')."""
     match method:
         case "onnx":
             # Generate the ONNX file

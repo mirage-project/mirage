@@ -52,9 +52,9 @@ The code automatically handles module imports from the parent directory. Ensure 
 - Python 3.10+
 - PyTorch with CUDA support
 
-## Running Tests
+## Using The Pipeline
 
-### Basic Test Execution
+### Basic Model Execution
 
 Navigate to Mirage root directory and run:
 
@@ -104,17 +104,18 @@ Optional:
 - Includes RMSNorm, attention mechanism, and MLP
 - Tests complex graph partitioning with multiple operation types
 
-## Configuration
+## Dataset Generation
+To train the cost model, we extract subgraphs from 4 different open source models (Qwen, Llama, Gemma, CLIP), superoptimized them, and recorded the execution time of their superoptimized kernels. To try and generate the dataset, navigate to Mirage home directory and run
 
-### Supported Operations
-The partitioning system supports most PyTorch operations. Unsupported operations automatically fall back to PyTorch:
-- Unsupported: `Constant`, `Identity`, `Unsqueeze`, `Abs`, `Gemm`, `Expand`, `Gather`, `Reshape`, `Transpose`, `Cast`, `CastLike`, `Tanh`, `ReduceSum`
+```bash
+python -m partitioning.tests.test_qwen
 
-### Tuning Parameters
+python -m partitioning.tests.test_gemma
 
-- **`max_nodes_per_partition`**: Controls partition granularity (smaller = more partitions)
-- **`max_mirage_ops`**: Maximum operations in a single Mirage kernel (affects optimization time)
-- **Batch sizes and sequence lengths**: Defined in test files, can be modified for different workloads
+python -m partitioning.tests.test_llama
+
+python -m partitioning.tests.test_clip
+```
 
 ## Development
 

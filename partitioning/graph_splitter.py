@@ -1,3 +1,37 @@
+"""Graph Splitter - Four-stage subgraph optimization for mixed operator graphs.
+
+This module implements a sophisticated graph partitioning algorithm that splits computational
+graphs into optimal subgraphs for execution on different backends (Mirage and PyTorch).
+
+The four-stage pipeline:
+    1. Conservative Splitting: Topologically sorts operators and creates subgraphs using
+       a conservative merging strategy that guarantees acyclic and connected properties.
+    
+    2. First Merge Pass: Optimizes by merging same-type adjacent subgraphs while maintaining
+       acyclicity through cycle detection.
+    
+    3. Demotion: Converts small Mirage subgraphs to PyTorch to reduce overhead and enable
+       further optimization opportunities.
+    
+    4. Second Merge Pass: Final optimization that merges subgraphs including those demoted
+       in stage 3, producing larger and more efficient execution regions.
+
+Key features:
+    - Handles special operators (Identity, Cast, Constant, Dropout) by removing and bypassing
+    - Checks for unsupported operations (4D tensors, broadcasting, user-defined ops)
+    - Maintains tensor shape and ID consistency across subgraph boundaries
+    - Provides detailed statistics and debugging information
+
+Classes:
+    SubgraphData: Data structure for subgraph representation with I/O edges
+    GraphSplitter: Main algorithm implementation with four-stage pipeline
+
+Functions:
+    process_operator_graph: High-level interface for the complete splitting pipeline
+    preprocess_special_operators: Handles ignored operators before splitting
+    remove_ignored_operators: Removes and bypasses specified operator types
+"""
+
 import os
 import sys
 from collections import defaultdict, deque, Counter
@@ -6,7 +40,15 @@ from dataclasses import dataclass, field
 
 @dataclass
 class SubgraphData:
-    """Represents a subgraph with detailed I/O information"""
+    """Represents a subgraph with detailed I/O information.
+    
+    Attributes:
+        id: Unique identifier for the subgraph
+        type: Subgraph type, either "mirage" or "pytorch"
+        operators: Dictionary of operators in the subgraph
+        input_edges: Mapping of operators to their input edges from other subgraphs
+        output_edges: Mapping of operators to their output edges to other subgraphs
+    """
     id: int
     type: str  # "mirage" or "pytorch"
     operators: Dict[Any, bool]
@@ -41,12 +83,24 @@ class GraphSplitter:
     """
     
     def __init__(self, unsupported_ops=None):
+        """Initialize the GraphSplitter.
+        
+        Args:
+            unsupported_ops: Set of operator names not supported by Mirage
+        """
         self.mirage_unsupported_ops = set()
         if unsupported_ops:
             self.mirage_unsupported_ops = {op.lower() for op in unsupported_ops}
     
     def is_supported_op(self, op) -> bool:
-        """Check if an operation is supported by Mirage."""
+        """Check if an operation is supported by Mirage.
+        
+        Args:
+            op: Operator to check
+            
+        Returns:
+            True if the operator is supported by Mirage, False otherwise
+        """
         if not hasattr(op, 'fn'):
             return False
         
@@ -158,7 +212,16 @@ class GraphSplitter:
         return subgraphs, deps_dict, subgraph_io, sorted_ops
     
     def _topological_sort(self, operators_graph: Dict) -> List[Any]:
-        """Topologically sort operators based on data flow dependencies. Uses DFS post-order (reversed)
+        """Topologically sort operators using DFS post-order traversal.
+        
+        Args:
+            operators_graph: Dictionary mapping operators to boolean values
+            
+        Returns:
+            List of operators in topological order
+            
+        Raises:
+            ValueError: If a cycle is detected or sort is incomplete
         """
         # Build adjacency list
         adj = defaultdict(list)
@@ -303,7 +366,15 @@ class GraphSplitter:
         return subgraphs, subgraph_deps, subgraph_io
     
     def _merge_into(self, subgraphs, source_id, target_id, subgraph_deps, subgraph_io):
-        """Merge source subgraph into target subgraph."""
+        """Merge source subgraph into target subgraph.
+        
+        Args:
+            subgraphs: List of (subgraph_dict, type) tuples
+            source_id: ID of the source subgraph to merge
+            target_id: ID of the target subgraph to merge into
+            subgraph_deps: Dictionary of subgraph dependencies
+            subgraph_io: List of I/O relationship dictionaries
+        """
         source_dict, source_type = subgraphs[source_id]
         target_dict, target_type = subgraphs[target_id]
         
@@ -331,7 +402,16 @@ class GraphSplitter:
         subgraphs[source_id] = None
     
     def _compact_merged_subgraphs(self, subgraphs, subgraph_deps, subgraph_io):
-        """Remove None subgraphs and renumber IDs."""
+        """Remove None subgraphs and renumber IDs after merging.
+        
+        Args:
+            subgraphs: List of (subgraph_dict, type) tuples (may contain None)
+            subgraph_deps: Dictionary of subgraph dependencies
+            subgraph_io: List of I/O relationship dictionaries
+            
+        Returns:
+            Tuple of (compacted_subgraphs, compacted_deps, compacted_io)
+        """
         compact_subgraphs = []
         id_mapping = {}
         
@@ -355,7 +435,16 @@ class GraphSplitter:
         return compact_subgraphs, compact_deps, compact_io
     
     def _has_path(self, dependencies: Dict[int, Set[int]], start: int, target: int) -> bool:
-        """Check if there exists a path from start to target in the dependency graph."""
+        """Check if there exists a path from start to target in the dependency graph.
+        
+        Args:
+            dependencies: Dictionary mapping subgraph IDs to their dependency sets
+            start: Starting subgraph ID
+            target: Target subgraph ID
+            
+        Returns:
+            True if a path exists from start to target, False otherwise
+        """
         if start == target:
             return True
         
@@ -428,7 +517,15 @@ class GraphSplitter:
         return True, []
     
     def _build_io_relationships(self, subgraphs, op_to_subgraph):
-        """Build I/O relationships between subgraphs."""
+        """Build I/O relationships between subgraphs.
+        
+        Args:
+            subgraphs: List of (subgraph_dict, type) tuples
+            op_to_subgraph: Mapping of operators to their subgraph IDs
+            
+        Returns:
+            List of dictionaries containing input/output relationships for each subgraph
+        """
         subgraph_io = [{"inputs": {}, "outputs": {}} for _ in subgraphs]
         
         for sg_id, (sg, _) in enumerate(subgraphs):
@@ -448,7 +545,11 @@ class GraphSplitter:
         return subgraph_io
     
     def _print_subgraph_stats(self, subgraphs):
-        """Print subgraph statistics."""
+        """Print statistics about subgraph sizes and distributions.
+        
+        Args:
+            subgraphs: List of (subgraph_dict, type) tuples
+        """
         mirage_subgraphs = [(sg_id, sg) for sg_id, (sg, sg_type) in enumerate(subgraphs) if sg_type == "mirage"]
         pytorch_subgraphs = [(sg_id, sg) for sg_id, (sg, sg_type) in enumerate(subgraphs) if sg_type == "pytorch"]
         
@@ -470,7 +571,12 @@ class GraphSplitter:
             print(f"  Total PyTorch ops: {total_pytorch_ops}, Avg: {avg_pytorch:.1f} ops/subgraph")
     
     def _print_subgraph_info(self, subgraphs, subgraph_io):
-        """Print detailed subgraph information."""
+        """Print detailed information about each subgraph including operators and I/O edges.
+        
+        Args:
+            subgraphs: List of (subgraph_dict, type) tuples
+            subgraph_io: List of I/O relationship dictionaries
+        """
         for sg_id, (sg, sg_type) in enumerate(subgraphs):
             print(f"\nSubgraph {sg_id} ({sg_type}):")
             print(f"  Operators: {[op.name if hasattr(op, 'name') else str(op) for op in sg]}")
@@ -490,7 +596,15 @@ class GraphSplitter:
                     print(f"    {op_name} -> Subgraph {tgt_sg_id} ({tgt_op_name})")
     
     def create_mirage_graph(self, subgraphs, subgraph_io):
-        """Create a Mirage execution graph from the subgraphs."""
+        """Create a Mirage execution graph from the subgraphs.
+        
+        Args:
+            subgraphs: List of (subgraph_dict, type) tuples
+            subgraph_io: List of I/O relationship dictionaries
+            
+        Returns:
+            Dictionary mapping kernel IDs to their execution metadata
+        """
         mirage_graph = {}
         
         for sg_id, (sg, sg_type) in enumerate(subgraphs):
@@ -525,7 +639,14 @@ class GraphSplitter:
         return mirage_graph
 
     def convert_to_adjacency_list(self, subgraphs):
-        """Convert subgraphs into adjacency list format."""
+        """Convert subgraphs into adjacency list format.
+        
+        Args:
+            subgraphs: List of (subgraph_dict, type) tuples
+            
+        Returns:
+            List of adjacency list dictionaries with operator connections and tensor shapes
+        """
         adjacency_list_subgraphs = []
         
         for sg_dict, sg_type in subgraphs:
@@ -671,18 +792,18 @@ def process_operator_graph(operators: Dict,
     return subgraphs, subgraph_deps, sorted_ops
 
 def preprocess_special_operators(operators_graph: Dict, IGNORE_OPS: Set[str] = None) -> Dict:
-    """
-    Preprocess the graph to handle special operators that need custom treatment.
+    """Preprocess the graph to handle special operators that need custom treatment.
     
-    Currently handles:
-    - Ignored operators: removed and connections bypassed
+    Removes ignored operators (e.g., Identity, Cast, Constant, Dropout) and bypasses
+    their connections to maintain graph connectivity.
     
     Args:
-        operators_graph: Dict mapping operators to boolean values
-        IGNORE_OPS: Set of operator names to ignore/remove
+        operators_graph: Dictionary mapping operators to boolean values
+        IGNORE_OPS: Set of operator names to ignore/remove. Defaults to 
+                    {"Identity", "Cast", "Constant", "Dropout"}
         
     Returns:
-        Dict: Processed operator graph
+        Processed operator graph without ignored operators
     """
     if IGNORE_OPS is None:
         IGNORE_OPS = {"Identity", "Cast", "Constant", "Dropout"}
@@ -692,15 +813,21 @@ def preprocess_special_operators(operators_graph: Dict, IGNORE_OPS: Set[str] = N
     return processed_graph
 
 def remove_ignored_operators(operators_graph: Dict, IGNORE_OPS: Set[str]) -> Dict:
-    """
-    Remove ignored operators from the graph and fix connections.
+    """Remove ignored operators from the graph and fix connections.
+    
+    For each ignored operator with single input/output, connects its predecessor
+    directly to its successor, preserving tensor IDs and shapes. Updates both
+    input_ops and input_tensor_shapes to maintain synchronization.
     
     Args:
-        operators_graph: Dict mapping operators to boolean values
+        operators_graph: Dictionary mapping operators to boolean values
         IGNORE_OPS: Set of operator names to ignore/remove
         
     Returns:
-        Dict: Cleaned operator graph without ignored operators
+        Cleaned operator graph without ignored operators
+        
+    Raises:
+        ValueError: If an ignored operator has more than 1 input or output
     """
     ignore_ops_lower = {op.lower() for op in IGNORE_OPS}
     

@@ -1,3 +1,10 @@
+"""Hybrid execution runtime for partitioned neural network graphs.
+
+Provides graph partitioning with dynamic programming to split computation graphs into
+Mirage-optimized kernels and PyTorch fallback operations. The HybridModel executor
+manages efficient routing between backends with tensor caching and type handling.
+"""
+
 import torch
 import os
 from pathlib import Path
@@ -5,7 +12,7 @@ import mirage as mi
 import numpy as np
 import warnings
 from build_computation_graph import get_computation_graph
-from utils import to_kernel_graph
+from utils import to_kernel_graph, is_connected
 from generate_dag import solve_partitions
 from graph_splitter import process_operator_graph
 from gnn_xgboost import GNNXGBoost
@@ -30,30 +37,15 @@ CAST_ID_TO_DTYPE = {
     15: torch.complex128,
 }
 
-def is_connected(nodes, adj):
-  if len(nodes) <= 1: return True
-  visited = set([nodes[0]])
-  queue = [nodes[0]]
-  while queue:
-    node = queue.pop(0)
-    for next_node in nodes:
-      if next_node not in visited and (adj[node][next_node] or adj[next_node][node]):
-        visited.add(next_node)
-        queue.append(next_node)
-  return len(visited) == len(nodes)
-
-
 def check_subgraph_exceeds_mirage_constraint(sg_dict, max_mirage_ops):
-    """
-    Check if a subgraph exceeds the mirage constraint:
-    num_inputs + num_outputs + num_operators > max_mirage_ops
+    """Check if subgraph complexity exceeds Mirage limit (inputs + outputs + ops > max).
     
     Args:
-        sg_dict: Dictionary representing the subgraph (keys are operators)
-        max_mirage_ops: Maximum allowed value for the constraint
+        sg_dict: Subgraph dictionary with operators as keys
+        max_mirage_ops: Maximum allowed complexity
     
     Returns:
-        True if constraint is exceeded, False otherwise
+        True if constraint exceeded
     """
     # Count operators
     num_operators = len(sg_dict)
@@ -78,11 +70,9 @@ def check_subgraph_exceeds_mirage_constraint(sg_dict, max_mirage_ops):
 
 
 class HybridModel:
-    """
-    Executable wrapper for Mirage + PyTorch hybrid execution.
+    """Hybrid model executor routing ops to Mirage kernels or PyTorch fallback.
     
-    Automatically routes operations to either Mirage-optimized kernels 
-    or PyTorch fallback implementations.
+    Manages execution plan, tensor I/O, parameters, and caching for optimal performance.
     """
     
     def __init__(self, execution_plan, input_tensor_ids, output_tensor_ids, parameter_tensors):
@@ -100,7 +90,7 @@ class HybridModel:
         self._init_op_handlers()
     
     def _handle_binary_op_with_scalar(self, op, inputs, fn_name):
-        """Handle binary ops that can work with scalars from additional_params"""
+        """Execute binary op with scalar from additional_params or second tensor input."""
         if len(inputs) == 1 and hasattr(op, 'additional_params') and 'arg1' in op.additional_params:
             scalar = op.additional_params['arg1']
             op_map = {
@@ -116,14 +106,14 @@ class HybridModel:
             raise ValueError(f"{fn_name} requires 2 inputs or additional_params, got {len(inputs)} inputs")
     
     def _handle_gemm(self, inputs):
-        """ONNX Gemm: Y = alpha * A * B^T + beta * C (default transB=1)"""
+        """Execute ONNX Gemm operation: Y = A * B^T + C (with optional bias)."""
         matmul_result = torch.matmul(inputs[0], inputs[1].T)
         if len(inputs) > 2:  # Has bias
             return matmul_result + inputs[2]
         return matmul_result
     
     def _handle_cast(self, op, inputs):
-        """Handle Cast and CastLike operations"""
+        """Cast tensor to target dtype with caching to avoid redundant conversions."""
         to_dtype = CAST_ID_TO_DTYPE.get(op.kwargs.get("to"), None)
         if to_dtype is not None:
             if inputs[0].dtype != to_dtype:
@@ -138,7 +128,7 @@ class HybridModel:
             raise NotImplementedError(f"Cast to dtype id '{op.kwargs.get('to')}' not implemented")
     
     def _init_op_handlers(self):
-        """Initialize the operation dispatch table"""
+        """Build dispatch table mapping operation names to PyTorch implementations."""
         self._op_handlers = {
             "Add": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Add"),
             "Sub": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Sub"),
@@ -168,7 +158,7 @@ class HybridModel:
         }
     
     def _get_params_on(self, device, dtype):
-        """Return dict of parameters placed on device, keeping their original dtype."""
+        """Get parameters moved to target device (cached), preserving original dtype."""
         # Note: We only cache by device, not dtype, because parameters should keep their original dtype
         # (e.g. embedding weights stay float32/float16 even if input tokens are int64)
         key = (device,)
@@ -187,7 +177,7 @@ class HybridModel:
         return params
 
     def _get_const(self, device, shape, value, dtype=torch.float16):
-        """Return a constant tensor for Mirage kernels, cached per (device, shape, value, dtype)."""
+        """Get or create cached constant tensor for Mirage kernels."""
         key = (device, tuple(shape), float(value), dtype)
         t = self._const_cache.get(key)
         if t is None:
@@ -196,6 +186,15 @@ class HybridModel:
         return t
     
     def __call__(self, *inputs, debug=False):
+        """Execute model with inputs, routing through Mirage kernels and PyTorch ops.
+        
+        Args:
+            *inputs: Input tensors matching model signature
+            debug: Enable verbose logging and validation
+        
+        Returns:
+            Output tensor(s) from execution plan
+        """
         if len(inputs) != len(self.input_tensor_ids):
             raise ValueError(f"Expected {len(self.input_tensor_ids)} input(s), got {len(inputs)}")
         device = inputs[0].device if inputs else torch.device('cuda')
@@ -284,7 +283,7 @@ class HybridModel:
         return outputs[0] if len(outputs) == 1 else outputs
     
     def _execute_pytorch_op(self, op, inputs):
-        """Execute a PyTorch operation using the dispatch table"""
+        """Execute PyTorch operation via dispatch table lookup."""
         fn = op.fn
         
         # Lookup and execute the operation
@@ -303,15 +302,23 @@ def partition_graph_with_dp(model,
                           max_mirage_ops=9,
                           dry_run=False,
                           ):
-    """
+    """Partition computation graph and build hybrid Mirage+PyTorch model.
     
-    Returns a HybridModel that combines Mirage-optimized kernels with PyTorch fallback.
+    Analyzes model ops, splits into Mirage-compatible and PyTorch fallback partitions,
+    applies DP-based partitioning to large subgraphs, and optimizes Mirage kernels.
     
     Args:
-        dry_run: If True, skip superoptimize and use original kernel graphs for fast testing
+        model: ONNX model to partition
+        dummy_input: Sample input for graph tracing
+        IGNORE_OPS: Operations to skip during partitioning
+        UNSUPPORTED_OPS: Operations requiring PyTorch fallback
+        cost_model: Cost estimator ('gnn-xgboost' or 'dnn-abacus')
+        max_nodes_per_partition: Max ops per partition for DP
+        max_mirage_ops: Complexity limit (inputs + outputs + ops)
+        dry_run: Skip superoptimization for fast testing
         
     Returns:
-        HybridModel: Executable model with hybrid Mirage+PyTorch execution
+        HybridModel: Executable hybrid model
     """    
     print("Building computation graph...")
     unique_operators = {}

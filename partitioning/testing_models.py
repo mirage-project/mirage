@@ -1,9 +1,24 @@
+"""Testing models for partitioning and benchmarking.
+
+This module contains neural network architectures designed for testing
+the Mirage partitioning system and performance benchmarking. All models
+use float16 precision.
+"""
+
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 class TestMLP(nn.Module):
+    """5-layer MLP with tanh and sigmoid activations.
+    
+    A simple multilayer perceptron for testing purposes with the following
+    architecture: 1024 -> 8192 -> 16384 -> 16384 -> 8192 -> 1024.
+    Uses tanh activation after layers 1 and 4, and sigmoid at the output.
+    All weights are float16 and initialized with Xavier uniform.
+    """
+    
     def __init__(self):
         super().__init__()
         # Define weights manually instead of nn.Linear layers
@@ -18,6 +33,14 @@ class TestMLP(nn.Module):
             nn.init.xavier_uniform_(w)
 
     def forward(self, x):
+        """Forward pass through the MLP.
+        
+        Args:
+            x: Input tensor of shape (batch_size, 1024)
+            
+        Returns:
+            Output tensor of shape (batch_size, 1024) with sigmoid activation
+        """
         # Using torch.matmul instead of nn.Linear
         x = torch.tanh(torch.matmul(x, self.w1))
         x = torch.matmul(x, self.w2)
@@ -27,7 +50,26 @@ class TestMLP(nn.Module):
         return x
 
 class TransformerBlock(nn.Module):
+    """Single transformer block with multi-head attention and feedforward.
+    
+    Implements a standard transformer block with:
+    - RMSNorm pre-normalization
+    - Multi-head self-attention
+    - Feedforward network with SiLU activation
+    - Residual connections
+    
+    All parameters use float16 precision.
+    """
+    
     def __init__(self, d_model, n_heads, ff_mult=4):
+        """Initialize transformer block.
+        
+        Args:
+            d_model: Model dimensionality (must be divisible by n_heads)
+            n_heads: Number of attention heads
+            ff_mult: Feedforward hidden dimension multiplier (default: 4)
+        """
+
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
@@ -47,6 +89,14 @@ class TransformerBlock(nn.Module):
         self.fc2 = nn.Linear(hidden, d_model, bias=False, dtype=torch.float16)
 
     def forward(self, x):
+        """Forward pass through transformer block.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, d_model)
+            
+        Returns:
+            Output tensor of shape (batch_size, seq_len, d_model)
+        """
         # --- Attention ---
         h = self.rms1(x)
         q = self.wq(h)  # (B, T, D)
@@ -84,9 +134,31 @@ class TransformerBlock(nn.Module):
 
 
 class TestTransformer(nn.Module):
-    """Simplified large transformer for inference benchmarking (RMSNorm)."""
+    """Large-scale transformer model for inference benchmarking.
+    
+    A complete transformer architecture designed for testing partitioning
+    strategies on large models. Features:
+    - Token and positional embeddings
+    - Stacked transformer blocks with RMSNorm
+    - Language modeling head
+    - Default configuration: 8192 hidden dim, 8 heads, 16K vocab
+    
+    All parameters use float16 precision for efficient inference.
+    """
+    
     def __init__(self, vocab_size=16384, max_seq_len=1024,
                  d_model=8192, n_heads=8, n_layers=1, ff_mult=4):
+        """Initialize transformer model.
+        
+        Args:
+            vocab_size: Vocabulary size (default: 16384)
+            max_seq_len: Maximum sequence length (default: 1024)
+            d_model: Model dimensionality (default: 8192)
+            n_heads: Number of attention heads per block (default: 8)
+            n_layers: Number of transformer blocks (default: 1)
+            ff_mult: Feedforward hidden dimension multiplier (default: 4)
+        """
+
         super().__init__()
         self.vocab_size = vocab_size
         self.tok_emb = nn.Embedding(vocab_size, d_model, dtype=torch.float16)
@@ -98,6 +170,15 @@ class TestTransformer(nn.Module):
         self.head = nn.Linear(d_model, vocab_size, bias=False, dtype=torch.float16)
 
     def forward(self, input_ids):
+        """Forward pass through the transformer.
+        
+        Args:
+            input_ids: Token indices of shape (batch_size, seq_len).
+                      Automatically converted to long dtype if needed.
+                      
+        Returns:
+            Logits tensor of shape (batch_size, seq_len, vocab_size)
+        """
         if input_ids.dtype != torch.long:
             input_ids = input_ids.long()
 

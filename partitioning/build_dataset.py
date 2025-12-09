@@ -1,3 +1,10 @@
+"""Dataset augmentation utilities for graph partitioning.
+
+This module provides tools to generate training datasets for graph partitioning models
+by augmenting computation graph partitions through structural modifications (expansion,
+contraction) and deduplication. The generated datasets can be serialized to JSON format.
+"""
+
 import random
 from collections import deque, defaultdict
 from typing import Dict, List, Set, Optional, Any, Tuple
@@ -5,7 +12,14 @@ import json
 from partitioning.build_computation_graph import get_computation_graph
 
 def _shallow_copy_adjacency(partition: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
-    """Create a shallow copy of adjacency list."""
+    """Create a shallow copy of adjacency list.
+    
+    Args:
+        partition: Adjacency list representation of a graph partition
+        
+    Returns:
+        Shallow copy with new lists for connections
+    """
     return {node: list(connections) for node, connections in partition.items()}
 
 
@@ -14,7 +28,18 @@ def _expand_partition_adjacency(partition: Dict[Any, List[Any]],
                                UNSUPPORTED_OPS: set,
                                IGNORE_OPS: set,
                                expansion_size: int = 2) -> Dict[Any, List[Any]]:
-    """Expand a partition in adjacency list format by adding connected neighbors."""
+    """Expand partition by adding neighboring nodes.
+    
+    Args:
+        partition: Adjacency list of current partition
+        all_operators: Dictionary of all available operators
+        UNSUPPORTED_OPS: Set of unsupported operation types
+        IGNORE_OPS: Set of operations to ignore
+        expansion_size: Number of neighbors to add (default: 2)
+        
+    Returns:
+        Expanded partition with new boundary nodes
+    """
     
     expanded = _shallow_copy_adjacency(partition)
     partition_nodes = set(partition.keys())
@@ -70,7 +95,15 @@ def _expand_partition_adjacency(partition: Dict[Any, List[Any]],
 
 def _contract_partition_adjacency(partition: Dict[Any, List[Any]], 
                                  contraction_size: int = 1) -> Dict[Any, List[Any]]:
-    """Contract a partition by removing leaf nodes."""
+    """Contract partition by removing nodes with fewest connections.
+    
+    Args:
+        partition: Adjacency list of current partition
+        contraction_size: Number of nodes to remove (default: 1)
+        
+    Returns:
+        Contracted partition with leaf nodes removed
+    """
     
     if len(partition) <= contraction_size + 1:
         return partition
@@ -111,9 +144,16 @@ def _contract_partition_adjacency(partition: Dict[Any, List[Any]],
 
 
 def _compute_partition_hash(partition):
-    """
-    Compute a hash for a partition based on structure and operation types.
-    This allows us to identify duplicate subgraphs.
+    """Compute structural hash for duplicate detection.
+    
+    Creates a canonical representation based on node features (operation type,
+    tensor shapes) and edge structure to identify duplicate subgraphs.
+    
+    Args:
+        partition: Adjacency list of partition
+        
+    Returns:
+        Integer hash of canonical structure
     """
     # Create a canonical representation
     nodes = []
@@ -150,14 +190,13 @@ def _compute_partition_hash(partition):
 
 
 def prune_duplicate_subgraphs(subgraphs):
-    """
-    Remove duplicate subgraphs from the dataset.
+    """Remove structurally identical subgraphs.
     
     Args:
         subgraphs: List of subgraphs in adjacency list format
         
     Returns:
-        List of unique subgraphs and count of duplicates removed
+        Tuple of (unique_subgraphs, num_duplicates_removed)
     """
     seen_hashes = set()
     unique_subgraphs = []
@@ -174,8 +213,16 @@ def prune_duplicate_subgraphs(subgraphs):
     return unique_subgraphs, num_duplicates
 
 def get_total_partition_ops(partition: Dict[Any, List[Any]]) -> int:
-    """
-    total = operators + external_inputs + external_outputs
+    """Calculate total operation count for a partition.
+    
+    Total = internal operators + external inputs + external outputs.
+    This represents the size of the kernel that would be generated.
+    
+    Args:
+        partition: Adjacency list of partition
+        
+    Returns:
+        Total operation count
     """
     partition_nodes = set(partition.keys())
     
@@ -211,22 +258,24 @@ def augment_partitions(valid_partitions,
                       max_size=9,
                       UNSUPPORTED_OPS=set(),
                       IGNORE_OPS=set()):
-    """
-    Augment dataset by creating variations of valid partitions.
+    """Generate augmented dataset from valid partitions.
+    
+    Creates variations through structural perturbations (expansion/contraction)
+    while respecting size constraints and operation type restrictions.
     
     Args:
-        valid_partitions: List of valid partitions from get_partitions (adjacency list format)
-        all_operators: Dictionary of operators from get_computation_graph
-        augmentation_factor: Number of variations to create per valid partition
-        perturbation_strategies: List of strategies ['expand', 'contract']
-        prune_duplicates: Whether to remove duplicate subgraphs
-        min_size: Minimum partition size
-        max_size: Maximum partition size
-        UNSUPPORTED_OPS: Set of unsupported operations
-        IGNORE_OPS: Set of operations to ignore
+        valid_partitions: Base partitions in adjacency list format
+        all_operators: Dictionary of available operators
+        augmentation_factor: Variations per partition (default: 5)
+        perturbation_strategies: List of strategies, e.g., ['expand', 'contract']
+        prune_duplicates: Remove structural duplicates (default: True)
+        min_size: Minimum partition size (default: 2)
+        max_size: Maximum partition size (default: 9)
+        UNSUPPORTED_OPS: Operations to exclude
+        IGNORE_OPS: Operations to skip
         
     Returns:
-        List of augmented subgraphs in adjacency list format
+        List of augmented subgraphs
     """
     
     if perturbation_strategies is None:
@@ -306,8 +355,17 @@ def augment_partitions(valid_partitions,
     return augmented_subgraphs
 
 def serialize_subgraphs_to_json(subgraphs: List[Dict[Any, List[Any]]], filename: str = None) -> str:
-    """
-    Serialize adjacency list subgraphs to JSON format.
+    """Serialize subgraphs to JSON format.
+    
+    Converts adjacency list representation to JSON with node metadata
+    (operation type, tensor shapes, parameters) and edge lists.
+    
+    Args:
+        subgraphs: List of subgraphs in adjacency list format
+        filename: Optional file path to save JSON (default: None)
+        
+    Returns:
+        JSON string representation of subgraphs
     """
     
     serialized_data = []
@@ -359,15 +417,14 @@ def serialize_subgraphs_to_json(subgraphs: List[Dict[Any, List[Any]]], filename:
 
 def _perturb_operator_params(partition: Dict[Any, List[Any]], 
                             num_to_perturb: int = 1) -> Dict[Any, List[Any]]:
-    """
-    Create a variation by modifying operator parameters.
+    """Create variation by modifying operator parameters.
     
     Args:
         partition: Partition in adjacency list format
-        num_to_perturb: Number of operators to modify
+        num_to_perturb: Number of operators to modify (default: 1)
         
     Returns:
-        Modified partition with perturbed parameters
+        Deep copy of partition with perturbed parameters
     """
     import copy
     
@@ -401,12 +458,13 @@ def _perturb_operator_params(partition: Dict[Any, List[Any]],
     return perturbed
 
 def _apply_parameter_perturbation(node):
-    """
-    Apply parameter perturbation to a single operator node.
-    Modifies the node's kwargs in place.
+    """Apply parameter perturbation to operator node (in-place).
     
-    Only perturbs operations that are supported by Mirage and have
-    parameters that affect kernel generation.
+    Modifies parameters like reduction dimensions, clamp ranges, exponents,
+    and epsilon values for supported operations (ReduceSum, Clip, Pow, RMSNorm).
+    
+    Args:
+        node: Operator node to perturb (modified in-place)
     """
     op_type = getattr(node, 'fn', '')
     
