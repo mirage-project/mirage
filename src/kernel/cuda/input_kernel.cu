@@ -39,7 +39,7 @@ __global__ void init_input_fingerprint(char *fp_base_ptr,
       (mirage::type::FPType *)(fp_base_ptr + A.fp_offset);
   if (idx < num_elements) {
     // FIXME: replace this with curand to generate random numbers
-    // Ensures different INPUTs have distinct fingerprints
+    // Ensure each INPUT gets a unique fingerprint
     size_t offset = (size_t)input_idx * 100003; // Large prime to separate inputs
     fp_ptr[idx] = (offset + idx + gpu_id * num_elements) % FP_PQ;
   }
@@ -50,7 +50,7 @@ bool KNInputOp::fingerprint(void) {
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
   
-  // Determine the INPUT op's logical index among all INPUTs for consistent fingerprinting
+  // Input's relative index among all Input ops
   int input_idx = 0;
   for (size_t i = 0; i < kgraph->operators.size(); i++) {
     if (kgraph->operators[i] == this) {
