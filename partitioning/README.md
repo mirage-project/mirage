@@ -2,6 +2,8 @@
 
 This directory contains the program partitioning system for Mirage, which automatically partitions PyTorch models into subgraphs and executes them using a hybrid approach: Mirage-optimized kernels for supported operations and PyTorch fallback for others.
 
+[Project Report](https://drive.google.com/file/d/1aD1tg8X7CdncB8Ophjpea3k7GmAFfj9O/view?usp=sharing)
+
 ## Overview
 
 The partitioning system converts PyTorch models to ONNX, partitions the computation graph into optimal subgraphs, and creates a hybrid execution model that combines:
