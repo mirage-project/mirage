@@ -437,19 +437,19 @@ class KNGraph:
             profiling=profiling,
             enable_online_softmax=enable_online_softmax,
         )
-        # if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
-        #     # the transpiled kernel exceeds shared memory limit
-        #     print(
-        #         f"required shared memory size {result['max_smem_size']} exceed max shared memory size of current gpu arch {get_shared_memory_capacity(target_cc)}"
-        #     )
-        #     self._is_compiled = True
-        #     self._valid_cuda_kernels = False
-        #     self._error_message = "shared memory usage exceed limit"
+        if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
+            # the transpiled kernel exceeds shared memory limit
+            print(
+                f"required shared memory size {result['max_smem_size']} exceed max shared memory size of current gpu arch {get_shared_memory_capacity(target_cc)}"
+            )
+            self._is_compiled = True
+            self._valid_cuda_kernels = False
+            self._error_message = "shared memory usage exceed limit"
 
-        #     if async_:
-        #         return Handle([], None)
-        #     else:
-        #         return None
+            if async_:
+                return Handle([], None)
+            else:
+                return None
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         # if True:
