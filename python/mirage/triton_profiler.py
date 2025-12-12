@@ -240,7 +240,7 @@ if __name__ == "__main__":
 
         print(f"\nBest performance: {best_perf:.3f} ms")
         print(f"Successes: {self.success_num}, Failures: {self.fail_num}")
-        return best_graph, best_file_path, best_output_shapes, best_perf
+        return best_graph, best_file_path, best_output_shapes
 
 
 def profile_and_select_best_graph(
