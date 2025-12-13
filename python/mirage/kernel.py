@@ -557,6 +557,7 @@ class KNGraph:
         use_cached_graphs: bool = True,
         save_codes: bool = False,
         is_formal_verified: bool = False,
+        return_best_perf: bool = False
     ):
         if use_graph_dataset:
             cached_graph = graph_dataset.find(
@@ -755,8 +756,9 @@ class KNGraph:
                     franges=franges,
                     backend=backend,
                 )
-
-            return best_graph, best_perf
+            if return_best_perf:
+                return best_graph, best_perf
+            return best_graph
         else:
             assert False, "Unsupported backend"
             return None

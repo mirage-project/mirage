@@ -313,7 +313,7 @@ def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name,
             
             # Use ThreadPoolExecutor with timeout
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(kernel_graph.superoptimize)
+                future = executor.submit(kernel_graph.superoptimize, return_best_perf=True)
                 try:
                     result = future.result(timeout=timeout_seconds)
                     
