@@ -704,7 +704,9 @@ class KNGraph:
                     fmaps=fmaps,
                     franges=franges,
                     backend=backend)
-            return best_graph, best_perf
+            if return_best_perf:
+                return best_graph, best_perf
+            return best_graph
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
