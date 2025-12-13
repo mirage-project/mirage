@@ -703,7 +703,7 @@ class KNGraph:
                     blockdims=blockdims,
                     fmaps=fmaps,
                     franges=franges,
-                    backend=backend
+                    backend=backend,
                 )
             if return_best_perf:
                 return best_graph, best_perf
