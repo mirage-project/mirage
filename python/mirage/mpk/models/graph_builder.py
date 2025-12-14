@@ -24,8 +24,13 @@ class MirageModelConfig:
     
     with_lm_head: bool = True
     
+    def __str__(self):
+        return self.info_as_string()
+    
     def info_as_string(self):
-        info = f"Hidden size: {self.hidden_size if self.hidden_size is not None else 'None'}\n"
+        info = "-------------------------------------------\n"
+        info += "MirageModelConfig info:"
+        info += f"Hidden size: {self.hidden_size if self.hidden_size is not None else 'None'}\n"
         info += f"Intermediate size: {self.intermediate_size if self.intermediate_size is not None else 'None'}\n"
         info += f"Vocab size: {self.vocab_size if self.vocab_size is not None else 'None'}\n"
         info += f"Num q heads: {self.local_num_q_heads if self.local_num_q_heads is not None else 'None'}\n"
@@ -37,6 +42,7 @@ class MirageModelConfig:
         info += f"Position embeddings cos: {self.position_embeddings[0].shape if self.position_embeddings[0] is not None else 'None'}\n"
         info += f"Position embeddings sin: {self.position_embeddings[1].shape if self.position_embeddings[1] is not None else 'None'}\n"
         info += f"State dict len: {len(self.state_dict) if self.state_dict is not None else 0}\n"
+        info += f"With LM head: {self.with_lm_head}\n"
         info += "-------------------------------------------\n"
         return info
 

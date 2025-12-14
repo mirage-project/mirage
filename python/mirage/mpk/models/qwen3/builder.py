@@ -598,6 +598,7 @@ class Qwen3Builder(GraphBuilder):
         )
         if with_lm_head:
             self.w_proj = self.mpk.attach_input(torch_tensor=self.lm_head_weight, name="lm_head")
+            grid_dim = (grid_for_rmsnorm_linear_layer(self.w_proj.dim(0)), 1, 1)
             self.mpk.linear_layer(
                 input=self.rmsnorm_out,
                 weight=self.w_proj,

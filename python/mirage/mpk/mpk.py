@@ -114,6 +114,7 @@ class MPK:
         self.init_mpi()
         self.metadata = meta
         args = meta
+        self.mode = args.mode
         self.model_name = args.model_name
         self.device = args.device
         self.total_num_requests = args.total_num_requests
@@ -128,10 +129,18 @@ class MPK:
         torch.cuda.set_device(self.rank)
         
         self.tokenizer = None
+        
         self.need_cpy_input = False
         self.src_input_tokens = None
+        self.need_cpy_step = False
+        self.src_step = args.step
         
-        self.step = args.step
+        if args.step is not None and args.step.dtype != torch.int32:
+            self.need_cpy_step = True
+            self.step = torch.empty_like(args.step, dtype=torch.int32, device=args.step.device)
+        else:
+            self.step = args.step
+            
         self.tokens = args.tokens
         if args.input_tokens.dtype != torch.int64:
             self.need_cpy_input = True
@@ -163,7 +172,7 @@ class MPK:
         print(f"num_workers: {self.num_workers}, num_schedulers: {self.num_schedulers}")
         
         self.persistent_kernel = PersistentKernel(
-            mode=args.mode,
+            mode=self.mode,
             world_size=self.world_size,
             mpi_rank=self.rank,
             num_workers=self.num_workers,
@@ -414,14 +423,20 @@ class MPK:
             self.compile()
         if self.need_cpy_input:
             self.input_tokens.copy_(self.src_input_tokens.to(torch.int64))
+        if self.need_cpy_step:
+            self.step.copy_(self.src_step.to(torch.int32))
+            original_steps = self.step.clone()
+        else:
+            original_steps = self.src_step.clone()
         self.persistent_kernel(**kwargs)
         
-        if not self.with_lm_head and self.persistent_kernel.mode == "online_notoken":
+        if not self.with_lm_head and self.mode == "online_notoken":
             #return the last hidden state
             return self.model_builder.returned_hidden_state
         
-        if self.persistent_kernel.mode == "online_multi_turn":
-            return self.tokens
+        if self.mode == "online_multi_turn":
+            num_generated = self.step[0] - original_steps[0]
+            return self.tokens[:, : num_generated]
         
     def decode(self, ids: torch.Tensor):
         return self.model_builder.decode(ids)

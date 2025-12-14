@@ -115,7 +115,7 @@ __global__ void init_kernel(RuntimeConfig config) {
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
     // initialize metadata
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_MULTI_TURN)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
     for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
@@ -168,6 +168,12 @@ __global__ void prepare_kernel(RuntimeConfig config,
     config.sched_queues[0][0] = end_of_task_graph_event_pos;
     config.sched_queue_last_ready_event_id[0] = 1;
   }
+
+#if defined(MODE_MULTI_TURN)
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < MPK_MAX_NUM_BATCHED_REQUESTS; i += blockDim.x * gridDim.x) {
+    config.cur_multi_turn_start_step[i] = config.step[i];
+  }
+#endif
 }
 
 #ifdef MODE_OFFLINE
@@ -373,79 +379,79 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config,
 #endif
 
 #ifdef MODE_MULTI_TURN
+// For now we assume that qo_indptr_buffer wont be changed in this multi-turn iteration
+// Any need to change qo_indptr_buffer should lead to returning false
+// step is [max_batched_tokens, 1] under this mode because *we don't maintain any request status*
 __device__ __forceinline__ bool
-    prepare_next_batch(RuntimeConfig const &config) {
-  bool can_continue = true;
-  // Pass 1: Check conditions and update history
+    prepare_next_batch(RuntimeConfig const &config, 
+                       size_t iteration_num = 0) {
+  bool some_has_finished = false;
+  if (iteration_num == 0) {
+    // iteration_num is 0 so do nothing because the tensors are already prepared by the outer engine
+    return true;
+  }
+  int pos_to_request_id[MPK_MAX_NUM_BATCHED_TOKENS];
+  int valid_token_num = config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
-    if (request_id != -1) {
-      int step = config.step[request_id];
-      int qo_indptr = config.qo_indptr_buffer[i];
-      int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
-
-      for (int j = 0; j < num_tokens; j++) {
-        long long token = config.output_tokens[qo_indptr + j];
-        if (step + j + 1 < config.max_seq_length) {
-          config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
-              token;
-        }
-        if (token == config.eos_token_id) {
-          printf("[prepare_next_batch] EOS token detected for request %d!\n", request_id);
-          can_continue = false;
-        }
-      }
-      config.step[request_id] = step + num_tokens;
-      config.paged_kv_last_page_len_buffer[i] =
-          (step + num_tokens) % MPK_PAGE_SIZE;
-
-      if (config.paged_kv_last_page_len_buffer[i] == 0) {
-        printf("[prepare_next_batch] A page is full for request %d!\n", request_id);
-        can_continue = false;
-      }
-      if (step + num_tokens >= config.max_seq_length) {
-        printf("[prepare_next_batch] Step exceeds max_seq_length for request %d!\n", request_id);
-        can_continue = false;
-      }
+    for (int j = config.qo_indptr_buffer[i]; j < config.qo_indptr_buffer[i + 1]; j++) {
+      pos_to_request_id[j] = i;
     }
   }
-
-  // Pass 2: Update qo_indptr and input_tokens for the NEXT step (Decode: 1 token)
-  int num_input_tokens = 0;
-  if (can_continue) {
-    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-      int request_id = config.request_ids[i];
-      // Update the start pointer for this request
-      config.qo_indptr_buffer[i] = num_input_tokens;
-      
-      if (request_id != -1) {
-        // Retrieve the last generated token to serve as input for the next step
-        // Note: step was incremented in Pass 1, so we look at step - 1
-        int current_step = config.step[request_id];
-        long long last_token = config.tokens[request_id * MPK_MAX_SEQ_LENGTH + current_step - 1];
-        
-        config.input_tokens[num_input_tokens] = last_token;
-        num_input_tokens++;
-      }
+  // Step 1: finalize previous batch
+  for (int i = 0; i < valid_token_num; i++) {
+    int cur_multi_turn_start_step = config.cur_multi_turn_start_step[i];
+    int step = config.step[i];
+    int prompt_len = config.prompt_length[i];
+    config.tokens[i * MPK_MAX_SEQ_LENGTH + step - cur_multi_turn_start_step] = config.output_tokens[i];
+    config.step[i] = step + 1;
+#ifdef MPK_ENABLE_PROFILING
+    if (true)
+#else
+    if ((step + 1 + 1 >= config.max_seq_length) ||
+        ((config.tokens[i * MPK_MAX_SEQ_LENGTH + step - cur_multi_turn_start_step] == config.eos_token_id) &&
+        (step + 1 >= prompt_len)))
+#endif
+    {
+      // Request is done
+      some_has_finished = true;
     }
-    // Set the end pointer for the last request
-    config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS] = num_input_tokens;
+    // }
   }
+  // Below this point, step means number of tokens done or id of the token to be processed next.
+  if (some_has_finished) {
+    return false;
+  }
+  // Step 3: prepare next batch
+  // Check if any token is in prefill procedure
+  for (int i = 0; i < valid_token_num; i++) {
+    int step = config.step[i];
+    int prompt_len = config.prompt_length[i];
+    int num_new_tokens = step - prompt_len;
+    if (num_new_tokens < 0) {
+      // Prefill requests
+      return false;
+    }
+  }
+  // Prepare next batch
+  // Only situation that can make to this point is that all requests only have one token.
+  // So token id is req id
+  for (int i = 0; i < valid_token_num; i++) {
+    int step = config.step[i];
+    int cur_multi_turn_start_step = config.cur_multi_turn_start_step[i];
+    config.input_tokens[i] = config.tokens[i * MPK_MAX_SEQ_LENGTH + step - cur_multi_turn_start_step - 1];
+    assert(step > 0);
+    if (step % MPK_PAGE_SIZE == 0) {
+      return false;
+    }
+    else {
+      int last_page_len = step % MPK_PAGE_SIZE + 1;
+      // Assume that next time serving frontend will calculate paged_kv_last_page_len_buffer from scratch.
+      // Otherwise, changing part of paged_kv_last_page_len_buffer and return in the middle may influence the correctness.
+      config.paged_kv_last_page_len_buffer[i] = last_page_len; 
+    }
 
-  printf("[prepare_next_batch] can_continue: %d\n", can_continue);
-  printf("[prepare_next_batch] num_input_tokens: %d\n", num_input_tokens);
-  printf("[prepare_next_batch] qo_indptr_buffer: ");
-  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS + 1; i++) {
-    printf("%d ", config.qo_indptr_buffer[i]);
   }
-  printf("\n");
-  printf("[prepare_next_batch] input_tokens: ");
-  for (int i = 0; i < num_input_tokens; i++) {
-    printf("%lld ", config.input_tokens[i]);
-  }
-  printf("\n");
-
-  return can_continue;
+  return true;
 }
 #endif
 
@@ -944,7 +950,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
         // Check if we want to continue
-#ifdef MODE_ONLINE_NOTOKEN
+#if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
         if (!prepare_next_batch(config, iteration_num))
 #else
         if (!prepare_next_batch(config))
@@ -1199,14 +1205,18 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_MULTI_TURN)
   global_runtime_config.request_ids =
       gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
+  // printf("[init_persistent_kernel] total_num_requests: %d\n", total_num_requests);
+  global_runtime_config.total_num_requests = total_num_requests;
+  global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
 #endif
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) 
-  global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
   global_runtime_config.page_queue =
       gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
   global_runtime_config.page_queue_head = gpu_malloc<int>(sizeof(int));
   global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.total_num_requests = total_num_requests;
+#endif
+#if defined(MODE_MULTI_TURN)
+  global_runtime_config.cur_multi_turn_start_step = gpu_malloc<int>(MPK_MAX_NUM_BATCHED_REQUESTS * sizeof(int));
 #endif
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;
@@ -1458,11 +1468,16 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_MULTI_TURN)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
   gpu_free(global_runtime_config.next_request_id);
+#endif
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   gpu_free(global_runtime_config.page_queue);
   gpu_free(global_runtime_config.page_queue_head);
   gpu_free(global_runtime_config.page_queue_tail);
+#endif
+#if defined(MODE_MULTI_TURN)
+  gpu_free(global_runtime_config.cur_multi_turn_start_step);
 #endif
   int num_workers = global_runtime_config.num_workers;
   std::vector<TaskId *> host_worker_queues(num_workers * 2);

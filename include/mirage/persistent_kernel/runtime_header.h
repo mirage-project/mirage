@@ -279,15 +279,19 @@ struct RuntimeConfig {
   int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
   // TODO: Some resources are not used in some modes
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
-    defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
   int *prompt_length;     // Metadata for online/offline serving
   int *request_ids;       // Metadata for online/offline serving
+  int total_num_requests; // Metadata for LLM serving
+  int *next_request_id;   // Metadata for LLM serving
+#endif
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   int *page_queue;        // Metadata for online/offline serving
   int *page_queue_head;   // Metadata for online/offline serving
   int *page_queue_tail;   // Metadata for oneline/offline serving
-  int *next_request_id;   // Metadata for LLM serving
-  int total_num_requests; // Metadata for LLM serving
+#endif
+#if defined(MODE_MULTI_TURN)
+  int *cur_multi_turn_start_step;
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;
