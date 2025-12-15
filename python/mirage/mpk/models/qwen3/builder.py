@@ -233,6 +233,8 @@ class Qwen3Builder(GraphBuilder):
     def build_layers(self, 
                      state_dict: dict):
         # add rmsnorm + linear
+        # TODO(Jianan Ji): decide whether to use splitk
+        use_splitk = False
         for i in range(self.num_layers):
             prefix = f"model.layers.{i}."
             w_norm = self.mpk.attach_input(
@@ -354,14 +356,24 @@ class Qwen3Builder(GraphBuilder):
             self.w = self.mpk.attach_input(
                 torch_tensor=state_dict[f"{prefix}self_attn.o_proj.weight"], name=f"layer_{i}_o_proj"
             )
-            self.mpk.linear_with_residual_layer(
-                input=self.attn_out,
-                weight=self.w,
-                residual=self.x,
-                output=self.attn_proj_out,
-                grid_dim=(self.hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if use_splitk:
+                self.attn_proj_out = self.x
+                self.mpk.splitk_linear_layer(
+                    input=self.attn_out,
+                    weight=self.w,
+                    output=self.attn_proj_out,
+                    grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
+                    block_dim=(256, 1, 1),
+                )
+            else:
+                self.mpk.linear_with_residual_layer(
+                    input=self.attn_out,
+                    weight=self.w,
+                    residual=self.x,
+                    output=self.attn_proj_out,
+                    grid_dim=(self.hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             # reset residual input as x
             self.x = self.attn_proj_out
             # add allreduce if needed
@@ -459,14 +471,24 @@ class Qwen3Builder(GraphBuilder):
             self.w = self.mpk.attach_input(
                 torch_tensor=state_dict[f"{prefix}mlp.down_proj.weight"], name=f"layer_{i}_down_proj"
             )
-            self.mpk.linear_with_residual_layer(
-                input=self.silu_mul_out,
-                weight=self.w,
-                residual=self.x,
-                output=self.mlp_out,
-                grid_dim=(self.hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if use_splitk:
+                self.mlp_out = self.x
+                self.mpk.splitk_linear_layer(
+                    input=self.silu_mul_out,
+                    weight=self.w,
+                    output=self.mlp_out,
+                    grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
+                    block_dim=(256, 1, 1),
+                )
+            else:
+                self.mpk.linear_with_residual_layer(
+                    input=self.silu_mul_out,
+                    weight=self.w,
+                    residual=self.x,
+                    output=self.mlp_out,
+                    grid_dim=(self.hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             # reset residual input as x
             self.x = self.mlp_out
             if self.world_size > 1:
