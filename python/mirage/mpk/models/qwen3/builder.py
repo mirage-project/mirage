@@ -10,7 +10,7 @@ from ...model_registry import register_model_builder
 from ....core import bfloat16, int64
 
 
-@register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B")
+@register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-0.6B")
 class Qwen3Builder(GraphBuilder):
     def __init__(self, mpk: PersistentKernel, weights: dict | None = None):
         super().__init__(mpk, weights)
@@ -36,6 +36,7 @@ class Qwen3Builder(GraphBuilder):
         self.intermediate_size = model_config.intermediate_size
         
         self.vocab_size = model_config.vocab_size
+        self.padded_vocab_size = 153600 #TODO: A better way to decide?
         # self.num_q_heads = model_config.num_q_heads
         # self.num_kv_heads = model_config.num_kv_heads
         # self.num_local_q_heads = self.num_q_heads // self.world_size
@@ -77,7 +78,8 @@ class Qwen3Builder(GraphBuilder):
         self.hidden_size = self.model.config.hidden_size
         self.intermediate_size = self.model.config.intermediate_size
         
-        self.vocab_size = 153600
+        self.vocab_size = self.model.config.vocab_size
+        self.padded_vocab_size = 153600
         self.num_q_heads = self.model.config.num_attention_heads
         self.num_kv_heads = self.model.config.num_key_value_heads
         self.num_local_q_heads = self.num_q_heads // self.world_size
@@ -134,7 +136,7 @@ class Qwen3Builder(GraphBuilder):
             self.mlp_final = self.mpk.attach_input(torch_tensor=self.mlp_final_tensor, name="mlp_final")
             
             if self.mpk.mode != "online_notoken":
-                self.argmax_in_tensor = torch.zeros(self.max_num_batched_tokens, self.vocab_size, dtype=torch.bfloat16, device="cuda")
+                self.argmax_in_tensor = torch.zeros(self.max_num_batched_tokens, self.padded_vocab_size, dtype=torch.bfloat16, device="cuda")
                 self.argmax_in = self.mpk.attach_input(torch_tensor=self.argmax_in_tensor, name="argmax_in")
                 
                 self.argmax_part_value_tensor = torch.zeros(self.max_num_batched_tokens, self.mpk.num_workers, dtype=torch.bfloat16, device="cuda")
@@ -212,7 +214,7 @@ class Qwen3Builder(GraphBuilder):
             )
             if self.mpk.mode != "online_notoken":
                 self.argmax_in = self.mpk.new_tensor(
-                    dims=(self.max_num_batched_tokens, self.vocab_size),
+                    dims=(self.max_num_batched_tokens, self.padded_vocab_size),
                     dtype=bfloat16,
                     name="argmax_in",
                     io_category="cuda_tensor",
@@ -511,7 +513,7 @@ class Qwen3Builder(GraphBuilder):
                 (
                     state_dict["lm_head.weight"],
                     torch.full(
-                        (153600 - self.model.config.vocab_size, self.hidden_size), 0, device="cuda"
+                        (self.padded_vocab_size - self.vocab_size, self.hidden_size), 0, device="cuda"
                     ),
                 ),
                 0,
