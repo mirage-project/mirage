@@ -18,7 +18,12 @@
 #include <cutlass/arch/barrier.h>
 
 namespace kernel {
-template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM>
+template <typename T,
+          typename InputSmem,
+          int NUM_HEAD,
+          int HEAD_DIM,
+          int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 6,
+          int ROTARY_SYNC_BARRIER_ID = 7>
 __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
                                                T const *weight_ptr,
                                                float *reduce_smem,
@@ -28,11 +33,13 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
                                                bool rotary_emd = false,
                                                T const *cos_ptr = nullptr,
                                                T const *sin_ptr = nullptr) {
-  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
+  cutlass::arch::NamedBarrier wg_barrier(
+      NUM_THREADS, /*bar-id*/ CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
   constexpr int ROTARY_PARTICIPATING_THREADS =
       (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
-  cutlass::arch::NamedBarrier wg_barrier_rotary(ROTARY_PARTICIPATING_THREADS,
-                                                /*bar-id*/ 7);
+  cutlass::arch::NamedBarrier wg_barrier_rotary(
+      ROTARY_PARTICIPATING_THREADS,
+      /*bar-id*/ ROTARY_SYNC_BARRIER_ID);
   if (threadIdx.x < NUM_THREADS) {
     // Avoid sync divergence dead lock.
     if (rotary_emd) {

@@ -1340,10 +1340,13 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   code.e("    tma_b,");
   code.e("    tma_out, ");
   if (with_residual) {
-    code.e("    &tma_residual");
+    code.e("    &tma_residual,");
+    code.e("    runtime_config.my_gpu_id == 0");
   } else {
-    code.e("    nullptr");
+    code.e("    nullptr,");
+    code.e("    false/*residual*/");
   }
+
   code.e(");");
 
   if (with_residual) {
