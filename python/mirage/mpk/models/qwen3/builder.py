@@ -1,5 +1,3 @@
-from .modeling_qwen3 import Qwen3ForCausalLM
-from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_model
 import torch
 
@@ -53,28 +51,28 @@ class Qwen3Builder(GraphBuilder):
         self.build_from_dict(model_config.state_dict, model_config.with_lm_head)
 
     def build_from_model(self, model_name: str, model_path: str | None = None):
-        
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+        from transformers import AutoTokenizer, AutoConfig
         with torch.device("cuda"):
             if model_path is not None:
                 self.model_path = model_path
                 print(f"Loading model from model path: {model_path}")
                 self.config = AutoConfig.from_pretrained(model_path)
-                self.model = Qwen3ForCausalLM(self.config, self.world_size, self.max_num_pages, self.page_size)
+                self.model = Qwen3ForCausalLM(self.config)
                 load_model(self.model, f"{model_path}/model{self.rank}-mp{self.world_size}.safetensors")
                 self.tokenizer = AutoTokenizer.from_pretrained(model_path)
             elif model_name is not None:
                 self.model_name = model_name
-                self.model = Qwen3ForCausalLM.from_pretrained(self.model_name, world_size=1, max_num_pages=self.max_num_pages, page_size=self.page_size).to("cuda")
+                self.model = Qwen3ForCausalLM.from_pretrained(self.model_name).to("cuda")
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             else:
                 raise ValueError("model_name or model_path is required")
+            
+        dummy_x = torch.empty(0, dtype=torch.bfloat16, device="cuda")
         
         self.positions = torch.arange(32768).unsqueeze(0).to(self.model.device)
-        self.position_embeddings = self.model.model.rotary_emb(self.positions)
-        
-        self.k_cache = self.model.model.kv_cache[0] # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
-        self.v_cache = self.model.model.kv_cache[1] # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
-        
+        self.position_embeddings = self.model.model.rotary_emb(dummy_x, self.positions)
+
         self.hidden_size = self.model.config.hidden_size
         self.intermediate_size = self.model.config.intermediate_size
         
@@ -90,6 +88,30 @@ class Qwen3Builder(GraphBuilder):
         self.fused_outdim_2 = 2 * self.intermediate_size
         
         self.num_layers = len(self.model.model.layers)
+        
+        self.k_cache = torch.empty(
+            (
+                self.num_layers,
+                self.max_num_pages,
+                self.page_size,
+                self.num_local_kv_heads,
+                self.head_dim,
+            ),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        self.v_cache = torch.empty(
+            (
+                self.num_layers,
+                self.max_num_pages,
+                self.page_size,
+                self.num_local_kv_heads,
+                self.head_dim,
+            ),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        
         print(f"build_from_model: Model name: {self.model_name}, num_layers: {self.num_layers}, hidden_size: {self.hidden_size}, intermediate_size: {self.intermediate_size}, vocab_size: {self.vocab_size}, num_q_heads: {self.num_q_heads}, num_kv_heads: {self.num_kv_heads}, num_local_q_heads: {self.num_local_q_heads}, num_local_kv_heads: {self.num_local_kv_heads}, head_dim: {self.head_dim}, fused_outdim_1: {self.fused_outdim_1}, fused_outdim_2: {self.fused_outdim_2}")
         
         self.build_from_dict(self.model.state_dict(), True)
