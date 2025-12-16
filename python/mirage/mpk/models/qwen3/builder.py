@@ -35,19 +35,13 @@ class Qwen3Builder(GraphBuilder):
         
         self.vocab_size = model_config.vocab_size
         self.padded_vocab_size = 153600 #TODO: A better way to decide?
-        # self.num_q_heads = model_config.num_q_heads
-        # self.num_kv_heads = model_config.num_kv_heads
-        # self.num_local_q_heads = self.num_q_heads // self.world_size
-        # self.num_local_kv_heads = self.num_kv_heads // self.world_size
         self.num_local_q_heads = model_config.local_num_q_heads
         self.num_local_kv_heads = model_config.local_num_kv_heads
         self.head_dim = model_config.head_dim
-        # self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
         self.fused_outdim_1 = (self.num_local_q_heads + 2 * self.num_local_kv_heads) * self.head_dim
         self.fused_outdim_2 = 2 * self.intermediate_size
         
         self.num_layers = model_config.num_layers
-        # raise NotImplementedError("build_from_vllm_graph is not implemented")
         self.build_from_dict(model_config.state_dict, model_config.with_lm_head)
 
     def build_from_model(self, model_name: str, model_path: str | None = None):
@@ -83,7 +77,6 @@ class Qwen3Builder(GraphBuilder):
         self.num_local_q_heads = self.num_q_heads // self.world_size
         self.num_local_kv_heads = self.num_kv_heads // self.world_size
         self.head_dim = self.model.config.head_dim
-        # self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
         self.fused_outdim_1 = (self.num_local_q_heads + 2 * self.num_local_kv_heads) * self.head_dim
         self.fused_outdim_2 = 2 * self.intermediate_size
         

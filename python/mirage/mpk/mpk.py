@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
 
-# from .models.modeling_qwen3 import Qwen3ForCausalLM
 from .model_registry import get_builder
 from .models.graph_builder import MirageModelConfig
 from .persistent_kernel import PersistentKernel
@@ -158,15 +157,12 @@ class MPK:
         self.model_config = args.model_config
         self.with_lm_head = self.model_config.with_lm_head
             
-        # self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
         if self.num_workers <= 0 or self.num_schedulers <= 0:
             self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
         else:
             self.num_workers = args.num_workers
             self.num_schedulers = args.num_schedulers
         print(f"num_workers: {self.num_workers}, num_schedulers: {self.num_schedulers}")
-        
-        # self.max_sm_num = args.max_sm_num
         
         self.persistent_kernel = PersistentKernel(
             mode=args.mode,
@@ -279,14 +275,6 @@ class MPK:
         """
         args = self.metadata
         self.total_num_requests = args.max_num_batched_requests
-                
-        # positions = torch.arange(32768).unsqueeze(0).to(self.model.device)
-        # TODO: What if using vllm?
-        # self.position_embeddings = self.model.model.rotary_emb(positions)
-        
-        # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-        #     enable_timing=True
-        # )
         
         if args.profiling:
             self.profiler_tensor = torch.zeros(
@@ -355,7 +343,6 @@ class MPK:
             logger.info(f"paged_kv_last_page_len_buffer: {self.paged_kv_last_page_len_buffer}")
             
     def init_per_request(self):
-        #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
         self.persistent_kernel.init_func(
             self.meta_tensors_ptr,
             self.profiler_buffer_ptr,
@@ -405,7 +392,6 @@ class MPK:
             self.tokenizer = self.model_builder.tokenizer
         else:
             self.model_builder.build_from_config(self.model_config)
-        # self.tokenizer = self.model_builder.tokenizer
         
         self.is_built = True
         
