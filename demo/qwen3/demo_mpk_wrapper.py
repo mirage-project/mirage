@@ -1,18 +1,9 @@
-# from models.modeling_qwen3 import Qwen3ForCausalLM
-from transformers import AutoTokenizer, AutoConfig
-from safetensors.torch import load_model
 import torch
-import torch.distributed as dist
 import argparse
-import os
 
 import mirage as mi
 from mirage.mpk.mpk import MPK, MPKMetadata, MirageModelConfig
 
-# print limitation
-# torch.set_printoptions(threshold=2000)
-
-    
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -79,52 +70,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("Input arguments:", args)
-    # print(f"world_size({world_size}) rank({rank})")
     model_name = args.model
 
     total_num_requests = args.max_num_batched_requests
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
-    
     prompt = "Give me a short introduction to large language model."
-    # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
-    # code_text = """import numpy as np
-    #             import matplotlib.pyplot as plt
-
-    #             # Calculate the average
-    #             average_throughput = np.mean(tokens_per_sec_arr)
-    #             print(f"Average Throughput: {average_throughput} tokens/sec")
-
-    #             # Plotting the histogram
-    #             plt.hist(tokens_per_sec_arr, bins=20, color='blue', edgecolor='black', alpha=0.7)
-    #             plt.title('Histogram of Throughput Values')
-    #             plt.xlabel('Tokens per Second')
-    #             plt.ylabel('Frequency')
-    #             plt.axvline(average_throughput, color='red', linestyle='dashed', linewidth=1)
-    #             plt.text(average_throughput*0.9, max(plt.ylim())*0.9, f'Average: {average_throughput:.2f}', color = 'red')
-    #             plt.show()
-    #             """
-    # #question = "Can you please change x axis to start from 0"
-    # #prompt = code_text + "\n" + question
-    # messages = [
-    #     {
-    #         "role": "system",
-    #         "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
-    #     },
-    #     {"role": "user", "content": prompt},
-    # ]
-    # text = tokenizer.apply_chat_template(
-    #     messages, tokenize=False, add_generation_prompt=True
-    # )
-    # model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    # for r in range(total_num_requests):
-    #     for i in range(model_inputs.input_ids.shape[-1]):
-    #         tokens[r, i] = model_inputs.input_ids[0, i]
     prompt_lengths = torch.full((total_num_requests,), 0, dtype=torch.int, device="cuda")
-    # positions = torch.arange(32768).unsqueeze(0).to(model.device)
-    # position_embeddings = model.model.rotary_emb(positions)
-
+    
     # get all model weight tensors
     input_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
     output_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
@@ -203,7 +157,6 @@ if __name__ == "__main__":
     
     mpk.load_new_request(prompt)
 
-    # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     warmup = 0
     output_len = 512
@@ -216,7 +169,6 @@ if __name__ == "__main__":
 
     for r in range(total_num_requests):
         generated_ids = tokens[r, : step[r] + 1]
-        # response = tokenizer.decode(generated_ids, skip_special_tokens=True)
         response = mpk.decode(generated_ids)
         print(response)
 
@@ -224,9 +176,3 @@ if __name__ == "__main__":
             prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
         )
     )
-    # print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
-    #       prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1)
-    #     )
-    # )
-    # if world_size > 1:
-    #     dist.destroy_process_group()
