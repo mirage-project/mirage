@@ -112,8 +112,6 @@ class MPK:
         print("Initializing mirage_wrapper...")
         
         self.init_mpi()
-        # if self.rank != 0:
-        #     print = lambda *_, **__: None
         self.metadata = meta
         args = meta
         self.model_name = args.model_name
@@ -176,7 +174,6 @@ class MPK:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_pages=args.max_num_pages,
             page_size=args.page_size,
-            eos_token_id=151645,
             meta_tensors={
                 "step": self.step,
                 "tokens": self.tokens,
@@ -233,7 +230,7 @@ class MPK:
             dist.init_process_group(backend="nccl", init_method="env://")
             
     def compensate_meta_tensors(self):
-        # TODO: This is a temporary workaround. Ideally we should only allocate tensors we need.
+        # TODO(Jianan Ji): This is a temporary workaround. Ideally we should only allocate tensors we need.
         if self.step is None:
             print(f"Compensating step tensor")
             self.step = torch.full((self.total_num_requests, ), 0, dtype=torch.int32, device="cuda")
@@ -405,7 +402,7 @@ class MPK:
         return results
     
     def compile(self, output_dir: str = None):
-        self.persistent_kernel.compile(output_dir=output_dir)
+        self.persistent_kernel.compile(output_dir=output_dir, eos_token_id=self.model_builder.eos_token_id)
         print("Compiling mpk... done")
         self.is_compiled = True
         

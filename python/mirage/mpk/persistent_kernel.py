@@ -12,6 +12,7 @@ from .speculative import (
     SpecDecodeConfig,
     PromptLookupConfig,
 )
+from typing import Optional
 
 HARD_CODE = """
 #include <Python.h>
@@ -253,12 +254,12 @@ class PersistentKernel:
         max_num_batched_tokens: int,
         max_num_pages: int,
         page_size: int,
-        eos_token_id: int64,
         meta_tensors: dict,
         profiler_tensor: torch.Tensor,
         trace_name: str,
         spec_decode_config: SpecDecodeConfig,
-        use_cutlass_kernel: bool
+        use_cutlass_kernel: bool,
+        eos_token_id: Optional[int64] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -1477,6 +1478,7 @@ class PersistentKernel:
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
+        self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
         self.init_func(
             meta_tensors_ptr,
             profiler_buffer_ptr,

@@ -7,10 +7,11 @@ from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, int64
 
+from typing import Optional
 
 @register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-0.6B")
 class Qwen3Builder(GraphBuilder):
-    def __init__(self, mpk: PersistentKernel, weights: dict | None = None):
+    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
         self.max_num_pages = mpk.max_num_pages
         self.page_size = mpk.page_size
@@ -22,6 +23,7 @@ class Qwen3Builder(GraphBuilder):
         self.model_path: str = None
         self.shuffled_tensors = {}
         self.rank = mpk.mpi_rank
+        self.eos_token_id = 151645 # default eos token id for Qwen3
 
     def build_from_config(self, 
                               model_config: MirageModelConfig):

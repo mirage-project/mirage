@@ -1339,17 +1339,6 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
 
-    // cudaError_t err_worker =
-    //     cudaStreamSynchronize(global_runtime_config.worker_stream);
-    // cudaError_t err_scheduler =
-    //     cudaStreamSynchronize(global_runtime_config.scheduler_stream);
-    // if (err_worker != cudaSuccess) {
-    //   printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err_worker));
-    // }
-    // if (err_scheduler != cudaSuccess) {
-    //   printf("CUDA kernel launch error: %s\n",
-    //          cudaGetErrorString(err_scheduler));
-    // }
 
     cudaEventRecord(global_runtime_config.worker_done_event, global_runtime_config.worker_stream);
     cudaEventRecord(global_runtime_config.scheduler_done_event, global_runtime_config.scheduler_stream);
@@ -1357,8 +1346,6 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     cudaStreamWaitEvent(default_stream, global_runtime_config.worker_done_event, 0);
     cudaStreamWaitEvent(default_stream, global_runtime_config.scheduler_done_event, 0);
     printf("Finished Launching Persistent Kernel (Async)\n");
-
-    // printf("Finished Launch Persistent Kernel\n");
   } else {
     printf("a single persistent kernel\n");
     int num_sms_to_use = global_runtime_config.num_workers + num_schedulers / 4;

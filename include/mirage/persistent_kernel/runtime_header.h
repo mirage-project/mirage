@@ -36,7 +36,7 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #elif MPK_TARGET_CC >= 80
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     160 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
-// Have to be 160 for vllm compatibility, or program will stuck
+// Have to be 160 for vllm compatibility, or program will get stuck
 #else
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
