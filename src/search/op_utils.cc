@@ -2,6 +2,8 @@
 #include "mirage/type.h"
 #include "mirage/utils/containers.h"
 
+#include <iostream>
+
 namespace mirage {
 namespace search {
 
@@ -198,6 +200,7 @@ TBOperator *create_op(threadblock::Graph &g,
       return g.create_forloop_accum_op(input, type);
     }
     default:
+      std::cerr << "Unsupported operator: " << json(type) << std::endl;
       assert(false && "Unsupported operator");
   }
 }

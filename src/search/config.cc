@@ -68,8 +68,6 @@ GeneratorConfig GeneratorConfig::get_default_config() {
 
 void GeneratorConfig::enable_attention_specific_optimization() {
   _enable_attention_specific_optimization = true;
-  max_num_threadblock_graphs = 2;
-  tbop_to_explore.push_back(type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
   deduplicate(tbop_to_explore);
 }
 

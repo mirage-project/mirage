@@ -89,6 +89,15 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
       int3 input_map = vec_to_int3(args->input_map);
       int forloop_dim = args->forloop_dim;
       op = graph->create_input_op(dtensor, input_map, forloop_dim, layout::SmemRowMajor, false);
+    } else if (this->operators[i].op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+      std::vector<threadblock::STensor> input_tensors;
+      for (int input_index : this->input_indices[i]) {
+        input_tensors.push_back(tensors_val[input_index]);
+      }
+      TBOutputOpArgs const *args = static_cast<TBOutputOpArgs const *>(this->operators[i].args.get());
+      int3 output_map = vec_to_int3(args->output_map);
+      mirage::type::TBEpilogueType epilogue = args->epilogue;
+      op = graph->create_output_op(input_tensors[0], output_map, -1, epilogue);
     } else {
       std::vector<threadblock::STensor> input_tensors;
       for (int input_index : this->input_indices[i]) {
@@ -98,10 +107,13 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
     }
     if (op == nullptr) {
       delete graph;
+      std::cerr << "failed to create operator: " << json(this->operators[i].op_type) << std::endl;
       return nullptr;
     }
     graph->operators.push_back(op);
-    tensors_val.push_back(op->output_tensors[0]);
+    if (op->output_tensors.size() > 0) {
+      tensors_val.push_back(op->output_tensors[0]);
+    }
   }
   return graph;
 } 

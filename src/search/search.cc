@@ -17,7 +17,7 @@
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
 #include "mirage/search/auto_tuner/auto_tuner.h"
-
+#include "mirage/search/profile.h"
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -861,39 +861,9 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
       abstract_expr_eval(*tb_graph, input_exprs, abs_exprs, output_exprs);
     }
 
-    std::vector<type::TBOperatorType> ops_for_debug = {
-      type::TB_INPUT_OP,
-      type::TB_INPUT_OP,
-      type::TB_INPUT_OP,
-      type::TB_MATMUL_OP,
-      type::TB_EXP_OP,
-      type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
-      type::TB_MATMUL_OP,
-      type::TB_FORLOOP_ACCUM_NO_RED_OP,
-    };
-
-
-    if (count_symbolic_op_of_type(type::KNOperatorType::KN_CUSTOMIZED_OP,
-      *kn_graph) > 0) {
-      ops_for_debug = std::vector<type::TBOperatorType>{
-        type::TB_INPUT_OP,
-        type::TB_INPUT_OP,
-        type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
-        type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
-        type::TB_DIV_OP,
-      };
-    }
-
-    if (tb_graph->operators.size() >= ops_for_debug.size()) {
-      return;
-    }
-
     // Case B2: Generate pre-defined threadblock operator
     for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
-      if (tb_graph->operators.size() >= ops_for_debug.size() || op_type != ops_for_debug[tb_graph->operators.size()]) {
-        continue;
-      }
-      for (auto const &input_idx :
+     for (auto const &input_idx :
            dim_strategy.get_input_cand_idx(op_type, tb_graph->tensors)) {
         Order order(input_idx, static_cast<int>(op_type));
         if (order <= get_max_op_order(*tb_graph)) {
@@ -960,11 +930,24 @@ bool KernelGraphGenerator::verify_symbolic_graph(
     // ++num_symbolic_graphs;
     std::cerr << "verified symbolic graph: " << json(symbolic_graph) << std::endl;
     ++num_valid_kernel_graphs;
-    // AutoTuner auto_tuner(AutoTunerConfig{});
-    // DimVarAssignment assignment = auto_tuner.tune(symbolic_graph);
-    // kernel::Graph *tuned_graph = symbolic_graph.to_kernel_graph(assignment);
-    // std::cerr << "tuned graph: " << json(*tuned_graph) << std::endl;
-    // delete tuned_graph;
+    AutoTuner auto_tuner(AutoTunerConfig{});
+    DimVarAssignment assignment = auto_tuner.tune(symbolic_graph);
+    kernel::Graph *tuned_graph = symbolic_graph.to_kernel_graph(assignment);
+    if (tuned_graph == nullptr) {
+      std::cerr << "failed to tune symbolic graph: " << json(symbolic_graph) << std::endl;
+      return false;
+    }
+    {
+      OutputMatch match = verifier->verify(*tuned_graph);
+      assert(match.is_valid());
+    }
+    ProfileResult result = profile(tuned_graph);
+    std::cerr << "tuned graph: " << json(*tuned_graph) << " " << result.run_time << std::endl;
+    {
+      #pragma omp critical
+      generated_graphs.push_back(json(*tuned_graph));
+    }
+    delete tuned_graph;
     return true;
   } else {
     return false;

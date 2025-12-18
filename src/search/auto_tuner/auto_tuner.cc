@@ -26,22 +26,40 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     return dim_indices_to_tune;
   };
 
+  auto check_grid_dim = [&](std::vector<int> const &values) -> bool {
+    int num_threadblocks = 1;
+    for (size_t i = 0; i < values.size(); ++i) {
+      num_threadblocks *= values[i];
+    }
+    return 0 < num_threadblocks && num_threadblocks <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
+  };
+
   std::vector<tensor_dim_var_index_t> dim_indices_to_tune = get_parallel_dim_vars();
 
-  auto initial_state_func = [&]() -> std::vector<int> {
+  auto initial_state_sampling = [&]() -> std::vector<int> {
     std::vector<int> values;
     for (size_t i = 0; i < dim_indices_to_tune.size(); ++i) {
-      // randomly select a power of 2
-      int power = rand() % 10;
-      values.push_back(rand() % (1 << power));
+    // randomly select a power of 2
+      int power = rand() % 3 + 2;
+      values.push_back(1 << power);
     }
+    std::cerr << "initial_state: " << json(values).dump() << std::endl;
     return values;
   };
 
-  auto neighbor_func = [&](std::vector<int> const &values) -> std::vector<int> {
+  auto initial_state_func = [&]() -> std::vector<int> {
+    while (true) {
+      std::vector<int> values = initial_state_sampling();
+      if (check_grid_dim(values)) {
+        return values;
+      }
+    }
+  };
+
+  auto neighbor_sampling = [&](std::vector<int> const &values) -> std::vector<int> {
     std::vector<int> neighbor_values = values;
     size_t index_to_change = rand() % values.size();
-    if (rand() % 2 == 0) {
+    if (rand() % 2 == 0 && values[index_to_change] > 1) {
       neighbor_values[index_to_change] /= 2;
     } else {
       neighbor_values[index_to_change] *= 2;
@@ -49,14 +67,23 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     return neighbor_values;
   };
 
+  auto neighbor_func = [&](std::vector<int> const &values) -> std::vector<int> {
+    while (true) {
+      std::vector<int> neighbor_values = neighbor_sampling(values);
+      if (check_grid_dim(neighbor_values)) {
+        return neighbor_values;
+      }
+    }
+  };
+
   auto energy_func = [&](std::vector<int> const &values) -> float {
-    // Create DimVarAssignment from values
     DimVarAssignment assignment;
     for (size_t i = 0; i < dim_indices_to_tune.size(); ++i) {
       assignment.assign(dim_indices_to_tune[i], values[i]);
     }
     
-    // Collect input DTensors needed by the threadblock graph
+    kernel::Graph kn_graph;
+    
     std::vector<kernel::DTensor> input_dtensors;
     for (size_t i = 0; i < symbolic_tb_graph.operators.size(); ++i) {
       if (symbolic_tb_graph.operators[i].op_type == type::TBOperatorType::TB_INPUT_OP) {
@@ -67,10 +94,7 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
         std::vector<int> concrete_dims;
         for (auto const &sym_dim : sym_dtensor.dims) {
           int dim_value = assignment.get_value(sym_dim);
-          // Use a reasonable default if dimension is not assigned
-          if (dim_value <= 0) {
-            dim_value = 128; // Default size
-          }
+          assert(dim_value > 0);
           concrete_dims.push_back(dim_value);
         }
         
@@ -82,9 +106,7 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
           stride *= concrete_dims[i];
         }
         
-        // Create kernel graph with input DTensor
-        kernel::Graph temp_kn_graph;
-        kernel::DTensor dtensor = temp_kn_graph.new_input(
+        kernel::DTensor dtensor = kn_graph.new_input(
             concrete_dims, strides, type::DT_FLOAT16, layout::DmemRowMajor);
         input_dtensors.push_back(dtensor);
       }
@@ -93,62 +115,42 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     // Create threadblock graph from symbolic graph
     threadblock::Graph *tb_graph = symbolic_tb_graph.to_threadblock_graph(assignment, input_dtensors);
     if (tb_graph == nullptr) {
-      // Failed to create threadblock graph - return high energy (bad performance)
+      std::cerr << "failed to create threadblock graph" << std::endl;
       return 1e9f;
     }
     
-    // Create kernel graph with customized op wrapping the threadblock graph
-    kernel::Graph *kn_graph = new kernel::Graph();
-    
-    // Create input DTensors in the kernel graph
-    std::vector<kernel::DTensor> kn_input_dtensors;
-    for (auto const &dtensor : input_dtensors) {
-      // Recreate in the new kernel graph
-      std::vector<int> dims;
-      for (int i = 0; i < dtensor.num_dims; ++i) {
-        dims.push_back(dtensor.dim[i]);
-      }
-      std::vector<size_t> strides_vec;
-      // Note: DTensor doesn't store strides directly, use default row-major
-      size_t stride = 1;
-      for (int i = dims.size() - 1; i >= 0; --i) {
-        strides_vec.insert(strides_vec.begin(), stride);
-        stride *= dims[i];
-      }
-      kernel::DTensor kn_dtensor = kn_graph->new_input(
-          dims, strides_vec, dtensor.data_type, dtensor.layout);
-      kn_input_dtensors.push_back(kn_dtensor);
-    }
-    
     // Create customized op with the threadblock graph
-    kernel::KNOperator *customized_op = kn_graph->create_customized_op(kn_input_dtensors, *tb_graph);
+    kernel::KNOperator *customized_op = kn_graph.create_customized_op(input_dtensors, *tb_graph);
     if (customized_op == nullptr) {
       delete tb_graph;
-      delete kn_graph;
-      return 1e9f; // Failed to create customized op
+      std::cerr << "failed to create customized op" << std::endl;
+      return 1e9f;
     }
-    kn_graph->operators.push_back(customized_op);
+    kn_graph.operators.push_back(customized_op);
     
     // Mark outputs
     for (auto const &output_tensor : customized_op->output_tensors) {
-      kn_graph->mark_output(output_tensor);
+      kn_graph.mark_output(output_tensor);
     }
     
     // Profile the kernel graph
-    ProfileResult result = profile(kn_graph);
+    ProfileResult result = profile(&kn_graph);
     
     // Cleanup
     delete tb_graph;
-    delete kn_graph;
     
     // Return runtime as energy (higher runtime = higher energy = worse)
     if (!result.is_success) {
-      return 1e9f; // Failed to profile - return high energy
+      std::cerr << "failed to profile the kernel graph" << std::endl;
+      return 1e9f;
     }
     return result.run_time;
   };
 
-  SimulatedAnnealing<std::vector<int>, float> simulated_annealing(SimulatedAnnealingConfig(), initial_state_func, neighbor_func, energy_func);
+  SimulatedAnnealingConfig simulated_annealing_config;
+  simulated_annealing_config.time_limit_seconds = 60.0;
+
+  SimulatedAnnealing<std::vector<int>, float> simulated_annealing(simulated_annealing_config, initial_state_func, neighbor_func, energy_func);
   std::vector<int> best_values = simulated_annealing.optimize();
 
   DimVarAssignment assignment;

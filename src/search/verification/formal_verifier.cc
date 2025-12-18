@@ -94,7 +94,6 @@ OutputMatch FormalVerifier::verify_symbolic_graph(SymbolicKNGraph const &graph) 
       }
       bool is_equiv = check_equiv(input_exprs[i].c_str(), graph_exprs[match[i]].c_str(), true);
       if (!is_equiv) {
-        std::cerr << "Rejected by expression mismatch" << std::endl;
         return false;
       }
     }

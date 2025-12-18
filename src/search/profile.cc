@@ -106,6 +106,7 @@ std::string build_compile_cmd(int target_cc, const std::string& nvcc_path,
     cmd << " -DMIRAGE_ENABLE_PROFILER";
   }
   
+  cmd << " -DMIRAGE_BACKEND_USE_CUDA";
   cmd << " -shared -std=c++17 -use_fast_math -lcublas -Xcompiler=-fPIC";
   cmd << " --expt-relaxed-constexpr -o " << so_file;
   
@@ -153,8 +154,9 @@ void get_mirage_paths(std::string& include_path, std::string& deps_path) {
 ProfileResult profile(kernel::Graph *graph) {
   ProfileResult result;
   result.is_success = false;
-  result.run_time = 0.0f;
+  result.run_time = std::numeric_limits<float>::max();
   result.error_message = "";
+  result.cuda_code = "";
 
   try {
     // Validate graph
@@ -216,6 +218,8 @@ ProfileResult profile(kernel::Graph *graph) {
     }
     out_file << transpile_result.code;
     out_file.close();
+
+    result.cuda_code = transpile_result.code;
     
     // Compile the code
     std::string nvcc_path = find_nvcc();

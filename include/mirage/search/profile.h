@@ -10,6 +10,7 @@ struct ProfileResult {
   float run_time;
   bool is_success;
   std::string error_message;
+  std::string cuda_code;
 };
 
 ProfileResult profile(kernel::Graph *graph);
