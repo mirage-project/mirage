@@ -7,5 +7,5 @@ numpy
 graphviz
 tqdm
 transformers==4.57.1
-protobuf==3.20.0
-tg4perfetto==0.0.4
+protobuf
+tg4perfetto @ git+https://github.com/flashinfer-ai/tg4perfetto.git
