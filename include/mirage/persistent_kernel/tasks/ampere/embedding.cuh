@@ -45,6 +45,7 @@ __device__ __forceinline__ void
                      void const *__restrict__ embedding_ptr,
                      void *__restrict__ output_ptr) {
   // barrier for first 4 worker warps
+  // TODO:(Jianan Ji) In vllm, type should be int32_t instead of int64_t.
   int64_t const *__restrict__ input_ids =
       static_cast<int64_t const *>(input_ptr);
   T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);

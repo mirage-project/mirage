@@ -120,7 +120,7 @@ def get_block_dim():
 def grid_for_rmsnorm_linear_layer(size):
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
-        # cutlass version will output unexpect result (not same out put for
+        # cutlass version will output unexpected result (not same out put for
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
         assert size % 256 == 0, f"FATAL: Linear layer size not support, it's {size}."
         return size // 256

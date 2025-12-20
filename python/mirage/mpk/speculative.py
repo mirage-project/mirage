@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Literal
 
-from .kernel import get_key_paths, KNGraph, TBGraph
-from .core import *
+from ..kernel import get_key_paths, KNGraph, TBGraph
+from ..core import *
 
 
 @dataclass
