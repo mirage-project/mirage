@@ -395,7 +395,7 @@ __device__ __forceinline__ void
           PRINT(cta_cC);
         }
 #endif
-        const int idx = threadIdx.x;
+        int const idx = threadIdx.x;
 
         TiledMMA tiled_mma;
         auto thr_mma = tiled_mma.get_slice(idx);
@@ -691,7 +691,7 @@ __device__ __forceinline__ void
 
             cute::gemm(tiled_mma, tCrD, tCrA(_, _, ik), tCrB(_, _, ik), tCrD);
           } // ik
-        } // itile
+        }   // itile
 
         // NOTE: We don't need data in SMEM for A and B anymore, so we could
         // just reuse them for C.
@@ -779,7 +779,7 @@ __device__ __forceinline__ void
           __syncthreads();
         }
       } // n_iter
-    } // m_iter
+    }   // m_iter
   }
 }
 
