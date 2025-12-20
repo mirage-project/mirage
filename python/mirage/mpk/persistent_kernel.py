@@ -259,7 +259,7 @@ class PersistentKernel:
         trace_name: str,
         spec_decode_config: SpecDecodeConfig,
         use_cutlass_kernel: bool,
-        eos_token_id: Optional[int64] = None,
+        eos_token_id: int64 = -1,
     ):
         self.__finalized__ = False
         self._is_compiled = False
