@@ -252,8 +252,9 @@ class Qwen3Builder(GraphBuilder):
     def build_layers(self, 
                      state_dict: dict):
         # add rmsnorm + linear
-        # TODO(Jianan Ji): decide whether to use splitk
-        use_splitk = False
+        target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
+        # A current workaround to use splitk for only B200 GPUs
+        use_splitk = (target_cc == 100)
         for i in range(self.num_layers):
             prefix = f"model.layers.{i}."
             w_norm = self.mpk.attach_input(
