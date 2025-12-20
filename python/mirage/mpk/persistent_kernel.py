@@ -6,12 +6,13 @@ import shutil
 import sys
 import sysconfig
 
-from .core import *
-from .kernel import get_key_paths, KNGraph, TBGraph
+from ..core import *
+from ..kernel import get_key_paths, KNGraph, TBGraph
 from .speculative import (
     SpecDecodeConfig,
     PromptLookupConfig,
 )
+from typing import Optional
 
 HARD_CODE = """
 #include <Python.h>
@@ -52,8 +53,22 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+static PyObject *init_request_func(PyObject *self, PyObject *args) {
+  Py_BEGIN_ALLOW_THREADS
+  init_request_resources();
+  Py_END_ALLOW_THREADS
+  Py_RETURN_NONE;
+}
+
 static PyObject *launch_func(PyObject *self, PyObject *args) {
-  launch_persistent_kernel();
+  PyObject *py_stream;
+  cudaStream_t stream;
+  if (!PyArg_ParseTuple(args, "O", &py_stream)) {
+    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
+    return NULL;
+  }
+  stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
+  launch_persistent_kernel(stream);
 
   Py_RETURN_NONE;
 }
@@ -66,6 +81,7 @@ static PyObject *finalize_func(PyObject *self, PyObject *args) {
 
 static PyMethodDef ModuleMethods[] = {
   {"init_func", init_func, METH_VARARGS, "initialize persistent kernel"},
+  {"init_request_func", init_request_func, METH_VARARGS, "initialize request resources"},
   {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
   {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
   {NULL, NULL, 0, NULL} // sentinel
@@ -93,7 +109,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-valid_persistent_kernel_modes = {"offline", "online", "onepass"}
+valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
 
 def get_compile_command(
     mpk,
@@ -128,14 +144,20 @@ def get_compile_command(
 
     common_cmd = [
         cc,
+        # "--default-stream per-thread" is used to create new stream for 
+        # each host thread as default stream instead of using the same 
+        # legacy stream for all host threads
+        # This is important in multi-threaded environment.
+        # "--default-stream",
+        # "per-thread",
         file_name,
         "-O3",
         # Use following flags when debugging
         # "-O0",
         # "-g",
         # "-G",
-        "--ptxas-options=-v",
-        "-Xptxas=-v",
+        # "--ptxas-options=-v",
+        # "-Xptxas=-v",
         "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
@@ -164,8 +186,12 @@ def get_compile_command(
         flags = flags + ["-DMODE_OFFLINE"]
     elif mpk.mode == "online":
         flags = flags + ["-DMODE_ONLINE"]
+    elif mpk.mode == "online_notoken":
+        flags = flags + ["-DMODE_ONLINE_NOTOKEN"]
     elif mpk.mode == "onepass":
         flags = flags + ["-DMODE_ONEPASS"]
+    elif mpk.mode == "online_multi_turn":
+        flags = flags + ["-DMODE_MULTI_TURN"]
     else:
         raise ValueError(f"Invalid persistent kernel mode: {mpk.mode}")
 
@@ -228,12 +254,12 @@ class PersistentKernel:
         max_num_batched_tokens: int,
         max_num_pages: int,
         page_size: int,
-        eos_token_id: int64,
         meta_tensors: dict,
         profiler_tensor: torch.Tensor,
         trace_name: str,
         spec_decode_config: SpecDecodeConfig,
-        use_cutlass_kernel: bool
+        use_cutlass_kernel: bool,
+        eos_token_id: Optional[int64] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -270,13 +296,27 @@ class PersistentKernel:
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
         # Check tensor shapes
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
-        assert qo_indptr_buffer.shape == (self.max_num_batched_requests+1,)
+        # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
+        assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
         paged_kv_indptr_buffer = self.meta_tensors["paged_kv_indptr_buffer"]
-        assert paged_kv_indptr_buffer.shape == (self.max_num_batched_requests+1,)
+        assert paged_kv_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"paged_kv_indptr_buffer.shape: {paged_kv_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
         paged_kv_indices_buffer = self.meta_tensors["paged_kv_indices_buffer"]
-        assert paged_kv_indices_buffer.shape == (self.max_num_pages,)
+        # assert paged_kv_indices_buffer.shape == (self.max_num_pages,), f"paged_kv_indices_buffer.shape: {paged_kv_indices_buffer.shape}, max_num_pages: {self.max_num_pages}"
+        # TODO: This is because the paged_kv_indices_buffer can be limited by max len on vllm side
+        assert paged_kv_indices_buffer.shape[0] <= self.max_num_pages, f"paged_kv_indices_buffer.shape: {paged_kv_indices_buffer.shape}, max_num_pages: {self.max_num_pages}"
         paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer"]
-        assert paged_kv_last_page_len_buffer.shape == (self.max_num_batched_requests,)
+        assert paged_kv_last_page_len_buffer.shape[0] <= self.max_num_batched_requests, f"paged_kv_last_page_len_buffer.shape: {paged_kv_last_page_len_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
+        
+        # check type of meta_tensors
+        assert self.meta_tensors["tokens"].dtype == torch.int64, f"tokens.dtype: {self.meta_tensors['tokens'].dtype}"
+        assert self.meta_tensors["input_tokens"].dtype == torch.int64, f"input_tokens.dtype: {self.meta_tensors['input_tokens'].dtype}"
+        assert self.meta_tensors["output_tokens"].dtype == torch.int64, f"output_tokens.dtype: {self.meta_tensors['output_tokens'].dtype}"
+        assert self.meta_tensors["num_new_tokens"].dtype == torch.int32, f"num_new_tokens.dtype: {self.meta_tensors['num_new_tokens'].dtype}"
+        assert self.meta_tensors["prompt_lengths"].dtype == torch.int32, f"prompt_lengths.dtype: {self.meta_tensors['prompt_lengths'].dtype}"
+        assert qo_indptr_buffer.dtype == torch.int32, f"qo_indptr_buffer.dtype: {qo_indptr_buffer.dtype}"
+        assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
+        assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
+        assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -1271,14 +1311,21 @@ class PersistentKernel:
         output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        tempdir_obj = tempfile.TemporaryDirectory()
-        tempdir = tempdir_obj.name
+        if self.mode == "online_notoken" or self.mode == "online" or self.mode == "online_multi_turn":
+            # We will init for multiple times so the output directory should be permanent
+            tempdir = "./permanent_output_dir/"
+        else:
+            tempdir_obj = tempfile.TemporaryDirectory()
+            tempdir = tempdir_obj.name
+        os.makedirs(tempdir, exist_ok=True)
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
         # check json file
         json_file_path = os.path.join(tempdir, "task_graph.json")
+        # build if files are not exist
+            
         with open(json_file_path, "w") as f:
             f.write(results["json_file"])
         with open(cuda_code_path, "w") as f:
@@ -1411,6 +1458,7 @@ class PersistentKernel:
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
+        self.init_request_func = getattr(mod, "init_request_func")
         self.finalize_func = getattr(mod, "finalize_func")
         print("Finished megakernel compilation...")
 
@@ -1430,6 +1478,7 @@ class PersistentKernel:
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
+        self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
         self.init_func(
             meta_tensors_ptr,
             profiler_buffer_ptr,
@@ -1447,10 +1496,24 @@ class PersistentKernel:
         # self.call_func = getattr(mod, "call_func")
 
     def __call__(self, **kwargs):
-        # stream = kwargs.get("stream", None)
-        # if stream is None:
-        #    stream = torch.cuda.default_stream()
-        self.launch_func()
+        stream = kwargs.get("default_stream", None)
+        if stream is None:
+           stream = torch.cuda.current_stream()
+        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
+        stream_ptr = 0
+        if hasattr(stream, "cuda_stream"):
+            try:
+                stream_ptr = int(stream.cuda_stream)
+            except Exception:
+                try:
+                    stream_ptr = int(stream.cuda_stream.value)
+                except Exception as e:
+                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
+        elif isinstance(stream, int):
+            stream_ptr = stream
+        else:
+            raise ValueError("Invalid stream object")
+        self.launch_func(stream_ptr)
         if self.profiler_tensor is not None:
             from .profiler_persistent import export_to_perfetto_trace
             

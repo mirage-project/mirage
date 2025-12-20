@@ -115,6 +115,7 @@ __global__ void init_kernel(RuntimeConfig config) {
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
     // initialize metadata
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
     for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
@@ -132,6 +133,7 @@ __global__ void init_kernel(RuntimeConfig config) {
     for (int i = 0; i < MPK_MAX_NUM_PAGES; i++) {
       config.page_queue[i] = i;
     }
+#endif
   }
 }
 
@@ -166,6 +168,12 @@ __global__ void prepare_kernel(RuntimeConfig config,
     config.sched_queues[0][0] = end_of_task_graph_event_pos;
     config.sched_queue_last_ready_event_id[0] = 1;
   }
+
+#if defined(MODE_MULTI_TURN)
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < MPK_MAX_NUM_BATCHED_REQUESTS; i += blockDim.x * gridDim.x) {
+    config.cur_multi_turn_start_step[i] = config.step[i];
+  }
+#endif
 }
 
 #ifdef MODE_OFFLINE
@@ -193,13 +201,14 @@ __device__ __forceinline__ bool
       }
       config.step[request_id] = step + num_tokens;
 #ifdef MPK_ENABLE_PROFILING
-      if (true) {
+      if (true)
 #else
       if ((step + num_tokens + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
-           (step + num_tokens >= prompt_len))) {
+           (step + num_tokens >= prompt_len)))
 #endif
+      {
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -352,6 +361,97 @@ __device__ __forceinline__ bool
     return true;
   }
 #endif
+}
+#endif
+
+#ifdef MODE_ONLINE_NOTOKEN
+__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config,
+                                                   size_t iteration_num = 0) {
+  // TODO: iteration_num is a current workaround
+  // We may consider split EVENT_END_OF_TASK_GRAPH into
+  // EVENT_END_OF_TASK_GRAPH and EVENT_START_OF_TASK_GRAPH
+  if (iteration_num > 0) {
+    return false;
+  } else { // iteration_num == 0
+    return true;
+  }
+}
+#endif
+
+#ifdef MODE_MULTI_TURN
+// For now we assume that qo_indptr_buffer wont be changed in this multi-turn iteration
+// Any need to change qo_indptr_buffer should lead to returning false
+// step is [max_batched_tokens, 1] under this mode because *we don't maintain any request status*
+__device__ __forceinline__ bool
+    prepare_next_batch(RuntimeConfig const &config, 
+                       size_t iteration_num = 0) {
+  bool some_has_finished = false;
+  if (iteration_num == 0) {
+    // iteration_num is 0 so do nothing because the tensors are already prepared by the outer engine
+    return true;
+  }
+  int pos_to_request_id[MPK_MAX_NUM_BATCHED_TOKENS];
+  int valid_token_num = config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];
+  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+    for (int j = config.qo_indptr_buffer[i]; j < config.qo_indptr_buffer[i + 1]; j++) {
+      pos_to_request_id[j] = i;
+    }
+  }
+  // Step 1: finalize previous batch
+  for (int i = 0; i < valid_token_num; i++) {
+    int cur_multi_turn_start_step = config.cur_multi_turn_start_step[i];
+    int step = config.step[i];
+    int prompt_len = config.prompt_length[i];
+    config.tokens[i * MPK_MAX_SEQ_LENGTH + step - cur_multi_turn_start_step] = config.output_tokens[i];
+    config.step[i] = step + 1;
+#ifdef MPK_ENABLE_PROFILING
+    if (true)
+#else
+    if ((step + 1 + 1 >= config.max_seq_length) ||
+        ((config.tokens[i * MPK_MAX_SEQ_LENGTH + step - cur_multi_turn_start_step] == config.eos_token_id) &&
+        (step + 1 >= prompt_len)))
+#endif
+    {
+      // Request is done
+      some_has_finished = true;
+    }
+    // }
+  }
+  // Below this point, step means number of tokens done or id of the token to be processed next.
+  if (some_has_finished) {
+    return false;
+  }
+  // Step 3: prepare next batch
+  // Check if any token is in prefill procedure
+  for (int i = 0; i < valid_token_num; i++) {
+    int step = config.step[i];
+    int prompt_len = config.prompt_length[i];
+    int num_new_tokens = step - prompt_len;
+    if (num_new_tokens < 0) {
+      // Prefill requests
+      return false;
+    }
+  }
+  // Prepare next batch
+  // Only situation that can make to this point is that all requests only have one token.
+  // So token id is req id
+  for (int i = 0; i < valid_token_num; i++) {
+    int step = config.step[i];
+    int cur_multi_turn_start_step = config.cur_multi_turn_start_step[i];
+    config.input_tokens[i] = config.tokens[i * MPK_MAX_SEQ_LENGTH + step - cur_multi_turn_start_step - 1];
+    assert(step > 0);
+    if (step % MPK_PAGE_SIZE == 0) {
+      return false;
+    }
+    else {
+      int last_page_len = step % MPK_PAGE_SIZE + 1;
+      // Assume that next time serving frontend will calculate paged_kv_last_page_len_buffer from scratch.
+      // Otherwise, changing part of paged_kv_last_page_len_buffer and return in the middle may influence the correctness.
+      config.paged_kv_last_page_len_buffer[i] = last_page_len; 
+    }
+
+  }
+  return true;
 }
 #endif
 
@@ -850,7 +950,12 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
         // Check if we want to continue
-        if (!prepare_next_batch(config)) {
+#if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
+        if (!prepare_next_batch(config, iteration_num))
+#else
+        if (!prepare_next_batch(config))
+#endif
+        {
           terminate_schedulers(config);
         } else {
           // Launch task 1 (begin_task_graph) for the next iteration
@@ -1040,6 +1145,12 @@ static RuntimeConfig global_runtime_config;
 // meta_tensors[8]: paged_kv_indices_buffer
 // meta_tensors[9]: paged_kv_last_page_len_buffer
 
+extern "C" void init_request_resources() {
+  init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
+      global_runtime_config);
+  cudaStreamSynchronize(NULL);
+}
+
 extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
                                        int my_rank,
@@ -1091,15 +1202,21 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   int npes = 1;
 #endif
 
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_MULTI_TURN)
   global_runtime_config.request_ids =
       gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
+  // printf("[init_persistent_kernel] total_num_requests: %d\n", total_num_requests);
+  global_runtime_config.total_num_requests = total_num_requests;
   global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
+#endif
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) 
   global_runtime_config.page_queue =
       gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
   global_runtime_config.page_queue_head = gpu_malloc<int>(sizeof(int));
   global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.total_num_requests = total_num_requests;
+#endif
+#if defined(MODE_MULTI_TURN)
+  global_runtime_config.cur_multi_turn_start_step = gpu_malloc<int>(MPK_MAX_NUM_BATCHED_REQUESTS * sizeof(int));
 #endif
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;
@@ -1242,18 +1359,24 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
   cudaFuncSetAttribute(scheduler_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+                       1024);
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
   // Create worker and scheduler streams
-  cudaStreamCreate(&global_runtime_config.worker_stream);
-  cudaStreamCreate(&global_runtime_config.scheduler_stream);
+  cudaStreamCreateWithFlags(&global_runtime_config.worker_stream,
+                            cudaStreamNonBlocking);
+  cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream,
+                            cudaStreamNonBlocking);
+  // Create events
+  cudaEventCreateWithFlags(&global_runtime_config.prepare_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.worker_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
+                           cudaEventDisableTiming);
 
-  // launch init kernel
-  init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
-      global_runtime_config);
-  cudaDeviceSynchronize();
+  init_request_resources();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
@@ -1262,7 +1385,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
 // Entry point for C/C++
 // TODO: change launch config
-extern "C" void launch_persistent_kernel() {
+extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
   // int device;
   // cudaGetDevice(&device);
   // int sm_count;
@@ -1271,9 +1394,12 @@ extern "C" void launch_persistent_kernel() {
   {
     int end_of_task_graph_event_pos = global_runtime_config.num_events - 1;
     prepare_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                     dim3(128, 1, 1)>>>(global_runtime_config,
+                     dim3(128, 1, 1),
+                     0 /*smem*/, default_stream>>>(global_runtime_config,
                                         end_of_task_graph_event_pos);
-    cudaDeviceSynchronize();
+    // cudaStreamSynchronize(NULL);
+    cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
+    // cudaDeviceSynchronize();
 #ifdef USE_NVSHMEM
     nvshmem_barrier_all();
 #endif
@@ -1283,6 +1409,9 @@ extern "C" void launch_persistent_kernel() {
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
     printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+
+    cudaStreamWaitEvent(global_runtime_config.worker_stream, global_runtime_config.prepare_done_event, 0);
+    cudaStreamWaitEvent(global_runtime_config.scheduler_stream, global_runtime_config.prepare_done_event, 0);
 
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
@@ -1299,11 +1428,13 @@ extern "C" void launch_persistent_kernel() {
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
 
-    cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-      printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-    }
-    printf("Finished Launch Persistent Kernel\n");
+
+    cudaEventRecord(global_runtime_config.worker_done_event, global_runtime_config.worker_stream);
+    cudaEventRecord(global_runtime_config.scheduler_done_event, global_runtime_config.scheduler_stream);
+
+    cudaStreamWaitEvent(default_stream, global_runtime_config.worker_done_event, 0);
+    cudaStreamWaitEvent(default_stream, global_runtime_config.scheduler_done_event, 0);
+    printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
     printf("a single persistent kernel\n");
     int num_sms_to_use = global_runtime_config.num_workers + num_schedulers / 4;
@@ -1337,11 +1468,16 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
   gpu_free(global_runtime_config.next_request_id);
+#endif
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   gpu_free(global_runtime_config.page_queue);
   gpu_free(global_runtime_config.page_queue_head);
   gpu_free(global_runtime_config.page_queue_tail);
+#endif
+#if defined(MODE_MULTI_TURN)
+  gpu_free(global_runtime_config.cur_multi_turn_start_step);
 #endif
   int num_workers = global_runtime_config.num_workers;
   std::vector<TaskId *> host_worker_queues(num_workers * 2);
@@ -1370,6 +1506,9 @@ extern "C" void finalize_persistent_kernel() {
   nvshmem_finalize();
 #endif
   // Free worker and scheduler streams
+  cudaEventDestroy(global_runtime_config.prepare_done_event);
+  cudaEventDestroy(global_runtime_config.worker_done_event);
+  cudaEventDestroy(global_runtime_config.scheduler_done_event);
   cudaStreamDestroy(global_runtime_config.worker_stream);
   cudaStreamDestroy(global_runtime_config.scheduler_stream);
 }
