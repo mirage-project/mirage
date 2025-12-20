@@ -1268,9 +1268,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaFuncSetAttribute(worker_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
-  cudaFuncSetAttribute(scheduler_kernel,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       1024);
+  cudaFuncSetAttribute(
+      scheduler_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 1024);
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
@@ -1306,8 +1305,9 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     int end_of_task_graph_event_pos = global_runtime_config.num_events - 1;
     prepare_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                      dim3(128, 1, 1),
-                     0 /*smem*/, default_stream>>>(global_runtime_config,
-                                        end_of_task_graph_event_pos);
+                     0 /*smem*/,
+                     default_stream>>>(global_runtime_config,
+                                       end_of_task_graph_event_pos);
     // cudaStreamSynchronize(NULL);
     cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
     // cudaDeviceSynchronize();
@@ -1321,8 +1321,12 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     printf("worker kernel & scheduler kernel\n");
     printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
-    cudaStreamWaitEvent(global_runtime_config.worker_stream, global_runtime_config.prepare_done_event, 0);
-    cudaStreamWaitEvent(global_runtime_config.scheduler_stream, global_runtime_config.prepare_done_event, 0);
+    cudaStreamWaitEvent(global_runtime_config.worker_stream,
+                        global_runtime_config.prepare_done_event,
+                        0);
+    cudaStreamWaitEvent(global_runtime_config.scheduler_stream,
+                        global_runtime_config.prepare_done_event,
+                        0);
 
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
@@ -1339,12 +1343,15 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
 
+    cudaEventRecord(global_runtime_config.worker_done_event,
+                    global_runtime_config.worker_stream);
+    cudaEventRecord(global_runtime_config.scheduler_done_event,
+                    global_runtime_config.scheduler_stream);
 
-    cudaEventRecord(global_runtime_config.worker_done_event, global_runtime_config.worker_stream);
-    cudaEventRecord(global_runtime_config.scheduler_done_event, global_runtime_config.scheduler_stream);
-
-    cudaStreamWaitEvent(default_stream, global_runtime_config.worker_done_event, 0);
-    cudaStreamWaitEvent(default_stream, global_runtime_config.scheduler_done_event, 0);
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.worker_done_event, 0);
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.scheduler_done_event, 0);
     printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
     printf("a single persistent kernel\n");

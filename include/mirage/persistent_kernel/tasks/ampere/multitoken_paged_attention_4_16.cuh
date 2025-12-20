@@ -103,7 +103,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
   //    paged_kv_last_page_len_buffer_ptr[request_id], request_id);
   // }
   // Load the paged KV indices into shared memory
-  // We need to align the page_indices to 16 bytes because vectorized access is used
+  // We need to align the page_indices to 16 bytes because vectorized access is
+  // used
   __shared__ __align__(16) int page_indices[MAX_PAGES_PER_REQUEST];
 #pragma unroll
   for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
