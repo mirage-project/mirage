@@ -81,6 +81,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];
   int const last_token_pos = qo_indptr_buffer_ptr[request_id + 1];
   // Exit the current task is number of query tokens is zero
+  // if (threadIdx.x == 0 && (blockIdx.x == 18 || blockIdx.x == 17)) {
+  //   printf("4_16 paged attn kernel, blockIdx.x: %d, first_token_pos: %d, last_token_pos: %d\n", blockIdx.x, first_token_pos, last_token_pos);
+  // }
   if (first_token_pos == last_token_pos) {
     return;
   }
