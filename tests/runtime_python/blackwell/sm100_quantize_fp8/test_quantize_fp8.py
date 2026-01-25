@@ -38,23 +38,18 @@ for batch_size in batch_sizes:
         dequant = output.float().view(batch_size, num_groups, group_size) * scales[:, :, None]
         dequant = dequant.view(batch_size, hidden_size)
 
-        print("scales[0,:8]:    ", scales[4, :])
-        print("scale_ref[0,:8]: ", scale_ref[4, :])
+        print("scales:    ", scales[4, :])
+        print("scale_ref: ", scale_ref[4, :])
 
-        print("output[0,:8]:    ", output[4, :128])
-        print("quant_ref[0,:8]: ", quant_ref[4, :128])
+        print("output:    ", output[4, :128])
+        print("quant_ref: ", quant_ref[4, :128])
 
-        # print("dequant[0,:8]:   ", dequant[0, :128])
-        # print("x_f32[0,:8]:     ", x_f32[0, :128])
+        # print("dequant:   ", dequant[0, :128])
+        # print("x_f32:     ", x_f32[0, :128])
 
         torch.testing.assert_close(scales, scale_ref, rtol=1e-4, atol=1e-4)
-        torch.testing.assert_close(
-            output.view(torch.uint8),
-            quant_ref.view(torch.uint8),
-            rtol=0, atol=0
-        )
+        torch.testing.assert_close(output.float(), quant_ref.float(), rtol=0, atol=0)
 
-        # torch.testing.assert_close(output.float(), quant_ref.float(), rtol=0, atol=0)
         # torch.testing.assert_close(dequant, x_f32, rtol=2e-1, atol=1e-1)
 
         print("Test passed!")

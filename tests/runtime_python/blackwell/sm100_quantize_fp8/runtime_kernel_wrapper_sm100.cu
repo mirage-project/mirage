@@ -19,11 +19,11 @@
 #include "tma.cuh"
 #include <c10/util/BFloat16.h>
 #include <c10/util/Float8_e4m3fn.h>
-#include <cuda_runtime.h>
-#include <torch/extension.h>
-#include <cuda_fp8.h>
 #include <cstdio>
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
 #include <iostream>
+#include <torch/extension.h>
 
 // Cutlass includes
 #include <cutlass/arch/barrier.h>
@@ -55,15 +55,16 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
       static_cast<bfloat16 const *>(input_ptr) + row * HIDDEN_SIZE;
   fp8_e4m3fn *output_q =
       static_cast<fp8_e4m3fn *>(output_q_ptr) + row * HIDDEN_SIZE;
-  float *output_s = static_cast<float *>(output_s_ptr) + row * (HIDDEN_SIZE / GROUP_SIZE);
+  float *output_s =
+      static_cast<float *>(output_s_ptr) + row * (HIDDEN_SIZE / GROUP_SIZE);
 
   kernel::per_token_group_quantize_fp8_task_impl</*BATCH_SIZE=*/1,
-                                 /*HIDDEN_SIZE=*/HIDDEN_SIZE,
-                                 /*GROUP_SIZE=*/GROUP_SIZE,
-                                 /*GLOBAL_STRIDE=*/HIDDEN_SIZE,
-                                 bfloat16,
-                                 fp8_e4m3fn,
-                                 /*SCALE_UE8M0=*/false>(
+                                                 /*HIDDEN_SIZE=*/HIDDEN_SIZE,
+                                                 /*GROUP_SIZE=*/GROUP_SIZE,
+                                                 /*GLOBAL_STRIDE=*/HIDDEN_SIZE,
+                                                 bfloat16,
+                                                 fp8_e4m3fn,
+                                                 /*SCALE_UE8M0=*/false>(
       input, output_q, output_s, eps, min_8bit, max_8bit);
 }
 
@@ -81,7 +82,7 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
       TORCH_CHECK(false,                                                       \
                   "Unsupported group_size=",                                   \
                   group_size,                                                  \
-                  " (must be one of {128})");                            \
+                  " (must be one of {128})");                                  \
       break;                                                                   \
   }
 
