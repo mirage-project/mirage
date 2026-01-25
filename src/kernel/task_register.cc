@@ -685,7 +685,7 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   c.e("      reinterpret_cast<char*>(task_desc->input_ptrs[0]) + i * $ * "
       "sizeof(bfloat16),",
       output_stride);
-  c.e("      task_desc->xfer_size_in_bytes / $,", batch_size);
+  c.e("      task_desc->task_metadata.xfer_size_in_bytes / $,", batch_size);
   c.e("      reinterpret_cast<uint64_t "
       "*>(&runtime_config.all_event_counters[event_index]),");
   c.e("      1 /*signal*/,");
@@ -1202,7 +1202,14 @@ int TaskRegister::register_linear_swapAB_hopper_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool with_residual) {
-  assert(params.size() == 0);
+  // assert(params.size() == 0);
+  bool rank_with_residual = with_residual;
+  if (with_residual) {
+    assert(params.size() == 1);
+    rank_with_residual = (params[0] == 1);
+  } else {
+    assert(params.size() == 0);
+  }
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -1276,7 +1283,7 @@ int TaskRegister::register_linear_swapAB_hopper_task(
          output_atom_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
-  if (with_residual) {
+  if (with_residual && rank_with_residual) {
     code.e(
         "using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
         "$, $, $, $, $, $, true>;",
@@ -1317,7 +1324,7 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   code.e("TMA_B "
          "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0])"
          ");");
-  if (with_residual) {
+  if (with_residual && rank_with_residual) {
     code.e("TMA_RESIDUAL "
            "tma_residual(static_cast<CUtensorMap*>(task_desc->input_tma_desc_"
            "ptrs[2][0]));");
@@ -1333,13 +1340,13 @@ int TaskRegister::register_linear_swapAB_hopper_task(
       output_size,
       reduction_size,
       Kstages,
-      with_residual ? "TMA_RESIDUAL" : "void",
+      (with_residual && rank_with_residual) ? "TMA_RESIDUAL" : "void",
       output_stride,
       "false" /*SplitK*/);
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    tma_out, ");
-  if (with_residual) {
+  if (with_residual && rank_with_residual) {
     code.e("    &tma_residual,");
     code.e("    runtime_config.my_gpu_id == 0");
   } else {
