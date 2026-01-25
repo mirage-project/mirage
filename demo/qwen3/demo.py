@@ -159,10 +159,10 @@ if __name__ == "__main__":
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
-            # load_model(
-            #     model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
-            # )
-            model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            load_model(
+                model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
+            )
+            # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
