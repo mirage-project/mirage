@@ -53,6 +53,7 @@ struct Dim3Comparator {
 void dfs_create_events_add_tasks(
     int depth,
     int const my_gpu_id,
+    int const num_gpus,
     std::vector<int> const &event_dims,
     int3 const input_map,
     int3 const output_map,
@@ -66,7 +67,9 @@ void dfs_create_events_add_tasks(
     std::vector<FullTaskDesc> &all_tasks,
     std::vector<FullTaskDesc> const &cur_op_tasks,
     std::map<dim3, TaskId, Dim3Comparator> const &pre_task_map,
-    std::map<dim3, TaskId, Dim3Comparator> &cur_task_map) {
+    std::map<dim3, TaskId, Dim3Comparator> &cur_task_map,
+    std::unordered_set<size_t> &nvshmem_events_idx,
+    bool nvshmem_event) {
   if (depth >= mirage::config::MAX_TENSOR_DIMS) {
     EventDesc event_desc;
     event_desc.num_triggers = 0;
@@ -92,10 +95,15 @@ void dfs_create_events_add_tasks(
           int task_id = pre_task_map.find(bid)->second;
           // encode gpu_id
           all_tasks[task_id].trigger_event = get_event_id(
-              my_gpu_id, all_events.size(), false /*nvshmem_event*/);
+              my_gpu_id, all_events.size(), nvshmem_event /*nvshmem_event*/);
           event_desc.num_triggers++;
         }
       }
+    }
+    if (nvshmem_event) {
+      // NVSHMEM events need to be triggered by all other GPUs
+      event_desc.num_triggers *= (num_gpus - 1);
+      nvshmem_events_idx.insert(all_events.size());
     }
     event_desc.event_type =
         event_desc.last_task_id >= event_desc.first_task_id + 8
@@ -140,6 +148,7 @@ void dfs_create_events_add_tasks(
       }
       dfs_create_events_add_tasks(depth + 1,
                                   my_gpu_id,
+                                  num_gpus,
                                   event_dims,
                                   input_map,
                                   output_map,
@@ -153,7 +162,9 @@ void dfs_create_events_add_tasks(
                                   all_tasks,
                                   cur_op_tasks,
                                   pre_task_map,
-                                  cur_task_map);
+                                  cur_task_map,
+                                  nvshmem_events_idx,
+                                  nvshmem_event);
     }
   }
 }
@@ -188,14 +199,12 @@ void register_mugraph(
     }
     std::tuple<int, int, TaskType, int> task_config =
         task_configs.find(op)->second;
-    std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
     // Customized op
     kn::KNCustomizedOp const *cur_op =
         dynamic_cast<kn::KNCustomizedOp const *>(op);
     tb::Graph const &bgraph = cur_op->bgraph;
     dim3 bid;
-    std::vector<FullTaskDesc> tasks;
     std::vector<tb::TBInputOp *> input_ops;
     std::vector<tb::TBInputOp *> output_ops;
     int num_inputs = std::get<0>(task_config);
@@ -211,14 +220,14 @@ void register_mugraph(
         output_ops.push_back(static_cast<tb::TBInputOp *>(op));
       }
     }
-    // Specical handling for ALLREDUCE
-    if (task_type == TASK_ALLREDUCE) {
-      // Shouldn't have AllReduce when num_gpus == 1
-      assert(num_gpus > 1);
-      assert(input_ops.size() == 2);
-      assert(output_ops.size() == 1);
-      // To simplify the implementation, asserting that
-      // produce/consumer must have the same partition
+
+    auto add_events_for_denpendency = [&](
+        std::vector<FullTaskDesc> const& cur_op_tasks, 
+        bool nvshmem_event) -> std::map<dim3, TaskId, Dim3Comparator>
+    {
+      std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
+      std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
+      std::vector<int> consumer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
       int num_shared_tensors = 0;
       int3 input_map, output_map;
       for (auto const &input : input_ops) {
@@ -230,137 +239,132 @@ void register_mugraph(
           }
         }
       }
-      assert(num_shared_tensors == 1);
-      assert(input_map == output_map);
-      assert(bgraph.grid_dim == pre_op->bgraph.grid_dim);
+      // assert that their is at least a single tensor shared between ops
+      assert(num_shared_tensors >= 1);
+      for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
+        if (d == input_map.x) {
+          consumer_partition[d] = bgraph.grid_dim.x;
+        }
+        if (d == input_map.y) {
+          consumer_partition[d] = bgraph.grid_dim.y;
+        }
+        if (d == input_map.z) {
+          consumer_partition[d] = bgraph.grid_dim.z;
+        }
+        if (d == output_map.x) {
+          producer_partition[d] = pre_op->bgraph.grid_dim.x;
+        }
+        if (d == output_map.y) {
+          producer_partition[d] = pre_op->bgraph.grid_dim.y;
+        }
+        if (d == output_map.z) {
+          producer_partition[d] = pre_op->bgraph.grid_dim.z;
+        }
+      }
+      // Step 2.2: create events and add tasks
+      // number of events is the product of gcd of producer/consumer
+      std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
+      for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
+        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
+      }
+      dfs_create_events_add_tasks(0,                       /*depth*/
+                                  my_gpu_id,               /*my_gpu_id*/
+                                  num_gpus,
+                                  event_dims,              /*event_dims*/
+                                  input_map,               /*input_map*/
+                                  output_map,              /*output_map*/
+                                  bgraph.grid_dim,         /*consumer_grid_dim*/
+                                  pre_op->bgraph.grid_dim, /*producer_grid_dim*/
+                                  dim3(0, 0, 0),           /*consumer_lo_bid*/
+                                  bgraph.grid_dim,         /*consumer_hi_bid*/
+                                  dim3(0, 0, 0),           /*producer_lo_bid*/
+                                  pre_op->bgraph.grid_dim, /*producer_hi_bid*/
+                                  all_events,
+                                  all_tasks,
+                                  cur_op_tasks,
+                                  pre_task_map, /*pre_task_map*/
+                                  cur_task_map /*cur_task_map)*/,
+                                  nvshmem_events_idx,
+                                  nvshmem_event);
+      return cur_task_map;
+    };
+
+    auto get_tensor_desc = [](threadblock::TBInputOp* const& tb_op) -> TensorDesc {
+      TensorDesc desc;
+      assert(tb_op->output_tensors.size() == 1);
+      tb::STensor stensor = tb_op->output_tensors[0];
+      kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
+          tb_op->dtensor.owner_op);
+      desc.num_dims = stensor.num_dims;
+      desc.data_type = stensor.data_type;
+      for (int d = stensor.num_dims - 1; d >= 0; d--) {
+        desc.dim[d] = stensor.dim[d];
+        desc.stride[d] = kernel_input_op->input_strides[d];
+      }
+      return desc;
+    };
+
+    // Specical handling for ALLREDUCE
+    if (task_type == TASK_ALLREDUCE) {
+      // TODO(Zepeng) Coalesce allgather tasks into a single massive task
+      // Shouldn't have AllReduce when num_gpus == 1
+      assert(num_gpus > 1);
+      assert(input_ops.size() == 2);
+      assert(output_ops.size() == 1);
+      std::vector<FullTaskDesc> allgather_tasks;
       dim3 bid;
-      std::map<dim3, std::map<int, TaskId>, Dim3Comparator> ag_pre_task_map;
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-            // event_desc_0 is the trigger_event of previous_task
-            // event_desc_1 is the trigger_event of allgather
-            EventDesc event_desc_0;
-            event_desc_0.event_type = EVENT_LAUNCH_TASKS;
-            event_desc_0.num_triggers = 1;
-            event_desc_0.first_task_id = all_tasks.size();
-            event_desc_0.last_task_id = all_tasks.size() + num_gpus - 1;
-            assert(pre_task_map.find(bid) != pre_task_map.end());
-            int task_id = pre_task_map.find(bid)->second;
-            all_tasks[task_id].trigger_event =
-                get_event_id(my_gpu_id, all_events.size(), false);
-            all_events.push_back(event_desc_0);
-            // Step 1: create (num_gpus - 1) tasks for allgather
-            std::map<int, TaskId> pre_tasks;
-            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
-              if (tgt_gpu_id == my_gpu_id) {
-                continue;
-              }
-              FullTaskDesc task(TASK_NVSHMEM_COPY, 0 /*variant_id*/);
-              // task.trigger_event = get_event_id(
-              //     tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
-              //  Initialize input tensors to the task
-              {
-                TensorDesc desc;
-                assert(input_ops[0]->output_tensors.size() == 1);
-                tb::STensor stensor = input_ops[0]->output_tensors[0];
-                desc.num_dims = stensor.num_dims;
-                desc.data_type = stensor.data_type;
-                for (int d = stensor.num_dims - 1; d >= 0; d--) {
-                  desc.dim[d] = stensor.dim[d];
-                  desc.stride[d] = (d == stensor.num_dims - 1)
-                                       ? 1
-                                       : desc.stride[d + 1] *
-                                             input_ops[0]->dtensor.dim[d + 1];
-                }
-                task.inputs[task.num_inputs++] = desc;
-              }
-              // Initialize output tensors to the task
-              {
-                TensorDesc desc;
-                assert(input_ops[1]->output_tensors.size() == 1);
-                tb::STensor stensor = input_ops[1]->output_tensors[0];
-                desc.num_dims = stensor.num_dims;
-                desc.data_type = stensor.data_type;
-                for (int d = stensor.num_dims - 1; d >= 0; d--) {
-                  desc.dim[d] = stensor.dim[d];
-                  desc.stride[d] = (d == stensor.num_dims - 1)
-                                       ? 1
-                                       : desc.stride[d + 1] *
-                                             input_ops[1]->dtensor.dim[d + 1];
-                }
-                task.outputs[task.num_outputs++] = desc;
-              }
-              all_tasks.push_back(task);
-              pre_tasks[tgt_gpu_id] = all_tasks.size() - 1;
-            } // for tgt_gpu_id
-            ag_pre_task_map[bid] = pre_tasks;
+            FullTaskDesc task(TASK_NVSHMEM_COPY, 0 /*variant_id*/);
+            //  Initialize input tensors to the task
+            TensorDesc input_desc = get_tensor_desc(input_ops[0]);
+            task.inputs[task.num_inputs++] = input_desc;
+            // Initialize output tensors to the task
+            TensorDesc output_desc = get_tensor_desc(input_ops[1]);
+            task.outputs[task.num_outputs++] = output_desc;
+            allgather_tasks.push_back(task);
           } // for bid.z
         }   // for bid.y
       }     // for bid.x
-      // (zepeng) The for loop to transfer strided tensor using nvshmem (hacky)
-      int for_loop = input_ops[0]->dtensor.dim[0];
+      // Add dependency between pre_op and allgather tasks
+      // Note: The allgather tasks are not triggered by nvshmem events, they trigger
+      std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
+      cur_task_map = add_events_for_denpendency(allgather_tasks, false /*nvshmem_event*/);
+      pre_task_map = cur_task_map;
+      // Currently, we assume that the output of the previous op is not copied
+      // into the allreduce buffer, residing in input_ops[0], so we do not need to
+      // set pre_output_ops to output_ops of current op.
+
+      decltype(allgather_tasks) reduce_tasks;
+      // Currently, the allgather and reduce tasks are of the same grid_dim
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-            // event_desc_1 is the trigger_event of allgather
-            EventDesc event_desc_1;
-            event_desc_1.event_type = EVENT_LAUNCH_TASKS;
-            event_desc_1.first_task_id = all_tasks.size();
-            event_desc_1.last_task_id = all_tasks.size() + 1;
-            // event_desc_1.num_triggers = num_gpus - 1;
-            event_desc_1.num_triggers = (num_gpus - 1) * for_loop;
-            assert(ag_pre_task_map.find(bid) != ag_pre_task_map.end());
-            std::map<int, TaskId> pre_tasks = ag_pre_task_map.find(bid)->second;
-            for (auto const &t : pre_tasks) {
-              all_tasks[t.second].trigger_event =
-                  get_event_id(t.first, all_events.size(), true);
-            }
-            nvshmem_events_idx.insert(all_events.size());
-            all_events.push_back(event_desc_1);
-            // Step 2: create a task for reduce
+            // nvshmem_events_idx.insert(all_events.size());
             FullTaskDesc task(TASK_REDUCE, 0 /*variant_id*/);
             for (int i = 0; i < 2; i++) {
-              TensorDesc desc;
-              tb::STensor stensor = input_ops[i]->output_tensors[0];
-              desc.num_dims = stensor.num_dims;
-              desc.data_type = stensor.data_type;
-              for (int d = stensor.num_dims - 1; d >= 0; d--) {
-                desc.dim[d] = stensor.dim[d];
-                desc.stride[d] =
-                    (d == stensor.num_dims - 1)
-                        ? 1
-                        : desc.stride[d + 1] * input_ops[1]->dtensor.dim[d + 1];
-              }
+              TensorDesc desc = get_tensor_desc(input_ops[i]);
               task.inputs[task.num_inputs++] = desc;
             }
-            // Create output tensor
-            {
-              TensorDesc desc;
-              tb::STensor stensor = output_ops[0]->output_tensors[0];
-              desc.num_dims = stensor.num_dims;
-              desc.data_type = stensor.data_type;
-              for (int d = stensor.num_dims - 1; d >= 0; d--) {
-                desc.dim[d] = stensor.dim[d];
-                desc.stride[d] = (d == stensor.num_dims - 1)
-                                     ? 1
-                                     : desc.stride[d + 1] *
-                                           output_ops[0]->dtensor.dim[d + 1];
-              }
-              task.inputs[task.num_outputs++] = desc;
-              all_tasks.push_back(task);
-              // Update current task map
-              cur_task_map[bid] = all_tasks.size() - 1;
-            }
+            TensorDesc desc = get_tensor_desc(output_ops[0]);
+            task.outputs[task.num_outputs++] = desc;
+            reduce_tasks.push_back(task);
           }
         }
       }
+      // Add dependency between allgather tasks and reduce tasks
+      // Note: The reduce tasks are triggered by nvshmem events
+      cur_task_map = add_events_for_denpendency(reduce_tasks, true);
+
       pre_output_ops = output_ops;
       pre_op = cur_op;
       pre_task_map = cur_task_map;
       all_task_maps.emplace(op, cur_task_map);
       continue;
     }
+
+    std::vector<FullTaskDesc> tasks;
     // Step 1: add all tasks based on their blockIdx
     // (bid.x, bid.y, bid.z) ordering
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
@@ -434,6 +438,7 @@ void register_mugraph(
       }
     }
     // Step 2: create events between operators
+    std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     if (pre_op == nullptr) {
       dim3 bid;
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
@@ -450,64 +455,7 @@ void register_mugraph(
         }
       }
     } else {
-      // Step 2.1: analyze dependencies between thread blocks of the two ops
-      std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
-      std::vector<int> consumer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
-      int num_shared_tensors = 0;
-      int3 input_map, output_map;
-      for (auto const &input : input_ops) {
-        for (auto const &output : pre_output_ops) {
-          if (input->dtensor.guid == output->dtensor.guid) {
-            input_map = input->input_map;
-            output_map = output->input_map;
-            num_shared_tensors++;
-          }
-        }
-      }
-      // assert that their is at least a single tensor shared between ops
-      assert(num_shared_tensors >= 1);
-      for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        if (d == input_map.x) {
-          consumer_partition[d] = bgraph.grid_dim.x;
-        }
-        if (d == input_map.y) {
-          consumer_partition[d] = bgraph.grid_dim.y;
-        }
-        if (d == input_map.z) {
-          consumer_partition[d] = bgraph.grid_dim.z;
-        }
-        if (d == output_map.x) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.x;
-        }
-        if (d == output_map.y) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.y;
-        }
-        if (d == output_map.z) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.z;
-        }
-      }
-      // Step 2.2: create events and add tasks
-      // number of events is the product of gcd of producer/consumer
-      std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
-      for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
-      }
-      dfs_create_events_add_tasks(0,                       /*depth*/
-                                  my_gpu_id,               /*my_gpu_id*/
-                                  event_dims,              /*event_dims*/
-                                  input_map,               /*input_map*/
-                                  output_map,              /*output_map*/
-                                  bgraph.grid_dim,         /*consumer_grid_dim*/
-                                  pre_op->bgraph.grid_dim, /*producer_grid_dim*/
-                                  dim3(0, 0, 0),           /*consumer_lo_bid*/
-                                  bgraph.grid_dim,         /*consumer_hi_bid*/
-                                  dim3(0, 0, 0),           /*producer_lo_bid*/
-                                  pre_op->bgraph.grid_dim, /*producer_hi_bid*/
-                                  all_events,
-                                  all_tasks,
-                                  tasks,        /*cur_op_tasks*/
-                                  pre_task_map, /*pre_task_map*/
-                                  cur_task_map /*cur_task_map)*/);
+      cur_task_map = add_events_for_denpendency(tasks, false /*nvshmem_event*/);
     }
     pre_output_ops = output_ops;
     pre_op = cur_op;
