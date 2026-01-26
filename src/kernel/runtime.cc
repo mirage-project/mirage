@@ -332,6 +332,7 @@ void register_mugraph(
       std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
       cur_task_map = add_events_for_denpendency(allgather_tasks, false /*nvshmem_event*/);
       pre_task_map = cur_task_map;
+      pre_op = cur_op;
       // Currently, we assume that the output of the previous op is not copied
       // into the allreduce buffer, residing in input_ops[0], so we do not need to
       // set pre_output_ops to output_ops of current op.
@@ -875,10 +876,7 @@ TaskGraphResult print_task_graph(
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
             // To perform allreduce, we first launch (num_gpus-1) tasks for
             // allgather
-            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
-              if (tgt_gpu_id == my_gpu_id) {
-                continue;
-              }
+            {
               FullTaskDesc task_desc = all_tasks[task_pos];
               assert(task_desc.task_type == TASK_NVSHMEM_COPY);
               tgbody.e("// task[$]", task_pos);
@@ -958,7 +956,8 @@ TaskGraphResult print_task_graph(
                   {"strides", json_strides}});
               // Add nvshmem_copy output
               // Note that nvshmem_copy's output is stored in input_ops[1]
-              offset = my_gpu_id * input_ops[0]->dtensor.num_elements();
+              // The per-GPU offset calculation is done at runtime.
+              offset = 0;
               int3 output_map = input_ops[1]->input_map;
               io_desc = io_configs.find(input_ops[1]->dtensor.guid)->second;
               if (output_map.x >= 0) {
