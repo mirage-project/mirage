@@ -102,7 +102,7 @@ void dfs_create_events_add_tasks(
         for (bid.z = producer_lo_bid.z; bid.z < producer_hi_bid.z; bid.z++) {
           assert(pre_task_map.find(bid) != pre_task_map.end());
           std::vector<TaskId> const &task_ids = pre_task_map.find(bid)->second;
-          if (task_ids.size() > 1) {
+          if (all_tasks[task_ids[0]].task_type == TASK_NVSHMEM_COPY) {
             // The previous task is a multigpu task, we should set gpu_id accordingly
             assert(task_ids.size() == (size_t)num_gpus - 1);
             for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {  
@@ -110,9 +110,12 @@ void dfs_create_events_add_tasks(
                 continue;
               }
               size_t idx = tgt_gpu_id < my_gpu_id ? tgt_gpu_id : tgt_gpu_id - 1;
+              // For now, only for-loop based TASK_NVSHMEM_COPY has this special behavior.
+              assert(all_tasks[task_ids[idx]].task_type == TASK_NVSHMEM_COPY);
               all_tasks[task_ids[idx]].trigger_event = get_event_id(
                   tgt_gpu_id, all_events.size(), nvshmem_event /*nvshmem_event*/);
-              event_desc.num_triggers++;
+              int loop_count = all_tasks[task_ids[idx]].inputs[0].dim[0];
+              event_desc.num_triggers += loop_count;
             }
           } else {
             assert(task_ids.size() == 1);
@@ -332,8 +335,6 @@ void register_mugraph(
 
     // Specical handling for ALLREDUCE
     if (task_type == TASK_ALLREDUCE) {
-      // TODO(Zepeng) Coalesce allgather tasks into a single massive task
-      // Shouldn't have AllReduce when num_gpus == 1
       assert(num_gpus > 1);
       assert(input_ops.size() == 2);
       assert(output_ops.size() == 1);
