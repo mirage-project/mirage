@@ -103,17 +103,21 @@ void dfs_create_events_add_tasks(
           assert(pre_task_map.find(bid) != pre_task_map.end());
           std::vector<TaskId> const &task_ids = pre_task_map.find(bid)->second;
           if (all_tasks[task_ids[0]].task_type == TASK_NVSHMEM_COPY) {
-            // The previous task is a multigpu task, we should set gpu_id accordingly
+            // The previous task is a multigpu task, we should set gpu_id
+            // accordingly
             assert(task_ids.size() == (size_t)num_gpus - 1);
-            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {  
+            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
               }
               size_t idx = tgt_gpu_id < my_gpu_id ? tgt_gpu_id : tgt_gpu_id - 1;
-              // For now, only for-loop based TASK_NVSHMEM_COPY has this special behavior.
+              // For now, only for-loop based TASK_NVSHMEM_COPY has this special
+              // behavior.
               assert(all_tasks[task_ids[idx]].task_type == TASK_NVSHMEM_COPY);
-              all_tasks[task_ids[idx]].trigger_event = get_event_id(
-                  tgt_gpu_id, all_events.size(), nvshmem_event /*nvshmem_event*/);
+              all_tasks[task_ids[idx]].trigger_event =
+                  get_event_id(tgt_gpu_id,
+                               all_events.size(),
+                               nvshmem_event /*nvshmem_event*/);
               int loop_count = all_tasks[task_ids[idx]].inputs[0].dim[0];
               event_desc.num_triggers += loop_count;
             }
@@ -248,11 +252,11 @@ void register_mugraph(
       }
     }
 
-    auto add_events_for_denpendency = [&](
-        std::vector<FullTaskDesc> const& cur_op_tasks, 
-        bool nvshmem_event,
-        bool multigpu_task) -> std::map<dim3, std::vector<TaskId>, Dim3Comparator>
-    {
+    auto add_events_for_denpendency =
+        [&](std::vector<FullTaskDesc> const &cur_op_tasks,
+            bool nvshmem_event,
+            bool multigpu_task)
+        -> std::map<dim3, std::vector<TaskId>, Dim3Comparator> {
       std::map<dim3, std::vector<TaskId>, Dim3Comparator> cur_task_map;
       std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
       std::vector<int> consumer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
@@ -295,8 +299,8 @@ void register_mugraph(
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
       }
-      dfs_create_events_add_tasks(0,                       /*depth*/
-                                  my_gpu_id,               /*my_gpu_id*/
+      dfs_create_events_add_tasks(0,         /*depth*/
+                                  my_gpu_id, /*my_gpu_id*/
                                   num_gpus,
                                   event_dims,              /*event_dims*/
                                   input_map,               /*input_map*/
@@ -318,12 +322,13 @@ void register_mugraph(
       return cur_task_map;
     };
 
-    auto get_tensor_desc = [](threadblock::TBInputOp* const& tb_op) -> TensorDesc {
+    auto get_tensor_desc =
+        [](threadblock::TBInputOp *const &tb_op) -> TensorDesc {
       TensorDesc desc;
       assert(tb_op->output_tensors.size() == 1);
       tb::STensor stensor = tb_op->output_tensors[0];
-      kn::KNInputOp* kernel_input_op = static_cast<kn::KNInputOp*>(
-          tb_op->dtensor.owner_op);
+      kn::KNInputOp *kernel_input_op =
+          static_cast<kn::KNInputOp *>(tb_op->dtensor.owner_op);
       desc.num_dims = stensor.num_dims;
       desc.data_type = stensor.data_type;
       for (int d = stensor.num_dims - 1; d >= 0; d--) {
@@ -357,17 +362,19 @@ void register_mugraph(
               allgather_tasks.push_back(task);
             }
           } // for bid.z
-        }   // for bid.y
-      }     // for bid.x
+        } // for bid.y
+      } // for bid.x
       // Add dependency between pre_op and allgather tasks
-      // Note: The allgather tasks are not triggered by nvshmem events, they trigger
+      // Note: The allgather tasks are not triggered by nvshmem events, they
+      // trigger
       std::map<dim3, std::vector<TaskId>, Dim3Comparator> cur_task_map;
-      cur_task_map = add_events_for_denpendency(allgather_tasks, false /*nvshmem_event*/, true);
+      cur_task_map = add_events_for_denpendency(
+          allgather_tasks, false /*nvshmem_event*/, true);
       pre_task_map = cur_task_map;
       pre_op = cur_op;
       // Currently, we assume that the output of the previous op is not copied
-      // into the allreduce buffer, residing in input_ops[0], so we do not need to
-      // set pre_output_ops to output_ops of current op.
+      // into the allreduce buffer, residing in input_ops[0], so we do not need
+      // to set pre_output_ops to output_ops of current op.
 
       decltype(allgather_tasks) reduce_tasks;
       // Currently, the allgather and reduce tasks are of the same grid_dim
@@ -393,7 +400,7 @@ void register_mugraph(
       pre_output_ops = output_ops;
       pre_op = cur_op;
       pre_task_map = cur_task_map;
-      
+
       std::map<dim3, TaskId, Dim3Comparator> cur_task_map_single;
       for (auto const &it : cur_task_map) {
         // The reduce task should be the only task for each bid
@@ -1062,10 +1069,10 @@ TaskGraphResult print_task_graph(
               tgbody.e("}");
               task_pos++;
             } // for tgt_gpu_id
-          }   // for bid.z
-        }     // for bid.y
-      }       // for bid.x
-    }         // if task_type == TASK_ALLREDUCE
+          } // for bid.z
+        } // for bid.y
+      } // for bid.x
+    } // if task_type == TASK_ALLREDUCE
 
     for (int i = 0;
          i < bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z;
