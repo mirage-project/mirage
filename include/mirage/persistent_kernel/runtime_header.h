@@ -198,9 +198,6 @@ struct FullTaskDesc {
       uint16_t kv_idx;       // Used for paged attention split kv
       int merge_task_offset; // Used for paged attention split kv merge
     };
-    struct {
-      size_t xfer_size_in_bytes; // Used for nvshmem
-    };
     unsigned long long raw_payload;
   } task_metadata;
 };

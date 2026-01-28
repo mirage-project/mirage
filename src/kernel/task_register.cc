@@ -669,25 +669,18 @@ int TaskRegister::register_nvshmem_allgather_strided_put_task(
   c.e("size_t event_index = "
       "get_event_position_index(task_desc->trigger_event);");
   c.inc_indent();
-  c.e("int gpu_id = "
+  c.e("int target_gpu_id = "
       "static_cast<int>(get_event_gpu_id(task_desc->trigger_event));");
-  c.e("assert(gpu_id < runtime_config.num_gpus);");
-  c.e("assert(gpu_id != runtime_config.my_gpu_id);");
-  c.e("for (int i = 0; i < $; i++) {", batch_size);
-  c.e("  nvshmemx_putmem_signal_block(");
-  c.e("      reinterpret_cast<char*>(task_desc->output_ptrs[0]) + i * $ * "
-      "sizeof(bfloat16),",
-      input_stride);
-  c.e("      reinterpret_cast<char*>(task_desc->input_ptrs[0]) + i * $ * "
-      "sizeof(bfloat16),",
+  c.e("nvshmem_allgather_strided_put<bfloat16, $, $, $>(",
+      batch_size,
+      output_size,
       output_stride);
-  c.e("      task_desc->task_metadata.xfer_size_in_bytes / $,", batch_size);
-  c.e("      reinterpret_cast<uint64_t "
-      "*>(&runtime_config.all_event_counters[event_index]),");
-  c.e("      1 /*signal*/,");
-  c.e("      NVSHMEM_SIGNAL_ADD,");
-  c.e("      gpu_id);");
-  c.e("}");
+  c.e("  task_desc->output_ptrs[0],");
+  c.e("  task_desc->input_ptrs[0],");
+  c.e("  &runtime_config.all_event_counters[event_index],");
+  c.e("  event_index,");
+  c.e("  target_gpu_id);");
+
   return register_task_variant(TASK_NVSHMEM_ALLGATHER_STRIDED_PUT,
                                c.to_string());
 }
