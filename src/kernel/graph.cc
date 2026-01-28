@@ -500,11 +500,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         task_register->register_argmax_reduce_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "nvshmem_allgather_strided_put") {
-    int variant_id =
-        task_register->register_nvshmem_allgather_strided_put_task(
-          customized->bgraph, params);
-    task_config[op] = std::make_tuple(1, 1, 
-      TASK_NVSHMEM_ALLGATHER_STRIDED_PUT, variant_id);
+    int variant_id = task_register->register_nvshmem_allgather_strided_put_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_NVSHMEM_ALLGATHER_STRIDED_PUT, variant_id);
   } else if (name == "reduction") {
     int variant_id =
         task_register->register_reduction_task(customized->bgraph, params);
