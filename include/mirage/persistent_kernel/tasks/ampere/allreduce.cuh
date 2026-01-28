@@ -22,33 +22,38 @@
 
 namespace kernel {
 
-
 #ifdef USE_NVSHMEM
 
 /**
  * NVSHMEM-based Allgather using put operations.
  * To achieve allreduce, we also need reduction after allgather.
  */
-template <typename T,
-          int BATCH_SIZE,
-          int OUTPUT_SIZE,
-          int OUTPUT_STRIDE>
-__device__ __forceinline__ void nvshmem_allgather_strided_put(
-    void* buffer_ptr,
-    void* local_data_ptr,
-    void* sig_addr,
-    size_t event_index,
-    int target_gpu_id) {
-  #pragma unroll
-  for (int i = 0; i < BATCH_SIZE; i++) {
-      nvshmemx_putmem_signal_block(
-          reinterpret_cast<char*>(buffer_ptr) + i * OUTPUT_STRIDE * sizeof(T),
-          reinterpret_cast<char*>(local_data_ptr) + i * OUTPUT_STRIDE * sizeof(T),
-          OUTPUT_SIZE * sizeof(T),
-          reinterpret_cast<uint64_t *>(sig_addr),
-          1 /*signal*/,
-          NVSHMEM_SIGNAL_ADD,
-          target_gpu_id);
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
+__device__ __forceinline__ void
+    nvshmem_allgather_strided_put(void *buffer_ptr,
+                                  void *local_data_ptr,
+                                  void *sig_addr,
+                                  size_t event_index,
+                                  int target_gpu_id) {
+  // TODO: remove event_index
+#pragma unroll
+  for (int i = 0; i < BATCH_SIZE - 1; i++) {
+    nvshmemx_putmem_nbi_block(reinterpret_cast<char *>(buffer_ptr) +
+                                  i * OUTPUT_STRIDE * sizeof(T),
+                              reinterpret_cast<char *>(local_data_ptr) +
+                                  i * OUTPUT_STRIDE * sizeof(T),
+                              OUTPUT_SIZE * sizeof(T),
+                              target_gpu_id);
+    // TODO(Zepeng): tune quiet frequency
+    nvshmem_quiet();
+  }
+
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    nvshmemx_signal_op(reinterpret_cast<uint64_t *>(sig_addr),
+                      1,
+                      NVSHMEM_SIGNAL_ADD,
+                      target_gpu_id);
   }
 }
 

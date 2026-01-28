@@ -124,24 +124,19 @@ void dfs_create_events_add_tasks(
           std::vector<TaskId> const &task_ids = pre_task_map.find(bid)->second;
           if (all_tasks[task_ids[0]].task_type ==
               TASK_NVSHMEM_ALLGATHER_STRIDED_PUT) {
-            // The previous task is a multigpu task, we should set gpu_id
-            // accordingly
             assert(task_ids.size() == (size_t)num_gpus - 1);
             for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
               }
               size_t idx = tgt_gpu_id < my_gpu_id ? tgt_gpu_id : tgt_gpu_id - 1;
-              // For now, only for-loop based TASK_NVSHMEM_ALLGATHER_STRIDED_PUT
-              // has this special behavior.
               assert(all_tasks[task_ids[idx]].task_type ==
                      TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
               all_tasks[task_ids[idx]].trigger_event =
                   get_event_id(tgt_gpu_id,
                                all_events.size(),
                                nvshmem_event /*nvshmem_event*/);
-              int loop_count = all_tasks[task_ids[idx]].inputs[0].dim[0];
-              event_desc.num_triggers += loop_count;
+              event_desc.num_triggers++;
             }
           } else {
             assert(task_ids.size() == 1);
@@ -506,11 +501,6 @@ bool sanity_check(mirage::kernel::Graph const &graph,
         // event_pos 0 is the end of task graph event
         if (event_pos == 0) {
           continue;
-        }
-        // These events counts are manually adjusted. Each task of nvshmem cpy
-        // will update BS times of event counter, not just once.
-        if (desc.task_type == runtime::TASK_NVSHMEM_ALLGATHER_STRIDED_PUT) {
-          event_counts[event_pos] -= desc.inputs[0].dim[0] - 1;
         }
         assert(event_counts[event_pos] > 0);
         event_counts[event_pos]--;
