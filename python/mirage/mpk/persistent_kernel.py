@@ -1032,13 +1032,26 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size)
         # params[0]: num_gpus
         # params[1]: my_gpu_id
-        params = [self.world_size, self.mpi_rank]
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (1, -1, -1), -1, True)
-        tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-        tb_graph.new_input(output, (1, -1, -1), -1, True)
-        self.kn_graph.customized([input, buffer, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "allreduce", params)
+        if self.target_cc < 90:
+            params = [self.world_size, self.mpi_rank]
+            allgather_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            allgather_tb_graph.new_input(input, (1, -1, -1), -1, True)
+            allgather_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
+            self.kn_graph.customized([input, buffer], allgather_tb_graph)
+            self.kn_graph.register_task(allgather_tb_graph, 
+                "nvshmem_allgather_strided_put", params)
+
+            reduction_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            reduction_tb_graph.new_input(input, (1, -1, -1), -1, True)
+            reduction_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
+            reduction_tb_graph.new_input(output, (1, -1, -1), -1, True)
+            self.kn_graph.customized([input, buffer, output], 
+                                     reduction_tb_graph)
+            self.kn_graph.register_task(reduction_tb_graph, "reduction", params)
+        else:
+            # TODO(Zepeng): Add nvshmem tile based allreduce
+            raise NotImplementedError(
+                "Allreduce layer is not yet implemented for SM90 and above.")
 
     def silu_mul_layer(
         self,
