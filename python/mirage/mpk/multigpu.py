@@ -81,13 +81,13 @@ class CollectiveStrategy(ABC):
         self.name = name
     
     @abstractmethod
-    def register_tasks(self, kn_graph, tensors: List, grid_dim: Tuple, 
+    def register_tasks(self, mpk, tensors: List, grid_dim: Tuple, 
                       block_dim: Tuple, params: List[int]) -> None:
         """
         Register tasks to the kernel graph.
         
         Args:
-            kn_graph: The kernel graph to register tasks to
+            mpk: The persistent kernel instance
             tensors: List of tensors involved in the collective
             grid_dim: Grid dimensions for kernel launch
             block_dim: Block dimensions for kernel launch
@@ -144,7 +144,8 @@ class AllReduceStrategy_AllgatherReduce(AllReduceStrategy):
         output_tensor = tensors.pop("output")
         buffer_tensor = tensors.pop("buffer")
 
-        print(f"{self} Unused tensors: {tensors.keys()}")
+        if len(tensors) > 0:
+            print(f"{self} Unused tensors: {tensors.keys()}")
 
         # Create allgather task
         allgather_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))

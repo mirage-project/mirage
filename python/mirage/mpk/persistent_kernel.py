@@ -12,6 +12,9 @@ from .speculative import (
     SpecDecodeConfig,
     PromptLookupConfig,
 )
+from .multigpu import (
+  auto_select_allreduce_implementation
+)
 from typing import Optional
 
 HARD_CODE = """
@@ -1032,26 +1035,16 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size)
         # params[0]: num_gpus
         # params[1]: my_gpu_id
-        if self.target_cc < 90:
-            params = [self.world_size, self.mpi_rank]
-            allgather_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            allgather_tb_graph.new_input(input, (1, -1, -1), -1, True)
-            allgather_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-            self.kn_graph.customized([input, buffer], allgather_tb_graph)
-            self.kn_graph.register_task(allgather_tb_graph, 
-                "nvshmem_allgather_strided_put", params)
+        best_implementation = auto_select_allreduce_implementation(self.world_size, self.mpi_rank)
+        tensors = {
+            "input": input,
+            "buffer": buffer,
+            "output": output,
+        }
+        params = [self.world_size, self.mpi_rank]
+        best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim, 
+                                           block_dim=block_dim, params=params)
 
-            reduction_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            reduction_tb_graph.new_input(input, (1, -1, -1), -1, True)
-            reduction_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-            reduction_tb_graph.new_input(output, (1, -1, -1), -1, True)
-            self.kn_graph.customized([input, buffer, output], 
-                                     reduction_tb_graph)
-            self.kn_graph.register_task(reduction_tb_graph, "reduction", params)
-        else:
-            # TODO(Zepeng): Add nvshmem tile based allreduce
-            raise NotImplementedError(
-                "Allreduce layer is not yet implemented for SM90 and above.")
 
     def silu_mul_layer(
         self,

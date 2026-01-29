@@ -1115,6 +1115,11 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   int npes = nvshmem_n_pes();
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
   printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
+
+  for (int i = 0; i < npes; i++) {
+    if (i == mype) continue;
+    CUDA_CHECK(cudaDeviceEnablePeerAccess(i, 0));
+  }
 #else
   int mype = 0;
   int npes = 1;
