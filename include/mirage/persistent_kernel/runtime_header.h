@@ -82,7 +82,7 @@ enum TaskType {
   TASK_ATTENTION_1 = 103,
   TASK_ATTENTION_2 = 104,
   TASK_SILU_MUL_LINEAR_WITH_RESIDUAL = 105,
-  TASK_ALLREDUCE = 106,
+  TASK_ALLREDUCE = 106, // This legacy allreduce task will be removed soon
   TASK_REDUCE = 107,
   TASK_LINEAR_WITH_RESIDUAL = 108,
   TASK_ARGMAX = 109,
@@ -134,7 +134,7 @@ enum TaskType {
   TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SAMPLING_SM100 = 265,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
-  TASK_NVSHMEM_COPY = 199,
+  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
@@ -197,9 +197,6 @@ struct FullTaskDesc {
       int16_t request_id;    // Used for paged attention
       uint16_t kv_idx;       // Used for paged attention split kv
       int merge_task_offset; // Used for paged attention split kv merge
-    };
-    struct {
-      size_t xfer_size_in_bytes; // Used for nvshmem
     };
     unsigned long long raw_payload;
   } task_metadata;

@@ -4,6 +4,11 @@
 #include "tasks/ampere/merge_splitkv.cuh"
 #include "tasks/ampere/silu_mul.cuh"
 #include "tasks/ampere/reduction.cuh"
+
+#ifdef USE_NVSHMEM
+#include "tasks/ampere/allreduce.cuh"
+#endif // USE_NVSHMEM
+
 // Hopper task impls
 #include "tasks/cute/hopper/gemm_ws.cuh"
 #include "tasks/cute/hopper/gemm_ws_cooperative.cuh"

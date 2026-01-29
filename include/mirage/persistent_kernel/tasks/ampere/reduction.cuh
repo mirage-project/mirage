@@ -135,34 +135,5 @@ static __device__ __forceinline__ void
   }
 }
 
-// Assume that input/buffer/output have the same stride
-template <typename T,
-          int NUM_GPUS,
-          int MY_GPU_ID,
-          int BATCH_SIZE,
-          int OUTPUT_SIZE,
-          int OUTPUT_STRIDE>
-__device__ __forceinline__ void reduction_kernel(void const *input_ptr,
-                                                 void const *buf_ptr,
-                                                 void *output_ptr) {
-  T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
-  T const *__restrict__ d_buffer = static_cast<T const *>(buf_ptr);
-  T *__restrict__ d_output = static_cast<T *>(output_ptr);
-  for (int idx = threadIdx.x; idx < OUTPUT_SIZE * BATCH_SIZE;
-       idx += blockDim.x) {
-    float accum = 0.0;
-    int batch = idx / OUTPUT_SIZE;
-    int offset = idx % OUTPUT_SIZE;
-    for (int i = 0; i < NUM_GPUS; i++) {
-      if (i == MY_GPU_ID) {
-        accum += static_cast<float>(d_input[batch * OUTPUT_STRIDE + offset]);
-      } else {
-        accum += static_cast<float>(d_buffer[i * BATCH_SIZE * OUTPUT_STRIDE +
-                                             batch * OUTPUT_STRIDE + offset]);
-      }
-    }
-    d_output[batch * OUTPUT_STRIDE + offset] = static_cast<T>(accum);
-  }
-}
 
 } // namespace kernel
