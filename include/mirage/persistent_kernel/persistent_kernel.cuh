@@ -174,6 +174,7 @@ __global__ void prepare_kernel(RuntimeConfig config,
 // TODO: parallelize this processing
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
+  // printf("offline prepare: bid: %d, tid: %d\n", blockIdx.x, threadIdx.x);
   __shared__ int smem_kv_indices[MPK_MAX_NUM_PAGES];
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
@@ -194,6 +195,7 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
+      // printf("for %d of request %d, before its step: %d, qo_indptr: %d, it get num_tokens: %d\n", i, request_id, step, qo_indptr, num_tokens);
 #ifdef MPK_ENABLE_PROFILING
       if (true)
 #else
@@ -238,10 +240,12 @@ __device__ __forceinline__ bool
       int num_new_tokens = config.prompt_length[request_id] - step;
       if (num_new_tokens > 0) {
         // Prefill requests
+        // printf("Prefill, num_reqs: %d is for request_id: %d, num_tokens: %d\n", num_reqs, request_id, num_tokens);
         num_new_tokens =
             min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       } else {
         // Decode requests
+        // printf("Decode, num_reqs: %d is for request_id: %d, num_tokens: %d\n", num_reqs, request_id, num_tokens);
         num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       }
       // Move tokens to input_tokens
@@ -280,6 +284,7 @@ __device__ __forceinline__ bool
     config.qo_indptr_buffer[num_reqs] = num_tokens;
     config.paged_kv_indptr_buffer[num_reqs] = num_pages;
     // Prefill request
+    // printf("Addtional Prefill, num_reqs: %d is for request_id: %d, num_tokens: %d\n", num_reqs, next_request_id, num_tokens);
     int num_new_tokens = min(config.prompt_length[next_request_id],
                              MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
     // Move tokens to input tokens
@@ -556,6 +561,25 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                                       config.per_worker_queue_len]);
       }
       __syncthreads();
+      // if (threadIdx.x == 0 && blockIdx.x == 25) {
+      //   for (int i = 0; i < num_loaded_tasks; i++) {
+      //     printf(
+      //         "[%d][FTCH] worker_id(%d) queue_idx(%d) next_task_pos(%llu, "
+      //         "%llu) last_task_pos(%llu, %llu) "
+      //         "task_id(%llu) task_type(%d) event_id(%llx) \n",
+      //         config.my_gpu_id,
+      //         worker_id,
+      //         queue_idx,
+      //         next_task_pos[0],
+      //         next_task_pos[1],
+      //         last_task_pos[0],
+      //         last_task_pos[1],
+      //         get_task_position_index(task_ids[i]),
+      //         config.all_tasks[get_task_position_index(task_ids[i])].task_type,
+      //         config.all_tasks[get_task_position_index(task_ids[i])]
+      //             .trigger_event);
+      //   }
+      // }
       if (threadIdx.x == 0) {
 #ifdef MPK_ENABLE_VERBOSE
         for (int i = 0; i < num_loaded_tasks; i++) {
@@ -642,6 +666,10 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     } else if (task_desc->task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
     } else {
+      // if (threadIdx.x == 0 && blockIdx.x == 25) {
+      //   printf("[worker] _execute_task EXECUTE_TASK %d\n",
+      //          task_desc->task_type);
+      // }
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0) {
         printf("[worker] _execute_task EXECUTE_TASK %d\n",
@@ -844,6 +872,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
       EventId event_id = ld_relaxed_gpu_u64(
           &sched_queues[queue_idx]
                        [cur_event_pos[queue_idx] % config.per_sched_queue_len]);
+      // printf("event_id: %d, bid: %d, tid: %d\n", event_id, blockIdx.x, threadIdx.x);
       EventDesc e = config.all_events[event_id];
       if (is_termination_event(event_id, e)) {
         // terminate all workers
@@ -926,6 +955,19 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
               atom_add_release_gpu_u64(
                   &config.worker_queue_last_ready_task_id[next_worker], 1);
 
+              // if (next_worker == 25) {
+              //   printf("[%d][SCHD] EVENT_LAUNCH_DEPENDENT_TASKS schd_id(%d) iter_num(%llu) "
+              //         "task_idx(%llu) "
+              //         "worker_id(%d) "
+              //         "worker_last_ready_pos(%llu)\n",
+              //         config.my_gpu_id,
+              //         sched_id,
+              //         iteration_num,
+              //         position_index,
+              //         next_worker,
+              //         last_task_id + 1);
+              // }
+
 #ifdef MPK_ENABLE_VERBOSE
               if (sched_id == 0) {
                 printf("[%d][SCHD] EVENT_LAUNCH_DEPENDENT_TASKS schd_id(%d) "
@@ -952,6 +994,9 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           }
         }
       } else {
+        // if (e.event_type == EVENT_EMPTY) {
+        //   printf("EVENT_EMPTY 222: bid: %d, tid: %d\n", blockIdx.x, threadIdx.x);
+        // }
         TaskId my_first_task = e.first_task_id, my_last_task = e.last_task_id;
         if (e.event_type == EVENT_LAUNCH_MASSIVE_TASKS) {
           // Split event across local schedulers
@@ -979,6 +1024,18 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           // worker CTAs before we increase its last_ready_task_id
           atom_add_release_gpu_u64(
               &config.worker_queue_last_ready_task_id[next_worker], 1);
+          // if (next_worker == 25) {
+          //   printf("[%d][SCHD] EXECUTE_TASK schd_id(%d) iter_num(%llu) "
+          //        "task_idx(%llu) "
+          //        "worker_id(%d) "
+          //        "worker_last_ready_pos(%llu)\n",
+          //        config.my_gpu_id,
+          //        sched_id,
+          //        iteration_num,
+          //        i,
+          //        next_worker,
+          //        last_task_id + 1);
+          // }
 
 #ifdef MPK_ENABLE_VERBOSE
           printf("[%d][SCHD] EXECUTE_TASK schd_id(%d) iter_num(%llu) "

@@ -67,12 +67,18 @@ void dfs_create_events_add_tasks(
     std::vector<FullTaskDesc> const &cur_op_tasks,
     std::map<dim3, TaskId, Dim3Comparator> const &pre_task_map,
     std::map<dim3, TaskId, Dim3Comparator> &cur_task_map) {
+  if (all_tasks.size() < 400 && cur_op_tasks.size() == 128) {
+    printf("cccccc consumer_hi_bid.x: %d, consumer_hi_bid.y: %d, consumer_hi_bid.z: %d\n", consumer_hi_bid.x, consumer_hi_bid.y, consumer_hi_bid.z);
+  }
   if (depth >= mirage::config::MAX_TENSOR_DIMS) {
     EventDesc event_desc;
     event_desc.num_triggers = 0;
     event_desc.first_task_id = all_tasks.size();
     // Add consumer tasks
     dim3 bid;
+    if (all_tasks.size() < 400 && cur_op_tasks.size() == 128) {
+      printf("consumer_hi_bid.x: %d, consumer_hi_bid.y: %d, consumer_hi_bid.z: %d\n", consumer_hi_bid.x, consumer_hi_bid.y, consumer_hi_bid.z);
+    }
     for (bid.x = consumer_lo_bid.x; bid.x < consumer_hi_bid.x; bid.x++) {
       for (bid.y = consumer_lo_bid.y; bid.y < consumer_hi_bid.y; bid.y++) {
         for (bid.z = consumer_lo_bid.z; bid.z < consumer_hi_bid.z; bid.z++) {
@@ -80,6 +86,9 @@ void dfs_create_events_add_tasks(
           int offset = bid.x * consumer_grid_dim.y * consumer_grid_dim.z +
                        bid.y * consumer_grid_dim.z + bid.z;
           all_tasks.push_back(cur_op_tasks[offset]);
+          if (all_tasks.size() < 400 && cur_op_tasks.size() == 128) {
+            printf("push_back for offset: %d, its bid: (%d, %d), its request_id: %d\n", offset, bid.x, bid.y, cur_op_tasks[offset].task_metadata.request_id);
+          }
         }
       }
     }
@@ -363,6 +372,9 @@ void register_mugraph(
     }
     // Step 1: add all tasks based on their blockIdx
     // (bid.x, bid.y, bid.z) ordering
+    if (task_type == TASK_PAGED_ATTENTION_1) {
+      printf("x.dim: %d, y.dim: %d\n", bgraph.grid_dim.x, bgraph.grid_dim.y);
+    }
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -433,6 +445,44 @@ void register_mugraph(
         }
       }
     }
+    if (task_type == TASK_PAGED_ATTENTION_1 && all_tasks.size() < 400) {
+      const int last_task_idx = tasks.size() - 1;
+      const int first_attn_tasks_idx = last_task_idx - (bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z) + 1;
+      for (int i = first_attn_tasks_idx; i <= last_task_idx; i ++) {
+        int x = (i - first_attn_tasks_idx) / bgraph.grid_dim.y;
+        int y = (i - first_attn_tasks_idx) % bgraph.grid_dim.y;
+        printf("for task %d, its bid: (%d, %d), its request_id: %d\n", i, x, y, tasks[i].task_metadata.request_id);
+      }
+      printf("aaaaa bgraph.grid_dim.x: %d, bgraph.grid_dim.y: %d, bgraph.grid_dim.z: %d\n", bgraph.grid_dim.x, bgraph.grid_dim.y, bgraph.grid_dim.z);
+    }
+
+
+
+    if (task_type == TASK_PAGED_ATTENTION_1) {
+      // swizzle for attn task
+      const int task_cnt = tasks.size();
+      std::vector<FullTaskDesc> tmp_tasks(task_cnt);
+      for (int x = 0; x < bgraph.grid_dim.x; x ++) {
+        for (int y = 0; y < bgraph.grid_dim.y; y ++) {
+          // do swizzling here
+          int pre_offset = x * bgraph.grid_dim.y + y;
+          int new_x = x ^ y;
+          int cur_offset = new_x * bgraph.grid_dim.y + y;
+          tmp_tasks[cur_offset] = tasks[pre_offset];
+        }
+      }
+      tasks = std::move(tmp_tasks);
+
+      if (task_type == TASK_PAGED_ATTENTION_1 && all_tasks.size() < 400) {
+        const int last_task_idx = tasks.size() - 1;
+        const int first_attn_tasks_idx = last_task_idx - (bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z) + 1;
+        for (int i = first_attn_tasks_idx; i <= last_task_idx; i ++) {
+          int x = (i - first_attn_tasks_idx) / bgraph.grid_dim.y;
+          int y = (i - first_attn_tasks_idx) % bgraph.grid_dim.y;
+          printf("for swizzled task %d, its bid: (%d, %d), its request_id: %d\n", i, x, y, tasks[i].task_metadata.request_id);
+        }
+      }
+    }
     // Step 2: create events between operators
     if (pre_op == nullptr) {
       dim3 bid;
@@ -491,6 +541,9 @@ void register_mugraph(
       std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
+      }
+      if (task_type == TASK_PAGED_ATTENTION_1 && all_tasks.size() < 400) {
+        printf("bbbbb bgraph.grid_dim.x: %d, bgraph.grid_dim.y: %d, bgraph.grid_dim.z: %d\n", bgraph.grid_dim.x, bgraph.grid_dim.y, bgraph.grid_dim.z);
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
