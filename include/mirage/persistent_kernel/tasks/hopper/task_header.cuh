@@ -2,8 +2,8 @@
 #include "tasks/ampere/argmax.cuh"
 #include "tasks/ampere/embedding.cuh"
 #include "tasks/ampere/merge_splitkv.cuh"
-#include "tasks/ampere/silu_mul.cuh"
 #include "tasks/ampere/reduction.cuh"
+#include "tasks/ampere/silu_mul.cuh"
 // Hopper task impls
 #include "tasks/cute/hopper/gemm_ws.cuh"
 #include "tasks/cute/hopper/gemm_ws_cooperative.cuh"
