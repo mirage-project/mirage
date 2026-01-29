@@ -63,6 +63,8 @@ struct Dim3Comparator {
  * putting data to one of the other GPUs.
  */
 int get_num_subtasks(int num_gpus, TaskType task_type) {
+  // TODO(Zepeng) Re-consider this design. Try if task coalescing can result in
+  // better performance.
   if (task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT) {
     return num_gpus - 1;
   } else {
