@@ -1660,7 +1660,13 @@ int TaskRegister::register_embedding_hopper_task(
 int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params,
                                              bool with_residual) {
-  assert(params.size() == 0);
+  bool rank_with_residual = with_residual;
+  if (with_residual) {
+    assert(params.size() == 1);
+    rank_with_residual = (params[0] == 1);
+  } else {
+    assert(params.size() == 0);
+  }
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -1779,7 +1785,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
-         with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
+         (with_residual && rank_with_residual) ? "task_desc->input_ptrs[2]" : "nullptr");
   code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
          "decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, $, $, "
@@ -1789,7 +1795,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
          batch_size,
          output_size,
          reduction_size,
-         with_residual ? "false" : "true",
+         (with_residual && rank_with_residual) ? "false" : "true",
          /*SplitK=*/"false",
          num_ab_stages,
          num_acc_stages,
