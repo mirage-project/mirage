@@ -73,6 +73,20 @@ using namespace kernel;
   } while (0)
 #endif
 
+#ifdef USE_NVSHMEM
+#ifndef NVSHMEM_CHECK
+#define NVSHMEM_CHECK(stmt)                                                    \
+    do {                                                                       \
+        int result = (stmt);                                                   \
+        if (NVSHMEMX_SUCCESS != result) {                                      \
+            fprintf(stderr, "[%s:%d] NVSHMEM failed with error %d\n",          \
+                    __FILE__, __LINE__, result);                               \
+            exit(EXIT_FAILURE);                                                \
+        }                                                                      \
+    } while (0)
+#endif    
+#endif
+
 // #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
@@ -1077,7 +1091,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_remote_schedulers,
                                        int max_seq_length,
                                        int total_num_requests,
-                                       long long eos_token_id) {
+                                       long long eos_token_id,
+                                       int allocate_nvshmem_teams) {
   assert(meta_tensors.size() == 10);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
@@ -1119,6 +1134,22 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   for (int i = 0; i < npes; i++) {
     if (i == mype) continue;
     CUDA_CHECK(cudaDeviceEnablePeerAccess(i, 0));
+  }
+  // Create nvshmem teams
+  // For now, we assume we always need these teams. In the future, we should
+  // determine the numebr of teams by scanning kernels.
+  if (allocate_nvshmem_teams == 1) {
+    std::vector<nvshmem_team_t> teams_host(global_runtime_config.num_workers);
+    for (int i = 0; i < global_runtime_config.num_workers; i++) {
+      NVSHMEM_CHECK(nvshmem_team_split_strided(
+          NVSHMEM_TEAM_WORLD, 0, 1, npes, nullptr, 0, &teams_host[i]));
+    }
+    global_runtime_config.nvshmem_teams = gpu_malloc<nvshmem_team_t>(
+        global_runtime_config.num_workers * sizeof(nvshmem_team_t));
+    cudaMemcpy(global_runtime_config.nvshmem_teams,
+              teams_host.data(),
+              global_runtime_config.num_workers * sizeof(nvshmem_team_t),
+              cudaMemcpyHostToDevice);
   }
 #else
   int mype = 0;

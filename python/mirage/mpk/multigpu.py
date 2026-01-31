@@ -8,6 +8,7 @@ of collective communication operations based on GPU architecture and hardware ca
 from abc import ABC, abstractmethod
 from typing import Optional, List, Tuple, Any, Dict
 import warnings
+import os
 
 from . import cuda_utils
 from .persistent_kernel import TBGraph, CyTBGraph
@@ -69,6 +70,19 @@ def get_collective_capabilities(num_devices: int, device_id: int = 0) -> Collect
     if collective_capabilities is None:
         collective_capabilities = CollectiveCapabilities(num_devices, device_id)
     return collective_capabilities
+
+def allocate_nvshmem_teams(mpk, num: int):
+    # We should set NVSHMEM_MAX_TEAMS environment variable
+    nvshmem_max_teams = os.environ.get("NVSHMEM_MAX_TEAMS", None)
+    target_num_teams = num * 32
+    if nvshmem_max_teams is None:
+        os.environ["NVSHMEM_MAX_TEAMS"] = str(target_num_teams)
+    else:
+        existing_max_teams = int(nvshmem_max_teams)
+        if existing_max_teams < num:
+            os.environ["NVSHMEM_MAX_TEAMS"] = str(target_num_teams)
+    mpk.allocate_nvshmem_teams = 1
+    print(f"Set NVSHMEM_MAX_TEAMS={os.environ['NVSHMEM_MAX_TEAMS']}")
 
 # ============================================================================
 # Strategy Pattern: Base Classes for Collective Implementations
@@ -136,14 +150,10 @@ class AllReduceStrategy_AllgatherReduce(AllReduceStrategy):
     
     def register_tasks(self, mpk, tensors: Dict, grid_dim: Tuple,
                       block_dim: Tuple, params: List[int]) -> None:
-        """Register allgather + reduction tasks."""
-        
         assert len(params) == 2, "params should contain [world_size, rank]"
-
         input_tensor = tensors.pop("input")
         output_tensor = tensors.pop("output")
         buffer_tensor = tensors.pop("buffer")
-
         if len(tensors) > 0:
             print(f"{self} Unused tensors: {tensors.keys()}")
 
@@ -163,18 +173,28 @@ class AllReduceStrategy_AllgatherReduce(AllReduceStrategy):
         mpk.kn_graph.register_task(reduction_tb_graph, "reduction", params)
 
 
-class NvshmemTileAllReduceStrategy(AllReduceStrategy):
+class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
     """AllReduce using NVSHMEM tile-based operations (for SM >= 90)."""
     
     def __init__(self):
         super().__init__("nvshmem_tile_allreduce")
     
-    def register_tasks(self, mpk, tensors: List, grid_dim: Tuple,
+    def register_tasks(self, mpk, tensors: Dict, grid_dim: Tuple,
                       block_dim: Tuple, params: List[int]) -> None:
-        """Register tile-based allreduce tasks."""
-        # TODO: Implement when tile-based allreduce is available
-        raise NotImplementedError(
-            "Tile-based allreduce is not yet implemented for SM90 and above.")
+        assert len(params) == 2, "params should contain [world_size, rank]"
+        input_tensor = tensors.pop("input")
+        output_tensor = tensors.pop("output")
+        if len(tensors) > 0:
+            print(f"{self} Unused tensors: {tensors.keys()}")
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_tensor, (1, -1, -1), -1, True)
+        tb_graph.new_input(output_tensor, (1, -1, -1), -1, True)
+        mpk.kn_graph.customized([input_tensor, output_tensor], tb_graph)
+        mpk.kn_graph.register_task(tb_graph, "nvshmem_tile_allreduce", params)
+
+        # We should set NVSHMEM_MAX_TEAMS environment variable
+        allocate_nvshmem_teams(mpk, mpk.num_workers)
 
 # ============================================================================
 # Concrete AllGather Implementations
@@ -210,7 +230,7 @@ def auto_select_allreduce_implementation(
     if capabilities.target_cc >= 90:
         if (capabilities.vmm_supported and capabilities.multicast_supported 
             and capabilities.peer_access_supported):
-            return NvshmemTileAllReduceStrategy()
+            return AllReduceStrategy_NvshmemTile()
 
     # Default to allgather + reduction
     return AllReduceStrategy_AllgatherReduce()

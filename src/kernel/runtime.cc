@@ -400,6 +400,11 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.z;
               task.task_metadata.merge_task_offset = bid.y;
             }
+            if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
+              task.task_metadata.task_offset = 
+                bid.x + bid.y * bgraph.grid_dim.x +
+                bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
+            }
             // Initialize input tensors to the task
             for (auto const &input : input_ops) {
               task.inputs[task.num_inputs++] = get_tensor_desc(input);
@@ -593,6 +598,8 @@ TaskGraphResult print_task_graph(
     code.e("task_desc.task_metadata.kv_idx = task.at(\"kv_idx\").get<int>();");
     code.e("task_desc.task_metadata.merge_task_offset = "
            "task.at(\"merge_task_offset\").get<int>();");
+    code.e("task_desc.task_metadata.task_offset = "
+           "task.at(\"task_offset\").get<int>();");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -797,7 +804,8 @@ TaskGraphResult print_task_graph(
              {"request_id", -1},
              {"expert_offset", -1},
              {"kv_idx", -1},
-             {"merge_task_offset", -1}});
+             {"merge_task_offset", -1},
+             {"task_offset", -1}});
   }
   // generate task[1]
   {
@@ -813,7 +821,8 @@ TaskGraphResult print_task_graph(
              {"request_id", -1},
              {"expert_offset", -1},
              {"kv_idx", -1},
-             {"merge_task_offset", -1}});
+             {"merge_task_offset", -1},
+             {"task_offset", -1}});
   }
   // generate all other tasks
   size_t task_pos = 2;
@@ -880,7 +889,8 @@ TaskGraphResult print_task_graph(
                 {"expert_offset", task_desc.task_metadata.expert_offset},
                 {"kv_idx", task_desc.task_metadata.kv_idx},
                 {"merge_task_offset",
-                 task_desc.task_metadata.merge_task_offset}};
+                 task_desc.task_metadata.merge_task_offset},
+                {"task_offset", task_desc.task_metadata.task_offset}};
 
             for (int i = 0; i < task_desc.num_inputs; i++) {
               if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
@@ -1178,8 +1188,6 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
-  task_type_to_name[TASK_NVSHMEM_ALLGATHER_STRIDED_PUT] =
-      "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
   task_type_to_name[TASK_REDUCE] = "TASK_REDUCE";
   task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
   task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";
@@ -1225,6 +1233,11 @@ TaskGraphResult print_task_graph(
       "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100";
   task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER] =
       "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER";
+  // Multi-gpu tasks
+  task_type_to_name[TASK_NVSHMEM_ALLGATHER_STRIDED_PUT] =
+      "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
+  task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] = 
+      "TASK_NVSHMEM_TILE_ALLREDUCE";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

@@ -16,6 +16,9 @@
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/rotary_embedding_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
+#ifdef USE_NVSHMEM
+#include "tasks/hopper/allreduce.cuh"
+#endif // USE_NVSHMEM
 // Blackwell task impls
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
