@@ -31,6 +31,7 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
                                                        void *output_ptr,
                                                        void *_teams,
                                                        int task_offset) {
+  // TODO(Zepeng): Avoid transferring inactive tokens
   // Output stride is the same as hidden size
   using c_hidden = ConstInt<OUTPUT_STRIDE>;
   using c_output = ConstInt<OUTPUT_SIZE>;

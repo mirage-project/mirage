@@ -82,7 +82,7 @@ def allocate_nvshmem_teams(mpk, num: int):
         if existing_max_teams < num:
             os.environ["NVSHMEM_MAX_TEAMS"] = str(target_num_teams)
     mpk.allocate_nvshmem_teams = 1
-    print(f"Set NVSHMEM_MAX_TEAMS={os.environ['NVSHMEM_MAX_TEAMS']}")
+    # print(f"Set NVSHMEM_MAX_TEAMS={os.environ['NVSHMEM_MAX_TEAMS']}")
 
 # ============================================================================
 # Strategy Pattern: Base Classes for Collective Implementations
@@ -184,8 +184,8 @@ class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
         assert len(params) == 2, "params should contain [world_size, rank]"
         input_tensor = tensors.pop("input")
         output_tensor = tensors.pop("output")
-        if len(tensors) > 0:
-            print(f"{self} Unused tensors: {tensors.keys()}")
+        # if len(tensors) > 0:
+        #     print(f"{self} Unused tensors: {tensors.keys()}")
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_tensor, (1, -1, -1), -1, True)
