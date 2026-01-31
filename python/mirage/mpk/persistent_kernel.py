@@ -175,7 +175,7 @@ def get_compile_command(
 
     flags = [
         "-shared",
-        "-std=c++17",
+        "-std=c++20",
         "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
