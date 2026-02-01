@@ -1128,8 +1128,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   nvshmem_barrier_all();
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
-  int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-  printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
+  printf("MPK: Rank%d is Ready. Worldsize=%d\n", mype, npes);
 
   for (int i = 0; i < npes; i++) {
     if (i == mype) continue;
@@ -1139,17 +1138,20 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   // For now, we assume we always need these teams. In the future, we should
   // determine the numebr of teams by scanning kernels.
   if (allocate_nvshmem_teams == 1) {
-    std::vector<nvshmem_team_t> teams_host(global_runtime_config.num_workers);
-    for (int i = 0; i < global_runtime_config.num_workers; i++) {
+    int num_teams = global_runtime_config.num_workers;
+    printf("MPK: Rank%d is allocating %d nvshmem teams\n", mype, num_teams);
+    std::vector<nvshmem_team_t> teams_host(num_teams);
+    for (int i = 0; i < num_teams; i++) {
       NVSHMEM_CHECK(nvshmem_team_split_strided(
           NVSHMEM_TEAM_WORLD, 0, 1, npes, nullptr, 0, &teams_host[i]));
     }
     global_runtime_config.nvshmem_teams = gpu_malloc<nvshmem_team_t>(
-        global_runtime_config.num_workers * sizeof(nvshmem_team_t));
+        num_teams * sizeof(nvshmem_team_t));
     cudaMemcpy(global_runtime_config.nvshmem_teams,
               teams_host.data(),
-              global_runtime_config.num_workers * sizeof(nvshmem_team_t),
+              num_teams * sizeof(nvshmem_team_t),
               cudaMemcpyHostToDevice);
+    printf("MPK: Rank%d finished allocating nvshmem teams\n");
   }
 #else
   int mype = 0;

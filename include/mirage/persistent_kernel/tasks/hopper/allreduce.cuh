@@ -30,7 +30,8 @@ template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
 __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
                                                        void *output_ptr,
                                                        void *_teams,
-                                                       int task_offset) {
+                                                       int task_offset,
+                                                       int active_tokens) {
   // TODO(Zepeng): Avoid transferring inactive tokens
   // Output stride is the same as hidden size
   using c_hidden = ConstInt<OUTPUT_STRIDE>;
@@ -38,7 +39,7 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
   using c_batch = ConstInt<BATCH_SIZE>;
   using c_1 = ConstInt<1>;
   auto tile_shape =
-      nvshmemx::make_shape<c_output, c_batch>(c_output{}, c_batch{});
+      nvshmemx::make_shape<c_output, int>(c_output{}, active_tokens);
   auto tile_stride = nvshmemx::make_stride<c_1, c_hidden>(c_1{}, c_hidden{});
   auto tile_layout = nvshmemx::make_layout(tile_shape, tile_stride);
   auto src_tensor =

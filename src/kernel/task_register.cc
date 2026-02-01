@@ -1725,7 +1725,8 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
-         (with_residual && rank_with_residual) ? "task_desc->input_ptrs[2]" : "nullptr");
+         (with_residual && rank_with_residual) ? "task_desc->input_ptrs[2]"
+                                               : "nullptr");
   code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
          "decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, $, $, "
@@ -3129,16 +3130,16 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   // Register tile allreduce task
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
-  c.e("nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(", 
+  c.e("nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
       batch_size,
       output_size,
       output_stride);
   c.e("  task_desc->input_ptrs[0],");
   c.e("  task_desc->output_ptrs[0],");
   c.e("  runtime_config.nvshmem_teams,");
-  c.e("  task_desc->task_metadata.task_offset);");
-  return register_task_variant(TASK_NVSHMEM_TILE_ALLREDUCE,
-                               c.to_string());
+  c.e("  task_desc->task_metadata.task_offset,");
+  c.e("  runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  return register_task_variant(TASK_NVSHMEM_TILE_ALLREDUCE, c.to_string());
 }
 
 } // namespace runtime

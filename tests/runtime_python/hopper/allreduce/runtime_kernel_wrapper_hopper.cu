@@ -28,7 +28,6 @@
 #include <nvshmem.h>
 #include <nvshmemx.h>
 
-using bfloat16 = type::bfloat16_t;
 
 #ifndef NVSHMEM_CHECK
 #define NVSHMEM_CHECK(stmt)                                                    \
@@ -48,12 +47,14 @@ static void* output_ptr_global = nullptr;
 // One CTA/team per hidden-dimension tile (4096 / 64 = 64 tiles).
 constexpr int NUM_TEAMS = 64;
 constexpr size_t MALLOC_SIZE = 1024 * 1024 * 1024; // 1GB
+constexpr int NUM_ITERS = 100;
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
 __global__ void allreduce_kernel_wrapper(void *input_ptr,
                                          void *output_ptr,
                                          void *nvshmem_teams,
-                                         int task_offset) {
+                                         int task_offset,
+                                         int active_tokens) {
   // One CTA per tile: map blockIdx.x to tile/team
   task_offset = blockIdx.x;
   // Offset to this tile's slice along hidden dimension
@@ -61,8 +62,10 @@ __global__ void allreduce_kernel_wrapper(void *input_ptr,
       reinterpret_cast<char*>(input_ptr) + blockIdx.x * OUTPUT_SIZE * sizeof(T));
   output_ptr = reinterpret_cast<void*>(
       reinterpret_cast<char*>(output_ptr) + blockIdx.x * OUTPUT_SIZE * sizeof(T));
-  kernel::nvshmem_tile_allreduce<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE>(
-      input_ptr, output_ptr, nvshmem_teams, task_offset);
+  for (int i = 0; i < NUM_ITERS; i++) {
+    kernel::nvshmem_tile_allreduce<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE>(
+        input_ptr, output_ptr, nvshmem_teams, task_offset, active_tokens);
+  }
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
@@ -72,10 +75,36 @@ void launch_allreduce(void *input_ptr,
                       int task_offset = 0) {
   dim3 grid_dim(NUM_TEAMS, 1, 1);
   dim3 block_dim(256, 1, 1);
+  cudaEvent_t start_event, stop_event;
+  cudaEventCreate(&start_event);
+  cudaEventCreate(&stop_event);
 
   allreduce_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE>
       <<<grid_dim, block_dim>>>(
-          input_ptr, output_ptr, nvshmem_teams, task_offset);
+          input_ptr, output_ptr, nvshmem_teams, task_offset, BATCH_SIZE);
+
+  // Sweep active token counts from 1 to BATCH_SIZE and time each run.
+  for (int active_tokens = 1; active_tokens <= BATCH_SIZE; ++active_tokens) {
+    cudaEventRecord(start_event);
+
+    allreduce_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE>
+        <<<grid_dim, block_dim>>>(
+            input_ptr, output_ptr, nvshmem_teams, task_offset, active_tokens);
+
+    cudaEventRecord(stop_event);
+    cudaEventSynchronize(stop_event);
+
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start_event, stop_event);
+
+    // Kernel does NUM_ITERS reductions internally. Report both total and per-iter time.
+    float avg_us_per_iter = (elapsed_ms * 1000.0f) / static_cast<float>(NUM_ITERS);
+    printf("active_tokens=%d : total %.3f ms for %d iters (avg %.3f us/iter)\n",
+           active_tokens, elapsed_ms, NUM_ITERS, avg_us_per_iter);
+  }
+
+  cudaEventDestroy(start_event);
+  cudaEventDestroy(stop_event);
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -140,11 +169,11 @@ void allreduce_kernel(torch::Tensor input,
   }
 
   // Copy data from tensor to nvshmem allocated memory
-  size_t num_bytes = input.numel() * sizeof(bfloat16);
+  size_t num_bytes = input.numel() * sizeof(nv_bfloat16);
   cudaMemcpy(input_ptr_global, input_ptr, num_bytes, cudaMemcpyDeviceToDevice);
 
   // Reduce hidden dimension using 64-element tiles (one CTA per tile).
-  launch_allreduce<__nv_bfloat16, 8, 64, 4096>(input_ptr_global, output_ptr_global, nvshmem_teams_ptr);
+  launch_allreduce<nv_bfloat16, 8, 64, 4096>(input_ptr_global, output_ptr_global, nvshmem_teams_ptr);
 
   cudaMemcpy(output_ptr, output_ptr_global, num_bytes, cudaMemcpyDeviceToDevice);
 }
