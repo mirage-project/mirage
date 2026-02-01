@@ -678,7 +678,8 @@ int TaskRegister::register_reduction_task(threadblock::Graph const &bgraph,
          output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
-  code.e("    task_desc->output_ptrs[0]);");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_REDUCE, code.to_string());
 }
 
@@ -3089,7 +3090,8 @@ int TaskRegister::register_nvshmem_allgather_strided_put_task(
   c.e("  task_desc->input_ptrs[0],");
   c.e("  &runtime_config.all_event_counters[event_index],");
   c.e("  event_index,");
-  c.e("  target_gpu_id);");
+  c.e("  target_gpu_id,");
+  c.e("  runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
 
   return register_task_variant(TASK_NVSHMEM_ALLGATHER_STRIDED_PUT,
                                c.to_string());
