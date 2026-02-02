@@ -1130,10 +1130,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   int npes = nvshmem_n_pes();
   printf("MPK: Rank%d is Ready. Worldsize=%d\n", mype, npes);
 
-  for (int i = 0; i < npes; i++) {
-    if (i == mype) continue;
-    CUDA_CHECK(cudaDeviceEnablePeerAccess(i, 0));
-  }
   // Create nvshmem teams
   // For now, we assume we always need these teams. In the future, we should
   // determine the numebr of teams by scanning kernels.
