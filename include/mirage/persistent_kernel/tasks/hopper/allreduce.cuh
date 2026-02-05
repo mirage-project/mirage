@@ -41,12 +41,12 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
       nvshmemx::make_shape<c_output, int>(c_output{}, active_tokens);
   auto tile_stride = nvshmemx::make_stride<c_1, c_hidden>(c_1{}, c_hidden{});
   auto tile_layout = nvshmemx::make_layout(tile_shape, tile_stride);
-  auto src_tensor =
-      nvshmemx::Tensor<T, decltype(tile_layout)>(reinterpret_cast<T*>(input_ptr), tile_layout);
-  auto dst_tensor =
-      nvshmemx::Tensor<T, decltype(tile_layout)>(reinterpret_cast<T*>(output_ptr), tile_layout);
-  
-  nvshmem_team_t* teams = reinterpret_cast<nvshmem_team_t*>(_teams);
+  auto src_tensor = nvshmemx::Tensor<T, decltype(tile_layout)>(
+      reinterpret_cast<T *>(input_ptr), tile_layout);
+  auto dst_tensor = nvshmemx::Tensor<T, decltype(tile_layout)>(
+      reinterpret_cast<T *>(output_ptr), tile_layout);
+
+  nvshmem_team_t *teams = reinterpret_cast<nvshmem_team_t *>(_teams);
 
   struct empty {};
   nvshmemx::tile_sum_reduce_block<
@@ -55,33 +55,34 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
       empty,
       nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(
       teams[task_offset], src_tensor, dst_tensor, empty{}, empty{}, 0, 0);
-  
+
   // // Ensure completion of the NBI tile collective before reusing dst.
   // nvshmemx::tile_collective_wait_block<
-  //     nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(teams[task_offset], 0);
+  //     nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(teams[task_offset],
+  //     0);
 }
 
 /**
  * @brief Warp level nvshmem tile allreduce.
- * 
+ *
  * @note To use this function, we need a huge number of teams (one per warp).
  *       This would introduce significant setup overhead.
  * @tparam T
- * @tparam BATCH_SIZE 
- * @tparam OUTPUT_SIZE 
- * @tparam OUTPUT_STRIDE 
- * @param input_ptr 
- * @param output_ptr 
+ * @tparam BATCH_SIZE
+ * @tparam OUTPUT_SIZE
+ * @tparam OUTPUT_STRIDE
+ * @param input_ptr
+ * @param output_ptr
  * @param _teams NVSHMEM teams pointer. Must have at least one team per warp.
  * @param task_offset The task offset (thread block level).
- * @param active_tokens 
+ * @param active_tokens
  */
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
 __device__ __forceinline__ void nvshmem_tile_allreduce_warp(void *input_ptr,
-                                                       void *output_ptr,
-                                                       void *_teams,
-                                                       int task_offset,
-                                                       int active_tokens) {
+                                                            void *output_ptr,
+                                                            void *_teams,
+                                                            int task_offset,
+                                                            int active_tokens) {
   // Output stride is the same as hidden size
   using c_hidden = ConstInt<OUTPUT_STRIDE>;
   using c_output = ConstInt<OUTPUT_SIZE>;
@@ -89,15 +90,16 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_warp(void *input_ptr,
   using c_1 = ConstInt<1>;
 
   constexpr int WARP_SIZE = 32;
-  const int warp_id = threadIdx.x / WARP_SIZE;
-  const int num_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
-  const int tokens_per_warp = active_tokens + num_warps - 1;
-  const int token_start = warp_id * tokens_per_warp;
+  int const warp_id = threadIdx.x / WARP_SIZE;
+  int const num_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+  int const tokens_per_warp = active_tokens + num_warps - 1;
+  int const token_start = warp_id * tokens_per_warp;
   int tokens_this_warp = 0;
   if (tokens_per_warp > 0) {
     int remaining = active_tokens - token_start;
     if (remaining > 0) {
-      tokens_this_warp = remaining < tokens_per_warp ? remaining : tokens_per_warp;
+      tokens_this_warp =
+          remaining < tokens_per_warp ? remaining : tokens_per_warp;
     }
   }
 
@@ -111,12 +113,14 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_warp(void *input_ptr,
   auto tile_stride = nvshmemx::make_stride<c_1, c_hidden>(c_1{}, c_hidden{});
   auto tile_layout = nvshmemx::make_layout(tile_shape, tile_stride);
 
-  T *src_base = reinterpret_cast<T*>(input_ptr) + token_start * OUTPUT_STRIDE;
-  T *dst_base = reinterpret_cast<T*>(output_ptr) + token_start * OUTPUT_STRIDE;
-  auto src_tensor = nvshmemx::Tensor<T, decltype(tile_layout)>(src_base, tile_layout);
-  auto dst_tensor = nvshmemx::Tensor<T, decltype(tile_layout)>(dst_base, tile_layout);
-  
-  nvshmem_team_t* teams = reinterpret_cast<nvshmem_team_t*>(_teams);
+  T *src_base = reinterpret_cast<T *>(input_ptr) + token_start * OUTPUT_STRIDE;
+  T *dst_base = reinterpret_cast<T *>(output_ptr) + token_start * OUTPUT_STRIDE;
+  auto src_tensor =
+      nvshmemx::Tensor<T, decltype(tile_layout)>(src_base, tile_layout);
+  auto dst_tensor =
+      nvshmemx::Tensor<T, decltype(tile_layout)>(dst_base, tile_layout);
+
+  nvshmem_team_t *teams = reinterpret_cast<nvshmem_team_t *>(_teams);
 
   struct empty {};
   nvshmemx::tile_sum_reduce_warp<
@@ -128,7 +132,8 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_warp(void *input_ptr,
 
   // Ensure completion of the NBI tile collective before reusing dst.
   nvshmemx::tile_collective_wait_warp<
-      nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(teams[task_offset], 0);
+      nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(teams[task_offset],
+                                                          0);
 }
 
 #endif // USE_NVSHMEM

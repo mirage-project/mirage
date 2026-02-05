@@ -660,7 +660,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
-  } 
+  }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {
     int variant_id = task_register->register_nvshmem_allgather_strided_put_task(

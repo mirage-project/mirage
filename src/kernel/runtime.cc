@@ -103,12 +103,13 @@ void dfs_create_events_add_tasks(
       for (bid.y = consumer_lo_bid.y; bid.y < consumer_hi_bid.y; bid.y++) {
         for (bid.z = consumer_lo_bid.z; bid.z < consumer_hi_bid.z; bid.z++) {
           int block_offset = bid.x * consumer_grid_dim.y * consumer_grid_dim.z +
-                       bid.y * consumer_grid_dim.z + bid.z;
+                             bid.y * consumer_grid_dim.z + bid.z;
           if (multigpu_task) {
             cur_task_map[bid] = std::vector<TaskId>();
             for (int i = 0; i < num_gpus - 1; i++) {
               cur_task_map[bid].push_back(all_tasks.size());
-              all_tasks.push_back(cur_op_tasks[block_offset * (num_gpus - 1) + i]);
+              all_tasks.push_back(
+                  cur_op_tasks[block_offset * (num_gpus - 1) + i]);
             }
           } else {
             cur_task_map[bid] = std::vector<TaskId>{all_tasks.size()};
@@ -402,9 +403,9 @@ void register_mugraph(
               task.task_metadata.merge_task_offset = bid.y;
             }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
-              task.task_metadata.task_offset = 
-                bid.x + bid.y * bgraph.grid_dim.x +
-                bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
+              task.task_metadata.task_offset =
+                  bid.x + bid.y * bgraph.grid_dim.x +
+                  bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
             }
             // Initialize input tensors to the task
             for (auto const &input : input_ops) {
@@ -860,9 +861,9 @@ TaskGraphResult print_task_graph(
     unsigned cur_op_num_subtasks = get_num_subtasks(num_gpus, task_type);
 
     // There is no guarantee that the tasks are added in (x,y,z) order,
-    // so, to keep the final tasks array in order, we need to re-order them here.
-    // ! tgbody-based gen is still prone to ordering issue.
-    std::vector<json> json_tasks(bgraph.grid_dim.x * bgraph.grid_dim.y * 
+    // so, to keep the final tasks array in order, we need to re-order them
+    // here. ! tgbody-based gen is still prone to ordering issue.
+    std::vector<json> json_tasks(bgraph.grid_dim.x * bgraph.grid_dim.y *
                                  bgraph.grid_dim.z * cur_op_num_subtasks);
     TaskId starting_task_id = task_pos;
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
@@ -1246,7 +1247,7 @@ TaskGraphResult print_task_graph(
   // Multi-gpu tasks
   task_type_to_name[TASK_NVSHMEM_ALLGATHER_STRIDED_PUT] =
       "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
-  task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] = 
+  task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
 
   code.e("__device__ __forceinline__");

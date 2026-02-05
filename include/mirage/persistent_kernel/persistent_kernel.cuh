@@ -76,15 +76,18 @@ using namespace kernel;
 #ifdef USE_NVSHMEM
 #ifndef NVSHMEM_CHECK
 #define NVSHMEM_CHECK(stmt)                                                    \
-    do {                                                                       \
-        int result = (stmt);                                                   \
-        if (NVSHMEMX_SUCCESS != result) {                                      \
-            fprintf(stderr, "[%s:%d] NVSHMEM failed with error %d\n",          \
-                    __FILE__, __LINE__, result);                               \
-            exit(EXIT_FAILURE);                                                \
-        }                                                                      \
-    } while (0)
-#endif    
+  do {                                                                         \
+    int result = (stmt);                                                       \
+    if (NVSHMEMX_SUCCESS != result) {                                          \
+      fprintf(stderr,                                                          \
+              "[%s:%d] NVSHMEM failed with error %d\n",                        \
+              __FILE__,                                                        \
+              __LINE__,                                                        \
+              result);                                                         \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  } while (0)
+#endif
 #endif
 
 // #define MPK_ENABLE_VERBOSE
@@ -1141,12 +1144,12 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       NVSHMEM_CHECK(nvshmem_team_split_strided(
           NVSHMEM_TEAM_WORLD, 0, 1, npes, nullptr, 0, &teams_host[i]));
     }
-    global_runtime_config.nvshmem_teams = gpu_malloc<nvshmem_team_t>(
-        num_teams * sizeof(nvshmem_team_t));
+    global_runtime_config.nvshmem_teams =
+        gpu_malloc<nvshmem_team_t>(num_teams * sizeof(nvshmem_team_t));
     cudaMemcpy(global_runtime_config.nvshmem_teams,
-              teams_host.data(),
-              num_teams * sizeof(nvshmem_team_t),
-              cudaMemcpyHostToDevice);
+               teams_host.data(),
+               num_teams * sizeof(nvshmem_team_t),
+               cudaMemcpyHostToDevice);
     printf("MPK: Rank%d finished allocating nvshmem teams\n", mype);
   }
 #else

@@ -51,9 +51,9 @@ __device__ __forceinline__ void
   __syncthreads();
   if (threadIdx.x == 0) {
     nvshmemx_signal_op(reinterpret_cast<uint64_t *>(sig_addr),
-                      1,
-                      NVSHMEM_SIGNAL_ADD,
-                      target_gpu_id);
+                       1,
+                       NVSHMEM_SIGNAL_ADD,
+                       target_gpu_id);
   }
 }
 
@@ -78,7 +78,7 @@ __device__ __forceinline__ void reduction_kernel(void const *input_ptr,
     float accum = 0.0;
     int batch = idx / OUTPUT_SIZE;
     int offset = idx % OUTPUT_SIZE;
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < NUM_GPUS; i++) {
       if (i == MY_GPU_ID) {
         accum += static_cast<float>(d_input[batch * OUTPUT_STRIDE + offset]);
