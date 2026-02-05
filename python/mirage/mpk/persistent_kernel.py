@@ -1033,13 +1033,26 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size)
         # params[0]: num_gpus
         # params[1]: my_gpu_id
-        params = [self.world_size, self.mpi_rank]
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (1, -1, -1), -1, True)
-        tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-        tb_graph.new_input(output, (1, -1, -1), -1, True)
-        self.kn_graph.customized([input, buffer, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "allreduce", params)
+        if self.target_cc < 90:
+            params = [self.world_size, self.mpi_rank]
+            allgather_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            allgather_tb_graph.new_input(input, (1, -1, -1), -1, True)
+            allgather_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
+            self.kn_graph.customized([input, buffer], allgather_tb_graph)
+            self.kn_graph.register_task(allgather_tb_graph, 
+                "nvshmem_allgather_strided_put", params)
+
+            reduction_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            reduction_tb_graph.new_input(input, (1, -1, -1), -1, True)
+            reduction_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
+            reduction_tb_graph.new_input(output, (1, -1, -1), -1, True)
+            self.kn_graph.customized([input, buffer, output], 
+                                     reduction_tb_graph)
+            self.kn_graph.register_task(reduction_tb_graph, "reduction", params)
+        else:
+            # TODO(Zepeng): Add nvshmem tile based allreduce
+            raise NotImplementedError(
+                "Allreduce layer is not yet implemented for SM90 and above.")
 
     def silu_mul_layer(
         self,
@@ -1389,17 +1402,19 @@ class PersistentKernel:
             # find nvshmem shared library
             if "NVSHMEM_LIB_PATH" in os.environ:
                 NVSHMEM_LIB_PATH = os.environ.get("NVSHMEM_LIB_PATH")
-                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
+                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem_device.a")
                 if not os.path.exists(lib_file_path):
                     raise RuntimeError(
-                        "Environment variable NVSHMEM_LIB_PATH is set but cannot find libnvshmem.a at {lib_file_path}"
+                        "Environment variable NVSHMEM_LIB_PATH is set but cannot find libnvshmem_device.a at {lib_file_path}"
+                        " MPK requires NVSHMEM >= 3.5.19"
                     )
             else:
                 NVSHMEM_LIB_PATH = "/usr/lib/x86_64-linux-gnu/"
-                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
+                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem_device.a")
                 if not os.path.exists(lib_file_path):
                     raise RuntimeError(
-                        "Cannot find libnvshmem.a, please set environment variable NVSHMEM_LIB_PATH"
+                        "Cannot find libnvshmem_device.a, please set environment variable NVSHMEM_LIB_PATH"
+                        " MPK requires NVSHMEM >= 3.5.19"
                     )
             # find mpi include foler
             if "MPI_INC_PATH" in os.environ:

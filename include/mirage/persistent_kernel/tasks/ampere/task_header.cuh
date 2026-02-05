@@ -13,6 +13,10 @@
 #include "rotary_embedding.cuh"
 #include "silu_mul.cuh"
 
+#ifdef USE_NVSHMEM
+#include "allreduce.cuh"
+#endif
+
 #if MIRAGE_USE_CUTLASS_KERNEL
 #include "linear_cutlass.cuh"
 #include "moe_linear.cuh"

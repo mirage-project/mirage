@@ -733,7 +733,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         }
       } else {
         // Case 2: trigger a nvshmem event
-        assert(task_desc->task_type == TASK_NVSHMEM_COPY);
+        // TODO(Zepeng): This branch is no longer used. Sanitize later.
+        assert(task_desc->task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
 #ifdef MPK_ENABLE_VERBOSE
@@ -1148,14 +1149,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
     //   printf("ft.kv_idx %d\n", ft.kv_idx);
     //   printf("ft.merge_task_offset %d\n", ft.merge_task_offset);
     // }
-    // Reinterpret part of TaskDesc to save xfer_size information
-    if (ft.task_type == TASK_NVSHMEM_COPY) {
-      int size_in_bytes = 2;
-      for (int i = 0; i < ft.inputs[0].num_dims; i++) {
-        size_in_bytes *= ft.inputs[0].dim[i];
-      }
-      task_desc.task_metadata.xfer_size_in_bytes = size_in_bytes;
-    }
     all_tasks.push_back(task_desc);
   }
 
