@@ -102,17 +102,17 @@ void dfs_create_events_add_tasks(
     for (bid.x = consumer_lo_bid.x; bid.x < consumer_hi_bid.x; bid.x++) {
       for (bid.y = consumer_lo_bid.y; bid.y < consumer_hi_bid.y; bid.y++) {
         for (bid.z = consumer_lo_bid.z; bid.z < consumer_hi_bid.z; bid.z++) {
-          int offset = bid.x * consumer_grid_dim.y * consumer_grid_dim.z +
+          int block_offset = bid.x * consumer_grid_dim.y * consumer_grid_dim.z +
                        bid.y * consumer_grid_dim.z + bid.z;
           if (multigpu_task) {
             cur_task_map[bid] = std::vector<TaskId>();
             for (int i = 0; i < num_gpus - 1; i++) {
               cur_task_map[bid].push_back(all_tasks.size());
-              all_tasks.push_back(cur_op_tasks[offset * (num_gpus - 1) + i]);
+              all_tasks.push_back(cur_op_tasks[block_offset * (num_gpus - 1) + i]);
             }
           } else {
             cur_task_map[bid] = std::vector<TaskId>{all_tasks.size()};
-            all_tasks.push_back(cur_op_tasks[offset]);
+            all_tasks.push_back(cur_op_tasks[block_offset]);
           }
         }
       }
@@ -146,7 +146,6 @@ void dfs_create_events_add_tasks(
                 my_gpu_id, all_events.size(), nvshmem_event /*nvshmem_event*/);
             event_desc.num_triggers++;
           }
-          // encode gpu_id
         }
       }
     }
@@ -295,6 +294,8 @@ void register_mugraph(
       // assert that their is at least a single tensor shared between ops
       assert(num_shared_tensors >= 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
+        // ! Note: If two block dimensions are mapped to the same tensor dim,
+        // ! then the partitioning will be incorrect.
         if (d == input_map.x) {
           consumer_partition[d] = bgraph.grid_dim.x;
         }
@@ -858,16 +859,20 @@ TaskGraphResult print_task_graph(
 
     unsigned cur_op_num_subtasks = get_num_subtasks(num_gpus, task_type);
 
+    // There is no guarantee that the tasks are added in (x,y,z) order,
+    // so, to keep the final tasks array in order, we need to re-order them here.
+    // ! tgbody-based gen is still prone to ordering issue.
+    std::vector<json> json_tasks(bgraph.grid_dim.x * bgraph.grid_dim.y * 
+                                 bgraph.grid_dim.z * cur_op_num_subtasks);
+    TaskId starting_task_id = task_pos;
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           for (int subtask_id = 0; subtask_id < cur_op_num_subtasks;
                subtask_id++) {
-            FullTaskDesc task_desc = all_tasks[task_pos];
-            assert(task_desc.task_type == task_type);
             TaskId task_id = task_map.at(bid)[subtask_id];
-            assert(task_pos == (task_id & 0xffffffff));
-            tgbody.e("// task[$]", task_pos);
+            FullTaskDesc task_desc = all_tasks[task_id];
+            tgbody.e("// task[$]", task_id);
             tgbody.e("{");
             tgbody.e("FullTaskDesc task_desc(static_cast<TaskType>($));",
                      task_desc.task_type);
@@ -1134,12 +1139,17 @@ TaskGraphResult print_task_graph(
 
             tgbody.e("all_tasks.push_back(task_desc);");
             tgbody.e("}");
-            json_task_graph["all_tasks"].push_back(json_task);
-            task_pos++;
-          }
-        }
-      }
+            // json_task_graph["all_tasks"].push_back(json_task);
+            json_tasks[task_id - starting_task_id] = json_task;
+          } // subtask_id
+        } // bid.z
+      } // bid.y
+    } // bid.x
+
+    for (int i = 0; i < json_tasks.size(); i++) {
+      json_task_graph["all_tasks"].push_back(json_tasks[i]);
     }
+    task_pos += json_tasks.size();
   }
   assert(task_pos == all_tasks.size());
   // Add all events
