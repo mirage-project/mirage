@@ -293,6 +293,7 @@ class PersistentKernel:
         # determine total number of requests for offline serving
         self.total_num_requests = meta_tensors["tokens"].shape[0]
         assert self.max_seq_length == meta_tensors["tokens"].shape[1]
+        ## target_cc: A100: 80, H100: 90, Blackwell: 100
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
         # Check tensor shapes
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
