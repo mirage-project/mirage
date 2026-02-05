@@ -55,10 +55,10 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
       empty,
       nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(
       teams[task_offset], src_tensor, dst_tensor, empty{}, empty{}, 0, 0);
-
-  // Ensure completion of the NBI tile collective before reusing dst.
-  nvshmemx::tile_collective_wait_block<
-      nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(teams[task_offset], 0);
+  
+  // // Ensure completion of the NBI tile collective before reusing dst.
+  // nvshmemx::tile_collective_wait_block<
+  //     nvshmemx::tile_coll_algo_t::NVLS_ONE_SHOT_PULL_NBI>(teams[task_offset], 0);
 }
 
 /**

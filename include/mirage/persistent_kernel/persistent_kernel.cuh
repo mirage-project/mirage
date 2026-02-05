@@ -1133,8 +1133,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   // Create nvshmem teams
   // For now, we assume we always need these teams. In the future, we should
   // determine the numebr of teams by scanning kernels.
-  if (allocate_nvshmem_teams == 1) {
-    int num_teams = global_runtime_config.num_workers;
+  if (allocate_nvshmem_teams > 0) {
+    int num_teams = allocate_nvshmem_teams;
     printf("MPK: Rank%d is allocating %d nvshmem teams\n", mype, num_teams);
     std::vector<nvshmem_team_t> teams_host(num_teams);
     for (int i = 0; i < num_teams; i++) {
@@ -1147,7 +1147,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
               teams_host.data(),
               num_teams * sizeof(nvshmem_team_t),
               cudaMemcpyHostToDevice);
-    printf("MPK: Rank%d finished allocating nvshmem teams\n");
+    printf("MPK: Rank%d finished allocating nvshmem teams\n", mype);
   }
 #else
   int mype = 0;

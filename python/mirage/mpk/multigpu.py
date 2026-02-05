@@ -74,14 +74,14 @@ def get_collective_capabilities(num_devices: int, device_id: int = 0) -> Collect
 def allocate_nvshmem_teams(mpk, num: int):
     # We should set NVSHMEM_MAX_TEAMS environment variable
     nvshmem_max_teams = os.environ.get("NVSHMEM_MAX_TEAMS", None)
-    target_num_teams = num * 32
+    target_num_teams = num * 20 + 32
     if nvshmem_max_teams is None:
         os.environ["NVSHMEM_MAX_TEAMS"] = str(target_num_teams)
     else:
         existing_max_teams = int(nvshmem_max_teams)
         if existing_max_teams < num:
             os.environ["NVSHMEM_MAX_TEAMS"] = str(target_num_teams)
-    mpk.allocate_nvshmem_teams = 1
+    mpk.allocate_nvshmem_teams = num
     # print(f"Set NVSHMEM_MAX_TEAMS={os.environ['NVSHMEM_MAX_TEAMS']}")
 
 # ============================================================================
@@ -194,7 +194,7 @@ class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
         mpk.kn_graph.register_task(tb_graph, "nvshmem_tile_allreduce", params)
 
         # We should set NVSHMEM_MAX_TEAMS environment variable
-        allocate_nvshmem_teams(mpk, mpk.num_workers)
+        allocate_nvshmem_teams(mpk, grid_dim[0] * grid_dim[1] * grid_dim[2])
 
 # ============================================================================
 # Concrete AllGather Implementations
