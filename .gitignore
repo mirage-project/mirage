@@ -36,6 +36,7 @@ __pycache__/
 *.egg-info
 dist/
 wheelhouse/
+.venv/
 
 # Cython
 /python/mirage/_cython/core.cpp
