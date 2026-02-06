@@ -17,15 +17,21 @@ from typing import Optional
 HARD_CODE = """
 #include <Python.h>
 #include <cuda_runtime.h>
+#include <string>
+#include <vector>
+
+extern std::string g_task_graph_json_path;
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *meta_list, *py_profiler_buffer;
+  PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path;
   std::vector<void*> meta_tensors;
+  std::vector<std::string> model_tensor_names;
+  std::vector<void*> model_tensor_ptrs;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiL", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -34,9 +40,16 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     PyErr_SetString(PyExc_TypeError, "arg1 must be a list.");
     return NULL;
   }
+  if(!PyList_Check(tensor_names_list)) {
+    PyErr_SetString(PyExc_TypeError, "tensor_names must be a list.");
+    return NULL;
+  }
+  if(!PyList_Check(tensor_ptrs_list)) {
+    PyErr_SetString(PyExc_TypeError, "tensor_ptrs must be a list.");
+    return NULL;
+  }
 
   Py_ssize_t meta_size = PyList_Size(meta_list);
-
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
@@ -48,7 +61,30 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id);
+  Py_ssize_t num_tensors = PyList_Size(tensor_names_list);
+  for(Py_ssize_t i = 0; i < num_tensors; i++) {
+    PyObject *name_item = PyList_GetItem(tensor_names_list, i);
+    PyObject *ptr_item = PyList_GetItem(tensor_ptrs_list, i);
+    
+    const char *name_str = PyUnicode_AsUTF8(name_item);
+    if (!name_str) {
+      PyErr_Format(PyExc_TypeError, "Failed to convert tensor name %d to string", i);
+      return NULL;
+    }
+    model_tensor_names.push_back(std::string(name_str));
+    
+    void *ptr = PyLong_AsVoidPtr(ptr_item);
+    model_tensor_ptrs.push_back(ptr);
+  }
+
+  if (PyUnicode_Check(py_json_path)) {
+    const char *json_path = PyUnicode_AsUTF8(py_json_path);
+    if (json_path && strlen(json_path) > 0) {
+      g_task_graph_json_path = std::string(json_path);
+    }
+  }
+
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, model_tensor_names, model_tensor_ptrs);
 
   Py_RETURN_NONE;
 }
@@ -284,6 +320,8 @@ class PersistentKernel:
         self.use_nvshmem = True if world_size > 1 else False
         self.spec_decode_config = spec_decode_config
         self.use_cutlass_kernel = use_cutlass_kernel
+        # Dictionary to track attached model tensors for kernel reuse
+        self._model_tensors = {}
         self._spec_decode_handlers = {
             "promptlookup": self.prompt_lookup_spec_handler,
         }
@@ -329,6 +367,8 @@ class PersistentKernel:
         # FIXME: currently assert that name is not None
         assert name is not None
         self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
+        # Track tensor for kernel reuse - tensor pointer can be passed at runtime
+        self._model_tensors[name] = torch_tensor
         return t
 
     def new_tensor(
@@ -1353,6 +1393,7 @@ class PersistentKernel:
             os.makedirs(output_dir, exist_ok=True)
             shutil.copy(cuda_code_path, os.path.join(output_dir, f"test_rank{self.mpi_rank}.cu"))
             shutil.copy(json_file_path, os.path.join(output_dir, f"task_graph_rank{self.mpi_rank}.json"))
+            so_output_path = os.path.join(output_dir, f"mpk_launcher_rank{self.mpi_rank}.cpython-{sys.version_info.major}{sys.version_info.minor}-x86_64-linux-gnu.so")
 
         cc = shutil.which("nvcc")
         if cc is None:
@@ -1470,6 +1511,12 @@ class PersistentKernel:
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)
         subprocess.check_call(cc_cmd)
+        
+        # Copy .so to output_dir if specified
+        if output_dir is not None:
+            so_output_path = os.path.join(output_dir, f"mpk_launcher_rank{self.mpi_rank}.cpython-{sys.version_info.major}{sys.version_info.minor}-x86_64-linux-gnu.so")
+            shutil.copy(so_path, so_output_path)
+            print(f"Saved compiled kernel to: {so_output_path}")
 
         import importlib.util
 
@@ -1499,6 +1546,11 @@ class PersistentKernel:
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
         self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
+        
+        # Build model tensor name/pointer lists for runtime tensor lookup
+        model_tensor_names = list(self._model_tensors.keys())
+        model_tensor_ptrs = [t.data_ptr() for t in self._model_tensors.values()]
+        
         self.init_func(
             meta_tensors_ptr,
             profiler_buffer_ptr,
@@ -1509,11 +1561,100 @@ class PersistentKernel:
             self.max_seq_length,
             self.total_num_requests,
             self.eos_token_id,
+            model_tensor_names,
+            model_tensor_ptrs,
+            "",  # Empty JSON path = use __FILE__ based path during initial compile
         )
 
         self._is_compiled = True
 
         # self.call_func = getattr(mod, "call_func")
+
+    def load_mpk_kernel(
+        self,
+        output_dir: str,
+        **kwargs,
+    ):
+        """
+        Load a pre-compiled MPK kernel from output_dir instead of recompiling.
+        
+        Args:
+            output_dir: Directory containing the pre-compiled kernel files:
+                       - mpk_launcher_rank{N}.cpython-*.so
+                       - task_graph_rank{N}.json
+        """
+        assert not self._is_compiled, "Kernel is already compiled"
+        
+        # Find the compiled .so file
+        so_pattern = f"mpk_launcher_rank{self.mpi_rank}.cpython-{sys.version_info.major}{sys.version_info.minor}-x86_64-linux-gnu.so"
+        so_path = os.path.join(output_dir, so_pattern)
+        
+        if not os.path.exists(so_path):
+            raise FileNotFoundError(
+                f"Pre-compiled kernel not found at {so_path}. "
+                f"Run compile(output_dir='{output_dir}') first to generate it."
+            )
+        
+        json_path = os.path.join(output_dir, f"task_graph_rank{self.mpi_rank}.json")
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(
+                f"Task graph not found at {json_path}. "
+                f"Run compile(output_dir='{output_dir}') first to generate it."
+            )
+        
+        print(f"[load_mpk_kernel] Loading launcher from: {so_path}")
+        print(f"[load_mpk_kernel] Using task graph JSON: {json_path}")
+        
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.init_func = getattr(mod, "init_func")
+        self.launch_func = getattr(mod, "launch_func")
+        self.init_request_func = getattr(mod, "init_request_func")
+        self.finalize_func = getattr(mod, "finalize_func")
+        
+        # Prepare meta tensors
+        meta_tensors = list()
+        meta_tensors.append(self.meta_tensors["step"])
+        meta_tensors.append(self.meta_tensors["tokens"])
+        meta_tensors.append(self.meta_tensors["input_tokens"])
+        meta_tensors.append(self.meta_tensors["output_tokens"])
+        meta_tensors.append(self.meta_tensors["num_new_tokens"])
+        meta_tensors.append(self.meta_tensors["prompt_lengths"])
+        meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
+        meta_tensors.append(self.meta_tensors["paged_kv_indptr_buffer"])
+        meta_tensors.append(self.meta_tensors["paged_kv_indices_buffer"])
+        meta_tensors.append(self.meta_tensors["paged_kv_last_page_len_buffer"])
+        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
+        profiler_buffer_ptr = (
+            self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
+        )
+        
+        self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
+        
+        # Build model tensor name/pointer lists for runtime tensor lookup
+        model_tensor_names = list(self._model_tensors.keys())
+        model_tensor_ptrs = [t.data_ptr() for t in self._model_tensors.values()]
+        
+        print(f"[load_mpk_kernel] Passing {len(model_tensor_names)} model tensors to kernel")
+        
+        self.init_func(
+            meta_tensors_ptr,
+            profiler_buffer_ptr,
+            self.mpi_rank,
+            self.num_workers,
+            self.num_local_schedulers,
+            self.num_remote_schedulers,
+            self.max_seq_length,
+            self.total_num_requests,
+            self.eos_token_id,
+            model_tensor_names,
+            model_tensor_ptrs,
+            json_path,  # Pass the JSON path for kernel reuse
+        )
+        
+        self._is_compiled = True
 
     def __call__(self, **kwargs):
         stream = kwargs.get("default_stream", None)
