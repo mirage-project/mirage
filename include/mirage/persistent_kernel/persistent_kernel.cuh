@@ -1048,9 +1048,13 @@ static void _init_persistent_kernel(std::vector<FullTaskDesc> &all_tasks,
                                     std::vector<EventDesc> &all_events,
                                     std::vector<TaskId> &first_tasks,
                                     int num_gpus,
-                                    int my_gpu_id);
+                                    int my_gpu_id,
+                                    std::map<std::string, void*> const &model_tensors);
 
 static RuntimeConfig global_runtime_config;
+
+// Global model tensors map for runtime tensor lookup
+static std::map<std::string, void*> global_model_tensors;
 
 // meta_tensors[0]: seq_length
 // meta_tensors[1]: tokens
@@ -1077,8 +1081,18 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_remote_schedulers,
                                        int max_seq_length,
                                        int total_num_requests,
-                                       long long eos_token_id) {
+                                       long long eos_token_id,
+                                       std::vector<std::string> model_tensor_names,
+                                       std::vector<void *> model_tensor_ptrs) {
   assert(meta_tensors.size() == 10);
+  
+  // Build global model tensors map from parallel vectors
+  assert(model_tensor_names.size() == model_tensor_ptrs.size());
+  global_model_tensors.clear();
+  for (size_t i = 0; i < model_tensor_names.size(); i++) {
+    global_model_tensors[model_tensor_names[i]] = model_tensor_ptrs[i];
+  }
+  
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
   global_runtime_config.input_tokens =
@@ -1140,7 +1154,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
-  _init_persistent_kernel(all_fulltasks, all_events, first_tasks, npes, mype);
+  _init_persistent_kernel(all_fulltasks, all_events, first_tasks, npes, mype, global_model_tensors);
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
