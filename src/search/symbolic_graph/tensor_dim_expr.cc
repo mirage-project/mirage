@@ -415,6 +415,34 @@ bool TensorDimDisj::is_disj() const {
   return true;
 }
 
+float TensorDimExpr::get_float_value(DimVarAssignment const &assignments) const {
+  assert(false);
+}
+
+float TensorDimVar::get_float_value(DimVarAssignment const &assignments) const {
+  return (float)get_value(assignments);
+}
+
+float TensorDimConst::get_float_value(DimVarAssignment const &assignments) const {
+  return (float)value;
+}
+
+float TensorDimAdd::get_float_value(DimVarAssignment const &assignments) const {
+  return lhs->get_float_value(assignments) + rhs->get_float_value(assignments);
+}
+
+float TensorDimMul::get_float_value(DimVarAssignment const &assignments) const {
+  return lhs->get_float_value(assignments) * rhs->get_float_value(assignments);
+}
+
+float TensorDimDiv::get_float_value(DimVarAssignment const &assignments) const {
+  return lhs->get_float_value(assignments) / rhs->get_float_value(assignments);
+}
+
+float TensorDimIte::get_float_value(DimVarAssignment const &assignments) const {
+  return cond->get_value(assignments) != 0 ? true_case->get_float_value(assignments) : false_case->get_float_value(assignments);
+}
+
 TensorDimVar::operator json() const {
   return json{{"opt", "var"}, {"index", index}};
 }
@@ -939,7 +967,7 @@ int get_value_with_all_vars_two(std::shared_ptr<TensorDimExpr const> expr) {
   for (auto const &var : all_vars) {
     assignment.assign(var->index, 2);
   }
-  return expr->get_value(assignment);
+  return (int)expr->get_float_value(assignment);
 }
 
 int get_value_with_all_vars_random(std::shared_ptr<TensorDimExpr const> expr) {
@@ -948,7 +976,7 @@ int get_value_with_all_vars_random(std::shared_ptr<TensorDimExpr const> expr) {
   for (auto const &var : all_vars) {
     assignment.assign(var->index, (int)var->index + 2);
   }
-  return expr->get_value(assignment);
+  return (int)expr->get_float_value(assignment);
 }
 
 } // namespace search

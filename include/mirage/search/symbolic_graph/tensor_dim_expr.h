@@ -19,6 +19,7 @@ public:
   virtual ~TensorDimExpr() = default;
 
   virtual int get_value(DimVarAssignment const &assignments) const;
+  virtual float get_float_value(DimVarAssignment const &assignments) const;
   virtual std::optional<int> maybe_get_value(DimVarAssignment const &assignments) const;
   virtual std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const = 0;
   virtual z3::expr to_z3(z3::context &c,
@@ -98,6 +99,7 @@ public:
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_var() const override;
+  float get_float_value(DimVarAssignment const &assignments) const override;
 
   size_t hash() const override;
   operator json() const override;
@@ -120,6 +122,7 @@ public:
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_const() const override;
+  float get_float_value(DimVarAssignment const &assignments) const override;
 
   size_t hash() const override;
   operator json() const override;
@@ -142,6 +145,7 @@ public:
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_add() const override;
+  float get_float_value(DimVarAssignment const &assignments) const override;
 
   size_t hash() const override;
   operator json() const override;
@@ -168,6 +172,7 @@ public:
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_mul() const override;
+  float get_float_value(DimVarAssignment const &assignments) const override;
 
   size_t hash() const override;
   operator json() const override;
@@ -193,6 +198,7 @@ public:
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_div() const override;
+  float get_float_value(DimVarAssignment const &assignments) const override;
 
   size_t hash() const override;
   operator json() const override;
@@ -218,6 +224,7 @@ public:
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_ite() const override;
+  float get_float_value(DimVarAssignment const &assignments) const override;
   size_t hash() const override;
   operator json() const override;
   bool same_expr_as(std::shared_ptr<TensorDimExpr const>) const override;

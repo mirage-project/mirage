@@ -38,16 +38,23 @@ OutputMatch FormalVerifier::verify(kernel::Graph const &graph) {
     }
     return true;
   };
+  bool with_output_ops = false;
   for (kernel::KNOperator *op : graph.operators) {
+    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      shapes.push_back(to_vector(op->input_tensors[0].num_dims, op->input_tensors[0].dim));
+      with_output_ops = true;
+      continue;
+    }
     for (kernel::DTensor dtensor : op->output_tensors) {
       if (is_output_tensor(dtensor)) {
+        assert(!with_output_ops);
         shapes.push_back(to_vector(dtensor.num_dims, dtensor.dim));
       }
     }
   }
   assert(shapes.size() == shapes_std.size());
   std::vector<std::string> graph_exprs =
-      get_concrete_exprs(graph, false);
+      get_concrete_exprs(graph, with_output_ops);
   assert(input_exprs.size() == graph_exprs.size());
 
   auto verify_with_match = [&](OutputMatch const &match) {
@@ -537,10 +544,10 @@ std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool w
     });
     std::vector<int> dummy_dim_size = vector_map(graph.grid_dim, [&](SymbolicTensorDim const &dim) {
       assert(dim->is_var());
-      return (int)std::static_pointer_cast<TensorDimVar const>(dim)->index;
+      return (int)std::static_pointer_cast<TensorDimVar const>(dim)->index + 2;
     });
     std::string forloop_range = graph.forloop_range->to_string();
-    int dummy_fsize = std::static_pointer_cast<TensorDimVar const>(graph.forloop_range)->index;
+    int dummy_fsize = std::static_pointer_cast<TensorDimVar const>(graph.forloop_range)->index + 2;
     for (size_t i = 0; i < graph.operators.size(); ++i) {
       switch (graph.operators[i].op_type) {
         case type::TBOperatorType::TB_INPUT_OP: {

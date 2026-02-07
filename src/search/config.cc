@@ -9,7 +9,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       5 /* max_num_kernel_graph_op */,
       1 /* max_num_threadblock_graphs */,
       3 /* max_num_threadblock_graph_inputs */,
-      2 /* max_num_threadblock_graph_outputs */,
+      1 /* max_num_threadblock_graph_outputs */,
       128 /* search_thread */,
       VerifierType::PROBABILISTIC_VERIFIER,
       {

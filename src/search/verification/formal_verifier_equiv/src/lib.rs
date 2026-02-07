@@ -224,6 +224,11 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
             "(sum (replicate ?t0 ?d1 ?i0) ?d0)"
             => "(replicate (sum ?t0 ?d0) ?d1 ?i0)" ),
 
+        rw!("replicate_reduce"; 
+            "(reduce (replicate ?t0 ?d1 ?i0) ?d0)"
+            => "(replicate (reduce ?t0 ?d0) ?d1 ?i0)"
+            if is_unique(&["?d0", "?d1"]) ),
+
         rw!("combine_sum"; 
             "(combine (sum ?t0 ?d0) ?d1 ?d2)" 
             => "(sum (combine ?t0 ?d1 ?d2) ?d0)" 
@@ -250,6 +255,10 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
             "(matmul (partition ?t0 ?d0 ?d1 ?i0) (partition ?t1 ?d0 ?d1 ?i0))"
             => "(partition (matmul ?t0 ?t1) ?d0 ?d1 ?i0)"
             if is_datadim(&["?d0"], vec!["data_dim2".to_string()]) ),
+
+        rw!("replicated_matmul";
+            "(matmul (replicate ?t0 ?d1 ?i0) (replicate ?t1 ?d1 ?i0))"
+            => "(replicate (matmul ?t0 ?t1) ?d1 ?i0)" ),
     ];
 
    let mut rules4 = vec![
@@ -465,12 +474,16 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
     ].concat();
 
     let mut rules9 = vec![
-
         rw!("bc-div-commute-partition";
             "(bc_div (partition ?t0 ?d0 ?d1 ?i0) ?t1)"
             <=> "(partition (bc_div ?t0 ?t1) ?d0 ?d1 ?i0)" 
             if is_datadim(&["?d0"], vec!["data_dim0".to_string()]) ),
 
+        vec![
+            rw!("replicate-select-one";
+                "(replicate ?t0 ?d0 ?i0)"
+                => "?t0" ),
+        ],
     ].concat();
 
     for i in 0..nums.len() {

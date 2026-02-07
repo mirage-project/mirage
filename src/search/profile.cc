@@ -271,7 +271,7 @@ ProfileResult profile(kernel::Graph *graph) {
     }
     
     // Get the execute function
-    using ExecuteFunc = void(*)(std::vector<void const*>, std::vector<void*>, void*, cudaStream_t, void*);
+    using ExecuteFunc = int(*)(std::vector<void const*>, std::vector<void*>, void*, cudaStream_t, void*);
     ExecuteFunc execute_func = (ExecuteFunc)dlsym(handle, "execute_mugraph");
     if (execute_func == nullptr) {
       result.error_message = "Failed to find execute_mugraph: " + std::string(dlerror());
@@ -331,6 +331,19 @@ ProfileResult profile(kernel::Graph *graph) {
     // Convert input pointers to const void*
     std::vector<void const*> const_input_ptrs(input_ptrs.begin(), input_ptrs.end());
     
+    // Check if the kernel can be successfully executed
+    int err = execute_func(const_input_ptrs, output_ptrs, buf_ptr, stream, profiler_buffer);
+    if (err != (int)cudaSuccess) {
+      result.error_message = "Kernel launch failed: " + std::string(cudaGetErrorString((cudaError_t)err));
+      cudaStreamDestroy(stream);
+      cudaFree(buf_ptr);
+      if (profiler_buffer != nullptr) cudaFree(profiler_buffer);
+      for (void* ptr : output_ptrs) cudaFree(ptr);
+      for (void* ptr : input_ptrs) cudaFree(ptr);
+      dlclose(handle);
+      return result;
+    }
+
     // Warmup runs
     const int warmup_iters = 16;
     for (int i = 0; i < warmup_iters; i++) {

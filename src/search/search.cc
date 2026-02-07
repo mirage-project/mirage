@@ -477,6 +477,11 @@ void KernelGraphGenerator::generate_kernel_graphs_symbolic() {
          std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                        start_time)
              .count());
+  
+  // save the verified symbolic graphs
+  std::ofstream ofs(checkpoint_filename);
+  ofs << json(generated_graphs);
+  ofs.close();
 }
 
 void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
@@ -710,9 +715,6 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
               input_tensor_idx, [&](int i) { return kn_graph->tensors[i]; });
 
           for (size_t num_parallel_dims : dim_strategy.get_num_parallel_dims_cand(input_tensors)) {
-            std::cerr << "number of configurations: " << dim_strategy.get_input_map_cand(input_tensors, num_parallel_dims).size()
-              * dim_strategy.get_forloop_dim_cand(input_tensors).size()
-              * dim_strategy.get_reduction_degree_cand(*kn_graph).size() << std::endl;
 
             for (auto const &input_maps : dim_strategy.get_input_map_cand(input_tensors, num_parallel_dims)) {
               for (auto const &forloop_dims : dim_strategy.get_forloop_dim_cand(input_tensors)) {
@@ -863,7 +865,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
 
     // Case B2: Generate pre-defined threadblock operator
     for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
-     for (auto const &input_idx :
+      for (auto const &input_idx :
            dim_strategy.get_input_cand_idx(op_type, tb_graph->tensors)) {
         Order order(input_idx, static_cast<int>(op_type));
         if (order <= get_max_op_order(*tb_graph)) {
@@ -922,32 +924,31 @@ bool KernelGraphGenerator::verify_symbolic_graph(
   std::shared_ptr<FormalVerifier> verifier = std::dynamic_pointer_cast<FormalVerifier>(this->verifier);
   assert(verifier);
 
-  // std::cerr << "verifying symbolic graph: " << json(symbolic_graph) << std::endl;
-
   OutputMatch match = verifier->verify_symbolic_graph(symbolic_graph);
 
   if (match.is_valid()) {
-    // ++num_symbolic_graphs;
-    std::cerr << "verified symbolic graph: " << json(symbolic_graph) << std::endl;
+    ++num_symbolic_graphs;
     ++num_valid_kernel_graphs;
-    AutoTuner auto_tuner(AutoTunerConfig{});
-    DimVarAssignment assignment = auto_tuner.tune(symbolic_graph);
-    kernel::Graph *tuned_graph = symbolic_graph.to_kernel_graph(assignment);
-    if (tuned_graph == nullptr) {
-      std::cerr << "failed to tune symbolic graph: " << json(symbolic_graph) << std::endl;
-      return false;
-    }
-    {
-      OutputMatch match = verifier->verify(*tuned_graph);
-      assert(match.is_valid());
-    }
-    ProfileResult result = profile(tuned_graph);
-    std::cerr << "tuned graph: " << json(*tuned_graph) << " " << result.run_time << std::endl;
-    {
-      #pragma omp critical
-      generated_graphs.push_back(json(*tuned_graph));
-    }
-    delete tuned_graph;
+    std::cerr << "verified symbolic graph: " << json(symbolic_graph) << std::endl;
+    generated_graphs.push_back(json(symbolic_graph));
+    // AutoTuner auto_tuner(AutoTunerConfig{});
+    // DimVarAssignment assignment = auto_tuner.tune(symbolic_graph);
+    // kernel::Graph *tuned_graph = symbolic_graph.to_kernel_graph(assignment);
+    // if (tuned_graph == nullptr) {
+    //   std::cerr << "failed to tune symbolic graph: " << json(symbolic_graph) << std::endl;
+    //   return false;
+    // }
+    // {
+    //   OutputMatch match = verifier->verify(*tuned_graph);
+    //   assert(match.is_valid());
+    // }
+    // ProfileResult result = profile(tuned_graph);
+    // std::cerr << "tuned graph: " << json(*tuned_graph) << " " << result.run_time << std::endl;
+    // {
+    //   #pragma omp critical
+    //   generated_graphs.push_back(json(*tuned_graph));
+    // }
+    // delete tuned_graph;
     return true;
   } else {
     return false;

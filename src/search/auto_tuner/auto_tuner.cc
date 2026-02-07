@@ -43,7 +43,6 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
       int power = rand() % 3 + 2;
       values.push_back(1 << power);
     }
-    std::cerr << "initial_state: " << json(values).dump() << std::endl;
     return values;
   };
 
@@ -115,7 +114,6 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     // Create threadblock graph from symbolic graph
     threadblock::Graph *tb_graph = symbolic_tb_graph.to_threadblock_graph(assignment, input_dtensors);
     if (tb_graph == nullptr) {
-      std::cerr << "failed to create threadblock graph" << std::endl;
       return 1e9f;
     }
     
@@ -123,7 +121,6 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     kernel::KNOperator *customized_op = kn_graph.create_customized_op(input_dtensors, *tb_graph);
     if (customized_op == nullptr) {
       delete tb_graph;
-      std::cerr << "failed to create customized op" << std::endl;
       return 1e9f;
     }
     kn_graph.operators.push_back(customized_op);
@@ -141,7 +138,6 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     
     // Return runtime as energy (higher runtime = higher energy = worse)
     if (!result.is_success) {
-      std::cerr << "failed to profile the kernel graph" << std::endl;
       return 1e9f;
     }
     return result.run_time;

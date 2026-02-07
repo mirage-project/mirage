@@ -107,7 +107,6 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
     }
     if (op == nullptr) {
       delete graph;
-      std::cerr << "failed to create operator: " << json(this->operators[i].op_type) << std::endl;
       return nullptr;
     }
     graph->operators.push_back(op);

@@ -254,6 +254,8 @@ std::vector<std::vector<int3>>
         {0, 1, -1},
         {0, 2, -1},
         {-1, 1, -1},
+        {0, -1, -1},
+        {0, -1, 2}
     };
     if (!config._enable_attention_specific_optimization) {
       imap_to_explore.push_back({-1, -1, -1});
@@ -521,29 +523,7 @@ std::vector<std::vector<std::vector<int>>> DimStrategy::get_input_map_cand(
 
   std::vector<std::vector<std::vector<int>>> input_map_cand_for_each_tensor = vector_map(tensors, get_input_map_cand_for_one_tensor);
   // return filter(cartesian_product(input_map_cand_for_each_tensor), no_redundant_parallel_dim);
-  auto result = filter(cartesian_product(input_map_cand_for_each_tensor), no_redundant_parallel_dim);
-  std::vector<std::vector<int>> expected = {
-    {0, -1, 1},
-    {0, 2, -1},
-    {0, 1, -1},
-  };
-  std::vector<std::vector<int>> expected2 = {
-    {0, 1},
-    {0, 1},
-  };
-  if (num_parallel_dims == 3 && tensors.size() == 3) {
-    if (!contains(result, expected)) {
-      std::cerr << "result: " << json(result) << std::endl;
-    }
-    assert(contains(result, expected));
-  }
-  if (num_parallel_dims == 2 && tensors.size() == 2) {
-    if (!contains(result, expected2)) {
-      std::cerr << "result: " << json(result) << std::endl;
-    }
-    assert(contains(result, expected2));
-  }
-  return result;
+  return filter(cartesian_product(input_map_cand_for_each_tensor), no_redundant_parallel_dim);
 }
 
 std::vector<std::vector<std::vector<int>>>
