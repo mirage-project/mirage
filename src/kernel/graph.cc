@@ -499,11 +499,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_argmax_reduce_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
-  } else if (name == "allreduce") {
-    // `register_reduce_task` will register two tasks, but we only record one
+  } else if (name == "nvshmem_allgather_strided_put") {
+    int variant_id = task_register->register_nvshmem_allgather_strided_put_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_NVSHMEM_ALLGATHER_STRIDED_PUT, variant_id);
+  } else if (name == "reduction") {
     int variant_id =
-        task_register->register_reduce_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, variant_id);
+        task_register->register_reduction_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_REDUCE, variant_id);
   } else if (name == "find_ngram_partial") {
     int variant_id = task_register->register_find_ngram_partial_task(
         customized->bgraph, params);
@@ -581,6 +585,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, false /*with_residual*/);
     task_config[op] =
         std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SWAPAB_HOPPER, variant_id);
+  } else if (name == "paged_attention_split_kv_hopper") {
+    int variant_id =
+        task_register->register_paged_attention_split_kv_hopper_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER, variant_id);
   }
   // SM100 tasks
   else if (name == "linear_sm100") {
@@ -611,6 +621,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
+  } else if (name == "sampling_sm100") {
+    int variant_id =
+        task_register->register_sampling_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SAMPLING_SM100, variant_id);
   } else if (name == "tensor_init") {
     int variant_id =
         task_register->register_tensor_init_task(customized->bgraph, params);
@@ -639,6 +653,18 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_MOE_MUL_SUM_ADD_SM100, variant_id);
+  } else if (name == "paged_attention_split_kv_sm100") {
+    int variant_id =
+        task_register->register_paged_attention_split_kv_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_SM100, variant_id);
+  } else if (name == "paged_attention_split_kv_merge_sm100") {
+    int variant_id =
+        task_register->register_paged_attention_split_kv_merge_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
   } else {
     printf("Unsupported task name: %s\n", name);
     assert(false && "Unsupported task type");

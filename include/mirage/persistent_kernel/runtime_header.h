@@ -27,9 +27,25 @@ constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 #endif
 
+#if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
+// Have to be smaller for vllm compatibility, or program will stuck
 #if MPK_TARGET_CC >= 90
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    227 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+    220 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 86
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 80
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    160 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#else
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#endif
+#else
+#if MPK_TARGET_CC >= 90
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -39,6 +55,7 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #else
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#endif
 #endif
 
 typedef unsigned long long int TaskId;
@@ -65,7 +82,7 @@ enum TaskType {
   TASK_ATTENTION_1 = 103,
   TASK_ATTENTION_2 = 104,
   TASK_SILU_MUL_LINEAR_WITH_RESIDUAL = 105,
-  TASK_ALLREDUCE = 106,
+  TASK_ALLREDUCE = 106, // This legacy allreduce task will be removed soon
   TASK_REDUCE = 107,
   TASK_LINEAR_WITH_RESIDUAL = 108,
   TASK_ARGMAX = 109,
@@ -96,6 +113,7 @@ enum TaskType {
   TASK_MOE_W13_LINEAR_SM90 = 161,
   TASK_MOE_W2_LINEAR_SM90 = 162,
   TASK_SPLITK_LINEAR_SWAPAB_HOPPER = 163,
+  TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER = 164,
   TASK_HOPPER_TASK_END = 198, // Hopper end placeholder, not a real task
   // SM100 Tasks
   TASK_SM100_TASK_BEGIN = 230, // SM100 start placeholder, not a real task
@@ -112,8 +130,11 @@ enum TaskType {
   TASK_MOE_TOPK_SOFTMAX_SM100 = 260,
   TASK_MOE_MUL_SUM_ADD_SM100 = 261,
   TASK_TENSOR_INIT = 262,
+  TASK_PAGED_ATTENTION_SPLIT_KV_SM100 = 263,
+  TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
+  TASK_SAMPLING_SM100 = 265,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
-  TASK_NVSHMEM_COPY = 199,
+  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
@@ -155,9 +176,12 @@ struct EventDesc {
 struct FullTaskDesc {
   FullTaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
-        request_id(-1), head_group(-1) {}
-  FullTaskDesc() {}
+        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {
+    task_metadata.raw_payload = ~0ull;
+  }
+  FullTaskDesc() {
+    task_metadata.raw_payload = ~0ull;
+  }
   TaskType task_type;
   unsigned variant_id;
   int num_inputs, num_outputs;
@@ -165,20 +189,28 @@ struct FullTaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
-  union {
+  union TaskMetadata {
     struct {
-      int request_id; // Used for paged attention
-      int head_group; // Used for paged attention hopper
+      int expert_offset; // Used for MoE
     };
-    int expert_offset; // Used for MoE
-  };
+    struct {
+      int16_t request_id;    // Used for paged attention
+      uint16_t kv_idx;       // Used for paged attention split kv
+      int merge_task_offset; // Used for paged attention split kv merge
+    };
+    unsigned long long raw_payload;
+  } task_metadata;
 };
+
+static_assert(
+    sizeof(FullTaskDesc::TaskMetadata) == sizeof(unsigned long long),
+    "FullTaskDesc::TaskMetadata layout changed; update raw_payload type.");
 
 struct alignas(16) TaskDesc {
   TaskDesc(FullTaskDesc t)
       : task_type(t.task_type), variant_id(t.variant_id),
         trigger_event(t.trigger_event), dependent_event(t.dependent_event),
-        request_id(t.request_id), head_group(t.head_group) {
+        task_metadata(t.task_metadata) {
     for (int i = 0; i < t.num_inputs; i++) {
       input_ptrs[i] = t.inputs[i].base_ptr;
     }
@@ -198,7 +230,9 @@ struct alignas(16) TaskDesc {
     }
 #endif
   }
-  TaskDesc() {}
+  TaskDesc() {
+    task_metadata.raw_payload = ~0ull;
+  }
   TaskType task_type;
   unsigned variant_id;
   EventId trigger_event;
@@ -211,14 +245,7 @@ struct alignas(16) TaskDesc {
   void *output_tma_desc_ptrs[MAX_OUTPUTS_PER_TASK]
                             [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
-  union {
-    struct {
-      int request_id; // Used for paged attention
-      int head_group; // Used for paged attention hopper
-    };
-    int expert_offset;         // Used for MoE
-    size_t xfer_size_in_bytes; // Used for nvshmem
-  };
+  FullTaskDesc::TaskMetadata task_metadata;
 };
 
 struct RuntimeConfig {
@@ -247,7 +274,8 @@ struct RuntimeConfig {
   int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
+    defined(MODE_ONLINE_NOTOKEN)
   int *prompt_length;     // Metadata for online/offline serving
   int *request_ids;       // Metadata for online/offline serving
   int *page_queue;        // Metadata for online/offline serving
@@ -259,6 +287,8 @@ struct RuntimeConfig {
   void *profiler_buffer;
   bool split_worker_scheduler;
   cudaStream_t worker_stream, scheduler_stream;
+  cudaEvent_t prepare_done_event;
+  cudaEvent_t worker_done_event, scheduler_done_event;
 };
 
 } // namespace runtime

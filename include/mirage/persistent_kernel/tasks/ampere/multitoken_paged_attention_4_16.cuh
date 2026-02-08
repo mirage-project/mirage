@@ -46,7 +46,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -73,7 +73,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
   constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 15) / 16;
 
   // the scale factor for normalization in softmax
-  float const sm_scale = 1.0f / sqrtf(static_cast<float>(HEAD_DIM));
+  float const sm_scale = 1.0f / sqrtf(static_cast<float>(HEAD_DIM)) * log2e;
 
   int warp_idx = warp_id();
   int lane_idx = lane_id();
@@ -96,8 +96,15 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
   int const seq_len = (num_pages - 1) * PAGE_SIZE +
                       paged_kv_last_page_len_buffer_ptr[request_id];
   // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
-
+  //  if(threadIdx.x == 0 && request_id == 0){
+  //    printf("small num_tokens %d, seq len%d, num_pages %d,
+  //    paged_kv_last_page_len_buffer_ptr[request_id], %d, request id %d\n",
+  //    num_tokens, seq_len, num_pages,
+  //    paged_kv_last_page_len_buffer_ptr[request_id], request_id);
+  // }
   // Load the paged KV indices into shared memory
+  // We need to align the page_indices to 16 bytes because vectorized access is
+  // used
   __shared__ __align__(16) int page_indices[MAX_PAGES_PER_REQUEST];
 #pragma unroll
   for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
@@ -113,6 +120,10 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
     for (int i = threadIdx.x; i < tail_pages; i += NUM_THREADS) {
       page_indices[tail_offset + i] =
           paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
+      // if(threadIdx.x == 0){
+      //   printf("page_indices[%d] = %d, %d, %d\n", tail_offset + i,
+      //   page_indices[tail_offset + i], first_page_pos, tail_offset, i);
+      // }
     }
   }
   __syncthreads();
@@ -493,8 +504,10 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
     float rescale[MMA_ITERS_M][2];
 #pragma unroll
     for (int m = 0; m < MMA_ITERS_M; m++) {
-      rescale[m][0] = expf(m_prev[m][0] * sm_scale - m_local[m][0] * sm_scale);
-      rescale[m][1] = expf(m_prev[m][1] * sm_scale - m_local[m][1] * sm_scale);
+      rescale[m][0] =
+          ptx_exp2(m_prev[m][0] * sm_scale - m_local[m][0] * sm_scale);
+      rescale[m][1] =
+          ptx_exp2(m_prev[m][1] * sm_scale - m_local[m][1] * sm_scale);
     }
 
     // update d: get partial sum
@@ -511,8 +524,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
             //            m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
             //     : 0.f;
             x_frag_f[m][frag_idx] =
-                expf(x_frag_f[m][frag_idx] * sm_scale -
-                     m_local[m][(frag_idx & 0x3) >> 1] * sm_scale);
+                ptx_exp2(x_frag_f[m][frag_idx] * sm_scale -
+                         m_local[m][(frag_idx & 0x3) >> 1] * sm_scale);
         d_partial[m][(frag_idx & 0x3) >> 1] += x_frag_f[m][frag_idx];
       }
     }
@@ -627,8 +640,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
       float other_m = s_m_buffer[md_smem_offset],
             other_d = s_d_buffer[md_smem_offset];
       m_global = max(m_prev, other_m);
-      d_global =
-          d_prev * expf(m_prev - m_global) + other_d * expf(other_m - m_global);
+      d_global = d_prev * ptx_exp2(m_prev - m_global) +
+                 other_d * ptx_exp2(other_m - m_global);
       // accumulate o
       float other_o =
           s_o_buffer[(row / 16) * NUM_THREADS * 64 // mma iter m
@@ -636,8 +649,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
                      + t_idx * 64                  // corresponding thread
                      + mma_iter_n * 8              // mma iter n
                      + frag_idx];
-      o_global = o_global * expf(m_prev - m_global) +
-                 other_o * expf(other_m - m_global);
+      o_global = o_global * ptx_exp2(m_prev - m_global) +
+                 other_o * ptx_exp2(other_m - m_global);
     }
     o_smem.at(row, col) = bfloat16(o_global / d_global);
   }

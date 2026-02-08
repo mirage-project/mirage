@@ -98,6 +98,7 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--split-kv-cache", action="store_true", help="Use split-kv cache")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -215,6 +216,7 @@ if __name__ == "__main__":
         head_dim = model.config.head_dim
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
         fused_outdim_2 = 2 * intermediate_size
+        num_kv_cache_chunks = max(1, args.max_seq_length // 256)
 
         if args.profiling:
             profiler_tensor = torch.zeros(
@@ -304,6 +306,20 @@ if __name__ == "__main__":
             dims=(args.max_num_batched_tokens, fused_outdim_1 // world_size), # [6, 6144]
             dtype=mi.bfloat16,
             name="attn_in",
+            io_category="cuda_tensor",
+        )
+        lse = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads, num_local_kv_heads),
+            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads),
+            dtype=mi.float32,
+            name="lse",
+            io_category="cuda_tensor",
+        )
+        attn_out_tmp = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim, num_local_kv_heads),
+            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim),
+            dtype=mi.bfloat16,
+            name="attn_out_tmp",
             io_category="cuda_tensor",
         )
         attn_out = mpk.new_tensor(
@@ -466,6 +482,30 @@ if __name__ == "__main__":
                     grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
                     block_dim=(256, 1, 1),
                 )
+            elif args.split_kv_cache:
+                mpk.paged_attention_split_kv_layer(
+                    input=attn_in,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
+                    cos_pos_embed=cos_pos_embed,
+                    sin_pos_embed=sin_pos_embed,
+                    lse=lse,
+                    output=attn_out_tmp,
+                    attention_params=(num_local_q_heads, num_kv_cache_chunks),
+                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, num_kv_cache_chunks),
+                    block_dim=(256, 1, 1),
+                )
+
+                mpk.paged_attention_split_kv_merge_layer(
+                    lse=lse,
+                    output_tmp=attn_out_tmp,
+                    output=attn_out,
+                    attention_params=(num_local_q_heads, head_dim),
+                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
+                    block_dim=(256, 1, 1),
+                )
             else:
                 mpk.paged_attention_layer(
                     input=attn_in,
@@ -477,7 +517,7 @@ if __name__ == "__main__":
                     sin_pos_embed=sin_pos_embed,
                     output=attn_out,
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
-                    block_dim=(256, 1, 1),
+                    block_dim=(128, 1, 1),
                 )
             # add linear w/ residual
             w = mpk.attach_input(

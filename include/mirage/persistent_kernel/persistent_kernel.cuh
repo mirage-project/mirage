@@ -73,6 +73,7 @@ using namespace kernel;
   } while (0)
 #endif
 
+// #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
@@ -114,6 +115,7 @@ __global__ void init_kernel(RuntimeConfig config) {
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
     // initialize metadata
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
     for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
@@ -131,6 +133,7 @@ __global__ void init_kernel(RuntimeConfig config) {
     for (int i = 0; i < MPK_MAX_NUM_PAGES; i++) {
       config.page_queue[i] = i;
     }
+#endif
   }
 }
 
@@ -176,7 +179,7 @@ __device__ __forceinline__ bool
   int page_queue_tail = *config.page_queue_tail;
   // Step 1: finalize previous batch
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       // Step 1.1: move output_tokens to tokens
       int step = config.step[request_id];
@@ -192,13 +195,14 @@ __device__ __forceinline__ bool
       }
       config.step[request_id] = step + num_tokens;
 #ifdef MPK_ENABLE_PROFILING
-      if (true) {
+      if (true)
 #else
       if ((step + num_tokens + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
-           (step + num_tokens >= prompt_len))) {
+           (step + num_tokens >= prompt_len)))
 #endif
+      {
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -223,7 +227,7 @@ __device__ __forceinline__ bool
   int num_reqs = 0, num_tokens = 0;
   num_pages = 0;
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       int kv_indptr = config.paged_kv_indptr_buffer[i];
       int num_old_pages = config.paged_kv_indptr_buffer[i + 1] - kv_indptr;
@@ -351,6 +355,20 @@ __device__ __forceinline__ bool
     return true;
   }
 #endif
+}
+#endif
+
+#ifdef MODE_ONLINE_NOTOKEN
+__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config,
+                                                   size_t iteration_num = 0) {
+  // TODO: iteration_num is a current workaround
+  // We may consider split EVENT_END_OF_TASK_GRAPH into
+  // EVENT_END_OF_TASK_GRAPH and EVENT_START_OF_TASK_GRAPH
+  if (iteration_num > 0) {
+    return false;
+  } else { // iteration_num == 0
+    return true;
+  }
 }
 #endif
 
@@ -593,11 +611,13 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
             get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
         if (is_nvshmem_event(event_id)) {
+#ifdef USE_NVSHMEM
           nvshmem_signal_wait_until(
               reinterpret_cast<uint64_t *>(
                   &config.all_event_counters[event_index]),
               NVSHMEM_CMP_EQ,
               needed_counts);
+#endif
         } else {
           while (actual_counts < needed_counts) {
             actual_counts =
@@ -713,7 +733,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         }
       } else {
         // Case 2: trigger a nvshmem event
-        assert(task_desc->task_type == TASK_NVSHMEM_COPY);
+        // TODO(Zepeng): This branch is no longer used. Sanitize later.
+        assert(task_desc->task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
 #ifdef MPK_ENABLE_VERBOSE
@@ -847,7 +868,12 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
         // Check if we want to continue
-        if (!prepare_next_batch(config)) {
+#ifdef MODE_ONLINE_NOTOKEN
+        if (!prepare_next_batch(config, iteration_num))
+#else
+        if (!prepare_next_batch(config))
+#endif
+        {
           terminate_schedulers(config);
         } else {
           // Launch task 1 (begin_task_graph) for the next iteration
@@ -1037,6 +1063,12 @@ static RuntimeConfig global_runtime_config;
 // meta_tensors[8]: paged_kv_indices_buffer
 // meta_tensors[9]: paged_kv_last_page_len_buffer
 
+extern "C" void init_request_resources() {
+  init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
+      global_runtime_config);
+  cudaStreamSynchronize(NULL);
+}
+
 extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
                                        int my_rank,
@@ -1112,14 +1144,11 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
-    // Reinterpret part of TaskDesc to save xfer_size information
-    if (ft.task_type == TASK_NVSHMEM_COPY) {
-      int size_in_bytes = 2;
-      for (int i = 0; i < ft.inputs[0].num_dims; i++) {
-        size_in_bytes *= ft.inputs[0].dim[i];
-      }
-      task_desc.xfer_size_in_bytes = size_in_bytes;
-    }
+    // if (ft.task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 || ft.task_type
+    // == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
+    //   printf("ft.kv_idx %d\n", ft.kv_idx);
+    //   printf("ft.merge_task_offset %d\n", ft.merge_task_offset);
+    // }
     all_tasks.push_back(task_desc);
   }
 
@@ -1232,20 +1261,25 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaFuncSetAttribute(worker_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
-  cudaFuncSetAttribute(scheduler_kernel,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+  cudaFuncSetAttribute(
+      scheduler_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 1024);
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
   // Create worker and scheduler streams
-  cudaStreamCreate(&global_runtime_config.worker_stream);
-  cudaStreamCreate(&global_runtime_config.scheduler_stream);
+  cudaStreamCreateWithFlags(&global_runtime_config.worker_stream,
+                            cudaStreamNonBlocking);
+  cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream,
+                            cudaStreamNonBlocking);
+  // Create events
+  cudaEventCreateWithFlags(&global_runtime_config.prepare_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.worker_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
+                           cudaEventDisableTiming);
 
-  // launch init kernel
-  init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
-      global_runtime_config);
-  cudaDeviceSynchronize();
+  init_request_resources();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
@@ -1254,7 +1288,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
 // Entry point for C/C++
 // TODO: change launch config
-extern "C" void launch_persistent_kernel() {
+extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
   // int device;
   // cudaGetDevice(&device);
   // int sm_count;
@@ -1263,9 +1297,13 @@ extern "C" void launch_persistent_kernel() {
   {
     int end_of_task_graph_event_pos = global_runtime_config.num_events - 1;
     prepare_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                     dim3(128, 1, 1)>>>(global_runtime_config,
-                                        end_of_task_graph_event_pos);
-    cudaDeviceSynchronize();
+                     dim3(128, 1, 1),
+                     0 /*smem*/,
+                     default_stream>>>(global_runtime_config,
+                                       end_of_task_graph_event_pos);
+    // cudaStreamSynchronize(NULL);
+    cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
+    // cudaDeviceSynchronize();
 #ifdef USE_NVSHMEM
     nvshmem_barrier_all();
 #endif
@@ -1275,6 +1313,13 @@ extern "C" void launch_persistent_kernel() {
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
     printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+
+    cudaStreamWaitEvent(global_runtime_config.worker_stream,
+                        global_runtime_config.prepare_done_event,
+                        0);
+    cudaStreamWaitEvent(global_runtime_config.scheduler_stream,
+                        global_runtime_config.prepare_done_event,
+                        0);
 
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
@@ -1291,11 +1336,16 @@ extern "C" void launch_persistent_kernel() {
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
 
-    cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-      printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-    }
-    printf("Finished Launch Persistent Kernel\n");
+    cudaEventRecord(global_runtime_config.worker_done_event,
+                    global_runtime_config.worker_stream);
+    cudaEventRecord(global_runtime_config.scheduler_done_event,
+                    global_runtime_config.scheduler_stream);
+
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.worker_done_event, 0);
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.scheduler_done_event, 0);
+    printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
     printf("a single persistent kernel\n");
     int num_sms_to_use = global_runtime_config.num_workers + num_schedulers / 4;
@@ -1362,6 +1412,9 @@ extern "C" void finalize_persistent_kernel() {
   nvshmem_finalize();
 #endif
   // Free worker and scheduler streams
+  cudaEventDestroy(global_runtime_config.prepare_done_event);
+  cudaEventDestroy(global_runtime_config.worker_done_event);
+  cudaEventDestroy(global_runtime_config.scheduler_done_event);
   cudaStreamDestroy(global_runtime_config.worker_stream);
   cudaStreamDestroy(global_runtime_config.scheduler_stream);
 }

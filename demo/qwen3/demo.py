@@ -21,7 +21,7 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
         return size // 64
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
-        # cutlass version will output unexpect result (not same out put for
+        # cutlass version will output unexpected result (not same out put for
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
         assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
         return size // 256
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
-    parser.add_argument("--max-num-batched-requests", default=4, type=int, help="Max number of requests in a batch")
+    parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
@@ -116,6 +116,7 @@ if __name__ == "__main__":
         help="Custom prompt text to generate from.",
     )
 
+    parser.add_argument("--split-kv-cache", action="store_true", help="Use split-kv cache")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -161,6 +162,7 @@ if __name__ == "__main__":
             load_model(
                 model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
             )
+            # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
@@ -243,6 +245,7 @@ if __name__ == "__main__":
         head_dim = model.config.head_dim
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
         fused_outdim_2 = 2 * intermediate_size
+        num_kv_cache_chunks = max(1, args.max_seq_length // 256)
 
         if args.profiling:
             profiler_tensor = torch.zeros(
@@ -251,7 +254,7 @@ if __name__ == "__main__":
         else:
             profiler_tensor = None
             
-        spec_decode_config = mi.speculative.spec_decode_class(
+        spec_decode_config = mi.mpk.spec_decode_class(
             args.spec_decode,
             ngram_size=args.ngram_size,
             spec_length=args.spec_length,
@@ -332,6 +335,20 @@ if __name__ == "__main__":
             dims=(args.max_num_batched_tokens, fused_outdim_1 // world_size), # [6, 6144]
             dtype=mi.bfloat16,
             name="attn_in",
+            io_category="cuda_tensor",
+        )
+        lse = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads, num_local_kv_heads),
+            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads),
+            dtype=mi.float32,
+            name="lse",
+            io_category="cuda_tensor",
+        )
+        attn_out_tmp = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim, num_local_kv_heads),
+            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim),
+            dtype=mi.bfloat16,
+            name="attn_out_tmp",
             io_category="cuda_tensor",
         )
         attn_out = mpk.new_tensor(
@@ -433,6 +450,8 @@ if __name__ == "__main__":
         )
         x = y
         for i, layer in enumerate(model.model.layers):
+            # if i > 0:
+            #     break
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,
@@ -484,7 +503,7 @@ if __name__ == "__main__":
             )
             k_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
-            )
+            ) 
             v_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
             )
@@ -502,6 +521,30 @@ if __name__ == "__main__":
                     grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
                     block_dim=(128, 1, 1),
                 )
+            elif args.split_kv_cache:
+                mpk.paged_attention_split_kv_layer(
+                    input=attn_in,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
+                    cos_pos_embed=cos_pos_embed,
+                    sin_pos_embed=sin_pos_embed,
+                    lse=lse,
+                    output=attn_out_tmp,
+                    attention_params=(num_local_q_heads, num_kv_cache_chunks),
+                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, num_kv_cache_chunks),
+                    block_dim=(128, 1, 1),
+                )
+
+                mpk.paged_attention_split_kv_merge_layer(
+                    lse=lse,
+                    output_tmp=attn_out_tmp,
+                    output=attn_out,
+                    attention_params=(num_local_q_heads, head_dim),
+                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
+                    block_dim=(128, 1, 1),
+                )
             else:
                 mpk.paged_attention_layer(
                     input=attn_in,
@@ -515,6 +558,8 @@ if __name__ == "__main__":
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
                 )
+            
+            
             # add linear w/ residual
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"

@@ -15,7 +15,8 @@
 
 #pragma once
 #include "../common/utils.cuh"
-// #include "utils.cuh"
+#include "utils.cuh"
+
 namespace kernel {
 template <typename T,
           typename InputSmem,
