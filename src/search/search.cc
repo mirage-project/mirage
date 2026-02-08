@@ -143,7 +143,7 @@ void KernelGraphGenerator::generate_next_operator(
     size_t search_depth,
     bool is_a_new_thread_start) {
   ++num_total_states;
-  if (num_total_states % 100 == 1) {
+  if (num_total_states % 100000 == 1) {
     show_statistics();
   }
   if (verify(c)) {
@@ -632,7 +632,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
   }
 
   ++num_total_states;
-  if (num_total_states % 10000 == 1) {
+  if (num_total_states % 100000 == 1) {
     show_statistics();
   }
 
