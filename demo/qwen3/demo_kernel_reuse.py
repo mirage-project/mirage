@@ -557,7 +557,7 @@ def main():
     mpk1 = create_mpk(model, args, world_size, rank, meta_tensors)
     build_mpk_graph(model, mpk1, args, world_size, rank, position_embeddings, lm_head_weight, input_tokens, output_tokens)
     
-    print("Compiling kernel (this takes ~1-2 minutes for first compile)...")
+    print("Compiling kernel...")
     mpk1.compile(output_dir=args.output_dir)
     compile_time = time.time() - compile_start
     print(f"Kernel compiled and saved to: {args.output_dir}")
@@ -599,7 +599,6 @@ def main():
     build_mpk_graph(model, mpk2, args, world_size, rank, position_embeddings, lm_head_weight, input_tokens, output_tokens)
     
     print(f"Loading pre-compiled kernel from: {args.output_dir}")
-    print("(No nvcc compilation needed!)")
     mpk2.load_mpk_kernel(output_dir=args.output_dir)
     load_time = time.time() - load_start
     print(f"Kernel loaded in: {load_time:.2f} seconds")
@@ -613,6 +612,46 @@ def main():
     print(f"\nGenerated {gen_len2} tokens, latency: {latency2:.3f} ms/token")
     
     mpk2.finalize()
+    
+    # ========================================
+    # PHASE 3: Test Compatibility Validation
+    # ========================================
+    print("\n" + "=" * 70)
+    print("PHASE 3: Testing Compatibility Validation")
+    print("=" * 70)
+    
+    print("Testing that mismatched configuration is detected...")
+    
+    # Create a PersistentKernel with different max_num_batched_requests
+    import copy
+    args_mismatch = copy.copy(args)
+    args_mismatch.max_num_batched_requests = args.max_num_batched_requests + 1  # Different from compiled kernel
+    
+    # We need to create new meta tensors with the mismatched size
+    meta_tensors_mismatch = {
+        "step": torch.full((args_mismatch.max_num_batched_requests,), 0, dtype=torch.int32, device="cuda"),
+        "tokens": torch.full((args_mismatch.max_num_batched_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda"),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "num_new_tokens": torch.full((args_mismatch.max_num_batched_requests,), 1, dtype=torch.int32, device="cuda"),
+        "prompt_lengths": torch.full((args_mismatch.max_num_batched_requests,), 0, dtype=torch.int32, device="cuda"),
+        "qo_indptr_buffer": torch.empty(args_mismatch.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"),
+        "paged_kv_indptr_buffer": torch.empty(args_mismatch.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"),
+        "paged_kv_indices_buffer": paged_kv_indices_buffer,
+        "paged_kv_last_page_len_buffer": torch.empty(args_mismatch.max_num_batched_requests, dtype=torch.int32, device="cuda"),
+    }
+    
+    try:
+        mpk3 = create_mpk(model, args_mismatch, world_size, rank, meta_tensors_mismatch)
+        build_mpk_graph(model, mpk3, args_mismatch, world_size, rank, position_embeddings, lm_head_weight, input_tokens, output_tokens)
+        mpk3.load_mpk_kernel(output_dir=args.output_dir)
+        print("ERROR: Expected validation to fail but it passed!")
+        mpk3.finalize()
+    except ValueError as e:
+        print("SUCCESS: Compatibility validation correctly detected mismatch:")
+        print(f"  {str(e)[:200]}...")
+    except Exception as e:
+        print(f"Unexpected error type: {type(e).__name__}: {e}")
     
     # ========================================
     # Summary

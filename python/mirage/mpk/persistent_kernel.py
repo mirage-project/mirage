@@ -5,6 +5,7 @@ import subprocess
 import shutil
 import sys
 import sysconfig
+import json
 
 from ..core import *
 from ..kernel import get_key_paths, KNGraph, TBGraph
@@ -355,6 +356,60 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
+
+    def _save_kernel_metadata(self, path: str) -> None:
+        """Save kernel config for validation when loading."""
+        metadata = {
+            "mode": self.mode,
+            "max_seq_length": self.max_seq_length,
+            "max_num_batched_requests": self.max_num_batched_requests,
+            "max_num_batched_tokens": self.max_num_batched_tokens,
+            "max_num_pages": self.max_num_pages,
+            "page_size": self.page_size,
+            "world_size": self.world_size,
+            "rank": self.mpi_rank,
+            "cuda_cc": self.target_cc,
+            "tensor_names": sorted(self._model_tensors.keys()),
+        }
+        with open(path, "w") as f:
+            json.dump(metadata, f, indent=2)
+    
+    def _validate_kernel_compatibility(self, metadata_path: str) -> None:
+        """Validate saved kernel is compatible with current config."""
+        with open(metadata_path, "r") as f:
+            saved = json.load(f)
+        
+        errors = []
+        checks = [
+            ("mode", self.mode),
+            ("max_seq_length", self.max_seq_length),
+            ("max_num_batched_requests", self.max_num_batched_requests),
+            ("max_num_batched_tokens", self.max_num_batched_tokens),
+            ("max_num_pages", self.max_num_pages),
+            ("page_size", self.page_size),
+            ("world_size", self.world_size),
+            ("rank", self.mpi_rank),
+            ("cuda_cc", self.target_cc),
+        ]
+        for key, current in checks:
+            if saved.get(key) != current:
+                errors.append(f"{key}: saved={saved.get(key)}, current={current}")
+        
+        # Check tensor names
+        saved_tensors = set(saved.get("tensor_names", []))
+        current_tensors = set(self._model_tensors.keys())
+        if saved_tensors != current_tensors:
+            missing = saved_tensors - current_tensors
+            extra = current_tensors - saved_tensors
+            if missing:
+                errors.append(f"missing tensors: {sorted(missing)}")
+            if extra:
+                errors.append(f"extra tensors: {sorted(extra)}")
+        
+        if errors:
+            raise ValueError(
+                f"Kernel incompatible with current config:\n  " + "\n  ".join(errors)
+            )
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -1517,6 +1572,10 @@ class PersistentKernel:
             so_output_path = os.path.join(output_dir, f"mpk_launcher_rank{self.mpi_rank}.cpython-{sys.version_info.major}{sys.version_info.minor}-x86_64-linux-gnu.so")
             shutil.copy(so_path, so_output_path)
             print(f"Saved compiled kernel to: {so_output_path}")
+            
+            # Save kernel metadata for compatibility validation during load
+            metadata_path = os.path.join(output_dir, f"kernel_metadata_rank{self.mpi_rank}.json")
+            self._save_kernel_metadata(metadata_path)
 
         import importlib.util
 
@@ -1601,6 +1660,15 @@ class PersistentKernel:
                 f"Task graph not found at {json_path}. "
                 f"Run compile(output_dir='{output_dir}') first to generate it."
             )
+        
+        # Validate kernel compatibility if metadata exists
+        metadata_path = os.path.join(output_dir, f"kernel_metadata_rank{self.mpi_rank}.json")
+        skip_validation = kwargs.get("skip_validation", False)
+        if os.path.exists(metadata_path) and not skip_validation:
+            self._validate_kernel_compatibility(metadata_path)
+            print(f"[load_mpk_kernel] Kernel compatibility check passed!")
+        elif not skip_validation:
+            print(f"[load_mpk_kernel] Warning: No kernel metadata found. Skipping validation.")
         
         print(f"[load_mpk_kernel] Loading launcher from: {so_path}")
         print(f"[load_mpk_kernel] Using task graph JSON: {json_path}")
