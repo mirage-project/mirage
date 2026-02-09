@@ -135,5 +135,4 @@ static __device__ __forceinline__ void
   }
 }
 
-
 } // namespace kernel

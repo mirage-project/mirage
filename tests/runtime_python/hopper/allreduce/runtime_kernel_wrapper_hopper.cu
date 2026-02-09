@@ -13,37 +13,39 @@
  * limitations under the License.
  */
 
+#include "mpi.h"
 #include "runtime_header.h"
 #include "tasks/common/common_header.cuh"
 #include "tasks/hopper/allreduce.cuh"
 #include <cassert>
 #include <cstddef>
 #include <cstdio>
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
-#include "mpi.h"
 #include <torch/extension.h>
 #include <vector>
-#include <cuda_bf16.h>
 
 #include <nvshmem.h>
 #include <nvshmemx.h>
 
-
 #ifndef NVSHMEM_CHECK
 #define NVSHMEM_CHECK(stmt)                                                    \
-    do {                                                                       \
-        int result = (stmt);                                                   \
-        if (NVSHMEMX_SUCCESS != result) {                                      \
-            fprintf(stderr, "[%s:%d] NVSHMEM failed with error %d\n",          \
-                    __FILE__, __LINE__, result);                               \
-            exit(EXIT_FAILURE);                                                \
-        }                                                                      \
-    } while (0)
-#endif    
+  do {                                                                         \
+    int result = (stmt);                                                       \
+    if (NVSHMEMX_SUCCESS != result) {                                          \
+      fprintf(stderr,                                                          \
+              "[%s:%d] NVSHMEM failed with error %d\n",                        \
+              __FILE__,                                                        \
+              __LINE__,                                                        \
+              result);                                                         \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  } while (0)
+#endif
 
-static void* nvshmem_teams_ptr_global = nullptr;
-static void* input_ptr_global = nullptr;
-static void* output_ptr_global = nullptr;
+static void *nvshmem_teams_ptr_global = nullptr;
+static void *input_ptr_global = nullptr;
+static void *output_ptr_global = nullptr;
 // One CTA/team per hidden-dimension tile (4096 / 64 = 64 tiles).
 constexpr int NUM_TEAMS = 64;
 constexpr size_t MALLOC_SIZE = 1024 * 1024 * 1024; // 1GB
@@ -58,10 +60,10 @@ __global__ void allreduce_kernel_wrapper(void *input_ptr,
   // One CTA per tile: map blockIdx.x to tile/team
   task_offset = blockIdx.x;
   // Offset to this tile's slice along hidden dimension
-  input_ptr = reinterpret_cast<void*>(
-      reinterpret_cast<char*>(input_ptr) + blockIdx.x * OUTPUT_SIZE * sizeof(T));
-  output_ptr = reinterpret_cast<void*>(
-      reinterpret_cast<char*>(output_ptr) + blockIdx.x * OUTPUT_SIZE * sizeof(T));
+  input_ptr = reinterpret_cast<void *>(reinterpret_cast<char *>(input_ptr) +
+                                       blockIdx.x * OUTPUT_SIZE * sizeof(T));
+  output_ptr = reinterpret_cast<void *>(reinterpret_cast<char *>(output_ptr) +
+                                        blockIdx.x * OUTPUT_SIZE * sizeof(T));
   for (int i = 0; i < NUM_ITERS; i++) {
     kernel::nvshmem_tile_allreduce<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE>(
         input_ptr, output_ptr, nvshmem_teams, task_offset, active_tokens);
@@ -97,10 +99,15 @@ void launch_allreduce(void *input_ptr,
     float elapsed_ms = 0.0f;
     cudaEventElapsedTime(&elapsed_ms, start_event, stop_event);
 
-    // Kernel does NUM_ITERS reductions internally. Report both total and per-iter time.
-    float avg_us_per_iter = (elapsed_ms * 1000.0f) / static_cast<float>(NUM_ITERS);
+    // Kernel does NUM_ITERS reductions internally. Report both total and
+    // per-iter time.
+    float avg_us_per_iter =
+        (elapsed_ms * 1000.0f) / static_cast<float>(NUM_ITERS);
     printf("active_tokens=%d : total %.3f ms for %d iters (avg %.3f us/iter)\n",
-           active_tokens, elapsed_ms, NUM_ITERS, avg_us_per_iter);
+           active_tokens,
+           elapsed_ms,
+           NUM_ITERS,
+           avg_us_per_iter);
   }
 
   cudaEventDestroy(start_event);
@@ -144,14 +151,15 @@ void init_nvshmem() {
   for (int i = 0; i < NUM_TEAMS; i++) {
     NVSHMEM_CHECK(nvshmem_team_split_strided(
         NVSHMEM_TEAM_WORLD, 0, 1, npes, nullptr, 0, &teams_host[i]));
-    if (mype == 0)
-    printf("Team %d : %d\n", i, teams_host[i]);
+    if (mype == 0) {
+      printf("Team %d : %d\n", i, teams_host[i]);
+    }
   }
   cudaMalloc(&nvshmem_teams_ptr_global, NUM_TEAMS * sizeof(nvshmem_team_t));
   cudaMemcpy(nvshmem_teams_ptr_global,
-            teams_host.data(),
-            NUM_TEAMS * sizeof(nvshmem_team_t),
-            cudaMemcpyHostToDevice);
+             teams_host.data(),
+             NUM_TEAMS * sizeof(nvshmem_team_t),
+             cudaMemcpyHostToDevice);
 }
 
 void allreduce_kernel(torch::Tensor input,
@@ -173,9 +181,11 @@ void allreduce_kernel(torch::Tensor input,
   cudaMemcpy(input_ptr_global, input_ptr, num_bytes, cudaMemcpyDeviceToDevice);
 
   // Reduce hidden dimension using 64-element tiles (one CTA per tile).
-  launch_allreduce<nv_bfloat16, 8, 64, 4096>(input_ptr_global, output_ptr_global, nvshmem_teams_ptr);
+  launch_allreduce<nv_bfloat16, 8, 64, 4096>(
+      input_ptr_global, output_ptr_global, nvshmem_teams_ptr);
 
-  cudaMemcpy(output_ptr, output_ptr_global, num_bytes, cudaMemcpyDeviceToDevice);
+  cudaMemcpy(
+      output_ptr, output_ptr_global, num_bytes, cudaMemcpyDeviceToDevice);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

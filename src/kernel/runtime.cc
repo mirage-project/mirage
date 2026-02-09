@@ -1143,9 +1143,9 @@ TaskGraphResult print_task_graph(
             // json_task_graph["all_tasks"].push_back(json_task);
             json_tasks[task_id - starting_task_id] = json_task;
           } // subtask_id
-        } // bid.z
-      } // bid.y
-    } // bid.x
+        }   // bid.z
+      }     // bid.y
+    }       // bid.x
 
     for (int i = 0; i < json_tasks.size(); i++) {
       json_task_graph["all_tasks"].push_back(json_tasks[i]);
