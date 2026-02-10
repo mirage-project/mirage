@@ -74,15 +74,26 @@ def get_collective_capabilities(num_devices: int, device_id: int = 0) -> Collect
 def allocate_nvshmem_teams(mpk, num: int):
     # We should set NVSHMEM_MAX_TEAMS environment variable
     nvshmem_max_teams = os.environ.get("NVSHMEM_MAX_TEAMS", None)
-    target_num_teams = num * 20 + 32
+    # We add 32 extra teams as a buffer to avoid hitting the limit in some edge cases
+    # 6 is the number of builtin teams in NVSHMEM.
+    max_num_teams = num + 6 + 32
     if nvshmem_max_teams is None:
-        os.environ["NVSHMEM_MAX_TEAMS"] = str(target_num_teams)
+        os.environ["NVSHMEM_MAX_TEAMS"] = str(max_num_teams)
     else:
         existing_max_teams = int(nvshmem_max_teams)
-        if existing_max_teams < num:
-            os.environ["NVSHMEM_MAX_TEAMS"] = str(target_num_teams)
+        if existing_max_teams < max_num_teams:
+            os.environ["NVSHMEM_MAX_TEAMS"] = str(max_num_teams)
     mpk.allocate_nvshmem_teams = num
     # print(f"Set NVSHMEM_MAX_TEAMS={os.environ['NVSHMEM_MAX_TEAMS']}")
+
+    # We should also set NVSHMEM_MAX_CTAS environment variable to avoid creating
+    # too many duplicate teams (team_dups[] in NVSHMEM).
+    # This env is not documented in the NVSHMEM documentation.
+    # One should look at the source code of NVSHMEM to find it.
+    nvshmem_max_ctas = os.environ.get("NVSHMEM_MAX_CTAS", None)
+    os.environ["NVSHMEM_MAX_CTAS"] = str(1)
+    if nvshmem_max_ctas is not None:
+        print(f"MPK: forcing env NVSHMEM_MAX_CTAS=1.")
 
 # ============================================================================
 # Strategy Pattern: Base Classes for Collective Implementations

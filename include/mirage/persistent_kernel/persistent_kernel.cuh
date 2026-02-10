@@ -1138,11 +1138,20 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   // determine the numebr of teams by scanning kernels.
   if (allocate_nvshmem_teams > 0) {
     int num_teams = allocate_nvshmem_teams;
-    printf("MPK: Rank%d is allocating %d nvshmem teams\n", mype, num_teams);
+    printf("MPK: Rank%d is allocating %d nvshmem teams. The more gpus "
+           "involved, the longer this takes.\n",
+           mype,
+           num_teams);
     std::vector<nvshmem_team_t> teams_host(num_teams);
     for (int i = 0; i < num_teams; i++) {
       NVSHMEM_CHECK(nvshmem_team_split_strided(
           NVSHMEM_TEAM_WORLD, 0, 1, npes, nullptr, 0, &teams_host[i]));
+      if (mype == 0) {
+        printf("MPK: Creating nvshmem team %d/%d, idx %d\n",
+               i + 1,
+               num_teams,
+               teams_host[i]);
+      }
     }
     global_runtime_config.nvshmem_teams =
         gpu_malloc<nvshmem_team_t>(num_teams * sizeof(nvshmem_team_t));
