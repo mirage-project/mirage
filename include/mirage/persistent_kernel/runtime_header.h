@@ -18,6 +18,11 @@
 #include "mirage/config.h"
 #include <cuda_runtime.h>
 
+#ifdef USE_NVSHMEM
+#include <nvshmem.h>
+#include <nvshmemx.h>
+#endif
+
 namespace mirage {
 namespace runtime {
 
@@ -134,11 +139,15 @@ enum TaskType {
   TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SAMPLING_SM100 = 265,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
-  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
   TASK_GET_NEXT_TASK = 203,
+  // Multi-GPU tasks
+  TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
+  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
+  TASK_NVSHMEM_TILE_ALLREDUCE = 302,
+  TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
 };
 
 enum EventType {
@@ -197,6 +206,9 @@ struct FullTaskDesc {
       int16_t request_id;    // Used for paged attention
       uint16_t kv_idx;       // Used for paged attention split kv
       int merge_task_offset; // Used for paged attention split kv merge
+    };
+    struct {
+      int task_offset; // Used for nvshmem team mapping
     };
     unsigned long long raw_payload;
   } task_metadata;
@@ -289,6 +301,9 @@ struct RuntimeConfig {
   cudaStream_t worker_stream, scheduler_stream;
   cudaEvent_t prepare_done_event;
   cudaEvent_t worker_done_event, scheduler_done_event;
+#ifdef USE_NVSHMEM
+  nvshmem_team_t *nvshmem_teams;
+#endif
 };
 
 } // namespace runtime

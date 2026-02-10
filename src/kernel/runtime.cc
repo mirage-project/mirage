@@ -102,17 +102,18 @@ void dfs_create_events_add_tasks(
     for (bid.x = consumer_lo_bid.x; bid.x < consumer_hi_bid.x; bid.x++) {
       for (bid.y = consumer_lo_bid.y; bid.y < consumer_hi_bid.y; bid.y++) {
         for (bid.z = consumer_lo_bid.z; bid.z < consumer_hi_bid.z; bid.z++) {
-          int offset = bid.x * consumer_grid_dim.y * consumer_grid_dim.z +
-                       bid.y * consumer_grid_dim.z + bid.z;
+          int block_offset = bid.x * consumer_grid_dim.y * consumer_grid_dim.z +
+                             bid.y * consumer_grid_dim.z + bid.z;
           if (multigpu_task) {
             cur_task_map[bid] = std::vector<TaskId>();
             for (int i = 0; i < num_gpus - 1; i++) {
               cur_task_map[bid].push_back(all_tasks.size());
-              all_tasks.push_back(cur_op_tasks[offset * (num_gpus - 1) + i]);
+              all_tasks.push_back(
+                  cur_op_tasks[block_offset * (num_gpus - 1) + i]);
             }
           } else {
             cur_task_map[bid] = std::vector<TaskId>{all_tasks.size()};
-            all_tasks.push_back(cur_op_tasks[offset]);
+            all_tasks.push_back(cur_op_tasks[block_offset]);
           }
         }
       }
@@ -146,7 +147,6 @@ void dfs_create_events_add_tasks(
                 my_gpu_id, all_events.size(), nvshmem_event /*nvshmem_event*/);
             event_desc.num_triggers++;
           }
-          // encode gpu_id
         }
       }
     }
@@ -295,6 +295,8 @@ void register_mugraph(
       // assert that their is at least a single tensor shared between ops
       assert(num_shared_tensors >= 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
+        // ! Note: If two block dimensions are mapped to the same tensor dim,
+        // ! then the partitioning will be incorrect.
         if (d == input_map.x) {
           consumer_partition[d] = bgraph.grid_dim.x;
         }
@@ -399,6 +401,11 @@ void register_mugraph(
                 task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) {
               task.task_metadata.kv_idx = bid.z;
               task.task_metadata.merge_task_offset = bid.y;
+            }
+            if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
+              task.task_metadata.task_offset =
+                  bid.x + bid.y * bgraph.grid_dim.x +
+                  bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
             }
             // Initialize input tensors to the task
             for (auto const &input : input_ops) {
@@ -593,6 +600,8 @@ TaskGraphResult print_task_graph(
     code.e("task_desc.task_metadata.kv_idx = task.at(\"kv_idx\").get<int>();");
     code.e("task_desc.task_metadata.merge_task_offset = "
            "task.at(\"merge_task_offset\").get<int>();");
+    code.e("task_desc.task_metadata.task_offset = "
+           "task.at(\"task_offset\").get<int>();");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -797,7 +806,8 @@ TaskGraphResult print_task_graph(
              {"request_id", -1},
              {"expert_offset", -1},
              {"kv_idx", -1},
-             {"merge_task_offset", -1}});
+             {"merge_task_offset", -1},
+             {"task_offset", -1}});
   }
   // generate task[1]
   {
@@ -813,7 +823,8 @@ TaskGraphResult print_task_graph(
              {"request_id", -1},
              {"expert_offset", -1},
              {"kv_idx", -1},
-             {"merge_task_offset", -1}});
+             {"merge_task_offset", -1},
+             {"task_offset", -1}});
   }
   // generate all other tasks
   size_t task_pos = 2;
@@ -849,16 +860,20 @@ TaskGraphResult print_task_graph(
 
     unsigned cur_op_num_subtasks = get_num_subtasks(num_gpus, task_type);
 
+    // There is no guarantee that the tasks are added in (x,y,z) order,
+    // so, to keep the final tasks array in order, we need to re-order them
+    // here. ! tgbody-based gen is still prone to ordering issue.
+    std::vector<json> json_tasks(bgraph.grid_dim.x * bgraph.grid_dim.y *
+                                 bgraph.grid_dim.z * cur_op_num_subtasks);
+    TaskId starting_task_id = task_pos;
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           for (int subtask_id = 0; subtask_id < cur_op_num_subtasks;
                subtask_id++) {
-            FullTaskDesc task_desc = all_tasks[task_pos];
-            assert(task_desc.task_type == task_type);
             TaskId task_id = task_map.at(bid)[subtask_id];
-            assert(task_pos == (task_id & 0xffffffff));
-            tgbody.e("// task[$]", task_pos);
+            FullTaskDesc task_desc = all_tasks[task_id];
+            tgbody.e("// task[$]", task_id);
             tgbody.e("{");
             tgbody.e("FullTaskDesc task_desc(static_cast<TaskType>($));",
                      task_desc.task_type);
@@ -880,7 +895,8 @@ TaskGraphResult print_task_graph(
                 {"expert_offset", task_desc.task_metadata.expert_offset},
                 {"kv_idx", task_desc.task_metadata.kv_idx},
                 {"merge_task_offset",
-                 task_desc.task_metadata.merge_task_offset}};
+                 task_desc.task_metadata.merge_task_offset},
+                {"task_offset", task_desc.task_metadata.task_offset}};
 
             for (int i = 0; i < task_desc.num_inputs; i++) {
               if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
@@ -1124,12 +1140,17 @@ TaskGraphResult print_task_graph(
 
             tgbody.e("all_tasks.push_back(task_desc);");
             tgbody.e("}");
-            json_task_graph["all_tasks"].push_back(json_task);
-            task_pos++;
-          }
-        }
-      }
+            // json_task_graph["all_tasks"].push_back(json_task);
+            json_tasks[task_id - starting_task_id] = json_task;
+          } // subtask_id
+        }   // bid.z
+      }     // bid.y
+    }       // bid.x
+
+    for (int i = 0; i < json_tasks.size(); i++) {
+      json_task_graph["all_tasks"].push_back(json_tasks[i]);
     }
+    task_pos += json_tasks.size();
   }
   assert(task_pos == all_tasks.size());
   // Add all events
@@ -1178,8 +1199,6 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
-  task_type_to_name[TASK_NVSHMEM_ALLGATHER_STRIDED_PUT] =
-      "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
   task_type_to_name[TASK_REDUCE] = "TASK_REDUCE";
   task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
   task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";
@@ -1225,6 +1244,11 @@ TaskGraphResult print_task_graph(
       "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100";
   task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER] =
       "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER";
+  // Multi-gpu tasks
+  task_type_to_name[TASK_NVSHMEM_ALLGATHER_STRIDED_PUT] =
+      "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
+  task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
+      "TASK_NVSHMEM_TILE_ALLREDUCE";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");
