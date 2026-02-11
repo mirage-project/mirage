@@ -54,6 +54,51 @@ struct PipedSharedStorage {
   }
 };
 
+// Scaled piped task storage. The shared memory buffers for A, B, and C matrices.
+template <class TypeA,  // Tensor A data type
+          class TypeB,  // Tensor B data type
+          class TypeC,  // Tensor C data type
+          class TypeSF, // Tensor SF data type
+          class ASmemLayout,
+          class BSmemLayout,
+          class CSmemLayout,
+          class SFASmemLayout,
+          class SFBSmemLayout,
+          int Num_AB_Stage,
+          int Num_ACC_Stage>
+struct PipedScaledSharedStorage {
+  alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
+  alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
+  alignas(128) cute::ArrayEngine<TypeC, cute::cosize_v<CSmemLayout>> C;
+  alignas(128) cute::ArrayEngine<TypeSF, cute::cosize_v<SFASmemLayout>> SFA;
+  alignas(128) cute::ArrayEngine<TypeSF, cute::cosize_v<SFBSmemLayout>> SFB;
+
+  alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];
+  alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
+  alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
+  alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
+
+  alignas(16) cute::uint32_t tmem_acc_ptr;
+  alignas(16) cute::uint32_t tmem_sfa_ptr;
+  alignas(16) cute::uint32_t tmem_sfb_ptr;
+
+  CUTE_DEVICE constexpr auto tensor_sA() {
+    return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{});
+  }
+  CUTE_DEVICE constexpr auto tensor_sB() {
+    return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{});
+  }
+  CUTE_DEVICE constexpr auto tensor_sC() {
+    return cute::make_tensor(cute::make_smem_ptr(C.begin()), CSmemLayout{});
+  }
+  CUTE_DEVICE constexpr auto tensor_sSFA() {
+    return cute::make_tensor(cute::make_smem_ptr(SFA.begin()), SFASmemLayout{});
+  }
+  CUTE_DEVICE constexpr auto tensor_sSFB() {
+    return cute::make_tensor(cute::make_smem_ptr(SFB.begin()), SFBSmemLayout{});
+  }
+};
+
 // Gated Topk storage. The shared memory buffers for A, B, and C matrices.
 template <class TypeA,   // Tensor A data type
           class TypeB,   // Tensor B data type
