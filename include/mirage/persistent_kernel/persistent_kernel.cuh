@@ -73,6 +73,23 @@ using namespace kernel;
   } while (0)
 #endif
 
+#ifdef USE_NVSHMEM
+#ifndef NVSHMEM_CHECK
+#define NVSHMEM_CHECK(stmt)                                                    \
+  do {                                                                         \
+    int result = (stmt);                                                       \
+    if (NVSHMEMX_SUCCESS != result) {                                          \
+      fprintf(stderr,                                                          \
+              "[%s:%d] NVSHMEM failed with error %d\n",                        \
+              __FILE__,                                                        \
+              __LINE__,                                                        \
+              result);                                                         \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  } while (0)
+#endif
+#endif
+
 // #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
@@ -1084,6 +1101,7 @@ extern "C" void
                            int max_seq_length,
                            int total_num_requests,
                            long long eos_token_id,
+                           int allocate_nvshmem_teams,
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs) {
   assert(meta_tensors.size() == 10);
@@ -1129,8 +1147,36 @@ extern "C" void
   nvshmem_barrier_all();
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
-  int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-  printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
+  printf("MPK: Rank%d is Ready. Worldsize=%d\n", mype, npes);
+
+  // Create nvshmem teams
+  // For now, we assume we always need these teams. In the future, we should
+  // determine the numebr of teams by scanning kernels.
+  if (allocate_nvshmem_teams > 0) {
+    int num_teams = allocate_nvshmem_teams;
+    printf("MPK: Rank%d is allocating %d nvshmem teams. The more gpus "
+           "involved, the longer this takes.\n",
+           mype,
+           num_teams);
+    std::vector<nvshmem_team_t> teams_host(num_teams);
+    for (int i = 0; i < num_teams; i++) {
+      NVSHMEM_CHECK(nvshmem_team_split_strided(
+          NVSHMEM_TEAM_WORLD, 0, 1, npes, nullptr, 0, &teams_host[i]));
+      if (mype == 0) {
+        printf("MPK: Creating nvshmem team %d/%d, idx %d\n",
+               i + 1,
+               num_teams,
+               teams_host[i]);
+      }
+    }
+    global_runtime_config.nvshmem_teams =
+        gpu_malloc<nvshmem_team_t>(num_teams * sizeof(nvshmem_team_t));
+    cudaMemcpy(global_runtime_config.nvshmem_teams,
+               teams_host.data(),
+               num_teams * sizeof(nvshmem_team_t),
+               cudaMemcpyHostToDevice);
+    printf("MPK: Rank%d finished allocating nvshmem teams\n", mype);
+  }
 #else
   int mype = 0;
   int npes = 1;

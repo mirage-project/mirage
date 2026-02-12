@@ -13,6 +13,9 @@ from .speculative import (
     SpecDecodeConfig,
     PromptLookupConfig,
 )
+from .multigpu import (
+  auto_select_allreduce_implementation
+)
 from typing import Optional
 
 HARD_CODE = """
@@ -30,9 +33,10 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   std::vector<void*> model_tensor_ptrs;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
+  int allocate_nvshmem_teams;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -62,6 +66,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams);
   Py_ssize_t num_tensors = PyList_Size(tensor_names_list);
   for(Py_ssize_t i = 0; i < num_tensors; i++) {
     PyObject *name_item = PyList_GetItem(tensor_names_list, i);
@@ -208,10 +213,11 @@ def get_compile_command(
 
     flags = [
         "-shared",
-        "-std=c++17",
+        "-std=c++20",
         "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
+        "-lcudart",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
@@ -329,6 +335,7 @@ class PersistentKernel:
         self._spec_verify_handlers = {
             "promptlookup": self.prompt_lookup_verify_handler,
         }
+        self.allocate_nvshmem_teams = 0
         # determine total number of requests for offline serving
         self.total_num_requests = meta_tensors["tokens"].shape[0]
         assert self.max_seq_length == meta_tensors["tokens"].shape[1]
@@ -1095,14 +1102,14 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
         
+        params = []
+        enable_residual = 1
+        if self.world_size > 1 and self.mpi_rank != 0:
+            enable_residual = 0
+        params.append(enable_residual)
         if self.target_cc == 100:
-            self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100")
+            self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100", params)
         elif self.target_cc == 90:
-            params = []
-            enable_residual = 1
-            if self.world_size > 1 and self.mpi_rank != 0:
-                enable_residual = 0
-            params.append(enable_residual)
             if weight.dim(0) // grid_dim[0] <= 64:
                 # self.kn_graph.register_task(tb_graph, "linear_cutlass_with_residual_hopper")
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
@@ -1127,26 +1134,16 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size)
         # params[0]: num_gpus
         # params[1]: my_gpu_id
-        if self.target_cc < 90:
-            params = [self.world_size, self.mpi_rank]
-            allgather_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            allgather_tb_graph.new_input(input, (1, -1, -1), -1, True)
-            allgather_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-            self.kn_graph.customized([input, buffer], allgather_tb_graph)
-            self.kn_graph.register_task(allgather_tb_graph, 
-                "nvshmem_allgather_strided_put", params)
+        best_implementation = auto_select_allreduce_implementation(self.world_size, self.mpi_rank)
+        tensors = {
+            "input": input,
+            "buffer": buffer,
+            "output": output,
+        }
+        params = [self.world_size, self.mpi_rank]
+        best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim, 
+                                           block_dim=block_dim, params=params)
 
-            reduction_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            reduction_tb_graph.new_input(input, (1, -1, -1), -1, True)
-            reduction_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-            reduction_tb_graph.new_input(output, (1, -1, -1), -1, True)
-            self.kn_graph.customized([input, buffer, output], 
-                                     reduction_tb_graph)
-            self.kn_graph.register_task(reduction_tb_graph, "reduction", params)
-        else:
-            # TODO(Zepeng): Add nvshmem tile based allreduce
-            raise NotImplementedError(
-                "Allreduce layer is not yet implemented for SM90 and above.")
 
     def silu_mul_layer(
         self,
@@ -1620,6 +1617,7 @@ class PersistentKernel:
             self.max_seq_length,
             self.total_num_requests,
             self.eos_token_id,
+            self.allocate_nvshmem_teams,
             model_tensor_names,
             model_tensor_ptrs,
             "",  # Empty JSON path = use __FILE__ based path during initial compile
