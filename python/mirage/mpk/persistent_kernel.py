@@ -66,7 +66,6 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams);
   Py_ssize_t num_tensors = PyList_Size(tensor_names_list);
   for(Py_ssize_t i = 0; i < num_tensors; i++) {
     PyObject *name_item = PyList_GetItem(tensor_names_list, i);
@@ -90,7 +89,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
   }
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, model_tensor_names, model_tensor_ptrs);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs);
 
   Py_RETURN_NONE;
 }
@@ -1715,6 +1714,7 @@ class PersistentKernel:
             self.max_seq_length,
             self.total_num_requests,
             self.eos_token_id,
+            self.allocate_nvshmem_teams,
             model_tensor_names,
             model_tensor_ptrs,
             json_path,  # Pass the JSON path for kernel reuse
