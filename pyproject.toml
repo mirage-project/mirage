@@ -10,5 +10,5 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 markers = [
-    "slow: tests that build the package in a fresh venv (deselect with '-m \"not slow\"')",
+    "impure: tests use networking, foreign libs we dont bundle, certain mutable paths, global dynamic loader paths, FHS assumptions, etc (deselect with '-m \"not impure\"')",
 ]
