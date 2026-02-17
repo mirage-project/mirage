@@ -1,8 +1,14 @@
 [build-system]
 requires = [
-    "setuptools>=49.4.0", 
+    "setuptools>=49.4.0",
     "cmake>=3.24",
     "cython>=0.28",
     "z3-solver",
     "graphviz"
+]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that build the package in a fresh venv (deselect with '-m \"not slow\"')",
 ]
