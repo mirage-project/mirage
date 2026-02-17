@@ -42,6 +42,7 @@ else:
 cuda_include_dir = os.path.join(cuda_home, "include")
 cuda_library_dirs = [
     os.path.join(cuda_home, "lib"),
+    os.path.join(cuda_home, "lib", "stubs"),
     os.path.join(cuda_home, "lib64"),
     os.path.join(cuda_home, "lib64", "stubs"),
 ]
