@@ -56,7 +56,7 @@ def repo_root(pytestconfig: pytest.Config) -> pathlib.Path:
 
 
 def _create_venv(base: pathlib.Path, name: str) -> pathlib.Path:
-    """Create a venv at `base/name` with an upgraded pip.
+    """Create a venv at ``base/name`` with an upgraded pip.
 
     Returns the path to the venv's Python interpreter.
 
@@ -76,7 +76,7 @@ def _create_venv(base: pathlib.Path, name: str) -> pathlib.Path:
 
 
 def _pip_install(python: pathlib.Path, repo_root: pathlib.Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run `pip install` with `args` inside the venv identified by `python`."""
+    """Run ``pip install`` with ``args`` inside the venv identified by ``python``."""
     return subprocess.run(
         [python, "-m", "pip", "install", *args],
         cwd=repo_root,
@@ -87,87 +87,78 @@ def _pip_install(python: pathlib.Path, repo_root: pathlib.Path, *args: str) -> s
     )
 
 
-class TestImport:
-    """Verify that mirage is importable in the current environment."""
-
-    def test_import_mirage(self) -> None:
-        """import mirage must succeed if the package is on sys.path."""
-        spec = importlib.util.find_spec("mirage")
-        if spec is None:
-            pytest.skip("mirage is not on sys.path")
-        import mirage  # noqa: F401
+def test_import_mirage() -> None:
+    """import mirage must succeed if the package is on sys.path."""
+    spec = importlib.util.find_spec("mirage")
+    if spec is None:
+        pytest.skip("mirage is not on sys.path")
+    import mirage  # noqa: F401
 
 
 @pytest.mark.slow
 @pytest.mark.impure
-class TestNonEditableInstall:
-    """Verify that ``pip install .`` produces a working, self-contained package.
+def test_non_editable_install(tmp_path: pathlib.Path, repo_root: pathlib.Path) -> None:
+    """Non-editable install must bundle native libs and import cleanly.
 
     Creates a fresh venv with no build tree, so native libs are only
     discoverable if they are properly bundled inside the package.
     """
+    python: pathlib.Path = _create_venv(tmp_path, "venv_non_editable")
+    _pip_install(python, repo_root, ".")
 
-    def test_install_layout_and_import(self, tmp_path: pathlib.Path, repo_root: pathlib.Path) -> None:
-        """Non-editable install must bundle native libs and import cleanly."""
-        python: pathlib.Path = _create_venv(tmp_path, "venv_non_editable")
-        _pip_install(python, repo_root, ".")
+    # Run layout + import check inside the fresh venv.  There is no
+    # build tree, so _find_native_lib() can only succeed if the libs
+    # are bundled in the package directory.
+    #
+    # Layout check runs first (via find_spec, without importing) so
+    # that diagnostic output is available even if import crashes.
+    check_script = textwrap.dedent("""\
+        import importlib.util
+        import pathlib
 
-        # Run layout + import check inside the fresh venv.  There is no
-        # build tree, so _find_native_lib() can only succeed if the libs
-        # are bundled in the package directory.
-        #
-        # Layout check runs first (via find_spec, without importing) so
-        # that diagnostic output is available even if import crashes.
-        check_script = textwrap.dedent("""\
-            import importlib.util
-            import pathlib
+        spec = importlib.util.find_spec("mirage")
+        assert spec is not None, "mirage not found on sys.path in venv"
+        assert spec.submodule_search_locations is not None
 
-            spec = importlib.util.find_spec("mirage")
-            assert spec is not None, "mirage not found on sys.path in venv"
-            assert spec.submodule_search_locations is not None
-
-            pkg_dir = pathlib.Path(spec.submodule_search_locations[0])
-            lib_dir = pkg_dir / "lib"
-            assert lib_dir.is_dir(), (
-                f"lib/ directory not found in installed package: {{pkg_dir}}"
-            )
-
-            required = {required!r}
-            for name in required:
-                found = any(
-                    name in f.name
-                    for f in lib_dir.iterdir()
-                    if f.suffix == ".so"
-                )
-                assert found, f"{{name}}.so not bundled in {{lib_dir}}"
-
-            print(f"layout ok: {{lib_dir}}")
-
-            import mirage
-            print("import ok")
-        """).format(required=list(REQUIRED_NATIVE_LIBS))
-
-        result = subprocess.run(
-            [python, "-c", check_script],
-            env=_clean_env(),
-            timeout=30,
+        pkg_dir = pathlib.Path(spec.submodule_search_locations[0])
+        lib_dir = pkg_dir / "lib"
+        assert lib_dir.is_dir(), (
+            f"lib/ directory not found in installed package: {{pkg_dir}}"
         )
-        assert result.returncode == 0, "Layout or import check failed (see output above)"
+
+        required = {required!r}
+        for name in required:
+            found = any(
+                name in f.name
+                for f in lib_dir.iterdir()
+                if f.suffix == ".so"
+            )
+            assert found, f"{{name}}.so not bundled in {{lib_dir}}"
+
+        print(f"layout ok: {{lib_dir}}")
+
+        import mirage
+        print("import ok")
+    """).format(required=list(REQUIRED_NATIVE_LIBS))
+
+    result = subprocess.run(
+        [python, "-c", check_script],
+        env=_clean_env(),
+        timeout=30,
+    )
+    assert result.returncode == 0, "Layout or import check failed (see output above)"
 
 
 @pytest.mark.slow
 @pytest.mark.impure
-class TestEditableInstall:
-    """Verify that ``pip install -e .`` produces a working package."""
+def test_editable_install(tmp_path: pathlib.Path, repo_root: pathlib.Path) -> None:
+    """``import mirage`` must succeed from an editable install."""
+    python: pathlib.Path = _create_venv(tmp_path, "venv_editable")
+    _pip_install(python, repo_root, "-e", ".")
 
-    def test_editable_import(self, tmp_path: pathlib.Path, repo_root: pathlib.Path) -> None:
-        """``import mirage`` must succeed from an editable install."""
-        python: pathlib.Path = _create_venv(tmp_path, "venv_editable")
-        _pip_install(python, repo_root, "-e", ".")
-
-        result = subprocess.run(
-            [python, "-c", "import mirage; print('editable import ok')"],
-            env=_clean_env(),
-            timeout=30,
-        )
-        assert result.returncode == 0, "import mirage failed from editable install (see output above)"
+    result = subprocess.run(
+        [python, "-c", "import mirage; print('editable import ok')"],
+        env=_clean_env(),
+        timeout=30,
+    )
+    assert result.returncode == 0, "import mirage failed from editable install (see output above)"
