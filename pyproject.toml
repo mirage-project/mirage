@@ -11,4 +11,5 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 markers = [
     "impure: tests use networking, foreign libs we dont bundle, certain mutable paths, global dynamic loader paths, FHS assumptions, etc (deselect with '-m \"not impure\"')",
+    "slow",
 ]
