@@ -132,6 +132,7 @@ def config_cython():
                         "-fPIC",
                         "-fopenmp",
                         "-lrt",
+                        f"-Wl,-rpath,{path.join('$ORIGIN', 'lib')}",
                         f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'abstract_subexpr', 'release')}",
                         f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'formal_verifier', 'release')}",
                     ],
@@ -143,94 +144,113 @@ def config_cython():
         print("WARNING: cython is not installed!!!")
         raise SystemExit(1)
     
-# Install Rust if not yet available
-try:
-    # Attempt to run a Rust command to check if Rust is installed
-    subprocess.check_output(['cargo', '--version'])
-except FileNotFoundError:
-    print("Rust/Cargo not found, installing it...")
-    # Rust is not installed, so install it using rustup
+if os.environ.get("MIRAGE_SKIP_NATIVE_BUILD") != "1":
+    # Install Rust if not yet available
     try:
-        subprocess.run("curl https://sh.rustup.rs -sSf | sh -s -- -y", shell=True, check=True)
-        print("Rust and Cargo installed successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"Error: {e}")
-    # Add the cargo binary directory to the PATH
-    os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
+        # Attempt to run a Rust command to check if Rust is installed
+        subprocess.check_output(['cargo', '--version'])
+    except FileNotFoundError:
+        print("Rust/Cargo not found, installing it...")
+        # Rust is not installed, so install it using rustup
+        try:
+            subprocess.run("curl https://sh.rustup.rs -sSf | sh -s -- -y", shell=True, check=True)
+            print("Rust and Cargo installed successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"Error: {e}")
+        # Add the cargo binary directory to the PATH
+        os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
 
-mirage_path = path.dirname(__file__)
-# z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
-# os.environ['Z3_DIR'] = z3_path
-if mirage_path == '':
-    mirage_path = '.'
-
-try:
-    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr')
-except subprocess.CalledProcessError as e:
-    print("Failed to build abstract_subexpr Rust library, building it ...")
-    try:
-        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
-        print("Abstract_subexpr Rust library built successfully.")
-    except subprocess.CalledProcessError as e:
-        print("Failed to build abstract_subexpr Rust library.")
-    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so')
-
-try:
-    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv')
-except subprocess.CalledProcessError as e:
-    print("Failed to build formal_verifier Rust library, building it ...")
-    try:
-        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv', check=True)
-        print("formal_verifier Rust library built successfully.")
-    except subprocess.CalledProcessError as e:
-        print("Failed to build formal_verifier Rust library.")
-    os.environ['FORMAL_VERIFIER_LIB'] = os.path.join(mirage_path,'build', 'formal_verifier', 'release', 'libformal_verifier.so')
-
-
-# build Mirage runtime library
-try:
-    os.environ["CUDACXX"] = nvcc_path if nvcc_path else os.path.join(
-        cuda_home, "bin", "nvcc"
-    )
     mirage_path = path.dirname(__file__)
     # z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
     # os.environ['Z3_DIR'] = z3_path
-    if mirage_path == "":
-        mirage_path = "."
-    os.makedirs(mirage_path, exist_ok=True)
-    os.chdir(mirage_path)
-    build_dir = os.path.join(mirage_path, "build")
+    if mirage_path == '':
+        mirage_path = '.'
 
-    cc_path = shutil.which("gcc")
-    os.environ["CC"] = cc_path if cc_path else "/usr/bin/gcc"
-    cxx_path = shutil.which("g++")
-    os.environ["CXX"] = cxx_path if cxx_path else "/usr/bin/g++"
-    print(f"CC: {os.environ['CC']}, CXX: {os.environ['CXX']}", flush=True)
+    try:
+        subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr')
+    except subprocess.CalledProcessError as e:
+        print("Failed to build abstract_subexpr Rust library, building it ...")
+        try:
+            subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
+            print("Abstract_subexpr Rust library built successfully.")
+        except subprocess.CalledProcessError as e:
+            print("Failed to build abstract_subexpr Rust library.")
+        os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so')
 
-    # Create the build directory if it does not exist
-    os.makedirs(build_dir, exist_ok=True)
-    subprocess.check_call(
-        [
-            "cmake",
-            "..",
-            "-DCMAKE_BUILD_TYPE=Debug",
-            "-DZ3_CXX_INCLUDE_DIRS=" + z3_path + "/include/",
-            "-DZ3_LIBRARIES=" + path.join(z3_path, "lib", "libz3.so"),
-            '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release'),
-            '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so'),
-            '-DFORMAL_VERIFIER_LIB=' + path.join(mirage_path, 'build', 'formal_verifier', 'release'),
-            '-DFORMAL_VERIFIER_LIBRARIES=' + path.join(mirage_path, 'build', 'formal_verifier', 'release', 'libformal_verifier.so'),
-            "-DCMAKE_C_COMPILER=" + os.environ["CC"],
-            "-DCMAKE_CXX_COMPILER=" + os.environ["CXX"],
-        ],
-        cwd=build_dir,
-        env=os.environ.copy(),
-    )
-    subprocess.check_call(["make", "-j8"], cwd=build_dir, env=os.environ.copy())
-    print("Mirage runtime library built successfully.")
-except subprocess.CalledProcessError as e:
-    print("Failed to build runtime library.")
-    raise SystemExit(e.returncode)
+    try:
+        subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv')
+    except subprocess.CalledProcessError as e:
+        print("Failed to build formal_verifier Rust library, building it ...")
+        try:
+            subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv', check=True)
+            print("formal_verifier Rust library built successfully.")
+        except subprocess.CalledProcessError as e:
+            print("Failed to build formal_verifier Rust library.")
+        os.environ['FORMAL_VERIFIER_LIB'] = os.path.join(mirage_path,'build', 'formal_verifier', 'release', 'libformal_verifier.so')
+
+
+    # build Mirage runtime library
+    try:
+        os.environ["CUDACXX"] = nvcc_path if nvcc_path else os.path.join(
+            cuda_home, "bin", "nvcc"
+        )
+        mirage_path = path.dirname(__file__)
+        # z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
+        # os.environ['Z3_DIR'] = z3_path
+        if mirage_path == "":
+            mirage_path = "."
+        os.makedirs(mirage_path, exist_ok=True)
+        os.chdir(mirage_path)
+        build_dir = os.path.join(mirage_path, "build")
+
+        cc_path = shutil.which("gcc")
+        os.environ["CC"] = cc_path if cc_path else "/usr/bin/gcc"
+        cxx_path = shutil.which("g++")
+        os.environ["CXX"] = cxx_path if cxx_path else "/usr/bin/g++"
+        print(f"CC: {os.environ['CC']}, CXX: {os.environ['CXX']}", flush=True)
+
+        # Create the build directory if it does not exist
+        os.makedirs(build_dir, exist_ok=True)
+        subprocess.check_call(
+            [
+                "cmake",
+                "..",
+                "-DCMAKE_BUILD_TYPE=" + os.environ.get("CMAKE_BUILD_TYPE", "Release"),
+                "-DZ3_CXX_INCLUDE_DIRS=" + z3_path + "/include/",
+                "-DZ3_LIBRARIES=" + path.join(z3_path, "lib", "libz3.so"),
+                '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release'),
+                '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so'),
+                '-DFORMAL_VERIFIER_LIB=' + path.join(mirage_path, 'build', 'formal_verifier', 'release'),
+                '-DFORMAL_VERIFIER_LIBRARIES=' + path.join(mirage_path, 'build', 'formal_verifier', 'release', 'libformal_verifier.so'),
+                "-DCMAKE_C_COMPILER=" + os.environ["CC"],
+                "-DCMAKE_CXX_COMPILER=" + os.environ["CXX"],
+            ],
+            cwd=build_dir,
+            env=os.environ.copy(),
+        )
+        subprocess.check_call(["make", "-j8"], cwd=build_dir, env=os.environ.copy())
+        print("Mirage runtime library built successfully.")
+    except subprocess.CalledProcessError as e:
+        print("Failed to build runtime library.")
+        raise SystemExit(e.returncode)
+else:
+    # Pre-built: just set mirage_path for config_cython()
+    mirage_path = path.dirname(__file__) or "."
+
+from setuptools.command.build_py import build_py as _build_py
+
+class build_py(_build_py):
+    """Copy native .so files into mirage/lib/ before the standard build_py runs."""
+    def run(self):
+        lib_dir = path.join("python", "mirage", "lib")
+        os.makedirs(lib_dir, exist_ok=True)
+        for so_path in [
+            path.join("build", "abstract_subexpr", "release", "libabstract_subexpr.so"),
+            path.join("build", "formal_verifier", "release", "libformal_verifier.so"),
+        ]:
+            if path.exists(so_path):
+                shutil.copy2(so_path, lib_dir)
+        super().run()
 
 setup_args = {}
 
@@ -293,6 +313,8 @@ with copy_include() as copied:
         install_requires=requirements,
         packages=find_packages(where="python"),
         package_dir={"": "python"},
+        package_data={"mirage": ["lib/*.so"]},
+        cmdclass={"build_py": build_py},
         url="https://github.com/mirage-project/mirage",
         ext_modules=config_cython(),
         include_package_data=True,
