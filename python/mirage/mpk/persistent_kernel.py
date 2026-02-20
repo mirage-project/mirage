@@ -972,15 +972,15 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
 
-        if self.target_cc == 100:
+        if self.target_cc >= 100:
             self.kn_graph.register_task(tb_graph, "linear_sm100")
-        elif self.target_cc == 90:
+        elif self.target_cc >= 90:
             if weight.dim(0) // grid_dim[0] <= 64:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
                 # self.kn_graph.register_task(tb_graph, "linear_cutlass_hopper")
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
-        elif self.target_cc == 80:
+        elif self.target_cc >= 80:
             self.kn_graph.register_task(tb_graph, "linear")
         else:
             assert False
@@ -1011,15 +1011,15 @@ class PersistentKernel:
         if self.world_size > 1 and self.mpi_rank != 0:
             enable_residual = 0
         params.append(enable_residual)
-        if self.target_cc == 100:
+        if self.target_cc >= 100:
             self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100", params)
-        elif self.target_cc == 90:
+        elif self.target_cc >= 90:
             if weight.dim(0) // grid_dim[0] <= 64:
                 # self.kn_graph.register_task(tb_graph, "linear_cutlass_with_residual_hopper")
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
-        elif self.target_cc == 80:
+        elif self.target_cc >= 80:
             self.kn_graph.register_task(tb_graph, "linear_with_residual")
         else:
             assert False
