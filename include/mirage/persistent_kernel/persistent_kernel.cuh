@@ -1248,44 +1248,12 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
     global_runtime_config.first_compute_task_index = 2;
 
     // GMEM barriers: int32 counters for cross-worker sync (Megakernels g.Bar pattern).
-    // One barrier per event.
+    // One barrier per event. Barrier info derived on GPU from TaskDesc fields
+    // and all_event_num_triggers — no extra per-task array needed.
     int num_barriers = (int)all_events.size();
     global_runtime_config.num_barriers = num_barriers;
     global_runtime_config.barriers =
         gpu_malloc<int>(num_barriers * sizeof(int));
-
-    // Build per-task barrier info on host, then upload to GPU.
-    // Each task's dependent_event/trigger_event maps to a barrier index.
-    // Pre-computed so no EventId decoding on GPU hot path.
-    {
-      std::vector<RuntimeConfig::TaskBarrierInfo> host_task_barriers(num_all_tasks);
-      for (int i = 0; i < num_all_tasks; i++) {
-        auto const &ft = all_fulltasks[i];
-        RuntimeConfig::TaskBarrierInfo &bi = host_task_barriers[i];
-
-        if (ft.dependent_event != EVENT_INVALID_ID) {
-          int eidx = (int)(ft.dependent_event & 0xFFFFFFFF);
-          bi.wait_barrier = eidx;
-          bi.wait_count = all_events[eidx].num_triggers;
-        } else {
-          bi.wait_barrier = -1;
-          bi.wait_count = 0;
-        }
-
-        if (ft.trigger_event != EVENT_INVALID_ID) {
-          bi.signal_barrier = (int)(ft.trigger_event & 0xFFFFFFFF);
-        } else {
-          bi.signal_barrier = -1;
-        }
-      }
-      global_runtime_config.task_barriers =
-          gpu_malloc<RuntimeConfig::TaskBarrierInfo>(
-              num_all_tasks * sizeof(RuntimeConfig::TaskBarrierInfo));
-      cudaMemcpy(global_runtime_config.task_barriers,
-                 host_task_barriers.data(),
-                 num_all_tasks * sizeof(RuntimeConfig::TaskBarrierInfo),
-                 cudaMemcpyHostToDevice);
-    }
 
     // Find end-of-graph barrier (for inter-iteration sync)
     global_runtime_config.end_barrier = num_barriers - 1; // fallback
@@ -1534,7 +1502,6 @@ extern "C" void finalize_persistent_kernel() {
 
 #ifdef MPK_STATIC_WORKER
   gpu_free(global_runtime_config.barriers);
-  gpu_free(global_runtime_config.task_barriers);
   gpu_free(global_runtime_config.prepare_done_counter);
   gpu_free(global_runtime_config.continue_flag);
   gpu_free(global_runtime_config.first_tasks);

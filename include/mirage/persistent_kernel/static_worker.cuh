@@ -36,10 +36,10 @@ barrier_wait(int *barriers, int idx, int expected) {
 // ── Mainloop ────────────────────────────────────────────────────────────────
 // Each worker executes its round-robin share of compute tasks.
 // Task positions computed locally: first_compute + i * num_workers + worker_id.
+// Barrier info derived from TaskDesc fields already in SMEM — no extra GPU array.
 __device__ __forceinline__ void
     static_mainloop(RuntimeConfig const &config, int worker_id) {
   __shared__ TaskDesc task_smem;
-  __shared__ RuntimeConfig::TaskBarrierInfo binfo;
 
   int const nw = config.num_workers;
   int const base = config.first_compute_task_index;
@@ -55,15 +55,17 @@ __device__ __forceinline__ void
     int const *src = reinterpret_cast<int const *>(&config.all_tasks[pos]);
     for (int w = threadIdx.x; w < WORDS; w += blockDim.x)
       dst[w] = src[w];
-
-    // Thread 0 loads pre-computed barrier info
-    if (threadIdx.x == 0)
-      binfo = config.task_barriers[pos];
     __syncthreads();
 
-    // Wait on dependency barrier
-    if (threadIdx.x == 0 && binfo.wait_barrier >= 0)
-      barrier_wait(config.barriers, binfo.wait_barrier, binfo.wait_count);
+    // Derive barrier info from TaskDesc (already in SMEM)
+    if (threadIdx.x == 0) {
+      EventId dep = task_smem.dependent_event;
+      if (dep != EVENT_INVALID_ID) {
+        int eidx = (int)(dep & 0xFFFFFFFF);
+        barrier_wait(config.barriers, eidx,
+                     config.all_event_num_triggers[eidx]);
+      }
+    }
     __syncthreads();
 
     // Execute
@@ -71,8 +73,11 @@ __device__ __forceinline__ void
     __syncthreads();
 
     // Signal completion barrier
-    if (threadIdx.x == 0 && binfo.signal_barrier >= 0)
-      barrier_arrive(config.barriers, binfo.signal_barrier);
+    if (threadIdx.x == 0) {
+      EventId trig = task_smem.trigger_event;
+      if (trig != EVENT_INVALID_ID)
+        barrier_arrive(config.barriers, (int)(trig & 0xFFFFFFFF));
+    }
   }
 }
 
