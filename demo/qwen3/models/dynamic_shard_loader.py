@@ -41,7 +41,8 @@ class DynamicShardLoader:
         for hf_filename in files_mapping:
             local_filepath = files_mapping[hf_filename]
 
-            with safe_open(local_filepath, framework="pt") as f:
+            # TODO (emily): handle loading onto other devices
+            with safe_open(local_filepath, framework="pt", device=f"cuda:{self.rank}") as f:
                 for name in f.keys():
                     assert name.startswith("model.") or name == "lm_head.weight"
                     key = name.split(".")[-2]
@@ -57,25 +58,31 @@ class DynamicShardLoader:
                             continue
 
                     # Allocate tensor on GPU & move data to it based on TP specifications.
+                    weight_slice = f.get_slice(name)
                     if ShardType.COL_PARALLEL in parallelism_info:
-                        pass
+                        tp_size = parallelism_info[ShardType.COL_PARALLEL]
+                        tensor = self.handle_tensor_parallelism(ShardType.COL_PARALLEL, tp_size, weight_slice, name)
                     elif ShardType.ROW_PARALLEL in parallelism_info:
-                        pass
+                        tp_size = parallelism_info[ShardType.ROW_PARALLEL]
+                        tensor = self.handle_tensor_parallelism(ShardType.ROW_PARALLEL, tp_size, weight_slice, name)
                     else: # No TP.
-                        pass
+                        tensor = weight_slice[:]
+
+
+                    # TODO: Attach tensor to model
 
 
     def _get_parallelism_info(self, param_key):
         """Given param key (ex: q_proj, gate), return parallelism info as a dictionary. 
         """
         mapping_info = self.mapping[param_key]
-        parallelism_dict = {} # key: ShardType. val: num groups to parallelize by, or None for default.
+        parallelism_dict = {} # key: ShardType. val: num groups to parallelize by.
         for info in mapping_info["shard_type"]:
             # Ensure the info is a list of tuples.
             if not isinstance(info, tuple):
                 info = (info,)
             
-            parallelism_dict[info[0]] = info[1] if len(info) > 1 else None
+            parallelism_dict[info[0]] = info[1] if len(info) > 1 else self.world_size
 
         return parallelism_dict
 
@@ -106,6 +113,28 @@ class DynamicShardLoader:
         expert_start = self.rank * experts_per_rank
         expert_end = min(expert_start + experts_per_rank, num_experts)
         return weight_num in range(expert_start, expert_end)
+
+
+    def handle_tensor_parallelism(self, tp_type, tp_size, weight_slice, weight_name):
+        dim = tp_type.value 
+        
+        # Valid shape with tensor parallel size.
+        shape = weight_slice.get_shape()
+        assert (
+            shape[dim] % tp_size == 0
+        ), f"Error in handle_tensor_parallelism for '{weight_name}': Dimension {dim} must be divisible by {mp}. Tensor shape is {shape}"
+
+
+        # Perform sharding and return Pytorch tensor.
+        shard_size = shape[dim] // tp_size
+        tp_rank = self.rank % tp_size
+        start = tp_rank * shard_size
+        end = (tp_rank + 1) * shard_size
+        if tp_type == ShardType.COL_PARALLEL:
+            return weight_slice[start:end, :]
+        else:
+            return weight_slice[:, start:end]
+
 
 
     def _get_model_index_file(self):
