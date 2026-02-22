@@ -144,8 +144,9 @@ def get_compile_command(
             min_schedulers = num_local_schedulers
         else:
             min_schedulers = min(num_local_schedulers, num_remote_schedulers)
-        # advance by 1 for the scheduler who are handling the not divisiable num_worker.
-        max_worker_per_scheduler = (num_workers // min_schedulers) + 1
+        if min_schedulers > 0:
+            # advance by 1 for the scheduler who are handling the not divisiable num_worker.
+            max_worker_per_scheduler = (num_workers // min_schedulers) + 1
 
     common_cmd = [
         cc,
