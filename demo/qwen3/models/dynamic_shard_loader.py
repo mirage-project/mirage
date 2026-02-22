@@ -6,6 +6,13 @@ from safetensors import safe_open
 from huggingface_hub import hf_hub_download
 import json
 import math
+from enum import Enum
+
+class ShardType(Enum):
+    COL_PARALLEL = 0
+    ROW_PARALLEL = 1
+    EXPERT_PARALLEL = 2
+    NONE = 100 # No sharding, replicate on all GPUs
 
 class DynamicShardLoader:
     def __init__(self, model_obj, model_name, mapping, rank, world_size, download=False):
@@ -36,10 +43,43 @@ class DynamicShardLoader:
 
             with safe_open(local_filepath, framework="pt") as f:
                 for name in f.keys():
-                    pass
-                    
+                    assert name.startswith("model.") or name == "lm_head.weight"
+                    key = name.split(".")[-2]
 
-    def check_expert_parallel(self, full_weight_name, expert_parallel_size=None):
+                    # TODO: either throw error (currently) or replicate on all GPUs if user didn't provide key
+                    assert key in self.mapping, f"Param Key {key} not found in mapping"
+                    
+                    parallelism_info = self._get_parallelism_info(key)
+                    
+                    # Check expert parallelism.
+                    if "expert" in name and ShardType.EXPERT_PARALLEL in parallelism_info:
+                        if not self._check_expert_parallel(name, parallelism_info[ShardType.EXPERT_PARALLEL]):
+                            continue
+
+                    # Allocate tensor on GPU & move data to it based on TP specifications.
+                    if ShardType.COL_PARALLEL in parallelism_info:
+                        pass
+                    elif ShardType.ROW_PARALLEL in parallelism_info:
+                        pass
+                    else: # No TP.
+                        pass
+
+
+    def _get_parallelism_info(self, param_key):
+        """Given param key (ex: q_proj, gate), return parallelism info as a dictionary. 
+        """
+        mapping_info = self.mapping[param_key]
+        parallelism_dict = {} # key: ShardType. val: num groups to parallelize by, or None for default.
+        for info in mapping_info["shard_type"]:
+            # Ensure the info is a list of tuples.
+            if not isinstance(info, tuple):
+                info = (info,)
+            
+            parallelism_dict[info[0]] = info[1] if len(info) > 1 else None
+
+        return parallelism_dict
+
+    def _check_expert_parallel(self, full_weight_name, expert_parallel_size=None):
         """Return true if the weight should be included, false otherwise, based on EP configs.
 
         Args:
@@ -59,14 +99,13 @@ class DynamicShardLoader:
 
         weight_name_components = full_weight_name.split('.')
         weight_num = int(weight_name_components[5])
+        num_experts = self.model_obj.config.num_experts
         
-        experts_per_rank = math.ceil(self.model_obj.config.num_experts / self.world_size)
+        experts_per_rank = math.ceil(num_experts / self.world_size)
 
         expert_start = self.rank * experts_per_rank
-        expert_end = min(expert_start + experts_per_rank, self.model_obj.config.num_experts)
+        expert_end = min(expert_start + experts_per_rank, num_experts)
         return weight_num in range(expert_start, expert_end)
-
-            
 
 
     def _get_model_index_file(self):
@@ -80,6 +119,7 @@ class DynamicShardLoader:
             index_path = self.comm.bcast(index_path, root=0)
 
         return index_path
+
 
     def _download_all_safetensor_files(self):
         if self.rank == 0:
