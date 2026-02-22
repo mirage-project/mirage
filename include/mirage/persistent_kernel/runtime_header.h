@@ -304,6 +304,29 @@ struct RuntimeConfig {
 #ifdef USE_NVSHMEM
   nvshmem_team_t *nvshmem_teams;
 #endif
+#ifdef MPK_STATIC_WORKER
+  // Per-task barrier info: pre-computed at init, no EventId decoding on GPU.
+  // Follows Megakernels pattern where each instruction encodes its own
+  // barrier coordinates (opcode / prev_opcode / expected count).
+  struct TaskBarrierInfo {
+    int wait_barrier;    // barrier index to wait on (-1 = no dependency)
+    int wait_count;      // expected arrivals before this task can run
+    int signal_barrier;  // barrier index to signal on completion (-1 = none)
+  };
+  TaskBarrierInfo *task_barriers;  // [num_all_tasks] — one per task position
+  // GMEM barriers: int32 counters, atomicAdd to arrive, volatile poll to wait.
+  // One per dependency point. Reset to zero between iterations.
+  int *barriers;                   // [num_barriers]
+  int num_barriers;
+  int end_barrier;                 // barrier index for end-of-graph
+  int end_barrier_count;           // expected arrivals for end-of-graph barrier
+  // Task info (each worker computes its own round-robin list locally)
+  int num_compute_tasks;
+  int first_compute_task_index;    // = 2 (skip TERMINATE and BEGIN_TASK_GRAPH)
+  // Iteration control
+  unsigned long long *prepare_done_counter;
+  bool *continue_flag;
+#endif
 };
 
 } // namespace runtime
