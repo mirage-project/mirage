@@ -299,6 +299,9 @@ class PersistentKernel:
         if use_static_worker:
             self.num_local_schedulers = 0
             self.num_remote_schedulers = 0
+            # Use all SMs as workers — no schedulers needed
+            sm_count = torch.cuda.get_device_properties(mpi_rank).multi_processor_count
+            self.num_workers = sm_count
         self._spec_decode_handlers = {
             "promptlookup": self.prompt_lookup_spec_handler,
         }
