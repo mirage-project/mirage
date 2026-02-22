@@ -1049,6 +1049,31 @@ void static_worker_kernel(RuntimeConfig config) {
   worker_checker(config);
   execute_worker_static(config);
 }
+
+// Prepare kernel for static worker: called once before the first iteration.
+// Mirrors the dynamic path where prepare_kernel seeds END_OF_TASK_GRAPH
+// to the scheduler, which then calls prepare_next_batch() to set up the
+// first batch (input_tokens, request_ids, KV page tables, etc.).
+// Also signals BEGIN_TASK_GRAPH's trigger event since task 1 is not
+// executed by static workers.
+__global__ void static_prepare_kernel(RuntimeConfig config) {
+  if (threadIdx.x == 0) {
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || \
+    defined(MODE_ONLINE_NOTOKEN)
+#ifdef MODE_ONLINE_NOTOKEN
+    prepare_next_batch(config, 0);
+#else
+    prepare_next_batch(config);
+#endif
+#endif
+    // Signal BEGIN_TASK_GRAPH's trigger event (task 1 is skipped by workers)
+    EventId trig = config.all_tasks[1].trigger_event;
+    if (trig != EVENT_INVALID_ID) {
+      int eidx = (int)(trig & 0xFFFFFFFF);
+      atomicAdd(&config.barriers[eidx], 1);
+    }
+  }
+}
 #endif
 
 template <typename DT>
@@ -1393,6 +1418,11 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                     default_stream);
     cudaMemsetAsync(global_runtime_config.prepare_done_counter, 0,
                     sizeof(unsigned long long), default_stream);
+
+    // Prepare first batch and signal BEGIN_TASK_GRAPH's trigger event.
+    // In the dynamic path, prepare_kernel seeds END_OF_TASK_GRAPH to the
+    // scheduler which calls prepare_next_batch() before launching tasks.
+    static_prepare_kernel<<<1, 1, 0, default_stream>>>(global_runtime_config);
 
     printf("static worker kernel: %d workers, smem %d\n",
            global_runtime_config.num_workers, MAX_DYNAMIC_SHARED_MEMORY_SIZE);

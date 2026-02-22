@@ -57,8 +57,17 @@ __device__ __forceinline__ void
       dst[w] = src[w];
     __syncthreads();
 
-    // Derive barrier info from TaskDesc (already in SMEM)
+    // Derive barrier info from TaskDesc (already in SMEM).
+    // Cache signal_barrier now — task_smem will be overwritten next iteration.
+    __shared__ int signal_barrier_idx;
     if (threadIdx.x == 0) {
+      // Cache signal barrier before execute
+      EventId trig = task_smem.trigger_event;
+      signal_barrier_idx = (trig != EVENT_INVALID_ID)
+                               ? (int)(trig & 0xFFFFFFFF)
+                               : -1;
+
+      // Wait on dependency barrier
       EventId dep = task_smem.dependent_event;
       if (dep != EVENT_INVALID_ID) {
         int eidx = (int)(dep & 0xFFFFFFFF);
@@ -72,12 +81,9 @@ __device__ __forceinline__ void
     _execute_task(&task_smem, config);
     __syncthreads();
 
-    // Signal completion barrier
-    if (threadIdx.x == 0) {
-      EventId trig = task_smem.trigger_event;
-      if (trig != EVENT_INVALID_ID)
-        barrier_arrive(config.barriers, (int)(trig & 0xFFFFFFFF));
-    }
+    // Signal completion barrier (reads cached index, no race with next load)
+    if (threadIdx.x == 0 && signal_barrier_idx >= 0)
+      barrier_arrive(config.barriers, signal_barrier_idx);
   }
 }
 
