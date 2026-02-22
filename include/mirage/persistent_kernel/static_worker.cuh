@@ -41,6 +41,14 @@ __device__ __forceinline__ void
     static_mainloop(RuntimeConfig const &config, int worker_id) {
   __shared__ TaskDesc task_smem;
 
+#ifdef MPK_ENABLE_PROFILING
+  PROFILER_CLOSURE_PARAMS_DECL;
+  PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
+                0, 1,
+                (threadIdx.x % WORKER_NUM_THREADS == 0));
+  size_t task_counter = 0;
+#endif
+
   int const nw = config.num_workers;
   int const base = config.first_compute_task_index;
   int const total = config.num_compute_tasks;
@@ -77,9 +85,17 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
+#ifdef MPK_ENABLE_PROFILING
+    PROFILER_EVENT_START(task_smem.task_type, task_counter);
+#endif
+
     // Execute
     _execute_task(&task_smem, config);
     __syncthreads();
+
+#ifdef MPK_ENABLE_PROFILING
+    PROFILER_EVENT_END(task_smem.task_type, task_counter++);
+#endif
 
     // Signal completion barrier (reads cached index, no race with next load)
     if (threadIdx.x == 0 && signal_barrier_idx >= 0)
