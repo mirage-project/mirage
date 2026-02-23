@@ -40,7 +40,12 @@ barrier_wait(int *barriers, int idx, int expected) {
 // Barrier info derived from TaskDesc fields already in SMEM — no extra GPU array.
 __device__ __forceinline__ void
     static_mainloop(RuntimeConfig const &config, int worker_id) {
-  __shared__ TaskDesc task_smem;
+  // Batched cp_async TaskDesc loading (same pattern as dynamic worker)
+  constexpr int BATCH_LEN = std::min(
+      (mirage::runtime::WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE - 16) /
+          (int)sizeof(TaskDesc),
+      16);
+  __shared__ TaskDesc task_descs[BATCH_LEN];
 
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
@@ -54,53 +59,73 @@ __device__ __forceinline__ void
   int const base = config.first_compute_task_index;
   int const total = config.num_compute_tasks;
 
-  for (int i = 0; base + i * nw + worker_id < base + total; i++) {
-    int pos = base + i * nw + worker_id;
+  static_assert(sizeof(TaskDesc) % 16 == 0);
+  constexpr int TASK_SIZE = sizeof(TaskDesc) / 16; // 128-bit units
 
-    // Load TaskDesc collectively (all threads participate)
-    static_assert(sizeof(TaskDesc) % sizeof(int) == 0);
-    constexpr int WORDS = sizeof(TaskDesc) / sizeof(int);
-    int *dst = reinterpret_cast<int *>(&task_smem);
-    int const *src = reinterpret_cast<int const *>(&config.all_tasks[pos]);
-    for (int w = threadIdx.x; w < WORDS; w += blockDim.x)
-      dst[w] = src[w];
-    __syncthreads();
+  int i = 0;
+  while (base + i * nw + worker_id < base + total) {
+    // Determine batch: how many consecutive tasks to load
+    int batch_count = 0;
+    for (int b = 0; b < BATCH_LEN && base + (i + b) * nw + worker_id < base + total; b++)
+      batch_count++;
 
-    // Derive barrier info from TaskDesc (already in SMEM).
-    // Cache signal_barrier now — task_smem will be overwritten next iteration.
-    __shared__ int signal_barrier_idx;
-    if (threadIdx.x == 0) {
-      // Cache signal barrier before execute
-      EventId trig = task_smem.trigger_event;
-      signal_barrier_idx = (trig != EVENT_INVALID_ID)
-                               ? (int)(trig & 0xFFFFFFFF)
-                               : -1;
-
-      // Wait on dependency barrier
-      EventId dep = task_smem.dependent_event;
-      if (dep != EVENT_INVALID_ID) {
-        int eidx = (int)(dep & 0xFFFFFFFF);
-        barrier_wait(config.barriers, eidx,
-                     config.all_event_num_triggers[eidx]);
-      }
+    // Batch load TaskDescs via cp_async (128-bit async copies)
+    for (int t = threadIdx.x; t < batch_count * TASK_SIZE; t += blockDim.x) {
+      int task_idx = t / TASK_SIZE;
+      int offset = t % TASK_SIZE;
+      int pos = base + (i + task_idx) * nw + worker_id;
+      load_smem(reinterpret_cast<char *>(task_descs + task_idx) + offset * 16,
+                reinterpret_cast<char const *>(config.all_tasks + pos) + offset * 16);
     }
+    kernel::cp_async_fence();
+    kernel::cp_async_wait<0>();
     __syncthreads();
 
+    // Execute each task in the batch
+    for (int b = 0; b < batch_count; b++) {
+      TaskDesc *task_desc = task_descs + b;
+      int pos = base + (i + b) * nw + worker_id;
+
+      // Cache signal_barrier now — task_desc may be overwritten by next batch
+      __shared__ int signal_barrier_idx;
+      if (threadIdx.x == 0) {
+        EventId trig = task_desc->trigger_event;
+        signal_barrier_idx = (trig != EVENT_INVALID_ID)
+                                 ? (int)(trig & 0xFFFFFFFF)
+                                 : -1;
+
+        // Wait on dependency barrier
+        EventId dep = task_desc->dependent_event;
+        if (dep != EVENT_INVALID_ID) {
+          int eidx = (int)(dep & 0xFFFFFFFF);
+          barrier_wait(config.barriers, eidx,
+                       config.all_event_num_triggers[eidx]);
+        }
+      }
+      __syncthreads();
+
 #ifdef MPK_ENABLE_PROFILING
-    PROFILER_EVENT_START(task_smem.task_type, task_counter);
+      PROFILER_EVENT_START(task_desc->task_type, task_counter);
 #endif
 
-    // Execute
-    _execute_task(&task_smem, config);
-    __syncthreads();
+      // Execute
+      if (threadIdx.x == 0 &&
+          (task_desc->task_type == TASK_PAGED_ATTENTION_1 ||
+           task_desc->task_type == TASK_ATTENTION_1))
+        printf("ATTN task pos=%d worker=%d blockIdx=%d\n",
+               pos, worker_id, blockIdx.x);
+      _execute_task(task_desc, config);
+      __syncthreads();
 
 #ifdef MPK_ENABLE_PROFILING
-    PROFILER_EVENT_END(task_smem.task_type, task_counter++);
+      PROFILER_EVENT_END(task_desc->task_type, task_counter++);
 #endif
 
-    // Signal completion barrier (reads cached index, no race with next load)
-    if (threadIdx.x == 0 && signal_barrier_idx >= 0)
-      barrier_arrive(config.barriers, signal_barrier_idx);
+      // Signal completion barrier
+      if (threadIdx.x == 0 && signal_barrier_idx >= 0)
+        barrier_arrive(config.barriers, signal_barrier_idx);
+    }
+    i += batch_count;
   }
 }
 
