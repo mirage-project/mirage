@@ -97,6 +97,7 @@ def export_to_perfetto_trace(
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
     num_blocks = int(num_blocks)
     num_groups = int(num_groups)
+    print(f"[profiler] header: num_blocks={num_blocks}, num_groups={num_groups}, raw={int(profiler_buffer_host[0]):#018x}")
 
     tgen = TraceGenerator(file_name)
 
