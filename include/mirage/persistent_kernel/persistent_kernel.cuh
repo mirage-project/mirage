@@ -1044,8 +1044,9 @@ __global__ void scheduler_kernel(RuntimeConfig config) {
 #ifdef MPK_STATIC_WORKER
 #include "static_worker.cuh"
 
-__global__ __launch_bounds__(WORKER_NUM_THREADS, 1)
-void static_worker_kernel(RuntimeConfig config) {
+__global__
+    __launch_bounds__(WORKER_NUM_THREADS,
+                      1) void static_worker_kernel(RuntimeConfig config) {
   worker_checker(config);
   execute_worker_static(config);
 }
@@ -1058,7 +1059,7 @@ void static_worker_kernel(RuntimeConfig config) {
 // executed by static workers.
 __global__ void static_prepare_kernel(RuntimeConfig config) {
   if (threadIdx.x == 0) {
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || \
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN)
 #ifdef MODE_ONLINE_NOTOKEN
     prepare_next_batch(config, 0);
@@ -1267,14 +1268,16 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   // No scheduler, no controller SM. Cross-SM sync via GMEM barriers.
   {
     int num_all_tasks = (int)all_tasks.size();
-    int num_compute_tasks = num_all_tasks - 2; // skip TERMINATE(0) and BEGIN_TASK_GRAPH(1)
+    int num_compute_tasks =
+        num_all_tasks - 2; // skip TERMINATE(0) and BEGIN_TASK_GRAPH(1)
 
     global_runtime_config.num_compute_tasks = num_compute_tasks;
     global_runtime_config.first_compute_task_index = 2;
 
-    // GMEM barriers: int32 counters for cross-worker sync (Megakernels g.Bar pattern).
-    // One barrier per event. Barrier info derived on GPU from TaskDesc fields
-    // and all_event_num_triggers — no extra per-task array needed.
+    // GMEM barriers: int32 counters for cross-worker sync (Megakernels g.Bar
+    // pattern). One barrier per event. Barrier info derived on GPU from
+    // TaskDesc fields and all_event_num_triggers — no extra per-task array
+    // needed.
     int num_barriers = (int)all_events.size();
     global_runtime_config.num_barriers = num_barriers;
     global_runtime_config.barriers =
@@ -1298,67 +1301,115 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
     printf("MPK Static Worker: %d tasks (%d compute), %d workers, "
            "%d barriers, end_barrier=%d (count=%d)\n",
-           num_all_tasks, num_compute_tasks, num_workers,
-           num_barriers, global_runtime_config.end_barrier,
+           num_all_tasks,
+           num_compute_tasks,
+           num_workers,
+           num_barriers,
+           global_runtime_config.end_barrier,
            global_runtime_config.end_barrier_count);
 
     // Print round-robin SM assignment
-    auto task_name = [](int t) -> const char * {
+    auto task_name = [](int t) -> char const * {
       switch (t) {
-        case 0:   return "TERMINATE";
-        case 10:  return "BEGIN_TASK_GRAPH";
-        case 101: return "EMBEDDING";
-        case 102: return "RMS_NORM_LINEAR";
-        case 103: return "ATTENTION_1";
-        case 104: return "ATTENTION_2";
-        case 105: return "SILU_MUL_LINEAR_W_RES";
-        case 106: return "ALLREDUCE";
-        case 107: return "REDUCE";
-        case 108: return "LINEAR_W_RES";
-        case 109: return "ARGMAX";
-        case 110: return "ARGMAX_PARTIAL";
-        case 111: return "ARGMAX_REDUCE";
-        case 115: return "SB_EXTEND_ATTN";
-        case 116: return "PAGED_ATTN_1";
-        case 117: return "PAGED_ATTN_2";
-        case 118: return "SILU_MUL";
-        case 119: return "RMS_NORM";
-        case 120: return "LINEAR";
-        case 121: return "IDENTITY";
-        case 151: return "LINEAR_W_RES_HOPPER";
-        case 152: return "LINEAR_HOPPER";
-        case 153: return "PAGED_ATTN_HOPPER";
-        case 154: return "RMS_NORM_HOPPER";
-        case 155: return "LINEAR_SWAPAB_HOPPER";
-        case 156: return "LINEAR_SWAPAB_W_RES_HOPPER";
-        case 157: return "LINEAR_CUTLASS_HOPPER";
-        case 158: return "LINEAR_CUTLASS_W_RES_HOPPER";
-        case 159: return "SILU_MUL_HOPPER";
-        case 160: return "EMBEDDING_HOPPER";
-        case 161: return "MOE_W13_LINEAR_SM90";
-        case 162: return "MOE_W2_LINEAR_SM90";
-        case 163: return "SPLITK_LINEAR_SWAPAB_HOPPER";
-        case 164: return "PAGED_ATTN_SPLIT_KV_HOPPER";
-        case 251: return "SPLITK_LINEAR_SM100";
-        case 252: return "LINEAR_W_RES_SM100";
-        case 253: return "LINEAR_SM100";
-        case 257: return "ATTN_SM100";
-        case 258: return "ARGMAX_REDUCE_SM100";
-        case 259: return "ARGMAX_PARTIAL_SM100";
-        case 262: return "TENSOR_INIT";
-        case 263: return "PAGED_ATTN_SPLIT_KV_SM100";
-        case 264: return "PAGED_ATTN_SPLIT_KV_MERGE_SM100";
-        case 265: return "SAMPLING_SM100";
-        default:  return "UNKNOWN";
+        case 0:
+          return "TERMINATE";
+        case 10:
+          return "BEGIN_TASK_GRAPH";
+        case 101:
+          return "EMBEDDING";
+        case 102:
+          return "RMS_NORM_LINEAR";
+        case 103:
+          return "ATTENTION_1";
+        case 104:
+          return "ATTENTION_2";
+        case 105:
+          return "SILU_MUL_LINEAR_W_RES";
+        case 106:
+          return "ALLREDUCE";
+        case 107:
+          return "REDUCE";
+        case 108:
+          return "LINEAR_W_RES";
+        case 109:
+          return "ARGMAX";
+        case 110:
+          return "ARGMAX_PARTIAL";
+        case 111:
+          return "ARGMAX_REDUCE";
+        case 115:
+          return "SB_EXTEND_ATTN";
+        case 116:
+          return "PAGED_ATTN_1";
+        case 117:
+          return "PAGED_ATTN_2";
+        case 118:
+          return "SILU_MUL";
+        case 119:
+          return "RMS_NORM";
+        case 120:
+          return "LINEAR";
+        case 121:
+          return "IDENTITY";
+        case 151:
+          return "LINEAR_W_RES_HOPPER";
+        case 152:
+          return "LINEAR_HOPPER";
+        case 153:
+          return "PAGED_ATTN_HOPPER";
+        case 154:
+          return "RMS_NORM_HOPPER";
+        case 155:
+          return "LINEAR_SWAPAB_HOPPER";
+        case 156:
+          return "LINEAR_SWAPAB_W_RES_HOPPER";
+        case 157:
+          return "LINEAR_CUTLASS_HOPPER";
+        case 158:
+          return "LINEAR_CUTLASS_W_RES_HOPPER";
+        case 159:
+          return "SILU_MUL_HOPPER";
+        case 160:
+          return "EMBEDDING_HOPPER";
+        case 161:
+          return "MOE_W13_LINEAR_SM90";
+        case 162:
+          return "MOE_W2_LINEAR_SM90";
+        case 163:
+          return "SPLITK_LINEAR_SWAPAB_HOPPER";
+        case 164:
+          return "PAGED_ATTN_SPLIT_KV_HOPPER";
+        case 251:
+          return "SPLITK_LINEAR_SM100";
+        case 252:
+          return "LINEAR_W_RES_SM100";
+        case 253:
+          return "LINEAR_SM100";
+        case 257:
+          return "ATTN_SM100";
+        case 258:
+          return "ARGMAX_REDUCE_SM100";
+        case 259:
+          return "ARGMAX_PARTIAL_SM100";
+        case 262:
+          return "TENSOR_INIT";
+        case 263:
+          return "PAGED_ATTN_SPLIT_KV_SM100";
+        case 264:
+          return "PAGED_ATTN_SPLIT_KV_MERGE_SM100";
+        case 265:
+          return "SAMPLING_SM100";
+        default:
+          return "UNKNOWN";
       }
     };
-    printf("── Static SM Assignment (round-robin) ──\n");
-    for (int pos = 2; pos < num_all_tasks; pos++) {
-      int w = (pos - 2) % num_workers;
-      printf("  pos=%3d  worker=%2d  %s\n",
-             pos, w, task_name(all_tasks[pos].task_type));
-    }
-    printf("── End SM Assignment ──\n");
+    // printf("── Static SM Assignment (round-robin) ──\n");
+    // for (int pos = 2; pos < num_all_tasks; pos++) {
+    //   int w = (pos - 2) % num_workers;
+    //   printf("  pos=%3d  worker=%2d  %s\n",
+    //          pos, w, task_name(all_tasks[pos].task_type));
+    // }
+    // printf("── End SM Assignment ──\n");
   }
 
   // Still need first_tasks for compatibility
@@ -1381,7 +1432,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
-#else // !MPK_STATIC_WORKER
+#else  // !MPK_STATIC_WORKER
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
   global_runtime_config.worker_queue_last_ready_task_id =
@@ -1471,11 +1522,14 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
 #ifdef MPK_STATIC_WORKER
   // Static worker mode: reset barriers, launch only worker CTAs.
   {
-    cudaMemsetAsync(global_runtime_config.barriers, 0,
+    cudaMemsetAsync(global_runtime_config.barriers,
+                    0,
                     global_runtime_config.num_barriers * sizeof(int),
                     default_stream);
-    cudaMemsetAsync(global_runtime_config.prepare_done_counter, 0,
-                    sizeof(unsigned long long), default_stream);
+    cudaMemsetAsync(global_runtime_config.prepare_done_counter,
+                    0,
+                    sizeof(unsigned long long),
+                    default_stream);
 
     // Prepare first batch and signal BEGIN_TASK_GRAPH's trigger event.
     // In the dynamic path, prepare_kernel seeds END_OF_TASK_GRAPH to the
@@ -1483,7 +1537,8 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     static_prepare_kernel<<<1, 1, 0, default_stream>>>(global_runtime_config);
 
     printf("static worker kernel: %d workers, smem %d\n",
-           global_runtime_config.num_workers, MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+           global_runtime_config.num_workers,
+           MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
     static_worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                            dim3(WORKER_NUM_THREADS, 1, 1),
@@ -1492,8 +1547,7 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
 
     cudaError_t err = cudaStreamSynchronize(default_stream);
     if (err != cudaSuccess) {
-      printf("CUDA static worker kernel error: %s\n",
-             cudaGetErrorString(err));
+      printf("CUDA static worker kernel error: %s\n", cudaGetErrorString(err));
     }
     printf("Finished Static Worker Kernel\n");
     return;

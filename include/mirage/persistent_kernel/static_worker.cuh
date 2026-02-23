@@ -22,24 +22,24 @@
 
 constexpr int BARRIER_SPIN_SLEEP_NS = 20;
 
-
-__device__ __forceinline__ void
-barrier_arrive(int *barriers, int idx) {
+__device__ __forceinline__ void barrier_arrive(int *barriers, int idx) {
   atomicAdd(&barriers[idx], 1);
 }
 
 __device__ __forceinline__ void
-barrier_wait(int *barriers, int idx, int expected) {
-  while (*(volatile int *)&barriers[idx] < expected)
+    barrier_wait(int *barriers, int idx, int expected) {
+  while (*(int volatile *)&barriers[idx] < expected) {
     __nanosleep(BARRIER_SPIN_SLEEP_NS);
+  }
 }
 
 // ── Mainloop ────────────────────────────────────────────────────────────────
 // Each worker executes its round-robin share of compute tasks.
 // Task positions computed locally: first_compute + i * num_workers + worker_id.
-// Barrier info derived from TaskDesc fields already in SMEM — no extra GPU array.
-__device__ __forceinline__ void
-    static_mainloop(RuntimeConfig const &config, int worker_id) {
+// Barrier info derived from TaskDesc fields already in SMEM — no extra GPU
+// array.
+__device__ __forceinline__ void static_mainloop(RuntimeConfig const &config,
+                                                int worker_id) {
   // Batched cp_async TaskDesc loading (same pattern as dynamic worker)
   constexpr int BATCH_LEN = std::min(
       (mirage::runtime::WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE - 16) /
@@ -50,7 +50,8 @@ __device__ __forceinline__ void
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
   PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
-                0, 1,
+                0,
+                1,
                 (threadIdx.x % WORKER_NUM_THREADS == 0));
   size_t task_counter = 0;
 #endif
@@ -66,8 +67,11 @@ __device__ __forceinline__ void
   while (base + i * nw + worker_id < base + total) {
     // Determine batch: how many consecutive tasks to load
     int batch_count = 0;
-    for (int b = 0; b < BATCH_LEN && base + (i + b) * nw + worker_id < base + total; b++)
+    for (int b = 0;
+         b < BATCH_LEN && base + (i + b) * nw + worker_id < base + total;
+         b++) {
       batch_count++;
+    }
 
     // Batch load TaskDescs via cp_async (128-bit async copies)
     for (int t = threadIdx.x; t < batch_count * TASK_SIZE; t += blockDim.x) {
@@ -75,7 +79,8 @@ __device__ __forceinline__ void
       int offset = t % TASK_SIZE;
       int pos = base + (i + task_idx) * nw + worker_id;
       load_smem(reinterpret_cast<char *>(task_descs + task_idx) + offset * 16,
-                reinterpret_cast<char const *>(config.all_tasks + pos) + offset * 16);
+                reinterpret_cast<char const *>(config.all_tasks + pos) +
+                    offset * 16);
     }
     kernel::cp_async_fence();
     kernel::cp_async_wait<0>();
@@ -90,16 +95,15 @@ __device__ __forceinline__ void
       __shared__ int signal_barrier_idx;
       if (threadIdx.x == 0) {
         EventId trig = task_desc->trigger_event;
-        signal_barrier_idx = (trig != EVENT_INVALID_ID)
-                                 ? (int)(trig & 0xFFFFFFFF)
-                                 : -1;
+        signal_barrier_idx =
+            (trig != EVENT_INVALID_ID) ? (int)(trig & 0xFFFFFFFF) : -1;
 
         // Wait on dependency barrier
         EventId dep = task_desc->dependent_event;
         if (dep != EVENT_INVALID_ID) {
           int eidx = (int)(dep & 0xFFFFFFFF);
-          barrier_wait(config.barriers, eidx,
-                       config.all_event_num_triggers[eidx]);
+          barrier_wait(
+              config.barriers, eidx, config.all_event_num_triggers[eidx]);
         }
       }
       __syncthreads();
@@ -109,11 +113,13 @@ __device__ __forceinline__ void
 #endif
 
       // Execute
-      if (threadIdx.x == 0 &&
-          (task_desc->task_type == TASK_PAGED_ATTENTION_1 ||
-           task_desc->task_type == TASK_ATTENTION_1))
+      if (threadIdx.x == 0 && (task_desc->task_type == TASK_PAGED_ATTENTION_1 ||
+                               task_desc->task_type == TASK_ATTENTION_1)) {
         printf("ATTN task pos=%d worker=%d blockIdx=%d\n",
-               pos, worker_id, blockIdx.x);
+               pos,
+               worker_id,
+               blockIdx.x);
+      }
       _execute_task(task_desc, config);
       __syncthreads();
 
@@ -122,8 +128,9 @@ __device__ __forceinline__ void
 #endif
 
       // Signal completion barrier
-      if (threadIdx.x == 0 && signal_barrier_idx >= 0)
+      if (threadIdx.x == 0 && signal_barrier_idx >= 0) {
         barrier_arrive(config.barriers, signal_barrier_idx);
+      }
     }
     i += batch_count;
   }
@@ -138,17 +145,20 @@ __device__ __forceinline__ void execute_worker_static(RuntimeConfig config) {
     static_mainloop(config, worker_id);
 
     // Inter-iteration barrier: wait for all tasks to complete
-    if (threadIdx.x == 0)
-      barrier_wait(config.barriers, config.end_barrier, config.end_barrier_count);
+    if (threadIdx.x == 0) {
+      barrier_wait(
+          config.barriers, config.end_barrier, config.end_barrier_count);
+    }
     __syncthreads();
 
     // Prepare next batch (multi-iteration modes only)
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || \
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN)
     if (worker_id == 0 && threadIdx.x == 0) {
       // Reset barriers for next iteration (safe: everyone past end_barrier)
-      for (int i = 0; i < config.num_barriers; i++)
+      for (int i = 0; i < config.num_barriers; i++) {
         config.barriers[i] = 0;
+      }
 
 #ifdef MODE_ONLINE_NOTOKEN
       bool ok = prepare_next_batch(config, iter);
@@ -160,12 +170,14 @@ __device__ __forceinline__ void execute_worker_static(RuntimeConfig config) {
       atomicAdd(config.prepare_done_counter, 1ULL);
     }
     if (threadIdx.x == 0) {
-      while (ld_acquire_sys_u64(config.prepare_done_counter) < iter)
+      while (ld_acquire_sys_u64(config.prepare_done_counter) < iter) {
         __nanosleep(BARRIER_SPIN_SLEEP_NS);
+      }
     }
     __syncthreads();
-    if (!(*config.continue_flag))
+    if (!(*config.continue_flag)) {
       return;
+    }
 #else
     return;
 #endif

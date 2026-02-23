@@ -305,17 +305,15 @@ struct RuntimeConfig {
   nvshmem_team_t *nvshmem_teams;
 #endif
 #ifdef MPK_STATIC_WORKER
-  // GMEM barriers: int32 counters, atomicAdd to arrive, volatile poll to wait.
-  // One per dependency point (mapped 1:1 from events). Reset to zero between iterations.
-  // Barrier info derived on GPU from TaskDesc.dependent_event/trigger_event
-  // and all_event_num_triggers — no extra per-task array needed.
-  int *barriers;                   // [num_barriers]
+  // GMEM barriers: int32 counters, use atomicAdd to arrive, use volatile poll
+  // to wait.
+  int *barriers; // [num_barriers]
   int num_barriers;
-  int end_barrier;                 // barrier index for end-of-graph
-  int end_barrier_count;           // expected arrivals for end-of-graph barrier
+  int end_barrier;       // barrier index for end-of-graph
+  int end_barrier_count; // expected arrivals for end-of-graph barrier
   // Task info (each worker computes its own round-robin list locally)
   int num_compute_tasks;
-  int first_compute_task_index;    // = 2 (skip TERMINATE and BEGIN_TASK_GRAPH)
+  int first_compute_task_index; // = 2 (skip TERMINATE and BEGIN_TASK_GRAPH)
   // Iteration control
   unsigned long long *prepare_done_counter;
   bool *continue_flag;
