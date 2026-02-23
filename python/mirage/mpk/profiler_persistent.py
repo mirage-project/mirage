@@ -109,6 +109,29 @@ def export_to_perfetto_trace(
             tid = pid.create_group(f"group_{group_idx}")
             tid_map[(block_idx, group_idx)] = tid
 
+    # Debug: count events per block_idx
+    from collections import Counter
+    block_counter = Counter()
+    max_block_seen = -1
+    for i in range(1, len(profiler_buffer_host)):
+        if profiler_buffer_host[i] == 0:
+            continue
+        tag, _ = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
+        tag = int(tag)
+        block_group_tag = (tag >> 11) & 0xFF
+        bidx = block_group_tag // num_groups
+        block_counter[bidx] += 1
+        if bidx > max_block_seen:
+            max_block_seen = bidx
+    print(f"[profiler] max block_idx seen: {max_block_seen}, unique blocks: {len(block_counter)}")
+    print(f"[profiler] block indices with events: {sorted(block_counter.keys())}")
+    # Show blocks >= 96
+    high_blocks = {k: v for k, v in block_counter.items() if k >= 96}
+    if high_blocks:
+        print(f"[profiler] blocks >= 96: {high_blocks}")
+    else:
+        print(f"[profiler] NO events for any block >= 96!")
+
     for i in range(1, len(profiler_buffer_host)):
         if profiler_buffer_host[i] == 0:
             continue
