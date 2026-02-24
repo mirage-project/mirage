@@ -19,15 +19,19 @@ class DynamicShardLoader:
     def __init__(self, model, model_name, mapping, rank, world_size, device, download=False):
         self.model = model
         self.model_name = model_name
-        self.mapping = mapping
         self.rank = rank
         self.world_size = world_size
         self.download = download
         self.device = device
 
+        # Reconstruct mapping dict, validate & update parallelism configs.
+        self.mapping_dict = self._construct_mapping_dict(mapping)
+
         if world_size > 1:
             from mpi4py import MPI
             self.comm = MPI.COMM_WORLD
+
+        
       
         # Initialize dict mapping each weight to the file it is in.
         index_path = self._get_model_index_file()
@@ -51,9 +55,9 @@ class DynamicShardLoader:
                     key = name_parts[-2] # ex: q_proj
 
                     # TODO: either throw error (currently) or replicate on all GPUs if user didn't provide key
-                    assert key in self.mapping, f"Param Key {key} not found in mapping"
+                    assert key in self.mapping_dict, f"Param Key {key} not found in mapping"
                     
-                    parallelism_info = self._get_parallelism_info(key)
+                    parallelism_info = self.mapping_dict[key]
                     
                     # Check expert parallelism.
                     if "expert" in name and ShardType.EXPERT_PARALLEL in parallelism_info:
@@ -82,11 +86,10 @@ class DynamicShardLoader:
                     self.materialize_and_attach_to_model(meta_shard, sharded_tensor, name, module)
 
 
-
-    def _get_parallelism_info(self, param_key):
+    def _get_parallelism_info(self, param_key, mapping):
         """Given param key (ex: q_proj, gate), validate config and return parallelism info as a dictionary. 
         """
-        mapping_info = self.mapping[param_key]
+        mapping_info = mapping[param_key]
         parallelism_dict = {} # key: ShardType. val: num groups to parallelize by.
         for info in mapping_info["shard_type"]:
             # Ensure the info is a list of tuples.
@@ -124,6 +127,15 @@ class DynamicShardLoader:
 
 
         return parallelism_dict
+
+    def _construct_mapping_dict(self, mapping):
+        """Reconstruct the mapping to be more accessible."""
+        updated_mapping_dict = {} # key: param key. val: dict containing ShardType and parallelism size.
+
+        for key in mapping:
+            updated_mapping_dict[key] = self._get_parallelism_info(key, mapping)
+
+        return updated_mapping_dict
 
     def _check_expert_parallel(self, full_weight_name, expert_parallel_size=None):
         """Return true if the weight should be included, false otherwise, based on EP configs.
@@ -222,6 +234,7 @@ class DynamicShardLoader:
             stride=tuple(meta_tensor.stride()),
             dtype=meta_tensor.dtype,
             requires_grad=False,
+            device=device
         )
         tensor.__class__ = meta_tensor.__class__
         tensor.__dict__ = meta_tensor.__dict__.copy()
