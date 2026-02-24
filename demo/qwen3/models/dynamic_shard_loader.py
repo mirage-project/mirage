@@ -181,7 +181,10 @@ class DynamicShardLoader:
         end = (tp_rank + 1) * shard_size
 
         # Get a meta tensor that is of the right shape.
-        meta_shard = meta_tensor.narrow(dim, start, shard_size)
+        if meta_tensor.size(dim) == shard_size:
+            meta_shard = meta_tensor
+        else:
+            meta_shard = meta_tensor.narrow(dim, start, shard_size)
 
         if tp_type == ShardType.COL_PARALLEL:
             return weight_slice[:, start:end], meta_shard
