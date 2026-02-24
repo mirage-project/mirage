@@ -10,8 +10,8 @@ from enum import Enum
 import torch
 
 class ShardType(Enum):
-    ROW_PARALLEL = 0
-    COL_PARALLEL = 1
+    COL_PARALLEL = 0
+    ROW_PARALLEL = 1
     EXPERT_PARALLEL = 2
     NONE = 100 # No sharding, replicate on all GPUs
 
@@ -201,9 +201,9 @@ class DynamicShardLoader:
             print(weight_name, "tp size", tp_size, "original shape", shape, "new shape", meta_shard.shape, "start", start, "end", end, "tp_rank", tp_rank, "shard_size", shard_size)
 
         if tp_type == ShardType.COL_PARALLEL:
-            return weight_slice[:, start:end], meta_shard
-        else:
             return weight_slice[start:end, :], meta_shard
+        else:
+            return weight_slice[:, start:end], meta_shard
 
 
     # TODO need to also handle cases where tp_type is None (where tp_size will then also be None).
