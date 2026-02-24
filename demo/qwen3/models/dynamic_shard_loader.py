@@ -31,8 +31,6 @@ class DynamicShardLoader:
             from mpi4py import MPI
             self.comm = MPI.COMM_WORLD
 
-        
-      
         # Initialize dict mapping each weight to the file it is in.
         index_path = self._get_model_index_file()
         with open(index_path, "r") as f: 
@@ -159,9 +157,10 @@ class DynamicShardLoader:
         weight_num = int(weight_name_components[5])
         num_experts = self.model.config.num_experts
         
-        experts_per_rank = math.ceil(num_experts / self.world_size)
+        experts_per_rank = math.ceil(num_experts / expert_parallel_size)
+        ep_rank = self.rank // expert_parallel_size
 
-        expert_start = self.rank * experts_per_rank
+        expert_start = ep_rank * experts_per_rank
         expert_end = min(expert_start + experts_per_rank, num_experts)
         return weight_num in range(expert_start, expert_end)
 
@@ -197,6 +196,9 @@ class DynamicShardLoader:
             meta_shard = meta_tensor
         else:
             meta_shard = meta_tensor.narrow(dim, start, shard_size)
+
+        if "expert" in weight_name:
+            print(weight_name, "tp size", tp_size, "original shape", shape, "new shape", meta_shard.shape, "start", start, "end", end, "tp_rank", tp_rank, "shard_size", shard_size)
 
         if tp_type == ShardType.COL_PARALLEL:
             return weight_slice[:, start:end], meta_shard
