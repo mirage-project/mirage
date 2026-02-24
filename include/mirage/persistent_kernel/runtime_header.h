@@ -76,7 +76,7 @@ typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
 int const MAX_OUTPUTS_PER_TASK = 3;
-int const MAX_NUM_WORKERS = 128;
+int const MAX_NUM_WORKERS = 160;
 
 enum TaskType {
   TASK_TERMINATE = 0,
