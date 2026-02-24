@@ -16,13 +16,14 @@ class ShardType(Enum):
     NONE = 100 # No sharding, replicate on all GPUs
 
 class DynamicShardLoader:
-    def __init__(self, model, model_name, mapping, rank, world_size, download=False):
+    def __init__(self, model, model_name, mapping, rank, world_size, device, download=False):
         self.model = model
         self.model_name = model_name
         self.mapping = mapping
         self.rank = rank
         self.world_size = world_size
         self.download = download
+        self.device = device
 
         if world_size > 1:
             from mpi4py import MPI
@@ -42,8 +43,7 @@ class DynamicShardLoader:
         for hf_filename in files_mapping:
             local_filepath = files_mapping[hf_filename]
 
-            # TODO (emily): see if this should be loaded onto CPU or GPU
-            # Load onto CPU since materialization of tensor happens after getting the slice.
+            # Load onto CPU for now since materialization of tensor happens after getting the slice.
             with safe_open(local_filepath, framework="pt", device="cpu") as f:
                 for name in f.keys():
                     name_parts = name.split(".")
@@ -202,8 +202,8 @@ class DynamicShardLoader:
             - weight_name (str): full weight name (ex: model.layers.0.mlp.experts.0.gate_proj.weights).
         """
         # Allocate memory for the actual tensor on the current device & copy tensor data.
-        device = torch.device(f"cuda:{self.rank}")
-        tensor = self.materialize_meta_tensor(meta_tensor, device)
+        
+        tensor = self.materialize_meta_tensor(meta_tensor, self.device)
         with torch.no_grad():
             tensor.copy_(sharded_tensor)
 
