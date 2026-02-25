@@ -184,12 +184,9 @@ __device__ __forceinline__ void
 
       if (lane == 0) {
         // Wait for compute warps to finish execution
+        // (compute thread 0 has already signaled the GMEM completion barrier
+        //  before arriving here, so cross-SM data is visible)
         mbar_wait(&task_done_mbar[cur], phase);
-
-        // Signal GMEM completion barrier (cross-SM dependency)
-        if (signal_barrier_idx >= 0) {
-          barrier_arrive(config.barriers, signal_barrier_idx);
-        }
       }
       __syncwarp();
     }
@@ -216,6 +213,13 @@ __device__ __forceinline__ void
 #ifdef MPK_ENABLE_PROFILING
       PROFILER_EVENT_END(task_buf[cur].task_type, task_counter++);
 #endif
+
+      // Signal GMEM completion barrier (cross-SM dependency).
+      // Done by compute thread 0 (which participated in TASK_SYNC / membar.cta)
+      // so that atom.add.release.gpu properly makes all compute writes visible.
+      if (threadIdx.x == 0 && signal_barrier_idx >= 0) {
+        barrier_arrive(config.barriers, signal_barrier_idx);
+      }
 
       // Signal controller: execution complete
       if (threadIdx.x == 0) {

@@ -28,6 +28,8 @@
 #include <curand_kernel.h>
 #include <curand_philox4x32_x.h>
 
+#include "worker_config.h"
+
 namespace kernel {
 
 using namespace cub;
@@ -221,7 +223,7 @@ __device__ __forceinline__ void
     }
 
     // Sync before next batch iteration to reuse shared memory
-    __syncthreads();
+    TASK_SYNC();
   }
 }
 
