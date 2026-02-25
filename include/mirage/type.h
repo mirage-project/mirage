@@ -120,6 +120,8 @@ enum KNOperatorType {
   KN_SPLIT_LAST_OP_ID = 1429,
   // Communication
   KN_ALLREDUCE_OP = 1900,
+  KN_ALL_TO_ALL_DISPATCH_OP = 1901,
+  KN_ALL_TO_ALL_COMBINE_OP = 1902,
   KN_CUSTOMIZED_OP = 1999,
 };
 
@@ -162,6 +164,10 @@ NLOHMANN_JSON_SERIALIZE_ENUM(KNOperatorType,
                                  {KN_CHUNK_2_OP, "kn_chunk_2_op"},
                                  {KN_SPLIT_LAST_OP_ID, "kn_split_last_op_id"},
                                  {KN_ALLREDUCE_OP, "kn_allreduce_op"},
+                                 {KN_ALL_TO_ALL_DISPATCH_OP,
+                                  "kn_all_to_all_dispatch_op"},
+                                 {KN_ALL_TO_ALL_COMBINE_OP,
+                                  "kn_all_to_all_combine_op"},
                                  {KN_CUSTOMIZED_OP, "kn_customized_op"},
                              })
 
