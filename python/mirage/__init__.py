@@ -14,8 +14,25 @@ preload_so(_z3_so_path, "libz3.so")
 
 _this_dir = os.path.dirname(__file__)
 _mirage_root = os.path.abspath(os.path.join(_this_dir, "..", ".."))
-_subexpr_so_path = os.path.join(_mirage_root, "build", "abstract_subexpr", "release", "libabstract_subexpr.so")
-_formal_verifier_so_path = os.path.join(_mirage_root, "build", "formal_verifier", "release", "libformal_verifier.so")
+
+def _find_native_lib(lib_name):
+    """Find a native .so, checking bundled location first (non-editable),
+    then build directory (editable install)."""
+    bundled = os.path.join(_this_dir, "lib", f"lib{lib_name}.so")
+    if os.path.isfile(bundled):
+        return bundled
+    editable = os.path.join(
+        _mirage_root, "build", lib_name, "release", f"lib{lib_name}.so"
+    )
+    if os.path.isfile(editable):
+        return editable
+    raise ImportError(
+        f"Could not find lib{lib_name}.so. Checked:\n"
+        f"  bundled: {bundled}\n  editable: {editable}"
+    )
+
+_subexpr_so_path = _find_native_lib("abstract_subexpr")
+_formal_verifier_so_path = _find_native_lib("formal_verifier")
 preload_so(_subexpr_so_path, "libabstract_subexpr.so")
 preload_so(_formal_verifier_so_path, "libformal_verifier.so")
 

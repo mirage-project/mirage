@@ -1,6 +1,17 @@
 from cuda.bindings import driver, nvrtc
 
 
+_cuda_driver_initialized = False
+
+
+def _ensure_cuda_driver_initialized():
+    global _cuda_driver_initialized
+    if _cuda_driver_initialized:
+        return
+    checkCudaErrors(driver.cuInit(0))
+    _cuda_driver_initialized = True
+
+
 def _cudaGetErrorEnum(error):
     if isinstance(error, driver.CUresult):
         err, name = driver.cuGetErrorName(error)
@@ -20,9 +31,8 @@ def checkCudaErrors(result):
     else:
         return result[1:]
 
-checkCudaErrors(driver.cuInit(0))
-
 def _queryMulticastSupport(cu_device):
+    _ensure_cuda_driver_initialized()
     # Query multicast object support
     multicast_supported = checkCudaErrors(driver.cuDeviceGetAttribute(
         driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED,
@@ -31,10 +41,12 @@ def _queryMulticastSupport(cu_device):
     return bool(multicast_supported)
 
 def queryMulticastSupport(device_id):
+    _ensure_cuda_driver_initialized()
     cu_device = checkCudaErrors(driver.cuDeviceGet(device_id))
     return _queryMulticastSupport(cu_device)
 
 def _queryVMMsupport(cu_device):
+    _ensure_cuda_driver_initialized()
     # Query virtual memory management support
     vmm_supported = checkCudaErrors(driver.cuDeviceGetAttribute(
         driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED,
@@ -43,10 +55,12 @@ def _queryVMMsupport(cu_device):
     return bool(vmm_supported)
 
 def queryVMMsupport(device_id):
+    _ensure_cuda_driver_initialized()
     cu_device = checkCudaErrors(driver.cuDeviceGet(device_id))
     return _queryVMMsupport(cu_device)
 
 def _queryPeerAccessSupported(cu_device_from, cu_device_to):
+    _ensure_cuda_driver_initialized()
     # Query peer access support
     peer_access_supported = checkCudaErrors(driver.cuDeviceCanAccessPeer(
         cu_device_from,
@@ -55,11 +69,13 @@ def _queryPeerAccessSupported(cu_device_from, cu_device_to):
     return bool(peer_access_supported)
 
 def queryPeerAccessSupported(device_id_from, device_id_to):
+    _ensure_cuda_driver_initialized()
     cu_device_from = checkCudaErrors(driver.cuDeviceGet(device_id_from))
     cu_device_to = checkCudaErrors(driver.cuDeviceGet(device_id_to))
     return _queryPeerAccessSupported(cu_device_from, cu_device_to)
 
 def _queryHandleTypePosixFileDescriptorSupported(cu_device):
+    _ensure_cuda_driver_initialized()
     # Query POSIX shared memory support
     supported = checkCudaErrors(driver.cuDeviceGetAttribute(
         driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED,
@@ -68,10 +84,12 @@ def _queryHandleTypePosixFileDescriptorSupported(cu_device):
     return bool(supported)
 
 def queryHandleTypePosixFileDescriptorSupported(device_id):
+    _ensure_cuda_driver_initialized()
     cu_device = checkCudaErrors(driver.cuDeviceGet(device_id))
     return _queryHandleTypePosixFileDescriptorSupported(cu_device)
 
 def queryComputeCapability(device_id):
+    _ensure_cuda_driver_initialized()
     cu_device = checkCudaErrors(driver.cuDeviceGet(device_id))
     major = checkCudaErrors(driver.cuDeviceGetAttribute(
         driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
