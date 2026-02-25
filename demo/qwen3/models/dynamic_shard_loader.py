@@ -196,9 +196,9 @@ class DynamicShardLoader:
 
         # Get a meta tensor that is of the right shape.
         if meta_tensor.size(dim) == shard_size:
-            meta_shard = meta_tensor
+            meta_shard = meta_tensor.contiguous()
         else:
-            meta_shard = meta_tensor.narrow(dim, start, shard_size)
+            meta_shard = meta_tensor.narrow(dim, start, shard_size).contiguous()
 
         if tp_type == ShardType.COL_PARALLEL:
             return weight_slice[start:end, :], meta_shard
@@ -215,8 +215,10 @@ class DynamicShardLoader:
             - sharded_tensor (PyTorch.Tensor): sharded tensor residing on the CPU (after calling get_slice()).
             - weight_name (str): full weight name (ex: model.layers.0.mlp.experts.0.gate_proj.weights).
         """
+        if not sharded_tensor.is_contiguous():
+            sharded_tensor = sharded_tensor.contiguous()
+
         # Allocate memory for the actual tensor on the current device & copy tensor data.
-        
         tensor = self.materialize_meta_tensor(meta_tensor, self.device)
         with torch.no_grad():
             tensor.copy_(sharded_tensor)
