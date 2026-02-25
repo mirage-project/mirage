@@ -39,12 +39,16 @@ __device__ __forceinline__ void
 // ── Mainloop ────────────────────────────────────────────────────────────────
 // Each worker executes its round-robin share of compute tasks.
 // Task positions computed locally: first_compute + i * num_workers + worker_id.
-// Double-buffered: prefetch next TaskDesc while executing current task.
+// Batch-loaded: load up to BATCH_SIZE tasks at once via cp_async, then iterate
+// through them with zero load overhead (same pattern as dynamic worker).
 __device__ __forceinline__ void static_mainloop(RuntimeConfig const &config,
                                                 int worker_id) {
-  // Double buffer: prefetch next task into buf[nxt] while executing from
-  // buf[cur]
-  __shared__ TaskDesc task_buf[2];
+  // Batch buffer: same pattern as dynamic worker's task_descs[]
+  constexpr int BATCH_SIZE = std::min(
+      (mirage::runtime::WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE) /
+          (int)(sizeof(TaskDesc)),
+      16);
+  __shared__ TaskDesc task_descs[BATCH_SIZE];
 
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
@@ -67,39 +71,38 @@ __device__ __forceinline__ void static_mainloop(RuntimeConfig const &config,
     return;
   }
 
-  // Prologue: load first task into buf[0]
-  {
-    int pos = base + worker_id;
-    for (int t = threadIdx.x; t < TASK_SIZE; t += blockDim.x) {
-      load_smem(reinterpret_cast<char *>(&task_buf[0]) + t * 16,
-                reinterpret_cast<char const *>(config.all_tasks + pos) +
-                    t * 16);
-    }
-    kernel::cp_async_fence();
-    kernel::cp_async_wait<0>();
-    __syncthreads();
-  }
+  int queue_pos = 0, queue_len = 0;
+  int task_idx = 0; // which round-robin slot we're on (i in the old loop)
 
-  for (int i = 0; i * nw + worker_id < total; i++) {
-    int cur = i & 1;
-    int nxt = cur ^ 1;
-    bool has_next = ((i + 1) * nw + worker_id < total);
-    TaskDesc *task_desc = &task_buf[cur];
+  while (task_idx * nw + worker_id < total) {
+    // Batch-load: fill task_descs[] with up to BATCH_SIZE tasks
+    if (queue_pos == queue_len) {
+      int remaining = 0;
+      for (int k = task_idx; k * nw + worker_id < total; k++) {
+        remaining++;
+      }
+      int num_to_load = min(remaining, BATCH_SIZE);
 
-    // Prefetch next task into other buffer
-    if (has_next) {
-      int pos_next = base + (i + 1) * nw + worker_id;
-      for (int t = threadIdx.x; t < TASK_SIZE; t += blockDim.x) {
-        load_smem(reinterpret_cast<char *>(&task_buf[nxt]) + t * 16,
-                  reinterpret_cast<char const *>(config.all_tasks + pos_next) +
-                      t * 16);
+      // Batch cp_async: load all tasks in one shot
+      for (int i = threadIdx.x; i < num_to_load * TASK_SIZE;
+           i += blockDim.x) {
+        int slot = i / TASK_SIZE;
+        int offset = i % TASK_SIZE;
+        int pos = base + (task_idx + slot) * nw + worker_id;
+        load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
+                  reinterpret_cast<char const *>(config.all_tasks + pos) +
+                      offset * 16);
       }
       kernel::cp_async_fence();
+      kernel::cp_async_wait<0>();
+      __syncthreads();
+      queue_pos = 0;
+      queue_len = num_to_load;
     }
 
+    TaskDesc *task_desc = &task_descs[queue_pos];
+
     // Thread 0: decode barrier info + dependency wait
-    // Other threads: wait for their prefetch copies to complete
-    // Both converge at the single __syncthreads below.
     int signal_barrier_idx = -1;
     if (threadIdx.x == 0) {
       EventId trig = task_desc->trigger_event;
@@ -113,10 +116,6 @@ __device__ __forceinline__ void static_mainloop(RuntimeConfig const &config,
         barrier_wait(
             config.barriers, eidx, config.all_event_num_triggers[eidx]);
       }
-    }
-    // Ensure prefetch copies are committed before the sync
-    if (has_next) {
-      kernel::cp_async_wait<0>();
     }
     __syncthreads();
 
@@ -136,6 +135,9 @@ __device__ __forceinline__ void static_mainloop(RuntimeConfig const &config,
     if (threadIdx.x == 0 && signal_barrier_idx >= 0) {
       barrier_arrive(config.barriers, signal_barrier_idx);
     }
+
+    queue_pos++;
+    task_idx++;
   }
 }
 
