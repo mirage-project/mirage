@@ -118,6 +118,13 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_paged_attention_split_kv_merge_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  // Expert Parallelism MoE Tasks
+  int register_ep_moe_routing_distributed_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_ep_moe_all_to_all_dispatch_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_ep_moe_all_to_all_combine_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   // SM100 tasks end
   int register_task_variant(TaskType type, std::string const &code);
 
