@@ -3118,19 +3118,19 @@ int TaskRegister::register_ep_moe_routing_distributed_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   if (normalize) {
-    code.e("kernel::moe_routing_distributed_task_impl"
-           "<cute::bfloat16_t, $, $, $, $, true>(",
-           batch_size, num_experts, topk, world_size);
+    code.e("mirage::kernel::moe_routing_device_impl"
+           "<cute::bfloat16_t, $, $, $, true>(",
+           num_experts, topk, world_size);
   } else {
-    code.e("kernel::moe_routing_distributed_task_impl"
-           "<cute::bfloat16_t, $, $, $, $, false>(",
-           batch_size, num_experts, topk, world_size);
+    code.e("mirage::kernel::moe_routing_device_impl"
+           "<cute::bfloat16_t, $, $, $, false>(",
+           num_experts, topk, world_size);
   }
   code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[0],");
   code.e("    (int*)task_desc->output_ptrs[0],");
   code.e("    (cute::bfloat16_t*)task_desc->output_ptrs[1],");
   code.e("    (int*)task_desc->output_ptrs[2],");
-  code.e("    (int*)task_desc->input_ptrs[1],");
+  code.e("    nullptr,");  // expert_counts: optional, nullptr for now
   code.e("    $,", experts_per_rank);
   code.e("    runtime_config.my_gpu_id,");
   code.e("    1.0f);");
@@ -3305,25 +3305,25 @@ int TaskRegister::register_ep_moe_all_to_all_combine_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   if (add_residual) {
-    code.e("kernel::all_to_all_combine_task_impl"
-           "<cute::bfloat16_t, $, $, $, $, true>(",
-           batch_size, hidden_dim, topk, world_size);
+    code.e("mirage::kernel::all_to_all_combine_device_impl"
+           "<cute::bfloat16_t, $, $, $, true>(",
+           hidden_dim, topk, world_size);
   } else {
-    code.e("kernel::all_to_all_combine_task_impl"
-           "<cute::bfloat16_t, $, $, $, $, false>(",
-           batch_size, hidden_dim, topk, world_size);
+    code.e("mirage::kernel::all_to_all_combine_device_impl"
+           "<cute::bfloat16_t, $, $, $, false>(",
+           hidden_dim, topk, world_size);
   }
   code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[0],");
-  code.e("    (int const*)task_desc->input_ptrs[3],");
+  code.e("    nullptr,");  // routing_indices_row: unused in combine kernel
   code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[1],");
   code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[2],");
   code.e("    (cute::bfloat16_t*)task_desc->output_ptrs[0],");
-  code.e("    (int const*)task_desc->input_ptrs[4],");
-  code.e("    (int const*)task_desc->input_ptrs[5],");
+  code.e("    nullptr,");  // recv_counts: unused in combine kernel
+  code.e("    nullptr,");  // recv_offsets: unused in combine kernel
   code.e("    $,", num_experts);
   code.e("    $,", experts_per_rank);
   code.e("    runtime_config.my_gpu_id,");
-  code.e("    (volatile int*)task_desc->input_ptrs[6]);");
+  code.e("    nullptr);"); // sync_flags: no-op for WORLD_SIZE=1 (loop skips own rank)
   return register_task_variant(TASK_EP_MOE_ALL_TO_ALL_COMBINE,
                                code.to_string());
 }
