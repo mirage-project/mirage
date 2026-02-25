@@ -96,16 +96,8 @@ __device__ __forceinline__ void
   int const base = config.first_compute_task_index;
   int const total = config.num_compute_tasks;
 
-  if (threadIdx.x == 0) {
-    printf("[W%d] pipelined: nw=%d base=%d total=%d blockDim=%d\n",
-           worker_id, nw, base, total, blockDim.x);
-  }
-
   // Early exit if this worker has no tasks
   if (worker_id >= total) {
-    if (threadIdx.x == 0) {
-      printf("[W%d] early exit (worker_id >= total)\n", worker_id);
-    }
     return;
   }
 
@@ -113,10 +105,6 @@ __device__ __forceinline__ void
   int my_task_count = 0;
   for (int k = 0; k * nw + worker_id < total; k++) {
     my_task_count++;
-  }
-
-  if (threadIdx.x == 0) {
-    printf("[W%d] my_task_count=%d\n", worker_id, my_task_count);
   }
 
   static_assert(sizeof(TaskDesc) % 16 == 0);
@@ -128,7 +116,6 @@ __device__ __forceinline__ void
     mbar_init(&task_ready_mbar[1], 1);
     mbar_init(&task_done_mbar[0], 1);  // one compute leader arrives once
     mbar_init(&task_done_mbar[1], 1);
-    printf("[W%d] mbar init done\n", worker_id);
   }
   __syncthreads(); // full-block sync (all 288 threads) to see init
 
@@ -136,20 +123,12 @@ __device__ __forceinline__ void
 
   if (warp_id == CONTROLLER_WARP_ID) {
     // ── Controller warp (warp 8, 32 threads) ──
-    // Handles: task load, dependency wait, task_ready signal,
-    //          next-task prefetch (overlapped), task_done wait,
-    //          GMEM completion barrier signal.
     int const lane = threadIdx.x % 32;
 
     for (int i = 0; i < my_task_count; i++) {
       int const cur = i & 1;
       int const phase = (i >> 1) & 1;
       int const pos = base + i * nw + worker_id;
-
-      if (lane == 0) {
-        printf("[W%d][CTRL] task %d/%d: cur=%d phase=%d pos=%d\n",
-               worker_id, i, my_task_count, cur, phase, pos);
-      }
 
       // Load current task into task_buf[cur]
       if (i == 0) {
@@ -169,27 +148,18 @@ __device__ __forceinline__ void
       }
 
       if (lane == 0) {
-        printf("[W%d][CTRL] task %d loaded, task_type=%d\n",
-               worker_id, i, (int)task_buf[cur].task_type);
-
         // Wait on dependency barrier (GMEM)
         EventId dep = task_buf[cur].dependent_event;
         if (dep != EVENT_INVALID_ID) {
           int eidx = (int)(dep & 0xFFFFFFFF);
-          printf("[W%d][CTRL] task %d waiting dep eidx=%d expected=%d\n",
-                 worker_id, i, eidx, config.all_event_num_triggers[eidx]);
           barrier_wait(
               config.barriers, eidx, config.all_event_num_triggers[eidx]);
-          printf("[W%d][CTRL] task %d dep satisfied\n", worker_id, i);
         }
 
         // Decode trigger event for later GMEM signal
         EventId trig = task_buf[cur].trigger_event;
         signal_barrier_idx =
             (trig != EVENT_INVALID_ID) ? (int)(trig & 0xFFFFFFFF) : -1;
-
-        printf("[W%d][CTRL] task %d signaling task_ready[%d], trig_bar=%d\n",
-               worker_id, i, cur, signal_barrier_idx);
 
         // Signal compute warps: task is ready
         mbar_arrive(&task_ready_mbar[cur]);
@@ -210,16 +180,10 @@ __device__ __forceinline__ void
       }
 
       if (lane == 0) {
-        printf("[W%d][CTRL] task %d waiting task_done[%d] phase=%d\n",
-               worker_id, i, cur, phase);
         // Wait for compute warps to finish execution
         mbar_wait(&task_done_mbar[cur], phase);
-        printf("[W%d][CTRL] task %d done\n", worker_id, i);
       }
       __syncwarp();
-    }
-    if (lane == 0) {
-      printf("[W%d][CTRL] all tasks done, exiting\n", worker_id);
     }
   } else {
     // ── Compute warps (warps 0-7, 256 threads) ──
@@ -229,17 +193,9 @@ __device__ __forceinline__ void
 
       // Wait for controller to signal task is ready
       if (threadIdx.x == 0) {
-        printf("[W%d][CMP] task %d/%d: waiting task_ready[%d] phase=%d\n",
-               worker_id, i, my_task_count, cur, phase);
         mbar_wait(&task_ready_mbar[cur], phase);
-        printf("[W%d][CMP] task %d: task_ready received\n", worker_id, i);
       }
       TASK_SYNC(); // broadcast to all 256 compute threads
-
-      if (threadIdx.x == 0) {
-        printf("[W%d][CMP] task %d: TASK_SYNC(pre) done, executing type=%d\n",
-               worker_id, i, (int)task_buf[cur].task_type);
-      }
 
 #ifdef MPK_ENABLE_PROFILING
       PROFILER_EVENT_START(task_buf[cur].task_type, task_counter);
@@ -248,16 +204,7 @@ __device__ __forceinline__ void
       // Execute task (256 compute threads)
       _execute_task(&task_buf[cur], config);
 
-      if (threadIdx.x == 0) {
-        printf("[W%d][CMP] task %d: _execute_task returned, pre TASK_SYNC(post)\n",
-               worker_id, i);
-      }
       TASK_SYNC();
-
-      if (threadIdx.x == 0) {
-        printf("[W%d][CMP] task %d: TASK_SYNC(post) done, sig_bar=%d\n",
-               worker_id, i, signal_barrier_idx);
-      }
 
 #ifdef MPK_ENABLE_PROFILING
       PROFILER_EVENT_END(task_buf[cur].task_type, task_counter++);
@@ -272,13 +219,8 @@ __device__ __forceinline__ void
 
       // Signal controller: execution complete
       if (threadIdx.x == 0) {
-        printf("[W%d][CMP] task %d: signaling task_done[%d]\n",
-               worker_id, i, cur);
         mbar_arrive(&task_done_mbar[cur]);
       }
-    }
-    if (threadIdx.x == 0) {
-      printf("[W%d][CMP] all tasks done, exiting\n", worker_id);
     }
   }
 }
@@ -397,10 +339,6 @@ __device__ __forceinline__ void execute_worker_static(RuntimeConfig config) {
   int const worker_id = blockIdx.x;
 
   for (size_t iter = 1;; iter++) {
-    if (threadIdx.x == 0) {
-      printf("[W%d] === iter %lu start ===\n", worker_id, iter);
-    }
-
     // Execute tasks (each worker computes its own round-robin list)
 #if defined(MIRAGE_GRACE_BLACKWELL)
     static_mainloop_pipelined(config, worker_id);
@@ -408,16 +346,10 @@ __device__ __forceinline__ void execute_worker_static(RuntimeConfig config) {
     static_mainloop(config, worker_id);
 #endif
 
-    if (threadIdx.x == 0) {
-      printf("[W%d] mainloop returned, waiting end_barrier idx=%d count=%d\n",
-             worker_id, config.end_barrier, config.end_barrier_count);
-    }
-
     // Inter-iteration barrier: wait for all tasks to complete
     if (threadIdx.x == 0) {
       barrier_wait(
           config.barriers, config.end_barrier, config.end_barrier_count);
-      printf("[W%d] end_barrier satisfied\n", worker_id);
     }
     __syncthreads();
 
