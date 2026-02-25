@@ -37,6 +37,7 @@ class DynamicShardLoader:
             index = json.load(f) 
             self.weight_map = index["weight_map"] # key: param name for the weights, val: filename it's in
         self.shard_and_load()
+        self.materialize_leftover_buffers()
 
     # TODO (emily): check if all rank should start from same safetensors file.
     def shard_and_load(self):
@@ -197,9 +198,6 @@ class DynamicShardLoader:
         else:
             meta_shard = meta_tensor.narrow(dim, start, shard_size)
 
-        if "expert" in weight_name:
-            print(weight_name, "tp size", tp_size, "original shape", shape, "new shape", meta_shard.shape, "start", start, "end", end, "tp_rank", tp_rank, "shard_size", shard_size)
-
         if tp_type == ShardType.COL_PARALLEL:
             return weight_slice[start:end, :], meta_shard
         else:
@@ -243,6 +241,25 @@ class DynamicShardLoader:
         return tensor
 
 
+    def materialize_leftover_buffers(self):
+        """
+        Finds any buffers still on the 'meta' device and moves them to 
+        the actual device, initializing them if they are empty.
+        """
+        count = 0
+        for name, buffer in self.model.named_buffers():
+            if buffer.is_meta:
+                # Allocate memory on device for buffer.
+                real_buffer = torch.empty_like(buffer, device=self.device)
+                
+                # Replace meta buffer with actual tensor in the model.
+                parent_name, buf_short_name = name.rsplit('.', 1) if '.' in name else ('', name)
+                parent_module = self.model.get_submodule(parent_name) if parent_name else model
+                parent_module.register_buffer(buf_short_name, real_buffer, persistent=True)
+                
+                count += 1
+                
+        return count
 
 
 
