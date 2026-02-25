@@ -23,10 +23,9 @@ namespace kernel {
 
 class KNAllToAll : public KNOperator {
 public:
-  enum class AllToAllType {
-    DISPATCH,
-    COMBINE
-  };
+  // Use the top-level enum (defined in all_to_all_type.h) so that graph.h
+  // can declare Graph::all_to_all() without a circular include dependency.
+  using AllToAllType = mirage::kernel::AllToAllType;
 
   KNAllToAll(Graph *_graph,
              DTensor const &input,

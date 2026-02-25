@@ -12,6 +12,7 @@ spec_decode_include_dir = os.path.join(include_dir, 'speculative_decoding')
 # Collect header files for the 'depends' argument. This tells the build system
 # to recompile if any of these headers change, without trying to compile them directly.
 header_files = glob.glob(os.path.join(include_dir, '*.cuh'))
+header_files += glob.glob(os.path.join(include_dir, 'tasks/common/*.cuh'))
 header_files += glob.glob(os.path.join(cutlass_dir, '*.cuh'))
 header_files += glob.glob(os.path.join(spec_decode_include_dir, '*.cuh'))
 header_files += glob.glob(os.path.join(header_root_dir, '*.h'))
@@ -35,14 +36,14 @@ setup(
                 header_root_dir,
             ],
             extra_compile_args={
-                'cxx': [],
+                'cxx': ['-DMIRAGE_GRACE_BLACKWELL'],
                 'nvcc': [
                     '-O3',
                     '-gencode=arch=compute_80,code=sm_80',
                     '-gencode=arch=compute_90a,code=sm_90a',
                     '-gencode=arch=compute_100,code=sm_100',
-                    '-DMIRAGE_UNIT_TEST',
-                    "-DMIRAGE_GRACE_HOPPER"
+                    '-gencode=arch=compute_100a,code=sm_100a',
+                    '-DMIRAGE_GRACE_BLACKWELL',
                 ]
             }
         )

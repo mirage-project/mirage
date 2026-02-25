@@ -24,7 +24,7 @@ namespace mirage {
 namespace kernel {
 
 DTensor Graph::all_to_all(DTensor const &input,
-                          KNAllToAll::AllToAllType type,
+                          AllToAllType type,
                           int num_experts,
                           int experts_per_rank,
                           int topk,
@@ -39,7 +39,7 @@ DTensor Graph::all_to_all(DTensor const &input,
 }
 
 DTensor *Graph::all_to_all(DTensor const *input,
-                           KNAllToAll::AllToAllType type,
+                           AllToAllType type,
                            int num_experts,
                            int experts_per_rank,
                            int topk,
@@ -54,7 +54,7 @@ DTensor *Graph::all_to_all(DTensor const *input,
 }
 
 KNOperator *Graph::create_all_to_all_op(DTensor const &input,
-                                        KNAllToAll::AllToAllType type,
+                                        AllToAllType type,
                                         int num_experts,
                                         int experts_per_rank,
                                         int topk,

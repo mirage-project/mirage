@@ -1,6 +1,8 @@
 #include "runtime_header.h"
 #include "tasks/ampere/task_header.cuh"
 #include "tasks/blackwell/task_header.cuh"
+#include "tasks/common/moe_routing_distributed.cuh"
+#include "tasks/common/all_to_all_combine_task.cuh"
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -1839,6 +1841,75 @@ void sampling_from_logits(torch::Tensor logits,
   }
 }
 
+// EP MoE kernels (single-GPU test, WORLD_SIZE=1)
+static constexpr int EP_BATCH_SIZE  = 8;
+static constexpr int EP_NUM_EXPERTS = 8;
+static constexpr int EP_TOPK        = 2;
+static constexpr int EP_WORLD_SIZE  = 1;
+static constexpr int EP_HIDDEN_DIM  = 64;
+
+void moe_routing(
+    torch::Tensor router_logits,
+    torch::Tensor routing_indices,
+    torch::Tensor routing_weights,
+    torch::Tensor dispatch_counts,
+    int experts_per_rank,
+    int rank,
+    float load_balance_factor) {
+
+  auto *logits_ptr  = reinterpret_cast<bfloat16 const *>(router_logits.data_ptr());
+  int  *idx_ptr     = routing_indices.data_ptr<int>();
+  auto *wts_ptr     = reinterpret_cast<bfloat16 *>(routing_weights.data_ptr());
+  int  *dcounts_ptr = dispatch_counts.data_ptr<int>();
+
+  cudaMemset(dcounts_ptr, 0, EP_WORLD_SIZE * sizeof(int));
+
+  dim3 grid(EP_BATCH_SIZE, 1, 1);
+  dim3 block(EP_TOPK, 1, 1);
+
+  mirage::kernel::moe_routing_distributed_task_impl<
+      bfloat16, EP_BATCH_SIZE, EP_NUM_EXPERTS, EP_TOPK, EP_WORLD_SIZE, true>
+    <<<grid, block>>>(
+      logits_ptr, idx_ptr, wts_ptr, dcounts_ptr,
+      nullptr, experts_per_rank, rank, load_balance_factor);
+
+  cudaDeviceSynchronize();
+}
+
+void moe_combine(
+    torch::Tensor expert_outputs,
+    torch::Tensor routing_indices,
+    torch::Tensor routing_weights,
+    torch::Tensor residual,
+    torch::Tensor output,
+    torch::Tensor recv_counts,
+    torch::Tensor recv_offsets,
+    torch::Tensor sync_flags,
+    int num_experts,
+    int experts_per_rank,
+    int rank) {
+
+  auto *exp_ptr  = reinterpret_cast<bfloat16 const *>(expert_outputs.data_ptr());
+  int  *idx_ptr  = routing_indices.data_ptr<int>();
+  auto *wts_ptr  = reinterpret_cast<bfloat16 const *>(routing_weights.data_ptr());
+  auto *res_ptr  = reinterpret_cast<bfloat16 const *>(residual.data_ptr());
+  auto *out_ptr  = reinterpret_cast<bfloat16 *>(output.data_ptr());
+  int  *rcnt_ptr = recv_counts.data_ptr<int>();
+  int  *roff_ptr = recv_offsets.data_ptr<int>();
+  volatile int *sf_ptr = reinterpret_cast<volatile int *>(sync_flags.data_ptr<int>());
+
+  dim3 grid(EP_BATCH_SIZE, 1, 1);
+  dim3 block(128, 1, 1);
+
+  mirage::kernel::all_to_all_combine_task_impl<
+      bfloat16, EP_BATCH_SIZE, EP_HIDDEN_DIM, EP_TOPK, EP_WORLD_SIZE, true>
+    <<<grid, block>>>(
+      exp_ptr, idx_ptr, wts_ptr, res_ptr, out_ptr,
+      rcnt_ptr, roff_ptr, num_experts, experts_per_rank, rank, sf_ptr);
+
+  cudaDeviceSynchronize();
+}
+
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1892,4 +1963,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Sampling from Logits kernel");
   // m.def("rms_norm", &rms_norm, "Window RMSNorm");
   // m.def("rope", &rope, "RoPE kernel");
+  m.def("moe_routing", &moe_routing, "MoE routing: TopK + softmax");
+  m.def("moe_combine", &moe_combine, "MoE combine: weighted sum + residual");
 }
