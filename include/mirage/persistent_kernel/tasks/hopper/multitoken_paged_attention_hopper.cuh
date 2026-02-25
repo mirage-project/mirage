@@ -14,6 +14,7 @@
  */
 
 #pragma once
+#include "../common/worker_config.h"
 #include "../common/copy_sm80.cuh"
 #include "../common/dmem_layout.cuh"
 // #include "../element_binary.cuh"
@@ -133,7 +134,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     }
   }
 
-  __syncthreads();
+  TASK_SYNC();
 
   T const *__restrict__ d_q =
       reinterpret_cast<T const *>(qkv_ptr) + first_token_pos * QKV_STRIDE;
@@ -281,7 +282,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       initialize_barrier(compute_done[i], 1);
     }
   }
-  __syncthreads();
+  TASK_SYNC();
 
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
     // prefetch

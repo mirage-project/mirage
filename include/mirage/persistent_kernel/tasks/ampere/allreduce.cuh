@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "../common/worker_config.h"
 #include "tasks/common/common_header.cuh"
 
 #ifdef USE_NVSHMEM
@@ -48,7 +49,7 @@ __device__ __forceinline__ void
   }
 
   nvshmem_quiet();
-  __syncthreads();
+  TASK_SYNC();
   if (threadIdx.x == 0) {
     nvshmemx_signal_op(reinterpret_cast<uint64_t *>(sig_addr),
                        1,

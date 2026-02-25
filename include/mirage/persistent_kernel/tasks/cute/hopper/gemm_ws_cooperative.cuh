@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "../../common/worker_config.h"
 
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/tensor.hpp"
@@ -262,7 +263,7 @@ CUTLASS_DEVICE void gemm_kernel_tma_warp_specialized_cooperative(
   Tensor gB_nkl = get<1>(load_inputs);
 
   // Wait for all thread blocks in the Cluster
-  __syncthreads();
+  TASK_SYNC();
 
   if (warp_group_role == WarpGroupRole::Producer) {
     work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});

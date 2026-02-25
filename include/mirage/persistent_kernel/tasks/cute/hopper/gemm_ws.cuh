@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "../../common/worker_config.h"
 
 #include "cutlass/arch/mma_sm90.h"
 #include "cutlass/arch/reg_reconfig.h"
@@ -200,7 +201,7 @@ CUTLASS_DEVICE void gemm_kernel_tma_warp_specialized(
   auto k_tile_count = size<3>(gA_mkl);
 
   // Wait for all thread blocks in the Cluster
-  __syncthreads();
+  TASK_SYNC();
 
   if (warp_group_role == WarpGroupRole::Producer) {
     if (producer_warp_role == ProducerWarpRole::MainloopEpilogue) {

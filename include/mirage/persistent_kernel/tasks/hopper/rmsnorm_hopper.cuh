@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "../common/worker_config.h"
 #include "../common/utils.cuh"
 namespace kernel {
 
@@ -101,7 +102,7 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
       } else if (for_idx + 1 == NUM_TILES) {
         cp_async_wait<0>();
       }
-      __syncthreads();
+      TASK_SYNC();
 #pragma unroll
       for (int i = threadIdx.x; i < TILE_SIZE; i += NUM_THREADS) {
         float val = (float)shared_input_buffer[for_idx * TILE_SIZE + i];
@@ -116,7 +117,7 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
     if (threadIdx.x % 32 == 0) {
       reduce_smem[threadIdx.x / 32] = sum;
     }
-    __syncthreads();
+    TASK_SYNC();
     sum = threadIdx.x < NUM_WARPS ? reduce_smem[threadIdx.x] : 0.0f;
 #pragma unroll
     for (int offset = NUM_WARPS / 2; offset > 0; offset /= 2) {
@@ -125,7 +126,7 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
     if (threadIdx.x == 0) {
       reduce_smem[0] = sum;
     }
-    __syncthreads();
+    TASK_SYNC();
 
     float rms_rcp = rsqrt(reduce_smem[0] / float(HIDDEN_DIM) + eps);
 
@@ -136,7 +137,7 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
       val *= rms_rcp * w;
       shared_output_buffer[i] = (T)val;
     }
-    __syncthreads();
+    TASK_SYNC();
 #pragma unroll
     for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
       if constexpr (BYTES_PER_CP == 16) {

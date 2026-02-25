@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include "../common/worker_config.h"
 #include "../common/dmem_layout.cuh"
 // #include "../element_binary.cuh"
 // #include "../element_unary.cuh"
@@ -208,7 +209,7 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
     }
   }
 
-  __syncthreads();
+  TASK_SYNC();
 
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {

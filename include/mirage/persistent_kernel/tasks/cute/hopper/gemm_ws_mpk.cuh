@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "../../common/worker_config.h"
 
 #include "cutlass/arch/mma_sm90.h"
 #include "cutlass/arch/reg_reconfig.h"
@@ -250,7 +251,7 @@ CUTLASS_DEVICE void linear_cutlass_ws_hopper(const TMA_A &tma_a,
   auto k_tile_count = NUM_ITERS_K;
 
   // Wait for all thread blocks in the Cluster
-  __syncthreads();
+  TASK_SYNC();
 
   if (warp_group_role == WarpGroupRole::Producer) {
     if (producer_warp_role == ProducerWarpRole::MainloopEpilogue) {
