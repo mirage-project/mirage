@@ -30,7 +30,7 @@ __device__ __forceinline__ void silu_mul_task_impl(void const *input_ptr,
 
 #pragma unroll
   for (int i = threadIdx.x; i < num_active_tokens * OUTPUT_SIZE;
-       i += blockDim.x) {
+       i += TASK_BLOCK_DIM) {
     int batch_idx = i / OUTPUT_SIZE;
     int offset = i % OUTPUT_SIZE;
     float input_val = float(d_input[batch_idx * I_STRIDE + offset]);

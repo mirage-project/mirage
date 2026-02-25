@@ -47,14 +47,14 @@ __device__ __forceinline__ void block_reduce_max_idx(T &val, long long &idx) {
     smem_idxs[my_warp_id] = idx;
   }
 
-  __syncthreads();
+  TASK_SYNC();
 
   // Only thread 0 holds the final result
   if (my_warp_id == 0) {
     T block_max_val = T(-inf);
     long long block_max_idx = -1;
 
-    int num_warps = (blockDim.x + 31) >> log2_constexpr(NUM_THREADS_PER_WARP);
+    int num_warps = (TASK_BLOCK_DIM + 31) >> log2_constexpr(NUM_THREADS_PER_WARP);
     if (my_lane_id < num_warps) {
       block_max_val = smem_vals[my_lane_id];
       block_max_idx = smem_idxs[my_lane_id];
@@ -126,7 +126,7 @@ __device__ __forceinline__ void
     long long local_packed_idx = -1;
 
 #pragma unroll
-    for (int i = tidx; i < NUM_PARTIAL_TASKS; i += blockDim.x) {
+    for (int i = tidx; i < NUM_PARTIAL_TASKS; i += TASK_BLOCK_DIM) {
       T current_val = partial_vals[i + batch_idx * NUM_PARTIAL_TASKS];
       if (current_val > local_max) {
         local_max = current_val;

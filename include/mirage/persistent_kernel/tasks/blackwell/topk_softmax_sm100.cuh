@@ -85,7 +85,7 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   int *mpk_active_expert_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
   // initialize routing indices to 0; active-id marks to -1; count to 0
   for (int expert = start_expert + threadIdx.x; expert < end_expert;
-       expert += blockDim.x) {
+       expert += TASK_BLOCK_DIM) {
     if (mpk_routing_indices != nullptr) {
       for (int row = 0; row < num_rows; ++row) {
         mpk_routing_indices[expert * num_rows + row] = 0;
@@ -289,7 +289,7 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   // Compact marks into a dense list and count
   if (mpk_active_expert_ids != nullptr) {
     for (int expert = start_expert + threadIdx.x; expert < end_expert;
-         expert += blockDim.x) {
+         expert += TASK_BLOCK_DIM) {
       int const local_expert = expert - start_expert;
       int const mark = mpk_active_expert_ids[local_expert];
       if (mark >= 0) {

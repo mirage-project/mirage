@@ -29,7 +29,7 @@ static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
                 "Incompatible reduction dimensions");
 
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += blockDim.x) {
+       dst_elem_idx += TASK_BLOCK_DIM) {
     float result = 0;
     int dst_row = dst_elem_idx / SMEM_DST::COL;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
@@ -54,7 +54,7 @@ static __device__ __forceinline__ void reduction_sum_row_add(SMEM_DST dst,
                 "Incompatible reduction dimensions");
 
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += blockDim.x) {
+       dst_elem_idx += TASK_BLOCK_DIM) {
     float result = float(dst.at(dst_elem_idx));
     int dst_row = dst_elem_idx / SMEM_DST::COL;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
@@ -79,7 +79,7 @@ static __device__ __forceinline__ void
     reduction_sum_row(SMEM_DST dst, SMEM_SRC src, float const *scalars) {
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::ROW;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += blockDim.x) {
+       dst_elem_idx += TASK_BLOCK_DIM) {
     float result = 0;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
 
@@ -99,7 +99,7 @@ static __device__ __forceinline__ void reduction_sum_col(SMEM_DST dst,
                                                          SMEM_SRC src) {
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::COL;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += blockDim.x) {
+       dst_elem_idx += TASK_BLOCK_DIM) {
     // TODO xinhaoc make this result float32
     float result = 0.0f;
     int dst_row = dst_elem_idx / SMEM_DST::COL;
@@ -121,7 +121,7 @@ static __device__ __forceinline__ void
     reduction_sum_col(SMEM_DST dst, SMEM_SRC src, float const *scalars) {
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::COL;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += blockDim.x) {
+       dst_elem_idx += TASK_BLOCK_DIM) {
     // TODO xinhaoc make this result float32
     float result = 0.0f;
     int dst_row = dst_elem_idx / SMEM_DST::COL;

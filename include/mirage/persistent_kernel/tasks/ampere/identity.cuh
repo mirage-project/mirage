@@ -27,7 +27,7 @@ __device__ __forceinline__ void identity_task_impl(void const *input_ptr,
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
 #pragma unroll
-  for (int i = threadIdx.x; i < OUTER_DIM_SIZE * OUTPUT_SIZE; i += blockDim.x) {
+  for (int i = threadIdx.x; i < OUTER_DIM_SIZE * OUTPUT_SIZE; i += TASK_BLOCK_DIM) {
     int outer_dim_idx = i / OUTPUT_SIZE;
     int inner_dim_idx = i % OUTPUT_SIZE;
     d_output[outer_dim_idx * OUTER_DIM_STRIDE + inner_dim_idx] =

@@ -136,7 +136,7 @@ struct vec_zero_t {
 
 #pragma unroll
     for (int i = 0; i < max_iters; ++i) {
-      int idx = i * blockDim.x + threadIdx.x;
+      int idx = i * TASK_BLOCK_DIM + threadIdx.x;
       if (idx < num_chunks) {
         vec_ptr[idx] = 0ul;
       }
