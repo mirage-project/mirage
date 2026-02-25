@@ -98,7 +98,7 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   if (threadIdx.x == NUM_EXPERTS && mpk_active_expert_ids != nullptr) {
     mpk_active_expert_ids[NUM_EXPERTS] = 0;
   }
-  __syncthreads();
+  TASK_SYNC();
   // Compile-time checks
   static_assert(VPT == (VPT & -VPT), "VPT must be power of 2");
   static_assert(NUM_EXPERTS == (NUM_EXPERTS & -NUM_EXPERTS),
@@ -285,7 +285,7 @@ __device__ __forceinline__ void topk_softmax_task_impl(
       }
     }
   }
-  __syncthreads();
+  TASK_SYNC();
   // Compact marks into a dense list and count
   if (mpk_active_expert_ids != nullptr) {
     for (int expert = start_expert + threadIdx.x; expert < end_expert;

@@ -381,7 +381,7 @@ __device__ __noinline__ void
   auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
 
   cutlass::arch::fence_barrier_init();
-  __syncthreads();
+  TASK_SYNC();
 
   // if (cute::thread0()) {
   //   printf("tma_trans_bytes_A: %d\n", tma_trans_bytes_A);
@@ -399,7 +399,7 @@ __device__ __noinline__ void
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
 
-  __syncthreads(); // Wait for all threads until warp0 allocates TMEM
+  TASK_SYNC(); // Wait for all threads until warp0 allocates TMEM
 
   if (warp_idx == 5) {
     // TMA warp (1)
@@ -693,7 +693,7 @@ __device__ __noinline__ void
       cute::tma_store_wait<0>();
     }
   }
-  __syncthreads();
+  TASK_SYNC();
 
   // Release the right to allocate before deallocations so that the next CTA can
   // rasterize Then deallocate TMEM
