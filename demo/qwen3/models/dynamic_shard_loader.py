@@ -8,6 +8,7 @@ import json
 import math
 from enum import Enum
 import torch
+from models.modeling_qwen3 import Qwen3RotaryEmbedding
 
 class ShardType(Enum):
     COL_PARALLEL = 0
@@ -38,6 +39,7 @@ class DynamicShardLoader:
             self.weight_map = index["weight_map"] # key: param name for the weights, val: filename it's in
         self.shard_and_load()
         self.materialize_leftover_buffers()
+        self.reinitialize_rope_buffers()
 
     # TODO (emily): check if all rank should start from same safetensors file.
     def shard_and_load(self):
@@ -257,9 +259,30 @@ class DynamicShardLoader:
                 parent_module = self.model.get_submodule(parent_name) if parent_name else model
                 parent_module.register_buffer(buf_short_name, real_buffer, persistent=True)
                 
+                print("Materialized", name)
                 count += 1
                 
         return count
+
+    def reinitialize_rope_buffers(self):
+        """
+        Re-calculates inv_freq on the actual device since it's not in safetensors.
+
+        Since the model is originally initialized on a meta device, the rotary embeddings were
+        not calculated during that time. 
+
+        This is specific to QWEN3 implementation.  
+        """
+        for name, module in self.model.named_modules():
+            if isinstance(module, Qwen3RotaryEmbedding):
+                module.to(self.device)
+                
+                inv_freq, attention_scaling = module.rope_init_fn(
+                    module.config, self.device, **module.rope_kwargs
+                )
+                
+                module.register_buffer("inv_freq", inv_freq, persistent=False)
+                module.attention_scaling = attention_scaling
 
 
 
