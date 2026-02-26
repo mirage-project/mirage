@@ -37,11 +37,14 @@ class DynamicShardLoader:
         with open(index_path, "r") as f: 
             index = json.load(f) 
             self.weight_map = index["weight_map"] # key: param name for the weights, val: filename it's in
+
+        # Perform sharding, loading, and materialization.
         self.shard_and_load()
         self.materialize_leftover_buffers()
+
+        # Qwen3 specific logic.
         self.reinitialize_rope_buffers()
 
-    # TODO (emily): check if all rank should start from same safetensors file.
     def shard_and_load(self):
         files_mapping = self._download_all_safetensor_files()
 
@@ -54,8 +57,8 @@ class DynamicShardLoader:
                     name_parts = name.split(".")
                     assert name.startswith("model.") or name == "lm_head.weight"
                     key = name_parts[-2] # ex: q_proj
+                    param_name = name_parts[-1] # ex: weight
 
-                    # TODO: either throw error (currently) or replicate on all GPUs if user didn't provide key
                     assert key in self.mapping_dict, f"Param Key {key} not found in mapping"
                     
                     parallelism_info = self.mapping_dict[key]
@@ -69,7 +72,7 @@ class DynamicShardLoader:
                     module_path = ".".join(name_parts[:-1]) # ex: model.layers.0.mlp.experts.0.gate_proj
                     module = self.model.get_submodule(module_path)
 
-                    meta_tensor = getattr(module, "weight")
+                    meta_tensor = getattr(module, param_name)
 
                     # Allocate tensor on GPU & move data to it based on TP specifications.
                     weight_slice = f.get_slice(name)
@@ -223,9 +226,11 @@ class DynamicShardLoader:
         with torch.no_grad():
             tensor.copy_(sharded_tensor)
 
+        param_name = weight_name.split(".")[-1] # ex: weight
+
         # Replace model's meta tensor with actual device tensor.
         new_model_param = torch.nn.Parameter(tensor, requires_grad=meta_tensor.requires_grad)
-        setattr(module, "weight", new_model_param)
+        setattr(module, param_name, new_model_param)
         
 
     def materialize_meta_tensor(self, meta_tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
