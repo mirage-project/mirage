@@ -68,10 +68,19 @@ __device__ __forceinline__ void mbar_wait(uint64_t *mbar, uint32_t phase) {
   } while (!done);
 }
 
-// ── Pipelined mainloop (Blackwell SM100) ────────────────────────────────────
+// ── Helper: check if a task type is streamable LINEAR_SM100 ─────────────────
+__device__ __forceinline__ bool is_linear_sm100(TaskType t) {
+  return t == TASK_LINEAR_SM100 || t == TASK_LINEAR_WITH_RESIDUAL_SM100;
+}
+
+// ── Pipelined mainloop with streaming LINEAR optimization (Blackwell SM100) ──
 // Controller warp 8 handles dependency-wait + task prefetch, pipelined with
 // compute warps 0-7 executing the current task. Overlaps dep-wait for task
 // N+1 with execution of task N.
+//
+// When consecutive LINEAR_SM100 tasks are detected, compute warps enter
+// streaming mode: barriers, TMEM, and the AB/ACC pipeline are kept alive
+// across task boundaries, eliminating per-task init/teardown overhead.
 //
 // SMEM semaphores (mbarrier-based, 2-stage pipeline):
 //   task_ready[2] — controller → compute: "dependency met, go execute"
@@ -82,6 +91,7 @@ __device__ __forceinline__ void
   __shared__ uint64_t task_done_mbar[2];
   __shared__ TaskDesc task_buf[2];
   __shared__ int signal_barrier_idx;
+  __shared__ int streaming_run_length; // >= 2 means streaming mode
 
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
@@ -123,7 +133,12 @@ __device__ __forceinline__ void
 
   if (warp_id == CONTROLLER_WARP_ID) {
     // ── Controller warp (warp 8, 32 threads) ──
+    // Processes tasks one-by-one. For the first task of a LINEAR run,
+    // scans ahead and writes streaming_run_length so compute warps can
+    // enter streaming mode. For subsequent tasks in the run, skips the
+    // scan (compute warps are already in streaming mode).
     int const lane = threadIdx.x % 32;
+    int remaining_in_run = 0; // tasks left in current streaming run
 
     for (int i = 0; i < my_task_count; i++) {
       int const cur = i & 1;
@@ -132,7 +147,6 @@ __device__ __forceinline__ void
 
       // Load current task into task_buf[cur]
       if (i == 0) {
-        // First task: explicit load
         for (int j = lane; j < TASK_SIZE; j += 32) {
           load_smem(reinterpret_cast<char *>(&task_buf[cur]) + j * 16,
                     reinterpret_cast<char const *>(config.all_tasks + pos) +
@@ -142,7 +156,6 @@ __device__ __forceinline__ void
         kernel::cp_async_wait<0>();
         __syncwarp();
       } else {
-        // Subsequent tasks: prefetch was issued in previous iteration
         kernel::cp_async_wait<0>();
         __syncwarp();
       }
@@ -161,6 +174,29 @@ __device__ __forceinline__ void
         signal_barrier_idx =
             (trig != EVENT_INVALID_ID) ? (int)(trig & 0xFFFFFFFF) : -1;
 
+        // Determine streaming run length (only at the start of a run)
+        if (remaining_in_run <= 0) {
+          if (is_linear_sm100(task_buf[cur].task_type)) {
+            // Scan ahead: read task_type from GMEM for upcoming tasks
+            int run_len = 1;
+            for (int j = i + 1; j < my_task_count; j++) {
+              int pos_j = base + j * nw + worker_id;
+              // Read task_type (first 4 bytes of TaskDesc)
+              TaskType type_j = config.all_tasks[pos_j].task_type;
+              if (is_linear_sm100(type_j))
+                run_len++;
+              else
+                break;
+            }
+            streaming_run_length = run_len;
+            remaining_in_run = run_len;
+          } else {
+            streaming_run_length = 1;
+            remaining_in_run = 1;
+          }
+        }
+        remaining_in_run--;
+
         // Signal compute warps: task is ready
         mbar_arrive(&task_ready_mbar[cur]);
       }
@@ -176,18 +212,17 @@ __device__ __forceinline__ void
                         j * 16);
         }
         kernel::cp_async_fence();
-        // Don't wait — overlaps with compute execution
       }
 
       if (lane == 0) {
-        // Wait for compute warps to finish execution
         mbar_wait(&task_done_mbar[cur], phase);
       }
       __syncwarp();
     }
   } else {
     // ── Compute warps (warps 0-7, 256 threads) ──
-    for (int i = 0; i < my_task_count; i++) {
+    int i = 0;
+    while (i < my_task_count) {
       int const cur = i & 1;
       int const phase = (i >> 1) & 1;
 
@@ -197,29 +232,59 @@ __device__ __forceinline__ void
       }
       TASK_SYNC(); // broadcast to all 256 compute threads
 
+      int run_len = streaming_run_length;
+
+      if (run_len >= 2) {
+        // ── Streaming mode: process run_len LINEAR tasks ──
+        // The streaming function handles task_ready/task_done for
+        // tasks 1..run_len-1 internally.  Task 0's task_ready was
+        // already consumed above; its task_done is signaled by
+        // the streaming function's epilogue.
+
 #ifdef MPK_ENABLE_PROFILING
-      PROFILER_EVENT_START(task_buf[cur].task_type, task_counter);
+        PROFILER_EVENT_START(task_buf[cur].task_type, task_counter);
 #endif
 
-      // Execute task (256 compute threads)
-      _execute_task(&task_buf[cur], config);
+        kernel::linear_sm100_streaming_run<cute::bfloat16_t>(
+            task_buf, task_ready_mbar, task_done_mbar,
+            &signal_barrier_idx, run_len, i, config);
 
-      TASK_SYNC();
+        // The streaming function has:
+        //   - Signaled GMEM barriers for each task
+        //   - Signaled task_done for each task
+        //   - TASK_SYNC'd at the end
 
 #ifdef MPK_ENABLE_PROFILING
-      PROFILER_EVENT_END(task_buf[cur].task_type, task_counter++);
+        PROFILER_EVENT_END(task_buf[cur].task_type, task_counter++);
+        task_counter += (run_len - 1); // account for skipped tasks
 #endif
 
-      // Signal GMEM completion barrier (cross-SM dependency).
-      // Done by compute thread 0 (which participated in TASK_SYNC / membar.cta)
-      // so that atom.add.release.gpu properly makes all compute writes visible.
-      if (threadIdx.x == 0 && signal_barrier_idx >= 0) {
-        barrier_arrive(config.barriers, signal_barrier_idx);
-      }
+        i += run_len;
+      } else {
+        // ── Monolithic mode: single task ──
 
-      // Signal controller: execution complete
-      if (threadIdx.x == 0) {
-        mbar_arrive(&task_done_mbar[cur]);
+#ifdef MPK_ENABLE_PROFILING
+        PROFILER_EVENT_START(task_buf[cur].task_type, task_counter);
+#endif
+
+        _execute_task(&task_buf[cur], config);
+        TASK_SYNC();
+
+#ifdef MPK_ENABLE_PROFILING
+        PROFILER_EVENT_END(task_buf[cur].task_type, task_counter++);
+#endif
+
+        // Signal GMEM completion barrier (cross-SM dependency)
+        if (threadIdx.x == 0 && signal_barrier_idx >= 0) {
+          barrier_arrive(config.barriers, signal_barrier_idx);
+        }
+
+        // Signal controller: execution complete
+        if (threadIdx.x == 0) {
+          mbar_arrive(&task_done_mbar[cur]);
+        }
+
+        i++;
       }
     }
   }

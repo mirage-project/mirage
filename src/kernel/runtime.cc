@@ -407,6 +407,20 @@ void register_mugraph(
                   bid.x + bid.y * bgraph.grid_dim.x +
                   bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
             }
+            // Set tile counts for LINEAR_SM100 streaming pipeline
+            if (task_type == TASK_LINEAR_SM100 ||
+                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100) {
+              int batch_size = output_ops[0]->output_tensors[0].dim[0];
+              int output_size = output_ops[0]->output_tensors[0].dim[1];
+              int reduction_size = input_ops[0]->dtensor.dim[1];
+              task.task_metadata.linear_tiles.k_tile_count =
+                  static_cast<uint16_t>(reduction_size / 64);
+              task.task_metadata.linear_tiles.m_tile_count =
+                  static_cast<uint16_t>(output_size / 128);
+              task.task_metadata.linear_tiles.n_tile_count =
+                  static_cast<uint16_t>(batch_size / 16);
+              task.task_metadata.linear_tiles._pad = 0;
+            }
             // Initialize input tensors to the task
             for (auto const &input : input_ops) {
               task.inputs[task.num_inputs++] = get_tensor_desc(input);

@@ -210,6 +210,12 @@ struct FullTaskDesc {
     struct {
       int task_offset; // Used for nvshmem team mapping
     };
+    struct {
+      uint16_t k_tile_count; // REDUCTION_SIZE / 64
+      uint16_t m_tile_count; // OUTPUT_SIZE / 128
+      uint16_t n_tile_count; // BATCH_SIZE / 16
+      uint16_t _pad;
+    } linear_tiles; // Used for LINEAR_SM100 streaming pipeline
     unsigned long long raw_payload;
   } task_metadata;
 };
