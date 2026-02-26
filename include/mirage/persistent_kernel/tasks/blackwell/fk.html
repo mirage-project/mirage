@@ -1,0 +1,125 @@
+<!-- Save as cluster.svg (or paste into an HTML file). Scales cleanly in Slides/Keynote/Figma. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520">
+  <defs>
+    <style>
+      .title { font: 700 28px Arial, Helvetica, sans-serif; fill: #111; }
+      .label { font: 600 16px Arial, Helvetica, sans-serif; fill: #111; }
+      .small { font: 500 14px Arial, Helvetica, sans-serif; fill: #222; }
+      .tiny  { font: 500 12px Arial, Helvetica, sans-serif; fill: #333; }
+      .box   { fill: #fff; stroke: #111; stroke-width: 2; }
+      .node  { fill: #fff; stroke: #111; stroke-width: 2; rx: 16; ry: 16; }
+      .cpu   { fill: #dff2d8; stroke: #2b6b2b; stroke-width: 2; rx: 12; ry: 12; }
+      .gpu   { fill: #dbe8ff; stroke: #1b4fbf; stroke-width: 2; rx: 10; ry: 10; }
+      .net   { fill: #fff3c7; stroke: #9a7b00; stroke-width: 2; rx: 14; ry: 14; }
+      .link  { stroke: #111; stroke-width: 2.5; fill: none; }
+      .thin  { stroke: #111; stroke-width: 1.8; fill: none; opacity: 0.9; }
+      .dash  { stroke-dasharray: 7 6; opacity: 0.8; }
+    </style>
+
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="40" y="50" class="title">Modern GPU Cluster (Simplified)</text>
+
+  <!-- Network -->
+  <rect x="380" y="70" width="440" height="70" class="net"/>
+  <text x="600" y="112" text-anchor="middle" class="label">High-Performance Network</text>
+  <text x="600" y="132" text-anchor="middle" class="tiny">(InfiniBand / Ethernet)</text>
+
+  <!-- Nodes layout parameters -->
+  <!-- Node 1 -->
+  <g transform="translate(70,180)">
+    <rect x="0" y="0" width="320" height="260" class="node"/>
+    <text x="18" y="28" class="label">Compute Node</text>
+
+    <!-- CPU -->
+    <rect x="20" y="50" width="280" height="70" class="cpu"/>
+    <text x="160" y="92" text-anchor="middle" class="label">CPU</text>
+
+    <!-- GPU tray -->
+    <text x="20" y="145" class="small">GPUs</text>
+
+    <!-- 8 GPUs -->
+    <g transform="translate(20,160)">
+      <!-- row 1 -->
+      <rect x="0"   y="0" width="62" height="34" class="gpu"/><text x="31"  y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="72"  y="0" width="62" height="34" class="gpu"/><text x="103" y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="144" y="0" width="62" height="34" class="gpu"/><text x="175" y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="216" y="0" width="62" height="34" class="gpu"/><text x="247" y="22" text-anchor="middle" class="tiny">GPU</text>
+
+      <!-- row 2 -->
+      <rect x="0"   y="48" width="62" height="34" class="gpu"/><text x="31"  y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="72"  y="48" width="62" height="34" class="gpu"/><text x="103" y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="144" y="48" width="62" height="34" class="gpu"/><text x="175" y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="216" y="48" width="62" height="34" class="gpu"/><text x="247" y="70" text-anchor="middle" class="tiny">GPU</text>
+
+      <!-- Intra-node interconnect hint -->
+      <path d="M10,17 C80,6 200,6 270,17" class="thin dash"/>
+      <path d="M10,65 C80,54 200,54 270,65" class="thin dash"/>
+      <text x="140" y="106" text-anchor="middle" class="tiny">High-speed interconnect (e.g., NVLink)</text>
+    </g>
+  </g>
+
+  <!-- Node 2 -->
+  <g transform="translate(440,180)">
+    <rect x="0" y="0" width="320" height="260" class="node"/>
+    <text x="18" y="28" class="label">Compute Node</text>
+
+    <rect x="20" y="50" width="280" height="70" class="cpu"/>
+    <text x="160" y="92" text-anchor="middle" class="label">CPU</text>
+
+    <text x="20" y="145" class="small">GPUs</text>
+
+    <g transform="translate(20,160)">
+      <rect x="0"   y="0" width="62" height="34" class="gpu"/><text x="31"  y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="72"  y="0" width="62" height="34" class="gpu"/><text x="103" y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="144" y="0" width="62" height="34" class="gpu"/><text x="175" y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="216" y="0" width="62" height="34" class="gpu"/><text x="247" y="22" text-anchor="middle" class="tiny">GPU</text>
+
+      <rect x="0"   y="48" width="62" height="34" class="gpu"/><text x="31"  y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="72"  y="48" width="62" height="34" class="gpu"/><text x="103" y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="144" y="48" width="62" height="34" class="gpu"/><text x="175" y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="216" y="48" width="62" height="34" class="gpu"/><text x="247" y="70" text-anchor="middle" class="tiny">GPU</text>
+
+      <path d="M10,17 C80,6 200,6 270,17" class="thin dash"/>
+      <path d="M10,65 C80,54 200,54 270,65" class="thin dash"/>
+      <text x="140" y="106" text-anchor="middle" class="tiny">High-speed interconnect</text>
+    </g>
+  </g>
+
+  <!-- Node 3 (ellipsis) -->
+  <g transform="translate(810,180)">
+    <rect x="0" y="0" width="320" height="260" class="node"/>
+    <text x="18" y="28" class="label">Compute Node</text>
+
+    <rect x="20" y="50" width="280" height="70" class="cpu"/>
+    <text x="160" y="92" text-anchor="middle" class="label">CPU</text>
+
+    <text x="20" y="145" class="small">GPUs</text>
+
+    <g transform="translate(20,160)">
+      <rect x="0"   y="0" width="62" height="34" class="gpu"/><text x="31"  y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="72"  y="0" width="62" height="34" class="gpu"/><text x="103" y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="144" y="0" width="62" height="34" class="gpu"/><text x="175" y="22" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="216" y="0" width="62" height="34" class="gpu"/><text x="247" y="22" text-anchor="middle" class="tiny">GPU</text>
+
+      <rect x="0"   y="48" width="62" height="34" class="gpu"/><text x="31"  y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="72"  y="48" width="62" height="34" class="gpu"/><text x="103" y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="144" y="48" width="62" height="34" class="gpu"/><text x="175" y="70" text-anchor="middle" class="tiny">GPU</text>
+      <rect x="216" y="48" width="62" height="34" class="gpu"/><text x="247" y="70" text-anchor="middle" class="tiny">GPU</text>
+
+      <text x="140" y="112" text-anchor="middle" class="tiny">...</text>
+    </g>
+  </g>
+
+  <!-- Links from network to nodes -->
+  <path d="M440,140 L230,180" class="link" marker-end="url(#arrow)"/>
+  <path d="M600,140 L600,180" class="link" marker-end="url(#arrow)"/>
+  <path d="M760,140 L970,180" class="link" marker-end="url(#arrow)"/>
+
+  <!-- Scale note -->
+  <text x="40" y="495" class="small">Scale-out: 1K–100K+ GPUs across many nodes</text>
+</svg>

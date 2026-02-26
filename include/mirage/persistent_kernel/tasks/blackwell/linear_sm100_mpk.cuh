@@ -705,6 +705,306 @@ __device__ __noinline__ void
 
 } // end linear_sm100_mpk_task_impl
 
+// ── Phase functions for streaming pipeline ───────────────────────────────────
+// Each function handles one task's worth of work for a single warp role.
+// They are self-contained: each reconstructs the CuTe types it needs
+// (compile-time, zero cost) from shared_storage and template parameters.
+
+// ── LOADER (warp 5): TMA loads for one task ──────────────────────────────────
+template <typename T_, int MMA_M, int MMA_N,
+          int NUM_AB_STAGE, typename SharedStorageT>
+__device__ void linear_sm100_load_one_task(
+    SharedStorageT &shared_storage,
+    CUtensorMap *tma_a_ptr,
+    CUtensorMap *tma_b_ptr,
+    int k_tiles, int m_tiles, int n_tiles,
+    int &global_ab_tile) {
+  constexpr int TILE_SIZE = 64;
+  constexpr int OUTPUT_ATOM_SIZE = MMA_M;
+  constexpr int B = 3, M = 3, S = 3;
+
+  int tma_transaction_bytes =
+      sizeof(T_) * MMA_N * TILE_SIZE + sizeof(T_) * MMA_M * TILE_SIZE;
+
+  T_ *shared_weight = shared_storage.A.begin();
+  T_ *shared_input = shared_storage.B.begin();
+
+  Barrier *ab_full_mbar_ptr =
+      reinterpret_cast<Barrier *>(shared_storage.ab_full_mbar_ptr);
+
+  using InputSmem = smem_tma<T_, B, M, S, MMA_N, TILE_SIZE, 1>;
+  InputSmem input_smem(shared_input);
+
+  using WeightSmem = smem_tma<T_, B, M, S, OUTPUT_ATOM_SIZE, TILE_SIZE, 1>;
+  WeightSmem input_weight_smem(shared_weight);
+
+  using TmaA = kernel::tma::tma_2d<T_, B, M, S,
+      1, 1, MMA_M, TILE_SIZE, 1, 1, 1, 1, MMA_M * TILE_SIZE, true>;
+  using TmaB = kernel::tma::tma_2d<T_, B, M, S,
+      1, 1, MMA_N, TILE_SIZE, 1, 1, 1, 1, MMA_N * TILE_SIZE, true>;
+  TmaA tma_a(tma_a_ptr);
+  TmaB tma_b(tma_b_ptr);
+
+  for (int m = 0; m < m_tiles; m++) {
+    for (int n = 0; n < n_tiles; n++) {
+      for (int k = 0; k < k_tiles; k++) {
+        int smem_wr_buffer = global_ab_tile % NUM_AB_STAGE;
+        int ab_empty_phase =
+            (global_ab_tile / NUM_AB_STAGE) % 2 ^ 1;
+
+        cute::wait_barrier(
+            shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+            ab_empty_phase);
+
+        if (cute::elect_one_sync()) {
+          int tma_coords_A[2] = {k * TILE_SIZE, m * OUTPUT_ATOM_SIZE};
+          int tma_coords_B[2] = {k * TILE_SIZE, n * MMA_N};
+          input_weight_smem.set_ptr(
+              shared_weight + smem_wr_buffer * OUTPUT_ATOM_SIZE * TILE_SIZE);
+          input_smem.set_ptr(
+              shared_input + smem_wr_buffer * MMA_N * TILE_SIZE);
+          cute::set_barrier_transaction_bytes(
+              shared_storage.ab_full_mbar_ptr[smem_wr_buffer],
+              tma_transaction_bytes);
+          tma_a.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer],
+                             input_weight_smem.base_ptr, tma_coords_A);
+          tma_b.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer],
+                             input_smem.base_ptr, tma_coords_B);
+        }
+
+        global_ab_tile++;
+      }
+    }
+  }
+}
+
+// ── COMPUTE (warp 4): WGMMA accumulation for one task ───────────────────────
+template <typename T_, int MMA_M, int MMA_N,
+          int NUM_AB_STAGE, int NUM_ACC_STAGE, typename SharedStorageT>
+__device__ void linear_sm100_compute_one_task(
+    SharedStorageT &shared_storage,
+    int k_tiles, int m_tiles, int n_tiles,
+    int &global_ab_tile, int &global_out_tile) {
+  cute::TiledMMA tiled_mma = cute::make_tiled_mma(
+      cute::SM100_MMA_F16BF16_SS<T_, T_, float, MMA_M, MMA_N,
+                                  cute::UMMA::Major::K,
+                                  cute::UMMA::Major::K>{});
+  auto bM = cute::tile_size<0>(tiled_mma);
+  auto bN = cute::tile_size<1>(tiled_mma);
+  auto bK = cute::tile_size<2>(tiled_mma) * cute::Int<4>{};
+  auto mma_tiler = cute::make_shape(bM, bN, bK);
+
+  cute::ThrMMA cta_mma = tiled_mma.get_slice(0);
+  cute::Tensor tCsA = shared_storage.tensor_sA();
+  cute::Tensor tCsB = shared_storage.tensor_sB();
+  cute::Tensor tCrA = cta_mma.make_fragment_A(tCsA);
+  cute::Tensor tCrB = cta_mma.make_fragment_B(tCsB);
+
+  auto acc_shape = cute::partition_shape_C(
+      tiled_mma,
+      cute::make_shape(cute::size<0>(mma_tiler), cute::size<1>(mma_tiler),
+                       cute::Int<NUM_ACC_STAGE>{}));
+  auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
+  tCtAcc.data() = shared_storage.tmem_base_ptr;
+
+  for (int m = 0; m < m_tiles; m++) {
+    for (int n = 0; n < n_tiles; n++) {
+      int acc_buf_idx = global_out_tile % NUM_ACC_STAGE;
+      auto tCtAcc_Slice =
+          tCtAcc(cute::_, cute::_, cute::_, acc_buf_idx);
+
+      int acc_empty_phase =
+          (global_out_tile / NUM_ACC_STAGE) % 2 ^ 1;
+      cute::wait_barrier(
+          shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
+          acc_empty_phase);
+
+      tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
+
+      for (int k = 0; k < k_tiles; k++) {
+        int smem_rd_buffer = global_ab_tile % NUM_AB_STAGE;
+        int ab_full_phase =
+            (global_ab_tile / NUM_AB_STAGE) % 2;
+
+        cute::wait_barrier(
+            shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
+            ab_full_phase);
+
+        for (int k_block = 0;
+             k_block < cute::size<2>(tCrA); ++k_block) {
+          cute::gemm(
+              tiled_mma,
+              tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
+              tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
+              tCtAcc_Slice);
+          tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
+        }
+
+        cutlass::arch::umma_arrive(
+            &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
+
+        global_ab_tile++;
+      } // k
+
+      cutlass::arch::umma_arrive(
+          &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
+      global_out_tile++;
+    } // n
+  }   // m
+}
+
+// ── EPILOGUE (warps 0-3): T2R → bias → convert → TMA store for one task ────
+template <typename T_, int MMA_M, int MMA_N,
+          int NUM_AB_STAGE, int NUM_ACC_STAGE, int NUM_C_STAGE,
+          typename SharedStorageT>
+__device__ void linear_sm100_store_one_task(
+    SharedStorageT &shared_storage,
+    CUtensorMap *tma_out_ptr,
+    T_ *bias_ptr,
+    int output_size,
+    int m_tiles, int n_tiles,
+    int &global_out_tile,
+    int warp_idx) {
+  constexpr int OUTPUT_ATOM_SIZE = MMA_M;
+  constexpr int B = 3, M = 3, S = 3;
+
+  // Reconstruct tCtAcc for T2R source shape
+  cute::TiledMMA tiled_mma = cute::make_tiled_mma(
+      cute::SM100_MMA_F16BF16_SS<T_, T_, float, MMA_M, MMA_N,
+                                  cute::UMMA::Major::K,
+                                  cute::UMMA::Major::K>{});
+  auto bM = cute::tile_size<0>(tiled_mma);
+  auto bN = cute::tile_size<1>(tiled_mma);
+  auto bK = cute::tile_size<2>(tiled_mma) * cute::Int<4>{};
+  auto mma_tiler = cute::make_shape(bM, bN, bK);
+
+  auto acc_shape = cute::partition_shape_C(
+      tiled_mma,
+      cute::make_shape(cute::size<0>(mma_tiler), cute::size<1>(mma_tiler),
+                       cute::Int<NUM_ACC_STAGE>{}));
+  auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
+  tCtAcc.data() = shared_storage.tmem_base_ptr;
+
+  using AccType = typename decltype(tCtAcc)::value_type;
+  using TypeBias = T_;
+  using TypeC = T_;
+
+  cutlass::NumericConverter<AccType, TypeBias> converterBias;
+  cutlass::NumericConverter<TypeC, AccType> converter;
+
+  cute::TiledCopy tiled_copy_t2r =
+      cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{},
+                           tCtAcc(cute::_, cute::_, cute::_, 0));
+  cute::ThrCopy thr_copy_t2r = tiled_copy_t2r.get_slice(threadIdx.x);
+  cute::Tensor tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc);
+
+  cute::Tensor tCgC_fake = cute::make_tensor<TypeC>(
+      cute::shape(tCtAcc(cute::_, cute::_, cute::_, 0)));
+  cute::Tensor tTR_rAcc_fake = thr_copy_t2r.partition_D(tCgC_fake);
+  cute::Tensor tTR_rAcc =
+      cute::make_tensor<AccType>(cute::shape(tTR_rAcc_fake));
+
+  cute::Tensor sC_epi = shared_storage.tensor_sC();
+  T_ *mm_output = shared_storage.C.begin();
+
+  using OutputSmem = smem_tma<T_, 0, M, S, MMA_N, OUTPUT_ATOM_SIZE, 1>;
+  OutputSmem mm_output_smem(mm_output);
+
+  using TmaOut = kernel::tma::tma_2d<T_, 0, M, S,
+      1, 1, MMA_N, OUTPUT_ATOM_SIZE, 1, 1, 1, 1,
+      MMA_N * OUTPUT_ATOM_SIZE, true>;
+  TmaOut tma_out(tma_out_ptr);
+
+  cutlass::arch::NamedBarrier epilogue_wg_barrier(
+      128, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+
+  for (int m = 0; m < m_tiles; m++) {
+    for (int n = 0; n < n_tiles; n++) {
+      int acc_buf_idx = global_out_tile % NUM_ACC_STAGE;
+      int acc_full_phase = (global_out_tile / NUM_ACC_STAGE) % 2;
+      int c_smem_wr_buffer_idx = global_out_tile % NUM_C_STAGE;
+
+      cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(
+          cute::shape(tTR_rAcc(0, cute::_, 0, 0)));
+      cute::Tensor tCrBiasTypeAcc =
+          cute::make_tensor<AccType>(cute::shape(tCrBiasTypeBias));
+      cute::Tensor tCrC =
+          cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
+
+      if (bias_ptr != nullptr) {
+        T_ *bias_tile_base =
+            bias_ptr + n * MMA_N * output_size + m * OUTPUT_ATOM_SIZE;
+        CUTE_UNROLL
+        for (int j = 0; j < tCrBiasTypeBias.size(); j++) {
+          tCrBiasTypeBias[j] =
+              bias_tile_base[j * output_size + threadIdx.x];
+        }
+        CUTE_UNROLL
+        for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
+          tCrBiasTypeAcc[i] = converterBias(tCrBiasTypeBias[i]);
+        }
+      }
+
+      mm_output_smem.set_ptr(
+          mm_output + c_smem_wr_buffer_idx * MMA_N * OUTPUT_ATOM_SIZE);
+
+      cute::wait_barrier(
+          shared_storage.acc_full_mbar_ptr[acc_buf_idx],
+          acc_full_phase);
+
+      // T2R copy
+      cute::copy(tiled_copy_t2r,
+                 tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
+                 tTR_rAcc);
+
+      epilogue_wg_barrier.arrive_and_wait();
+      if (cute::elect_one_sync()) {
+        cute::arrive_barrier(
+            shared_storage.acc_empty_mbar_ptr[acc_buf_idx]);
+      }
+
+      // Add bias
+      if (bias_ptr != nullptr) {
+        CUTE_UNROLL
+        for (int i = 0; i < tTR_rAcc.size(); i++) {
+          tTR_rAcc[i] += tCrBiasTypeAcc[i];
+        }
+      }
+
+      // Convert to output type
+      CUTE_UNROLL
+      for (int i = 0; i < tCrC.size(); i++) {
+        tCrC[i] = converter(tTR_rAcc[i]);
+      }
+
+      // R2S copy
+      cute::Tensor sC_epi_slice =
+          cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx));
+      cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
+
+      // S2G TMA store
+      cute::tma_store_fence();
+      epilogue_wg_barrier.arrive_and_wait();
+
+      if (warp_idx == 0 && cute::elect_one_sync()) {
+        tma_out.tma_store_async(
+            mm_output_smem.base_ptr,
+            {m * OUTPUT_ATOM_SIZE, n * MMA_N});
+        cute::tma_store_arrive();
+        cute::tma_store_wait<NUM_C_STAGE - 1>();
+      }
+
+      global_out_tile++;
+    } // n
+  }   // m
+
+  // Drain all TMA stores for this task
+  if (warp_idx == 0 && cute::elect_one_sync()) {
+    cute::tma_store_wait<0>();
+  }
+  epilogue_wg_barrier.arrive_and_wait();
+}
+
 // ── Streaming pipeline for consecutive LINEAR_SM100 tasks ────────────────────
 // Runs a sequence of LINEAR tasks through the same SMEM pipeline, reusing
 // barriers and TMEM across task boundaries.  Warp 5 (loader) runs 1 task
@@ -897,55 +1197,9 @@ __device__ __noinline__ void
       int m_tiles = task_buf[cur].task_metadata.linear_tiles.m_tile_count;
       int n_tiles = task_buf[cur].task_metadata.linear_tiles.n_tile_count;
 
-      // Construct TMA wrappers (same SMEM layout, different GMEM desc)
-      // Template params after B,M,S,ROW,COL don't matter on device side
-      // when SMEM_REPEAT_ROW=1, SMEM_REPEAT_COL=1.  We just swap desc_ptr.
-      using TmaA = kernel::tma::tma_2d<T_, B, M, S,
-          /*GMEM_ROW=*/1, /*GMEM_COL=*/1,
-          /*SMEM_ROW=*/MMA_M, /*SMEM_COL=*/TILE_SIZE,
-          /*GMEM_STRIDE_ROW=*/1, /*GMEM_STRIDE_COL=*/1,
-          /*SMEM_REPEAT_ROW=*/1, /*SMEM_REPEAT_COL=*/1,
-          /*SMEM_STRIDE=*/MMA_M * TILE_SIZE, /*ROW_MAJOR=*/true>;
-      using TmaB = kernel::tma::tma_2d<T_, B, M, S,
-          /*GMEM_ROW=*/1, /*GMEM_COL=*/1,
-          /*SMEM_ROW=*/MMA_N, /*SMEM_COL=*/TILE_SIZE,
-          /*GMEM_STRIDE_ROW=*/1, /*GMEM_STRIDE_COL=*/1,
-          /*SMEM_REPEAT_ROW=*/1, /*SMEM_REPEAT_COL=*/1,
-          /*SMEM_STRIDE=*/MMA_N * TILE_SIZE, /*ROW_MAJOR=*/true>;
-      TmaA tma_a(tma_a_ptr);
-      TmaB tma_b(tma_b_ptr);
-
-      for (int m = 0; m < m_tiles; m++) {
-        for (int n = 0; n < n_tiles; n++) {
-          for (int k = 0; k < k_tiles; k++) {
-            int smem_wr_buffer = global_ab_tile % NUM_AB_STAGE;
-            int ab_empty_phase =
-                (global_ab_tile / NUM_AB_STAGE) % 2 ^ 1;
-
-            cute::wait_barrier(
-                shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                ab_empty_phase);
-
-            if (cute::elect_one_sync()) {
-              int tma_coords_A[2] = {k * TILE_SIZE, m * OUTPUT_ATOM_SIZE};
-              int tma_coords_B[2] = {k * TILE_SIZE, n * MMA_N};
-              input_weight_smem.set_ptr(
-                  shared_weight + smem_wr_buffer * OUTPUT_ATOM_SIZE * TILE_SIZE);
-              input_smem.set_ptr(
-                  shared_input + smem_wr_buffer * MMA_N * TILE_SIZE);
-              cute::set_barrier_transaction_bytes(
-                  shared_storage.ab_full_mbar_ptr[smem_wr_buffer],
-                  tma_transaction_bytes);
-              tma_a.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer],
-                                 input_weight_smem.base_ptr, tma_coords_A);
-              tma_b.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer],
-                                 input_smem.base_ptr, tma_coords_B);
-            }
-
-            global_ab_tile++;
-          }
-        }
-      }
+      linear_sm100_load_one_task<T_, MMA_M, MMA_N, NUM_AB_STAGE>(
+          shared_storage, tma_a_ptr, tma_b_ptr,
+          k_tiles, m_tiles, n_tiles, global_ab_tile);
     } // end loader task loop
 
   } else if (warp_idx == 4) {
@@ -954,7 +1208,6 @@ __device__ __noinline__ void
     // new (m,n) output tile; signals acc_full after reduction completes.
 
     tmem_allocation_result_barrier.arrive_and_wait();
-    tCtAcc.data() = shared_storage.tmem_base_ptr;
 
     int global_ab_tile = 0;
     int global_out_tile = 0;
@@ -972,52 +1225,11 @@ __device__ __noinline__ void
       int m_tiles = task_buf[cur].task_metadata.linear_tiles.m_tile_count;
       int n_tiles = task_buf[cur].task_metadata.linear_tiles.n_tile_count;
 
-      for (int m = 0; m < m_tiles; m++) {
-        for (int n = 0; n < n_tiles; n++) {
-          int acc_buf_idx = global_out_tile % NUM_ACC_STAGE;
-          auto tCtAcc_Slice =
-              tCtAcc(cute::_, cute::_, cute::_, acc_buf_idx);
-
-          // Wait for accumulator buffer to be free
-          int acc_empty_phase =
-              (global_out_tile / NUM_ACC_STAGE) % 2 ^ 1;
-          cute::wait_barrier(
-              shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-              acc_empty_phase);
-
-          tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
-
-          for (int k = 0; k < k_tiles; k++) {
-            int smem_rd_buffer = global_ab_tile % NUM_AB_STAGE;
-            int ab_full_phase =
-                (global_ab_tile / NUM_AB_STAGE) % 2;
-
-            cute::wait_barrier(
-                shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
-                ab_full_phase);
-
-            for (int k_block = 0;
-                 k_block < cute::size<2>(tCrA); ++k_block) {
-              cute::gemm(
-                  tiled_mma,
-                  tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
-                  tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
-                  tCtAcc_Slice);
-              tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
-            }
-
-            cutlass::arch::umma_arrive(
-                &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
-
-            global_ab_tile++;
-          } // k
-
-          cutlass::arch::umma_arrive(
-              &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
-          global_out_tile++;
-        } // n
-      }   // m
-    }     // task loop
+      linear_sm100_compute_one_task<T_, MMA_M, MMA_N,
+                                    NUM_AB_STAGE, NUM_ACC_STAGE>(
+          shared_storage, k_tiles, m_tiles, n_tiles,
+          global_ab_tile, global_out_tile);
+    } // task loop
 
   } else if (warp_idx < 4) {
     // ── EPILOGUE WARPS (0-3) ────────────────────────────────────────────
@@ -1030,26 +1242,6 @@ __device__ __noinline__ void
                               &shared_storage.tmem_base_ptr);
     }
     tmem_allocation_result_barrier.arrive_and_wait();
-    tCtAcc.data() = shared_storage.tmem_base_ptr;
-
-    using AccType = typename decltype(tCtAcc)::value_type;
-    using TypeBias = T_;
-    using TypeC = T_;
-
-    cutlass::NumericConverter<AccType, TypeBias> converterBias;
-    cutlass::NumericConverter<TypeC, AccType> converter;
-
-    cute::TiledCopy tiled_copy_t2r =
-        cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{},
-                             tCtAcc(cute::_, cute::_, cute::_, 0));
-    cute::ThrCopy thr_copy_t2r = tiled_copy_t2r.get_slice(threadIdx.x);
-    cute::Tensor tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc);
-
-    cute::Tensor tCgC_fake = cute::make_tensor<TypeC>(
-        cute::shape(tCtAcc(cute::_, cute::_, cute::_, 0)));
-    cute::Tensor tTR_rAcc_fake = thr_copy_t2r.partition_D(tCgC_fake);
-    cute::Tensor tTR_rAcc =
-        cute::make_tensor<AccType>(cute::shape(tTR_rAcc_fake));
 
     int global_out_tile = 0;
     for (int ti = 0; ti < run_length; ti++) {
@@ -1066,116 +1258,19 @@ __device__ __noinline__ void
       int m_tiles = task_buf[cur].task_metadata.linear_tiles.m_tile_count;
       int n_tiles = task_buf[cur].task_metadata.linear_tiles.n_tile_count;
 
-      // Output TMA descriptor (switches per task)
       CUtensorMap *tma_out_ptr = static_cast<CUtensorMap *>(
           task_buf[cur].output_tma_desc_ptrs[0][0]);
-      using TmaOut = kernel::tma::tma_2d<T_, 0, M, S,
-          /*GMEM_ROW=*/1, /*GMEM_COL=*/1,
-          /*SMEM_ROW=*/MMA_N, /*SMEM_COL=*/OUTPUT_ATOM_SIZE,
-          /*GMEM_STRIDE_ROW=*/1, /*GMEM_STRIDE_COL=*/1,
-          /*SMEM_REPEAT_ROW=*/1, /*SMEM_REPEAT_COL=*/1,
-          /*SMEM_STRIDE=*/MMA_N * OUTPUT_ATOM_SIZE, /*ROW_MAJOR=*/true>;
-      TmaOut tma_out(tma_out_ptr);
-
-      // Bias pointer (may be nullptr for NOBIAS variants)
       T_ *bias_ptr = nullptr;
       if (task_buf[cur].task_type == TASK_LINEAR_WITH_RESIDUAL_SM100) {
         bias_ptr = static_cast<T_ *>(task_buf[cur].input_ptrs[2]);
       }
-      // output_size used as row stride for bias GMEM loads (contiguous layout)
       int output_size = m_tiles * OUTPUT_ATOM_SIZE;
 
-      for (int m = 0; m < m_tiles; m++) {
-        for (int n = 0; n < n_tiles; n++) {
-          int acc_buf_idx = global_out_tile % NUM_ACC_STAGE;
-          int acc_full_phase = (global_out_tile / NUM_ACC_STAGE) % 2;
-          int c_smem_wr_buffer_idx = global_out_tile % NUM_C_STAGE;
-
-          // Bias tile (register)
-          cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(
-              cute::shape(tTR_rAcc(0, cute::_, 0, 0)));
-          cute::Tensor tCrBiasTypeAcc =
-              cute::make_tensor<AccType>(cute::shape(tCrBiasTypeBias));
-          cute::Tensor tCrC =
-              cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
-
-          // Load bias from GMEM if present
-          // Matches monolithic pattern: cute::copy(tCgBias(_, threadIdx.x), tCrBias)
-          // Bias/residual layout: (batch_size, output_size) row-major, stride=output_size
-          // Thread threadIdx.x (0..127) handles column m*MMA_M+threadIdx.x,
-          // loading tCrBiasTypeBias.size() rows starting at n*MMA_N.
-          if (bias_ptr != nullptr) {
-            T_ *bias_tile_base =
-                bias_ptr + n * MMA_N * output_size + m * OUTPUT_ATOM_SIZE;
-            CUTE_UNROLL
-            for (int j = 0; j < tCrBiasTypeBias.size(); j++) {
-              tCrBiasTypeBias[j] =
-                  bias_tile_base[j * output_size + threadIdx.x];
-            }
-            CUTE_UNROLL
-            for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
-              tCrBiasTypeAcc[i] = converterBias(tCrBiasTypeBias[i]);
-            }
-          }
-
-          mm_output_smem.set_ptr(
-              mm_output + c_smem_wr_buffer_idx * MMA_N * OUTPUT_ATOM_SIZE);
-
-          cute::wait_barrier(
-              shared_storage.acc_full_mbar_ptr[acc_buf_idx],
-              acc_full_phase);
-
-          // T2R copy
-          cute::copy(tiled_copy_t2r,
-                     tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
-                     tTR_rAcc);
-
-          epilogue_wg_barrier.arrive_and_wait();
-          if (cute::elect_one_sync()) {
-            cute::arrive_barrier(
-                shared_storage.acc_empty_mbar_ptr[acc_buf_idx]);
-          }
-
-          // Add bias
-          if (bias_ptr != nullptr) {
-            CUTE_UNROLL
-            for (int i = 0; i < tTR_rAcc.size(); i++) {
-              tTR_rAcc[i] += tCrBiasTypeAcc[i];
-            }
-          }
-
-          // Convert to output type
-          CUTE_UNROLL
-          for (int i = 0; i < tCrC.size(); i++) {
-            tCrC[i] = converter(tTR_rAcc[i]);
-          }
-
-          // R2S copy
-          cute::Tensor sC_epi_slice =
-              cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx));
-          cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
-
-          // S2G TMA store
-          cute::tma_store_fence();
-          epilogue_wg_barrier.arrive_and_wait();
-
-          if (warp_idx == 0 && cute::elect_one_sync()) {
-            tma_out.tma_store_async(
-                mm_output_smem.base_ptr,
-                {m * OUTPUT_ATOM_SIZE, n * MMA_N});
-            cute::tma_store_arrive();
-            cute::tma_store_wait<NUM_C_STAGE - 1>();
-          }
-
-          global_out_tile++;
-        } // n
-      }   // m
-
-      // Drain all TMA stores for this task
-      if (warp_idx == 0 && cute::elect_one_sync()) {
-        cute::tma_store_wait<0>();
-      }
-      epilogue_wg_barrier.arrive_and_wait();
+      linear_sm100_store_one_task<T_, MMA_M, MMA_N,
+                                  NUM_AB_STAGE, NUM_ACC_STAGE, NUM_C_STAGE>(
+          shared_storage, tma_out_ptr, bias_ptr,
+          output_size, m_tiles, n_tiles,
+          global_out_tile, warp_idx);
 
       // Signal GMEM completion barrier for cross-SM dependencies
       if (threadIdx.x == 0 && *signal_barrier_idx_ptr >= 0) {
