@@ -240,7 +240,7 @@ if __name__ == "__main__":
         else:
             profiler_tensor = None
             
-        spec_decode_config = mi.speculative.spec_decode_class(
+        spec_decode_config = mi.mpk.speculative.spec_decode_class(
             args.spec_decode,
             ngram_size=args.ngram_size,
             spec_length=args.spec_length,
