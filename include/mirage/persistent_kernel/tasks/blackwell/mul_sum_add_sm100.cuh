@@ -32,7 +32,7 @@ __device__ __forceinline__ void
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
   for (int row_idx = 0; row_idx < BATCH_SIZE; ++row_idx) {
-    for (int i = threadIdx.x; i < OUTPUT_SIZE; i += TASK_BLOCK_DIM) {
+    for (int i = threadIdx.x; i < OUTPUT_SIZE; i += blockDim.x) {
       T res_val = d_residual[row_idx * OUTPUT_STRIDE + i];
       float sum_val = float(res_val);
 #pragma unroll

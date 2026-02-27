@@ -41,8 +41,6 @@
 #include "cutlass/trace.h"
 #endif
 
-#include "../common/worker_config.h"
-
 //////////////////////////////////////////////////////////////////////////////
 // Section 1: Pow2 Helper
 //////////////////////////////////////////////////////////////////////////////
@@ -545,7 +543,7 @@ struct Sm100FmhaMlaReductionKernel {
         }
       }
     }
-    TASK_SYNC();
+    __syncthreads();
 
     constexpr int Elements = kHeadDimLatent / MaxThreadsPerBlock;
     const size_t offset_oaccum =

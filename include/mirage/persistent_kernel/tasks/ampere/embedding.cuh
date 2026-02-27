@@ -30,7 +30,7 @@ __device__ __forceinline__ void
   T *__restrict__ output = static_cast<T *>(output_ptr);
   constexpr int BATCH_SIZE = 1;
 
-  for (int i = threadIdx.x; i < BATCH_SIZE * OUT_DIM; i += TASK_BLOCK_DIM) {
+  for (int i = threadIdx.x; i < BATCH_SIZE * OUT_DIM; i += blockDim.x) {
     // int idx = i / OUT_DIM;
     int off = i % OUT_DIM;
     // int64_t wordIdx = input_ids[idx];
@@ -56,14 +56,14 @@ __device__ __forceinline__ void
     int64_t wordIdx = input_ids[batch_idx];
     if (wordIdx >= 0) {
 #pragma unroll
-      for (int i = threadIdx.x; i < CHUNK_SIZE; i += TASK_BLOCK_DIM) {
+      for (int i = threadIdx.x; i < CHUNK_SIZE; i += blockDim.x) {
         output[batch_idx * OUTPUT_DIM_SIZE + i] =
             embedding[wordIdx * OUTPUT_DIM_SIZE + i];
       }
     } else {
       // TODO: This might not be necessary
       for (int i = threadIdx.x; i < CHUNK_SIZE;
-           i += TASK_BLOCK_DIM) { // writing 0 to output
+           i += blockDim.x) { // writing 0 to output
         output[batch_idx * OUTPUT_DIM_SIZE + i] = T(0.0f);
       }
     }

@@ -56,13 +56,6 @@ using namespace kernel;
 #define WORKER_NUM_THREADS 128
 #define SINGLE_KERNEL_NUM_THREADS 128
 #endif
-#ifdef MPK_STATIC_WORKER
-#if defined(MIRAGE_GRACE_BLACKWELL)
-#define STATIC_WORKER_NUM_THREADS 288
-#else
-#define STATIC_WORKER_NUM_THREADS WORKER_NUM_THREADS
-#endif
-#endif
 #define INIT_NUM_THREADS 128
 
 #ifndef CUDA_CHECK
@@ -1052,7 +1045,7 @@ __global__ void scheduler_kernel(RuntimeConfig config) {
 #include "static_worker.cuh"
 
 __global__
-    __launch_bounds__(STATIC_WORKER_NUM_THREADS,
+    __launch_bounds__(WORKER_NUM_THREADS,
                       1) void static_worker_kernel(RuntimeConfig config) {
   worker_checker(config);
   execute_worker_static(config);
@@ -1548,7 +1541,7 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
            MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
     static_worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                           dim3(STATIC_WORKER_NUM_THREADS, 1, 1),
+                           dim3(WORKER_NUM_THREADS, 1, 1),
                            MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                            default_stream>>>(global_runtime_config);
 

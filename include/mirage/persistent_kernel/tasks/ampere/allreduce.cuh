@@ -13,7 +13,6 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common/worker_config.h"
 #include "tasks/common/common_header.cuh"
 
 #ifdef USE_NVSHMEM
@@ -49,7 +48,7 @@ __device__ __forceinline__ void
   }
 
   nvshmem_quiet();
-  TASK_SYNC();
+  __syncthreads();
   if (threadIdx.x == 0) {
     nvshmemx_signal_op(reinterpret_cast<uint64_t *>(sig_addr),
                        1,
@@ -75,7 +74,7 @@ __device__ __forceinline__ void reduction_kernel(void const *input_ptr,
   T const *__restrict__ d_buffer = static_cast<T const *>(buf_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
   for (int idx = threadIdx.x; idx < OUTPUT_SIZE * active_tokens;
-       idx += TASK_BLOCK_DIM) {
+       idx += blockDim.x) {
     float accum = 0.0;
     int batch = idx / OUTPUT_SIZE;
     int offset = idx % OUTPUT_SIZE;

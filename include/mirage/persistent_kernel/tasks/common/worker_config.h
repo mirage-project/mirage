@@ -27,19 +27,3 @@ constexpr float inf = 5e4;
 constexpr int WORKER_NUM_THREADS = 256;   // Grace Hopper setting
 constexpr int CONSUMER_NUM_THREADS = 128; // Grace Hopper setting
 #endif
-
-// Inside-SM pipelining for static worker (Blackwell SM100 only):
-// Extra warp 8 = controller; warps 0-7 = compute (256 threads).
-#if defined(MPK_STATIC_WORKER) && defined(MIRAGE_GRACE_BLACKWELL)
-constexpr int CONTROLLER_WARP_ID = 8;
-constexpr int NUM_COMPUTE_THREADS = 256;
-constexpr int PIPELINED_BLOCK_SIZE = 288; // 9 warps: 8 compute + 1 controller
-// Named barrier: only 256 compute threads sync (excludes controller warp 8)
-#define TASK_SYNC() asm volatile("bar.sync %0, %1;\n" :: "r"(0), "n"(256))
-// blockDim.x is 288 (includes controller warp) but tasks only use 256 threads.
-// Use TASK_BLOCK_DIM instead of blockDim.x in loop strides within task code.
-#define TASK_BLOCK_DIM NUM_COMPUTE_THREADS
-#else
-#define TASK_SYNC() __syncthreads()
-#define TASK_BLOCK_DIM blockDim.x
-#endif
