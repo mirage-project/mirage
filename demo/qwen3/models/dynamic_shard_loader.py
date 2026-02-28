@@ -160,8 +160,8 @@ class DynamicShardLoader:
         weight_num = int(weight_name_components[5])
         num_experts = self.model.config.num_experts
         
-        experts_per_rank = math.ceil(num_experts / expert_parallel_size)
-        ep_rank = self.rank // experts_per_rank
+        num_gpus_per_ep_group = self.world_size // expert_parallel_size
+        ep_rank = self.rank // num_gpus_per_ep_group
 
         expert_start = ep_rank * experts_per_rank
         expert_end = min(expert_start + experts_per_rank, num_experts)
