@@ -156,15 +156,12 @@ class DynamicShardLoader:
         if "expert" not in full_weight_name:
             return True
 
-        if expert_parallel_size == None:
-            expert_parallel_size = self.world_size
-
         weight_name_components = full_weight_name.split('.')
         weight_num = int(weight_name_components[5])
         num_experts = self.model.config.num_experts
         
         experts_per_rank = math.ceil(num_experts / expert_parallel_size)
-        ep_rank = self.rank // expert_parallel_size
+        ep_rank = self.rank // experts_per_rank
 
         expert_start = ep_rank * experts_per_rank
         expert_end = min(expert_start + experts_per_rank, num_experts)
