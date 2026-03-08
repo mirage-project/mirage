@@ -1,5 +1,15 @@
 #!/bin/bash
 # Script to install system dependencies required by Mirage
+# Usage: install_dependencies.sh [CUDA_VERSION]
+#   CUDA_VERSION: e.g. "12.1.1", "12.4.1", "12.6.3" (default: "12.1.1")
+
+set -e
+
+CUDA_VERSION="${1:-12.1.1}"
+# Extract major.minor for torch index (e.g., 12.1.1 -> cu121)
+CUDA_SHORT=$(echo "$CUDA_VERSION" | sed 's/\.\([0-9]\)$/\1/' | sed 's/\.//g')
+TORCH_CUDA="cu${CUDA_SHORT}"
+
 sudo apt update
 sudo apt install -y software-properties-common lsb-release wget python3-pip g++ make libboost-all-dev
 
@@ -19,12 +29,18 @@ sudo ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake
 # Install Python dependencies (including torch)
 pip3 install --upgrade pip build setuptools wheel cython
 
-# Install PyTorch temporarily since it is not included in requirements.txt so far
-pip3 install torch==2.6.0+cu118 torchvision==0.21.0+cu118 torchaudio==2.6.0+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+# Install PyTorch matching the target CUDA version
+echo "Installing PyTorch for ${TORCH_CUDA}..."
+pip3 install torch==2.6.0+${TORCH_CUDA} torchvision==0.21.0+${TORCH_CUDA} torchaudio==2.6.0+${TORCH_CUDA} \
+  --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA}
 
-# Install project requirements
+# Install project requirements (skip git+ dependencies that break wheel metadata)
 if [ -f requirements.txt ]; then
-pip3 install -r requirements.txt
+  grep -v '^[[:space:]]*#' requirements.txt | grep -v 'git+' | pip3 install -r /dev/stdin
+  # Install git+ dependencies separately (won't be in wheel metadata)
+  grep 'git+' requirements.txt | while read -r dep; do
+    pip3 install "$dep" || echo "WARNING: Failed to install $dep"
+  done
 fi
 
 # Install cuDNN
@@ -42,3 +58,6 @@ sudo rm -rf /var/lib/apt/lists/*
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 # shellcheck source=/dev/null
 . "$HOME/.cargo/env"
+
+# Install auditwheel and patchelf for wheel repair
+pip3 install auditwheel patchelf
