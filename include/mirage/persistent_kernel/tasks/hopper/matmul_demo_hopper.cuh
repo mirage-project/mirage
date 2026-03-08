@@ -15,13 +15,7 @@
  */
 
 #pragma once
-#include "../common.h"
-#include "../dmem_layout.cuh"
-#include "../element_binary.cuh"
-#include "../element_unary.cuh"
-#include "../reduction.cuh"
-#include "../smem_layout.cuh"
-#include "../utils.cuh"
+#include "../common/common_header.h"
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"

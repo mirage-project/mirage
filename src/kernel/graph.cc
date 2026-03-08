@@ -480,6 +480,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_silu_mul_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+  } else if (name == "identity") {
+    int variant_id =
+        task_register->register_identity_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_IDENTITY, variant_id);
   } else if (name == "silu_mul_linear_with_residual") {
     int variant_id = task_register->register_silu_mul_linear_with_residual_task(
         customized->bgraph, params);
@@ -495,8 +499,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_argmax_reduce_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
-  } else if (name == "allreduce") {
-    task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
+  } else if (name == "reduction") {
+    int variant_id =
+        task_register->register_reduction_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_REDUCE, variant_id);
   } else if (name == "find_ngram_partial") {
     int variant_id = task_register->register_find_ngram_partial_task(
         customized->bgraph, params);
@@ -541,7 +547,135 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] = std::make_tuple(
         3, 1, TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER, variant_id);
-  } else {
+  } else if (name == "linear_cutlass_hopper") {
+    int variant_id = task_register->register_linear_cutlass_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_LINEAR_CUTLASS_HOPPER, variant_id);
+  } else if (name == "linear_cutlass_with_residual_hopper") {
+    int variant_id = task_register->register_linear_cutlass_hopper_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] = std::make_tuple(
+        3, 1, TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER, variant_id);
+  } else if (name == "silu_mul_hopper") {
+    int variant_id = task_register->register_silu_mul_hopper_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL_HOPPER, variant_id);
+  } else if (name == "embedding_hopper") {
+    int variant_id = task_register->register_embedding_hopper_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING_HOPPER, variant_id);
+  } else if (name == "moe_w13_linear_sm90") {
+    int variant_id = task_register->register_moe_linear_sm90_task(
+        customized->bgraph, params, true /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W13_LINEAR_SM90, variant_id);
+  } else if (name == "moe_w2_linear_sm90") {
+    int variant_id = task_register->register_moe_linear_sm90_task(
+        customized->bgraph, params, false /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM90, variant_id);
+  } else if (name == "splitk_linear_swapAB_hopper") {
+    int variant_id = task_register->register_splitk_linear_swapAB_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SWAPAB_HOPPER, variant_id);
+  } else if (name == "paged_attention_split_kv_hopper") {
+    int variant_id =
+        task_register->register_paged_attention_split_kv_hopper_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER, variant_id);
+  }
+  // SM100 tasks
+  else if (name == "linear_sm100") {
+    int variant_id = task_register->register_linear_sm100_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR_SM100, variant_id);
+  } else if (name == "splitk_linear_sm100") {
+    int variant_id = task_register->register_splitk_linear_sm100_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SM100, variant_id);
+  } else if (name == "linear_with_residual_sm100") {
+    int variant_id = task_register->register_linear_sm100_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100, variant_id);
+  } else if (name == "paged_attention_sm100") {
+    int variant_id = task_register->register_paged_attention_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_ATTN_SM100, variant_id);
+  } else if (name == "argmax_partial_sm100") {
+    int variant_id = task_register->register_argmax_partial_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 2, TASK_ARGMAX_PARTIAL_SM100, variant_id);
+  } else if (name == "argmax_reduce_sm100") {
+    int variant_id = task_register->register_argmax_reduce_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
+  } else if (name == "sampling_sm100") {
+    int variant_id =
+        task_register->register_sampling_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SAMPLING_SM100, variant_id);
+  } else if (name == "tensor_init") {
+    int variant_id =
+        task_register->register_tensor_init_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_TENSOR_INIT, variant_id);
+  } else if (name == "moe_topk_softmax_sm100") {
+    int variant_id = task_register->register_moe_topk_softmax_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 3, TASK_MOE_TOPK_SOFTMAX_SM100, variant_id);
+  } else if (name == "moe_w13_linear_sm100") {
+    int variant_id = task_register->register_moe_linear_sm100_task(
+        customized->bgraph, params, true /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W13_LINEAR_SM100, variant_id);
+  } else if (name == "moe_silu_mul") {
+    int variant_id =
+        task_register->register_moe_silu_mul_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+  } else if (name == "moe_w2_linear_sm100") {
+    int variant_id = task_register->register_moe_linear_sm100_task(
+        customized->bgraph, params, false /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM100, variant_id);
+  } else if (name == "moe_mul_sum_add_sm100") {
+    int variant_id = task_register->register_moe_mul_sum_add_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_MOE_MUL_SUM_ADD_SM100, variant_id);
+  } else if (name == "paged_attention_split_kv_sm100") {
+    int variant_id =
+        task_register->register_paged_attention_split_kv_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_SM100, variant_id);
+  } else if (name == "paged_attention_split_kv_merge_sm100") {
+    int variant_id =
+        task_register->register_paged_attention_split_kv_merge_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
+  }
+  // Multi-GPU tasks
+  else if (name == "nvshmem_allgather_strided_put") {
+    int variant_id = task_register->register_nvshmem_allgather_strided_put_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_NVSHMEM_ALLGATHER_STRIDED_PUT, variant_id);
+  } else if (name == "nvshmem_tile_allreduce") {
+    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  }
+
+  else {
+    printf("Unsupported task name: %s\n", name);
     assert(false && "Unsupported task type");
   }
 }

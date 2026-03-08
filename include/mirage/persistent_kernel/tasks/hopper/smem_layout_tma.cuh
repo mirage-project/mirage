@@ -50,28 +50,33 @@ struct smem_tma {
 
   __device__ __forceinline__ size_t
       get_swizzled_offset(size_t logical_idx) const {
-    size_t block_idx = logical_idx >> (M + S + B);
-    size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
+    // Skip swizzling calculation for B == 0
+    if constexpr (B == 0) {
+      return logical_idx;
+    } else {
+      size_t block_idx = logical_idx >> (M + S + B);
+      size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
-    size_t irow = in_block_idx >> (M + S);
-    size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-    icol ^= irow;
-    size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
-    size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
-                        (icol << M) + offset_in_bank;
+      size_t irow = in_block_idx >> (M + S);
+      size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
+      icol ^= irow;
+      size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
+      size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
+                          (icol << M) + offset_in_bank;
 #ifdef MIRAGE_DEBUG_HOPPER
-    if (logical_idx == 0 && threadIdx.x == 0) {
-      printf("block_idx: %llu\n", block_idx);
-      printf("in_block_idx: %llu\n", in_block_idx);
-      printf("irow: %llu\n", irow);
-      printf("icol: %llu\n", icol);
-      printf("offset_in_bank: %llu\n", offset_in_bank);
-      printf("phy_offset: %llu\n", phy_offset);
-      printf("base_ptr[logical_idx]: %f\n", (float)base_ptr[logical_idx]);
-      printf("base_ptr[phy_offset]: %f\n", (float)base_ptr[phy_offset]);
-    }
+      if (logical_idx == 0 && threadIdx.x == 0) {
+        printf("block_idx: %llu\n", block_idx);
+        printf("in_block_idx: %llu\n", in_block_idx);
+        printf("irow: %llu\n", irow);
+        printf("icol: %llu\n", icol);
+        printf("offset_in_bank: %llu\n", offset_in_bank);
+        printf("phy_offset: %llu\n", phy_offset);
+        printf("base_ptr[logical_idx]: %f\n", (float)base_ptr[logical_idx]);
+        printf("base_ptr[phy_offset]: %f\n", (float)base_ptr[phy_offset]);
+      }
 #endif
-    return phy_offset;
+      return phy_offset;
+    }
   }
   // 3D access
   __device__ __forceinline__ T *operator()(size_t logical_idx_row,

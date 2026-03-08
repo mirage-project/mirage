@@ -57,6 +57,8 @@ def torch_multitoken_paged_attention(
     paged_kv_last_page_len_buffer,
     request_id,
     num_tokens,
+    qk_norm,
+    rope,
     q_norm_weight,
     k_norm_weight,
     cos,
@@ -83,13 +85,19 @@ def torch_multitoken_paged_attention(
     norm_q = torch.zeros_like(q)
     norm_k = torch.zeros_like(k_cache[-num_tokens:, :])
     for i in range(num_tokens):
-        norm_q[i, :] = rmsnorm(q[i, :], q_norm_weight, eps)
-        norm_k[i, :] = rmsnorm(
-            k_cache[seq_len - num_tokens + i, :], k_norm_weight, eps
-        )
-        norm_q[i, :], norm_k[i, :] = apply_rotary_pos_emb(
-            norm_q[i, :], norm_k[i, :], cos[seq_len - num_tokens + i, :], sin[seq_len - num_tokens + i, :]
-        )
+        if qk_norm:
+            norm_q[i, :] = rmsnorm(q[i, :], q_norm_weight, eps)
+            norm_k[i, :] = rmsnorm(
+                k_cache[seq_len - num_tokens + i, :], k_norm_weight, eps
+            )
+        else:
+            norm_q[i, :] = q[i, :]
+            norm_k[i, :] = k_cache[seq_len - num_tokens + i, :]
+        
+        if rope:
+            norm_q[i, :], norm_k[i, :] = apply_rotary_pos_emb(
+                norm_q[i, :], norm_k[i, :], cos[seq_len - num_tokens + i, :], sin[seq_len - num_tokens + i, :]
+            )
     k_cache[seq_len - num_tokens : seq_len, :] = norm_k
     paged_k_cache[page_indices[-1], last_page_len - num_tokens : last_page_len, :] = (
         norm_k
@@ -203,6 +211,8 @@ torch_out = torch_multitoken_paged_attention(
     paged_kv_last_page_len_buffer,
     0,
     max_tokens,
+    True,
+    True,
     q_norm_weight,
     k_norm_weight,
     torch_cos,

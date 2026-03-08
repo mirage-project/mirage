@@ -14,8 +14,7 @@
  */
 
 #pragma once
-#include "../common.h"
-#include "../utils.cuh"
+#include "../common/utils.cuh"
 #include "utils.cuh"
 namespace kernel {
 
@@ -30,6 +29,10 @@ __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
                                                         T const *cos_ptr,
                                                         T const *sin_ptr,
                                                         int token_offset = 0) {
+  // Avoid sync divergence dead lock.
+  static_assert(HEAD_DIM < NUM_THREADS || HEAD_DIM % NUM_THREADS == 0);
+  constexpr int ROTARY_PARTICIPATING_THREADS =
+      (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
 #pragma unroll
   for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
 
@@ -52,6 +55,9 @@ __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
         float sin = static_cast<float>(cur_sin_ptr[offset]);
 
         float v_rot;
+
+        wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
+
         if (i < HEAD_DIM / 2) {
           float v1 = static_cast<float>(smem_input.at(row, col));
           float v2 = static_cast<float>(smem_input.at(row, col + HEAD_DIM / 2));
@@ -61,7 +67,7 @@ __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
           float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
           v_rot = v1 * cos + v2 * sin;
         }
-        wg_sync<NUM_THREADS>(BARRIER_ID);
+        wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
         smem_input.at(row, col) = static_cast<T>(v_rot);
       }
     }

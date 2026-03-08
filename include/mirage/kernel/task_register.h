@@ -45,12 +45,16 @@ public:
                            bool with_residual);
   int register_silu_mul_task(threadblock::Graph const &bgraph,
                              std::vector<int> const &params);
+  int register_identity_task(threadblock::Graph const &bgraph,
+                             std::vector<int> const &params);
   int register_silu_mul_linear_with_residual_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_argmax_partial_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
   int register_argmax_reduce_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
+  int register_reduction_task(threadblock::Graph const &bgraph,
+                              std::vector<int> const &params);
   int register_find_ngram_partial_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
   int register_find_ngram_global_task(threadblock::Graph const &bgraph,
@@ -68,6 +72,59 @@ public:
   int register_linear_swapAB_hopper_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params,
                                          bool with_residual);
+  int register_linear_cutlass_hopper_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params,
+                                          bool with_residual);
+  int register_silu_mul_hopper_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params);
+  int register_embedding_hopper_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_moe_linear_sm90_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params,
+                                    bool w13_linear);
+  int register_splitk_linear_swapAB_hopper_task(
+      threadblock::Graph const &bgraph,
+      std::vector<int> const &params,
+      bool with_residual);
+  int register_paged_attention_split_kv_hopper_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  // SM100 tasks
+  int register_splitk_linear_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params,
+                                        bool with_residual);
+  int register_linear_sm100_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params,
+                                 bool with_residual);
+  int register_paged_attention_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
+  int register_argmax_partial_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  int register_sampling_sm100_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
+  int register_tensor_init_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params);
+  int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_moe_linear_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params,
+                                     bool w13_linear);
+  int register_moe_silu_mul_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
+  int register_moe_mul_sum_add_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
+  int register_paged_attention_split_kv_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_paged_attention_split_kv_merge_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  // SM100 tasks end
+  // Multi-GPU tasks
+  int register_nvshmem_allgather_strided_put_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_nvshmem_tile_allreduce_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  // Multi-GPU tasks end
   int register_task_variant(TaskType type, std::string const &code);
 
 public:

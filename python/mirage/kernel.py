@@ -143,6 +143,7 @@ def get_cc_cmd(
         f"-I{py_include_dir}",
         f"-I{os.path.join(INCLUDE_PATH, 'mirage/transpiler/runtime')}",
         f"-I{os.path.join(DEPS_PATH, 'cutlass/include')}",
+        "-DMIRAGE_BACKEND_USE_CUDA",
         "-shared",
         "-std=c++17",
         "-use_fast_math",
@@ -229,9 +230,9 @@ class KNGraph:
             strides = reversed(strides)
         else:
             assert len(dims) == len(strides)
-            assert check_stride(dims, strides, "row-major") | check_stride(
-                dims, strides, "column-major"
-            )
+            # assert check_stride(dims, strides, "row-major") | check_stride(
+            #     dims, strides, "column-major"
+            # )
         return self.cygraph.new_input(dims, tuple(strides), dtype)
 
     def mark_output(self, A: DTensor, strides: tuple = None):

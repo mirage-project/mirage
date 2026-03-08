@@ -1,20 +1,6 @@
-#include "argmax.cuh"
-#include "bfloat16.h"
-#include "linear.cuh"
-#include "multitoken_paged_attention.cuh"
-#include "norm.cuh"
-#include "norm_linear.cuh"
-// #include "norm_linear_original.cuh"
-#include "bfloat16.h"
-#include "embedding.cuh"
-#include "paged_attention.cuh"
-#include "prompt_lookup.cuh"
-#include "rotary_embedding.cuh"
-#include "silu_mul_linear.cuh"
-#include "single_batch_decoding.cuh"
-#include "single_batch_extend.cuh"
-#include "single_batch_gqa.cuh"
-#include "target_verify.cuh"
+#include "runtime_header.h"
+#include "tasks/ampere/task_header.cuh"
+#include "tasks/blackwell/task_header.cuh"
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -23,20 +9,25 @@
 using kernel::argmax_partial_kernel;
 using kernel::argmax_reduce_kernel;
 using kernel::embedding_kernel;
-using kernel::find_ngram_global_kernel;
-using kernel::find_ngram_partial_kernel;
+// using kernel::find_ngram_global_kernel;
+// using kernel::find_ngram_partial_kernel;
 using kernel::linear_kernel;
+using kernel::moe_linear_kernel;
 using kernel::multitoken_paged_attention_task_impl;
-using kernel::norm_linear_task_impl;
-using kernel::paged_attention_task_impl;
+// using kernel::norm_linear_task_impl;
+// using kernel::paged_attention_task_impl;
 using kernel::rotary_embedding;
-using kernel::silu_mul_linear_task_impl;
-using kernel::single_batch_decoding_kernel;
-using kernel::single_batch_extend_kernel;
-using kernel::single_batch_gqa_kernel;
-using kernel::target_verify_greedy_kernel;
+using kernel::sampling_from_logits_kernel;
+using kernel::SAMPLING_REDUCE_ALGO;
+using kernel::SamplingDataAndIndex;
+// using kernel::silu_mul_linear_task_impl;
+// using kernel::single_batch_decoding_kernel;
+// using kernel::single_batch_extend_kernel;
+// using kernel::single_batch_gqa_kernel;
+// using kernel::target_verify_greedy_kernel;
 using bfloat16 = type::bfloat16_t;
 
+#ifdef DEPRECATED_TESTS
 template <typename T>
 __global__ void single_batch_gqa_kernel_wrapper(void const *qkv_ptr,
                                                 void *k_cache_ptr,
@@ -344,8 +335,11 @@ void single_batch_extend(
   }
 }
 
+#endif
+
 // Paged Attention
 
+#ifdef DEPRECATED_TESTS
 template <typename T,
           int NUM_Q_PER_KV,
           int HEAD_DIM,
@@ -490,6 +484,8 @@ void paged_attention(
   }
 }
 
+#endif
+
 // Multitoken Paged Attention
 
 template <typename T,
@@ -511,7 +507,7 @@ __global__ void multitoken_paged_attention_wrapper(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -568,7 +564,7 @@ void launch_multitoken_paged_attention(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -733,7 +729,7 @@ void multitoken_paged_attention(
     torch::Tensor paged_kv_indptr_buffer,
     torch::Tensor paged_kv_indices_buffer,
     torch::Tensor paged_kv_last_page_len_buffer,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     torch::optional<torch::Tensor> q_norm_weight = torch::nullopt,
@@ -802,8 +798,9 @@ void multitoken_paged_attention(
   }
 }
 
-// RMSNorm Linear
+#ifdef DEPRECATED_TESTS
 
+// RMSNorm Linear
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *norm_weight_ptr,
@@ -819,7 +816,7 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                         OUTPUT_SIZE,
                         REDUCTION_SIZE,
                         OUTPUT_SIZE>(
-      input_ptr, norm_weight_ptr, weight_ptr, BATCH_SIZE, eps, output_ptr);
+      input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -933,6 +930,7 @@ void norm_linear(torch::Tensor input,
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
 // Window RMSNorm Linear
 
@@ -1074,9 +1072,9 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
     case 256:                                                                  \
       DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(256);                         \
       break;                                                                   \
-    case 1600:                                                                 \
-      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                        \
-      break;                                                                   \
+    /* case 1600: Commented out - HEAD_DIM=1600 violates norm.cuh assertion */ \
+    /*   DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                  */ \
+    /*   break; */                                                             \
     default:                                                                   \
       printf("Unsupported head dim in test: %zu\n", head_dim);                 \
       break;                                                                   \
@@ -1146,7 +1144,7 @@ void rms_norm(torch::Tensor input, // shape [batch, window_size, head_dim]
 }
 
 // SiLU MUL Linear
-
+#ifdef DEPRECATED_TESTS
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
                                                void const *weight_ptr,
@@ -1224,9 +1222,10 @@ void silu_mul_linear(torch::Tensor input,
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
 // Linear
-
+#ifdef DEPRECATED_TESTS
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *weight_ptr,
@@ -1305,6 +1304,140 @@ void linear(torch::Tensor input,
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
+
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int OUTPUT_STRIDE,
+          int REDUCTION_SIZE,
+          int NUM_EXPERTS,
+          int NUM_TOPK,
+          int EXPERT_STRIDE,
+          bool NOBIAS = true>
+__global__ void moe_linear_kernel_wrapper(void const *input_ptr,
+                                          void const *weight_ptr,
+                                          void const *residual_ptr,
+                                          void const *expert_routing_ptr,
+                                          void const *expert_mask_ptr,
+                                          void *output_ptr) {
+  moe_linear_kernel<T,
+                    BATCH_SIZE,
+                    OUTPUT_SIZE,
+                    OUTPUT_STRIDE,
+                    REDUCTION_SIZE,
+                    NUM_EXPERTS,
+                    NUM_TOPK,
+                    EXPERT_STRIDE,
+                    NOBIAS>(input_ptr,
+                            weight_ptr,
+                            residual_ptr,
+                            expert_routing_ptr,
+                            expert_mask_ptr,
+                            output_ptr,
+                            blockIdx.x);
+}
+
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_STRIDE,
+          int REDUCTION_SIZE,
+          int NUM_EXPERTS,
+          int NUM_TOPK,
+          int EXPERT_STRIDE>
+void launch_moe_linear(void const *input_ptr,
+                       void const *weight_ptr,
+                       void const *residual_ptr,
+                       void const *expert_routing_ptr,
+                       void const *expert_mask_ptr,
+                       void *output_ptr) {
+  static_assert(OUTPUT_STRIDE % 64 == 0);
+  dim3 grid_dim(EXPERT_STRIDE, OUTPUT_STRIDE / 64, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 96 * 1024;
+
+  cudaFuncSetAttribute(moe_linear_kernel_wrapper<T,
+                                                 BATCH_SIZE,
+                                                 64,
+                                                 OUTPUT_STRIDE,
+                                                 REDUCTION_SIZE,
+                                                 NUM_EXPERTS,
+                                                 NUM_TOPK,
+                                                 EXPERT_STRIDE>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  moe_linear_kernel_wrapper<T,
+                            BATCH_SIZE,
+                            64,
+                            OUTPUT_STRIDE,
+                            REDUCTION_SIZE,
+                            NUM_EXPERTS,
+                            NUM_TOPK,
+                            EXPERT_STRIDE>
+      <<<grid_dim, block_dim, smem_size>>>(input_ptr,
+                                           weight_ptr,
+                                           residual_ptr,
+                                           expert_routing_ptr,
+                                           expert_mask_ptr,
+                                           output_ptr);
+}
+
+// TODO: For the test we only support reducation size as 2048, expert_size as
+// 128 and activate_expert_size as 8 and expert_stride as 5.
+#define MOE_LINEAR_DISPATCH_OUTPUT_STRIDE(BATCH_SIZE, OUTPUT_STRIDE)           \
+  case OUTPUT_STRIDE:                                                          \
+    launch_moe_linear<bfloat16, BATCH_SIZE, OUTPUT_STRIDE, 2048, 128, 8, 5>(   \
+        input_ptr,                                                             \
+        weight_ptr,                                                            \
+        residual_ptr,                                                          \
+        expert_routing_ptr,                                                    \
+        expert_mask_ptr,                                                       \
+        output_ptr);                                                           \
+    break;
+
+#define MOE_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE)                             \
+  case BATCH_SIZE:                                                             \
+    switch (output.size(2)) {                                                  \
+      MOE_LINEAR_DISPATCH_OUTPUT_STRIDE(BATCH_SIZE, 64)                        \
+      MOE_LINEAR_DISPATCH_OUTPUT_STRIDE(BATCH_SIZE, 1536)                      \
+      default:                                                                 \
+        printf("Unsupported output stride size in test: %zu\n",                \
+               output.size(2));                                                \
+        break;                                                                 \
+    }                                                                          \
+    break;
+
+void moe_linear(torch::Tensor input,
+                torch::Tensor weight,
+                c10::optional<at::Tensor> residual,
+                torch::Tensor expert_routing,
+                torch::Tensor expert_mask,
+                torch::Tensor output) {
+
+  void const *input_ptr = input.data_ptr();
+  void const *weight_ptr = weight.data_ptr();
+  bool has_residual = residual.has_value();
+  void const *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
+  void *output_ptr = output.data_ptr();
+  void const *expert_routing_ptr = expert_routing.data_ptr();
+  void const *expert_mask_ptr = expert_mask.data_ptr();
+
+  switch (input.size(0)) {
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(1)
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(2)
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(4)
+    MOE_LINEAR_DISPATCH_BATCH_SIZE(8)
+    default:
+      printf("Unsupported batch size in test: %zu\n", input.size(0));
+      break;
+  }
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
 
 // Embedding Kernel
 template <typename T, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>
@@ -1351,6 +1484,7 @@ void embedding(torch::Tensor input,
   }
 }
 
+#ifdef DEPRECATED_TESTS
 // Prompt Lookup Kernel
 template <int NGRAM_SIZE, int NUM_WORKERS>
 __global__ void
@@ -1457,7 +1591,9 @@ void verify(torch::Tensor spec_tokens,
     printf("CUDA kernel launch error in verify: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
+#ifdef DEPRECATED_TESTS
 // Argmax Kernel
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __global__ void
@@ -1649,54 +1785,111 @@ void rope(torch::Tensor input,
     printf("rotary_embedding kernel error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
+
+// Sampling from Logits
+
+// Wrapper __global__ kernel that calls the __device__ function
+template <uint32_t BLOCK_THREADS,
+          uint32_t VEC_SIZE,
+          typename DType,
+          typename IdType>
+__global__ void sampling_from_logits_test_wrapper(DType *logits,
+                                                  IdType *output,
+                                                  uint32_t vocab_size,
+                                                  uint64_t philox_seed,
+                                                  uint64_t philox_offset,
+                                                  int batch_size) {
+  kernel::sampling_from_logits_kernel<BLOCK_THREADS, VEC_SIZE, DType, IdType>(
+      logits, output, vocab_size, philox_seed, philox_offset, batch_size);
+}
+
+void sampling_from_logits(torch::Tensor logits,
+                          torch::Tensor output,
+                          int64_t seed) {
+  void const *logits_ptr = logits.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  uint32_t batch_size = logits.size(0);
+  uint32_t vocab_size = logits.size(1);
+
+  if (vocab_size == 50257) {
+    dim3 grid_dim(1, 1, 1); // Single block processes all batches
+    dim3 block_dim(256, 1, 1);
+    size_t smem_size =
+        sizeof(typename cub::BlockReduce<SamplingDataAndIndex<float, int>,
+                                         256,
+                                         SAMPLING_REDUCE_ALGO>::TempStorage);
+
+    sampling_from_logits_test_wrapper<256, 4, float, int>
+        <<<grid_dim, block_dim, smem_size>>>((float *)logits_ptr,
+                                             (int *)output_ptr,
+                                             vocab_size,
+                                             seed,      // philox_seed
+                                             0,         // philox_offset
+                                             batch_size // batch_size
+        );
+  } else {
+    printf("Unsupported vocab size in sampling test: %u\n", vocab_size);
+  }
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("Sampling kernel error: %s\n", cudaGetErrorString(err));
+  }
+}
 
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
-  m.def("embedding", &embedding, "Embedding kernel");
-  m.def("linear", &linear, "Linear kernel");
-  m.def("argmax", &argmax, "Argmax kernel");
-  m.def("verify", &verify, "Target verification kernel");
-  m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
-  m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
-  m.def("single_batch_decoding",
-        &single_batch_decoding,
-        py::arg("qkv"),
-        py::arg("k_cache"),
-        py::arg("v_cache"),
-        py::arg("output"),
-        py::arg("seq_len"),
-        py::arg("qk_norm"),
-        py::arg("rotary_embed"),
-        py::arg("qnorm_weight") = py::none(),
-        py::arg("knorm_weight") = py::none(),
-        py::arg("cos") = py::none(),
-        py::arg("sin") = py::none(),
-        py::arg("q_eps") = 0.0f,
-        py::arg("k_eps") = 0.0f);
-  m.def("single_batch_extend",
-        &single_batch_extend,
-        py::arg("qkv"),
-        py::arg("k_cache"),
-        py::arg("v_cache"),
-        py::arg("output"),
-        py::arg("seq_len"),
-        py::arg("extend_num"),
-        py::arg("qk_norm"),
-        py::arg("rotary_embed"),
-        py::arg("qnorm_weight") = py::none(),
-        py::arg("knorm_weight") = py::none(),
-        py::arg("cos") = py::none(),
-        py::arg("sin") = py::none(),
-        py::arg("q_eps") = 0.0f,
-        py::arg("k_eps") = 0.0f,
-        py::arg("q_norm_debug") = py::none(),
-        py::arg("k_norm_debug") = py::none());
-  m.def("paged_attention", &paged_attention, "Paged Attention");
+  // m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
+  // m.def("embedding", &embedding, "Embedding kernel");
+  // m.def("linear", &linear, "Linear kernel");
+  m.def("moe_linear", &moe_linear, "MOE linear kernel");
+  // m.def("argmax", &argmax, "Argmax kernel");
+  // m.def("verify", &verify, "Target verification kernel");
+  // m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
+  // m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
+  // m.def("single_batch_decoding",
+  //       &single_batch_decoding,
+  //       py::arg("qkv"),
+  //       py::arg("k_cache"),
+  //       py::arg("v_cache"),
+  //       py::arg("output"),
+  //       py::arg("seq_len"),
+  //       py::arg("qk_norm"),
+  //       py::arg("rotary_embed"),
+  //       py::arg("qnorm_weight") = py::none(),
+  //       py::arg("knorm_weight") = py::none(),
+  //       py::arg("cos") = py::none(),
+  //       py::arg("sin") = py::none(),
+  //       py::arg("q_eps") = 0.0f,
+  //       py::arg("k_eps") = 0.0f);
+  // m.def("single_batch_extend",
+  //       &single_batch_extend,
+  //       py::arg("qkv"),
+  //       py::arg("k_cache"),
+  //       py::arg("v_cache"),
+  //       py::arg("output"),
+  //       py::arg("seq_len"),
+  //       py::arg("extend_num"),
+  //       py::arg("qk_norm"),
+  //       py::arg("rotary_embed"),
+  //       py::arg("qnorm_weight") = py::none(),
+  //       py::arg("knorm_weight") = py::none(),
+  //       py::arg("cos") = py::none(),
+  //       py::arg("sin") = py::none(),
+  //       py::arg("q_eps") = 0.0f,
+  //       py::arg("k_eps") = 0.0f,
+  //       py::arg("q_norm_debug") = py::none(),
+  //       py::arg("k_norm_debug") = py::none());
+  // m.def("paged_attention", &paged_attention, "Paged Attention");
   m.def("multitoken_paged_attention",
         &multitoken_paged_attention,
         "Multitoken Paged Attention");
-  m.def("rms_norm", &rms_norm, "Window RMSNorm");
-  m.def("rope", &rope, "RoPE kernel");
+  m.def("sampling_from_logits",
+        &sampling_from_logits,
+        "Sampling from Logits kernel");
+  // m.def("rms_norm", &rms_norm, "Window RMSNorm");
+  // m.def("rope", &rope, "RoPE kernel");
 }

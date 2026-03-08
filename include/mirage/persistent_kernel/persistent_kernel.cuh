@@ -14,13 +14,12 @@
  */
 
 #include "profiler.h"
-#include "tasks/copy_sm80.cuh"
+#include "tasks/common/copy_sm80.cuh"
 #ifdef MPK_ENABLE_TMA
 #include "tma.cuh"
 #endif
+#include "mpk_atoms.cuh"
 #include "runtime_header.h"
-#include "tasks/kernel.h"
-#include "utils.cuh"
 #ifdef USE_NVSHMEM
 #include <mpi.h>
 #include <nvshmem.h>
@@ -29,6 +28,14 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+
+#if defined(MIRAGE_GRACE_HOPPER)
+#include "tasks/hopper/task_header.cuh"
+#elif defined(MIRAGE_GRACE_BLACKWELL)
+#include "tasks/blackwell/task_header.cuh"
+#else
+#include "tasks/ampere/task_header.cuh"
+#endif
 
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
@@ -40,15 +47,50 @@ using namespace kernel;
 // #define MPK_PAGE_SIZE 64
 
 #if defined(MIRAGE_GRACE_HOPPER)
-#define WORKER_THREADS 256
-#define SINGLE_KERNEL_THREADS 256
+#define WORKER_NUM_THREADS 256
+#define SINGLE_KERNEL_NUM_THREADS 256
+#elif defined(MIRAGE_GRACE_BLACKWELL)
+#define WORKER_NUM_THREADS 256
+#define SINGLE_KERNEL_NUM_THREADS 256
 #else
-#define WORKER_THREADS 128
-#define SINGLE_KERNEL_THREADS 128
+#define WORKER_NUM_THREADS 128
+#define SINGLE_KERNEL_NUM_THREADS 128
 #endif
-#define INIT_THREADS 128
-#define SCHEDULER_THREADS 128
+#define INIT_NUM_THREADS 128
 
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t err = call;                                                    \
+    if (err != cudaSuccess) {                                                  \
+      fprintf(stderr,                                                          \
+              "CUDA error at %s:%d: %s\n",                                     \
+              __FILE__,                                                        \
+              __LINE__,                                                        \
+              cudaGetErrorString(err));                                        \
+      exit(1);                                                                 \
+    }                                                                          \
+  } while (0)
+#endif
+
+#ifdef USE_NVSHMEM
+#ifndef NVSHMEM_CHECK
+#define NVSHMEM_CHECK(stmt)                                                    \
+  do {                                                                         \
+    int result = (stmt);                                                       \
+    if (NVSHMEMX_SUCCESS != result) {                                          \
+      fprintf(stderr,                                                          \
+              "[%s:%d] NVSHMEM failed with error %d\n",                        \
+              __FILE__,                                                        \
+              __LINE__,                                                        \
+              result);                                                         \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  } while (0)
+#endif
+#endif
+
+// #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
@@ -83,18 +125,14 @@ __device__ __forceinline__ TaskId compute_task_id(size_t iteration_num,
   return ((iteration_num << 32) | position_index);
 }
 
-__global__ void init_kernel(RuntimeConfig config,
-                            size_t end_of_task_graph_event_pos) {
+__global__ void init_kernel(RuntimeConfig config) {
   assert(gridDim.x == 1);
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
-    // Send event to scheduler[0]
-    config.sched_queue_next_free_event_id[0] = 1;
-    config.sched_queues[0][0] = end_of_task_graph_event_pos;
-    config.sched_queue_last_ready_event_id[0] = 1;
     // initialize metadata
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
     for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
@@ -112,6 +150,40 @@ __global__ void init_kernel(RuntimeConfig config,
     for (int i = 0; i < MPK_MAX_NUM_PAGES; i++) {
       config.page_queue[i] = i;
     }
+#endif
+  }
+}
+
+__global__ void prepare_kernel(RuntimeConfig config,
+                               int end_of_task_graph_event_pos) {
+  // Initialize worker queue last task id
+  // Each worker now maintains a local and a remote worker queue
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+       i < 2 * config.num_workers;
+       i += blockDim.x * gridDim.x) {
+    config.worker_queue_last_ready_task_id[i] = 0;
+  }
+  // Initialize scheduler queue last event id
+  // We maintain one extra scheduler queue for the global scheduler
+  int num_schedulers =
+      config.num_local_schedulers + config.num_remote_schedulers;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < num_schedulers + 1;
+       i += blockDim.x * gridDim.x) {
+    config.sched_queue_last_ready_event_id[i] = 0;
+    config.sched_queue_next_free_event_id[i] = 0;
+  }
+  // Initialize all event counters
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < config.num_events;
+       i += blockDim.x * gridDim.x) {
+    config.all_event_counters[i] = 0;
+  }
+  // Send event to scheduler[0]
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    assert(config.all_events[end_of_task_graph_event_pos].event_type ==
+           EVENT_END_OF_TASK_GRAPH);
+    config.sched_queue_next_free_event_id[0] = 1;
+    config.sched_queues[0][0] = end_of_task_graph_event_pos;
+    config.sched_queue_last_ready_event_id[0] = 1;
   }
 }
 
@@ -124,7 +196,7 @@ __device__ __forceinline__ bool
   int page_queue_tail = *config.page_queue_tail;
   // Step 1: finalize previous batch
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       // Step 1.1: move output_tokens to tokens
       int step = config.step[request_id];
@@ -140,13 +212,14 @@ __device__ __forceinline__ bool
       }
       config.step[request_id] = step + num_tokens;
 #ifdef MPK_ENABLE_PROFILING
-      if (true) {
+      if (true)
 #else
-      if ((step + num_tokens >= config.max_seq_length) ||
+      if ((step + num_tokens + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
-           (step + num_tokens >= prompt_len))) {
+           (step + num_tokens >= prompt_len)))
 #endif
+      {
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -171,7 +244,7 @@ __device__ __forceinline__ bool
   int num_reqs = 0, num_tokens = 0;
   num_pages = 0;
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       int kv_indptr = config.paged_kv_indptr_buffer[i];
       int num_old_pages = config.paged_kv_indptr_buffer[i + 1] - kv_indptr;
@@ -213,35 +286,36 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Add a new prefill request
-  if (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-      num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
+  // Add new prefill requests until we reach capacity
+  while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
+         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
     int next_request_id = *config.next_request_id;
-    if (next_request_id < config.total_num_requests) {
-      config.request_ids[num_reqs] = next_request_id;
-      config.qo_indptr_buffer[num_reqs] = num_tokens;
-      config.paged_kv_indptr_buffer[num_reqs] = num_pages;
-      // Prefill request
-      int num_new_tokens = min(config.prompt_length[next_request_id],
-                               MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
-      // Move tokens to input tokens
-      for (int j = 0; j < num_new_tokens; j++) {
-        config.input_tokens[num_tokens + j] =
-            config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
-      }
-      int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-      config.paged_kv_last_page_len_buffer[num_reqs] =
-          num_new_tokens % MPK_PAGE_SIZE;
-      for (int j = 0; j < num_new_pages; j++) {
-        config.paged_kv_indices_buffer[num_pages + j] =
-            config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
-        page_queue_head++;
-      }
-      num_tokens += num_new_tokens;
-      num_pages += num_new_pages;
-      num_reqs++;
-      *config.next_request_id = next_request_id + 1;
+    if (next_request_id >= config.total_num_requests) {
+      break;
     }
+    config.request_ids[num_reqs] = next_request_id;
+    config.qo_indptr_buffer[num_reqs] = num_tokens;
+    config.paged_kv_indptr_buffer[num_reqs] = num_pages;
+    // Prefill request
+    int num_new_tokens = min(config.prompt_length[next_request_id],
+                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    // Move tokens to input tokens
+    for (int j = 0; j < num_new_tokens; j++) {
+      config.input_tokens[num_tokens + j] =
+          config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
+    }
+    int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
+    config.paged_kv_last_page_len_buffer[num_reqs] =
+        num_new_tokens % MPK_PAGE_SIZE;
+    for (int j = 0; j < num_new_pages; j++) {
+      config.paged_kv_indices_buffer[num_pages + j] =
+          config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
+      page_queue_head++;
+    }
+    num_tokens += num_new_tokens;
+    num_pages += num_new_pages;
+    num_reqs++;
+    *config.next_request_id = next_request_id + 1;
   }
 
   // Step 4: Update all unused requests slots
@@ -298,6 +372,20 @@ __device__ __forceinline__ bool
     return true;
   }
 #endif
+}
+#endif
+
+#ifdef MODE_ONLINE_NOTOKEN
+__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config,
+                                                   size_t iteration_num = 0) {
+  // TODO: iteration_num is a current workaround
+  // We may consider split EVENT_END_OF_TASK_GRAPH into
+  // EVENT_END_OF_TASK_GRAPH and EVENT_START_OF_TASK_GRAPH
+  if (iteration_num > 0) {
+    return false;
+  } else { // iteration_num == 0
+    return true;
+  }
 }
 #endif
 
@@ -388,15 +476,17 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
   // Each scheduelr SM serves four schedulers
-  int num_schedulers =
+  int const num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  assert(num_schedulers % 4 == 0);
-  assert(gridDim.x == config.num_workers + num_schedulers / 4);
+  int const num_schedulers_per_sm = std::min((int)blockDim.x / 32, 4);
+  assert(num_schedulers % num_schedulers_per_sm == 0);
+  assert(gridDim.x ==
+         config.num_workers + num_schedulers / num_schedulers_per_sm);
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
   // collectively load it from device to shared memory
   static_assert(sizeof(TaskDesc) % sizeof(int) == 0);
-  assert(blockDim.x >= 128);
+  // assert(blockDim.x >= 128);
 }
 
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
@@ -423,9 +513,9 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
                 0,
                 1,
-                (threadIdx.x % WORKER_THREADS == 0));
-#endif
+                (threadIdx.x % WORKER_NUM_THREADS == 0));
 
+#endif
   int const worker_id = blockIdx.x;
   worker_queues[0] = config.worker_queues[worker_id];
   worker_queue_ids[0] = worker_id;
@@ -518,8 +608,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                       get_task_position_index(task_ids[task_idx])) +
                       offset * 16);
       }
-      cp_async_fence();
-      cp_async_wait<0>();
+      kernel::cp_async_fence();
+      kernel::cp_async_wait<0>();
       __syncthreads();
       queue_pos = 0;
       queue_len = num_loaded_tasks;
@@ -530,7 +620,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       if (task_desc->dependent_event != EVENT_INVALID_ID) {
         // Wait until the event has been triggered enough times
         EventId event_id = task_desc->dependent_event;
-        assert(!is_nvshmem_event(event_id));
         assert(get_event_gpu_id(event_id) == config.my_gpu_id);
         size_t event_index = get_event_position_index(event_id);
         EventCounter needed_counts =
@@ -538,10 +627,20 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                 config.all_event_num_triggers[event_index]) *
             get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
-        while (actual_counts < needed_counts) {
-          actual_counts =
-              ld_acquire_gpu_u64(&config.all_event_counters[event_index]);
-          __nanosleep(10);
+        if (is_nvshmem_event(event_id)) {
+#ifdef USE_NVSHMEM
+          nvshmem_signal_wait_until(
+              reinterpret_cast<uint64_t *>(
+                  &config.all_event_counters[event_index]),
+              NVSHMEM_CMP_EQ,
+              needed_counts);
+#endif
+        } else {
+          while (actual_counts < needed_counts) {
+            actual_counts =
+                ld_acquire_sys_u64(&config.all_event_counters[event_index]);
+            __nanosleep(10);
+          }
         }
       }
     }
@@ -559,40 +658,9 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       return;
     } else if (task_desc->task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
-#ifdef USE_NVSHMEM
-    } else if (task_desc->task_type == TASK_NVSHMEM_COPY) {
-      size_t size_in_bytes = 2;
-      for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
-        size_in_bytes *= task_desc.inputs[0].dim[i];
-      }
-      size_t event_index = get_event_position_index(task_desc->trigger_event);
-      int gpu_id = static_cast<int>(get_event_gpu_id(task_desc->trigger_event));
-      assert(gpu_id < config.num_gpus);
-      assert(gpu_id != config.my_gpu_id);
-      nvshmemx_putmem_signal_block(
-          task_desc->output_ptrs[0],
-          task_desc->input_ptrs[0],
-          size_in_bytes,
-          reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
-          1 /*signal*/,
-          NVSHMEM_SIGNAL_ADD,
-          gpu_id);
-    } else if (task_desc.task_type == TASK_REDUCE) {
-      // Currently support 2D reduction, buffer has an extra world_size dim
-      // assert(task_desc.inputs[0].num_dims == 2);
-      // assert(task_desc.inputs[1].num_dims == 3);
-      kernel::reduction_kernel<bfloat16>(task_desc->input_ptrs[0],
-                                         task_desc->input_ptrs[1],
-                                         task_desc->output_ptrs[0],
-                                         config.num_gpus,
-                                         config.my_gpu_id,
-                                         task_desc->inputs[0].dim[0],
-                                         task_desc->inputs[0].dim[1],
-                                         task_desc->inputs[0].stride[0]);
-#endif
     } else {
 #ifdef MPK_ENABLE_VERBOSE
-      if (threadIdx.x == 0 && blockIdx.x == 0) {
+      if (threadIdx.x == 0) {
         printf("[worker] _execute_task EXECUTE_TASK %d\n",
                task_desc->task_type);
       }
@@ -682,7 +750,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         }
       } else {
         // Case 2: trigger a nvshmem event
-        assert(task_desc->task_type == TASK_NVSHMEM_COPY);
+        // TODO(Zepeng): This branch is no longer used. Sanitize later.
+        assert(task_desc->task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
 #ifdef MPK_ENABLE_VERBOSE
@@ -702,13 +771,15 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 // need to alter as there is only one warp per block
 __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
                                                   int offset) {
-  int num_schedulers =
+  int const num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  int warp_thread_id = threadIdx.x % 32;
-
+  // if we have more than 4 warps per thread block
+  // only the first 4 warps will run schedulers
+  int const num_schedulers_per_sm = std::min((int)blockDim.x / 32, 4);
+  int const warp_id = threadIdx.x / 32;
   // CANNOT use syncthreads below
-  if (warp_thread_id == 0) {
-    int sched_id = blockIdx.x + offset;
+  if (threadIdx.x % 32 == 0 && warp_id < num_schedulers_per_sm) {
+    int const sched_id = blockIdx.x * num_schedulers_per_sm + warp_id + offset;
     // if (threadIdx.x == 0) {
     //   int sched_id = (blockIdx.x - config.num_workers);
     int num_sched_queues = 1;
@@ -814,7 +885,12 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
         // Check if we want to continue
-        if (!prepare_next_batch(config)) {
+#ifdef MODE_ONLINE_NOTOKEN
+        if (!prepare_next_batch(config, iteration_num))
+#else
+        if (!prepare_next_batch(config))
+#endif
+        {
           terminate_schedulers(config);
         } else {
           // Launch task 1 (begin_task_graph) for the next iteration
@@ -944,7 +1020,8 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
   }
 }
 
-__global__ void persistent_kernel(RuntimeConfig config) {
+__global__ __launch_bounds__(WORKER_NUM_THREADS,
+                             1) void persistent_kernel(RuntimeConfig config) {
   persistent_checker(config);
   if (blockIdx.x < config.num_workers) {
     execute_worker(config);
@@ -953,7 +1030,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
   }
 }
 
-__global__ void worker_kernel(RuntimeConfig config) {
+__global__ __launch_bounds__(WORKER_NUM_THREADS,
+                             1) void worker_kernel(RuntimeConfig config) {
   worker_checker(config);
   execute_worker(config);
 }
@@ -1002,6 +1080,12 @@ static RuntimeConfig global_runtime_config;
 // meta_tensors[8]: paged_kv_indices_buffer
 // meta_tensors[9]: paged_kv_last_page_len_buffer
 
+extern "C" void init_request_resources() {
+  init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
+      global_runtime_config);
+  cudaStreamSynchronize(NULL);
+}
+
 extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
                                        int my_rank,
@@ -1010,7 +1094,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_remote_schedulers,
                                        int max_seq_length,
                                        int total_num_requests,
-                                       long long eos_token_id) {
+                                       long long eos_token_id,
+                                       int allocate_nvshmem_teams) {
   assert(meta_tensors.size() == 10);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
@@ -1037,16 +1122,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
-  global_runtime_config.request_ids =
-      gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
-  global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.page_queue =
-      gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
-  global_runtime_config.page_queue_head = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.total_num_requests = total_num_requests;
-#endif
 
 #ifdef USE_NVSHMEM
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
@@ -1056,11 +1131,50 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   nvshmem_barrier_all();
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
-  int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-  printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
+  printf("MPK: Rank%d is Ready. Worldsize=%d\n", mype, npes);
+
+  // Create nvshmem teams
+  // For now, we assume we always need these teams. In the future, we should
+  // determine the numebr of teams by scanning kernels.
+  if (allocate_nvshmem_teams > 0) {
+    int num_teams = allocate_nvshmem_teams;
+    printf("MPK: Rank%d is allocating %d nvshmem teams. The more gpus "
+           "involved, the longer this takes.\n",
+           mype,
+           num_teams);
+    std::vector<nvshmem_team_t> teams_host(num_teams);
+    for (int i = 0; i < num_teams; i++) {
+      NVSHMEM_CHECK(nvshmem_team_split_strided(
+          NVSHMEM_TEAM_WORLD, 0, 1, npes, nullptr, 0, &teams_host[i]));
+      if (mype == 0) {
+        printf("MPK: Creating nvshmem team %d/%d, idx %d\n",
+               i + 1,
+               num_teams,
+               teams_host[i]);
+      }
+    }
+    global_runtime_config.nvshmem_teams =
+        gpu_malloc<nvshmem_team_t>(num_teams * sizeof(nvshmem_team_t));
+    cudaMemcpy(global_runtime_config.nvshmem_teams,
+               teams_host.data(),
+               num_teams * sizeof(nvshmem_team_t),
+               cudaMemcpyHostToDevice);
+    printf("MPK: Rank%d finished allocating nvshmem teams\n", mype);
+  }
 #else
   int mype = 0;
   int npes = 1;
+#endif
+
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+  global_runtime_config.request_ids =
+      gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
+  global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.page_queue =
+      gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
+  global_runtime_config.page_queue_head = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.total_num_requests = total_num_requests;
 #endif
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;
@@ -1076,6 +1190,11 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
+    // if (ft.task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 || ft.task_type
+    // == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
+    //   printf("ft.kv_idx %d\n", ft.kv_idx);
+    //   printf("ft.merge_task_offset %d\n", ft.merge_task_offset);
+    // }
     all_tasks.push_back(task_desc);
   }
 
@@ -1084,16 +1203,16 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.worker_queue_last_ready_task_id =
       gpu_malloc<unsigned long long int>((num_workers * 2) *
                                          sizeof(unsigned long long int));
-  std::vector<unsigned long long int> host_worker_queue_last_task_id;
-  for (int i = 0; i < 2 * num_workers; i++) {
-    host_worker_queue_last_task_id.push_back(0);
-  }
-  cudaMemcpy(global_runtime_config.worker_queue_last_ready_task_id,
-             host_worker_queue_last_task_id.data(),
-             (num_workers * 2) * sizeof(unsigned long long int),
-             cudaMemcpyHostToDevice);
-  // Initialize scheduler queue last event id
-  // We maintain one extra scheduler queue for the global scheduler
+  // std::vector<unsigned long long int> host_worker_queue_last_task_id;
+  // for (int i = 0; i < 2 * num_workers; i++) {
+  //   host_worker_queue_last_task_id.push_back(0);
+  // }
+  // cudaMemcpy(global_runtime_config.worker_queue_last_ready_task_id,
+  //            host_worker_queue_last_task_id.data(),
+  //            (num_workers * 2) * sizeof(unsigned long long int),
+  //            cudaMemcpyHostToDevice);
+  //  Initialize scheduler queue last event id
+  //  We maintain one extra scheduler queue for the global scheduler
   global_runtime_config.sched_queue_last_ready_event_id =
       gpu_malloc<unsigned long long int>((num_schedulers + 1) *
                                          sizeof(unsigned long long int));
@@ -1101,19 +1220,19 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       gpu_malloc<unsigned long long int>((num_schedulers + 1) *
                                          sizeof(unsigned long long int));
 
-  std::vector<unsigned long long int> host_sched_queue_last_event_id;
-  for (int i = 0; i < (num_schedulers + 1); i++) {
-    host_sched_queue_last_event_id.push_back(0);
-  }
-  cudaMemcpy(global_runtime_config.sched_queue_last_ready_event_id,
-             host_sched_queue_last_event_id.data(),
-             (num_schedulers + 1) * sizeof(unsigned long long int),
-             cudaMemcpyHostToDevice);
-  cudaMemcpy(global_runtime_config.sched_queue_next_free_event_id,
-             host_sched_queue_last_event_id.data(),
-             (num_schedulers + 1) * sizeof(unsigned long long int),
-             cudaMemcpyHostToDevice);
-  // Initialize all event counters
+  // std::vector<unsigned long long int> host_sched_queue_last_event_id;
+  // for (int i = 0; i < (num_schedulers + 1); i++) {
+  //   host_sched_queue_last_event_id.push_back(0);
+  // }
+  // cudaMemcpy(global_runtime_config.sched_queue_last_ready_event_id,
+  //            host_sched_queue_last_event_id.data(),
+  //            (num_schedulers + 1) * sizeof(unsigned long long int),
+  //            cudaMemcpyHostToDevice);
+  // cudaMemcpy(global_runtime_config.sched_queue_next_free_event_id,
+  //            host_sched_queue_last_event_id.data(),
+  //            (num_schedulers + 1) * sizeof(unsigned long long int),
+  //            cudaMemcpyHostToDevice);
+  //  Initialize all event counters
   global_runtime_config.all_event_counters =
       gpu_malloc<EventCounter>(all_events.size() * sizeof(EventCounter));
   global_runtime_config.all_event_num_triggers =
@@ -1126,10 +1245,10 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
              host_all_event_counters.data(),
              all_events.size() * sizeof(int),
              cudaMemcpyHostToDevice);
-  cudaMemset(global_runtime_config.all_event_counters,
-             0,
-             all_events.size() * sizeof(EventCounter));
-  // Initialize all tasks
+  // cudaMemset(global_runtime_config.all_event_counters,
+  //            0,
+  //            all_events.size() * sizeof(EventCounter));
+  //  Initialize all tasks
   global_runtime_config.all_tasks =
       gpu_malloc<TaskDesc>(all_tasks.size() * sizeof(TaskDesc));
   cudaMemcpy(global_runtime_config.all_tasks,
@@ -1137,6 +1256,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
              all_tasks.size() * sizeof(TaskDesc),
              cudaMemcpyHostToDevice);
   // Initialize all events
+  global_runtime_config.num_events = (int)all_events.size();
   global_runtime_config.all_events =
       gpu_malloc<EventDesc>(all_events.size() * sizeof(EventDesc));
   cudaMemcpy(global_runtime_config.all_events,
@@ -1183,13 +1303,29 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                cudaMemcpyHostToDevice);
   }
 
-  // launch init kernel
-  size_t end_of_task_graph_event_pos = all_events.size() - 1;
-  assert(all_events[end_of_task_graph_event_pos].event_type ==
-         EVENT_END_OF_TASK_GRAPH);
-  init_kernel<<<dim3(1, 1, 1), dim3(INIT_THREADS, 1, 1)>>>(
-      global_runtime_config, end_of_task_graph_event_pos);
-  cudaDeviceSynchronize();
+  // Set configuration for kernels
+  cudaFuncSetAttribute(worker_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+  cudaFuncSetAttribute(
+      scheduler_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 1024);
+  cudaFuncSetAttribute(persistent_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+  // Create worker and scheduler streams
+  cudaStreamCreateWithFlags(&global_runtime_config.worker_stream,
+                            cudaStreamNonBlocking);
+  cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream,
+                            cudaStreamNonBlocking);
+  // Create events
+  cudaEventCreateWithFlags(&global_runtime_config.prepare_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.worker_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
+                           cudaEventDisableTiming);
+
+  init_request_resources();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
@@ -1198,66 +1334,78 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
 // Entry point for C/C++
 // TODO: change launch config
-extern "C" void launch_persistent_kernel() {
-  int device;
-  cudaGetDevice(&device);
-  int sm_count;
-  cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
-
+extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
+  // int device;
+  // cudaGetDevice(&device);
+  // int sm_count;
+  // cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+  //  Prepare next persistent kernel by resetting queue pointers
+  {
+    int end_of_task_graph_event_pos = global_runtime_config.num_events - 1;
+    prepare_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
+                     dim3(128, 1, 1),
+                     0 /*smem*/,
+                     default_stream>>>(global_runtime_config,
+                                       end_of_task_graph_event_pos);
+    // cudaStreamSynchronize(NULL);
+    cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
+    // cudaDeviceSynchronize();
+#ifdef USE_NVSHMEM
+    nvshmem_barrier_all();
+#endif
+  }
+  int num_schedulers = global_runtime_config.num_local_schedulers +
+                       global_runtime_config.num_remote_schedulers;
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
+    printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
-    // Launcher worker & scheduler kernel
-    cudaFuncSetAttribute(worker_kernel,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
-    cudaFuncSetAttribute(scheduler_kernel,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
-
-    cudaStream_t worker_stream, scheduler_stream;
-    cudaStreamCreate(&worker_stream);
-    cudaStreamCreate(&scheduler_stream);
+    cudaStreamWaitEvent(global_runtime_config.worker_stream,
+                        global_runtime_config.prepare_done_event,
+                        0);
+    cudaStreamWaitEvent(global_runtime_config.scheduler_stream,
+                        global_runtime_config.prepare_done_event,
+                        0);
 
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                    dim3(WORKER_THREADS, 1, 1),
+                    dim3(WORKER_NUM_THREADS, 1, 1),
                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
-                    worker_stream>>>(global_runtime_config);
+                    global_runtime_config.worker_stream>>>(
+        global_runtime_config);
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
                        dim3(32, 1, 1),
                        0 /*smem*/,
-                       scheduler_stream>>>(global_runtime_config);
+                       global_runtime_config.scheduler_stream>>>(
+        global_runtime_config);
 
-    cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-      printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-    }
+    cudaEventRecord(global_runtime_config.worker_done_event,
+                    global_runtime_config.worker_stream);
+    cudaEventRecord(global_runtime_config.scheduler_done_event,
+                    global_runtime_config.scheduler_stream);
 
-    cudaStreamDestroy(worker_stream);
-    cudaStreamDestroy(scheduler_stream);
-
-    printf("Finished Launch Persistent Kernel\n");
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.worker_done_event, 0);
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.scheduler_done_event, 0);
+    printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
     printf("a single persistent kernel\n");
-    // Launcher persistent kernel
-    cudaFuncSetAttribute(persistent_kernel,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    int num_sms_to_use = global_runtime_config.num_workers + num_schedulers / 4;
 #ifdef USE_NVSHMEM
     void *args[] = {&global_runtime_config};
     nvshmemx_collective_launch((void const *)persistent_kernel,
-                               dim3(sm_count, 1, 1),
-                               dim3(SINGLE_KERNEL_THREADS, 1, 1),
+                               dim3(num_sms_to_use, 1, 1),
+                               dim3(SINGLE_KERNEL_NUM_THREADS, 1, 1),
                                args,
                                MAX_DYNAMIC_SHARED_MEMORY_SIZE /*sharedmem*/,
                                0 /*stream*/);
 #else
-    persistent_kernel<<<dim3(sm_count, 1, 1),
-                        dim3(SINGLE_KERNEL_THREADS, 1, 1),
+    persistent_kernel<<<dim3(num_sms_to_use, 1, 1),
+                        dim3(SINGLE_KERNEL_NUM_THREADS, 1, 1),
                         MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/>>>(
         global_runtime_config);
 #endif
@@ -1309,4 +1457,10 @@ extern "C" void finalize_persistent_kernel() {
   nvshmem_barrier_all();
   nvshmem_finalize();
 #endif
+  // Free worker and scheduler streams
+  cudaEventDestroy(global_runtime_config.prepare_done_event);
+  cudaEventDestroy(global_runtime_config.worker_done_event);
+  cudaEventDestroy(global_runtime_config.scheduler_done_event);
+  cudaStreamDestroy(global_runtime_config.worker_stream);
+  cudaStreamDestroy(global_runtime_config.scheduler_stream);
 }
