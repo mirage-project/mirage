@@ -32,9 +32,17 @@ sudo ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake
 pip3 install --upgrade pip build setuptools wheel cython
 
 # Install PyTorch matching the target CUDA version
-echo "Installing PyTorch for ${TORCH_CUDA}..."
-pip3 install torch==2.6.0+${TORCH_CUDA} torchvision==0.21.0+${TORCH_CUDA} torchaudio==2.6.0+${TORCH_CUDA} \
-  --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA}
+# PyTorch wheel indices don't always match every CUDA toolkit version.
+# CUDA is backward compatible within a major version, so we map to the
+# closest available PyTorch index.
+TORCH_INDEX="cu${CUDA_SHORT}"
+case "${CUDA_SHORT}" in
+  121) TORCH_INDEX="cu124" ;;  # PyTorch dropped cu121 from 2.6.0+
+  128) TORCH_INDEX="cu126" ;;  # cu128 index doesn't exist yet
+esac
+echo "Installing PyTorch for CUDA ${CUDA_VERSION} (using ${TORCH_INDEX} index)..."
+pip3 install torch torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/${TORCH_INDEX}
 
 # Install project requirements (skip git+ dependencies that break wheel metadata)
 if [ -f requirements.txt ]; then
