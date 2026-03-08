@@ -6,8 +6,10 @@
 set -e
 
 CUDA_VERSION="${1:-12.1.1}"
-# Extract major.minor for torch index (e.g., 12.1.1 -> cu121)
-CUDA_SHORT=$(echo "$CUDA_VERSION" | sed 's/\.\([0-9]\)$/\1/' | sed 's/\.//g')
+# Extract major.minor for torch index (e.g., 12.1.1 -> cu121, 12.4.1 -> cu124)
+CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d. -f1)
+CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d. -f2)
+CUDA_SHORT="${CUDA_MAJOR}${CUDA_MINOR}"
 TORCH_CUDA="cu${CUDA_SHORT}"
 
 sudo apt update
