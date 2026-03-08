@@ -51,6 +51,7 @@ fi
 
 # --- cuDNN ---
 dnf install -y libcudnn9-cuda-12 libcudnn9-devel-cuda-12 || \
+
   echo "WARNING: cuDNN install failed, continuing without it"
 ldconfig
 
