@@ -29,12 +29,12 @@ if [ -n "${GITHUB_PATH:-}" ]; then
 fi
 
 # --- System dependencies (AlmaLinux 8 / RHEL 8) ---
-yum install -y gcc-c++ make boost-devel wget
+dnf install -y gcc-c++ make boost-devel wget
 
 # --- CUDA toolkit via NVIDIA repo ---
-yum-config-manager --add-repo \
+dnf config-manager --add-repo \
   "https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo"
-yum install -y "cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
+dnf install -y "cuda-toolkit-${CUDA_MAJOR}-${CUDA_MINOR}"
 
 CUDA_PATH="/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}"
 export PATH="${CUDA_PATH}/bin:${PATH}"
@@ -50,7 +50,7 @@ if [ -n "${GITHUB_PATH:-}" ]; then
 fi
 
 # --- cuDNN ---
-yum install -y libcudnn9-cuda-12 libcudnn9-devel-cuda-12 || \
+dnf install -y libcudnn9-cuda-12 libcudnn9-devel-cuda-12 || \
   echo "WARNING: cuDNN install failed, continuing without it"
 ldconfig
 
