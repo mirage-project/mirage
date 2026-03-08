@@ -18,6 +18,8 @@ jobs:
   build-wheels:
     name: Build wheel (Python ${{ matrix.python }}, CUDA ${{ matrix.cuda }})
     runs-on: ubuntu-22.04
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -30,35 +32,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Free space on runner
-        run: .github/workflows/helpers/free_space_on_runner.sh
-
-      - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Install CUDA ${{ matrix.cuda }}
-        uses: Jimver/cuda-toolkit@v0.2.30
-        id: cuda-toolkit
-        with:
-          cuda: ${{ matrix.cuda }}
-          use-github-cache: false
-          use-local-cache: false
-          log-file-suffix: py${{ matrix.python }}-cu${{ matrix.cuda }}.log
-
       - name: Install dependencies
         run: |
-          .github/workflows/helpers/install_dependencies.sh "${{ matrix.cuda }}"
+          .github/workflows/helpers/install_dependencies_manylinux.sh "${{ matrix.cuda }}" "${{ matrix.python }}"
           pip install build
 
       - name: Setup environment variables
-        run: .github/workflows/helpers/set_env.sh
+        run: |
+          # Set compiler and CUDA env vars
+          CUDA_MAJOR=$(echo "${{ matrix.cuda }}" | cut -d. -f1)
+          CUDA_MINOR=$(echo "${{ matrix.cuda }}" | cut -d. -f2)
+          CUDA_PATH="/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}"
+
+          echo "CUDACXX=${CUDA_PATH}/bin/nvcc" >> $GITHUB_ENV
+          echo "CUDA_HOME=${CUDA_PATH}" >> $GITHUB_ENV
+          echo "CC=$(which gcc)" >> $GITHUB_ENV
+          echo "CXX=$(which g++)" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
 
       - name: Build wheel
-        env:
-          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: |
           # Extract CUDA short version (e.g., 12.1.1 -> cu121)
           CUDA_SHORT=$(echo "${{ matrix.cuda }}" | cut -d. -f1,2 | tr -d '.')
@@ -72,13 +64,16 @@ jobs:
 
       - name: Repair wheel with auditwheel
         run: |
+          CUDA_MAJOR=$(echo "${{ matrix.cuda }}" | cut -d. -f1)
+          CUDA_MINOR=$(echo "${{ matrix.cuda }}" | cut -d. -f2)
+          CUDA_LIB="/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}/lib64"
+
           # Add CUDA and Z3 library paths so auditwheel can find shared libs
-          Z3_LIB_DIR=$(python -c "import z3, os; print(os.path.join(os.path.dirname(z3.__file__), 'lib'))")
-          export LD_LIBRARY_PATH="${Z3_LIB_DIR}:${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/lib64:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+          export LD_LIBRARY_PATH="${Z3_LIB_DIR}:${CUDA_LIB}:${LD_LIBRARY_PATH:-}"
 
           mkdir -p dist/
           for whl in raw-dist/*.whl; do
-            # Repair and bundle shared libraries; use manylinux_2_28 (Ubuntu 22.04)
+            # Repair and bundle shared libraries
             auditwheel repair "$whl" \
               --plat manylinux_2_28_x86_64 \
               -w repaired/ \
@@ -91,8 +86,6 @@ jobs:
           done
 
           # Rename wheels to include CUDA version
-          # e.g., mirage_project-0.2.4-cp310-cp310-manylinux_2_28_x86_64.whl
-          #     -> mirage_project-0.2.4+cu121-cp310-cp310-manylinux_2_28_x86_64.whl
           for whl in repaired/*.whl; do
             base=$(basename "$whl")
             new_name=$(echo "$base" | sed "s/\(mirage_project-[0-9.]*\)/\1+${CUDA_SHORT}/")
