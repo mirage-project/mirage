@@ -61,7 +61,7 @@ jobs:
           CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: |
           # Extract CUDA short version (e.g., 12.1.1 -> cu121)
-          CUDA_SHORT=$(echo "${{ matrix.cuda }}" | sed 's/\.\([0-9]\)$/\1/' | sed 's/\.//g')
+          CUDA_SHORT=$(echo "${{ matrix.cuda }}" | cut -d. -f1,2 | tr -d '.')
           echo "CUDA_SHORT=cu${CUDA_SHORT}" >> $GITHUB_ENV
 
           # Strip git+ URLs from requirements.txt before building
