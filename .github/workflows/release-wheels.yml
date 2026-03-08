@@ -46,6 +46,7 @@ jobs:
           cuda: ${{ matrix.cuda }}
           use-github-cache: false
           use-local-cache: false
+          log-file-suffix: py${{ matrix.python }}-cu${{ matrix.cuda }}.log
 
       - name: Install dependencies
         run: |
@@ -71,15 +72,15 @@ jobs:
 
       - name: Repair wheel with auditwheel
         run: |
-          # Add CUDA and Z3 library paths so auditwheel can find them
-          export LD_LIBRARY_PATH="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/lib64:$LD_LIBRARY_PATH"
-          export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+          # Add CUDA and Z3 library paths so auditwheel can find shared libs
+          Z3_LIB_DIR=$(python -c "import z3, os; print(os.path.join(os.path.dirname(z3.__file__), 'lib'))")
+          export LD_LIBRARY_PATH="${Z3_LIB_DIR}:${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/lib64:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
 
           mkdir -p dist/
           for whl in raw-dist/*.whl; do
-            # Repair and bundle shared libraries; use manylinux_2_35 (Ubuntu 22.04)
+            # Repair and bundle shared libraries; use manylinux_2_28 (Ubuntu 22.04)
             auditwheel repair "$whl" \
-              --plat manylinux_2_35_x86_64 \
+              --plat manylinux_2_28_x86_64 \
               -w repaired/ \
               --exclude libcuda.so.1 \
               --exclude libnvidia-ml.so.1 \
@@ -90,8 +91,8 @@ jobs:
           done
 
           # Rename wheels to include CUDA version
-          # e.g., mirage_project-0.2.4-cp310-cp310-manylinux_2_35_x86_64.whl
-          #     -> mirage_project-0.2.4+cu121-cp310-cp310-manylinux_2_35_x86_64.whl
+          # e.g., mirage_project-0.2.4-cp310-cp310-manylinux_2_28_x86_64.whl
+          #     -> mirage_project-0.2.4+cu121-cp310-cp310-manylinux_2_28_x86_64.whl
           for whl in repaired/*.whl; do
             base=$(basename "$whl")
             new_name=$(echo "$base" | sed "s/\(mirage_project-[0-9.]*\)/\1+${CUDA_SHORT}/")
@@ -146,7 +147,8 @@ jobs:
 
             ### Wheel naming convention
 
-            `mirage_project-${{ env.VERSION }}+cuXXX-cpYYY-cpYYY-manylinux_2_35_x86_64.whl`
+            `mirage_project-${{ env.VERSION }}+cuXXX-cpYYY-cpYYY-manylinux_2_28_x86_64.whl`
+            > Note: actual platform tag may vary
             - `cuXXX`: CUDA version (e.g., `cu121` = CUDA 12.1, `cu124` = CUDA 12.4, `cu126` = CUDA 12.6)
             - `cpYYY`: Python version (e.g., `cp310` = Python 3.10)
           files: wheels/*.whl
