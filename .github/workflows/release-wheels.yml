@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ['3.10', '3.11', '3.12']
-        cuda: ['12.1.1', '12.4.1', '12.6.3']
+        cuda: ['12.1.1', '12.4.1', '12.6.2']
 
     steps:
       - name: Checkout Repository
