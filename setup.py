@@ -203,10 +203,10 @@ if os.environ.get("MIRAGE_SKIP_NATIVE_BUILD") != "1":
         os.chdir(mirage_path)
         build_dir = os.path.join(mirage_path, "build")
 
-        cc_path = shutil.which("gcc")
-        os.environ["CC"] = cc_path if cc_path else "/usr/bin/gcc"
-        cxx_path = shutil.which("g++")
-        os.environ["CXX"] = cxx_path if cxx_path else "/usr/bin/g++"
+        cc_path = os.environ.get("CC") or shutil.which("gcc") or "/usr/bin/gcc"
+        os.environ["CC"] = cc_path
+        cxx_path = os.environ.get("CXX") or shutil.which("g++") or "/usr/bin/g++"
+        os.environ["CXX"] = cxx_path
         print(f"CC: {os.environ['CC']}, CXX: {os.environ['CXX']}", flush=True)
 
         # Create the build directory if it does not exist
