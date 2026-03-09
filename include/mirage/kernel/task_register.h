@@ -53,8 +53,6 @@ public:
                                    std::vector<int> const &params);
   int register_argmax_reduce_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
-  int register_nvshmem_allgather_strided_put_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_reduction_task(threadblock::Graph const &bgraph,
                               std::vector<int> const &params);
   int register_find_ngram_partial_task(threadblock::Graph const &bgraph,
@@ -121,6 +119,12 @@ public:
   int register_paged_attention_split_kv_merge_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   // SM100 tasks end
+  // Multi-GPU tasks
+  int register_nvshmem_allgather_strided_put_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_nvshmem_tile_allreduce_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  // Multi-GPU tasks end
   int register_task_variant(TaskType type, std::string const &code);
 
 public:
