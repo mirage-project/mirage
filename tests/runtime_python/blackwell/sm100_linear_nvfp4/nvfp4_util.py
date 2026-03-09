@@ -199,6 +199,78 @@ def encode_ue4m3(value: float) -> int:
     return best_byte
 
 
+def make_sequential_nvfp4_tensors(
+    batch_size: int,
+    output_size: int,
+    reduction_size: int,
+    scale_vector_size: int = 16,
+    device: str = "cuda",
+):
+    """
+    Create x (input) and w (weight) packed FP4 tensors with sequential nibble
+    patterns for debugging kernel data flow.
+
+    Nibble sequence for x: [1, 3, 5, 7, 9, 11, 13, 15, 1, 3, ...]  (odd, period 8)
+    Nibble sequence for w: [0, 2, 4, 6,  8, 10, 12, 14, 0, 2, ...]  (even, period 8)
+
+    Packing: low nibble (bits 0-3) = element at even index,
+             high nibble (bits 4-7) = element at odd index.
+
+    So reading the raw bytes for x gives:  0x31, 0x75, 0xB9, 0xFD, 0x31, ...
+    And reading the raw bytes for w gives:  0x20, 0x64, 0xA8, 0xEC, 0x20, ...
+
+    Scale factors are set to 1.0 (ue4m3 = 0x38 = 56) for both tensors.
+
+    Returns:
+        x_packed: uint8 (batch_size,  reduction_size // 2)
+        w_packed: uint8 (output_size, reduction_size // 2)
+        x_sf:     uint8 (batch_size,  reduction_size // scale_vector_size)
+        w_sf:     uint8 (output_size, reduction_size // scale_vector_size)
+    """
+    assert reduction_size % 2 == 0
+    half_k = reduction_size // 2
+    num_sf_cols = reduction_size // scale_vector_size
+
+    # Build the nibble sequence for one row (length = reduction_size)
+    indices = np.arange(reduction_size, dtype=np.int32)
+
+    # x: odd nibbles — position i → (2i + 1) mod 16
+    x_nibs = ((2 * indices + 1) % 16).astype(np.uint8)
+    # w: even nibbles — position i → (2i) mod 16
+    w_nibs = ((2 * indices) % 16).astype(np.uint8)
+
+    # Pack pairs: byte j = high(nib[2j+1]) | low(nib[2j])
+    x_row = ((x_nibs[1::2] << 4) | x_nibs[0::2]).astype(np.uint8)  # (half_k,)
+    w_row = ((w_nibs[1::2] << 4) | w_nibs[0::2]).astype(np.uint8)  # (half_k,)
+
+    # Tile the single row across all rows of each matrix
+    x_packed = torch.from_numpy(
+        np.tile(x_row, (batch_size, 1))
+    ).to(device=device, dtype=torch.uint8)
+    w_packed = torch.from_numpy(
+        np.tile(w_row, (output_size, 1))
+    ).to(device=device, dtype=torch.uint8)
+
+    # Unit scale factors so scaled value = raw fp4 value
+    # x_sf = make_unit_scale_factors(batch_size, num_sf_cols)
+    # w_sf = make_unit_scale_factors(output_size, num_sf_cols)
+    x_sf = make_sequential_scale_factors(batch_size, num_sf_cols)
+    w_sf = make_sequential_scale_factors(output_size, num_sf_cols)
+
+
+    return x_packed, w_packed, x_sf, w_sf
+
+
+def make_sequential_scale_factors(rows: int, cols: int) -> torch.Tensor:
+    """
+    Create a scale-factor tensor where raw byte values increase sequentially
+    0, 1, 2, ..., 255, 0, 1, ... across the flattened tensor (row-major order).
+    """
+    total = rows * cols
+    flat = np.arange(total, dtype=np.int64) % 256
+    return torch.from_numpy(flat.reshape(rows, cols).astype(np.uint8)).to("cuda")
+
+
 def make_unit_scale_factors(rows: int, cols: int) -> torch.Tensor:
     """
     Create a scale-factor tensor where every entry is 1.0 in ue4m3 encoding.

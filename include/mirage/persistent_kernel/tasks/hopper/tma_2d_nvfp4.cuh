@@ -51,7 +51,7 @@ struct tma_2d_nvfp4 {
 
   __host__ inline tma_2d_nvfp4(void *src) {
     CUtensorMap host_desc;
-    create_tma_desc(&host_desc, src); // host-only function
+    create_tma_desc_nvfp4(&host_desc, src); // host-only function
     cudaMalloc(&desc_ptr, sizeof(CUtensorMap));
     cudaMemcpy(
         desc_ptr, &host_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
@@ -63,10 +63,10 @@ struct tma_2d_nvfp4 {
 #endif
   }
   
-public:
+public: 
   template <int NDIM, typename Barrier>
   __device__ inline void tma_cp_async(Barrier &mbar,
-                                      T *smem_ptr,
+                                      void *smem_ptr,
                                       int const (&tma_coords)[NDIM]) const {
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
@@ -84,7 +84,7 @@ public:
         printf("smem_ptr: %p\n", smem_ptr);
         printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
 #endif
-        launch_tma_cp_async(mbar, smem_ptr + smem_offset, tma_coords_local);
+        launch_tma_cp_async(mbar, static_cast<T*>(smem_ptr) + smem_offset, tma_coords_local);
       }
     }
   }

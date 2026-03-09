@@ -35,9 +35,12 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
-  constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  //  (std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-  //                                       : CUtensorMapDataType(-1));
+  constexpr CUtensorMapDataType tma_format = 
+    std::is_same_v<T, cute::float_e2m1_t> ? 
+      CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B : 
+    std::is_same_v<T, cute::float_ue4m3_t> ? 
+      CU_TENSOR_MAP_DATA_TYPE_UINT8  : 
+      CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   constexpr CUtensorMapInterleave tma_interleave =
       CU_TENSOR_MAP_INTERLEAVE_NONE;
   constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -107,22 +110,14 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   assert(gmem_prob_shape[4] <= (uint64_t(1) << 32)); // Size must be max 2^32
 
   // Assert the byte strides. Tma Descriptor uses byte strides
-  assert((gmem_prob_stride[1]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[1] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
-  assert((gmem_prob_stride[2]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[2] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
-  assert((gmem_prob_stride[3]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[3] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
-  assert((gmem_prob_stride[4]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[4] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
+  assert((gmem_prob_stride[1]) < (uint64_t(1) << 40));  // Stride must be max 2^40
+  assert((gmem_prob_stride[1] & 0b1111) == 0);          // Stride must be multiple of 16B (128b)
+  assert((gmem_prob_stride[2]) < (uint64_t(1) << 40));  // Stride must be max 2^40
+  assert((gmem_prob_stride[2] & 0b1111) == 0);          // Stride must be multiple of 16B (128b)
+  assert((gmem_prob_stride[3]) < (uint64_t(1) << 40));  // Stride must be max 2^40
+  assert((gmem_prob_stride[3] & 0b1111) == 0);          // Stride must be multiple of 16B (128b)
+  assert((gmem_prob_stride[4]) < (uint64_t(1) << 40));  // Stride must be max 2^40
+  assert((gmem_prob_stride[4] & 0b1111) == 0);          // Stride must be multiple of 16B (128b)
 
   if constexpr (NDIM == 2) {
     smem_box_shape[0] = smem_shape[1];

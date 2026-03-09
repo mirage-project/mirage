@@ -66,7 +66,7 @@ struct tma_2d {
 public:
   template <int NDIM, typename Barrier>
   __device__ inline void tma_cp_async(Barrier &mbar,
-                                      T *smem_ptr,
+                                      void *smem_ptr,
                                       int const (&tma_coords)[NDIM]) const {
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
@@ -83,8 +83,15 @@ public:
         printf("smem_offset: %d\n", smem_offset);
         printf("smem_ptr: %p\n", smem_ptr);
         printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
+        printf("\n");
 #endif
-        launch_tma_cp_async(mbar, smem_ptr + smem_offset, tma_coords_local);
+
+        // TMA hardware zero-fills out-of-bounds elements on load, so the box
+        // may legally extend beyond GMEM bounds (e.g. BATCH_SIZE < MMA_N).
+        // Only assert that the starting coordinate itself is in bounds.
+        assert(tma_coords_local[0] < (int)GMEM_COL);
+        assert(tma_coords_local[1] < (int)GMEM_ROW);
+        launch_tma_cp_async(mbar, static_cast<T*>(smem_ptr) + smem_offset, tma_coords_local);
       }
     }
   }
@@ -254,9 +261,8 @@ private:
     constexpr uint32_t tma_dim = 5;
     void *global_addr = src;
 
-    constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-    //  (std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-    //                                       : CUtensorMapDataType(-1));
+    constexpr CUtensorMapDataType tma_format = 
+        CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
     constexpr CUtensorMapInterleave tma_interleave =
         CU_TENSOR_MAP_INTERLEAVE_NONE;
     constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -264,10 +270,10 @@ private:
     constexpr CUtensorMapFloatOOBfill tma_oobFill =
         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
     constexpr CUtensorMapSwizzle tma_swizzle =
-        (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
-         : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
-         : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
-                  : CU_TENSOR_MAP_SWIZZLE_NONE);
+        (B == 1 ? CU_TENSOR_MAP_SWIZZLE_32B
+       : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
+       : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
+       :          CU_TENSOR_MAP_SWIZZLE_NONE);
 
     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
     uint64_t gmem_prob_stride[5] = {
