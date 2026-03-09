@@ -168,7 +168,7 @@ def get_compile_command(
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/tools/util/include')}",
-        f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
+        f"-I{os.path.join(mirage_deps_path, 'json/include')}",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
@@ -1366,13 +1366,8 @@ class PersistentKernel:
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
 
-        # find mirage home
-        if "MIRAGE_HOME" in os.environ:
-            MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME")
-        else:
-            raise RuntimeError(
-                "MIRAGE_HOME unspecified; Please set MIRAGE_HOME to be the root of the Mirage folder"
-            )
+        # find mirage home (fall back to MIRAGE_ROOT from get_key_paths)
+        MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME", MIRAGE_ROOT)
 
         NVSHMEM_INC_PATH = None
         NVSHMEM_LIB_PATH = None
