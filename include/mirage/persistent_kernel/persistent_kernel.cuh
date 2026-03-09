@@ -29,6 +29,10 @@
 #include <unistd.h>
 #include <vector>
 
+#if defined(MIRAGE_GRACE_BLACKWELL)
+#include "warp_roles.cuh"
+#endif
+
 #if defined(MIRAGE_GRACE_HOPPER)
 #include "tasks/hopper/task_header.cuh"
 #elif defined(MIRAGE_GRACE_BLACKWELL)
@@ -50,8 +54,8 @@ using namespace kernel;
 #define WORKER_NUM_THREADS 256
 #define SINGLE_KERNEL_NUM_THREADS 256
 #elif defined(MIRAGE_GRACE_BLACKWELL)
-#define WORKER_NUM_THREADS 256
-#define SINGLE_KERNEL_NUM_THREADS 256
+#define WORKER_NUM_THREADS 384
+#define SINGLE_KERNEL_NUM_THREADS 384
 #else
 #define WORKER_NUM_THREADS 128
 #define SINGLE_KERNEL_NUM_THREADS 128

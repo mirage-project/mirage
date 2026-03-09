@@ -299,6 +299,9 @@ __device__ __noinline__ void
   int tma_transaction_bytes =
       sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler) +
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
+  // B-only transaction bytes (used when A is prefetched for stage 0)
+  int tma_transaction_bytes_B =
+      sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 
   constexpr int TILE_SIZE = 64;
   constexpr int INPUT_TMA_TILE_SIZE = 64;
@@ -381,7 +384,7 @@ __device__ __noinline__ void
   auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
 
   cutlass::arch::fence_barrier_init();
-  __syncthreads();
+  MPK_CONSUMER_SYNC();
 
   // if (cute::thread0()) {
   //   printf("tma_trans_bytes_A: %d\n", tma_trans_bytes_A);
@@ -399,10 +402,19 @@ __device__ __noinline__ void
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
 
-  __syncthreads(); // Wait for all threads until warp0 allocates TMEM
+  MPK_CONSUMER_SYNC(); // Wait for all threads until warp0 allocates TMEM
 
   if (warp_idx == 5) {
     // TMA warp (1)
+
+    // Read prefetch flag: set by static_worker.cuh cooperative copy.
+    // If true, A[stage 0] already contains the first weight tile.
+    constexpr int PREFETCH_META_OFFSET_ =
+        mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE - 16384 - 128;
+    int prefetch_was_done =
+        *reinterpret_cast<int *>(shared_memory + PREFETCH_META_OFFSET_ + 16);
+    bool first_iteration = true;
+
     int total_k_tile_count = 0;
     for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
       for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
@@ -435,6 +447,10 @@ __device__ __noinline__ void
                                tma_wr_ab_empty_phase);
           }
 
+          // Check if A was prefetched for this iteration (stage 0 only)
+          bool skip_a = first_iteration && prefetch_was_done;
+          first_iteration = false;
+
           if (cute::elect_one_sync()) {
             int tma_coords_A[2] = {k_tile * TILE_SIZE,
                                    m_tile * OUTPUT_ATOM_SIZE};
@@ -445,12 +461,12 @@ __device__ __noinline__ void
                                smem_wr_buffer * MMA_N * TILE_SIZE);
             cute::set_barrier_transaction_bytes(
                 shared_storage.ab_full_mbar_ptr[smem_wr_buffer],
-                tma_transaction_bytes);
-            // set_barrier_transaction_bytes(ab_full_mbar_ptr[smem_wr_buffer],
-            // tma_transaction_bytes);
-            tma_a.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer],
-                               input_weight_smem.base_ptr,
-                               tma_coords_A);
+                skip_a ? tma_transaction_bytes_B : tma_transaction_bytes);
+            if (!skip_a) {
+              tma_a.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer],
+                                 input_weight_smem.base_ptr,
+                                 tma_coords_A);
+            }
             tma_b.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer],
                                input_smem.base_ptr,
                                tma_coords_B);
@@ -693,7 +709,7 @@ __device__ __noinline__ void
       cute::tma_store_wait<0>();
     }
   }
-  __syncthreads();
+  MPK_CONSUMER_SYNC();
 
   // Release the right to allocate before deallocations so that the next CTA can
   // rasterize Then deallocate TMEM
