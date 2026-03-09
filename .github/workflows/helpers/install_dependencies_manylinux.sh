@@ -71,7 +71,7 @@ fi
 pip install cmake
 
 # --- Python build dependencies ---
-pip install --upgrade pip build setuptools wheel cython
+pip install --upgrade pip build setuptools wheel cython pyproject-metadata
 
 # --- PyTorch ---
 TORCH_INDEX="cu${CUDA_SHORT}"
@@ -85,8 +85,8 @@ pip install torch torchvision torchaudio \
 
 # --- Project requirements ---
 if [ -f requirements.txt ]; then
-  grep -v '^[[:space:]]*#' requirements.txt | grep -v 'git+' | pip install -r /dev/stdin
-  grep 'git+' requirements.txt | while read -r dep; do
+  grep -v '^[[:space:]]*#' requirements.txt | grep -v 'git+' | pip install -r /dev/stdin || true
+  { grep 'git+' requirements.txt || true; } | while read -r dep; do
     pip install "$dep" || echo "WARNING: Failed to install $dep"
   done
 fi
@@ -95,6 +95,11 @@ fi
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 # shellcheck source=/dev/null
 . "$HOME/.cargo/env"
+
+# Persist cargo PATH for subsequent GitHub Actions steps
+if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+fi
 
 # --- auditwheel and patchelf ---
 pip install auditwheel patchelf

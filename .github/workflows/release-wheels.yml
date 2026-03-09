@@ -33,9 +33,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install dependencies
-        run: |
-          .github/workflows/helpers/install_dependencies_manylinux.sh "${{ matrix.cuda }}" "${{ matrix.python }}"
-          pip install build
+        run: .github/workflows/helpers/install_dependencies_manylinux.sh "${{ matrix.cuda }}" "${{ matrix.python }}"
 
       - name: Setup environment variables
         run: |
