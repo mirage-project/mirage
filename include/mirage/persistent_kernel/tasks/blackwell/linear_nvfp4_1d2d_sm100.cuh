@@ -668,6 +668,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                         constexpr int A_buffer_bytes = MMA_M * MMA_K / 2;  // 4-bit = 2 elements per byte
                         constexpr int B_buffer_bytes  = MMA_N * MMA_K / 2;
                         // SF TMA tile width = 16 bytes (UINT8 TMA minimum)
+                        // This must be 4
                         constexpr int sf_smem_col      = 4;
                         constexpr int SFA_buffer_bytes = MMA_M * sf_smem_col;
                         constexpr int SFB_buffer_bytes = MMA_N * sf_smem_col;
