@@ -44,11 +44,9 @@ jobs:
 
           echo "CUDACXX=${CUDA_PATH}/bin/nvcc" >> $GITHUB_ENV
           echo "CUDA_HOME=${CUDA_PATH}" >> $GITHUB_ENV
-          echo "CC=$(which gcc)" >> $GITHUB_ENV
-          echo "CXX=$(which g++)" >> $GITHUB_ENV
+          # CC and CXX are already set by install_dependencies_manylinux.sh
+          # (pointing to gcc-toolset-12 for CUDA compatibility)
           echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
-          echo "CUDAFLAGS=-allow-unsupported-compiler" >> $GITHUB_ENV
-          echo "CMAKE_CUDA_FLAGS=-allow-unsupported-compiler" >> $GITHUB_ENV
 
       - name: Build wheel
         run: |

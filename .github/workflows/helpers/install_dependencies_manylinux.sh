@@ -29,7 +29,26 @@ if [ -n "${GITHUB_PATH:-}" ]; then
 fi
 
 # --- System dependencies (AlmaLinux 8 / RHEL 8) ---
-dnf install -y gcc-c++ make boost-devel wget
+dnf install -y make boost-devel wget
+
+# --- GCC 12 (required: CUDA < 12.8 does not support GCC > 13) ---
+dnf install -y gcc-toolset-12-gcc gcc-toolset-12-gcc-c++
+GCC12_BIN="/opt/rh/gcc-toolset-12/root/usr/bin"
+GCC12_LIB="/opt/rh/gcc-toolset-12/root/usr/lib64"
+export PATH="${GCC12_BIN}:${PATH}"
+export CC="${GCC12_BIN}/gcc"
+export CXX="${GCC12_BIN}/g++"
+export LD_LIBRARY_PATH="${GCC12_LIB}:${LD_LIBRARY_PATH:-}"
+
+# Persist GCC 12 for subsequent GitHub Actions steps
+if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "${GCC12_BIN}" >> "$GITHUB_PATH"
+fi
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "CC=${GCC12_BIN}/gcc" >> "$GITHUB_ENV"
+  echo "CXX=${GCC12_BIN}/g++" >> "$GITHUB_ENV"
+  echo "LD_LIBRARY_PATH=${GCC12_LIB}:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+fi
 
 # --- CUDA toolkit via NVIDIA repo ---
 dnf config-manager --add-repo \
