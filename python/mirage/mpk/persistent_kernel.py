@@ -193,6 +193,7 @@ def get_compile_command(
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
+        "-lstdc++fs",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
@@ -1348,7 +1349,7 @@ class PersistentKernel:
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
-        so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
+        so_path = os.path.join(tempdir, "test" + sysconfig.get_config_var("EXT_SUFFIX"))
         # check json file
         json_file_path = os.path.join(tempdir, "task_graph.json")
         # build if files are not exist
