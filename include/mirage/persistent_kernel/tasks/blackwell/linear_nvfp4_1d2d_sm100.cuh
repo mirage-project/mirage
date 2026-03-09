@@ -665,18 +665,10 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                             n_tile * MMA_N
                         };
 
-                        constexpr int A_buffer_bytes = MMA_M * MMA_K / 2;  // 4-bit = 2 elements per byte
-                        constexpr int B_buffer_bytes  = MMA_N * MMA_K / 2;
-                        // SF TMA tile width = 16 bytes (UINT8 TMA minimum)
-                        // This must be 4
-                        constexpr int sf_smem_col      = 4;
-                        constexpr int SFA_buffer_bytes = MMA_M * sf_smem_col;
-                        constexpr int SFB_buffer_bytes = MMA_N * sf_smem_col;
-
-                        sA.set_ptr(static_cast<char*>(sA_ptr) + smem_wr_buffer * A_buffer_bytes);
-                        sB.set_ptr(static_cast<char*>(sB_ptr) + smem_wr_buffer * B_buffer_bytes);
-                        sSFA.set_ptr(sSFA_ptr + smem_wr_buffer * SFA_buffer_bytes);
-                        sSFB.set_ptr(sSFB_ptr + smem_wr_buffer * SFB_buffer_bytes);
+                        sA.set_ptr(static_cast<void*>(cute::raw_pointer_cast(tCsA(cute::_, cute::_, cute::_, smem_wr_buffer).data())));
+                        sB.set_ptr(static_cast<void*>(cute::raw_pointer_cast(tCsB(cute::_, cute::_, cute::_, smem_wr_buffer).data())));
+                        sSFA.set_ptr(tCsSFA(cute::_, cute::_, cute::_, smem_wr_buffer).data().get());
+                        sSFB.set_ptr(tCsSFB(cute::_, cute::_, cute::_, smem_wr_buffer).data().get());
 
                         cute::set_barrier_transaction_bytes(
                             shared_storage.ab_full_mbar_ptr[smem_wr_buffer],
@@ -752,7 +744,6 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                         // Index into the staged SMEM tensor to get the base pointer for this pipeline slot
                         SF_type* sfa = tCsSFA(cute::_, cute::_, cute::_, smem_rd_buffer).data().get();
                         SF_type* sfb = tCsSFB(cute::_, cute::_, cute::_, smem_rd_buffer).data().get();
-
                         if (cute::elect_one_sync()) {
                             uint32_t sfa_addr = cute::cast_smem_ptr_to_uint(sfa);
                             uint64_t sfa_desc = matrix_descriptor_encode((uint64_t)(sfa_addr)) |
@@ -760,10 +751,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                                                 matrix_descriptor_encode((uint64_t)16) << 16 | // LBO
                                                 matrix_descriptor_encode((uint64_t)128) << 32 | // SBO
                                                 (uint64_t) 0 << 62;                             // swizzle
-                            printf("[MMA warp k=%d] BEFORE tcgen05.cp SFA: sfa_addr=0x%08x tmem_col_sfa=%u desc=0x%016llx\n",
-                                k_tile, sfa_addr, tmem_col_sfa, (unsigned long long)sfa_desc);
                             asm volatile("{tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;}" :: "r"(tmem_col_sfa), "l"(sfa_desc));
-                            printf("[MMA warp k=%d] AFTER tcgen05.cp SFA\n", k_tile);
 
                             uint32_t sfb_addr = cute::cast_smem_ptr_to_uint(sfb);
                             uint64_t sfb_desc = matrix_descriptor_encode((uint64_t)(sfb_addr)) |
@@ -771,17 +759,12 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                                                 matrix_descriptor_encode((uint64_t)16) << 16 | // LBO
                                                 matrix_descriptor_encode((uint64_t)128) << 32 | // SBO
                                                 (uint64_t) 0 << 62;                             // swizzle
-                            printf("[MMA warp k=%d] BEFORE tcgen05.cp SFB: sfb_addr=0x%08x tmem_col_sfb=%u desc=0x%016llx\n",
-                                k_tile, sfb_addr, tmem_col_sfb, (unsigned long long)sfb_desc);
                             asm volatile("{tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;}" :: "r"(tmem_col_sfb), "l"(sfb_desc));
-                            printf("[MMA warp k=%d] AFTER tcgen05.cp SFB\n", k_tile);
                         }
                     }
 
                     auto accumulate = tiled_mma.accumulate_;
-                    if (lane_idx == 0) printf("[MMA warp k=%d] BEFORE gemm loop size<2>(tCfA)=%d\n", k_tile, (int)cute::size<2>(tCfA));
                     for (int k_block = 0; k_block < cute::size<2>(tCfA); ++k_block) {
-                        if (lane_idx == 0) printf("[MMA warp k=%d k_block=%d] BEFORE cute::gemm\n", k_tile, k_block);
                         cute::gemm(
                             tiled_mma.with(
                                 accumulate,
@@ -792,7 +775,6 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                             tCfB(cute::_, cute::_, k_block, smem_rd_buffer),
                             tCtC(cute::_, cute::_, cute::_, acc_buf_idx)
                         );
-                        if (lane_idx == 0) printf("[MMA warp k=%d k_block=%d] AFTER cute::gemm\n", k_tile, k_block);
                         accumulate = cute::UMMA::ScaleOut::One;
                     }
                     tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
