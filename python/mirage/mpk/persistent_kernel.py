@@ -115,6 +115,19 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 
 valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
 
+def _detect_cxx_standard():
+    """Use c++20 if the host compiler supports it, otherwise fall back to c++17."""
+    try:
+        result = subprocess.run(
+            ["g++", "-std=c++20", "-x", "c++", "-E", "-"],
+            input="", capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return "-std=c++20"
+    except FileNotFoundError:
+        pass
+    return "-std=c++17"
+
 def get_compile_command(
     mpk,
     target_cc,
@@ -175,7 +188,7 @@ def get_compile_command(
 
     flags = [
         "-shared",
-        "-std=c++20",
+        _detect_cxx_standard(),
         "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
