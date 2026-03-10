@@ -166,6 +166,10 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
         rw!("rms_definition";
             "(rms ?t0 ?d0)"
             <=> "(sqrt (sum (square ?t0) ?d0))"),
+
+        rw!("bc_div_mul_common_denom";
+            "(ew_mul (bc_div ?a ?c) (bc_div ?b ?c))"
+            <=> "(bc_div (ew_mul ?a ?b) (ew_mul ?c ?c))"),
     ].concat();
 
     let mut rules1 = vec![

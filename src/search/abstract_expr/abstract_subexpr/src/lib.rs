@@ -57,6 +57,9 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
         rw!("div-div"; "(/ (/ ?a ?b) ?c)" => "(/ ?a (* ?b ?c))" ),
         rw!("div-div-inv"; "(/ ?a (* ?b ?c))" => "(/ (/ ?a ?b) ?c)" ),
 
+        rw!("div-mul-common-denom"; "(* (/ ?a ?c) (/ ?b ?c))" => "(/ (* ?a ?b) (* ?c ?c))"),
+        rw!("div-mul-common-denom-inv"; "(/ (* ?a ?b) (* ?c ?c))" => "(* (/ ?a ?c) (/ ?b ?c))"),
+
         rw!("comm-sum"; "(sum ?i (sum ?j ?a))" => "(sum ?j (sum ?i ?a))" ),
         rw!("sum-add"; "(sum ?i (+ ?a ?b))" => "(+ (sum ?i ?a) (sum ?i ?b))"),
         rw!("sum-add-inv"; "(+ (sum ?i ?a) (sum ?i ?b))" => "(sum ?i (+ ?a ?b))" ),
