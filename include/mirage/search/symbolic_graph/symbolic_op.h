@@ -32,5 +32,8 @@ public:
   operator json() const;
 };
 
+void from_json(json const &j, SymbolicTBOp &op);
+void from_json(json const &j, SymbolicKNOp &op);
+
 } // namespace search
 } // namespace mirage

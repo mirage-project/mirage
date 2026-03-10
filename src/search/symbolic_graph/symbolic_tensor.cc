@@ -14,8 +14,7 @@ SymbolicSTensor::SymbolicSTensor(std::vector<SymbolicTensorDim> dim_templates,
 SymbolicDTensor::operator json() const {
   std::vector<json> dims_json;
   for (auto const &dim : dims) {
-    // dims_json.push_back(*dim);
-    dims_json.push_back((dim->to_string()));
+    dims_json.push_back(json(*dim));
   }
   return json{{"dims", dims_json}};
 }
@@ -23,10 +22,30 @@ SymbolicDTensor::operator json() const {
 SymbolicSTensor::operator json() const {
   std::vector<json> dims_json;
   for (auto const &dim : dims) {
-    // dims_json.push_back(*dim);
-    dims_json.push_back((dim->to_string()));
+    dims_json.push_back(json(*dim));
   }
   return json{{"dims", dims_json}, {"after_accum", after_accum}};
+}
+
+void from_json(json const &j, SymbolicDTensor &tensor) {
+  std::vector<SymbolicTensorDim> dims;
+  for (auto const &jdim : j.at("dims")) {
+    SymbolicTensorDim dim;
+    from_json(jdim, dim);
+    dims.push_back(dim);
+  }
+  tensor = SymbolicDTensor(dims);
+}
+
+void from_json(json const &j, SymbolicSTensor &tensor) {
+  std::vector<SymbolicTensorDim> dims;
+  for (auto const &jdim : j.at("dims")) {
+    SymbolicTensorDim dim;
+    from_json(jdim, dim);
+    dims.push_back(dim);
+  }
+  bool after_accum = j.at("after_accum").get<bool>();
+  tensor = SymbolicSTensor(dims, after_accum);
 }
 
 } // namespace search

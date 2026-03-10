@@ -33,7 +33,6 @@ public:
 
   char const *checkpoint_filename;
   std::vector<json> generated_graphs;
-  std::vector<SymbolicKNGraphWithPartialAssignment> verified_symbolic_graphs;
   int num_thread;
   bool verbose;
 

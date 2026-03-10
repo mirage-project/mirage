@@ -41,6 +41,7 @@ struct GeneratorConfig {
   std::vector<int> fmap_to_explore;
   std::vector<int> frange_to_explore;
   int reduction_dimx;
+  double search_time_limit_sec; // Maximum wall-clock seconds for search (0 = no limit)
   bool
       randomized_branches; // Only for developers to tune the search performance
   bool _enable_attention_specific_optimization;
@@ -70,6 +71,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneratorConfig,
                                    fmap_to_explore,
                                    frange_to_explore,
                                    reduction_dimx,
+                                   search_time_limit_sec,
                                    _enable_attention_specific_optimization,
                                    _enable_concat_matmul_transformation);
 

@@ -35,6 +35,23 @@ public:
   TensorDimConstraint get_memory_usage_constraint() const;
   bool check_memory_usage();
 
+  // Return a copy of this TB graph with updated input dtensor shapes.
+  // The new_input_dtensors vector must have one entry per TB_INPUT_OP.
+  // All downstream STensor dims are recomputed by replaying the operators.
+  SymbolicTBGraph with_updated_input_shapes(
+      std::vector<SymbolicDTensor> const &new_input_dtensors) const;
+
+  // Returns the largest value for `var_index` that exactly divides every
+  // constant C for which (C / var_index) appears in the tensor dims.
+  // Falls back to 4 if the variable appears in no division expression.
+  int get_initial_value_for_var(tensor_dim_var_index_t var_index) const;
+
+  // Returns true iff the assignment satisfies:
+  //   (a) every TensorDimDiv node evaluates with zero remainder, and
+  //   (b) total smem (in bytes, assuming fp16) <= MAX_SMEM_SIZE.
+  // Uses maybe_get_value to avoid assert-on-unassigned-var.
+  bool is_valid_assignment(DimVarAssignment const &assignment) const;
+
   tensor_dim_var_index_t dim_variable_index_base;
   tensor_dim_var_index_t next_dim_variable_index;
 
@@ -78,10 +95,13 @@ public:
   operator json() const;
 };
 
-struct SymbolicKNGraphWithPartialAssignment {
-  SymbolicKNGraph kn_graph;
-  DimVarAssignment partial_assignment;
-};
+void from_json(json const &j, SymbolicTBGraph &symbolic_tb_graph);
+void from_json(json const &j, SymbolicKNGraph &symbolic_kn_graph);
+
+SymbolicKNGraph construct_graph_with_different_input_shapes(
+  SymbolicKNGraph const &ref_graph,
+  std::vector<std::vector<int>> const &input_shapes
+);
 
 } // namespace search
 } // namespace mirage

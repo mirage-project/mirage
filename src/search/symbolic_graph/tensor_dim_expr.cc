@@ -498,6 +498,75 @@ TensorDimDisj::operator json() const {
   return json{{"opt", "disj"}, {"args", args_json}};
 }
 
+void from_json(json const &j, SymbolicTensorDim &dim) {
+  if (j.is_null()) {
+    dim = nullptr;
+    return;
+  }
+  std::string opt = j.at("opt").get<std::string>();
+  if (opt == "var") {
+    dim = std::make_shared<TensorDimVar>(j.at("index").get<tensor_dim_var_index_t>());
+  } else if (opt == "const") {
+    dim = dim_expr_make_const(j.at("value").get<int>());
+  } else if (opt == "add") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_add(lhs, rhs);
+  } else if (opt == "mul") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_mul(lhs, rhs);
+  } else if (opt == "div") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_div(lhs, rhs);
+  } else if (opt == "ite") {
+    SymbolicTensorDim cond, true_case, false_case;
+    from_json(j.at("cond"), cond);
+    from_json(j.at("true_case"), true_case);
+    from_json(j.at("false_case"), false_case);
+    dim = dim_expr_make_ite(cond, true_case, false_case);
+  } else if (opt == "ge") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_ge(lhs, rhs);
+  } else if (opt == "le") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_le(lhs, rhs);
+  } else if (opt == "gt") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_gt(lhs, rhs);
+  } else if (opt == "lt") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_lt(lhs, rhs);
+  } else if (opt == "eq") {
+    SymbolicTensorDim lhs, rhs;
+    from_json(j.at("lhs"), lhs);
+    from_json(j.at("rhs"), rhs);
+    dim = dim_expr_make_eq(lhs, rhs);
+  } else if (opt == "disj") {
+    std::vector<SymbolicTensorDim> args;
+    for (auto const &jarg : j.at("args")) {
+      SymbolicTensorDim arg;
+      from_json(jarg, arg);
+      args.push_back(arg);
+    }
+    dim = dim_expr_make_disj(args);
+  } else {
+    assert(false && "unknown TensorDimExpr opt");
+  }
+}
+
 size_t TensorDimVar::hash() const {
   size_t h = 0;
   hash_combine(h, index);

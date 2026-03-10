@@ -119,6 +119,7 @@ public:
 };
 
 class TBElementBinaryOpArgs : public OpArgs {
+public:
   TBElementBinaryOpArgs(mirage::type::TBOperatorType op_type);
   mirage::type::TBOperatorType op_type;
 
@@ -133,6 +134,11 @@ public:
 
   operator json() const override;
 };
+
+std::shared_ptr<OpArgs const> op_args_from_json_tb(json const &j,
+                                                   type::TBOperatorType op_type);
+std::shared_ptr<OpArgs const> op_args_from_json_kn(json const &j,
+                                                   type::KNOperatorType op_type);
 
 } // namespace search
 } // namespace mirage

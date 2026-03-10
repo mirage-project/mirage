@@ -11,6 +11,8 @@
 #include "mirage/utils/containers.h"
 
 #include <iostream>
+#include <numeric>
+#include <optional>
 #include <unordered_set>
 
 namespace mirage {
@@ -133,6 +135,140 @@ TensorDimConstraint SymbolicTBGraph::get_memory_usage_constraint() const {
 bool SymbolicTBGraph::check_memory_usage() {
   assert(false && "TBD");
   return true;
+}
+
+// Recursively walk an expression tree; for every node of the form
+// TensorDimDiv(const C, var v) where v->index == var_index, push C.
+static void collect_divisor_constants(
+    SymbolicTensorDim const &expr,
+    tensor_dim_var_index_t var_index,
+    std::vector<int> &out) {
+  if (expr->is_div()) {
+    auto d = std::static_pointer_cast<TensorDimDiv const>(expr);
+    if (d->rhs->is_var() && d->lhs->is_const()) {
+      auto var = std::static_pointer_cast<TensorDimVar const>(d->rhs);
+      if (var->index == var_index) {
+        auto c = std::static_pointer_cast<TensorDimConst const>(d->lhs);
+        out.push_back(c->value);
+      }
+    }
+    collect_divisor_constants(d->lhs, var_index, out);
+    collect_divisor_constants(d->rhs, var_index, out);
+  } else if (expr->is_mul()) {
+    auto m = std::static_pointer_cast<TensorDimMul const>(expr);
+    collect_divisor_constants(m->lhs, var_index, out);
+    collect_divisor_constants(m->rhs, var_index, out);
+  } else if (expr->is_add()) {
+    auto a = std::static_pointer_cast<TensorDimAdd const>(expr);
+    collect_divisor_constants(a->lhs, var_index, out);
+    collect_divisor_constants(a->rhs, var_index, out);
+  }
+  // Var, Const, Ite, comparison nodes: nothing to collect.
+}
+
+// Recursively verify that every TensorDimDiv node in the expression
+// evaluates without remainder under the given assignment.
+static bool check_dim_divisibility(SymbolicTensorDim const &expr,
+                                   DimVarAssignment const &assignment) {
+  if (expr->is_div()) {
+    auto d = std::static_pointer_cast<TensorDimDiv const>(expr);
+    auto lv = d->lhs->maybe_get_value(assignment);
+    auto rv = d->rhs->maybe_get_value(assignment);
+    if (lv && rv && (*rv == 0 || *lv % *rv != 0)) return false;
+    return check_dim_divisibility(d->lhs, assignment) &&
+           check_dim_divisibility(d->rhs, assignment);
+  }
+  if (expr->is_mul()) {
+    auto m = std::static_pointer_cast<TensorDimMul const>(expr);
+    return check_dim_divisibility(m->lhs, assignment) &&
+           check_dim_divisibility(m->rhs, assignment);
+  }
+  if (expr->is_add()) {
+    auto a = std::static_pointer_cast<TensorDimAdd const>(expr);
+    return check_dim_divisibility(a->lhs, assignment) &&
+           check_dim_divisibility(a->rhs, assignment);
+  }
+  return true;
+}
+
+SymbolicTBGraph SymbolicTBGraph::with_updated_input_shapes(
+    std::vector<SymbolicDTensor> const &new_input_dtensors) const {
+  // Rebuild the TB graph by replaying operators with new input dtensors.
+  // This correctly recomputes all downstream STensor dims.
+  //
+  // We use placement-style init to preserve the original grid_dim/forloop_range
+  // symbolic variables (the constructor would create fresh ones).
+  SymbolicTBGraph result(this->dim_variable_index_base,
+                         static_cast<int>(this->grid_dim.size()));
+  result.grid_dim = this->grid_dim;
+  result.block_dim = this->block_dim;
+  result.forloop_range = this->forloop_range;
+  result.reduction_degree = this->reduction_degree;
+  result.next_dim_variable_index = this->next_dim_variable_index;
+
+  size_t input_idx = 0;
+  for (size_t i = 0; i < this->operators.size(); ++i) {
+    auto const &op = this->operators[i];
+    if (op.op_type == type::TBOperatorType::TB_INPUT_OP) {
+      TBInputOpArgs const *args =
+          static_cast<TBInputOpArgs const *>(op.args.get());
+      SymbolicDTensor dtensor = (input_idx < new_input_dtensors.size())
+                                    ? new_input_dtensors[input_idx]
+                                    : args->dtensor;
+      result.add_input(dtensor, args->input_map, args->forloop_dim);
+      ++input_idx;
+    } else if (op.op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+      TBOutputOpArgs const *args =
+          static_cast<TBOutputOpArgs const *>(op.args.get());
+      int tb_input_index = this->input_indices[i][0];
+      result.add_output(tb_input_index, args->output_map, args->epilogue);
+    } else {
+      result.add_operator(op.op_type, this->input_indices[i]);
+    }
+  }
+  return result;
+}
+
+int SymbolicTBGraph::get_initial_value_for_var(
+    tensor_dim_var_index_t var_index) const {
+  std::vector<int> constants;
+  for (auto const &tensor : tensors) {
+    for (auto const &dim : tensor.dims) {
+      collect_divisor_constants(dim, var_index, constants);
+    }
+  }
+  if (constants.empty()) return 4;  // no divisibility constraint; safe default
+  int g = constants[0];
+  for (size_t i = 1; i < constants.size(); ++i) {
+    g = std::gcd(g, constants[i]);
+  }
+  return g;  // largest value that divides all constants exactly
+}
+
+bool SymbolicTBGraph::is_valid_assignment(
+    DimVarAssignment const &assignment) const {
+  // (a) Divisibility: every C/v node must divide evenly.
+  for (auto const &tensor : tensors) {
+    for (auto const &dim : tensor.dims) {
+      if (!check_dim_divisibility(dim, assignment)) return false;
+    }
+  }
+  // (b) Smem: mirror get_memory_usage_constraint() logic but in bytes (fp16 = 2).
+  // get_tensor_size() returns element count; multiply by 2 to get bytes.
+  SymbolicTensorDim total_elems = dim_expr_make_const(0);
+  for (size_t i = 0; i < operators.size(); ++i) {
+    if (is_unary(operators[i].op_type) ||
+        operators[i].op_type ==
+            type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP) {
+      continue;
+    }
+    for (int idx : output_indices[i]) {
+      total_elems = total_elems + get_tensor_size(tensors[idx]);
+    }
+  }
+  auto elems = total_elems->maybe_get_value(assignment);
+  if (!elems.has_value()) return false;          // unresolved variable
+  return (*elems * 2) <= (int)mirage::config::MAX_SMEM_SIZE;  // fp16 = 2 bytes
 }
 
 bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
@@ -507,6 +643,18 @@ mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(
       tensors_val.push_back(output_tensor);
     }
   }
+  // Mark output tensors: any tensor not consumed as an input by a later op.
+  std::unordered_set<int> consumed;
+  for (auto const &idx_list : this->input_indices) {
+    for (int idx : idx_list) {
+      consumed.insert(idx);
+    }
+  }
+  for (size_t i = 0; i < tensors_val.size(); ++i) {
+    if (consumed.find((int)i) == consumed.end()) {
+      graph->mark_output(tensors_val[i]);
+    }
+  }
   return graph;
 }
 
@@ -722,6 +870,162 @@ SymbolicKNGraph::operator json() const {
       {"input_indices", input_indices},
       {"output_indices", output_indices},
   };
+}
+
+void from_json(json const &j, SymbolicTBGraph &symbolic_tb_graph) {
+  symbolic_tb_graph.grid_dim.clear();
+  for (auto const &jd : j.at("grid_dim")) {
+    SymbolicTensorDim dim;
+    from_json(jd, dim);
+    symbolic_tb_graph.grid_dim.push_back(dim);
+  }
+  symbolic_tb_graph.block_dim.clear();
+  for (auto const &jd : j.at("block_dim")) {
+    SymbolicTensorDim dim;
+    from_json(jd, dim);
+    symbolic_tb_graph.block_dim.push_back(dim);
+  }
+  from_json(j.at("forloop_range"), symbolic_tb_graph.forloop_range);
+  if (j.at("reduction_degree").is_null()) {
+    symbolic_tb_graph.reduction_degree = nullptr;
+  } else {
+    from_json(j.at("reduction_degree"), symbolic_tb_graph.reduction_degree);
+  }
+  symbolic_tb_graph.operators.clear();
+  for (auto const &jop : j.at("operators")) {
+    SymbolicTBOp op(type::TBOperatorType::TB_UNKOWN, nullptr);
+    from_json(jop, op);
+    symbolic_tb_graph.operators.push_back(op);
+  }
+  symbolic_tb_graph.tensors.clear();
+  for (auto const &jt : j.at("tensors")) {
+    SymbolicSTensor t(std::vector<SymbolicTensorDim>{}, false);
+    from_json(jt, t);
+    symbolic_tb_graph.tensors.push_back(t);
+  }
+  symbolic_tb_graph.input_indices = j.at("input_indices").get<std::vector<std::vector<int>>>();
+  symbolic_tb_graph.output_indices = j.at("output_indices").get<std::vector<std::vector<int>>>();
+}
+
+void from_json(json const &j, SymbolicKNGraph &symbolic_kn_graph) {
+  symbolic_kn_graph.operators.clear();
+  for (auto const &jop : j.at("operators")) {
+    SymbolicKNOp op(type::KNOperatorType::KN_UNKOWN, nullptr);
+    from_json(jop, op);
+    symbolic_kn_graph.operators.push_back(op);
+  }
+  symbolic_kn_graph.tensors.clear();
+  for (auto const &jt : j.at("tensors")) {
+    SymbolicDTensor t(std::vector<SymbolicTensorDim>{});
+    from_json(jt, t);
+    symbolic_kn_graph.tensors.push_back(t);
+  }
+  symbolic_kn_graph.input_indices = j.at("input_indices").get<std::vector<std::vector<int>>>();
+  symbolic_kn_graph.output_indices = j.at("output_indices").get<std::vector<std::vector<int>>>();
+}
+
+namespace {
+
+std::vector<size_t> default_strides_from_dims(std::vector<int> const &dims) {
+  std::vector<size_t> strides(dims.size());
+  size_t stride = 1;
+  for (int i = static_cast<int>(dims.size()) - 1; i >= 0; --i) {
+    strides[i] = stride;
+    stride *= dims[i];
+  }
+  return strides;
+}
+
+// If all dims are const, return their values; otherwise nullopt.
+std::optional<std::vector<int>> get_concrete_dims(SymbolicDTensor const &t) {
+  std::vector<int> dims;
+  for (auto const &d : t.dims) {
+    if (!d->is_const()) {
+      return std::nullopt;
+    }
+    dims.push_back(
+        std::static_pointer_cast<TensorDimConst const>(d)->value);
+  }
+  return dims;
+}
+
+} // namespace
+
+SymbolicKNGraph construct_graph_with_different_input_shapes(
+    SymbolicKNGraph const &ref_graph,
+    std::vector<std::vector<int>> const &input_shapes) {
+  SymbolicKNGraph result;
+  result.next_dim_variable_index = ref_graph.next_dim_variable_index;
+
+  int input_op_idx = 0;
+  for (size_t i = 0; i < ref_graph.operators.size(); ++i) {
+    SymbolicKNOp const &ref_op = ref_graph.operators[i];
+    std::vector<int> const &ref_input_idx = ref_graph.input_indices[i];
+
+    switch (ref_op.op_type) {
+      case type::KNOperatorType::KN_INPUT_OP: {
+        if (input_op_idx >= static_cast<int>(input_shapes.size())) {
+          return SymbolicKNGraph();
+        }
+        std::shared_ptr<KNInputOpArgs const> args =
+            std::static_pointer_cast<KNInputOpArgs const>(ref_op.args);
+        std::vector<int> new_dims = input_shapes[input_op_idx++];
+        std::vector<size_t> new_strides = default_strides_from_dims(new_dims);
+        if (!result.add_input(new_dims, new_strides, args->data_type,
+                             args->layout, args->input_map)) {
+          return SymbolicKNGraph();
+        }
+        break;
+      }
+      case type::KNOperatorType::KN_OUTPUT_OP: {
+        std::shared_ptr<KNOutputOpArgs const> args =
+            std::static_pointer_cast<KNOutputOpArgs const>(ref_op.args);
+        int input_index = ref_input_idx[0];
+        std::vector<size_t> output_strides;
+        if (input_index < static_cast<int>(result.tensors.size())) {
+          auto concrete = get_concrete_dims(result.tensors[input_index]);
+          if (concrete) {
+            output_strides = default_strides_from_dims(*concrete);
+          } else {
+            output_strides = args->output_strides;
+          }
+        } else {
+          output_strides = args->output_strides;
+        }
+        int3 output_map = args->output_map;
+        if (!result.add_output(input_index, output_strides, output_map)) {
+          return SymbolicKNGraph();
+        }
+        break;
+      }
+      case type::KNOperatorType::KN_CUSTOMIZED_OP: {
+        std::shared_ptr<KNCustomizedOpArgs const> args =
+            std::static_pointer_cast<KNCustomizedOpArgs const>(ref_op.args);
+        // Build new dtensors from the KN-level input shapes for this op.
+        std::vector<SymbolicDTensor> new_tb_dtensors;
+        for (int kn_idx : ref_input_idx) {
+          if (kn_idx < static_cast<int>(result.tensors.size())) {
+            new_tb_dtensors.push_back(result.tensors[kn_idx]);
+          }
+        }
+        // Rebuild the TB graph template with updated input shapes.
+        // This recomputes all downstream STensor dims correctly.
+        SymbolicTBGraph updated_tb =
+            args->tb_graph_template.with_updated_input_shapes(new_tb_dtensors);
+        if (!result.add_customized_operator(updated_tb, ref_input_idx)) {
+          return SymbolicKNGraph();
+        }
+        break;
+      }
+      default:
+        if (!result.add_operator(ref_op.op_type, ref_input_idx)) {
+          return SymbolicKNGraph();
+        }
+        break;
+    }
+  }
+
+  return result;
 }
 
 } // namespace search

@@ -14,9 +14,11 @@
 
 #pragma once
 
+#if defined(MIRAGE_GRACE_BLACKWELL)
 #include "cute/arch/cluster_sm100.hpp"
-#include "cute/arch/cluster_sm90.hpp"
 #include "cutlass/gemm/collective/builders/sm100_common.inl"
+#endif
+#include "cute/arch/cluster_sm90.hpp"
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/pipeline/pipeline.hpp"
@@ -254,6 +256,7 @@ public:
 };
 
 // Blackwell
+#if defined(MIRAGE_GRACE_BLACKWELL)
 template <typename T,
           class DstLayout,
           class SrcLayout,
@@ -393,5 +396,6 @@ public:
     }
   }
 };
+#endif // MIRAGE_GRACE_BLACKWELL
 
 } // namespace tb

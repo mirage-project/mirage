@@ -146,6 +146,11 @@ void KernelGraphGenerator::generate_next_operator(
   if (num_total_states % 100000 == 1) {
     show_statistics();
   }
+  // Time limit check
+  if (config.search_time_limit_sec > 0 &&
+      get_elapsed_time_in_sec() > config.search_time_limit_sec) {
+    return;
+  }
   if (verify(c)) {
     verified_graphs.push_back(SerializedSearchContext(c));
     return;
@@ -291,6 +296,9 @@ void KernelGraphGenerator::generate_next_operator(
     // threadblock-level search
     assert(c.tb_graph != nullptr);
 
+    // print tb_graph
+    // std::cerr << json(*c.tb_graph) << std::endl;
+
     std::vector<STensor> output_tensors = [&] {
       std::vector<STensor> results;
       for (auto const &op : c.tb_graph->operators) {
@@ -402,6 +410,9 @@ void KernelGraphGenerator::generate_next_operator(
 }
 
 void KernelGraphGenerator::generate_kernel_graphs() {
+
+  printf("[Search] Starting search with %d threads...\n", num_thread);
+
   start_time = std::chrono::steady_clock::now();
   SearchContext c;
   c.level = SearchLevel::LV_KERNEL;
@@ -441,15 +452,17 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   save_results();
 
+  double elapsed = get_elapsed_time_in_sec();
+  bool timed_out = config.search_time_limit_sec > 0 &&
+                   elapsed >= config.search_time_limit_sec;
   printf("\n");
-  printf("[Search] Second step finished. Time elapsed: %fsec\n",
-         std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                       start_time)
-             .count());
+  printf("[Search] Finished%s. Time elapsed: %fsec\n",
+         timed_out ? " (time limit reached)" : "",
+         elapsed);
   printf("[Search] Total states explored: %d\n", num_total_states.load());
   printf("[Search] Random tests performed: %d\n",
          num_total_random_tests.load());
-  printf("[Serach] Valid kernel graphs explored: %d\n",
+  printf("[Search] Valid kernel graphs explored: %d\n",
          num_valid_kernel_graphs.load());
 }
 
@@ -472,11 +485,13 @@ void KernelGraphGenerator::generate_kernel_graphs_symbolic() {
       generate_next_symbolic_operator(kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, 0, true);
     }
   }
-  std::cerr << num_symbolic_graphs << std::endl;
-  printf("[Search] Symbolic search finished. Time elapsed: %fsec\n",
-         std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                       start_time)
-             .count());
+  double elapsed = get_elapsed_time_in_sec();
+  bool timed_out = config.search_time_limit_sec > 0 &&
+                   elapsed >= config.search_time_limit_sec;
+  printf("[Search] Symbolic search finished%s. Symbolic graph found: %ld. Time elapsed: %fsec\n",
+         timed_out ? " (time limit reached)" : "",
+         generated_graphs.size(),
+         elapsed);
   
   // save the verified symbolic graphs
   std::ofstream ofs(checkpoint_filename);
@@ -634,6 +649,11 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
   ++num_total_states;
   if (num_total_states % 100000 == 1) {
     show_statistics();
+  }
+  // Time limit check
+  if (config.search_time_limit_sec > 0 &&
+      get_elapsed_time_in_sec() > config.search_time_limit_sec) {
+    return;
   }
 
   if (level == SearchLevel::LV_KERNEL) {
@@ -838,7 +858,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
              op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_MAX_OP;
     };
 
-    if (filter(vector_map(tb_graph->operators, [&](auto const &op) { return op.op_type; }), is_reduction_op).size() > 2) {
+    if (filter(vector_map(tb_graph->operators, [&](auto const &op) { return op.op_type; }), is_reduction_op).size() > 3) {
       return;
     }
 
@@ -862,6 +882,8 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                                [&](int i) { return kn_abs_exprs[i]; });
       abstract_expr_eval(*tb_graph, input_exprs, abs_exprs, output_exprs);
     }
+
+    // std::cerr << json(*tb_graph) << std::endl;
 
     // Case B2: Generate pre-defined threadblock operator
     for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
@@ -929,8 +951,11 @@ bool KernelGraphGenerator::verify_symbolic_graph(
   if (match.is_valid()) {
     ++num_symbolic_graphs;
     ++num_valid_kernel_graphs;
-    std::cerr << "verified symbolic graph: " << json(symbolic_graph) << std::endl;
-    generated_graphs.push_back(json(symbolic_graph));
+#pragma omp critical
+    {
+      std::cerr << "verified symbolic graph: " << json(symbolic_graph) << std::endl;
+      generated_graphs.push_back(json(symbolic_graph));
+    }
     // AutoTuner auto_tuner(AutoTunerConfig{});
     // DimVarAssignment assignment = auto_tuner.tune(symbolic_graph);
     // kernel::Graph *tuned_graph = symbolic_graph.to_kernel_graph(assignment);
