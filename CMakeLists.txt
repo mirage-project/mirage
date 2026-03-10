@@ -136,9 +136,7 @@ if (NOT "${USE_CUDA}" STREQUAL "OFF")
     include_directories(${CUDA_INCLUDE_DIRS})
     message(STATUS "CUDA_INCLUDE_DIR=" ${CUDA_INCLUDE_DIRS})
     list(APPEND MIRAGE_LINK_LIBS ${CUDA_CUDART_LIBRARY})
-    # list(APPEND MIRAGE_LINK_LIBS ${CUDA_CUDA_LIBRARY})
-    list(APPEND MIRAGE_LINK_LIBS "/home/mengdiwu/miniconda3/targets/x86_64-linux/lib/stubs/libcuda.so")
-    # list(APPEND MIRAGE_LINK_LIBS "/home/mengdiwu/miniconda3/envs/mirage/lib/libcudart.so")
+    list(APPEND MIRAGE_LINK_LIBS ${CUDA_CUDA_LIBRARY})
   else()
     message(FATAL_ERROR "Cannot find CUDA, USE_CUDA=" ${USE_CUDA})
   endif(CUDA_FOUND)
@@ -269,23 +267,23 @@ install(FILES ${ABSTRACT_SUBEXPR_LIBRARIES}
 
 # C++ examples: each has a single .cc in cpp_examples/ and links to mirage_runtime
 set(CPP_EXAMPLE_BINARIES
-  dnn
-  multi_query_attn_inc_decode
-  multi_query_attn_spec_decode
-  multi_query_attn_prefill
-  group_query_attn_inc_decode
-  group_query_attn_spec_decode
-  group_query_attn_prefill
-  multi_head_attn_inc_decode
-  multi_head_attn_spec_decode
-  multi_head_attn_prefill
-  lora
-  mlp
-  moe
-  rms
-  gated_mlp
-  chameleon
-  egg_tests
+  # dnn
+  # multi_query_attn_inc_decode
+  # multi_query_attn_spec_decode
+  # multi_query_attn_prefill
+  # group_query_attn_inc_decode
+  # group_query_attn_spec_decode
+  # group_query_attn_prefill
+  # multi_head_attn_inc_decode
+  # multi_head_attn_spec_decode
+  # multi_head_attn_prefill
+  # lora
+  # mlp
+  # moe
+  # rms
+  # gated_mlp
+  # chameleon
+  # egg_tests
   symbolic_search
 )
 
@@ -298,6 +296,22 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
       PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
     target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
   endforeach()
+
+  # Symbolic sub-examples (cpp_examples/symbolic/)
+  foreach(target IN ITEMS rms_norm attention down_proj_residual_rmsnorm rmsnorm_mlp swiglu lora two_layer_mlp)
+    add_executable(symbolic_${target}
+      ${CPP_EXAMPLES_DIR}/symbolic/${target}.cc)
+    set_target_properties(symbolic_${target}
+      PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR}/symbolic)
+    target_link_libraries(symbolic_${target} mirage_runtime)
+  endforeach()
+
+  # Test: verifier check for NS-style rmsnorm topology
+  add_executable(test_verifier_rmsnorm
+    ${CPP_EXAMPLES_DIR}/symbolic/test_verifier_rmsnorm.cc)
+  set_target_properties(test_verifier_rmsnorm
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR}/symbolic)
+  target_link_libraries(test_verifier_rmsnorm mirage_runtime)
 endif()
 
 option(MIRAGE_BUILD_UNIT_TEST "build unit tests" OFF)
