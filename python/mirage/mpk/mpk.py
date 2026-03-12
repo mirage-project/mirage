@@ -131,14 +131,34 @@ class MPK:
         self.need_cpy_input = False
         self.src_input_tokens = None
         
-        self.step = args.step
-        self.tokens = args.tokens
-        if args.input_tokens.dtype != torch.int64:
-            self.need_cpy_input = True
-            self.input_tokens = torch.empty_like(args.input_tokens, dtype=torch.int64, device=args.input_tokens.device)
-            self.src_input_tokens = args.input_tokens
-        else:
-            self.input_tokens = args.input_tokens
+        # self.step = args.step
+        # self.tokens = args.tokens
+        # if args.input_tokens.dtype != torch.int64:
+        #     self.need_cpy_input = True
+        #     self.input_tokens = torch.empty_like(args.input_tokens, dtype=torch.int64, device=args.input_tokens.device)
+        #     self.src_input_tokens = args.input_tokens
+        # else:
+        #     self.input_tokens = args.input_tokens
+
+        # Always create buffers with size max_num_batched_tokens, NOT based on first batch size
+        # This ensures the buffer can accommodate any batch size up to max_num_batched_tokens
+        if args.step is not None:
+            # If input is a slice/view of a larger buffer, get the full buffer
+            # by using storage information to reconstruct the base tensor
+            if args.step.storage_offset() > 0 or args.step.numel() < args.step.untyped_storage().size() // args.step.element_size():
+                # args.step a view/slice, reconstruct full buffer
+                storage_size = args.step.untyped_storage().size() // args.step.element_size()
+                full_step = torch.tensor([], dtype=args.step.dtype, device=args.step.device).set_(
+                    args.step.untyped_storage(), 0, (storage_size,))
+                self.src_step = full_step
+            else:
+                self.src_step = args.step
+            # always create a buffer with max number batched tokens
+            if self.src_step.dtype != torch.int32 or self.src_step.shape[0] < self.max_num_batched_tokens:
+                self.need_cpy_step = True
+                self.step = torch.empty(self.max_num_batched_tokens, dtype=torch.int32, device=args.step.device)
+            else:
+                self.step = self.src_step
         self.output_tokens = args.output_tokens
         self.num_new_tokens = args.num_new_tokens
         self.prompt_lengths = args.prompt_lengths
