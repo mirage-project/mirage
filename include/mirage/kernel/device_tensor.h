@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "mirage/config.h"
 #include "mirage/cpu/cmem_tensor.h"
 #include "mirage/layout.h"
 #include "mirage/type.h"
@@ -25,8 +26,6 @@
 
 namespace mirage {
 namespace kernel {
-
-constexpr int MAX_TENSOR_DIMS = 4;
 
 class KNOperator;
 
@@ -107,10 +106,11 @@ struct alignas(16) DTensor {
     return num_elements() * data_type_size;
   }
 
+  static const DTensor EMPTY_TENSOR;
+
   // hash related functions
   size_t get_owner_independent_hash() const;
 
-  // bool has_same_fingerprint(DTensor const &ref) const;
   bool has_same_fingerprint(mirage::cpu::CTensor const &ref) const;
   mirage::cpu::CTensor copy_fingerprint_to_ctensor() const;
 
@@ -118,7 +118,7 @@ public:
   mirage::type::DataType data_type;
   mirage::layout::DmemLayout layout;
   int num_dims;
-  int dim[MAX_TENSOR_DIMS];
+  int dim[mirage::config::MAX_TENSOR_DIMS];
   type::GuidType guid;
   // int stride[MAX_TENSOR_DIMS];
   //  DTensor fields
@@ -130,7 +130,7 @@ public:
   int64_t data_offset;
   // pointer to fingerprint
   // mirage::type::FPType *fp_ptr;
-  // offset in device memory
+  // offset in device memory in bytes
   int64_t fp_offset;
 
   static std::atomic<int64_t> next_guid;

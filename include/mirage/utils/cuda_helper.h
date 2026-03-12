@@ -16,12 +16,10 @@
 #pragma once
 
 #include "cutlass/array.h"
+#include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include "mirage/config.h"
 #include "mirage/type.h"
-#include <cublas_v2.h>
-#include <cudnn.h>
-#include <cutlass/cutlass.h>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -36,15 +34,6 @@ namespace mirage {
     std::cerr << _message.str() << "\nAborting...\n";                          \
     assert(false);                                                             \
     exit(1);                                                                   \
-  } while (0)
-
-#define checkCUDNN(status)                                                     \
-  do {                                                                         \
-    std::stringstream _error;                                                  \
-    if (status != CUDNN_STATUS_SUCCESS) {                                      \
-      _error << "CUDNN failure: " << cudnnGetErrorString(status);              \
-      FatalError(_error.str());                                                \
-    }                                                                          \
   } while (0)
 
 #define checkCURAND(status)                                                    \
@@ -155,7 +144,7 @@ namespace utils {
 using namespace mirage::type;
 
 struct FpPointerList {
-  mirage::type::FPType *ptrs[mirage::config::MAX_NUM_GPUS];
+  mirage::type::FPType *ptrs[mirage::config::MAX_NUM_DEVICES];
 };
 
 cudaDataType_t to_cuda_datatype(DataType type);

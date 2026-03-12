@@ -17,8 +17,8 @@
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/type.h"
+#include "mirage/vector_types.h"
 #include <vector>
-#include <vector_types.h>
 
 namespace mirage {
 namespace threadblock {
@@ -56,7 +56,8 @@ public:
             mirage::kernel::DTensor const &dtensor,
             int3 input_map,
             int forloop_dim,
-            mirage::layout::SmemLayout layout);
+            mirage::layout::SmemLayout layout,
+            bool store_in_dmem);
   ~TBInputOp();
 
   operator json() const override;

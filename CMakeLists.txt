@@ -1,6 +1,4 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
-project(MIRAGE LANGUAGES C CXX CUDA)
-
 message(STATUS "CMake Version: ${CMAKE_VERSION}")
 
 if (EXISTS ${CMAKE_CURRENT_BINARY_DIR}/config.cmake)
@@ -9,6 +7,13 @@ else()
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/config.cmake)
     include(${CMAKE_CURRENT_SOURCE_DIR}/config.cmake)
   endif()
+endif()
+
+if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  project(MIRAGE LANGUAGES C CXX CUDA)
+else()
+  message(STATUS "USE_CUDA is OFF, will not use CUDA")
+  project(MIRAGE LANGUAGES C CXX)
 endif()
 
 #include directories
@@ -20,12 +25,22 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_LIST_DIR}/cmake)
 
 #add_subdirectory(deps/cutlass)
 
-set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
+set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
 #set(CUTLASS_NVCC_ARCHS "80;86")
 
 file(GLOB_RECURSE MIRAGE_SRCS
   src/*.cc
 )
+
+if (${USE_CUDA} STREQUAL "OFF")
+  file(GLOB_RECURSE MIRAGE_EXCLUDE_SRCS
+    src/transpiler/*.cc
+  )
+
+  list(REMOVE_ITEM MIRAGE_SRCS ${MIRAGE_EXCLUDE_SRCS})
+  
+  message(STATUS "MIRAGE_SRCS: ${MIRAGE_SRCS}")
+endif()
 
 file(GLOB_RECURSE MIRAGE_CUDA_SRCS
   src/*.cu
@@ -35,11 +50,13 @@ include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-std=c++17" SUPPORT_CXX17)
 
 #set CUDA version
-include(deps/cutlass/CUDA.cmake)
-string(REPLACE "." ";" CUDA_VERSION_PARTS ${CUDA_VERSION})
-list(GET CUDA_VERSION_PARTS 0 CUDA_VERSION_MAJOR)
-list(GET CUDA_VERSION_PARTS 1 CUDA_VERSION_MINOR)
-list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__CUDACC_VER_MINOR__=${CUDA_VERSION_MINOR}")
+if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  include(deps/cutlass/CUDA.cmake)
+  string(REPLACE "." ";" CUDA_VERSION_PARTS ${CUDA_VERSION})
+  list(GET CUDA_VERSION_PARTS 0 CUDA_VERSION_MAJOR)
+  list(GET CUDA_VERSION_PARTS 1 CUDA_VERSION_MINOR)
+  list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__CUDACC_VER_MINOR__=${CUDA_VERSION_MINOR}")
+endif()
 
 # TODO: Currently disable CUTLASS_ARCH_MMA_SM80_ENABLED flag
 # since we target Triton to perform codegen
@@ -64,8 +81,6 @@ if (NOT "${USE_CUDA}" STREQUAL "OFF")
     message(STATUS "CUDA_INCLUDE_DIR=" ${CUDA_INCLUDE_DIRS})
     list(APPEND MIRAGE_LINK_LIBS ${CUDA_CUDART_LIBRARY})
     list(APPEND MIRAGE_LINK_LIBS ${CUDA_CUDA_LIBRARY})
-    list(APPEND MIRAGE_LINK_LIBS ${CUDA_CUDNN_LIBRARY})
-    list(APPEND MIRAGE_LINK_LIBS ${CUDA_CUBLAS_LIBRARY})
   else()
     message(FATAL_ERROR "Cannot find CUDA, USE_CUDA=" ${USE_CUDA})
   endif(CUDA_FOUND)
@@ -94,6 +109,9 @@ list(APPEND MIRAGE_LINK_LIBS ${Z3_LIBRARIES})
 
 add_subdirectory(deps/json)
 list(APPEND MIRAGE_LINK_LIBS nlohmann_json::nlohmann_json)
+
+link_directories(${CMAKE_SOURCE_DIR}/build/release)
+list(APPEND MIRAGE_LINK_LIBS abstract_subexpr)
 
 #add_subdirectory(deps/z3 z3 EXCLUDE_FROM_ALL)
 #include_directories(deps/z3/src/api/c++)
@@ -146,11 +164,32 @@ endif()
 include_directories(${ABSTRACT_SUBEXPR_LIB})
 list(APPEND MIRAGE_LINK_LIBS ${ABSTRACT_SUBEXPR_LIBRARIES})
 
-set_target_properties(mirage_runtime PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+if(FORMAL_VERIFIER_LIB AND FORMAL_VERIFIER_LIBRARIES)
+  message(STATUS "FORMAL_VERIFIER_LIB: ${FORMAL_VERIFIER_LIB}")
+  message(STATUS "FORMAL_VERIFIER_LIBRARIES: ${FORMAL_VERIFIER_LIBRARIES}")
+else()
+  message(STATUS "FORMAL_VERIFIER_LIB not set, will build it")
+endif()
+include_directories(${FORMAL_VERIFIER_LIB})
+list(APPEND MIRAGE_LINK_LIBS ${FORMAL_VERIFIER_LIBRARIES})
 
-set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
+set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "75;80;86;89;90")
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
+
+if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_BACKEND_USE_CUDA)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CUDA)
+endif()
+
+if (NOT "${USE_NKI}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_BACKEND_USE_NKI)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CPU)
+endif()
+
+if (NOT "${USE_FORMAL_VERIFIER}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_FORMAL_VERIFIER)
+endif()
 
 target_link_libraries(mirage_runtime ${MIRAGE_LINK_LIBS})
 
@@ -345,16 +384,6 @@ endif()
 if("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN egg_tests)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN profile)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
   add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
   set_target_properties(${CPP_EXAMPLES_BIN}

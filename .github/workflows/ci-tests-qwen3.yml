@@ -1,0 +1,61 @@
+name: mpk-qwen-ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: mpk-qwen-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-inference:
+    runs-on: [self-hosted, gpu, a100]
+
+    env:
+      HF_HOME: /home/haojia/hf_cache
+      TRANSFORMERS_CACHE: /home/haojia/hf_cache
+      HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+      CUDA_VISIBLE_DEVICES: "0"
+      CUBLAS_WORKSPACE_CONFIG: ":16:8"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . -v
+          pip install pytest
+
+      - name: Warm up HF cache (optional)
+        run: |
+          mkdir -p "$HF_HOME"
+          echo "HF cache at $HF_HOME"
+
+      - name: Set MIRAGE_HOME
+        run: echo "MIRAGE_HOME=$PWD" >> $GITHUB_ENV
+
+      - name: Run Qwen3 Torch vs MPK comparison
+        env:
+          MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
+        run: |
+          bash tests/ci-tests/run_ci_tests_qwen3.sh
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpk-qwen-outputs
+          path: |
+            outputs/
+            logs/

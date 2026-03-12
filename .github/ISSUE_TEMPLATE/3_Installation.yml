@@ -1,0 +1,32 @@
+name: "Installation Issue"
+description: "Report an issue with installation"
+title: "[Installation] - Brief Description"
+labels: ["installation"]
+
+body:
+  - type: textarea
+    id: issue_description
+    attributes:
+      label: "Issue Description"
+      description: "Provide a detailed description of the installation issue."
+      placeholder: "Enter issue description here..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: build_env
+    attributes:
+      label: "Build Environment"
+      description: "Provide details about your build environment (e.g., OS, dependencies, versions)."
+      placeholder: "Enter build environment details here..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_message
+    attributes:
+      label: "Error Message Output"
+      description: "Provide the error message or logs."
+      placeholder: "Enter error message or logs here..."
+    validations:
+      required: true

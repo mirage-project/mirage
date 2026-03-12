@@ -26,13 +26,15 @@ size_t get_datatype_size(DataType type) {
     case DT_BFLOAT16:
     case DT_FLOAT16:
       return 2;
+    case DT_INT32:
     case DT_FLOAT32:
       return 4;
+    case DT_INT64:
     case DT_DOUBLE:
       return 8;
     case DT_UNKNOWN:
     default:
-      assert(false);
+      assert(false && "Unsupported datatype");
   }
 }
 
@@ -50,6 +52,8 @@ std::string get_datatype_str(DataType dtype) {
       return "half_t";
     case DT_UINT16:
       return "uint16";
+    case DT_INT32:
+      return "int32";
     case DT_FLOAT32:
       return "float";
     case DT_DOUBLE:

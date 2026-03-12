@@ -1,7 +1,12 @@
 cmake>=3.24
 cython>=0.28
-z3-solver==4.15.0.0
-# torch>=2.0
+z3-solver==4.16
+torch>=2.4
+accelerate==1.8.0
 numpy
 graphviz
 tqdm
+transformers==4.57.1
+protobuf
+tg4perfetto @ git+https://github.com/flashinfer-ai/tg4perfetto.git
+cuda-python

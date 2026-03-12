@@ -29,8 +29,6 @@
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
 
-#include "cutlass/gemm/collective/builders/sm90_common.inl"
-
 namespace mirage {
 namespace transpiler {
 
@@ -319,14 +317,15 @@ CustomOPTranspileResult
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
-  if (GPU_CC::H100 != config.target_cc ||
+  if (GPU_CC::H100 > config.target_cc ||
       (config::MAX_NUM_WARP_GROUPS <
        config.num_consumer_wgs + config.num_producer_wgs) ||
       (num_threads !=
            (config.num_consumer_wgs + config.num_producer_wgs) * 128 &&
        (g.forloop_range > 1))) {
     assert(false && "compiler assertion failure");
-    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, 0, ""};
+    return CustomOPTranspileResult{
+        CUDA_T_CONFIG_ERROR, func_name, 0, 0, "", {}};
   }
 
   // int barrier_size = 16 * config.pipeline_stages;
@@ -554,8 +553,8 @@ CustomOPTranspileResult
   code.e("");
   code.e("__syncthreads();");
 
-  // add tma templates for H100
-  if (GPU_CC::H100 == config.target_cc) {
+  // add tma templates for H100 and later GPUs
+  if (GPU_CC::H100 <= config.target_cc) {
 
     assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
     string tma;
@@ -821,7 +820,7 @@ CustomOPTranspileResult
       // Pick up MMA atom
       // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
       // small
-      if (GPU_CC::H100 == config.target_cc) {
+      if (GPU_CC::H100 <= config.target_cc) {
         // Hopper wgmma
         assert(num_threads >= 128);
       } else {

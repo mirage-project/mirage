@@ -20,42 +20,64 @@ ProbabilisticVerifier::ProbabilisticVerifier(kernel::Graph const &input_graph) {
 }
 
 OutputMatch ProbabilisticVerifier::verify(kernel::Graph const &graph) {
-  std::lock_guard<std::mutex> lock(fp_mutex);
 
-  std::vector<kernel::DTensor> fingerprints;
-
-  for (auto const &op : graph.operators) {
-    op->fingerprint();
-  }
+  int num_outputs = 0;
 
   for (auto const &op : graph.operators) {
     for (auto const &tensor : op->output_tensors) {
       if (get_num_consumers(graph, tensor) == 0) {
-        fingerprints.push_back(tensor);
+        num_outputs++;
       }
     }
   }
 
-  assert(fingerprints.size() == input_graph_fingerprints.size());
+  OutputMatch match(num_outputs);
+  bool verified = false;
 
-  auto verify_with_match = [&](OutputMatch const &match) {
-    for (size_t i = 0; i < match.size(); i++) {
-      if (!fingerprints[match[i]].has_same_fingerprint(
-              input_graph_fingerprints[i])) {
-        return false;
+  // #pragma omp single
+  {
+    std::vector<kernel::DTensor> fingerprints;
+
+    for (auto const &op : graph.operators) {
+      op->fingerprint();
+    }
+
+    for (auto const &op : graph.operators) {
+      for (auto const &tensor : op->output_tensors) {
+        if (get_num_consumers(graph, tensor) == 0) {
+          fingerprints.push_back(tensor);
+        }
       }
     }
-    return true;
-  };
 
-  OutputMatch match(fingerprints.size());
-  do {
-    if (verify_with_match(match)) {
-      assert(match.is_valid());
-      return match;
-    }
-  } while (match.next());
-  return OutputMatch::invalid_match();
+    assert(fingerprints.size() == input_graph_fingerprints.size());
+
+    auto verify_with_match = [&](OutputMatch const &match) {
+      for (size_t i = 0; i < match.size(); i++) {
+        if (!fingerprints[match[i]].has_same_fingerprint(
+                input_graph_fingerprints[i])) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    OutputMatch match(fingerprints.size());
+    do {
+      if (verify_with_match(match)) {
+        assert(match.is_valid());
+        // return match;
+        verified = true;
+        break;
+      }
+    } while (match.next());
+    // return OutputMatch::invalid_match();
+  }
+  if (verified) {
+    return match;
+  } else {
+    return OutputMatch::invalid_match();
+  }
 }
 
 } // namespace search
