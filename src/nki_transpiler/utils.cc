@@ -48,8 +48,9 @@ std::string get_tensor_variable_name(kernel::DTensor const &tensor) {
   return fmt("dtensor$", tensor.guid);
 }
 
-std::string get_tensor_variable_name(threadblock::STensor const &tensor) {
-  return fmt("stensor$", tensor.guid);
+std::string get_tensor_variable_name(threadblock::STensor const &tensor,
+                                     int buffer_id) {
+  return fmt("stensor$_buffer$", tensor.guid, buffer_id);
 }
 
 } // namespace nki_transpiler
