@@ -115,6 +115,19 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 
 valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
 
+def _detect_cxx_standard():
+    """Use c++20 if the host compiler supports it, otherwise fall back to c++17."""
+    try:
+        result = subprocess.run(
+            ["g++", "-std=c++20", "-x", "c++", "-E", "-"],
+            input="", capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return "-std=c++20"
+    except FileNotFoundError:
+        pass
+    return "-std=c++17"
+
 def get_compile_command(
     mpk,
     target_cc,
@@ -168,18 +181,19 @@ def get_compile_command(
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/tools/util/include')}",
-        f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
+        f"-I{os.path.join(mirage_deps_path, 'json/include')}",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
 
     flags = [
         "-shared",
-        "-std=c++20",
+        _detect_cxx_standard(),
         "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
+        "-lstdc++fs",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
@@ -1336,7 +1350,7 @@ class PersistentKernel:
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
-        so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
+        so_path = os.path.join(tempdir, "test" + sysconfig.get_config_var("EXT_SUFFIX"))
         # check json file
         json_file_path = os.path.join(tempdir, "task_graph.json")
         # build if files are not exist
@@ -1367,13 +1381,8 @@ class PersistentKernel:
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
 
-        # find mirage home
-        if "MIRAGE_HOME" in os.environ:
-            MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME")
-        else:
-            raise RuntimeError(
-                "MIRAGE_HOME unspecified; Please set MIRAGE_HOME to be the root of the Mirage folder"
-            )
+        # find mirage home (fall back to MIRAGE_ROOT from get_key_paths)
+        MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME", MIRAGE_ROOT)
 
         NVSHMEM_INC_PATH = None
         NVSHMEM_LIB_PATH = None
