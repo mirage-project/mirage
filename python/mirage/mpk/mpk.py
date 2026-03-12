@@ -131,8 +131,8 @@ class MPK:
         self.need_cpy_input = False
         self.src_input_tokens = None
         
-        # self.step = args.step
-        # self.tokens = args.tokens
+        self.step = args.step
+        self.tokens = args.tokens
         # if args.input_tokens.dtype != torch.int64:
         #     self.need_cpy_input = True
         #     self.input_tokens = torch.empty_like(args.input_tokens, dtype=torch.int64, device=args.input_tokens.device)
