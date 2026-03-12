@@ -1,12 +1,12 @@
 #pragma once
 
 #include <vector>
-#include <vector_types.h>
 
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/type.h"
 #include "mirage/utils/hash_utils.h"
+#include "mirage/vector_types.h"
 
 namespace mirage {
 namespace search {

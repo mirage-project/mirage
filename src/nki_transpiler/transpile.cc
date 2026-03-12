@@ -46,7 +46,7 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
 
 NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
                              NKITranspilerConfig const &_config)
-    : config(_config) {
+    : config(_config), nki_custom_kernel_idx_counter(0) {
   // using mirnage::type namespace to simplify code
   using namespace mirage::type;
 
@@ -217,9 +217,13 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
             case TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
               assert(stensor_inputs.size() == 1);
               assert(bop->output_tensors.size() == 1);
-              threadblock::STensor st = tbg->forloop_accum(
-                  stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
-              st = tbg->reduction(st, st.num_dims - 1);
+              // threadblock::STensor st = tbg->forloop_accum(
+              //     stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
+              // st = tbg->reduction(st, st.num_dims - 1);
+              // stensor_mapping[bop->output_tensors[0].guid] = st;
+              threadblock::STensor st = tbg->reduction(
+                  stensor_inputs[0], stensor_inputs[0].num_dims - 1);
+              st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
@@ -235,8 +239,10 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
               size_t normalization_factor =
                   st.dim[st.num_dims - 1] * customized_op->bgraph.forloop_range;
               st = tbg->mul_scalar(st, (1.0f / normalization_factor));
-              st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
+              // st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
+              // st = tbg->reduction(st, st.num_dims - 1);
               st = tbg->reduction(st, st.num_dims - 1);
+              st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
               st = tbg->sqrt(st);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
@@ -339,9 +345,9 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
     for (int i = 0; i < num_dims; i++) {
       partition_exprs.push_back(s_is_partition[stensor.guid][i]);
       // A partition dimension cannot be larger than 128
-      if (stensor.dim[i] > 128) {
-        opt.add(!s_is_partition[stensor.guid][i]);
-      }
+      // if (stensor.dim[i] > 128) {
+      //   opt.add(!s_is_partition[stensor.guid][i]);
+      // }
       // A partition dimension must be the last two dims
       if ((i != num_dims - 1) && (i != num_dims - 2)) {
         opt.add(!s_is_partition[stensor.guid][i]);
@@ -367,6 +373,8 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
             // TODO: does the cost of loading stensor from HBM to SBUF
             // depend on the partition dimension???
             // Currently do nothing
+            tb::STensor const &stensor = tb_op->output_tensors.at(0);
+            opt.add(!s_is_partition[stensor.guid][stensor.num_dims - 1]);
             break;
           }
           case type::TB_OUTPUT_OP: {
@@ -406,15 +414,16 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
                                        ceil_div(input1.dim[num_dims - 1], 512);
             int num_matmul_for_case2 = ceil_div(input1.dim[num_dims - 1], 128) *
                                        ceil_div(input0.dim[num_dims - 2], 512);
-            if (num_matmul_for_case1 < num_matmul_for_case2) {
-              // Enforce using case 1 by setting output.dim[num_dims-2] as
-              // the partition dim for the output
-              opt.add(s_is_partition[output.guid][num_dims - 2]);
-            } else if (num_matmul_for_case1 > num_matmul_for_case2) {
-              // Enforce using case 2 by setting output.dim[num_dims-1] as
-              // the partition dim for the output
-              opt.add(s_is_partition[output.guid][num_dims - 1]);
-            }
+            // if (num_matmul_for_case1 < num_matmul_for_case2) {
+            //   // Enforce using case 1 by setting output.dim[num_dims-2] as
+            //   // the partition dim for the output
+            //   opt.add(s_is_partition[output.guid][num_dims - 2]);
+            // } else if (num_matmul_for_case1 > num_matmul_for_case2) {
+            //   // Enforce using case 2 by setting output.dim[num_dims-1] as
+            //   // the partition dim for the output
+            //   opt.add(s_is_partition[output.guid][num_dims - 1]);
+            // }
+            opt.add(s_is_partition[output.guid][num_dims - 2]);
             break;
           }
           case type::TB_EXP_OP:
@@ -466,6 +475,17 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
           }
           case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
             // Do nothing
+            tb::STensor const &input = tb_op->input_tensors.at(0);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            assert(input.num_dims == output.num_dims);
+            int num_dims = input.num_dims;
+            // Need a transpose is input and output pick different partition dim
+            for (int i = 0; i < num_dims; i++) {
+              costs.push_back(z3::ite(!s_is_partition[input.guid][i] &&
+                                          s_is_partition[output.guid][i],
+                                      ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                      ctx.int_val(0)));
+            }
             break;
           }
           case type::TB_REDUCTION_0_OP:
@@ -548,7 +568,6 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   header.e("import neuronxcc.nki as nki");
   header.e("import neuronxcc.nki.language as nl");
   header.e("import neuronxcc.nki.isa as nisa");
-  header.e("from torch_neuronx import nki_jit");
   CodeKeeper exec;
   exec.e("if __name__ == \"__main__\":");
   exec.inc_indent();
@@ -565,28 +584,16 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
              fmt("dtensor$", dtensor.guid),
              shape);
     }
-#ifdef DEADCODE
-    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
-      std::string shape;
-      kn::DTensor dtensor = op->output_tensors.at(0);
-      for (int i = 0; i < dtensor.num_dims; i++) {
-        shape += fmt("$,", dtensor.dim[i]);
-      }
-      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
-    }
-    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      std::string shape;
-      kn::DTensor dtensor = op->input_tensors.at(0);
-      for (int i = 0; i < dtensor.num_dims; i++) {
-        shape += fmt("$,", dtensor.dim[i]);
-      }
-      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
-    }
-#endif
+  }
+  // Generate helper functions
+  CodeKeeper helper;
+  std::vector<HelperFunction> helper_functions;
+  helper_functions.push_back(tiled_transpose_function());
+  helper_functions.push_back(divide_function());
+  helper_functions.push_back(tiled_matmul_accum_function());
+  helper_functions.push_back(tiled_matmul_function());
+  for (HelperFunction const &hf : helper_functions) {
+    helper.e(hf.get_code());
   }
   CodeKeeper custom_kernels;
   for (kn::KNOperator *const op : g->operators) {
@@ -604,8 +611,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
         std::vector<std::string> dtensor_names;
-        for (kn::DTensor const &dtensor :
-             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
           std::string dtensor_name = fmt("dtensor$", dtensor.guid);
           dtensor_names.push_back(dtensor_name);
         }
@@ -613,12 +619,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         NKICustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
         // Launch kernels
         custom_kernels.e(result.code);
-        exec.e("$[$, $, $]($)",
-               result.func_name,
-               bgraph.grid_dim.x,
-               bgraph.grid_dim.y,
-               bgraph.grid_dim.z,
-               dtensor_names);
+        exec.e("$($)", result.func_name, dtensor_names);
         break;
       }
       case type::KN_ADD_OP:
@@ -651,8 +652,9 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
     }
   }
 
-  std::string code = fmt("$\n$\n$",
+  std::string code = fmt("$\n$\n$\n$",
                          header.to_string(),
+                         helper.to_string(),
                          custom_kernels.to_string(),
                          exec.to_string());
   return NKITranspileResult{std::move(code)};

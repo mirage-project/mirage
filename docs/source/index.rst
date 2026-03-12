@@ -10,7 +10,7 @@ Mirage is a tensor algebra superoptimizer that automatically discovers highly-op
 Getting Started
 ---------------
 
-- Follow the :doc:`instllation <installation>` to install Mirage
+- Follow the :doc:`installation <installation>` to install Mirage
 - Take a look at the :doc:`tutorials <tutorials/index>` to learn how to use Mirage to superoptimize your DNNs
 
 .. toctree::
@@ -23,6 +23,7 @@ Getting Started
    cuda-transpiler
    triton-transpiler
    tutorials/index
+   linear_kernel
 
 .. Indices and tables
 .. ==================

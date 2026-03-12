@@ -14,35 +14,68 @@ preload_so(_z3_so_path, "libz3.so")
 
 _this_dir = os.path.dirname(__file__)
 _mirage_root = os.path.abspath(os.path.join(_this_dir, "..", ".."))
-_rust_so_path = os.path.join(_mirage_root, "build", "release", "libabstract_subexpr.so")
-preload_so(_rust_so_path, "libabstract_subexpr.so")
+
+def _find_native_lib(lib_name):
+    """Find a native .so, checking bundled location first (non-editable),
+    then build directory (editable install)."""
+    bundled = os.path.join(_this_dir, "lib", f"lib{lib_name}.so")
+    if os.path.isfile(bundled):
+        return bundled
+    editable = os.path.join(
+        _mirage_root, "build", lib_name, "release", f"lib{lib_name}.so"
+    )
+    if os.path.isfile(editable):
+        return editable
+    raise ImportError(
+        f"Could not find lib{lib_name}.so. Checked:\n"
+        f"  bundled: {bundled}\n  editable: {editable}"
+    )
+
+_subexpr_so_path = _find_native_lib("abstract_subexpr")
+_formal_verifier_so_path = _find_native_lib("formal_verifier")
+preload_so(_subexpr_so_path, "libabstract_subexpr.so")
+preload_so(_formal_verifier_so_path, "libformal_verifier.so")
 
 from .core import *
-
 from .kernel import *
+from .mpk.persistent_kernel import PersistentKernel
+from .mpk.speculative import spec_decode_class
+# Re-export MPK interfaces for external integrations (e.g., vLLM Mirage backend)
+from .mpk.mpk import MPK, MPKMetadata
+from .mpk.models.graph_builder import MirageModelConfig
 from .threadblock import *
 
+
 class InputNotFoundError(Exception):
-    """Raised when cannot find input tensors """
+    """Raised when cannot find input tensors"""
+
     pass
+
 
 def set_gpu_device_id(device_id: int):
     global_config.gpu_device_id = device_id
     core.set_gpu_device_id(device_id)
 
-def bypass_compile_errors(value: bool=True):
+
+def bypass_compile_errors(value: bool = True):
     global_config.bypass_compile_errors = value
+
 
 def new_kernel_graph():
     kgraph = core.CyKNGraph()
     return KNGraph(kgraph)
 
-def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int):
+
+def new_threadblock_graph(
+    grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int
+):
     bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)
     return TBGraph(bgraph)
 
+
 # Other Configurations
 from .global_config import global_config
+
 # Graph Datasets
 from .graph_dataset import graph_dataset
 from .version import __version__

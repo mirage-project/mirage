@@ -15,12 +15,13 @@
 
 #pragma once
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+
 #include "mirage/utils/fingerprint_functions.h"
 
 namespace mirage {
 namespace threadblock {
 
-using namespace cutlass;
 using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
@@ -74,3 +75,5 @@ public:
 
 } // namespace threadblock
 } // namespace mirage
+
+#endif // MIRAGE_FINGERPRINT_USE_CUDA

@@ -22,6 +22,7 @@
 
 #include "mirage/kernel/element_binary.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/nki_transpiler/helper_function.h"
 #include "mirage/transpiler/structs.h"
 
 namespace mirage {
@@ -45,6 +46,8 @@ struct STensorMeta {
 struct NKITranspilerConfig {
   // Target compute capability
   int target_cc;
+  // Whether use double buffer
+  bool use_double_buffer;
 };
 
 struct NeuronArch {
@@ -104,6 +107,8 @@ private:
   std::vector<mirage::kernel::DTensor> mugraph_output_tensors;
   std::unordered_map<decltype(tb::STensor::guid), STensorMeta>
       stensor_metas; // STensor guid -> metadata
+  int nki_custom_kernel_idx_counter;
+
 public:
   NKITranspiler(kernel::Graph const *_graph,
                 NKITranspilerConfig const &_config);
