@@ -563,6 +563,14 @@ TaskGraphResult print_task_graph(
     code.e("using json = nlohmann::json;");
   }
   code.e("using namespace mirage::runtime;");
+  // Global variable for runtime JSON path (for kernel reuse across directories)
+  if (use_json_format) {
+    code.e("");
+    code.e("// Global variable for runtime JSON path (referenced by Python for "
+           "kernel reuse)");
+    code.e("std::string g_task_graph_json_path;");
+    code.e("");
+  }
   code.e("size_t get_event_id(int my_gpu_id, size_t event_pos, bool "
          "nvshmem_event) {");
   code.e("size_t event_id = ((static_cast<size_t>(my_gpu_id) << 32) | "
@@ -583,9 +591,22 @@ TaskGraphResult print_task_graph(
     code.e("                          std::vector<TaskId> &first_tasks,");
     code.e("                          std::map<std::string, void*> const "
            "&all_tensors) {");
-    code.e("std::filesystem::path file_path(__FILE__);");
-    code.e("std::ifstream "
-           "json_file(file_path.parent_path().string()+\"/task_graph.json\");");
+    // Use g_task_graph_json_path if set (for kernel reuse), otherwise fall back
+    // to __FILE__
+    code.e("  std::string json_path = g_task_graph_json_path;");
+    code.e("  if (json_path.empty()) {");
+    code.e(
+        "    // Fall back to __FILE__ based path for backward compatibility");
+    code.e("    std::filesystem::path file_path(__FILE__);");
+    code.e("    json_path = "
+           "file_path.parent_path().string()+\"/task_graph.json\";");
+    code.e("  }");
+    code.e("  std::ifstream json_file(json_path);");
+    code.e("  if (!json_file.is_open()) {");
+    code.e("    fprintf(stderr, \"ERROR: Failed to open task graph JSON file: "
+           "%s\\n\", json_path.c_str());");
+    code.e("    abort();");
+    code.e("  }");
     code.e("nlohmann::json json_task_graph;");
     code.e("json_file >> json_task_graph;");
     // load tasks
@@ -696,7 +717,9 @@ TaskGraphResult print_task_graph(
          "&all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");
   code.e("                                  int num_gpus,");
-  code.e("                                  int my_gpu_id) {");
+  code.e("                                  int my_gpu_id,");
+  code.e("                                  std::map<std::string, void*> const "
+         "&model_tensors) {");
   code.e("assert(num_gpus = $);", num_gpus);
 
   if (use_json_format) {
@@ -706,7 +729,10 @@ TaskGraphResult print_task_graph(
     IODesc desc = iter.second;
     switch (desc.type) {
       case IODesc::TorchTensor: {
-        code.e("char *$ = (char*)($);", desc.name, desc.torch_data_ptr);
+        // Use runtime tensor lookup
+        code.e("char *$ = static_cast<char*>(model_tensors.at(\"$\"));",
+               desc.name,
+               desc.name);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
@@ -714,7 +740,10 @@ TaskGraphResult print_task_graph(
       }
       case IODesc::FusedTorchTensor: {
         for (auto const &sdesc : desc.sub_descs) {
-          code.e("char *$ = (char*)($);", sdesc.name, sdesc.torch_data_ptr);
+          // Use runtime tensor lookup
+          code.e("char *$ = static_cast<char*>(model_tensors.at(\"$\"));",
+                 sdesc.name,
+                 sdesc.name);
           if (use_json_format) {
             code.e("all_tensors[\"$\"] = $;", sdesc.name, sdesc.name);
           }
@@ -768,17 +797,19 @@ TaskGraphResult print_task_graph(
         }
         size_t start_addr_offset = 0;
         for (int i = 0; i < desc.sub_descs.size(); i++) {
-          code.e("CUDA_CHECK(cudaMemcpy2DAsync(reinterpret_cast<void *>($ + "
-                 "$), $, "
-                 "reinterpret_cast<const void *>($), $, $, $, "
-                 "cudaMemcpyDeviceToDevice));",
-                 desc.name,         /*dst address*/
-                 start_addr_offset, /*dst bytes offset between each copy*/
-                 bytes_per_group,   /*dst bytes offset between each copy*/
-                 desc.sub_descs[i].torch_data_ptr, /*src address*/
-                 bytes_per_tensor[i], /*src bytes offset between each copy*/
-                 bytes_per_tensor[i], /*width*/
-                 desc.num_groups      /*height*/
+          // Use runtime tensor lookup for shuffled tensor source addresses
+          code.e(
+              "CUDA_CHECK(cudaMemcpy2DAsync(reinterpret_cast<void *>($ + "
+              "$), $, "
+              "model_tensors.at(\"$\"), $, $, $, "
+              "cudaMemcpyDeviceToDevice));",
+              desc.name,              /*dst address*/
+              start_addr_offset,      /*dst bytes offset between each copy*/
+              bytes_per_group,        /*dst bytes offset between each copy*/
+              desc.sub_descs[i].name, /*src tensor name - looked up at runtime*/
+              bytes_per_tensor[i],    /*src bytes offset between each copy*/
+              bytes_per_tensor[i],    /*width*/
+              desc.num_groups         /*height*/
           );
           start_addr_offset += bytes_per_tensor[i];
         }
