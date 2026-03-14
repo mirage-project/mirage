@@ -4,9 +4,16 @@ from nvfp4_util import make_sequential_nvfp4_tensors, nvfp4_block_scaled_matmul
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
-reduction_sizes = [768]
+# Minimum is 256
+# MMA_M = 128, N 128, K 64
+# 16B
+# 16 SF
+# 16 FP4
+# 128 x 4b
+# 128 x 16b
+reduction_sizes = [256]
 output_sizes = [128]
-batch_size = 1
+batch_size = 128
 has_residual = False
 
 for reduction_size in reduction_sizes:
@@ -18,6 +25,9 @@ for reduction_size in reduction_sizes:
         x, w, x_sf, w_sf = make_sequential_nvfp4_tensors(
             batch_size, output_size, reduction_size
         )
+        
+        print(f"x shape: {x.shape}")
+        print(f"w shape: {w.shape}")
 
         print(f"x[0, :4] = {x[0, :4].tolist()}  (expect [0x31, 0x75, 0xB9, 0xFD])")
         print(f"w[0, :4] = {w[0, :4].tolist()}  (expect [0x20, 0x64, 0xA8, 0xEC])")
@@ -30,7 +40,7 @@ for reduction_size in reduction_sizes:
             residual = None
         print("Launching reference implementation")
         torch_out = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, reduction_size, residual=residual)
-        print(torch_out)
+        # print(torch_out)
         print("Launching custom implementation")
         runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf, w, w_sf, residual, output)
         print(output)

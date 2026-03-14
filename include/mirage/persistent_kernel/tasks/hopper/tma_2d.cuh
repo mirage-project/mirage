@@ -346,7 +346,7 @@ private:
     uint32_t const *smem_box_shape_ptr = &smem_box_shape[0];
     uint32_t const *smem_box_stride_ptr = &smem_box_stride[0];
 
-#if 0
+#if 1
     printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
           gmem_prob_shape[0],
           gmem_prob_shape[1],

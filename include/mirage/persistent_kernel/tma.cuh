@@ -21,7 +21,46 @@
 namespace mirage {
 namespace runtime {
 
+using namespace cute;
 using bfloat16 = type::bfloat16_t;
+
+// https://github.com/NVIDIA/cutlass/blob/73c59c055c0fec87792470dbf33325158113db5e/include/cute/arch/copy_sm90_desc.hpp#L206
+template <class T>
+constexpr CUtensorMapDataType
+to_CUtensorMapDataType() {
+  if constexpr (is_same_v<T,        int8_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT8;    } else
+  if constexpr (is_same_v<T,       uint8_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT8;    } else
+  if constexpr (is_same_v<T,  float_e4m3_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT8;    } else
+  if constexpr (is_same_v<T,  float_e5m2_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT8;    } else
+  if constexpr (is_same_v<T, float_ue4m3_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT8;    } else
+  if constexpr (is_same_v<T, float_ue8m0_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT8;   } else
+  if constexpr (is_same_v<T, type_erased_dynamic_float8_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT8;} else 
+  if constexpr (is_same_v<T,      uint16_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT16;   } else
+  if constexpr (is_same_v<T,      uint32_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT32;   } else
+  if constexpr (is_same_v<T,      uint64_t>) { return CU_TENSOR_MAP_DATA_TYPE_UINT64;   } else
+  if constexpr (is_same_v<T,       int32_t>) { return CU_TENSOR_MAP_DATA_TYPE_INT32;    } else
+  if constexpr (is_same_v<T,       int64_t>) { return CU_TENSOR_MAP_DATA_TYPE_INT64;    } else
+  if constexpr (is_same_v<T,        half_t>) { return CU_TENSOR_MAP_DATA_TYPE_FLOAT16;  } else
+  if constexpr (is_same_v<T,         float>) { return CU_TENSOR_MAP_DATA_TYPE_FLOAT32;  } else
+  if constexpr (is_same_v<T,        double>) { return CU_TENSOR_MAP_DATA_TYPE_FLOAT64;  } else
+  if constexpr (is_same_v<T,    bfloat16_t> || is_same_v<T, bfloat16>) { return CU_TENSOR_MAP_DATA_TYPE_BFLOAT16; } else
+  if constexpr (is_same_v<T,    tfloat32_t>) { return CU_TENSOR_MAP_DATA_TYPE_TFLOAT32; } else
+#if ((__CUDACC_VER_MAJOR__ > 12) || ((__CUDACC_VER_MAJOR__ == 12) && (__CUDACC_VER_MINOR__ > 6)))
+  if constexpr (is_same_v<T, float_e2m1_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B;  } else
+  if constexpr (is_same_v<T, float_e2m3_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B; } else
+  if constexpr (is_same_v<T, float_e3m2_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B; } else
+  if constexpr (is_same_v<T, type_erased_dynamic_float4_t>)    { return CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B;  } else
+  if constexpr (is_same_v<T, type_erased_dynamic_float6_t>)    { return CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B; } else
+  if constexpr (is_same_v<T, detail::float_e2m1_unpacksmem_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B; } else
+  if constexpr (is_same_v<T, detail::float_e2m3_unpacksmem_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B; } else
+  if constexpr (is_same_v<T, detail::float_e3m2_unpacksmem_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B; } else
+  if constexpr (is_same_v<T, detail::type_erased_dynamic_float4_unpacksmem_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B; } else
+  if constexpr (is_same_v<T, detail::type_erased_dynamic_float6_unpacksmem_t>) { return CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B; } else
+#endif
+
+  { static_assert(sizeof(T) < 0, "Unknown TMA Format!"); }
+}
+
 
 // NOTE(Yu): Assume smem_stride is always 1, so we don't pass it as an argument
 template <typename T, int B, int M, int S, int NDIM>
@@ -35,20 +74,15 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
-  constexpr CUtensorMapDataType tma_format = 
-    std::is_same_v<T, cute::float_e2m1_t> ? 
-      CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B : 
-    std::is_same_v<T, cute::float_ue4m3_t> ? 
-      CU_TENSOR_MAP_DATA_TYPE_UINT8  : 
-      CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  constexpr CUtensorMapInterleave tma_interleave =
-      CU_TENSOR_MAP_INTERLEAVE_NONE;
-  constexpr CUtensorMapL2promotion tma_l2Promotion =
-      CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
-  constexpr CUtensorMapFloatOOBfill tma_oobFill =
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+  constexpr CUtensorMapDataType tma_format = // to_CUtensorMapDataType<T>();
+    std::is_same_v<T, cute::float_e2m1_t >  ? CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B : 
+    std::is_same_v<T, cute::float_ue4m3_t>  ? CU_TENSOR_MAP_DATA_TYPE_UINT8  : 
+                                              CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+  constexpr CUtensorMapInterleave tma_interleave    = CU_TENSOR_MAP_INTERLEAVE_NONE;
+  constexpr CUtensorMapL2promotion tma_l2Promotion  = CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
+  constexpr CUtensorMapFloatOOBfill tma_oobFill     = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
   constexpr CUtensorMapSwizzle tma_swizzle =
-      (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
+      (  B == 1 ? CU_TENSOR_MAP_SWIZZLE_32B
        : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
        : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
                 : CU_TENSOR_MAP_SWIZZLE_NONE);
@@ -206,9 +240,9 @@ printf("global_addr: %p\n", global_addr);
   assert(smem_box_stride[4] >= (uint32_t(1))); // Stride must be min 1
   assert(smem_box_stride[4] <= (uint32_t(8))); // Stride must be max 2^3 = 8
 
-  uint64_t const *gmem_shape_ptr = &gmem_prob_shape[0];
-  uint64_t const *gmem_stride_ptr = &gmem_prob_stride[0];
-  uint32_t const *smem_box_shape_ptr = &smem_box_shape[0];
+  uint64_t const *gmem_shape_ptr      = &gmem_prob_shape[0];
+  uint64_t const *gmem_stride_ptr     = &gmem_prob_stride[0];
+  uint32_t const *smem_box_shape_ptr  = &smem_box_shape[0];
   uint32_t const *smem_box_stride_ptr = &smem_box_stride[0];
 
   CUresult result = cuTensorMapEncodeTiled(tma_desc,
