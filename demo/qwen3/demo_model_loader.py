@@ -5,7 +5,10 @@ import torch
 import torch.distributed as dist
 import argparse
 import os, json
-from models.dynamic_shard_loader import DynamicShardLoader, ShardType
+# from models.dynamic_shard_loader import Qwen3ShardLoader, ShardType
+from models.qwen3_shard_loader import Qwen3ShardLoader
+from mirage.mpk.base_dynamic_shard_loader import ShardType
+
 
 mapping = {
     "embed_tokens": {"name": "embed", "shard_type": [(ShardType.NONE,)]},
@@ -172,7 +175,7 @@ if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
-    if args.model_path is not None or world_size == 1:
+    if args.model_path is not None or world_size == 0:
       with torch.device("cuda"):
           if args.model_path is not None:
               # load model locally (necessary for multi-GPU case)
@@ -194,7 +197,7 @@ if __name__ == "__main__":
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
 
         device = torch.device(f"cuda:{rank}")
-        loader = DynamicShardLoader(model, model_name, mapping, rank, world_size, device, download=False)
+        loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device, download=False)
 
         with torch.device("cuda"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)

@@ -8,7 +8,8 @@ import json
 import math
 from enum import Enum
 import torch
-from models.modeling_qwen3 import Qwen3RotaryEmbedding
+from abc import ABC, abstractmethod
+
 
 class ShardType(Enum):
     COL_PARALLEL = 0
@@ -16,7 +17,7 @@ class ShardType(Enum):
     EXPERT_PARALLEL = 2
     NONE = 100 # No sharding, replicate on all GPUs
 
-class DynamicShardLoader:
+class BaseDynamicShardLoader(ABC):
     def __init__(self, model, model_name, mapping, rank, world_size, device, download=False):
         self.model = model
         self.model_name = model_name
@@ -42,8 +43,8 @@ class DynamicShardLoader:
         self.shard_and_load()
         self.materialize_leftover_buffers()
 
-        # Qwen3 specific logic.
-        self.reinitialize_rope_buffers()
+        # Model specific logic.
+        self.model_specific_initialition_logic()
 
     def shard_and_load(self):
         files_mapping = self._download_all_safetensor_files()
@@ -268,25 +269,25 @@ class DynamicShardLoader:
                 
         return count
 
-    def reinitialize_rope_buffers(self):
-        """
-        Re-calculates inv_freq on the actual device since it's not in safetensors.
+    # def reinitialize_rope_buffers(self):
+    #     """
+    #     Re-calculates inv_freq on the actual device since it's not in safetensors.
 
-        Since the model is originally initialized on a meta device, the rotary embeddings were
-        not calculated during that time. 
+    #     Since the model is originally initialized on a meta device, the rotary embeddings were
+    #     not calculated during that time. 
 
-        This is specific to QWEN3 implementation.  
-        """
-        for name, module in self.model.named_modules():
-            if isinstance(module, Qwen3RotaryEmbedding):
-                module.to(self.device)
+    #     This is specific to QWEN3 implementation.  
+    #     """
+    #     for name, module in self.model.named_modules():
+    #         if isinstance(module, Qwen3RotaryEmbedding):
+    #             module.to(self.device)
                 
-                inv_freq, attention_scaling = module.rope_init_fn(
-                    module.config, self.device, **module.rope_kwargs
-                )
+    #             inv_freq, attention_scaling = module.rope_init_fn(
+    #                 module.config, self.device, **module.rope_kwargs
+    #             )
                 
-                module.register_buffer("inv_freq", inv_freq, persistent=False)
-                module.attention_scaling = attention_scaling
+    #             module.register_buffer("inv_freq", inv_freq, persistent=False)
+    #             module.attention_scaling = attention_scaling
 
 
 
@@ -321,5 +322,10 @@ class DynamicShardLoader:
         
         self.files_mapping = files_mapping
         return files_mapping
+
+    # Use for model specific logic after all the sharding.
+    # Common usage is RoPE embeddings.
+    def model_specific_initialition_logic(self):
+        pass
 
     
