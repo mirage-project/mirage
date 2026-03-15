@@ -148,6 +148,7 @@ def get_compile_command(
     num_local_schedulers=None,
     num_remote_schedulers=None,
     use_cutlass_kernel=True,
+    use_static_worker=False,
 ):
     max_worker_per_scheduler = 128
     if num_workers != None and num_local_schedulers != None and num_remote_schedulers != None:
@@ -156,8 +157,9 @@ def get_compile_command(
             min_schedulers = num_local_schedulers
         else:
             min_schedulers = min(num_local_schedulers, num_remote_schedulers)
-        # advance by 1 for the scheduler who are handling the not divisiable num_worker.
-        max_worker_per_scheduler = (num_workers // min_schedulers) + 1
+        if min_schedulers > 0:
+            # advance by 1 for the scheduler who are handling the not divisiable num_worker.
+            max_worker_per_scheduler = (num_workers // min_schedulers) + 1
 
     common_cmd = [
         cc,
@@ -256,6 +258,9 @@ def get_compile_command(
     if profiling:
         flags = flags + ["-DMPK_ENABLE_PROFILING"]
 
+    if use_static_worker:
+        flags = flags + ["-DMPK_STATIC_WORKER"]
+
     return common_cmd + specific_cmd + flags
 
 
@@ -279,6 +284,7 @@ class PersistentKernel:
         spec_decode_config: SpecDecodeConfig,
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
+        use_static_worker: bool = False,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -303,6 +309,13 @@ class PersistentKernel:
         self.use_nvshmem = True if world_size > 1 else False
         self.spec_decode_config = spec_decode_config
         self.use_cutlass_kernel = use_cutlass_kernel
+        self.use_static_worker = use_static_worker
+        if use_static_worker:
+            self.num_local_schedulers = 0
+            self.num_remote_schedulers = 0
+            # Use all SMs as workers — no schedulers needed
+            sm_count = torch.cuda.get_device_properties(mpi_rank).multi_processor_count
+            self.num_workers = sm_count
         self._spec_decode_handlers = {
             "promptlookup": self.prompt_lookup_spec_handler,
         }
@@ -1468,9 +1481,10 @@ class PersistentKernel:
             profiling=True if self.profiler_tensor is not None else False,
             use_nvshmem=self.use_nvshmem,
             num_workers=self.num_workers,
-            num_local_schedulers=self.num_local_schedulers, 
+            num_local_schedulers=self.num_local_schedulers,
             num_remote_schedulers=self.num_remote_schedulers,
             use_cutlass_kernel=self.use_cutlass_kernel,
+            use_static_worker=self.use_static_worker,
         )
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)

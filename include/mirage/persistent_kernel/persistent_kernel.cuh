@@ -29,6 +29,10 @@
 #include <unistd.h>
 #include <vector>
 
+#if defined(MIRAGE_GRACE_BLACKWELL)
+#include "warp_roles.cuh"
+#endif
+
 #if defined(MIRAGE_GRACE_HOPPER)
 #include "tasks/hopper/task_header.cuh"
 #elif defined(MIRAGE_GRACE_BLACKWELL)
@@ -51,7 +55,7 @@ using namespace kernel;
 #define SINGLE_KERNEL_NUM_THREADS 256
 #elif defined(MIRAGE_GRACE_BLACKWELL)
 #define WORKER_NUM_THREADS 256
-#define SINGLE_KERNEL_NUM_THREADS 256
+#define SINGLE_KERNEL_NUM_THREADS 384
 #else
 #define WORKER_NUM_THREADS 128
 #define SINGLE_KERNEL_NUM_THREADS 128
@@ -1041,6 +1045,46 @@ __global__ void scheduler_kernel(RuntimeConfig config) {
   execute_scheduler(config, 0);
 }
 
+#ifdef MPK_STATIC_WORKER
+#include "static_worker.cuh"
+
+__global__
+    __launch_bounds__(WORKER_NUM_THREADS,
+                      1) void static_worker_kernel(RuntimeConfig config) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    printf("[DEBUG] static_worker_kernel entered, blockIdx.x=%d, blockDim.x=%d\n",
+           blockIdx.x, blockDim.x);
+  }
+  worker_checker(config);
+  execute_worker_static(config);
+}
+
+// Prepare kernel for static worker: called once before the first iteration.
+// Mirrors the dynamic path where prepare_kernel seeds END_OF_TASK_GRAPH
+// to the scheduler, which then calls prepare_next_batch() to set up the
+// first batch (input_tokens, request_ids, KV page tables, etc.).
+// Also signals BEGIN_TASK_GRAPH's trigger event since task 1 is not
+// executed by static workers.
+__global__ void static_prepare_kernel(RuntimeConfig config) {
+  if (threadIdx.x == 0) {
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
+    defined(MODE_ONLINE_NOTOKEN)
+#ifdef MODE_ONLINE_NOTOKEN
+    prepare_next_batch(config, 0);
+#else
+    prepare_next_batch(config);
+#endif
+#endif
+    // Signal BEGIN_TASK_GRAPH's trigger event (task 1 is skipped by workers)
+    EventId trig = config.all_tasks[1].trigger_event;
+    if (trig != EVENT_INVALID_ID) {
+      int eidx = (int)(trig & 0xFFFFFFFF);
+      atomicAdd(&config.barriers[eidx], 1);
+    }
+  }
+}
+#endif
+
 template <typename DT>
 DT *gpu_malloc(size_t size) {
   void *dst_ptr;
@@ -1198,41 +1242,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
     all_tasks.push_back(task_desc);
   }
 
-  // Initialize worker queue last task id
-  // Each worker now maintains a local and a remote worker queue
-  global_runtime_config.worker_queue_last_ready_task_id =
-      gpu_malloc<unsigned long long int>((num_workers * 2) *
-                                         sizeof(unsigned long long int));
-  // std::vector<unsigned long long int> host_worker_queue_last_task_id;
-  // for (int i = 0; i < 2 * num_workers; i++) {
-  //   host_worker_queue_last_task_id.push_back(0);
-  // }
-  // cudaMemcpy(global_runtime_config.worker_queue_last_ready_task_id,
-  //            host_worker_queue_last_task_id.data(),
-  //            (num_workers * 2) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
-  //  Initialize scheduler queue last event id
-  //  We maintain one extra scheduler queue for the global scheduler
-  global_runtime_config.sched_queue_last_ready_event_id =
-      gpu_malloc<unsigned long long int>((num_schedulers + 1) *
-                                         sizeof(unsigned long long int));
-  global_runtime_config.sched_queue_next_free_event_id =
-      gpu_malloc<unsigned long long int>((num_schedulers + 1) *
-                                         sizeof(unsigned long long int));
-
-  // std::vector<unsigned long long int> host_sched_queue_last_event_id;
-  // for (int i = 0; i < (num_schedulers + 1); i++) {
-  //   host_sched_queue_last_event_id.push_back(0);
-  // }
-  // cudaMemcpy(global_runtime_config.sched_queue_last_ready_event_id,
-  //            host_sched_queue_last_event_id.data(),
-  //            (num_schedulers + 1) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
-  // cudaMemcpy(global_runtime_config.sched_queue_next_free_event_id,
-  //            host_sched_queue_last_event_id.data(),
-  //            (num_schedulers + 1) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
-  //  Initialize all event counters
+  // Initialize all event counters
   global_runtime_config.all_event_counters =
       gpu_malloc<EventCounter>(all_events.size() * sizeof(EventCounter));
   global_runtime_config.all_event_num_triggers =
@@ -1245,10 +1255,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
              host_all_event_counters.data(),
              all_events.size() * sizeof(int),
              cudaMemcpyHostToDevice);
-  // cudaMemset(global_runtime_config.all_event_counters,
-  //            0,
-  //            all_events.size() * sizeof(EventCounter));
-  //  Initialize all tasks
+  // Initialize all tasks
   global_runtime_config.all_tasks =
       gpu_malloc<TaskDesc>(all_tasks.size() * sizeof(TaskDesc));
   cudaMemcpy(global_runtime_config.all_tasks,
@@ -1263,6 +1270,190 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
              all_events.data(),
              all_events.size() * sizeof(EventDesc),
              cudaMemcpyHostToDevice);
+
+#ifdef MPK_STATIC_WORKER
+  // Static worker: each worker computes its own round-robin task list on GPU.
+  // No scheduler, no controller SM. Cross-SM sync via GMEM barriers.
+  {
+    int num_all_tasks = (int)all_tasks.size();
+    int num_compute_tasks =
+        num_all_tasks - 2; // skip TERMINATE(0) and BEGIN_TASK_GRAPH(1)
+
+    global_runtime_config.num_compute_tasks = num_compute_tasks;
+    global_runtime_config.first_compute_task_index = 2;
+
+    // GMEM barriers: int32 counters for cross-worker sync (Megakernels g.Bar
+    // pattern). One barrier per event. Barrier info derived on GPU from
+    // TaskDesc fields and all_event_num_triggers — no extra per-task array
+    // needed.
+    int num_barriers = (int)all_events.size();
+    global_runtime_config.num_barriers = num_barriers;
+    global_runtime_config.barriers =
+        gpu_malloc<int>(num_barriers * sizeof(int));
+
+    // Find end-of-graph barrier (for inter-iteration sync)
+    global_runtime_config.end_barrier = num_barriers - 1; // fallback
+    global_runtime_config.end_barrier_count = 0;
+    for (int i = (int)all_events.size() - 1; i >= 0; i--) {
+      if (all_events[i].event_type == EVENT_END_OF_TASK_GRAPH) {
+        global_runtime_config.end_barrier = i;
+        global_runtime_config.end_barrier_count = all_events[i].num_triggers;
+        break;
+      }
+    }
+
+    // Iteration control
+    global_runtime_config.prepare_done_counter =
+        gpu_malloc<unsigned long long>(sizeof(unsigned long long));
+    global_runtime_config.continue_flag = gpu_malloc<bool>(sizeof(bool));
+
+    printf("MPK Static Worker: %d tasks (%d compute), %d workers, "
+           "%d barriers, end_barrier=%d (count=%d)\n",
+           num_all_tasks,
+           num_compute_tasks,
+           num_workers,
+           num_barriers,
+           global_runtime_config.end_barrier,
+           global_runtime_config.end_barrier_count);
+
+    // Print round-robin SM assignment
+    auto task_name = [](int t) -> char const * {
+      switch (t) {
+        case 0:
+          return "TERMINATE";
+        case 10:
+          return "BEGIN_TASK_GRAPH";
+        case 101:
+          return "EMBEDDING";
+        case 102:
+          return "RMS_NORM_LINEAR";
+        case 103:
+          return "ATTENTION_1";
+        case 104:
+          return "ATTENTION_2";
+        case 105:
+          return "SILU_MUL_LINEAR_W_RES";
+        case 106:
+          return "ALLREDUCE";
+        case 107:
+          return "REDUCE";
+        case 108:
+          return "LINEAR_W_RES";
+        case 109:
+          return "ARGMAX";
+        case 110:
+          return "ARGMAX_PARTIAL";
+        case 111:
+          return "ARGMAX_REDUCE";
+        case 115:
+          return "SB_EXTEND_ATTN";
+        case 116:
+          return "PAGED_ATTN_1";
+        case 117:
+          return "PAGED_ATTN_2";
+        case 118:
+          return "SILU_MUL";
+        case 119:
+          return "RMS_NORM";
+        case 120:
+          return "LINEAR";
+        case 121:
+          return "IDENTITY";
+        case 151:
+          return "LINEAR_W_RES_HOPPER";
+        case 152:
+          return "LINEAR_HOPPER";
+        case 153:
+          return "PAGED_ATTN_HOPPER";
+        case 154:
+          return "RMS_NORM_HOPPER";
+        case 155:
+          return "LINEAR_SWAPAB_HOPPER";
+        case 156:
+          return "LINEAR_SWAPAB_W_RES_HOPPER";
+        case 157:
+          return "LINEAR_CUTLASS_HOPPER";
+        case 158:
+          return "LINEAR_CUTLASS_W_RES_HOPPER";
+        case 159:
+          return "SILU_MUL_HOPPER";
+        case 160:
+          return "EMBEDDING_HOPPER";
+        case 161:
+          return "MOE_W13_LINEAR_SM90";
+        case 162:
+          return "MOE_W2_LINEAR_SM90";
+        case 163:
+          return "SPLITK_LINEAR_SWAPAB_HOPPER";
+        case 164:
+          return "PAGED_ATTN_SPLIT_KV_HOPPER";
+        case 251:
+          return "SPLITK_LINEAR_SM100";
+        case 252:
+          return "LINEAR_W_RES_SM100";
+        case 253:
+          return "LINEAR_SM100";
+        case 257:
+          return "ATTN_SM100";
+        case 258:
+          return "ARGMAX_REDUCE_SM100";
+        case 259:
+          return "ARGMAX_PARTIAL_SM100";
+        case 262:
+          return "TENSOR_INIT";
+        case 263:
+          return "PAGED_ATTN_SPLIT_KV_SM100";
+        case 264:
+          return "PAGED_ATTN_SPLIT_KV_MERGE_SM100";
+        case 265:
+          return "SAMPLING_SM100";
+        default:
+          return "UNKNOWN";
+      }
+    };
+    // printf("── Static SM Assignment (round-robin) ──\n");
+    // for (int pos = 2; pos < num_all_tasks; pos++) {
+    //   int w = (pos - 2) % num_workers;
+    //   printf("  pos=%3d  worker=%2d  %s\n",
+    //          pos, w, task_name(all_tasks[pos].task_type));
+    // }
+    // printf("── End SM Assignment ──\n");
+  }
+
+  // Still need first_tasks for compatibility
+  global_runtime_config.first_tasks =
+      gpu_malloc<TaskId>(first_tasks.size() * sizeof(TaskId));
+  cudaMemcpy(global_runtime_config.first_tasks,
+             first_tasks.data(),
+             first_tasks.size() * sizeof(TaskId),
+             cudaMemcpyHostToDevice);
+
+  // Set NULL pointers for unused dynamic scheduler structures
+  global_runtime_config.worker_queue_last_ready_task_id = nullptr;
+  global_runtime_config.sched_queue_last_ready_event_id = nullptr;
+  global_runtime_config.sched_queue_next_free_event_id = nullptr;
+  global_runtime_config.worker_queues = nullptr;
+  global_runtime_config.sched_queues = nullptr;
+
+  // Set configuration for static worker kernel
+  cudaFuncSetAttribute(static_worker_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+
+#else  // !MPK_STATIC_WORKER
+  // Initialize worker queue last task id
+  // Each worker now maintains a local and a remote worker queue
+  global_runtime_config.worker_queue_last_ready_task_id =
+      gpu_malloc<unsigned long long int>((num_workers * 2) *
+                                         sizeof(unsigned long long int));
+  //  Initialize scheduler queue last event id
+  //  We maintain one extra scheduler queue for the global scheduler
+  global_runtime_config.sched_queue_last_ready_event_id =
+      gpu_malloc<unsigned long long int>((num_schedulers + 1) *
+                                         sizeof(unsigned long long int));
+  global_runtime_config.sched_queue_next_free_event_id =
+      gpu_malloc<unsigned long long int>((num_schedulers + 1) *
+                                         sizeof(unsigned long long int));
   // Initialize worker queues
   {
     std::vector<TaskId *> host_worker_queues;
@@ -1312,6 +1503,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+#endif // MPK_STATIC_WORKER
   // Create worker and scheduler streams
   cudaStreamCreateWithFlags(&global_runtime_config.worker_stream,
                             cudaStreamNonBlocking);
@@ -1335,10 +1527,50 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 // Entry point for C/C++
 // TODO: change launch config
 extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
-  // int device;
-  // cudaGetDevice(&device);
-  // int sm_count;
-  // cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+#ifdef MPK_STATIC_WORKER
+  // Static worker mode: reset barriers, launch only worker CTAs.
+  {
+    cudaMemsetAsync(global_runtime_config.barriers,
+                    0,
+                    global_runtime_config.num_barriers * sizeof(int),
+                    default_stream);
+    cudaMemsetAsync(global_runtime_config.prepare_done_counter,
+                    0,
+                    sizeof(unsigned long long),
+                    default_stream);
+
+    // Prepare first batch and signal BEGIN_TASK_GRAPH's trigger event.
+    // In the dynamic path, prepare_kernel seeds END_OF_TASK_GRAPH to the
+    // scheduler which calls prepare_next_batch() before launching tasks.
+    static_prepare_kernel<<<1, 1, 0, default_stream>>>(global_runtime_config);
+
+    printf("static worker kernel: %d workers, smem %d\n",
+           global_runtime_config.num_workers,
+           MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+
+    cudaError_t attr_err = cudaFuncSetAttribute(static_worker_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    printf("[DEBUG] cudaFuncSetAttribute: %s (requested %d bytes)\n",
+           cudaGetErrorString(attr_err), MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+
+    static_worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
+                           dim3(WORKER_NUM_THREADS, 1, 1),
+                           MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
+                           default_stream>>>(global_runtime_config);
+
+    cudaError_t launch_err = cudaGetLastError();
+    printf("[DEBUG] kernel launch: %s\n", cudaGetErrorString(launch_err));
+
+    cudaError_t err = cudaStreamSynchronize(default_stream);
+    if (err != cudaSuccess) {
+      printf("CUDA static worker kernel error: %s\n", cudaGetErrorString(err));
+    }
+    printf("Finished Static Worker Kernel\n");
+    return;
+  }
+#endif // MPK_STATIC_WORKER
+
   //  Prepare next persistent kernel by resetting queue pointers
   {
     int end_of_task_graph_event_pos = global_runtime_config.num_events - 1;
@@ -1347,9 +1579,7 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                      0 /*smem*/,
                      default_stream>>>(global_runtime_config,
                                        end_of_task_graph_event_pos);
-    // cudaStreamSynchronize(NULL);
     cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
-    // cudaDeviceSynchronize();
 #ifdef USE_NVSHMEM
     nvshmem_barrier_all();
 #endif
@@ -1418,9 +1648,6 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
 }
 
 extern "C" void finalize_persistent_kernel() {
-  gpu_free(global_runtime_config.worker_queue_last_ready_task_id);
-  gpu_free(global_runtime_config.sched_queue_last_ready_event_id);
-  gpu_free(global_runtime_config.sched_queue_next_free_event_id);
   gpu_free(global_runtime_config.all_event_counters);
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
@@ -1431,6 +1658,13 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.page_queue_head);
   gpu_free(global_runtime_config.page_queue_tail);
 #endif
+
+#ifdef MPK_STATIC_WORKER
+  gpu_free(global_runtime_config.barriers);
+  gpu_free(global_runtime_config.prepare_done_counter);
+  gpu_free(global_runtime_config.continue_flag);
+  gpu_free(global_runtime_config.first_tasks);
+#else
   int num_workers = global_runtime_config.num_workers;
   std::vector<TaskId *> host_worker_queues(num_workers * 2);
   cudaMemcpy(host_worker_queues.data(),
@@ -1441,6 +1675,7 @@ extern "C" void finalize_persistent_kernel() {
     gpu_free(host_worker_queues[i]);
   }
   gpu_free(global_runtime_config.worker_queues);
+  gpu_free(global_runtime_config.worker_queue_last_ready_task_id);
   int num_schedulers = global_runtime_config.num_local_schedulers +
                        global_runtime_config.num_remote_schedulers;
   std::vector<EventId *> host_sched_queues(num_schedulers + 1);
@@ -1452,7 +1687,10 @@ extern "C" void finalize_persistent_kernel() {
     gpu_free(host_sched_queues[i]);
   }
   gpu_free(global_runtime_config.sched_queues);
+  gpu_free(global_runtime_config.sched_queue_last_ready_event_id);
+  gpu_free(global_runtime_config.sched_queue_next_free_event_id);
   gpu_free(global_runtime_config.first_tasks);
+#endif // MPK_STATIC_WORKER
 #ifdef USE_NVSHMEM
   nvshmem_barrier_all();
   nvshmem_finalize();

@@ -543,7 +543,7 @@ struct Sm100FmhaMlaReductionKernel {
         }
       }
     }
-    __syncthreads();
+    MPK_CONSUMER_SYNC();
 
     constexpr int Elements = kHeadDimLatent / MaxThreadsPerBlock;
     const size_t offset_oaccum =

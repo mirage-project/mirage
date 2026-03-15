@@ -221,7 +221,7 @@ __device__ __forceinline__ void
     }
 
     // Sync before next batch iteration to reuse shared memory
-    __syncthreads();
+    MPK_CONSUMER_SYNC();
   }
 }
 

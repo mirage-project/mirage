@@ -76,7 +76,7 @@ typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
 int const MAX_OUTPUTS_PER_TASK = 3;
-int const MAX_NUM_WORKERS = 128;
+int const MAX_NUM_WORKERS = 160;
 
 enum TaskType {
   TASK_TERMINATE = 0,
@@ -303,6 +303,20 @@ struct RuntimeConfig {
   cudaEvent_t worker_done_event, scheduler_done_event;
 #ifdef USE_NVSHMEM
   nvshmem_team_t *nvshmem_teams;
+#endif
+#ifdef MPK_STATIC_WORKER
+  // GMEM barriers: int32 counters, use atomicAdd to arrive, use volatile poll
+  // to wait.
+  int *barriers; // [num_barriers]
+  int num_barriers;
+  int end_barrier;       // barrier index for end-of-graph
+  int end_barrier_count; // expected arrivals for end-of-graph barrier
+  // Task info (each worker computes its own round-robin list locally)
+  int num_compute_tasks;
+  int first_compute_task_index; // = 2 (skip TERMINATE and BEGIN_TASK_GRAPH)
+  // Iteration control
+  unsigned long long *prepare_done_counter;
+  bool *continue_flag;
 #endif
 };
 

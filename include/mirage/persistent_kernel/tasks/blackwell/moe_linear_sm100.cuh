@@ -420,7 +420,7 @@ __device__ __forceinline__ void
   // (MMA, MMA_M, MMA_N, STAGE)
   auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
   cutlass::arch::fence_barrier_init();
-  __syncthreads();
+  MPK_CONSUMER_SYNC();
 
   //   if (cute::thread0()) {
   //     cute::print("tCrA:\t");
@@ -461,7 +461,7 @@ __device__ __forceinline__ void
   //   }
   //   total_activated_experts += expert_mask;
   // }
-  __syncthreads(); // Wait for preprocessing done
+  MPK_CONSUMER_SYNC(); // Wait for preprocessing done
 
   if (warp_idx == 5) {
     // DMA warp (1)
@@ -800,7 +800,7 @@ __device__ __forceinline__ void
       }   // end for m_tile
     }     // end for expert_idx
   }       // end of epilogue warps
-  __syncthreads();
+  MPK_CONSUMER_SYNC();
 
   if (warp_idx == 0) {
     // don't do relinquish for megakernel

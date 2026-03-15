@@ -23,7 +23,23 @@ constexpr int WARPGROUP_WARPS = 4;
 constexpr float inf = 5e4;
 // TODO: only setting this for Hopper can have compilation issues on blackwell
 // and presumably ampere
-#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+#if defined(MIRAGE_GRACE_BLACKWELL)
+constexpr int WORKER_NUM_THREADS = 384;   // 12 warps: 8 consumer + 4 helper
+constexpr int CONSUMER_NUM_THREADS = 256; // 8 consumer warps (warps 0-7)
+#elif defined(MIRAGE_GRACE_HOPPER)
 constexpr int WORKER_NUM_THREADS = 256;   // Grace Hopper setting
 constexpr int CONSUMER_NUM_THREADS = 128; // Grace Hopper setting
+#endif
+
+// Consumer-only sync: named barrier on Blackwell static worker (256 of 384
+// threads), falls back to __syncthreads() otherwise.
+#if defined(MIRAGE_GRACE_BLACKWELL) && defined(MPK_STATIC_WORKER)
+#include <cutlass/arch/barrier.h>
+constexpr int MPK_CONSUMER_NUM_THREADS = CONSUMER_NUM_THREADS;
+constexpr int MPK_CONSUMER_SYNC = 0;
+#define MPK_CONSUMER_SYNC() \
+  do { cutlass::arch::NamedBarrier(MPK_CONSUMER_NUM_THREADS, MPK_CONSUMER_SYNC).arrive_and_wait(); \
+       asm volatile("" ::: "memory"); } while(0)
+#else
+#define MPK_CONSUMER_SYNC() __syncthreads()
 #endif

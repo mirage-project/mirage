@@ -405,14 +405,16 @@ if __name__ == "__main__":
             name="argmax_in",
             io_category="cuda_tensor",
         )
+        # Round down to multiple of 8 for bf16 vectorized load alignment
+        argmax_partitions = (mpk.num_workers // 8) * 8
         argmax_part_value = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, argmax_partitions),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, argmax_partitions),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
@@ -688,7 +690,7 @@ if __name__ == "__main__":
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
+            argmax_partial_grid_dim = (argmax_partitions, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,
