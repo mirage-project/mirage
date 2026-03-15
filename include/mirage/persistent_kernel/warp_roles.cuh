@@ -43,7 +43,7 @@ constexpr int CONSUMER_WARP_COUNT       = ROLE_CONSUMER_WARPS_END - ROLE_CONSUME
 // are defined in tasks/common/worker_config.h
 
 // ── Instruction Pipeline ────────────────────────────────────────────────────
-constexpr int PIPELINE_STAGES = 1;
+constexpr int PIPELINE_STAGES = 2;
 
 struct __align__(128) InstructionState {
   mirage::runtime::TaskDesc task;  // loaded by controller from GMEM

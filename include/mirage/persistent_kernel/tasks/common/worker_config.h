@@ -31,12 +31,12 @@ constexpr int WORKER_NUM_THREADS = 256;   // Grace Hopper setting
 constexpr int CONSUMER_NUM_THREADS = 128; // Grace Hopper setting
 #endif
 
-// Consumer-only sync: named barrier on Blackwell (256 of 384 threads),
-// falls back to __syncthreads() otherwise.
-#if defined(MIRAGE_GRACE_BLACKWELL)
+// Consumer-only sync: named barrier on Blackwell static worker (256 of 384
+// threads), falls back to __syncthreads() otherwise.
+#if defined(MIRAGE_GRACE_BLACKWELL) && defined(MPK_STATIC_WORKER)
 #include <cutlass/arch/barrier.h>
 constexpr int MPK_CONSUMER_NUM_THREADS = CONSUMER_NUM_THREADS;
-constexpr int MPK_CONSUMER_SYNC = 1;
+constexpr int MPK_CONSUMER_SYNC = 0;
 #define MPK_CONSUMER_SYNC() \
   do { cutlass::arch::NamedBarrier(MPK_CONSUMER_NUM_THREADS, MPK_CONSUMER_SYNC).arrive_and_wait(); \
        asm volatile("" ::: "memory"); } while(0)

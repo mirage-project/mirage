@@ -54,7 +54,7 @@ using namespace kernel;
 #define WORKER_NUM_THREADS 256
 #define SINGLE_KERNEL_NUM_THREADS 256
 #elif defined(MIRAGE_GRACE_BLACKWELL)
-#define WORKER_NUM_THREADS 384
+#define WORKER_NUM_THREADS 256
 #define SINGLE_KERNEL_NUM_THREADS 384
 #else
 #define WORKER_NUM_THREADS 128
@@ -1051,6 +1051,10 @@ __global__ void scheduler_kernel(RuntimeConfig config) {
 __global__
     __launch_bounds__(WORKER_NUM_THREADS,
                       1) void static_worker_kernel(RuntimeConfig config) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    printf("[DEBUG] static_worker_kernel entered, blockIdx.x=%d, blockDim.x=%d\n",
+           blockIdx.x, blockDim.x);
+  }
   worker_checker(config);
   execute_worker_static(config);
 }
@@ -1544,10 +1548,19 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
            global_runtime_config.num_workers,
            MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
+    cudaError_t attr_err = cudaFuncSetAttribute(static_worker_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    printf("[DEBUG] cudaFuncSetAttribute: %s (requested %d bytes)\n",
+           cudaGetErrorString(attr_err), MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+
     static_worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                            dim3(WORKER_NUM_THREADS, 1, 1),
                            MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                            default_stream>>>(global_runtime_config);
+
+    cudaError_t launch_err = cudaGetLastError();
+    printf("[DEBUG] kernel launch: %s\n", cudaGetErrorString(launch_err));
 
     cudaError_t err = cudaStreamSynchronize(default_stream);
     if (err != cudaSuccess) {
