@@ -34,6 +34,7 @@
 #include <cute/arch/cluster_sm90.hpp> // CuTe functions for querying the details of cluster launched
 #include <cute/arch/tmem_allocator_sm100.hpp> // TMEM allocator for SM100
 #include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
+#include <cute/numeric/numeric_types.hpp>
 #include <cute/pointer_flagged.hpp>
 #include <cute/tensor.hpp> // CuTe tensor implementation
 
@@ -64,13 +65,13 @@ __global__
 
   constexpr int MMA_K = 64;  
 
-  constexpr int B = 0; // 3=CU_TENSOR_MAP_SWIZZLE_128B
+  constexpr int B_FP4 = 0; // no swizzle for A/B
+  constexpr int B_SF  = 0; // no swizzle for scale factors
+  constexpr int B_OUT = 0; // no swizzle for output
   constexpr int M = 3;
   constexpr int S = 3;
 
   constexpr int SCALE_VECTOR_SIZE = 16;
-
-  using TypeAcc = float;
 
   // With 128B swizzle, max cp size = 64 FP4 elements (= 32 bytes packed)
   constexpr int TMA_CP_ASYNC_SIZE   = 64; // 64 FP4 elements = MMA_K
@@ -79,11 +80,11 @@ __global__
       (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
       
   using TMA_A =
-      kernel::tma::tma_2d_nvfp4<float_e2m1,
-                          B,
+      kernel::tma::tma_2d_nvfp4<cute::float_e2m1_t,
+                          B_FP4,
                           M,
                           S,
-                          OUTPUT_SIZE,               /*GMEM_ROW_*/
+                          BATCH_SIZE,               /*GMEM_ROW_*/
                           REDUCTION_SIZE,            /*GMEM_COL_*/
                           MMA_M,                     /*SMEM_ROW_*/
                           TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
@@ -95,11 +96,11 @@ __global__
                           true>;
 
   using TMA_B =
-      kernel::tma::tma_2d_nvfp4<float_e2m1,
-                          B,
+      kernel::tma::tma_2d_nvfp4<cute::float_e2m1_t,
+                          B_FP4,
                           M,
                           S,
-                          BATCH_SIZE,                /*GMEM_ROW_*/
+                          OUTPUT_SIZE,               /*GMEM_ROW_*/ 
                           REDUCTION_SIZE,            /*GMEM_COL_*/
                           MMA_N,                     /*SMEM_ROW_*/
                           TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
@@ -109,52 +110,59 @@ __global__
                           TMA_CP_ASYNC_REPEAT_COL,   /*SMEM_REPEAT_COL_*/
                           MMA_N * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
                           true>;
-  // SFA/SFB load directly into each pipeline slot every k-tile.
-  // Layout: MMA_M/N rows × SF_PER_SLOT cols (transposed so fast dim = MMA_M/N >= 16B).
-  constexpr int SF_PER_SLOT = MMA_K / SCALE_VECTOR_SIZE; // = 4
 
   using TMA_SFA =
-      kernel::tma::tma_2d<float_ue4m3,
-                          0, M, S,
-                          OUTPUT_SIZE,
-                          REDUCTION_SIZE / SCALE_VECTOR_SIZE,
-                          MMA_M,                               // SMEM_ROW
-                          SF_PER_SLOT,                         // SMEM_COL = 4
-                          REDUCTION_SIZE / SCALE_VECTOR_SIZE,
-                          1,
-                          1,
-                          1,                                   // SMEM_REPEAT_COL
-                          MMA_M * SF_PER_SLOT,                 // SMEM_STRIDE
+      kernel::tma::tma_3d<cute::half_t,
+                          B_SF, 
+                          M, 
+                          S,
+                          BATCH_SIZE / MMA_M,                                                 /*GMEM_DEPTH_*/
+                          REDUCTION_SIZE / MMA_K,                                             /*GMEM_ROW_*/
+                          MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2,                              /*GMEM_COL_*/
+                          1,                                                                  /*SMEM_DEPTH_*/
+                          1,                                                                  /*SMEM_ROW_*/ 
+                          MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2,                              /*SMEM_COL_*/ 
+                          (MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2) * (REDUCTION_SIZE / MMA_K), /*GMEM_STRIDE_DEPTH_*/ 
+                          (MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2),                            /*GMEM_STRIDE_ROW_*/
+                          1,                                                                  /*GMEM_STRIDE_COL_*/     
+                          1,                                                                  /*SMEM_REPEAT_ROW_*/       
+                          1,                                                                  /*SMEM_REPEAT_COL_*/
+                          MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2,                                  /*SMEM_STRIDE_*/   
                           true>;
 
   using TMA_SFB =
-      kernel::tma::tma_2d<float_ue4m3,
-                          0, M, S,
-                          BATCH_SIZE,
-                          REDUCTION_SIZE / SCALE_VECTOR_SIZE,
-                          MMA_N,                               // SMEM_ROW
-                          SF_PER_SLOT,                         // SMEM_COL = 4
-                          REDUCTION_SIZE / SCALE_VECTOR_SIZE,
-                          1,
-                          1,
-                          1,                                   // SMEM_REPEAT_COL
-                          MMA_N * SF_PER_SLOT,                 // SMEM_STRIDE
+      kernel::tma::tma_3d<cute::half_t,
+                          B_SF, 
+                          M, 
+                          S,
+                          OUTPUT_SIZE / MMA_N,                                              /*GMEM_DEPTH_*/
+                          REDUCTION_SIZE / MMA_K,                                           /*GMEM_ROW_*/
+                          MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2,                                /*GMEM_COL_*/
+                          1,                                                                /*SMEM_DEPTH_*/
+                          1,                                                                /*SMEM_ROW_*/ 
+                          MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2,                                /*SMEM_COL_*/ 
+                          (MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2) * (REDUCTION_SIZE / MMA_K), /*GMEM_STRIDE_DEPTH_*/ 
+                          (MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2),                                /*GMEM_STRIDE_ROW_*/
+                          1,                                                                /*GMEM_STRIDE_COL_*/     
+                          1,                                                                /*SMEM_REPEAT_ROW_*/       
+                          1,                                                                /*SMEM_REPEAT_COL_*/
+                          MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2,                                /*SMEM_STRIDE_*/   
                           true>;
 
   using TMA_OUT =
       kernel::tma::tma_2d<float,
-                          0,
+                          B_OUT,
                           M,
                           S,
                           BATCH_SIZE,             /*GMEM_ROW_*/
                           OUTPUT_SIZE,            /*GMEM_COL_*/
-                          MMA_N,                  /*SMEM_ROW_*/
-                          MMA_M,                  /*SMEM_COL_*/
+                          MMA_M,                  /*SMEM_ROW_*/
+                          MMA_N,                  /*SMEM_COL_*/
                           OUTPUT_SIZE,            /*GMEM_STRIDE_ROW_*/
                           1,                      /*GMEM_STRIDE_COL_*/
                           1,                      /*SMEM_REPEAT_ROW_*/
                           1,                      /*SMEM_REPEAT_COL_*/
-                          MMA_N * MMA_M,          /*SMEM_STRIDE_*/
+                          MMA_M * MMA_N,          /*SMEM_STRIDE_*/
                           true>;
 
   TMA_A tma_a(static_cast<CUtensorMap *>(tma_a_desc_ptr));
@@ -199,12 +207,13 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
   using namespace cute;
   using namespace cutlass;
 
-  constexpr int B = 0;
+  constexpr int B_FP4 = 0; // 32B swizzle matching Layout_K_SW32_Atom; box[0]=K=64 elements = 64 bytes (valid)
+  constexpr int B_SF  = 0; // no swizzle for UINT8 scale factors
+  constexpr int B_OUT = 0; // no swizzle for float32 output
   constexpr int M = 3;
   constexpr int S = 3;
 
   constexpr int SCALE_VECTOR_SIZE = 16;
-  using TypeAcc = float;
 
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 128;
@@ -225,100 +234,104 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
   CUtensorMap *desc_o_ptr;
 
   // TMA_INPUT
-  // Batch Size x Reduction Size NVFP4 = (BATCH_SIZE,REDUCTION_SIZE/2):(REDUCTION_SIZE/2,1)
   uint64_t i_gmem_shape[2] = {
     static_cast<uint64_t>(BATCH_SIZE),
     static_cast<uint64_t>(REDUCTION_SIZE)
   };
   uint64_t i_gmem_stride[2] = {
-    1, 
+    1,
     static_cast<uint64_t>(REDUCTION_SIZE)
   };
   uint32_t i_smem_shape[2] = {
-    static_cast<uint32_t>(TMA_CP_ASYNC_SIZE), // 64 / 2
-    static_cast<uint32_t>(MMA_N), // 128
+    static_cast<uint32_t>(MMA_M),
+    static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)
   };
   size_t i_smem_repeat_col = (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
-  mirage::runtime::fill_tma_desc<float_e2m1, B, M, S, 2>(&host_i_desc,
-                                                         static_cast<float_e2m1 *>(input_ptr),
-                                                         i_gmem_shape,
-                                                         i_gmem_stride,
-                                                         i_smem_shape,
-                                                         1,
-                                                         i_smem_repeat_col);
+  mirage::runtime::fill_tma_desc<cute::float_e2m1_t, B_FP4, M, S, 2>(&host_i_desc,
+                                                                      static_cast<cute::float_e2m1_t *>(input_ptr),
+                                                                      i_gmem_shape,
+                                                                      i_gmem_stride,
+                                                                      i_smem_shape,
+                                                                      1,
+                                                                      i_smem_repeat_col);
+    printf("TMA_INPUT Init Complete\n");
 
-    // TMA_INPUT_SF — loads directly into each SFB pipeline slot [MMA_N, SF_PER_SLOT].
-    // fill_tma_desc reverses smem_shape: smem_box[0]=smem_shape[1], smem_box[1]=smem_shape[0].
-    // Pass {SF_PER_SLOT, MMA_N} so boxSize[0]=MMA_N (fast dim, satisfies >=16B requirement).
-    uint64_t i_sf_gmem_shape[2] = {
-      static_cast<uint64_t>(BATCH_SIZE),
-      static_cast<uint64_t>(REDUCTION_SIZE / SCALE_VECTOR_SIZE)
+    // TMA_INPUT_SF
+    uint64_t i_sf_gmem_shape[3] = {
+      static_cast<uint64_t>(BATCH_SIZE / MMA_M),
+      static_cast<uint64_t>(REDUCTION_SIZE / MMA_K),
+      static_cast<uint64_t>(MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2)
     };
-    uint64_t i_sf_gmem_stride[2] = {
+    uint64_t i_sf_gmem_stride[3] = {
       1,
-      static_cast<uint64_t>(REDUCTION_SIZE / SCALE_VECTOR_SIZE)
+      static_cast<uint64_t>((MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2)),
+      static_cast<uint64_t>((MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2) * (REDUCTION_SIZE / MMA_K))
     };
-    uint32_t i_sf_smem_shape[2] = {
-      static_cast<uint32_t>(MMA_K / SCALE_VECTOR_SIZE),  // → boxSize[1]
-      static_cast<uint32_t>(MMA_N)                       // → boxSize[0] (fast dim, MMA_N >= 16 bytes)
+    uint32_t i_sf_smem_shape[3] = {
+      static_cast<uint32_t>(1),
+      static_cast<uint32_t>(1),
+      static_cast<uint32_t>(MMA_M * MMA_K / SCALE_VECTOR_SIZE / 2)
     };
-    size_t i_sf_smem_repeat_col = 1;
-    mirage::runtime::fill_tma_desc<cute::float_ue4m3_t, 0, M, S, 2>(&host_i_sf_desc,
-                                                                    static_cast<cute::float_ue4m3_t *>(input_sf_ptr),
+    mirage::runtime::fill_tma_desc<cute::half_t, B_SF, M, S, 3>(&host_i_sf_desc,
+                                                                    static_cast<cute::half_t *>(input_sf_ptr),
                                                                     i_sf_gmem_shape,
                                                                     i_sf_gmem_stride,
                                                                     i_sf_smem_shape,
                                                                     1,
-                                                                    i_sf_smem_repeat_col);
+                                                                    1);
+    printf("TMA_INPUT_SF Init Complete\n");
 
-    // TMA_WEIGHT (FP4 packed: shape/stride in bytes = elements/2)
-    // 
-    uint64_t w_gmem_shape[2] = {
+    // TMA_WEIGHT
+    uint64_t w_gmem_shape[2] = { 
       static_cast<uint64_t>(OUTPUT_SIZE),
       static_cast<uint64_t>(REDUCTION_SIZE)
     };
     uint64_t w_gmem_stride[2] = {
-      1, 
+      1,
       static_cast<uint64_t>(REDUCTION_SIZE)
     };
     uint32_t w_smem_shape[2] = {
-      static_cast<uint32_t>(TMA_CP_ASYNC_SIZE),
-      static_cast<uint32_t>(MMA_M)
+      static_cast<uint32_t>(MMA_N),
+      static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)
     };
-    size_t w_smem_repeat_col = (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
-    mirage::runtime::fill_tma_desc<float_e2m1, B, M, S, 2>(&host_w_desc,
-                                                            static_cast<float_e2m1 *>(weight_ptr),
-                                                            w_gmem_shape,
-                                                            w_gmem_stride,
-                                                            w_smem_shape,
-                                                            1,
-                                                            w_smem_repeat_col);
-
-    // TMA_WEIGHT_SF — loads directly into each SFA pipeline slot [MMA_M, SF_PER_SLOT].
-    // Pass {SF_PER_SLOT, MMA_M} so boxSize[0]=MMA_M (fast dim, satisfies >=16B requirement).
-    uint64_t w_sf_gmem_shape[2] = {
-      static_cast<uint64_t>(OUTPUT_SIZE),
-      static_cast<uint64_t>(REDUCTION_SIZE / SCALE_VECTOR_SIZE)
-    };
-    uint64_t w_sf_gmem_stride[2] = {
+    mirage::runtime::fill_tma_desc<cute::float_e2m1_t, B_FP4, M, S, 2>(
+      &host_w_desc,
+      static_cast<cute::float_e2m1_t *>(weight_ptr),
+      w_gmem_shape,
+      w_gmem_stride,
+      w_smem_shape,
       1,
-      static_cast<uint64_t>(REDUCTION_SIZE / SCALE_VECTOR_SIZE)
+      1
+    );
+    printf("TMA_WEIGHT Init Complete\n");
+
+    // TMA_WEIGHT_SF
+    uint64_t w_sf_gmem_shape[3] = {
+      static_cast<uint64_t>(OUTPUT_SIZE / MMA_N),
+      static_cast<uint64_t>(REDUCTION_SIZE / MMA_K),
+      static_cast<uint64_t>(MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2)
     };
-    uint32_t w_sf_smem_shape[2] = {
-      static_cast<uint32_t>(MMA_K / SCALE_VECTOR_SIZE),  // → boxSize[1]
-      static_cast<uint32_t>(MMA_M)                       // → boxSize[0] (fast dim, MMA_M >= 16 bytes)
+    uint64_t w_sf_gmem_stride[3] = {
+      1,
+      static_cast<uint64_t>((MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2)),
+      static_cast<uint64_t>((MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2) * (REDUCTION_SIZE / MMA_K))
+    };
+    uint32_t w_sf_smem_shape[3] = {
+      static_cast<uint32_t>(1),
+      static_cast<uint32_t>(1),
+      static_cast<uint32_t>(MMA_N * MMA_K / SCALE_VECTOR_SIZE / 2)
     };
     size_t w_sf_smem_repeat_col = 1;
-    mirage::runtime::fill_tma_desc<cute::float_ue4m3_t, 0, M, S, 2>(&host_w_sf_desc,
-                                                            static_cast<cute::float_ue4m3_t *>(weight_sf_ptr),
-                                                            w_sf_gmem_shape,
-                                                            w_sf_gmem_stride,
-                                                            w_sf_smem_shape,
-                                                            1,
-                                                            w_sf_smem_repeat_col);
+    mirage::runtime::fill_tma_desc<cute::half_t, B_SF, M, S, 3>(&host_w_sf_desc,
+                                                                       static_cast<cute::half_t *>(weight_sf_ptr),
+                                                                       w_sf_gmem_shape,
+                                                                       w_sf_gmem_stride,
+                                                                       w_sf_smem_shape,
+                                                                       1,
+                                                                       w_sf_smem_repeat_col);
+    printf("TMA_WEIGHT_SF Init Complete\n");
 
   // TMA_OUT
-  int const output_stride = OUTPUT_SIZE;
   uint64_t o_gmem_shape[2]  = {
     static_cast<uint64_t>(BATCH_SIZE),
     static_cast<uint64_t>(OUTPUT_SIZE)
@@ -332,31 +345,35 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
     static_cast<uint32_t>(MMA_N)
   };
   size_t o_smem_repeat_col = 1;
-  mirage::runtime::fill_tma_desc<float, 0, M, S, 2>(&host_o_desc,
+  mirage::runtime::fill_tma_desc<float, B_OUT, M, S, 2>(&host_o_desc,
                                                        static_cast<float *>(output_ptr),
                                                        o_gmem_shape,
                                                        o_gmem_stride,
                                                        o_smem_shape,
                                                        1,
                                                        o_smem_repeat_col);
+    printf("TMA_OUT Init Complete\n");
+
 
   cudaMalloc(&desc_i_ptr, sizeof(CUtensorMap));
   cudaMalloc(&desc_i_sf_ptr, sizeof(CUtensorMap));
   cudaMalloc(&desc_w_ptr, sizeof(CUtensorMap));
   cudaMalloc(&desc_w_sf_ptr, sizeof(CUtensorMap));
   cudaMalloc(&desc_o_ptr, sizeof(CUtensorMap));
+  printf("cudaMalloc complete\n");
 
   cudaMemcpy(desc_i_ptr, &host_i_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
   cudaMemcpy(desc_i_sf_ptr, &host_i_sf_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
   cudaMemcpy(desc_w_ptr, &host_w_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
   cudaMemcpy(desc_w_sf_ptr, &host_w_sf_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
   cudaMemcpy(desc_o_ptr, &host_o_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+  printf("cudaMemcpy complete\n");
 
-  void *tma_desc_input    = desc_i_ptr;
-  void *tma_desc_input_sf = desc_i_sf_ptr;
-  void *tma_desc_weight   = desc_w_ptr;
-  void *tma_desc_weight_sf = desc_w_sf_ptr;
-  void *tma_desc_output   = desc_o_ptr;
+  void *tma_desc_input      = desc_i_ptr;
+  void *tma_desc_input_sf   = desc_i_sf_ptr;
+  void *tma_desc_weight     = desc_w_ptr;
+  void *tma_desc_weight_sf  = desc_w_sf_ptr;
+  void *tma_desc_output     = desc_o_ptr;
 
   // Residual
   cute::Layout layout_Bias = cute::make_layout(
@@ -403,6 +420,7 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
       std::cerr << "Error: Failed at kernel Launch" << std::endl;
     }
   } else {
+    printf("setting kernel_ptr\n");
     auto *kernel_ptr = &linear_nvfp4_1d2d_sm100_wrapper<T,
                                                         BATCH_SIZE,
                                                         OUTPUT_SIZE,
@@ -427,6 +445,7 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
                                           tma_desc_input_sf,
                                           mBias,
                                           tma_desc_output);
+    printf("launched kernel\n");
     CUTE_CHECK_LAST();
 
     if (status != cutlass::Status::kSuccess) {
@@ -461,7 +480,8 @@ void linear_nvfp4_1d2d_sm100_kernel(torch::Tensor input,
   assert(weight.size(0) == OUTPUT_SIZE);
 
   cudaDeviceSetLimit(cudaLimitStackSize, 4096);  // or 8192
-  launch_linear_nvfp4_1d2d_sm100<float_e2m1, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
+  printf("Launching kernel...\n");
+  launch_linear_nvfp4_1d2d_sm100<cute::float_e2m1_t, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
       input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr
   );
   cudaError_t err = cudaDeviceSynchronize();

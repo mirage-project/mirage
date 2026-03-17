@@ -43,7 +43,7 @@ for reduction_size in reduction_sizes:
         # print(torch_out)
         print("Launching custom implementation")
         runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf, w, w_sf, residual, output)
-        print(output)
+        # print(output)
         
         torch.testing.assert_close(
             output,

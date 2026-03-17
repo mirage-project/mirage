@@ -76,13 +76,6 @@ public:
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW)};
 #if 1
-        printf("tma_coords: %d, %d\n", tma_coords[0], tma_coords[1]);
-        printf("tma_coords_local: %d, %d\n",
-              tma_coords_local[0],
-              tma_coords_local[1]);
-        printf("smem_offset: %d\n", smem_offset);
-        printf("smem_ptr: %p\n", smem_ptr);
-        printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
 #endif
         launch_tma_cp_async(mbar, static_cast<T*>(smem_ptr) + smem_offset, tma_coords_local);
       }
@@ -338,33 +331,6 @@ private:
     uint32_t const *smem_box_shape_ptr = &smem_box_shape[0];
     uint32_t const *smem_box_stride_ptr = &smem_box_stride[0];
 
-#if 0
-    printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
-          gmem_prob_shape[0],
-          gmem_prob_shape[1],
-          gmem_prob_shape[2],
-          gmem_prob_shape[3],
-          gmem_prob_shape[4]);
-    printf("gmem_prob_stride: %lu, %lu, %lu, %lu, %lu\n",
-          gmem_prob_stride[0],
-          gmem_prob_stride[1],
-          gmem_prob_stride[2],
-          gmem_prob_stride[3],
-          gmem_prob_stride[4]);
-    printf("smem_box_shape: %d, %d, %d, %d, %d\n",
-          smem_box_shape[0],
-          smem_box_shape[1],
-          smem_box_shape[2],
-          smem_box_shape[3],
-          smem_box_shape[4]);
-    printf("smem_box_stride: %d, %d, %d, %d, %d\n",
-          smem_box_stride[0],
-          smem_box_stride[1],
-          smem_box_stride[2],
-          smem_box_stride[3],
-          smem_box_stride[4]);
-#endif
-
     CUresult result = cuTensorMapEncodeTiled(tma_desc,
                                              tma_format,
                                              tma_dim,
@@ -487,33 +453,6 @@ private:
     uint64_t const *gmem_stride_ptr = &gmem_prob_stride[0];
     uint32_t const *smem_box_shape_ptr = &smem_box_shape[0];
     uint32_t const *smem_box_stride_ptr = &smem_box_stride[0];
-
-#if 0
-    printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
-          gmem_prob_shape[0],
-          gmem_prob_shape[1],
-          gmem_prob_shape[2],
-          gmem_prob_shape[3],
-          gmem_prob_shape[4]);
-    printf("gmem_prob_stride: %lu, %lu, %lu, %lu, %lu\n",
-          gmem_prob_stride[0],
-          gmem_prob_stride[1],
-          gmem_prob_stride[2],
-          gmem_prob_stride[3],
-          gmem_prob_stride[4]);
-    printf("smem_box_shape: %d, %d, %d, %d, %d\n",
-          smem_box_shape[0],
-          smem_box_shape[1],
-          smem_box_shape[2],
-          smem_box_shape[3],
-          smem_box_shape[4]);
-    printf("smem_box_stride: %d, %d, %d, %d, %d\n",
-          smem_box_stride[0],
-          smem_box_stride[1],
-          smem_box_stride[2],
-          smem_box_stride[3],
-          smem_box_stride[4]);
-#endif
 
     CUresult result = cuTensorMapEncodeTiled(tma_desc,
                                              tma_format,

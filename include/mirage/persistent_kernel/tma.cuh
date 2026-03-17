@@ -71,6 +71,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
                                           uint32_t const (&smem_shape)[NDIM],
                                           size_t smem_repeat_row,
                                           size_t smem_repeat_col) {
+
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
@@ -98,8 +99,8 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[2] = 1;
     gmem_prob_shape[3] = 1;
     gmem_prob_shape[4] = 1;
-    gmem_prob_stride[0] = sizeof(T);
-    gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
+    gmem_prob_stride[0] = 1;  // implicit in cuTensorMapEncodeTiled; element size handled by tma_format
+    gmem_prob_stride[1] = gmem_stride[1] * sizeof_bits<T>::value / 8;
     gmem_prob_stride[2] = 0;
     gmem_prob_stride[3] = 0;
     gmem_prob_stride[4] = 0;
@@ -109,9 +110,9 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[2] = gmem_shape[0];
     gmem_prob_shape[3] = 1;
     gmem_prob_shape[4] = 1;
-    gmem_prob_stride[0] = sizeof(T);
-    gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
-    gmem_prob_stride[2] = gmem_stride[2] * sizeof(T);
+    gmem_prob_stride[0] = 1;  // implicit in cuTensorMapEncodeTiled; element size handled by tma_format
+    gmem_prob_stride[1] = gmem_stride[1] * sizeof_bits<T>::value / 8;
+    gmem_prob_stride[2] = gmem_stride[2] * sizeof_bits<T>::value / 8;
     gmem_prob_stride[3] = 0;
     gmem_prob_stride[4] = 0;
   } else if constexpr (NDIM == 4) {
@@ -120,10 +121,10 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[2] = gmem_shape[1];
     gmem_prob_shape[3] = gmem_shape[0];
     gmem_prob_shape[4] = 1;
-    gmem_prob_stride[0] = sizeof(T);
-    gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
-    gmem_prob_stride[2] = gmem_stride[2] * sizeof(T);
-    gmem_prob_stride[3] = gmem_stride[3] * sizeof(T);
+    gmem_prob_stride[0] = 1;  // implicit in cuTensorMapEncodeTiled; element size handled by tma_format
+    gmem_prob_stride[1] = gmem_stride[1] * sizeof_bits<T>::value / 8;
+    gmem_prob_stride[2] = gmem_stride[2] * sizeof_bits<T>::value / 8;
+    gmem_prob_stride[3] = gmem_stride[3] * sizeof_bits<T>::value / 8;
     gmem_prob_stride[4] = 0;
   } else {
     assert(false);
@@ -190,33 +191,6 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     assert(false);
   }
 
-#if 0
-printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
-      gmem_prob_shape[0],
-      gmem_prob_shape[1],
-      gmem_prob_shape[2],
-      gmem_prob_shape[3],
-      gmem_prob_shape[4]);
-printf("gmem_prob_stride: %lu, %lu, %lu, %lu, %lu\n",
-      gmem_prob_stride[0],
-      gmem_prob_stride[1],
-      gmem_prob_stride[2],
-      gmem_prob_stride[3],
-      gmem_prob_stride[4]);
-printf("smem_box_shape: %d, %d, %d, %d, %d\n",
-      smem_box_shape[0],
-      smem_box_shape[1],
-      smem_box_shape[2],
-      smem_box_shape[3],
-      smem_box_shape[4]);
-printf("smem_box_stride: %d, %d, %d, %d, %d\n",
-      smem_box_stride[0],
-      smem_box_stride[1],
-      smem_box_stride[2],
-      smem_box_stride[3],
-      smem_box_stride[4]);
-printf("global_addr: %p\n", global_addr);
-#endif
 
   assert(smem_box_shape[0] >= (uint32_t(1)));      // Size must be min 1
   assert(smem_box_shape[0] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256

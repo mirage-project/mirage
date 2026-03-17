@@ -75,17 +75,6 @@ public:
         int const tma_coords_local[NDIM] = {
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW)};
-#if 0
-        printf("tma_coords: %d, %d\n", tma_coords[0], tma_coords[1]);
-        printf("tma_coords_local: %d, %d\n",
-              tma_coords_local[0],
-              tma_coords_local[1]);
-        printf("smem_offset: %d\n", smem_offset);
-        printf("smem_ptr: %p\n", smem_ptr);
-        printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
-        printf("\n");
-#endif
-
         // TMA hardware zero-fills out-of-bounds elements on load, so the box
         // may legally extend beyond GMEM bounds (e.g. BATCH_SIZE < MMA_N).
         // Only assert that the starting coordinate itself is in bounds.
