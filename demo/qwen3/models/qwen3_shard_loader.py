@@ -8,7 +8,6 @@ class Qwen3ShardLoader(BaseDynamicShardLoader):
         Executes Qwen3-specific setup after all generic sharding 
         and loading is complete.
         """
-        print("calling the qwen3 version of model specific initialization logic")
         self.reinitialize_rope_buffers()
 
     def reinitialize_rope_buffers(self):
@@ -21,9 +20,7 @@ class Qwen3ShardLoader(BaseDynamicShardLoader):
         This is specific to QWEN3 implementation.  
         """
         for name, module in self.model.named_modules():
-            print("name", name, module.__class__.__name__)
             if module.__class__.__name__ == "Qwen3RotaryEmbedding":
-                print("found a rotary embedding")
                 module.to(self.device)
                 
                 inv_freq, attention_scaling = module.rope_init_fn(
