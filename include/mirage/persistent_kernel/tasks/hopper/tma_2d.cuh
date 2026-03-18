@@ -90,10 +90,8 @@ public:
       Barrier &mbar, T *smem_ptr, int const (&tma_coords)[NDIM]) const {
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
-    uint32_t smem_int_mbar =
-        static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
-    uint32_t smem_int_ptr =
-        static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    uint32_t smem_int_mbar = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
+    uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
 
     int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
     if constexpr (NDIM > 0) {

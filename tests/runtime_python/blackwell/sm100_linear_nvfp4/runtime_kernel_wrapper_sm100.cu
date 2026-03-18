@@ -279,7 +279,6 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
                                                                     i_sf_smem_shape,
                                                                     1,
                                                                     1);
-    printf("TMA_INPUT_SF Init Complete\n");
 
     // TMA_WEIGHT
     uint64_t w_gmem_shape[2] = { 
@@ -303,7 +302,6 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
       1,
       1
     );
-    printf("TMA_WEIGHT Init Complete\n");
 
     // TMA_WEIGHT_SF
     uint64_t w_sf_gmem_shape[3] = {
@@ -329,7 +327,6 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
                                                                        w_sf_smem_shape,
                                                                        1,
                                                                        w_sf_smem_repeat_col);
-    printf("TMA_WEIGHT_SF Init Complete\n");
 
   // TMA_OUT
   uint64_t o_gmem_shape[2]  = {
