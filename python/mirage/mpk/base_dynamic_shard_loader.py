@@ -100,36 +100,29 @@ class BaseDynamicShardLoader(ABC):
             # Ensure the info is a list of tuples.
             if not isinstance(info, tuple):
                 info = (info,)
+
+            # EP requires user to spceify number of groups.
+            if info[0] == ShardType.EXPERT_PARALLEL:
+                assert len(info) > 1, f"ShardType.EXPERT_PARALLEL specified for {param_key} but no number of groups provided"
             
-            parallelism_dict[info[0]] = min(info[1], self.world_size) if len(info) > 1 else self.world_size
+            parallelism_dict[info[0]] = info[1] if len(info) > 1 else None
 
-        # Validate config. By default, this will priortize EP before TP. 
-        # This will only throw error if world size is not divisible by TP and EP. Otherwise, it'll update the config to the optimal config.
-        # Optimal config will ensure that ep * tp == world_size
-        if ShardType.EXPERT_PARALLEL in parallelism_dict:
-            ep_size = parallelism_dict[ShardType.EXPERT_PARALLEL]
-            assert ep_size <= self.world_size and self.world_size % ep_size == 0, f"world size not divisible by {param_key}'s EP configuration"
+        # Fix any unspecified TP sizes.
+        for shard_type in parallelism_dict:
+            if shard_type in [ShardType.ROW_PARALLEL, ShardType.COL_PARALLEL] and parallelism_dict[shard_type] is None:
+                # Specical Case: For both EP and TP and user does not specify TP size, TP = world_size // EP.
+                if ShardType.EXPERT_PARALLEL in parallelism_dict:
+                    if ShardType.ROW_PARALLEL in parallelism_dict:
+                        parallelism_dict[ShardType.ROW_PARALLEL] = self.world_size // parallelism_dict[ShardType.EXPERT_PARALLEL]
+                    elif ShardType.COL_PARALLEL in parallelism_dict:
+                        parallelism_dict[ShardType.COL_PARALLEL] = self.world_size // parallelism_dict[ShardType.EXPERT_PARALLEL]
+                else: # Pure TP.
+                    parallelism_dict[shard_type] = self.world_size
 
-            if parallelism_dict[ShardType.EXPERT_PARALLEL] > self.world_size:
-                parallelism_dict[ShardType.EXPERT_PARALLEL] = self.world_size
-                ep_size = self.world_size
-        else:
-            ep_size = 1
-
-        if ShardType.ROW_PARALLEL in parallelism_dict:
-            tp_size = parallelism_dict[ShardType.ROW_PARALLEL]
-            assert self.world_size % tp_size == 0, f"world size {self.world_size} not divisible by {param_key}'s TP configuration of {tp_size}"
-
-            if parallelism_dict[ShardType.ROW_PARALLEL] * ep_size != self.world_size:
-                parallelism_dict[ShardType.ROW_PARALLEL] = self.world_size // ep_size
-
-        if ShardType.COL_PARALLEL in parallelism_dict:
-            tp_size = parallelism_dict[ShardType.COL_PARALLEL]
-            assert self.world_size % tp_size == 0, f"world size {self.world_size} not divisible by {param_key}'s TP configuration of {tp_size}"
-
-            if parallelism_dict[ShardType.COL_PARALLEL] * ep_size != self.world_size:
-                parallelism_dict[ShardType.COL_PARALLEL] = self.world_size // ep_size
-
+        size = 1
+        for shard_type in parallelism_dict:
+            size *= parallelism_dict[shard_type]
+        assert size <= self.world_size, f"Invalid parallelism config for {param_key}: total parallelism groups {size} exceeds world size {self.world_size}"
 
         return parallelism_dict
 
@@ -327,5 +320,3 @@ class BaseDynamicShardLoader(ABC):
     # Common usage is RoPE embeddings.
     def model_specific_initialition_logic(self):
         pass
-
-    
