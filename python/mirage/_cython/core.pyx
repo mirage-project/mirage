@@ -18,7 +18,10 @@ from cpython cimport array
 import ctypes
 import array
 import numpy as np
-import torch
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 from libcpp.string cimport string
 
 # Code snippet from OpenAI Triton
@@ -71,12 +74,12 @@ class dtype:
     def is_uint64(self):
         return self.name == 'uint64'
 
-    def __eq__(self, other: dtype):
+    def __eq__(self, other):
         if not isinstance(other, dtype):
             return False
         return self.name == other.name
 
-    def __ne__(self, other: dtype):
+    def __ne__(self, other):
         return not self.__eq__(other)
 
     def __hash__(self):
@@ -147,8 +150,6 @@ def get_kn_operator_type_string(int op_type):
         return "kn_reduction_2_op"
     elif op_type == KN_RMS_NORM_OP:
         return "kn_rms_norm_op"
-    elif op_type == KN_CONCAT_FIRST_OP_ID:
-        return "kn_concat_first_op_id"
     elif op_type == KN_CONCAT_0_OP:
         return "kn_concat_0_op"
     elif op_type == KN_CONCAT_1_OP:
@@ -157,8 +158,6 @@ def get_kn_operator_type_string(int op_type):
         return "kn_concat_2_op"
     elif op_type == KN_CONCAT_LAST_OP_ID:
         return "kn_concat_last_op_id"
-    elif op_type == KN_SPLIT_FIRST_OP_ID:
-        return "kn_split_first_op_id"
     elif op_type == KN_SPLIT_0_OP:
         return "kn_split_0_op"
     elif op_type == KN_SPLIT_1_OP:
@@ -244,8 +243,6 @@ def get_tb_operator_type_string(int op_type):
         return "tb_reduction_last_op_id"
     elif op_type == TB_RMS_NORM_OP:
         return "tb_rms_norm_op"
-    elif op_type == TB_CONCAT_FIRST_OP_ID:
-        return "tb_concat_first_op_id"
     elif op_type == TB_CONCAT_0_OP:
         return "tb_concat_0_op"
     elif op_type == TB_CONCAT_1_OP:
@@ -256,8 +253,6 @@ def get_tb_operator_type_string(int op_type):
         return "tb_concat_last_op_id"
     elif op_type == TB_CONCAT_THEN_MATMUL_OP:
         return "tb_concat_then_matmul_op"
-    elif op_type == TB_SPLIT_FIRST_OP_ID:
-        return "tb_split_first_op_id"
     elif op_type == TB_SPLIT_0_OP:
         return "tb_split_0_op"
     elif op_type == TB_SPLIT_1_OP:
@@ -319,6 +314,8 @@ def convert_dtype_to_ctype(type : dtype):
         raise RuntimeError(f"Unsupported dtype: {type}")
 
 def convert_dtype_to_torch_type(type : dtype):
+    if torch is None:
+        raise ModuleNotFoundError("torch is required for dtype conversion to torch dtypes")
     if type.is_int8():
         return torch.int8
     elif type.is_uint8():
@@ -371,6 +368,8 @@ def convert_ctype_to_dtype(type):
         return None
 
 def convert_torch_type_to_dtype(type):
+    if torch is None:
+        raise ModuleNotFoundError("torch is required for dtype conversion from torch dtypes")
     if type is torch.int8:
         return int8
     elif type is torch.uint8:
@@ -963,7 +962,7 @@ cdef class CyKNGraph:
             cname = py_byte_string
         self.p_kgraph.attach_nvshmem_tensor(tensor.c_ptr, cname)
 
-    def fuse_tensors(self, list[DTensor] inputs, int fused_dim, int num_groups, str name):
+    def fuse_tensors(self, list inputs, int fused_dim, int num_groups, str name):
         cdef vector[const CppDTensor*] cinputs
         cinputs.resize(len(inputs))
         cdef DTensor t
@@ -979,7 +978,7 @@ cdef class CyKNGraph:
         output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(output)
 
-    def shuffle_tensors(self, list[DTensor] inputs, int shuffled_dim, int num_groups, str name):
+    def shuffle_tensors(self, list inputs, int shuffled_dim, int num_groups, str name):
         cdef vector[const CppDTensor*] cinputs
         cinputs.resize(len(inputs))
         cdef DTensor t
@@ -1348,6 +1347,22 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
     return {
         "code": result.code.decode("UTF-8"),
         "output_shapes": result.output_shapes
+    }
+
+def generate_pallas_program(CyKNGraph input_graph, *, target_chip=None, bool debug=False) -> dict:
+    cdef PallasTranspilerConfig transpiler_config
+    if target_chip is None:
+        target_chip = ""
+    transpiler_config.target_chip = (<str>target_chip).encode("UTF-8")
+    transpiler_config.debug = debug
+
+    cdef PallasTranspileResult result = transpile(input_graph.p_kgraph, transpiler_config)
+    cdef list error_list = [error.decode("UTF-8") for error in result.error_state.errors]
+
+    return {
+        "code": result.code.decode("UTF-8"),
+        "output_shapes": result.output_shapes,
+        "errors": error_list,
     }
 
 def set_gpu_device_id(gpu_id: int):
