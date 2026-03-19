@@ -38,12 +38,20 @@ preload_so(_formal_verifier_so_path, "libformal_verifier.so")
 
 from .core import *
 from .kernel import *
-from .mpk.persistent_kernel import PersistentKernel
-from .mpk.speculative import spec_decode_class
-# Re-export MPK interfaces for external integrations (e.g., vLLM Mirage backend)
-from .mpk.mpk import MPK, MPKMetadata
-from .mpk.models.graph_builder import MirageModelConfig
 from .threadblock import *
+
+try:
+    from .mpk.persistent_kernel import PersistentKernel
+    from .mpk.speculative import spec_decode_class
+    # Re-export MPK interfaces for external integrations (e.g., vLLM Mirage backend)
+    from .mpk.mpk import MPK, MPKMetadata
+    from .mpk.models.graph_builder import MirageModelConfig
+except ModuleNotFoundError:
+    PersistentKernel = None
+    spec_decode_class = None
+    MPK = None
+    MPKMetadata = None
+    MirageModelConfig = None
 
 
 class InputNotFoundError(Exception):

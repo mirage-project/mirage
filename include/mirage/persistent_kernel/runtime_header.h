@@ -16,7 +16,13 @@
 #pragma once
 
 #include "mirage/config.h"
+
+#ifdef MIRAGE_BACKEND_USE_CUDA
 #include <cuda_runtime.h>
+#else
+using cudaEvent_t = void *;
+using cudaStream_t = void *;
+#endif
 
 #ifdef USE_NVSHMEM
 #include <nvshmem.h>
