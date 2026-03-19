@@ -40,6 +40,7 @@ public:
   using NeighborFunc = std::function<State(State const &)>;
   using EnergyFunc = std::function<Energy(State const &)>;
   using AcceptanceFunc = std::function<bool(Energy, Energy, double)>;
+  using StateToStringFunc = std::function<std::string(State const &)>;
   
   SimulatedAnnealing(SimulatedAnnealingConfig const &config,
                      InitialStateFunc initial_state_func,
@@ -60,13 +61,22 @@ public:
   void set_acceptance_func(AcceptanceFunc acceptance_func) {
     acceptance_func_ = acceptance_func;
   }
+
+  void set_state_to_string_func(StateToStringFunc func) {
+    state_to_string_func_ = func;
+  }
   
   State optimize() {
     State current_state = initial_state_func_();
     Energy current_energy = energy_func_(current_state);
-    
+
     State best_state = current_state;
     Energy best_energy = current_energy;
+
+    if (state_to_string_func_) {
+      std::cerr << "[SA] initial: " << state_to_string_func_(current_state)
+                << " energy=" << current_energy << std::endl;
+    }
     
     temperature_ = config_.initial_temperature;
     size_t iteration = 0;
@@ -91,36 +101,41 @@ public:
         break;
       }
 
-      std::cerr << "temperature: " << temperature_ << std::endl;
-      
+      std::cerr << "[SA] T=" << temperature_ << std::endl;
+
       for (size_t i = 0; i < config_.iterations_per_temperature; ++i) {
         if (iteration >= config_.max_iterations) {
           break;
         }
-        
+
         if (time_limit_exceeded()) {
           break;
         }
-        
+
         State neighbor_state = neighbor_func_(current_state);
         Energy neighbor_energy = energy_func_(neighbor_state);
 
-        if (neighbor_energy < current_energy) {
-          std::cerr << "neighbor_energy: " << neighbor_energy << std::endl;
-        }
-        
         bool accept = acceptance_func_(current_energy, neighbor_energy, temperature_);
-        
+
+        if (state_to_string_func_) {
+          std::cerr << "[SA] iter=" << iteration
+                    << " " << state_to_string_func_(neighbor_state)
+                    << " energy=" << neighbor_energy
+                    << (accept ? " ACCEPT" : " reject")
+                    << (neighbor_energy < best_energy ? " NEW_BEST" : "")
+                    << std::endl;
+        }
+
         if (accept) {
           current_state = neighbor_state;
           current_energy = neighbor_energy;
-          
+
           if (neighbor_energy < best_energy) {
             best_state = neighbor_state;
             best_energy = neighbor_energy;
           }
         }
-        
+
         ++iteration;
       }
       
@@ -133,9 +148,14 @@ public:
       }
     }
     
+    if (state_to_string_func_) {
+      std::cerr << "[SA] done: iters=" << iteration
+                << " best: " << state_to_string_func_(best_state)
+                << " energy=" << best_energy << std::endl;
+    }
     return best_state;
   }
-  
+
   double get_temperature() const { return temperature_; }
   
   void reset_temperature() { temperature_ = config_.initial_temperature; }
@@ -150,6 +170,7 @@ private:
   std::mt19937 rng_;
   std::uniform_real_distribution<double> uniform_dist_;
   double temperature_;
+  StateToStringFunc state_to_string_func_;
   
   bool metropolis_acceptance(Energy current_energy, Energy neighbor_energy, 
                              double temperature) {

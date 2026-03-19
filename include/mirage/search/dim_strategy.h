@@ -37,6 +37,7 @@ struct DimStrategy {
   std::vector<SymbolicTensorDim> get_reduction_degree_cand(SymbolicKNGraph const &kn_graph);
   std::vector<std::vector<int>> get_unary_input(int num_tensors);
   std::vector<std::vector<int>> get_binary_input(int num_tensors);
+  std::vector<std::vector<int>> get_binary_input_commutative(int num_tensors);
   std::vector<std::vector<int>> get_nary_input(int num_tensors, int n);
 
   std::vector<size_t> get_num_parallel_dims_cand(std::vector<SymbolicDTensor> const &tensors);
@@ -49,6 +50,9 @@ struct DimStrategy {
       return get_unary_input(all_inputs.size());
     }
     if (is_binary(op_type)) {
+      if (is_commutative(op_type)) {
+        return get_binary_input_commutative(all_inputs.size());
+      }
       return get_binary_input(all_inputs.size());
     }
     return get_nary_input(all_inputs.size(), get_input_number(op_type));

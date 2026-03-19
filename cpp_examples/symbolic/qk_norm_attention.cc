@@ -1,26 +1,32 @@
 #include "common.h"
 
-// Attention
+// QK-Norm Attention (Q-norm variant)
 //
-// Computes: O = softmax(Q @ K^T) @ V
+// Computes: O = softmax(rms_norm(Q) @ K^T) @ V
 //   Q:  (batch, g, head_dim)   g = num_heads * query_seq_len
 //   Kt: (batch, head_dim, h)   h = num_heads * kv_seq_len
 //   V:  (batch, h, head_dim)
 //   O:  (batch, g, head_dim)
 //
+// Normalizes Q with RMS norm before computing attention scores.
+// The key fusion opportunity: rms_norm(Q) @ K^T can share the
+// RMS reduction with the matmul in a single fused kernel.
+// Used in Cohere Command R, ViT-22B, and similar architectures.
+//
 // Usage:
-//   ./symbolic_attention                        – sweep all attention configs
-//   ./symbolic_attention -d                     – single debug config
-//   ./symbolic_attention --force-nonsym         – re-run non-symbolic search
-//   ./symbolic_attention --force-sym            – re-run symbolic search
-//   ./symbolic_attention --skip-nonsym          – skip non-symbolic search entirely
-//   ./symbolic_attention --skip-sym             – skip symbolic search entirely
-//   ./symbolic_attention --sym-checkpoint <f>   – use <f> as symbolic checkpoint
-//   ./symbolic_attention --time-limit <sec>     – search time limit (default 3600)
+//   ./symbolic_qk_norm_attention                        – sweep all configs
+//   ./symbolic_qk_norm_attention -d                     – single debug config
+//   ./symbolic_qk_norm_attention --force-nonsym         – re-run non-symbolic search
+//   ./symbolic_qk_norm_attention --force-sym            – re-run symbolic search
+//   ./symbolic_qk_norm_attention --skip-nonsym          – skip non-symbolic search
+//   ./symbolic_qk_norm_attention --skip-sym             – skip symbolic search
+//   ./symbolic_qk_norm_attention --config <b,h,q,kv,hd> – single config
+//   ./symbolic_qk_norm_attention --sym-checkpoint <f>   – override symbolic checkpoint
+//   ./symbolic_qk_norm_attention --time-limit <sec>     – search time limit (default 3600)
 //
 // Output files:
-//   checkpoints/attention/      – per-config and shared symbolic checkpoints
-//   results_attention.json      – best times for each config x {non-symbolic, symbolic}
+//   checkpoints/qk_norm_attention/  – per-config and shared symbolic checkpoints
+//   results_qk_norm_attention.json  – best times per config
 
 struct AttentionConfig {
   int batch, num_heads, query_seq_len, kv_seq_len, head_dim;
@@ -29,11 +35,6 @@ struct AttentionConfig {
 static AttentionConfig const kDebugConfig{2, 8, 1, 1024, 128};
 
 static std::vector<AttentionConfig> get_configs() {
-  // Real-world shapes: g = num_heads * q_seq, h = num_heads * kv_seq
-  // GQA models (LLaMA-7B/Mistral): 8 KV heads, head_dim=128
-  // Full-head models (LLaMA-7B): 32 heads, head_dim=128
-  // Decode: q_seq=1; Prefill: q_seq=128
-  // batch >= 2 needed for parallelization opportunities
   std::vector<AttentionConfig> configs;
   for (int batch     : {2, 4})
   for (int num_heads : {8, 32})
@@ -67,7 +68,12 @@ static void build_ref_graph(kernel::Graph &ref, AttentionConfig const &cfg) {
       {cfg.batch, h, cfg.head_dim},
       {(size_t)h * cfg.head_dim, (size_t)cfg.head_dim, 1},
       type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor A = ref.matmul(Q, Kt);
+
+  // Q-norm: rms_norm along head_dim (last dim of Q)
+  kernel::DTensor Q_norm = ref.rms_norm(Q, {cfg.head_dim});
+
+  // softmax(rms_norm(Q) @ K^T) @ V
+  kernel::DTensor A = ref.matmul(Q_norm, Kt);
   kernel::DTensor E = ref.exp(A);
   kernel::DTensor S = ref.reduction(E, 2);
   kernel::DTensor D = ref.div(E, S);
@@ -75,9 +81,9 @@ static void build_ref_graph(kernel::Graph &ref, AttentionConfig const &cfg) {
   ref.mark_output(O);
 }
 
-static std::string const kCkptDir     = "checkpoints/attention";
+static std::string const kCkptDir     = "checkpoints/qk_norm_attention";
 static std::string const kSymCkpt     = kCkptDir + "/checkpoint_symbolic.json";
-static std::string const kResultsFile = "results_attention.json";
+static std::string const kResultsFile = "results_qk_norm_attention.json";
 
 static std::string nonsym_ckpt(AttentionConfig const &cfg) {
   return kCkptDir +
@@ -136,9 +142,9 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
 
   // ---- Experiment 1: non-symbolic search (per-config checkpoint) ----
   if (skip_nonsym) {
-    std::cout << "\n=== attention: non-symbolic search (skipped) ===" << std::endl;
+    std::cout << "\n=== qk_norm_attention: non-symbolic search (skipped) ===" << std::endl;
   } else {
-  std::cout << "\n=== attention: non-symbolic search ===" << std::endl;
+  std::cout << "\n=== qk_norm_attention: non-symbolic search ===" << std::endl;
   for (auto const &cfg : configs) {
     print_config(cfg);
 
@@ -181,9 +187,9 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
 
   // ---- Experiment 2: symbolic search (one shared checkpoint) ----
   if (skip_sym) {
-    std::cout << "\n=== attention: symbolic search (skipped) ===" << std::endl;
+    std::cout << "\n=== qk_norm_attention: symbolic search (skipped) ===" << std::endl;
   } else {
-  std::cout << "\n=== attention: symbolic search ===" << std::endl;
+  std::cout << "\n=== qk_norm_attention: symbolic search ===" << std::endl;
   double sym_search_time = 0;
   {
     kernel::Graph ref;

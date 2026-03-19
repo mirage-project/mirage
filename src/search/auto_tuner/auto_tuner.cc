@@ -7,6 +7,7 @@
 
 #include <limits>
 #include <map>
+#include <string>
 #include <thread>
 
 namespace mirage {
@@ -126,11 +127,19 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     // Step 1: Generate candidate values per variable.
     // For each var, collect divisor constants (C where C/var appears in dims),
     // then generate all powers of 2 from 1..max(C) that divide every constant.
+    size_t num_grid_dims = symbolic_tb_graph.grid_dim.size();
     std::vector<std::vector<int>> per_var_candidates;
-    for (auto idx : dim_indices_to_tune) {
+    for (size_t vi = 0; vi < dim_indices_to_tune.size(); ++vi) {
+      auto idx = dim_indices_to_tune[vi];
       int max_val = symbolic_tb_graph.get_initial_value_for_var(idx);
+      // For grid dimensions, cap at MAX_NUM_THREADBLOCKS since higher
+      // values are wasteful; SA can still refine within this range.
+      if (vi < num_grid_dims) {
+        max_val = std::min(max_val,
+                           (int)config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
+      }
       std::vector<int> candidates;
-      for (int v = 1; v <= max_val; v *= 2) {
+      for (int v = 4; v <= max_val; v *= 4) {
         candidates.push_back(v);
       }
       // Also include max_val itself if it's not already in the list
@@ -186,6 +195,10 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
 
       // Profile via cached energy function.
       float e = cached_energy(values);
+      std::cerr << "[GridSearch] ";
+      for (size_t i = 0; i < num_vars; ++i)
+        std::cerr << "var" << dim_indices_to_tune[i] << "=" << values[i] << " ";
+      std::cerr << "-> " << (e >= 1e9f ? "FAIL" : std::to_string(e) + "ms") << std::endl;
       if (e >= 1e9f) continue;
       ++profiled_candidates;
 
@@ -219,7 +232,7 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
   auto neighbor_sampling = [&](std::vector<int> const &values) -> std::vector<int> {
     std::vector<int> neighbor_values = values;
     size_t index_to_change = local_rng() % values.size();
-    if (local_rng() % 2 == 0 && values[index_to_change] > 1) {
+    if (local_rng() % 2 == 0 && values[index_to_change] > 2) {
       neighbor_values[index_to_change] /= 2;
     } else {
       neighbor_values[index_to_change] *= 2;
@@ -253,6 +266,14 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
 
   auto cached_initial = [&initial_state]() { return initial_state; };
   SimulatedAnnealing<std::vector<int>, float> simulated_annealing(simulated_annealing_config, cached_initial, neighbor_func, cached_energy);
+  simulated_annealing.set_state_to_string_func([&](std::vector<int> const &vals) -> std::string {
+    std::string s;
+    for (size_t i = 0; i < dim_indices_to_tune.size(); ++i) {
+      if (i > 0) s += " ";
+      s += "var" + std::to_string(dim_indices_to_tune[i]) + "=" + std::to_string(vals[i]);
+    }
+    return s;
+  });
   std::vector<int> best_values = simulated_annealing.optimize();
 
   DimVarAssignment assignment;
@@ -422,6 +443,19 @@ kernel::Graph *AutoTuner::tune(std::vector<SymbolicKNGraph> const &symbolic_kn_g
 
   SimulatedAnnealing<StateType, float> simulated_annealing(
       simulated_annealing_config, initial_state_func, neighbor_func, energy_func);
+  simulated_annealing.set_state_to_string_func([&](StateType const &state) -> std::string {
+    std::string s;
+    for (size_t g = 0; g < groups.size(); ++g) {
+      if (g > 0) s += " | ";
+      s += "g" + std::to_string(g) + ":[";
+      for (size_t i = 0; i < groups[g].dim_indices_to_tune.size(); ++i) {
+        if (i > 0) s += " ";
+        s += "var" + std::to_string(groups[g].dim_indices_to_tune[i]) + "=" + std::to_string(state[g][i]);
+      }
+      s += "]";
+    }
+    return s;
+  });
   StateType best_state = simulated_annealing.optimize();
 
   DimVarAssignment best_assignment = state_to_assignment(best_state);

@@ -24,6 +24,7 @@
 //   ./symbolic_two_layer_mlp --sym-checkpoint <f>   – use <f> as symbolic checkpoint
 //   ./symbolic_two_layer_mlp --time-limit <sec>     – search time limit (default 3600)
 //   ./symbolic_two_layer_mlp --max-kn-ops <n>       – max kernel graph ops (default 5)
+//   ./symbolic_two_layer_mlp --explore-all-maps     – explore all input mappings
 //
 // Output files:
 //   checkpoints/two_layer_mlp/  – per-config and shared symbolic checkpoints
@@ -82,7 +83,9 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
                             bool skip_sym = false,
                             std::string const &sym_ckpt_override = "",
                             double time_limit_sec = -1,
-                            int max_kn_ops = -1) {
+                            int max_kn_ops = -1,
+                            bool explore_all_mappings = false,
+                            bool search_only = false) {
   ensure_dir(kCkptDir);
   std::string const sym_ckpt =
       sym_ckpt_override.empty() ? kSymCkpt : sym_ckpt_override;
@@ -111,11 +114,21 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
     for (auto const &op : ref.operators) op->fingerprint();
 
     search::GeneratorConfig config = get_generator_config(
-        /*use_symbolic_search=*/false, /*for_attention=*/false, time_limit_sec);
+        /*use_symbolic_search=*/false, /*for_attention=*/false, time_limit_sec, explore_all_mappings);
     if (max_kn_ops > 0) config.max_num_kernel_graph_op = max_kn_ops;
     search::KernelGraphGenerator gen(ref, config, nonsym_ckpt(cfg).data());
-    gen.generate_kernel_graphs();
+    double ns_search_time = 0;
+    {
+      auto t0 = std::chrono::steady_clock::now();
+      gen.generate_kernel_graphs();
+      auto t1 = std::chrono::steady_clock::now();
+      ns_search_time = std::chrono::duration<double>(t1 - t0).count();
+    }
 
+    if (search_only) {
+      std::cout << "  --search-only: skipping profiling" << std::endl;
+      continue;
+    }
     auto [best_time, so_path] = profile_best_with_so(gen.generated_graphs);
     std::cout << "  Best time (non-symbolic): " << best_time << " ms" << std::endl;
     std::cout << "  Best .so file: " << so_path << std::endl;
@@ -128,6 +141,7 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
     }
     results[idx]["non_symbolic_ms"] = best_time;
     results[idx]["non_symbolic_so"] = so_path;
+    results[idx]["non_symbolic_search_s"] = ns_search_time;
     save_results(kResultsFile, results);
   }
   } // end if (!skip_nonsym)
@@ -137,6 +151,7 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
     std::cout << "\n=== two_layer_mlp: symbolic search (skipped) ===" << std::endl;
   } else {
   std::cout << "\n=== two_layer_mlp: symbolic search ===" << std::endl;
+  double sym_search_time = 0;
   {
     kernel::Graph ref;
     build_ref_graph(ref, kDebugConfig.n, kDebugConfig.d);
@@ -144,12 +159,21 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
 
     search::AbstractExpr::symbolic_expr = true;
     search::GeneratorConfig config = get_generator_config(
-        /*use_symbolic_search=*/true, /*for_attention=*/false, time_limit_sec);
+        /*use_symbolic_search=*/true, /*for_attention=*/false, time_limit_sec, explore_all_mappings);
     if (max_kn_ops > 0) config.max_num_kernel_graph_op = max_kn_ops;
     search::KernelGraphGenerator gen(ref, config, sym_ckpt.data());
     if (!checkpoint_exists(sym_ckpt)) {
+      auto t0 = std::chrono::steady_clock::now();
       gen.generate_kernel_graphs_symbolic();
+      auto t1 = std::chrono::steady_clock::now();
+      sym_search_time = std::chrono::duration<double>(t1 - t0).count();
+    } else {
+      sym_search_time = -1;  // cached
     }
+  }
+  if (search_only) {
+    std::cout << "  --search-only: skipping per-config tuning" << std::endl;
+    return;
   }
   {
     std::vector<json> sym_graphs = load_graphs(sym_ckpt);
@@ -177,6 +201,7 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
       }
       results[idx]["symbolic_ms"] = best_time;
       results[idx]["symbolic_so"] = so_path;
+      results[idx]["symbolic_search_s"] = sym_search_time;
       save_results(kResultsFile, results);
     }
   }
@@ -205,6 +230,8 @@ int main(int argc, char **argv) {
   bool force_sym    = false;
   bool skip_nonsym  = false;
   bool skip_sym     = false;
+  bool explore_all  = false;
+  bool search_only  = false;
   double time_limit = -1;
   int max_kn_ops    = -1;
   std::string sym_ckpt_override;
@@ -216,6 +243,8 @@ int main(int argc, char **argv) {
     else if (arg == "--force-sym")    force_sym    = true;
     else if (arg == "--skip-nonsym")  skip_nonsym  = true;
     else if (arg == "--skip-sym")     skip_sym     = true;
+    else if (arg == "--explore-all-maps") explore_all = true;
+    else if (arg == "--search-only")     search_only = true;
     else if (arg == "--config") {
       if (i + 1 >= argc) {
         std::cerr << "--config requires n,d argument\n";
@@ -244,9 +273,9 @@ int main(int argc, char **argv) {
       std::cerr << "Unknown argument: " << arg << "\n"
                 << "Usage: " << argv[0]
                 << " [-d] [--force-nonsym] [--force-sym] [--skip-nonsym]"
-                << " [--skip-sym] [--config <n,d>]"
-                << " [--sym-checkpoint <path>] [--time-limit <seconds>]"
-                << " [--max-kn-ops <n>]\n";
+                << " [--skip-sym] [--search-only] [--explore-all-maps]"
+                << " [--config <n,d>] [--sym-checkpoint <path>]"
+                << " [--time-limit <seconds>] [--max-kn-ops <n>]\n";
       return 1;
     }
   }
@@ -262,6 +291,7 @@ int main(int argc, char **argv) {
     configs = debug ? std::vector<TwoLayerMlpConfig>{kDebugConfig} : get_configs();
   }
   run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
-                  sym_ckpt_override, time_limit, max_kn_ops);
+                  sym_ckpt_override, time_limit, max_kn_ops, explore_all,
+                  search_only);
   return 0;
 }

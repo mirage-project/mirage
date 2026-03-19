@@ -4,7 +4,9 @@
 #include "mirage/type.h"
 #include "mirage/utils/containers.h"
 #include "mirage/search/symbolic_graph/op_args.h"
+#include <algorithm>
 #include <iostream>
+#include <numeric>
 #include <optional>
 
 namespace mirage {
@@ -113,6 +115,45 @@ std::vector<dim3>
   std::vector<dim3> cands = config.grid_dim_to_explore;
   int batch = get_batch();
 
+  if (config.explore_all_mappings) {
+    // Exhaustive: collect all divisors (>1) of all tensor dimensions,
+    // then enumerate 1D and 2D grids within the threadblock limit.
+    std::unordered_set<int> divisor_set;
+    for (DTensor const &tensor : tensors) {
+      for (int i = 0; i < tensor.num_dims; ++i) {
+        int d = tensor.dim[i];
+        for (int f = 2; f * f <= d; ++f) {
+          if (d % f == 0) {
+            divisor_set.insert(f);
+            divisor_set.insert(d / f);
+          }
+        }
+        if (d > 1) {
+          divisor_set.insert(d);
+        }
+      }
+    }
+    std::vector<int> divisors(divisor_set.begin(), divisor_set.end());
+    std::sort(divisors.begin(), divisors.end());
+
+    // 1D grids: (x, 1, 1)
+    for (int x : divisors) {
+      if (x <= (int)config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
+        cands.push_back({(unsigned)x, 1, 1});
+      }
+    }
+    // 2D grids: (x, y, 1) with x >= y to break symmetry
+    for (int x : divisors) {
+      for (int y : divisors) {
+        if (x < y) continue;
+        long long total = (long long)x * y;
+        if (total <= (int)config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
+          cands.push_back({(unsigned)x, (unsigned)y, 1});
+        }
+      }
+    }
+  } else {
+
 #ifdef MIRAGE_BACKEND_USE_CUDA
   cands = vector_concat(cands, generate_1d_grids(get_dims()));
   if (config._enable_attention_specific_optimization) {
@@ -136,6 +177,8 @@ std::vector<dim3>
   cands = vector_concat(cands, generate_1d_grids(get_dims()));
   cands = vector_concat(cands, generate_2d_grids(get_dims()));
 #endif
+
+  } // end if (!explore_all_mappings)
 
   cands = deduplicate(cands);
 
@@ -248,6 +291,20 @@ std::vector<std::vector<int3>>
   } else if (!config.imap_to_explore.empty()) {
     generate_input_map_cand(
         tensors, grid_dim, config.imap_to_explore, {}, results);
+  } else if (config.explore_all_mappings) {
+    int max_dims = 0;
+    for (auto const &t : tensors) {
+      max_dims = std::max(max_dims, t.num_dims);
+    }
+    std::vector<int3> imap_to_explore;
+    for (int x = -1; x < max_dims; ++x)
+      for (int y = -1; y < max_dims; ++y)
+        for (int z = -1; z < max_dims; ++z) {
+          if (x != -1 && (x == y || x == z)) continue;
+          if (y != -1 && y == z) continue;
+          imap_to_explore.push_back({x, y, z});
+        }
+    generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   } else {
     std::vector<int3> imap_to_explore = {
         {0, -1, 1},
@@ -294,18 +351,32 @@ std::vector<int3>
 
   std::vector<int3> results;
   std::vector<int3> omap_to_explore = config.omap_to_explore;
-  omap_to_explore = vector_concat(omap_to_explore,
-                                  {
-                                      {0, 1, -1},
-                                      {0, 2, 1},
-                                      {0, 2, -1},
-                                      {0, -1, -1},
-                                      {-1, 2, 1},
-                                      {-1, 1, -1},
-                                      {-1, 2, -1},
-                                      {-1, -1, -1},
-                                      {1, -1, -1},
-                                  });
+  if (config.explore_all_mappings) {
+    int max_dims = 0;
+    for (auto const &t : tensors) {
+      max_dims = std::max(max_dims, t.num_dims);
+    }
+    for (int x = -1; x < max_dims; ++x)
+      for (int y = -1; y < max_dims; ++y)
+        for (int z = -1; z < max_dims; ++z) {
+          if (x != -1 && (x == y || x == z)) continue;
+          if (y != -1 && y == z) continue;
+          omap_to_explore.push_back({x, y, z});
+        }
+  } else {
+    omap_to_explore = vector_concat(omap_to_explore,
+                                    {
+                                        {0, 1, -1},
+                                        {0, 2, 1},
+                                        {0, 2, -1},
+                                        {0, -1, -1},
+                                        {-1, 2, 1},
+                                        {-1, 1, -1},
+                                        {-1, 2, -1},
+                                        {-1, -1, -1},
+                                        {1, -1, -1},
+                                    });
+  }
   omap_to_explore = deduplicate(omap_to_explore);
   for (int3 output_map : omap_to_explore) {
     if (is_valid_output_map(output_map)) {
@@ -437,6 +508,16 @@ std::vector<std::vector<int>> DimStrategy::get_binary_input(int num_tensors) {
   return result;
 }
 
+std::vector<std::vector<int>> DimStrategy::get_binary_input_commutative(int num_tensors) {
+  std::vector<std::vector<int>> result;
+  for (int i = 0; i < num_tensors; ++i) {
+    for (int j = i; j < num_tensors; ++j) {
+      result.push_back({i, j});
+    }
+  }
+  return result;
+}
+
 void get_nary_input(int n,
                     int num_tensors,
                     std::vector<int> &cur,
@@ -521,9 +602,37 @@ std::vector<std::vector<std::vector<int>>> DimStrategy::get_input_map_cand(
     return true;
   };
 
+  // Reject mapping combos that are not the lexicographically smallest
+  // representative under permutation of parallel dim indices.
+  // This prunes symmetric duplicates (e.g., swapping grid dims 0 and 1).
+  auto is_canonical_parallel_dim_order = [&](std::vector<std::vector<int>> const &combo) {
+    std::vector<size_t> perm(num_parallel_dims);
+    std::iota(perm.begin(), perm.end(), 0);
+    // std::next_permutation skips the identity (initial sorted order),
+    // so we only compare against non-trivial permutations.
+    while (std::next_permutation(perm.begin(), perm.end())) {
+      // Lexicographic comparison: iterate tensors, then parallel dims.
+      for (size_t t = 0; t < combo.size(); ++t) {
+        for (size_t p = 0; p < num_parallel_dims; ++p) {
+          int orig = combo[t][p];
+          int permuted = combo[t][perm[p]];
+          if (permuted < orig) {
+            return false; // permuted combo is smaller → not canonical
+          }
+          if (permuted > orig) {
+            goto next_perm; // permuted is larger → this perm can't beat original
+          }
+        }
+      }
+      next_perm:;
+    }
+    return true;
+  };
+
   std::vector<std::vector<std::vector<int>>> input_map_cand_for_each_tensor = vector_map(tensors, get_input_map_cand_for_one_tensor);
-  // return filter(cartesian_product(input_map_cand_for_each_tensor), no_redundant_parallel_dim);
-  return filter(cartesian_product(input_map_cand_for_each_tensor), no_redundant_parallel_dim);
+  return filter(cartesian_product(input_map_cand_for_each_tensor), [&](std::vector<std::vector<int>> const &combo) {
+    return no_redundant_parallel_dim(combo) && is_canonical_parallel_dim_order(combo);
+  });
 }
 
 std::vector<std::vector<std::vector<int>>>

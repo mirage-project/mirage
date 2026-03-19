@@ -336,7 +336,9 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
     case type::TBOperatorType::TB_MUL_OP:
     case type::TBOperatorType::TB_DIV_OP: {
       assert(input_indices.size() == 2);
-      if (input_indices[0] == input_indices[1]) {
+      // Allow mul(x, x) (e.g. rms*rms), but reject add(x,x) and div(x,x)
+      if (input_indices[0] == input_indices[1] &&
+          op_type != type::TBOperatorType::TB_MUL_OP) {
         return false;
       }
       SymbolicSTensor A = this->tensors[input_indices[0]];

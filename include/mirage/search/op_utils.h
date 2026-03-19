@@ -25,8 +25,10 @@ int get_num_consumers(GraphType const &g,
 
 bool is_binary(type::TBOperatorType op);
 bool is_unary(type::TBOperatorType op);
+bool is_commutative(type::TBOperatorType op);
 bool is_binary(type::KNOperatorType op);
 bool is_unary(type::KNOperatorType op);
+bool is_commutative(type::KNOperatorType op);
 
 int get_input_number(type::KNOperatorType);
 int get_input_number(type::TBOperatorType);

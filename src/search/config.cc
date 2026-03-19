@@ -65,6 +65,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       false /* enable_attention_specific_optimization */,
       false /* enable_concat_matmul_transformation */,
       false /* randomized_branches */,
+      false /* explore_all_mappings */,
   };
 }
 
@@ -120,6 +121,7 @@ void GeneratorConfig::show() const {
     printf("%d ", frange);
   }
   printf("\n");
+  printf("  explore_all_mappings: %s\n", explore_all_mappings ? "true" : "false");
 }
 
 bool TBGraphConfig::operator==(TBGraphConfig const &other) const {

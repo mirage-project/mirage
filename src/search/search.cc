@@ -921,8 +921,6 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                                           false);
           // Revert the changes
           tb_graph->remove_last_operator();
-        } else {
-          // std::cerr << "failed to add operator: " << json(op_type) << std::endl;
         }
       }
     }

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -150,7 +151,11 @@ inline std::pair<float, std::string> auto_tune_best_with_so(std::vector<json> co
     symbolic_kn_graphs.push_back(sg);
   }
   AutoTuner auto_tuner(AutoTunerConfig{});
+  auto t0 = std::chrono::steady_clock::now();
   kernel::Graph *tuned = auto_tuner.tune_multi_threaded(symbolic_kn_graphs);
+  auto t1 = std::chrono::steady_clock::now();
+  double tune_sec = std::chrono::duration<double>(t1 - t0).count();
+  std::cout << "  Auto-tuning time: " << tune_sec << " s" << std::endl;
   if (!tuned) {
     std::cout << "Auto-tuning failed (no valid graph found)" << std::endl;
     return {std::numeric_limits<float>::max(), ""};
@@ -172,7 +177,8 @@ inline float get_best_time(std::vector<json> const &graphs, bool use_symbolic) {
 // Build a GeneratorConfig for the given search mode and operator type.
 inline search::GeneratorConfig get_generator_config(bool use_symbolic_search,
                                                     bool for_attention,
-                                                    double time_limit_sec = -1) {
+                                                    double time_limit_sec = -1,
+                                                    bool explore_all_mappings = false) {
   search::GeneratorConfig config = search::GeneratorConfig::get_default_config();
   if (use_symbolic_search) {
     config.verifier_type = search::VerifierType::FORMAL_VERIFIER;
@@ -182,6 +188,7 @@ inline search::GeneratorConfig get_generator_config(bool use_symbolic_search,
   if (time_limit_sec >= 0) {
     config.search_time_limit_sec = time_limit_sec;
   }
+  config.explore_all_mappings = explore_all_mappings;
   return config;
 }
 
@@ -256,17 +263,41 @@ inline std::vector<json> execute_search(kernel::Graph &ref_graph,
                                         std::string const &checkpoint,
                                         bool use_symbolic,
                                         bool for_attention = false,
-                                        double time_limit_sec = -1) {
-  if (checkpoint_exists(checkpoint)) {
-    return load_graphs(checkpoint);
+                                        double time_limit_sec = -1,
+                                        bool explore_all_mappings = false,
+                                        double *search_time_out = nullptr) {
+  // When explore_all_mappings is set, use a separate checkpoint file so
+  // full-space and default search results coexist without conflicts.
+  std::string ckpt = checkpoint;
+  if (explore_all_mappings) {
+    auto pos = ckpt.rfind(".json");
+    if (pos != std::string::npos)
+      ckpt.insert(pos, "_fullspace");
+    else
+      ckpt += "_fullspace";
+  }
+  if (checkpoint_exists(ckpt)) {
+    auto graphs = load_graphs(ckpt);
+    std::cout << "  Search: loaded from checkpoint (" << graphs.size()
+              << " graphs)" << std::endl;
+    if (search_time_out) *search_time_out = -1;  // cached
+    return graphs;
   }
   search::AbstractExpr::symbolic_expr = use_symbolic;
-  search::GeneratorConfig config = get_generator_config(use_symbolic, for_attention, time_limit_sec);
-  search::KernelGraphGenerator gen(ref_graph, config, checkpoint.data());
+  search::GeneratorConfig config = get_generator_config(use_symbolic, for_attention, time_limit_sec, explore_all_mappings);
+  search::KernelGraphGenerator gen(ref_graph, config, ckpt.data());
+  auto t0 = std::chrono::steady_clock::now();
   if (use_symbolic) {
     gen.generate_kernel_graphs_symbolic();
   } else {
     gen.generate_kernel_graphs();
   }
+  auto t1 = std::chrono::steady_clock::now();
+  double search_sec = std::chrono::duration<double>(t1 - t0).count();
+  std::cout << "  Search time: " << search_sec << " s ("
+            << gen.generated_graphs.size() << " graphs, "
+            << (use_symbolic ? "symbolic" : "non-symbolic") << ")"
+            << std::endl;
+  if (search_time_out) *search_time_out = search_sec;
   return gen.generated_graphs;
 }

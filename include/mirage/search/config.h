@@ -46,6 +46,7 @@ struct GeneratorConfig {
       randomized_branches; // Only for developers to tune the search performance
   bool _enable_attention_specific_optimization;
   bool _enable_concat_matmul_transformation;
+  bool explore_all_mappings;
 
   void show() const;
   void enable_attention_specific_optimization();
@@ -73,7 +74,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneratorConfig,
                                    reduction_dimx,
                                    search_time_limit_sec,
                                    _enable_attention_specific_optimization,
-                                   _enable_concat_matmul_transformation);
+                                   _enable_concat_matmul_transformation,
+                                   explore_all_mappings);
 
 struct TBGraphConfig {
   dim3 grid_dim, block_dim;
