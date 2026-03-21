@@ -261,6 +261,33 @@ def make_sequential_nvfp4_tensors(
     return x_packed, w_packed, x_sf, w_sf
 
 
+def make_random_nvfp4_tensors(
+    batch_size: int,
+    output_size: int,
+    reduction_size: int,
+    scale_vector_size: int = 16,
+    device: str = "cuda",
+):
+    """
+    Create x (input) and w (weight) packed FP4 tensors with random values.
+
+    Returns:
+        x_packed: uint8 (batch_size,  reduction_size // 2)
+        w_packed: uint8 (output_size, reduction_size // 2)
+        x_sf:     uint8 (batch_size,  reduction_size // scale_vector_size)
+        w_sf:     uint8 (output_size, reduction_size // scale_vector_size)
+    """
+    half_k = reduction_size // 2
+    num_sf_cols = reduction_size // scale_vector_size
+
+    x_packed = torch.randint(0, 256, (batch_size,  half_k),      device=device, dtype=torch.uint8)
+    w_packed = torch.randint(0, 256, (output_size, half_k),      device=device, dtype=torch.uint8)
+    x_sf     = torch.randint(0, 256, (batch_size,  num_sf_cols), device=device, dtype=torch.uint8)
+    w_sf     = torch.randint(0, 256, (output_size, num_sf_cols), device=device, dtype=torch.uint8)
+
+    return x_packed, w_packed, x_sf, w_sf
+
+
 def make_sequential_scale_factors(rows: int, cols: int) -> torch.Tensor:
     """
     Create a scale-factor tensor where raw byte values increase sequentially

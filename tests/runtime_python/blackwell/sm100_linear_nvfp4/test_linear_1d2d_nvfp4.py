@@ -1,6 +1,6 @@
 import torch
 import runtime_kernel_blackwell_linear_nvfp4 as runtime_kernel_blackwell
-from nvfp4_util import make_sequential_nvfp4_tensors, nvfp4_block_scaled_matmul
+from nvfp4_util import make_sequential_nvfp4_tensors, nvfp4_block_scaled_matmul, make_random_nvfp4_tensors
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
@@ -40,10 +40,10 @@ for reduction_size in reduction_sizes:
             residual = None
         print("Launching reference implementation")
         torch_out = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, reduction_size, residual=residual)
-        # print(torch_out)
+        print(torch_out[0])
         print("Launching custom implementation")
         runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf, w, w_sf, residual, output)
-        # print(output)
+        print(output[0])
         
         torch.testing.assert_close(
             output,
