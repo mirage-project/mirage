@@ -108,8 +108,8 @@ class BaseDynamicShardLoader(ABC):
             parallelism_dict[info[0]] = info[1] if len(info) > 1 else None
 
         # Fix any unspecified TP sizes.
-        for shard_type in parallelism_dict:
-            if shard_type in [ShardType.ROW_PARALLEL, ShardType.COL_PARALLEL] and parallelism_dict[shard_type] is None:
+        for shard_type in [ShardType.ROW_PARALLEL, ShardType.COL_PARALLEL]:
+            if shard_type in parallelism_dict and parallelism_dict[shard_type] is None:
                 # Specical Case: For both EP and TP and user does not specify TP size, TP = world_size // EP.
                 if ShardType.EXPERT_PARALLEL in parallelism_dict:
                     if ShardType.ROW_PARALLEL in parallelism_dict:
@@ -121,7 +121,8 @@ class BaseDynamicShardLoader(ABC):
 
         size = 1
         for shard_type in parallelism_dict:
-            size *= parallelism_dict[shard_type]
+            if shard_type != ShardType.NONE:
+                size *= parallelism_dict[shard_type]
         assert size <= self.world_size, f"Invalid parallelism config for {param_key}: total parallelism groups {size} exceeds world size {self.world_size}"
 
         return parallelism_dict
