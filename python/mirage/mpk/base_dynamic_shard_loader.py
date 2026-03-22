@@ -320,7 +320,6 @@ class BaseDynamicShardLoader(ABC):
             return weight_slice[:, start:end], meta_shard
 
 
-    # TODO need to also handle cases where tp_type is None (where tp_size will then also be None).
     def materialize_and_attach_to_model(self, meta_tensor, sharded_tensor, weight_name, module):
         """Materialize the tensor in the model to point to the sharded tensor on device.
         
