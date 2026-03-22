@@ -6,6 +6,28 @@ import torch.distributed as dist
 import argparse
 import os, json
 
+from models.qwen3_shard_loader import Qwen3ShardLoader
+from mirage.mpk.base_dynamic_shard_loader import ShardType
+
+
+mapping = {
+    "embed_tokens": {"name": "embed", "shard_type": [(ShardType.NONE,)]},
+    "input_layernorm": {"name": "attn_norm", "shard_type": [(ShardType.NONE,)]},
+    "q_proj" : {"name": "wq", "shard_type": [(ShardType.COL_PARALLEL,)]},
+	"q_norm" : {"name": "wq", "shard_type": [(ShardType.NONE,)]}, 
+    "k_proj": {"name": "wk", "shard_type": [(ShardType.COL_PARALLEL,)]},
+    "k_norm": {"name": "wk", "shard_type": [(ShardType.NONE,)]},
+    "v_proj": {"name": "wv", "shard_type": [(ShardType.COL_PARALLEL,)]},
+	"o_proj" : {"name": "wo", "shard_type": [(ShardType.ROW_PARALLEL)]},
+    "post_attention_layernorm": {"name": "post_norm", "shard_type": [(ShardType.NONE)]}, 
+	"gate": {"name": "gate", "shard_type": [(ShardType.NONE)]}, # router gate
+	"gate_proj": {"name": "w1", "shard_type": [(ShardType.COL_PARALLEL)]}, 
+	"down_proj": {"name": "w2", "shard_type": [(ShardType.ROW_PARALLEL)]}, 
+	"up_proj": {"name": "w3", "shard_type": [(ShardType.COL_PARALLEL)]}, 
+    "norm": {"name": "norm", "shard_type": [(ShardType.NONE)]},
+    "lm_head": {"name": "head", "shard_type": [(ShardType.NONE)]}
+}
+
 DEFAULT_SAVE_DIR = os.path.join("outputs", "qwen3")
 MAX_SAVE_TOKENS = 100
 
@@ -21,9 +43,9 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
         return size // 64
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
-        # cutlass version will output unexpected result (not same out put for
+        # cutlass version will output unexpected result (not same output for
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
-        assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
+        assert size % 256 == 0, "FATAL: Linear layer size not supported, it's {size}."
         return size // 256
     if size % 96 == 0:
         return 96
@@ -153,19 +175,31 @@ if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
-    with torch.device("cuda"):
-        if args.model_path is not None:
-            # load model locally (necessary for multi-GPU case)
-            print(f"Load model from model path: {args.model_path}")
-            config = AutoConfig.from_pretrained(args.model_path)
+    if args.model_path is not None or world_size == 1:
+      with torch.device("cuda"):
+          if args.model_path is not None:
+              # load model locally (necessary for multi-GPU case)
+              print(f"Load model from model path: {args.model_path}")
+              config = AutoConfig.from_pretrained(args.model_path)
+              model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+              load_model(
+                  model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
+              )
+              # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+              tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+          else:
+              model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+              tokenizer = AutoTokenizer.from_pretrained(model_name)
+    else: # Use dynamic shard loader to load directly from HF and shard.
+        print("Detected multi-GPU run without a local path specified. Will use the DynamicShardLoader class.")
+        with torch.device("meta"):
+            config = AutoConfig.from_pretrained(model_name)
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
-            load_model(
-                model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
-            )
-            # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
-            tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-        else:
-            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+
+        device = torch.device(f"cuda:{rank}")
+        loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device)
+
+        with torch.device("cuda"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
