@@ -40,10 +40,10 @@ for reduction_size in reduction_sizes:
             residual = None
         print("Launching reference implementation")
         torch_out = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, reduction_size, residual=residual)
-        print(torch_out[0])
+        print(torch_out[0:2])
         print("Launching custom implementation")
         runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf, w, w_sf, residual, output)
-        print(output[0])
+        print(output[0:2])
         
         torch.testing.assert_close(
             output,
