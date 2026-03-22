@@ -18,12 +18,11 @@ class ShardType(Enum):
     NONE = 100 # No sharding, replicate on all GPUs
 
 class BaseDynamicShardLoader(ABC):
-    def __init__(self, model, model_name, mapping, rank, world_size, device, download=False):
+    def __init__(self, model, model_name, mapping, rank, world_size, device):
         self.model = model
         self.model_name = model_name
         self.rank = rank
         self.world_size = world_size
-        self.download = download
         self.device = device
 
         # Reconstruct mapping dict, validate & update parallelism configs.
@@ -154,6 +153,8 @@ class BaseDynamicShardLoader(ABC):
         weight_name_components = full_weight_name.split('.')
         weight_num = int(weight_name_components[5])
         num_experts = self.model.config.num_experts
+
+        experts_per_rank = math.ceil(num_experts / expert_parallel_size)
         
         num_gpus_per_ep_group = self.world_size // expert_parallel_size
         ep_rank = self.rank // num_gpus_per_ep_group

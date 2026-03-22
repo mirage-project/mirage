@@ -197,7 +197,7 @@ if __name__ == "__main__":
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
 
         device = torch.device(f"cuda:{rank}")
-        loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device, download=False)
+        loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device)
 
         with torch.device("cuda"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
