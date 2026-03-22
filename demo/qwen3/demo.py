@@ -43,9 +43,9 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
         return size // 64
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
-        # cutlass version will output unexpected result (not same out put for
+        # cutlass version will output unexpected result (not same output for
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
-        assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
+        assert size % 256 == 0, "FATAL: Linear layer size not supported, it's {size}."
         return size // 256
     if size % 96 == 0:
         return 96
@@ -191,7 +191,7 @@ if __name__ == "__main__":
               model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
               tokenizer = AutoTokenizer.from_pretrained(model_name)
     else: # Use dynamic shard loader to load directly from HF and shard.
-        print("Detected multi-gpu run without a local path specified. Will be using the DynamicShardLoader class.")
+        print("Detected multi-GPU run without a local path specified. Will use the DynamicShardLoader class.")
         with torch.device("meta"):
             config = AutoConfig.from_pretrained(model_name)
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)

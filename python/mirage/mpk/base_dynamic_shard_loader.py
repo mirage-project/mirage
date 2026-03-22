@@ -1,5 +1,45 @@
-"""
-Library for sharding and loading the model weights directly from HuggingFace.
+"""Dynamic Hugging Face safetensor loader with TP/EP sharding support.
+
+This module provides :class:`BaseDynamicShardLoader`, a constructor-driven loader
+that downloads safetensor shards from Hugging Face, slices weights according to
+user-provided sharding rules, materializes tensors on a target CUDA device, and
+attaches the resulting parameters to a model initialized on ``meta``.
+
+Expected mapping format
+-----------------------
+The ``mapping`` input to :class:`BaseDynamicShardLoader` is a dictionary keyed
+by Hugging Face weight keys (for example ``"q_proj"``, ``"o_proj"``), where each
+value is a dictionary with at least:
+
+- ``"shard_type"``: Iterable of shard specs. Each shard spec can be:
+  - ``ShardType`` (for example ``ShardType.ROW_PARALLEL``)
+  - ``(ShardType,)``
+  - ``(ShardType, int)`` where ``int`` is a group size
+
+Optional fields (for example ``"name"`` in some demos) are allowed but ignored
+by this loader.
+
+The group size must be specified for ``ShardType.EXPERT_PARALLEL``. For TP shard 
+types, if group size is not specified, it defaults to ``world_size`` for pure TP, 
+or ``world_size // ep_groups`` when combined with EP.
+
+Example::
+
+    mapping = {
+        "embed_tokens": {"name": "embed", "shard_type": [(ShardType.NONE,)]},
+        "q_proj": {"name": "wq", "shard_type": [(ShardType.COL_PARALLEL,)]},
+        "o_proj": {"name": "wo", "shard_type": [(ShardType.ROW_PARALLEL,)]},
+        "gate_proj": {
+            "name": "w1",
+            "shard_type": [(ShardType.EXPERT_PARALLEL, 4), (ShardType.COL_PARALLEL,)],
+        },
+    }
+
+Subclassing
+-----------
+Create model-specific loaders by subclassing :class:`BaseDynamicShardLoader`
+and overriding :meth:`model_specific_initialization_logic` for post-load logic
+(for example RoPE buffer reinitialization, as shown in demo/qwen3/models/qwen3_shard_loader.py).
 """
 
 from safetensors import safe_open
@@ -12,6 +52,13 @@ from abc import ABC, abstractmethod
 
 
 class ShardType(Enum):
+    """Sharding strategies supported by :class:`BaseDynamicShardLoader`.
+
+    - ``COL_PARALLEL``: Tensor parallel split across dimension 0.
+    - ``ROW_PARALLEL``: Tensor parallel split across dimension 1.
+    - ``EXPERT_PARALLEL``: Keep only experts assigned to this EP group.
+    - ``NONE``: No sharding; replicate full tensor on each rank.
+    """
     COL_PARALLEL = 0
     ROW_PARALLEL = 1
     EXPERT_PARALLEL = 2
@@ -19,6 +66,38 @@ class ShardType(Enum):
 
 class BaseDynamicShardLoader(ABC):
     def __init__(self, model, model_name, mapping, rank, world_size, device):
+        """Initialize and execute dynamic sharded weight loading.
+
+        This constructor performs the full loading lifecycle immediately:
+
+        1. Validate and normalize ``mapping`` via ``_construct_mapping_dict``.
+        2. Download/broadcast ``model.safetensors.index.json``.
+        3. Read in weights, shard tensors, and materialize parameters.
+        4. Materialize leftover meta buffers.
+        5. Run `model_specific_initialization_logic`.
+
+        Args:
+            model (torch.nn.Module): Model instance, typically created on the
+                ``meta`` device. Must expose ``get_submodule`` and
+                ``named_buffers`` and have parameter paths that match Hugging
+                Face safetensor names.
+            model_name (str): Hugging Face repository id.
+            mapping (dict[str, dict]): Mapping from weight key to sharding
+                configuration. Required key per entry:
+                ``"shard_type"`` (iterable of ``ShardType`` specs).
+                Accepted shard spec forms are ``ShardType``, ``(ShardType,)``,
+                and ``(ShardType, int)``.
+            rank (int): Global rank id in ``[0, world_size)``.
+            world_size (int): Total number of ranks.
+            device (torch.device): Target device to load/materialize tensors on
+                (for example ``torch.device(f"cuda:{rank}")``).
+
+        Notes:
+            - For expert parallel loading, the model is expected to expose
+              ``model.config.num_experts``.
+            - In multi-rank mode, file paths are downloaded on rank 0 and
+              broadcast to other ranks, which assumes shared filesystem access.
+        """
         self.model = model
         self.model_name = model_name
         self.rank = rank
@@ -43,9 +122,15 @@ class BaseDynamicShardLoader(ABC):
         self.materialize_leftover_buffers()
 
         # Model specific logic.
-        self.model_specific_initialition_logic()
+        self.model_specific_initialization_logic()
 
     def shard_and_load(self):
+        """Download shard files and materialize mapped weights onto ``device``.
+
+        Iterates through all safetensor files in the model index, applies
+        mapping-driven TP/EP logic, and replaces model parameters in-place with
+        materialized tensors.
+        """
         files_mapping = self._download_all_safetensor_files()
 
         for hf_filename in files_mapping:
@@ -91,7 +176,22 @@ class BaseDynamicShardLoader(ABC):
 
 
     def _get_parallelism_info(self, param_key, mapping):
-        """Given param key (ex: q_proj, gate), validate config and return parallelism info as a dictionary. 
+        """Validate one mapping entry and normalize it into shard sizes.
+
+        Args:
+            param_key (str): Mapping key (for example ``"q_proj"``).
+            mapping (dict[str, dict]): User mapping dictionary.
+
+        Returns:
+            dict[ShardType, int]: Normalized shard configuration where
+            each key is a shard type and each value is the group size.
+
+        Notes:
+            - ``ShardType.EXPERT_PARALLEL`` must provide an explicit size.
+            - Unspecified TP sizes default to ``world_size`` for pure TP, or
+              ``world_size // ep_groups`` when TP is combined with EP.
+            - Recommended EP configuration is to ensure
+              ``world_size % ep_groups == 0`` for even expert distribution.
         """
         mapping_info = mapping[param_key]
         parallelism_dict = {} # key: ShardType. val: num groups to parallelize by.
@@ -100,7 +200,7 @@ class BaseDynamicShardLoader(ABC):
             if not isinstance(info, tuple):
                 info = (info,)
 
-            # EP requires user to spceify number of groups.
+            # EP requires user to specify number of groups.
             if info[0] == ShardType.EXPERT_PARALLEL:
                 assert len(info) > 1, f"ShardType.EXPERT_PARALLEL specified for {param_key} but no number of groups provided"
             
@@ -109,7 +209,7 @@ class BaseDynamicShardLoader(ABC):
         # Fix any unspecified TP sizes.
         for shard_type in [ShardType.ROW_PARALLEL, ShardType.COL_PARALLEL]:
             if shard_type in parallelism_dict and parallelism_dict[shard_type] is None:
-                # Specical Case: For both EP and TP and user does not specify TP size, TP = world_size // EP.
+                # Special case: For both EP and TP and user does not specify TP size, TP = world_size // EP.
                 if ShardType.EXPERT_PARALLEL in parallelism_dict:
                     if ShardType.ROW_PARALLEL in parallelism_dict:
                         parallelism_dict[ShardType.ROW_PARALLEL] = self.world_size // parallelism_dict[ShardType.EXPERT_PARALLEL]
@@ -127,7 +227,16 @@ class BaseDynamicShardLoader(ABC):
         return parallelism_dict
 
     def _construct_mapping_dict(self, mapping):
-        """Reconstruct the mapping to be more accessible."""
+        """Convert user mapping to normalized shard metadata.
+
+        Args:
+            mapping (dict[str, dict]): Raw mapping config passed to
+                :class:`BaseDynamicShardLoader`.
+
+        Returns:
+            dict[str, dict[ShardType, int]]: Mapping keyed by weight key,
+            where each value is normalized shard information.
+        """
         updated_mapping_dict = {} # key: param key. val: dict containing ShardType and parallelism size.
 
         for key in mapping:
@@ -136,15 +245,19 @@ class BaseDynamicShardLoader(ABC):
         return updated_mapping_dict
 
     def _check_expert_parallel(self, full_weight_name, expert_parallel_size=None):
-        """Return true if the weight should be included, false otherwise, based on EP configs.
+        """Check whether an expert weight belongs to the current EP rank.
 
         Args:
-            - full_weight_name: Full name of the weights from the safetensor files.
-                           ex: model.layers.18.mlp.experts.94.gate_proj.weight
-            - expert_parallel_size: Number of groups to divide the experts into.
+            full_weight_name (str): Full safetensor key, for example
+                ``model.layers.18.mlp.experts.94.gate_proj.weight``.
+            expert_parallel_size (int): Number of EP groups.
 
         Returns:
-            - bool for whether or not this weight should be included.
+            bool: ``True`` if this rank should load the weight, else ``False``.
+
+        Notes:
+            This helper expects expert ids to be in a name pattern compatible
+            with ``...experts.<expert_id>...``.
         """
         # Only check if it's an expert layer.
         if "expert" not in full_weight_name:
@@ -168,11 +281,16 @@ class BaseDynamicShardLoader(ABC):
         """Perform sharding and create blueprint for the meta tensor.
 
         Args:
-            - meta_tensor (PyTorch.Tensor): the meta tensor initialized in the model for this weight.
+            tp_type (ShardType): Either ``ShardType.COL_PARALLEL`` or
+                ``ShardType.ROW_PARALLEL``.
+            tp_size (int): Tensor parallel group size.
+            weight_slice: Safetensor slice object from ``safe_open(...).get_slice``.
+            weight_name (str): Full weight name from safetensors.
+            meta_tensor (torch.Tensor): Meta tensor initialized in the model.
         
         Returns:
             A tuple containing:
-                - PyTorch.Tensor of the sharded tensor
+                - torch.Tensor of the sharded tensor
                 - A meta tensor with the correct shape (as blueprint for the actual tensor)
         """
         dim = tp_type.value 
@@ -181,10 +299,10 @@ class BaseDynamicShardLoader(ABC):
         shape = weight_slice.get_shape()
         assert (
             shape[dim] % tp_size == 0
-        ), f"Error in handle_tensor_parallelism for '{weight_name}': Dimension {dim} must be divisible by {mp}. Tensor shape is {shape}"
+        ), f"Error in handle_tensor_parallelism for '{weight_name}': Dimension {dim} must be divisible by {tp_size}. Tensor shape is {shape}"
 
 
-        # Perform sharding and return Pytorch tensor.
+        # Perform sharding and return PyTorch tensor.
         shard_size = shape[dim] // tp_size
         tp_rank = self.rank % tp_size
         start = tp_rank * shard_size
@@ -207,9 +325,10 @@ class BaseDynamicShardLoader(ABC):
         """Materialize the tensor in the model to point to the sharded tensor on device.
         
         Args:
-            - meta_tensor (PyTorch.Tensor): meta tensor to base the actual device tensor on (has the right shape / strides).
-            - sharded_tensor (PyTorch.Tensor): sharded tensor residing on the CPU (after calling get_slice()).
-            - weight_name (str): full weight name (ex: model.layers.0.mlp.experts.0.gate_proj.weights).
+            - meta_tensor (torch.Tensor): meta tensor to base the actual device tensor on (has the right shape / strides).
+            - sharded_tensor (torch.Tensor): sharded tensor residing on CPU (after calling ``get_slice()``).
+            - weight_name (str): full weight name (ex: ``model.layers.0.mlp.experts.0.gate_proj.weight``).
+            - module (torch.nn.Module): module that owns ``weight_name``.
         """
         if not sharded_tensor.is_contiguous():
             sharded_tensor = sharded_tensor.contiguous()
@@ -227,9 +346,9 @@ class BaseDynamicShardLoader(ABC):
         
 
     def materialize_meta_tensor(self, meta_tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
-        """ Adopted from vLLM's implementation.
+        """ Materialize a meta tensor into an actual tensor on the given device.
 
-        Materialize a meta tensor into an actual tensor on the given device.
+        Note: Adopted from vLLM's implementation.
         """
         tensor = torch.empty_strided(
             size=tuple(meta_tensor.size()),
@@ -247,6 +366,9 @@ class BaseDynamicShardLoader(ABC):
         """
         Finds any buffers still on the 'meta' device and moves them to 
         the actual device, initializing them if they are empty.
+
+        Returns:
+            int: Number of buffers materialized.
         """
         count = 0
         for name, buffer in self.model.named_buffers():
@@ -256,7 +378,7 @@ class BaseDynamicShardLoader(ABC):
                 
                 # Replace meta buffer with actual tensor in the model.
                 parent_name, buf_short_name = name.rsplit('.', 1) if '.' in name else ('', name)
-                parent_module = self.model.get_submodule(parent_name) if parent_name else model
+                parent_module = self.model.get_submodule(parent_name) if parent_name else self.model
                 parent_module.register_buffer(buf_short_name, real_buffer, persistent=True)
                 
                 print("Materialized", name)
@@ -264,29 +386,14 @@ class BaseDynamicShardLoader(ABC):
                 
         return count
 
-    # def reinitialize_rope_buffers(self):
-    #     """
-    #     Re-calculates inv_freq on the actual device since it's not in safetensors.
-
-    #     Since the model is originally initialized on a meta device, the rotary embeddings were
-    #     not calculated during that time. 
-
-    #     This is specific to QWEN3 implementation.  
-    #     """
-    #     for name, module in self.model.named_modules():
-    #         if isinstance(module, Qwen3RotaryEmbedding):
-    #             module.to(self.device)
-                
-    #             inv_freq, attention_scaling = module.rope_init_fn(
-    #                 module.config, self.device, **module.rope_kwargs
-    #             )
-                
-    #             module.register_buffer("inv_freq", inv_freq, persistent=False)
-    #             module.attention_scaling = attention_scaling
-
 
 
     def _get_model_index_file(self):
+        """Download and broadcast the model safetensor index file path.
+
+        Returns:
+            str: Local path to ``model.safetensors.index.json``.
+        """
         # Fetch model index file from HuggingFace & broadcast path to all ranks.
         if self.rank == 0:
             index_path = hf_hub_download(repo_id=self.model_name, filename="model.safetensors.index.json")
@@ -300,6 +407,11 @@ class BaseDynamicShardLoader(ABC):
 
 
     def _download_all_safetensor_files(self):
+        """Download all safetensor shards and broadcast local paths.
+
+        Returns:
+            dict[str, str]: Mapping of Hugging Face filename to local filepath.
+        """
         if self.rank == 0:
             files_list = set(self.weight_map.values())
             files_mapping = {} # key: safetensor filename on HF. val: local filepath.
@@ -320,5 +432,10 @@ class BaseDynamicShardLoader(ABC):
 
     # Use for model specific logic after all the sharding.
     # Common usage is RoPE embeddings.
-    def model_specific_initialition_logic(self):
+    def model_specific_initialization_logic(self):
+        """Hook for subclass-specific initialization after generic loading.
+
+        Override this method in subclasses to run post-load logic required by a
+        specific model implementation (for example reinitializing RoPE buffers).
+        """
         pass

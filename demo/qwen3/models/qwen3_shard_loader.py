@@ -2,11 +2,9 @@ from mirage.mpk.base_dynamic_shard_loader import BaseDynamicShardLoader
 from models.modeling_qwen3 import Qwen3RotaryEmbedding
 
 class Qwen3ShardLoader(BaseDynamicShardLoader):
-    
-    def model_specific_initialition_logic(self):
-        """
-        Executes Qwen3-specific setup after all generic sharding 
-        and loading is complete.
+
+    def model_specific_initialization_logic(self):
+        """Run Qwen3-specific post-load initialization.
         """
         self.reinitialize_rope_buffers()
 
