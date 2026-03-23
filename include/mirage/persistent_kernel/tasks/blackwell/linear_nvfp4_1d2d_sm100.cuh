@@ -113,10 +113,6 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     static_assert(MMA_N % 8 == 0 && MMA_N != 0 && MMA_N <=256, "MMA_N must be {8, 16, … 256} steps of 8"); 
     constexpr int MMA_K = 64; // SM100_MMA_MXF4_SS forces MMA_K to be 64
     
-    // tCgA - Matrix A in global memory (source for TMA loads)
-    // tCsA - Matrix A in shared memory (staging buffer, receives TMA data)
-    // tCfA - SMEM descriptor pointing to tCsA (direct input to MMA instructions)
-
     using A_type = cutlass::float_e2m1_t;
     using B_type = cutlass::float_e2m1_t;
     using SF_type = cutlass::float_ue4m3_t;
@@ -132,8 +128,6 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
 
     int warp_idx = cutlass::canonical_warp_idx_sync();
     int lane_idx = kernel::lane_id();
-
-
 
     // TODO: SM100_MMA_MXF4_SS vs SM100_MMA_MXF4_2x1SM_SS
     cute::TiledMMA tiled_mma = cute::make_tiled_mma(
@@ -170,7 +164,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     // Coordinate tensor for matrix
     cute::Tensor mA = cute::make_coord_tensor(
         cute::make_layout(
-            cute::make_shape(BATCH_SIZE, REDUCTION_SIZE),   // input (activation)
+            cute::make_shape(BATCH_SIZE, REDUCTION_SIZE),   // input
             cute::make_stride(cute::E<1>{}, cute::E<0>{})
         )
     );

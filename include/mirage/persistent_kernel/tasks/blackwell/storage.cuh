@@ -54,11 +54,11 @@ struct PipedSharedStorage {
   }
 };
 
-// Scaled piped task storage. The shared memory buffers for A, B, and C matrices.
-template <class TypeA,  // Tensor A data type
-          class TypeB,  // Tensor B data type
-          class TypeC,  // Tensor C data type
-          class TypeSF, // Tensor SF data type
+// Scaled piped task storage. The shared memory buffers for A, B, and C matrices and its scale factor.
+template <class TypeA, 
+          class TypeB, 
+          class TypeC, 
+          class TypeSF,
           class ASmemLayout,
           class BSmemLayout,
           class CSmemLayout,

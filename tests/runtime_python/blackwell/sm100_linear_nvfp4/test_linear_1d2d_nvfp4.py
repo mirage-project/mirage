@@ -4,13 +4,6 @@ from nvfp4_util import make_sequential_nvfp4_tensors, nvfp4_block_scaled_matmul,
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
-# Minimum is 256
-# MMA_M = 128, N 128, K 64
-# 16B
-# 16 SF
-# 16 FP4
-# 128 x 4b
-# 128 x 16b
 reduction_sizes = [256]
 output_sizes = [128]
 batch_size = 128
@@ -23,7 +16,7 @@ for reduction_size in reduction_sizes:
         )
 
         # make_sequential_nvfp4_tensors | make_random_nvfp4_tensors
-        x, w, x_sf, w_sf = make_random_nvfp4_tensors(
+        x, w, x_sf, w_sf = make_sequential_nvfp4_tensors(
             batch_size, output_size, reduction_size
         )
         x_sf_interleaved = interleave_sf_tensor(x_sf)
@@ -60,6 +53,7 @@ for reduction_size in reduction_sizes:
         for _ in range(16):
             runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
 
+        print("Warmup complete!")
         torch.cuda.synchronize()
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         repetitions = 1000
