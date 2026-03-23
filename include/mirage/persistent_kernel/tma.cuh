@@ -76,8 +76,9 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   void *global_addr = src;
 
   constexpr CUtensorMapDataType tma_format = // to_CUtensorMapDataType<T>();
-    std::is_same_v<T, cute::float_e2m1_t >  ? CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B : 
-    std::is_same_v<T, cute::float_ue4m3_t>  ? CU_TENSOR_MAP_DATA_TYPE_UINT8  : 
+    std::is_same_v<T, cute::float_e2m1_t >  ? CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B :
+    std::is_same_v<T, cute::float_ue4m3_t>  ? CU_TENSOR_MAP_DATA_TYPE_UINT8  :
+    std::is_same_v<T, float>                 ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32 :
                                               CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   constexpr CUtensorMapInterleave tma_interleave    = CU_TENSOR_MAP_INTERLEAVE_NONE;
   constexpr CUtensorMapL2promotion tma_l2Promotion  = CU_TENSOR_MAP_L2_PROMOTION_L2_128B;

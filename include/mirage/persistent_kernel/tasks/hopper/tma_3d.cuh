@@ -75,22 +75,11 @@ public:
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
-        int smem_offset = SMEM_STRIDE_ * j;
+        int smem_offset = SMEM_STRIDE_ * (i * SMEM_REPEAT_COL + j);
         int const tma_coords_local[NDIM] = {
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
             tma_coords[2]};
-#if 0
-          printf("tma_coords: %d, %d, %d\n", tma_coords[0], tma_coords[1], tma_coords[2]);
-          printf("tma_coords_local: %d, %d, %d\n",
-                 tma_coords_local[0],
-                 tma_coords_local[1],
-                 tma_coords_local[2]);
-          printf("smem_offset: %d\n", smem_offset);
-          printf("smem_ptr: %p\n", smem_ptr);
-          printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
-          printf("mbar: %p\n", &mbar);
-#endif
         launch_tma_cp_async(mbar, smem_ptr + smem_offset, tma_coords_local);
       }
     }

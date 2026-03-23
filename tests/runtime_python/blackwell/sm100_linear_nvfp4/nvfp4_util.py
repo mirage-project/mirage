@@ -172,7 +172,7 @@ def nvfp4_block_scaled_matmul(
     b_scaled = apply_block_scaling(b_f32, sfb_f32, scale_vector_size)
 
     # (batch_size, K) × (K, output_size) → (batch_size, output_size)
-    output = torch.matmul(b_scaled, a_scaled.T)
+    output = torch.matmul(a_scaled, b_scaled.T)
     if residual is not None:
         output = output + residual
     return output
@@ -257,7 +257,6 @@ def make_sequential_nvfp4_tensors(
     x_sf = make_sequential_scale_factors(batch_size, num_sf_cols)
     w_sf = make_sequential_scale_factors(output_size, num_sf_cols)
 
-
     return x_packed, w_packed, x_sf, w_sf
 
 
@@ -268,34 +267,45 @@ def make_random_nvfp4_tensors(
     scale_vector_size: int = 16,
     device: str = "cuda",
 ):
-    """
-    Create x (input) and w (weight) packed FP4 tensors with random values.
-
-    Returns:
-        x_packed: uint8 (batch_size,  reduction_size // 2)
-        w_packed: uint8 (output_size, reduction_size // 2)
-        x_sf:     uint8 (batch_size,  reduction_size // scale_vector_size)
-        w_sf:     uint8 (output_size, reduction_size // scale_vector_size)
-    """
     half_k = reduction_size // 2
     num_sf_cols = reduction_size // scale_vector_size
 
-    x_packed = torch.randint(0, 256, (batch_size,  half_k),      device=device, dtype=torch.uint8)
-    w_packed = torch.randint(0, 256, (output_size, half_k),      device=device, dtype=torch.uint8)
-    x_sf     = torch.randint(0, 256, (batch_size,  num_sf_cols), device=device, dtype=torch.uint8)
-    w_sf     = torch.randint(0, 256, (output_size, num_sf_cols), device=device, dtype=torch.uint8)
+    def random_fp4_bytes(shape):
+        lo = torch.randint(0, 16, shape, device=device, dtype=torch.uint8)
+        hi = torch.randint(0, 16, shape, device=device, dtype=torch.uint8)
+        return (hi << 4) | lo
+
+    def random_valid_fp8(shape):
+        exp = torch.randint(0, 15, shape, device=device, dtype=torch.uint8)
+        mant = torch.randint(0, 8,  shape, device=device, dtype=torch.uint8)
+        return (exp << 3) | mant
+
+    x_packed = random_fp4_bytes((batch_size, half_k))
+    w_packed = random_fp4_bytes((output_size, half_k))
+    x_sf     = random_valid_fp8((batch_size, num_sf_cols))
+    w_sf     = random_valid_fp8((output_size, num_sf_cols))
 
     return x_packed, w_packed, x_sf, w_sf
 
 
 def make_sequential_scale_factors(rows: int, cols: int) -> torch.Tensor:
     """
-    Create a scale-factor tensor where raw byte values increase sequentially
-    0, 1, 2, ..., 255, 0, 1, ... across the flattened tensor (row-major order).
+    Generate dense, valid ue4m3 scale factors (no NaN/Inf encodings).
+
+    Strategy:
+    - Sweep through all exponent values 0–14
+    - Sweep mantissa 0–7
+    - Avoid exponent = 15 (NaN/Inf)
     """
+    valid_bytes = []
+    for exp in range(0, 15):          # 0..14 (safe)
+        for mant in range(0, 8):      # 3-bit mantissa
+            byte = (exp << 3) | mant
+            valid_bytes.append(byte)
+    valid_bytes = np.array(valid_bytes, dtype=np.uint8)  # size = 15 * 8 = 120
     total = rows * cols
-    flat = np.arange(total, dtype=np.int64) % 256
-    return torch.from_numpy(flat.reshape(rows, cols).astype(np.uint8)).to("cuda")
+    tiled = np.tile(valid_bytes, total // len(valid_bytes) + 1)[:total]
+    return torch.from_numpy(tiled.reshape(rows, cols)).to("cuda")
 
 
 def make_unit_scale_factors(rows: int, cols: int) -> torch.Tensor:
@@ -305,6 +315,56 @@ def make_unit_scale_factors(rows: int, cols: int) -> torch.Tensor:
     """
     UE4M3_ONE = encode_ue4m3(1.0)   # should be 56
     return torch.full((rows, cols), UE4M3_ONE, device="cuda", dtype=torch.uint8)
+
+def interleave_sf_tensor(sf: torch.Tensor) -> torch.Tensor:
+    M, SF_K = sf.shape
+    REST_M = M // 128
+    REST_K = SF_K // 4
+    out = sf.reshape(REST_M, 4, 32, REST_K, 4)
+    out = out.permute(0, 3, 2, 1, 4).contiguous()
+    out = out.permute(2, 3, 0, 4, 1)
+    return out
+
+# def interleave_sf_tensor(sf: torch.Tensor) -> torch.Tensor:
+#     """
+#     Reorder a scale-factor tensor from row-major (M, SF_K) layout into the
+#     physical SMEM layout expected by deduce_smem_layoutSFA/B and the TMA 3D descriptor.
+
+#     The SMEM layout (from Sm1xxBlockScaledBasicChunk with MMA_M=128, MMA_K=64, SV=16)
+#     places sf[row, k_group] at byte offset:
+#         (row%32)*16 + (row/32)*4 + (k_group%4) + (k_group//4)*512
+
+#     This requires a 5-way reshape and permute:
+#         sf[REST_M, row=128, SF_K=16]
+#         → sf[REST_M, r_inner=32, r_outer=4, k_outer=4, k_inner=4]   (reshape)
+#         → out[REST_M, k_outer, r_inner, r_outer, k_inner]            (permute 0,3,1,2,4)
+#         → contiguous → byte = k_outer*512 + r_inner*16 + r_outer*4 + k_inner  ✓
+
+#     The TMA 3D descriptor loads one (1, 1, SF_COL=256) half_t box per issue, advancing
+#     the GMEM ROW coordinate by 1 per SMEM_REPEAT_ROW iteration, loading:
+#         k_outer=0 → SMEM[0..511]
+#         k_outer=1 → SMEM[512..1023]
+#         k_outer=2 → SMEM[1024..1535]
+#         k_outer=3 → SMEM[1536..2047]
+
+#     Args:
+#         sf: uint8 tensor of shape (M, SF_K). M must be a multiple of 128; SF_K a multiple of 4.
+
+#     Returns:
+#         Contiguous uint8 tensor in the interleaved layout for TMA.
+#     """
+#     M, SF_K = sf.shape
+#     assert M % 128 == 0, f"M={M} must be a multiple of 128 (MMA_M)"
+#     assert SF_K % 4 == 0, f"SF_K={SF_K} must be a multiple of 4 (MMA_K/SV)"
+#     REST_M = M // 128
+#     NUM_K_OUTER = SF_K // 4  # number of MMA_K blocks (= REDUCTION_SIZE / MMA_K)
+#     # sf[REST_M, r_outer=4, r_inner=32, k_outer, k_inner=4]  (row-major: r_outer is outer)
+#     out = sf.reshape(REST_M, 4, 32, NUM_K_OUTER, 4)
+#     # permute to (REST_M, k_outer, r_inner, r_outer, k_inner)
+#     # → byte = k_outer*512 + r_inner*16 + r_outer*4 + k_inner  ✓
+#     out = out.permute(0, 3, 2, 1, 4).contiguous()
+#     return out
+
 
 # # ---------------------------------------------------------------------------
 # # Example corrected test script
