@@ -67,7 +67,7 @@ __global__
   constexpr int NUM_MMA_K = 4;
   constexpr int bK = MMA_K * NUM_MMA_K;  // = 256, full K reduction per stage
 
-  constexpr int B_FP4 = 0; // no swizzle for A/B
+  constexpr int B_FP4 = 1; // 32-byte swizzle to match Layout_K_SW32_Atom
   constexpr int B_SF  = 0; // no swizzle for scale factors
   constexpr int B_OUT = 0; // no swizzle for output
   constexpr int M = 3;
@@ -208,7 +208,7 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
   using namespace cute;
   using namespace cutlass;
 
-  constexpr int B_FP4 = 0;
+  constexpr int B_FP4 = 1;
   constexpr int B_SF  = 0;
   constexpr int B_OUT = 0;
   constexpr int M = 3;
@@ -454,9 +454,9 @@ void linear_nvfp4_1d2d_sm100_kernel(torch::Tensor input,
   void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
 
-  constexpr int BATCH_SIZE = 128;
-  constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 256;
+  constexpr int BATCH_SIZE = 128*12;
+  constexpr int OUTPUT_SIZE = 128*12;
+  constexpr int REDUCTION_SIZE = 256*12;
 
   assert(input.size(1)  == REDUCTION_SIZE / 2); 
   assert(weight.size(0) == OUTPUT_SIZE);

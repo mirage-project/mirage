@@ -172,7 +172,7 @@ def nvfp4_block_scaled_matmul(
     b_scaled = apply_block_scaling(b_f32, sfb_f32, scale_vector_size)
 
     # (batch_size, K) × (K, output_size) → (batch_size, output_size)
-    output = torch.matmul(a_scaled, b_scaled.T)
+    output = torch.matmul(b_scaled, a_scaled.T)
     if residual is not None:
         output = output + residual
     return output
@@ -319,10 +319,9 @@ def make_unit_scale_factors(rows: int, cols: int) -> torch.Tensor:
 def interleave_sf_tensor(sf: torch.Tensor) -> torch.Tensor:
     M, SF_K = sf.shape
     REST_M = M // 128
-    REST_K = SF_K // 4
-    out = sf.reshape(REST_M, 4, 32, REST_K, 4)
+    NUM_K_OUTER = SF_K // 4
+    out = sf.reshape(REST_M, 4, 32, NUM_K_OUTER, 4)
     out = out.permute(0, 3, 2, 1, 4).contiguous()
-    out = out.permute(2, 3, 0, 4, 1)
     return out
 
 # def interleave_sf_tensor(sf: torch.Tensor) -> torch.Tensor:

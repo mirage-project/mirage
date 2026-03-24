@@ -4,9 +4,16 @@ from nvfp4_util import make_sequential_nvfp4_tensors, nvfp4_block_scaled_matmul,
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
-reduction_sizes = [256]
-output_sizes = [128]
-batch_size = 128
+# Minimum is 256
+# MMA_M = 128, N 128, K 64
+# 16B
+# 16 SF
+# 16 FP4
+# 128 x 4b
+# 128 x 16b
+reduction_sizes = [256*12]
+output_sizes = [128*12]
+batch_size = 128*12
 has_residual = False
 
 for reduction_size in reduction_sizes:
@@ -16,18 +23,11 @@ for reduction_size in reduction_sizes:
         )
 
         # make_sequential_nvfp4_tensors | make_random_nvfp4_tensors
-        x, w, x_sf, w_sf = make_sequential_nvfp4_tensors(
+        x, w, x_sf, w_sf = make_random_nvfp4_tensors(
             batch_size, output_size, reduction_size
         )
         x_sf_interleaved = interleave_sf_tensor(x_sf)
         w_sf_interleaved = interleave_sf_tensor(w_sf)
-
-        print(f"x shape: {x.shape}")
-        print(f"w shape: {w.shape}")
-
-        print(f"x[0, :4] = {x[0, :4].tolist()}  (expect [0x31, 0x75, 0xB9, 0xFD])")
-        print(f"w[0, :4] = {w[0, :4].tolist()}  (expect [0x20, 0x64, 0xA8, 0xEC])")
-        print()
         
         residual = torch.randn(batch_size, output_size, device="cuda", dtype=torch.float32)
         output = torch.empty(batch_size, output_size, device="cuda", dtype=torch.float32)
@@ -36,10 +36,35 @@ for reduction_size in reduction_sizes:
             residual = None
         print("Launching reference implementation")
         torch_out = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, reduction_size, residual=residual)
-        print(torch_out[0:2])
+        print(torch_out[0, :10])
         print("Launching custom implementation")
         runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
-        print(output[0:2])
+        print(output[0, :10])        
+        torch.testing.assert_close(
+            output,
+            torch_out.to(output.device),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+        print("Test 1 passed!")
+        
+        x, w, x_sf, w_sf = make_random_nvfp4_tensors(
+            batch_size, output_size, reduction_size
+        )
+        x_sf_interleaved = interleave_sf_tensor(x_sf)
+        w_sf_interleaved = interleave_sf_tensor(w_sf)
+        
+        residual = torch.randn(batch_size, output_size, device="cuda", dtype=torch.float32)
+        output = torch.empty(batch_size, output_size, device="cuda", dtype=torch.float32)
+
+        if not has_residual:
+            residual = None
+        print("Launching reference implementation")
+        torch_out = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, reduction_size, residual=residual)
+        # print(torch_out[0:2])
+        print("Launching custom implementation")
+        runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
+        # print(output[0:2])
         
         torch.testing.assert_close(
             output,
@@ -47,13 +72,12 @@ for reduction_size in reduction_sizes:
             rtol=1e-2,
             atol=1e-2,
         )
-        print("Test passed!")
+        print("Test 2 passed!")
 
         # Warm-up 
         for _ in range(16):
             runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
 
-        print("Warmup complete!")
         torch.cuda.synchronize()
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         repetitions = 1000

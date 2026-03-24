@@ -75,7 +75,7 @@ public:
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
-        int smem_offset = SMEM_STRIDE_ * j;
+        int smem_offset = SMEM_STRIDE_ * (i * SMEM_REPEAT_COL + j);
         int const tma_coords_local[NDIM] = {
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
@@ -147,7 +147,7 @@ public:
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
-        int smem_offset = SMEM_STRIDE_ * j;
+        int smem_offset = SMEM_STRIDE_ * (i * SMEM_REPEAT_COL + j);
         int const tma_coords_local[NDIM] = {
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
