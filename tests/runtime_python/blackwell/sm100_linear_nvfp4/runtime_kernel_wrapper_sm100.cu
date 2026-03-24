@@ -62,6 +62,10 @@ __global__
                                              void *tma_sfb_desc_ptr,
                                              BiasTensor mBias,
                                              void *tma_out_desc_ptr) {
+  constexpr int tile_m_begin = 0;
+  constexpr int tile_m_end   = BATCH_SIZE / MMA_M;
+  constexpr int tile_n_begin = 0;
+  constexpr int tile_n_end   = OUTPUT_SIZE / MMA_N;
 
   constexpr int MMA_K = 64;
   constexpr int NUM_MMA_K = 4;
@@ -194,7 +198,11 @@ __global__
                                                          tma_sfa,
                                                          tma_sfb,
                                                          mBias,
-                                                         tma_out);
+                                                         tma_out,
+                                                         tile_m_begin,
+                                                         tile_m_end,
+                                                         tile_n_begin,
+                                                         tile_n_end);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -454,9 +462,9 @@ void linear_nvfp4_1d2d_sm100_kernel(torch::Tensor input,
   void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
 
-  constexpr int BATCH_SIZE = 128*12;
-  constexpr int OUTPUT_SIZE = 128*12;
-  constexpr int REDUCTION_SIZE = 256*12;
+  constexpr int BATCH_SIZE = 256*32;
+  constexpr int OUTPUT_SIZE = 128*2;
+  constexpr int REDUCTION_SIZE = 128*7;
 
   assert(input.size(1)  == REDUCTION_SIZE / 2); 
   assert(weight.size(0) == OUTPUT_SIZE);

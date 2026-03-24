@@ -81,7 +81,11 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                                   const TMA_SFA &tma_sfa,
                                   const TMA_SFB &tma_sfb,
                                   BiasTensor mBias,
-                                  const TMA_OUT &tma_out) {
+                                  const TMA_OUT &tma_out,
+                                  int tile_m_begin,
+                                  int tile_m_end,
+                                  int tile_n_begin,
+                                  int tile_n_end) {
 
     /*
         Naming convention:
@@ -456,8 +460,8 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     if (warp_idx == 5) {
         // TMA warp (1)
         int total_k_tile_count = 0;
-        for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-            for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+        for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
+            for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
 
                 int num_prev_k_blk = total_k_tile_count;
                 total_k_tile_count += k_tile_count;
@@ -484,10 +488,10 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                     }
 
                     if (cute::elect_one_sync()) {
-                        int tma_coords_A[2] = {k_tile * MMA_K, m_tile * MMA_M};
-                        int tma_coords_B[2] = {k_tile * MMA_K, n_tile * MMA_N};
-                        int tma_coords_SFA[3] = {0, k_tile, m_tile};
-                        int tma_coords_SFB[3] = {0, k_tile, n_tile};
+                        int tma_coords_A[2] = {k_tile * bK, m_tile * MMA_M};
+                        int tma_coords_B[2] = {k_tile * bK, n_tile * MMA_N};
+                        int tma_coords_SFA[3] = {0, k_tile * NUM_MMA_K, m_tile};
+                        int tma_coords_SFB[3] = {0, k_tile * NUM_MMA_K, n_tile};
 
                         sA.set_ptr(static_cast<void*>(cute::raw_pointer_cast(tCsA(cute::_, cute::_, cute::_, smem_wr_buffer).data())));
                         sB.set_ptr(static_cast<void*>(cute::raw_pointer_cast(tCsB(cute::_, cute::_, cute::_, smem_wr_buffer).data())));
@@ -524,8 +528,8 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
         
         int total_k_tile_count = 0;
         int num_tiles_executed = 0;
-        for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-            for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {    
+        for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
+            for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
                 int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
                 int num_prev_k_blk = total_k_tile_count;
                 total_k_tile_count += k_tile_count;
@@ -633,8 +637,8 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
         cute::Tensor tCrAcc   = cute::make_tensor<AccType>(cute::shape(thr_copy_t2r.partition_D(tCrC_ref)));
 
         int num_tiles_executed = 0;
-        for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-          for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+        for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
+          for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
             int epi_rd_acc_buf        = num_tiles_executed % NUM_ACC_STAGE;
             int epi_rd_acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
             int c_smem_wr_buffer      = num_tiles_executed % NUM_C_STAGE;
