@@ -62,11 +62,6 @@ __global__
                                              void *tma_sfb_desc_ptr,
                                              BiasTensor mBias,
                                              void *tma_out_desc_ptr) {
-  constexpr int tile_m_begin = 0;
-  constexpr int tile_m_end   = BATCH_SIZE / MMA_M;
-  constexpr int tile_n_begin = 0;
-  constexpr int tile_n_end   = OUTPUT_SIZE / MMA_N;
-
   constexpr int MMA_K = 64;
   constexpr int NUM_MMA_K = 4;
   constexpr int bK = MMA_K * NUM_MMA_K;  // = 256, full K reduction per stage
@@ -198,11 +193,7 @@ __global__
                                                          tma_sfa,
                                                          tma_sfb,
                                                          mBias,
-                                                         tma_out,
-                                                         tile_m_begin,
-                                                         tile_m_end,
-                                                         tile_n_begin,
-                                                         tile_n_end);
+                                                         tma_out);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>

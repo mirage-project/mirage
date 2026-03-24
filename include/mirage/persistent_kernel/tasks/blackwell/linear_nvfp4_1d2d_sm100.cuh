@@ -81,11 +81,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                                   const TMA_SFA &tma_sfa,
                                   const TMA_SFB &tma_sfb,
                                   BiasTensor mBias,
-                                  const TMA_OUT &tma_out,
-                                  int tile_m_begin,
-                                  int tile_m_end,
-                                  int tile_n_begin,
-                                  int tile_n_end) {
+                                  const TMA_OUT &tma_out) {
 
     /*
         Naming convention:
@@ -114,7 +110,13 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     static_assert(std::is_same_v<T_, cutlass::float_e2m1_t>, "T_ must be cutlass::float_e2m1_t");
     static_assert(SCALE_VECTOR_SIZE == 16, "SCALE_VECTOR_SIZE must be 16");
     static_assert(MMA_M == 128, "MMA_M must be 128");
-    static_assert(MMA_N % 8 == 0 && MMA_N != 0 && MMA_N <=256, "MMA_N must be {8, 16, … 256} steps of 8"); 
+    static_assert(MMA_N % 8 == 0 && MMA_N != 0 && MMA_N <=256, "MMA_N must be {8, 16, … 256} steps of 8");
+
+    constexpr int tile_m_begin = 0;
+    constexpr int tile_m_end   = BATCH_SIZE / MMA_M;
+    constexpr int tile_n_begin = 0;
+    constexpr int tile_n_end   = OUTPUT_SIZE / MMA_N;
+
     constexpr int MMA_K = 64; // SM100_MMA_MXF4_SS forces MMA_K to be 64
     
     using A_type = cutlass::float_e2m1_t;
