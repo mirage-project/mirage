@@ -7,9 +7,9 @@ torch.set_printoptions(sci_mode=False, profile="full")
 # BATCH_SIZE must be divisible by MMA_M = 128
 # OUTPUT_SIZE must be divisible by MMA_N = 128
 # REDUCTION_SIZE must be divisible by bK = 256
-reduction_sizes = [128*7]
-output_sizes = [128*2]
-batch_size = 256*32
+reduction_sizes = [4096]
+output_sizes = [4096]
+batch_size = 4096
 has_residual = False
 
 for reduction_size in reduction_sizes:
@@ -70,19 +70,28 @@ for reduction_size in reduction_sizes:
         )
         print("Test 2 passed!")
 
-        # Warm-up 
+        # Warm-up
         for _ in range(3):
             runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
 
         torch.cuda.synchronize()
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         repetitions = 10
+
         starter.record()
         for rep in range(repetitions):
             runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
         ender.record()
         torch.cuda.synchronize()
-        total_time = starter.elapsed_time(ender)
-        avg_time = total_time / repetitions
+        avg_time = starter.elapsed_time(ender) / repetitions
         tflops = 2 * batch_size * output_size * reduction_size / (avg_time * 1e-3) / 1e12
-        print(f"Average time over {repetitions} runs: {avg_time:.6f} ms  ({tflops:.2f} TFLOP/s)")
+        print(f"[Custom]    Average time over {repetitions} runs: {avg_time:.6f} ms  ({tflops:.2f} TFLOP/s)")
+
+        starter.record()
+        for rep in range(repetitions):
+            nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, reduction_size, residual=residual)
+        ender.record()
+        torch.cuda.synchronize()
+        avg_time_ref = starter.elapsed_time(ender) / repetitions
+        tflops_ref = 2 * batch_size * output_size * reduction_size / (avg_time_ref * 1e-3) / 1e12
+        print(f"[Reference] Average time over {repetitions} runs: {avg_time_ref:.6f} ms  ({tflops_ref:.2f} TFLOP/s)")

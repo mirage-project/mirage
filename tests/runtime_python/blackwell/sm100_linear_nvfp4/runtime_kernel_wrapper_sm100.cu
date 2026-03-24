@@ -368,7 +368,9 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
       cute::make_tensor(cute::make_gmem_ptr(static_cast<float *>(residual_ptr)),
                         layout_Bias); // (Gemm_N, Gemm_M)
 
-  dim3 grid_dim(1, 1, 1);
+  constexpr int num_tiles_m = BATCH_SIZE / MMA_M;
+  constexpr int num_tiles_n = OUTPUT_SIZE / MMA_N;
+  dim3 grid_dim(num_tiles_m * num_tiles_n, 1, 1);
   dim3 block_dim(256, 1, 1);
   dim3 cluster_dim(1, 1, 1);
   constexpr int NUM_C_STAGE_LAUNCH = 1;
@@ -453,9 +455,9 @@ void linear_nvfp4_1d2d_sm100_kernel(torch::Tensor input,
   void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
 
-  constexpr int BATCH_SIZE = 256*32;
-  constexpr int OUTPUT_SIZE = 128*2;
-  constexpr int REDUCTION_SIZE = 128*7;
+  constexpr int BATCH_SIZE = 4096;
+  constexpr int OUTPUT_SIZE = 4096;
+  constexpr int REDUCTION_SIZE = 4096;
 
   assert(input.size(1)  == REDUCTION_SIZE / 2); 
   assert(weight.size(0) == OUTPUT_SIZE);

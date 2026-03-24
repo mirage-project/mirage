@@ -112,10 +112,17 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     static_assert(MMA_M == 128, "MMA_M must be 128");
     static_assert(MMA_N % 8 == 0 && MMA_N != 0 && MMA_N <=256, "MMA_N must be {8, 16, … 256} steps of 8");
 
-    constexpr int tile_m_begin = 0;
-    constexpr int tile_m_end   = BATCH_SIZE / MMA_M;
-    constexpr int tile_n_begin = 0;
-    constexpr int tile_n_end   = OUTPUT_SIZE / MMA_N;
+    constexpr int num_tiles_m = BATCH_SIZE / MMA_M;
+    constexpr int num_tiles_n = OUTPUT_SIZE / MMA_N;
+
+    // Each CTA handles exactly one (m_tile, n_tile) output tile.
+    const int cta_m_tile = blockIdx.x / num_tiles_n;
+    const int cta_n_tile = blockIdx.x % num_tiles_n;
+
+    const int tile_m_begin = cta_m_tile;
+    const int tile_m_end   = cta_m_tile + 1;
+    const int tile_n_begin = cta_n_tile;
+    const int tile_n_end   = cta_n_tile + 1;
 
     constexpr int MMA_K = 64; // SM100_MMA_MXF4_SS forces MMA_K to be 64
     
