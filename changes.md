@@ -1,6 +1,6 @@
 # TPU Pallas Backend Changes
 
-This document summarizes the changes made on branch `tpu`, why they were needed, and what was verified on a real TPU VM.
+This document summarizes the current Pallas TPU work on branch `tpu`, why the changes were needed, and what was verified on the TPU VM.
 
 ## 1. Added a standalone Pallas TPU backend
 
@@ -21,23 +21,25 @@ This document summarizes the changes made on branch `tpu`, why they were needed,
 ### What changed
 
 - Added a new `pallas_transpiler` backend that emits Python/JAX/Pallas code.
-- Added a shared graph-normalization pass used by NKI and Pallas to:
-  - clone Mirage graphs into a fresh graph for backend lowering,
-  - decompose `TB_RMS_NORM_OP`,
-  - lower supported `TB_FORLOOP_ACCUM_*` variants into simpler primitive ops,
-  - preserve input/output structure and guid mappings needed by codegen.
+- Added a shared graph-normalization pass and moved backend-independent lowering into it.
+- Switched the NKI transpiler to use the shared graph normalizer instead of carrying its own copy of that logic.
 - Wired `generate_pallas_program(...)` through the Python/Cython layer.
-- Added Pallas runtime integration so generated code can be imported and executed through the Mirage Python API.
+- Added Python runtime integration so generated Pallas code can be imported and executed through Mirage.
 
 ### Why this was necessary
 
-Mirage already had backend-specific transpilers. TPU support needed the same shape of integration:
+TPU support needed the same basic integration shape as the existing backends:
 
-- a dedicated backend entrypoint,
-- a Python-visible transpilation API,
-- and a runtime path that could execute generated Pallas kernels on TPU.
+- a backend-specific transpiler,
+- Python bindings,
+- and a runtime path that can execute generated kernels.
 
-The shared graph normalizer was needed so backend-independent lowering logic did not have to be duplicated again inside the Pallas backend.
+The graph normalizer was important for two reasons:
+
+- Pallas and NKI both needed the same backend-independent decomposition and graph rebuild logic.
+- Keeping that logic shared prevents the backend implementations from drifting apart.
+
+The shared normalizer now handles the graph cloning and primitive lowering path that both backends need, including RMSNorm and supported forloop-accum rewrites.
 
 ## 2. Made Mirage buildable and importable on TPU-only systems
 
@@ -56,22 +58,22 @@ The shared graph normalizer was needed so backend-independent lowering logic did
 
 ### What changed
 
-- Made non-CUDA builds stop depending on CUDA-only headers and symbols.
-- Added non-CUDA stubs for legacy backend entrypoints that the Python extension still expects.
-- Made Python imports tolerate TPU/JAX-only environments where `torch` is absent.
-- Guarded optional imports that were not relevant to the TPU path.
+- Removed non-essential CUDA assumptions from the TPU build path.
+- Added non-CUDA stubs for legacy extension symbols that still need to link.
+- Made Python imports tolerate JAX-only / TPU-only environments where `torch` is absent.
+- Guarded optional imports that are unrelated to the Pallas path.
 
 ### Why this was necessary
 
-Before any Pallas code could be debugged, Mirage had to:
+Before backend debugging could even start, Mirage had to:
 
 - build with `USE_CUDA OFF`,
-- import without a CUDA runtime,
-- and avoid failing on unconditional torch- or CUDA-specific imports.
+- import without CUDA,
+- and avoid crashing on TPU VMs because of unconditional CUDA- or torch-specific imports.
 
-Without these compatibility fixes, TPU testing failed before reaching any actual Pallas backend logic.
+Without these fixes, TPU validation failed before any Pallas logic ran.
 
-## 3. Added Pallas backend tests and TPU demos
+## 3. Added tests and a real superoptimize-based RMSNorm demo
 
 ### New files
 
@@ -80,10 +82,8 @@ Without these compatibility fixes, TPU testing failed before reaching any actual
 
 ### What changed
 
-- Added Python tests for:
-  - successful Pallas code generation on a supported graph,
-  - descriptive rejection of unsupported threadblock operators.
-- Added a TPU demo for RMSNorm that now uses the proper user path:
+- Added Python tests for supported Pallas codegen and for clear rejection of unsupported threadblock ops.
+- Reworked the RMSNorm demo so it uses the real user path:
   - build a normal KN graph,
   - call `superoptimize(..., backend="pallas")`,
   - transpile the selected graph,
@@ -92,12 +92,14 @@ Without these compatibility fixes, TPU testing failed before reaching any actual
 
 ### Why this was necessary
 
-The backend needed both:
+The backend needed:
 
-- a stable regression surface for codegen and API behavior,
-- and an end-to-end TPU validation path that exercised the actual `superoptimize` flow rather than a hand-built customized graph.
+- regression coverage for codegen and API behavior,
+- and a TPU demo that exercises the actual search + transpile + execute path.
 
-## 4. Fixed the Pallas superoptimize candidate-selection logic
+This replaces the earlier temporary demo shape that bypassed the real superoptimize flow.
+
+## 4. Fixed Pallas candidate selection in superoptimize
 
 ### Updated file
 
@@ -105,58 +107,70 @@ The backend needed both:
 
 ### What changed
 
-- `superoptimize(..., backend="pallas")` no longer returns `all_graphs[0]` blindly.
+- `superoptimize(..., backend="pallas")` no longer returns the first search result blindly.
 - It now:
-  - raises a clear error if search returns no candidates,
-  - iterates through the candidate graphs,
-  - calls `generate_pallas_program(...)` on each one,
+  - errors clearly if search returns no candidates,
+  - iterates over the candidate graphs,
+  - runs `generate_pallas_program(...)` on each one,
   - selects the first graph that the Pallas transpiler accepts,
-  - raises a clear error if none of the candidates are transpileable.
+  - errors clearly if no candidate is transpileable.
 
 ### Why this was necessary
 
-The original implementation was only a placeholder. It treated the first search result as valid without checking whether the Pallas backend could lower it. That was not defensible for a new backend and made failures difficult to interpret.
+The first-result behavior was only a placeholder. A new backend needs to validate that the selected graph is actually lowerable before handing it back to the user.
 
-## 5. Fixed real search issues blocking RMSNorm on Pallas
+## 5. Fixed search-space issues that blocked small Pallas RMSNorm examples
+
+### Updated file
+
+- `src/search/search_c.cc`
+
+### What changed
+
+- Added backend-specific default search candidates for Pallas when the user does not override them:
+  - `forloop_range = 1`
+  - `grid_dim = (1, 1, 1)`
+
+### Why this was necessary
+
+Two real search issues showed up during TPU validation:
+
+1. Mirage often needs a no-op accum stage with `forloop_range = 1` to make threadblock outputs legal.
+2. The non-CUDA search heuristics only proposed large grids, which meant small single-chip TPU examples had no viable customized-op grid candidate.
+
+Adding these defaults made the RMSNorm demo searchable through the normal Pallas path.
+
+## 6. Made the probabilistic verifier work on the pre-normalized search graph
 
 ### Updated files
 
-- `src/search/search_c.cc`
-- `python/mirage/kernel.py`
-
-### What changed
-
-- Added backend-specific search defaults for Pallas:
-  - include `forloop_range = 1` when the user does not provide `franges`,
-  - include `grid_dim = (1, 1, 1)` when the user does not provide `griddims`.
-- Made the user-facing `superoptimize(..., backend="pallas")` path use the formal verifier by default.
-
-### Why this was necessary
-
-Two separate search problems showed up during TPU validation of RMSNorm:
-
-1. `forloop_range = 1` was not in the default search space, even though Mirage often needs a no-op accum stage to make threadblock outputs legal.
-2. The non-CUDA search heuristics only proposed large grid sizes, so a small single-chip example like the RMSNorm demo had no viable customized-op grid candidate at all.
-
-Adding `frange = 1` and `grid_dim = (1, 1, 1)` for Pallas fixed the search space so RMSNorm candidates could actually be discovered.
-
-The formal-verifier default was added because the probabilistic verifier still crashes on this Pallas RMSNorm search space. The formal path is the one that was verified successfully end to end on TPU.
-
-## 6. Added missing RMSNorm fingerprint support for customized threadblock graphs
-
-### Updated file
-
 - `src/kernel/customized.cc`
+- `src/kernel/element_unary.cc`
+- `src/kernel/element_binary.cc`
+- `src/kernel/reduction.cc`
 
 ### What changed
 
-- Added a missing `TB_RMS_NORM_OP` fingerprint implementation in `KNCustomizedOp::fingerprint`.
+- Added missing CPU fingerprint implementations for KN unary, KN binary, and KN reduction operators used by search.
+- Expanded customized-kernel fingerprinting to cover the TB primitives that search can generate directly, including:
+  - unary primitives such as `TB_SQUARE_OP`, `TB_SQRT_OP`, `TB_MUL_SCALAR_OP`,
+  - binary primitives such as `TB_ADD_OP`, `TB_MUL_OP`, `TB_DIV_OP`, `TB_POW_OP`,
+  - reduction primitives such as `TB_REDUCTION_*`,
+  - forloop reduction-accum variants,
+  - and `TB_RMS_NORM_OP`.
+- Fixed undefined behavior in `KNCustomizedOp::fingerprint()` by returning `true` instead of falling off the end of the function.
 
 ### Why this was necessary
 
-Even after search began exploring the right graph shapes, RMSNorm still needed threadblock-level fingerprint support in the customized-kernel verifier path. Without this case, RMSNorm-containing customized graphs could not be checked correctly by the probabilistic verifier.
+Search verification happens on the pre-normalized graph, not the backend-normalized Pallas graph.
 
-This fix was necessary, but it was not sufficient by itself to make the probabilistic verifier path stable. The direct probabilistic Pallas search path still segfaults for the RMSNorm case.
+That means the probabilistic verifier must be able to fingerprint the primitive KN/TB operators that search generates directly. Before these fixes:
+
+- several KN fingerprint paths were still stubs,
+- customized-kernel fingerprinting only handled a narrow subset of TB ops,
+- and the customized fingerprint function had a missing return.
+
+Those gaps were the reason the direct probabilistic Pallas search path was crashing.
 
 ## 7. TPU validation results
 
@@ -164,9 +178,9 @@ The following behaviors were verified on the TPU VM:
 
 - Mirage builds and imports on a TPU-only setup.
 - `generate_pallas_program(...)` works for supported graphs.
-- `superoptimize(..., backend="pallas")` now finds RMSNorm candidate graphs for the demo case.
-- A real superoptimized RMSNorm graph found through the formal verifier transpiles successfully with the current Pallas backend.
-- `demo/pallas_rms_norm.py` now runs through the intended path and completes successfully on TPU.
+- `mi.search(..., backend="pallas", is_formal_verified=False)` now works for the RMSNorm demo graph.
+- `superoptimize(..., backend="pallas")` finds RMSNorm candidate graphs through the normal default verifier path.
+- `demo/pallas_rms_norm.py` runs end to end on TPU through search, transpile, and execute.
 
 Observed TPU result for `demo/pallas_rms_norm.py`:
 
@@ -177,24 +191,17 @@ Observed TPU result for `demo/pallas_rms_norm.py`:
 
 The non-blocking warning about `qwen3.builder` missing `safetensors` is still present on the TPU VM, but it does not affect the Pallas backend flow.
 
-## 8. What is still unresolved
+## 8. What remains out of scope
 
-The current Pallas path is substantially better than the original version, but it is not complete.
+The current backend is still intentionally narrow:
 
-Known remaining issues:
-
-- The probabilistic verifier path for `mi.search(..., backend="pallas", is_formal_verified=False)` still segfaults on the RMSNorm search space.
-- The current Pallas superoptimize flow relies on the formal verifier by default for correctness and stability.
-- The transpiler has been validated on the RMSNorm path through normalized primitive ops, not as a direct lowering of raw `TB_RMS_NORM_OP`.
-- The backend remains intentionally narrow:
-  - single-chip oriented,
-  - heuristic-driven,
-  - and limited to the first supported subset of Mirage ops.
+- single-chip oriented,
+- heuristic-driven,
+- and limited to the initial supported subset of Mirage ops.
 
 Still out of scope for this work:
 
 - distributed TPU execution,
 - topology-aware scheduling,
 - remote DMA and collectives,
-- broad full-graph Pallas coverage across all Mirage operators,
-- and a complete fix for the probabilistic verifier on the new search space.
+- broad full-graph Pallas coverage across all Mirage operators.

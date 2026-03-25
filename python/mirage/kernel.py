@@ -672,8 +672,6 @@ class KNGraph:
             )
         else:
             previous_checkpoint = None
-        effective_is_formal_verified = is_formal_verified or backend == "pallas"
-
         cygraphs = search(
             self.cygraph,
             backend=backend,
@@ -686,7 +684,7 @@ class KNGraph:
             previous_checkpoint=previous_checkpoint,
             verbose=verbose,
             default_config=config,
-            is_formal_verified=effective_is_formal_verified,
+            is_formal_verified=is_formal_verified,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
         print("Finished search, discovering {} mugraphs ...".format(len(all_graphs)))

@@ -17,6 +17,7 @@
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/layout.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -184,7 +185,51 @@ KNElementUnaryOp::operator json() const {
 
 #ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNElementUnaryOp::fingerprint(void) {
-  assert(false && "To be implemented");
+  kernel::DeviceMemoryManager *dmm =
+      kernel::DeviceMemoryManager::get_instance();
+
+  for (int device_id = 0; device_id < dmm->num_devices; ++device_id) {
+    type::FPType *input_ptr = reinterpret_cast<type::FPType *>(
+        dmm->fp_base_ptr[device_id] + input_tensors[0].fp_offset);
+    type::FPType *output_ptr = reinterpret_cast<type::FPType *>(
+        dmm->fp_base_ptr[device_id] + output_tensors[0].fp_offset);
+
+    for (size_t i = 0; i < output_tensors[0].num_elements(); ++i) {
+      switch (op_type) {
+        case mirage::type::KN_EXP_OP:
+          output_ptr[i] =
+              utils::compute_exp_fingerprint(input_ptr[i], dmm->exp_lookup_table);
+          break;
+        case mirage::type::KN_SQUARE_OP:
+          output_ptr[i] = utils::compute_square_fingerprint(input_ptr[i]);
+          break;
+        case mirage::type::KN_SQRT_OP:
+          output_ptr[i] = utils::compute_sqrt_fingerprint(
+              input_ptr[i],
+              dmm->sqrt_p_lookup_table,
+              dmm->sqrt_q_lookup_table);
+          break;
+        case mirage::type::KN_SILU_OP:
+          output_ptr[i] =
+              utils::compute_silu_fingerprint(input_ptr[i], dmm->exp_lookup_table);
+          break;
+        case mirage::type::KN_GELU_OP:
+          output_ptr[i] =
+              utils::compute_gelu_fingerprint(input_ptr[i], dmm->exp_lookup_table);
+          break;
+        case mirage::type::KN_RELU_OP:
+          output_ptr[i] = utils::compute_relu_fingerprint(input_ptr[i]);
+          break;
+        case mirage::type::KN_CLAMP_OP:
+          output_ptr[i] = utils::compute_clamp_fingerprint(input_ptr[i]);
+          break;
+        default:
+          assert(false && "Unsupported kernel unary op for fingerprinting");
+      }
+    }
+  }
+
+  return true;
 }
 #endif
 
