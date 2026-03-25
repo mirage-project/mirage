@@ -1,8 +1,8 @@
 # TPU Pallas Backend Changes
 
-This document summarizes the changes made on branch `tpu` to bring Mirage closer to a usable TPU backend through JAX/Pallas, and explains why each change was necessary.
+This document summarizes the changes made on branch `tpu`, why they were needed, and what was verified on a real TPU VM.
 
-## 1. Added an initial Pallas TPU backend
+## 1. Added a standalone Pallas TPU backend
 
 ### New files
 
@@ -20,32 +20,26 @@ This document summarizes the changes made on branch `tpu` to bring Mirage closer
 
 ### What changed
 
-- Added a new standalone `pallas_transpiler` backend.
-- Added a shared graph-normalization pass used to:
+- Added a new `pallas_transpiler` backend that emits Python/JAX/Pallas code.
+- Added a shared graph-normalization pass used by NKI and Pallas to:
   - clone Mirage graphs into a fresh graph for backend lowering,
   - decompose `TB_RMS_NORM_OP`,
-  - lower supported `TB_FORLOOP_ACCUM_*` variants into primitive ops,
-  - preserve input/output graph structure for codegen.
-- Switched the NKI transpiler to use the shared graph-normalization logic instead of keeping its own copy of that lowering path.
-- Added Python/Cython bindings for Pallas transpilation so Python code can call `generate_pallas_program(...)`.
-- Added Pallas runtime integration in `python/mirage/kernel.py`:
-  - `backend="pallas"` dispatch,
-  - dynamic compilation of generated Python,
-  - JAX-based execution on TPU devices,
-  - simple backend selection behavior in `superoptimize(..., backend="pallas")`.
+  - lower supported `TB_FORLOOP_ACCUM_*` variants into simpler primitive ops,
+  - preserve input/output structure and guid mappings needed by codegen.
+- Wired `generate_pallas_program(...)` through the Python/Cython layer.
+- Added Pallas runtime integration so generated code can be imported and executed through the Mirage Python API.
 
 ### Why this was necessary
 
-The repo already had backend-specific transpilers, but nothing for TPU/Pallas. The new backend needed:
+Mirage already had backend-specific transpilers. TPU support needed the same shape of integration:
 
-- a backend-specific transpiler entrypoint,
-- Python exposure so it could be called from Mirage’s public API,
-- runtime integration so generated Pallas programs could actually execute,
-- and shared graph preprocessing so the same backend-independent lowering logic did not have to be reimplemented in both NKI and Pallas.
+- a dedicated backend entrypoint,
+- a Python-visible transpilation API,
+- and a runtime path that could execute generated Pallas kernels on TPU.
 
-Without the normalization pass, the Pallas backend would have had to directly handle composite threadblock operators like RMSNorm and complex accumulators. That would have made the initial TPU backend much more fragile and much harder to debug.
+The shared graph normalizer was needed so backend-independent lowering logic did not have to be duplicated again inside the Pallas backend.
 
-## 2. Made Mirage usable on TPU-only and non-CUDA installs
+## 2. Made Mirage buildable and importable on TPU-only systems
 
 ### New file
 
@@ -62,34 +56,22 @@ Without the normalization pass, the Pallas backend would have had to directly ha
 
 ### What changed
 
-- Made `setup.py` stop linking CUDA headers and libraries when the selected backend is not CUDA.
-- Guarded CUDA-only runtime types in `runtime_header.h` so non-CUDA builds can still compile the shared headers.
-- Added a non-CUDA stub for the legacy CUDA transpiler entrypoint so the Python extension can still link on TPU-only builds.
-- Added a non-CUDA stub for `cython_set_gpu_device_id(...)` so importing `mirage.core` does not fail on TPU-only installs.
-- Added a non-CUDA stub for Triton codegen so the extension does not contain an undefined symbol for `generate_triton_program(...)`.
-- Made Python imports more tolerant of TPU-only environments:
-  - made `torch`-dependent helpers optional,
-  - guarded MPK imports behind `ModuleNotFoundError`,
-  - preserved runtime errors when CUDA- or torch-specific features are actually used.
+- Made non-CUDA builds stop depending on CUDA-only headers and symbols.
+- Added non-CUDA stubs for legacy backend entrypoints that the Python extension still expects.
+- Made Python imports tolerate TPU/JAX-only environments where `torch` is absent.
+- Guarded optional imports that were not relevant to the TPU path.
 
 ### Why this was necessary
 
-The original codebase assumed a CUDA environment in several places:
+Before any Pallas code could be debugged, Mirage had to:
 
-- build logic,
-- runtime headers,
-- extension symbols,
-- and Python imports.
+- build with `USE_CUDA OFF`,
+- import without a CUDA runtime,
+- and avoid failing on unconditional torch- or CUDA-specific imports.
 
-That meant the Mirage package could not even be imported cleanly on the TPU VM, even before exercising any Pallas logic. Several TPU debugging sessions failed first on missing CUDA symbols or unconditional PyTorch imports rather than on actual backend issues.
+Without these compatibility fixes, TPU testing failed before reaching any actual Pallas backend logic.
 
-These compatibility fixes were required to:
-
-- build Mirage on a TPU VM with `USE_CUDA OFF`,
-- import `mirage` without installing the full CUDA/PyTorch stack,
-- and make TPU testing fail for real Pallas backend reasons instead of basic packaging or linking issues.
-
-## 3. Added validation for the new backend
+## 3. Added Pallas backend tests and TPU demos
 
 ### New files
 
@@ -100,75 +82,119 @@ These compatibility fixes were required to:
 
 - Added Python tests for:
   - successful Pallas code generation on a supported graph,
-  - descriptive error reporting on unsupported threadblock ops.
-- Added a working Pallas RMSNorm demo that:
-  - builds an explicit customized threadblock RMSNorm graph,
-  - uses the Pallas backend directly instead of relying on `superoptimize(..., backend="pallas")`,
-  - runs the generated program,
-  - and compares the result against a JAX reference.
+  - descriptive rejection of unsupported threadblock operators.
+- Added a TPU demo for RMSNorm that now uses the proper user path:
+  - build a normal KN graph,
+  - call `superoptimize(..., backend="pallas")`,
+  - transpile the selected graph,
+  - execute it on TPU,
+  - compare against a JAX reference.
 
 ### Why this was necessary
 
-The backend needed a concrete validation path beyond just generating code.
+The backend needed both:
 
-The test file provides a stable regression surface for:
+- a stable regression surface for codegen and API behavior,
+- and an end-to-end TPU validation path that exercised the actual `superoptimize` flow rather than a hand-built customized graph.
 
-- the Python API,
-- generated-code structure,
-- and unsupported-op reporting.
+## 4. Fixed the Pallas superoptimize candidate-selection logic
 
-The RMSNorm demo was especially important because it exposed two real issues during TPU validation:
+### Updated file
 
-1. The original demo depended on `superoptimize(..., backend="pallas")` to discover a suitable graph, but that path was not producing one for the RMSNorm example.
-2. Threadblock outputs in Mirage are expected to come after an accumulation op. A direct `TB_RMS_NORM_OP -> TB_OUTPUT_OP` path was not valid in practice, so the demo had to insert a no-op `forloop_accum` when `forloop_range=1`.
+- `python/mirage/kernel.py`
 
-The final demo reflects the actual supported Pallas path instead of relying on behavior the backend does not yet implement.
+### What changed
 
-## 4. Bugs found and fixed during TPU validation
+- `superoptimize(..., backend="pallas")` no longer returns `all_graphs[0]` blindly.
+- It now:
+  - raises a clear error if search returns no candidates,
+  - iterates through the candidate graphs,
+  - calls `generate_pallas_program(...)` on each one,
+  - selects the first graph that the Pallas transpiler accepts,
+  - raises a clear error if none of the candidates are transpileable.
 
-These issues were not part of the initial design, but were discovered while testing on a real TPU VM.
+### Why this was necessary
 
-### Pallas output-shape codegen bug
+The original implementation was only a placeholder. It treated the first search result as valid without checking whether the Pallas backend could lower it. That was not defensible for a new backend and made failures difficult to interpret.
 
-In `src/pallas_transpiler/transpile.cc`, the generated `out_shape` originally used an output tensor symbol before that symbol existed. This produced invalid generated Python during execution.
+## 5. Fixed real search issues blocking RMSNorm on Pallas
 
-This was fixed by emitting the output dtype from DTensor metadata directly instead of referencing the not-yet-created output variable.
+### Updated files
 
-### Optional PyTorch import issues
+- `src/search/search_c.cc`
+- `python/mirage/kernel.py`
 
-The TPU VM did not have `torch` installed. Mirage initially imported `torch` too early and too broadly, which prevented use of the JAX/Pallas path even though the TPU backend itself does not require torch.
+### What changed
 
-This was fixed by:
+- Added backend-specific search defaults for Pallas:
+  - include `forloop_range = 1` when the user does not provide `franges`,
+  - include `grid_dim = (1, 1, 1)` when the user does not provide `griddims`.
+- Made the user-facing `superoptimize(..., backend="pallas")` path use the formal verifier by default.
 
-- making top-level torch imports optional where possible,
-- raising clear runtime errors only when torch-specific functionality is actually used.
+### Why this was necessary
 
-### Cython runtime annotation issue
+Two separate search problems showed up during TPU validation of RMSNorm:
 
-`python/mirage/_cython/core.pyx` contained self-referential annotations inside the `dtype` class that broke module initialization in the TPU environment. Those annotations were removed so the module could import reliably.
+1. `forloop_range = 1` was not in the default search space, even though Mirage often needs a no-op accum stage to make threadblock outputs legal.
+2. The non-CUDA search heuristics only proposed large grid sizes, so a small single-chip example like the RMSNorm demo had no viable customized-op grid candidate at all.
 
-## 5. Outcome
+Adding `frange = 1` and `grid_dim = (1, 1, 1)` for Pallas fixed the search space so RMSNorm candidates could actually be discovered.
 
-At the end of this work:
+The formal-verifier default was added because the probabilistic verifier still crashes on this Pallas RMSNorm search space. The formal path is the one that was verified successfully end to end on TPU.
 
-- Mirage has an initial runnable Pallas TPU backend.
-- The backend is exposed through the Python API.
-- Mirage can be built and imported on a TPU VM without a CUDA runtime.
-- The Pallas backend has regression tests.
-- The Pallas RMSNorm demo runs successfully through the supported customized-kernel path.
+## 6. Added missing RMSNorm fingerprint support for customized threadblock graphs
 
-## 6. Scope limits that still remain
+### Updated file
 
-This work does not make the TPU backend fully feature-complete. The current implementation is still intentionally narrow:
+- `src/kernel/customized.cc`
 
-- single-chip oriented,
-- heuristic-based,
-- and limited to the subset of Mirage ops that were targeted for the first milestone.
+### What changed
 
-In particular, the following areas are still intentionally out of scope or only partially supported:
+- Added a missing `TB_RMS_NORM_OP` fingerprint implementation in `KNCustomizedOp::fingerprint`.
+
+### Why this was necessary
+
+Even after search began exploring the right graph shapes, RMSNorm still needed threadblock-level fingerprint support in the customized-kernel verifier path. Without this case, RMSNorm-containing customized graphs could not be checked correctly by the probabilistic verifier.
+
+This fix was necessary, but it was not sufficient by itself to make the probabilistic verifier path stable. The direct probabilistic Pallas search path still segfaults for the RMSNorm case.
+
+## 7. TPU validation results
+
+The following behaviors were verified on the TPU VM:
+
+- Mirage builds and imports on a TPU-only setup.
+- `generate_pallas_program(...)` works for supported graphs.
+- `superoptimize(..., backend="pallas")` now finds RMSNorm candidate graphs for the demo case.
+- A real superoptimized RMSNorm graph found through the formal verifier transpiles successfully with the current Pallas backend.
+- `demo/pallas_rms_norm.py` now runs through the intended path and completes successfully on TPU.
+
+Observed TPU result for `demo/pallas_rms_norm.py`:
+
+- discovered `13` candidate muGraphs
+- output shape `(8, 8)`
+- `max_abs_err = 1.0`
+- `output_sum = 69767.5`
+
+The non-blocking warning about `qwen3.builder` missing `safetensors` is still present on the TPU VM, but it does not affect the Pallas backend flow.
+
+## 8. What is still unresolved
+
+The current Pallas path is substantially better than the original version, but it is not complete.
+
+Known remaining issues:
+
+- The probabilistic verifier path for `mi.search(..., backend="pallas", is_formal_verified=False)` still segfaults on the RMSNorm search space.
+- The current Pallas superoptimize flow relies on the formal verifier by default for correctness and stability.
+- The transpiler has been validated on the RMSNorm path through normalized primitive ops, not as a direct lowering of raw `TB_RMS_NORM_OP`.
+- The backend remains intentionally narrow:
+  - single-chip oriented,
+  - heuristic-driven,
+  - and limited to the first supported subset of Mirage ops.
+
+Still out of scope for this work:
 
 - distributed TPU execution,
 - topology-aware scheduling,
 - remote DMA and collectives,
-- broad `superoptimize(..., backend="pallas")` coverage,
-- and full support for every existing Mirage kernel and threadblock operator.
+- broad full-graph Pallas coverage across all Mirage operators,
+- and a complete fix for the probabilistic verifier on the new search space.
