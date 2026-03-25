@@ -3202,12 +3202,12 @@ int TaskRegister::register_ep_moe_all_to_all_dispatch_task(
   assert(input_ops[2]->output_tensors[0].dim[0] == batch_size);
   assert(input_ops[2]->output_tensors[0].dim[1] == topk);
 
-  // Extra communication buffers passed via task_desc at runtime:
-  //   input_ptrs[3] = recv_ptrs    (T** peer GPU pointers, NVLink)
+  // Extra communication buffers passed via task_desc at runtime (NVSHMEM layout):
+  //   input_ptrs[3] = recv_buf     (T* NVSHMEM symmetric [WORLD_SIZE*BATCH*TOPK, HIDDEN])
   //   input_ptrs[4] = send_counts  (int[world_size])
   //   input_ptrs[5] = send_offsets (int[world_size])
-  //   input_ptrs[6] = grid_counter (int[1], for grid.sync())
-  //   output_ptrs[1]= sync_flags   (volatile int[world_size])
+  //   input_ptrs[6] = grid_counter (int[1], reserved for grid.sync())
+  //   output_ptrs[1]= sync_sigs    (uint64_t* NVSHMEM symmetric [world_size])
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::all_to_all_dispatch_task_impl"
@@ -3216,16 +3216,14 @@ int TaskRegister::register_ep_moe_all_to_all_dispatch_task(
   code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[0],");
   code.e("    (int const*)task_desc->input_ptrs[1],");
   code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[2],");
-  code.e("    (cute::bfloat16_t*)task_desc->output_ptrs[0],");
-  code.e("    (cute::bfloat16_t**)task_desc->input_ptrs[3],");
+  code.e("    (cute::bfloat16_t*)task_desc->input_ptrs[3],");  // recv_buf (NVSHMEM)
   code.e("    (int*)task_desc->input_ptrs[4],");
   code.e("    (int*)task_desc->input_ptrs[5],");
   code.e("    $,", num_experts);
   code.e("    $,", experts_per_rank);
   code.e("    runtime_config.my_gpu_id,");
-  code.e("    $,", node_size);
   code.e("    (int*)task_desc->input_ptrs[6],");
-  code.e("    (volatile int*)task_desc->output_ptrs[1]);");
+  code.e("    (uint64_t*)task_desc->output_ptrs[1]);");
   return register_task_variant(TASK_EP_MOE_ALL_TO_ALL_DISPATCH,
                                code.to_string());
 }
@@ -3301,7 +3299,7 @@ int TaskRegister::register_ep_moe_all_to_all_combine_task(
   //   input_ptrs[3] = routing_indices (int[batch_size, topk], unused in kernel)
   //   input_ptrs[4] = recv_counts     (int[world_size])
   //   input_ptrs[5] = recv_offsets    (int[world_size])
-  //   input_ptrs[6] = sync_flags      (volatile int[world_size])
+  //   input_ptrs[6] = sync_sigs       (uint64_t* NVSHMEM symmetric [world_size])
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   if (add_residual) {
@@ -3323,7 +3321,7 @@ int TaskRegister::register_ep_moe_all_to_all_combine_task(
   code.e("    $,", num_experts);
   code.e("    $,", experts_per_rank);
   code.e("    runtime_config.my_gpu_id,");
-  code.e("    nullptr);"); // sync_flags: no-op for WORLD_SIZE=1 (loop skips own rank)
+  code.e("    nullptr);"); // sync_sigs: no-op for WORLD_SIZE=1 (loop skips own rank)
   return register_task_variant(TASK_EP_MOE_ALL_TO_ALL_COMBINE,
                                code.to_string());
 }

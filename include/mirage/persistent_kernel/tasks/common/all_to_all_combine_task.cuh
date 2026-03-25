@@ -18,6 +18,10 @@
 #include "cutlass/cutlass.h"
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
+// nvshmem.h and nvshmemx.h are intentionally NOT included here.
+// They must be included by the parent compilation unit (.cu file) BEFORE
+// this header, so that device-side NVSHMEM APIs are available to the
+// #if USE_NVSHMEM blocks below without contaminating other translation units.
 
 namespace mirage {
 namespace kernel {
@@ -25,32 +29,45 @@ namespace kernel {
 // __device__ version: operates on pre-offset pointers for a single token.
 // Called from within the persistent kernel's _execute_task (one task per token).
 // Threads within the block parallelize over the HIDDEN_DIM vectors.
-// For world_size=1, the spin-wait on sync_flags is a no-op.
+//
+// sync_sigs : NVSHMEM symmetric uint64_t[WORLD_SIZE] signal array set by each
+//             source PE's dispatch kernel.  With USE_NVSHMEM, thread 0 calls
+//             nvshmem_signal_wait_until per source rank (hardware-accelerated on
+//             NVLink).  For world_size=1 the inner loop body never executes.
+//             Without USE_NVSHMEM, falls back to a software spin-wait.
 template <typename T,
           int HIDDEN_DIM,
           int TOPK,
           int WORLD_SIZE,
           bool ADD_RESIDUAL = true>
 __device__ void all_to_all_combine_device_impl(
-    T const *expert_outputs_row,    // [TOPK, HIDDEN_DIM] - pre-offset to this token
-    int const *routing_indices_row, // [TOPK] - pre-offset (reserved for future use)
-    T const *routing_weights_row,   // [TOPK] - pre-offset to this token
-    T const *residual_row,          // [HIDDEN_DIM] - pre-offset, or nullptr
-    T       *output_row,            // [HIDDEN_DIM] - pre-offset to this token
-    int const *recv_counts,         // [WORLD_SIZE] - reserved
-    int const *recv_offsets,        // [WORLD_SIZE] - reserved
-    int num_experts,
-    int experts_per_rank,
-    int rank,
-    volatile int *sync_flags) {     // [WORLD_SIZE] - spin-wait for cross-GPU ordering
+    T const   *expert_outputs_row,    // [TOPK, HIDDEN_DIM] - pre-offset to this token
+    int const *routing_indices_row,   // [TOPK] - pre-offset (reserved for future use)
+    T const   *routing_weights_row,   // [TOPK] - pre-offset to this token
+    T const   *residual_row,          // [HIDDEN_DIM] - pre-offset, or nullptr
+    T         *output_row,            // [HIDDEN_DIM] - pre-offset to this token
+    int const *recv_counts,           // [WORLD_SIZE] - reserved
+    int const *recv_offsets,          // [WORLD_SIZE] - reserved
+    int        num_experts,
+    int        experts_per_rank,
+    int        rank,
+    uint64_t  *sync_sigs) {           // [WORLD_SIZE] NVSHMEM symmetric signal array
 
   const int tid = threadIdx.x;
 
-  // Phase 1: Wait for all source GPUs (no-op for world_size=1).
+  // Phase 1: Wait for all source GPUs.
+  // For WORLD_SIZE=1 the loop body never executes — no-op.
   if (tid == 0) {
     for (int src_rank = 0; src_rank < WORLD_SIZE; src_rank++) {
       if (src_rank == rank) continue;
-      while (sync_flags[src_rank] == 0) { __threadfence_system(); }
+#if USE_NVSHMEM
+      // Hardware-accelerated NVLink signal wait (B200 / GraceBlackwell).
+      nvshmem_signal_wait_until(sync_sigs + src_rank, NVSHMEM_CMP_EQ, 1ULL);
+#else
+      while (((volatile uint64_t *)sync_sigs)[src_rank] == 0) {
+        __threadfence_system();
+      }
+#endif
     }
     __threadfence_system();
   }
@@ -69,14 +86,14 @@ __device__ void all_to_all_combine_device_impl(
     #pragma unroll
     for (int k = 0; k < TOPK; k++) {
       float weight = static_cast<float>(routing_weights_row[k]);
-      const T* expert_ptr = expert_outputs_row + k * HIDDEN_DIM + v * ELEMS_PER_VEC;
+      const T *expert_ptr = expert_outputs_row + k * HIDDEN_DIM + v * ELEMS_PER_VEC;
       #pragma unroll
       for (int i = 0; i < ELEMS_PER_VEC; i++) {
         accum[i] += weight * static_cast<float>(expert_ptr[i]);
       }
     }
 
-    T* out_ptr = output_row + v * ELEMS_PER_VEC;
+    T *out_ptr = output_row + v * ELEMS_PER_VEC;
     #pragma unroll
     for (int i = 0; i < ELEMS_PER_VEC; i++) {
       out_ptr[i] = static_cast<T>(accum[i]);
@@ -88,7 +105,7 @@ __device__ void all_to_all_combine_device_impl(
   if constexpr (ADD_RESIDUAL) {
     if (residual_row != nullptr) {
       for (int v = tid; v < NUM_VECS; v += blockDim.x) {
-        T *out_ptr       = output_row   + v * ELEMS_PER_VEC;
+        T       *out_ptr = output_row   + v * ELEMS_PER_VEC;
         const T *res_ptr = residual_row + v * ELEMS_PER_VEC;
         #pragma unroll
         for (int i = 0; i < ELEMS_PER_VEC; i++) {
@@ -110,30 +127,35 @@ template <typename T,
           int WORLD_SIZE,
           bool ADD_RESIDUAL = true>
 __global__ void all_to_all_combine_task_impl(
-    T const *expert_outputs,         // [BATCH_SIZE, TOPK, HIDDEN_DIM]
-    int const *routing_indices,      // [BATCH_SIZE, TOPK]
-    T const *routing_weights,        // [BATCH_SIZE, TOPK]
-    T const *residual,               // [BATCH_SIZE, HIDDEN_DIM]
-    T *output,                       // [BATCH_SIZE, HIDDEN_DIM]
-    int const *recv_counts,          // [WORLD_SIZE]
-    int const *recv_offsets,         // [WORLD_SIZE]
-    int num_experts,
-    int experts_per_rank,
-    int rank,
-    volatile int *sync_flags) {
+    T const   *expert_outputs,         // [BATCH_SIZE, TOPK, HIDDEN_DIM]
+    int const *routing_indices,        // [BATCH_SIZE, TOPK]
+    T const   *routing_weights,        // [BATCH_SIZE, TOPK]
+    T const   *residual,               // [BATCH_SIZE, HIDDEN_DIM]
+    T         *output,                 // [BATCH_SIZE, HIDDEN_DIM]
+    int const *recv_counts,            // [WORLD_SIZE]
+    int const *recv_offsets,           // [WORLD_SIZE]
+    int        num_experts,
+    int        experts_per_rank,
+    int        rank,
+    uint64_t  *sync_sigs) {            // [WORLD_SIZE] NVSHMEM symmetric signal array
 
-  const int tid = threadIdx.x;
-  const int bid = blockIdx.x;
-  const int num_blocks = gridDim.x;
-  const int batch_tokens = BATCH_SIZE / num_blocks;
+  const int tid         = threadIdx.x;
+  const int bid         = blockIdx.x;
+  const int batch_tokens = BATCH_SIZE / gridDim.x;
   const int start_token = bid * batch_tokens;
-  const int end_token = start_token + batch_tokens;
+  const int end_token   = start_token + batch_tokens;
 
-  // Phase 1: Wait for all source GPUs (only block 0 waits to reduce contention).
+  // Phase 1: Wait for all source GPUs (only block 0 to reduce contention).
   if (tid == 0 && bid == 0) {
     for (int src_rank = 0; src_rank < WORLD_SIZE; src_rank++) {
       if (src_rank == rank) continue;
-      while (sync_flags[src_rank] == 0) {}
+#if USE_NVSHMEM
+      nvshmem_signal_wait_until(sync_sigs + src_rank, NVSHMEM_CMP_EQ, 1ULL);
+#else
+      while (((volatile uint64_t *)sync_sigs)[src_rank] == 0) {
+        __threadfence_system();
+      }
+#endif
     }
     __threadfence_system();
   }
@@ -151,14 +173,12 @@ __global__ void all_to_all_combine_task_impl(
     for (int v = 0; v < NUM_VECS; v++) {
       float accum[ELEMS_PER_VEC];
       #pragma unroll
-      for (int i = 0; i < ELEMS_PER_VEC; i++) {
-        accum[i] = 0.0f;
-      }
+      for (int i = 0; i < ELEMS_PER_VEC; i++) accum[i] = 0.0f;
 
       #pragma unroll
       for (int k = 0; k < TOPK; k++) {
-        float weight = static_cast<float>(routing_weights[token_idx * TOPK + k]);
-        const T* expert_ptr = expert_outputs +
+        float weight    = static_cast<float>(routing_weights[token_idx * TOPK + k]);
+        const T *expert_ptr = expert_outputs +
                               token_idx * TOPK * HIDDEN_DIM +
                               k * HIDDEN_DIM +
                               v * ELEMS_PER_VEC;
@@ -168,14 +188,13 @@ __global__ void all_to_all_combine_task_impl(
         }
       }
 
-      T* out_ptr = output + token_idx * HIDDEN_DIM + v * ELEMS_PER_VEC;
+      T *out_ptr = output + token_idx * HIDDEN_DIM + v * ELEMS_PER_VEC;
       #pragma unroll
       for (int i = 0; i < ELEMS_PER_VEC; i++) {
         out_ptr[i] = static_cast<T>(accum[i]);
       }
     }
   }
-
   __syncthreads();
 
   // Phase 3: Add residual — output[t,h] += residual[t,h]
@@ -186,7 +205,7 @@ __global__ void all_to_all_combine_task_impl(
 
       #pragma unroll
       for (int v = 0; v < NUM_VECS; v++) {
-        T *out_ptr       = output   + token_idx * HIDDEN_DIM + v * ELEMS_PER_VEC;
+        T       *out_ptr = output   + token_idx * HIDDEN_DIM + v * ELEMS_PER_VEC;
         const T *res_ptr = residual + token_idx * HIDDEN_DIM + v * ELEMS_PER_VEC;
 
         #pragma unroll
