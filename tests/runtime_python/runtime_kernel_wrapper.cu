@@ -1,7 +1,22 @@
+// NVSHMEM selective includes:
+//   - Only device/nvshmem_defines.h for device-side p2p + wait APIs.
+//     We deliberately avoid nvshmemx_defines.h (pulls in coll/reduce.cuh which
+//     clashes with PyTorch's -D__CUDA_NO_HALF_OPERATORS__ for half arithmetic).
+//   - nvshmem_host.h + host/nvshmemx_api.h for host-side management APIs.
+//   Must be first — before runtime_header.h / cutlass — to let device headers
+//   see plain CUDA types before custom operator overloads are brought in.
+#if USE_NVSHMEM
+#include "device/nvshmem_defines.h"    // device: putmem_nbi, quiet, signal_wait_until, uint64_p
+#include "nvshmem_host.h"              // host:   nvshmem_malloc/free/barrier/finalize
+#include "host/nvshmemx_api.h"         // host:   nvshmemx_get_uniqueid, init_attr, etc.
+#include "device_host_transport/nvshmem_constants.h"  // NVSHMEM_CMP_EQ etc.
+#endif
+
 #include "runtime_header.h"
 #include "tasks/ampere/task_header.cuh"
 #include "tasks/blackwell/task_header.cuh"
 #include "tasks/common/moe_routing_distributed.cuh"
+#include "tasks/common/all_to_all_dispatch_task.cuh"
 #include "tasks/common/all_to_all_combine_task.cuh"
 #include <cstdio>
 #include <cuda_runtime.h>
@@ -1841,13 +1856,29 @@ void sampling_from_logits(torch::Tensor logits,
   }
 }
 
-// EP MoE kernels (single-GPU test, WORLD_SIZE=1)
+// ─────────────────────────────────────────────────────────────────────────────
+// EP MoE — single-GPU constants (WORLD_SIZE=1, NUM_EXPERTS=8)
+// ─────────────────────────────────────────────────────────────────────────────
 static constexpr int EP_BATCH_SIZE  = 8;
 static constexpr int EP_NUM_EXPERTS = 8;
 static constexpr int EP_TOPK        = 2;
 static constexpr int EP_WORLD_SIZE  = 1;
 static constexpr int EP_HIDDEN_DIM  = 64;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EP MoE — multi-GPU constants (WORLD_SIZE=2, NUM_EXPERTS=4)
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr int EP_MG_WORLD_SIZE   = 2;
+static constexpr int EP_MG_BATCH_SIZE   = 8;
+static constexpr int EP_MG_NUM_EXPERTS  = 4;
+static constexpr int EP_MG_TOPK         = 2;
+static constexpr int EP_MG_HIDDEN_DIM   = 64;
+// recv_buf slots per PE: worst case all tokens go to one destination.
+static constexpr int EP_MG_RECV_SLOTS   = EP_MG_WORLD_SIZE * EP_MG_BATCH_SIZE * EP_MG_TOPK;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Single-GPU routing (existing test — unchanged behaviour)
+// ─────────────────────────────────────────────────────────────────────────────
 void moe_routing(
     torch::Tensor router_logits,
     torch::Tensor routing_indices,
@@ -1876,6 +1907,10 @@ void moe_routing(
   cudaDeviceSynchronize();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Single-GPU combine (existing test — kept for backward compat).
+// sync_flags tensor is accepted but ignored (WORLD_SIZE=1, wait loop is no-op).
+// ─────────────────────────────────────────────────────────────────────────────
 void moe_combine(
     torch::Tensor expert_outputs,
     torch::Tensor routing_indices,
@@ -1884,7 +1919,7 @@ void moe_combine(
     torch::Tensor output,
     torch::Tensor recv_counts,
     torch::Tensor recv_offsets,
-    torch::Tensor sync_flags,
+    torch::Tensor sync_flags,   // kept for API compat; WORLD_SIZE=1 never waits
     int num_experts,
     int experts_per_rank,
     int rank) {
@@ -1896,7 +1931,6 @@ void moe_combine(
   auto *out_ptr  = reinterpret_cast<bfloat16 *>(output.data_ptr());
   int  *rcnt_ptr = recv_counts.data_ptr<int>();
   int  *roff_ptr = recv_offsets.data_ptr<int>();
-  volatile int *sf_ptr = reinterpret_cast<volatile int *>(sync_flags.data_ptr<int>());
 
   dim3 grid(EP_BATCH_SIZE, 1, 1);
   dim3 block(128, 1, 1);
@@ -1905,12 +1939,259 @@ void moe_combine(
       bfloat16, EP_BATCH_SIZE, EP_HIDDEN_DIM, EP_TOPK, EP_WORLD_SIZE, true>
     <<<grid, block>>>(
       exp_ptr, idx_ptr, wts_ptr, res_ptr, out_ptr,
-      rcnt_ptr, roff_ptr, num_experts, experts_per_rank, rank, sf_ptr);
+      rcnt_ptr, roff_ptr, num_experts, experts_per_rank, rank,
+      /*sync_sigs=*/nullptr);  // no-op: WORLD_SIZE=1 skips wait loop
 
   cudaDeviceSynchronize();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NVSHMEM host management helpers
+// ─────────────────────────────────────────────────────────────────────────────
+#if USE_NVSHMEM
+
+// Returns the raw bytes of nvshmemx_uniqueid_t as a Python bytes object.
+// Call once in the main process and share with all workers.
+py::bytes nvshmem_get_uniqueid() {
+  nvshmemx_uniqueid_t uid = NVSHMEMX_UNIQUEID_INITIALIZER;
+  int ret = nvshmemx_get_uniqueid(&uid);
+  if (ret != 0) {
+    throw std::runtime_error("nvshmemx_get_uniqueid failed");
+  }
+  return py::bytes(reinterpret_cast<char *>(&uid), sizeof(uid));
+}
+
+// Initialise NVSHMEM in each worker process using the shared uniqueid.
+void nvshmem_init_uid(int myrank, int nranks, py::bytes uid_bytes) {
+  std::string uid_str = uid_bytes;
+  if (uid_str.size() != sizeof(nvshmemx_uniqueid_t)) {
+    throw std::runtime_error("nvshmem_init_uid: uid_bytes has wrong size");
+  }
+  nvshmemx_uniqueid_t uid;
+  std::memcpy(&uid, uid_str.data(), sizeof(uid));
+
+  nvshmemx_init_attr_t attr;
+  nvshmemx_set_attr_uniqueid_args(myrank, nranks, &uid, &attr);
+  int ret = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &attr);
+  if (ret != 0) {
+    throw std::runtime_error("nvshmemx_init_attr failed");
+  }
+}
+
+void nvshmem_finalize_wrapper() {
+  nvshmem_finalize();
+}
+
+// Returns a Python int containing the raw device pointer from nvshmem_malloc.
+uintptr_t nvshmem_malloc_wrapper(size_t bytes) {
+  void *ptr = nvshmem_malloc(bytes);
+  if (!ptr && bytes > 0) {
+    throw std::runtime_error("nvshmem_malloc failed");
+  }
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void nvshmem_free_wrapper(uintptr_t ptr) {
+  nvshmem_free(reinterpret_cast<void *>(ptr));
+}
+
+// Zero-initialise a NVSHMEM symmetric buffer via cudaMemset.
+void nvshmem_memset_zero(uintptr_t ptr, size_t bytes) {
+  cudaMemset(reinterpret_cast<void *>(ptr), 0, bytes);
+  cudaDeviceSynchronize();
+}
+
+void nvshmem_barrier_all_wrapper() {
+  nvshmem_barrier_all();
+}
+
+// Copy uint64_t values from a NVSHMEM device pointer to a Python list.
+// Needed because the raw pointer is a GPU address and cannot be dereferenced
+// from the CPU via ctypes.
+std::vector<int64_t> nvshmem_read_uint64s(uintptr_t ptr, int count) {
+  std::vector<uint64_t> host(count, 0);
+  cudaMemcpy(host.data(), reinterpret_cast<const void *>(ptr),
+             count * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+  return std::vector<int64_t>(host.begin(), host.end());
+}
+
+// Return true if any bfloat16 value in the device buffer is nonzero.
+bool nvshmem_has_nonzero_bf16(uintptr_t ptr, size_t bytes) {
+  std::vector<uint16_t> host(bytes / sizeof(uint16_t), 0);
+  cudaMemcpy(host.data(), reinterpret_cast<const void *>(ptr),
+             bytes, cudaMemcpyDeviceToHost);
+  for (auto v : host) { if (v != 0) return true; }
+  return false;
+}
+
+// Fill a device uint64_t array with a single value (H2D memcpy).
+// Useful for pre-setting sync_sigs to 1 before combine.
+void nvshmem_fill_uint64(uintptr_t ptr, int count, int64_t value) {
+  std::vector<uint64_t> host(count, static_cast<uint64_t>(value));
+  cudaMemcpy(reinterpret_cast<void *>(ptr), host.data(),
+             count * sizeof(uint64_t), cudaMemcpyHostToDevice);
+  cudaDeviceSynchronize();
+}
+
+#endif // USE_NVSHMEM
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-GPU routing wrapper (WORLD_SIZE=2, NUM_EXPERTS=4)
+// Same kernel as single-GPU; just different template constants.
+// ─────────────────────────────────────────────────────────────────────────────
+void moe_routing_dev(
+    int /*rank_arg*/,              // unused — cuda device already set by caller
+    torch::Tensor router_logits,
+    torch::Tensor routing_indices,
+    torch::Tensor routing_weights,
+    torch::Tensor dispatch_counts,
+    int experts_per_rank,
+    int rank,
+    float load_balance_factor) {
+
+  auto *logits_ptr  = reinterpret_cast<bfloat16 const *>(router_logits.data_ptr());
+  int  *idx_ptr     = routing_indices.data_ptr<int>();
+  auto *wts_ptr     = reinterpret_cast<bfloat16 *>(routing_weights.data_ptr());
+  int  *dcounts_ptr = dispatch_counts.data_ptr<int>();
+
+  cudaMemset(dcounts_ptr, 0, EP_MG_WORLD_SIZE * sizeof(int));
+
+  dim3 grid(EP_MG_BATCH_SIZE, 1, 1);
+  dim3 block(EP_MG_TOPK, 1, 1);
+
+  mirage::kernel::moe_routing_distributed_task_impl<
+      bfloat16, EP_MG_BATCH_SIZE, EP_MG_NUM_EXPERTS, EP_MG_TOPK,
+      EP_MG_WORLD_SIZE, true>
+    <<<grid, block>>>(
+      logits_ptr, idx_ptr, wts_ptr, dcounts_ptr,
+      nullptr, experts_per_rank, rank, load_balance_factor);
+
+  cudaDeviceSynchronize();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-GPU dispatch wrapper (NVSHMEM communication, WORLD_SIZE=2)
+//
+// recv_buf_ptr  : raw device pointer (int) from nvshmem_malloc
+//                 Layout: [WORLD_SIZE * BATCH * TOPK, HIDDEN] — each source
+//                 PE writes to its own slice (rank * BATCH * TOPK).
+// sync_sigs_ptr : raw device pointer (int) from nvshmem_malloc
+//                 Layout: uint64_t[WORLD_SIZE] — source sets sync_sigs[rank]=1
+//                 on all PEs after quiet.
+//
+// The kernel is launched cooperatively (grid.sync() inside) so we use
+// cudaLaunchCooperativeKernel.
+// ─────────────────────────────────────────────────────────────────────────────
+void moe_dispatch_dev(
+    int /*rank_arg*/,
+    torch::Tensor tokens,
+    torch::Tensor routing_indices,
+    torch::Tensor send_counts,
+    torch::Tensor send_offsets,
+    uintptr_t recv_buf_ptr,
+    uintptr_t sync_sigs_ptr,
+    int num_experts,
+    int experts_per_rank,
+    int rank) {
+
+  auto *tok_ptr    = reinterpret_cast<bfloat16 const *>(tokens.data_ptr());
+  int  *idx_ptr    = routing_indices.data_ptr<int>();
+  int  *scnt_ptr   = send_counts.data_ptr<int>();
+  int  *soff_ptr   = send_offsets.data_ptr<int>();
+  auto *rbuf_ptr   = reinterpret_cast<bfloat16 *>(recv_buf_ptr);
+  auto *ssig_ptr   = reinterpret_cast<uint64_t *>(sync_sigs_ptr);
+
+  cudaMemset(scnt_ptr, 0, EP_MG_WORLD_SIZE * sizeof(int));
+  cudaMemset(soff_ptr, 0, EP_MG_WORLD_SIZE * sizeof(int));
+
+  using KernelFn = void (*)(bfloat16 const *, int const *, bfloat16 const *,
+                            bfloat16 *, int *, int *,
+                            int, int, int, int *, uint64_t *);
+
+  KernelFn fn = mirage::kernel::all_to_all_dispatch_task_impl<
+      bfloat16, EP_MG_BATCH_SIZE, EP_MG_HIDDEN_DIM, EP_MG_TOPK, EP_MG_WORLD_SIZE>;
+
+  // Cooperative kernel: all blocks on this GPU sync via grid.sync().
+  // Launch with 1 block for simplicity (avoids multi-block grid.sync issues
+  // when running inside mp.spawn workers with separate CUDA contexts).
+  dim3 grid(1, 1, 1);
+  dim3 block(256, 1, 1);
+
+  // routing_weights — kernel ignores it; pass tok_ptr as a dummy const*.
+  const bfloat16 *dummy_wts    = tok_ptr;
+  // grid_counter    — reserved; pass typed null pointer.
+  int            *grid_counter  = nullptr;
+
+  void *kargs[] = {
+    (void *)&tok_ptr,
+    (void *)&idx_ptr,
+    (void *)&dummy_wts,
+    (void *)&rbuf_ptr,
+    (void *)&scnt_ptr,
+    (void *)&soff_ptr,
+    (void *)&num_experts,
+    (void *)&experts_per_rank,
+    (void *)&rank,
+    (void *)&grid_counter,   // pointer to null int*
+    (void *)&ssig_ptr,
+  };
+
+  cudaError_t err = cudaLaunchCooperativeKernel(
+      reinterpret_cast<void *>(fn), grid, block, kargs, /*smem=*/0);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(
+        std::string("cudaLaunchCooperativeKernel dispatch failed: ") +
+        cudaGetErrorString(err));
+  }
+  cudaDeviceSynchronize();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-GPU combine wrapper (NVSHMEM signal-wait, WORLD_SIZE=2)
+//
+// sync_sigs_ptr : raw device pointer (int) from nvshmem_malloc
+//                 uint64_t[WORLD_SIZE] — all entries must be 1 before combine
+//                 returns (dispatch sets them via nvshmemx_signal_op).
+// ─────────────────────────────────────────────────────────────────────────────
+void moe_combine_dev(
+    int /*rank_arg*/,
+    torch::Tensor expert_outputs,
+    torch::Tensor routing_indices,
+    torch::Tensor routing_weights,
+    torch::Tensor residual,
+    torch::Tensor output,
+    torch::Tensor recv_counts,
+    torch::Tensor recv_offsets,
+    uintptr_t sync_sigs_ptr,
+    int num_experts,
+    int experts_per_rank,
+    int rank) {
+
+  auto *exp_ptr  = reinterpret_cast<bfloat16 const *>(expert_outputs.data_ptr());
+  int  *idx_ptr  = routing_indices.data_ptr<int>();
+  auto *wts_ptr  = reinterpret_cast<bfloat16 const *>(routing_weights.data_ptr());
+  auto *res_ptr  = reinterpret_cast<bfloat16 const *>(residual.data_ptr());
+  auto *out_ptr  = reinterpret_cast<bfloat16 *>(output.data_ptr());
+  int  *rcnt_ptr = recv_counts.data_ptr<int>();
+  int  *roff_ptr = recv_offsets.data_ptr<int>();
+  auto *ssig_ptr = reinterpret_cast<uint64_t *>(sync_sigs_ptr);
+
+  dim3 grid(EP_MG_BATCH_SIZE, 1, 1);
+  dim3 block(128, 1, 1);
+
+  mirage::kernel::all_to_all_combine_task_impl<
+      bfloat16, EP_MG_BATCH_SIZE, EP_MG_HIDDEN_DIM, EP_MG_TOPK,
+      EP_MG_WORLD_SIZE, true>
+    <<<grid, block>>>(
+      exp_ptr, idx_ptr, wts_ptr, res_ptr, out_ptr,
+      rcnt_ptr, roff_ptr, num_experts, experts_per_rank, rank, ssig_ptr);
+
+  cudaDeviceSynchronize();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // pybind11 bindings
+// ─────────────────────────────────────────────────────────────────────────────
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
@@ -1921,39 +2202,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // m.def("verify", &verify, "Target verification kernel");
   // m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
   // m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
-  // m.def("single_batch_decoding",
-  //       &single_batch_decoding,
-  //       py::arg("qkv"),
-  //       py::arg("k_cache"),
-  //       py::arg("v_cache"),
-  //       py::arg("output"),
-  //       py::arg("seq_len"),
-  //       py::arg("qk_norm"),
-  //       py::arg("rotary_embed"),
-  //       py::arg("qnorm_weight") = py::none(),
-  //       py::arg("knorm_weight") = py::none(),
-  //       py::arg("cos") = py::none(),
-  //       py::arg("sin") = py::none(),
-  //       py::arg("q_eps") = 0.0f,
-  //       py::arg("k_eps") = 0.0f);
-  // m.def("single_batch_extend",
-  //       &single_batch_extend,
-  //       py::arg("qkv"),
-  //       py::arg("k_cache"),
-  //       py::arg("v_cache"),
-  //       py::arg("output"),
-  //       py::arg("seq_len"),
-  //       py::arg("extend_num"),
-  //       py::arg("qk_norm"),
-  //       py::arg("rotary_embed"),
-  //       py::arg("qnorm_weight") = py::none(),
-  //       py::arg("knorm_weight") = py::none(),
-  //       py::arg("cos") = py::none(),
-  //       py::arg("sin") = py::none(),
-  //       py::arg("q_eps") = 0.0f,
-  //       py::arg("k_eps") = 0.0f,
-  //       py::arg("q_norm_debug") = py::none(),
-  //       py::arg("k_norm_debug") = py::none());
+  // m.def("single_batch_decoding", ...);
+  // m.def("single_batch_extend", ...);
   // m.def("paged_attention", &paged_attention, "Paged Attention");
   m.def("multitoken_paged_attention",
         &multitoken_paged_attention,
@@ -1961,8 +2211,36 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sampling_from_logits",
         &sampling_from_logits,
         "Sampling from Logits kernel");
-  // m.def("rms_norm", &rms_norm, "Window RMSNorm");
-  // m.def("rope", &rope, "RoPE kernel");
   m.def("moe_routing", &moe_routing, "MoE routing: TopK + softmax");
   m.def("moe_combine", &moe_combine, "MoE combine: weighted sum + residual");
+
+  // ── NVSHMEM multi-GPU EP MoE ─────────────────────────────────────────────
+#if USE_NVSHMEM
+  m.def("nvshmem_get_uniqueid",  &nvshmem_get_uniqueid,
+        "Get NVSHMEM unique ID (call once in main process)");
+  m.def("nvshmem_init_uid",      &nvshmem_init_uid,
+        "Init NVSHMEM in worker using shared uniqueid bytes");
+  m.def("nvshmem_finalize",      &nvshmem_finalize_wrapper,
+        "Finalize NVSHMEM");
+  m.def("nvshmem_malloc",        &nvshmem_malloc_wrapper,
+        "Allocate NVSHMEM symmetric memory, returns int pointer");
+  m.def("nvshmem_free",          &nvshmem_free_wrapper,
+        "Free NVSHMEM symmetric memory");
+  m.def("nvshmem_memset_zero",   &nvshmem_memset_zero,
+        "Zero-init NVSHMEM buffer (cudaMemset + sync)");
+  m.def("nvshmem_barrier_all",   &nvshmem_barrier_all_wrapper,
+        "NVSHMEM barrier across all PEs");
+  m.def("nvshmem_read_uint64s",  &nvshmem_read_uint64s,
+        "Copy uint64_t values from device pointer to Python list");
+  m.def("nvshmem_has_nonzero_bf16", &nvshmem_has_nonzero_bf16,
+        "Check if any bf16 value in device buffer is nonzero");
+  m.def("nvshmem_fill_uint64",     &nvshmem_fill_uint64,
+        "Fill device uint64_t array with a scalar value (H2D memcpy)");
+  m.def("moe_routing_dev",       &moe_routing_dev,
+        "Multi-GPU MoE routing (WORLD_SIZE=2)");
+  m.def("moe_dispatch_dev",      &moe_dispatch_dev,
+        "Multi-GPU MoE dispatch via NVSHMEM puts + signal");
+  m.def("moe_combine_dev",       &moe_combine_dev,
+        "Multi-GPU MoE combine with NVSHMEM signal-wait");
+#endif // USE_NVSHMEM
 }
