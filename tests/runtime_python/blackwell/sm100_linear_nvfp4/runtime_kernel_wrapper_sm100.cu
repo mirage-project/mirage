@@ -219,7 +219,12 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
   constexpr int MMA_N = 128;
   constexpr int MMA_K = 64;
 
+  constexpr int NUM_MMA_M = 1;
+  constexpr int NUM_MMA_N = 1;
   constexpr int NUM_MMA_K = 4;
+
+  constexpr int bM = MMA_M * NUM_MMA_M;
+  constexpr int bN = MMA_N * NUM_MMA_N;
   constexpr int bK = MMA_K * NUM_MMA_K;  // = 256
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int TMA_CP_ASYNC_REPEAT_COL = bK / TMA_CP_ASYNC_SIZE;  // = 4
@@ -359,17 +364,16 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
   void *tma_desc_weight_sf  = desc_w_sf_ptr;
   void *tma_desc_output     = desc_o_ptr;
 
-  // Residual
   cute::Layout layout_Bias = cute::make_layout(
       cute::make_shape(BATCH_SIZE, OUTPUT_SIZE),
       cute::make_stride(OUTPUT_SIZE, cute::Int<1>{})
     ); // (Gemm_M,Gemm_N):(Gemm_N,_1)
   cute::Tensor mBias =
       cute::make_tensor(cute::make_gmem_ptr(static_cast<float *>(residual_ptr)),
-                        layout_Bias); // (Gemm_N, Gemm_M)
+                        layout_Bias); // (Gemm_M, Gemm_N)
 
-  constexpr int num_tiles_m = BATCH_SIZE / MMA_M;
-  constexpr int num_tiles_n = OUTPUT_SIZE / MMA_N;
+  constexpr int num_tiles_m = BATCH_SIZE / bM;
+  constexpr int num_tiles_n = OUTPUT_SIZE / bN;
   dim3 grid_dim(num_tiles_m * num_tiles_n, 1, 1);
   dim3 block_dim(256, 1, 1);
   dim3 cluster_dim(1, 1, 1);
