@@ -459,14 +459,14 @@ void linear_nvfp4_1d2d_sm100_kernel(torch::Tensor input,
   void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
 
-  constexpr int BATCH_SIZE = 4096;
-  constexpr int OUTPUT_SIZE = 4096;
-  constexpr int REDUCTION_SIZE = 4096;
+  constexpr int BATCH_SIZE = 1024*4;
+  constexpr int OUTPUT_SIZE = 1024*4;
+  constexpr int REDUCTION_SIZE = 1024*4;
 
   assert(input.size(1)  == REDUCTION_SIZE / 2); 
   assert(weight.size(0) == OUTPUT_SIZE);
 
-  cudaDeviceSetLimit(cudaLimitStackSize, 4096);  // or 8192
+  // cudaDeviceSetLimit(cudaLimitStackSize, 4096);  // or 8192
   launch_linear_nvfp4_1d2d_sm100<cute::float_e2m1_t, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
       input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr
   );
