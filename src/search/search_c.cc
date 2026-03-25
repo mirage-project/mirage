@@ -44,6 +44,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
   {
     search::GeneratorConfig config =
         search::GeneratorConfig::get_default_config();
+    bool const is_pallas_backend =
+        backend != nullptr && !strcmp(backend, "pallas");
     if (default_config != nullptr) {
       if (!strcmp(default_config, "attention")) {
         config.enable_attention_specific_optimization();
@@ -75,6 +77,10 @@ int cython_search(mirage::kernel::Graph const *input_graph,
       for (auto const &griddim : grid_dim_to_explore) {
         config.grid_dim_to_explore.push_back({griddim.x, griddim.y, griddim.z});
       }
+    } else if (is_pallas_backend &&
+               !contains(config.grid_dim_to_explore, dim3{1, 1, 1})) {
+      config.grid_dim_to_explore.insert(config.grid_dim_to_explore.begin(),
+                                        dim3{1, 1, 1});
     }
     // Customized blockdims
     if (block_dim_to_explore.size() > 0) {
@@ -97,6 +103,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
       for (auto const &frange : frange_to_explore) {
         config.frange_to_explore.push_back(frange);
       }
+    } else if (is_pallas_backend && !contains(config.frange_to_explore, 1)) {
+      config.frange_to_explore.insert(config.frange_to_explore.begin(), 1);
     }
     char const *result_filename =
         filename ? filename : "mirage_search_checkpoint.json";

@@ -672,6 +672,8 @@ class KNGraph:
             )
         else:
             previous_checkpoint = None
+        effective_is_formal_verified = is_formal_verified or backend == "pallas"
+
         cygraphs = search(
             self.cygraph,
             backend=backend,
@@ -684,7 +686,7 @@ class KNGraph:
             previous_checkpoint=previous_checkpoint,
             verbose=verbose,
             default_config=config,
-            is_formal_verified=is_formal_verified,
+            is_formal_verified=effective_is_formal_verified,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
         print("Finished search, discovering {} mugraphs ...".format(len(all_graphs)))
@@ -803,7 +805,33 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "pallas":
-            best_graph = all_graphs[0]
+            if not all_graphs:
+                raise RuntimeError(
+                    "Search did not produce any candidate graphs for backend='pallas'"
+                )
+
+            best_graph = None
+            for idx, g in enumerate(all_graphs):
+                result = generate_pallas_program(
+                    g.cygraph,
+                    debug=verbose,
+                )
+                if result["errors"]:
+                    if verbose:
+                        print(
+                            "muGraph {} rejected by Pallas transpiler:\n{}".format(
+                                idx, "\n".join(result["errors"])
+                            )
+                        )
+                    continue
+                best_graph = g
+                break
+
+            if best_graph is None:
+                raise RuntimeError(
+                    "No superoptimized graph could be transpiled by the Pallas backend"
+                )
+
             best_graph.backend = "pallas"
             if use_graph_dataset:
                 graph_dataset.store(

@@ -391,6 +391,33 @@ bool KNCustomizedOp::fingerprint(void) {
         }
         break;
       }
+      case type::TB_RMS_NORM_OP: {
+        size_t reduction_degree =
+            op->input_tensors[0].dim[op->input_tensors[0].num_dims - 1];
+        size_t num_rows =
+            op->input_tensors[0].num_elements() / reduction_degree;
+        FPType n = reduction_degree % config::FP_PQ;
+        for (size_t row = 0; row < num_rows; ++row) {
+          FPType rms = 0;
+          for (size_t col = 0; col < reduction_degree; ++col) {
+            utils::accum_square_fingerprint(
+                rms, input_buffers[0][row * reduction_degree + col]);
+          }
+          rms = utils::compute_div_fingerprint(
+              rms, n, dmm->div_p_lookup_table, dmm->div_q_lookup_table);
+          rms = utils::compute_sqrt_fingerprint(
+              rms, dmm->sqrt_p_lookup_table, dmm->sqrt_q_lookup_table);
+          for (size_t col = 0; col < reduction_degree; ++col) {
+            output_buffers[0][row * reduction_degree + col] =
+                utils::compute_div_fingerprint(
+                    input_buffers[0][row * reduction_degree + col],
+                    rms,
+                    dmm->div_p_lookup_table,
+                    dmm->div_q_lookup_table);
+          }
+        }
+        break;
+      }
       default: {
         assert(false && "Unsupported threadblock operator for fingerprinting");
       }
