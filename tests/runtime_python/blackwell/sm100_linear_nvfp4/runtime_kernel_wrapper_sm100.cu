@@ -225,9 +225,9 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
 
   constexpr int bM = MMA_M * NUM_MMA_M;
   constexpr int bN = MMA_N * NUM_MMA_N;
-  constexpr int bK = MMA_K * NUM_MMA_K;  // = 256
+  constexpr int bK = MMA_K * NUM_MMA_K;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
-  constexpr int TMA_CP_ASYNC_REPEAT_COL = bK / TMA_CP_ASYNC_SIZE;  // = 4
+  constexpr int TMA_CP_ASYNC_REPEAT_COL = bK / TMA_CP_ASYNC_SIZE;
 
   CUtensorMap host_i_desc;
   CUtensorMap host_i_sf_desc;
@@ -372,9 +372,11 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
       cute::make_tensor(cute::make_gmem_ptr(static_cast<float *>(residual_ptr)),
                         layout_Bias); // (Gemm_M, Gemm_N)
 
-  constexpr int num_tiles_m = BATCH_SIZE / bM;
-  constexpr int num_tiles_n = OUTPUT_SIZE / bN;
-  dim3 grid_dim(num_tiles_m * num_tiles_n, 1, 1);
+  constexpr int NUM_M_TILE_PER_CTA = 2;
+  constexpr int NUM_N_TILE_PER_CTA = 2;
+  constexpr int num_tiles_m = BATCH_SIZE / bM / NUM_M_TILE_PER_CTA;
+  constexpr int num_tiles_n = OUTPUT_SIZE / bN / NUM_N_TILE_PER_CTA;
+  dim3 grid_dim(num_tiles_m, num_tiles_n, 1);
   dim3 block_dim(256, 1, 1);
   dim3 cluster_dim(1, 1, 1);
   constexpr int NUM_C_STAGE_LAUNCH = 1;

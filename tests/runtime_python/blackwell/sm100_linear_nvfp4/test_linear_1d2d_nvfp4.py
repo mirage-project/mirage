@@ -34,8 +34,6 @@ if __name__ == "__main__":
     print("max error:", error.max())
     print("mean error:", error.mean())
     print("relative max:", (error / torch_out_cuda.abs().clamp_min(1e-5)).max())
-    # print(output[0])
-    # print(torch_out_cuda[0])
     torch.testing.assert_close(
         output,
         torch_out_cuda,
@@ -126,7 +124,7 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     WARM_UP = 10
-    REPETITIONS = 50
+    REPETITIONS = 100
     
     x, w, x_sf, w_sf = make_random_nvfp4_tensors(
         BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE
@@ -162,13 +160,13 @@ if __name__ == "__main__":
     print(f"[Reference - torch._scaled_mm (NVFP4)]  Average time over {REPETITIONS} runs: {avg_time_scaled_mm:.6f} ms  ({tflops_scaled_mm:.2f} TFLOP/s)")
 
     # torch.matmul implementation
-    for _ in range(WARM_UP):
-        nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    ref_times = []
-    for rep in range(REPETITIONS):
-        _, elapsed = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-        ref_times.append(elapsed)
-    avg_time_ref = sum(ref_times) / REPETITIONS
-    tflops_ref = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_time_ref * 1e-3) / 1e12
-    print(f"[Reference - torch.matmul (FP32)]       Average time over {REPETITIONS} runs: {avg_time_ref:.6f} ms  ({tflops_ref:.2f} TFLOP/s)\n")
+    # for _ in range(WARM_UP):
+    #     nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
+    # ref_times = []
+    # for rep in range(REPETITIONS):
+    #     _, elapsed = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
+    #     ref_times.append(elapsed)
+    # avg_time_ref = sum(ref_times) / REPETITIONS
+    # tflops_ref = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_time_ref * 1e-3) / 1e12
+    # print(f"[Reference - torch.matmul (FP32)]       Average time over {REPETITIONS} runs: {avg_time_ref:.6f} ms  ({tflops_ref:.2f} TFLOP/s)\n")
 
