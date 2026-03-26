@@ -74,7 +74,11 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     // [max_num_pages, page_size, num_kv_heads, head_dim]
 
     constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
+#if MPK_TARGET_CC >= 120
+    constexpr int KV_TILE_SIZE = 32;
+#else
     constexpr int KV_TILE_SIZE = 64;
+#endif
     constexpr int MAX_PAGES_PER_REQUEST =
         (MAX_SEQ_LEN + PAGE_SIZE - 1) / PAGE_SIZE;
 

@@ -115,11 +115,16 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 
 valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
 
+def _get_host_cxx():
+    """Return the host C++ compiler, respecting CUDAHOSTCXX and CXX env vars."""
+    return os.environ.get("CUDAHOSTCXX", os.environ.get("CXX", "g++"))
+
 def _detect_cxx_standard():
     """Use c++20 if the host compiler supports it, otherwise fall back to c++17."""
+    cxx = _get_host_cxx()
     try:
         result = subprocess.run(
-            ["g++", "-std=c++20", "-x", "c++", "-E", "-"],
+            [cxx, "-std=c++20", "-x", "c++", "-E", "-"],
             input="", capture_output=True, text=True,
         )
         if result.returncode == 0:
@@ -186,7 +191,10 @@ def get_compile_command(
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
 
-    flags = [
+    host_cxx = _get_host_cxx()
+    ccbin_flags = [f"-ccbin={host_cxx}"] if host_cxx != "g++" else []
+
+    flags = ccbin_flags + [
         "-shared",
         _detect_cxx_standard(),
         "-rdc=false" if not use_nvshmem else "-rdc=true",
@@ -247,6 +255,11 @@ def get_compile_command(
             "-gencode=arch=compute_100a,code=sm_100a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_BLACKWELL",
+        ]
+    elif target_cc == 120:
+        specific_cmd = [
+            "-arch=sm_120a",
+            "-gencode=arch=compute_120a,code=sm_120a",
         ]
     else:
         specific_cmd = [
@@ -429,7 +442,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm")
+        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if (self.target_cc >= 90 and self.target_cc < 120) else "rmsnorm")
 
     def rmsnorm_linear_layer(
         self,
@@ -994,7 +1007,7 @@ class PersistentKernel:
                 # self.kn_graph.register_task(tb_graph, "linear_cutlass_hopper")
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
-        elif self.target_cc >= 80 and self.target_cc < 90:
+        elif self.target_cc >= 80 and self.target_cc < 90 or self.target_cc == 120:
             self.kn_graph.register_task(tb_graph, "linear")
         else:
             assert False, f"Unsupported compute capability: {self.target_cc}"
@@ -1033,7 +1046,7 @@ class PersistentKernel:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
-        elif self.target_cc >= 80 and self.target_cc < 90:
+        elif self.target_cc >= 80 and self.target_cc < 90 or self.target_cc == 120:
             self.kn_graph.register_task(tb_graph, "linear_with_residual")
         else:
             assert False, f"Unsupported compute capability: {self.target_cc}"

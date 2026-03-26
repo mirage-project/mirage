@@ -1,0 +1,12 @@
+[qwen]
+BS=8  tokens=8:  3.347 ms/token
+BS=16 tokens=8:  7.050 ms/token (actual, 2 rounds)
+Scheduling overhead per round: 0.356 ms/token
+BS=16 tokens=16: 6.694 ms/token (simulated, 1 round)
+
+[llama]
+BS=8  tokens=8:  3.988 ms/token
+BS=16 tokens=8:  8.425 ms/token (actual, 2 rounds)
+Scheduling overhead per round: 0.449 ms/token
+BS=16 tokens=16: 7.976 ms/token (simulated, 1 round)
+

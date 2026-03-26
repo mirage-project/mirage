@@ -26,7 +26,10 @@
 namespace mirage {
 namespace runtime {
 
-#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+#if MPK_TARGET_CC >= 120
+// Blackwell desktop: use smaller static reservation to fit in 99KB
+constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
+#elif defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 #else
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
@@ -34,7 +37,11 @@ constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 
 #if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
 // Have to be smaller for vllm compatibility, or program will stuck
-#if MPK_TARGET_CC >= 90
+#if MPK_TARGET_CC >= 120
+// Blackwell desktop (sm_120) has only 99KB opt-in shared memory
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 90
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     220 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
@@ -48,7 +55,11 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #endif
 #else
-#if MPK_TARGET_CC >= 90
+#if MPK_TARGET_CC >= 120
+// Blackwell desktop (sm_120) has only 99KB opt-in shared memory
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 90
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86

@@ -1641,9 +1641,17 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   constexpr int bM = 128;
   constexpr int bN = MMA_N;
   constexpr int bK = 64;
-  constexpr int num_ab_stages = 8;
+  // SM120 (Blackwell desktop) has only 99KB shared memory,
+  // use fewer pipeline stages to fit.
+  // Emit preprocessor conditional in generated CUDA code
+  code.e("#if MPK_TARGET_CC >= 120");
+  code.e("constexpr int NUM_AB_STAGES = 3;");
+  code.e("constexpr int NUM_C_STAGES = 2;");
+  code.e("#else");
+  code.e("constexpr int NUM_AB_STAGES = 8;");
+  code.e("constexpr int NUM_C_STAGES = 4;");
+  code.e("#endif");
   constexpr int num_acc_stages = 2;
-  constexpr int num_c_stages = 4;
   constexpr int num_tmem_columns = bN * num_acc_stages;
   assert(num_tmem_columns <= 512);
   // define TMAs
@@ -1731,7 +1739,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
          "decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, $, $, "
-         "$, $, $>(",
+         "NUM_AB_STAGES, $, NUM_C_STAGES>(",
          MMA_M,
          MMA_N,
          batch_size,
@@ -1739,9 +1747,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
          reduction_size,
          (with_residual && rank_with_residual) ? "false" : "true",
          /*SplitK=*/"false",
-         num_ab_stages,
-         num_acc_stages,
-         num_c_stages);
+         num_acc_stages);
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    mBias,");
@@ -1795,9 +1801,15 @@ int TaskRegister::register_splitk_linear_sm100_task(
   constexpr int bM = 128;
   constexpr int bN = MMA_N;
   constexpr int bK = 64;
-  constexpr int num_ab_stages = 8;
+  // SM120 (Blackwell desktop) has only 99KB shared memory
+  code.e("#if MPK_TARGET_CC >= 120");
+  code.e("constexpr int NUM_AB_STAGES = 3;");
+  code.e("constexpr int NUM_C_STAGES = 2;");
+  code.e("#else");
+  code.e("constexpr int NUM_AB_STAGES = 8;");
+  code.e("constexpr int NUM_C_STAGES = 4;");
+  code.e("#endif");
   constexpr int num_acc_stages = 2;
-  constexpr int num_c_stages = 4;
   constexpr int num_tmem_columns = bN * num_acc_stages;
   assert(num_tmem_columns <= 512);
   // define TMAs
@@ -1884,7 +1896,7 @@ int TaskRegister::register_splitk_linear_sm100_task(
   code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
          "decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, $, $, "
-         "$, $, $>(",
+         "NUM_AB_STAGES, $, NUM_C_STAGES>(",
          MMA_M,
          MMA_N,
          batch_size,
@@ -1892,9 +1904,7 @@ int TaskRegister::register_splitk_linear_sm100_task(
          reduction_size,
          with_residual ? "false" : "true",
          /*SplitK=*/"true",
-         num_ab_stages,
-         num_acc_stages,
-         num_c_stages);
+         num_acc_stages);
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    mBias,");

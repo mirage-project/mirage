@@ -1,0 +1,5 @@
+BS=1  tokens=8  Prompt length 61, generate length 1987, per-token latency (both prefill and decode): 2.436 ms
+BS=2  tokens=8  Prompt length 61, generate length 1987, per-token latency (both prefill and decode): 2.476 ms
+BS=4  tokens=8  Prompt length 61, generate length 1987, per-token latency (both prefill and decode): 2.661 ms
+BS=8  tokens=8  Prompt length 61, generate length 1987, per-token latency (both prefill and decode): 3.400 ms
+BS=16  tokens=8  Prompt length 61, generate length 1987, per-token latency (both prefill and decode): 7.173 ms

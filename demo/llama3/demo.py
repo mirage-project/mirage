@@ -54,7 +54,9 @@ def parse_arguments():
         default=True,
         help="Not use the cutlass version kernel.",
     )
-    
+    parser.add_argument("--ignore-eos", action="store_true",
+                       help="Ignore eos token during generation")
+
     return parser.parse_args()
 
 
@@ -267,7 +269,7 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
         profiler_tensor = None
     
     # Setup speculative decoding configuration
-    spec_decode_config = mi.speculative.spec_decode_class(
+    spec_decode_config = mi.mpk.spec_decode_class(
         args.spec_decode,
         ngram_size=args.ngram_size,
         spec_length=args.spec_length,
@@ -881,11 +883,13 @@ def run_mirage_generation(mpk):
 def run_generation_comparison(model, tokenizer, args, world_size, rank):
     # Process EOS tokens
     eos_token_id_for_mirage, eos_token_ids = process_eos_tokens(model, tokenizer)
-    
+    if args.ignore_eos:
+        eos_token_id_for_mirage = -1
+
     # Prepare test data
     messages = prepare_test_prompt()
     input_data = prepare_input_tensors(model, tokenizer, messages, args, args.use_mirage)
-    
+
     if args.use_mirage:
         mpk = build_mirage_graph(model, args, world_size, rank, input_data, eos_token_id_for_mirage)
         run_time = run_mirage_generation(mpk)
