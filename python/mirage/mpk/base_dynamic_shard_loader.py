@@ -391,7 +391,6 @@ class BaseDynamicShardLoader(ABC):
                 parent_module = self.model.get_submodule(parent_name) if parent_name else self.model
                 parent_module.register_buffer(buf_short_name, real_buffer, persistent=True)
                 
-                print("Materialized", name)
                 count += 1
                 
         return count
