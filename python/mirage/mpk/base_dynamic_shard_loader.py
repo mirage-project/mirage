@@ -72,9 +72,6 @@ class BaseDynamicShardLoader(ABC):
 
         1. Validate and normalize ``mapping`` via ``_construct_mapping_dict``.
         2. Download/broadcast ``model.safetensors.index.json``.
-        3. Read in weights, shard tensors, and materialize parameters.
-        4. Materialize leftover meta buffers.
-        5. Run `model_specific_initialization_logic`.
 
         Args:
             model (torch.nn.Module): Model instance, typically created on the
@@ -117,6 +114,19 @@ class BaseDynamicShardLoader(ABC):
             index = json.load(f) 
             self.weight_map = index["weight_map"] # key: param name for the weights, val: filename it's in
 
+
+    def load(self):
+        """Main entry point for loading weights, will be called by user.
+
+         This method performs the full loading lifecycle, which includes:
+            1. Downloading safetensor shards and broadcasting file paths.
+            2. Iterating through each weight, applying sharding logic, and
+               materializing tensors on the target device.
+            3. Materializing any leftover meta buffers.
+            4. Running model-specific initialization logic (for example RoPE buffer
+               reinitialization).
+        """
+
         # Perform sharding, loading, and materialization.
         self.shard_and_load()
         self.materialize_leftover_buffers()
@@ -124,6 +134,7 @@ class BaseDynamicShardLoader(ABC):
         # Model specific logic.
         self.model_specific_initialization_logic()
 
+    
     def shard_and_load(self):
         """Download shard files and materialize mapped weights onto ``device``.
 

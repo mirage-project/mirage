@@ -198,6 +198,7 @@ if __name__ == "__main__":
 
         device = torch.device(f"cuda:{rank}")
         loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device)
+        loader.load()
 
         with torch.device("cuda"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
