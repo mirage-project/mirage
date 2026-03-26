@@ -77,8 +77,6 @@ struct PipedScaledSharedStorage {
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t sf_full_mbar_ptr[Num_AB_Stage];       // SFA/SFB arrived in SMEM
   alignas(16) cute::uint64_t sf_empty_mbar_ptr[Num_AB_Stage];      // SF SMEM buffer free for reuse
-  alignas(16) cute::uint64_t sf_tmem_full_mbar_ptr[1];  // SFA/SFB copied to TMEM (single TMEM buffer)
-  alignas(16) cute::uint64_t sf_tmem_empty_mbar_ptr[1]; // TMEM SF buffer free for reuse (single TMEM buffer)
   alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
   alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
 

@@ -349,12 +349,6 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
             NUM_AB_STAGE>(shared_storage.sf_empty_mbar_ptr, 1);
         cutlass::arch::detail::initialize_barrier_array_aligned<
             cutlass::arch::ClusterBarrier,
-            1>(shared_storage.sf_tmem_full_mbar_ptr, 1);
-        cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterBarrier,
-            1>(shared_storage.sf_tmem_empty_mbar_ptr, 1);
-        cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterBarrier,
             NUM_ACC_STAGE>(shared_storage.acc_full_mbar_ptr, 1);
         cutlass::arch::detail::initialize_barrier_array_aligned<
             cutlass::arch::ClusterBarrier,
@@ -463,7 +457,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     uint32_t tmem_sfb_ptr = shared_storage.tmem_sfb_ptr;
     int k_tile_count = cute::size<4>(tCgA);
 
-    if (warp_idx == 7) {
+    if (warp_idx == 6) {
         // TMA A/B GMEM -> SMEM
         int total_k_tile_count = 0;
         for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
@@ -521,7 +515,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                 } // end for k_tile
             } // end for n_tile
         } // end for m_tile
-    } else if (warp_idx == 6) {
+    } else if (warp_idx == 5) {
         // TMA SFA/SFB GMEM -> SMEM
         int total_k_tile_count = 0;
         for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
@@ -579,36 +573,48 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                 } // end for k_tile
             } // end for n_tile
         } // end for m_tile
-    } else if (warp_idx == 5) {
-        // SFA/SFB SMEM -> TMEM
+    } else if (warp_idx == 4) {
+        // SMEM -> TMEM (SF) + MMA
+        tmem_allocation_result_barrier.arrive_and_wait();
+
         int total_k_tile_count = 0;
+        int num_tiles_executed = 0;
         for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
             for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
-
+                int acc_buf_idx    = num_tiles_executed % NUM_ACC_STAGE;
                 int num_prev_k_blk = total_k_tile_count;
                 total_k_tile_count += k_tile_count;
 
-                int sf_rd_k_tile        = 0;
-                int smem_rd_buffer      = (num_prev_k_blk + sf_rd_k_tile) % NUM_AB_STAGE;
-                int sf_rd_full_phase    = (num_prev_k_blk + sf_rd_k_tile) / NUM_AB_STAGE % 2;
-                int sf_tmem_empty_phase = (num_prev_k_blk + sf_rd_k_tile) % 2 ^ 1;
+                int mma_rd_k_tile        = 0;
+                int smem_rd_buffer       = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
+                int mma_rd_ab_full_phase = (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
+                int mma_rd_sf_full_phase = (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
+                int acc_empty_phase      = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
 
+                cute::wait_barrier(
+                    shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
+                    acc_empty_phase
+                );
+
+                tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
                 for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
-                    int sf_rd_k_tile_next        = sf_rd_k_tile + 1;
-                    int smem_rd_buffer_next      = (num_prev_k_blk + sf_rd_k_tile_next) % NUM_AB_STAGE;
-                    int sf_rd_full_phase_next    = smem_rd_buffer_next == 0
-                                                       ? sf_rd_full_phase ^ 1
-                                                       : sf_rd_full_phase;
-                    int sf_tmem_empty_phase_next = sf_tmem_empty_phase ^ 1;
+                    int mma_rd_k_tile_next        = mma_rd_k_tile + 1;
+                    int smem_rd_buffer_next       = (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
+                    int mma_rd_ab_full_phase_next = smem_rd_buffer_next == 0
+                                                        ? mma_rd_ab_full_phase ^ 1
+                                                        : mma_rd_ab_full_phase;
+                    int mma_rd_sf_full_phase_next = smem_rd_buffer_next == 0
+                                                        ? mma_rd_sf_full_phase ^ 1
+                                                        : mma_rd_sf_full_phase;
 
-                    // Wait for SF in SMEM, empty in TMEM
+                    // Wait for A/B in SMEM and SFA/SFB in SMEM
                     cute::wait_barrier(
-                        shared_storage.sf_full_mbar_ptr[smem_rd_buffer],
-                        sf_rd_full_phase
+                        shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
+                        mma_rd_ab_full_phase
                     );
                     cute::wait_barrier(
-                        shared_storage.sf_tmem_empty_mbar_ptr[0],
-                        sf_tmem_empty_phase
+                        shared_storage.sf_full_mbar_ptr[smem_rd_buffer],
+                        mma_rd_sf_full_phase
                     );
 
                     // SF SMEM -> TMEM
@@ -631,60 +637,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
 
                         copy_sf_s2t(tCsSFA, tCtSFA, smem_rd_buffer);
                         copy_sf_s2t(tCsSFB, tCtSFB, smem_rd_buffer);
-
-                        cute::arrive_barrier(shared_storage.sf_tmem_full_mbar_ptr[0]);
-                        cute::arrive_barrier(shared_storage.sf_empty_mbar_ptr[smem_rd_buffer]);
                     }
-
-                    sf_rd_k_tile        = sf_rd_k_tile_next;
-                    smem_rd_buffer      = smem_rd_buffer_next;
-                    sf_rd_full_phase    = sf_rd_full_phase_next;
-                    sf_tmem_empty_phase = sf_tmem_empty_phase_next;
-
-                } // end for k_tile
-            } // end for n_tile
-        } // end for m_tile
-    } else if (warp_idx == 4) {
-        // MMA
-        tmem_allocation_result_barrier.arrive_and_wait();
-
-        int total_k_tile_count = 0;
-        int num_tiles_executed = 0;
-        for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
-            for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
-                int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
-                int num_prev_k_blk = total_k_tile_count;
-                total_k_tile_count += k_tile_count;
-
-                int mma_rd_k_tile           = 0;
-                int smem_rd_buffer          = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
-                int mma_rd_ab_full_phase    = (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
-                int mma_rd_sf_tmem_phase    = (num_prev_k_blk + mma_rd_k_tile) % 2;
-                int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
-
-                cute::wait_barrier(
-                    shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-                    acc_empty_phase
-                );
-
-                tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
-                for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
-                    int mma_rd_k_tile_next         = mma_rd_k_tile + 1;
-                    int smem_rd_buffer_next        = (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
-                    int mma_rd_ab_full_phase_next  = smem_rd_buffer_next == 0
-                                                        ? mma_rd_ab_full_phase ^ 1
-                                                        : mma_rd_ab_full_phase;
-                    int mma_rd_sf_tmem_phase_next  = mma_rd_sf_tmem_phase ^ 1;
-
-                    // Wait for A/B in SMEM, SFA/AFB in TMEM
-                    cute::wait_barrier(
-                        shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
-                        mma_rd_ab_full_phase
-                    );
-                    cute::wait_barrier(
-                        shared_storage.sf_tmem_full_mbar_ptr[0],
-                        mma_rd_sf_tmem_phase
-                    );
 
                     // MMA
                     auto accumulate = tiled_mma.accumulate_;
@@ -707,13 +660,13 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                         &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]
                     );
                     cutlass::arch::umma_arrive(
-                        &shared_storage.sf_tmem_empty_mbar_ptr[0]
+                        &shared_storage.sf_empty_mbar_ptr[smem_rd_buffer]
                     );
 
-                    mma_rd_k_tile         = mma_rd_k_tile_next;
-                    smem_rd_buffer        = smem_rd_buffer_next;
-                    mma_rd_ab_full_phase  = mma_rd_ab_full_phase_next;
-                    mma_rd_sf_tmem_phase  = mma_rd_sf_tmem_phase_next;
+                    mma_rd_k_tile        = mma_rd_k_tile_next;
+                    smem_rd_buffer       = smem_rd_buffer_next;
+                    mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
+                    mma_rd_sf_full_phase = mma_rd_sf_full_phase_next;
 
                 } // end for k_tile
 
