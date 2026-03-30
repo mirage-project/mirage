@@ -16,6 +16,9 @@
 #pragma once
 #include "runtime_header.h"
 #include "tasks/common/common_header.cuh"
+#include <cutlass/float8.h>
+#include <cutlass/numeric_types.h>
+#include <type_traits>
 #include <cuda.h>
 
 namespace mirage {
@@ -35,9 +38,23 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
-  constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  //  (std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-  //                                       : CUtensorMapDataType(-1));
+  constexpr CUtensorMapDataType tma_format =
+      std::is_same_v<T, type::bfloat16_t>       ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
+      : std::is_same_v<T, cutlass::bfloat16_t>  ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
+      : std::is_same_v<T, cutlass::half_t>      ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+      : std::is_same_v<T, __half>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+      : std::is_same_v<T, float>                ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
+      : std::is_same_v<T, double>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
+      : std::is_same_v<T, cutlass::float_e4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_e5m2_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_ue8m0_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, uint8_t>              ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, uint16_t>             ? CU_TENSOR_MAP_DATA_TYPE_UINT16
+      : std::is_same_v<T, uint32_t>             ? CU_TENSOR_MAP_DATA_TYPE_UINT32
+      : std::is_same_v<T, int32_t>              ? CU_TENSOR_MAP_DATA_TYPE_INT32
+                                               : CUtensorMapDataType(-1);
+  static_assert(tma_format != CUtensorMapDataType(-1),
+                "Unsupported TMA data type");
   constexpr CUtensorMapInterleave tma_interleave =
       CU_TENSOR_MAP_INTERLEAVE_NONE;
   constexpr CUtensorMapL2promotion tma_l2Promotion =
