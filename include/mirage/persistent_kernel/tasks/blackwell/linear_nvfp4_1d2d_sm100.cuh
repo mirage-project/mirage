@@ -15,7 +15,6 @@
 
 #pragma once
 
-// Cutlass includes
 #include "cute/tensor.hpp"
 #include "cute/util/debug.hpp"
 
@@ -48,15 +47,14 @@
 
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
 
-
 namespace kernel {
 
-using namespace cute;   
+using namespace cute;
 using namespace cutlass;
 
 __device__ static inline uint64_t matrix_descriptor_encode(uint64_t x) { return (((x) & 0x3FFFF) >> 0x4); }
 
-//  C = (A * SFA) x (B * SFB) + bias
+// C = (A * SFA) x (B * SFB) + bias
 template <typename T_,
           typename TMA_A,
           typename TMA_B,
@@ -83,43 +81,21 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                                   BiasTensor mBias,
                                   const TMA_OUT &tma_out) {
 
-    /*
-        Naming convention:
-            m{Matrix}   - Logical/full matrix view (coordinate tensor)
-            g{Matrix}   - Global memory
-            s{Matrix}   - Shared memory
-            r{Matrix}   - Register
-            t{Matrix}   - TMEM storage
-
-            tCg{Matrix} - This CTA's Global view (thread-partitioned)
-            tCs{Matrix} - This CTA's Shared view
-            tCf{Matrix} - This CTA's Shared fragment/descriptor view (required for SMEM -> MMA)
-            tCr{Matrix} - This CTA's Register view
-            tTR_{...}   - Thread's T2R (TMEM-to-Register) view
-
-            A     - Left matrix (weights)
-            B     - Right matrix (input/activation)
-            C     - Output matrix
-            Acc   - Accumulator
-            SFA   - Scale factors for A
-            SFB   - Scale factors for B
-            Bias  - Bias vector
-    */
-
-    // MMA_N >= 32 for SFB SMEM -> TMEM transfer correctness
     static_assert(std::is_same_v<T_, cutlass::float_e2m1_t>, "T_ must be cutlass::float_e2m1_t");
     static_assert(SCALE_VECTOR_SIZE == 16, "SCALE_VECTOR_SIZE must be 16");
     static_assert(MMA_M == 128, "MMA_M must be 128");
-    static_assert(MMA_N % 8 == 0 && MMA_N != 0 && MMA_N <=256, "MMA_N must be {8, 16, … 256} steps of 8");
+    static_assert(MMA_N % 8 == 0 && MMA_N != 0 && MMA_N <= 256, "MMA_N must be {8, 16, ... 256} in steps of 8");
 
-    constexpr int MMA_K = 64; // SM100_MMA_MXF4_SS forces MMA_K to be 64
-    
-    using A_type = cutlass::float_e2m1_t;
-    using B_type = cutlass::float_e2m1_t;
+    constexpr int MMA_K = 64;
+
+    using A_type  = cutlass::float_e2m1_t;
+    using B_type  = cutlass::float_e2m1_t;
     using SF_type = cutlass::float_ue4m3_t;
-    using C_type = float;
+    using C_type  = float;
 
-    constexpr int B = 0;
+    constexpr int B_FP4 = 1;
+    constexpr int B_SF  = 0;
+    constexpr int B_OUT = 3;
     constexpr int M = 3;
     constexpr int S = 3;
 
@@ -130,198 +106,108 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     int warp_idx = cutlass::canonical_warp_idx_sync();
     int lane_idx = kernel::lane_id();
 
-    // TODO: SM100_MMA_MXF4_SS vs SM100_MMA_MXF4_2x1SM_SS
     cute::TiledMMA tiled_mma = cute::make_tiled_mma(
-                cute::SM100_MMA_MXF4_SS<A_type,
-                                        B_type,
-                                        C_type,
-                                        SF_type,
-                                        MMA_M,
-                                        MMA_N,
-                                        SCALE_VECTOR_SIZE,
-                                        cute::UMMA::Major::K,
-                                        cute::UMMA::Major::K>{}
+        cute::SM100_MMA_MXF4_SS<A_type, B_type, C_type, SF_type,
+                                 MMA_M, MMA_N, SCALE_VECTOR_SIZE,
+                                 cute::UMMA::Major::K, cute::UMMA::Major::K>{}
     );
 
     constexpr auto bM = MMA_M * NUM_MMA_M;
     constexpr auto bN = MMA_N * NUM_MMA_N;
     constexpr auto bK = MMA_K * NUM_MMA_K;
 
-    constexpr int NUM_M_TILE_PER_CTA = 2;
-    constexpr int NUM_N_TILE_PER_CTA = 2;
+    constexpr int NUM_M_TILE_PER_CTA = 1;
+    constexpr int NUM_N_TILE_PER_CTA = 1;
 
     const int cta_m_tile = blockIdx.x;
     const int cta_n_tile = blockIdx.y;
 
-    const int tile_m_begin = NUM_M_TILE_PER_CTA * (cta_m_tile);
+    const int tile_m_begin = NUM_M_TILE_PER_CTA * cta_m_tile;
     const int tile_m_end   = NUM_M_TILE_PER_CTA * (cta_m_tile + 1);
-    const int tile_n_begin = NUM_N_TILE_PER_CTA * (cta_n_tile);
+    const int tile_n_begin = NUM_N_TILE_PER_CTA * cta_n_tile;
     const int tile_n_end   = NUM_N_TILE_PER_CTA * (cta_n_tile + 1);
 
-    using TiledMma              = decltype(tiled_mma);
-    using ThrBlkTileShape_MNK   = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
-    using Sm1xxBlkScaledConfig  = cutlass::detail::Sm1xxBlockScaledConfig<SCALE_VECTOR_SIZE>;
-    using SmemLayoutAtomSFA     = decltype(Sm1xxBlkScaledConfig::deduce_smem_layoutSFA(TiledMma{}, ThrBlkTileShape_MNK{}));
-    using SmemLayoutAtomSFB     = decltype(Sm1xxBlkScaledConfig::deduce_smem_layoutSFB(TiledMma{}, ThrBlkTileShape_MNK{}));
+    using TiledMma             = decltype(tiled_mma);
+    using ThrBlkTileShape_MNK  = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
+    using Sm1xxBlkScaledConfig = cutlass::detail::Sm1xxBlockScaledConfig<SCALE_VECTOR_SIZE>;
+    using SmemLayoutAtomSFA    = decltype(Sm1xxBlkScaledConfig::deduce_smem_layoutSFA(TiledMma{}, ThrBlkTileShape_MNK{}));
+    using SmemLayoutAtomSFB    = decltype(Sm1xxBlkScaledConfig::deduce_smem_layoutSFB(TiledMma{}, ThrBlkTileShape_MNK{}));
 
-    auto tb_mma_coord_vmnk = cute::make_coord(0,           // Peer CTA coordinate
-                                              cute::_,     //    MMA-M coordinate
-                                              cute::_,     //    MMA-N coordinate
-                                              cute::_);    //    MMA-K coordinate
-    auto tb_mma_coord = cute::select<1, 2, 3>(tb_mma_coord_vmnk);
-    auto tb_mma_tiler = ThrBlkTileShape_MNK{};
-    auto tb_cd_tiler  = cute::make_shape(cute::Int<bM>{}, cute::Int<bN>{}, cute::Int<bK>{});
-    auto tb_sf_tiler  = cute::make_shape(cute::Int<bM>{}, cute::Int<bN>{}, cute::Int<bK / SCALE_VECTOR_SIZE>{});
+    auto tb_mma_coord_vmnk = cute::make_coord(0, cute::_, cute::_, cute::_);
+    auto tb_mma_coord      = cute::select<1, 2, 3>(tb_mma_coord_vmnk);
+    auto tb_mma_tiler      = ThrBlkTileShape_MNK{};
+    auto tb_cd_tiler       = cute::make_shape(cute::Int<bM>{}, cute::Int<bN>{}, cute::Int<bK>{});
+    auto tb_sf_tiler       = cute::make_shape(cute::Int<bM>{}, cute::Int<bN>{}, cute::Int<bK / SCALE_VECTOR_SIZE>{});
 
-    // Coordinate tensor for matrix
     cute::Tensor mA = cute::make_coord_tensor(
-        cute::make_layout(
-            cute::make_shape(BATCH_SIZE, REDUCTION_SIZE),   // input
-            cute::make_stride(cute::E<1>{}, cute::E<0>{})
-        )
-    );
+        cute::make_layout(cute::make_shape(BATCH_SIZE, REDUCTION_SIZE),
+                          cute::make_stride(cute::E<1>{}, cute::E<0>{})));
     cute::Tensor mB = cute::make_coord_tensor(
-        cute::make_layout(
-            cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE),  // weight
-            cute::make_stride(cute::E<1>{}, cute::E<0>{})
-        )
-    );
+        cute::make_layout(cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE),
+                          cute::make_stride(cute::E<1>{}, cute::E<0>{})));
     cute::Tensor mC = cute::make_coord_tensor(
-        cute::make_layout(
-            cute::make_shape(BATCH_SIZE, OUTPUT_SIZE),
-            cute::make_stride(cute::E<1>{}, cute::E<0>{})
-        )
-    );
+        cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE),
+                          cute::make_stride(cute::E<1>{}, cute::E<0>{})));
     cute::Tensor mSFA = cute::make_coord_tensor(
-        cute::make_layout(
-            cute::make_shape(BATCH_SIZE, REDUCTION_SIZE / SCALE_VECTOR_SIZE),   // input SF
-            cute::make_stride(cute::E<1>{},cute::E<0>{})
-        )
-    );
+        cute::make_layout(cute::make_shape(BATCH_SIZE, REDUCTION_SIZE / SCALE_VECTOR_SIZE),
+                          cute::make_stride(cute::E<1>{}, cute::E<0>{})));
     cute::Tensor mSFB = cute::make_coord_tensor(
-        cute::make_layout(
-            cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE / SCALE_VECTOR_SIZE),  // weight SF
-            cute::make_stride(cute::E<1>{},cute::E<0>{})
-        )
-    );
+        cute::make_layout(cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE / SCALE_VECTOR_SIZE),
+                          cute::make_stride(cute::E<1>{}, cute::E<0>{})));
 
-    // CTA's global memory tile
-    cute::Tensor gA = cute::local_tile(
-        mA,
-        tb_mma_tiler,
-        tb_mma_coord,
-        cute::Step<cute::_1,    // M
-                    cute::X,    // N
-                    cute::_1>{} // K
-    );
-    cute::Tensor gB = cute::local_tile(
-        mB,
-        tb_mma_tiler,
-        tb_mma_coord,
-        cute::Step<cute::X,     // M
-                    cute::_1,   // N
-                    cute::_1>{} // K
-    );
-    cute::Tensor gBias = cute::local_tile(
-        mBias,
-        tb_cd_tiler,
-        tb_mma_coord,
-        cute::Step<cute::_1,    // M
-                   cute::_1,    // N
-                   cute::X>{}   // K
-    );
-    cute::Tensor gSFA = cute::local_tile(
-        mSFA,
-        tb_sf_tiler,
-        tb_mma_coord,
-        cute::Step<cute::_1,    // M
-                   cute::X,     // N
-                   cute::_1>{}  // K
-    );
-    cute::Tensor gSFB = cute::local_tile(
-        mSFB,
-        tb_sf_tiler,
-        tb_mma_coord,
-        cute::Step<cute::X,     // M
-                   cute::_1,    // N
-                   cute::_1>{}  // K
-    );
+    cute::Tensor gA = cute::local_tile(mA, tb_mma_tiler, tb_mma_coord,
+                                       cute::Step<cute::_1, cute::X, cute::_1>{});
+    cute::Tensor gB = cute::local_tile(mB, tb_mma_tiler, tb_mma_coord,
+                                       cute::Step<cute::X, cute::_1, cute::_1>{});
+    cute::Tensor gBias = cute::local_tile(mBias, tb_cd_tiler, tb_mma_coord,
+                                          cute::Step<cute::_1, cute::_1, cute::X>{});
+    cute::Tensor gSFA = cute::local_tile(mSFA, tb_sf_tiler, tb_mma_coord,
+                                         cute::Step<cute::_1, cute::X, cute::_1>{});
+    cute::Tensor gSFB = cute::local_tile(mSFB, tb_sf_tiler, tb_mma_coord,
+                                         cute::Step<cute::X, cute::_1, cute::_1>{});
 
-    // Partition global tensors into tiles
-    auto cta_ind = cute::get<0>(tb_mma_coord_vmnk);
-    cute::ThrMMA cta_mma = tiled_mma.get_slice(cta_ind);    // Use Peer CTA coordinate
-    cute::Tensor tCgA    = cta_mma.partition_A(gA);         // ((MMA_M, MMA_K), NUM_MMA_M, NUM_MMA_K, REDUCTION_SIZE      / bK)
-    cute::Tensor tCgB    = cta_mma.partition_B(gB);         // ((MMA_N, MMA_K), NUM_MMA_N, NUM_MMA_K, REDUCTION_SIZE      / bK)
-    cute::Tensor tCgSFA  = cta_mma.partition_A(gSFA);       // ((MMA_M, MMA_K), NUM_MMA_M, NUM_MMA_K, REDUCTION_SIZE / 16 / bK)
-    cute::Tensor tCgSFB  = cta_mma.partition_B(gSFB);       // ((MMA_N, MMA_K), NUM_MMA_N, NUM_MMA_K, REDUCTION_SIZE / 16 / bK)
+    auto cta_ind  = cute::get<0>(tb_mma_coord_vmnk);
+    cute::ThrMMA cta_mma = tiled_mma.get_slice(cta_ind);
+    cute::Tensor tCgA   = cta_mma.partition_A(gA);
+    cute::Tensor tCgB   = cta_mma.partition_B(gB);
+    cute::Tensor tCgSFA = cta_mma.partition_A(gSFA);
+    cute::Tensor tCgSFB = cta_mma.partition_B(gSFB);
 
-    // CTA's shared memory tile
-    // ((MMA_M, MMA_K), NUM_MMA_M, NUM_MMA_K, NUM_AB_STAGE)
     auto mma_shape_A = cute::partition_shape_A(
-        tiled_mma,                          // (MMA_M, MMA_K)
-        cute::make_shape(
-            cute::Int<bM>{},                // MMA_M * NUM_MMA_M
-            cute::Int<bK>{},                // MMA_K * NUM_MMA_K
-            cute::Int<NUM_AB_STAGE>{}       // NUM_AB_STAGE
-        )
-    );
-    // ((MMA_N, MMA_K), NUM_MMA_N, NUM_MMA_K, NUM_AB_STAGE)
+        tiled_mma, cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<NUM_AB_STAGE>{}));
     auto mma_shape_B = cute::partition_shape_B(
-        tiled_mma,                          // (MMA_N, MMA_K)
-        cute::make_shape(
-            cute::Int<bN>{},                // MMA_N * NUM_MMA_N
-            cute::Int<bK>{},                // MMA_K * NUM_MMA_K
-            cute::Int<NUM_AB_STAGE>{}       // NUM_AB_STAGE
-        )
-    );
-    // ((MMA_N, MMA_M), 1, 1, NUM_C_STAGE)
+        tiled_mma, cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<NUM_AB_STAGE>{}));
     auto mma_shape_C = cute::make_shape(
         cute::make_shape(cute::Int<MMA_N>{}, cute::Int<MMA_M>{}),
-        cute::Int<1>{},
-        cute::Int<1>{},
-        cute::Int<NUM_C_STAGE>{}
-    );
+        cute::Int<1>{}, cute::Int<1>{}, cute::Int<NUM_C_STAGE>{});
 
-    // Using Layout_K_SW32_Atom as MMA_K = 64 FP4 = 32 bytes
-    auto sA_layout      = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW32_Atom<A_type>{}, mma_shape_A);
-    auto sB_layout      = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW32_Atom<B_type>{}, mma_shape_B);
-    auto sC_layout_fake = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_INTER_Atom<C_type>{}, mma_shape_C);
+    // bK=256 FP4 = 128 bytes = one 128B swizzle stripe, matches B_FP4=3 TMA descriptor
+    auto sA_layout      = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<A_type>{}, mma_shape_A);
+    auto sB_layout      = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<B_type>{}, mma_shape_B);
+    auto sC_layout_fake = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<C_type>{}, mma_shape_C);
     auto sC_shape = cute::make_shape(
         cute::make_shape(cute::Int<MMA_M>{}, cute::Int<MMA_N>{}),
-        cute::Int<1>{},
-        cute::Int<1>{},
-        cute::make_shape(cute::Int<1>{}, cute::Int<NUM_C_STAGE>{})
-    );
+        cute::Int<1>{}, cute::Int<1>{},
+        cute::make_shape(cute::Int<1>{}, cute::Int<NUM_C_STAGE>{}));
     auto sC_stride = cute::make_stride(
         cute::make_stride(cute::Int<1>{}, cute::Int<MMA_M>{}),
-        cute::Int<0>{},
-        cute::Int<0>{},
-        cute::make_stride(cute::Int<0>{}, cute::Int<MMA_M * MMA_N>{})
-    );
+        cute::Int<0>{}, cute::Int<0>{},
+        cute::make_stride(cute::Int<0>{}, cute::Int<MMA_M * MMA_N>{}));
     auto sC_layout = cute::composition(
         sC_layout_fake.layout_a(),
         sC_layout_fake.offset(),
-        cute::make_layout(sC_shape, sC_stride)
-    );
+        cute::make_layout(sC_shape, sC_stride));
     auto sSFA_layout = cute::tile_to_shape(
         SmemLayoutAtomSFA{},
-        cute::append(cute::shape(SmemLayoutAtomSFA{}), cute::Int<NUM_AB_STAGE>{})
-    );
+        cute::append(cute::shape(SmemLayoutAtomSFA{}), cute::Int<NUM_AB_STAGE>{}));
     auto sSFB_layout = cute::tile_to_shape(
         SmemLayoutAtomSFB{},
-        cute::append(cute::shape(SmemLayoutAtomSFB{}), cute::Int<NUM_AB_STAGE>{})
-    );
-    using SharedStorage = PipedScaledSharedStorage<A_type,
-                                                   B_type,
-                                                   C_type,
-                                                   SF_type,
-                                                   decltype(sA_layout),
-                                                   decltype(sB_layout),
-                                                   decltype(sC_layout),
-                                                   decltype(sSFA_layout),
-                                                   decltype(sSFB_layout),
-                                                   NUM_AB_STAGE,
-                                                   NUM_ACC_STAGE>;
+        cute::append(cute::shape(SmemLayoutAtomSFB{}), cute::Int<NUM_AB_STAGE>{}));
+
+    using SharedStorage = PipedScaledSharedStorage<A_type, B_type, C_type, SF_type,
+                                                   decltype(sA_layout), decltype(sB_layout),
+                                                   decltype(sC_layout), decltype(sSFA_layout),
+                                                   decltype(sSFB_layout), NUM_AB_STAGE, NUM_ACC_STAGE>;
 
     extern __shared__ char shared_memory[];
     uintptr_t aligned_smem = (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
@@ -333,78 +219,62 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     cute::Tensor tCsSFB = shared_storage.tensor_sSFB();
     cute::Tensor tCsC   = shared_storage.tensor_sC();
 
-    // Initialize barriers
     if (warp_idx == 0) {
         cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterTransactionBarrier,
-            NUM_AB_STAGE>(shared_storage.ab_full_mbar_ptr, 1);
+            cutlass::arch::ClusterTransactionBarrier, NUM_AB_STAGE>(shared_storage.ab_full_mbar_ptr, 1);
         cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterBarrier,
-            NUM_AB_STAGE>(shared_storage.ab_empty_mbar_ptr, 1);
+            cutlass::arch::ClusterBarrier, NUM_AB_STAGE>(shared_storage.ab_empty_mbar_ptr, 1);
         cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterTransactionBarrier,
-            NUM_AB_STAGE>(shared_storage.sf_full_mbar_ptr, 1);
+            cutlass::arch::ClusterTransactionBarrier, NUM_AB_STAGE>(shared_storage.sf_full_mbar_ptr, 1);
         cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterBarrier,
-            NUM_AB_STAGE>(shared_storage.sf_empty_mbar_ptr, 1);
+            cutlass::arch::ClusterBarrier, NUM_AB_STAGE>(shared_storage.sf_empty_mbar_ptr, 1);
         cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterBarrier,
-            NUM_ACC_STAGE>(shared_storage.acc_full_mbar_ptr, 1);
+            cutlass::arch::ClusterBarrier, NUM_ACC_STAGE>(shared_storage.acc_full_mbar_ptr, 1);
         cutlass::arch::detail::initialize_barrier_array_aligned<
-            cutlass::arch::ClusterBarrier,
-            NUM_ACC_STAGE>(shared_storage.acc_empty_mbar_ptr, 4);
+            cutlass::arch::ClusterBarrier, NUM_ACC_STAGE>(shared_storage.acc_empty_mbar_ptr, 4);
     }
     __syncthreads();
 
-    // 32 threads (mma warp 4) + 128 threads (epilogue warps 0-3)
     cutlass::arch::NamedBarrier tmem_allocation_result_barrier(32 + 128, cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
     cutlass::arch::NamedBarrier epilogue_wg_barrier(128, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
     Barrier *ab_full_mbar_ptr = reinterpret_cast<Barrier *>(shared_storage.ab_full_mbar_ptr);
     Barrier *sf_full_mbar_ptr = reinterpret_cast<Barrier *>(shared_storage.sf_full_mbar_ptr);
 
-    constexpr int MMA_K_SF = MMA_K / SCALE_VECTOR_SIZE;  // = 4
-    constexpr int tma_transaction_bytes_AB = MMA_M * MMA_K / 2 * NUM_MMA_K   // A (FP4 packed, all K-blocks)
-                                           + MMA_N * MMA_K / 2 * NUM_MMA_K;  // B (FP4 packed, all K-blocks)
-    constexpr int tma_transaction_bytes_SF = MMA_M * MMA_K_SF * NUM_MMA_K    // SFA (all K-blocks)
-                                           + MMA_N * MMA_K_SF * NUM_MMA_K;   // SFB (all K-blocks)
+    constexpr int MMA_K_SF = MMA_K / SCALE_VECTOR_SIZE;
+    constexpr int tma_transaction_bytes_AB = MMA_M * MMA_K / 2 * NUM_MMA_K
+                                           + MMA_N * MMA_K / 2 * NUM_MMA_K;
+    constexpr int tma_transaction_bytes_SF = MMA_M * MMA_K_SF * NUM_MMA_K
+                                           + MMA_N * MMA_K_SF * NUM_MMA_K;
 
-    // A_type *sA_ptr = shared_storage.A.begin();
-    // B_type *sB_ptr = shared_storage.B.begin();
-    void    *sA_ptr      = static_cast<void*>(&shared_storage.A);  // Has to be done since type is fp4 (TODO: fix?)
-    void    *sB_ptr      = static_cast<void*>(&shared_storage.B);
-    C_type  *sC_ptr      = shared_storage.C.begin();
-    SF_type *sSFA_ptr    = shared_storage.SFA.begin();
-    SF_type *sSFB_ptr    = shared_storage.SFB.begin();
+    void    *sA_ptr   = static_cast<void*>(&shared_storage.A);
+    void    *sB_ptr   = static_cast<void*>(&shared_storage.B);
+    C_type  *sC_ptr   = shared_storage.C.begin();
+    SF_type *sSFA_ptr = shared_storage.SFA.begin();
+    SF_type *sSFB_ptr = shared_storage.SFB.begin();
 
-    // TODO: Create subbyte iterator?
-    using A_smem_TMA = smem_tma<A_type, B, M, S, MMA_M, MMA_K, 1>;
-    using B_smem_TMA = smem_tma<B_type, B, M, S, MMA_N, MMA_K, 1>;
-    using C_smem_TMA = smem_tma<C_type, 0, M, S, MMA_N, MMA_M, 1>;
-    using SFA_smem_TMA = smem_tma<SF_type, B, M, S, MMA_M, MMA_K_SF, 1>;
-    using SFB_smem_TMA = smem_tma<SF_type, B, M, S, MMA_N, MMA_K_SF, 1>;
+    using A_smem_TMA   = smem_tma<A_type,  B_FP4, M, S, MMA_M, MMA_K, 1>;
+    using B_smem_TMA   = smem_tma<B_type,  B_FP4, M, S, MMA_N, MMA_K, 1>;
+    using C_smem_TMA   = smem_tma<C_type,  B_OUT, M, S, MMA_N, MMA_M, 1>;
+    using SFA_smem_TMA = smem_tma<SF_type, B_SF,  M, S, MMA_M, MMA_K_SF, 1>;
+    using SFB_smem_TMA = smem_tma<SF_type, B_SF,  M, S, MMA_N, MMA_K_SF, 1>;
 
-    A_smem_TMA sA(sA_ptr);
-    B_smem_TMA sB(sB_ptr);
-    C_smem_TMA sC(sC_ptr);
+    A_smem_TMA   sA(sA_ptr);
+    B_smem_TMA   sB(sB_ptr);
+    C_smem_TMA   sC(sC_ptr);
     SFA_smem_TMA sSFA(sSFA_ptr);
     SFB_smem_TMA sSFB(sSFB_ptr);
 
     cutlass::arch::fence_barrier_init();
     __syncthreads();
 
-    cute::Tensor tCfA = cta_mma.make_fragment_A(tCsA); // (1, NUM_MMA_M, NUM_MMA_K, NUM_AB_STAGE)
-    cute::Tensor tCfB = cta_mma.make_fragment_B(tCsB); // (1, NUM_MMA_N, NUM_MMA_K, NUM_AB_STAGE)
+    cute::Tensor tCfA = cta_mma.make_fragment_A(tCsA);
+    cute::Tensor tCfB = cta_mma.make_fragment_B(tCsB);
     auto acc_shape = cute::partition_shape_C(
-        tiled_mma,                          // MMA
-        cute::make_shape(
-            cute::size<0>(tb_mma_tiler),       // MMA_M,
-            cute::size<1>(tb_mma_tiler),       // MMA_N
-            cute::Int<NUM_ACC_STAGE>{}      // NUM_ACC_STAGE
-        )
-    ); // (MmaC, NumMma_M, NumMma_N, NumAcc_Stage)
-    cute::Tensor tCtC = tiled_mma.make_fragment_C(acc_shape); // (1, MMA_M, MMA_N, NUM_ACC_STAGE)
+        tiled_mma,
+        cute::make_shape(cute::size<0>(tb_mma_tiler), cute::size<1>(tb_mma_tiler),
+                         cute::Int<NUM_ACC_STAGE>{}));
+    cute::Tensor tCtC = tiled_mma.make_fragment_C(acc_shape);
 
-    // TMEM Allocation
     using UtccpOp = cute::SM100_UTCCP_4x32dp128bit_1cta;
     using TmemAllocator = cute::TMEM::Allocator1Sm;
     TmemAllocator tmem_allocator{};
@@ -414,37 +284,21 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     __syncthreads();
     tCtC.data() = cute::make_tmem_ptr<C_type>(shared_storage.tmem_acc_ptr);
 
-    // Create prototype TMEM tensors
     using FrgTypeSFA = cute::UMMA::tmem_sf_frg<SF_type, SCALE_VECTOR_SIZE, 1, true>;
     using FrgTypeSFB = cute::UMMA::tmem_sf_frg<SF_type, SCALE_VECTOR_SIZE, 1, false>;
-    static constexpr int MMA_M_SFB = ((MMA_M + 127) / 128) * 128;  // = 128
-    auto sfa_tmem_shape = cute::make_shape(     // ((MMA_M, (16, 4)), NUM_MMA_M, NUM_MMA_K)
-        cute::make_shape(
-            cute::Int<MMA_M_SFB>{},
-            cute::make_shape(
-                cute::Int<SCALE_VECTOR_SIZE>{},
-                cute::Int<MMA_K / SCALE_VECTOR_SIZE>{}
-            )
-        ),
-        cute::Int<NUM_MMA_M>{},
-        cute::Int<NUM_MMA_K>{}
-    );
-    static constexpr int MMA_N_SFB = ((MMA_N + 127) / 128) * 128;  // = 128
-    auto sfb_tmem_shape = cute::make_shape(     // ((MMA_N_SFB, (16, 4)), NUM_MMA_N, NUM_MMA_K)
-        cute::make_shape(
-            cute::Int<MMA_N_SFB>{},
-            cute::make_shape(
-                cute::Int<SCALE_VECTOR_SIZE>{},
-                cute::Int<MMA_K / SCALE_VECTOR_SIZE>{}
-            )
-        ),
-        cute::Int<NUM_MMA_N>{},
-        cute::Int<NUM_MMA_K>{}
-    );
+    static constexpr int MMA_M_SFB = ((MMA_M + 127) / 128) * 128;
+    static constexpr int MMA_N_SFB = ((MMA_N + 127) / 128) * 128;
+    auto sfa_tmem_shape = cute::make_shape(
+        cute::make_shape(cute::Int<MMA_M_SFB>{},
+                         cute::make_shape(cute::Int<SCALE_VECTOR_SIZE>{}, cute::Int<MMA_K / SCALE_VECTOR_SIZE>{})),
+        cute::Int<NUM_MMA_M>{}, cute::Int<NUM_MMA_K>{});
+    auto sfb_tmem_shape = cute::make_shape(
+        cute::make_shape(cute::Int<MMA_N_SFB>{},
+                         cute::make_shape(cute::Int<SCALE_VECTOR_SIZE>{}, cute::Int<MMA_K / SCALE_VECTOR_SIZE>{})),
+        cute::Int<NUM_MMA_N>{}, cute::Int<NUM_MMA_K>{});
     auto tCtSFA = FrgTypeSFA::make(sfa_tmem_shape);
     auto tCtSFB = FrgTypeSFB::make(sfb_tmem_shape);
 
-    // Compute TMEM offsets using find_tmem_tensor_col_offset for correctness
     uint32_t sfa_offset = cutlass::detail::find_tmem_tensor_col_offset(tCtC);
     uint32_t sfb_offset = sfa_offset + cutlass::detail::find_tmem_tensor_col_offset(tCtSFA);
     shared_storage.tmem_sfa_ptr = shared_storage.tmem_acc_ptr + sfa_offset;
@@ -452,17 +306,15 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     tCtSFA.data() = make_tmem_ptr<SF_type>(shared_storage.tmem_sfa_ptr);
     tCtSFB.data() = make_tmem_ptr<SF_type>(shared_storage.tmem_sfb_ptr);
 
-    // Precompute TMEM column start for SFA/SFB
     uint32_t tmem_sfa_ptr = shared_storage.tmem_sfa_ptr;
     uint32_t tmem_sfb_ptr = shared_storage.tmem_sfb_ptr;
     int k_tile_count = cute::size<4>(tCgA);
 
     if (warp_idx == 6) {
-        // TMA A/B GMEM -> SMEM
+        // TMA A/B: GMEM -> SMEM
         int total_k_tile_count = 0;
         for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
             for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
-
                 int num_prev_k_blk = total_k_tile_count;
                 total_k_tile_count += k_tile_count;
 
@@ -470,13 +322,11 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                 int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
                 int tma_wr_ab_empty_phase = (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
                 bool peek_ab_empty_status = kernel::try_wait_barrier(
-                    shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                    tma_wr_ab_empty_phase
-                );
+                    shared_storage.ab_empty_mbar_ptr[smem_wr_buffer], tma_wr_ab_empty_phase);
 
                 for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
-                    int tma_wr_k_tile_next  = tma_wr_k_tile + 1;
-                    int smem_wr_buffer_next = (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
+                    int tma_wr_k_tile_next        = tma_wr_k_tile + 1;
+                    int smem_wr_buffer_next       = (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
                     int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
                                                         ? tma_wr_ab_empty_phase ^ 1
                                                         : tma_wr_ab_empty_phase;
@@ -494,9 +344,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                         sB.set_ptr(static_cast<void*>(cute::raw_pointer_cast(tCsB(cute::_, cute::_, cute::_, smem_wr_buffer).data())));
 
                         cute::set_barrier_transaction_bytes(
-                            shared_storage.ab_full_mbar_ptr[smem_wr_buffer],
-                            tma_transaction_bytes_AB
-                        );
+                            shared_storage.ab_full_mbar_ptr[smem_wr_buffer], tma_transaction_bytes_AB);
 
                         tma_a.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer], sA.base_ptr, tma_coords_A);
                         tma_b.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer], sB.base_ptr, tma_coords_B);
@@ -508,19 +356,17 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                             tma_wr_ab_empty_phase_next);
                     }
 
-                    tma_wr_k_tile = tma_wr_k_tile_next;
-                    smem_wr_buffer = smem_wr_buffer_next;
+                    tma_wr_k_tile        = tma_wr_k_tile_next;
+                    smem_wr_buffer       = smem_wr_buffer_next;
                     tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
-
-                } // end for k_tile
-            } // end for n_tile
-        } // end for m_tile
+                }
+            }
+        }
     } else if (warp_idx == 5) {
-        // TMA SFA/SFB GMEM -> SMEM
+        // TMA SFA/SFB: GMEM -> SMEM
         int total_k_tile_count = 0;
         for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
             for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
-
                 int num_prev_k_blk = total_k_tile_count;
                 total_k_tile_count += k_tile_count;
 
@@ -528,13 +374,11 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                 int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
                 int tma_wr_sf_empty_phase = (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
                 bool peek_sf_empty_status = kernel::try_wait_barrier(
-                    shared_storage.sf_empty_mbar_ptr[smem_wr_buffer],
-                    tma_wr_sf_empty_phase
-                );
+                    shared_storage.sf_empty_mbar_ptr[smem_wr_buffer], tma_wr_sf_empty_phase);
 
                 for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
-                    int tma_wr_k_tile_next  = tma_wr_k_tile + 1;
-                    int smem_wr_buffer_next = (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
+                    int tma_wr_k_tile_next        = tma_wr_k_tile + 1;
+                    int smem_wr_buffer_next       = (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
                     int tma_wr_sf_empty_phase_next = smem_wr_buffer_next == 0
                                                         ? tma_wr_sf_empty_phase ^ 1
                                                         : tma_wr_sf_empty_phase;
@@ -552,9 +396,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                         sSFB.set_ptr(static_cast<void*>(tCsSFB(cute::_, cute::_, cute::_, smem_wr_buffer).data().get()));
 
                         cute::set_barrier_transaction_bytes(
-                            shared_storage.sf_full_mbar_ptr[smem_wr_buffer],
-                            tma_transaction_bytes_SF
-                        );
+                            shared_storage.sf_full_mbar_ptr[smem_wr_buffer], tma_transaction_bytes_SF);
 
                         tma_sfa.tma_cp_async(sf_full_mbar_ptr[smem_wr_buffer], reinterpret_cast<cute::half_t*>(sSFA.base_ptr), tma_coords_SFA);
                         tma_sfb.tma_cp_async(sf_full_mbar_ptr[smem_wr_buffer], reinterpret_cast<cute::half_t*>(sSFB.base_ptr), tma_coords_SFB);
@@ -566,15 +408,14 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                             tma_wr_sf_empty_phase_next);
                     }
 
-                    tma_wr_k_tile = tma_wr_k_tile_next;
-                    smem_wr_buffer = smem_wr_buffer_next;
+                    tma_wr_k_tile        = tma_wr_k_tile_next;
+                    smem_wr_buffer       = smem_wr_buffer_next;
                     tma_wr_sf_empty_phase = tma_wr_sf_empty_phase_next;
-
-                } // end for k_tile
-            } // end for n_tile
-        } // end for m_tile
+                }
+            }
+        }
     } else if (warp_idx == 4) {
-        // SMEM -> TMEM (SF) + MMA
+        // SF SMEM -> TMEM + MMA
         tmem_allocation_result_barrier.arrive_and_wait();
 
         int total_k_tile_count = 0;
@@ -591,10 +432,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                 int mma_rd_sf_full_phase = (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
                 int acc_empty_phase      = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
 
-                cute::wait_barrier(
-                    shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-                    acc_empty_phase
-                );
+                cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx], acc_empty_phase);
 
                 tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
                 for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -607,75 +445,54 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                                                         ? mma_rd_sf_full_phase ^ 1
                                                         : mma_rd_sf_full_phase;
 
-                    // Wait for A/B in SMEM and SFA/SFB in SMEM
-                    cute::wait_barrier(
-                        shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
-                        mma_rd_ab_full_phase
-                    );
-                    cute::wait_barrier(
-                        shared_storage.sf_full_mbar_ptr[smem_rd_buffer],
-                        mma_rd_sf_full_phase
-                    );
+                    cute::wait_barrier(shared_storage.ab_full_mbar_ptr[smem_rd_buffer], mma_rd_ab_full_phase);
+                    cute::wait_barrier(shared_storage.sf_full_mbar_ptr[smem_rd_buffer], mma_rd_sf_full_phase);
 
-                    // SF SMEM -> TMEM
                     if (cute::elect_one_sync()) {
                         using UtccpOp = SM100_UTCCP_4x32dp128bit_1cta;
                         auto copy_sf_s2t = [&](auto& tCsSF, auto& tCtSF, int stage) {
                             auto tCsSF_stage   = tCsSF(cute::_, cute::_, cute::_, stage);
                             auto tCsSF_compact = make_tensor(tCsSF_stage.data(), filter_zeros(tCsSF_stage.layout()));
                             auto tCtSF_compact = make_tensor(tCtSF.data(), filter_zeros(tCtSF.layout()));
-
-                            auto tiled_s2t = make_utccp_copy(UtccpOp{}, tCtSF_compact);
-                            auto thr_s2t   = tiled_s2t.get_slice(0);
-
-                            auto src_ = thr_s2t.partition_S(tCsSF_compact);
-                            auto src  = get_utccp_smem_desc_tensor<UtccpOp>(src_);
-                            auto dst  = thr_s2t.partition_D(tCtSF_compact);
-
+                            auto tiled_s2t     = make_utccp_copy(UtccpOp{}, tCtSF_compact);
+                            auto thr_s2t       = tiled_s2t.get_slice(0);
+                            auto src_          = thr_s2t.partition_S(tCsSF_compact);
+                            auto src           = get_utccp_smem_desc_tensor<UtccpOp>(src_);
+                            auto dst           = thr_s2t.partition_D(tCtSF_compact);
                             cute::copy(tiled_s2t, src, dst);
                         };
-
                         copy_sf_s2t(tCsSFA, tCtSFA, smem_rd_buffer);
                         copy_sf_s2t(tCsSFB, tCtSFB, smem_rd_buffer);
                     }
 
-                    // MMA
                     auto accumulate = tiled_mma.accumulate_;
                     for (int k_block = 0; k_block < cute::size<2>(tCfA); ++k_block) {
                         cute::gemm(
-                            tiled_mma.with(
-                                accumulate,
-                                tCtSFA(cute::_, cute::_, k_block),
-                                tCtSFB(cute::_, cute::_, k_block)
-                            ),
+                            tiled_mma.with(accumulate,
+                                           tCtSFA(cute::_, cute::_, k_block),
+                                           tCtSFB(cute::_, cute::_, k_block)),
                             tCfA(cute::_, cute::_, k_block, smem_rd_buffer),
                             tCfB(cute::_, cute::_, k_block, smem_rd_buffer),
-                            tCtC(cute::_, cute::_, cute::_, acc_buf_idx)
-                        );
+                            tCtC(cute::_, cute::_, cute::_, acc_buf_idx));
                         accumulate = cute::UMMA::ScaleOut::One;
                     }
                     tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
 
-                    cutlass::arch::umma_arrive(
-                        &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]
-                    );
-                    cutlass::arch::umma_arrive(
-                        &shared_storage.sf_empty_mbar_ptr[smem_rd_buffer]
-                    );
+                    cutlass::arch::umma_arrive(&shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
+                    cutlass::arch::umma_arrive(&shared_storage.sf_empty_mbar_ptr[smem_rd_buffer]);
 
                     mma_rd_k_tile        = mma_rd_k_tile_next;
                     smem_rd_buffer       = smem_rd_buffer_next;
                     mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
                     mma_rd_sf_full_phase = mma_rd_sf_full_phase_next;
-
-                } // end for k_tile
+                }
 
                 cutlass::arch::umma_arrive(&shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
                 num_tiles_executed++;
-            } // end for n_tile
+            }
         }
     } else if (warp_idx < 4) {
-        // Epilogue warps (4)
+        // Epilogue
         tmem_allocation_result_barrier.arrive_and_wait();
 
         cute::Tensor tCtAcc_proto = tCtC(cute::make_coord(cute::_, cute::_), cute::_0{}, cute::_0{}, cute::_0{});
@@ -692,27 +509,19 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
             int epi_rd_acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
             int c_smem_wr_buffer      = num_tiles_executed % NUM_C_STAGE;
 
-            // Bias
-            cute::Tensor tCgBias = gBias(cute::_, cute::_, m_tile, n_tile); // (MMA_M, MMA_N)
+            cute::Tensor tCgBias = gBias(cute::_, cute::_, m_tile, n_tile);
             cute::Tensor tCrBias = cute::make_tensor<C_type>(cute::shape(tCrAcc));
             if constexpr (!NOBIAS) {
               cute::copy(thr_copy_t2r.partition_D(tCgBias), tCrBias);
             }
 
-            // TMEM -> REG
-            cute::wait_barrier(
-                shared_storage.acc_full_mbar_ptr[epi_rd_acc_buf],
-                epi_rd_acc_full_phase
-            );
-            cute::copy(tiled_copy_t2r,
-                       tTR_tCtC(cute::_, cute::_, cute::_, epi_rd_acc_buf),
-                       tCrAcc);
+            cute::wait_barrier(shared_storage.acc_full_mbar_ptr[epi_rd_acc_buf], epi_rd_acc_full_phase);
+            cute::copy(tiled_copy_t2r, tTR_tCtC(cute::_, cute::_, cute::_, epi_rd_acc_buf), tCrAcc);
             epilogue_wg_barrier.arrive_and_wait();
             if (cute::elect_one_sync()) {
               cute::arrive_barrier(shared_storage.acc_empty_mbar_ptr[epi_rd_acc_buf]);
             }
 
-            // Apply Bias
             if constexpr (!NOBIAS) {
               CUTE_UNROLL
               for (int i = 0; i < tCrAcc.size(); i++) {
@@ -721,22 +530,19 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
             }
             epilogue_wg_barrier.arrive_and_wait();
 
-            // REG -> SMEM
             cute::copy(tCrAcc, cute::flatten(tCsC(cute::_, 0, 0, c_smem_wr_buffer))(cute::_, threadIdx.x));
             cute::tma_store_fence();
             epilogue_wg_barrier.arrive_and_wait();
 
-            // SMEM -> GMEM
             if (warp_idx == 0 && cute::elect_one_sync()) {
-              sC.set_ptr(static_cast<void*>(tCsC(cute::_, 0, 0, c_smem_wr_buffer).data().get()));
+              constexpr int SWIZZLE_SIZE = 32;
+              sC.set_ptr(static_cast<void*>(raw_pointer_cast(tCsC(cute::_, 0, 0, c_smem_wr_buffer).data())));
               if constexpr (SplitK) {
-                tma_out.tma_reduce_add_async(
-                    sC.base_ptr,
-                    {n_tile * MMA_N, m_tile * MMA_M});
+                tma_out.tma_reduce_add_async(sC.base_ptr,
+                    {0, n_tile * (MMA_N / SWIZZLE_SIZE), m_tile * MMA_M});
               } else {
-                tma_out.tma_store_async(
-                    sC.base_ptr,
-                    {n_tile * MMA_N, m_tile * MMA_M});
+                tma_out.tma_store_async(sC.base_ptr,
+                    {0, n_tile * (MMA_N / SWIZZLE_SIZE), m_tile * MMA_M});
               }
               cute::tma_store_arrive();
               cute::tma_store_wait<NUM_C_STAGE - 1>();
@@ -745,21 +551,16 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
             num_tiles_executed++;
           }
         }
-        // wait all TMA stores to complete
         if (warp_idx == 0 && cute::elect_one_sync()) {
           cute::tma_store_wait<0>();
         }
-      }
-      __syncthreads();
+    }
+    __syncthreads();
 
-    // Release the right to allocate before deallocations so that the next CTA can
-    // rasterize Then deallocate TMEM
     if (warp_idx == 0) {
-      // don't do relinquish for megakernel
-      // tmem_allocator.release_allocation_lock(); 
       tmem_allocator.free(shared_storage.tmem_acc_ptr, TmemAllocator::Sm100TmemCapacityColumns);
     }
-} // end linear_fp8_1d2d_sm100_mpk_task_impl
+}
 
 };  // namespace kernel
 
