@@ -7,6 +7,9 @@ namespace mirage {
 namespace search {
 
 struct AutoTunerConfig {
+  bool use_sa = false;            // simulated annealing refinement
+  bool use_evolutionary = false;  // evolutionary search refinement
+  // if both false: grid search only (fastest)
 };
 
 class AutoTuner {

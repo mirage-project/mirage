@@ -17,6 +17,8 @@ public:
   FormalVerifier(kernel::Graph const &input_graph);
   virtual OutputMatch verify(kernel::Graph const &graph) override;
   OutputMatch verify_symbolic_graph(SymbolicKNGraph const &graph);
+  std::vector<std::pair<SymbolicKNGraph, OutputMatch>>
+      verify_symbolic_graph_with_unknown_maps(SymbolicKNGraph const &graph);
 
 private:
   std::vector<std::string> input_exprs;

@@ -1,10 +1,9 @@
 #pragma once
 
 #include "mirage/search/symbolic_graph/dim_var_assignment.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/utils/hash_utils.h"
 #include "mirage/utils/json_utils.h"
-#include "z3++.h"
 #include <memory>
 #include <mutex>
 #include <shared_mutex>

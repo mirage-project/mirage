@@ -298,7 +298,7 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   endforeach()
 
   # Symbolic sub-examples (cpp_examples/symbolic/)
-  foreach(target IN ITEMS rms_norm attention qk_norm_attention down_proj_residual_rmsnorm rmsnorm_mlp swiglu lora two_layer_mlp)
+  foreach(target IN ITEMS rms_norm rms_linear attention qk_norm_attention down_proj_residual_rmsnorm rmsnorm_mlp swiglu lora two_layer_mlp)
     add_executable(symbolic_${target}
       ${CPP_EXAMPLES_DIR}/symbolic/${target}.cc)
     set_target_properties(symbolic_${target}

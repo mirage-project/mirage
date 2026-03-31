@@ -5,8 +5,11 @@
 #include "mirage/search/profile.h"
 #include "mirage/search/symbolic_graph/op_args.h"
 
+#include <algorithm>
+#include <chrono>
 #include <limits>
 #include <map>
+#include <random>
 #include <string>
 #include <thread>
 
@@ -125,27 +128,47 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     // This replaces BFS initialization with exhaustive search over a small space.
 
     // Step 1: Generate candidate values per variable.
-    // For each var, collect divisor constants (C where C/var appears in dims),
-    // then generate all powers of 2 from 1..max(C) that divide every constant.
+    // Use input tensor shapes to determine appropriate ranges:
+    // - Grid dims produce tile = data_dim / grid; tile should be in [8, 512]
+    // - Forloop produces K-tile = data_dim / fl; K-tile should be in [16, 256]
+    // - Small dims (<=64): all powers of 2 up to data_dim
     size_t num_grid_dims = symbolic_tb_graph.grid_dim.size();
     std::vector<std::vector<int>> per_var_candidates;
+
     for (size_t vi = 0; vi < dim_indices_to_tune.size(); ++vi) {
       auto idx = dim_indices_to_tune[vi];
-      int max_val = symbolic_tb_graph.get_initial_value_for_var(idx);
-      // For grid dimensions, cap at MAX_NUM_THREADBLOCKS since higher
-      // values are wasteful; SA can still refine within this range.
-      if (vi < num_grid_dims) {
-        max_val = std::min(max_val,
-                           (int)config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
-      }
+      int data_dim = symbolic_tb_graph.get_initial_value_for_var(idx);
+      bool is_forloop = (vi == dim_indices_to_tune.size() - 1);
       std::vector<int> candidates;
-      for (int v = 4; v <= max_val; v *= 4) {
-        candidates.push_back(v);
+
+      if (data_dim <= 64) {
+        // Small dim: all powers of 2 up to data_dim
+        for (int v = 1; v <= data_dim; v *= 2) {
+          if (data_dim % v == 0) candidates.push_back(v);
+        }
+      } else if (is_forloop) {
+        // Forloop: tile = data_dim/fl should be in [16, 256]
+        // So fl in [data_dim/256, data_dim/16]
+        int fl_min = std::max(1, data_dim / 256);
+        int fl_max = data_dim / 16;
+        for (int v = fl_min; v <= fl_max; v *= 2) {
+          if (data_dim % v == 0) candidates.push_back(v);
+        }
+      } else {
+        // Grid dim: tile = data_dim/grid should be in [8, 512]
+        // So grid in [data_dim/512, data_dim/8]
+        int g_min = std::max(1, data_dim / 512);
+        int g_max = data_dim / 8;
+        for (int v = g_min; v <= g_max; v *= 2) {
+          if (data_dim % v == 0) candidates.push_back(v);
+        }
       }
-      // Also include max_val itself if it's not already in the list
-      if (candidates.empty() || candidates.back() != max_val) {
-        candidates.push_back(max_val);
+      // Include 2 when the data dimension is exactly 2 (e.g., batch=2)
+      if (data_dim == 2 && std::find(candidates.begin(), candidates.end(), 2) == candidates.end()) {
+        candidates.push_back(2);
       }
+      std::sort(candidates.begin(), candidates.end());
+      if (candidates.empty()) candidates.push_back(1);
       per_var_candidates.push_back(std::move(candidates));
     }
 
@@ -180,33 +203,97 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
       return true;
     };
 
+    // Step 2a: Collect all valid candidates.
+    std::vector<std::vector<int>> all_valid;
     do {
       ++total_candidates;
       for (size_t i = 0; i < num_vars; ++i)
         values[i] = per_var_candidates[i][current[i]];
 
-      // Cheap validity check first.
       DimVarAssignment a;
       for (size_t i = 0; i < num_vars; ++i)
         a.assign(dim_indices_to_tune[i], values[i]);
       if (!check_grid_dim(values) || !symbolic_tb_graph.is_valid_assignment(a))
         continue;
       ++valid_candidates;
+      all_valid.push_back(values);
+    } while (!enumerate_done());
 
-      // Profile via cached energy function.
-      float e = cached_energy(values);
+    // Subsample up to 15 evenly distributed candidates.
+    std::vector<std::vector<int>> valid_value_sets;
+    // Adaptive cap: more candidates for fewer variables
+    size_t const max_grid_candidates = 20;
+    if (all_valid.size() <= max_grid_candidates) {
+      valid_value_sets = all_valid;
+    } else {
+      for (size_t i = 0; i < max_grid_candidates; ++i) {
+        size_t idx = i * all_valid.size() / max_grid_candidates;
+        valid_value_sets.push_back(all_valid[idx]);
+      }
+    }
+
+    // Step 2b: Build kernel graphs and compile in parallel.
+    size_t nv = valid_value_sets.size();
+    std::vector<kernel::Graph*> kg_vec(nv, nullptr);
+    std::vector<ProfileCompileResult> compiled_vec(nv);
+    for (size_t i = 0; i < nv; ++i) {
+      DimVarAssignment a;
+      for (size_t j = 0; j < num_vars; ++j)
+        a.assign(dim_indices_to_tune[j], valid_value_sets[i][j]);
+      kg_vec[i] = build_kn_graph_for_tb(a);
+      if (kg_vec[i]) {
+        std::cerr << "[GridSearch] built graph for";
+        for (size_t j = 0; j < num_vars; ++j)
+          std::cerr << " var" << dim_indices_to_tune[j] << "=" << valid_value_sets[i][j];
+        std::cerr << ": " << json(*kg_vec[i]) << std::endl;
+      } else {
+        std::cerr << "[GridSearch] build_kn_graph FAILED for";
+        for (size_t j = 0; j < num_vars; ++j)
+          std::cerr << " var" << dim_indices_to_tune[j] << "=" << valid_value_sets[i][j];
+        std::cerr << std::endl;
+      }
+    }
+    {
+      unsigned hw = std::thread::hardware_concurrency();
+      size_t num_threads = std::min(nv, static_cast<size_t>(hw > 0 ? hw : 8));
+      std::atomic<size_t> next_idx{0};
+      std::vector<std::thread> threads;
+      for (size_t t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&]() {
+          while (true) {
+            size_t i = next_idx.fetch_add(1, std::memory_order_relaxed);
+            if (i >= nv) break;
+            if (kg_vec[i]) {
+              compiled_vec[i] = profile_compile(kg_vec[i]);
+            }
+          }
+        });
+      }
+      for (auto &t : threads) t.join();
+    }
+    for (size_t i = 0; i < nv; ++i) {
+      delete kg_vec[i];
+    }
+
+    // Step 2c: Sequential GPU profiling.
+    for (size_t i = 0; i < nv; ++i) {
+      float e = 1e9f;
+      if (compiled_vec[i].is_success) {
+        ProfileResult result = profile_run(compiled_vec[i]);
+        if (result.is_success) e = result.run_time;
+      }
+      energy_cache[valid_value_sets[i]] = e;
       std::cerr << "[GridSearch] ";
-      for (size_t i = 0; i < num_vars; ++i)
-        std::cerr << "var" << dim_indices_to_tune[i] << "=" << values[i] << " ";
+      for (size_t j = 0; j < num_vars; ++j)
+        std::cerr << "var" << dim_indices_to_tune[j] << "=" << valid_value_sets[i][j] << " ";
       std::cerr << "-> " << (e >= 1e9f ? "FAIL" : std::to_string(e) + "ms") << std::endl;
       if (e >= 1e9f) continue;
       ++profiled_candidates;
-
       if (e < best_time) {
         best_time = e;
-        best_values = values;
+        best_values = valid_value_sets[i];
       }
-    } while (!enumerate_done());
+    }
 
     std::cerr << "[GridSearch tid=" << std::this_thread::get_id()
               << "] total=" << total_candidates
@@ -261,20 +348,99 @@ DimVarAssignment AutoTuner::tune(SymbolicTBGraph const &symbolic_tb_graph) {
     return assignment;
   }
 
-  SimulatedAnnealingConfig simulated_annealing_config;
-  simulated_annealing_config.time_limit_seconds = 60.0;
+  std::vector<int> best_values;
 
-  auto cached_initial = [&initial_state]() { return initial_state; };
-  SimulatedAnnealing<std::vector<int>, float> simulated_annealing(simulated_annealing_config, cached_initial, neighbor_func, cached_energy);
-  simulated_annealing.set_state_to_string_func([&](std::vector<int> const &vals) -> std::string {
-    std::string s;
-    for (size_t i = 0; i < dim_indices_to_tune.size(); ++i) {
-      if (i > 0) s += " ";
-      s += "var" + std::to_string(dim_indices_to_tune[i]) + "=" + std::to_string(vals[i]);
+  if (!config.use_sa && !config.use_evolutionary) {
+    // --- Grid search only, no refinement ---
+    best_values = initial_state;
+
+  } else if (config.use_evolutionary) {
+    // --- Evolutionary search ---
+    // Collect grid search population from energy cache (already profiled).
+    struct Individual { std::vector<int> values; float energy; };
+    std::vector<Individual> population;
+    for (auto const &kv : energy_cache) {
+      if (kv.second < 1e8f) {
+        population.push_back({kv.first, kv.second});
+      }
     }
-    return s;
-  });
-  std::vector<int> best_values = simulated_annealing.optimize();
+    std::sort(population.begin(), population.end(),
+              [](auto const &a, auto const &b) { return a.energy < b.energy; });
+
+    auto evo_start = std::chrono::steady_clock::now();
+    double evo_time_limit = 15.0;
+    int generation = 0;
+
+    std::cerr << "[Evo tid=" << std::this_thread::get_id()
+              << "] initial population: " << population.size()
+              << " best=" << (population.empty() ? 0.f : population[0].energy) << "ms" << std::endl;
+
+    while (!population.empty()) {
+      auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration<double>(now - evo_start).count() >= evo_time_limit) break;
+
+      std::vector<Individual> offspring;
+
+      // Mutation: mutate top half (up to 5)
+      for (size_t i = 0; i < population.size() / 2 && i < 5; ++i) {
+        auto child_vals = neighbor_func(population[i].values);
+        float e = cached_energy(child_vals);
+        offspring.push_back({child_vals, e});
+        now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - evo_start).count() >= evo_time_limit) break;
+      }
+
+      // Crossover: pair top individuals (up to 2 pairs)
+      for (size_t i = 0; i + 1 < population.size() && i < 4; i += 2) {
+        now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - evo_start).count() >= evo_time_limit) break;
+
+        auto const &p1 = population[i].values;
+        auto const &p2 = population[i + 1].values;
+        std::vector<int> child(p1.size());
+        for (size_t d = 0; d < p1.size(); ++d) {
+          child[d] = (local_rng() % 2 == 0) ? p1[d] : p2[d];
+        }
+        DimVarAssignment a;
+        for (size_t d = 0; d < dim_indices_to_tune.size(); ++d)
+          a.assign(dim_indices_to_tune[d], child[d]);
+        if (check_grid_dim(child) && symbolic_tb_graph.is_valid_assignment(a)) {
+          float e = cached_energy(child);
+          offspring.push_back({child, e});
+        }
+      }
+
+      // Merge and select best
+      population.insert(population.end(), offspring.begin(), offspring.end());
+      std::sort(population.begin(), population.end(),
+                [](auto const &a, auto const &b) { return a.energy < b.energy; });
+      if (population.size() > 15) population.resize(15);
+
+      ++generation;
+    }
+
+    best_values = population.empty() ? initial_state : population[0].values;
+    std::cerr << "[Evo tid=" << std::this_thread::get_id()
+              << "] done: generations=" << generation
+              << " best=" << (population.empty() ? 0.f : population[0].energy) << "ms" << std::endl;
+
+  } else {
+    // --- Simulated Annealing (original) ---
+    SimulatedAnnealingConfig simulated_annealing_config;
+    simulated_annealing_config.time_limit_seconds = 15.0;
+
+    auto cached_initial = [&initial_state]() { return initial_state; };
+    SimulatedAnnealing<std::vector<int>, float> simulated_annealing(simulated_annealing_config, cached_initial, neighbor_func, cached_energy);
+    simulated_annealing.set_state_to_string_func([&](std::vector<int> const &vals) -> std::string {
+      std::string s;
+      for (size_t i = 0; i < dim_indices_to_tune.size(); ++i) {
+        if (i > 0) s += " ";
+        s += "var" + std::to_string(dim_indices_to_tune[i]) + "=" + std::to_string(vals[i]);
+      }
+      return s;
+    });
+    best_values = simulated_annealing.optimize();
+  }
 
   DimVarAssignment assignment;
   for (size_t i = 0; i < dim_indices_to_tune.size(); ++i) {
@@ -439,7 +605,7 @@ kernel::Graph *AutoTuner::tune(std::vector<SymbolicKNGraph> const &symbolic_kn_g
   };
 
   SimulatedAnnealingConfig simulated_annealing_config;
-  simulated_annealing_config.time_limit_seconds = 60.0;
+  simulated_annealing_config.time_limit_seconds = 15.0;
 
   SimulatedAnnealing<StateType, float> simulated_annealing(
       simulated_annealing_config, initial_state_func, neighbor_func, energy_func);
@@ -466,50 +632,77 @@ kernel::Graph *AutoTuner::tune_multi_threaded(std::vector<SymbolicKNGraph> const
   if (symbolic_kn_graphs.empty()) {
     return nullptr;
   }
-  std::vector<DimVarAssignment> assignments(symbolic_kn_graphs.size());
-  std::vector<std::thread> threads;
-  threads.reserve(symbolic_kn_graphs.size());
-  for (size_t i = 0; i < symbolic_kn_graphs.size(); ++i) {
-    threads.emplace_back([this, &symbolic_kn_graphs, &assignments, i]() {
-      assignments[i] = tune(symbolic_kn_graphs[i]);
-    });
+
+  size_t N = symbolic_kn_graphs.size();
+
+  // Phase 1: Per-graph tuning in parallel threads.
+  // Each thread calls tune(SymbolicKNGraph) which internally does grid search
+  // with parallel compilation and sequential profiling.
+  // GPU profiling within each tune() is serialized by the CUDA runtime.
+  std::vector<DimVarAssignment> assignments(N);
+  std::vector<bool> tune_success(N, false);
+  {
+    std::atomic<size_t> next_idx{0};
+    unsigned hw = std::thread::hardware_concurrency();
+    // Use fewer threads than HW concurrency to avoid GPU contention during profiling
+    size_t num_threads = std::min(N, static_cast<size_t>(std::max(hw / 4, 2u)));
+    std::vector<std::thread> threads;
+    for (size_t t = 0; t < num_threads; ++t) {
+      threads.emplace_back([&]() {
+        while (true) {
+          size_t gi = next_idx.fetch_add(1, std::memory_order_relaxed);
+          if (gi >= N) break;
+          assignments[gi] = tune(symbolic_kn_graphs[gi]);
+          tune_success[gi] = true;
+        }
+      });
+    }
+    for (auto &t : threads) t.join();
   }
-  for (auto &t : threads) {
-    t.join();
+
+  // Phase 2: Build kernel graphs and compile in parallel.
+  std::vector<kernel::Graph*> kg_vec(N, nullptr);
+  std::vector<ProfileCompileResult> compiled_vec(N);
+  for (size_t gi = 0; gi < N; ++gi) {
+    if (!tune_success[gi]) continue;
+    kg_vec[gi] = symbolic_kn_graphs[gi].to_kernel_graph(assignments[gi]);
   }
-  // Try each graph's assignment; return the best (fastest) kernel graph.
+  {
+    unsigned hw = std::thread::hardware_concurrency();
+    size_t num_threads = std::min(N, static_cast<size_t>(hw > 0 ? hw : 8));
+    std::atomic<size_t> next_idx{0};
+    std::vector<std::thread> threads;
+    for (size_t t = 0; t < num_threads; ++t) {
+      threads.emplace_back([&]() {
+        while (true) {
+          size_t i = next_idx.fetch_add(1, std::memory_order_relaxed);
+          if (i >= N) break;
+          if (kg_vec[i]) compiled_vec[i] = profile_compile(kg_vec[i]);
+        }
+      });
+    }
+    for (auto &t : threads) t.join();
+  }
+
+  // Phase 3: Profile sequentially, pick best.
   kernel::Graph *best_kg = nullptr;
   float best_time = std::numeric_limits<float>::max();
-  for (size_t i = 0; i < symbolic_kn_graphs.size(); ++i) {
-    // Print assignment values for debugging
-    std::cerr << "[tune_mt] graph[" << i << "] assignment:";
-    for (auto const &kv : assignments[i].get_assignments()) {
-      std::cerr << " var" << kv.first << "=" << kv.second;
-    }
-    std::cerr << std::endl;
-    kernel::Graph *kg = symbolic_kn_graphs[i].to_kernel_graph(assignments[i]);
-    std::cerr << "[tune_mt] graph[" << i << "] to_kernel_graph=" << (kg ? "ok" : "null") << std::endl;
-    if (kg == nullptr) {
-      continue;
-    }
-    ProfileCompileResult probe = profile_compile(kg);
-    std::cerr << "[tune_mt] graph[" << i << "] compile=" << (probe.is_success ? "ok" : "fail:" + probe.error_message) << std::endl;
-    if (!probe.is_success) {
-      delete kg;
-      continue;
-    }
-    ProfileResult run_result = profile_run(probe);
-    std::cerr << "[tune_mt] graph[" << i << "] run_time="
-              << (run_result.is_success ? std::to_string(run_result.run_time) + " ms" : "fail:" + run_result.error_message)
-              << std::endl;
-    if (run_result.is_success && run_result.run_time < best_time) {
+  for (size_t gi = 0; gi < N; ++gi) {
+    if (!kg_vec[gi]) continue;
+    if (!compiled_vec[gi].is_success) { delete kg_vec[gi]; kg_vec[gi] = nullptr; continue; }
+    ProfileResult result = profile_run(compiled_vec[gi]);
+    std::cerr << "[tune_mt] graph[" << gi << "] -> "
+              << (result.is_success ? std::to_string(result.run_time) + "ms" : "FAIL") << std::endl;
+    if (result.is_success && result.run_time < best_time) {
       delete best_kg;
-      best_kg = kg;
-      best_time = run_result.run_time;
+      best_kg = kg_vec[gi]; kg_vec[gi] = nullptr;
+      best_time = result.run_time;
     } else {
-      delete kg;
+      delete kg_vec[gi]; kg_vec[gi] = nullptr;
     }
   }
+
+  std::cerr << "[tune_mt] best: " << best_time << "ms" << std::endl;
   return best_kg;
 }
 

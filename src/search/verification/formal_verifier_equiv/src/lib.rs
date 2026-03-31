@@ -480,8 +480,9 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
     let mut rules9 = vec![
         rw!("bc-div-commute-partition";
             "(bc_div (partition ?t0 ?d0 ?d1 ?i0) ?t1)"
-            <=> "(partition (bc_div ?t0 ?t1) ?d0 ?d1 ?i0)" 
+            <=> "(partition (bc_div ?t0 ?t1) ?d0 ?d1 ?i0)"
             if is_datadim(&["?d0"], vec!["data_dim0".to_string()]) ),
+
 
         vec![
             rw!("replicate-select-one";

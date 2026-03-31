@@ -88,8 +88,7 @@ private:
   void preprocess(kernel::Graph const &computation_graph);
   bool verify(kernel::Graph &g);
 
-  bool check_abstract_expr(std::shared_ptr<AbstractExpr const> expr,
-                           TensorDimConstraints const &constraints = {});
+  bool check_abstract_expr(std::shared_ptr<AbstractExpr const> expr);
 
   void save_results() const;
   double get_elapsed_time_in_sec() const;

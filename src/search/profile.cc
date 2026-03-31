@@ -120,14 +120,14 @@ std::string build_compile_cmd(int target_cc, const std::string& nvcc_path,
   } else if (target_cc == 100) {
     cmd << " -arch=sm_100a -gencode=arch=compute_100a,code=sm_100a";
   } else {
-    cmd << " -arch=native";
+    cmd << " -arch=sm_80";
   }
 
   if (profiling) {
     cmd << " -DMIRAGE_ENABLE_PROFILER";
   }
 
-  cmd << " -DMIRAGE_BACKEND_USE_CUDA";
+  cmd << " -DMIRAGE_BACKEND_USE_CUDA -DCUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL";
   cmd << " -shared -std=c++17 -use_fast_math -lcublas -Xcompiler=-fPIC";
   cmd << " --expt-relaxed-constexpr -o " << so_file;
 

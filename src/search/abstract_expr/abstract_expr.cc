@@ -231,7 +231,10 @@ std::string RMS::to_string() const {
 
 std::string RMS::to_egg() const {
   if (AbstractExpr::symbolic_expr) {
-    int value = get_value_with_all_vars_two(reduction_degree);
+    int value = get_value_with_bool_vars_zero_others_one(reduction_degree);
+    if (value == 1) {
+      return elems->to_egg();
+    }
     return "(rms " + std::to_string(value) + " " + elems->to_egg() + ")";
   }
   return "(rms " + reduction_degree->to_string() + " " + elems->to_egg() + ")";
@@ -251,7 +254,10 @@ std::string Red::to_string() const {
 
 std::string Red::to_egg() const {
   if (AbstractExpr::symbolic_expr) {
-    int value = get_value_with_all_vars_two(reduction_degree);
+    int value = get_value_with_bool_vars_zero_others_one(reduction_degree);
+    if (value == 1) {
+      return summand->to_egg();
+    }
     return "(sum " + std::to_string(value) + " " + summand->to_egg() + ")";
   }
   return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() +

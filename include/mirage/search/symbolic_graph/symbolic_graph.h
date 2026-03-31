@@ -5,7 +5,6 @@
 #include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/search/symbolic_graph/symbolic_op.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/type.h"
@@ -27,12 +26,14 @@ public:
                            std::vector<kernel::DTensor> const &inputs) const;
   bool add_operator(type::TBOperatorType op_type,
                     std::vector<int> input_indices);
-  // bool add_input(SymbolicDTensor dtensor);
+  bool add_input(SymbolicDTensor dtensor);
   bool add_input(SymbolicDTensor dtensor, std::vector<int> input_map, int forloop_dim);
-  // bool add_output(int input_index, mirage::type::TBEpilogueType epilogue_type);
+  // Mixed symbolic/concrete: sym_imap controls grid rows, sym_fmap controls forloop row
+  bool add_input(SymbolicDTensor dtensor, std::vector<int> input_map, int forloop_dim,
+                 bool sym_imap, bool sym_fmap);
+  bool add_output(int input_index, mirage::type::TBEpilogueType epilogue_type);
   bool add_output(int input_index, std::vector<int> output_map, type::TBEpilogueType epilogue_type);
   bool remove_last_operator();
-  TensorDimConstraint get_memory_usage_constraint() const;
   bool check_memory_usage();
 
   // Return a copy of this TB graph with updated input dtensor shapes.
@@ -62,6 +63,12 @@ public:
   std::vector<SymbolicSTensor> tensors;
   std::vector<std::vector<int>> input_indices;
   std::vector<std::vector<int>> output_indices;
+
+  // Pairs of symbolic dims that must be equal, recorded when
+  // can_be_symbolically_equivalent_to succeeds during add_operator.
+  std::vector<std::pair<SymbolicTensorDim, SymbolicTensorDim>> dim_equalities;
+  // dim_equalities.size() before each operator was added, for backtracking.
+  std::vector<size_t> dim_equalities_watermarks;
 
   operator json() const;
 };

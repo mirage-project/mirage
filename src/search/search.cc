@@ -9,7 +9,6 @@
 #include "mirage/search/symbolic_graph/op_args.h"
 #include "mirage/search/symbolic_graph/symbolic_graph.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
 #include "mirage/search/symbolic_graph/dim_var_assignments.h"
 #include "mirage/search/verification/formal_verifier.h"
 #include "mirage/search/verification/probabilistic_verifier.h"
@@ -537,8 +536,7 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 }
 
 bool KernelGraphGenerator::check_abstract_expr(
-    std::shared_ptr<AbstractExpr const> expr,
-    TensorDimConstraints const &constraints) {
+    std::shared_ptr<AbstractExpr const> expr) {
 
   if (!expr) {
     return false;
@@ -734,28 +732,44 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
           std::vector<SymbolicDTensor> input_tensors = vector_map(
               input_tensor_idx, [&](int i) { return kn_graph->tensors[i]; });
 
-          for (size_t num_parallel_dims : dim_strategy.get_num_parallel_dims_cand(input_tensors)) {
+          auto parallel_dims_cand = dim_strategy.get_num_parallel_dims_cand(input_tensors);
+          for (size_t num_parallel_dims : parallel_dims_cand) {
 
-            for (auto const &input_maps : dim_strategy.get_input_map_cand(input_tensors, num_parallel_dims)) {
-              for (auto const &forloop_dims : dim_strategy.get_forloop_dim_cand(input_tensors)) {
+           {
+            // Input map candidates: single dummy entry when symbolic, full enumeration when concrete
+            auto imap_cands = config.sym_imap
+                ? std::vector<std::vector<std::vector<int>>>{
+                    std::vector<std::vector<int>>(input_tensors.size(),
+                        std::vector<int>(num_parallel_dims, -1))}
+                : dim_strategy.get_input_map_cand(input_tensors, num_parallel_dims);
+            auto fmap_cands = config.sym_fmap
+                ? std::vector<std::vector<int>>{
+                    std::vector<int>(input_tensors.size(), -1)}
+                : dim_strategy.get_forloop_dim_cand(input_tensors);
+
+            for (auto const &input_maps : imap_cands) {
+              for (auto const &forloop_dims : fmap_cands) {
                 for (auto const &reduction_degree : dim_strategy.get_reduction_degree_cand(*kn_graph)) {
 
                   std::shared_ptr<SymbolicTBGraph> new_tb_graph = std::make_shared<SymbolicTBGraph>(
                           kn_graph->next_dim_variable_index, num_parallel_dims);
                   new_tb_graph->reduction_degree = reduction_degree;
 
-                  // Try to create input operators
                   bool input_created = true;
                   for (size_t i = 0; i < input_tensors.size(); ++i) {
-                    SymbolicDTensor dtensor = input_tensors[i];
-                    if (!new_tb_graph->add_input(dtensor, input_maps[i], forloop_dims[i])) {
-                      input_created = false;
-                      break;
+                    bool ok;
+                    if (config.sym_imap && config.sym_fmap) {
+                      ok = new_tb_graph->add_input(input_tensors[i]);
+                    } else if (!config.sym_imap && !config.sym_fmap) {
+                      ok = new_tb_graph->add_input(input_tensors[i], input_maps[i], forloop_dims[i]);
+                    } else {
+                      ok = new_tb_graph->add_input(input_tensors[i], input_maps[i], forloop_dims[i],
+                                                    config.sym_imap, config.sym_fmap);
                     }
+                    if (!ok) { input_created = false; break; }
                   }
 
                   if (input_created) {
-                    // Recursively generate the next operator
                     generate_next_symbolic_operator(kn_graph,
                                                     new_tb_graph,
                                                     input_tensor_idx,
@@ -766,6 +780,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                 }
               }
             }
+           }
           }
         }
       }
@@ -820,22 +835,37 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
         return;
       }
 
-      for (auto const &output_maps : dim_strategy.get_output_map_cand(output_tensors, tb_graph->grid_dim.size())) {
-        if (create_threadblock_outputs(output_tensor_indices, output_maps)) {
-          // Create the customized operator
-          if (kn_graph->add_customized_operator(
-                  *tb_graph, input_dtensor_indices_for_tb_graph)) {
-            // Recursively generate the next operator
-            generate_next_symbolic_operator(
-                kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, search_depth + 1, false);
-            // Revert the changes
-            kn_graph->remove_last_operator();
+      {
+        auto omap_cands = config.sym_omap
+            ? std::vector<std::vector<std::vector<int>>>{
+                std::vector<std::vector<int>>(output_tensor_indices.size(),
+                    std::vector<int>(tb_graph->grid_dim.size(), -1))}
+            : dim_strategy.get_output_map_cand(output_tensors, tb_graph->grid_dim.size());
+
+        for (auto const &output_maps : omap_cands) {
+          bool outputs_created = true;
+          if (config.sym_omap) {
+            for (int output_index : output_tensor_indices) {
+              if (!tb_graph->add_output(output_index, type::TB_EPILOGUE_NONE)) {
+                outputs_created = false;
+                break;
+              }
+            }
+          } else {
+            outputs_created = create_threadblock_outputs(output_tensor_indices, output_maps);
           }
-        }
-        // Revert the changes
-        while (tb_graph->operators.back().op_type ==
-                type::TBOperatorType::TB_OUTPUT_OP) {
-          tb_graph->remove_last_operator();
+          if (outputs_created) {
+            if (kn_graph->add_customized_operator(
+                    *tb_graph, input_dtensor_indices_for_tb_graph)) {
+              generate_next_symbolic_operator(
+                  kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, search_depth + 1, false);
+              kn_graph->remove_last_operator();
+            }
+          }
+          while (tb_graph->operators.back().op_type ==
+                  type::TBOperatorType::TB_OUTPUT_OP) {
+            tb_graph->remove_last_operator();
+          }
         }
       }
     };
@@ -905,7 +935,6 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
         std::shared_ptr<AbstractExpr const> expr =
             get_abstract_expr(op_type, input_tensors, input_exprs, *tb_graph);
 
-        // Check if the abstract expression is a subexpression of the final output
         if (!check_abstract_expr(expr)) {
           continue;
         }
@@ -943,6 +972,42 @@ bool KernelGraphGenerator::verify_symbolic_graph(
 
   std::shared_ptr<FormalVerifier> verifier = std::dynamic_pointer_cast<FormalVerifier>(this->verifier);
   assert(verifier);
+
+  // Check if graph has symbolic (non-concrete) maps
+  bool has_symbolic_maps = false;
+  for (auto const &op : symbolic_graph.operators) {
+    if (op.op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
+      auto args = std::static_pointer_cast<KNCustomizedOpArgs const>(op.args);
+      for (auto const &tb_op : args->tb_graph_template.operators) {
+        if (tb_op.op_type == type::TBOperatorType::TB_INPUT_OP) {
+          auto a = static_cast<TBInputOpArgs const *>(tb_op.args.get());
+          if (!a->input_map.is_concrete()) { has_symbolic_maps = true; break; }
+        } else if (tb_op.op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+          auto a = static_cast<TBOutputOpArgs const *>(tb_op.args.get());
+          if (!a->output_map.is_concrete()) { has_symbolic_maps = true; break; }
+        }
+      }
+      if (has_symbolic_maps) break;
+    }
+  }
+
+
+  if (has_symbolic_maps) {
+    auto verified = verifier->verify_symbolic_graph_with_unknown_maps(symbolic_graph);
+    if (!verified.empty()) {
+      for (auto const &[concrete_graph, match] : verified) {
+        ++num_symbolic_graphs;
+        ++num_valid_kernel_graphs;
+#pragma omp critical
+        {
+          std::cerr << "verified symbolic graph (from unknown maps): " << json(concrete_graph) << std::endl;
+          generated_graphs.push_back(json(concrete_graph));
+        }
+      }
+      return true;
+    }
+    return false;
+  }
 
   OutputMatch match = verifier->verify_symbolic_graph(symbolic_graph);
 

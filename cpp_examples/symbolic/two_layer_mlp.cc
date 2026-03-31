@@ -85,7 +85,8 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
                             double time_limit_sec = -1,
                             int max_kn_ops = -1,
                             bool explore_all_mappings = false,
-                            bool search_only = false) {
+                            bool search_only = false,
+                            bool symbolic_maps = false) {
   ensure_dir(kCkptDir);
   std::string const sym_ckpt =
       sym_ckpt_override.empty() ? kSymCkpt : sym_ckpt_override;
@@ -114,7 +115,7 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
     for (auto const &op : ref.operators) op->fingerprint();
 
     search::GeneratorConfig config = get_generator_config(
-        /*use_symbolic_search=*/false, /*for_attention=*/false, time_limit_sec, explore_all_mappings);
+        /*use_symbolic_search=*/false, /*for_attention=*/false, time_limit_sec, explore_all_mappings, symbolic_maps);
     if (max_kn_ops > 0) config.max_num_kernel_graph_op = max_kn_ops;
     search::KernelGraphGenerator gen(ref, config, nonsym_ckpt(cfg).data());
     double ns_search_time = 0;
@@ -159,7 +160,7 @@ static void run_experiments(std::vector<TwoLayerMlpConfig> const &configs,
 
     search::AbstractExpr::symbolic_expr = true;
     search::GeneratorConfig config = get_generator_config(
-        /*use_symbolic_search=*/true, /*for_attention=*/false, time_limit_sec, explore_all_mappings);
+        /*use_symbolic_search=*/true, /*for_attention=*/false, time_limit_sec, explore_all_mappings, symbolic_maps);
     if (max_kn_ops > 0) config.max_num_kernel_graph_op = max_kn_ops;
     search::KernelGraphGenerator gen(ref, config, sym_ckpt.data());
     if (!checkpoint_exists(sym_ckpt)) {
@@ -232,6 +233,7 @@ int main(int argc, char **argv) {
   bool skip_sym     = false;
   bool explore_all  = false;
   bool search_only  = false;
+  bool sym_maps     = false;
   double time_limit = -1;
   int max_kn_ops    = -1;
   std::string sym_ckpt_override;
@@ -245,6 +247,7 @@ int main(int argc, char **argv) {
     else if (arg == "--skip-sym")     skip_sym     = true;
     else if (arg == "--explore-all-maps") explore_all = true;
     else if (arg == "--search-only")     search_only = true;
+    else if (arg == "--symbolic-maps")   sym_maps    = true;
     else if (arg == "--config") {
       if (i + 1 >= argc) {
         std::cerr << "--config requires n,d argument\n";
@@ -274,7 +277,8 @@ int main(int argc, char **argv) {
                 << "Usage: " << argv[0]
                 << " [-d] [--force-nonsym] [--force-sym] [--skip-nonsym]"
                 << " [--skip-sym] [--search-only] [--explore-all-maps]"
-                << " [--config <n,d>] [--sym-checkpoint <path>]"
+                << " [--symbolic-maps] [--config <n,d>]"
+                << " [--sym-checkpoint <path>]"
                 << " [--time-limit <seconds>] [--max-kn-ops <n>]\n";
       return 1;
     }
@@ -292,6 +296,6 @@ int main(int argc, char **argv) {
   }
   run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
                   sym_ckpt_override, time_limit, max_kn_ops, explore_all,
-                  search_only);
+                  search_only, sym_maps);
   return 0;
 }

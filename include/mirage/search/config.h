@@ -47,6 +47,16 @@ struct GeneratorConfig {
   bool _enable_attention_specific_optimization;
   bool _enable_concat_matmul_transformation;
   bool explore_all_mappings;
+  bool symbolic_maps; // legacy: sets all sym_* flags below
+  // Fine-grained symbolization flags for ablation study
+  bool sym_grid_dim;  // symbolic grid dim sizes (vs exhaustive enumeration)
+  bool sym_frange;    // symbolic forloop range (vs exhaustive enumeration)
+  bool sym_imap;      // symbolic input grid-dim maps
+  bool sym_fmap;      // symbolic forloop maps
+  bool sym_omap;      // symbolic output grid-dim maps
+
+  bool any_symbolic_maps() const { return sym_imap || sym_fmap || sym_omap; }
+  bool all_symbolic_maps() const { return sym_imap && sym_fmap && sym_omap; }
 
   void show() const;
   void enable_attention_specific_optimization();
@@ -75,7 +85,13 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneratorConfig,
                                    search_time_limit_sec,
                                    _enable_attention_specific_optimization,
                                    _enable_concat_matmul_transformation,
-                                   explore_all_mappings);
+                                   explore_all_mappings,
+                                   symbolic_maps,
+                                   sym_grid_dim,
+                                   sym_frange,
+                                   sym_imap,
+                                   sym_fmap,
+                                   sym_omap);
 
 struct TBGraphConfig {
   dim3 grid_dim, block_dim;

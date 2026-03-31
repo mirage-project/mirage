@@ -79,12 +79,13 @@ inline float profile_best_time(std::vector<json> const &list_graphs) {
 // Profile a list of concrete kernel graphs and return the best .so file path.
 // Phase 1: compile all graphs in parallel (nvcc is the bottleneck).
 // Phase 2: run compiled kernels on GPU sequentially (timing needs exclusive GPU).
-inline std::pair<float, std::string> profile_best_with_so(std::vector<json> const &list_graphs) {
+inline std::pair<float, std::string> profile_best_with_so(std::vector<json> const &list_graphs, double *compile_profile_time_out = nullptr) {
   size_t const n = list_graphs.size();
   if (n == 0) return {std::numeric_limits<float>::max(), ""};
 
   std::cout << "Profiling " << n << " graphs (parallel compile)..." << std::endl;
 
+  auto t_compile_start = std::chrono::steady_clock::now();
   // Phase 1 — parallel compilation
   std::vector<search::ProfileCompileResult> compiled(n);
   {
@@ -105,9 +106,12 @@ inline std::pair<float, std::string> profile_best_with_so(std::vector<json> cons
     }
     for (auto &t : threads) t.join();
   }
-  std::cout << "Compilation done." << std::endl;
+  auto t_compile_end = std::chrono::steady_clock::now();
+  double compile_sec = std::chrono::duration<double>(t_compile_end - t_compile_start).count();
+  std::cout << "  Compile time: " << compile_sec << " s (" << n << " graphs)" << std::endl;
 
   // Phase 2 — sequential GPU profiling
+  auto t_profile_start = std::chrono::steady_clock::now();
   float best = std::numeric_limits<float>::max();
   std::string best_so;
   for (size_t i = 0; i < n; ++i) {
@@ -125,6 +129,10 @@ inline std::pair<float, std::string> profile_best_with_so(std::vector<json> cons
       best_so = compiled[i].so_file;
     }
   }
+  auto t_profile_end = std::chrono::steady_clock::now();
+  double profile_sec = std::chrono::duration<double>(t_profile_end - t_profile_start).count();
+  std::cout << "  Profile time: " << profile_sec << " s" << std::endl;
+  if (compile_profile_time_out) *compile_profile_time_out = compile_sec + profile_sec;
   return {best, best_so};
 }
 
@@ -143,7 +151,7 @@ inline float auto_tune_best_time(std::vector<json> const &list_symbolic_graphs) 
 }
 
 // Auto-tune a list of symbolic kernel graphs and return the best .so file path.
-inline std::pair<float, std::string> auto_tune_best_with_so(std::vector<json> const &list_symbolic_graphs) {
+inline std::pair<float, std::string> auto_tune_best_with_so(std::vector<json> const &list_symbolic_graphs, double *tune_time_out = nullptr) {
   std::vector<SymbolicKNGraph> symbolic_kn_graphs;
   for (auto const &jgraph : list_symbolic_graphs) {
     SymbolicKNGraph sg;
@@ -156,6 +164,7 @@ inline std::pair<float, std::string> auto_tune_best_with_so(std::vector<json> co
   auto t1 = std::chrono::steady_clock::now();
   double tune_sec = std::chrono::duration<double>(t1 - t0).count();
   std::cout << "  Auto-tuning time: " << tune_sec << " s" << std::endl;
+  if (tune_time_out) *tune_time_out = tune_sec;
   if (!tuned) {
     std::cout << "Auto-tuning failed (no valid graph found)" << std::endl;
     return {std::numeric_limits<float>::max(), ""};
@@ -175,10 +184,25 @@ inline float get_best_time(std::vector<json> const &graphs, bool use_symbolic) {
 }
 
 // Build a GeneratorConfig for the given search mode and operator type.
+// Fine-grained symbolization flags for ablation study.
+struct SymFlags {
+  bool grid_dim = false;
+  bool frange = false;
+  bool imap = false;
+  bool fmap = false;
+  bool omap = false;
+
+  // Convenience: set all flags at once (matches legacy symbolic_maps=true)
+  static SymFlags all() { return {true, true, true, true, true}; }
+  static SymFlags none() { return {false, false, false, false, false}; }
+};
+
 inline search::GeneratorConfig get_generator_config(bool use_symbolic_search,
                                                     bool for_attention,
                                                     double time_limit_sec = -1,
-                                                    bool explore_all_mappings = false) {
+                                                    bool explore_all_mappings = false,
+                                                    bool symbolic_maps = false,
+                                                    SymFlags sym = SymFlags()) {
   search::GeneratorConfig config = search::GeneratorConfig::get_default_config();
   if (use_symbolic_search) {
     config.verifier_type = search::VerifierType::FORMAL_VERIFIER;
@@ -189,6 +213,16 @@ inline search::GeneratorConfig get_generator_config(bool use_symbolic_search,
     config.search_time_limit_sec = time_limit_sec;
   }
   config.explore_all_mappings = explore_all_mappings;
+  config.symbolic_maps = symbolic_maps;
+  // If legacy symbolic_maps is set, enable all fine-grained flags
+  if (symbolic_maps) {
+    sym = SymFlags::all();
+  }
+  config.sym_grid_dim = sym.grid_dim;
+  config.sym_frange = sym.frange;
+  config.sym_imap = sym.imap;
+  config.sym_fmap = sym.fmap;
+  config.sym_omap = sym.omap;
   return config;
 }
 
@@ -265,7 +299,9 @@ inline std::vector<json> execute_search(kernel::Graph &ref_graph,
                                         bool for_attention = false,
                                         double time_limit_sec = -1,
                                         bool explore_all_mappings = false,
-                                        double *search_time_out = nullptr) {
+                                        double *search_time_out = nullptr,
+                                        bool symbolic_maps = false,
+                                        SymFlags sym = SymFlags()) {
   // When explore_all_mappings is set, use a separate checkpoint file so
   // full-space and default search results coexist without conflicts.
   std::string ckpt = checkpoint;
@@ -284,7 +320,7 @@ inline std::vector<json> execute_search(kernel::Graph &ref_graph,
     return graphs;
   }
   search::AbstractExpr::symbolic_expr = use_symbolic;
-  search::GeneratorConfig config = get_generator_config(use_symbolic, for_attention, time_limit_sec, explore_all_mappings);
+  search::GeneratorConfig config = get_generator_config(use_symbolic, for_attention, time_limit_sec, explore_all_mappings, symbolic_maps, sym);
   search::KernelGraphGenerator gen(ref_graph, config, ckpt.data());
   auto t0 = std::chrono::steady_clock::now();
   if (use_symbolic) {

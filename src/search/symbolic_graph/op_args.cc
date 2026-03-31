@@ -1,4 +1,5 @@
 #include "mirage/search/symbolic_graph/op_args.h"
+#include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/utils/json_utils.h"
@@ -24,11 +25,11 @@ KNRMSNormOpArgs::KNRMSNormOpArgs(int normalized_size)
 KNCustomizedOpArgs::KNCustomizedOpArgs(SymbolicTBGraph tb_graph_template)
     : tb_graph_template(tb_graph_template) {}
 
-TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, std::vector<int> const &input_map, int forloop_dim)
-    : dtensor(dtensor), input_map(input_map), forloop_dim(forloop_dim) {}
+TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &input_map)
+    : dtensor(dtensor), input_map(input_map) {}
 
 TBOutputOpArgs::TBOutputOpArgs(SymbolicDTensor dtensor,
-                              std::vector<int> const &output_map,
+                               SymbolicMap const &output_map,
                                mirage::type::TBEpilogueType epilogue)
     : dtensor(dtensor), output_map(output_map),
       epilogue(epilogue) {}
@@ -73,12 +74,12 @@ KNCustomizedOpArgs::operator json() const {
 }
 
 TBInputOpArgs::operator json() const {
-  return json{{"dtensor", dtensor}, {"input_map", input_map}, {"forloop_dim", forloop_dim}};
+  return json{{"dtensor", dtensor}, {"input_map", (json)input_map}};
 }
 
 TBOutputOpArgs::operator json() const {
   return json{{"dtensor", dtensor},
-              {"output_map", output_map},
+              {"output_map", (json)output_map},
               {"epilogue", epilogue}};
 }
 
@@ -104,14 +105,30 @@ std::shared_ptr<OpArgs const> op_args_from_json_tb(json const &j,
   case type::TBOperatorType::TB_INPUT_OP: {
     SymbolicDTensor dtensor(std::vector<SymbolicTensorDim>{});
     from_json(j.at("dtensor"), dtensor);
-    std::vector<int> input_map = j.at("input_map").get<std::vector<int>>();
-    int forloop_dim = j.at("forloop_dim").get<int>();
-    return std::make_shared<TBInputOpArgs const>(dtensor, input_map, forloop_dim);
+    auto const &imap_json = j.at("input_map");
+    SymbolicMap input_map(0, 0, std::vector<int>{});
+    if (imap_json.is_object() && imap_json.contains("num_grid_dims")) {
+      // New SymbolicMap format
+      mirage::search::from_json(imap_json, input_map);
+    } else {
+      // Legacy format: input_map is array of ints, forloop_dim is separate int
+      std::vector<int> legacy_map = imap_json.get<std::vector<int>>();
+      int forloop_dim = j.at("forloop_dim").get<int>();
+      input_map = SymbolicMap(legacy_map.size(), dtensor.dims.size(), legacy_map, forloop_dim);
+    }
+    return std::make_shared<TBInputOpArgs const>(dtensor, input_map);
   }
   case type::TBOperatorType::TB_OUTPUT_OP: {
     SymbolicDTensor dtensor(std::vector<SymbolicTensorDim>{});
     from_json(j.at("dtensor"), dtensor);
-    std::vector<int> output_map = j.at("output_map").get<std::vector<int>>();
+    auto const &omap_json = j.at("output_map");
+    SymbolicMap output_map(0, 0, std::vector<int>{});
+    if (omap_json.is_object() && omap_json.contains("num_grid_dims")) {
+      mirage::search::from_json(omap_json, output_map);
+    } else {
+      std::vector<int> legacy_map = omap_json.get<std::vector<int>>();
+      output_map = SymbolicMap(legacy_map.size(), dtensor.dims.size(), legacy_map);
+    }
     type::TBEpilogueType epilogue = j.at("epilogue").get<type::TBEpilogueType>();
     return std::make_shared<TBOutputOpArgs const>(dtensor, output_map, epilogue);
   }

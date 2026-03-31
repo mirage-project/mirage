@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mirage/search/symbolic_graph/symbolic_graph.h"
+#include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/type.h"
 #include "mirage/vector_types.h"
 
@@ -73,29 +74,18 @@ public:
 
 class TBInputOpArgs : public OpArgs {
 public:
-  // TBInputOpArgs(SymbolicDTensor dtensor, SymbolicIMap const &input_map);
-  // SymbolicDTensor dtensor;
-  // SymbolicIMap input_map;
-  TBInputOpArgs(SymbolicDTensor dtensor, std::vector<int> const &input_map, int forloop_dim);
+  TBInputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &input_map);
   SymbolicDTensor dtensor;
-  std::vector<int> input_map;
-  int forloop_dim;
+  SymbolicMap input_map; // has_forloop=true, last row is forloop
 
   operator json() const override;
 };
 
 class TBOutputOpArgs : public OpArgs {
 public:
-  // TBOutputOpArgs(SymbolicDTensor dtensor,
-  //                SymbolicOmap const &output_map,
-  //                mirage::type::TBEpilogueType epilogue);
-  // SymbolicDTensor dtensor;
-  // SymbolicOmap output_map;
-  // mirage::type::TBEpilogueType epilogue;
-
-  TBOutputOpArgs(SymbolicDTensor dtensor, std::vector<int> const &output_map, type::TBEpilogueType epilogue);
+  TBOutputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &output_map, type::TBEpilogueType epilogue);
   SymbolicDTensor dtensor;
-  std::vector<int> output_map;
+  SymbolicMap output_map;
   type::TBEpilogueType epilogue;
 
   operator json() const override;

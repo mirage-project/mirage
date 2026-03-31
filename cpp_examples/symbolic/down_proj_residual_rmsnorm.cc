@@ -164,7 +164,8 @@ static void run_experiments(std::vector<DownProjConfig> const &configs,
                             std::string const &sym_ckpt_override = "",
                             double time_limit_sec = -1,
                             bool explore_all_mappings = false,
-                            bool search_only = false) {
+                            bool search_only = false,
+                            bool symbolic_maps = false) {
   ensure_dir(kCkptDir);
   std::string const sym_ckpt =
       sym_ckpt_override.empty() ? kSymCkpt : sym_ckpt_override;
@@ -267,7 +268,7 @@ static void run_experiments(std::vector<DownProjConfig> const &configs,
     for (auto const &op : ref.operators) op->fingerprint();
     execute_search(ref, sym_ckpt, /*use_symbolic=*/true,
                    /*for_attention=*/false, time_limit_sec, explore_all_mappings,
-                   &sym_search_time);
+                   &sym_search_time, symbolic_maps);
   }
   if (search_only) {
     std::cout << "  --search-only: skipping per-config tuning" << std::endl;
@@ -332,6 +333,7 @@ int main(int argc, char **argv) {
   bool skip_sym     = false;
   bool explore_all  = false;
   bool search_only  = false;
+  bool sym_maps     = false;
   double time_limit = -1;
   std::string sym_ckpt_override;
   std::string config_str;
@@ -344,6 +346,7 @@ int main(int argc, char **argv) {
     else if (arg == "--skip-sym")     skip_sym     = true;
     else if (arg == "--explore-all-maps") explore_all = true;
     else if (arg == "--search-only")     search_only = true;
+    else if (arg == "--symbolic-maps")   sym_maps    = true;
     else if (arg == "--config") {
       if (i + 1 >= argc) {
         std::cerr << "--config requires n,d argument\n";
@@ -367,7 +370,8 @@ int main(int argc, char **argv) {
                 << "Usage: " << argv[0]
                 << " [-d] [--force-nonsym] [--force-sym] [--skip-nonsym]"
                 << " [--skip-sym] [--search-only] [--explore-all-maps]"
-                << " [--config <n,d>] [--sym-checkpoint <path>]"
+                << " [--symbolic-maps] [--config <n,d>]"
+                << " [--sym-checkpoint <path>]"
                 << " [--time-limit <seconds>]\n";
       return 1;
     }
@@ -384,6 +388,7 @@ int main(int argc, char **argv) {
     configs = debug ? std::vector<DownProjConfig>{kDebugConfig} : get_configs();
   }
   run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
-                  sym_ckpt_override, time_limit, explore_all, search_only);
+                  sym_ckpt_override, time_limit, explore_all, search_only,
+                  sym_maps);
   return 0;
 }

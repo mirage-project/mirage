@@ -66,6 +66,12 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       false /* enable_concat_matmul_transformation */,
       false /* randomized_branches */,
       false /* explore_all_mappings */,
+      false /* symbolic_maps */,
+      false /* sym_grid_dim */,
+      false /* sym_frange */,
+      false /* sym_imap */,
+      false /* sym_fmap */,
+      false /* sym_omap */,
   };
 }
 

@@ -131,7 +131,8 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
                             std::string const &sym_ckpt_override = "",
                             double time_limit_sec = -1,
                             bool explore_all_mappings = false,
-                            bool search_only = false) {
+                            bool search_only = false,
+                            bool symbolic_maps = false) {
   ensure_dir(kCkptDir);
   std::string const sym_ckpt =
       sym_ckpt_override.empty() ? kSymCkpt : sym_ckpt_override;
@@ -168,7 +169,8 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
       std::cout << "  --search-only: skipping profiling" << std::endl;
       continue;
     }
-    auto [best_time, so_path] = profile_best_with_so(graphs);
+    double ns_cp_time = 0;
+    auto [best_time, so_path] = profile_best_with_so(graphs, &ns_cp_time);
     std::cout << "  Best time (non-symbolic): " << best_time << " ms" << std::endl;
     std::cout << "  Best .so file: " << so_path << std::endl;
 
@@ -181,6 +183,7 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
     results[idx]["non_symbolic_ms"] = best_time;
     results[idx]["non_symbolic_so"] = so_path;
     results[idx]["non_symbolic_search_s"] = ns_search_time;
+    results[idx]["non_symbolic_compile_profile_s"] = ns_cp_time;
     save_results(kResultsFile, results);
   }
   } // end if (!skip_nonsym)
@@ -197,7 +200,7 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
     for (auto const &op : ref.operators) op->fingerprint();
     execute_search(ref, sym_ckpt, /*use_symbolic=*/true,
                    /*for_attention=*/true, time_limit_sec, explore_all_mappings,
-                   &sym_search_time);
+                   &sym_search_time, symbolic_maps);
   }
   if (search_only) {
     std::cout << "  --search-only: skipping per-config tuning" << std::endl;
@@ -215,7 +218,8 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
 
     std::vector<json> graphs = load_graphs(sym_ckpt);
     graphs = apply_input_shapes(graphs, get_input_shapes(cfg));
-    auto [best_time, so_path] = auto_tune_best_with_so(graphs);
+    double sym_tune_time = 0;
+    auto [best_time, so_path] = auto_tune_best_with_so(graphs, &sym_tune_time);
     std::cout << "  Best time (symbolic): " << best_time << " ms" << std::endl;
     std::cout << "  Best .so file: " << so_path << std::endl;
 
@@ -228,6 +232,7 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
     results[idx]["symbolic_ms"] = best_time;
     results[idx]["symbolic_so"] = so_path;
     results[idx]["symbolic_search_s"] = sym_search_time;
+    results[idx]["symbolic_tune_s"] = sym_tune_time;
     save_results(kResultsFile, results);
   }
   } // end if (!skip_sym)
@@ -246,6 +251,7 @@ int main(int argc, char **argv) {
   bool skip_sym     = false;
   bool explore_all  = false;
   bool search_only  = false;
+  bool sym_maps     = false;
   double time_limit = -1;
   std::string sym_ckpt_override;
   std::string config_str;
@@ -258,6 +264,7 @@ int main(int argc, char **argv) {
     else if (arg == "--skip-sym")     skip_sym     = true;
     else if (arg == "--explore-all-maps") explore_all = true;
     else if (arg == "--search-only")     search_only = true;
+    else if (arg == "--symbolic-maps")   sym_maps    = true;
     else if (arg == "--sym-checkpoint") {
       if (i + 1 >= argc) {
         std::cerr << "--sym-checkpoint requires a path argument\n";
@@ -281,6 +288,7 @@ int main(int argc, char **argv) {
                 << "Usage: " << argv[0]
                 << " [-d] [--force-nonsym] [--force-sym] [--skip-nonsym]"
                 << " [--skip-sym] [--search-only] [--explore-all-maps]"
+                << " [--symbolic-maps]"
                 << " [--config <batch,heads,q_seq,kv_seq,head_dim>]"
                 << " [--sym-checkpoint <path>] [--time-limit <seconds>]\n";
       return 1;
@@ -298,6 +306,7 @@ int main(int argc, char **argv) {
     configs = debug ? std::vector<AttentionConfig>{kDebugConfig} : get_configs();
   }
   run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
-                  sym_ckpt_override, time_limit, explore_all, search_only);
+                  sym_ckpt_override, time_limit, explore_all, search_only,
+                  sym_maps);
   return 0;
 }

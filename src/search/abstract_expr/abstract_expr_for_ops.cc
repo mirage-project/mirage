@@ -188,17 +188,7 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     std::vector<SymbolicSTensor> const &tensors,
     std::vector<std::shared_ptr<AbstractExpr const>> const &opds,
     SymbolicTBGraph const &g) {
-  bool is_forloop_greater_than_one = [&]() {
-    for (size_t i = 0; i < g.operators.size(); ++i) {
-      if (g.operators[i].op_type == type::TBOperatorType::TB_INPUT_OP) {
-        if (std::static_pointer_cast<TBInputOpArgs const>(g.operators[i].args)->forloop_dim >= 0) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }();
-  SymbolicTensorDim forloop_range = is_forloop_greater_than_one ? g.forloop_range : dim_expr_make_const(1);
+  SymbolicTensorDim forloop_range = g.forloop_range;
   switch (op) {
     case type::TBOperatorType::TB_INPUT_OP:
     case type::TBOperatorType::TB_OUTPUT_OP: {
