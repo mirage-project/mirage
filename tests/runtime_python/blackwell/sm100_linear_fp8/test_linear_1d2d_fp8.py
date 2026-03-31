@@ -5,13 +5,12 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-reduction_sizes = [768]
-output_sizes = [128]
-batch_size = 1
+supported_shapes = [
+    tuple(int(dim) for dim in shape)
+    for shape in runtime_kernel_blackwell.supported_dense_gemm_shapes()
+]
 block_k = 128
-num_k_blocks = reduction_sizes[0] // block_k
-
-has_residual = False
+benchmark_shape = (1, 128, 768)
 
 
 def round_up_to_multiple(x: int, m: int) -> int:
@@ -19,14 +18,6 @@ def round_up_to_multiple(x: int, m: int) -> int:
 
 
 def quantize_to_fp8_with_packed_ue8m0_scale(x_bf16: torch.Tensor, block_k: int):
-    """
-    Quantize a BF16 tensor of shape [outer_dim, K] into:
-      1. FP8 E4M3FN tensor of the same shape
-      2. Packed uint32 scale tensor of shape [outer_dim, padded_scale_k]
-
-    Logical valid scale count is K // 128.
-    Physical storage pads the 2nd dimension to a multiple of 4 uint32s (16B).
-    """
     assert x_bf16.dim() == 2
     outer_dim, k = x_bf16.shape
     assert k % block_k == 0
@@ -37,8 +28,6 @@ def quantize_to_fp8_with_packed_ue8m0_scale(x_bf16: torch.Tensor, block_k: int):
 
     x_fp32 = x_bf16.float()
     x_q = torch.empty_like(x_fp32, dtype=torch.float8_e4m3fn)
-
-    # Use zeros so padded tail is well-defined.
     packed_scales = torch.zeros(
         (outer_dim, padded_scale_k), device=x_bf16.device, dtype=torch.uint32
     )
@@ -51,7 +40,6 @@ def quantize_to_fp8_with_packed_ue8m0_scale(x_bf16: torch.Tensor, block_k: int):
             k_end = k_start + block_k
 
             block = x_fp32[outer_idx, k_start:k_end].clone()
-
             packed = 0
             q_block = torch.empty_like(block, dtype=torch.float8_e4m3fn)
 
@@ -60,16 +48,15 @@ def quantize_to_fp8_with_packed_ue8m0_scale(x_bf16: torch.Tensor, block_k: int):
                 sub_end = sub_start + 32
                 sub = block[sub_start:sub_end]
 
-                abs_max = sub.abs().max().item()
-                abs_max = max(abs_max, 1e-10)
+                abs_max = max(sub.abs().max().item(), 1e-10)
                 scale = abs_max / max_fp8
-
-                # UE8M0 exponent-only encoding
                 ue8m0 = int(torch.ceil(torch.log2(torch.tensor(scale))).item()) + 127
                 ue8m0 = max(0, min(255, ue8m0))
                 packed |= (ue8m0 & 0xFF) << (8 * sub_idx)
 
-                q_sub = torch.clamp(sub / scale, -max_fp8, max_fp8).to(torch.float8_e4m3fn)
+                q_sub = torch.clamp(sub / scale, -max_fp8, max_fp8).to(
+                    torch.float8_e4m3fn
+                )
                 q_block[sub_start:sub_end] = q_sub
 
             x_q[outer_idx, k_start:k_end] = q_block
@@ -78,13 +65,9 @@ def quantize_to_fp8_with_packed_ue8m0_scale(x_bf16: torch.Tensor, block_k: int):
     return x_q, packed_scales
 
 
-def dequant_from_fp8_and_packed_ue8m0(x_q: torch.Tensor, packed_scales: torch.Tensor, block_k: int):
-    """
-    Dequantize FP8 E4M3FN tensor using packed uint32 UE8M0 scales.
-
-    packed_scales may be physically padded on dim-1; only the first valid_scale_k
-    entries are consumed.
-    """
+def dequant_from_fp8_and_packed_ue8m0(
+    x_q: torch.Tensor, packed_scales: torch.Tensor, block_k: int
+):
     assert x_q.dim() == 2
     outer_dim, k = x_q.shape
     assert k % block_k == 0
@@ -122,13 +105,11 @@ def dequant_from_fp8_and_packed_ue8m0(x_q: torch.Tensor, packed_scales: torch.Te
     return out
 
 
-for reduction_size in reduction_sizes:
-    for output_size in output_sizes:
+for batch_size, output_size, reduction_size in supported_shapes:
+    for has_residual in (False, True):
         print(
-            f"\n=== Testing batch_size = {batch_size} output_size = {output_size} reduction_size = {reduction_size} has_residual = {has_residual} ==="
+            f"\n=== Testing batch_size={batch_size} output_size={output_size} reduction_size={reduction_size} has_residual={has_residual} ==="
         )
-
-        assert reduction_size % block_k == 0
 
         x_bf16 = torch.randn(
             (batch_size, reduction_size),
@@ -146,44 +127,29 @@ for reduction_size in reduction_sizes:
         x_q, x_scale = quantize_to_fp8_with_packed_ue8m0_scale(x_bf16, block_k)
         w_q, w_scale = quantize_to_fp8_with_packed_ue8m0_scale(w_bf16, block_k)
 
-        print("x_scale shape:", tuple(x_scale.shape), "stride:", x_scale.stride())
-        print("w_scale shape:", tuple(w_scale.shape), "stride:", w_scale.stride())
-
         residual = torch.randn(
             batch_size, output_size, device="cuda", dtype=torch.bfloat16, generator=g
         )
+        if not has_residual:
+            residual = None
+
         output = torch.empty(
             batch_size, output_size, device="cuda", dtype=torch.bfloat16
         )
 
-        if not has_residual:
-            residual = None
-
-        # Route B:
-        # The runtime binding is expected to accept already-quantized inputs:
-        #   x_q      : [BATCH_SIZE, REDUCTION_SIZE], fp8_e4m3fn
-        #   x_scale  : [BATCH_SIZE, padded_scale_k], uint32 packed UE8M0
-        #   w_q      : [OUTPUT_SIZE, REDUCTION_SIZE], fp8_e4m3fn
-        #   w_scale  : [OUTPUT_SIZE, padded_scale_k], uint32 packed UE8M0
-        # where only the first valid_scale_k columns are logically valid.
         runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
             x_q, x_scale, w_q, w_scale, residual, output
         )
 
         x_ref = dequant_from_fp8_and_packed_ue8m0(x_q, x_scale, block_k)
         w_ref = dequant_from_fp8_and_packed_ue8m0(w_q, w_scale, block_k)
-
-        torch_out = torch.matmul(x_ref, torch.transpose(w_ref, 0, 1)).to(torch.bfloat16)
+        torch_out = torch.matmul(x_ref, torch.transpose(w_ref, 0, 1))
         if has_residual:
-            torch_out = torch_out + residual
+            torch_out = torch_out + residual.float()
+        torch_out = torch_out.to(torch.bfloat16)
 
-        torch.testing.assert_close(
-            output,
-            torch_out,
-            rtol=1e-2,
-            atol=1e-2,
-        )
-        print("Test passed!")
+        torch.testing.assert_close(output, torch_out, rtol=1e-2, atol=1e-2)
+        print("Random-input test passed!")
 
         zero_x_bf16 = torch.zeros_like(x_bf16)
         zero_x_q, zero_x_scale = quantize_to_fp8_with_packed_ue8m0_scale(
@@ -198,37 +164,98 @@ for reduction_size in reduction_sizes:
         zero_x_ref = dequant_from_fp8_and_packed_ue8m0(
             zero_x_q, zero_x_scale, block_k
         )
-        zero_torch_out = torch.matmul(
-            zero_x_ref, torch.transpose(w_ref, 0, 1)
-        ).to(torch.bfloat16)
+        zero_torch_out = torch.matmul(zero_x_ref, torch.transpose(w_ref, 0, 1))
         if has_residual:
-            zero_torch_out = zero_torch_out + residual
+            zero_torch_out = zero_torch_out + residual.float()
+        zero_torch_out = zero_torch_out.to(torch.bfloat16)
 
-        torch.testing.assert_close(
-            zero_output,
-            zero_torch_out,
-            rtol=1e-2,
-            atol=1e-2,
-        )
+        torch.testing.assert_close(zero_output, zero_torch_out, rtol=1e-2, atol=1e-2)
         print("Zero-input bring-up passed!")
 
-        for _ in range(16):
-            runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
-                x_q, x_scale, w_q, w_scale, residual, output
-            )
+        if (batch_size, output_size, reduction_size) == benchmark_shape and not has_residual:
+            for _ in range(16):
+                runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
+                    x_q, x_scale, w_q, w_scale, residual, output
+                )
 
-        torch.cuda.synchronize()
-        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-            enable_timing=True
-        )
-        repetitions = 1000
-        starter.record()
-        for _ in range(repetitions):
-            runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
-                x_q, x_scale, w_q, w_scale, residual, output
-            )
-        ender.record()
-        torch.cuda.synchronize()
-        total_time = starter.elapsed_time(ender)
-        avg_time = total_time / repetitions
-        print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+            torch.cuda.synchronize()
+            starter = torch.cuda.Event(enable_timing=True)
+            ender = torch.cuda.Event(enable_timing=True)
+            repetitions = 1000
+            starter.record()
+            for _ in range(repetitions):
+                runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
+                    x_q, x_scale, w_q, w_scale, residual, output
+                )
+            ender.record()
+            torch.cuda.synchronize()
+            total_time = starter.elapsed_time(ender)
+            avg_time = total_time / repetitions
+            print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+
+
+print("\n=== Negative tests ===")
+
+unsupported_k = 640
+x_bad_k = torch.randn((1, unsupported_k), device="cuda", dtype=torch.bfloat16, generator=g)
+w_bad_k = torch.randn((128, unsupported_k), device="cuda", dtype=torch.bfloat16, generator=g)
+x_bad_k_q, x_bad_k_scale = quantize_to_fp8_with_packed_ue8m0_scale(x_bad_k, block_k)
+w_bad_k_q, w_bad_k_scale = quantize_to_fp8_with_packed_ue8m0_scale(w_bad_k, block_k)
+bad_k_output = torch.empty((1, 128), device="cuda", dtype=torch.bfloat16)
+try:
+    runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
+        x_bad_k_q, x_bad_k_scale, w_bad_k_q, w_bad_k_scale, None, bad_k_output
+    )
+    raise AssertionError("Expected unsupported K failure")
+except RuntimeError as exc:
+    assert "Unsupported linear_fp8_1d2d_sm100 shape" in str(exc)
+    print("Unsupported K negative test passed!")
+
+unsupported_n = 256
+x_bad_n = torch.randn((1, 768), device="cuda", dtype=torch.bfloat16, generator=g)
+w_bad_n = torch.randn((unsupported_n, 768), device="cuda", dtype=torch.bfloat16, generator=g)
+x_bad_n_q, x_bad_n_scale = quantize_to_fp8_with_packed_ue8m0_scale(x_bad_n, block_k)
+w_bad_n_q, w_bad_n_scale = quantize_to_fp8_with_packed_ue8m0_scale(w_bad_n, block_k)
+bad_n_output = torch.empty((1, unsupported_n), device="cuda", dtype=torch.bfloat16)
+try:
+    runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
+        x_bad_n_q, x_bad_n_scale, w_bad_n_q, w_bad_n_scale, None, bad_n_output
+    )
+    raise AssertionError("Expected unsupported N failure")
+except RuntimeError as exc:
+    assert "Unsupported linear_fp8_1d2d_sm100 shape" in str(exc)
+    print("Unsupported N negative test passed!")
+
+unsupported_b = 2
+x_bad_b = torch.randn((unsupported_b, 768), device="cuda", dtype=torch.bfloat16, generator=g)
+w_bad_b = torch.randn((128, 768), device="cuda", dtype=torch.bfloat16, generator=g)
+x_bad_b_q, x_bad_b_scale = quantize_to_fp8_with_packed_ue8m0_scale(x_bad_b, block_k)
+w_bad_b_q, w_bad_b_scale = quantize_to_fp8_with_packed_ue8m0_scale(w_bad_b, block_k)
+bad_b_output = torch.empty((unsupported_b, 128), device="cuda", dtype=torch.bfloat16)
+try:
+    runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
+        x_bad_b_q, x_bad_b_scale, w_bad_b_q, w_bad_b_scale, None, bad_b_output
+    )
+    raise AssertionError("Expected unsupported B failure")
+except RuntimeError as exc:
+    assert "Unsupported linear_fp8_1d2d_sm100 shape" in str(exc)
+    print("Unsupported B negative test passed!")
+
+x_valid = torch.randn((1, 768), device="cuda", dtype=torch.bfloat16, generator=g)
+w_valid = torch.randn((128, 768), device="cuda", dtype=torch.bfloat16, generator=g)
+x_valid_q, x_valid_scale = quantize_to_fp8_with_packed_ue8m0_scale(x_valid, block_k)
+w_valid_q, w_valid_scale = quantize_to_fp8_with_packed_ue8m0_scale(w_valid, block_k)
+bad_scale_output = torch.empty((1, 128), device="cuda", dtype=torch.bfloat16)
+try:
+    runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
+        x_valid_q,
+        x_valid_scale[:, :-1].contiguous(),
+        w_valid_q,
+        w_valid_scale,
+        None,
+        bad_scale_output,
+    )
+    raise AssertionError("Expected input_scale shape mismatch failure")
+except RuntimeError as exc:
+    assert "input_scale shape mismatch" in str(exc)
+    print("Scale shape mismatch negative test passed!")

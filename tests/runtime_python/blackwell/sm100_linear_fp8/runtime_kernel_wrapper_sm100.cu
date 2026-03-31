@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "../common/sm100_fp8_runtime_registry.h"
 #include "blackwell/linear_fp8_1d2d_sm100.cuh"
 #include "hopper/tma_2d.cuh"
 #include "runtime_header.h"
@@ -24,8 +25,11 @@
 
 #include <cstdio>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <tuple>
+#include <vector>
 
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cluster_launch.hpp>
@@ -40,10 +44,25 @@
 #include <cute/tensor.hpp>
 
 using bfloat16 = cute::bfloat16_t;
+namespace fp8_runtime = mirage::blackwell::sm100_fp8_runtime;
 // sm100_linear_fp8_1d2d
 namespace {
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+struct LinearFp8RuntimeKey {
+  int batch_size;
+  int output_size;
+  int reduction_size;
+  bool has_residual;
+
+  bool operator<(LinearFp8RuntimeKey const &other) const {
+    return std::tie(batch_size, output_size, reduction_size, has_residual) <
+           std::tie(other.batch_size,
+                    other.output_size,
+                    other.reduction_size,
+                    other.has_residual);
+  }
+};
+
 struct LinearFp8TmaDescriptorCache {
   CUtensorMap host_input_desc{};
   CUtensorMap host_weight_desc{};
@@ -55,17 +74,23 @@ struct LinearFp8TmaDescriptorCache {
   void *last_weight_ptr = nullptr;
   void *last_output_ptr = nullptr;
   bool initialized = false;
-  bool no_bias_kernel_configured = false;
-  bool bias_kernel_configured = false;
+  bool kernel_configured = false;
   std::mutex mutex;
 };
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
-LinearFp8TmaDescriptorCache<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE> &
-    get_linear_fp8_tma_descriptor_cache() {
-  static LinearFp8TmaDescriptorCache<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
-      cache;
-  return cache;
+LinearFp8TmaDescriptorCache &
+    get_linear_fp8_tma_descriptor_cache(LinearFp8RuntimeKey const &key) {
+  static std::map<LinearFp8RuntimeKey,
+                  std::unique_ptr<LinearFp8TmaDescriptorCache>>
+      caches;
+  static std::mutex caches_mutex;
+
+  std::lock_guard<std::mutex> guard(caches_mutex);
+  auto &cache = caches[key];
+  if (!cache) {
+    cache = std::make_unique<LinearFp8TmaDescriptorCache>();
+  }
+  return *cache;
 }
 
 template <typename T>
@@ -219,7 +244,11 @@ __global__ __launch_bounds__(256, 1) void linear_fp8_1d2d_sm100_wrapper(
       tma_a, tma_b, weight_scale_ptr, input_scale_ptr, mBias, tma_out);
 }
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          bool HasResidual>
 void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
                                   void *input_scale_ptr,  // sfb_ptr
                                   void *weight_ptr,       // a_ptr
@@ -243,10 +272,8 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
   // TMA_B tma_b(input_ptr);
   // TMA_OUT tma_out(output_ptr);
 
-  auto &cache = get_linear_fp8_tma_descriptor_cache<T,
-                                                    BATCH_SIZE,
-                                                    OUTPUT_SIZE,
-                                                    REDUCTION_SIZE>();
+  auto &cache = get_linear_fp8_tma_descriptor_cache(LinearFp8RuntimeKey{
+      BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, HasResidual});
   std::lock_guard<std::mutex> lock(cache.mutex);
 
   if (!cache.initialized) {
@@ -356,9 +383,8 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
       cute::make_shape(BATCH_SIZE, OUTPUT_SIZE),
       cute::make_stride(OUTPUT_SIZE,
                         cute::Int<1>{})); // (Gemm_M,Gemm_N):(Gemm_N,_1)
-  T *bias_ptr = residual_ptr
-                    ? static_cast<T *>(residual_ptr)
-                    : static_cast<T *>(output_ptr); // dummy valid pointer
+  bfloat16 *bias_ptr = residual_ptr ? static_cast<bfloat16 *>(residual_ptr)
+                                    : static_cast<bfloat16 *>(output_ptr);
   cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(bias_ptr),
                                          layout_Bias); // (Gemm_N, Gemm_M)
 
@@ -368,7 +394,7 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
   int smemBytes = 224 * 1024;
   cudaStream_t cuda_stream = at::cuda::getCurrentCUDAStream().stream();
 
-  if (residual_ptr != nullptr) {
+  if constexpr (HasResidual) {
     auto *kernel_ptr = &linear_fp8_1d2d_sm100_wrapper<T,
                                                       BATCH_SIZE,
                                                       OUTPUT_SIZE,
@@ -377,12 +403,12 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
                                                       MMA_M,
                                                       MMA_N,
                                                       false>;
-    if (!cache.bias_kernel_configured) {
+    if (!cache.kernel_configured) {
       CUTE_CHECK_ERROR(cudaFuncSetAttribute(
           kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
       CUTE_CHECK_ERROR(cudaFuncSetAttribute(
           kernel_ptr, cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
-      cache.bias_kernel_configured = true;
+      cache.kernel_configured = true;
     }
     launch_kernel_ex_cluster(grid_dim,
                              block_dim,
@@ -396,7 +422,6 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
                              static_cast<uint32_t const *>(input_scale_ptr),
                              mBias,
                              cache.device_output_desc);
-    CUTE_CHECK_LAST();
   } else {
     auto *kernel_ptr = &linear_fp8_1d2d_sm100_wrapper<T,
                                                       BATCH_SIZE,
@@ -406,12 +431,12 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
                                                       MMA_M,
                                                       MMA_N,
                                                       true>;
-    if (!cache.no_bias_kernel_configured) {
+    if (!cache.kernel_configured) {
       CUTE_CHECK_ERROR(cudaFuncSetAttribute(
           kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
       CUTE_CHECK_ERROR(cudaFuncSetAttribute(
           kernel_ptr, cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
-      cache.no_bias_kernel_configured = true;
+      cache.kernel_configured = true;
     }
     launch_kernel_ex_cluster(grid_dim,
                              block_dim,
@@ -425,7 +450,6 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
                              static_cast<uint32_t const *>(input_scale_ptr),
                              mBias,
                              cache.device_output_desc);
-    CUTE_CHECK_LAST();
   }
   CUTE_CHECK_LAST();
 }
@@ -436,50 +460,172 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
                                   torch::Tensor weight_scale,
                                   c10::optional<at::Tensor> residual,
                                   torch::Tensor output) {
+  TORCH_CHECK(input_q.dim() == 2, "input_q must be 2D");
+  TORCH_CHECK(input_scale.dim() == 2, "input_scale must be 2D");
+  TORCH_CHECK(weight_q.dim() == 2, "weight_q must be 2D");
+  TORCH_CHECK(weight_scale.dim() == 2, "weight_scale must be 2D");
+  TORCH_CHECK(output.dim() == 2, "output must be 2D");
+  TORCH_CHECK(input_q.is_contiguous(), "input_q must be contiguous");
+  TORCH_CHECK(input_scale.is_contiguous(), "input_scale must be contiguous");
+  TORCH_CHECK(weight_q.is_contiguous(), "weight_q must be contiguous");
+  TORCH_CHECK(weight_scale.is_contiguous(), "weight_scale must be contiguous");
+  TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
+  TORCH_CHECK(input_q.scalar_type() == at::kFloat8_e4m3fn,
+              "input_q must be float8_e4m3fn");
+  TORCH_CHECK(weight_q.scalar_type() == at::kFloat8_e4m3fn,
+              "weight_q must be float8_e4m3fn");
+  TORCH_CHECK(input_scale.scalar_type() == at::kInt ||
+                  input_scale.scalar_type() == at::kUInt32,
+              "input_scale must be uint32-compatible");
+  TORCH_CHECK(weight_scale.scalar_type() == at::kInt ||
+                  weight_scale.scalar_type() == at::kUInt32,
+              "weight_scale must be uint32-compatible");
+  TORCH_CHECK(output.scalar_type() == at::kBFloat16, "output must be bfloat16");
+
+  int const batch_size = static_cast<int>(input_q.size(0));
+  int const reduction_size = static_cast<int>(input_q.size(1));
+  int const output_size = static_cast<int>(weight_q.size(0));
+  int const expected_padded_scale_k =
+      fp8_runtime::padded_scale_k_for_reduction_size(reduction_size);
+
+  TORCH_CHECK(weight_q.size(1) == reduction_size,
+              "weight_q shape mismatch: expected reduction_size ",
+              reduction_size,
+              " in dim-1 but got ",
+              weight_q.size(1));
+  TORCH_CHECK(output.size(0) == batch_size && output.size(1) == output_size,
+              "output shape mismatch: expected [",
+              batch_size,
+              ", ",
+              output_size,
+              "] but got [",
+              output.size(0),
+              ", ",
+              output.size(1),
+              "]");
+  TORCH_CHECK(input_scale.size(0) == batch_size &&
+                  input_scale.size(1) == expected_padded_scale_k,
+              "input_scale shape mismatch: expected [",
+              batch_size,
+              ", ",
+              expected_padded_scale_k,
+              "] but got [",
+              input_scale.size(0),
+              ", ",
+              input_scale.size(1),
+              "]");
+  TORCH_CHECK(weight_scale.size(0) == output_size &&
+                  weight_scale.size(1) == expected_padded_scale_k,
+              "weight_scale shape mismatch: expected [",
+              output_size,
+              ", ",
+              expected_padded_scale_k,
+              "] but got [",
+              weight_scale.size(0),
+              ", ",
+              weight_scale.size(1),
+              "]");
+
+  TORCH_CHECK(fp8_runtime::is_supported_dense_gemm_shape(
+                  batch_size, output_size, reduction_size),
+              "Unsupported linear_fp8_1d2d_sm100 shape [B=",
+              batch_size,
+              ", N=",
+              output_size,
+              ", K=",
+              reduction_size,
+              "]. Supported batch sizes: {",
+              fp8_runtime::supported_batch_sizes_string(),
+              "}, output sizes: {",
+              fp8_runtime::supported_output_sizes_string(),
+              "}, reduction sizes: {",
+              fp8_runtime::supported_reduction_sizes_string(),
+              "}");
 
   void *input_ptr = input_q.data_ptr();
   void *input_scale_ptr = input_scale.data_ptr();
   void *weight_ptr = weight_q.data_ptr();
   void *weight_scale_ptr = weight_scale.data_ptr();
-  bool has_residual = residual.has_value();
-  void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
+  bool const has_residual = residual.has_value();
+  if (has_residual) {
+    TORCH_CHECK(residual->dim() == 2, "residual must be 2D");
+    TORCH_CHECK(residual->is_contiguous(), "residual must be contiguous");
+    TORCH_CHECK(residual->scalar_type() == at::kBFloat16,
+                "residual must be bfloat16");
+    TORCH_CHECK(residual->size(0) == batch_size &&
+                    residual->size(1) == output_size,
+                "residual shape mismatch: expected [",
+                batch_size,
+                ", ",
+                output_size,
+                "] but got [",
+                residual->size(0),
+                ", ",
+                residual->size(1),
+                "]");
+  }
+  void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
 
-  constexpr int BATCH_SIZE = 1;
-  constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 768;
-  constexpr int SCALE_K = REDUCTION_SIZE / 128;
-  constexpr int PADDED_SCALE_K = ((SCALE_K + 3) / 4) * 4;
+#define DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                         \
+    BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, HAS_RESIDUAL)                     \
+  case REDUCTION_SIZE:                                                         \
+    launch_linear_fp8_1d2d_sm100<cutlass::float_e4m3_t,                        \
+                                 BATCH_SIZE,                                   \
+                                 OUTPUT_SIZE,                                  \
+                                 REDUCTION_SIZE,                               \
+                                 HAS_RESIDUAL>(input_ptr,                      \
+                                               input_scale_ptr,                \
+                                               weight_ptr,                     \
+                                               weight_scale_ptr,               \
+                                               output_ptr,                     \
+                                               residual_ptr);                  \
+    break;
 
-  assert(input_q.size(0) == BATCH_SIZE);
-  assert(input_q.size(1) == REDUCTION_SIZE);
-  assert(weight_q.size(0) == OUTPUT_SIZE);
-  assert(weight_q.size(1) == REDUCTION_SIZE);
-  assert(input_scale.size(0) == BATCH_SIZE);
-  assert(input_scale.size(1) == PADDED_SCALE_K);
-  assert(weight_scale.size(0) == OUTPUT_SIZE);
-  assert(weight_scale.size(1) == PADDED_SCALE_K);
-  assert(input_q.scalar_type() == at::kFloat8_e4m3fn);
-  assert(weight_q.scalar_type() == at::kFloat8_e4m3fn);
-  assert(input_scale.scalar_type() == at::kInt ||
-         input_scale.scalar_type() == at::kUInt32);
-  assert(weight_scale.scalar_type() == at::kInt ||
-         weight_scale.scalar_type() == at::kUInt32);
-  assert(output.scalar_type() == at::kBFloat16);
+  if (has_residual) {
+    switch (reduction_size) {
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 128, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 256, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 384, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 512, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 768, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1024, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1536, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 2048, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 4096, true)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 7168, true)
+      default:
+        TORCH_CHECK(false, "Unsupported reduction_size dispatch");
+    }
+  } else {
+    switch (reduction_size) {
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 128, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 256, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 384, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 512, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 768, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1024, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1536, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 2048, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 4096, false)
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 7168, false)
+      default:
+        TORCH_CHECK(false, "Unsupported reduction_size dispatch");
+    }
+  }
 
-  launch_linear_fp8_1d2d_sm100<cutlass::float_e4m3_t,
-                               BATCH_SIZE,
-                               OUTPUT_SIZE,
-                               REDUCTION_SIZE>(input_ptr,
-                                               input_scale_ptr,
-                                               weight_ptr,
-                                               weight_scale_ptr,
-                                               output_ptr,
-                                               residual_ptr);
+#undef DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE
+}
+
+std::vector<std::vector<int64_t>> supported_dense_gemm_shapes() {
+  return fp8_runtime::supported_dense_gemm_shapes_vector();
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("linear_fp8_1d2d_sm100",
         &linear_fp8_1d2d_sm100_kernel,
         "Linear kernel SM100 FP8 1D2D");
+  m.def("supported_dense_gemm_shapes",
+        &supported_dense_gemm_shapes,
+        "Supported SM100 FP8 dense GEMM shapes");
 }

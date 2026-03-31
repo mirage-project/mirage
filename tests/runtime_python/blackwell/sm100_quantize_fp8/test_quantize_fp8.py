@@ -6,9 +6,12 @@ torch.set_printoptions(sci_mode=False, profile="full")
 g = torch.Generator(device="cuda").manual_seed(1234)
 
 batch_sizes = [1, 8]
-hidden_sizes = [128, 256, 768, 7168]
+hidden_sizes = [int(x) for x in runtime_kernel_blackwell.supported_hidden_sizes()]
+group_sizes = [int(x) for x in runtime_kernel_blackwell.supported_group_sizes()]
 block_k = 128
 fp8_max = 448.0
+
+assert group_sizes == [block_k]
 
 
 def round_up_to_multiple(x: int, m: int) -> int:
@@ -63,7 +66,6 @@ def quantize_to_fp8_with_packed_ue8m0_scale(x_bf16: torch.Tensor, block_k: int):
 
 for batch_size in batch_sizes:
     for hidden_size in hidden_sizes:
-        assert hidden_size % block_k == 0
         valid_scale_k = hidden_size // block_k
         padded_scale_k = round_up_to_multiple(valid_scale_k, 4)
 
@@ -71,9 +73,18 @@ for batch_size in batch_sizes:
             f"\n=== Testing batch_size={batch_size} hidden_size={hidden_size} block_k={block_k} padded_scale_k={padded_scale_k} ==="
         )
 
-        x = torch.randn((batch_size, hidden_size), device="cuda", dtype=torch.bfloat16, generator=g)
-        output = torch.empty((batch_size, hidden_size), device="cuda", dtype=torch.float8_e4m3fn)
-        scales = torch.empty((batch_size, padded_scale_k), device="cuda", dtype=torch.uint32)
+        x = torch.randn(
+            (batch_size, hidden_size),
+            device="cuda",
+            dtype=torch.bfloat16,
+            generator=g,
+        )
+        output = torch.empty(
+            (batch_size, hidden_size), device="cuda", dtype=torch.float8_e4m3fn
+        )
+        scales = torch.empty(
+            (batch_size, padded_scale_k), device="cuda", dtype=torch.uint32
+        )
 
         runtime_kernel_blackwell.quantize_fp8_sm100(x, output, scales, group_size=block_k)
 
@@ -106,3 +117,44 @@ for batch_size in batch_sizes:
             atol=16.0,
         )
         print("Zero-input bring-up passed!")
+
+
+print("\n=== Negative tests ===")
+
+unsupported_hidden_size = 640
+unsupported_output = torch.empty(
+    (1, unsupported_hidden_size), device="cuda", dtype=torch.float8_e4m3fn
+)
+unsupported_scales = torch.empty(
+    (1, round_up_to_multiple(unsupported_hidden_size // block_k, 4)),
+    device="cuda",
+    dtype=torch.uint32,
+)
+unsupported_x = torch.randn(
+    (1, unsupported_hidden_size), device="cuda", dtype=torch.bfloat16, generator=g
+)
+try:
+    runtime_kernel_blackwell.quantize_fp8_sm100(
+        unsupported_x, unsupported_output, unsupported_scales, group_size=block_k
+    )
+    raise AssertionError("Expected unsupported hidden_size failure")
+except RuntimeError as exc:
+    assert "Unsupported hidden_size" in str(exc)
+    print("Unsupported hidden_size negative test passed!")
+
+bad_group_size = 64
+bad_group_output = torch.empty((1, block_k), device="cuda", dtype=torch.float8_e4m3fn)
+bad_group_scales = torch.empty(
+    (1, round_up_to_multiple(block_k // bad_group_size, 4)),
+    device="cuda",
+    dtype=torch.uint32,
+)
+bad_group_x = torch.randn((1, block_k), device="cuda", dtype=torch.bfloat16, generator=g)
+try:
+    runtime_kernel_blackwell.quantize_fp8_sm100(
+        bad_group_x, bad_group_output, bad_group_scales, group_size=bad_group_size
+    )
+    raise AssertionError("Expected unsupported group_size failure")
+except RuntimeError as exc:
+    assert "Unsupported group_size" in str(exc)
+    print("Unsupported group_size negative test passed!")

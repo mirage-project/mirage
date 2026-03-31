@@ -12,6 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "../common/sm100_fp8_runtime_registry.h"
 #include "blackwell/per_token_group_quantize_fp8.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/BFloat16.h>
@@ -22,6 +23,7 @@
 
 using fp8_e4m3fn = __nv_fp8_e4m3;
 using bfloat16 = type::bfloat16_t;
+namespace fp8_runtime = mirage::blackwell::sm100_fp8_runtime;
 
 namespace {
 
@@ -73,7 +75,9 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
       TORCH_CHECK(false,                                                       \
                   "Unsupported group_size=",                                   \
                   group_size,                                                  \
-                  " (must be one of {128})");                                  \
+                  " (must be one of {",                                        \
+                  fp8_runtime::supported_group_sizes_string(),                 \
+                  "})");                                                       \
       break;                                                                   \
   }
 
@@ -132,19 +136,35 @@ void quantize_fp8_sm100(torch::Tensor input,
   switch (hidden_size) {
     DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(128)
     DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(256)
+    DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(384)
+    DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(512)
     DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(768)
+    DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(1024)
+    DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(1536)
+    DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(2048)
+    DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(4096)
     DISPATCH_QUANTIZE_FP8_SM100_HIDDEN_SIZE_CASE(7168)
     default:
       TORCH_CHECK(false,
                   "Unsupported hidden_size=",
                   hidden_size,
-                  " (must be one of {128, 256, 768, 7168})");
+                  " (must be one of {",
+                  fp8_runtime::supported_hidden_sizes_string(),
+                  "})");
   }
 
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
               "CUDA kernel launch error: ",
               cudaGetErrorString(err));
+}
+
+std::vector<int64_t> supported_hidden_sizes() {
+  return fp8_runtime::supported_hidden_sizes_vector();
+}
+
+std::vector<int64_t> supported_group_sizes() {
+  return fp8_runtime::supported_group_sizes_vector();
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -155,4 +175,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output_s"),
         py::arg("group_size") = 128,
         "Quantize FP8 SM100");
+  m.def("supported_hidden_sizes",
+        &supported_hidden_sizes,
+        "Supported hidden sizes for SM100 FP8 quantize");
+  m.def("supported_group_sizes",
+        &supported_group_sizes,
+        "Supported group sizes for SM100 FP8 quantize");
 }
