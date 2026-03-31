@@ -13,14 +13,13 @@
  * limitations under the License.
  */
 
-
 #include "blackwell/linear_fp8_1d2d_sm100.cuh"
 #include "hopper/tma_2d.cuh"
 #include "runtime_header.h"
 #include "tma.cuh"
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 
 #include <cstdio>
@@ -28,24 +27,20 @@
 #include <memory>
 #include <mutex>
 
-// Cutlass includes
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cluster_launch.hpp>
-#include <cutlass/half.h> // F16 data type
+#include <cutlass/half.h> 
 #include <cutlass/util/print_error.hpp>
 
-// CuTe includes
-#include <cute/algorithm/cooperative_copy.hpp> // Auto vectorized copy operation
-#include <cute/arch/cluster_sm90.hpp> // CuTe functions for querying the details of cluster launched
-#include <cute/arch/tmem_allocator_sm100.hpp> // TMEM allocator for SM100
-#include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
+#include <cute/algorithm/cooperative_copy.hpp> 
+#include <cute/arch/cluster_sm90.hpp>
+#include <cute/arch/tmem_allocator_sm100.hpp> 
+#include <cute/numeric/integral_constant.hpp>
 #include <cute/pointer_flagged.hpp>
-#include <cute/tensor.hpp> // CuTe tensor implementation
+#include <cute/tensor.hpp> 
 
 using bfloat16 = cute::bfloat16_t;
-
 // sm100_linear_fp8_1d2d
-
 namespace {
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -67,7 +62,7 @@ struct LinearFp8TmaDescriptorCache {
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 LinearFp8TmaDescriptorCache<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE> &
-get_linear_fp8_tma_descriptor_cache() {
+    get_linear_fp8_tma_descriptor_cache() {
   static LinearFp8TmaDescriptorCache<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       cache;
   return cache;
@@ -100,7 +95,8 @@ void launch_kernel_ex_cluster(dim3 grid_dim,
                               Args... args) {
   cudaLaunchAttribute launch_attribute{};
   launch_attribute.id = cudaLaunchAttributeClusterDimension;
-  launch_attribute.val.clusterDim = {cluster_dim.x, cluster_dim.y, cluster_dim.z};
+  launch_attribute.val.clusterDim = {
+      cluster_dim.x, cluster_dim.y, cluster_dim.z};
 
   cudaLaunchConfig_t launch_config{};
   launch_config.gridDim = grid_dim;
@@ -110,8 +106,8 @@ void launch_kernel_ex_cluster(dim3 grid_dim,
   launch_config.numAttrs = 1;
   launch_config.attrs = &launch_attribute;
 
-  void *kernel_params[] = {
-      const_cast<void *>(reinterpret_cast<void const *>(std::addressof(args)))...};
+  void *kernel_params[] = {const_cast<void *>(
+      reinterpret_cast<void const *>(std::addressof(args)))...};
   if (cluster_dim.x == 1 && cluster_dim.y == 1 && cluster_dim.z == 1) {
     CUTE_CHECK_ERROR(cudaLaunchKernel((void const *)kernel_ptr,
                                       grid_dim,
@@ -138,94 +134,89 @@ template <typename T,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__global__
-    __launch_bounds__(256,
-                      1) void linear_fp8_1d2d_sm100_wrapper(void *tma_a_desc_ptr,
-                                                       void *tma_b_desc_ptr,
-                                                       uint32_t const *weight_scale_ptr,
-                                                       uint32_t const *input_scale_ptr,
-                                                       BiasTensor mBias,
-                                                       void *tma_out_desc_ptr) {
+__global__ __launch_bounds__(256, 1) void linear_fp8_1d2d_sm100_wrapper(
+    void *tma_a_desc_ptr,
+    void *tma_b_desc_ptr,
+    uint32_t const *weight_scale_ptr,
+    uint32_t const *input_scale_ptr,
+    BiasTensor mBias,
+    void *tma_out_desc_ptr) {
 
   constexpr int B = 3;
   constexpr int M = 3;
   constexpr int S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 128;
   constexpr int TILE_SIZE = 128;
-  constexpr int TMA_CP_ASYNC_REPEAT_COL = (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+  constexpr int TMA_CP_ASYNC_REPEAT_COL =
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
   using TMA_B =
-    kernel::tma::tma_2d<cutlass::float_e4m3_t,
-                        B,
-                        M,
-                        S,
-                        BATCH_SIZE,                /*GMEM_ROW_*/
-                        REDUCTION_SIZE,            /*GMEM_COL_*/
-                        MMA_N,                     /*SMEM_ROW_*/
-                        TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
-                        REDUCTION_SIZE,            /*GMEM_STRIDE_ROW_*/
-                        1,                         /*GMEM_STRIDE_COL_*/
-                        1,                         /*SMEM_REPEAT_ROW_*/
-                        TMA_CP_ASYNC_REPEAT_COL,   /*SMEM_REPEAT_COL_*/
-                        MMA_N * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
-                        true>;
+      kernel::tma::tma_2d<cutlass::float_e4m3_t,
+                          B,
+                          M,
+                          S,
+                          BATCH_SIZE,                /*GMEM_ROW_*/
+                          REDUCTION_SIZE,            /*GMEM_COL_*/
+                          MMA_N,                     /*SMEM_ROW_*/
+                          TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
+                          REDUCTION_SIZE,            /*GMEM_STRIDE_ROW_*/
+                          1,                         /*GMEM_STRIDE_COL_*/
+                          1,                         /*SMEM_REPEAT_ROW_*/
+                          TMA_CP_ASYNC_REPEAT_COL,   /*SMEM_REPEAT_COL_*/
+                          MMA_N * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
+                          true>;
 
   using TMA_A =
-    kernel::tma::tma_2d<cutlass::float_e4m3_t,
-                        B,
-                        M,
-                        S,
-                        OUTPUT_SIZE,               /*GMEM_ROW_*/
-                        REDUCTION_SIZE,            /*GMEM_COL_*/
-                        MMA_M,                     /*SMEM_ROW_*/
-                        TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
-                        REDUCTION_SIZE,            /*GMEM_STRIDE_ROW_*/
-                        1,                         /*GMEM_STRIDE_COL_*/
-                        1,                         /*SMEM_REPEAT_ROW_*/
-                        TMA_CP_ASYNC_REPEAT_COL,   /*SMEM_REPEAT_COL_*/
-                        MMA_M * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
-                        true>;
+      kernel::tma::tma_2d<cutlass::float_e4m3_t,
+                          B,
+                          M,
+                          S,
+                          OUTPUT_SIZE,               /*GMEM_ROW_*/
+                          REDUCTION_SIZE,            /*GMEM_COL_*/
+                          MMA_M,                     /*SMEM_ROW_*/
+                          TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
+                          REDUCTION_SIZE,            /*GMEM_STRIDE_ROW_*/
+                          1,                         /*GMEM_STRIDE_COL_*/
+                          1,                         /*SMEM_REPEAT_ROW_*/
+                          TMA_CP_ASYNC_REPEAT_COL,   /*SMEM_REPEAT_COL_*/
+                          MMA_M * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
+                          true>;
 
-  using TMA_OUT =
-    kernel::tma::tma_2d<bfloat16,
-                        0,
-                        M,
-                        S,
-                        BATCH_SIZE,             /*GMEM_ROW_*/
-                        OUTPUT_SIZE,            /*GMEM_COL_*/
-                        MMA_N,                  /*SMEM_ROW_*/
-                        MMA_M,                  /*SMEM_COL_*/
-                        OUTPUT_SIZE,            /*GMEM_STRIDE_ROW_*/
-                        1,                      /*GMEM_STRIDE_COL_*/
-                        1,                      /*SMEM_REPEAT_ROW_*/
-                        1,                      /*SMEM_REPEAT_COL_*/
-                        MMA_N * MMA_M,          /*SMEM_STRIDE_*/
-                        true>;
+  using TMA_OUT = kernel::tma::tma_2d<bfloat16,
+                                      0,
+                                      M,
+                                      S,
+                                      BATCH_SIZE,    /*GMEM_ROW_*/
+                                      OUTPUT_SIZE,   /*GMEM_COL_*/
+                                      MMA_N,         /*SMEM_ROW_*/
+                                      MMA_M,         /*SMEM_COL_*/
+                                      OUTPUT_SIZE,   /*GMEM_STRIDE_ROW_*/
+                                      1,             /*GMEM_STRIDE_COL_*/
+                                      1,             /*SMEM_REPEAT_ROW_*/
+                                      1,             /*SMEM_REPEAT_COL_*/
+                                      MMA_N * MMA_M, /*SMEM_STRIDE_*/
+                                      true>;
 
   TMA_A tma_a(static_cast<CUtensorMap *>(tma_a_desc_ptr));
   TMA_B tma_b(static_cast<CUtensorMap *>(tma_b_desc_ptr));
   TMA_OUT tma_out(static_cast<CUtensorMap *>(tma_out_desc_ptr));
 
   kernel::linear_fp8_1d2d_sm100_task_impl<T,
-                                     TMA_A,
-                                     TMA_B,
-                                     BiasTensor,
-                                     TMA_OUT,
-                                     MMA_M,
-                                     MMA_N,
-                                     BATCH_SIZE,
-                                     OUTPUT_SIZE,
-                                     REDUCTION_SIZE,
-                                     NoBias,
-                                     /*SplitK=*/false,
-                                     NUM_AB_STAGE,
-                                     NUM_ACC_STAGE,
-                                     NUM_C_STAGE>(tma_a,
-                                                  tma_b,
-                                                  weight_scale_ptr,
-                                                  input_scale_ptr,
-                                                  mBias,
-                                                  tma_out);
+                                          TMA_A,
+                                          TMA_B,
+                                          BiasTensor,
+                                          TMA_OUT,
+                                          MMA_M,
+                                          MMA_N,
+                                          BATCH_SIZE,
+                                          OUTPUT_SIZE,
+                                          REDUCTION_SIZE,
+                                          NoBias,
+                                          /*SplitK=*/false,
+                                          NUM_AB_STAGE,
+                                          NUM_ACC_STAGE,
+                                          NUM_C_STAGE>(
+      tma_a, tma_b, weight_scale_ptr, input_scale_ptr, mBias, tma_out);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -252,8 +243,10 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
   // TMA_B tma_b(input_ptr);
   // TMA_OUT tma_out(output_ptr);
 
-  auto &cache =
-      get_linear_fp8_tma_descriptor_cache<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>();
+  auto &cache = get_linear_fp8_tma_descriptor_cache<T,
+                                                    BATCH_SIZE,
+                                                    OUTPUT_SIZE,
+                                                    REDUCTION_SIZE>();
   std::lock_guard<std::mutex> lock(cache.mutex);
 
   if (!cache.initialized) {
@@ -303,8 +296,10 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
         o_smem_repeat_col);
 
     CUTE_CHECK_ERROR(cudaMalloc(&cache.device_input_desc, sizeof(CUtensorMap)));
-    CUTE_CHECK_ERROR(cudaMalloc(&cache.device_weight_desc, sizeof(CUtensorMap)));
-    CUTE_CHECK_ERROR(cudaMalloc(&cache.device_output_desc, sizeof(CUtensorMap)));
+    CUTE_CHECK_ERROR(
+        cudaMalloc(&cache.device_weight_desc, sizeof(CUtensorMap)));
+    CUTE_CHECK_ERROR(
+        cudaMalloc(&cache.device_output_desc, sizeof(CUtensorMap)));
 
     CUTE_CHECK_ERROR(cudaMemcpy(cache.device_input_desc,
                                 &cache.host_input_desc,
@@ -359,9 +354,13 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
   // Residual
   cute::Layout layout_Bias = cute::make_layout(
       cute::make_shape(BATCH_SIZE, OUTPUT_SIZE),
-      cute::make_stride(OUTPUT_SIZE, cute::Int<1>{})); // (Gemm_M,Gemm_N):(Gemm_N,_1)
-  T *bias_ptr = residual_ptr ? static_cast<T *>(residual_ptr) : static_cast<T *>(output_ptr);  // dummy valid pointer
-  cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(bias_ptr), layout_Bias); // (Gemm_N, Gemm_M)
+      cute::make_stride(OUTPUT_SIZE,
+                        cute::Int<1>{})); // (Gemm_M,Gemm_N):(Gemm_N,_1)
+  T *bias_ptr = residual_ptr
+                    ? static_cast<T *>(residual_ptr)
+                    : static_cast<T *>(output_ptr); // dummy valid pointer
+  cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(bias_ptr),
+                                         layout_Bias); // (Gemm_N, Gemm_M)
 
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(256, 1, 1);
@@ -371,13 +370,13 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
 
   if (residual_ptr != nullptr) {
     auto *kernel_ptr = &linear_fp8_1d2d_sm100_wrapper<T,
-                                                 BATCH_SIZE,
-                                                 OUTPUT_SIZE,
-                                                 REDUCTION_SIZE,
-                                                 decltype(mBias),
-                                                 MMA_M,
-                                                 MMA_N,
-                                                 false>;
+                                                      BATCH_SIZE,
+                                                      OUTPUT_SIZE,
+                                                      REDUCTION_SIZE,
+                                                      decltype(mBias),
+                                                      MMA_M,
+                                                      MMA_N,
+                                                      false>;
     if (!cache.bias_kernel_configured) {
       CUTE_CHECK_ERROR(cudaFuncSetAttribute(
           kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
@@ -400,13 +399,13 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
     CUTE_CHECK_LAST();
   } else {
     auto *kernel_ptr = &linear_fp8_1d2d_sm100_wrapper<T,
-                                                 BATCH_SIZE,
-                                                 OUTPUT_SIZE,
-                                                 REDUCTION_SIZE,
-                                                 decltype(mBias),
-                                                 MMA_M,
-                                                 MMA_N,
-                                                 true>;
+                                                      BATCH_SIZE,
+                                                      OUTPUT_SIZE,
+                                                      REDUCTION_SIZE,
+                                                      decltype(mBias),
+                                                      MMA_M,
+                                                      MMA_N,
+                                                      true>;
     if (!cache.no_bias_kernel_configured) {
       CUTE_CHECK_ERROR(cudaFuncSetAttribute(
           kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
@@ -430,7 +429,6 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
   }
   CUTE_CHECK_LAST();
 }
-
 
 void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
                                   torch::Tensor input_scale,
@@ -463,14 +461,25 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
   assert(weight_scale.size(1) == PADDED_SCALE_K);
   assert(input_q.scalar_type() == at::kFloat8_e4m3fn);
   assert(weight_q.scalar_type() == at::kFloat8_e4m3fn);
-  assert(input_scale.scalar_type() == at::kInt || input_scale.scalar_type() == at::kUInt32);
-  assert(weight_scale.scalar_type() == at::kInt || weight_scale.scalar_type() == at::kUInt32);
+  assert(input_scale.scalar_type() == at::kInt ||
+         input_scale.scalar_type() == at::kUInt32);
+  assert(weight_scale.scalar_type() == at::kInt ||
+         weight_scale.scalar_type() == at::kUInt32);
   assert(output.scalar_type() == at::kBFloat16);
 
-  launch_linear_fp8_1d2d_sm100<cutlass::float_e4m3_t, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(input_ptr, input_scale_ptr, weight_ptr, weight_scale_ptr, output_ptr, residual_ptr);
+  launch_linear_fp8_1d2d_sm100<cutlass::float_e4m3_t,
+                               BATCH_SIZE,
+                               OUTPUT_SIZE,
+                               REDUCTION_SIZE>(input_ptr,
+                                               input_scale_ptr,
+                                               weight_ptr,
+                                               weight_scale_ptr,
+                                               output_ptr,
+                                               residual_ptr);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def(
-      "linear_fp8_1d2d_sm100", &linear_fp8_1d2d_sm100_kernel, "Linear kernel SM100 FP8 1D2D");
+  m.def("linear_fp8_1d2d_sm100",
+        &linear_fp8_1d2d_sm100_kernel,
+        "Linear kernel SM100 FP8 1D2D");
 }

@@ -16,8 +16,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/BFloat16.h>
 #include <c10/util/Float8_e4m3fn.h>
-#include <cuda_runtime.h>
 #include <cuda_fp8.h>
+#include <cuda_runtime.h>
 #include <torch/extension.h>
 
 using fp8_e4m3fn = __nv_fp8_e4m3;
@@ -29,7 +29,7 @@ constexpr int round_up_to_multiple(int value, int multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
-}  // namespace
+} // namespace
 
 template <int HIDDEN_SIZE, int GROUP_SIZE>
 __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
@@ -50,12 +50,12 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
       static_cast<uint32_t *>(output_s_ptr) + row * kPaddedScaleK;
 
   kernel::per_token_group_quantize_fp8_task_impl</*BATCH_SIZE=*/1,
-                                 /*HIDDEN_SIZE=*/HIDDEN_SIZE,
-                                 /*GROUP_SIZE=*/GROUP_SIZE,
-                                 /*GLOBAL_STRIDE=*/HIDDEN_SIZE,
-                                 bfloat16,
-                                 fp8_e4m3fn,
-                                 /*SCALE_UE8M0=*/true>(
+                                                 /*HIDDEN_SIZE=*/HIDDEN_SIZE,
+                                                 /*GROUP_SIZE=*/GROUP_SIZE,
+                                                 /*GLOBAL_STRIDE=*/HIDDEN_SIZE,
+                                                 bfloat16,
+                                                 fp8_e4m3fn,
+                                                 /*SCALE_UE8M0=*/true>(
       input, output_q, output_s, eps, min_8bit, max_8bit);
 }
 
@@ -73,7 +73,7 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
       TORCH_CHECK(false,                                                       \
                   "Unsupported group_size=",                                   \
                   group_size,                                                  \
-                  " (must be one of {128})");                            \
+                  " (must be one of {128})");                                  \
       break;                                                                   \
   }
 
@@ -110,11 +110,12 @@ void quantize_fp8_sm100(torch::Tensor input,
   int const num_groups = hidden_size / group_size;
   int const padded_scale_k = round_up_to_multiple(num_groups, 4);
 
-  TORCH_CHECK(output_s.size(1) == padded_scale_k,
-              "output_s must have padded hidden_size/group_size columns, expected ",
-              padded_scale_k,
-              " but got ",
-              output_s.size(1));
+  TORCH_CHECK(
+      output_s.size(1) == padded_scale_k,
+      "output_s must have padded hidden_size/group_size columns, expected ",
+      padded_scale_k,
+      " but got ",
+      output_s.size(1));
 
   void const *input_ptr = input.data_ptr();
   void *output_q_ptr = output_q.data_ptr();
