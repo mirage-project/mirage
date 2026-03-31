@@ -237,6 +237,65 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
   std::cout << "Symbolic:     " << best_sym_so << std::endl;
 }
 
+static void run_ablation(AttentionConfig const &cfg, double time_limit_sec) {
+  ensure_dir(kCkptDir);
+
+  struct AblationConfig {
+    std::string name;
+    SymFlags flags;
+  };
+
+  std::vector<AblationConfig> configs = {
+    {"all_sym",                    {true,  true,  true,  true,  true}},
+    {"no_omap",                    {true,  true,  true,  true,  false}},
+    {"no_fmap",                    {true,  true,  true,  false, true}},
+    {"no_imap",                    {true,  true,  false, true,  true}},
+    {"no_omap_fmap",               {true,  true,  true,  false, false}},
+    {"no_imap_omap",               {true,  true,  false, true,  false}},
+    {"no_maps",                    {true,  true,  false, false, false}},
+  };
+
+  int g = cfg.num_heads * cfg.query_seq_len;
+  int h = cfg.num_heads * cfg.kv_seq_len;
+  kernel::Graph ref;
+  build_ref_graph(ref, cfg);
+  for (auto const &op : ref.operators) op->fingerprint();
+
+  printf("\n=== Ablation Study: attn batch=%d heads=%d q=%d kv=%d hd=%d ===\n",
+         cfg.batch, cfg.num_heads, cfg.query_seq_len, cfg.kv_seq_len, cfg.head_dim);
+  printf("%-25s %5s %5s %5s %5s %5s  %10s  %10s\n",
+         "Config", "grid", "frnge", "imap", "fmap", "omap", "Time(s)", "Graphs");
+
+  for (auto const &ac : configs) {
+    std::string ckpt = kCkptDir + "/ablation_" + ac.name + ".json";
+    std::remove(ckpt.c_str());
+
+    search::AbstractExpr::symbolic_expr = true;
+    search::GeneratorConfig gen_config =
+        get_generator_config(/*use_symbolic=*/true, /*for_attention=*/true,
+                             time_limit_sec, /*explore_all_mappings=*/false,
+                             /*symbolic_maps=*/false, ac.flags);
+    search::KernelGraphGenerator gen(ref, gen_config, ckpt.data());
+
+    auto t0 = std::chrono::steady_clock::now();
+    gen.generate_kernel_graphs_symbolic();
+    auto t1 = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(t1 - t0).count();
+
+    printf("%-25s %5s %5s %5s %5s %5s  %10.1f  %10zu\n",
+           ac.name.c_str(),
+           ac.flags.grid_dim ? "sym" : "enum",
+           ac.flags.frange   ? "sym" : "enum",
+           ac.flags.imap     ? "sym" : "enum",
+           ac.flags.fmap     ? "sym" : "enum",
+           ac.flags.omap     ? "sym" : "enum",
+           elapsed,
+           gen.generated_graphs.size());
+
+    std::remove(ckpt.c_str());
+  }
+}
+
 int main(int argc, char **argv) {
   bool debug        = false;
   bool force_nonsym = false;
@@ -246,6 +305,7 @@ int main(int argc, char **argv) {
   bool explore_all  = false;
   bool search_only  = false;
   bool sym_maps     = false;
+  bool ablation     = false;
   double time_limit = -1;
   std::string sym_ckpt_override;
   std::string config_str;
@@ -259,6 +319,7 @@ int main(int argc, char **argv) {
     else if (arg == "--explore-all-maps") explore_all = true;
     else if (arg == "--search-only")     search_only = true;
     else if (arg == "--symbolic-maps")   sym_maps    = true;
+    else if (arg == "--ablation")        ablation    = true;
     else if (arg == "--sym-checkpoint") {
       if (i + 1 >= argc) {
         std::cerr << "--sym-checkpoint requires a path argument\n";
@@ -298,6 +359,11 @@ int main(int argc, char **argv) {
     configs.push_back({b, h, q, kv, hd});
   } else {
     configs = debug ? std::vector<AttentionConfig>{kDebugConfig} : get_configs();
+  }
+  if (ablation) {
+    AttentionConfig cfg = configs.empty() ? kDebugConfig : configs[0];
+    run_ablation(cfg, time_limit >= 0 ? time_limit : 3600.0);
+    return 0;
   }
   run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
                   sym_ckpt_override, time_limit, explore_all, search_only,

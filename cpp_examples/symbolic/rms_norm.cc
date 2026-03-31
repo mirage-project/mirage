@@ -199,6 +199,87 @@ static void run_experiments(std::vector<RmsNormConfig> const &configs,
   }
 }
 
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
+
+static void run_ablation(RmsNormConfig const &cfg, double time_limit_sec) {
+  ensure_dir(kCkptDir);
+
+  struct AblationConfig {
+    std::string name;
+    SymFlags flags;
+  };
+
+  std::vector<AblationConfig> configs = {
+    {"all_sym",                    {true,  true,  true,  true,  true}},
+    {"no_omap",                    {true,  true,  true,  true,  false}},
+    {"no_fmap",                    {true,  true,  true,  false, true}},
+    {"no_imap",                    {true,  true,  false, true,  true}},
+    {"no_omap_fmap",               {true,  true,  true,  false, false}},
+    {"no_imap_omap",               {true,  true,  false, true,  false}},
+    {"no_maps",                    {true,  true,  false, false, false}},
+  };
+
+  printf("\n=== Ablation Study: rms_norm n=%d d=%d (timeout=%.0fs) ===\n",
+         cfg.n, cfg.d, time_limit_sec);
+  printf("%-25s %5s %5s %5s %5s %5s  %10s\n",
+         "Config", "grid", "frnge", "imap", "fmap", "omap", "Time(s)");
+  fflush(stdout);
+
+  for (auto const &ac : configs) {
+    std::string ckpt = kCkptDir + "/ablation_" + ac.name + ".json";
+    std::remove(ckpt.c_str());
+
+    auto wall_start = std::chrono::steady_clock::now();
+    pid_t pid = fork();
+    if (pid == 0) {
+      kernel::Graph ref;
+      build_ref_graph(ref, cfg.n, cfg.d);
+      for (auto const &op : ref.operators) op->fingerprint();
+
+      search::AbstractExpr::symbolic_expr = true;
+      search::GeneratorConfig gen_config =
+          get_generator_config(/*use_symbolic=*/true, /*for_attention=*/false,
+                               time_limit_sec, /*explore_all_mappings=*/false,
+                               /*symbolic_maps=*/false, ac.flags);
+      search::KernelGraphGenerator gen(ref, gen_config, ckpt.data());
+      gen.generate_kernel_graphs_symbolic();
+      _exit(0);
+    }
+    bool timed_out = false;
+    while (true) {
+      int status;
+      pid_t w = waitpid(pid, &status, WNOHANG);
+      if (w > 0) break;
+      auto now = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(now - wall_start).count();
+      if (elapsed > time_limit_sec) {
+        kill(pid, SIGKILL);
+        waitpid(pid, nullptr, 0);
+        timed_out = true;
+        break;
+      }
+      usleep(500000);
+    }
+    auto wall_end = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(wall_end - wall_start).count();
+
+    printf("%-25s %5s %5s %5s %5s %5s  %10.1f%s\n",
+           ac.name.c_str(),
+           ac.flags.grid_dim ? "sym" : "enum",
+           ac.flags.frange   ? "sym" : "enum",
+           ac.flags.imap     ? "sym" : "enum",
+           ac.flags.fmap     ? "sym" : "enum",
+           ac.flags.omap     ? "sym" : "enum",
+           elapsed,
+           timed_out ? " (timeout)" : "");
+    fflush(stdout);
+
+    std::remove(ckpt.c_str());
+  }
+}
+
 int main(int argc, char **argv) {
   bool debug        = false;
   bool force_nonsym = false;
@@ -208,6 +289,7 @@ int main(int argc, char **argv) {
   bool explore_all  = false;
   bool search_only  = false;
   bool sym_maps     = false;
+  bool ablation     = false;
   double time_limit = -1;
   std::string sym_ckpt_override;
   std::string config_str;
@@ -221,6 +303,7 @@ int main(int argc, char **argv) {
     else if (arg == "--explore-all-maps") explore_all = true;
     else if (arg == "--search-only")     search_only = true;
     else if (arg == "--symbolic-maps")   sym_maps    = true;
+    else if (arg == "--ablation")        ablation    = true;
     else if (arg == "--config") {
       if (i + 1 >= argc) {
         std::cerr << "--config requires n,d argument\n";
@@ -259,6 +342,11 @@ int main(int argc, char **argv) {
     configs.push_back({n, d});
   } else {
     configs = debug ? std::vector<RmsNormConfig>{kDebugConfig} : get_configs();
+  }
+  if (ablation) {
+    RmsNormConfig cfg = configs.empty() ? kDebugConfig : configs[0];
+    run_ablation(cfg, time_limit >= 0 ? time_limit : 3600.0);
+    return 0;
   }
   run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
                   sym_ckpt_override, time_limit, explore_all, search_only, sym_maps);

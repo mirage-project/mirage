@@ -328,7 +328,12 @@ static void run_experiments(std::vector<RmsNormMlpConfig> const &configs,
   }
 }
 
-// Ablation study: measure search time with different symbolization levels
+// Ablation study: measure search time with different symbolization levels.
+// Uses fork() + hard kill for timeout since verification can block indefinitely.
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
+
 static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
   ensure_dir(kCkptDir);
 
@@ -337,21 +342,7 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
     SymFlags flags;
   };
 
-  // Test from fastest (most symbolic) to slowest (most concrete)
   std::vector<AblationConfig> configs = {
-    {"all_sym (full SSO)",         {true,  true,  true,  true,  true}},
-    {"+sym_omap",                  {true,  true,  true,  true,  false}},
-    {"+sym_fmap",                  {true,  true,  true,  false, false}},
-    {"+sym_imap",                  {true,  true,  false, false, false}},
-    {"sym_grid+frange only",       {true,  true,  false, false, false}},
-    {"sym_grid only",              {true,  false, false, false, false}},
-    {"all_concrete (exhaustive)",  {false, false, false, false, false}},
-    {"maps_sym, grid_concrete",    {false, false, true,  true,  true}},
-  };
-
-  // Deduplicate: configs[2] and [3] are the same (both sym_grid+frange, no maps)
-  // Fix: config[2] should be +sym_imap (grid+frange+imap), config[3] is grid+frange only
-  configs = {
     {"all_sym",                    {true,  true,  true,  true,  true}},
     {"no_omap",                    {true,  true,  true,  true,  false}},
     {"no_fmap",                    {true,  true,  true,  false, true}},
@@ -359,37 +350,56 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
     {"no_omap_fmap",               {true,  true,  true,  false, false}},
     {"no_imap_omap",               {true,  true,  false, true,  false}},
     {"no_maps",                    {true,  true,  false, false, false}},
-    {"grid_only",                  {true,  false, false, false, false}},
-    {"none",                       {false, false, false, false, false}},
-    {"maps_only",                  {false, false, true,  true,  true}},
   };
 
-  kernel::Graph ref;
-  build_ref_graph(ref, cfg.n, cfg.d);
-  for (auto const &op : ref.operators) op->fingerprint();
-
-  printf("\n=== Ablation Study: rmsnorm_mlp n=%d d=%d ===\n", cfg.n, cfg.d);
-  printf("%-25s %5s %5s %5s %5s %5s  %10s  %10s\n",
-         "Config", "grid", "frnge", "imap", "fmap", "omap", "Time(s)", "Graphs");
+  printf("\n=== Ablation Study: rmsnorm_mlp n=%d d=%d (timeout=%.0fs) ===\n",
+         cfg.n, cfg.d, time_limit_sec);
+  printf("%-25s %5s %5s %5s %5s %5s  %10s\n",
+         "Config", "grid", "frnge", "imap", "fmap", "omap", "Time(s)");
+  fflush(stdout);
 
   for (auto const &ac : configs) {
     std::string ckpt = kCkptDir + "/ablation_" + ac.name + ".json";
-    // Remove old checkpoint to force fresh search
     std::remove(ckpt.c_str());
 
-    search::AbstractExpr::symbolic_expr = true;
-    search::GeneratorConfig gen_config =
-        get_generator_config(/*use_symbolic=*/true, /*for_attention=*/false,
-                             time_limit_sec, /*explore_all_mappings=*/false,
-                             /*symbolic_maps=*/false, ac.flags);
-    search::KernelGraphGenerator gen(ref, gen_config, ckpt.data());
+    // Fork a child process for hard timeout
+    auto wall_start = std::chrono::steady_clock::now();
+    pid_t pid = fork();
+    if (pid == 0) {
+      // Child: run search, exit with 0 on completion
+      kernel::Graph ref;
+      build_ref_graph(ref, cfg.n, cfg.d);
+      for (auto const &op : ref.operators) op->fingerprint();
 
-    auto t0 = std::chrono::steady_clock::now();
-    gen.generate_kernel_graphs_symbolic();
-    auto t1 = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(t1 - t0).count();
+      search::AbstractExpr::symbolic_expr = true;
+      search::GeneratorConfig gen_config =
+          get_generator_config(/*use_symbolic=*/true, /*for_attention=*/false,
+                               time_limit_sec, /*explore_all_mappings=*/false,
+                               /*symbolic_maps=*/false, ac.flags);
+      search::KernelGraphGenerator gen(ref, gen_config, ckpt.data());
+      gen.generate_kernel_graphs_symbolic();
+      _exit(0);
+    }
+    // Parent: wait with hard timeout
+    bool timed_out = false;
+    while (true) {
+      int status;
+      pid_t w = waitpid(pid, &status, WNOHANG);
+      if (w > 0) break; // child finished
+      auto now = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(now - wall_start).count();
+      if (elapsed > time_limit_sec) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        timed_out = true;
+        break;
+      }
+      usleep(500000); // check every 0.5s
+    }
+    auto wall_end = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(wall_end - wall_start).count();
 
-    printf("%-25s %5s %5s %5s %5s %5s  %10.1f  %10zu\n",
+    printf("%-25s %5s %5s %5s %5s %5s  %10.1f%s\n",
            ac.name.c_str(),
            ac.flags.grid_dim ? "sym" : "enum",
            ac.flags.frange   ? "sym" : "enum",
@@ -397,9 +407,9 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
            ac.flags.fmap     ? "sym" : "enum",
            ac.flags.omap     ? "sym" : "enum",
            elapsed,
-           gen.generated_graphs.size());
+           timed_out ? " (timeout)" : "");
+    fflush(stdout);
 
-    // Clean up ablation checkpoint
     std::remove(ckpt.c_str());
   }
 }
