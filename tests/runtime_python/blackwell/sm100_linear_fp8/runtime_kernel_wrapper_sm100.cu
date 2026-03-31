@@ -29,15 +29,15 @@
 
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cluster_launch.hpp>
-#include <cutlass/half.h> 
+#include <cutlass/half.h>
 #include <cutlass/util/print_error.hpp>
 
-#include <cute/algorithm/cooperative_copy.hpp> 
+#include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/arch/cluster_sm90.hpp>
-#include <cute/arch/tmem_allocator_sm100.hpp> 
+#include <cute/arch/tmem_allocator_sm100.hpp>
 #include <cute/numeric/integral_constant.hpp>
 #include <cute/pointer_flagged.hpp>
-#include <cute/tensor.hpp> 
+#include <cute/tensor.hpp>
 
 using bfloat16 = cute::bfloat16_t;
 // sm100_linear_fp8_1d2d
