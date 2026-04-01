@@ -21,10 +21,13 @@ supported_shapes = [
     for shape in linear_kernel.supported_dense_gemm_shapes()
 ]
 representative_ks = [128, 768, 2048, 7168]
+representative_batch_sizes = [1, 2, 4, 8, 16]
 pipeline_shapes = [
     shape
     for shape in supported_shapes
-    if shape[0] == 1 and shape[1] == 128 and shape[2] in representative_ks
+    if shape[0] in representative_batch_sizes
+    and shape[1] == 128
+    and shape[2] in representative_ks
 ]
 
 

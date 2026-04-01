@@ -5,7 +5,7 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-batch_sizes = [1, 8]
+batch_sizes = [1, 2, 4, 8, 16]
 hidden_sizes = [int(x) for x in runtime_kernel_blackwell.supported_hidden_sizes()]
 group_sizes = [int(x) for x in runtime_kernel_blackwell.supported_group_sizes()]
 block_k = 128

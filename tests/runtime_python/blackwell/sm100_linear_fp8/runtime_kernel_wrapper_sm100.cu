@@ -582,38 +582,57 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
                                                residual_ptr);                  \
     break;
 
+#define DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(BATCH_SIZE, HAS_RESIDUAL)    \
+  case BATCH_SIZE:                                                             \
+    switch (reduction_size) {                                                  \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 128, HAS_RESIDUAL)                                  \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 256, HAS_RESIDUAL)                                  \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 384, HAS_RESIDUAL)                                  \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 512, HAS_RESIDUAL)                                  \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 768, HAS_RESIDUAL)                                  \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 1024, HAS_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 1536, HAS_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 2048, HAS_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 4096, HAS_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
+          BATCH_SIZE, 128, 7168, HAS_RESIDUAL)                                 \
+      default:                                                                 \
+        TORCH_CHECK(false, "Unsupported reduction_size dispatch");             \
+    }                                                                          \
+    break;
+
   if (has_residual) {
-    switch (reduction_size) {
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 128, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 256, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 384, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 512, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 768, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1024, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1536, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 2048, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 4096, true)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 7168, true)
+    switch (batch_size) {
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(1, true)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(2, true)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(4, true)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(8, true)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(16, true)
       default:
-        TORCH_CHECK(false, "Unsupported reduction_size dispatch");
+        TORCH_CHECK(false, "Unsupported batch_size dispatch");
     }
   } else {
-    switch (reduction_size) {
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 128, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 256, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 384, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 512, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 768, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1024, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 1536, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 2048, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 4096, false)
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(1, 128, 7168, false)
+    switch (batch_size) {
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(1, false)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(2, false)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(4, false)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(8, false)
+      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(16, false)
       default:
-        TORCH_CHECK(false, "Unsupported reduction_size dispatch");
+        TORCH_CHECK(false, "Unsupported batch_size dispatch");
     }
   }
 
+#undef DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE
 #undef DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE
 }
 

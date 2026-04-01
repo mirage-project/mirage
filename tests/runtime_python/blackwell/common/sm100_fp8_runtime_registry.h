@@ -10,7 +10,7 @@ namespace mirage::blackwell::sm100_fp8_runtime {
 
 inline constexpr int kBlockK = 128;
 inline constexpr std::array<int, 1> kSupportedGroupSizes = {128};
-inline constexpr std::array<int, 1> kSupportedBatchSizes = {1};
+inline constexpr std::array<int, 5> kSupportedBatchSizes = {1, 2, 4, 8, 16};
 inline constexpr std::array<int, 1> kSupportedOutputSizes = {128};
 inline constexpr std::array<int, 10> kSupportedReductionSizes = {
     128, 256, 384, 512, 768, 1024, 1536, 2048, 4096, 7168};

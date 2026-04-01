@@ -226,7 +226,7 @@ except RuntimeError as exc:
     assert "Unsupported linear_fp8_1d2d_sm100 shape" in str(exc)
     print("Unsupported N negative test passed!")
 
-unsupported_b = 2
+unsupported_b = 3
 x_bad_b = torch.randn((unsupported_b, 768), device="cuda", dtype=torch.bfloat16, generator=g)
 w_bad_b = torch.randn((128, 768), device="cuda", dtype=torch.bfloat16, generator=g)
 x_bad_b_q, x_bad_b_scale = quantize_to_fp8_with_packed_ue8m0_scale(x_bad_b, block_k)
@@ -240,6 +240,36 @@ try:
 except RuntimeError as exc:
     assert "Unsupported linear_fp8_1d2d_sm100 shape" in str(exc)
     print("Unsupported B negative test passed!")
+
+unsupported_large_b = 32
+x_bad_large_b = torch.randn(
+    (unsupported_large_b, 768), device="cuda", dtype=torch.bfloat16, generator=g
+)
+w_bad_large_b = torch.randn(
+    (128, 768), device="cuda", dtype=torch.bfloat16, generator=g
+)
+x_bad_large_b_q, x_bad_large_b_scale = quantize_to_fp8_with_packed_ue8m0_scale(
+    x_bad_large_b, block_k
+)
+w_bad_large_b_q, w_bad_large_b_scale = quantize_to_fp8_with_packed_ue8m0_scale(
+    w_bad_large_b, block_k
+)
+bad_large_b_output = torch.empty(
+    (unsupported_large_b, 128), device="cuda", dtype=torch.bfloat16
+)
+try:
+    runtime_kernel_blackwell.linear_fp8_1d2d_sm100(
+        x_bad_large_b_q,
+        x_bad_large_b_scale,
+        w_bad_large_b_q,
+        w_bad_large_b_scale,
+        None,
+        bad_large_b_output,
+    )
+    raise AssertionError("Expected unsupported large B failure")
+except RuntimeError as exc:
+    assert "Unsupported linear_fp8_1d2d_sm100 shape" in str(exc)
+    print("Unsupported large B negative test passed!")
 
 x_valid = torch.randn((1, 768), device="cuda", dtype=torch.bfloat16, generator=g)
 w_valid = torch.randn((128, 768), device="cuda", dtype=torch.bfloat16, generator=g)
