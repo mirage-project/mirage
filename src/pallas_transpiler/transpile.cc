@@ -294,6 +294,9 @@ bool is_supported_tb_op(type::TBOperatorType type) {
     case type::TB_REDUCTION_1_TO_DIMX_OP:
     case type::TB_REDUCTION_2_TO_DIMX_OP:
     case type::TB_FORLOOP_ACCUM_NO_RED_OP:
+    case type::TB_FORLOOP_ACCUM_MAX_OP:
+    case type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+    case type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP:
       return true;
     default:
       return false;
@@ -368,9 +371,6 @@ PallasTranspiler::PallasTranspiler(kernel::Graph const *graph,
           case type::TB_CONCAT_1_OP:
           case type::TB_CONCAT_2_OP:
           case type::TB_CONCAT_THEN_MATMUL_OP:
-          case type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
-          case type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP:
-          case type::TB_FORLOOP_ACCUM_MAX_OP:
             errors.push_back(
                 fmt("Original graph contains an unsupported threadblock op for the Pallas "
                     "v1 backend: $",
@@ -523,16 +523,18 @@ PallasCustomOPTranspileResult
   code.inc_indent();
 
   for (tb::TBOperator const *tb_op : tb_graph.operators) {
-    if (tb_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+    if (tb_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+        tb_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+        tb_op->op_type == type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP) {
       tb::STensor const &output = tb_op->output_tensors[0];
-      std::string acc_dtype = get_jnp_dtype(output.data_type);
-      if (output.data_type != type::DT_FLOAT32) {
-        acc_dtype = "jnp.float32";
-      }
-      code.e("$ = jnp.zeros($, dtype=$)",
+      code.e("$ = jnp.zeros($, dtype=jnp.float32)",
              get_stensor_name(output),
-             get_shape_literal(output),
-             acc_dtype);
+             get_shape_literal(output));
+    } else if (tb_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) {
+      tb::STensor const &output = tb_op->output_tensors[0];
+      code.e("$ = jnp.full($, -jnp.inf, dtype=jnp.float32)",
+             get_stensor_name(output),
+             get_shape_literal(output));
     }
   }
 
@@ -656,6 +658,42 @@ PallasCustomOPTranspileResult
                get_stensor_name(output),
                get_stensor_name(output),
                get_stensor_name(tb_op->input_tensors[0]));
+        break;
+      }
+      case type::TB_FORLOOP_ACCUM_MAX_OP: {
+        tb::STensor const &output = tb_op->output_tensors[0];
+        code.e("$ = jnp.maximum($, $.astype(jnp.float32))",
+               get_stensor_name(output),
+               get_stensor_name(output),
+               get_stensor_name(tb_op->input_tensors[0]));
+        break;
+      }
+      case type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+        // input_tensors[0] = value to accumulate
+        // input_tensors[1] = rescale factor exp(old_max - new_max)
+        tb::STensor const &output = tb_op->output_tensors[0];
+        tb::STensor const &input = tb_op->input_tensors[0];
+        tb::STensor const &rescale = tb_op->input_tensors[1];
+        code.e("$ = $ * $.astype(jnp.float32) + $.astype(jnp.float32)",
+               get_stensor_name(output),
+               get_stensor_name(output),
+               get_stensor_name(rescale),
+               get_stensor_name(input));
+        break;
+      }
+      case type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        // input_tensors[0] = value to reduce-accumulate
+        // input_tensors[1] = rescale factor exp(old_max - new_max)
+        tb::STensor const &output = tb_op->output_tensors[0];
+        tb::STensor const &input = tb_op->input_tensors[0];
+        tb::STensor const &rescale = tb_op->input_tensors[1];
+        int reduce_dim = input.num_dims - 1;
+        code.e("$ = $ * $.astype(jnp.float32) + jnp.sum($.astype(jnp.float32), axis=$, keepdims=True)",
+               get_stensor_name(output),
+               get_stensor_name(output),
+               get_stensor_name(rescale),
+               get_stensor_name(input),
+               reduce_dim);
         break;
       }
       default:
