@@ -67,11 +67,11 @@ setup(
             extra_compile_args={
                 'cxx': ['-DMIRAGE_GRACE_BLACKWELL'],
                 'nvcc': [
-                    '-O0',          # debug - change to 03 later
-                    '-g',           # debug
+                    '-O3',          # debug - change to 03 later
+                    # '-g',           # debug
                     # '-G',           # debug
-                    '-Xcompiler',   # debug 
-                    '-rdynamic',    # debug
+                    # '-Xcompiler',   # debug 
+                    # '-rdynamic',    # debug
                     '-lineinfo',    # debug
                     '-gencode=arch=compute_100a,code=sm_100a',
                     '-DMIRAGE_GRACE_BLACKWELL',

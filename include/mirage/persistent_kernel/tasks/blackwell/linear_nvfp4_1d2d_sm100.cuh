@@ -61,6 +61,7 @@ template <typename T_,
           typename TMA_SFA,
           typename TMA_SFB,
           class BiasTensor,
+          class OutputTensor,
           typename TMA_OUT,
           int MMA_M,
           int MMA_N,
@@ -79,6 +80,7 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
                                   const TMA_SFA &tma_sfa,
                                   const TMA_SFB &tma_sfb,
                                   BiasTensor mBias,
+                                  OutputTensor mOutput,
                                   const TMA_OUT &tma_out) {
 
     static_assert(std::is_same_v<T_, cutlass::float_e2m1_t>, "T_ must be cutlass::float_e2m1_t");
@@ -87,7 +89,8 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     static_assert(MMA_N % 8 == 0 && MMA_N != 0 && MMA_N <= 256, "MMA_N must be {8, 16, ... 256} in steps of 8");
 
     constexpr int MMA_K = 64;
-
+    constexpr int EPI_PIPE_DEPTH = 4;
+    constexpr int EPI_N = MMA_N / EPI_PIPE_DEPTH;
     using A_type  = cutlass::float_e2m1_t;
     using B_type  = cutlass::float_e2m1_t;
     using SF_type = cutlass::float_ue4m3_t;
@@ -95,13 +98,18 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
 
     constexpr int B_FP4 = 1;
     constexpr int B_SF  = 0;
-    constexpr int B_OUT = 3;
+    constexpr int B_OUT = 0;
     constexpr int M = 3;
     constexpr int S = 3;
+    constexpr int OUTPUT_SWIZZLE = 128 / sizeof(C_type);
 
     constexpr int NUM_MMA_M = 1;
     constexpr int NUM_MMA_N = 1;
     constexpr int NUM_MMA_K = 4;
+
+    static_assert(MMA_N % EPI_PIPE_DEPTH == 0, "EPI_PIPE_DEPTH must evenly divide MMA_N");
+    static_assert(NUM_C_STAGE >= EPI_PIPE_DEPTH, "NUM_C_STAGE must cover all epilogue subtiles");
+    static_assert(EPI_N % OUTPUT_SWIZZLE == 0, "EPI subtile must align with the output swizzle width");
 
     int warp_idx = cutlass::canonical_warp_idx_sync();
     int lane_idx = kernel::lane_id();
@@ -177,26 +185,11 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
         tiled_mma, cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<NUM_AB_STAGE>{}));
     auto mma_shape_B = cute::partition_shape_B(
         tiled_mma, cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<NUM_AB_STAGE>{}));
-    auto mma_shape_C = cute::make_shape(
-        cute::make_shape(cute::Int<MMA_N>{}, cute::Int<MMA_M>{}),
-        cute::Int<1>{}, cute::Int<1>{}, cute::Int<NUM_C_STAGE>{});
-
     // bK=256 FP4 = 128 bytes = one 128B swizzle stripe, matches B_FP4=3 TMA descriptor
-    auto sA_layout      = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<A_type>{}, mma_shape_A);
-    auto sB_layout      = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<B_type>{}, mma_shape_B);
-    auto sC_layout_fake = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<C_type>{}, mma_shape_C);
-    auto sC_shape = cute::make_shape(
-        cute::make_shape(cute::Int<MMA_M>{}, cute::Int<MMA_N>{}),
-        cute::Int<1>{}, cute::Int<1>{},
-        cute::make_shape(cute::Int<1>{}, cute::Int<NUM_C_STAGE>{}));
-    auto sC_stride = cute::make_stride(
-        cute::make_stride(cute::Int<1>{}, cute::Int<MMA_M>{}),
-        cute::Int<0>{}, cute::Int<0>{},
-        cute::make_stride(cute::Int<0>{}, cute::Int<MMA_M * MMA_N>{}));
-    auto sC_layout = cute::composition(
-        sC_layout_fake.layout_a(),
-        sC_layout_fake.offset(),
-        cute::make_layout(sC_shape, sC_stride));
+    auto sA_layout = cute::UMMA::tile_to_mma_shape(
+        cute::UMMA::Layout_K_SW128_Atom<A_type>{}, mma_shape_A);
+    auto sB_layout = cute::UMMA::tile_to_mma_shape(
+        cute::UMMA::Layout_K_SW128_Atom<B_type>{}, mma_shape_B);
     auto sSFA_layout = cute::tile_to_shape(
         SmemLayoutAtomSFA{},
         cute::append(cute::shape(SmemLayoutAtomSFA{}), cute::Int<NUM_AB_STAGE>{}));
@@ -204,10 +197,11 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
         SmemLayoutAtomSFB{},
         cute::append(cute::shape(SmemLayoutAtomSFB{}), cute::Int<NUM_AB_STAGE>{}));
 
-    using SharedStorage = PipedScaledSharedStorage<A_type, B_type, C_type, SF_type,
-                                                   decltype(sA_layout), decltype(sB_layout),
-                                                   decltype(sC_layout), decltype(sSFA_layout),
-                                                   decltype(sSFB_layout), NUM_AB_STAGE, NUM_ACC_STAGE>;
+    constexpr int NUM_C_STAGE_ELEMENTS = MMA_M * EPI_N * NUM_C_STAGE;
+    using SharedStorage = PipedScaledEpilogueSharedStorage<A_type, B_type, C_type, SF_type,
+                                                           decltype(sA_layout), decltype(sB_layout),
+                                                           decltype(sSFA_layout), decltype(sSFB_layout),
+                                                           NUM_C_STAGE_ELEMENTS, NUM_AB_STAGE, NUM_ACC_STAGE>;
 
     extern __shared__ char shared_memory[];
     uintptr_t aligned_smem = (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
@@ -217,7 +211,6 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
     cute::Tensor tCsB   = shared_storage.tensor_sB();
     cute::Tensor tCsSFA = shared_storage.tensor_sSFA();
     cute::Tensor tCsSFB = shared_storage.tensor_sSFB();
-    cute::Tensor tCsC   = shared_storage.tensor_sC();
 
     if (warp_idx == 0) {
         cutlass::arch::detail::initialize_barrier_array_aligned<
@@ -248,13 +241,13 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
 
     void    *sA_ptr   = static_cast<void*>(&shared_storage.A);
     void    *sB_ptr   = static_cast<void*>(&shared_storage.B);
-    C_type  *sC_ptr   = shared_storage.C.begin();
+    C_type  *sC_ptr   = shared_storage.C_epi.begin();
     SF_type *sSFA_ptr = shared_storage.SFA.begin();
     SF_type *sSFB_ptr = shared_storage.SFB.begin();
 
     using A_smem_TMA   = smem_tma<A_type,  B_FP4, M, S, MMA_M, MMA_K, 1>;
     using B_smem_TMA   = smem_tma<B_type,  B_FP4, M, S, MMA_N, MMA_K, 1>;
-    using C_smem_TMA   = smem_tma<C_type,  B_OUT, M, S, MMA_N, MMA_M, 1>;
+    using C_smem_TMA   = smem_tma<C_type,  B_OUT, M, S, MMA_M, EPI_N, 1>;
     using SFA_smem_TMA = smem_tma<SF_type, B_SF,  M, S, MMA_M, MMA_K_SF, 1>;
     using SFB_smem_TMA = smem_tma<SF_type, B_SF,  M, S, MMA_N, MMA_K_SF, 1>;
 
@@ -492,62 +485,101 @@ linear_nvfp4_1d2d_sm100_task_impl(const TMA_A &tma_a,
             }
         }
     } else if (warp_idx < 4) {
-        // Epilogue
+        // Epilogue: drain the 128x128 accumulator tile as four 128x32 subtiles.
         tmem_allocation_result_barrier.arrive_and_wait();
 
+        auto epi_tile_shape = cute::make_shape(cute::Int<MMA_M>{}, cute::Int<EPI_N>{});
         cute::Tensor tCtAcc_proto = tCtC(cute::make_coord(cute::_, cute::_), cute::_0{}, cute::_0{}, cute::_0{});
-        cute::TiledCopy tiled_copy_t2r = cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc_proto);
+        cute::Tensor tCtAcc_epi_proto = cute::flat_divide(tCtAcc_proto, epi_tile_shape);
+        cute::Tensor tCtAcc_subtile_proto = tCtAcc_epi_proto(cute::_, cute::_, cute::_0{}, cute::_0{});
+
+        cute::TiledCopy tiled_copy_t2r = cute::make_tmem_copy(
+            cute::SM100_TMEM_LOAD_32dp32b2x{}, tCtAcc_subtile_proto);
         cute::ThrCopy thr_copy_t2r = tiled_copy_t2r.get_slice(threadIdx.x);
-        cute::Tensor tTR_tCtC = thr_copy_t2r.partition_S(tCtC(cute::make_coord(cute::_, cute::_), cute::_0{}, cute::_0{}, cute::_));
-        cute::Tensor tCrC_ref = cute::make_tensor<C_type>(cute::make_shape(cute::Int<MMA_M>{}, cute::Int<MMA_N>{}));
-        cute::Tensor tCrAcc   = cute::make_tensor<C_type>(cute::shape(thr_copy_t2r.partition_D(tCrC_ref)));
+        cute::Tensor tCrSubtile_ref = cute::make_tensor<C_type>(epi_tile_shape);
+        cute::Tensor tCcSubtile = cute::make_identity_tensor(epi_tile_shape);
+        cute::Tensor tCrAcc0 = cute::make_tensor<C_type>(cute::shape(thr_copy_t2r.partition_D(tCrSubtile_ref)));
+        cute::Tensor tCrAcc1 = cute::make_tensor<C_type>(cute::shape(thr_copy_t2r.partition_D(tCrSubtile_ref)));
+        cute::Tensor tCrBias0 = cute::make_tensor<C_type>(cute::shape(tCrAcc0));
+        cute::Tensor tCrBias1 = cute::make_tensor<C_type>(cute::shape(tCrAcc1));
+        cute::Tensor tCrCoord = thr_copy_t2r.partition_D(tCcSubtile);
 
         int num_tiles_executed = 0;
         for (int m_tile = tile_m_begin; m_tile < tile_m_end; ++m_tile) {
           for (int n_tile = tile_n_begin; n_tile < tile_n_end; ++n_tile) {
             int epi_rd_acc_buf        = num_tiles_executed % NUM_ACC_STAGE;
             int epi_rd_acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
-            int c_smem_wr_buffer      = num_tiles_executed % NUM_C_STAGE;
-
-            cute::Tensor tCgBias = gBias(cute::_, cute::_, m_tile, n_tile);
-            cute::Tensor tCrBias = cute::make_tensor<C_type>(cute::shape(tCrAcc));
-            if constexpr (!NOBIAS) {
-              cute::copy(thr_copy_t2r.partition_D(tCgBias), tCrBias);
-            }
-
             cute::wait_barrier(shared_storage.acc_full_mbar_ptr[epi_rd_acc_buf], epi_rd_acc_full_phase);
-            cute::copy(tiled_copy_t2r, tTR_tCtC(cute::_, cute::_, cute::_, epi_rd_acc_buf), tCrAcc);
+
+            auto tCtAcc_tile = tCtC(cute::make_coord(cute::_, cute::_), cute::_0{}, cute::_0{}, epi_rd_acc_buf);
+            auto tCtAcc_epi = cute::flat_divide(tCtAcc_tile, epi_tile_shape);
+
+            auto tCgBias_tile = gBias(cute::_, cute::_, m_tile, n_tile);
+            auto tCgBias_epi = cute::flat_divide(tCgBias_tile, epi_tile_shape);
+
+            auto load_subtile = [&](int subtile_idx, auto &tCrAccStage, auto &tCrBiasStage) {
+              auto tCtAcc_subtile = tCtAcc_epi(cute::_, cute::_, cute::_0{}, subtile_idx);
+              cute::copy(tiled_copy_t2r, thr_copy_t2r.partition_S(tCtAcc_subtile), tCrAccStage);
+              if constexpr (!NOBIAS) {
+                auto tCgBias_subtile = tCgBias_epi(cute::_, cute::_, cute::_0{}, subtile_idx);
+                cute::copy(thr_copy_t2r.partition_D(tCgBias_subtile), tCrBiasStage);
+              }
+            };
+
+            load_subtile(0, tCrAcc0, tCrBias0);
             epilogue_wg_barrier.arrive_and_wait();
             if (cute::elect_one_sync()) {
               cute::arrive_barrier(shared_storage.acc_empty_mbar_ptr[epi_rd_acc_buf]);
             }
 
-            if constexpr (!NOBIAS) {
+            for (int subtile_idx = 0; subtile_idx < EPI_PIPE_DEPTH; ++subtile_idx) {
+              int stage_idx = subtile_idx & 1;
+              int next_stage_idx = (subtile_idx + 1) & 1;
+              auto &tCrAcc = stage_idx == 0 ? tCrAcc0 : tCrAcc1;
+              auto &tCrBias = stage_idx == 0 ? tCrBias0 : tCrBias1;
+              auto &tCrAccNext = next_stage_idx == 0 ? tCrAcc0 : tCrAcc1;
+              auto &tCrBiasNext = next_stage_idx == 0 ? tCrBias0 : tCrBias1;
+
+              if (subtile_idx + 1 < EPI_PIPE_DEPTH) {
+                load_subtile(subtile_idx + 1, tCrAccNext, tCrBiasNext);
+              }
+
+              if constexpr (!NOBIAS) {
+                CUTE_UNROLL
+                for (int i = 0; i < tCrAcc.size(); i++) {
+                  tCrAcc[i] += tCrBias[i];
+                }
+              }
+
+              int c_smem_wr_buffer = subtile_idx % NUM_C_STAGE;
+              sC.set_ptr(static_cast<void*>(
+                  shared_storage.C_epi.begin() + c_smem_wr_buffer * MMA_M * EPI_N));
+
               CUTE_UNROLL
-              for (int i = 0; i < tCrAcc.size(); i++) {
-                tCrAcc[i] += tCrBias[i];
+              for (int i = 0; i < tCrAcc.size(); ++i) {
+                auto coord = tCrCoord(i);
+                auto m_coord = cute::get<0>(coord);
+                auto n_coord = cute::get<1>(coord);
+                *sC(m_coord, n_coord) = tCrAcc[i];
               }
-            }
-            epilogue_wg_barrier.arrive_and_wait();
 
-            cute::copy(tCrAcc, cute::flatten(tCsC(cute::_, 0, 0, c_smem_wr_buffer))(cute::_, threadIdx.x));
-            cute::tma_store_fence();
-            epilogue_wg_barrier.arrive_and_wait();
+              cute::tma_store_fence();
+              epilogue_wg_barrier.arrive_and_wait();
 
-            if (warp_idx == 0 && cute::elect_one_sync()) {
-              constexpr int SWIZZLE_SIZE = 32;
-              sC.set_ptr(static_cast<void*>(raw_pointer_cast(tCsC(cute::_, 0, 0, c_smem_wr_buffer).data())));
-              if constexpr (SplitK) {
-                tma_out.tma_reduce_add_async(sC.base_ptr,
-                    {0, n_tile * (MMA_N / SWIZZLE_SIZE), m_tile * MMA_M});
-              } else {
-                tma_out.tma_store_async(sC.base_ptr,
-                    {0, n_tile * (MMA_N / SWIZZLE_SIZE), m_tile * MMA_M});
+              if (warp_idx == 0 && cute::elect_one_sync()) {
+                int out_n_coord = n_tile * EPI_PIPE_DEPTH + subtile_idx;
+                if constexpr (SplitK) {
+                  tma_out.tma_reduce_add_async(
+                      sC.base_ptr, {0, out_n_coord, m_tile * MMA_M});
+                } else {
+                  tma_out.tma_store_async(
+                      sC.base_ptr, {0, out_n_coord, m_tile * MMA_M});
+                }
+                cute::tma_store_arrive();
+                cute::tma_store_wait<NUM_C_STAGE - 1>();
               }
-              cute::tma_store_arrive();
-              cute::tma_store_wait<NUM_C_STAGE - 1>();
+              epilogue_wg_barrier.arrive_and_wait();
             }
-
             num_tiles_executed++;
           }
         }

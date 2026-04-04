@@ -43,6 +43,7 @@ template <typename T,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           class BiasTensor,
+          class OutputTensor,
           int MMA_M,
           int MMA_N,
           bool NoBias,
@@ -55,14 +56,17 @@ void linear_nvfp4_1d2d_sm100_wrapper(void *tma_a_desc_ptr,
                                      void *tma_sfa_desc_ptr,
                                      void *tma_sfb_desc_ptr,
                                      BiasTensor mBias,
+                                     OutputTensor mOutput,
                                      void *tma_out_desc_ptr) {
   constexpr int MMA_K          = 64;
   constexpr int NUM_MMA_K      = 4;
   constexpr int bK             = MMA_K * NUM_MMA_K;
   constexpr int SCALE_VECTOR_SIZE = 16;
+  constexpr int EPI_PIPE_DEPTH = 4;
+  constexpr int EPI_N          = MMA_N / EPI_PIPE_DEPTH;
   constexpr int B_FP4 = 3;
   constexpr int B_SF  = 0;
-  constexpr int B_OUT = 3;
+  constexpr int B_OUT = 0;
   constexpr int M = 3;
   constexpr int S = 3;
 
@@ -88,9 +92,9 @@ void linear_nvfp4_1d2d_sm100_wrapper(void *tma_a_desc_ptr,
   constexpr int SWIZZLE_SIZE = 128 / sizeof(float);
   using TMA_OUT = kernel::tma::tma_3d<float, B_OUT, M, S,
       BATCH_SIZE, OUTPUT_SIZE / SWIZZLE_SIZE, SWIZZLE_SIZE,
-      MMA_M, MMA_N / SWIZZLE_SIZE, SWIZZLE_SIZE,
+      MMA_M, EPI_N / SWIZZLE_SIZE, SWIZZLE_SIZE,
       OUTPUT_SIZE, SWIZZLE_SIZE, 1,
-      1, 1, MMA_M * MMA_N, true>;
+      1, 1, MMA_M * EPI_N, true>;
 
   TMA_A   tma_a(static_cast<CUtensorMap *>(tma_a_desc_ptr));
   TMA_B   tma_b(static_cast<CUtensorMap *>(tma_b_desc_ptr));
@@ -99,12 +103,12 @@ void linear_nvfp4_1d2d_sm100_wrapper(void *tma_a_desc_ptr,
   TMA_OUT tma_out(static_cast<CUtensorMap *>(tma_out_desc_ptr));
 
   kernel::linear_nvfp4_1d2d_sm100_task_impl<T, TMA_A, TMA_B, TMA_SFA, TMA_SFB,
-                                             BiasTensor, TMA_OUT,
+                                             BiasTensor, OutputTensor, TMA_OUT,
                                              MMA_M, MMA_N,
                                              BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
                                              SCALE_VECTOR_SIZE, NoBias, /*SplitK=*/false,
                                              NUM_AB_STAGE, NUM_ACC_STAGE, NUM_C_STAGE>(
-      tma_a, tma_b, tma_sfa, tma_sfb, mBias, tma_out);
+      tma_a, tma_b, tma_sfa, tma_sfb, mBias, mOutput, tma_out);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -119,7 +123,7 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
 
   constexpr int B_FP4 = 3;
   constexpr int B_SF  = 0;
-  constexpr int B_OUT = 3;
+  constexpr int B_OUT = 0;
   constexpr int M = 3;
   constexpr int S = 3;
 
@@ -129,6 +133,8 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
   constexpr int MMA_K    = 64;
   constexpr int NUM_MMA_K = 4;
   constexpr int bK = MMA_K * NUM_MMA_K;
+  constexpr int EPI_PIPE_DEPTH = 4;
+  constexpr int EPI_N = MMA_N / EPI_PIPE_DEPTH;
 
   constexpr int NUM_M_TILE_PER_CTA = 1;
   constexpr int NUM_N_TILE_PER_CTA = 1;
@@ -185,7 +191,7 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
     constexpr int SWIZZLE_SIZE = 128 / sizeof(float);
     uint64_t gmem_shape[3]  = {(uint64_t)BATCH_SIZE, (uint64_t)(OUTPUT_SIZE / SWIZZLE_SIZE), (uint64_t)SWIZZLE_SIZE};
     uint64_t gmem_stride[3] = {1, (uint64_t)SWIZZLE_SIZE, (uint64_t)OUTPUT_SIZE};
-    uint32_t smem_shape[3]  = {(uint32_t)MMA_M, (uint32_t)(MMA_N / SWIZZLE_SIZE), (uint32_t)SWIZZLE_SIZE};
+    uint32_t smem_shape[3]  = {(uint32_t)MMA_M, (uint32_t)(EPI_N / SWIZZLE_SIZE), (uint32_t)SWIZZLE_SIZE};
     mirage::runtime::fill_tma_desc<float, B_OUT, M, S, 3>(
         &host_o_desc, static_cast<float *>(output_ptr),
         gmem_shape, gmem_stride, smem_shape, 1, 1);
@@ -208,13 +214,15 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
       cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}));
   cute::Tensor mBias = cute::make_tensor(
       cute::make_gmem_ptr(static_cast<float *>(residual_ptr)), layout_Bias);
+  cute::Tensor mOutput = cute::make_tensor(
+      cute::make_gmem_ptr(static_cast<float *>(output_ptr)), layout_Bias);
 
   constexpr int num_tiles_m = BATCH_SIZE / bM / NUM_M_TILE_PER_CTA;
   constexpr int num_tiles_n = OUTPUT_SIZE / bN / NUM_N_TILE_PER_CTA;
   dim3 grid_dim(num_tiles_m, num_tiles_n, 1);
   dim3 block_dim(256, 1, 1);
   dim3 cluster_dim(1, 1, 1);
-  constexpr int NUM_C_STAGE_LAUNCH = 1;
+  constexpr int NUM_C_STAGE_LAUNCH = 4;
   int smemBytes = 224 * 1024;
 
   bool has_residual = (residual_ptr != nullptr);
@@ -226,7 +234,7 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
         params, (void const *)kernel_ptr,
         (void *)desc_i_ptr, (void *)desc_w_ptr,
         (void *)desc_i_sf_ptr, (void *)desc_w_sf_ptr,
-        mBias, (void *)desc_o_ptr);
+        mBias, mOutput, (void *)desc_o_ptr);
     CUTE_CHECK_LAST();
     if (status != cutlass::Status::kSuccess) {
       std::cerr << "Error: Failed at kernel launch" << std::endl;
@@ -235,12 +243,12 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
 
   if (has_residual) {
     launch(&linear_nvfp4_1d2d_sm100_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
-                                            decltype(mBias), MMA_M, MMA_N, false,
+                                            decltype(mBias), decltype(mOutput), MMA_M, MMA_N, false,
                                             /*NUM_AB_STAGE=*/4, /*NUM_ACC_STAGE=*/2,
                                             NUM_C_STAGE_LAUNCH>);
   } else {
     launch(&linear_nvfp4_1d2d_sm100_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
-                                            decltype(mBias), MMA_M, MMA_N, true,
+                                            decltype(mBias), decltype(mOutput), MMA_M, MMA_N, true,
                                             /*NUM_AB_STAGE=*/4, /*NUM_ACC_STAGE=*/2,
                                             NUM_C_STAGE_LAUNCH>);
   }
