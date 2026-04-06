@@ -110,15 +110,15 @@ template <class TypeA,
           class TypeSF,
           class ASmemLayout,
           class BSmemLayout,
+          class CSmemLayout,
           class SFASmemLayout,
           class SFBSmemLayout,
-          int Num_C_Stage_Elements,
           int Num_AB_Stage,
           int Num_ACC_Stage>
 struct PipedScaledEpilogueSharedStorage {
   alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
   alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
-  alignas(128) cute::ArrayEngine<TypeC, Num_C_Stage_Elements> C_epi;
+  alignas(128) cute::ArrayEngine<TypeC, cute::cosize_v<CSmemLayout>> C_epi;
   alignas(128) cute::ArrayEngine<TypeSF, cute::cosize_v<SFASmemLayout>> SFA;
   alignas(128) cute::ArrayEngine<TypeSF, cute::cosize_v<SFBSmemLayout>> SFB;
 
@@ -138,6 +138,9 @@ struct PipedScaledEpilogueSharedStorage {
   }
   CUTE_DEVICE constexpr auto tensor_sB() {
     return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{});
+  }
+  CUTE_DEVICE constexpr auto tensor_sC() {
+    return cute::make_tensor(cute::make_smem_ptr(C_epi.begin()), CSmemLayout{});
   }
   CUTE_DEVICE constexpr auto tensor_sSFA() {
     return cute::make_tensor(cute::make_smem_ptr(SFA.begin()), SFASmemLayout{});

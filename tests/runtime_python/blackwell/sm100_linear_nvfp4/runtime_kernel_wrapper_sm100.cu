@@ -66,7 +66,7 @@ void linear_nvfp4_1d2d_sm100_wrapper(void *tma_a_desc_ptr,
   constexpr int EPI_N          = MMA_N / EPI_PIPE_DEPTH;
   constexpr int B_FP4 = 3;
   constexpr int B_SF  = 0;
-  constexpr int B_OUT = 0;
+  constexpr int B_OUT = 3;
   constexpr int M = 3;
   constexpr int S = 3;
 
@@ -123,7 +123,7 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
 
   constexpr int B_FP4 = 3;
   constexpr int B_SF  = 0;
-  constexpr int B_OUT = 0;
+  constexpr int B_OUT = 3;
   constexpr int M = 3;
   constexpr int S = 3;
 
