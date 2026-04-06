@@ -2,7 +2,6 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import os
 import shutil
-from os import path
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -19,29 +18,29 @@ cuda_library_dirs = [
     os.path.join(cuda_home, "lib64", "stubs"),
 ]
 
-macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
+macros = [("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
 
 setup(
-    name='runtime_kernel_blackwell',
+    name='runtime_kernel_fp8_moe',
     ext_modules=[
         CUDAExtension(
-            name='runtime_kernel_blackwell',
+            name='runtime_kernel_fp8_moe',
             sources=[
-                os.path.join(this_dir, 'runtime_kernel_wrapper_sm100.cu'),
+                os.path.join(this_dir, 'runtime_kernel_wrapper_fp8_moe.cu'),
             ],
             depends=[
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/topk_softmax_sm100.cuh'),
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/moe_linear_sm100.cuh'),
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/mul_sum_add_sm100.cuh'),
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/utils.cuh'),
+                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/fp8_group_gemm_sm100.cuh'),
+                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/storage.cuh'),
             ],
             define_macros=macros,
             include_dirs=[
+                os.path.join(this_dir, '../../../../include/mirage/'),
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/'),
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/'),
                 os.path.join(this_dir, '../../../../include'),
                 os.path.join(this_dir, '../../../../deps/cutlass/include'),
                 os.path.join(this_dir, '../../../../deps/cutlass/tools/util/include'),
+                os.path.join(this_dir, '../../../../deps/DeepGEMM/deep_gemm/include'),
             ],
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,
@@ -52,6 +51,8 @@ setup(
                     '-gencode=arch=compute_100a,code=sm_100a',
                     '-DMIRAGE_GRACE_BLACKWELL',
                     '-DMPK_ENABLE_TMA',
+                    '-DCUTE_ARCH_TCGEN05_TMEM_ENABLED',
+                    '-DCUTE_ARCH_TCGEN05_MXF8F6F4_MMA_ENABLED',
                 ]
             }
         )
