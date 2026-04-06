@@ -35,9 +35,11 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
-  constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  //  (std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-  //                                       : CUtensorMapDataType(-1));
+  // For 1-byte types (e.g., FP8 E4M3), use UINT8 — TMA only uses this for
+  // element size; semantics are irrelevant. For 2-byte types (BF16), use BFLOAT16.
+  constexpr CUtensorMapDataType tma_format =
+      (sizeof(T) == 1) ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+                       : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   constexpr CUtensorMapInterleave tma_interleave =
       CU_TENSOR_MAP_INTERLEAVE_NONE;
   constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -865,6 +867,43 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MOE_W13_FP8_SM100:
+    case TASK_MOE_W2_FP8_SM100: {
+      // FP8 E4M3 weight TMA (param_id == 2 is the weight tensor)
+      // bK=128 tiles, MMA_M=128 rows per tile; FP8 = 1 byte per element.
+      constexpr int FP8_BK = 128;
+      const size_t smem_repeat_row_fp8 = 1;
+      constexpr int B = 3;
+      constexpr int M = 3;
+      constexpr int S = 3;
+      constexpr int MMA_M = 128;
+
+      if (param_id == 2) {
+        // TMA_WEIGHT (fp8): inputs are [input_fp8, input_scale, weight_fp8, ...]
+        int const num_experts = tensor_desc.dim[0];
+        int const output_size = tensor_desc.dim[1];
+        int const reduction_size = tensor_desc.dim[2];
+        int const orig_output_size =
+            tensor_desc.stride[0] / tensor_desc.stride[1];
+        uint64_t gmem_shape[2] = {
+            static_cast<uint64_t>((num_experts - 1) * orig_output_size +
+                                  output_size),
+            static_cast<uint64_t>(reduction_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),
+                                  static_cast<uint32_t>(FP8_BK)};
+        size_t smem_repeat_col_fp8 = 1; // FP8_BK is the full tile width
+        // Use uint8_t as the element type (sizeof=1) so fill_tma_desc selects UINT8 format
+        fill_tma_desc<uint8_t, B, M, S, 2>(tma_desc,
+                                           tensor_desc.base_ptr,
+                                           gmem_shape,
+                                           gmem_stride,
+                                           smem_shape,
+                                           smem_repeat_row_fp8,
+                                           smem_repeat_col_fp8);
+      }
+      break;
+    }
     case TASK_MOE_W13_LINEAR_SM90:
     case TASK_MOE_W2_LINEAR_SM90: {
       int const cp_async_size = 64;
@@ -1063,6 +1102,19 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_MOE_W2_LINEAR_SM100: {
       // only weight (param_id=1) have 1 tma_desc
       size_t param_id = 1;
+      TensorDesc &tensor_desc =
+          (param_id < task_desc.num_inputs)
+              ? task_desc.inputs[param_id]
+              : task_desc.outputs[param_id - task_desc.num_inputs];
+      create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      break;
+    }
+    case TASK_MOE_W13_FP8_SM100:
+    case TASK_MOE_W2_FP8_SM100: {
+      // only weight_fp8 (param_id=2) has 1 tma_desc
+      // inputs order: [input_fp8, input_scale, weight_fp8, weight_scale,
+      //                routing_indices, mask]
+      size_t param_id = 2;
       TensorDesc &tensor_desc =
           (param_id < task_desc.num_inputs)
               ? task_desc.inputs[param_id]
