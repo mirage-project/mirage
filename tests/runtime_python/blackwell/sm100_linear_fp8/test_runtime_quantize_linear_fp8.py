@@ -4,17 +4,25 @@ import torch
 import runtime_kernel_blackwell_linear_fp8 as linear_kernel
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+COMMON_DIR = os.path.abspath(os.path.join(THIS_DIR, "../common"))
 QUANTIZE_DIR = os.path.abspath(os.path.join(THIS_DIR, "../sm100_quantize_fp8"))
+if COMMON_DIR not in sys.path:
+    sys.path.insert(0, COMMON_DIR)
 if QUANTIZE_DIR not in sys.path:
     sys.path.insert(0, QUANTIZE_DIR)
 
 import runtime_kernel_blackwell_quantize_fp8 as quantize_kernel
+from sm100_fp8_scale_layout import (
+    BLOCK_K,
+    allocate_packed_ue8m0_scale,
+    dequant_from_packed_ue8m0_deepgemm_style,
+)
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-block_k = 128
+block_k = BLOCK_K
 
 supported_shapes = [
     tuple(int(dim) for dim in shape)
@@ -29,45 +37,6 @@ pipeline_shapes = [
     and shape[1] == 128
     and shape[2] in representative_ks
 ]
-
-
-def dequant_from_fp8_and_packed_ue8m0(
-    x_q: torch.Tensor, packed_scales: torch.Tensor, block_k: int
-):
-    assert x_q.dim() == 2
-    outer_dim, k = x_q.shape
-    assert k % block_k == 0
-    assert block_k == 128
-
-    valid_scale_k = k // block_k
-    assert packed_scales.dim() == 2
-    assert packed_scales.shape[0] == outer_dim
-    assert packed_scales.shape[1] >= valid_scale_k
-
-    x_q_fp32 = x_q.float()
-    out = torch.empty_like(x_q_fp32, dtype=torch.float32)
-
-    for outer_idx in range(outer_dim):
-        for blk_idx in range(valid_scale_k):
-            k_start = blk_idx * block_k
-            k_end = k_start + block_k
-
-            packed = int(packed_scales[outer_idx, blk_idx].item())
-            q_block = x_q_fp32[outer_idx, k_start:k_end]
-            deq_block = torch.empty_like(q_block, dtype=torch.float32)
-
-            for sub_idx in range(4):
-                ue8m0 = (packed >> (8 * sub_idx)) & 0xFF
-                scale = 2.0 ** (ue8m0 - 127)
-
-                sub_start = sub_idx * 32
-                sub_end = sub_start + 32
-                deq_block[sub_start:sub_end] = q_block[sub_start:sub_end] * scale
-
-            out[outer_idx, k_start:k_end] = deq_block
-
-    return out
-
 
 for batch_size, output_size, reduction_size in pipeline_shapes:
     for has_residual in (False, True):
@@ -88,17 +57,10 @@ for batch_size, output_size, reduction_size in pipeline_shapes:
             generator=g,
         )
 
-        valid_scale_k = reduction_size // block_k
-        padded_scale_k = ((valid_scale_k + 3) // 4) * 4
-
         x_q = torch.empty_like(x_bf16, dtype=torch.float8_e4m3fn)
         w_q = torch.empty_like(w_bf16, dtype=torch.float8_e4m3fn)
-        x_scale = torch.empty(
-            (batch_size, padded_scale_k), device="cuda", dtype=torch.uint32
-        )
-        w_scale = torch.empty(
-            (output_size, padded_scale_k), device="cuda", dtype=torch.uint32
-        )
+        x_scale = allocate_packed_ue8m0_scale(batch_size, reduction_size, x_bf16.device)
+        w_scale = allocate_packed_ue8m0_scale(output_size, reduction_size, w_bf16.device)
 
         quantize_kernel.quantize_fp8_sm100(x_bf16, x_q, x_scale, group_size=block_k)
         quantize_kernel.quantize_fp8_sm100(w_bf16, w_q, w_scale, group_size=block_k)
@@ -117,8 +79,8 @@ for batch_size, output_size, reduction_size in pipeline_shapes:
             x_q, x_scale, w_q, w_scale, residual, output
         )
 
-        x_ref = dequant_from_fp8_and_packed_ue8m0(x_q, x_scale, block_k)
-        w_ref = dequant_from_fp8_and_packed_ue8m0(w_q, w_scale, block_k)
+        x_ref = dequant_from_packed_ue8m0_deepgemm_style(x_q, x_scale)
+        w_ref = dequant_from_packed_ue8m0_deepgemm_style(w_q, w_scale)
         torch_out = torch.matmul(x_ref, torch.transpose(w_ref, 0, 1))
         if has_residual:
             torch_out = torch_out + residual.float()
@@ -129,7 +91,9 @@ for batch_size, output_size, reduction_size in pipeline_shapes:
 
         zero_x_bf16 = torch.zeros_like(x_bf16)
         zero_x_q = torch.empty_like(x_q)
-        zero_x_scale = torch.empty_like(x_scale)
+        zero_x_scale = allocate_packed_ue8m0_scale(
+            batch_size, reduction_size, x_bf16.device
+        )
         zero_output = torch.empty_like(output)
 
         quantize_kernel.quantize_fp8_sm100(
@@ -139,9 +103,7 @@ for batch_size, output_size, reduction_size in pipeline_shapes:
             zero_x_q, zero_x_scale, w_q, w_scale, residual, zero_output
         )
 
-        zero_x_ref = dequant_from_fp8_and_packed_ue8m0(
-            zero_x_q, zero_x_scale, block_k
-        )
+        zero_x_ref = dequant_from_packed_ue8m0_deepgemm_style(zero_x_q, zero_x_scale)
         zero_torch_out = torch.matmul(zero_x_ref, torch.transpose(w_ref, 0, 1))
         if has_residual:
             zero_torch_out = zero_torch_out + residual.float()

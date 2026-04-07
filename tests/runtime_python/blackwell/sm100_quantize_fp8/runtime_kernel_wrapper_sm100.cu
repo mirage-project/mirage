@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #include "../common/sm100_fp8_runtime_registry.h"
+#include "../common/sm100_fp8_scale_layout.h"
 #include "blackwell/per_token_group_quantize_fp8.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/BFloat16.h>
@@ -38,6 +39,7 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
     void const *__restrict__ input_ptr,
     void *__restrict__ output_q_ptr,
     void *__restrict__ output_s_ptr,
+    int output_s_col_stride,
     float eps,
     float min_8bit,
     float max_8bit) {
@@ -46,10 +48,7 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
       static_cast<bfloat16 const *>(input_ptr) + row * HIDDEN_SIZE;
   fp8_e4m3fn *output_q =
       static_cast<fp8_e4m3fn *>(output_q_ptr) + row * HIDDEN_SIZE;
-  constexpr int kNumGroups = HIDDEN_SIZE / GROUP_SIZE;
-  constexpr int kPaddedScaleK = round_up_to_multiple(kNumGroups, 4);
-  uint32_t *output_s =
-      static_cast<uint32_t *>(output_s_ptr) + row * kPaddedScaleK;
+  uint32_t *output_s = static_cast<uint32_t *>(output_s_ptr) + row;
 
   kernel::per_token_group_quantize_fp8_task_impl</*BATCH_SIZE=*/1,
                                                  /*HIDDEN_SIZE=*/HIDDEN_SIZE,
@@ -58,14 +57,26 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
                                                  bfloat16,
                                                  fp8_e4m3fn,
                                                  /*SCALE_UE8M0=*/true>(
-      input, output_q, output_s, eps, min_8bit, max_8bit);
+      input,
+      output_q,
+      output_s,
+      eps,
+      min_8bit,
+      max_8bit,
+      output_s_col_stride);
 }
 
 #define DISPATCH_QUANTIZE_FP8_SM100_GROUP_SIZE_CASE(HIDDEN_SIZE, GROUP_SIZE)   \
   case GROUP_SIZE:                                                             \
     quantize_fp8_sm100_kernel<HIDDEN_SIZE, GROUP_SIZE>                         \
         <<<grid_dim, block_dim, 0, stream>>>(                                  \
-            input_ptr, output_q_ptr, output_s_ptr, kEps, kMin8, kMax8);        \
+            input_ptr,                                                         \
+            output_q_ptr,                                                      \
+            output_s_ptr,                                                      \
+            output_s_stride_col,                                               \
+            kEps,                                                              \
+            kMin8,                                                             \
+            kMax8);                                                            \
     break;
 
 #define DISPATCH_QUANTIZE_FP8_SM100_GROUP_SIZE(HIDDEN_SIZE)                    \
@@ -99,7 +110,6 @@ void quantize_fp8_sm100(torch::Tensor input,
               "output_s must have batch_size rows");
   TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
   TORCH_CHECK(output_q.is_contiguous(), "output_q must be contiguous");
-  TORCH_CHECK(output_s.is_contiguous(), "output_s must be contiguous");
   TORCH_CHECK(input.scalar_type() == at::kBFloat16, "input must be bfloat16");
   TORCH_CHECK(output_q.scalar_type() == at::kFloat8_e4m3fn,
               "output_q must be float8_e4m3fn");
@@ -111,19 +121,13 @@ void quantize_fp8_sm100(torch::Tensor input,
 
   int const batch_size = static_cast<int>(input.size(0));
   int const hidden_size = static_cast<int>(input.size(1));
-  int const num_groups = hidden_size / group_size;
-  int const padded_scale_k = round_up_to_multiple(num_groups, 4);
-
-  TORCH_CHECK(
-      output_s.size(1) == padded_scale_k,
-      "output_s must have padded hidden_size/group_size columns, expected ",
-      padded_scale_k,
-      " but got ",
-      output_s.size(1));
+  mirage::blackwell::sm100_fp8_scale_layout::check_scale_tensor(
+      output_s, batch_size, hidden_size, "output_s");
 
   void const *input_ptr = input.data_ptr();
   void *output_q_ptr = output_q.data_ptr();
   void *output_s_ptr = output_s.data_ptr();
+  int const output_s_stride_col = static_cast<int>(output_s.stride(1));
 
   constexpr float kEps = 0.0f;
   constexpr float kMin8 = -448.0f;

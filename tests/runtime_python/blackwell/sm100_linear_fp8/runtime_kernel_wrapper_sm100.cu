@@ -14,6 +14,7 @@
  */
 
 #include "../common/sm100_fp8_runtime_registry.h"
+#include "../common/sm100_fp8_scale_layout.h"
 #include "blackwell/linear_fp8_1d2d_sm100.cuh"
 #include "hopper/tma_2d.cuh"
 #include "runtime_header.h"
@@ -42,6 +43,9 @@
 #include <cute/numeric/integral_constant.hpp>
 #include <cute/pointer_flagged.hpp>
 #include <cute/tensor.hpp>
+
+#include <deep_gemm/common/epilogue_utils.cuh>
+#include <deep_gemm/impls/sm100_fp8_gemm_1d1d.cuh>
 
 using bfloat16 = cute::bfloat16_t;
 namespace fp8_runtime = mirage::blackwell::sm100_fp8_runtime;
@@ -78,6 +82,22 @@ struct LinearFp8TmaDescriptorCache {
   std::mutex mutex;
 };
 
+struct LinearFp8FastDescriptorCache {
+  CUtensorMap host_input_desc{};
+  CUtensorMap host_weight_desc{};
+  CUtensorMap host_input_scale_desc{};
+  CUtensorMap host_weight_scale_desc{};
+  CUtensorMap host_output_desc{};
+  void *last_input_ptr = nullptr;
+  void *last_weight_ptr = nullptr;
+  void *last_input_scale_ptr = nullptr;
+  void *last_weight_scale_ptr = nullptr;
+  void *last_output_ptr = nullptr;
+  bool initialized = false;
+  bool kernel_configured = false;
+  std::mutex mutex;
+};
+
 LinearFp8TmaDescriptorCache &
     get_linear_fp8_tma_descriptor_cache(LinearFp8RuntimeKey const &key) {
   static std::map<LinearFp8RuntimeKey,
@@ -89,6 +109,21 @@ LinearFp8TmaDescriptorCache &
   auto &cache = caches[key];
   if (!cache) {
     cache = std::make_unique<LinearFp8TmaDescriptorCache>();
+  }
+  return *cache;
+}
+
+LinearFp8FastDescriptorCache &
+get_linear_fp8_fast_descriptor_cache(LinearFp8RuntimeKey const &key) {
+  static std::map<LinearFp8RuntimeKey,
+                  std::unique_ptr<LinearFp8FastDescriptorCache>>
+      caches;
+  static std::mutex caches_mutex;
+
+  std::lock_guard<std::mutex> guard(caches_mutex);
+  auto &cache = caches[key];
+  if (!cache) {
+    cache = std::make_unique<LinearFp8FastDescriptorCache>();
   }
   return *cache;
 }
@@ -108,6 +143,158 @@ void check_driver_success(CUresult result, char const *what) {
               (error_name ? error_name : "unknown"),
               ": ",
               (error_string ? error_string : "unknown"));
+}
+
+int get_non_contiguous_dim(cute::UMMA::Major major) {
+  return major == cute::UMMA::Major::K ? -2 : -1;
+}
+
+void check_last_launch(char const *kernel_name) {
+  auto const err = cudaPeekAtLastError();
+  TORCH_CHECK(err == cudaSuccess,
+              kernel_name,
+              " launch failed: ",
+              cudaGetErrorString(err));
+}
+
+CUtensorMapDataType aten_dtype_to_tensor_map_dtype(at::ScalarType dtype) {
+  switch (dtype) {
+  case at::kInt:
+    return CU_TENSOR_MAP_DATA_TYPE_INT32;
+  case at::kUInt32:
+    return CU_TENSOR_MAP_DATA_TYPE_UINT32;
+  case at::kFloat:
+    return CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+  case at::kBFloat16:
+    return CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+  case at::kFloat8_e4m3fn:
+    return CU_TENSOR_MAP_DATA_TYPE_UINT8;
+  default:
+    TORCH_CHECK(false, "Unsupported tensor map dtype ", dtype);
+  }
+}
+
+CUtensorMapSwizzle mode_into_tensor_map_swizzle(int mode, int base = 0) {
+#if CUDART_VERSION >= 12080
+  if (base != 0) {
+    TORCH_CHECK(base == 32 && mode == 128,
+                "Unsupported swizzle base/mode combination");
+    return CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B;
+  }
+#endif
+
+  TORCH_CHECK(base == 0, "Unsupported non-zero swizzle base");
+  switch (mode) {
+  case 0:
+  case 16:
+    return CU_TENSOR_MAP_SWIZZLE_NONE;
+  case 32:
+    return CU_TENSOR_MAP_SWIZZLE_32B;
+  case 64:
+    return CU_TENSOR_MAP_SWIZZLE_64B;
+  case 128:
+    return CU_TENSOR_MAP_SWIZZLE_128B;
+  default:
+    TORCH_CHECK(false, "Unsupported swizzle mode ", mode);
+  }
+}
+
+CUtensorMap make_tma_2d_desc(torch::Tensor const &t,
+                             int gmem_inner_dim,
+                             int gmem_outer_dim,
+                             int smem_inner_dim,
+                             int smem_outer_dim,
+                             int gmem_outer_stride,
+                             int swizzle_mode,
+                             int swizzle_base = 0) {
+  const auto elem_size = static_cast<int>(t.element_size());
+  if (swizzle_mode != 0) {
+    smem_inner_dim = swizzle_mode / elem_size;
+  }
+
+  CUtensorMap tensor_map{};
+  const cuuint64_t gmem_dims[2] = {static_cast<cuuint64_t>(gmem_inner_dim),
+                                   static_cast<cuuint64_t>(gmem_outer_dim)};
+  const cuuint32_t smem_dims[2] = {static_cast<cuuint32_t>(smem_inner_dim),
+                                   static_cast<cuuint32_t>(smem_outer_dim)};
+  const cuuint64_t gmem_strides[1] = {
+      static_cast<cuuint64_t>(gmem_outer_stride * elem_size)};
+  const cuuint32_t elem_strides[2] = {1, 1};
+  check_driver_success<int>(
+      cuTensorMapEncodeTiled(&tensor_map,
+                             aten_dtype_to_tensor_map_dtype(t.scalar_type()),
+                             2,
+                             t.data_ptr(),
+                             gmem_dims,
+                             gmem_strides,
+                             smem_dims,
+                             elem_strides,
+                             CU_TENSOR_MAP_INTERLEAVE_NONE,
+                             mode_into_tensor_map_swizzle(swizzle_mode,
+                                                           swizzle_base),
+                             CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                             CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+      "cuTensorMapEncodeTiled");
+  return tensor_map;
+}
+
+CUtensorMap make_tma_a_desc(torch::Tensor const &t,
+                            int shape_m,
+                            int shape_k,
+                            int block_m,
+                            int block_k,
+                            int outer_stride,
+                            int swizzle_mode) {
+  return make_tma_2d_desc(t,
+                          shape_k,
+                          shape_m,
+                          block_k,
+                          block_m,
+                          outer_stride,
+                          swizzle_mode);
+}
+
+CUtensorMap make_tma_b_desc(torch::Tensor const &t,
+                            int shape_n,
+                            int shape_k,
+                            int block_n,
+                            int block_k,
+                            int outer_stride,
+                            int swizzle_mode) {
+  return make_tma_2d_desc(t,
+                          shape_k,
+                          shape_n,
+                          block_k,
+                          block_n,
+                          outer_stride,
+                          swizzle_mode);
+}
+
+CUtensorMap make_tma_cd_desc(torch::Tensor const &t,
+                             int shape_m,
+                             int shape_n,
+                             int block_m,
+                             int block_n,
+                             int outer_stride,
+                             int swizzle_mode) {
+  return make_tma_2d_desc(
+      t, shape_n, shape_m, block_n, block_m, outer_stride, swizzle_mode);
+}
+
+CUtensorMap make_tma_sf_desc(torch::Tensor const &t,
+                             int outer_dim,
+                             int reduction_size,
+                             int block_outer,
+                             int gran_k) {
+  int aligned_outer = fp8_runtime::aligned_scale_outer_dim(outer_dim);
+  int packed_scale_k = fp8_runtime::packed_scale_k_for_reduction_size(reduction_size);
+  return make_tma_2d_desc(t,
+                          aligned_outer,
+                          packed_scale_k,
+                          block_outer,
+                          1,
+                          aligned_outer,
+                          0);
 }
 
 template <typename KernelPtr, typename... Args>
@@ -147,6 +334,196 @@ void launch_kernel_ex_cluster(dim3 grid_dim,
 }
 
 } // namespace
+
+template <int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+void launch_linear_fp8_1d1d_sm100_fast(torch::Tensor const &input_q,
+                                       torch::Tensor const &input_scale,
+                                       torch::Tensor const &weight_q,
+                                       torch::Tensor const &weight_scale,
+                                       torch::Tensor &output) {
+  static_assert(OUTPUT_SIZE == 128, "Fast path currently requires N=128");
+  constexpr int BLOCK_M = 32;
+  constexpr int BLOCK_N = 16;
+  constexpr int BLOCK_K = 128;
+  constexpr int kGranKA = 128;
+  constexpr int kGranKB = 128;
+  constexpr int kSwizzleAMode = 128;
+  constexpr int kSwizzleBMode = 128;
+  constexpr int kSwizzleCDMode = 32;
+  constexpr int kNumStages = 32;
+  constexpr int kNumNonEpilogueThreads = 128;
+  constexpr int kNumEpilogueThreads = 128;
+  constexpr int kNumMulticast = 1;
+  constexpr bool kIsMulticastOnA = false;
+  constexpr int kNumSMs = 8;
+  constexpr int kDynamicSmemBytes = 232236;
+
+  auto &cache = get_linear_fp8_fast_descriptor_cache(LinearFp8RuntimeKey{
+      BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, false});
+  std::lock_guard<std::mutex> lock(cache.mutex);
+
+  auto update_desc = [](CUtensorMap &desc, void *ptr, char const *name) {
+    check_driver_success<int>(cuTensorMapReplaceAddress(&desc, ptr), name);
+  };
+
+  void *input_ptr = input_q.data_ptr();
+  void *weight_ptr = weight_q.data_ptr();
+  void *input_scale_ptr = input_scale.data_ptr();
+  void *weight_scale_ptr = weight_scale.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  if (!cache.initialized) {
+    cache.host_input_desc = make_tma_a_desc(input_q,
+                                            BATCH_SIZE,
+                                            REDUCTION_SIZE,
+                                            BLOCK_M,
+                                            BLOCK_K,
+                                            static_cast<int>(input_q.stride(0)),
+                                            kSwizzleAMode);
+    cache.host_weight_desc = make_tma_b_desc(weight_q,
+                                             OUTPUT_SIZE,
+                                             REDUCTION_SIZE,
+                                             BLOCK_N,
+                                             BLOCK_K,
+                                             static_cast<int>(weight_q.stride(0)),
+                                             kSwizzleBMode);
+    cache.host_input_scale_desc =
+        make_tma_sf_desc(input_scale, BATCH_SIZE, REDUCTION_SIZE, BLOCK_M, kGranKA);
+    cache.host_weight_scale_desc = make_tma_sf_desc(
+        weight_scale, OUTPUT_SIZE, REDUCTION_SIZE, BLOCK_N, kGranKB);
+    cache.host_output_desc = make_tma_cd_desc(output,
+                                              BATCH_SIZE,
+                                              OUTPUT_SIZE,
+                                              BLOCK_M,
+                                              BLOCK_N,
+                                              static_cast<int>(output.stride(0)),
+                                              kSwizzleCDMode);
+    cache.last_input_ptr = input_ptr;
+    cache.last_weight_ptr = weight_ptr;
+    cache.last_input_scale_ptr = input_scale_ptr;
+    cache.last_weight_scale_ptr = weight_scale_ptr;
+    cache.last_output_ptr = output_ptr;
+    cache.initialized = true;
+  } else {
+    if (input_ptr != cache.last_input_ptr) {
+      update_desc(cache.host_input_desc, input_ptr, "cuTensorMapReplaceAddress(input)");
+      cache.last_input_ptr = input_ptr;
+    }
+    if (weight_ptr != cache.last_weight_ptr) {
+      update_desc(cache.host_weight_desc,
+                  weight_ptr,
+                  "cuTensorMapReplaceAddress(weight)");
+      cache.last_weight_ptr = weight_ptr;
+    }
+    if (input_scale_ptr != cache.last_input_scale_ptr) {
+      update_desc(cache.host_input_scale_desc,
+                  input_scale_ptr,
+                  "cuTensorMapReplaceAddress(input_scale)");
+      cache.last_input_scale_ptr = input_scale_ptr;
+    }
+    if (weight_scale_ptr != cache.last_weight_scale_ptr) {
+      update_desc(cache.host_weight_scale_desc,
+                  weight_scale_ptr,
+                  "cuTensorMapReplaceAddress(weight_scale)");
+      cache.last_weight_scale_ptr = weight_scale_ptr;
+    }
+    if (output_ptr != cache.last_output_ptr) {
+      update_desc(cache.host_output_desc,
+                  output_ptr,
+                  "cuTensorMapReplaceAddress(output)");
+      cache.last_output_ptr = output_ptr;
+    }
+  }
+
+  using Kernel = decltype(&deep_gemm::sm100_fp8_gemm_1d1d_impl<
+                          cute::UMMA::Major::K,
+                          cute::UMMA::Major::K,
+                          kGranKA,
+                          kGranKB,
+                          BATCH_SIZE,
+                          OUTPUT_SIZE,
+                          REDUCTION_SIZE,
+                          BLOCK_M,
+                          BLOCK_N,
+                          BLOCK_K,
+                          1,
+                          kSwizzleAMode,
+                          kSwizzleBMode,
+                          kSwizzleCDMode,
+                          kNumStages,
+                          kNumNonEpilogueThreads,
+                          kNumEpilogueThreads,
+                          kNumMulticast,
+                          kIsMulticastOnA,
+                          kNumSMs,
+                          deep_gemm::GemmType::Normal,
+                          false,
+                          cutlass::float_e4m3_t,
+                          cutlass::float_e4m3_t,
+                          cutlass::bfloat16_t,
+                          deep_gemm::EpilogueIdentity>);
+
+  auto *kernel_ptr = &deep_gemm::sm100_fp8_gemm_1d1d_impl<
+      cute::UMMA::Major::K,
+      cute::UMMA::Major::K,
+      kGranKA,
+      kGranKB,
+      BATCH_SIZE,
+      OUTPUT_SIZE,
+      REDUCTION_SIZE,
+      BLOCK_M,
+      BLOCK_N,
+      BLOCK_K,
+      1,
+      kSwizzleAMode,
+      kSwizzleBMode,
+      kSwizzleCDMode,
+      kNumStages,
+      kNumNonEpilogueThreads,
+      kNumEpilogueThreads,
+      kNumMulticast,
+      kIsMulticastOnA,
+      kNumSMs,
+      deep_gemm::GemmType::Normal,
+      false,
+      cutlass::float_e4m3_t,
+      cutlass::float_e4m3_t,
+      cutlass::bfloat16_t,
+      deep_gemm::EpilogueIdentity>;
+
+  if (!cache.kernel_configured) {
+    CUTE_CHECK_ERROR(cudaFuncSetAttribute(
+        kernel_ptr,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        kDynamicSmemBytes));
+    cache.kernel_configured = true;
+  }
+
+  dim3 grid_dim(kNumSMs, 1, 1);
+  dim3 block_dim(kNumNonEpilogueThreads + kNumEpilogueThreads, 1, 1);
+  dim3 cluster_dim(1, 1, 1);
+  cudaStream_t cuda_stream = at::cuda::getCurrentCUDAStream().stream();
+  int *grouped_layout = nullptr;
+  uint32_t shape_m = BATCH_SIZE;
+  uint32_t shape_n = OUTPUT_SIZE;
+  uint32_t shape_k = REDUCTION_SIZE;
+  launch_kernel_ex_cluster(grid_dim,
+                           block_dim,
+                           cluster_dim,
+                           kDynamicSmemBytes,
+                           cuda_stream,
+                           kernel_ptr,
+                           grouped_layout,
+                           shape_m,
+                           shape_n,
+                           shape_k,
+                           cache.host_input_desc,
+                           cache.host_weight_desc,
+                           cache.host_input_scale_desc,
+                           cache.host_weight_scale_desc,
+                           cache.host_output_desc);
+  check_last_launch("linear_fp8_1d1d_sm100_fast");
+}
 
 template <typename T,
           int BATCH_SIZE,
@@ -451,7 +828,7 @@ void launch_linear_fp8_1d2d_sm100(void *input_ptr,        // b_ptr
                              mBias,
                              cache.device_output_desc);
   }
-  CUTE_CHECK_LAST();
+  check_last_launch("linear_fp8_1d2d_sm100_legacy");
 }
 
 void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
@@ -466,9 +843,7 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
   TORCH_CHECK(weight_scale.dim() == 2, "weight_scale must be 2D");
   TORCH_CHECK(output.dim() == 2, "output must be 2D");
   TORCH_CHECK(input_q.is_contiguous(), "input_q must be contiguous");
-  TORCH_CHECK(input_scale.is_contiguous(), "input_scale must be contiguous");
   TORCH_CHECK(weight_q.is_contiguous(), "weight_q must be contiguous");
-  TORCH_CHECK(weight_scale.is_contiguous(), "weight_scale must be contiguous");
   TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
   TORCH_CHECK(input_q.scalar_type() == at::kFloat8_e4m3fn,
               "input_q must be float8_e4m3fn");
@@ -485,8 +860,6 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
   int const batch_size = static_cast<int>(input_q.size(0));
   int const reduction_size = static_cast<int>(input_q.size(1));
   int const output_size = static_cast<int>(weight_q.size(0));
-  int const expected_padded_scale_k =
-      fp8_runtime::padded_scale_k_for_reduction_size(reduction_size);
 
   TORCH_CHECK(weight_q.size(1) == reduction_size,
               "weight_q shape mismatch: expected reduction_size ",
@@ -503,28 +876,10 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
               ", ",
               output.size(1),
               "]");
-  TORCH_CHECK(input_scale.size(0) == batch_size &&
-                  input_scale.size(1) == expected_padded_scale_k,
-              "input_scale shape mismatch: expected [",
-              batch_size,
-              ", ",
-              expected_padded_scale_k,
-              "] but got [",
-              input_scale.size(0),
-              ", ",
-              input_scale.size(1),
-              "]");
-  TORCH_CHECK(weight_scale.size(0) == output_size &&
-                  weight_scale.size(1) == expected_padded_scale_k,
-              "weight_scale shape mismatch: expected [",
-              output_size,
-              ", ",
-              expected_padded_scale_k,
-              "] but got [",
-              weight_scale.size(0),
-              ", ",
-              weight_scale.size(1),
-              "]");
+  mirage::blackwell::sm100_fp8_scale_layout::check_scale_tensor(
+      input_scale, batch_size, reduction_size, "input_scale");
+  mirage::blackwell::sm100_fp8_scale_layout::check_scale_tensor(
+      weight_scale, output_size, reduction_size, "weight_scale");
 
   TORCH_CHECK(fp8_runtime::is_supported_dense_gemm_shape(
                   batch_size, output_size, reduction_size),
@@ -542,11 +897,6 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
               fp8_runtime::supported_reduction_sizes_string(),
               "}");
 
-  void *input_ptr = input_q.data_ptr();
-  void *input_scale_ptr = input_scale.data_ptr();
-  void *weight_ptr = weight_q.data_ptr();
-  void *weight_scale_ptr = weight_scale.data_ptr();
-  void *output_ptr = output.data_ptr();
   bool const has_residual = residual.has_value();
   if (has_residual) {
     TORCH_CHECK(residual->dim() == 2, "residual must be 2D");
@@ -565,75 +915,47 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
                 residual->size(1),
                 "]");
   }
-  void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
-
-#define DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                         \
-    BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, HAS_RESIDUAL)                     \
+#define DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE,  \
+                                                     REDUCTION_SIZE)           \
   case REDUCTION_SIZE:                                                         \
-    launch_linear_fp8_1d2d_sm100<cutlass::float_e4m3_t,                        \
-                                 BATCH_SIZE,                                   \
-                                 OUTPUT_SIZE,                                  \
-                                 REDUCTION_SIZE,                               \
-                                 HAS_RESIDUAL>(input_ptr,                      \
-                                               input_scale_ptr,                \
-                                               weight_ptr,                     \
-                                               weight_scale_ptr,               \
-                                               output_ptr,                     \
-                                               residual_ptr);                  \
+    launch_linear_fp8_1d1d_sm100_fast<BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(\
+        input_q, input_scale, weight_q, weight_scale, output);                \
     break;
 
-#define DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(BATCH_SIZE, HAS_RESIDUAL)    \
+#define DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(BATCH_SIZE)                   \
   case BATCH_SIZE:                                                             \
     switch (reduction_size) {                                                  \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 128, HAS_RESIDUAL)                                  \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 256, HAS_RESIDUAL)                                  \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 384, HAS_RESIDUAL)                                  \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 512, HAS_RESIDUAL)                                  \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 768, HAS_RESIDUAL)                                  \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 1024, HAS_RESIDUAL)                                 \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 1536, HAS_RESIDUAL)                                 \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 2048, HAS_RESIDUAL)                                 \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 4096, HAS_RESIDUAL)                                 \
-      DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE(                           \
-          BATCH_SIZE, 128, 7168, HAS_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 128)      \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 256)      \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 384)      \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 512)      \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 768)      \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1024)     \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1536)     \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 2048)     \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 4096)     \
+      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 7168)     \
       default:                                                                 \
         TORCH_CHECK(false, "Unsupported reduction_size dispatch");             \
     }                                                                          \
     break;
 
-  if (has_residual) {
-    switch (batch_size) {
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(1, true)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(2, true)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(4, true)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(8, true)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(16, true)
-      default:
-        TORCH_CHECK(false, "Unsupported batch_size dispatch");
-    }
-  } else {
-    switch (batch_size) {
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(1, false)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(2, false)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(4, false)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(8, false)
-      DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE(16, false)
-      default:
-        TORCH_CHECK(false, "Unsupported batch_size dispatch");
-    }
+  switch (batch_size) {
+    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(1)
+    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(2)
+    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(4)
+    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(8)
+    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(16)
+    default:
+      TORCH_CHECK(false, "Unsupported batch_size dispatch");
   }
 
-#undef DISPATCH_LINEAR_FP8_SM100_BATCH_SIZE_CASE
-#undef DISPATCH_LINEAR_FP8_SM100_REDUCTION_SIZE_CASE
+  if (has_residual) {
+    output.add_(*residual);
+  }
+
+#undef DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE
+#undef DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE
 }
 
 std::vector<std::vector<int64_t>> supported_dense_gemm_shapes() {
