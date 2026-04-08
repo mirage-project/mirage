@@ -46,7 +46,6 @@ constexpr int TEST_OUTPUT_SIZE    = 256;
 constexpr int TEST_REDUCTION_SIZE = 256;
 constexpr int TEST_NUM_EXPERTS    = 8;
 constexpr int TEST_NUM_TOPK       = 2;
-constexpr int TEST_EXPERT_STRIDE  = 1;
 constexpr int TEST_NUM_AB_STAGE   = 2;  // reduced for debugging
 constexpr int TEST_NUM_ACC_STAGE  = 2;
 constexpr int TEST_NUM_C_STAGE    = 4;
@@ -123,9 +122,16 @@ using OutputTensor = cute::Tensor<
     cute::ViewEngine<cute::gmem_ptr<cute::bfloat16_t*>>, OutputLayout>;
 
 // ----------------------------------------------------------------
-// Global kernel wrapper for standalone testing.
-// One thread block per call (expert_offset=0 tests expert 0).
+// Global kernel wrapper.
+//
+// Multi-CTA mode: launch with grid=(num_ctas, 1, 1).
+//   Each CTA uses blockIdx.x as expert_offset and gridDim.x as expert_stride.
+//   CTA i processes experts i, i+gridDim.x, i+2*gridDim.x, ...
+//
+// Single-CTA mode: launch with grid=(1, 1, 1), expert_offset=0.
+//   The single CTA processes all experts sequentially (stride=1).
 // ----------------------------------------------------------------
+template <int EXPERT_STRIDE>
 __global__
 __launch_bounds__(256, 1)
 void fp8_moe_w13_test_kernel(
@@ -161,6 +167,11 @@ void fp8_moe_w13_test_kernel(
       cute::make_gmem_ptr(output),
       OutputLayout{});
 
+  // In multi-CTA mode (EXPERT_STRIDE > 1), use blockIdx.x as expert_offset
+  // so each CTA handles a different expert. In single-CTA mode (EXPERT_STRIDE=1),
+  // use the provided expert_offset argument.
+  int actual_expert_offset = (EXPERT_STRIDE > 1) ? blockIdx.x : expert_offset;
+
   kernel::fp8_moe_group_gemm_sm100_task_impl<
       FP8TMA_W13,
       InputTensor,
@@ -177,7 +188,7 @@ void fp8_moe_w13_test_kernel(
       TEST_REDUCTION_SIZE,
       TEST_NUM_EXPERTS,
       TEST_NUM_TOPK,
-      TEST_EXPERT_STRIDE,
+      EXPERT_STRIDE,
       true,                // W13_LINEAR
       TEST_NUM_AB_STAGE,
       TEST_NUM_ACC_STAGE,
@@ -189,7 +200,7 @@ void fp8_moe_w13_test_kernel(
       mRoutingIndices,
       mMask,
       mOutput,
-      expert_offset);
+      actual_expert_offset);
 }
 
 // ----------------------------------------------------------------
@@ -226,7 +237,20 @@ CUtensorMap* create_fp8_weight_tma_desc(void *weight_ptr,
 }
 
 // ----------------------------------------------------------------
-// Python-facing launch function
+// Shared smem size computation
+// ----------------------------------------------------------------
+static constexpr int compute_smem_size() {
+  constexpr int smem_A = TEST_NUM_AB_STAGE * TEST_MMA_M * 128 * 1;
+  constexpr int smem_B = TEST_NUM_AB_STAGE * TEST_MMA_N * 128 * 1;
+  constexpr int smem_SF = 2 * TEST_NUM_AB_STAGE * 128 * 4;
+  constexpr int smem_barriers = 8 * TEST_NUM_AB_STAGE * 8
+                               + 2 * TEST_NUM_ACC_STAGE * 8
+                               + TEST_NUM_EXPERTS * 4 + 4 + 128;
+  return smem_A + smem_B + smem_SF + smem_barriers + 4096;
+}
+
+// ----------------------------------------------------------------
+// Python-facing launch: single CTA (for correctness tests)
 // ----------------------------------------------------------------
 void fp8_moe_w13_gemm(
     torch::Tensor input_fp8,
@@ -243,34 +267,20 @@ void fp8_moe_w13_gemm(
   int num_experts = weight_fp8.size(0);
   int output_size = weight_fp8.size(1);
   int reduction_size = weight_fp8.size(2);
-  int total_rows = num_experts * output_size; // flat weight rows
+  int total_rows = num_experts * output_size;
 
-  // Create TMA descriptor for FP8 weights
   CUtensorMap *tma_desc = create_fp8_weight_tma_desc(
       weight_fp8.data_ptr(), total_rows, reduction_size);
 
-  // Compute smem size for SharedStorage
-  // A: NUM_AB_STAGE * MMA_M * bK * 1 byte
-  // B: NUM_AB_STAGE * MMA_N * bK * 1 byte
-  // SFA + SFB: 2 * NUM_AB_STAGE * 128 * 4 bytes
-  // Barriers + expert_mask + tmem_ptr: ~4 KB
-  constexpr int smem_A = TEST_NUM_AB_STAGE * TEST_MMA_M * 128 * 1;
-  constexpr int smem_B = TEST_NUM_AB_STAGE * TEST_MMA_N * 128 * 1;
-  constexpr int smem_SF = 2 * TEST_NUM_AB_STAGE * 128 * 4;
-  constexpr int smem_barriers = 8 * TEST_NUM_AB_STAGE * 8  // 8 barrier arrays × 8 bytes each × stages
-                               + 2 * TEST_NUM_ACC_STAGE * 8
-                               + TEST_NUM_EXPERTS * 4 + 4 + 128;
-  constexpr int smem_size = smem_A + smem_B + smem_SF + smem_barriers;
-
-  // Launch: 1 block (single expert_offset=0), 256 threads
+  constexpr int smem_size = compute_smem_size();
   dim3 grid(1, 1, 1);
   dim3 block(256, 1, 1);
 
-  cudaFuncSetAttribute(fp8_moe_w13_test_kernel,
+  cudaFuncSetAttribute(fp8_moe_w13_test_kernel<1>,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem_size + 4096);
+                       smem_size);
 
-  fp8_moe_w13_test_kernel<<<grid, block, smem_size + 4096>>>(
+  fp8_moe_w13_test_kernel<1><<<grid, block, smem_size>>>(
       tma_desc,
       reinterpret_cast<uint8_t*>(input_fp8.data_ptr()),
       reinterpret_cast<float*>(input_scale.data_ptr()),
@@ -284,11 +294,98 @@ void fp8_moe_w13_gemm(
   if (err != cudaSuccess) {
     printf("CUDA kernel error: %s\n", cudaGetErrorString(err));
   }
-
   cudaFree(tma_desc);
+}
+
+// ----------------------------------------------------------------
+// Python-facing launch: multi-CTA (for realistic benchmarking)
+//
+// Launches num_ctas thread blocks. CTA i handles experts
+// i, i+num_ctas, i+2*num_ctas, ...
+// Does NOT synchronize — caller is responsible for sync/timing.
+// ----------------------------------------------------------------
+// Persistent TMA descriptor handle for benchmark mode
+static CUtensorMap *g_tma_desc = nullptr;
+
+void fp8_moe_w13_gemm_setup(
+    torch::Tensor weight_fp8)
+{
+  c10::cuda::CUDAGuard guard(weight_fp8.device());
+  int num_experts = weight_fp8.size(0);
+  int output_size = weight_fp8.size(1);
+  int reduction_size = weight_fp8.size(2);
+  int total_rows = num_experts * output_size;
+
+  if (g_tma_desc) cudaFree(g_tma_desc);
+  g_tma_desc = create_fp8_weight_tma_desc(
+      weight_fp8.data_ptr(), total_rows, reduction_size);
+
+  // Set max dynamic smem for both kernel variants
+  constexpr int smem_size = compute_smem_size();
+  cudaFuncSetAttribute(fp8_moe_w13_test_kernel<1>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+  cudaFuncSetAttribute(fp8_moe_w13_test_kernel<TEST_NUM_EXPERTS>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+}
+
+void fp8_moe_w13_gemm_launch(
+    torch::Tensor input_fp8,
+    torch::Tensor input_scale,
+    torch::Tensor weight_scale,
+    torch::Tensor routing_indices,
+    torch::Tensor mask,
+    torch::Tensor output,
+    int num_ctas)
+{
+  assert(g_tma_desc != nullptr && "Call fp8_moe_w13_gemm_setup first");
+  constexpr int smem_size = compute_smem_size();
+
+  if (num_ctas == 1) {
+    // Single CTA: EXPERT_STRIDE=1, expert_offset=0
+    // One CTA processes all experts sequentially
+    fp8_moe_w13_test_kernel<1><<<dim3(1,1,1), dim3(256,1,1), smem_size>>>(
+        g_tma_desc,
+        reinterpret_cast<uint8_t*>(input_fp8.data_ptr()),
+        reinterpret_cast<float*>(input_scale.data_ptr()),
+        reinterpret_cast<float*>(weight_scale.data_ptr()),
+        reinterpret_cast<cute::int32_t*>(routing_indices.data_ptr()),
+        reinterpret_cast<cute::int32_t*>(mask.data_ptr()),
+        reinterpret_cast<cute::bfloat16_t*>(output.data_ptr()),
+        0);
+  } else {
+    // Multi-CTA: EXPERT_STRIDE=num_ctas, expert_offset=blockIdx.x
+    // Each CTA processes experts blockIdx.x, blockIdx.x+num_ctas, ...
+    // The expert_offset arg is ignored; blockIdx.x is used instead.
+    dim3 grid(num_ctas, 1, 1);
+    dim3 block(256, 1, 1);
+    fp8_moe_w13_test_kernel<TEST_NUM_EXPERTS><<<grid, block, smem_size>>>(
+        g_tma_desc,
+        reinterpret_cast<uint8_t*>(input_fp8.data_ptr()),
+        reinterpret_cast<float*>(input_scale.data_ptr()),
+        reinterpret_cast<float*>(weight_scale.data_ptr()),
+        reinterpret_cast<cute::int32_t*>(routing_indices.data_ptr()),
+        reinterpret_cast<cute::int32_t*>(mask.data_ptr()),
+        reinterpret_cast<cute::bfloat16_t*>(output.data_ptr()),
+        -1);  // unused; kernel uses blockIdx.x
+  }
+  // No sync — caller handles timing
+}
+
+void fp8_moe_w13_gemm_cleanup()
+{
+  if (g_tma_desc) {
+    cudaFree(g_tma_desc);
+    g_tma_desc = nullptr;
+  }
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_moe_w13_gemm", &fp8_moe_w13_gemm,
-        "FP8 block-scaled MoE W13 group GEMM (SM100/Blackwell)");
+        "FP8 block-scaled MoE W13 group GEMM - single CTA (SM100/Blackwell)");
+  m.def("fp8_moe_w13_gemm_setup", &fp8_moe_w13_gemm_setup,
+        "Setup TMA descriptor for benchmark mode");
+  m.def("fp8_moe_w13_gemm_launch", &fp8_moe_w13_gemm_launch,
+        "Launch FP8 MoE GEMM without sync (for benchmarking)");
+  m.def("fp8_moe_w13_gemm_cleanup", &fp8_moe_w13_gemm_cleanup,
+        "Free TMA descriptor");
 }
