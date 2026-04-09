@@ -66,7 +66,7 @@ struct tma_2d {
 public:
   template <int NDIM, typename Barrier>
   __device__ inline void tma_cp_async(Barrier &mbar,
-                                      T *smem_ptr,
+                                      void *smem_ptr,
                                       int const (&tma_coords)[NDIM]) const {
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
@@ -84,7 +84,7 @@ public:
         printf("smem_ptr: %p\n", smem_ptr);
         printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
 #endif
-        launch_tma_cp_async(mbar, smem_ptr + smem_offset, tma_coords_local);
+        launch_tma_cp_async(mbar, static_cast<T*>(smem_ptr) + smem_offset, tma_coords_local);
       }
     }
   }
@@ -94,10 +94,8 @@ public:
       Barrier &mbar, T *smem_ptr, int const (&tma_coords)[NDIM]) const {
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
-    uint32_t smem_int_mbar =
-        static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
-    uint32_t smem_int_ptr =
-        static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    uint32_t smem_int_mbar = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
+    uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
 
     int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
     if constexpr (NDIM > 0) {
@@ -254,9 +252,8 @@ private:
     constexpr uint32_t tma_dim = 5;
     void *global_addr = src;
 
-    constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-    //  (std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-    //                                       : CUtensorMapDataType(-1));
+    constexpr CUtensorMapDataType tma_format = 
+        CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
     constexpr CUtensorMapInterleave tma_interleave =
         CU_TENSOR_MAP_INTERLEAVE_NONE;
     constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -264,10 +261,10 @@ private:
     constexpr CUtensorMapFloatOOBfill tma_oobFill =
         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
     constexpr CUtensorMapSwizzle tma_swizzle =
-        (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
-         : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
-         : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
-                  : CU_TENSOR_MAP_SWIZZLE_NONE);
+        (B == 1 ? CU_TENSOR_MAP_SWIZZLE_32B
+       : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
+       : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
+       :          CU_TENSOR_MAP_SWIZZLE_NONE);
 
     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
     uint64_t gmem_prob_stride[5] = {
@@ -340,7 +337,7 @@ private:
     uint32_t const *smem_box_shape_ptr = &smem_box_shape[0];
     uint32_t const *smem_box_stride_ptr = &smem_box_stride[0];
 
-#if 0
+#if 1
     printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
           gmem_prob_shape[0],
           gmem_prob_shape[1],
