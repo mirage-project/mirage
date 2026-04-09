@@ -1,10 +1,12 @@
 #pragma once
 
-#include <cutlass/arch/barrier.h>
 #include <cute/arch/copy_sm100_tma.hpp>
 #include <cute/arch/copy_sm90_tma.hpp>
+#include <cutlass/arch/barrier.h>
 
-namespace deep_gemm {
+#include "linear_fp8_sm100_utils.cuh"
+
+namespace mirage::blackwell::linear_fp8_sm100 {
 
 template <uint32_t BLOCK_INNER, uint32_t kSwizzleMode, typename dtype_t>
 constexpr uint32_t get_inner_block_atom_size() {
@@ -17,13 +19,13 @@ template <uint32_t BLOCK_INNER,
           typename dtype_t,
           bool kIs3DTMA = false>
 __device__ __forceinline__ void
-tma_copy(void const *desc_ptr,
-         cutlass::arch::ClusterTransactionBarrier *barrier_ptr,
-         dtype_t *smem_ptr,
-         const uint32_t &inner_idx,
-         const uint32_t &outer_idx,
-         const uint32_t &num_tma_multicast = 1,
-         const uint32_t &batch_idx = 0) {
+    tma_copy(void const *desc_ptr,
+             cutlass::arch::ClusterTransactionBarrier *barrier_ptr,
+             dtype_t *smem_ptr,
+             uint32_t const &inner_idx,
+             uint32_t const &outer_idx,
+             uint32_t const &num_tma_multicast = 1,
+             uint32_t const &batch_idx = 0) {
   DG_STATIC_ASSERT(
       static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_NORMAL) ==
           static_cast<uint64_t>(cute::TMA::CacheHintSm100::EVICT_NORMAL),
@@ -93,7 +95,7 @@ __device__ __forceinline__ void tensor_map_release_cta() {
 }
 
 __device__ __forceinline__ void
-tensor_map_acquire_cta(const cute::TmaDescriptor *gmem_desc_ptr) {
+    tensor_map_acquire_cta(cute::TmaDescriptor const *gmem_desc_ptr) {
   auto gmem_int_desc = reinterpret_cast<uint64_t>(gmem_desc_ptr);
   asm volatile("fence.proxy.tensormap::generic.acquire.cta [%0], 128;"
                :
@@ -102,14 +104,15 @@ tensor_map_acquire_cta(const cute::TmaDescriptor *gmem_desc_ptr) {
 }
 
 __device__ __forceinline__ void
-tensor_map_replace_global_addr_in_smem(cute::TmaDescriptor *smem_desc,
-                                       const void *new_addr) {
-  auto smem_int_desc = static_cast<uint32_t>(__cvta_generic_to_shared(smem_desc));
-  const auto new_int64_addr = reinterpret_cast<uint64_t>(new_addr);
+    tensor_map_replace_global_addr_in_smem(cute::TmaDescriptor *smem_desc,
+                                           void const *new_addr) {
+  auto smem_int_desc =
+      static_cast<uint32_t>(__cvta_generic_to_shared(smem_desc));
+  auto const new_int64_addr = reinterpret_cast<uint64_t>(new_addr);
   asm volatile(
       "tensormap.replace.tile.global_address.shared::cta.b1024.b64 [%0], %1;"
       :
       : "r"(smem_int_desc), "l"(new_int64_addr));
 }
 
-} // namespace deep_gemm
+} // namespace mirage::blackwell::linear_fp8_sm100

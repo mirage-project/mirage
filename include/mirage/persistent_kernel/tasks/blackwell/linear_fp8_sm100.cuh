@@ -4,14 +4,16 @@
 
 #include <cutlass/arch/barrier.h>
 
-#include <deep_gemm/common/epilogue_utils.cuh>
-#include <deep_gemm/common/scheduler.cuh>
-#include <deep_gemm/common/sm100_utils.cuh>
-#include <deep_gemm/common/utils.cuh>
+#include "linear_fp8_sm100_common.cuh"
 
-namespace deep_gemm {
+namespace mirage::blackwell::linear_fp8_sm100_detail {
 
-using namespace deep_gemm::sm100;
+using namespace mirage::blackwell::linear_fp8_sm100;
+using namespace mirage::blackwell::linear_fp8_sm100::sm100;
+
+} // namespace mirage::blackwell::linear_fp8_sm100_detail
+
+namespace kernel {
 
 template <cute::UMMA::Major kMajorA,
           cute::UMMA::Major kMajorB,
@@ -33,35 +35,35 @@ template <cute::UMMA::Major kMajorA,
           uint32_t kNumMulticast,
           bool kIsMulticastOnA,
           uint32_t kNumSMs,
-          GemmType kGemmType,
+          mirage::blackwell::linear_fp8_sm100::GemmType kGemmType,
           bool kWithAccumulation,
           typename a_dtype_t,
           typename b_dtype_t,
           typename cd_dtype_t,
           typename epilogue_type_t>
-__global__ void
-    __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads, 1)
-        sm100_fp8_gemm_1d1d_impl(
-            int *grouped_layout,
-            uint32_t shape_m,
-            uint32_t shape_n,
-            uint32_t shape_k,
-            const __grid_constant__ cute::TmaDescriptor tensor_map_a,
-            const __grid_constant__ cute::TmaDescriptor tensor_map_b,
-            const __grid_constant__ cute::TmaDescriptor tensor_map_sfa,
-            const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
-            const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
+__device__ __noinline__ void
+    linear_fp8_sm100_task_impl(int *grouped_layout,
+                               uint32_t shape_m,
+                               uint32_t shape_n,
+                               uint32_t shape_k,
+                               cute::TmaDescriptor const &tensor_map_a,
+                               cute::TmaDescriptor const &tensor_map_b,
+                               cute::TmaDescriptor const &tensor_map_sfa,
+                               cute::TmaDescriptor const &tensor_map_sfb,
+                               cute::TmaDescriptor const &tensor_map_cd) {
+  using namespace mirage::blackwell::linear_fp8_sm100_detail;
+
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) ||                    \
     defined(__CLION_IDE__)
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
-  using Allocator =
-      cute::conditional_t<kNumMulticast == 1,
-                          cute::TMEM::Allocator1Sm,
-                          cute::TMEM::Allocator2Sm>;
+  using Allocator = cute::conditional_t<kNumMulticast == 1,
+                                        cute::TMEM::Allocator1Sm,
+                                        cute::TMEM::Allocator2Sm>;
 
-  if constexpr (kWithAccumulation)
+  if constexpr (kWithAccumulation) {
     DG_STATIC_ASSERT(cute::is_same_v<cd_dtype_t, float>,
                      "Invalid C/D data dtype");
+  }
 
   constexpr uint32_t LAYOUT_AD_M = 128;
   constexpr uint32_t WAVE_BLOCK_M = cute::min<uint32_t>(BLOCK_M, LAYOUT_AD_M);
@@ -86,8 +88,8 @@ __global__ void
   const uint32_t shape_sfb_k = ceil_div(shape_k, kGranKB * 4);
 
   bool is_leader_cta = cute::block_rank_in_cluster() == 0;
-  const auto warp_idx = cutlass::canonical_warp_idx_sync();
-  const auto lane_idx = get_lane_idx();
+  auto const warp_idx = cutlass::canonical_warp_idx_sync();
+  auto const lane_idx = get_lane_idx();
 
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
 
@@ -98,8 +100,7 @@ __global__ void
   constexpr uint32_t STORE_BLOCK_M = cute::min<uint32_t>(BLOCK_M, LAYOUT_AD_M);
   constexpr uint32_t STORE_BLOCK_N = kSwizzleCDMode / sizeof(cd_dtype_t);
   constexpr uint32_t kNumUMMAStoreThreads = STORE_BLOCK_M;
-  DG_STATIC_ASSERT(!kIsMulticastOnA || kNumMulticast == 1,
-                   "Invalid multicast");
+  DG_STATIC_ASSERT(!kIsMulticastOnA || kNumMulticast == 1, "Invalid multicast");
   DG_STATIC_ASSERT(LOAD_BLOCK_M == BLOCK_M,
                    "Only support tensor memory layout A/D");
   DG_STATIC_ASSERT(kNumMulticast == 1 || kNumMulticast == 2,
@@ -126,18 +127,19 @@ __global__ void
 
   static constexpr uint32_t UMMA_A_SIZE_PER_STAGE =
       constexpr_align(LOAD_BLOCK_M, LAYOUT_AD_M) * BLOCK_K * sizeof(a_dtype_t);
-  DG_STATIC_ASSERT(
-      UMMA_A_SIZE_PER_STAGE <=
-          SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE * kNumStages,
-      "Memory Out of bound for UMMA");
+  DG_STATIC_ASSERT(UMMA_A_SIZE_PER_STAGE <=
+                       SMEM_A_SIZE_PER_STAGE +
+                           SMEM_B_SIZE_PER_STAGE * kNumStages,
+                   "Memory Out of bound for UMMA");
 
   constexpr uint32_t kNumSFATmemCols = SF_BLOCK_M / 32;
   constexpr uint32_t kNumSFBTmemCols = SF_BLOCK_N / 32;
   constexpr uint32_t kNumEpilogueStages =
       (2 * kNumMWaves * BLOCK_N + kNumSFATmemCols + kNumSFBTmemCols) > 512 ? 1
-                                                                            : 2;
+                                                                           : 2;
 
-  constexpr uint32_t kNumAccumTmemCols = kNumEpilogueStages * kNumMWaves * BLOCK_N;
+  constexpr uint32_t kNumAccumTmemCols =
+      kNumEpilogueStages * kNumMWaves * BLOCK_N;
   constexpr uint32_t kNumTmemCols =
       get_num_aligned_tmem_cols<kNumAccumTmemCols + kNumSFATmemCols +
                                 kNumSFBTmemCols>();
@@ -152,28 +154,28 @@ __global__ void
     cute::prefetch_tma_descriptor(&tensor_map_cd);
   }
 
-  auto smem_cd = PatternVisitor([&](const uint32_t &i) {
+  auto smem_cd = PatternVisitor([&](uint32_t const &i) {
     return reinterpret_cast<cd_dtype_t *>(smem_buffer +
                                           i * SMEM_CD_SIZE_PER_STAGE);
   });
-  auto smem_a = PatternVisitor([&](const uint32_t &i) {
+  auto smem_a = PatternVisitor([&](uint32_t const &i) {
     return reinterpret_cast<a_dtype_t *>(smem_buffer + SMEM_CD_SIZE +
                                          i * SMEM_A_SIZE_PER_STAGE);
   });
-  auto smem_b = PatternVisitor([&](const uint32_t &i) {
-    return reinterpret_cast<b_dtype_t *>(
-        smem_buffer + SMEM_CD_SIZE + kNumStages * SMEM_A_SIZE_PER_STAGE +
-        i * SMEM_B_SIZE_PER_STAGE);
+  auto smem_b = PatternVisitor([&](uint32_t const &i) {
+    return reinterpret_cast<b_dtype_t *>(smem_buffer + SMEM_CD_SIZE +
+                                         kNumStages * SMEM_A_SIZE_PER_STAGE +
+                                         i * SMEM_B_SIZE_PER_STAGE);
   });
 
   auto sf_start_ptr =
       smem_buffer + SMEM_CD_SIZE +
       kNumStages * (SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE);
-  auto smem_sfa = PatternVisitor([=](const uint32_t &i) {
+  auto smem_sfa = PatternVisitor([=](uint32_t const &i) {
     return reinterpret_cast<uint32_t *>(sf_start_ptr +
                                         i * SMEM_SFA_SIZE_PER_STAGE);
   });
-  auto smem_sfb = PatternVisitor([=](const uint32_t &i) {
+  auto smem_sfb = PatternVisitor([=](uint32_t const &i) {
     return reinterpret_cast<uint32_t *>(sf_start_ptr +
                                         kNumStages * SMEM_SFA_SIZE_PER_STAGE +
                                         i * SMEM_SFB_SIZE_PER_STAGE);
@@ -183,19 +185,17 @@ __global__ void
       smem_buffer + SMEM_CD_SIZE +
       kNumStages * (SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE) +
       kNumStages * (SMEM_SFA_SIZE_PER_STAGE + SMEM_SFB_SIZE_PER_STAGE));
-  auto full_barriers = PatternVisitor([=](const uint32_t &i) {
-    return barrier_start_ptr + (i);
-  });
-  auto empty_barriers = PatternVisitor([=](const uint32_t &i) {
-    return barrier_start_ptr + (kNumStages + i);
-  });
-  auto with_sf_full_barriers = PatternVisitor([=](const uint32_t &i) {
+  auto full_barriers = PatternVisitor(
+      [=](uint32_t const &i) { return barrier_start_ptr + (i); });
+  auto empty_barriers = PatternVisitor(
+      [=](uint32_t const &i) { return barrier_start_ptr + (kNumStages + i); });
+  auto with_sf_full_barriers = PatternVisitor([=](uint32_t const &i) {
     return barrier_start_ptr + (kNumStages * 2 + i);
   });
-  auto tmem_full_barriers = PatternVisitor([=](const uint32_t &i) {
+  auto tmem_full_barriers = PatternVisitor([=](uint32_t const &i) {
     return barrier_start_ptr + (kNumStages * 3 + i);
   });
-  auto tmem_empty_barriers = PatternVisitor([=](const uint32_t &i) {
+  auto tmem_empty_barriers = PatternVisitor([=](uint32_t const &i) {
     return barrier_start_ptr + (kNumStages * 3 + kNumEpilogueStages + i);
   });
 
@@ -204,8 +204,9 @@ __global__ void
   DG_STATIC_ASSERT(32 <= kNumTmemCols && kNumTmemCols <= 512,
                    "Invalid tensor memory columns");
 
-  if (kNumMulticast > 1)
+  if (kNumMulticast > 1) {
     cute::cluster_sync();
+  }
 
   if (warp_idx == 1 && cute::elect_one_sync()) {
 #pragma unroll
@@ -227,8 +228,13 @@ __global__ void
 
   uint32_t m_block_idx, n_block_idx;
   auto scheduler =
-      Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumMulticast,
-                kIsMulticastOnA, kNumSMs>(shape_m, shape_n, shape_k, grouped_layout);
+      Scheduler<kGemmType,
+                BLOCK_M,
+                BLOCK_N,
+                kNumGroups,
+                kNumMulticast,
+                kIsMulticastOnA,
+                kNumSMs>(shape_m, shape_n, shape_k, grouped_layout);
 
   uint32_t stage_idx = 0, phase = 0;
   auto advance_pipeline = [&](uint32_t &k_block_idx) {
@@ -239,46 +245,61 @@ __global__ void
 
   if (warp_idx == 0 && cute::elect_one_sync()) {
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
-      const auto &num_total_k_blocks = ceil_div(scheduler.current_shape_k, BLOCK_K);
+      auto const &num_total_k_blocks =
+          ceil_div(scheduler.current_shape_k, BLOCK_K);
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
         empty_barriers[stage_idx]->wait(phase ^ 1);
 
         uint32_t m_idx = scheduler.template get_global_idx<
-            (kGemmType == GemmType::MGroupedMasked), IndexType::MN>(
-            shape_m, BLOCK_M, m_block_idx);
-        uint32_t n_idx = scheduler.template get_global_idx<
-            (kMajorB == cute::UMMA::Major::K), IndexType::MN>(
-            shape_n, BLOCK_N, n_block_idx, m_block_idx);
+            (kGemmType == GemmType::MGroupedMasked),
+            IndexType::MN>(shape_m, BLOCK_M, m_block_idx);
+        uint32_t n_idx =
+            scheduler.template get_global_idx<(kMajorB == cute::UMMA::Major::K),
+                                              IndexType::MN>(
+                shape_n, BLOCK_N, n_block_idx, m_block_idx);
 
         uint32_t k_idx = k_block_idx * BLOCK_K;
-        uint32_t k_a_idx = scheduler.template get_global_idx<
-            (kMajorA == cute::UMMA::Major::MN), IndexType::K>(
-            shape_k, BLOCK_K, k_block_idx, m_block_idx);
-        uint32_t k_b_idx = scheduler.template get_global_idx<
-            (kMajorB == cute::UMMA::Major::MN), IndexType::K>(
-            shape_k, BLOCK_K, k_block_idx, m_block_idx);
+        uint32_t k_a_idx =
+            scheduler
+                .template get_global_idx<(kMajorA == cute::UMMA::Major::MN),
+                                         IndexType::K>(
+                    shape_k, BLOCK_K, k_block_idx, m_block_idx);
+        uint32_t k_b_idx =
+            scheduler
+                .template get_global_idx<(kMajorB == cute::UMMA::Major::MN),
+                                         IndexType::K>(
+                    shape_k, BLOCK_K, k_block_idx, m_block_idx);
 
         constexpr bool kIsBatchedMM = (kGemmType == GemmType::Batched);
-        const uint32_t batch_idx = (kIsBatchedMM ? scheduler.current_group_idx : 0);
-        if constexpr (kMajorA == cute::UMMA::Major::K)
-          tma_copy<BLOCK_K, LOAD_BLOCK_M, kSwizzleAMode, a_dtype_t, kIsBatchedMM>(
-              &tensor_map_a,
-              full_barriers[stage_idx],
-              smem_a[stage_idx],
-              k_a_idx,
-              m_idx,
-              1,
-              batch_idx);
-        if constexpr (kMajorB == cute::UMMA::Major::K)
-          tma_copy<BLOCK_K, LOAD_BLOCK_N, kSwizzleBMode, b_dtype_t, kIsBatchedMM>(
-              &tensor_map_b,
-              full_barriers[stage_idx],
-              smem_b[stage_idx],
-              k_b_idx,
-              n_idx,
-              1,
-              batch_idx);
+        const uint32_t batch_idx =
+            (kIsBatchedMM ? scheduler.current_group_idx : 0);
+        if constexpr (kMajorA == cute::UMMA::Major::K) {
+          tma_copy<BLOCK_K,
+                   LOAD_BLOCK_M,
+                   kSwizzleAMode,
+                   a_dtype_t,
+                   kIsBatchedMM>(&tensor_map_a,
+                                 full_barriers[stage_idx],
+                                 smem_a[stage_idx],
+                                 k_a_idx,
+                                 m_idx,
+                                 1,
+                                 batch_idx);
+        }
+        if constexpr (kMajorB == cute::UMMA::Major::K) {
+          tma_copy<BLOCK_K,
+                   LOAD_BLOCK_N,
+                   kSwizzleBMode,
+                   b_dtype_t,
+                   kIsBatchedMM>(&tensor_map_b,
+                                 full_barriers[stage_idx],
+                                 smem_b[stage_idx],
+                                 k_b_idx,
+                                 n_idx,
+                                 1,
+                                 batch_idx);
+        }
         auto num_arrival_bytes =
             SMEM_A_SIZE_PER_STAGE /
                 (std::is_same_v<a_dtype_t, cutlass::float_e4m3_t> ? 1 : 2) +
@@ -286,29 +307,30 @@ __global__ void
                 (std::is_same_v<b_dtype_t, cutlass::float_e4m3_t> ? 1 : 2);
 
         if (k_block_idx % kNumSFAStagesPerLoad == 0) {
-          tma_copy<BLOCK_M, 1, 0>(&tensor_map_sfa,
-                                  full_barriers[stage_idx],
-                                  smem_sfa[stage_idx],
-                                  m_block_idx * BLOCK_M,
-                                  scheduler.template get_global_idx<
-                                      (!is_m_grouped_contiguous(kGemmType)),
-                                      IndexType::SF_K>(
-                                      shape_sfa_k,
-                                      1,
-                                      ceil_div(k_idx, BLOCK_K * kNumSFAStagesPerLoad)));
+          tma_copy<BLOCK_M, 1, 0>(
+              &tensor_map_sfa,
+              full_barriers[stage_idx],
+              smem_sfa[stage_idx],
+              m_block_idx * BLOCK_M,
+              scheduler.template get_global_idx<(!is_m_grouped_contiguous(
+                                                    kGemmType)),
+                                                IndexType::SF_K>(
+                  shape_sfa_k,
+                  1,
+                  ceil_div(k_idx, BLOCK_K * kNumSFAStagesPerLoad)));
           num_arrival_bytes += BLOCK_M * sizeof(uint32_t);
         }
         if (k_block_idx % kNumSFBStagesPerLoad == 0) {
-          tma_copy<BLOCK_N, 1, 0>(&tensor_map_sfb,
-                                  full_barriers[stage_idx],
-                                  smem_sfb[stage_idx],
-                                  n_block_idx * BLOCK_N,
-                                  scheduler.template get_global_idx<true,
-                                                                    IndexType::SF_K>(
-                                      shape_sfb_k,
-                                      1,
-                                      ceil_div(k_idx, BLOCK_K * kNumSFBStagesPerLoad),
-                                      m_block_idx));
+          tma_copy<BLOCK_N, 1, 0>(
+              &tensor_map_sfb,
+              full_barriers[stage_idx],
+              smem_sfb[stage_idx],
+              n_block_idx * BLOCK_N,
+              scheduler.template get_global_idx<true, IndexType::SF_K>(
+                  shape_sfb_k,
+                  1,
+                  ceil_div(k_idx, BLOCK_K * kNumSFBStagesPerLoad),
+                  m_block_idx));
           num_arrival_bytes += BLOCK_N * sizeof(uint32_t);
         }
 
@@ -316,7 +338,8 @@ __global__ void
       }
     }
   } else if (warp_idx == 1 && is_leader_cta) {
-    constexpr uint32_t UMMA_M = LAYOUT_AD_M * (kIsMulticastOnA ? 1 : kNumMulticast);
+    constexpr uint32_t UMMA_M =
+        LAYOUT_AD_M * (kIsMulticastOnA ? 1 : kNumMulticast);
     constexpr uint32_t UMMA_N = BLOCK_N * (kIsMulticastOnA ? kNumMulticast : 1);
     constexpr uint32_t UMMA_K = 32;
     auto instr_desc =
@@ -331,23 +354,23 @@ __global__ void
     auto sf_desc = make_sf_desc(nullptr);
 
     DG_STATIC_ASSERT(kNumStages <= 32, "Too many stages");
-    auto a_desc =
-        make_umma_desc<kMajorA, LOAD_BLOCK_M, BLOCK_K, kSwizzleAMode>(
-            smem_a[0], 0, 0);
-    auto b_desc =
-        make_umma_desc<kMajorB, LOAD_BLOCK_N, BLOCK_K, kSwizzleBMode>(
-            smem_b[0], 0, 0);
-    uint32_t a_desc_lo =
-        lane_idx < kNumStages ? a_desc.lo + lane_idx * SMEM_A_SIZE_PER_STAGE / 16
-                              : 0u;
-    uint32_t b_desc_lo =
-        lane_idx < kNumStages ? b_desc.lo + lane_idx * SMEM_B_SIZE_PER_STAGE / 16
-                              : 0u;
+    auto a_desc = make_umma_desc<kMajorA, LOAD_BLOCK_M, BLOCK_K, kSwizzleAMode>(
+        smem_a[0], 0, 0);
+    auto b_desc = make_umma_desc<kMajorB, LOAD_BLOCK_N, BLOCK_K, kSwizzleBMode>(
+        smem_b[0], 0, 0);
+    uint32_t a_desc_lo = lane_idx < kNumStages
+                             ? a_desc.lo + lane_idx * SMEM_A_SIZE_PER_STAGE / 16
+                             : 0u;
+    uint32_t b_desc_lo = lane_idx < kNumStages
+                             ? b_desc.lo + lane_idx * SMEM_B_SIZE_PER_STAGE / 16
+                             : 0u;
 
     DG_STATIC_ASSERT(
         (UMMA_M == 64 && UMMA_N % 8 == 0 && 8 <= UMMA_N && UMMA_N <= 256) ||
-            (UMMA_M == 128 && UMMA_N % 16 == 0 && 16 <= UMMA_N && UMMA_N <= 256) ||
-            (UMMA_M == 256 && UMMA_N % 16 == 0 && 16 <= UMMA_N && UMMA_N <= 256),
+            (UMMA_M == 128 && UMMA_N % 16 == 0 && 16 <= UMMA_N &&
+             UMMA_N <= 256) ||
+            (UMMA_M == 256 && UMMA_N % 16 == 0 && 16 <= UMMA_N &&
+             UMMA_N <= 256),
         "Invalid MMA instruction shape");
 
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
@@ -356,17 +379,19 @@ __global__ void
       tmem_empty_barriers[accum_stage_idx]->wait(accum_phase_idx ^ 1);
       tcgen05_after_thread_sync();
 
-      auto empty_barrier_arrive = [&](const bool &do_tmem_full_arrive) {
+      auto empty_barrier_arrive = [&](bool const &do_tmem_full_arrive) {
         auto umma_arrive = [](const uint64_t *barrier) {
           cutlass::arch::umma_arrive(barrier);
         };
         umma_arrive(reinterpret_cast<uint64_t *>(empty_barriers[stage_idx]));
-        if (do_tmem_full_arrive)
+        if (do_tmem_full_arrive) {
           umma_arrive(reinterpret_cast<uint64_t *>(
               tmem_full_barriers[accum_stage_idx]));
+        }
       };
 
-      const auto &num_total_k_blocks = ceil_div(scheduler.current_shape_k, BLOCK_K);
+      auto const &num_total_k_blocks =
+          ceil_div(scheduler.current_shape_k, BLOCK_K);
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
         with_sf_full_barriers[stage_idx]->wait(phase);
@@ -396,9 +421,9 @@ __global__ void
         __syncwarp();
 
         using mma_t = SM100_MMA_MXF8F6F4_SS;
-        const auto &a_desc_base_lo =
+        auto const &a_desc_base_lo =
             __shfl_sync(0xffffffff, a_desc_lo, static_cast<int>(stage_idx));
-        const auto &b_desc_base_lo =
+        auto const &b_desc_base_lo =
             __shfl_sync(0xffffffff, b_desc_lo, static_cast<int>(stage_idx));
         if (cute::elect_one_sync()) {
 #pragma unroll
@@ -407,7 +432,7 @@ __global__ void
                 (kGranKA == 32 ? k : sfa_stage_in_group_idx);
             const uint32_t sfb_id =
                 (kGranKB == 32 ? k : sfb_stage_in_group_idx);
-            const auto &runtime_instr_desc =
+            auto const &runtime_instr_desc =
                 make_runtime_instr_desc_with_sf_id(instr_desc, sfa_id, sfb_id);
 
             b_desc.lo =
@@ -422,17 +447,14 @@ __global__ void
               a_desc.lo = advance_umma_desc_lo<kMajorA,
                                                LOAD_BLOCK_M,
                                                kSwizzleAMode,
-                                               a_dtype_t>(a_desc_base_lo,
-                                                          w * WAVE_BLOCK_M *
-                                                              BLOCK_K,
-                                                          k * UMMA_K);
+                                               a_dtype_t>(
+                  a_desc_base_lo, w * WAVE_BLOCK_M * BLOCK_K, k * UMMA_K);
               mma_t::fma(a_desc,
                          b_desc,
                          accum_stage_idx * kNumMWaves * BLOCK_N + w * BLOCK_N,
                          k_block_idx > 0 || k > 0,
                          runtime_instr_desc,
-                         kTmemStartColOfSFA +
-                             w * (kNumUTCCPAlignedElems / 32),
+                         kTmemStartColOfSFA + w * (kNumUTCCPAlignedElems / 32),
                          kTmemStartColOfSFB);
             }
           }
@@ -441,14 +463,15 @@ __global__ void
       }
     }
 
-    const auto &iter_idx = scheduler.current_iter - 1;
+    auto const &iter_idx = scheduler.current_iter - 1;
     if (kNumMulticast > 1 && iter_idx >= 0) {
-      const auto &accum_phase_idx = (iter_idx / kNumEpilogueStages) & 1;
+      auto const &accum_phase_idx = (iter_idx / kNumEpilogueStages) & 1;
       tmem_empty_barriers[iter_idx % kNumEpilogueStages]->wait(accum_phase_idx);
     }
   } else if (warp_idx == 2) {
-    auto utccp_required_smem_warp_transpose = [&](const uint32_t *smem_ptr) {
-      DG_STATIC_ASSERT(kNumUTCCPAlignedElems == 128, "Invalid aligned elements");
+    auto utccp_required_smem_warp_transpose = [&](uint32_t const *smem_ptr) {
+      DG_STATIC_ASSERT(kNumUTCCPAlignedElems == 128,
+                       "Invalid aligned elements");
       uint32_t values[4];
 #pragma unroll
       for (uint32_t i = 0; i < 4; ++i)
@@ -460,23 +483,26 @@ __global__ void
     };
 
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
-      const auto &num_total_k_blocks = ceil_div(scheduler.current_shape_k, BLOCK_K);
+      auto const &num_total_k_blocks =
+          ceil_div(scheduler.current_shape_k, BLOCK_K);
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
         full_barriers[stage_idx]->wait(phase);
 
         if (k_block_idx % kNumSFAStagesPerLoad == 0) {
 #pragma unroll
-          for (uint32_t i = 0; i < SF_BLOCK_M / kNumUTCCPAlignedElems; ++i)
+          for (uint32_t i = 0; i < SF_BLOCK_M / kNumUTCCPAlignedElems; ++i) {
             utccp_required_smem_warp_transpose(smem_sfa[stage_idx] +
                                                i * kNumUTCCPAlignedElems);
+          }
           cutlass::arch::fence_view_async_shared();
         }
         if (k_block_idx % kNumSFBStagesPerLoad == 0) {
 #pragma unroll
-          for (uint32_t i = 0; i < SF_BLOCK_N / kNumUTCCPAlignedElems; ++i)
+          for (uint32_t i = 0; i < SF_BLOCK_N / kNumUTCCPAlignedElems; ++i) {
             utccp_required_smem_warp_transpose(smem_sfb[stage_idx] +
                                                i * kNumUTCCPAlignedElems);
+          }
           cutlass::arch::fence_view_async_shared();
         }
 
@@ -484,9 +510,8 @@ __global__ void
       }
     }
   } else if (warp_idx >= kNumNonEpilogueThreads / 32 &&
-             warp_idx <
-                 (kNumNonEpilogueThreads + kNumUMMAStoreThreads) / 32) {
-    const auto epilogue_warp_idx = warp_idx - (kNumNonEpilogueThreads / 32);
+             warp_idx < (kNumNonEpilogueThreads + kNumUMMAStoreThreads) / 32) {
+    auto const epilogue_warp_idx = warp_idx - (kNumNonEpilogueThreads / 32);
     DG_TRAP_ONLY_DEVICE_ASSERT(ld_shared(tmem_ptr_in_smem) == 0);
 
     constexpr uint32_t kNumBankGroupBytes = 16;
@@ -508,7 +533,8 @@ __global__ void
       tmem_full_barriers[accum_stage_idx]->wait(accum_phase_idx);
       tcgen05_after_thread_sync();
 
-      DG_STATIC_ASSERT(kNumEpilogueThreads == 128, "Epilogue threads not enough");
+      DG_STATIC_ASSERT(kNumEpilogueThreads == 128,
+                       "Epilogue threads not enough");
       DG_STATIC_ASSERT(BLOCK_N % STORE_BLOCK_N == 0, "Invalid block sizes");
 
 #pragma unroll
@@ -516,16 +542,16 @@ __global__ void
         constexpr uint32_t kNumStores = BLOCK_N / STORE_BLOCK_N;
 #pragma unroll
         for (uint32_t s = 0; s < kNumStores; ++s, advance_store_pipeline()) {
-          if (epilogue_warp_idx == 0)
+          if (epilogue_warp_idx == 0) {
             cute::tma_store_wait<kNumTMAStoreStages - 1>();
+          }
           cutlass::arch::NamedBarrier::sync(kNumUMMAStoreThreads, 0);
 
-          const auto m_idx =
-              scheduler.template get_global_idx<
-                  (!is_m_grouped_contiguous(kGemmType)), IndexType::MN>(
-                  shape_m, BLOCK_M, m_block_idx) +
-              w * WAVE_BLOCK_M;
-          const auto n_idx =
+          auto const m_idx = scheduler.template get_global_idx<
+                                 (!is_m_grouped_contiguous(kGemmType)),
+                                 IndexType::MN>(shape_m, BLOCK_M, m_block_idx) +
+                             w * WAVE_BLOCK_M;
+          auto const n_idx =
               epilogue_type_t::template apply_index_n<STORE_BLOCK_N>(
                   n_block_idx * BLOCK_N + s * STORE_BLOCK_N);
 
@@ -536,17 +562,18 @@ __global__ void
 
             constexpr bool kHasShortcut =
                 (kSwizzleCDMode / kNumBankGroupBytes) == 8;
-            auto row = kHasShortcut ? (i / 8 + lane_idx) : (bank_group_index / 8);
+            auto row =
+                kHasShortcut ? (i / 8 + lane_idx) : (bank_group_index / 8);
             auto col = kHasShortcut ? (i) : (bank_group_index % 8);
             col ^= row % (kSwizzleCDMode / 16);
 
-            uint32_t tmem_addr =
-                accum_stage_idx * kNumMWaves * BLOCK_N + w * BLOCK_N +
-                s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;
-            auto smem_ptr = reinterpret_cast<uint8_t *>(smem_cd[tma_stage_idx]) +
-                            epilogue_warp_idx * 32 * kSwizzleCDMode +
-                            row * (kNumBankGroupBytes * 8) +
-                            col * kNumBankGroupBytes;
+            uint32_t tmem_addr = accum_stage_idx * kNumMWaves * BLOCK_N +
+                                 w * BLOCK_N + s * STORE_BLOCK_N +
+                                 i * kNumElemsPerBankGroup;
+            auto smem_ptr =
+                reinterpret_cast<uint8_t *>(smem_cd[tma_stage_idx]) +
+                epilogue_warp_idx * 32 * kSwizzleCDMode +
+                row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;
 
             uint32_t values[kNumElemsPerBankGroup];
             if constexpr (cute::is_same_v<cd_dtype_t, float>) {
@@ -560,16 +587,15 @@ __global__ void
                   kNumElemsPerBankGroup == 8 &&
                       cute::is_same_v<cd_dtype_t, cutlass::bfloat16_t>,
                   "Invalid type");
-              cute::SM100_TMEM_LOAD_32dp32b8x::copy(
-                  tmem_addr,
-                  values[0],
-                  values[1],
-                  values[2],
-                  values[3],
-                  values[4],
-                  values[5],
-                  values[6],
-                  values[7]);
+              cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
+                                                    values[0],
+                                                    values[1],
+                                                    values[2],
+                                                    values[3],
+                                                    values[4],
+                                                    values[5],
+                                                    values[6],
+                                                    values[7]);
               cutlass::arch::fence_view_async_tmem_load();
               st_shared(smem_ptr,
                         cast_into_bf16_and_pack(values[0], values[1]),
@@ -588,22 +614,22 @@ __global__ void
           cutlass::arch::NamedBarrier::sync(kNumUMMAStoreThreads, 0);
           if (epilogue_warp_idx == 0 && cute::elect_one_sync()) {
             if constexpr (kGemmType == GemmType::Batched) {
-              using cute_tma_t = cute::conditional_t<kWithAccumulation,
-                                                     cute::SM90_TMA_REDUCE_ADD_3D,
-                                                     cute::SM90_TMA_STORE_3D>;
+              using cute_tma_t =
+                  cute::conditional_t<kWithAccumulation,
+                                      cute::SM90_TMA_REDUCE_ADD_3D,
+                                      cute::SM90_TMA_STORE_3D>;
               cute_tma_t::copy(&tensor_map_cd,
                                smem_cd[tma_stage_idx],
                                n_idx,
                                m_idx,
                                scheduler.current_group_idx);
             } else {
-              using cute_tma_t = cute::conditional_t<kWithAccumulation,
-                                                     cute::SM90_TMA_REDUCE_ADD_2D,
-                                                     cute::SM90_TMA_STORE_2D>;
-              cute_tma_t::copy(&tensor_map_cd,
-                               smem_cd[tma_stage_idx],
-                               n_idx,
-                               m_idx);
+              using cute_tma_t =
+                  cute::conditional_t<kWithAccumulation,
+                                      cute::SM90_TMA_REDUCE_ADD_2D,
+                                      cute::SM90_TMA_STORE_2D>;
+              cute_tma_t::copy(
+                  &tensor_map_cd, smem_cd[tma_stage_idx], n_idx, m_idx);
             }
             cute::tma_store_arrive();
           }
@@ -613,15 +639,91 @@ __global__ void
   }
 
   kNumMulticast > 1 ? cute::cluster_sync() : __syncthreads();
-  if (warp_idx == 0)
+  if (warp_idx == 0) {
     Allocator().free(0, kNumTmemCols);
+  }
 
 #else
-  if (blockIdx.x == 0 && threadIdx.x == 0)
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
     DG_DEVICE_ASSERT(false && "This kernel only support sm_100f");
+  }
 #endif
 }
 
-}; // namespace deep_gemm
+template <cute::UMMA::Major kMajorA,
+          cute::UMMA::Major kMajorB,
+          uint32_t kGranKA,
+          uint32_t kGranKB,
+          uint32_t SHAPE_M,
+          uint32_t SHAPE_N,
+          uint32_t SHAPE_K,
+          uint32_t BLOCK_M,
+          uint32_t BLOCK_N,
+          uint32_t BLOCK_K,
+          uint32_t kNumGroups,
+          uint32_t kSwizzleAMode,
+          uint32_t kSwizzleBMode,
+          uint32_t kSwizzleCDMode,
+          uint32_t kNumStages,
+          uint32_t kNumNonEpilogueThreads,
+          uint32_t kNumEpilogueThreads,
+          uint32_t kNumMulticast,
+          bool kIsMulticastOnA,
+          uint32_t kNumSMs,
+          mirage::blackwell::linear_fp8_sm100::GemmType kGemmType,
+          bool kWithAccumulation,
+          typename a_dtype_t,
+          typename b_dtype_t,
+          typename cd_dtype_t,
+          typename epilogue_type_t>
+__global__ void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads,
+                                  1)
+    linear_fp8_sm100_wrapper(
+        int *grouped_layout,
+        uint32_t shape_m,
+        uint32_t shape_n,
+        uint32_t shape_k,
+        const __grid_constant__ cute::TmaDescriptor tensor_map_a,
+        const __grid_constant__ cute::TmaDescriptor tensor_map_b,
+        const __grid_constant__ cute::TmaDescriptor tensor_map_sfa,
+        const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
+        const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
+  linear_fp8_sm100_task_impl<kMajorA,
+                             kMajorB,
+                             kGranKA,
+                             kGranKB,
+                             SHAPE_M,
+                             SHAPE_N,
+                             SHAPE_K,
+                             BLOCK_M,
+                             BLOCK_N,
+                             BLOCK_K,
+                             kNumGroups,
+                             kSwizzleAMode,
+                             kSwizzleBMode,
+                             kSwizzleCDMode,
+                             kNumStages,
+                             kNumNonEpilogueThreads,
+                             kNumEpilogueThreads,
+                             kNumMulticast,
+                             kIsMulticastOnA,
+                             kNumSMs,
+                             kGemmType,
+                             kWithAccumulation,
+                             a_dtype_t,
+                             b_dtype_t,
+                             cd_dtype_t,
+                             epilogue_type_t>(grouped_layout,
+                                              shape_m,
+                                              shape_n,
+                                              shape_k,
+                                              tensor_map_a,
+                                              tensor_map_b,
+                                              tensor_map_sfa,
+                                              tensor_map_sfb,
+                                              tensor_map_cd);
+}
+
+} // namespace kernel
 
 #pragma clang diagnostic pop

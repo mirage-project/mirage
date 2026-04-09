@@ -15,6 +15,7 @@
 
 #include "../common/sm100_fp8_runtime_registry.h"
 #include "../common/sm100_fp8_scale_layout.h"
+#include "blackwell/linear_fp8_sm100.cuh"
 #include "runtime_header.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
@@ -39,11 +40,9 @@
 #include <cute/pointer_flagged.hpp>
 #include <cute/tensor.hpp>
 
-#include <deep_gemm/common/epilogue_utils.cuh>
-#include <deep_gemm/impls/sm100_fp8_gemm_1d1d.cuh>
-
 using bfloat16 = cute::bfloat16_t;
 namespace fp8_runtime = mirage::blackwell::sm100_fp8_runtime;
+namespace fp8_linear = mirage::blackwell::linear_fp8_sm100;
 // sm100_linear_fp8_1d2d
 namespace {
 
@@ -58,7 +57,7 @@ struct LinearFp8RuntimeKey {
   }
 };
 
-struct LinearFp8FastDescriptorCache {
+struct LinearFp8DescriptorCache {
   CUtensorMap host_input_desc{};
   CUtensorMap host_weight_desc{};
   CUtensorMap host_input_scale_desc{};
@@ -74,17 +73,17 @@ struct LinearFp8FastDescriptorCache {
   std::mutex mutex;
 };
 
-LinearFp8FastDescriptorCache &
-    get_linear_fp8_fast_descriptor_cache(LinearFp8RuntimeKey const &key) {
+LinearFp8DescriptorCache &
+    get_linear_fp8_descriptor_cache(LinearFp8RuntimeKey const &key) {
   static std::map<LinearFp8RuntimeKey,
-                  std::unique_ptr<LinearFp8FastDescriptorCache>>
+                  std::unique_ptr<LinearFp8DescriptorCache>>
       caches;
   static std::mutex caches_mutex;
 
   std::lock_guard<std::mutex> guard(caches_mutex);
   auto &cache = caches[key];
   if (!cache) {
-    cache = std::make_unique<LinearFp8FastDescriptorCache>();
+    cache = std::make_unique<LinearFp8DescriptorCache>();
   }
   return *cache;
 }
@@ -278,12 +277,12 @@ void launch_kernel_ex_cluster(dim3 grid_dim,
 } // namespace
 
 template <int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
-void launch_linear_fp8_1d1d_sm100_fast(torch::Tensor const &input_q,
-                                       torch::Tensor const &input_scale,
-                                       torch::Tensor const &weight_q,
-                                       torch::Tensor const &weight_scale,
-                                       torch::Tensor &output) {
-  static_assert(OUTPUT_SIZE == 128, "Fast path currently requires N=128");
+void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
+                                  torch::Tensor const &input_scale,
+                                  torch::Tensor const &weight_q,
+                                  torch::Tensor const &weight_scale,
+                                  torch::Tensor &output) {
+  static_assert(OUTPUT_SIZE == 128, "Current path requires N=128");
   constexpr int BLOCK_M = 32;
   constexpr int BLOCK_N = 16;
   constexpr int BLOCK_K = 128;
@@ -300,7 +299,7 @@ void launch_linear_fp8_1d1d_sm100_fast(torch::Tensor const &input_q,
   constexpr int kNumSMs = 8;
   constexpr int kDynamicSmemBytes = 232236;
 
-  auto &cache = get_linear_fp8_fast_descriptor_cache(
+  auto &cache = get_linear_fp8_descriptor_cache(
       LinearFp8RuntimeKey{BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE});
   std::lock_guard<std::mutex> lock(cache.mutex);
 
@@ -380,61 +379,61 @@ void launch_linear_fp8_1d1d_sm100_fast(torch::Tensor const &input_q,
     }
   }
 
-  using Kernel = decltype(&deep_gemm::sm100_fp8_gemm_1d1d_impl<
-                          cute::UMMA::Major::K,
-                          cute::UMMA::Major::K,
-                          kGranKA,
-                          kGranKB,
-                          BATCH_SIZE,
-                          OUTPUT_SIZE,
-                          REDUCTION_SIZE,
-                          BLOCK_M,
-                          BLOCK_N,
-                          BLOCK_K,
-                          1,
-                          kSwizzleAMode,
-                          kSwizzleBMode,
-                          kSwizzleCDMode,
-                          kNumStages,
-                          kNumNonEpilogueThreads,
-                          kNumEpilogueThreads,
-                          kNumMulticast,
-                          kIsMulticastOnA,
-                          kNumSMs,
-                          deep_gemm::GemmType::Normal,
-                          false,
-                          cutlass::float_e4m3_t,
-                          cutlass::float_e4m3_t,
-                          cutlass::bfloat16_t,
-                          deep_gemm::EpilogueIdentity>);
+  using Kernel =
+      decltype(&kernel::linear_fp8_sm100_wrapper<cute::UMMA::Major::K,
+                                                 cute::UMMA::Major::K,
+                                                 kGranKA,
+                                                 kGranKB,
+                                                 BATCH_SIZE,
+                                                 OUTPUT_SIZE,
+                                                 REDUCTION_SIZE,
+                                                 BLOCK_M,
+                                                 BLOCK_N,
+                                                 BLOCK_K,
+                                                 1,
+                                                 kSwizzleAMode,
+                                                 kSwizzleBMode,
+                                                 kSwizzleCDMode,
+                                                 kNumStages,
+                                                 kNumNonEpilogueThreads,
+                                                 kNumEpilogueThreads,
+                                                 kNumMulticast,
+                                                 kIsMulticastOnA,
+                                                 kNumSMs,
+                                                 fp8_linear::GemmType::Normal,
+                                                 false,
+                                                 cutlass::float_e4m3_t,
+                                                 cutlass::float_e4m3_t,
+                                                 cutlass::bfloat16_t,
+                                                 fp8_linear::EpilogueIdentity>);
 
   auto *kernel_ptr =
-      &deep_gemm::sm100_fp8_gemm_1d1d_impl<cute::UMMA::Major::K,
-                                           cute::UMMA::Major::K,
-                                           kGranKA,
-                                           kGranKB,
-                                           BATCH_SIZE,
-                                           OUTPUT_SIZE,
-                                           REDUCTION_SIZE,
-                                           BLOCK_M,
-                                           BLOCK_N,
-                                           BLOCK_K,
-                                           1,
-                                           kSwizzleAMode,
-                                           kSwizzleBMode,
-                                           kSwizzleCDMode,
-                                           kNumStages,
-                                           kNumNonEpilogueThreads,
-                                           kNumEpilogueThreads,
-                                           kNumMulticast,
-                                           kIsMulticastOnA,
-                                           kNumSMs,
-                                           deep_gemm::GemmType::Normal,
-                                           false,
-                                           cutlass::float_e4m3_t,
-                                           cutlass::float_e4m3_t,
-                                           cutlass::bfloat16_t,
-                                           deep_gemm::EpilogueIdentity>;
+      &kernel::linear_fp8_sm100_wrapper<cute::UMMA::Major::K,
+                                        cute::UMMA::Major::K,
+                                        kGranKA,
+                                        kGranKB,
+                                        BATCH_SIZE,
+                                        OUTPUT_SIZE,
+                                        REDUCTION_SIZE,
+                                        BLOCK_M,
+                                        BLOCK_N,
+                                        BLOCK_K,
+                                        1,
+                                        kSwizzleAMode,
+                                        kSwizzleBMode,
+                                        kSwizzleCDMode,
+                                        kNumStages,
+                                        kNumNonEpilogueThreads,
+                                        kNumEpilogueThreads,
+                                        kNumMulticast,
+                                        kIsMulticastOnA,
+                                        kNumSMs,
+                                        fp8_linear::GemmType::Normal,
+                                        false,
+                                        cutlass::float_e4m3_t,
+                                        cutlass::float_e4m3_t,
+                                        cutlass::bfloat16_t,
+                                        fp8_linear::EpilogueIdentity>;
 
   if (!cache.kernel_configured) {
     CUTE_CHECK_ERROR(
@@ -467,7 +466,7 @@ void launch_linear_fp8_1d1d_sm100_fast(torch::Tensor const &input_q,
                            cache.host_input_scale_desc,
                            cache.host_weight_scale_desc,
                            cache.host_output_desc);
-  check_last_launch("linear_fp8_1d1d_sm100_fast");
+  check_last_launch("linear_fp8_1d1d_sm100");
 }
 
 void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
@@ -554,39 +553,37 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
                 residual->size(1),
                 "]");
   }
-#define DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(                          \
+#define DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                               \
     BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)                                   \
   case REDUCTION_SIZE:                                                         \
-    launch_linear_fp8_1d1d_sm100_fast<BATCH_SIZE,                              \
-                                      OUTPUT_SIZE,                             \
-                                      REDUCTION_SIZE>(                         \
+    launch_linear_fp8_1d1d_sm100<BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(     \
         input_q, input_scale, weight_q, weight_scale, output);                 \
     break;
 
-#define DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(BATCH_SIZE)                   \
+#define DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(BATCH_SIZE)                        \
   case BATCH_SIZE:                                                             \
     switch (reduction_size) {                                                  \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 128)       \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 256)       \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 384)       \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 512)       \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 768)       \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1024)      \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1536)      \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 2048)      \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 4096)      \
-      DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 7168)      \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 128)            \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 256)            \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 384)            \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 512)            \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 768)            \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1024)           \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1536)           \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 2048)           \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 4096)           \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 7168)           \
       default:                                                                 \
         TORCH_CHECK(false, "Unsupported reduction_size dispatch");             \
     }                                                                          \
     break;
 
   switch (batch_size) {
-    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(1)
-    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(2)
-    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(4)
-    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(8)
-    DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE(16)
+    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(1)
+    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(2)
+    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(4)
+    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(8)
+    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(16)
     default:
       TORCH_CHECK(false, "Unsupported batch_size dispatch");
   }
@@ -595,8 +592,8 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
     output.add_(*residual);
   }
 
-#undef DISPATCH_LINEAR_FP8_FAST_BATCH_SIZE_CASE
-#undef DISPATCH_LINEAR_FP8_FAST_REDUCTION_SIZE_CASE
+#undef DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE
+#undef DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE
 }
 
 std::vector<std::vector<int64_t>> supported_dense_gemm_shapes() {

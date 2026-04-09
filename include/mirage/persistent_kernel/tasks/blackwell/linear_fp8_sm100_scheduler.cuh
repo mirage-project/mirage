@@ -1,9 +1,9 @@
 #pragma once
 
-#include <deep_gemm/common/types.hpp>
-#include <deep_gemm/common/utils.cuh>
+#include "linear_fp8_sm100_types.hpp"
+#include "linear_fp8_sm100_utils.cuh"
 
-namespace deep_gemm {
+namespace mirage::blackwell::linear_fp8_sm100 {
 
 enum class IndexType {
   MN,
@@ -17,16 +17,18 @@ template <GemmType kGemmType,
           uint32_t kNumSMs,
           bool kIsMulticastOnA>
 static constexpr uint32_t get_num_1d_blocks_per_group() {
-  uint32_t num_best_blocks = 0, min_usage = cute::numeric_limits<uint32_t>::max();
-  for (const auto &candidate : {8u, 16u}) {
-    const auto &usage =
-        kIsMulticastOnA
-            ? candidate * BLOCK_N +
-                  constexpr_ceil_div(kNumSMs, candidate) * BLOCK_M
-            : candidate * BLOCK_M +
-                  constexpr_ceil_div(kNumSMs, candidate) * BLOCK_N;
-    if (usage < min_usage)
-      min_usage = usage, num_best_blocks = candidate;
+  uint32_t num_best_blocks = 0,
+           min_usage = cute::numeric_limits<uint32_t>::max();
+  for (auto const &candidate : {8u, 16u}) {
+    auto const &usage =
+        kIsMulticastOnA ? candidate * BLOCK_N +
+                              constexpr_ceil_div(kNumSMs, candidate) * BLOCK_M
+                        : candidate * BLOCK_M +
+                              constexpr_ceil_div(kNumSMs, candidate) * BLOCK_N;
+    if (usage < min_usage) {
+      min_usage = usage;
+      num_best_blocks = candidate;
+    }
   }
   return num_best_blocks;
 }
@@ -62,23 +64,25 @@ struct Scheduler {
                             current_sf_k_cumsum = 0;
   uint32_t next_group_idx, next_shape_k;
 
-  __device__ __forceinline__ void
-  get_next_k_group(uint32_t &group_idx, uint32_t &shape_k) const {
+  __device__ __forceinline__ void get_next_k_group(uint32_t &group_idx,
+                                                   uint32_t &shape_k) const {
     for (; group_idx < kNumGroups; ++group_idx) {
       shape_k = __ldg(grouped_layout + group_idx);
-      if (shape_k > 0)
+      if (shape_k > 0) {
         break;
+      }
     }
   }
 
-  __device__ __forceinline__ explicit Scheduler(const uint32_t &shape_m,
-                                                const uint32_t &shape_n,
-                                                const uint32_t &shape_k,
+  __device__ __forceinline__ explicit Scheduler(uint32_t const &shape_m,
+                                                uint32_t const &shape_n,
+                                                uint32_t const &shape_k,
                                                 int *grouped_layout = nullptr) {
     num_m_blocks = ceil_div(shape_m, BLOCK_M);
     num_n_blocks = ceil_div(shape_n, BLOCK_N);
     current_shape_k = shape_k;
-    if constexpr (kGemmType == GemmType::Normal || kGemmType == GemmType::Batched) {
+    if constexpr (kGemmType == GemmType::Normal ||
+                  kGemmType == GemmType::Batched) {
       num_blocks = num_m_blocks * num_n_blocks;
     } else if constexpr (kGemmType == GemmType::MGroupedContiguous) {
       num_blocks = num_m_blocks * num_n_blocks;
@@ -98,18 +102,18 @@ struct Scheduler {
     }
   }
 
-  __device__ __forceinline__ void
-  get_swizzled_block_idx(const uint32_t &block_idx,
-                         uint32_t &m_block_idx,
-                         uint32_t &n_block_idx) {
+  __device__ __forceinline__ void get_swizzled_block_idx(
+      uint32_t const &block_idx, uint32_t &m_block_idx, uint32_t &n_block_idx) {
     DG_STATIC_ASSERT(kNum1DBlocksPerGroup % kNumMulticast == 0,
                      "Invalid group size");
 
-    const auto &primary_num_blocks = kIsMulticastOnA ? num_n_blocks : num_m_blocks;
-    const auto &secondary_num_blocks =
+    auto const &primary_num_blocks =
+        kIsMulticastOnA ? num_n_blocks : num_m_blocks;
+    auto const &secondary_num_blocks =
         kIsMulticastOnA ? num_m_blocks : num_n_blocks;
-    const auto &num_blocks_per_group = secondary_num_blocks * kNum1DBlocksPerGroup;
-    const auto &group_idx = block_idx / num_blocks_per_group;
+    auto const &num_blocks_per_group =
+        secondary_num_blocks * kNum1DBlocksPerGroup;
+    auto const &group_idx = block_idx / num_blocks_per_group;
     auto first_block_idx = group_idx * kNum1DBlocksPerGroup;
     auto in_group_idx = block_idx % num_blocks_per_group;
     num_blocks_in_group =
@@ -126,50 +130,56 @@ struct Scheduler {
 
   template <bool kWithGroupOffset, IndexType kIndexType = IndexType::MN>
   __device__ __forceinline__ uint32_t
-  get_global_idx(const uint32_t shape_dim,
-                 const uint32_t block_size,
-                 const uint32_t &block_idx,
-                 const uint32_t &m_block_idx = 0) {
+      get_global_idx(uint32_t shape_dim,
+                     uint32_t block_size,
+                     uint32_t const &block_idx,
+                     uint32_t const &m_block_idx = 0) {
     if constexpr (kGemmType == GemmType::Normal) {
       return block_idx * block_size;
     } else if constexpr (kGemmType == GemmType::MGroupedContiguous) {
-      const auto offset =
-          kWithGroupOffset ? cute::max(0, __ldg(grouped_layout + m_block_idx * BLOCK_M)) : 0;
+      auto const offset =
+          kWithGroupOffset
+              ? cute::max(0, __ldg(grouped_layout + m_block_idx * BLOCK_M))
+              : 0;
       return offset * shape_dim + block_idx * block_size;
     } else if constexpr (kGemmType == GemmType::MGroupedMasked ||
-                         kGemmType == GemmType::MGroupedContiguousWithPsumLayout) {
-      const auto offset = kWithGroupOffset ? current_group_idx : 0;
+                         kGemmType ==
+                             GemmType::MGroupedContiguousWithPsumLayout) {
+      auto const offset = kWithGroupOffset ? current_group_idx : 0;
       return offset * shape_dim + block_idx * block_size;
     } else if constexpr (kGemmType == GemmType::KGroupedContiguous) {
       auto offset = 0;
       if constexpr (kWithGroupOffset) {
-        if constexpr (kIndexType == IndexType::MN)
+        if constexpr (kIndexType == IndexType::MN) {
           offset = current_group_idx * shape_dim;
-        else if constexpr (kIndexType == IndexType::K)
+        } else if constexpr (kIndexType == IndexType::K) {
           offset = current_k_cumsum;
-        else if constexpr (kIndexType == IndexType::SF_K)
+        } else if constexpr (kIndexType == IndexType::SF_K) {
           offset = current_sf_k_cumsum;
+        }
       }
       return offset + block_idx * block_size;
     } else {
-      const auto offset = kIndexType == IndexType::SF_K ? current_group_idx : 0;
+      auto const offset = kIndexType == IndexType::SF_K ? current_group_idx : 0;
       return offset * shape_dim + block_idx * block_size;
     }
   }
 
   __device__ __forceinline__ bool get_next_block(uint32_t &m_block_idx,
                                                  uint32_t &n_block_idx) {
-    const auto next_block_idx = (++current_iter) * kNumSMs + blockIdx.x;
+    auto const next_block_idx = (++current_iter) * kNumSMs + blockIdx.x;
     if constexpr (kGemmType == GemmType::Normal) {
-      if (next_block_idx >= num_blocks)
+      if (next_block_idx >= num_blocks) {
         return false;
+      }
       get_swizzled_block_idx(next_block_idx, m_block_idx, n_block_idx);
       return true;
     } else if constexpr (kGemmType == GemmType::Batched) {
-      if (next_block_idx >= num_blocks * kNumGroups)
+      if (next_block_idx >= num_blocks * kNumGroups) {
         return false;
+      }
       current_group_idx = next_block_idx / num_blocks;
-      const auto &block_idx = next_block_idx - current_group_idx * num_blocks;
+      auto const &block_idx = next_block_idx - current_group_idx * num_blocks;
       if constexpr (kIsMulticastOnA) {
         m_block_idx = block_idx / num_n_blocks;
         n_block_idx = block_idx % num_n_blocks;
@@ -184,4 +194,4 @@ struct Scheduler {
   }
 };
 
-} // namespace deep_gemm
+} // namespace mirage::blackwell::linear_fp8_sm100
