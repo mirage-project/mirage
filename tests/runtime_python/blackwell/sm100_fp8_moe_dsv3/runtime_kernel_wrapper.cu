@@ -47,7 +47,7 @@ constexpr int DSV3_OUTPUT_SIZE    = 4096;    // full N = 2 * intermediate_size
 constexpr int DSV3_REDUCTION_SIZE = 7168;    // hidden_size = K
 constexpr int DSV3_NUM_EXPERTS    = 256;
 constexpr int DSV3_NUM_TOPK       = 8;
-constexpr int DSV3_NUM_AB_STAGE   = 8;       // matches BF16 kernel for fair comparison
+constexpr int DSV3_NUM_AB_STAGE   = 4;       // matches BF16 kernel for fair comparison
 constexpr int DSV3_NUM_ACC_STAGE  = 2;
 constexpr int DSV3_NUM_C_STAGE    = 4;
 constexpr int DSV3_K_SCALE        = DSV3_REDUCTION_SIZE / 128;  // 56
@@ -422,6 +422,10 @@ void fp8_moe_gemm_2d(
   DISPATCH_2D_CASE(8, 8);
   DISPATCH_2D_CASE(8, 16);
   DISPATCH_2D_CASE(8, 32);
+  // Alternative grid configs: more expert CTAs, fewer N-splits
+  DISPATCH_2D_CASE(4, 32);
+  DISPATCH_2D_CASE(16, 8);
+  DISPATCH_2D_CASE(32, 4);
   // Single expert CTA (for debugging)
   DISPATCH_2D_CASE(1, 1);
   DISPATCH_2D_CASE(1, 16);
@@ -465,9 +469,12 @@ void fp8_moe_gemm_bench_setup(
   c10::cuda::CUDAGuard guard(weight_fp8.device());
 
   // Dispatch to correct template
-  if (expert_stride == 8 && n_splits == 16) bench_setup_impl<8, 16>(weight_fp8);
-  else if (expert_stride == 8 && n_splits == 1)  bench_setup_impl<8, 1>(weight_fp8);
-  else if (expert_stride == 8 && n_splits == 32) bench_setup_impl<8, 32>(weight_fp8);
+  if      (expert_stride == 8  && n_splits == 16) bench_setup_impl<8,  16>(weight_fp8);
+  else if (expert_stride == 8  && n_splits == 1)  bench_setup_impl<8,  1>(weight_fp8);
+  else if (expert_stride == 8  && n_splits == 32) bench_setup_impl<8,  32>(weight_fp8);
+  else if (expert_stride == 4  && n_splits == 32) bench_setup_impl<4,  32>(weight_fp8);
+  else if (expert_stride == 16 && n_splits == 8)  bench_setup_impl<16, 8>(weight_fp8);
+  else if (expert_stride == 32 && n_splits == 4)  bench_setup_impl<32, 4>(weight_fp8);
   else printf("ERROR: bench_setup not supported for (%d, %d)\n", expert_stride, n_splits);
 }
 
@@ -498,12 +505,18 @@ void fp8_moe_gemm_bench_launch(
     torch::Tensor mask, torch::Tensor output)
 {
   assert(g_bench_tma_array && "Call fp8_moe_gemm_bench_setup first");
-  if (g_bench_expert_stride == 8 && g_bench_n_splits == 16)
-    bench_launch_impl<8, 16>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
-  else if (g_bench_expert_stride == 8 && g_bench_n_splits == 1)
-    bench_launch_impl<8, 1>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
-  else if (g_bench_expert_stride == 8 && g_bench_n_splits == 32)
-    bench_launch_impl<8, 32>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
+  if      (g_bench_expert_stride == 8  && g_bench_n_splits == 16)
+    bench_launch_impl<8,  16>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
+  else if (g_bench_expert_stride == 8  && g_bench_n_splits == 1)
+    bench_launch_impl<8,  1>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
+  else if (g_bench_expert_stride == 8  && g_bench_n_splits == 32)
+    bench_launch_impl<8,  32>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
+  else if (g_bench_expert_stride == 4  && g_bench_n_splits == 32)
+    bench_launch_impl<4,  32>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
+  else if (g_bench_expert_stride == 16 && g_bench_n_splits == 8)
+    bench_launch_impl<16, 8>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
+  else if (g_bench_expert_stride == 32 && g_bench_n_splits == 4)
+    bench_launch_impl<32, 4>(input_fp8, input_scale, weight_scale, routing_indices, mask, output);
 }
 
 void fp8_moe_gemm_bench_cleanup() {

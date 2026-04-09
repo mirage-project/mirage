@@ -206,8 +206,10 @@ void bf16_bench_setup_impl(torch::Tensor weight) {
 
 void bf16_moe_bench_setup(torch::Tensor weight, int expert_stride, int n_splits) {
   c10::cuda::CUDAGuard guard(weight.device());
-  if      (expert_stride == 8 && n_splits == 1)  bf16_bench_setup_impl<8, 1>(weight);
-  else if (expert_stride == 8 && n_splits == 16) bf16_bench_setup_impl<8, 16>(weight);
+  if      (expert_stride == 8  && n_splits == 1)  bf16_bench_setup_impl<8,  1>(weight);
+  else if (expert_stride == 8  && n_splits == 16) bf16_bench_setup_impl<8,  16>(weight);
+  else if (expert_stride == 16 && n_splits == 8)  bf16_bench_setup_impl<16, 8>(weight);
+  else if (expert_stride == 32 && n_splits == 4)  bf16_bench_setup_impl<32, 4>(weight);
   else printf("ERROR: bf16 bench_setup not supported for (%d, %d)\n", expert_stride, n_splits);
 }
 
@@ -234,10 +236,14 @@ void bf16_moe_bench_launch(
     torch::Tensor output)
 {
   assert(g_bf16_tma_array && "Call bf16_moe_bench_setup first");
-  if      (g_bf16_expert_stride == 8 && g_bf16_n_splits == 1)
-    bf16_bench_launch_impl<8, 1>(input, routing, mask, output);
-  else if (g_bf16_expert_stride == 8 && g_bf16_n_splits == 16)
-    bf16_bench_launch_impl<8, 16>(input, routing, mask, output);
+  if      (g_bf16_expert_stride == 8  && g_bf16_n_splits == 1)
+    bf16_bench_launch_impl<8,  1>(input, routing, mask, output);
+  else if (g_bf16_expert_stride == 8  && g_bf16_n_splits == 16)
+    bf16_bench_launch_impl<8,  16>(input, routing, mask, output);
+  else if (g_bf16_expert_stride == 16 && g_bf16_n_splits == 8)
+    bf16_bench_launch_impl<16, 8>(input, routing, mask, output);
+  else if (g_bf16_expert_stride == 32 && g_bf16_n_splits == 4)
+    bf16_bench_launch_impl<32, 4>(input, routing, mask, output);
 }
 
 void bf16_moe_bench_cleanup() {

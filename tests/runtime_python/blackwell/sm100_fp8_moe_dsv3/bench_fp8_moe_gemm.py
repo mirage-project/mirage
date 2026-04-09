@@ -264,11 +264,19 @@ def fmt_err(abs_err, rel_err, n_cmp):
 def main():
     device = torch.device("cuda")
 
-    # 2D grid configs: (expert_stride, n_splits, label)
-    grid_configs = [
-        (8, 16, "MPK-FP8"),
+    # 2D grid configs for FP8: (expert_stride, n_splits, label)
+    fp8_grids = [
+        (4,  32, "FP8-4x32"),     # 128 CTAs
+        (8,  16, "FP8-8x16"),     # 128 CTAs
+        (16,  8, "FP8-16x8"),     # 128 CTAs
+        (32,  4, "FP8-32x4"),     # 128 CTAs
     ]
-    bf16_grid = (8, 16, "MPK-BF16")
+    # 2D grid configs for BF16: same set
+    bf16_grids = [
+        (8,  16, "BF16-8x16"),    # 128 CTAs
+        (16,  8, "BF16-16x8"),    # 128 CTAs
+        (32,  4, "BF16-32x4"),    # 128 CTAs
+    ]
 
     print("=" * 140)
     print("FP8 MoE Group GEMM Benchmark — DeepSeek V3 Configuration")
@@ -301,30 +309,9 @@ def main():
     del weight_bf16
     torch.cuda.empty_cache()
 
-    # ---- Build bench/error names ----
-    bench_names = [cfg[2] for cfg in grid_configs]
-    if HAS_BF16:
-        bench_names += [bf16_grid[2]]
-    if HAS_FLASHINFER:
-        bench_names += ["FI-grpGEMM", "FI-grpDG", "FI-bmm16"]
-    bench_names += ["PyTorch"]
-
-    err_names = [grid_configs[0][2]]
-    if HAS_BF16:
-        err_names += [bf16_grid[2]]
-    if HAS_FLASHINFER:
-        err_names += ["FI-grpGEMM", "FI-grpDG"]
-
-    col_w = 30
-    err_w = 30
-    header = f"{'M':>3}"
-    for name in bench_names:
-        header += f"  {(name + ' (us)'):>{col_w}}"
-    for name in err_names:
-        header += f"  {(name + ' err'):>{err_w}}"
-    print()
-    print(header)
-    print("-" * len(header))
+    # Collect all results across batch sizes
+    all_results = {}  # batch_size -> {label -> (median, min, p99)}
+    all_errors = {}   # batch_size -> {label -> (abs, rel, n)}
 
     for batch_size in [1, 2, 4, 8, 16]:
         torch.manual_seed(100 + batch_size)
@@ -338,7 +325,6 @@ def main():
         output = torch.zeros(MPK_BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE,
                              dtype=torch.bfloat16, device=device)
 
-        # ---- Compute references ----
         ref_ue8m0 = compute_reference_ue8m0(input_fp8, input_scale, weight_fp8, weight_scale,
                                              batch_size, MPK_BATCH_SIZE, token_to_experts)
         ref_bf16 = compute_reference_f32(input_bf16[:batch_size], w_bf16,
@@ -348,14 +334,14 @@ def main():
         errors = {}
 
         # ---- Mirage MPK FP8 ----
-        for es, ns, label in grid_configs:
-                rk.fp8_moe_gemm_bench_setup(weight_fp8, es, ns)
-                results[label] = bench(
-                    lambda: rk.fp8_moe_gemm_bench_launch(
-                        input_fp8, input_scale, weight_scale,
-                        routing, mask, output))
-                rk.fp8_moe_gemm_bench_cleanup()
-                # Correctness
+        for es, ns, label in fp8_grids:
+            rk.fp8_moe_gemm_bench_setup(weight_fp8, es, ns)
+            results[label] = bench(
+                lambda: rk.fp8_moe_gemm_bench_launch(
+                    input_fp8, input_scale, weight_scale,
+                    routing, mask, output))
+            rk.fp8_moe_gemm_bench_cleanup()
+            if label == fp8_grids[0][2]:
                 output.zero_()
                 rk.fp8_moe_gemm_2d(input_fp8, input_scale, weight_fp8, weight_scale,
                                     routing, mask, output, es, ns)
@@ -363,23 +349,23 @@ def main():
 
         # ---- Mirage MPK BF16 ----
         if HAS_BF16:
-            es, ns, label = bf16_grid
             bf16_input = input_bf16[:MPK_BATCH_SIZE].contiguous()
             bf16_output = torch.zeros(MPK_BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE,
                                        dtype=torch.bfloat16, device=device)
-            rk_bf16.bf16_moe_bench_setup(w_bf16, es, ns)
-            results[label] = bench(
-                lambda: rk_bf16.bf16_moe_bench_launch(
-                    bf16_input, routing, mask, bf16_output))
-            rk_bf16.bf16_moe_bench_cleanup()
-            # Correctness
-            bf16_output.zero_()
-            rk_bf16.bf16_moe_bench_setup(w_bf16, es, ns)
-            rk_bf16.bf16_moe_bench_launch(bf16_input, routing, mask, bf16_output)
-            torch.cuda.synchronize()
-            rk_bf16.bf16_moe_bench_cleanup()
-            errors[label] = compare_mpk_vs_ref(bf16_output, ref_bf16[:MPK_BATCH_SIZE],
-                                                batch_size, token_to_experts)
+            for es, ns, label in bf16_grids:
+                rk_bf16.bf16_moe_bench_setup(w_bf16, es, ns)
+                results[label] = bench(
+                    lambda: rk_bf16.bf16_moe_bench_launch(
+                        bf16_input, routing, mask, bf16_output))
+                rk_bf16.bf16_moe_bench_cleanup()
+                if label == bf16_grids[0][2]:
+                    bf16_output.zero_()
+                    rk_bf16.bf16_moe_bench_setup(w_bf16, es, ns)
+                    rk_bf16.bf16_moe_bench_launch(bf16_input, routing, mask, bf16_output)
+                    torch.cuda.synchronize()
+                    rk_bf16.bf16_moe_bench_cleanup()
+                    errors[label] = compare_mpk_vs_ref(bf16_output, ref_bf16[:MPK_BATCH_SIZE],
+                                                        batch_size, token_to_experts)
 
         # ---- FlashInfer ----
         if HAS_FLASHINFER and fi_b_fp8 is not None:
@@ -387,8 +373,6 @@ def main():
             fi_data = build_fi_packed_data(batch_size, active_input, token_to_experts, device)
             if fi_data is not None:
                 a_fp8, a_scale, m_indptr, m_indices, expert_order = fi_data
-
-                # group_gemm (CUTLASS)
                 try:
                     out_grp = [None]
                     def run_grp():
@@ -402,7 +386,6 @@ def main():
                 except Exception as ex:
                     print(f"    FI-grpGEMM error: {ex}")
 
-                # group_deepgemm (DeepGEMM)
                 try:
                     out_dg = [None]
                     def run_dg():
@@ -416,7 +399,6 @@ def main():
                 except Exception as ex:
                     print(f"    FI-grpDG error: {ex}")
 
-            # bmm_bf16
             bmm_data = build_bmm_bf16_data(batch_size, active_input, w_bf16, token_to_experts)
             if bmm_data is not None:
                 a_bat, b_bat, out_bat = bmm_data
@@ -432,7 +414,7 @@ def main():
                     results["FI-bmm16"] = bench(
                         lambda: torch.bmm(a_bat, b_bat, out=out_bat))
 
-        # ---- PyTorch baseline ----
+        # ---- PyTorch ----
         active_in = input_bf16[:batch_size]
         pt_out = torch.zeros(batch_size, NUM_TOPK, OUTPUT_SIZE,
                               dtype=torch.bfloat16, device=device)
@@ -442,34 +424,138 @@ def main():
                     pt_out[i, slot] = (active_in[i:i+1] @ w_bf16[e].T).squeeze(0)
         results["PyTorch"] = bench(run_pytorch)
 
-        # ---- Print row ----
-        line = f"{batch_size:>3}"
-        for name in bench_names:
-            r = results.get(name)
+        all_results[batch_size] = results
+        all_errors[batch_size] = errors
+        print(f"  M={batch_size:>2} done")
+
+    # ================================================================
+    # TABLE 1: Main comparison (best MPK configs vs baselines)
+    # ================================================================
+    print()
+    print("=" * 80)
+    print("Table 1: Latency Comparison — median (min/p99) in microseconds")
+    print("=" * 80)
+
+    main_cols = ["MPK-FP8", "MPK-BF16", "FI-grpGEMM", "FI-bmm16", "PyTorch"]
+    # Map display names to result keys
+    main_map = {
+        "MPK-FP8":    fp8_grids[1][2],     # (8,16) — best FP8 config
+        "MPK-BF16":   bf16_grids[0][2],     # (8,16) — best BF16 config
+        "FI-grpGEMM": "FI-grpGEMM",
+        "FI-bmm16":   "FI-bmm16",
+        "PyTorch":    "PyTorch",
+    }
+
+    cw = 12  # column width for median
+    header = f"{'M':>3}"
+    for name in main_cols:
+        header += f"  {name:>{cw}}"
+    print(header)
+    print("-" * len(header))
+
+    for bs in [1, 2, 4, 8, 16]:
+        line = f"{bs:>3}"
+        for name in main_cols:
+            key = main_map[name]
+            r = all_results[bs].get(key)
             if r:
-                line += f"  {fmt_us(*r):>{col_w}}"
+                line += f"  {r[0]:>{cw}.1f}"
             else:
-                line += f"  {'N/A':>{col_w}}"
-        for name in err_names:
-            e = errors.get(name)
-            line += f"  {fmt_err(*e):>{err_w}}" if e else f"  {'N/A':>{err_w}}"
+                line += f"  {'N/A':>{cw}}"
         print(line)
 
+    # ================================================================
+    # TABLE 2: FP8 grid config sweep
+    # ================================================================
     print()
-    print("Legend:")
-    for es, ns, label in grid_configs:
-        print(f"  {label:<12}  Mirage MPK FP8, grid=({es},{ns},1), {es*ns} CTAs")
+    print("=" * 80)
+    print("Table 2: FP8 Grid Config Sweep — median latency (us)")
+    print("=" * 80)
+
+    cw = 12
+    header = f"{'M':>3}"
+    for _, _, label in fp8_grids:
+        header += f"  {label:>{cw}}"
+    print(header)
+    print("-" * len(header))
+
+    for bs in [1, 2, 4, 8, 16]:
+        line = f"{bs:>3}"
+        for _, _, label in fp8_grids:
+            r = all_results[bs].get(label)
+            line += f"  {r[0]:>{cw}.1f}" if r else f"  {'N/A':>{cw}}"
+        print(line)
+
+    # ================================================================
+    # TABLE 3: BF16 grid config sweep
+    # ================================================================
     if HAS_BF16:
-        es, ns, label = bf16_grid
-        print(f"  {label:<12}  Mirage MPK BF16, grid=({es},{ns},1), {es*ns} CTAs")
-    if HAS_FLASHINFER:
-        print("  FI-grpGEMM   FlashInfer group_gemm_fp8_nt_groupwise (CUTLASS, packed segments)")
-        print("  FI-grpDG     FlashInfer group_deepgemm_fp8_nt_groupwise (DeepGEMM, per-row indices)")
-        print("  FI-bmm16     FlashInfer bmm_bf16 / torch.bmm fallback (batched BF16 matmul)")
-    print("  PyTorch      per-expert BF16 torch.matmul loop")
+        print()
+        print("=" * 80)
+        print("Table 3: BF16 Grid Config Sweep — median latency (us)")
+        print("=" * 80)
+
+        header = f"{'M':>3}"
+        for _, _, label in bf16_grids:
+            header += f"  {label:>{cw}}"
+        print(header)
+        print("-" * len(header))
+
+        for bs in [1, 2, 4, 8, 16]:
+            line = f"{bs:>3}"
+            for _, _, label in bf16_grids:
+                r = all_results[bs].get(label)
+                line += f"  {r[0]:>{cw}.1f}" if r else f"  {'N/A':>{cw}}"
+            print(line)
+
+    # ================================================================
+    # TABLE 4: Correctness (errors)
+    # ================================================================
     print()
-    print("  Timing: FlashInfer bench_gpu_time (CUPTI/CUDA events), median/min/p99 in us")
-    print("  MPK-FP8 err: vs UE8M0 dequant ref | BF16/FI err: vs BF16 matmul ref")
+    print("=" * 80)
+    print("Table 4: Correctness — max absolute / relative error")
+    print("=" * 80)
+    print(f"  MPK-FP8: vs UE8M0 dequant reference")
+    print(f"  MPK-BF16 / FI: vs BF16 matmul reference")
+    print()
+
+    err_cols = [fp8_grids[0][2], bf16_grids[0][2], "FI-grpGEMM"]
+    err_display = ["MPK-FP8", "MPK-BF16", "FI-grpGEMM"]
+    ew = 20
+    header = f"{'M':>3}"
+    for name in err_display:
+        header += f"  {name:>{ew}}"
+    print(header)
+    print("-" * len(header))
+
+    for bs in [1, 2, 4, 8, 16]:
+        line = f"{bs:>3}"
+        for key in err_cols:
+            e = all_errors[bs].get(key)
+            if e:
+                line += f"  {e[0]:>7.2f} / {e[1]:.4f}"
+            else:
+                line += f"  {'N/A':>{ew}}"
+        print(line)
+
+    # ================================================================
+    # Footer
+    # ================================================================
+    print()
+    print("Grid configs (all 128 CTAs):")
+    for es, ns, label in fp8_grids:
+        print(f"  {label}: grid=({es},{ns},1)")
+    if HAS_BF16:
+        for es, ns, label in bf16_grids:
+            print(f"  {label}: grid=({es},{ns},1)")
+    print()
+    print("Baselines:")
+    if HAS_FLASHINFER:
+        print("  FI-grpGEMM: FlashInfer group_gemm_fp8_nt_groupwise (CUTLASS)")
+        print("  FI-bmm16:   FlashInfer bmm_bf16 / torch.bmm (batched BF16)")
+    print("  PyTorch:    per-expert BF16 torch.matmul loop")
+    print()
+    print("Timing: FlashInfer bench_gpu_time (CUPTI/CUDA events)")
 
 
 if __name__ == "__main__":

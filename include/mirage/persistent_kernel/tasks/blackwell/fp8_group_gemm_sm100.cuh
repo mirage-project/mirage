@@ -1027,51 +1027,43 @@ __device__ __forceinline__ void
               uint8_t *dst_base =
                   &shared_storage.B[smem_wr_buffer][0];
               constexpr int BYTES_PER_THREAD = (MMA_N * bK) / 32;
-              // 8 bytes per cp.async instruction (uint2 = 8 bytes)
-              constexpr int COPIES_PER_THREAD = BYTES_PER_THREAD / 8;
-              // Each lane starts at a different offset to cover the whole tile
+              // 16 bytes per cp.async instruction (uint4 = 16 bytes).
+              // SWIZZLE_128B with bK=128: the swizzle XOR is (row%8)*16,
+              // so 16-byte aligned addresses stay 16-byte aligned after swizzle.
+              constexpr int CP_BYTES = 16;
+              constexpr int COPIES_PER_THREAD = BYTES_PER_THREAD / CP_BYTES;
               int base_byte = lane_idx * BYTES_PER_THREAD;
               #pragma unroll
               for (int c = 0; c < COPIES_PER_THREAD; ++c) {
-                int byte_off = base_byte + c * 8;
-                // Convert flat byte offset to (row, col) in the [MMA_N x bK] tile
-                int row = byte_off / bK;       // row = token index within the tile
-                int col = byte_off % bK;       // col = K-element offset within the row
-                int32_t token_idx_n = n_tile * MMA_N + row;  // global token index
-                int32_t topk_idx_n  = tRoutingIndex(token_idx_n);  // routing check
+                int byte_off = base_byte + c * CP_BYTES;
+                int row = byte_off / bK;
+                int col = byte_off % bK;
+                int32_t token_idx_n = n_tile * MMA_N + row;
+                int32_t topk_idx_n  = tRoutingIndex(token_idx_n);
 
-                // Compute SWIZZLE_128B destination address in shared memory.
-                // For uint8_t elements with bK=128 bytes per row:
-                //   linear_off = row * 128 + col  (byte offset in un-swizzled tile)
-                //   row_in_group = (linear_off / 128) % 8 = row % 8
-                //   swizzled_off = linear_off ^ (row_in_group * 16)
-                // Simplified: swizzled_off = linear_off ^ (((linear_off >> 7) & 7) << 4)
+                // SWIZZLE_128B: swizzled = linear ^ ((row%8)*16)
                 int linear_off = row * bK + col;
                 int swizzled_off = linear_off ^ (((linear_off >> 7) & 7) << 4);
                 uint32_t dst_smem = cute::cast_smem_ptr_to_uint(
                     dst_base + swizzled_off);
 
                 if (token_idx_n < BATCH_SIZE && topk_idx_n > 0) {
-                  // Token is routed to this expert: issue async copy from global mem
                   const uint8_t *src_row;
                   if constexpr (W13_LINEAR) {
-                    // W1/W3 projection: input shape [batch, K], flat indexing
                     src_row = reinterpret_cast<const uint8_t*>(
                         &mInput(token_idx_n, k_tile * bK + col));
                   } else {
-                    // W2 projection: input shape [batch, topk, K], 3D indexing
                     src_row = reinterpret_cast<const uint8_t*>(
                         &mInput(token_idx_n, topk_idx_n - 1, k_tile * bK + col));
                   }
-                  // cp.async.ca = cache-all policy, copies 8 bytes from global to smem
+                  // cp.async.ca with 16-byte transfer (halves instruction count)
                   asm volatile(
-                      "cp.async.ca.shared.global [%0], [%1], 8;\n"
+                      "cp.async.ca.shared.global [%0], [%1], 16;\n"
                       :: "r"(dst_smem), "l"(src_row));
                 } else {
-                  // Token not routed to this expert (or out of bounds): write zeros.
-                  // This ensures the UMMA reads valid (zero) data for padding tokens.
-                  *reinterpret_cast<uint2*>(dst_base + swizzled_off) =
-                      make_uint2(0, 0);
+                  // Zero-fill 16 bytes for unrouted tokens
+                  *reinterpret_cast<uint4*>(dst_base + swizzled_off) =
+                      make_uint4(0, 0, 0, 0);
                 }
               }
               // Commit all outstanding cp.async instructions as a group.
@@ -1227,11 +1219,14 @@ __device__ __forceinline__ void
           int mma_rd_ab_full_phase =
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
-          // Optimistic peeks: check if A/B data is already in smem
+          // Optimistic peeks: check if A/B/scales are already ready
           bool peek_a = kernel::try_wait_barrier(
               shared_storage.a_full_mbar_ptr[smem_rd_buf], mma_rd_ab_full_phase);
           bool peek_b = kernel::try_wait_barrier(
               shared_storage.b_full_mbar_ptr[smem_rd_buf], mma_rd_ab_full_phase);
+          int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
+          bool peek_sf = kernel::try_wait_barrier(
+              shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);
 
           // Wait for epilogue to finish reading the previous accumulator in this
           // buffer slot before we overwrite it with new UMMA results.
@@ -1263,17 +1258,10 @@ __device__ __forceinline__ void
               cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buf],
                                  mma_rd_ab_full_phase);
 
-            // ============================================================
-            // WAIT FOR SCALE WARP (warp 6) to finish packing + transposing
-            // ============================================================
-            // Scale loading, UE8M0 conversion, packing, and warp-transpose are
-            // performed by warp 6 in parallel with DMA/MMA pipeline. Warp 6
-            // signals sf_ready when the transposed scales are in smem.
-            {
-              int sf_phase = (num_prev_k_blk + k_tile) / NUM_AB_STAGE % 2;
+            // Wait for scale warp (warp 6) to finish transpose (if peek failed)
+            if (!peek_sf)
               cute::wait_barrier(shared_storage.sf_ready_mbar_ptr[smem_rd_buf],
                                  sf_phase);
-            }
 
             // ============================================================
             // UTCCP: Copy transposed scales from smem -> TMEM
@@ -1376,7 +1364,7 @@ __device__ __forceinline__ void
             cutlass::arch::umma_arrive(
                 &shared_storage.ab_empty_mbar_ptr[smem_rd_buf]);
 
-            // Lookahead peek for the next K-tile's A/B data
+            // Lookahead peek for the next K-tile's A/B/scale data
             if (mma_rd_k_tile_next < k_tile_count) {
               peek_a = kernel::try_wait_barrier(
                   shared_storage.a_full_mbar_ptr[smem_rd_buf_next],
@@ -1384,6 +1372,11 @@ __device__ __forceinline__ void
               peek_b = kernel::try_wait_barrier(
                   shared_storage.b_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
+              int sf_phase_next = (num_prev_k_blk + mma_rd_k_tile_next) / NUM_AB_STAGE % 2;
+              peek_sf = kernel::try_wait_barrier(
+                  shared_storage.sf_ready_mbar_ptr[smem_rd_buf_next],
+                  sf_phase_next);
+              sf_phase = sf_phase_next;
             }
 
             // Advance pipeline state to the next K-tile
