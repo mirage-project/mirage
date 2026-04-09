@@ -36,7 +36,8 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   void *global_addr = src;
 
   // For 1-byte types (e.g., FP8 E4M3), use UINT8 — TMA only uses this for
-  // element size; semantics are irrelevant. For 2-byte types (BF16), use BFLOAT16.
+  // element size; semantics are irrelevant. For 2-byte types (BF16), use
+  // BFLOAT16.
   constexpr CUtensorMapDataType tma_format =
       (sizeof(T) == 1) ? CU_TENSOR_MAP_DATA_TYPE_UINT8
                        : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
