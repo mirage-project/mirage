@@ -12,9 +12,9 @@
 // chain correctly (Copy_Atom, SM80_CP_ASYNC, etc.) for moe_linear_sm100.cuh.
 // NOTE: If this fails to compile due to mla_prefill_sm100.cuh errors, the
 // BF16 module can be safely skipped — the benchmark handles HAS_BF16=False.
+#include "runtime_header.h"
 #include "tasks/blackwell/task_header.cuh"
 #include "tasks/hopper/tma_2d.cuh"
-#include "runtime_header.h"
 #include "tma.cuh"
 #include <cuda_runtime.h>
 

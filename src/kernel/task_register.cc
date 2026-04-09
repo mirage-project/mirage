@@ -2211,7 +2211,8 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   assert(input_ops[1]->output_tensors[0].num_dims == 1);
   assert(input_ops[1]->output_tensors[0].dim[0] == num_experts);
 
-  assert(num_experts % num_groups == 0 && "Number of experts must be divisible by number of groups");
+  assert(num_experts % num_groups == 0 &&
+         "Number of experts must be divisible by number of groups");
   int experts_per_group = num_experts / num_groups;
 
   mirage::transpiler::CodeKeeper code;

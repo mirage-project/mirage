@@ -454,8 +454,8 @@ void launch_2d_impl(torch::Tensor input_fp8,
   CUtensorMap *first_desc;
   cudaMemcpy(
       &first_desc, tma_array, sizeof(CUtensorMap *), cudaMemcpyDeviceToHost);
-  cudaFree(first_desc);  // free contiguous descriptor block
-  cudaFree(tma_array);   // free pointer array
+  cudaFree(first_desc); // free contiguous descriptor block
+  cudaFree(tma_array);  // free pointer array
 }
 
 // Dispatch macro for (expert_stride, n_splits) compile-time pairs
@@ -527,7 +527,9 @@ void bench_setup_impl(torch::Tensor weight_fp8) {
   // Free any previously allocated descriptors to avoid GPU memory leaks
   if (g_bench_tma_array) {
     CUtensorMap *first_desc;
-    cudaMemcpy(&first_desc, g_bench_tma_array, sizeof(CUtensorMap *),
+    cudaMemcpy(&first_desc,
+               g_bench_tma_array,
+               sizeof(CUtensorMap *),
                cudaMemcpyDeviceToHost);
     cudaFree(first_desc);
     cudaFree(g_bench_tma_array);
