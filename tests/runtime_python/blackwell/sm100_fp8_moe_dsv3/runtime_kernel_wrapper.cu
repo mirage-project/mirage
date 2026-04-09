@@ -41,13 +41,13 @@
 // DeepSeek V3 W13 dimensions
 // ================================================================
 constexpr int DSV3_MMA_M          = 128;
-constexpr int DSV3_MMA_N          = 128;
-constexpr int DSV3_BATCH_SIZE     = 128;
+constexpr int DSV3_MMA_N          = 16;      // matches production task_register (MMA_N=16)
+constexpr int DSV3_BATCH_SIZE     = 16;      // actual max tokens (no padding waste)
 constexpr int DSV3_OUTPUT_SIZE    = 4096;    // full N = 2 * intermediate_size
 constexpr int DSV3_REDUCTION_SIZE = 7168;    // hidden_size = K
 constexpr int DSV3_NUM_EXPERTS    = 256;
 constexpr int DSV3_NUM_TOPK       = 8;
-constexpr int DSV3_NUM_AB_STAGE   = 4;
+constexpr int DSV3_NUM_AB_STAGE   = 8;       // matches BF16 kernel for fair comparison
 constexpr int DSV3_NUM_ACC_STAGE  = 2;
 constexpr int DSV3_NUM_C_STAGE    = 4;
 constexpr int DSV3_K_SCALE        = DSV3_REDUCTION_SIZE / 128;  // 56

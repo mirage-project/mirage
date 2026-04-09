@@ -31,7 +31,7 @@ except ImportError:
 # ================================================================
 # DeepSeek V3 W13 MoE parameters
 # ================================================================
-BATCH_SIZE    = 128    # padded to MMA_N=128
+BATCH_SIZE    = 16     # matches MMA_N=16 (production config, no padding waste)
 OUTPUT_SIZE   = 4096   # 2 * intermediate_size
 K             = 7168   # hidden_size
 NUM_EXPERTS   = 256
