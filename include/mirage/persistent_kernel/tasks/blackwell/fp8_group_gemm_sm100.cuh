@@ -1,208 +1,19 @@
+/* Copyright 2025 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #pragma once
-// ===================================================================
-// FP8 Block-Scaled MoE Group GEMM for SM100 (Blackwell B200)
-// ===================================================================
-//
-// MMA used:  tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale
-//
-// ===================================================================
-// MATHEMATICAL OPERATION
-// ===================================================================
-//
-// For each expert `e` assigned to this task, the kernel computes:
-//
-//   output[token, topk_slot, :] = input_fp8[token, :] @ weight_fp8[e, :, :].T
-//
-// where:
-//   - input_fp8:  [batch_size, K]            FP8 E4M3 activations
-//   - weight_fp8: [num_experts, N, K]        FP8 E4M3 weights (row-major)
-//   - output:     [batch_size, num_topk, N]  BF16 results
-//   - Routing indices determine which tokens go to which experts
-//
-// ===================================================================
-// OPERAND MAPPING (swapAB Convention)
-// ===================================================================
-//
-// The UMMA hardware computes C[M,N] += A[M,K] * B[N,K] (both K-major).
-// We map the operands as follows ("swapAB"):
-//
-//   UMMA operand A  ←  weight_fp8[e]    shape [N_weight, K]  (M dimension =
-//   N_weight) UMMA operand B  ←  input_fp8        shape [B_tokens, K]  (N
-//   dimension = B_tokens) UMMA operand C  ←  accumulator       shape [N_weight,
-//   B_tokens]
-//
-// This means:
-//   - MMA_M corresponds to the OUTPUT dimension (weight rows, N_weight)
-//   - MMA_N corresponds to the BATCH dimension (tokens, B_tokens)
-//   - The K dimension is the reduction/hidden dimension
-//
-// ===================================================================
-// EXPECTED SCALE FACTOR FORMAT
-// ===================================================================
-//
-// This kernel expects FP8 E4M3 data with per-block float32 scale factors.
-// The scale factors are converted to UE8M0 (8-bit exponent-only) in-kernel
-// before being loaded into TMEM for the block-scaled UMMA instruction.
-//
-// ---- Weight scales (SFA) ----
-//   Input tensor:  weight_scale [num_experts, N, K/128]  dtype=float32
-//   Block size:    128 elements along K (reduction dimension)
-//   Granularity:   Per-row, per-128-K-block
-//                  (each weight row has K/128 float32 scale values)
-//   Example:       DeepSeek V3 W13: [256, 4096, 56] float32
-//
-// ---- Input/activation scales (SFB) ----
-//   Input tensor:  input_scale [batch, K/128]              (W13_LINEAR=true)
-//                  input_scale [batch, num_topk, K/128]    (W13_LINEAR=false)
-//   Block size:    128 elements along K (same as weights)
-//   Granularity:   Per-token, per-128-K-block
-//   Example:       DeepSeek V3: [16, 56] float32
-//
-// ---- In-kernel conversion pipeline ----
-//   1. Load float32 scale from global memory
-//   2. Convert to UE8M0: ue8m0 = (__float_as_uint(sf) >> 23) & 0xFF
-//      This extracts the IEEE 754 biased exponent, giving a power-of-2
-//      approximation: dequantized = 2^(ue8m0 - 127)
-//   3. Pack into uint32: replicate UE8M0 across 4 bytes (one per 32-K sub-tile)
-//        packed = ue8m0 | (ue8m0 << 8) | (ue8m0 << 16) | (ue8m0 << 24)
-//   4. Warp-transpose 128 packed uint32s for UTCCP column-major layout
-//   5. UTCCP copies from smem to 4 TMEM scale columns
-//
-// ---- Hardware constraints (SM100 block-scaled UMMA) ----
-//   - Scale format in TMEM: UE8M0 (8-bit exponent-only) — set via
-//     instruction descriptor field scale_format_=1
-//   - Alternative: UE4M3 (4-bit mantissa) — scale_format_=0 (not used here)
-//   - The format applies to BOTH A and B scales simultaneously
-//     (single bit in the instruction descriptor, shared)
-//   - Each packed uint32 holds 4 UE8M0 bytes, one per 32-K UMMA sub-tile.
-//     sfa_id/sfb_id (2-bit each) select which byte to use per sub-tile.
-//   - A and B CAN have independent sub-tile byte selection (sfa_id != sfb_id),
-//     enabling per-32-K granularity if scales differ across sub-tiles.
-//   - Current implementation: per-128-K (all 4 bytes identical,
-//   sfa_id=sfb_id=k_sub)
-//
-// ---- Flexibility ----
-//   - Input scales MUST be float32 (kernel converts to UE8M0 internally)
-//   - Block size along K is fixed at 128 (= bK, matching one K-tile)
-//   - Per-32-K granularity possible by packing 4 different UE8M0 values
-//   - Row granularity is always per-row (128 entries per UTCCP = MMA_M or MMA_N
-//   rows)
-//
-// ===================================================================
-// WARP ROLE ASSIGNMENT (256 threads = 8 warps × 32 threads)
-// ===================================================================
-//
-//   Warps 0-3 (threads 0-127):   EPILOGUE
-//     - Allocate TMEM (warp 0)
-//     - Wait for MMA completion (acc_full barrier)
-//     - Copy FP32 accumulators from TMEM → registers via TMEM_LOAD
-//     - Convert FP32 → BF16
-//     - Scatter-write results to global memory using routing indices
-//
-//   Warp 4 (threads 128-159):    MMA (UTCCP + UMMA only)
-//     - Wait for DMA to fill A/B smem tiles (a_full, b_full barriers)
-//     - Wait for scale warp to finish transpose (sf_ready barrier)
-//     - Issue UTCCP to copy transposed scales from smem → TMEM
-//     - Issue 4× FP8 UMMA instructions per K-tile (bK/UMMA_K = 128/32 = 4)
-//     - Signal accumulator ready (acc_full barrier)
-//     - Signal smem consumed (ab_empty barrier)
-//
-//   Warp 5 (threads 160-191):    DMA (Data Movement)
-//     - TMA load: FP8 weight tile [MMA_M × bK] from global → smem A
-//     - cp.async load: FP8 input tile [MMA_N × bK] from global → smem B
-//       with SWIZZLE_128B and per-token routing checks
-//     - Signal tiles ready (a_full, b_full barriers)
-//
-//   Warp 6 (threads 192-223):    SCALE (float32 → UE8M0 → transpose)
-//     - Load float32 weight/input scale factors from global memory
-//     - Convert float32 → UE8M0, pack 4 copies into uint32
-//     - Warp-transpose packed scales for UTCCP column-major layout
-//     - Signal sf_ready barrier for MMA warp
-//     - Runs in parallel with DMA and prior UMMA execution
-//
-//   Warp 7 (threads 224-255):    IDLE
-//
-// ===================================================================
-// PIPELINE STRUCTURE
-// ===================================================================
-//
-// The kernel uses a multi-stage software pipeline with barriers to overlap
-// data movement and computation:
-//
-//   NUM_AB_STAGE stages for A/B smem buffers (default 4):
-//     DMA warp fills stage S while MMA warp consumes stage S-1
-//     Barriers: a_full (TMA done), b_full (cp.async done), ab_empty (MMA done)
-//
-//   NUM_ACC_STAGE stages for accumulator buffers in TMEM (default 2):
-//     MMA warp fills accumulator S while epilogue reads accumulator S-1
-//     Barriers: acc_full (MMA reduction done), acc_empty (epilogue read done)
-//
-// Execution flow per (expert, m_tile, n_tile) work unit:
-//   1. DMA warp loads K-tiles sequentially into rotating AB stages
-//   2. MMA warp consumes K-tiles, accumulating into one ACC stage
-//   3. After all K-tiles for this work unit, MMA signals acc_full
-//   4. Epilogue warps read the accumulator, convert, and write output
-//   5. Epilogue signals acc_empty so MMA can reuse the ACC buffer
-//
-// ===================================================================
-// 2D WORK DISTRIBUTION ACROSS CTAs
-// ===================================================================
-//
-// With grid_dim=(X, Y, 1), work is distributed in 2 dimensions:
-//
-//   grid_dim.x (X CTAs): Expert distribution
-//     - Each CTA gets expert_offset = bid.x
-//     - EXPERT_STRIDE = X (set to grid_dim.x by task_register)
-//     - CTA i processes experts at indices i, i+X, i+2X, ...
-//
-//   grid_dim.y (Y CTAs): N-dimension (output row) splitting
-//     - The N dimension of the weight matrix is split into Y chunks
-//     - OUTPUT_SIZE = ORIG_OUTPUT_SIZE / Y (per-CTA slice)
-//     - The runtime offsets each CTA's weight/scale/output base pointers
-//       so the kernel only sees its own [0, OUTPUT_SIZE) slice
-//     - TMA coordinates use ORIG_OUTPUT_SIZE for expert stride (global layout)
-//
-// Total CTAs = X * Y. Example: grid_dim=(8, 16, 1) → 128 CTAs.
-//
-// ===================================================================
-// TILING AND LOOP STRUCTURE
-// ===================================================================
-//
-// The outermost loop iterates over activated experts (with EXPERT_STRIDE
-// for multi-CTA parallelism in MPK). For each expert:
-//
-//   for m_tile in [0, ceil(OUTPUT_SIZE / MMA_M)):     # output tiles (per-CTA
-//   slice)
-//     for n_tile in [0, ceil(BATCH_SIZE / MMA_N)):    # token dimension tiles
-//       for k_tile in [0, REDUCTION_SIZE / bK):       # reduction dimension
-//       tiles
-//         UMMA: C[m_tile, n_tile] += A[m_tile, k_tile] * B[n_tile, k_tile]
-//
-// Each K-tile of 128 elements is further split into 4 UMMA sub-tiles of 32:
-//   for k_sub in [0, 4):
-//     fma(A_desc[k_sub*32], B_desc[k_sub*32], C_tmem, scale_a[k_sub],
-//     scale_b[k_sub])
-//
-// ===================================================================
-// SMEM LAYOUT AND SWIZZLING
-// ===================================================================
-//
-// Both A (weight) and B (input) tiles are stored in shared memory with
-// SWIZZLE_128B layout (CuTe Swizzle<3,4,3> at byte level):
-//
-//   swizzled_byte_offset = linear_offset ^ (((linear_offset >> 7) & 7) << 4)
-//
-// This XOR-based swizzle eliminates bank conflicts for 128-byte aligned
-// access patterns. The UMMA descriptor encodes this as
-// LayoutType::SWIZZLE_128B.
-//
-// A (weight): loaded via TMA which handles swizzling automatically.
-// B (input):  loaded via manual cp.async with explicit swizzle computation
-//             in the DMA warp (since we need per-token routing checks).
-//
-// Scale factor buffers use SWIZZLE_NONE layout (no swizzle needed for UTCCP).
-//
-// ===================================================================
 
 #include "sm100_utils.cuh"
 #include <cstdio>
@@ -234,6 +45,89 @@
 #include "storage.cuh"                   // Shared storage base types
 
 namespace kernel {
+
+// ===================================================================
+// FP8 Block-Scaled MoE Group GEMM for SM100 (Blackwell B200)
+// ===================================================================
+// MATHEMATICAL OPERATION
+// ===================================================================
+// For each expert `e` assigned to this task, the kernel computes:
+//   output[token, topk_slot, :] = input_fp8[token, :] @ weight_fp8[e, :, :].T
+//
+// where:
+//   - input_fp8:  [batch_size, K]            FP8 E4M3 activations
+//   - weight_fp8: [num_experts, N, K]        FP8 E4M3 weights (row-major)
+//   - output:     [batch_size, num_topk, N]  BF16 results
+//   - Routing indices determine which tokens go to which experts
+// ===================================================================
+// OPERAND MAPPING (swapAB Convention)
+// ===================================================================
+// The UMMA hardware computes C[M,N] += A[M,K] * B[N,K] (both K-major).
+// We map the operands as follows ("swapAB"):
+//   UMMA operand A ← weight_fp8[e] shape [N_weight,K] (M dimension = N_weight)
+//   UMMA operand B ← input_fp8     shape [B_tokens,K] (N dimension = B_tokens)
+//   UMMA operand C ← accumulator   shape [N_weight,B_tokens]
+// This means:
+//   - MMA_M corresponds to the OUTPUT dimension (weight rows, N_weight)
+//   - MMA_N corresponds to the BATCH dimension (tokens, B_tokens)
+// ===================================================================
+// EXPECTED SCALE FACTOR FORMAT
+// ===================================================================
+// This kernel expects FP8 E4M3 data with per-block float32 scale factors.
+// The scale factors are converted to UE8M0 (8-bit exponent-only) in-kernel.
+//
+// ---- Weight scales (SFA) ----
+//   Input tensor:  weight_scale [num_experts, N, K/128]
+//   Dtype:       float32
+//   Granularity:   Per-row, per-128-K-block
+// ---- Input/activation scales (SFB) ----
+//   Input tensor:  input_scale [batch, K/128]              (W13_LINEAR=true)
+//                  input_scale [batch, num_topk, K/128]    (W13_LINEAR=false)
+//   Dtype:       float32
+//   Granularity:   Per-token, per-128-K-block
+// ===================================================================
+// WARP ROLE ASSIGNMENT (256 threads = 8 warps × 32 threads)
+// ===================================================================
+//   Warps 0-3 (threads 0-127):   EPILOGUE
+//     - Copy FP32 accumulators from TMEM → registers via TMEM_LOAD
+//     - Convert FP32 → BF16
+//     - Scatter-write results to global memory using routing indices
+//   Warp 4 (threads 128-159):    MMA (UTCCP + UMMA only)
+//     - Wait for DMA to fill A/B smem tiles (a_full, b_full barriers)
+//     - Wait for scale warp to finish transpose (sf_ready barrier)
+//     - Issue UTCCP to copy transposed scales from smem → TMEM
+//     - Issue 4× FP8 UMMA instructions per K-tile (bK/UMMA_K = 128/32 = 4)
+//   Warp 5 (threads 160-191):    DMA (Data Movement)
+//     - TMA load: FP8 weight tile [MMA_M × bK] from global → smem A
+//     - cp.async load: FP8 input tile [MMA_N × bK] from global → smem B
+//       with SWIZZLE_128B and per-token routing checks
+//   Warp 6 (threads 192-223):    SCALE (float32 → UE8M0 → transpose)
+//     - Load float32 weight/input scale factors from global memory
+//     - Convert float32 → UE8M0, pack 4 copies into uint32
+//     - Warp-transpose packed scales for UTCCP column-major layout
+//   Warp 7 (threads 224-255):    IDLE
+// ===================================================================
+// 2D WORK DISTRIBUTION ACROSS CTAs
+// ===================================================================
+// With grid_dim=(X, Y, 1), work is distributed in 2 dimensions:
+//
+//   grid_dim.x (X CTAs): Expert distribution
+//     - EXPERT_STRIDE = X (set to grid_dim.x by task_register)
+//     - CTA i processes experts at indices i, i+X, i+2X, ...
+//   grid_dim.y (Y CTAs): N-dimension (output row) splitting
+//     - OUTPUT_SIZE = ORIG_OUTPUT_SIZE / Y (per-CTA slice)
+// ===================================================================
+// SMEM LAYOUT AND SWIZZLING
+// ===================================================================
+// Both A (weight) and B (input) tiles are stored in shared memory with
+// SWIZZLE_128B layout (CuTe Swizzle<3,4,3> at byte level):
+//
+// A (weight): loaded via TMA which handles swizzling automatically.
+// B (input):  loaded via manual cp.async with explicit swizzle computation
+//             in the DMA warp (since we need per-token routing checks).
+//
+// Scale factor buffers use SWIZZLE_NONE layout (no swizzle needed for UTCCP).
+// ===================================================================
 
 // Load a 32-bit value from shared memory using its smem address.
 // Used by fp8_utccp_warp_transpose to read scale factor entries.
@@ -272,17 +166,6 @@ __device__ __forceinline__ void fp8_tcgen05_after_thread_sync() {
 // uint8_t (1 byte) elements with SWIZZLE_128B would trigger that assertion.
 // Instead, we handle swizzling manually in the DMA warp (for B/input) and
 // rely on TMA's built-in swizzling (for A/weight).
-//
-// Memory layout (approximate sizes for MMA_M=MMA_N=128, bK=128, 4 AB stages):
-//
-//   A[4][16384]        = 64 KB   (4 stages × 128×128 × 1 byte FP8 weight tiles)
-//   B[4][16384]        = 64 KB   (4 stages × 128×128 × 1 byte FP8 input tiles)
-//   sfa_smem[4][128]   =  2 KB   (4 stages × 128 × 4 bytes packed UE8M0 weight
-//   scales) sfb_smem[4][128]   =  2 KB   (4 stages × 128 × 4 bytes packed UE8M0
-//   input scales) barriers           = ~0.5 KB (a_full, b_full, ab_empty,
-//   acc_full, acc_empty) expert_mask + tmem  = ~36 B Total              ≈ 132
-//   KB  (fits within SM100's 228 KB shared memory)
-//
 template <
     class BF16_ASmemLayout, // Placeholder type (used only for template
                             // deduction)
@@ -311,10 +194,6 @@ struct MoEFP8SharedStorage {
   // --- Scale Factor Buffers (for UTCCP → TMEM) ---
   // Each buffer holds 128 packed uint32_t entries. Each uint32 contains 4 UE8M0
   // bytes, one per 32-element K-subtile within the 128-K block:
-  //   byte 0 (bits  0-7):  UE8M0 scale for K[0..31]   (k_sub=0)
-  //   byte 1 (bits  8-15): UE8M0 scale for K[32..63]  (k_sub=1)
-  //   byte 2 (bits 16-23): UE8M0 scale for K[64..95]  (k_sub=2)
-  //   byte 3 (bits 24-31): UE8M0 scale for K[96..127] (k_sub=3)
   // Since our scale granularity is per-128-K (one scale per row per K-tile),
   // all 4 bytes in each uint32 are identical replicas of the same UE8M0 value.
   //
@@ -375,61 +254,6 @@ struct MoEFP8SharedStorage {
   //                are offset from this.
   alignas(16) cute::uint32_t tmem_base_ptr;
 };
-
-// ===================================================================
-// UMMA Descriptor Helpers (Legacy — kept for reference)
-// ===================================================================
-//
-// NOTE: These functions are NOT used by the main kernel, which instead uses
-// the helpers from sm100_utils.cuh (kernel::sm100::make_umma_desc, etc.).
-// They are retained here as reference implementations that document the
-// UMMA descriptor format.
-
-// Build a UMMA shared memory descriptor for a K-major tile.
-//
-// The UMMA instruction reads operand tiles from shared memory via descriptors
-// that encode the tile's base address, swizzle mode, and stride information.
-//
-// For K-major layout (K dimension is contiguous in memory):
-//   - Each row of BLOCK_MN elements has BLOCK_K contiguous bytes
-//   - Stride Byte Offset (SBO) = distance between groups of 32 rows
-//     = (BLOCK_MN / 32) * BLOCK_K * sizeof(element) bytes
-//   - Leading Byte Offset (LBO) = 0 (no leading dimension offset needed)
-//   - LayoutType = SWIZZLE_128B (128-byte XOR swizzle for bank conflict
-//   avoidance)
-//
-// Template parameters:
-//   BLOCK_MN:     tile dimension along M or N (e.g., 128)
-//   BLOCK_K:      tile dimension along K (e.g., 128)
-//   kSwizzleMode: must equal BLOCK_K * sizeof(element) = 128 for FP8
-template <uint32_t BLOCK_MN, uint32_t BLOCK_K, uint32_t kSwizzleMode>
-__device__ __forceinline__ cute::UMMA::SmemDescriptor
-    fp8_make_umma_desc_k_major(uint8_t *base_smem_ptr) {
-  static_assert(kSwizzleMode == BLOCK_K * sizeof(uint8_t), "Swizzle mismatch");
-  // atom_base = 32: the UMMA hardware processes tiles in groups of 32 rows
-  constexpr uint32_t atom_base = 32;
-  constexpr uint32_t num_non_contiguous = BLOCK_MN / atom_base;
-  // SBO encodes the byte stride between consecutive 32-row groups
-  // For MMA_M=128, bK=128: SBO = (128/32) * 128 * 1 = 512 bytes
-  const uint32_t stride_byte_offset =
-      num_non_contiguous * BLOCK_K * sizeof(uint8_t);
-  const uint32_t leading_byte_offset = 0;
-  constexpr auto layout_type = cute::UMMA::LayoutType::SWIZZLE_128B;
-
-  cute::UMMA::SmemDescriptor desc;
-  desc.desc_ = 0;
-  desc.version_ = 1;
-  desc.lbo_mode_ = 0;
-  desc.layout_type_ = static_cast<uint8_t>(layout_type);
-  auto const uint_ptr = cute::cast_smem_ptr_to_uint(base_smem_ptr);
-  // start_address is the smem pointer shifted right by 4 (16-byte granularity)
-  desc.start_address_ = static_cast<uint16_t>(uint_ptr >> 4);
-  desc.base_offset_ = 0;
-  // SBO and LBO are stored in units of 16 bytes
-  desc.stride_byte_offset_ = stride_byte_offset >> 4;
-  desc.leading_byte_offset_ = leading_byte_offset >> 4;
-  return desc;
-}
 
 // Advance the low 32 bits of a K-major UMMA descriptor to point at a
 // different K-subtile within the same smem buffer.
@@ -526,52 +350,45 @@ __device__ __forceinline__ void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
 //
 // Template Parameters:
 //   TMA_Weight:       TMA descriptor type for FP8 weight tensor
-//   (tma_2d<uint8_t, ...>).
+//                     (tma_2d<uint8_t, ...>).
 //                     Encodes the global memory layout, swizzle mode, and tile
 //                     shape for hardware-accelerated tensor memory access.
-//
 //   InputTensor:      CuTe tensor type for FP8 input activations.
 //                     W13_LINEAR=true:  [batch_size, K] (flat input before MoE
 //                     routing) W13_LINEAR=false: [batch_size, num_topk, K]
 //                     (after first MoE layer) Element type is uint8_t* (FP8
 //                     E4M3 stored as raw bytes to avoid CuTe type assertion
 //                     issues with gmem_ptr<float_e4m3_t>).
-//
 //   InputScaleTensor: CuTe tensor type for float32 input scale factors.
 //                     Shape [batch_size, K/128] or [batch_size, num_topk,
 //                     K/128]. One scale per 128 consecutive K-elements per
 //                     token.
-//
 //   WeightScaleTensor: CuTe tensor type for float32 weight scale factors.
 //                      Shape [num_experts * N, K/128] (flattened expert
 //                      dimension). One scale per 128 consecutive K-elements per
 //                      weight row.
-//
 //   IndicesTensor:    CuTe tensor type for int32 routing indices.
 //                     Shape [num_experts, batch_size].
 //                     routing_indices[e, token] = topk_slot (1-indexed) if
 //                     token is routed to expert e, else 0 (not routed).
-//
 //   MaskTensor:       CuTe tensor type for int32 expert activation mask.
 //                     Shape [num_experts + 1].
 //                     mask[0..N-1] = expert IDs of the N activated experts.
 //                     mask[num_experts] = N (number of activated experts).
-//
 //   OutputTensor:     CuTe tensor type for BF16 output.
 //                     Shape [batch_size, num_topk, N] with strides [topk*N, N,
 //                     1]. output[token, topk_slot, output_row] stores the GEMM
 //                     result.
-//
-//   MMA_M:            UMMA tile M dimension (weight/output rows). Typically
-//   128. MMA_N:            UMMA tile N dimension (tokens). Typically 128.
-//   BATCH_SIZE:       Padded batch size (padded to MMA_N). Actual tokens may be
-//   fewer. OUTPUT_SIZE:      Per-CTA output dimension (N / grid_dim.y). This is
-//   the number
+//   MMA_M:            UMMA tile M dimension (weight/output rows).
+//   MMA_N:            UMMA tile N dimension (tokens). Typically 128.
+//   BATCH_SIZE:       Padded batch size (padded to MMA_N).
+//   OUTPUT_SIZE:      Per-CTA output dimension (N / grid_dim.y). This is
+//                     the number
 //                     of weight rows each CTA processes. When grid_dim.y=1 (no
 //                     N-split), OUTPUT_SIZE = ORIG_OUTPUT_SIZE. May not be a
 //                     multiple of MMA_M.
 //   ORIG_OUTPUT_SIZE: Full output dimension N before splitting across
-//   grid_dim.y.
+//                     grid_dim.y.
 //                     Used for expert stride in TMA coordinates and weight
 //                     scale indexing: expert e's rows start at e *
 //                     ORIG_OUTPUT_SIZE in the global weight tensor.
@@ -579,17 +396,16 @@ __device__ __forceinline__ void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
 //   NUM_EXPERTS:      Total number of experts in the model.
 //   NUM_TOPK:         Number of experts each token is routed to (top-k).
 //   EXPERT_STRIDE:    Stride for multi-CTA expert parallelism. Set to
-//   grid_dim.x
+//                     grid_dim.x
 //                     by the task register so each CTA in the x-dimension
 //                     handles a disjoint set of experts.
 //   W13_LINEAR:       true for W1/W3 (gate/up) projection (input is flat
-//   [batch, K]),
+//                     [batch, K]),
 //                     false for W2 (down) projection (input is [batch, topk,
 //                     K]).
-//   NUM_AB_STAGE:     Number of pipeline stages for A/B smem buffers (default
-//   4). NUM_ACC_STAGE:    Number of accumulator double-buffer stages in TMEM
-//   (default 2). NUM_C_STAGE:      Number of output staging buffers (default 4,
-//   currently unused).
+//   NUM_AB_STAGE:     Number of pipeline stages for A/B smem buffers.
+//   NUM_ACC_STAGE:    Number of accumulator double-buffer stages in TMEM.
+//   NUM_C_STAGE:      Number of output staging buffers.
 //
 template <typename TMA_Weight,
           class InputTensor,
@@ -1392,8 +1208,7 @@ __device__ __forceinline__ void
             auto const b_desc_base_lo =
                 __shfl_sync(0xffffffff, b_desc_lo, smem_rd_buf);
 
-            // Issue 4 UMMA sub-tile instructions (bK/UMMA_K = 128/32 = 4).
-            // elect_one_sync: only lane 0 issues the tcgen05.mma instruction.
+            // Issue UMMA sub-tile instructions (bK/UMMA_K = 128/32 = 4).
             // WARNING: Do NOT add an outer elect_one_sync around this block —
             // the fma() call contains its own elect_one_sync internally, and
             // nesting them causes a deadlock.
