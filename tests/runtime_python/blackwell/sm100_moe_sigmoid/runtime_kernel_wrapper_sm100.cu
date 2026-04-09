@@ -44,24 +44,23 @@ __global__ __launch_bounds__(256) void topk_sigmoid_kernel(
   static constexpr int VPT = C::VPT;
   static constexpr int WARPS_PER_TB = 8;
   kernel::topk_sigmoid_task_impl<T,
-                                  VPT,
-                                  EXPERTS,
-                                  WARPS_PER_TB,
-                                  BYTES_PER_LDG,
-                                  NUM_GROUPS,
-                                  TOPK_GROUP,
-                                  EXPERTS_PER_GROUP,
-                                  TOPK_EXPERTS>(
-      gating_output,
-      bias,
-      /*finished=*/nullptr,
-      topk_weights,
-      num_rows,
-      mpk_routing_indices,
-      mpk_active_expert_ids,
-      /*start_expert=*/0,
-      /*end_expert=*/EXPERTS,
-      routed_scaling_factor);
+                                 VPT,
+                                 EXPERTS,
+                                 WARPS_PER_TB,
+                                 BYTES_PER_LDG,
+                                 NUM_GROUPS,
+                                 TOPK_GROUP,
+                                 EXPERTS_PER_GROUP,
+                                 TOPK_EXPERTS>(gating_output,
+                                               bias,
+                                               /*finished=*/nullptr,
+                                               topk_weights,
+                                               num_rows,
+                                               mpk_routing_indices,
+                                               mpk_active_expert_ids,
+                                               /*start_expert=*/0,
+                                               /*end_expert=*/EXPERTS,
+                                               routed_scaling_factor);
   __syncthreads();
 }
 
@@ -108,8 +107,11 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
                                      BATCH_SIZE,
                                      routed_scaling_factor);
   } else {
-    printf("Unsupported configuration: num_experts=%d num_groups=%d topk_group=%d\n",
-           OUTPUT_SIZE, num_groups, topk_group);
+    printf("Unsupported configuration: num_experts=%d num_groups=%d "
+           "topk_group=%d\n",
+           OUTPUT_SIZE,
+           num_groups,
+           topk_group);
   }
 
   cudaError_t err = cudaGetLastError();
