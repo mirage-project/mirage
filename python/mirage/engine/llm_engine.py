@@ -42,6 +42,8 @@ class LLMEngine:
         self.manager = manager
         self.model_runner = model_runner
         self.tokenizer = model_runner.tokenizer
+        # Maps request_id -> step value recorded just before the last kernel launch.
+        self._prev_step: dict[int, int] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -72,7 +74,7 @@ class LLMEngine:
             )
         else:
             text = prompt
-        prompt_token_ids = self.tokenizer.encode([text],return_tensors="pt")
+        prompt_token_ids = self.tokenizer([text],return_tensors="pt").input_ids[0]
         req = RequestMetadata(prompt_token_ids, sampling_params)
         self.manager.enqueue(req)
         return req
@@ -97,17 +99,50 @@ class LLMEngine:
         """
         torch.cuda.synchronize() # flush previous kernel
 
+        # Bulk-transfer all read-only GPU tensors to CPU in one shot.
+        self.manager.refresh_cpu_cache()
+
+        # Snapshot step values before manager.step() may call complete(), which
+        # sets token_row=None and makes the tensor unreadable for those requests.
+        pre_active = self.manager.get_active_requests()
+        step_after_kernel: dict[int, tuple[int, int]] = {
+            req.request_id: (
+                int(self.manager._step_cpu[req.token_row]),
+                req.prompt_len,
+            )
+            for req in pre_active
+            if req.token_row is not None
+        }
+
         # Collect outputs from the previous GPU iteration, release finished
         # slots, and admit new requests — all in one call.
         completed = self.manager.step()
 
-        # Compute a signed token count for throughput reporting.
-        active = self.manager.get_active_requests()
-        num_prefill = [r for r in active if r.status.name == "PREFILL"]
-        if num_prefill:
-            num_tokens = sum(r.prompt_len for r in num_prefill)
-        else:
-            num_tokens = -len(active)  # negative → decode phase
+        # Compute the actual tokens processed this iteration per request.
+        # delta = current_step - prev_step (i.e. the chunk the kernel consumed).
+        # For requests crossing the prefill→decode boundary within one chunk,
+        # split the delta into prefill and decode portions accordingly.
+        prefill_tokens = decode_tokens = 0
+        for rid, (current, prompt_len) in step_after_kernel.items():
+            prev = self._prev_step.get(rid, 0)
+            delta = current - prev
+            if prev < prompt_len:
+                prefill_chunk = min(delta, prompt_len - prev)
+                prefill_tokens += prefill_chunk
+                decode_tokens += delta - prefill_chunk
+            else:
+                decode_tokens += delta
+        # mark decode_tokens to negative to classify prefill and decode
+        num_tokens = prefill_tokens if prefill_tokens > 0 else -decode_tokens 
+
+        # Snapshot step values for every request that will be active in the next
+        # kernel launch (includes newly admitted requests whose step starts at 0).
+        # _step_cpu is still valid here — no new kernel has launched since the refresh.
+        self._prev_step = {
+            req.request_id: int(self.manager._step_cpu[req.token_row])
+            for req in self.manager.get_active_requests()
+            if req.token_row is not None
+        }
 
         # Launch the next iteration.
         self.model_runner()
@@ -118,6 +153,108 @@ class LLMEngine:
     def is_finished(self) -> bool:
         """True when every submitted request has completed."""
         return self.manager.num_waiting == 0 and self.manager.num_active == 0
+
+    def generate_batch(
+        self,
+        prompts: list[str] | list[list[int]],
+        sampling_params: "SamplingParams | list[SamplingParams] | None" = None,
+        use_tqdm: bool = True,
+    ) -> list[dict]:
+        """Batch-first generation: admit all → single kernel launch → collect.
+
+        Unlike :meth:`generate`, which drives the kernel step-by-step from
+        Python, this method:
+
+        1. Enqueues all prompts.
+        2. Admits up to ``max_num_batched_requests`` requests at once, honouring
+           prefix-cache hits (step[token_row] written by manager.admit()).
+        3. Calls :meth:`~ModelRunner.prepare_batch_state` to lay out prefix
+           pages in ``paged_kv_indices_buffer`` (no-op without kernel patch P2).
+        4. Calls :meth:`~ModelRunner.init` with the exact admitted count so the
+           kernel does not waste cycles on empty slots.
+        5. Launches the kernel **once**; it runs until every admitted request
+           finishes (offline mode).
+        6. Synchronizes and collects all outputs.
+        7. Repeats for any remaining waiting requests.
+
+        After the kernel patches P1/P2/P3 land, step 3 will additionally
+        populate free-page lists and prefix KV pages for true KV reuse.
+        """
+        if use_tqdm:
+            pbar = tqdm(total=len(prompts), desc="Generating (batch)", dynamic_ncols=True)
+
+        if not isinstance(sampling_params, list):
+            sampling_params = [sampling_params] * len(prompts)
+
+        request_ids: list[int] = []
+        for prompt, sp in zip(prompts, sampling_params):
+            req = self.add_request(prompt, sp)
+            request_ids.append(req.request_id)
+
+        outputs: dict[int, list[int]] = {}
+        prefill_throughput = decode_throughput = 0.0
+
+        while not self.is_finished():
+            # Admit as many waiting requests as slots and token budget allow.
+            while self.manager.can_admit():
+                self.manager.admit()
+
+            n_active = self.manager.num_active
+            if n_active == 0:
+                break
+
+            # Lay out paged_kv buffers for prefix pages (requires P1+P2).
+            # Without kernel patches this is a lightweight no-op but still
+            # writes the correct paged_kv_indptr offsets.
+            self.manager.prepare_batch_state()
+
+            # Re-initialize kernel for exactly n_active slots so empty slots
+            # are not processed.
+            t = perf_counter()
+            self.model_runner.init(n_active)
+
+            # Single kernel launch — runs until all n_active requests complete.
+            self.model_runner()
+            torch.cuda.synchronize()
+            elapsed = perf_counter() - t
+
+            # Bulk-copy read-only GPU tensors to CPU once.
+            self.manager.refresh_cpu_cache()
+
+            # Collect outputs; every request should be finished after one run.
+            completed = self.manager.collect_outputs()
+            for req in completed:
+                self.manager.complete(req)
+                # TODO (P3): read final_paged_kv_indices / final_paged_kv_num_pages
+                # tensors written by the kernel on completion, then call:
+                #   self.manager.register_completed(req, page_indices)
+
+            # Decode/prefill throughput estimate (all tokens processed in one shot).
+            total_tokens = sum(
+                req.prompt_len + req.num_output_tokens for req in completed
+            )
+            if total_tokens > 0 and elapsed > 0:
+                decode_throughput = total_tokens / elapsed
+
+            if use_tqdm:
+                pbar.set_postfix({"Decode": f"{int(decode_throughput)}tok/s"})
+                for req in completed:
+                    outputs[req.request_id] = req.output_token_ids
+                    pbar.update(1)
+            else:
+                for req in completed:
+                    outputs[req.request_id] = req.output_token_ids
+
+        if use_tqdm:
+            pbar.close()
+
+        return [
+            {
+                "text": self.tokenizer.decode(outputs[rid], skip_special_tokens=True),
+                "token_ids": outputs[rid],
+            }
+            for rid in request_ids
+        ]
 
     def generate(
         self,

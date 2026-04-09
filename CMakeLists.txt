@@ -154,10 +154,6 @@ if(NOT CARGO_RESULT EQUAL 0)
     "and follow the instructions on the screen.")
 endif()
 
-set(ABSTRACT_SUBEXPR_LIBRARIES ${PROJECT_SOURCE_DIR}/build/abstract_subexpr/release/libabstract_subexpr.so)
-set(FORMAL_VERIFIER_LIBRARIES ${PROJECT_SOURCE_DIR}/build/formal_verifier/release/libformal_verifier.so)
-list(APPEND MIRAGE_LINK_LIBS "-lstdc++fs")
-
 #set RUST
 if(ABSTRACT_SUBEXPR_LIB AND ABSTRACT_SUBEXPR_LIBRARIES)
   message(STATUS "ABSTRACT_SUBEXPR_LIB: ${ABSTRACT_SUBEXPR_LIB}")

@@ -56,6 +56,13 @@ class RequestMetadata:
         self.slot_id:   Optional[int] = None
         self.token_row: Optional[int] = None
 
+        # Prefix cache hit data — set by admit() when a KV prefix is reused.
+        # prefix_len  : number of tokens whose KV data is already in the cache.
+        # prefix_pages: GPU page indices for those KV pages.
+        # Requires kernel patch P2 to actually skip recomputing those tokens.
+        self.prefix_len:   int       = 0
+        self.prefix_pages: list[int] = []
+
     @property
     def prompt_len(self) -> int:
         return len(self.prompt_token_ids)

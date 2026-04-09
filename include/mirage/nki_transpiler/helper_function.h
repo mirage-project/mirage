@@ -17,6 +17,7 @@ struct HelperFunction {
 };
 
 HelperFunction tiled_transpose_function();
+HelperFunction divide_function();
 HelperFunction tiled_matmul_function();
 HelperFunction tiled_matmul_accum_function();
 
