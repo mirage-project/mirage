@@ -8,15 +8,16 @@
 #include <cassert>
 #include <cstdio>
 
-// task_header.cuh transitively includes all CuTe/CUTLASS headers
-// and the BF16 MoE kernel (moe_linear_sm100.cuh).
-#include "runtime_header.h"
+// task_header.cuh includes all SM100 kernels and sets up the CuTe include
+// chain correctly (Copy_Atom, SM80_CP_ASYNC, etc.) for moe_linear_sm100.cuh.
+// NOTE: If this fails to compile due to mla_prefill_sm100.cuh errors, the
+// BF16 module can be safely skipped — the benchmark handles HAS_BF16=False.
 #include "tasks/blackwell/task_header.cuh"
 #include "tasks/hopper/tma_2d.cuh"
+#include "runtime_header.h"
 #include "tma.cuh"
 #include <cuda_runtime.h>
 
-#include <cute/tensor.hpp>
 #include <cutlass/cluster_launch.hpp>
 #include <cutlass/cutlass.h>
 #include <cutlass/half.h>

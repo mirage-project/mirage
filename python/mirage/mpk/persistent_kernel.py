@@ -991,13 +991,13 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # input_fp8:        (batch_size, hidden_size)          FP8 E4M3
-        # input_scale:      (batch_size, hidden_size//128)     float32
-        # weight_fp8:       (num_experts, 2*intermediate_size, hidden_size)  FP8 E4M3
-        # weight_scale:     (num_experts, 2*intermediate_size, hidden_size//128)  float32
-        # moe_routing_indices: (num_experts_per_tok, batch_size)  int32
-        # moe_mask:         (num_experts + 1,)                 int32
-        # output:           (batch_size, num_experts_per_tok, 2*intermediate_size)  BF16
+        # input_fp8:           (batch_size, hidden_size)          FP8 E4M3
+        # input_scale:         (batch_size, hidden_size//128)     float32
+        # weight_fp8:          (num_experts, 2*intermediate_size, hidden_size)  FP8 E4M3
+        # weight_scale:        (num_experts, 2*intermediate_size, hidden_size//128)  float32
+        # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
+        # moe_mask:            (num_experts + 1,)         int32
+        # output:              (batch_size, num_experts_per_tok, 2*intermediate_size)  BF16
         assert input_fp8.num_dims == 2
         assert input_scale.num_dims == 2
         assert weight_fp8.num_dims == 3
@@ -1031,13 +1031,13 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # input_fp8:        (batch_size, num_experts_per_tok, intermediate_size)  FP8 E4M3
-        # input_scale:      (batch_size, num_experts_per_tok, intermediate_size//128)  float32
-        # weight_fp8:       (num_experts, hidden_size, intermediate_size)  FP8 E4M3
-        # weight_scale:     (num_experts, hidden_size, intermediate_size//128)  float32
-        # moe_routing_indices: (num_experts_per_tok, batch_size)  int32
-        # moe_mask:         (num_experts + 1,)                 int32
-        # output:           (batch_size, num_experts_per_tok, hidden_size)  BF16
+        # input_fp8:           (batch_size, num_experts_per_tok, intermediate_size)  FP8 E4M3
+        # input_scale:         (batch_size, num_experts_per_tok, intermediate_size//128)  float32
+        # weight_fp8:          (num_experts, hidden_size, intermediate_size)  FP8 E4M3
+        # weight_scale:        (num_experts, hidden_size, intermediate_size//128)  float32
+        # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
+        # moe_mask:            (num_experts + 1,)         int32
+        # output:              (batch_size, num_experts_per_tok, hidden_size)  BF16
         assert input_fp8.num_dims == 3
         assert input_scale.num_dims == 3
         assert weight_fp8.num_dims == 3

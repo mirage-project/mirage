@@ -39,26 +39,30 @@ common_nvcc_flags = [
     '-DCUTE_ARCH_TCGEN05_MXF8F6F4_MMA_ENABLED',
 ]
 
-setup(
-    name='runtime_kernels_fp8_moe',
-    ext_modules=[
-        # FP8 MoE kernel
-        CUDAExtension(
-            name='runtime_kernel_fp8_moe',
-            sources=[os.path.join(this_dir, 'runtime_kernel_wrapper.cu')],
-            depends=[
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/fp8_group_gemm_sm100.cuh'),
-            ],
-            define_macros=macros,
-            include_dirs=common_include_dirs,
-            libraries=["cuda"],
-            library_dirs=cuda_library_dirs,
-            extra_compile_args={
-                'cxx': ['-DMIRAGE_GRACE_BLACKWELL'],
-                'nvcc': common_nvcc_flags,
-            }
-        ),
-        # BF16 MoE kernel
+ext_modules = [
+    # FP8 MoE kernel (always built)
+    CUDAExtension(
+        name='runtime_kernel_fp8_moe',
+        sources=[os.path.join(this_dir, 'runtime_kernel_wrapper.cu')],
+        depends=[
+            os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/fp8_group_gemm_sm100.cuh'),
+        ],
+        define_macros=macros,
+        include_dirs=common_include_dirs,
+        libraries=["cuda"],
+        library_dirs=cuda_library_dirs,
+        extra_compile_args={
+            'cxx': ['-DMIRAGE_GRACE_BLACKWELL'],
+            'nvcc': common_nvcc_flags,
+        }
+    ),
+]
+
+# BF16 MoE kernel (optional — depends on task_header.cuh compiling cleanly)
+# Skip if mla_prefill_sm100.cuh or other unrelated headers have build issues.
+BUILD_BF16 = os.environ.get('BUILD_BF16', '0') == '1'
+if BUILD_BF16:
+    ext_modules.append(
         CUDAExtension(
             name='runtime_kernel_bf16_moe',
             sources=[os.path.join(this_dir, 'runtime_kernel_wrapper_bf16.cu')],
@@ -73,7 +77,11 @@ setup(
                 'cxx': ['-DMIRAGE_GRACE_BLACKWELL'],
                 'nvcc': common_nvcc_flags,
             }
-        ),
-    ],
+        )
+    )
+
+setup(
+    name='runtime_kernels_fp8_moe',
+    ext_modules=ext_modules,
     cmdclass={'build_ext': BuildExtension}
 )

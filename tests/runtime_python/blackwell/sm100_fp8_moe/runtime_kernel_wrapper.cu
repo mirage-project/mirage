@@ -448,6 +448,14 @@ void launch_2d_impl(torch::Tensor input_fp8,
           reinterpret_cast<cute::int32_t *>(mask.data_ptr()),
           reinterpret_cast<cute::bfloat16_t *>(output.data_ptr()),
           reinterpret_cast<uint8_t *>(weight_fp8.data_ptr()));
+
+  // Free the TMA descriptor arrays after kernel completes
+  // (fp8_moe_gemm_2d calls cudaDeviceSynchronize after this returns)
+  CUtensorMap *first_desc;
+  cudaMemcpy(
+      &first_desc, tma_array, sizeof(CUtensorMap *), cudaMemcpyDeviceToHost);
+  cudaFree(first_desc);  // free contiguous descriptor block
+  cudaFree(tma_array);   // free pointer array
 }
 
 // Dispatch macro for (expert_stride, n_splits) compile-time pairs
@@ -515,6 +523,16 @@ template <int EXPERT_STRIDE, int N_SPLITS>
 void bench_setup_impl(torch::Tensor weight_fp8) {
   constexpr int OUTPUT_PER_CTA = DSV3_OUTPUT_SIZE / N_SPLITS;
   constexpr int smem_size = compute_smem_size();
+
+  // Free any previously allocated descriptors to avoid GPU memory leaks
+  if (g_bench_tma_array) {
+    CUtensorMap *first_desc;
+    cudaMemcpy(&first_desc, g_bench_tma_array, sizeof(CUtensorMap *),
+               cudaMemcpyDeviceToHost);
+    cudaFree(first_desc);
+    cudaFree(g_bench_tma_array);
+    g_bench_tma_array = nullptr;
+  }
 
   g_bench_tma_array = create_tma_desc_array(
       weight_fp8.data_ptr(), N_SPLITS, OUTPUT_PER_CTA, DSV3_OUTPUT_SIZE);

@@ -79,13 +79,27 @@ def float32_to_ue8m0_approx(scale: torch.Tensor):
 # ================================================================
 # Routing generation
 # ================================================================
-def make_routing(batch_size, num_experts, num_topk, device, seed=42):
-    """Random routing: each of batch_size tokens picks num_topk distinct experts."""
+def make_routing(active_tokens, num_experts, num_topk, device, seed=42):
+    """Random routing: each of active_tokens tokens picks num_topk distinct experts.
+
+    Args:
+        active_tokens: number of real tokens (1-16)
+        num_experts: total experts (e.g., 256)
+        num_topk: experts per token (e.g., 8)
+        device: CUDA device
+        seed: random seed
+
+    Returns:
+        routing: [num_experts, BATCH_SIZE] int32, padded to compiled BATCH_SIZE
+        mask: [num_experts+1] int32, activated expert list
+        token_to_experts: dict mapping token_idx -> list of expert indices
+    """
     rng = random.Random(seed)
+    # Allocate with padded BATCH_SIZE (compiled kernel constant), fill only active_tokens
     routing = torch.zeros(num_experts, BATCH_SIZE, dtype=torch.int32, device=device)
     token_to_experts = {}
 
-    for i in range(batch_size):
+    for i in range(active_tokens):
         experts = rng.sample(range(num_experts), num_topk)
         token_to_experts[i] = experts
         for slot, e in enumerate(experts):
@@ -93,7 +107,7 @@ def make_routing(batch_size, num_experts, num_topk, device, seed=42):
 
     activated = []
     for e in range(num_experts):
-        if routing[e, :batch_size].any():
+        if routing[e, :active_tokens].any():
             activated.append(e)
 
     mask = torch.zeros(num_experts + 1, dtype=torch.int32, device=device)
