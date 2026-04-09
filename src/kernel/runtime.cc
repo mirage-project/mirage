@@ -392,7 +392,9 @@ void register_mugraph(
             if (task_type == TASK_MOE_W13_LINEAR_SM100 ||
                 task_type == TASK_MOE_W2_LINEAR_SM100 ||
                 task_type == TASK_MOE_W13_LINEAR_SM90 ||
-                task_type == TASK_MOE_W2_LINEAR_SM90) {
+                task_type == TASK_MOE_W2_LINEAR_SM90 ||
+                task_type == TASK_MOE_W13_FP8_SM100 ||
+                task_type == TASK_MOE_W2_FP8_SM100) {
               task.task_metadata.expert_offset = bid.x;
             }
             // Set paged attention split kv task kv_idx
@@ -1254,8 +1256,12 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";
+  task_type_to_name[TASK_MOE_TOPK_SIGMOID_SM100] =
+      "TASK_MOE_TOPK_SIGMOID_SM100";
   task_type_to_name[TASK_MOE_W13_LINEAR_SM100] = "TASK_MOE_W13_LINEAR_SM100";
   task_type_to_name[TASK_MOE_W2_LINEAR_SM100] = "TASK_MOE_W2_LINEAR_SM100";
+  task_type_to_name[TASK_MOE_W13_FP8_SM100] = "TASK_MOE_W13_FP8_SM100";
+  task_type_to_name[TASK_MOE_W2_FP8_SM100] = "TASK_MOE_W2_FP8_SM100";
   task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
   task_type_to_name[TASK_MOE_W13_LINEAR_SM90] = "TASK_MOE_W13_LINEAR_SM90";
   task_type_to_name[TASK_MOE_W2_LINEAR_SM90] = "TASK_MOE_W2_LINEAR_SM90";

@@ -22,6 +22,7 @@
 // Blackwell task impls
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
+#include "fp8_group_gemm_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
 #include "mla_dispatch_sm100.cuh"
 #include "mla_prefill_sm100.cuh"
@@ -30,4 +31,5 @@
 #include "mul_sum_add_sm100.cuh"
 #include "tasks/common/sampling.cuh"
 #include "tensor_init.cuh"
+#include "topk_sigmoid_sm100.cuh"
 #include "topk_softmax_sm100.cuh"

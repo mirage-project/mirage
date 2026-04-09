@@ -629,6 +629,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 3, TASK_MOE_TOPK_SOFTMAX_SM100, variant_id);
+  } else if (name == "moe_topk_sigmoid_sm100") {
+    int variant_id = task_register->register_moe_topk_sigmoid_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 3, TASK_MOE_TOPK_SIGMOID_SM100, variant_id);
   } else if (name == "moe_w13_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, true /*w13_linear*/);
@@ -643,6 +648,14 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, false /*w13_linear*/);
     task_config[op] =
         std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM100, variant_id);
+  } else if (name == "moe_w13_fp8_sm100") {
+    int variant_id = task_register->register_moe_fp8_sm100_task(
+        customized->bgraph, params, true /*w13_linear*/);
+    task_config[op] = std::make_tuple(6, 1, TASK_MOE_W13_FP8_SM100, variant_id);
+  } else if (name == "moe_w2_fp8_sm100") {
+    int variant_id = task_register->register_moe_fp8_sm100_task(
+        customized->bgraph, params, false /*w13_linear*/);
+    task_config[op] = std::make_tuple(6, 1, TASK_MOE_W2_FP8_SM100, variant_id);
   } else if (name == "moe_mul_sum_add_sm100") {
     int variant_id = task_register->register_moe_mul_sum_add_sm100_task(
         customized->bgraph, params);

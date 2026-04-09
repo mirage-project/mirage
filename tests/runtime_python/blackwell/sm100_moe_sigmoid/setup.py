@@ -22,18 +22,16 @@ cuda_library_dirs = [
 macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
 
 setup(
-    name='runtime_kernel_blackwell',
+    name='runtime_kernel_moe_sigmoid',
     ext_modules=[
         CUDAExtension(
-            name='runtime_kernel_blackwell',
+            name='runtime_kernel_moe_sigmoid',
             sources=[
                 os.path.join(this_dir, 'runtime_kernel_wrapper_sm100.cu'),
             ],
             depends=[
+                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/topk_sigmoid_sm100.cuh'),
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/topk_softmax_sm100.cuh'),
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/moe_linear_sm100.cuh'),
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/mul_sum_add_sm100.cuh'),
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/utils.cuh'),
             ],
             define_macros=macros,
             include_dirs=[
