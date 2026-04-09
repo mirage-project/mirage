@@ -81,15 +81,13 @@ if __name__ == "__main__":
         output_dir=args.output_dir
     )
     runner = ModelRunner(runnerConfig)
-    manager = runner.make_manager()
-    llm = LLMEngine(manager,runner)
+    llm = LLMEngine(runner)
 
-    sampling_params = SamplingParams(max_new_tokens=256)
     prompts = [ # all requests
         "introduce yourself",
         "list all prime numbers within 100",
     ]
-    outputs = llm.generate(prompts,sampling_params)
+    outputs = llm.generate(prompts)
 
     for prompt,output in zip(prompts,outputs):
         print("\n")
