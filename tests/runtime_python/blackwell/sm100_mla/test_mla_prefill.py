@@ -1,12 +1,12 @@
 """
-Test MLA prefill device function (mla_prefill_sm100.cuh) correctness and performance.
+Test MPK MLA prefilling kernel (mla_prefill_sm100.cuh) correctness and performance.
 
 Build:
     cd tests/runtime_python/blackwell/sm100_mla
     CUDA_HOME=/usr/local/cuda-12.8 python3 setup_mla_prefill.py build_ext --inplace
 
 Run:
-    python3 test_mla_prefill_device.py [--seq-len 1024]
+    python3 test_mla_prefill.py [--seq-len 1024]
 """
 
 import argparse
@@ -44,7 +44,7 @@ def pytorch_mla_prefill_ref(Q_nope, Q_pe, CKV, KPE, sm_scale):
 def test_correctness(seq_len=1024):
     B, H = 1, 128
     print(f"\n{'='*60}")
-    print(f"MLA Prefill Device Function Correctness")
+    print(f"MPK MLA Prefilling Correctness")
     print(f"  B={B}, S={seq_len}, H={H}")
     print(f"{'='*60}")
 
@@ -58,8 +58,8 @@ def test_correctness(seq_len=1024):
     KPE = torch.randn(B, seq_len, D_KPE, device=device, dtype=torch.bfloat16) * 0.1
     O = torch.zeros(B, seq_len, H, D_V, device=device, dtype=torch.bfloat16)
 
-    # Device function
-    print("Running device function...")
+    # MPK MLA prefilling kernel
+    print("Running MPK MLA prefilling kernel...")
     runtime_kernel_mla_prefill.mla_prefill_test(
         Q_nope.view(B * seq_len, H, D_CKV) if False else Q_nope,
         Q_pe, CKV, KPE, O, sm_scale
@@ -97,7 +97,7 @@ def test_performance(seq_len=1024, warmup=16, repeats=50):
 
     flops = B * H * seq_len * seq_len * (D_CKV + D_KPE + D_CKV)
 
-    # --- Device function ---
+    # --- MPK MLA prefilling kernel ---
     runtime_kernel_mla_prefill.mla_prefill_init(Q_nope, Q_pe, CKV, KPE, O, sm_scale)
     for _ in range(warmup):
         runtime_kernel_mla_prefill.mla_prefill_run(Q_nope, Q_pe, CKV, KPE, O)
@@ -112,7 +112,7 @@ def test_performance(seq_len=1024, warmup=16, repeats=50):
     torch.cuda.synchronize()
     us = starter.elapsed_time(ender) / repeats * 1000
     tflops = flops / (us * 1e-6) / 1e12
-    print(f"  Device func: {us:8.1f} us  {tflops:6.1f} TFLOPS")
+    print(f"  MPK MLA: {us:8.1f} us  {tflops:6.1f} TFLOPS")
 
     # --- FlashInfer ---
     if HAS_FLASHINFER:

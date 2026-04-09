@@ -1,5 +1,5 @@
 """
-Test MLA decode device function (mla_decode_sm100.cuh + mla_reduce_sm100.cuh).
+Test MLA decode MPK MLA decoding kernel (mla_decode_sm100.cuh + mla_reduce_sm100.cuh).
 
 Correctness: compare vs PyTorch reference
 Performance: compare vs mla_host.cu binary and FlashInfer
@@ -94,7 +94,7 @@ def test_performance(batch_size=1, kv_len=4096, num_splits=32, warmup=16, repeat
 
     flops = 2.0 * batch_size * NUM_HEADS * kv_len * (D_K + D_V)
 
-    # --- Our device function ---
+    # --- Our MPK MLA decoding kernel ---
     runtime_kernel_mla_decode.mla_init(Q, KV, O, num_splits, softmax_scale)
 
     for _ in range(warmup):
@@ -111,7 +111,7 @@ def test_performance(batch_size=1, kv_len=4096, num_splits=32, warmup=16, repeat
     ours_ms = starter.elapsed_time(ender) / repeats
     ours_us = ours_ms * 1000
     ours_tflops = flops / (ours_us * 1e-6) / 1e12
-    print(f"\n  Device func:   {ours_us:.2f} us  ({ours_tflops:.2f} TFLOPS)")
+    print(f"\n  MPK MLA:   {ours_us:.2f} us  ({ours_tflops:.2f} TFLOPS)")
 
     # --- PyTorch reference ---
     O_ref = pytorch_mla_reference(Q, KV, softmax_scale, kv_len)  # warmup
