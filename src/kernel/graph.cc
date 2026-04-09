@@ -629,6 +629,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 3, TASK_MOE_TOPK_SOFTMAX_SM100, variant_id);
+  } else if (name == "moe_topk_sigmoid_sm100") {
+    int variant_id = task_register->register_moe_topk_sigmoid_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 3, TASK_MOE_TOPK_SIGMOID_SM100, variant_id);
   } else if (name == "moe_w13_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, true /*w13_linear*/);

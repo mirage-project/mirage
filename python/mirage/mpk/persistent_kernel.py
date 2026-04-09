@@ -911,7 +911,43 @@ class PersistentKernel:
         self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
 
         self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100")
-        
+
+    def moe_topk_sigmoid_routing_layer(
+        self,
+        input: DTensor,
+        bias: DTensor,
+        output: tuple[DTensor, DTensor, DTensor],
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_groups: int = 8,
+        topk_group: int = 4,
+        routed_scaling_factor: float = 2.5,
+    ):
+        import struct
+
+        assert input.num_dims == 2  # (batch_size, num_experts)
+        assert bias.num_dims == 1  # (num_experts,)
+        assert len(output) == 3
+        moe_topk_weight, moe_routing_indices, moe_masks = output
+        assert moe_topk_weight.num_dims == 2  # (batch_size, num_experts_per_tok)
+        assert moe_routing_indices.num_dims == 2  # (num_experts, batch_size)
+        assert moe_masks.num_dims == 1  # (num_experts + 1)
+
+        scaling_bits = struct.unpack("i", struct.pack("f", routed_scaling_factor))[0]
+        params = [num_groups, topk_group, scaling_bits]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(bias, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_topk_weight, (0, -1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, bias, moe_topk_weight, moe_routing_indices, moe_masks],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "moe_topk_sigmoid_sm100", params)
+
     def moe_w13_linear_layer(
         self,
         input: DTensor,

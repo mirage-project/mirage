@@ -107,6 +107,8 @@ public:
                                 std::vector<int> const &params);
   int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  int register_moe_topk_sigmoid_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
   int register_moe_linear_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params,
                                      bool w13_linear);

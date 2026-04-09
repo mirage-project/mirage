@@ -2172,6 +2172,72 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }
 
+int TaskRegister::register_moe_topk_sigmoid_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 3);
+  int num_groups = params[0];
+  int topk_group = params[1];
+  float scaling_factor;
+  memcpy(&scaling_factor, &params[2], sizeof(float));
+
+  int batch_size = 0, num_experts = 0, num_experts_per_tok = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // Validate output shapes
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  assert(output_ops[1]->output_tensors[0].num_dims == 2);
+  assert(output_ops[2]->output_tensors[0].num_dims == 1);
+  num_experts = output_ops[1]->output_tensors[0].dim[0];
+  batch_size = output_ops[1]->output_tensors[0].dim[1];
+  num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts + 1);
+  // Validate input shapes
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
+  // Validate bias shape
+  assert(input_ops[1]->output_tensors[0].num_dims == 1);
+  assert(input_ops[1]->output_tensors[0].dim[0] == num_experts);
+
+  int experts_per_group = num_experts / num_groups;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
+         "$, $>(",
+         /*VPT=*/8,
+         /*EXPERTS=*/num_experts,
+         /*WARPS_PER_TB=*/8,
+         /*BYTES_PER_LDG=*/16,
+         /*NUM_GROUPS=*/num_groups,
+         /*TOPK_GROUP=*/topk_group,
+         /*EXPERTS_PER_GROUP=*/experts_per_group,
+         /*TOPK_EXPERTS=*/num_experts_per_tok);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    nullptr,");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    $,", batch_size);
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    task_desc->output_ptrs[2],");
+  code.e("    0,");
+  code.e("    $,", num_experts);
+  code.e("    $f);", scaling_factor);
+  return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
+}
+
 int TaskRegister::register_moe_linear_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
