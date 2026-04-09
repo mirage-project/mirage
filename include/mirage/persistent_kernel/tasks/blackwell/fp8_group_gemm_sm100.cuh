@@ -3,17 +3,7 @@
 // FP8 Block-Scaled MoE Group GEMM for SM100 (Blackwell B200)
 // ===================================================================
 //
-// This file implements a per-expert FP8 E4M3 block-quantized GEMM kernel
-// for Mixture-of-Experts (MoE) layers in the MPK (Mirage Persistent Kernel)
-// runtime. It targets the SM100 (Blackwell) architecture, specifically the
-// block-scaled FP8 UMMA (Unified Matrix Multiply-Accumulate) instruction:
-//
-//   tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale
-//
-// This instruction performs matrix multiplication on FP8 E4M3 operands
-// with per-block UE8M0 (8-bit exponent-only) scale factors, enabling
-// efficient inference for models like DeepSeek V3/R1 that use FP8
-// block-quantized weights and activations.
+// MMA used:  tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale
 //
 // ===================================================================
 // MATHEMATICAL OPERATION
@@ -36,44 +26,67 @@
 // The UMMA hardware computes C[M,N] += A[M,K] * B[N,K] (both K-major).
 // We map the operands as follows ("swapAB"):
 //
-//   UMMA operand A  ←  weight_fp8[e]    shape [N_weight, K]  (M dimension = N_weight)
-//   UMMA operand B  ←  input_fp8        shape [B_tokens, K]  (N dimension = B_tokens)
-//   UMMA operand C  ←  accumulator       shape [N_weight, B_tokens]
+//   UMMA operand A  ←  weight_fp8[e]    shape [N_weight, K]  (M dimension =
+//   N_weight) UMMA operand B  ←  input_fp8        shape [B_tokens, K]  (N
+//   dimension = B_tokens) UMMA operand C  ←  accumulator       shape [N_weight,
+//   B_tokens]
 //
 // This means:
 //   - MMA_M corresponds to the OUTPUT dimension (weight rows, N_weight)
 //   - MMA_N corresponds to the BATCH dimension (tokens, B_tokens)
 //   - The K dimension is the reduction/hidden dimension
 //
-// Why swapAB? Because:
-//   1. Weight is the larger, static tensor → ideal for TMA (hardware tensor
-//      memory access) which provides async bulk copy with hardware address
-//      generation and swizzling.
-//   2. Input requires per-token routing logic (checking if each token is
-//      routed to this expert) → manual cp.async with conditional loads is
-//      more flexible.
-//   3. This matches the convention used by the existing BF16 MoE tasks and
-//      DeepGEMM's FP8 GEMM implementation.
-//
 // ===================================================================
-// BLOCK-SCALED FP8 QUANTIZATION
+// EXPECTED SCALE FACTOR FORMAT
 // ===================================================================
 //
-// Both weights and activations use per-128-element block quantization:
-//   - Along the K (reduction) dimension, every 128 consecutive elements
-//     share one float32 scale factor.
-//   - Scale factor count per row = K / 128 (e.g., 7168/128 = 56 for
-//     DeepSeek V3).
-//   - The UMMA hardware expects scales in UE8M0 format (unsigned 8-bit
-//     exponent-only float), which represents powers of 2.
-//   - Conversion: ue8m0 = (float_as_uint(scale_f32) >> 23) & 0xFF
-//     This extracts the IEEE 754 biased exponent, effectively computing
-//     floor(log2(scale)) + 127. The dequantized value = 2^(ue8m0 - 127).
-//   - Since bK=128 matches the scale block size, each K-tile uses exactly
-//     one scale factor per row. Within the 128-K tile, the hardware
-//     processes 4 sub-tiles of 32 elements each (UMMA_K=32), all sharing
-//     the same scale → the scale is replicated across 4 bytes in a uint32:
-//       packed_scale = ue8m0 | (ue8m0 << 8) | (ue8m0 << 16) | (ue8m0 << 24)
+// This kernel expects FP8 E4M3 data with per-block float32 scale factors.
+// The scale factors are converted to UE8M0 (8-bit exponent-only) in-kernel
+// before being loaded into TMEM for the block-scaled UMMA instruction.
+//
+// ---- Weight scales (SFA) ----
+//   Input tensor:  weight_scale [num_experts, N, K/128]  dtype=float32
+//   Block size:    128 elements along K (reduction dimension)
+//   Granularity:   Per-row, per-128-K-block
+//                  (each weight row has K/128 float32 scale values)
+//   Example:       DeepSeek V3 W13: [256, 4096, 56] float32
+//
+// ---- Input/activation scales (SFB) ----
+//   Input tensor:  input_scale [batch, K/128]              (W13_LINEAR=true)
+//                  input_scale [batch, num_topk, K/128]    (W13_LINEAR=false)
+//   Block size:    128 elements along K (same as weights)
+//   Granularity:   Per-token, per-128-K-block
+//   Example:       DeepSeek V3: [16, 56] float32
+//
+// ---- In-kernel conversion pipeline ----
+//   1. Load float32 scale from global memory
+//   2. Convert to UE8M0: ue8m0 = (__float_as_uint(sf) >> 23) & 0xFF
+//      This extracts the IEEE 754 biased exponent, giving a power-of-2
+//      approximation: dequantized = 2^(ue8m0 - 127)
+//   3. Pack into uint32: replicate UE8M0 across 4 bytes (one per 32-K sub-tile)
+//        packed = ue8m0 | (ue8m0 << 8) | (ue8m0 << 16) | (ue8m0 << 24)
+//   4. Warp-transpose 128 packed uint32s for UTCCP column-major layout
+//   5. UTCCP copies from smem to 4 TMEM scale columns
+//
+// ---- Hardware constraints (SM100 block-scaled UMMA) ----
+//   - Scale format in TMEM: UE8M0 (8-bit exponent-only) — set via
+//     instruction descriptor field scale_format_=1
+//   - Alternative: UE4M3 (4-bit mantissa) — scale_format_=0 (not used here)
+//   - The format applies to BOTH A and B scales simultaneously
+//     (single bit in the instruction descriptor, shared)
+//   - Each packed uint32 holds 4 UE8M0 bytes, one per 32-K UMMA sub-tile.
+//     sfa_id/sfb_id (2-bit each) select which byte to use per sub-tile.
+//   - A and B CAN have independent sub-tile byte selection (sfa_id != sfb_id),
+//     enabling per-32-K granularity if scales differ across sub-tiles.
+//   - Current implementation: per-128-K (all 4 bytes identical,
+//   sfa_id=sfb_id=k_sub)
+//
+// ---- Flexibility ----
+//   - Input scales MUST be float32 (kernel converts to UE8M0 internally)
+//   - Block size along K is fixed at 128 (= bK, matching one K-tile)
+//   - Per-32-K granularity possible by packing 4 different UE8M0 values
+//   - Row granularity is always per-row (128 entries per UTCCP = MMA_M or MMA_N
+//   rows)
 //
 // ===================================================================
 // WARP ROLE ASSIGNMENT (256 threads = 8 warps × 32 threads)
@@ -158,14 +171,17 @@
 // The outermost loop iterates over activated experts (with EXPERT_STRIDE
 // for multi-CTA parallelism in MPK). For each expert:
 //
-//   for m_tile in [0, ceil(OUTPUT_SIZE / MMA_M)):     # output tiles (per-CTA slice)
+//   for m_tile in [0, ceil(OUTPUT_SIZE / MMA_M)):     # output tiles (per-CTA
+//   slice)
 //     for n_tile in [0, ceil(BATCH_SIZE / MMA_N)):    # token dimension tiles
-//       for k_tile in [0, REDUCTION_SIZE / bK):       # reduction dimension tiles
+//       for k_tile in [0, REDUCTION_SIZE / bK):       # reduction dimension
+//       tiles
 //         UMMA: C[m_tile, n_tile] += A[m_tile, k_tile] * B[n_tile, k_tile]
 //
 // Each K-tile of 128 elements is further split into 4 UMMA sub-tiles of 32:
 //   for k_sub in [0, 4):
-//     fma(A_desc[k_sub*32], B_desc[k_sub*32], C_tmem, scale_a[k_sub], scale_b[k_sub])
+//     fma(A_desc[k_sub*32], B_desc[k_sub*32], C_tmem, scale_a[k_sub],
+//     scale_b[k_sub])
 //
 // ===================================================================
 // SMEM LAYOUT AND SWIZZLING
@@ -177,7 +193,8 @@
 //   swizzled_byte_offset = linear_offset ^ (((linear_offset >> 7) & 7) << 4)
 //
 // This XOR-based swizzle eliminates bank conflicts for 128-byte aligned
-// access patterns. The UMMA descriptor encodes this as LayoutType::SWIZZLE_128B.
+// access patterns. The UMMA descriptor encodes this as
+// LayoutType::SWIZZLE_128B.
 //
 // A (weight): loaded via TMA which handles swizzling automatically.
 // B (input):  loaded via manual cp.async with explicit swizzle computation
@@ -187,50 +204,40 @@
 //
 // ===================================================================
 
+#include "sm100_utils.cuh"
 #include <cstdio>
 #include <iostream>
-// sm100_utils.cuh provides UMMA descriptor construction helpers:
-//   make_umma_desc, advance_umma_desc_lo, make_sf_desc,
-//   make_runtime_instr_desc_with_sf_id, SM100_MMA_MXF8F6F4_SS
-// These are adapted from DeepGEMM's SM100 FP8 GEMM implementation.
-#include "sm100_utils.cuh"
 
 // Cutlass includes
-#include <cutlass/arch/barrier.h>        // ClusterTransactionBarrier, NamedBarrier
-#include <cutlass/cluster_launch.hpp>    // Cluster launch utilities
-#include <cutlass/cutlass.h>             // Core CUTLASS types
-#include <cutlass/numeric_conversion.h>  // NumericConverter (FP32→BF16)
-#include <cutlass/numeric_types.h>       // float_e4m3_t, float_ue8m0_t, bfloat16_t
+#include <cutlass/arch/barrier.h>     // ClusterTransactionBarrier, NamedBarrier
+#include <cutlass/cluster_launch.hpp> // Cluster launch utilities
+#include <cutlass/cutlass.h>          // Core CUTLASS types
+#include <cutlass/numeric_conversion.h> // NumericConverter (FP32→BF16)
+#include <cutlass/numeric_types.h> // float_e4m3_t, float_ue8m0_t, bfloat16_t
 
 // CuTe includes
-#include <cute/algorithm/cooperative_copy.hpp>   // Cooperative copy algorithms
-#include <cute/arch/cluster_sm90.hpp>            // Cluster synchronization primitives
-#include <cute/arch/copy_sm100.hpp>              // SM100_UTCCP_4x32dp128bit_1cta (scale copy to TMEM)
-#include <cute/arch/mma_sm100_desc.hpp>          // UMMA::SmemDescriptor, make_instr_desc_block_scaled
-#include <cute/arch/mma_sm100_umma.hpp>          // SM100_MMA_MXF8F6F4_SS (block-scaled FP8 UMMA)
-#include <cute/arch/tmem_allocator_sm100.hpp>    // TMEM::Allocator1Sm (tensor memory allocator)
-#include <cute/atom/mma_traits_sm100.hpp>        // Layout_K_SW128_Atom, UMMA namespace
-#include <cute/numeric/integral_constant.hpp>    // Compile-time integer constants
-#include <cute/tensor.hpp>                       // CuTe tensor abstractions
+#include <cute/algorithm/cooperative_copy.hpp> // Cooperative copy algorithms
+#include <cute/arch/cluster_sm90.hpp> // Cluster synchronization primitives
+#include <cute/arch/copy_sm100.hpp> // SM100_UTCCP_4x32dp128bit_1cta (scale copy to TMEM)
+#include <cute/arch/mma_sm100_desc.hpp> // UMMA::SmemDescriptor, make_instr_desc_block_scaled
+#include <cute/arch/mma_sm100_umma.hpp> // SM100_MMA_MXF8F6F4_SS (block-scaled FP8 UMMA)
+#include <cute/arch/tmem_allocator_sm100.hpp> // TMEM::Allocator1Sm (tensor memory allocator)
+#include <cute/atom/mma_traits_sm100.hpp> // Layout_K_SW128_Atom, UMMA namespace
+#include <cute/numeric/integral_constant.hpp> // Compile-time integer constants
+#include <cute/tensor.hpp>                    // CuTe tensor abstractions
 
-#include "../common/dmem_layout.cuh"     // Device memory layout helpers
-#include "../common/worker_config.h"     // MPK worker configuration
-#include "../hopper/barrier.cuh"         // Barrier helper functions (try_wait_barrier)
+#include "../common/dmem_layout.cuh" // Device memory layout helpers
+#include "../common/worker_config.h" // MPK worker configuration
+#include "../hopper/barrier.cuh" // Barrier helper functions (try_wait_barrier)
 #include "../hopper/smem_layout_tma.cuh" // smem_tma layout descriptor
 #include "../hopper/tma.cuh"             // TMA copy async wrapper
 #include "storage.cuh"                   // Shared storage base types
 
 namespace kernel {
 
-// ===================================================================
-// Inline PTX Helpers
-// ===================================================================
-// These provide direct access to PTX instructions that are not exposed
-// through CuTe's API in the version of CUTLASS bundled with this project.
-
 // Load a 32-bit value from shared memory using its smem address.
 // Used by fp8_utccp_warp_transpose to read scale factor entries.
-__device__ __forceinline__ uint32_t fp8_ld_shared(const uint32_t *ptr) {
+__device__ __forceinline__ uint32_t fp8_ld_shared(uint32_t const *ptr) {
   uint32_t val;
   asm volatile("ld.shared.u32 %0, [%1];"
                : "=r"(val)
@@ -270,21 +277,24 @@ __device__ __forceinline__ void fp8_tcgen05_after_thread_sync() {
 //
 //   A[4][16384]        = 64 KB   (4 stages × 128×128 × 1 byte FP8 weight tiles)
 //   B[4][16384]        = 64 KB   (4 stages × 128×128 × 1 byte FP8 input tiles)
-//   sfa_smem[4][128]   =  2 KB   (4 stages × 128 × 4 bytes packed UE8M0 weight scales)
-//   sfb_smem[4][128]   =  2 KB   (4 stages × 128 × 4 bytes packed UE8M0 input scales)
-//   barriers           = ~0.5 KB (a_full, b_full, ab_empty, acc_full, acc_empty)
-//   expert_mask + tmem  = ~36 B
-//   Total              ≈ 132 KB  (fits within SM100's 228 KB shared memory)
+//   sfa_smem[4][128]   =  2 KB   (4 stages × 128 × 4 bytes packed UE8M0 weight
+//   scales) sfb_smem[4][128]   =  2 KB   (4 stages × 128 × 4 bytes packed UE8M0
+//   input scales) barriers           = ~0.5 KB (a_full, b_full, ab_empty,
+//   acc_full, acc_empty) expert_mask + tmem  = ~36 B Total              ≈ 132
+//   KB  (fits within SM100's 228 KB shared memory)
 //
-template <class BF16_ASmemLayout,  // Placeholder type (used only for template deduction)
-          class BF16_BSmemLayout,  // Placeholder type (used only for template deduction)
-          class BF16_BCpLayout,    // Placeholder type (used only for template deduction)
-          int Num_Experts,         // Number of experts (for expert_mask array sizing)
-          int Num_AB_Stage,        // Number of pipeline stages for A/B smem buffers
-          int Num_ACC_Stage,       // Number of pipeline stages for accumulator buffers
-          int MMA_M_val,           // UMMA M dimension (weight/output rows per tile)
-          int MMA_N_val,           // UMMA N dimension (tokens per tile)
-          int bK_val>              // K-tile size (always 128 to match scale block size)
+template <
+    class BF16_ASmemLayout, // Placeholder type (used only for template
+                            // deduction)
+    class BF16_BSmemLayout, // Placeholder type (used only for template
+                            // deduction)
+    class BF16_BCpLayout, // Placeholder type (used only for template deduction)
+    int Num_Experts,      // Number of experts (for expert_mask array sizing)
+    int Num_AB_Stage,     // Number of pipeline stages for A/B smem buffers
+    int Num_ACC_Stage,    // Number of pipeline stages for accumulator buffers
+    int MMA_M_val,        // UMMA M dimension (weight/output rows per tile)
+    int MMA_N_val,        // UMMA N dimension (tokens per tile)
+    int bK_val>           // K-tile size (always 128 to match scale block size)
 struct MoEFP8SharedStorage {
   // --- FP8 Data Tiles ---
   // A: Weight tile buffer. One tile = [MMA_M × bK] bytes of FP8 E4M3 data.
@@ -292,9 +302,10 @@ struct MoEFP8SharedStorage {
   //    The UMMA descriptor for A points into this buffer.
   alignas(128) uint8_t A[Num_AB_Stage][MMA_M_val * bK_val];
 
-  // B: Input/activation tile buffer. One tile = [MMA_N × bK] bytes of FP8 E4M3 data.
-  //    Loaded by manual cp.async (warp 5) with explicit SWIZZLE_128B computation.
-  //    The UMMA descriptor for B points into this buffer.
+  // B: Input/activation tile buffer. One tile = [MMA_N × bK] bytes of FP8 E4M3
+  // data.
+  //    Loaded by manual cp.async (warp 5) with explicit SWIZZLE_128B
+  //    computation. The UMMA descriptor for B points into this buffer.
   alignas(128) uint8_t B[Num_AB_Stage][MMA_N_val * bK_val];
 
   // --- Scale Factor Buffers (for UTCCP → TMEM) ---
@@ -307,8 +318,9 @@ struct MoEFP8SharedStorage {
   // Since our scale granularity is per-128-K (one scale per row per K-tile),
   // all 4 bytes in each uint32 are identical replicas of the same UE8M0 value.
   //
-  // The 128 entries correspond to 128 rows (MMA_M rows for SFA, MMA_N rows for SFB).
-  // After warp-transpose, these are in the column-major layout that UTCCP expects.
+  // The 128 entries correspond to 128 rows (MMA_M rows for SFA, MMA_N rows for
+  // SFB). After warp-transpose, these are in the column-major layout that UTCCP
+  // expects.
   //
   // SFA: Weight scale factors (one per weight row in the current M-tile)
   alignas(128) uint32_t sfa_smem[Num_AB_Stage][128];
@@ -317,17 +329,20 @@ struct MoEFP8SharedStorage {
 
   // --- Pipeline Barriers ---
   // These barriers synchronize the 3-stage producer-consumer pipeline:
-  //   DMA warp (producer) → MMA warp (consumer/producer) → Epilogue warps (consumer)
+  //   DMA warp (producer) → MMA warp (consumer/producer) → Epilogue warps
+  //   (consumer)
   //
   // a_full:    Signaled by DMA warp when TMA weight load completes.
   //            Expected by MMA warp (1 transaction per signal).
   //            Uses ClusterTransactionBarrier (tracks TMA byte count).
   alignas(16) cute::uint64_t a_full_mbar_ptr[Num_AB_Stage];
   // b_full:    Signaled by DMA warp when cp.async input load completes.
-  //            Expected by MMA warp (32 threads arrive via cpasync_barrier_arrive_noinc).
-  //            Uses ClusterBarrier (thread-count based).
+  //            Expected by MMA warp (32 threads arrive via
+  //            cpasync_barrier_arrive_noinc). Uses ClusterBarrier (thread-count
+  //            based).
   alignas(16) cute::uint64_t b_full_mbar_ptr[Num_AB_Stage];
-  // ab_empty:  Signaled by MMA warp (via umma_arrive) when it finishes reading A/B.
+  // ab_empty:  Signaled by MMA warp (via umma_arrive) when it finishes reading
+  // A/B.
   //            Expected by DMA warp before overwriting the smem stage.
   //            Uses ClusterBarrier (1 thread arrives via umma_arrive).
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
@@ -335,23 +350,29 @@ struct MoEFP8SharedStorage {
   //            (expert, m_tile, n_tile) work unit are accumulated.
   //            Expected by epilogue warps before reading TMEM.
   alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
-  // acc_empty: Signaled by epilogue warps when they finish reading the accumulator.
-  //            Expected by MMA warp before reusing the ACC buffer for the next tile.
-  //            Uses ClusterBarrier (4 warps × 1 elected thread = 4 arrivals).
+  // acc_empty: Signaled by epilogue warps when they finish reading the
+  // accumulator.
+  //            Expected by MMA warp before reusing the ACC buffer for the next
+  //            tile. Uses ClusterBarrier (4 warps × 1 elected thread = 4
+  //            arrivals).
   alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
-  // sf_ready:  Signaled by scale warp (warp 6) when scale factors have been loaded,
-  //            packed, and warp-transposed in smem. Expected by MMA warp (warp 4)
-  //            before issuing UTCCP to copy scales to TMEM.
-  //            Uses ClusterBarrier (1 thread arrival from warp 6 via elect_one_sync).
+  // sf_ready:  Signaled by scale warp (warp 6) when scale factors have been
+  // loaded,
+  //            packed, and warp-transposed in smem. Expected by MMA warp (warp
+  //            4) before issuing UTCCP to copy scales to TMEM. Uses
+  //            ClusterBarrier (1 thread arrival from warp 6 via
+  //            elect_one_sync).
   alignas(16) cute::uint64_t sf_ready_mbar_ptr[Num_AB_Stage];
 
   // --- Expert Mask and TMEM Base ---
-  // expert_mask: cached copy of activated expert indices (unused in current impl,
+  // expert_mask: cached copy of activated expert indices (unused in current
+  // impl,
   //              experts are read directly from mMask global tensor).
   alignas(16) cute::uint32_t expert_mask[Num_Experts];
   // tmem_base_ptr: base column address in TMEM, allocated by warp 0 of the
-  //                epilogue group and broadcast to all warps via this shared variable.
-  //                All TMEM accesses (accumulators + scale columns) are offset from this.
+  //                epilogue group and broadcast to all warps via this shared
+  //                variable. All TMEM accesses (accumulators + scale columns)
+  //                are offset from this.
   alignas(16) cute::uint32_t tmem_base_ptr;
 };
 
@@ -374,22 +395,24 @@ struct MoEFP8SharedStorage {
 //   - Stride Byte Offset (SBO) = distance between groups of 32 rows
 //     = (BLOCK_MN / 32) * BLOCK_K * sizeof(element) bytes
 //   - Leading Byte Offset (LBO) = 0 (no leading dimension offset needed)
-//   - LayoutType = SWIZZLE_128B (128-byte XOR swizzle for bank conflict avoidance)
+//   - LayoutType = SWIZZLE_128B (128-byte XOR swizzle for bank conflict
+//   avoidance)
 //
 // Template parameters:
 //   BLOCK_MN:     tile dimension along M or N (e.g., 128)
 //   BLOCK_K:      tile dimension along K (e.g., 128)
 //   kSwizzleMode: must equal BLOCK_K * sizeof(element) = 128 for FP8
 template <uint32_t BLOCK_MN, uint32_t BLOCK_K, uint32_t kSwizzleMode>
-__device__ __forceinline__
-cute::UMMA::SmemDescriptor fp8_make_umma_desc_k_major(uint8_t* base_smem_ptr) {
+__device__ __forceinline__ cute::UMMA::SmemDescriptor
+    fp8_make_umma_desc_k_major(uint8_t *base_smem_ptr) {
   static_assert(kSwizzleMode == BLOCK_K * sizeof(uint8_t), "Swizzle mismatch");
   // atom_base = 32: the UMMA hardware processes tiles in groups of 32 rows
   constexpr uint32_t atom_base = 32;
   constexpr uint32_t num_non_contiguous = BLOCK_MN / atom_base;
   // SBO encodes the byte stride between consecutive 32-row groups
   // For MMA_M=128, bK=128: SBO = (128/32) * 128 * 1 = 512 bytes
-  const uint32_t stride_byte_offset = num_non_contiguous * BLOCK_K * sizeof(uint8_t);
+  const uint32_t stride_byte_offset =
+      num_non_contiguous * BLOCK_K * sizeof(uint8_t);
   const uint32_t leading_byte_offset = 0;
   constexpr auto layout_type = cute::UMMA::LayoutType::SWIZZLE_128B;
 
@@ -398,7 +421,7 @@ cute::UMMA::SmemDescriptor fp8_make_umma_desc_k_major(uint8_t* base_smem_ptr) {
   desc.version_ = 1;
   desc.lbo_mode_ = 0;
   desc.layout_type_ = static_cast<uint8_t>(layout_type);
-  const auto uint_ptr = cute::cast_smem_ptr_to_uint(base_smem_ptr);
+  auto const uint_ptr = cute::cast_smem_ptr_to_uint(base_smem_ptr);
   // start_address is the smem pointer shifted right by 4 (16-byte granularity)
   desc.start_address_ = static_cast<uint16_t>(uint_ptr >> 4);
   desc.base_offset_ = 0;
@@ -417,8 +440,9 @@ cute::UMMA::SmemDescriptor fp8_make_umma_desc_k_major(uint8_t* base_smem_ptr) {
 //
 // This is called 4 times per K-tile (k_sub = 0..3) to step through
 // the 32-element UMMA sub-tiles within the 128-element K-tile.
-__device__ __forceinline__
-uint32_t fp8_advance_umma_desc_lo(uint32_t base_lo, uint32_t offset, uint32_t k_idx) {
+__device__ __forceinline__ uint32_t fp8_advance_umma_desc_lo(uint32_t base_lo,
+                                                             uint32_t offset,
+                                                             uint32_t k_idx) {
   return base_lo + (((offset + k_idx * 1) * sizeof(uint8_t)) >> 4u);
 }
 
@@ -432,8 +456,8 @@ uint32_t fp8_advance_umma_desc_lo(uint32_t base_lo, uint32_t offset, uint32_t k_
 //   - SBO = 8 (in 16-byte units = 128 bytes): stride between 32-element groups
 //
 // This matches DeepGEMM's make_sf_desc function.
-__device__ __forceinline__
-cute::UMMA::SmemDescriptor fp8_make_sf_smem_desc(const uint32_t *smem_ptr) {
+__device__ __forceinline__ cute::UMMA::SmemDescriptor
+    fp8_make_sf_smem_desc(uint32_t const *smem_ptr) {
   cute::UMMA::SmemDescriptor desc;
   desc.desc_ = 0;
   desc.version_ = 1;
@@ -471,19 +495,20 @@ cute::UMMA::SmemDescriptor fp8_make_sf_smem_desc(const uint32_t *smem_ptr) {
 //   This effectively performs a 4×32 → 32×4 transpose within the warp.
 //
 // Must be called by all 32 threads of the warp simultaneously.
-__device__ __forceinline__
-void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
+__device__ __forceinline__ void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
   const uint32_t lane_idx = cutlass::canonical_lane_idx();
   uint32_t values[4];
-  // Phase 1: Read — each lane reads 4 non-contiguous elements
-  #pragma unroll
-  for (uint32_t i = 0; i < 4; ++i)
+// Phase 1: Read — each lane reads 4 non-contiguous elements
+#pragma unroll
+  for (uint32_t i = 0; i < 4; ++i) {
     values[i] = fp8_ld_shared(smem_ptr + (i ^ (lane_idx >> 3)) * 32 + lane_idx);
+  }
   __syncwarp();
-  // Phase 2: Write — each lane writes 4 contiguous elements (transposed)
-  #pragma unroll
-  for (uint32_t i = 0; i < 4; ++i)
+// Phase 2: Write — each lane writes 4 contiguous elements (transposed)
+#pragma unroll
+  for (uint32_t i = 0; i < 4; ++i) {
     fp8_st_shared(smem_ptr + lane_idx * 4 + (i ^ (lane_idx >> 3)), values[i]);
+  }
 }
 
 // ===================================================================
@@ -492,35 +517,40 @@ void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
 // The expert_offset parameter indexes into the activated experts list
 // (stored in mMask). With EXPERT_STRIDE > 1, multiple CTAs can process
 // different experts in parallel — CTA i handles experts at indices
-// expert_offset, expert_offset + EXPERT_STRIDE, expert_offset + 2*EXPERT_STRIDE, ...
+// expert_offset, expert_offset + EXPERT_STRIDE, expert_offset +
+// 2*EXPERT_STRIDE, ...
 //
 // For each assigned expert, the kernel iterates over all (m_tile, n_tile)
 // output tiles, performing a full K-reduction for each tile via the
 // DMA→MMA→Epilogue pipeline described in the file header.
 //
 // Template Parameters:
-//   TMA_Weight:       TMA descriptor type for FP8 weight tensor (tma_2d<uint8_t, ...>).
-//                     Encodes the global memory layout, swizzle mode, and tile shape
-//                     for hardware-accelerated tensor memory access.
+//   TMA_Weight:       TMA descriptor type for FP8 weight tensor
+//   (tma_2d<uint8_t, ...>).
+//                     Encodes the global memory layout, swizzle mode, and tile
+//                     shape for hardware-accelerated tensor memory access.
 //
 //   InputTensor:      CuTe tensor type for FP8 input activations.
-//                     W13_LINEAR=true:  [batch_size, K] (flat input before MoE routing)
-//                     W13_LINEAR=false: [batch_size, num_topk, K] (after first MoE layer)
-//                     Element type is uint8_t* (FP8 E4M3 stored as raw bytes to avoid
-//                     CuTe type assertion issues with gmem_ptr<float_e4m3_t>).
+//                     W13_LINEAR=true:  [batch_size, K] (flat input before MoE
+//                     routing) W13_LINEAR=false: [batch_size, num_topk, K]
+//                     (after first MoE layer) Element type is uint8_t* (FP8
+//                     E4M3 stored as raw bytes to avoid CuTe type assertion
+//                     issues with gmem_ptr<float_e4m3_t>).
 //
 //   InputScaleTensor: CuTe tensor type for float32 input scale factors.
-//                     Shape [batch_size, K/128] or [batch_size, num_topk, K/128].
-//                     One scale per 128 consecutive K-elements per token.
+//                     Shape [batch_size, K/128] or [batch_size, num_topk,
+//                     K/128]. One scale per 128 consecutive K-elements per
+//                     token.
 //
 //   WeightScaleTensor: CuTe tensor type for float32 weight scale factors.
-//                      Shape [num_experts * N, K/128] (flattened expert dimension).
-//                      One scale per 128 consecutive K-elements per weight row.
+//                      Shape [num_experts * N, K/128] (flattened expert
+//                      dimension). One scale per 128 consecutive K-elements per
+//                      weight row.
 //
 //   IndicesTensor:    CuTe tensor type for int32 routing indices.
 //                     Shape [num_experts, batch_size].
-//                     routing_indices[e, token] = topk_slot (1-indexed) if token
-//                     is routed to expert e, else 0 (not routed).
+//                     routing_indices[e, token] = topk_slot (1-indexed) if
+//                     token is routed to expert e, else 0 (not routed).
 //
 //   MaskTensor:       CuTe tensor type for int32 expert activation mask.
 //                     Shape [num_experts + 1].
@@ -528,30 +558,38 @@ void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
 //                     mask[num_experts] = N (number of activated experts).
 //
 //   OutputTensor:     CuTe tensor type for BF16 output.
-//                     Shape [batch_size, num_topk, N] with strides [topk*N, N, 1].
-//                     output[token, topk_slot, output_row] stores the GEMM result.
+//                     Shape [batch_size, num_topk, N] with strides [topk*N, N,
+//                     1]. output[token, topk_slot, output_row] stores the GEMM
+//                     result.
 //
-//   MMA_M:            UMMA tile M dimension (weight/output rows). Typically 128.
-//   MMA_N:            UMMA tile N dimension (tokens). Typically 128.
-//   BATCH_SIZE:       Padded batch size (padded to MMA_N). Actual tokens may be fewer.
-//   OUTPUT_SIZE:      Per-CTA output dimension (N / grid_dim.y). This is the number
-//                     of weight rows each CTA processes. When grid_dim.y=1 (no N-split),
-//                     OUTPUT_SIZE = ORIG_OUTPUT_SIZE. May not be a multiple of MMA_M.
-//   ORIG_OUTPUT_SIZE: Full output dimension N before splitting across grid_dim.y.
-//                     Used for expert stride in TMA coordinates and weight scale
-//                     indexing: expert e's rows start at e * ORIG_OUTPUT_SIZE in the
-//                     global weight tensor.
+//   MMA_M:            UMMA tile M dimension (weight/output rows). Typically
+//   128. MMA_N:            UMMA tile N dimension (tokens). Typically 128.
+//   BATCH_SIZE:       Padded batch size (padded to MMA_N). Actual tokens may be
+//   fewer. OUTPUT_SIZE:      Per-CTA output dimension (N / grid_dim.y). This is
+//   the number
+//                     of weight rows each CTA processes. When grid_dim.y=1 (no
+//                     N-split), OUTPUT_SIZE = ORIG_OUTPUT_SIZE. May not be a
+//                     multiple of MMA_M.
+//   ORIG_OUTPUT_SIZE: Full output dimension N before splitting across
+//   grid_dim.y.
+//                     Used for expert stride in TMA coordinates and weight
+//                     scale indexing: expert e's rows start at e *
+//                     ORIG_OUTPUT_SIZE in the global weight tensor.
 //   REDUCTION_SIZE:   K dimension (hidden size). Must be a multiple of bK=128.
 //   NUM_EXPERTS:      Total number of experts in the model.
 //   NUM_TOPK:         Number of experts each token is routed to (top-k).
-//   EXPERT_STRIDE:    Stride for multi-CTA expert parallelism. Set to grid_dim.x
-//                     by the task register so each CTA in the x-dimension handles
-//                     a disjoint set of experts.
-//   W13_LINEAR:       true for W1/W3 (gate/up) projection (input is flat [batch, K]),
-//                     false for W2 (down) projection (input is [batch, topk, K]).
-//   NUM_AB_STAGE:     Number of pipeline stages for A/B smem buffers (default 4).
-//   NUM_ACC_STAGE:    Number of accumulator double-buffer stages in TMEM (default 2).
-//   NUM_C_STAGE:      Number of output staging buffers (default 4, currently unused).
+//   EXPERT_STRIDE:    Stride for multi-CTA expert parallelism. Set to
+//   grid_dim.x
+//                     by the task register so each CTA in the x-dimension
+//                     handles a disjoint set of experts.
+//   W13_LINEAR:       true for W1/W3 (gate/up) projection (input is flat
+//   [batch, K]),
+//                     false for W2 (down) projection (input is [batch, topk,
+//                     K]).
+//   NUM_AB_STAGE:     Number of pipeline stages for A/B smem buffers (default
+//   4). NUM_ACC_STAGE:    Number of accumulator double-buffer stages in TMEM
+//   (default 2). NUM_C_STAGE:      Number of output staging buffers (default 4,
+//   currently unused).
 //
 template <typename TMA_Weight,
           class InputTensor,
@@ -574,7 +612,7 @@ template <typename TMA_Weight,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
 __device__ __forceinline__ void
-    fp8_moe_group_gemm_sm100_task_impl(const TMA_Weight &tma_weight,
+    fp8_moe_group_gemm_sm100_task_impl(TMA_Weight const &tma_weight,
                                        InputTensor mInput,
                                        InputScaleTensor mInputScale,
                                        WeightScaleTensor mWeightScale,
@@ -585,8 +623,8 @@ __device__ __forceinline__ void
   using namespace cute;
 
   using bf16_t = cute::bfloat16_t;
-  using AccType = float;                    // FP32 accumulators in TMEM
-  using ue8m0_t = cutlass::float_ue8m0_t;  // 8-bit exponent-only scale type
+  using AccType = float;                  // FP32 accumulators in TMEM
+  using ue8m0_t = cutlass::float_ue8m0_t; // 8-bit exponent-only scale type
 
   // ----------------------------------------------------------------
   // COMPILE-TIME CONSTANTS
@@ -610,9 +648,10 @@ __device__ __forceinline__ void
   // to the tensor core. The UMMA instruction reads/writes TMEM directly.
   //
   // Our TMEM allocation contains three regions:
-  //   1. Accumulators: MMA_N columns x NUM_ACC_STAGE stages for double-buffering
-  //      the FP32 accumulator matrix. Each accumulator holds one (m_tile, n_tile)
-  //      result of shape [MMA_M=128 rows, MMA_N columns].
+  //   1. Accumulators: MMA_N columns x NUM_ACC_STAGE stages for
+  //   double-buffering
+  //      the FP32 accumulator matrix. Each accumulator holds one (m_tile,
+  //      n_tile) result of shape [MMA_M=128 rows, MMA_N columns].
   //   2. SFA (Scale Factor A): 4 columns for weight UE8M0 scales.
   //      The 4 columns correspond to the 4 K-subtiles (k_sub=0..3).
   //   3. SFB (Scale Factor B): 4 columns for input UE8M0 scales.
@@ -623,18 +662,24 @@ __device__ __forceinline__ void
   //
   // Each UMMA tile requires Mx1 and 1xN scale factors from A and B,
   // respectively, so SFA=SFB=4 columns (one per k_sub).
-  constexpr int num_tmem_acc_cols  = MMA_N * NUM_ACC_STAGE;  // e.g., 128*2 = 256
-  constexpr int kNumSFATmemCols    = 4;   // 4 columns for weight scales (one per k_sub)
-  constexpr int kNumSFBTmemCols    = 4;   // 4 columns for input scales (one per k_sub)
-  constexpr int kTmemStartColOfSFA = num_tmem_acc_cols;  // SFA starts right after accumulators
-  constexpr int kTmemStartColOfSFB = num_tmem_acc_cols + kNumSFATmemCols;  // SFB after SFA
+  constexpr int num_tmem_acc_cols = MMA_N * NUM_ACC_STAGE; // e.g., 128*2 = 256
+  constexpr int kNumSFATmemCols =
+      4; // 4 columns for weight scales (one per k_sub)
+  constexpr int kNumSFBTmemCols =
+      4; // 4 columns for input scales (one per k_sub)
+  constexpr int kTmemStartColOfSFA =
+      num_tmem_acc_cols; // SFA starts right after accumulators
+  constexpr int kTmemStartColOfSFB =
+      num_tmem_acc_cols + kNumSFATmemCols; // SFB after SFA
 
   // TMEM allocation sizes must be powers of 2 (hardware constraint).
   // Round up to the nearest valid size: 64, 128, 256, or 512 columns.
-  constexpr int kNumTmemColsRaw    = num_tmem_acc_cols + kNumSFATmemCols + kNumSFBTmemCols;
-  constexpr int kNumTmemColsTotal  = kNumTmemColsRaw <= 64  ? 64
-                                   : kNumTmemColsRaw <= 128 ? 128
-                                   : kNumTmemColsRaw <= 256 ? 256 : 512;
+  constexpr int kNumTmemColsRaw =
+      num_tmem_acc_cols + kNumSFATmemCols + kNumSFBTmemCols;
+  constexpr int kNumTmemColsTotal = kNumTmemColsRaw <= 64    ? 64
+                                    : kNumTmemColsRaw <= 128 ? 128
+                                    : kNumTmemColsRaw <= 256 ? 256
+                                                             : 512;
 
   // ----------------------------------------------------------------
   // BF16 TiledMMA PROXY (for accumulator structure only)
@@ -648,10 +693,14 @@ __device__ __forceinline__ void
   //     so we piggyback on the well-tested BF16 infrastructure for the
   //     accumulator/epilogue data path.
   //   - The actual FP8 UMMA is issued via manual PTX (see MMA warp section).
-  cute::TiledMMA tiled_mma_bf16 = cute::make_tiled_mma(
-      cute::SM100_MMA_F16BF16_SS<bf16_t, bf16_t, AccType,
-                                  MMA_M, MMA_N,
-                                  UMMA::Major::K, UMMA::Major::K>{});
+  cute::TiledMMA tiled_mma_bf16 =
+      cute::make_tiled_mma(cute::SM100_MMA_F16BF16_SS<bf16_t,
+                                                      bf16_t,
+                                                      AccType,
+                                                      MMA_M,
+                                                      MMA_N,
+                                                      UMMA::Major::K,
+                                                      UMMA::Major::K>{});
 
   // mma_coord_vmnk = (V=0, M=_, N=_, K=_): selects the first "value group"
   // (V=0) and leaves M, N, K as free tiling dimensions for partitioning.
@@ -691,12 +740,13 @@ __device__ __forceinline__ void
   auto mma_tiler =
       cute::make_shape(cute::Int<MMA_M>{}, cute::Int<MMA_N>{}, cute::Int<bK>{});
   auto mma_coord = cute::select<1, 2, 3>(mma_coord_vmnk);
-  auto cd_tiler  =
+  auto cd_tiler =
       cute::make_shape(cute::Int<MMA_N>{}, cute::Int<MMA_M>{}, cute::Int<bK>{});
 
   // Tile the weight coordinate tensor into per-tile views.
   // gA(m_tile, k_tile) gives the coordinate pair for TMA address generation.
-  // Step<_1, X, _1> selects M and K dimensions, skipping N (tokens aren't in A).
+  // Step<_1, X, _1> selects M and K dimensions, skipping N (tokens aren't in
+  // A).
   cute::Tensor gA = cute::local_tile(
       mA, mma_tiler, mma_coord, cute::Step<cute::_1, cute::X, cute::_1>{});
   // Note: gB (input tensor tiling) is NOT created here because input loading
@@ -722,16 +772,20 @@ __device__ __forceinline__ void
   // SHARED MEMORY SETUP
   // ----------------------------------------------------------------
   // Cast the dynamically-allocated shared memory (extern __shared__) to our
-  // MoEFP8SharedStorage struct. Align to 128 bytes for TMA and UMMA requirements.
-  // The first three template parameters are placeholders — MoEFP8SharedStorage
-  // doesn't actually use them (it sizes A/B arrays from MMA_M, MMA_N, bK directly).
-  using SharedStorage = MoEFP8SharedStorage<decltype(mma_shape_A_acc), // placeholder
-                                             decltype(mma_shape_A_acc), // placeholder
-                                             decltype(mma_shape_A_acc), // placeholder
-                                             NUM_EXPERTS,
-                                             NUM_AB_STAGE,
-                                             NUM_ACC_STAGE,
-                                             MMA_M, MMA_N, bK>;
+  // MoEFP8SharedStorage struct. Align to 128 bytes for TMA and UMMA
+  // requirements. The first three template parameters are placeholders —
+  // MoEFP8SharedStorage doesn't actually use them (it sizes A/B arrays from
+  // MMA_M, MMA_N, bK directly).
+  using SharedStorage =
+      MoEFP8SharedStorage<decltype(mma_shape_A_acc), // placeholder
+                          decltype(mma_shape_A_acc), // placeholder
+                          decltype(mma_shape_A_acc), // placeholder
+                          NUM_EXPERTS,
+                          NUM_AB_STAGE,
+                          NUM_ACC_STAGE,
+                          MMA_M,
+                          MMA_N,
+                          bK>;
   extern __shared__ char shared_memory[];
   uintptr_t aligned_smem =
       (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
@@ -747,11 +801,12 @@ __device__ __forceinline__ void
   // ----------------------------------------------------------------
   // Initialize all pipeline barriers before any warp can use them.
   // Each barrier type tracks a different synchronization event:
-  //   a_full (TransactionBarrier, 1): TMA weight load complete (byte-count tracking)
-  //   b_full (ClusterBarrier, 32):    cp.async input load complete (32 lane arrivals)
-  //   ab_empty (ClusterBarrier, 1):   MMA done reading A/B (1 umma_arrive)
-  //   acc_full (ClusterBarrier, 1):   MMA accumulated all K-tiles (1 umma_arrive)
-  //   acc_empty (ClusterBarrier, 4):  Epilogue done reading accumulator (4 warp arrivals)
+  //   a_full (TransactionBarrier, 1): TMA weight load complete (byte-count
+  //   tracking) b_full (ClusterBarrier, 32):    cp.async input load complete
+  //   (32 lane arrivals) ab_empty (ClusterBarrier, 1):   MMA done reading A/B
+  //   (1 umma_arrive) acc_full (ClusterBarrier, 1):   MMA accumulated all
+  //   K-tiles (1 umma_arrive) acc_empty (ClusterBarrier, 4):  Epilogue done
+  //   reading accumulator (4 warp arrivals)
   if (warp_idx == 0) {
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterTransactionBarrier,
@@ -808,16 +863,20 @@ __device__ __forceinline__ void
   int tma_transaction_bytes_A = MMA_M * bK * sizeof(uint8_t);
 
   // Tile counts derived from compile-time dimensions.
-  // Computed directly from integer constants rather than from CuTe tensor shapes
-  // to avoid confusion with the BF16 proxy (which sees different element counts).
+  // Computed directly from integer constants rather than from CuTe tensor
+  // shapes to avoid confusion with the BF16 proxy (which sees different element
+  // counts).
   //
   // fp8_num_m_tiles uses OUTPUT_SIZE (per-CTA slice), NOT ORIG_OUTPUT_SIZE.
   // When grid_dim.y > 1, each CTA only processes its own N-slice.
   // Ceiling division handles cases where OUTPUT_SIZE is not a multiple of MMA_M
-  // (e.g., OUTPUT_SIZE=448 with MMA_M=128 → 4 tiles, last tile partially valid).
-  constexpr int fp8_k_tile_count  = REDUCTION_SIZE / bK;                    // K-tiles per expert
-  constexpr int fp8_num_m_tiles   = (OUTPUT_SIZE + MMA_M - 1) / MMA_M;     // output-dim tiles (per-CTA)
-  constexpr int fp8_num_n_tiles   = (BATCH_SIZE + MMA_N - 1) / MMA_N;      // token-dim tiles (ceil)
+  // (e.g., OUTPUT_SIZE=448 with MMA_M=128 → 4 tiles, last tile partially
+  // valid).
+  constexpr int fp8_k_tile_count = REDUCTION_SIZE / bK; // K-tiles per expert
+  constexpr int fp8_num_m_tiles =
+      (OUTPUT_SIZE + MMA_M - 1) / MMA_M; // output-dim tiles (per-CTA)
+  constexpr int fp8_num_n_tiles =
+      (BATCH_SIZE + MMA_N - 1) / MMA_N; // token-dim tiles (ceil)
 
   // ----------------------------------------------------------------
   // TMA AND SMEM INFRASTRUCTURE FOR WEIGHT (A) LOADING
@@ -825,15 +884,16 @@ __device__ __forceinline__ void
   // Constants for the TMA weight tile.
   //   TILE_SIZE = bK = 128: K-dimension of each tile (contiguous in memory)
   //   OUTPUT_ATOM_SIZE = MMA_M = 128: M-dimension of each tile (weight rows)
-  //   B_PARAM, M_PARAM, S_PARAM = 3,3,3: CuTe Swizzle<3,3,3> parameters encoding
+  //   B_PARAM, M_PARAM, S_PARAM = 3,3,3: CuTe Swizzle<3,3,3> parameters
+  //   encoding
   //     SWIZZLE_128B mode. The swizzle XORs row*16 with the byte offset within
   //     each 128-byte line to eliminate shared memory bank conflicts.
-  constexpr int TILE_SIZE           = bK;
+  constexpr int TILE_SIZE = bK;
   constexpr int WEIGHT_TMA_TILE_SIZE = bK;
-  constexpr int OUTPUT_ATOM_SIZE     = MMA_M;
-  constexpr int B_PARAM              = 3;  // log2(8 rows in XOR group)
-  constexpr int M_PARAM              = 3;  // log2(8-byte shift amount)
-  constexpr int S_PARAM              = 3;  // log2(8-byte XOR base stride)
+  constexpr int OUTPUT_ATOM_SIZE = MMA_M;
+  constexpr int B_PARAM = 3; // log2(8 rows in XOR group)
+  constexpr int M_PARAM = 3; // log2(8-byte shift amount)
+  constexpr int S_PARAM = 3; // log2(8-byte XOR base stride)
   uint8_t *shared_weight = &shared_storage.A[0][0];
 
   // Barrier for TMA weight loads: ClusterTransactionBarrier tracks the byte
@@ -846,12 +906,12 @@ __device__ __forceinline__ void
   // layout for TMA. The TMA hardware uses this to map global memory addresses
   // to swizzled shared memory addresses automatically.
   using WeightSmem = smem_tma<uint8_t,
-                               B_PARAM,
-                               M_PARAM,
-                               S_PARAM,
-                               OUTPUT_ATOM_SIZE,     // SMEM_ROW = MMA_M
-                               WEIGHT_TMA_TILE_SIZE, // SMEM_COL = bK
-                               1>;                   // repeat count = 1
+                              B_PARAM,
+                              M_PARAM,
+                              S_PARAM,
+                              OUTPUT_ATOM_SIZE,     // SMEM_ROW = MMA_M
+                              WEIGHT_TMA_TILE_SIZE, // SMEM_COL = bK
+                              1>;                   // repeat count = 1
   WeightSmem weight_smem(shared_weight);
   // Note: Input (B) loading does NOT use TMA — see DMA warp section below.
 
@@ -862,12 +922,13 @@ __device__ __forceinline__ void
   // This does NOT allocate TMEM; it just computes the fragment shape/layout.
   // The actual TMEM allocation happens later via tmem_allocator.allocate()
   // in the epilogue warp. The base column address is stored in
-  // shared_storage.tmem_base_ptr and assigned to tCtAcc.data() after allocation.
+  // shared_storage.tmem_base_ptr and assigned to tCtAcc.data() after
+  // allocation.
   auto acc_shape = cute::partition_shape_C(
       tiled_mma_bf16,
-      cute::make_shape(cute::size<0>(mma_tiler),      // MMA_M
-                       cute::size<1>(mma_tiler),      // MMA_N
-                       cute::Int<NUM_ACC_STAGE>{}));   // double-buffering
+      cute::make_shape(cute::size<0>(mma_tiler),     // MMA_M
+                       cute::size<1>(mma_tiler),     // MMA_N
+                       cute::Int<NUM_ACC_STAGE>{})); // double-buffering
   auto tCtAcc = tiled_mma_bf16.make_fragment_C(acc_shape);
 
   // ----------------------------------------------------------------
@@ -886,8 +947,9 @@ __device__ __forceinline__ void
   __syncthreads();
 
   // Runtime loop bounds used by all warps.
-  int k_tile_count          = fp8_k_tile_count;   // K-tiles per expert
-  int num_activated_experts = mMask(NUM_EXPERTS);  // read from last element of mask
+  int k_tile_count = fp8_k_tile_count; // K-tiles per expert
+  int num_activated_experts =
+      mMask(NUM_EXPERTS); // read from last element of mask
 
   // TMEM allocator for single-SM mode (no multi-SM cluster in this kernel).
   using TmemAllocator = cute::TMEM::Allocator1Sm;
@@ -945,13 +1007,14 @@ __device__ __forceinline__ void
           // Pipeline stage management: compute which smem buffer to write into
           // and what barrier phase to wait on. The phase alternates every
           // NUM_AB_STAGE K-tiles (XOR with 1 to get initial DMA phase).
-          int tma_wr_k_tile          = 0;
-          int smem_wr_buffer         = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
-          int tma_wr_ab_empty_phase  =
+          int tma_wr_k_tile = 0;
+          int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
+          int tma_wr_ab_empty_phase =
               (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
           // Optimistic peek: try to check if the MMA warp has already consumed
-          // this buffer (ab_empty). If yes, we can skip the blocking wait below.
+          // this buffer (ab_empty). If yes, we can skip the blocking wait
+          // below.
           bool peek_ab_empty_status = kernel::try_wait_barrier(
               shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
               tma_wr_ab_empty_phase);
@@ -959,14 +1022,15 @@ __device__ __forceinline__ void
           // Inner loop: iterate over K-tiles for this (expert, m_tile, n_tile)
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
             // Pre-compute next iteration's pipeline state for lookahead peeks
-            int tma_wr_k_tile_next        = tma_wr_k_tile + 1;
-            int smem_wr_buffer_next       =
+            int tma_wr_k_tile_next = tma_wr_k_tile + 1;
+            int smem_wr_buffer_next =
                 (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
-            int tma_wr_ab_empty_phase_next =
-                smem_wr_buffer_next == 0 ? tma_wr_ab_empty_phase ^ 1
-                                         : tma_wr_ab_empty_phase;
+            int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
+                                                 ? tma_wr_ab_empty_phase ^ 1
+                                                 : tma_wr_ab_empty_phase;
 
-            // Wait for MMA warp to finish reading this smem buffer (if peek failed)
+            // Wait for MMA warp to finish reading this smem buffer (if peek
+            // failed)
             if (!peek_ab_empty_status) {
               cute::wait_barrier(
                   shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
@@ -988,12 +1052,13 @@ __device__ __forceinline__ void
             //   M_offset = expert_idx * ORIG_OUTPUT_SIZE + m_tile * MMA_M
             //              (which weight rows, accounting for expert offset)
             if (cute::elect_one_sync()) {
-              int tma_coords_A[2] = {
-                  k_tile * TILE_SIZE,
-                  m_tile * OUTPUT_ATOM_SIZE + expert_idx * ORIG_OUTPUT_SIZE};
+              int tma_coords_A[2] = {k_tile * TILE_SIZE,
+                                     m_tile * OUTPUT_ATOM_SIZE +
+                                         expert_idx * ORIG_OUTPUT_SIZE};
               // Point smem destination to the correct pipeline stage buffer
-              weight_smem.set_ptr(shared_weight +
-                                  smem_wr_buffer * OUTPUT_ATOM_SIZE * TILE_SIZE);
+              weight_smem.set_ptr(shared_weight + smem_wr_buffer *
+                                                      OUTPUT_ATOM_SIZE *
+                                                      TILE_SIZE);
               // Tell the transaction barrier how many bytes to expect
               cute::set_barrier_transaction_bytes(
                   shared_storage.a_full_mbar_ptr[smem_wr_buffer],
@@ -1011,9 +1076,9 @@ __device__ __forceinline__ void
             // the MoE routing decision (topk_idx > 0).
             //
             // All 32 lanes of the DMA warp cooperate:
-            //   Total tile bytes = MMA_N * bK * sizeof(uint8_t) = 128*128 = 16384 bytes
-            //   Bytes per thread = 16384 / 32 = 512 bytes
-            //   Copies per thread = 512 / 8 = 64 (each cp.async copies 8 bytes)
+            //   Total tile bytes = MMA_N * bK * sizeof(uint8_t) = 128*128 =
+            //   16384 bytes Bytes per thread = 16384 / 32 = 512 bytes Copies
+            //   per thread = 512 / 8 = 64 (each cp.async copies 8 bytes)
             //
             // Each lane computes which (row, col) of the input tile its bytes
             // correspond to, checks the routing, and either issues cp.async to
@@ -1021,48 +1086,52 @@ __device__ __forceinline__ void
             //
             // The destination smem addresses are swizzled with SWIZZLE_128B to
             // match the layout expected by the UMMA B descriptor:
-            //   swizzled_offset = linear_offset ^ (((linear_offset >> 7) & 7) << 4)
-            // This XOR formula maps byte offset L to L ^ ((row_in_128B_group % 8) * 16).
+            //   swizzled_offset = linear_offset ^ (((linear_offset >> 7) & 7)
+            //   << 4)
+            // This XOR formula maps byte offset L to L ^ ((row_in_128B_group %
+            // 8) * 16).
             {
-              uint8_t *dst_base =
-                  &shared_storage.B[smem_wr_buffer][0];
+              uint8_t *dst_base = &shared_storage.B[smem_wr_buffer][0];
               constexpr int BYTES_PER_THREAD = (MMA_N * bK) / 32;
               // 16 bytes per cp.async instruction (uint4 = 16 bytes).
               // SWIZZLE_128B with bK=128: the swizzle XOR is (row%8)*16,
-              // so 16-byte aligned addresses stay 16-byte aligned after swizzle.
+              // so 16-byte aligned addresses stay 16-byte aligned after
+              // swizzle.
               constexpr int CP_BYTES = 16;
               constexpr int COPIES_PER_THREAD = BYTES_PER_THREAD / CP_BYTES;
               int base_byte = lane_idx * BYTES_PER_THREAD;
-              #pragma unroll
+#pragma unroll
               for (int c = 0; c < COPIES_PER_THREAD; ++c) {
                 int byte_off = base_byte + c * CP_BYTES;
                 int row = byte_off / bK;
                 int col = byte_off % bK;
                 int32_t token_idx_n = n_tile * MMA_N + row;
-                int32_t topk_idx_n  = tRoutingIndex(token_idx_n);
+                int32_t topk_idx_n = tRoutingIndex(token_idx_n);
 
                 // SWIZZLE_128B: swizzled = linear ^ ((row%8)*16)
                 int linear_off = row * bK + col;
                 int swizzled_off = linear_off ^ (((linear_off >> 7) & 7) << 4);
-                uint32_t dst_smem = cute::cast_smem_ptr_to_uint(
-                    dst_base + swizzled_off);
+                uint32_t dst_smem =
+                    cute::cast_smem_ptr_to_uint(dst_base + swizzled_off);
 
                 if (token_idx_n < BATCH_SIZE && topk_idx_n > 0) {
-                  const uint8_t *src_row;
+                  uint8_t const *src_row;
                   if constexpr (W13_LINEAR) {
-                    src_row = reinterpret_cast<const uint8_t*>(
+                    src_row = reinterpret_cast<uint8_t const *>(
                         &mInput(token_idx_n, k_tile * bK + col));
                   } else {
-                    src_row = reinterpret_cast<const uint8_t*>(
-                        &mInput(token_idx_n, topk_idx_n - 1, k_tile * bK + col));
+                    src_row = reinterpret_cast<uint8_t const *>(&mInput(
+                        token_idx_n, topk_idx_n - 1, k_tile * bK + col));
                   }
-                  // cp.async.ca with 16-byte transfer (halves instruction count)
+                  // cp.async.ca with 16-byte transfer (halves instruction
+                  // count)
                   asm volatile(
-                      "cp.async.ca.shared.global [%0], [%1], 16;\n"
-                      :: "r"(dst_smem), "l"(src_row));
+                      "cp.async.ca.shared.global [%0], [%1], 16;\n" ::"r"(
+                          dst_smem),
+                      "l"(src_row));
                 } else {
                   // Zero-fill 16 bytes for unrouted tokens
-                  *reinterpret_cast<uint4*>(dst_base + swizzled_off) =
+                  *reinterpret_cast<uint4 *>(dst_base + swizzled_off) =
                       make_uint4(0, 0, 0, 0);
                 }
               }
@@ -1085,14 +1154,14 @@ __device__ __forceinline__ void
                   tma_wr_ab_empty_phase_next);
             }
             // Advance pipeline state to the next K-tile
-            tma_wr_k_tile        = tma_wr_k_tile_next;
-            smem_wr_buffer       = smem_wr_buffer_next;
+            tma_wr_k_tile = tma_wr_k_tile_next;
+            smem_wr_buffer = smem_wr_buffer_next;
             tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
           } // end k_tile loop
-        } // end n_tile loop
-      } // end m_tile loop
-    } // end expert loop
-  } // end warp 5 (DMA warp)
+        }   // end n_tile loop
+      }     // end m_tile loop
+    }       // end expert loop
+  }         // end warp 5 (DMA warp)
   // ================================================================
   // WARP 4 -- MMA WARP: Scale Loading + UTCCP + FP8 Block-Scaled UMMA
   // ================================================================
@@ -1131,8 +1200,8 @@ __device__ __forceinline__ void
     // These are column indices within the TMEM allocation, used by UMMA
     // (accumulator destination) and UTCCP (scale factor destination).
     const uint32_t tmem_base = shared_storage.tmem_base_ptr;
-    const uint32_t sfa_tmem  = tmem_base + kTmemStartColOfSFA;  // weight scales
-    const uint32_t sfb_tmem  = tmem_base + kTmemStartColOfSFB;  // input scales
+    const uint32_t sfa_tmem = tmem_base + kTmemStartColOfSFA; // weight scales
+    const uint32_t sfb_tmem = tmem_base + kTmemStartColOfSFB; // input scales
 
     // UTCCP type: copies 4 columns x 32 rows x 128 bits from smem to TMEM.
     // "4x32dp128bit_1cta" = 4 columns, 32 depth, 128-bit data path, 1 CTA.
@@ -1146,10 +1215,15 @@ __device__ __forceinline__ void
     //   C type: float (FP32 accumulator)
     //   Scale type: float_ue8m0_t (8-bit exponent-only)
     //   Both A and B are K-major (reduction dimension is contiguous)
-    auto instr_desc = cute::UMMA::make_instr_desc_block_scaled<
-        cutlass::float_e4m3_t, cutlass::float_e4m3_t, float,
-        cutlass::float_ue8m0_t, MMA_M, MMA_N,
-        cute::UMMA::Major::K, cute::UMMA::Major::K>();
+    auto instr_desc =
+        cute::UMMA::make_instr_desc_block_scaled<cutlass::float_e4m3_t,
+                                                 cutlass::float_e4m3_t,
+                                                 float,
+                                                 cutlass::float_ue8m0_t,
+                                                 MMA_M,
+                                                 MMA_N,
+                                                 cute::UMMA::Major::K,
+                                                 cute::UMMA::Major::K>();
 
     // ---- BUILD SCALE FACTOR DESCRIPTOR ----
     // UTCCP needs a smem descriptor for the source of scale factor data.
@@ -1167,15 +1241,17 @@ __device__ __forceinline__ void
     //   - Major order: K (K dimension is contiguous)
     //
     // A descriptor: points to weight data in shared_storage.A[0]
-    auto a_desc = kernel::sm100::make_umma_desc<
-        cute::UMMA::Major::K, MMA_M, bK, 128>(
-        reinterpret_cast<cutlass::float_e4m3_t*>(&shared_storage.A[0][0]),
-        0, 0);
+    auto a_desc =
+        kernel::sm100::make_umma_desc<cute::UMMA::Major::K, MMA_M, bK, 128>(
+            reinterpret_cast<cutlass::float_e4m3_t *>(&shared_storage.A[0][0]),
+            0,
+            0);
     // B descriptor: points to input data in shared_storage.B[0]
-    auto b_desc = kernel::sm100::make_umma_desc<
-        cute::UMMA::Major::K, MMA_N, bK, 128>(
-        reinterpret_cast<cutlass::float_e4m3_t*>(&shared_storage.B[0][0]),
-        0, 0);
+    auto b_desc =
+        kernel::sm100::make_umma_desc<cute::UMMA::Major::K, MMA_N, bK, 128>(
+            reinterpret_cast<cutlass::float_e4m3_t *>(&shared_storage.B[0][0]),
+            0,
+            0);
 
     // ---- PRE-COMPUTE PER-STAGE DESCRIPTOR BASE ADDRESSES ----
     // The UMMA descriptor's lo-word contains the smem base address (in 16-byte
@@ -1186,19 +1262,25 @@ __device__ __forceinline__ void
     // the correct stage's lo-word to all lanes.
     //
     // Lane i holds the lo-word for stage i (i < NUM_AB_STAGE).
-    // Stage offset = i * (MMA_M * bK * sizeof(uint8_t)) / 16  (in 16-byte units)
+    // Stage offset = i * (MMA_M * bK * sizeof(uint8_t)) / 16  (in 16-byte
+    // units)
     const uint32_t lane_idx = cutlass::canonical_lane_idx();
-    uint32_t a_desc_lo = (lane_idx < (uint32_t)NUM_AB_STAGE)
-        ? (a_desc.lo + lane_idx * (MMA_M * bK * sizeof(uint8_t)) / 16) : 0u;
-    uint32_t b_desc_lo = (lane_idx < (uint32_t)NUM_AB_STAGE)
-        ? (b_desc.lo + lane_idx * (MMA_N * bK * sizeof(uint8_t)) / 16) : 0u;
+    uint32_t a_desc_lo =
+        (lane_idx < (uint32_t)NUM_AB_STAGE)
+            ? (a_desc.lo + lane_idx * (MMA_M * bK * sizeof(uint8_t)) / 16)
+            : 0u;
+    uint32_t b_desc_lo =
+        (lane_idx < (uint32_t)NUM_AB_STAGE)
+            ? (b_desc.lo + lane_idx * (MMA_N * bK * sizeof(uint8_t)) / 16)
+            : 0u;
 
-    int total_k_tile_count  = 0;   // cumulative K-tile counter (for pipeline stage)
-    int num_tiles_executed  = 0;   // cumulative work-unit counter (for ACC stage)
+    int total_k_tile_count =
+        0; // cumulative K-tile counter (for pipeline stage)
+    int num_tiles_executed = 0; // cumulative work-unit counter (for ACC stage)
 
-    // Same triple-nested loop structure as the DMA warp: expert x m_tile x n_tile.
-    // Both warps must iterate in the same order so their pipeline stage indices
-    // stay synchronized (DMA fills stage S, MMA reads stage S).
+    // Same triple-nested loop structure as the DMA warp: expert x m_tile x
+    // n_tile. Both warps must iterate in the same order so their pipeline stage
+    // indices stay synchronized (DMA fills stage S, MMA reads stage S).
     for (int activated_expert_offset = expert_offset;
          activated_expert_offset < num_activated_experts;
          activated_expert_offset += EXPERT_STRIDE) {
@@ -1208,74 +1290,80 @@ __device__ __forceinline__ void
       for (int m_tile = 0; m_tile < fp8_num_m_tiles; ++m_tile) {
         for (int n_tile = 0; n_tile < fp8_num_n_tiles; ++n_tile) {
           // Which accumulator buffer to use for this work unit (rotating)
-          int acc_buf_idx    = num_tiles_executed % NUM_ACC_STAGE;
+          int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
 
           // Pipeline stage tracking (must match DMA warp's numbering)
           int num_prev_k_blk = total_k_tile_count;
           total_k_tile_count += k_tile_count;
 
-          int mma_rd_k_tile        = 0;
-          int smem_rd_buf          = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
+          int mma_rd_k_tile = 0;
+          int smem_rd_buf = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
           int mma_rd_ab_full_phase =
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Optimistic peeks: check if A/B/scales are already ready
           bool peek_a = kernel::try_wait_barrier(
-              shared_storage.a_full_mbar_ptr[smem_rd_buf], mma_rd_ab_full_phase);
+              shared_storage.a_full_mbar_ptr[smem_rd_buf],
+              mma_rd_ab_full_phase);
           bool peek_b = kernel::try_wait_barrier(
-              shared_storage.b_full_mbar_ptr[smem_rd_buf], mma_rd_ab_full_phase);
+              shared_storage.b_full_mbar_ptr[smem_rd_buf],
+              mma_rd_ab_full_phase);
           int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
           bool peek_sf = kernel::try_wait_barrier(
               shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);
 
-          // Wait for epilogue to finish reading the previous accumulator in this
-          // buffer slot before we overwrite it with new UMMA results.
+          // Wait for epilogue to finish reading the previous accumulator in
+          // this buffer slot before we overwrite it with new UMMA results.
           int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
           cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
                              acc_empty_phase);
 
-
-          // first_tile: controls whether the UMMA accumulates (1) or overwrites (0).
-          // The first K-tile's first sub-tile clears the accumulator; all subsequent
-          // sub-tiles and K-tiles accumulate into it.
+          // first_tile: controls whether the UMMA accumulates (1) or overwrites
+          // (0). The first K-tile's first sub-tile clears the accumulator; all
+          // subsequent sub-tiles and K-tiles accumulate into it.
           bool first_tile = true;
 
           // ---- K-TILE LOOP: Accumulate all K-tiles for this work unit ----
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
             // Pre-compute next K-tile's pipeline state for lookahead peeks
-            int mma_rd_k_tile_next      = mma_rd_k_tile + 1;
-            int smem_rd_buf_next        =
+            int mma_rd_k_tile_next = mma_rd_k_tile + 1;
+            int smem_rd_buf_next =
                 (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
-            int mma_rd_ab_full_phase_next =
-                smem_rd_buf_next == 0 ? mma_rd_ab_full_phase ^ 1
-                                      : mma_rd_ab_full_phase;
+            int mma_rd_ab_full_phase_next = smem_rd_buf_next == 0
+                                                ? mma_rd_ab_full_phase ^ 1
+                                                : mma_rd_ab_full_phase;
 
-            // Wait for DMA warp to finish loading this K-tile's A/B data into smem
-            if (!peek_a)
+            // Wait for DMA warp to finish loading this K-tile's A/B data into
+            // smem
+            if (!peek_a) {
               cute::wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buf],
                                  mma_rd_ab_full_phase);
-            if (!peek_b)
+            }
+            if (!peek_b) {
               cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buf],
                                  mma_rd_ab_full_phase);
+            }
 
             // Wait for scale warp (warp 6) to finish transpose (if peek failed)
-            if (!peek_sf)
+            if (!peek_sf) {
               cute::wait_barrier(shared_storage.sf_ready_mbar_ptr[smem_rd_buf],
                                  sf_phase);
+            }
 
             // ============================================================
             // UTCCP: Copy transposed scales from smem -> TMEM
             // ============================================================
-            // Issue UTCCP instructions to copy scale factors from smem into TMEM.
-            // Only one lane issues each UTCCP (hardware requirement for tcgen05
-            // instructions — elect_one_sync selects lane 0).
+            // Issue UTCCP instructions to copy scale factors from smem into
+            // TMEM. Only one lane issues each UTCCP (hardware requirement for
+            // tcgen05 instructions — elect_one_sync selects lane 0).
             //
-            // Each UTCCP copies 128 uint32 values (= 4 columns x 32 rows x 128 bits)
-            // from the smem scale buffer into the TMEM scale columns.
-            // SFA goes to columns [kTmemStartColOfSFA .. +4)
-            // SFB goes to columns [kTmemStartColOfSFB .. +4)
+            // Each UTCCP copies 128 uint32 values (= 4 columns x 32 rows x 128
+            // bits) from the smem scale buffer into the TMEM scale columns. SFA
+            // goes to columns [kTmemStartColOfSFA .. +4) SFB goes to columns
+            // [kTmemStartColOfSFB .. +4)
             if (cute::elect_one_sync()) {
-              // Update sf_desc's smem address to point at this stage's SFA buffer
+              // Update sf_desc's smem address to point at this stage's SFA
+              // buffer
               kernel::sm100::replace_smem_desc_addr(
                   sf_desc, shared_storage.sfa_smem[smem_rd_buf]);
               UTCCP_t::copy(static_cast<uint64_t>(sf_desc), sfa_tmem);
@@ -1284,21 +1372,24 @@ __device__ __forceinline__ void
                   sf_desc, shared_storage.sfb_smem[smem_rd_buf]);
               UTCCP_t::copy(static_cast<uint64_t>(sf_desc), sfb_tmem);
             }
-            __syncwarp();  // ensure UTCCP is issued before proceeding
+            __syncwarp(); // ensure UTCCP is issued before proceeding
 
             // ============================================================
             // STEP 3: ISSUE FP8 UMMA INSTRUCTIONS
             // ============================================================
-            // Each bK=128 K-tile is processed as 4 UMMA sub-tiles of 32 K-elements.
-            // The UMMA instruction: tcgen05.mma.kind::mxf8f6f4.block_scale
+            // Each bK=128 K-tile is processed as 4 UMMA sub-tiles of 32
+            // K-elements. The UMMA instruction:
+            // tcgen05.mma.kind::mxf8f6f4.block_scale
             //
-            // First, broadcast the correct per-stage smem descriptor base address
-            // from the lane that pre-computed it (lane index = smem_rd_buf).
-            // __shfl_sync(0xffffffff, value, src_lane) broadcasts src_lane's value
-            // to all 32 lanes. This avoids recomputing the descriptor for each stage.
-            const auto a_desc_base_lo =
+            // First, broadcast the correct per-stage smem descriptor base
+            // address from the lane that pre-computed it (lane index =
+            // smem_rd_buf).
+            // __shfl_sync(0xffffffff, value, src_lane) broadcasts src_lane's
+            // value to all 32 lanes. This avoids recomputing the descriptor for
+            // each stage.
+            auto const a_desc_base_lo =
                 __shfl_sync(0xffffffff, a_desc_lo, smem_rd_buf);
-            const auto b_desc_base_lo =
+            auto const b_desc_base_lo =
                 __shfl_sync(0xffffffff, b_desc_lo, smem_rd_buf);
 
             // Issue 4 UMMA sub-tile instructions (bK/UMMA_K = 128/32 = 4).
@@ -1307,13 +1398,14 @@ __device__ __forceinline__ void
             // the fma() call contains its own elect_one_sync internally, and
             // nesting them causes a deadlock.
             if (cute::elect_one_sync()) {
-              #pragma unroll
+#pragma unroll
               for (int k_sub = 0; k_sub < bK / UMMA_K; ++k_sub) {
-                // sfa_id/sfb_id select which byte of the packed uint32 scale to use.
-                // k_sub=0 -> byte 0 (bits 0-7), k_sub=1 -> byte 1 (bits 8-15), etc.
-                // Since all 4 bytes are identical (same scale replicated), the choice
-                // doesn't matter for per-128-K quantization — but it would matter if
-                // finer-grained (per-32-K) quantization were used in the future.
+                // sfa_id/sfb_id select which byte of the packed uint32 scale to
+                // use. k_sub=0 -> byte 0 (bits 0-7), k_sub=1 -> byte 1 (bits
+                // 8-15), etc. Since all 4 bytes are identical (same scale
+                // replicated), the choice doesn't matter for per-128-K
+                // quantization — but it would matter if finer-grained
+                // (per-32-K) quantization were used in the future.
                 const uint32_t sfa_id = k_sub;
                 const uint32_t sfb_id = k_sub;
                 // Build the runtime instruction descriptor with this sub-tile's
@@ -1327,23 +1419,32 @@ __device__ __forceinline__ void
                 // For K-major layout, advancing by k_sub*UMMA_K elements moves
                 // the start address by (k_sub * 32 * sizeof(fp8)) / 16 in the
                 // descriptor's 16-byte-granularity address field.
-                b_desc.lo = kernel::sm100::advance_umma_desc_lo<
-                    cute::UMMA::Major::K, MMA_N, 128,
-                    cutlass::float_e4m3_t>(b_desc_base_lo, 0, k_sub * UMMA_K);
-                a_desc.lo = kernel::sm100::advance_umma_desc_lo<
-                    cute::UMMA::Major::K, MMA_M, 128,
-                    cutlass::float_e4m3_t>(a_desc_base_lo, 0, k_sub * UMMA_K);
+                b_desc.lo =
+                    kernel::sm100::advance_umma_desc_lo<cute::UMMA::Major::K,
+                                                        MMA_N,
+                                                        128,
+                                                        cutlass::float_e4m3_t>(
+                        b_desc_base_lo, 0, k_sub * UMMA_K);
+                a_desc.lo =
+                    kernel::sm100::advance_umma_desc_lo<cute::UMMA::Major::K,
+                                                        MMA_M,
+                                                        128,
+                                                        cutlass::float_e4m3_t>(
+                        a_desc_base_lo, 0, k_sub * UMMA_K);
 
                 // Issue the FP8 block-scaled UMMA instruction:
-                //   C[tmem_col] += A[smem] * B[smem] * scale_a[tmem] * scale_b[tmem]
+                //   C[tmem_col] += A[smem] * B[smem] * scale_a[tmem] *
+                //   scale_b[tmem]
                 //
                 // Arguments:
-                //   a_desc/b_desc: smem descriptors pointing to FP8 operand sub-tiles
-                //   tmem_base + acc_buf_idx * MMA_N: accumulator column in TMEM
-                //   accumulate flag: 0 = overwrite (first sub-tile of first K-tile),
+                //   a_desc/b_desc: smem descriptors pointing to FP8 operand
+                //   sub-tiles tmem_base + acc_buf_idx * MMA_N: accumulator
+                //   column in TMEM accumulate flag: 0 = overwrite (first
+                //   sub-tile of first K-tile),
                 //                    1 = accumulate (all subsequent sub-tiles)
-                //   runtime_instr_desc: instruction descriptor with sfa_id/sfb_id
-                //   sfa_tmem/sfb_tmem: TMEM column addresses for scale factors
+                //   runtime_instr_desc: instruction descriptor with
+                //   sfa_id/sfb_id sfa_tmem/sfb_tmem: TMEM column addresses for
+                //   scale factors
                 kernel::sm100::SM100_MMA_MXF8F6F4_SS::fma(
                     a_desc,
                     b_desc,
@@ -1372,7 +1473,8 @@ __device__ __forceinline__ void
               peek_b = kernel::try_wait_barrier(
                   shared_storage.b_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
-              int sf_phase_next = (num_prev_k_blk + mma_rd_k_tile_next) / NUM_AB_STAGE % 2;
+              int sf_phase_next =
+                  (num_prev_k_blk + mma_rd_k_tile_next) / NUM_AB_STAGE % 2;
               peek_sf = kernel::try_wait_barrier(
                   shared_storage.sf_ready_mbar_ptr[smem_rd_buf_next],
                   sf_phase_next);
@@ -1380,28 +1482,28 @@ __device__ __forceinline__ void
             }
 
             // Advance pipeline state to the next K-tile
-            mma_rd_k_tile        = mma_rd_k_tile_next;
-            smem_rd_buf          = smem_rd_buf_next;
+            mma_rd_k_tile = mma_rd_k_tile_next;
+            smem_rd_buf = smem_rd_buf_next;
             mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
           } // end k_tile loop
 
-          // All K-tiles for this (expert, m_tile, n_tile) have been accumulated.
-          // Signal the epilogue that the accumulator is ready to read.
-          // umma_arrive ensures all UMMA writes to the accumulator TMEM columns
-          // are complete before the epilogue reads them.
+          // All K-tiles for this (expert, m_tile, n_tile) have been
+          // accumulated. Signal the epilogue that the accumulator is ready to
+          // read. umma_arrive ensures all UMMA writes to the accumulator TMEM
+          // columns are complete before the epilogue reads them.
           cutlass::arch::umma_arrive(
               &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
           num_tiles_executed++;
         } // end n_tile loop
-      } // end m_tile loop
-    } // end expert loop
-  } // end warp 4 (MMA warp)
+      }   // end m_tile loop
+    }     // end expert loop
+  }       // end warp 4 (MMA warp)
   // ================================================================
   // WARP 6 -- SCALE WARP: Load float32 scales, convert to UE8M0, transpose
   // ================================================================
   //
-  // This warp runs in parallel with the DMA warp (warp 5) and MMA warp (warp 4).
-  // For each K-tile, it:
+  // This warp runs in parallel with the DMA warp (warp 5) and MMA warp (warp
+  // 4). For each K-tile, it:
   //   1. Loads float32 scales from global memory (weight and input)
   //   2. Converts to UE8M0 (exponent extraction)
   //   3. Packs 4 copies into uint32 (one per UMMA sub-tile)
@@ -1431,25 +1533,24 @@ __device__ __forceinline__ void
 
             // ---- Load + convert + pack SFA (weight scales) ----
             uint32_t *sfa_buf = shared_storage.sfa_smem[smem_buf];
-            #pragma unroll
+#pragma unroll
             for (int i = lane_idx; i < 128; i += 32) {
               int row = m_tile * MMA_M + i;
               int global_row = expert_idx * ORIG_OUTPUT_SIZE + row;
-              float sf_val = (row < OUTPUT_SIZE)
-                  ? mWeightScale(global_row, k_tile)
-                  : 1.0f;
+              float sf_val =
+                  (row < OUTPUT_SIZE) ? mWeightScale(global_row, k_tile) : 1.0f;
               uint32_t ue8m0 = (__float_as_uint(sf_val) >> 23) & 0xFF;
               sfa_buf[i] = ue8m0 | (ue8m0 << 8) | (ue8m0 << 16) | (ue8m0 << 24);
             }
 
             // ---- Load + convert + pack SFB (input scales) ----
             uint32_t *sfb_buf = shared_storage.sfb_smem[smem_buf];
-            #pragma unroll
+#pragma unroll
             for (int i = lane_idx; i < 128; i += 32) {
               uint32_t ue8m0 = 0x7F; // default: UE8M0(1.0) for padding
               if (i < MMA_N) {
                 int32_t token_idx_n = n_tile * MMA_N + i;
-                int32_t topk_idx    = tRoutingIndex(token_idx_n);
+                int32_t topk_idx = tRoutingIndex(token_idx_n);
                 if (token_idx_n < BATCH_SIZE && topk_idx > 0) {
                   float sf_val;
                   if constexpr (W13_LINEAR) {
@@ -1474,10 +1575,10 @@ __device__ __forceinline__ void
               cute::arrive_barrier(shared_storage.sf_ready_mbar_ptr[smem_buf]);
             }
           } // end k_tile loop
-        } // end n_tile loop
-      } // end m_tile loop
-    } // end expert loop
-  } // end warp 6 (scale warp)
+        }   // end n_tile loop
+      }     // end m_tile loop
+    }       // end expert loop
+  }         // end warp 6 (scale warp)
   // ================================================================
   // WARPS 0-3 -- EPILOGUE: TMEM -> BF16 -> Global Memory
   // ================================================================
@@ -1491,7 +1592,8 @@ __device__ __forceinline__ void
   // whether the UMMA input was FP8 or BF16 — the accumulator shape depends
   // only on (MMA_M, MMA_N), not on the input data type.
   //
-  // Data flow: TMEM (FP32) -> registers (FP32) -> convert -> registers (BF16) -> global mem
+  // Data flow: TMEM (FP32) -> registers (FP32) -> convert -> registers (BF16)
+  // -> global mem
   //
   // Thread mapping: each of 128 threads (warps 0-3) handles one row of the
   // MMA_M=128-row accumulator tile. Thread i reads row i from TMEM and writes
@@ -1505,7 +1607,8 @@ __device__ __forceinline__ void
     if (warp_idx == 0) {
       tmem_allocator.allocate(kNumTmemColsTotal, &shared_storage.tmem_base_ptr);
     }
-    // Wait for allocation to complete, then set the TMEM fragment's base address.
+    // Wait for allocation to complete, then set the TMEM fragment's base
+    // address.
     tmem_allocation_result_barrier.arrive_and_wait();
     tCtAcc.data() = shared_storage.tmem_base_ptr;
 
@@ -1515,8 +1618,9 @@ __device__ __forceinline__ void
     // We use the BF16 TiledMMA's fragment structure to determine the correct
     // TMEM addressing for each thread.
     using TypeC = bf16_t;
-    cutlass::NumericConverter<AccType, AccType> converterBias;  // identity (unused)
-    cutlass::NumericConverter<TypeC, AccType>   converter;       // FP32 -> BF16
+    cutlass::NumericConverter<AccType, AccType>
+        converterBias;                                   // identity (unused)
+    cutlass::NumericConverter<TypeC, AccType> converter; // FP32 -> BF16
 
     // Build a tiled TMEM->register copy operation.
     // tiled_copy_t2r maps each thread to its TMEM rows/columns.
@@ -1531,8 +1635,8 @@ __device__ __forceinline__ void
     // We need a register tensor shaped to match the TMEM load output.
     // Use a fake BF16 tensor to derive the correct shape, then create an
     // AccType (FP32) tensor with the same shape for the actual TMEM load.
-    cute::Tensor tCgC_fake =
-        cute::make_tensor<TypeC>(cute::shape(tCtAcc(cute::_, cute::_, cute::_, 0)));
+    cute::Tensor tCgC_fake = cute::make_tensor<TypeC>(
+        cute::shape(tCtAcc(cute::_, cute::_, cute::_, 0)));
     cute::Tensor tTR_rAcc_fake = thr_copy_t2r.partition_D(tCgC_fake);
     cute::Tensor tTR_rAcc =
         cute::make_tensor<AccType>(cute::shape(tTR_rAcc_fake));
@@ -1546,7 +1650,7 @@ __device__ __forceinline__ void
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       for (int m_tile = 0; m_tile < fp8_num_m_tiles; ++m_tile) {
         for (int n_tile = 0; n_tile < fp8_num_n_tiles; ++n_tile) {
-          int acc_buf_idx    = num_tiles_executed % NUM_ACC_STAGE;
+          int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
           int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
 
           // Register buffer for BF16 output values (one per N-dim token)
@@ -1564,7 +1668,8 @@ __device__ __forceinline__ void
 
           // Synchronize all 4 epilogue warps, then signal MMA warp that the
           // accumulator buffer is free to reuse. Only one elected lane per
-          // warp arrives at the barrier (4 total arrivals match initialization).
+          // warp arrives at the barrier (4 total arrivals match
+          // initialization).
           epilogue_wg_barrier.arrive_and_wait();
           if (cute::elect_one_sync()) {
             cute::arrive_barrier(
@@ -1578,19 +1683,21 @@ __device__ __forceinline__ void
           }
 
           // Scatter-write BF16 results to global memory.
-          // Each thread writes one output row (m_idx = m_tile*MMA_M + threadIdx.x)
-          // for each token in the N-tile. Only routed tokens are written
-          // (topk_idx > 0). Unrouted tokens' output positions are left unchanged.
+          // Each thread writes one output row (m_idx = m_tile*MMA_M +
+          // threadIdx.x) for each token in the N-tile. Only routed tokens are
+          // written (topk_idx > 0). Unrouted tokens' output positions are left
+          // unchanged.
           //
           // Output tensor layout: mOutput(n_idx, topk_idx, m_idx)
           //   n_idx:    token index (batch dimension)
-          //   topk_idx: top-k slot (0-indexed, after subtracting 1 from routing)
-          //   m_idx:    output row (weight dimension)
+          //   topk_idx: top-k slot (0-indexed, after subtracting 1 from
+          //   routing) m_idx:    output row (weight dimension)
           CUTE_UNROLL
           for (int i = 0; i < MMA_N; ++i) {
-            int32_t m_idx    = m_tile * MMA_M + threadIdx.x;  // output row for this thread
-            int32_t n_idx    = n_tile * MMA_N + i;            // token index
-            int32_t topk_idx = tRoutingIndex(n_idx);          // routing check
+            int32_t m_idx =
+                m_tile * MMA_M + threadIdx.x;   // output row for this thread
+            int32_t n_idx = n_tile * MMA_N + i; // token index
+            int32_t topk_idx = tRoutingIndex(n_idx); // routing check
             if (n_idx < BATCH_SIZE && topk_idx > 0) {
               // topk_idx is 1-indexed in routing table, convert to 0-indexed
               mOutput(n_idx, topk_idx - 1, m_idx) = tCrC[i];

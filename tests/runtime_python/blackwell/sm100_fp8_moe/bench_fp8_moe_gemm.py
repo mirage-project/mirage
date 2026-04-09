@@ -1,68 +1,65 @@
 """
-Benchmark: FP8 MoE Group GEMM — Mirage MPK kernel vs FlashInfer vs PyTorch.
+Benchmark: FP8 MoE Group GEMM — DeepSeek V3 Configuration.
 
-Compares kernel-only latency (excluding launch overhead) of MoE GEMM:
-  1. Mirage MPK single-CTA  (1 CTA processing all experts sequentially)
-  2. Mirage MPK multi-CTA   (NUM_EXPERTS CTAs, 1 expert per CTA)
-  3. FlashInfer SegmentGEMM  (BF16, multi-CTA segment GEMM)
-  4. FlashInfer bmm_fp8      (FP8, batched matmul via cuBLAS)
-  5. PyTorch baseline        (BF16 per-expert torch.matmul loop)
+Compares kernel-only latency AND correctness of MoE GEMM with real dimensions:
+  - 256 experts, top-8, hidden_size=7168, intermediate_size*2=4096
+  - Batch sizes M = 1, 2, 4, 8, 16, 64, 128
 
-Timing: Each iteration is timed with its own CUDA event pair (start/end).
-The median of all iterations is reported (robust to outliers). The kernel
-launch itself is NOT included — events are recorded around the kernel only.
+Uses FlashInfer's bench_gpu_time for consistent CUPTI-based timing.
 
 Run:
-    cd tests/runtime_python/blackwell/sm100_fp8_moe
+    cd tests/runtime_python/blackwell/sm100_fp8_moe_dsv3
     python setup.py build_ext --inplace
-    python bench_fp8_moe_gemm.py
+    CUDA_VISIBLE_DEVICES=6 python bench_fp8_moe_gemm.py
 """
 
 import torch
 import sys
-import os
 import random
-import statistics
+import numpy as np
 
-# --------------------------------------------------------------------------
-# Import Mirage MPK kernel
-# --------------------------------------------------------------------------
 try:
     import runtime_kernel_fp8_moe as rk
 except ImportError:
     print("ERROR: runtime_kernel_fp8_moe not found.")
-    print("Please run: python setup.py build_ext --inplace")
+    print("Run: python setup.py build_ext --inplace")
     sys.exit(1)
 
-# --------------------------------------------------------------------------
-# Import FlashInfer
-# --------------------------------------------------------------------------
 try:
-    from flashinfer import SegmentGEMMWrapper
-    from flashinfer.gemm import (bmm_fp8,
-                                  group_gemm_fp8_nt_groupwise,
-                                  group_deepgemm_fp8_nt_groupwise,
-                                  batch_deepgemm_fp8_nt_groupwise)
+    import runtime_kernel_bf16_moe as rk_bf16
+    HAS_BF16 = True
+except ImportError:
+    print("WARNING: runtime_kernel_bf16_moe not found, skipping BF16 benchmarks.")
+    HAS_BF16 = False
+
+try:
+    from flashinfer.gemm import (group_gemm_fp8_nt_groupwise,
+                                  group_deepgemm_fp8_nt_groupwise)
+    from flashinfer import bmm_bf16
+    from flashinfer.testing.utils import quantize_fp8 as fi_quantize_fp8
+    from flashinfer.testing.utils import bench_gpu_time
     HAS_FLASHINFER = True
 except ImportError:
     print("WARNING: FlashInfer not available, skipping FlashInfer benchmarks.")
     HAS_FLASHINFER = False
 
-# --------------------------------------------------------------------------
-# Test dimensions (must match the compiled MPK kernel constants)
-# --------------------------------------------------------------------------
-BATCH_SIZE  = 128   # padded to MMA_N=128
-OUTPUT_SIZE = 256   # N
-K           = 256   # REDUCTION_SIZE
-NUM_EXPERTS = 8
-NUM_TOPK    = 2
+# ================================================================
+# DeepSeek V3 dimensions (must match compiled kernel)
+# ================================================================
+MPK_BATCH_SIZE = 16     # compiled BATCH_SIZE for MPK kernels (MMA_N=16)
+OUTPUT_SIZE    = 4096   # N = 2 * intermediate_size
+K              = 7168   # hidden_size
+NUM_EXPERTS    = 256
+NUM_TOPK       = 8
+TILE_SIZE      = 128    # FP8 block quantization granularity
 
-WARMUP_ITERS = 50
-BENCH_ITERS  = 200
 
+# ================================================================
+# Quantization utilities
+# ================================================================
 
 def quantize_to_fp8(x: torch.Tensor, block_k: int = 128):
-    """Per-128-element block quantization to FP8 E4M3."""
+    """Per-128-element block quantization to FP8 E4M3 (for Mirage kernel)."""
     shape = x.shape
     K_dim = shape[-1]
     assert K_dim % block_k == 0
@@ -75,438 +72,503 @@ def quantize_to_fp8(x: torch.Tensor, block_k: int = 128):
     return x_fp8, scale.float()
 
 
-def make_random_routing(batch_size, num_experts, num_topk, device, seed=42):
-    """Create random routing for benchmarking."""
+def dequantize_fp8(x_fp8, scale, block_k=128):
+    shape = x_fp8.shape
+    K_dim = shape[-1]
+    num_blocks = K_dim // block_k
+    x_blocks = x_fp8.reshape(*shape[:-1], num_blocks, block_k).float()
+    return (x_blocks * scale.unsqueeze(-1)).reshape(*shape)
+
+
+def float32_to_ue8m0_approx(scale):
+    bits = scale.view(torch.int32)
+    ue8m0 = (bits >> 23) & 0xFF
+    return 2.0 ** (ue8m0.float() - 127.0)
+
+
+def make_random_routing(batch_size, padded_batch, device, seed=42):
     rng = random.Random(seed)
-    routing = torch.zeros(num_experts, BATCH_SIZE, dtype=torch.int32, device=device)
+    routing = torch.zeros(NUM_EXPERTS, padded_batch, dtype=torch.int32, device=device)
     token_to_experts = {}
     for i in range(batch_size):
-        experts = rng.sample(range(num_experts), num_topk)
+        experts = rng.sample(range(NUM_EXPERTS), NUM_TOPK)
         token_to_experts[i] = experts
         for slot, e in enumerate(experts):
             routing[e, i] = slot + 1
 
     activated = []
-    for e in range(num_experts):
+    for e in range(NUM_EXPERTS):
         if routing[e, :batch_size].any():
             activated.append(e)
 
-    mask = torch.zeros(num_experts + 1, dtype=torch.int32, device=device)
+    mask = torch.zeros(NUM_EXPERTS + 1, dtype=torch.int32, device=device)
     for idx, e in enumerate(activated):
         mask[idx] = e
-    mask[num_experts] = len(activated)
-
+    mask[NUM_EXPERTS] = len(activated)
     return routing, mask, token_to_experts
 
 
-def bench_kernel(fn, warmup=WARMUP_ITERS, iters=BENCH_ITERS):
-    """Benchmark a CUDA kernel with per-iteration event timing.
+# ================================================================
+# Timing helper using FlashInfer's bench_gpu_time
+# ================================================================
 
-    Each iteration gets its own (start, end) event pair. We report the
-    median latency across all iterations (robust to outliers from
-    scheduling jitter, power state changes, etc.).
-
-    The function `fn` should launch kernel(s) WITHOUT calling synchronize.
-    """
-    # Warmup — fill caches, stabilize clocks
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-
-    # Create event pairs for each iteration
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    ends   = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-
-    # Timed iterations
-    for i in range(iters):
-        starts[i].record()
-        fn()
-        ends[i].record()
-
-    torch.cuda.synchronize()
-
-    # Collect per-iteration latencies
-    latencies = [starts[i].elapsed_time(ends[i]) * 1000.0  # ms -> us
-                 for i in range(iters)]
-
-    median_us = statistics.median(latencies)
-    min_us = min(latencies)
-    p99_us = sorted(latencies)[int(iters * 0.99)]
-    return median_us, min_us, p99_us
+def bench(fn):
+    """Benchmark using FlashInfer's bench_gpu_time. Returns median in microseconds."""
+    measurements = bench_gpu_time(fn, dry_run_time_ms=100, repeat_time_ms=1000)
+    median_ms = np.median(measurements)
+    min_ms = np.min(measurements)
+    p99_ms = np.percentile(measurements, 99)
+    return median_ms * 1000.0, min_ms * 1000.0, p99_ms * 1000.0  # ms -> us
 
 
-# =========================================================================
-# Benchmark implementations
-# =========================================================================
+# ================================================================
+# References
+# ================================================================
 
-def bench_mirage_single_cta(input_fp8, input_scale, weight_scale,
-                             routing, mask, output):
-    """Mirage MPK: 1 CTA processes all experts sequentially."""
-    def fn():
-        rk.fp8_moe_w13_gemm_launch(input_fp8, input_scale, weight_scale,
-                                     routing, mask, output, 1)
-    return bench_kernel(fn)
-
-
-def bench_mirage_multi_cta(input_fp8, input_scale, weight_scale,
-                            routing, mask, output, num_ctas):
-    """Mirage MPK: num_ctas CTAs, each handles 1 expert."""
-    def fn():
-        rk.fp8_moe_w13_gemm_launch(input_fp8, input_scale, weight_scale,
-                                     routing, mask, output, num_ctas)
-    return bench_kernel(fn)
+def compute_reference_ue8m0(input_fp8, input_scale, weight_fp8, weight_scale,
+                             batch_size, padded_batch, token_to_experts):
+    i_scale = float32_to_ue8m0_approx(input_scale)
+    w_scale = float32_to_ue8m0_approx(weight_scale)
+    input_deq = dequantize_fp8(input_fp8, i_scale).bfloat16()
+    ref = torch.zeros(padded_batch, NUM_TOPK, OUTPUT_SIZE,
+                      dtype=torch.bfloat16, device=input_fp8.device)
+    for i in range(batch_size):
+        for slot, e in enumerate(token_to_experts[i]):
+            w_deq = dequantize_fp8(weight_fp8[e], w_scale[e]).bfloat16()
+            ref[i, slot] = (input_deq[i:i+1] @ w_deq.T).squeeze(0)
+    return ref
 
 
-def bench_flashinfer_segment_gemm(batch_size, input_bf16, weight_bf16,
-                                    token_to_experts):
-    """FlashInfer SegmentGEMM (BF16, multi-CTA, optimized for MoE routing)."""
-    device = input_bf16.device
+def compute_reference_f32(input_bf16, weight_bf16, batch_size, padded_batch, token_to_experts):
+    ref = torch.zeros(padded_batch, NUM_TOPK, OUTPUT_SIZE,
+                      dtype=torch.bfloat16, device=input_bf16.device)
+    for i in range(batch_size):
+        for slot, e in enumerate(token_to_experts[i]):
+            ref[i, slot] = (input_bf16[i:i+1] @ weight_bf16[e].T).squeeze(0)
+    return ref
 
+
+# ================================================================
+# FlashInfer data builders
+# ================================================================
+
+def build_fi_weight_fp8(weight_bf16):
+    b_fp8, b_scale = fi_quantize_fp8(
+        weight_bf16.float(),
+        (NUM_EXPERTS, OUTPUT_SIZE // TILE_SIZE, K // TILE_SIZE),
+        (1, TILE_SIZE, TILE_SIZE), "K")
+    return b_fp8, b_scale
+
+
+def build_fi_packed_data(batch_size, input_bf16, token_to_experts, device):
     expert_tokens = {e: [] for e in range(NUM_EXPERTS)}
-    for tok_idx, experts in token_to_experts.items():
-        for e in experts:
+    for tok_idx in range(batch_size):
+        for e in token_to_experts[tok_idx]:
             expert_tokens[e].append(tok_idx)
 
     packed_rows = []
-    seg_lens = []
-    weight_indices = []
-    for e in range(NUM_EXPERTS):
-        tokens = expert_tokens[e]
-        if len(tokens) == 0:
-            continue
-        for t in tokens:
-            packed_rows.append(input_bf16[t])
-        seg_lens.append(len(tokens))
-        weight_indices.append(e)
-
-    if len(packed_rows) == 0:
-        return 0.0, 0.0, 0.0
-
-    x_packed = torch.stack(packed_rows).to(torch.bfloat16)
-    seg_lens_t = torch.tensor(seg_lens, dtype=torch.int64, device=device)
-    weight_idx_t = torch.tensor(weight_indices, dtype=torch.int64, device=device)
-
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)
-    seg_gemm = SegmentGEMMWrapper(workspace)
-
-    def fn():
-        seg_gemm.run(x_packed, weight_bf16, len(seg_lens), True,
-                     seg_lens=seg_lens_t, weight_indices=weight_idx_t)
-
-    return bench_kernel(fn)
-
-
-def bench_flashinfer_bmm_fp8(batch_size, weight_bf16, token_to_experts):
-    """FlashInfer bmm_fp8 (FP8, batched matmul via cuBLAS per expert)."""
-    device = weight_bf16.device
-
-    expert_tokens = {e: [] for e in range(NUM_EXPERTS)}
-    for tok_idx, experts in token_to_experts.items():
-        for e in experts:
-            expert_tokens[e].append(tok_idx)
-
-    input_bf16_rand = torch.randn(batch_size, K, device=device, dtype=torch.bfloat16)
-    a_list, b_list = [], []
-    a_scale = torch.ones(1, dtype=torch.float32, device=device)
-    b_scale = torch.ones(1, dtype=torch.float32, device=device)
-
-    for e in range(NUM_EXPERTS):
-        tokens = expert_tokens[e]
-        if len(tokens) == 0:
-            continue
-        a_bf16 = torch.stack([input_bf16_rand[t] for t in tokens]).unsqueeze(0)
-        a_fp8 = a_bf16.to(torch.float8_e4m3fn).contiguous()
-        b_fp8 = weight_bf16[e].T.unsqueeze(0).to(torch.float8_e4m3fn).contiguous()
-        a_list.append(a_fp8)
-        b_list.append(b_fp8)
-
-    if not a_list:
-        return 0.0, 0.0, 0.0
-
-    def fn():
-        for a_fp8, b_fp8 in zip(a_list, b_list):
-            bmm_fp8(a_fp8, b_fp8, a_scale, b_scale, dtype=torch.bfloat16)
-
-    return bench_kernel(fn)
-
-
-def _build_expert_token_map(token_to_experts):
-    """Build a map from expert index to list of token indices."""
-    expert_tokens = {e: [] for e in range(NUM_EXPERTS)}
-    for tok_idx, experts in token_to_experts.items():
-        for e in experts:
-            expert_tokens[e].append(tok_idx)
-    return expert_tokens
-
-
-def _build_packed_fp8_data(batch_size, input_bf16, weight_bf16, token_to_experts):
-    """Build packed FP8 data with block scales for group GEMM APIs.
-
-    Returns:
-        a_fp8:    [cum_m, K]           packed FP8 activations
-        a_scale:  [cum_m, K//128]      per-token K-major scales
-        b_fp8:    [NUM_EXPERTS, N, K]  FP8 weights
-        b_scale:  [NUM_EXPERTS, N//128, K//128]  per-block scales
-        m_indptr: [NUM_EXPERTS+1]      segment boundaries (padded to multiple of 4)
-        m_indices:[cum_m]              per-row group assignment
-        expert_tokens: dict            expert -> [token_indices]
-    """
-    device = input_bf16.device
-    expert_tokens = _build_expert_token_map(token_to_experts)
-    block_k = 128
-
-    # Build packed A: concatenate tokens per expert, pad each segment to multiple of 4
-    packed_a_rows = []
     m_indptr_list = [0]
     m_indices_list = []
+    expert_order = []
 
     for e in range(NUM_EXPERTS):
         tokens = expert_tokens[e]
-        n_tokens = len(tokens)
-        # Pad to multiple of 4 (required by group_gemm_fp8_nt_groupwise)
-        padded = ((n_tokens + 3) // 4) * 4
         for t in tokens:
-            packed_a_rows.append(input_bf16[t])
+            packed_rows.append(input_bf16[t])
             m_indices_list.append(e)
-        # Pad with zeros
-        for _ in range(padded - n_tokens):
-            packed_a_rows.append(torch.zeros(K, device=device, dtype=input_bf16.dtype))
-            m_indices_list.append(e)
-        m_indptr_list.append(m_indptr_list[-1] + padded)
+            slot = token_to_experts[t].index(e)
+            expert_order.append((t, slot, e))
+        m_indptr_list.append(m_indptr_list[-1] + len(tokens))
 
     cum_m = m_indptr_list[-1]
-    a_bf16_packed = torch.stack(packed_a_rows)  # [cum_m, K]
-    # Per-token FP8 quantization for A
-    a_fp8 = a_bf16_packed.to(torch.float8_e4m3fn).contiguous()
-    # Per-token scale: [cum_m, K//128]
-    num_k_blocks = K // block_k
-    a_blocks = a_bf16_packed.float().reshape(cum_m, num_k_blocks, block_k)
-    a_amax = a_blocks.abs().amax(dim=-1)  # [cum_m, num_k_blocks]
-    a_scale = (a_amax / 448.0).clamp(min=1e-12).float()
+    if cum_m == 0:
+        return None
 
-    # Per-block FP8 quantization for B: [NUM_EXPERTS, N, K]
-    n_blocks = (OUTPUT_SIZE + block_k - 1) // block_k
-    b_fp8 = weight_bf16.to(torch.float8_e4m3fn).contiguous()
-    # b_scale: [NUM_EXPERTS, N//128, K//128]
-    w_blocks = weight_bf16.float().reshape(NUM_EXPERTS, n_blocks, block_k, num_k_blocks, block_k)
-    b_amax = w_blocks.abs().amax(dim=(2, 4))  # [NUM_EXPERTS, n_blocks, num_k_blocks]
-    b_scale = (b_amax / 448.0).clamp(min=1e-12).float()
-
+    a_bf16 = torch.stack(packed_rows)
     m_indptr = torch.tensor(m_indptr_list, dtype=torch.int32, device=device)
     m_indices = torch.tensor(m_indices_list, dtype=torch.int32, device=device)
-
-    return a_fp8, a_scale, b_fp8, b_scale, m_indptr, m_indices, expert_tokens
-
-
-def bench_fi_group_gemm_fp8(input_bf16, weight_bf16, token_to_experts):
-    """FlashInfer group_gemm_fp8_nt_groupwise (CUTLASS FP8, packed segments)."""
-    a_fp8, a_scale, b_fp8, b_scale, m_indptr, _, _ = \
-        _build_packed_fp8_data(0, input_bf16, weight_bf16, token_to_experts)
-
-    def fn():
-        group_gemm_fp8_nt_groupwise(
-            a_fp8, b_fp8, a_scale, b_scale, m_indptr,
-            scale_granularity_mnk=(1, 128, 128),
-            scale_major_mode='K')
-
-    return bench_kernel(fn)
+    a_fp8, a_scale = fi_quantize_fp8(
+        a_bf16.float(), (cum_m, K // TILE_SIZE), (1, TILE_SIZE), "K")
+    return a_fp8, a_scale, m_indptr, m_indices, expert_order
 
 
-def bench_fi_group_deepgemm_fp8(input_bf16, weight_bf16, token_to_experts):
-    """FlashInfer group_deepgemm_fp8_nt_groupwise (DeepGEMM backend, packed with m_indices)."""
-    a_fp8, a_scale, b_fp8, b_scale, _, m_indices, _ = \
-        _build_packed_fp8_data(0, input_bf16, weight_bf16, token_to_experts)
-
-    def fn():
-        group_deepgemm_fp8_nt_groupwise(
-            a_fp8, b_fp8, a_scale, b_scale, m_indices,
-            scale_granularity_mnk=(1, 128, 128))
-
-    return bench_kernel(fn)
-
-
-def bench_fi_batch_deepgemm_fp8(batch_size, input_bf16, weight_bf16, token_to_experts):
-    """FlashInfer batch_deepgemm_fp8_nt_groupwise (DeepGEMM backend, 3D masked)."""
+def build_bmm_bf16_data(batch_size, input_bf16, weight_bf16, token_to_experts):
     device = input_bf16.device
-    expert_tokens = _build_expert_token_map(token_to_experts)
-    block_k = 128
+    expert_tokens = {e: [] for e in range(NUM_EXPERTS)}
+    for tok_idx in range(batch_size):
+        for e in token_to_experts[tok_idx]:
+            expert_tokens[e].append(tok_idx)
 
-    max_m = max(max(len(v) for v in expert_tokens.values()), 1)
-    # Pad max_m to at least 4 for alignment
-    max_m = max(max_m, 4)
+    active_experts = [e for e in range(NUM_EXPERTS) if len(expert_tokens[e]) > 0]
+    if not active_experts:
+        return None
+    max_m = max(len(expert_tokens[e]) for e in active_experts)
+    num_active = len(active_experts)
 
-    # A: [NUM_EXPERTS, max_m, K]
-    a_bf16 = torch.zeros(NUM_EXPERTS, max_m, K, device=device, dtype=input_bf16.dtype)
-    masked_m = torch.zeros(NUM_EXPERTS, device=device, dtype=torch.int32)
-    for e in range(NUM_EXPERTS):
-        tokens = expert_tokens[e]
-        masked_m[e] = len(tokens)
-        for local_idx, tok_idx in enumerate(tokens):
-            a_bf16[e, local_idx] = input_bf16[tok_idx]
+    a_batched = torch.zeros(num_active, max_m, K, device=device, dtype=torch.bfloat16)
+    for idx, e in enumerate(active_experts):
+        for local_idx, tok_idx in enumerate(expert_tokens[e]):
+            a_batched[idx, local_idx] = input_bf16[tok_idx]
 
-    a_fp8 = a_bf16.to(torch.float8_e4m3fn).contiguous()
-    num_k_blocks = K // block_k
-    a_blocks = a_bf16.float().reshape(NUM_EXPERTS, max_m, num_k_blocks, block_k)
-    a_amax = a_blocks.abs().amax(dim=-1)  # [NUM_EXPERTS, max_m, num_k_blocks]
-    a_scale = (a_amax / 448.0).clamp(min=1e-12).float()
+    b_batched = torch.zeros(num_active, K, OUTPUT_SIZE, device=device, dtype=torch.bfloat16)
+    for idx, e in enumerate(active_experts):
+        b_batched[idx] = weight_bf16[e].T
 
-    # B: same per-block scales
-    n_blocks = (OUTPUT_SIZE + block_k - 1) // block_k
-    b_fp8 = weight_bf16.to(torch.float8_e4m3fn).contiguous()
-    w_blocks = weight_bf16.float().reshape(NUM_EXPERTS, n_blocks, block_k, num_k_blocks, block_k)
-    b_amax = w_blocks.abs().amax(dim=(2, 4))
-    b_scale = (b_amax / 448.0).clamp(min=1e-12).float()
-
-    out = torch.empty(NUM_EXPERTS, max_m, OUTPUT_SIZE, device=device, dtype=torch.bfloat16)
-    expected_m = max(1, batch_size // NUM_EXPERTS)
-
-    def fn():
-        batch_deepgemm_fp8_nt_groupwise(
-            a_fp8, b_fp8, a_scale, b_scale, masked_m, expected_m,
-            scale_granularity_mnk=(1, 128, 128), out=out)
-
-    return bench_kernel(fn)
+    out = torch.empty(num_active, max_m, OUTPUT_SIZE, device=device, dtype=torch.bfloat16)
+    return a_batched, b_batched, out
 
 
-def bench_pytorch_matmul(batch_size, input_bf16, weight_bf16, token_to_experts):
-    """PyTorch BF16 per-expert matmul loop (baseline)."""
-    device = input_bf16.device
-    output = torch.zeros(batch_size, NUM_TOPK, OUTPUT_SIZE,
-                         dtype=torch.bfloat16, device=device)
+# ================================================================
+# Correctness helpers
+# ================================================================
 
-    def fn():
-        for i in range(batch_size):
-            for slot, e in enumerate(token_to_experts[i]):
-                output[i, slot] = (input_bf16[i:i+1] @ weight_bf16[e].T).squeeze(0)
+def compare_fi_vs_ref(fi_out_packed, expert_order, ref, label):
+    max_abs, max_rel, n_cmp = 0.0, 0.0, 0
+    for row_idx, (tok, slot, _) in enumerate(expert_order):
+        fi_row = fi_out_packed[row_idx].float()
+        ref_row = ref[tok, slot].float()
+        diff = (fi_row - ref_row).abs()
+        abs_err = diff.max().item()
+        denom = ref_row.abs().max().item()
+        rel_err = abs_err / max(denom, 1e-6)
+        max_abs = max(max_abs, abs_err)
+        max_rel = max(max_rel, rel_err)
+        n_cmp += 1
+    return max_abs, max_rel, n_cmp
 
-    return bench_kernel(fn)
+
+def compare_mpk_vs_ref(mpk_out, ref, batch_size, token_to_experts):
+    max_abs, max_rel, n_cmp = 0.0, 0.0, 0
+    for i in range(batch_size):
+        for slot in range(len(token_to_experts[i])):
+            out_row = mpk_out[i, slot].float()
+            ref_row = ref[i, slot].float()
+            diff = (out_row - ref_row).abs()
+            abs_err = diff.max().item()
+            denom = ref_row.abs().max().item()
+            rel_err = abs_err / max(denom, 1e-6)
+            max_abs = max(max_abs, abs_err)
+            max_rel = max(max_rel, rel_err)
+            n_cmp += 1
+    return max_abs, max_rel, n_cmp
 
 
 def fmt_us(median, min_val, p99):
-    """Format timing as 'median (min / p99)'."""
-    return f"{median:7.2f} ({min_val:6.2f}/{p99:7.2f})"
+    return f"{median:8.1f} ({min_val:7.1f}/{p99:8.1f})"
+
+
+def fmt_err(abs_err, rel_err, n_cmp):
+    return f"abs={abs_err:.4f} rel={rel_err:.4f} ({n_cmp})"
 
 
 def main():
     device = torch.device("cuda")
-    print("=" * 120)
-    print("FP8 MoE Group GEMM Benchmark — Kernel-Only Latency (us)")
-    print(f"  N={OUTPUT_SIZE}, K={K}, num_experts={NUM_EXPERTS}, top_k={NUM_TOPK}")
-    print(f"  BATCH_SIZE (padded)={BATCH_SIZE}")
-    print(f"  Warmup={WARMUP_ITERS}, Iters={BENCH_ITERS}")
-    print(f"  Format: median (min / p99) in microseconds")
+
+    # 2D grid configs for FP8: (expert_stride, n_splits, label)
+    fp8_grids = [
+        (4,  32, "FP8-4x32"),     # 128 CTAs
+        (8,  16, "FP8-8x16"),     # 128 CTAs
+        (16,  8, "FP8-16x8"),     # 128 CTAs
+        (32,  4, "FP8-32x4"),     # 128 CTAs
+    ]
+    # 2D grid configs for BF16: same set
+    bf16_grids = [
+        (8,  16, "BF16-8x16"),    # 128 CTAs
+        (16,  8, "BF16-16x8"),    # 128 CTAs
+        (32,  4, "BF16-32x4"),    # 128 CTAs
+    ]
+
+    print("=" * 140)
+    print("FP8 MoE Group GEMM Benchmark — DeepSeek V3 Configuration")
+    print(f"  N={OUTPUT_SIZE}, K={K}, experts={NUM_EXPERTS}, topk={NUM_TOPK}")
+    print(f"  GPU: {torch.cuda.get_device_name()}")
+    print(f"  Timing: FlashInfer bench_gpu_time (CUPTI or CUDA events)")
     print(f"  FlashInfer: {'available' if HAS_FLASHINFER else 'NOT available'}")
-    print("=" * 120)
+    print("=" * 140)
 
-    # ---- Benchmark names and corresponding functions ----
-    # Each entry: (short_name, header_width)
-    bench_names = ["MPK-1CTA", "MPK-8CTA"]
+    # ---- Pre-generate weights ----
+    # Generate in bf16, quantize for Mirage FP8, then for FlashInfer.
+    # Careful with memory: 256 experts × 4096 × 7168 = ~15GB per copy.
+    torch.manual_seed(42)
+    weight_bf16 = torch.randn(NUM_EXPERTS, OUTPUT_SIZE, K,
+                               device=device, dtype=torch.bfloat16)
+
+    # Mirage FP8 quantization (per-row, per-128-K block)
+    print("  Quantizing weights for Mirage FP8...")
+    weight_fp8_list, weight_scale_list = [], []
+    for e in range(NUM_EXPERTS):
+        w_fp8, w_scale = quantize_to_fp8(weight_bf16[e].float())
+        weight_fp8_list.append(w_fp8)
+        weight_scale_list.append(w_scale)
+    weight_fp8 = torch.stack(weight_fp8_list, dim=0)
+    weight_scale = torch.stack(weight_scale_list, dim=0)
+    del weight_fp8_list, weight_scale_list
+
+    # Keep bf16 weights for BF16 kernel and PyTorch baseline
+    w_bf16 = weight_bf16
+
+    # FlashInfer quantization (per-block scales, needs float32 intermediates)
+    # Do this AFTER Mirage quantization and free bf16 source to make room.
+    fi_b_fp8, fi_b_scale = None, None
     if HAS_FLASHINFER:
-        bench_names += ["FI-SegGEMM", "FI-bmm_fp8",
-                        "FI-grp_fp8", "FI-grpDG_fp8", "FI-batDG_fp8"]
-    bench_names += ["PyTorch"]
+        print("  Quantizing weights for FlashInfer...")
+        try:
+            fi_b_fp8, fi_b_scale = build_fi_weight_fp8(weight_bf16)
+            print(f"  Done. b_fp8={fi_b_fp8.shape}, b_scale={fi_b_scale.shape}")
+        except torch.OutOfMemoryError:
+            print("  WARNING: OOM during FlashInfer weight quantization, skipping FI benchmarks")
+            torch.cuda.empty_cache()
 
-    col_w = 26
-    header = f"{'batch':>5}"
-    for name in bench_names:
-        header += f"  {(name + ' (us)'):>{col_w}}"
+    del weight_bf16
+    torch.cuda.empty_cache()
+
+    # Collect all results across batch sizes
+    all_results = {}  # batch_size -> {label -> (median, min, p99)}
+    all_errors = {}   # batch_size -> {label -> (abs, rel, n)}
+
+    for batch_size in [1, 2, 4, 8, 16]:
+        torch.manual_seed(100 + batch_size)
+
+        input_bf16 = torch.randn(MPK_BATCH_SIZE, K, device=device, dtype=torch.bfloat16)
+        input_fp8, input_scale = quantize_to_fp8(input_bf16.float())
+
+        routing, mask, token_to_experts = make_random_routing(
+            batch_size, MPK_BATCH_SIZE, device, seed=100 + batch_size)
+
+        output = torch.zeros(MPK_BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE,
+                             dtype=torch.bfloat16, device=device)
+
+        ref_ue8m0 = compute_reference_ue8m0(input_fp8, input_scale, weight_fp8, weight_scale,
+                                             batch_size, MPK_BATCH_SIZE, token_to_experts)
+        ref_bf16 = compute_reference_f32(input_bf16[:batch_size], w_bf16,
+                                          batch_size, MPK_BATCH_SIZE, token_to_experts)
+
+        results = {}
+        errors = {}
+
+        # ---- Mirage MPK FP8 ----
+        for es, ns, label in fp8_grids:
+            rk.fp8_moe_gemm_bench_setup(weight_fp8, es, ns)
+            results[label] = bench(
+                lambda: rk.fp8_moe_gemm_bench_launch(
+                    input_fp8, input_scale, weight_scale,
+                    routing, mask, output))
+            rk.fp8_moe_gemm_bench_cleanup()
+            if label == fp8_grids[0][2]:
+                output.zero_()
+                rk.fp8_moe_gemm_2d(input_fp8, input_scale, weight_fp8, weight_scale,
+                                    routing, mask, output, es, ns)
+                errors[label] = compare_mpk_vs_ref(output, ref_ue8m0, batch_size, token_to_experts)
+
+        # ---- Mirage MPK BF16 ----
+        if HAS_BF16:
+            bf16_input = input_bf16[:MPK_BATCH_SIZE].contiguous()
+            bf16_output = torch.zeros(MPK_BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE,
+                                       dtype=torch.bfloat16, device=device)
+            for es, ns, label in bf16_grids:
+                rk_bf16.bf16_moe_bench_setup(w_bf16, es, ns)
+                results[label] = bench(
+                    lambda: rk_bf16.bf16_moe_bench_launch(
+                        bf16_input, routing, mask, bf16_output))
+                rk_bf16.bf16_moe_bench_cleanup()
+                if label == bf16_grids[0][2]:
+                    bf16_output.zero_()
+                    rk_bf16.bf16_moe_bench_setup(w_bf16, es, ns)
+                    rk_bf16.bf16_moe_bench_launch(bf16_input, routing, mask, bf16_output)
+                    torch.cuda.synchronize()
+                    rk_bf16.bf16_moe_bench_cleanup()
+                    errors[label] = compare_mpk_vs_ref(bf16_output, ref_bf16[:MPK_BATCH_SIZE],
+                                                        batch_size, token_to_experts)
+
+        # ---- FlashInfer ----
+        if HAS_FLASHINFER and fi_b_fp8 is not None:
+            active_input = input_bf16[:batch_size]
+            fi_data = build_fi_packed_data(batch_size, active_input, token_to_experts, device)
+            if fi_data is not None:
+                a_fp8, a_scale, m_indptr, m_indices, expert_order = fi_data
+                try:
+                    out_grp = [None]
+                    def run_grp():
+                        out_grp[0] = group_gemm_fp8_nt_groupwise(
+                            a_fp8, fi_b_fp8, a_scale, fi_b_scale, m_indptr,
+                            scale_major_mode="K", out_dtype=torch.bfloat16)
+                    results["FI-grpGEMM"] = bench(run_grp)
+                    run_grp()
+                    errors["FI-grpGEMM"] = compare_fi_vs_ref(
+                        out_grp[0], expert_order, ref_bf16, "FI-grpGEMM")
+                except Exception as ex:
+                    print(f"    FI-grpGEMM error: {ex}")
+
+                try:
+                    out_dg = [None]
+                    def run_dg():
+                        out_dg[0] = group_deepgemm_fp8_nt_groupwise(
+                            a_fp8, fi_b_fp8, a_scale, fi_b_scale, m_indices,
+                            out_dtype=torch.bfloat16)
+                    results["FI-grpDG"] = bench(run_dg)
+                    run_dg()
+                    errors["FI-grpDG"] = compare_fi_vs_ref(
+                        out_dg[0], expert_order, ref_bf16, "FI-grpDG")
+                except Exception as ex:
+                    print(f"    FI-grpDG error: {ex}")
+
+            bmm_data = build_bmm_bf16_data(batch_size, active_input, w_bf16, token_to_experts)
+            if bmm_data is not None:
+                a_bat, b_bat, out_bat = bmm_data
+                use_fi_bmm = True
+                try:
+                    bmm_bf16(a_bat, b_bat, out=out_bat, out_dtype=torch.bfloat16)
+                except Exception:
+                    use_fi_bmm = False
+                if use_fi_bmm:
+                    results["FI-bmm16"] = bench(
+                        lambda: bmm_bf16(a_bat, b_bat, out=out_bat, out_dtype=torch.bfloat16))
+                else:
+                    results["FI-bmm16"] = bench(
+                        lambda: torch.bmm(a_bat, b_bat, out=out_bat))
+
+        # ---- PyTorch ----
+        active_in = input_bf16[:batch_size]
+        pt_out = torch.zeros(batch_size, NUM_TOPK, OUTPUT_SIZE,
+                              dtype=torch.bfloat16, device=device)
+        def run_pytorch():
+            for i in range(batch_size):
+                for slot, e in enumerate(token_to_experts[i]):
+                    pt_out[i, slot] = (active_in[i:i+1] @ w_bf16[e].T).squeeze(0)
+        results["PyTorch"] = bench(run_pytorch)
+
+        all_results[batch_size] = results
+        all_errors[batch_size] = errors
+        print(f"  M={batch_size:>2} done")
+
+    # ================================================================
+    # TABLE 1: Main comparison (best MPK configs vs baselines)
+    # ================================================================
     print()
+    print("=" * 80)
+    print("Table 1: Latency Comparison — median (min/p99) in microseconds")
+    print("=" * 80)
+
+    main_cols = ["MPK-FP8", "MPK-BF16", "FI-grpGEMM", "FI-bmm16", "PyTorch"]
+    # Map display names to result keys
+    main_map = {
+        "MPK-FP8":    fp8_grids[1][2],     # (8,16) — best FP8 config
+        "MPK-BF16":   bf16_grids[0][2],     # (8,16) — best BF16 config
+        "FI-grpGEMM": "FI-grpGEMM",
+        "FI-bmm16":   "FI-bmm16",
+        "PyTorch":    "PyTorch",
+    }
+
+    cw = 12  # column width for median
+    header = f"{'M':>3}"
+    for name in main_cols:
+        header += f"  {name:>{cw}}"
     print(header)
     print("-" * len(header))
 
-    for batch_size in [1, 2, 4, 8, 16]:
-        torch.manual_seed(42 + batch_size)
-
-        # Generate test data
-        input_bf16 = torch.randn(BATCH_SIZE, K, device=device, dtype=torch.bfloat16)
-        input_fp8, input_scale = quantize_to_fp8(input_bf16.float())
-        weight_bf16 = torch.randn(NUM_EXPERTS, OUTPUT_SIZE, K, device=device, dtype=torch.bfloat16)
-        weight_fp8_list, weight_scale_list = [], []
-        for e in range(NUM_EXPERTS):
-            w_fp8, w_scale = quantize_to_fp8(weight_bf16[e].float())
-            weight_fp8_list.append(w_fp8)
-            weight_scale_list.append(w_scale)
-        weight_fp8 = torch.stack(weight_fp8_list, dim=0)
-        weight_scale = torch.stack(weight_scale_list, dim=0)
-
-        routing, mask, token_to_experts = make_random_routing(
-            batch_size, NUM_EXPERTS, NUM_TOPK, device)
-
-        output = torch.zeros(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE,
-                             dtype=torch.bfloat16, device=device)
-
-        # Setup MPK benchmark mode (pre-create TMA descriptor)
-        rk.fp8_moe_w13_gemm_setup(weight_fp8)
-
-        results = {}
-
-        # Mirage single CTA
-        results["MPK-1CTA"] = bench_mirage_single_cta(
-            input_fp8, input_scale, weight_scale, routing, mask, output)
-
-        # Mirage multi CTA (8 CTAs = 1 per expert)
-        results["MPK-8CTA"] = bench_mirage_multi_cta(
-            input_fp8, input_scale, weight_scale, routing, mask, output, NUM_EXPERTS)
-
-        if HAS_FLASHINFER:
-            active_input = input_bf16[:batch_size]
-
-            # FlashInfer SegmentGEMM (BF16)
-            results["FI-SegGEMM"] = bench_flashinfer_segment_gemm(
-                batch_size, active_input, weight_bf16, token_to_experts)
-
-            # FlashInfer bmm_fp8 (per-tensor scaled, cuBLAS)
-            results["FI-bmm_fp8"] = bench_flashinfer_bmm_fp8(
-                batch_size, weight_bf16, token_to_experts)
-
-            # FlashInfer group_gemm_fp8_nt_groupwise (CUTLASS, packed segments)
-            try:
-                results["FI-grp_fp8"] = bench_fi_group_gemm_fp8(
-                    active_input, weight_bf16, token_to_experts)
-            except Exception:
-                results["FI-grp_fp8"] = None
-
-            # FlashInfer group_deepgemm_fp8_nt_groupwise (DeepGEMM, packed m_indices)
-            try:
-                results["FI-grpDG_fp8"] = bench_fi_group_deepgemm_fp8(
-                    active_input, weight_bf16, token_to_experts)
-            except Exception:
-                results["FI-grpDG_fp8"] = None
-
-            # FlashInfer batch_deepgemm_fp8_nt_groupwise (DeepGEMM, 3D masked)
-            try:
-                results["FI-batDG_fp8"] = bench_fi_batch_deepgemm_fp8(
-                    batch_size, active_input, weight_bf16, token_to_experts)
-            except Exception:
-                results["FI-batDG_fp8"] = None
-
-        # PyTorch baseline
-        results["PyTorch"] = bench_pytorch_matmul(
-            batch_size, input_bf16[:batch_size].bfloat16(), weight_bf16,
-            token_to_experts)
-
-        # Print row
-        line = f"{batch_size:>5}"
-        for name in bench_names:
-            r = results.get(name)
+    for bs in [1, 2, 4, 8, 16]:
+        line = f"{bs:>3}"
+        for name in main_cols:
+            key = main_map[name]
+            r = all_results[bs].get(key)
             if r:
-                line += f"  {fmt_us(*r):>{col_w}}"
+                line += f"  {r[0]:>{cw}.1f}"
             else:
-                line += f"  {'N/A':>{col_w}}"
+                line += f"  {'N/A':>{cw}}"
         print(line)
 
-        rk.fp8_moe_w13_gemm_cleanup()
-
+    # ================================================================
+    # TABLE 2: FP8 grid config sweep
+    # ================================================================
     print()
-    print("Legend:")
-    print("  MPK-1CTA:      Mirage MPK, single CTA processes all experts sequentially")
-    print("  MPK-8CTA:      Mirage MPK, 8 CTAs (1 per expert), processing in parallel")
-    print("  FI-SegGEMM:    FlashInfer SegmentGEMM (BF16, multi-CTA)")
-    print("  FI-bmm_fp8:    FlashInfer batched FP8 matmul (per-tensor scale, cuBLAS)")
-    print("  FI-grp_fp8:    FlashInfer group_gemm_fp8_nt_groupwise (CUTLASS, block-scaled)")
-    print("  FI-grpDG_fp8:  FlashInfer group_deepgemm_fp8_nt_groupwise (DeepGEMM, block-scaled)")
-    print("  FI-batDG_fp8:  FlashInfer batch_deepgemm_fp8_nt_groupwise (DeepGEMM, 3D masked)")
-    print("  PyTorch:       per-expert BF16 torch.matmul loop")
+    print("=" * 80)
+    print("Table 2: FP8 Grid Config Sweep — median latency (us)")
+    print("=" * 80)
+
+    cw = 12
+    header = f"{'M':>3}"
+    for _, _, label in fp8_grids:
+        header += f"  {label:>{cw}}"
+    print(header)
+    print("-" * len(header))
+
+    for bs in [1, 2, 4, 8, 16]:
+        line = f"{bs:>3}"
+        for _, _, label in fp8_grids:
+            r = all_results[bs].get(label)
+            line += f"  {r[0]:>{cw}.1f}" if r else f"  {'N/A':>{cw}}"
+        print(line)
+
+    # ================================================================
+    # TABLE 3: BF16 grid config sweep
+    # ================================================================
+    if HAS_BF16:
+        print()
+        print("=" * 80)
+        print("Table 3: BF16 Grid Config Sweep — median latency (us)")
+        print("=" * 80)
+
+        header = f"{'M':>3}"
+        for _, _, label in bf16_grids:
+            header += f"  {label:>{cw}}"
+        print(header)
+        print("-" * len(header))
+
+        for bs in [1, 2, 4, 8, 16]:
+            line = f"{bs:>3}"
+            for _, _, label in bf16_grids:
+                r = all_results[bs].get(label)
+                line += f"  {r[0]:>{cw}.1f}" if r else f"  {'N/A':>{cw}}"
+            print(line)
+
+    # ================================================================
+    # TABLE 4: Correctness (errors)
+    # ================================================================
+    print()
+    print("=" * 80)
+    print("Table 4: Correctness — max absolute / relative error")
+    print("=" * 80)
+    print(f"  MPK-FP8: vs UE8M0 dequant reference")
+    print(f"  MPK-BF16 / FI: vs BF16 matmul reference")
+    print()
+
+    err_cols = [fp8_grids[0][2], bf16_grids[0][2], "FI-grpGEMM"]
+    err_display = ["MPK-FP8", "MPK-BF16", "FI-grpGEMM"]
+    ew = 20
+    header = f"{'M':>3}"
+    for name in err_display:
+        header += f"  {name:>{ew}}"
+    print(header)
+    print("-" * len(header))
+
+    for bs in [1, 2, 4, 8, 16]:
+        line = f"{bs:>3}"
+        for key in err_cols:
+            e = all_errors[bs].get(key)
+            if e:
+                line += f"  {e[0]:>7.2f} / {e[1]:.4f}"
+            else:
+                line += f"  {'N/A':>{ew}}"
+        print(line)
+
+    # ================================================================
+    # Footer
+    # ================================================================
+    print()
+    print("Grid configs (all 128 CTAs):")
+    for es, ns, label in fp8_grids:
+        print(f"  {label}: grid=({es},{ns},1)")
+    if HAS_BF16:
+        for es, ns, label in bf16_grids:
+            print(f"  {label}: grid=({es},{ns},1)")
+    print()
+    print("Baselines:")
+    if HAS_FLASHINFER:
+        print("  FI-grpGEMM: FlashInfer group_gemm_fp8_nt_groupwise (CUTLASS)")
+        print("  FI-bmm16:   FlashInfer bmm_bf16 / torch.bmm (batched BF16)")
+    print("  PyTorch:    per-expert BF16 torch.matmul loop")
+    print()
+    print("Timing: FlashInfer bench_gpu_time (CUPTI/CUDA events)")
 
 
 if __name__ == "__main__":

@@ -2366,10 +2366,9 @@ int TaskRegister::register_moe_linear_sm100_task(
   }
 }
 
-int TaskRegister::register_moe_fp8_sm100_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params,
-    bool w13_linear) {
+int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params,
+                                              bool w13_linear) {
   assert(params.size() == 0);
   // Input ordering (6 inputs, 1 output):
   //   [0] input_fp8       [batch, K] or [batch, top_k, K]
@@ -2382,7 +2381,8 @@ int TaskRegister::register_moe_fp8_sm100_task(
   int num_inputs = 6;
   int num_outputs = 1;
   int num_experts = 0, num_experts_per_tok = 0, batch_size = 0;
-  int output_size = 0, orig_output_size = 0, reduction_size = 0, output_stride = 0;
+  int output_size = 0, orig_output_size = 0, reduction_size = 0,
+      output_stride = 0;
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -2443,15 +2443,17 @@ int TaskRegister::register_moe_fp8_sm100_task(
   // MMA constants (same as BF16 MoE task)
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
-  constexpr int bK    = 128; // FP8: bK=128 for one scale-block per k-tile
-  constexpr int num_ab_stages  = 4;
+  constexpr int bK = 128; // FP8: bK=128 for one scale-block per k-tile
+  constexpr int num_ab_stages = 4;
   constexpr int num_acc_stages = 2;
-  constexpr int num_c_stages   = 4;
+  constexpr int num_c_stages = 4;
   constexpr int num_tmem_columns = MMA_N * num_acc_stages; // 32
   assert(num_tmem_columns <= 512);
 
-  // Expert stride (same heuristic as BF16 variant)
-  int expert_stride = w13_linear ? 10 : 8;
+  // Expert stride: must match grid_dim.x so each CTA processes a distinct
+  // set of experts. With grid_dim=(X, Y, 1), X CTAs handle expert distribution
+  // (expert_offset = bid.x, stride = X) and Y CTAs split the N dimension.
+  int expert_stride = bgraph.grid_dim.x;
 
   // TMA for FP8 weight (param_id=2, dtype=uint8_t→UINT8 format, bK=128 tile)
   constexpr int B = 3;
@@ -2463,14 +2465,14 @@ int TaskRegister::register_moe_fp8_sm100_task(
          M,
          S,
          (num_experts - 1) * orig_output_size + output_size, /*GMEM_ROW_*/
-         reduction_size,                                      /*GMEM_COL_*/
-         MMA_M,                                               /*SMEM_ROW_*/
-         bK,                                                  /*SMEM_COL_*/
-         reduction_size,                                      /*GMEM_STRIDE_ROW_*/
-         1,                                                   /*GMEM_STRIDE_COL_*/
-         1,                                                   /*SMEM_REPEAT_ROW_*/
-         1,                                                   /*SMEM_REPEAT_COL_*/
-         MMA_M * bK                                           /*SMEM_STRIDE_*/
+         reduction_size,                                     /*GMEM_COL_*/
+         MMA_M,                                              /*SMEM_ROW_*/
+         bK,                                                 /*SMEM_COL_*/
+         reduction_size, /*GMEM_STRIDE_ROW_*/
+         1,              /*GMEM_STRIDE_COL_*/
+         1,              /*SMEM_REPEAT_ROW_*/
+         1,              /*SMEM_REPEAT_COL_*/
+         MMA_M * bK      /*SMEM_STRIDE_*/
   );
 
   code.inc_indent();
@@ -2479,14 +2481,21 @@ int TaskRegister::register_moe_fp8_sm100_task(
 
   // Input FP8 activation tensor
   if (w13_linear) {
-    code.e("cute::Layout layout_input = cute::make_layout(cute::make_shape($, $), "
-           "cute::make_stride($, cute::Int<1>{}));",
-           batch_size, reduction_size, reduction_size);
+    code.e(
+        "cute::Layout layout_input = cute::make_layout(cute::make_shape($, $), "
+        "cute::make_stride($, cute::Int<1>{}));",
+        batch_size,
+        reduction_size,
+        reduction_size);
   } else {
-    code.e("cute::Layout layout_input = cute::make_layout(cute::make_shape($, $, $), "
+    code.e("cute::Layout layout_input = cute::make_layout(cute::make_shape($, "
+           "$, $), "
            "cute::make_stride($, cute::Int<1>{}, $));",
-           batch_size, reduction_size, num_experts_per_tok,
-           num_experts_per_tok * reduction_size, reduction_size);
+           batch_size,
+           reduction_size,
+           num_experts_per_tok,
+           num_experts_per_tok * reduction_size,
+           reduction_size);
   }
   code.e("cute::Tensor mInput = cute::make_tensor("
          "cute::make_gmem_ptr(static_cast<uint8_t*>("
@@ -2496,22 +2505,33 @@ int TaskRegister::register_moe_fp8_sm100_task(
   if (w13_linear) {
     code.e("cute::Layout layout_input_scale = cute::make_layout("
            "cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
-           batch_size, k_scale, k_scale);
+           batch_size,
+           k_scale,
+           k_scale);
   } else {
     code.e("cute::Layout layout_input_scale = cute::make_layout("
            "cute::make_shape($, $, $), "
            "cute::make_stride($, cute::Int<1>{}, $));",
-           batch_size, k_scale, num_experts_per_tok,
-           num_experts_per_tok * k_scale, k_scale);
+           batch_size,
+           k_scale,
+           num_experts_per_tok,
+           num_experts_per_tok * k_scale,
+           k_scale);
   }
   code.e("cute::Tensor mInputScale = cute::make_tensor("
          "cute::make_gmem_ptr(static_cast<float*>("
          "task_desc->input_ptrs[1])), layout_input_scale);");
 
-  // Weight scale tensor [num_experts * ORIG_OUTPUT_SIZE, K/128] (flat)
+  // Weight scale tensor — flat 2D view with strided expert access.
+  // When grid_dim.y > 1, the runtime offsets the base pointer per bid.y.
+  // Row count = (E-1)*orig_output_size + output_size: expert e's rows start
+  // at offset e*orig_output_size, and only output_size rows per expert are
+  // accessible from this CTA's base pointer. Same pattern as TMA GMEM_ROW.
   code.e("cute::Layout layout_weight_scale = cute::make_layout("
          "cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
-         num_experts * orig_output_size, k_scale, k_scale);
+         (num_experts - 1) * orig_output_size + output_size,
+         k_scale,
+         k_scale);
   code.e("cute::Tensor mWeightScale = cute::make_tensor("
          "cute::make_gmem_ptr(static_cast<float*>("
          "task_desc->input_ptrs[3])), layout_weight_scale);");
@@ -2519,7 +2539,9 @@ int TaskRegister::register_moe_fp8_sm100_task(
   // Routing indices [num_experts, batch]
   code.e("cute::Layout layout_routing_indices = cute::make_layout("
          "cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
-         num_experts, batch_size, batch_size);
+         num_experts,
+         batch_size,
+         batch_size);
   code.e("cute::Tensor mRoutingIndices = cute::make_tensor("
          "cute::make_gmem_ptr(static_cast<cute::int32_t*>("
          "task_desc->input_ptrs[4])), layout_routing_indices);");
@@ -2536,8 +2558,11 @@ int TaskRegister::register_moe_fp8_sm100_task(
   code.e("cute::Layout layout_output = cute::make_layout("
          "cute::make_shape($, $, $), "
          "cute::make_stride($, cute::Int<1>{}, $));",
-         batch_size, output_size, num_experts_per_tok,
-         num_experts_per_tok * output_stride, output_stride);
+         batch_size,
+         output_size,
+         num_experts_per_tok,
+         num_experts_per_tok * output_stride,
+         output_stride);
   code.e("cute::Tensor mOutput = cute::make_tensor("
          "cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "task_desc->output_ptrs[0])), layout_output);");

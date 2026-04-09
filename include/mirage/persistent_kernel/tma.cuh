@@ -879,7 +879,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr int MMA_M = 128;
 
       if (param_id == 2) {
-        // TMA_WEIGHT (fp8): inputs are [input_fp8, input_scale, weight_fp8, ...]
+        // TMA_WEIGHT (fp8): inputs are [input_fp8, input_scale, weight_fp8,
+        // ...]
         int const num_experts = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
         int const reduction_size = tensor_desc.dim[2];
@@ -893,7 +894,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),
                                   static_cast<uint32_t>(FP8_BK)};
         size_t smem_repeat_col_fp8 = 1; // FP8_BK is the full tile width
-        // Use uint8_t as the element type (sizeof=1) so fill_tma_desc selects UINT8 format
+        // Use uint8_t as the element type (sizeof=1) so fill_tma_desc selects
+        // UINT8 format
         fill_tma_desc<uint8_t, B, M, S, 2>(tma_desc,
                                            tensor_desc.base_ptr,
                                            gmem_shape,

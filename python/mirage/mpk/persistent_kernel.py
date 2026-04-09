@@ -972,11 +972,11 @@ class PersistentKernel:
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
         tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_fp8,          (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_scale,        (-1, -1, -1), -1, False)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
         tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
         tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
-        tb_graph.new_input(output,              (-1, -1, -1), -1, True)
+        tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale,
              moe_routing_indices, moe_mask, output], tb_graph)
@@ -1012,11 +1012,11 @@ class PersistentKernel:
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
         tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_fp8,          (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_scale,        (-1, -1, -1), -1, False)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
         tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
         tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
-        tb_graph.new_input(output,              (-1, -1, -1), -1, True)
+        tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale,
              moe_routing_indices, moe_mask, output], tb_graph)

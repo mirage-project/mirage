@@ -20,9 +20,9 @@
 #include "tasks/hopper/allreduce.cuh"
 #endif // USE_NVSHMEM
 // Blackwell task impls
-#include "fp8_group_gemm_sm100.cuh"
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
+#include "fp8_group_gemm_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
 #include "mla_dispatch_sm100.cuh"
 #include "mla_prefill_sm100.cuh"
