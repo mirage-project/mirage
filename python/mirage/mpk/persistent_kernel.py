@@ -843,6 +843,31 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "mla_reduce_sm100", params)
 
+    def mla_prefill_layer(
+        self,
+        q_nope: DTensor,   # [S, H, D_CKV]
+        q_pe: DTensor,     # [S, H, D_KPE]
+        ckv: DTensor,      # [S, D_CKV]
+        kpe: DTensor,      # [S, D_KPE]
+        output: DTensor,   # [S, H, D_V]
+        mla_params: tuple, # (num_heads, seq_len, d_ckv, d_kpe, d_v)
+        grid_dim: tuple,   # (H, num_q_blocks, B)
+        block_dim: tuple,  # (256, 1, 1)
+    ):
+        num_heads, seq_len, d_ckv, d_kpe, d_v = mla_params
+        params = [num_heads, seq_len, d_ckv, d_kpe, d_v]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (0, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (0, -1, -1), -1, True)
+        tb_graph.new_input(ckv, (0, -1, -1), -1, True)
+        tb_graph.new_input(kpe, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope, q_pe, ckv, kpe, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_prefill_sm100", params)
+
     # MoE Layers
     def tensor_init_layer(
         self,

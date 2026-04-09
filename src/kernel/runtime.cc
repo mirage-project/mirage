@@ -402,6 +402,18 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.z;
               task.task_metadata.merge_task_offset = bid.y;
             }
+            // Set MLA decode metadata: request_id=batch (bid.y), kv_idx=split
+            // (bid.x)
+            if (task_type == TASK_MLA_DECODE_SM100) {
+              task.task_metadata.request_id = bid.y; // batch_idx
+              task.task_metadata.kv_idx = bid.x;     // split_idx
+            }
+            // Set MLA prefill metadata: request_id=head (bid.x), kv_idx=q_block
+            // (bid.y)
+            if (task_type == TASK_MLA_PREFILL_SM100) {
+              task.task_metadata.request_id = bid.x; // head
+              task.task_metadata.kv_idx = bid.y;     // q_block
+            }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
@@ -1234,6 +1246,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";
   task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
   task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

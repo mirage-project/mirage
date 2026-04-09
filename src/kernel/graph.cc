@@ -670,6 +670,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     // 2 inputs (Oa, La), 1 output (O)
     task_config[op] = std::make_tuple(2, 1, TASK_MLA_REDUCE_SM100, variant_id);
+  } else if (name == "mla_prefill_sm100") {
+    int variant_id = task_register->register_mla_prefill_sm100_task(
+        customized->bgraph, params);
+    // 4 inputs (Q_nope, Q_pe, CKV, KPE), 1 output (O)
+    task_config[op] = std::make_tuple(4, 1, TASK_MLA_PREFILL_SM100, variant_id);
   }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {
