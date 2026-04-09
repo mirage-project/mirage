@@ -9,10 +9,8 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-
-from .manager import RequestMetadataManager
-from .prefix_cache import PagePool, PrefixCache
 from ..mpk.mpk import MPK, MPKMetadata
+from ..mpk import OnlinePinnedRuntime
 from ..mpk.models.graph_builder import MirageModelConfig
 
 
@@ -22,8 +20,8 @@ from ..mpk.models.graph_builder import MirageModelConfig
 class RunnerConfig:
     """Configuration for :class:`ModelRunner`.
 
-    All capacity limits are upper bounds; the actual batch size per step is
-    determined at runtime by :class:`~mirage.engine.RequestMetadataManager`.
+    All capacity limits are upper bounds; the actual batch size per session is
+    determined by the number of requests submitted to the ring buffer.
     """
     model: str
     """HuggingFace model name *or* local model directory."""
@@ -36,6 +34,9 @@ class RunnerConfig:
     max_seq_length: int = 512
     max_num_pages: int = 16
     page_size: int = 4096
+
+    pinned_ring_capacity: int = 8
+    """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""
 
     tensor_parallel_size: int = 1
     """Number of GPUs for tensor parallelism (matches ``mpirun -n`` count)."""
@@ -52,13 +53,12 @@ class RunnerConfig:
 # ── ModelRunner ───────────────────────────────────────────────────────────────
 
 class ModelRunner:
-    """Manages MPK kernel construction and per-step execution.
+    """Manages MPK kernel construction and per-session execution.
 
-    Each :class:`ModelRunner` instance owns the shared *meta tensors* that
-    the kernel and :class:`~mirage.engine.RequestMetadataManager` exchange
-    data through.  Call :meth:`make_manager` to get a manager already wired
-    to those tensors.
-
+    Wraps an :class:`~mirage.mpk.MPK` compiled in ``online_pinned`` mode and
+    exposes an :class:`~mirage.mpk.OnlinePinnedRuntime` for CPU↔GPU ring-buffer
+    communication.  Pass this object to :class:`~mirage.engine.LLMEngine` to
+    drive multi-request generation.
     """
 
     def __init__(
@@ -69,22 +69,23 @@ class ModelRunner:
         self.config = config
 
         # ── Distributed init ──────────────────────────────────────────────
-        self.rank, self.world_size = self._init_distributed(rank) # deprecated, may substitute later
-        torch.cuda.set_device(self.rank) # set device once during modelrunner init
+        self.rank, self.world_size = self._init_distributed(rank)
+        torch.cuda.set_device(self.rank)
         torch.set_default_dtype(torch.bfloat16)
 
-        # ── Meta tensors (shared with kernel and manager) ─────────────────
+        # ── Meta tensors (shared with kernel) ─────────────────────────────
         self.meta_tensors = self._allocate_meta_tensors(config)
 
         # ── Build + compile the MPK ───────────────────────────────────────
         mpk_meta = MPKMetadata(
-            mode="online_test",
+            mode="online_pinned",
             total_num_requests=config.max_num_batched_requests,
             max_seq_length=config.max_seq_length,
             max_num_batched_requests=config.max_num_batched_requests,
             max_num_batched_tokens=config.max_num_batched_tokens,
             max_num_pages=config.max_num_pages,
             page_size=config.page_size,
+            pinned_ring_capacity=config.pinned_ring_capacity,
             world_size=self.world_size,
             rank=self.rank,
             weight_from_model=True,
@@ -96,56 +97,17 @@ class ModelRunner:
         )
         self.mpk = MPK(mpk_meta)
         self.mpk.build()
+        self.runtime = OnlinePinnedRuntime(self.mpk)
         self.tokenizer = self.mpk.tokenizer
         self.mpk.compile(output_dir=config.output_dir)
-
-        # ── Prefix cache (CPU-side LRU KV-page cache) ─────────────────────
-        self.page_pool    = PagePool(config.max_num_pages)
-        self.prefix_cache = PrefixCache(self.page_pool, config.page_size)
-
-    # ── Factory ───────────────────────────────────────────────────────────────
-
-    def make_manager(self) -> RequestMetadataManager:
-        """Return a :class:`RequestMetadataManager` bound to this runner's
-        meta tensors.
-
-        The manager's ``tokens`` / ``prompt_lengths`` writes and its
-        ``output_tokens`` / ``qo_indptr_buffer`` / ``step`` reads all go
-        directly through the tensors the kernel uses.
-
-        Note: MPK.__init__ may allocate a fresh internal buffer for ``step``
-        when the provided tensor's shape[0] < max_num_batched_tokens (see
-        mpk.py:150-152).  We must therefore pass ``self.mpk.step`` — the tensor
-        the kernel actually writes to — rather than the original allocation in
-        meta_tensors, which the kernel would never touch in that case.
-        """
-        mt = self.meta_tensors
-        return RequestMetadataManager(
-            max_num_batched_requests=self.config.max_num_batched_requests,
-            max_num_batched_tokens=self.config.max_num_batched_tokens,
-            max_seq_length=self.config.max_seq_length,
-            page_size=self.config.page_size,
-            tokens=mt["tokens"],
-            prompt_lengths=mt["prompt_lengths"],
-            output_tokens=mt["output_tokens"],
-            qo_indptr_buffer=mt["qo_indptr_buffer"],
-            step=self.mpk.step,
-            prefix_cache=self.prefix_cache,
-            paged_kv_indptr_buffer=mt["paged_kv_indptr_buffer"],
-            paged_kv_indices_buffer=mt["paged_kv_indices_buffer"],
-            paged_kv_last_page_len_buffer=mt["paged_kv_last_page_len_buffer"],
-        )
 
     # ── Execution ─────────────────────────────────────────────────────────────
 
     def init(self, n: int) -> None:
-        """Re-initialize the offline kernel for exactly *n* active requests.
+        """Initialize the persistent kernel for exactly *n* active requests.
 
-        Call this after all *n* requests have been admitted (tokens and
-        prompt_lengths written into meta_tensors) and before the next
-        :meth:`__call__`.  Passing ``n < max_num_batched_requests`` prevents
-        the kernel from trying to process uninitialized empty slots, which
-        would otherwise run them to ``max_seq_length``.
+        Call before :meth:`__call__`.  Passing ``n < max_num_batched_requests``
+        prevents the kernel from trying to process uninitialized empty slots.
         """
         pk = self.mpk.persistent_kernel
         pk.init_func(
@@ -162,15 +124,12 @@ class ModelRunner:
         )
 
     def __call__(self) -> None:
-        """Launch one MPK kernel step.
+        """Launch the MPK persistent kernel.
 
-        Called by :class:`~mirage.engine.LLMEngine` after the manager has
-        admitted pending requests.  The kernel reads prompt tokens from
-        ``meta_tensors["tokens"]`` / ``meta_tensors["prompt_lengths"]``
-        (written by :meth:`~RequestMetadataManager.admit`) and writes
-        generated tokens to ``meta_tensors["output_tokens"]``,
-        ``meta_tensors["qo_indptr_buffer"]``, and ``meta_tensors["step"]``
-        (read back by :meth:`~RequestMetadataManager.collect_outputs`).
+        Blocks until all requests submitted to the ring buffer have been
+        processed.  Intended to run in a background thread so the main thread
+        can concurrently submit requests and poll completions via
+        :attr:`runtime`.
         """
         self.mpk()
 

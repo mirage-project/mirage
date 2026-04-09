@@ -68,6 +68,26 @@ class OnlinePinnedRuntime:
     # Public API
     # ------------------------------------------------------------------
 
+    def load_tokens(
+        self,
+        request_id: int,
+        input_ids: torch.Tensor,
+    ) -> None:
+        """Copy prompt token IDs into the GPU token buffer for this request.
+
+        Must be called before ``submit_request`` so the GPU sees the tokens
+        when it processes the ring entry.
+
+        Parameters
+        ----------
+        request_id : row index into mpk.tokens
+        input_ids  : 1-D int64 tensor of prompt token IDs (CPU or CUDA)
+        """
+        prompt_len = input_ids.shape[0]
+        self._mpk.tokens[request_id, :prompt_len].copy_(input_ids)
+        # copy_() is synchronous by default (non_blocking=False), so the
+        # HtoD transfer is complete before this call returns.
+
     def submit_request(
         self,
         request_id: int,
@@ -76,8 +96,7 @@ class OnlinePinnedRuntime:
     ) -> None:
         """Write one request entry into the CPU→GPU ring.
 
-        The caller is responsible for filling ``mpk.tokens[request_id, :]``
-        with the prompt tokens **before** calling this method.
+        Call ``load_tokens`` first to ensure prompt tokens are in GPU memory.
 
         Parameters
         ----------
