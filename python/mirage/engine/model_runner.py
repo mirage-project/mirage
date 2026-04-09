@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 
 from .manager import RequestMetadataManager
+from .prefix_cache import PagePool, PrefixCache
 from ..mpk.mpk import MPK, MPKMetadata
 from ..mpk.models.graph_builder import MirageModelConfig
 
@@ -77,7 +78,7 @@ class ModelRunner:
 
         # ── Build + compile the MPK ───────────────────────────────────────
         mpk_meta = MPKMetadata(
-            mode="offline",
+            mode="online_test",
             total_num_requests=config.max_num_batched_requests,
             max_seq_length=config.max_seq_length,
             max_num_batched_requests=config.max_num_batched_requests,
@@ -98,6 +99,10 @@ class ModelRunner:
         self.tokenizer = self.mpk.tokenizer
         self.mpk.compile(output_dir=config.output_dir)
 
+        # ── Prefix cache (CPU-side LRU KV-page cache) ─────────────────────
+        self.page_pool    = PagePool(config.max_num_pages)
+        self.prefix_cache = PrefixCache(self.page_pool, config.page_size)
+
     # ── Factory ───────────────────────────────────────────────────────────────
 
     def make_manager(self) -> RequestMetadataManager:
@@ -107,20 +112,54 @@ class ModelRunner:
         The manager's ``tokens`` / ``prompt_lengths`` writes and its
         ``output_tokens`` / ``qo_indptr_buffer`` / ``step`` reads all go
         directly through the tensors the kernel uses.
+
+        Note: MPK.__init__ may allocate a fresh internal buffer for ``step``
+        when the provided tensor's shape[0] < max_num_batched_tokens (see
+        mpk.py:150-152).  We must therefore pass ``self.mpk.step`` — the tensor
+        the kernel actually writes to — rather than the original allocation in
+        meta_tensors, which the kernel would never touch in that case.
         """
         mt = self.meta_tensors
         return RequestMetadataManager(
             max_num_batched_requests=self.config.max_num_batched_requests,
             max_num_batched_tokens=self.config.max_num_batched_tokens,
             max_seq_length=self.config.max_seq_length,
+            page_size=self.config.page_size,
             tokens=mt["tokens"],
             prompt_lengths=mt["prompt_lengths"],
             output_tokens=mt["output_tokens"],
             qo_indptr_buffer=mt["qo_indptr_buffer"],
-            step=mt["step"],
+            step=self.mpk.step,
+            prefix_cache=self.prefix_cache,
+            paged_kv_indptr_buffer=mt["paged_kv_indptr_buffer"],
+            paged_kv_indices_buffer=mt["paged_kv_indices_buffer"],
+            paged_kv_last_page_len_buffer=mt["paged_kv_last_page_len_buffer"],
         )
 
     # ── Execution ─────────────────────────────────────────────────────────────
+
+    def init(self, n: int) -> None:
+        """Re-initialize the offline kernel for exactly *n* active requests.
+
+        Call this after all *n* requests have been admitted (tokens and
+        prompt_lengths written into meta_tensors) and before the next
+        :meth:`__call__`.  Passing ``n < max_num_batched_requests`` prevents
+        the kernel from trying to process uninitialized empty slots, which
+        would otherwise run them to ``max_seq_length``.
+        """
+        pk = self.mpk.persistent_kernel
+        pk.init_func(
+            self.mpk.meta_tensors_ptr,
+            self.mpk.profiler_buffer_ptr,
+            pk.mpi_rank,
+            pk.num_workers,
+            pk.num_local_schedulers,
+            pk.num_remote_schedulers,
+            pk.max_seq_length,
+            n,
+            pk.eos_token_id,
+            pk.allocate_nvshmem_teams,
+        )
 
     def __call__(self) -> None:
         """Launch one MPK kernel step.

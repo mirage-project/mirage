@@ -52,6 +52,8 @@ class MPKMetadata:
     profiling: bool = False
     profiler_tensor: Optional[torch.Tensor] = None
     trace_name: Optional[str] = None
+    # pinned ring buffer capacity (power of 2, MODE_ONLINE_PINNED only)
+    pinned_ring_capacity: int = 8
     # spec decode config
     spec_decode: Optional[str] = None
     spec_decode_config: Optional[object] = None
@@ -146,12 +148,14 @@ class MPK:
                 self.src_step = full_step
             else:
                 self.src_step = args.step
+            self.step = self.src_step
+            # uncomment them if you are using vllm-mpk integration
             # always create a buffer with max number batched tokens
-            if self.src_step.dtype != torch.int32 or self.src_step.shape[0] < self.max_num_batched_tokens:
-                self.need_cpy_step = True
-                self.step = torch.empty(self.max_num_batched_tokens, dtype=torch.int32, device=args.step.device)
-            else:
-                self.step = self.src_step
+            # if self.src_step.dtype != torch.int32 or self.src_step.shape[0] < self.max_num_batched_tokens:
+            #     self.need_cpy_step = True
+            #     self.step = torch.empty(self.max_num_batched_tokens, dtype=torch.int32, device=args.step.device)
+            # else:
+            #     self.step = self.src_step
         
         if args.input_tokens is not None:
             # If input is a slice/view of a larger buffer, get the full buffer
@@ -163,13 +167,14 @@ class MPK:
                 self.src_input_tokens = full_input
             else:
                 self.src_input_tokens = args.input_tokens
-            
+            self.input_tokens = self.src_input_tokens
+            # uncomment them if you are using vllm-mpk integration
             # Always create a buffer with max size
-            if self.src_input_tokens.dtype != torch.int64 or self.src_input_tokens.shape[0] < self.max_num_batched_tokens:
-                self.need_cpy_input = True
-                self.input_tokens = torch.empty(self.max_num_batched_tokens, dtype=torch.int64, device=args.input_tokens.device)
-            else:
-                self.input_tokens = self.src_input_tokens
+            # if self.src_input_tokens.dtype != torch.int64 or self.src_input_tokens.shape[0] < self.max_num_batched_tokens:
+            #     self.need_cpy_input = True
+            #     self.input_tokens = torch.empty(self.max_num_batched_tokens, dtype=torch.int64, device=args.input_tokens.device)
+            # else:
+            #     self.input_tokens = self.src_input_tokens
         self.output_tokens = args.output_tokens
         self.num_new_tokens = args.num_new_tokens
         self.prompt_lengths = args.prompt_lengths
@@ -220,7 +225,8 @@ class MPK:
             profiler_tensor=self.profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=self.spec_decode_config,
-            use_cutlass_kernel=args.use_cutlass_kernel
+            use_cutlass_kernel=args.use_cutlass_kernel,
+            pinned_ring_capacity=args.pinned_ring_capacity,
         )
         meta_tensors = [
             self.step,
@@ -234,6 +240,34 @@ class MPK:
             self.paged_kv_indices_buffer,
             self.paged_kv_last_page_len_buffer,
         ]
+        # Pinned ring buffers for online_pinned mode.
+        # Both CPU and GPU access these arrays; pin_memory() gives a stable
+        # physical address so no DMA copy is needed (zero-copy).
+        if args.mode == "online_pinned":
+            cap = args.pinned_ring_capacity
+            assert cap > 0 and (cap & (cap - 1)) == 0, \
+                f"pinned_ring_capacity must be a power of 2, got {cap}"
+            self.pinned_ring_capacity = cap
+            # CPU→GPU request ring (7 arrays, capacity=cap each)
+            self.pinned_req_ready        = torch.zeros(cap, dtype=torch.int32).pin_memory()
+            self.pinned_req_request_id   = torch.zeros(cap, dtype=torch.int32).pin_memory()
+            self.pinned_req_prompt_len   = torch.zeros(cap, dtype=torch.int32).pin_memory()
+            self.pinned_req_initial_step = torch.zeros(cap, dtype=torch.int32).pin_memory()
+            # GPU→CPU completion ring (3 arrays, capacity=cap each)
+            self.pinned_comp_ready       = torch.zeros(cap, dtype=torch.int32).pin_memory()
+            self.pinned_comp_request_id  = torch.zeros(cap, dtype=torch.int32).pin_memory()
+            self.pinned_comp_final_step  = torch.zeros(cap, dtype=torch.int32).pin_memory()
+            meta_tensors += [
+                self.pinned_req_ready,
+                self.pinned_req_request_id,
+                self.pinned_req_prompt_len,
+                self.pinned_req_initial_step,
+                self.pinned_comp_ready,
+                self.pinned_comp_request_id,
+                self.pinned_comp_final_step,
+            ]
+        else:
+            self.pinned_ring_capacity = 0
         self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         self.profiler_buffer_ptr = (
             self.persistent_kernel.profiler_tensor.data_ptr() if self.persistent_kernel.profiler_tensor is not None else 0

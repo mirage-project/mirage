@@ -113,7 +113,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
+valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn", "online_pinned"}
 
 def _detect_cxx_standard():
     """Use c++20 if the host compiler supports it, otherwise fall back to c++17."""
@@ -211,6 +211,9 @@ def get_compile_command(
         flags = flags + ["-DMODE_ONEPASS"]
     elif mpk.mode == "online_multi_turn":
         flags = flags + ["-DMODE_MULTI_TURN"]
+    elif mpk.mode == "online_pinned":
+        flags = flags + ["-DMODE_ONLINE_PINNED",
+                         f"-DMPK_PINNED_RING_CAPACITY={mpk.pinned_ring_capacity}"]
     else:
         raise ValueError(f"Invalid persistent kernel mode: {mpk.mode}")
 
@@ -279,12 +282,14 @@ class PersistentKernel:
         spec_decode_config: SpecDecodeConfig,
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
+        pinned_ring_capacity: int = 0,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
         self.mode = mode
+        self.pinned_ring_capacity = pinned_ring_capacity
         self.world_size = world_size
         self.mpi_rank = mpi_rank
         self.num_workers = num_workers
