@@ -901,6 +901,81 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MLA_DECODE_SM100: {
+      // MLA uses 3D TMA descriptors with 128B swizzle.
+      // Q tensor: [B*NUM_HEADS, D_K] → 3D TMA (BK=64, B*NUM_HEADS, D_K/BK)
+      // KV tensor: [B*KL, D_K] → 3D TMA (BK=64, B*KL, D_K/BK)
+      //
+      // The kernel loads tiles of shape (BK, NUM_HEADS_or_TILE_S, 1) per TMA
+      // op. cuTensorMapEncodeTiled is called directly since fill_tma_desc's
+      // generic path doesn't handle the MLA-specific layout.
+      constexpr int BK = 64;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+
+      if (param_id == 0) {
+        // Q: global [B*NUM_HEADS, D_K], treat as 3D (BK, B*NUM_HEADS, D_K/BK)
+        int total_rows = tensor_desc.dim[0]; // B*NUM_HEADS
+        int d_k = tensor_desc.dim[1];        // D_K
+        int k_iters = d_k / BK;
+        // Box loads NUM_HEADS rows per TMA op.
+        // For batch>1, total_rows = B*NUM_HEADS but box height = NUM_HEADS (one
+        // batch).
+        // TODO: derive num_heads from tensor metadata when supporting other MLA
+        // configs.
+        int num_heads = 128;
+        // gd: global dims, gs: global byte strides (dim0 stride is implicit
+        // sizeof(T)) gs[0] = row stride in bytes = D_K * sizeof(bf16) gs[1] =
+        // k_iter stride in bytes = BK * sizeof(bf16) = 128
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)num_heads, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      } else if (param_id == 1) {
+        // KV: global [B*KL, D_K], treat as 3D (BK, B*KL, D_K/BK)
+        int total_rows = tensor_desc.dim[0]; // B*KL
+        int d_k = tensor_desc.dim[1];        // D_K
+        int k_iters = d_k / BK;
+        int tile_s = 128; // TILE_S
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)tile_s, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      }
+      break;
+    }
     default:
       assert(false);
   }
@@ -997,6 +1072,18 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_RMS_NORM_HOPPER: {
       // no TMA needed
+      break;
+    }
+    case TASK_MLA_DECODE_SM100: {
+      // Q (input 0) and KV (input 1) each get 1 TMA desc
+      for (size_t param_id = 0; param_id < 2; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MLA_REDUCE_SM100: {
+      // no TMA needed — uses raw pointer reads
       break;
     }
     default:

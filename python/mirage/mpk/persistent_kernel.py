@@ -798,6 +798,51 @@ class PersistentKernel:
         else:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
+    # MLA (Multi-head Latent Attention) Layers
+    def mla_decode_layer(
+        self,
+        q_input: DTensor,         # Q tensor (attached with TMA desc)
+        kv_input: DTensor,        # KV cache tensor (attached with TMA desc)
+        output_partial: DTensor,  # partial O: [B*sk, D_V*NUM_HEADS] float32
+        output_lse: DTensor,      # partial LSE: [B*sk, NUM_HEADS] float32
+        mla_params: tuple,        # (num_heads, d_k, d_v, num_splits, kv_len)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        num_heads, d_k, d_v, num_splits, kv_len = mla_params
+        params = [num_heads, d_k, d_v, num_splits, kv_len]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_input, kv_input, output_partial, output_lse], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_decode_sm100", params)
+
+    def mla_reduce_layer(
+        self,
+        input_partial: DTensor,   # partial O from decode tasks
+        input_lse: DTensor,       # partial LSE from decode tasks
+        output: DTensor,          # final O: [B, NUM_HEADS, D_V] bf16
+        mla_params: tuple,        # (num_heads, d_v, num_splits, d_start, d_count)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        num_heads, d_v, num_splits, d_start, d_count = mla_params
+        params = [num_heads, d_v, num_splits, d_start, d_count]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_partial, input_lse, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_reduce_sm100", params)
+
     # MoE Layers
     def tensor_init_layer(
         self,

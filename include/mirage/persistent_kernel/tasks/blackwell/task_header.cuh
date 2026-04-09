@@ -23,6 +23,8 @@
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
+#include "mla_dispatch_sm100.cuh"
+#include "mla_reduce_sm100.cuh"
 #include "moe_linear_sm100.cuh"
 #include "mul_sum_add_sm100.cuh"
 #include "tasks/common/sampling.cuh"

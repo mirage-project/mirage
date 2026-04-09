@@ -669,6 +669,10 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") < TASK_SM100_TMA_END_TASK) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
+    // MLA Decode (outside SM100_TMA range but needs TMA)
+    code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
     code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
@@ -1228,6 +1232,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";
+  task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
+  task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

@@ -2950,6 +2950,64 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
                                code.to_string());
 }
 
+int TaskRegister::register_mla_decode_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_heads (e.g. 128)
+  // params[1]: d_k (e.g. 576)
+  // params[2]: d_v (e.g. 512)
+  // params[3]: num_splits
+  // params[4]: kv_len
+  assert(params.size() == 5);
+  int num_heads = params[0];
+  int d_k = params[1];
+  int d_v = params[2];
+  int num_splits = params[3];
+  int kv_len = params[4];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_decode_dispatch<$, $, $>(", num_heads, d_k, d_v);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<float*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");
+  code.e("    $f,", 1.0f / sqrtf((float)d_k));
+  code.e("    $,", kv_len);
+  code.e("    task_desc->task_metadata.kv_idx,");     // split_idx
+  code.e("    task_desc->task_metadata.request_id,"); // batch_idx
+  code.e("    $);", num_splits);
+  return register_task_variant(TASK_MLA_DECODE_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_heads (e.g. 128)
+  // params[1]: d_v (e.g. 512)
+  // params[2]: num_splits
+  // params[3]: d_start (start dim index for this task)
+  // params[4]: d_count (num dims this task handles)
+  assert(params.size() == 5);
+  int num_heads = params[0];
+  int d_v = params[1];
+  int num_splits = params[2];
+  int d_start = params[3];
+  int d_count = params[4];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_reduce_sm100_task_impl<$, $>(", num_heads, d_v);
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    $,", num_splits);
+  code.e("    task_desc->task_metadata.request_id,"); // batch_idx
+  code.e("    $,", d_start);
+  code.e("    $);", d_count);
+  return register_task_variant(TASK_MLA_REDUCE_SM100, code.to_string());
+}
+
 int TaskRegister::register_paged_attention_split_kv_hopper_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
