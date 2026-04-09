@@ -408,6 +408,10 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y; // batch_idx
               task.task_metadata.kv_idx = bid.x;     // split_idx
             }
+            // Set MLA reduce metadata: request_id=batch (bid.x)
+            if (task_type == TASK_MLA_REDUCE_SM100) {
+              task.task_metadata.request_id = bid.x; // batch_idx
+            }
             // Set MLA prefill metadata: request_id=head (bid.x), kv_idx=q_block
             // (bid.y)
             if (task_type == TASK_MLA_PREFILL_SM100) {
