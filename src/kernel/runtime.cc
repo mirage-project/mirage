@@ -402,6 +402,22 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.z;
               task.task_metadata.merge_task_offset = bid.y;
             }
+            // Set MLA decode metadata: request_id=batch (bid.y), kv_idx=split
+            // (bid.x)
+            if (task_type == TASK_MLA_DECODE_SM100) {
+              task.task_metadata.request_id = bid.y; // batch_idx
+              task.task_metadata.kv_idx = bid.x;     // split_idx
+            }
+            // Set MLA reduce metadata: request_id=batch (bid.x)
+            if (task_type == TASK_MLA_REDUCE_SM100) {
+              task.task_metadata.request_id = bid.x; // batch_idx
+            }
+            // Set MLA prefill metadata: request_id=head (bid.x), kv_idx=q_block
+            // (bid.y)
+            if (task_type == TASK_MLA_PREFILL_SM100) {
+              task.task_metadata.request_id = bid.x; // head
+              task.task_metadata.kv_idx = bid.y;     // q_block
+            }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
@@ -667,6 +683,10 @@ TaskGraphResult print_task_graph(
     // SM100 Tasks
     code.e("if (task.at(\"task_type\") > TASK_SM100_TMA_START_TASK && "
            "task.at(\"task_type\") < TASK_SM100_TMA_END_TASK) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
+    // MLA Decode (outside SM100_TMA range but needs TMA)
+    code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1228,6 +1248,9 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";
+  task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
+  task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

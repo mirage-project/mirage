@@ -118,6 +118,12 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_paged_attention_split_kv_merge_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_mla_decode_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_mla_reduce_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_mla_prefill_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(
