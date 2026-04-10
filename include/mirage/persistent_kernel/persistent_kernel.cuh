@@ -1185,7 +1185,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                cudaMemcpyHostToDevice);
     printf("MPK: Rank%d finished allocating nvshmem teams\n", mype);
   }
-#else // USE_NVSHMEM
+#else  // USE_NVSHMEM
   int mype = 0;
   int npes = 1;
 #endif // USE_NVSHMEM
@@ -1350,8 +1350,9 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                            cudaEventDisableTiming);
 
   if (is_test_mode) {
-    printf("MPK is running in test mode. The persistent kernel will run exactly "
-           "one pass of the task graph, then terminate.\n");
+    printf(
+        "MPK is running in test mode. The persistent kernel will run exactly "
+        "one pass of the task graph, then terminate.\n");
     printf("Skipping request resource initialization.\n");
   } else {
     init_request_resources();
