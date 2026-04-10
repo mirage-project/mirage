@@ -128,8 +128,9 @@ def test_gateup_silu_down():
     print(f"Test: Full MLP pipeline (gate+up → silu_mul → down+residual)")
     print(f"  B={batch_size}, hidden={hidden_size}, intermediate={intermediate_size}")
 
-    # Weights
-    w_gatedup = torch.randn(fused_outdim, hidden_size, dtype=dtype, device=device) * 0.01
+    # Weights: gate and up separately (will be shuffled)
+    w_gate = torch.randn(intermediate_size, hidden_size, dtype=dtype, device=device) * 0.01
+    w_up = torch.randn(intermediate_size, hidden_size, dtype=dtype, device=device) * 0.01
     w_down = torch.randn(hidden_size, intermediate_size, dtype=dtype, device=device) * 0.01
 
     # Input and residual
@@ -142,10 +143,9 @@ def test_gateup_silu_down():
     mlp_out = torch.zeros(batch_size, hidden_size, dtype=dtype, device=device)
 
     # PyTorch reference
-    ref_mid = (input_act.float() @ w_gatedup.float().T)
-    gate = ref_mid[:, :intermediate_size]
-    up = ref_mid[:, intermediate_size:]
-    ref_silu = torch.nn.functional.silu(gate) * up
+    ref_gate = input_act.float() @ w_gate.float().T
+    ref_up = input_act.float() @ w_up.float().T
+    ref_silu = torch.nn.functional.silu(ref_gate) * ref_up
     ref_out = (ref_silu @ w_down.float().T + residual.float()).to(dtype)
 
     # Build PersistentKernel
@@ -161,7 +161,8 @@ def test_gateup_silu_down():
     pk = PersistentKernel(**params)
 
     input_dt = pk.attach_input(input_act, name="input")
-    w_gatedup_dt = pk.attach_input(w_gatedup, name="w_gatedup")
+    w_gate_dt = pk.attach_input(w_gate, name="w_gate")
+    w_up_dt = pk.attach_input(w_up, name="w_up")
     w_down_dt = pk.attach_input(w_down, name="w_down")
     residual_dt = pk.attach_input(residual, name="residual")
     mlp_mid_dt = pk.attach_input(mlp_mid, name="mlp_mid")
@@ -170,6 +171,14 @@ def test_gateup_silu_down():
 
     block_dim = (256, 1, 1) if pk.target_cc >= 90 else (128, 1, 1)
     num_tasks_gatedup = grid_for_linear(fused_outdim)
+
+    # shuffle_tensors interleaves gate and up weight rows
+    w_gatedup_dt = pk.shuffle_tensors(
+        inputs=[w_gate_dt, w_up_dt],
+        shuffled_dim=0,
+        num_groups=num_tasks_gatedup // 2,
+        name="w_gatedup",
+    )
 
     # Layer 1: Gate+Up linear
     pk.linear_layer(
@@ -238,8 +247,9 @@ def test_gateup_silu():
     print(f"Test: Gate+Up linear + SiLU-Mul")
     print(f"  B={batch_size}, hidden={hidden_size}, intermediate={intermediate_size}")
 
-    # Weights
-    w_gatedup = torch.randn(fused_outdim, hidden_size, dtype=dtype, device=device) * 0.01
+    # Weights: gate_proj and up_proj separately (will be shuffled)
+    w_gate = torch.randn(intermediate_size, hidden_size, dtype=dtype, device=device) * 0.01
+    w_up = torch.randn(intermediate_size, hidden_size, dtype=dtype, device=device) * 0.01
 
     # Input
     input_act = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
@@ -248,14 +258,19 @@ def test_gateup_silu():
     mlp_mid = torch.zeros(batch_size, fused_outdim, dtype=dtype, device=device)
     silu_mul_out = torch.zeros(batch_size, intermediate_size, dtype=dtype, device=device)
 
-    # PyTorch reference
-    ref_mid = input_act.float() @ w_gatedup.float().T
-    gate = ref_mid[:, :intermediate_size]
-    up = ref_mid[:, intermediate_size:]
-    ref_silu = (torch.nn.functional.silu(gate) * up).to(dtype)
+    # PyTorch reference: gate and up are computed from the SHUFFLED weight,
+    # but since shuffle interleaves row groups, the final matmul result is the same —
+    # the silu_mul kernel just reads gate/up from interleaved positions.
+    # For the reference, compute gate and up projections directly:
+    ref_gate = (input_act.float() @ w_gate.float().T)
+    ref_up = (input_act.float() @ w_up.float().T)
+    ref_silu = (torch.nn.functional.silu(ref_gate) * ref_up).to(dtype)
     torch.cuda.synchronize()
 
     # Build PersistentKernel
+    qo_indptr_buffer = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    qo_indptr_buffer[batch_size] = batch_size
+
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params["test_mode"] = True
@@ -268,17 +283,28 @@ def test_gateup_silu():
     pk = PersistentKernel(**params)
 
     input_dt = pk.attach_input(input_act, name="input")
-    w_dt = pk.attach_input(w_gatedup, name="w_gatedup")
+    w_gate_dt = pk.attach_input(w_gate, name="w_gate")
+    w_up_dt = pk.attach_input(w_up, name="w_up")
     mlp_mid_dt = pk.attach_input(mlp_mid, name="mlp_mid")
     silu_mul_dt = pk.attach_input(silu_mul_out, name="silu_mul_out")
 
     block_dim = (256, 1, 1) if pk.target_cc >= 90 else (128, 1, 1)
     num_tasks = grid_for_linear(fused_outdim)
 
+    # shuffle_tensors interleaves gate and up weight rows so that each CTA's
+    # output slice contains matching gate/up pairs for silu_mul.
+    # This matches demo/qwen3/demo.py's usage.
+    w_gatedup_dt = pk.shuffle_tensors(
+        inputs=[w_gate_dt, w_up_dt],
+        shuffled_dim=0,
+        num_groups=num_tasks // 2,
+        name="w_gatedup",
+    )
+
     # Layer 1: Gate+Up linear
     pk.linear_layer(
         input=input_dt,
-        weight=w_dt,
+        weight=w_gatedup_dt,
         output=mlp_mid_dt,
         grid_dim=(num_tasks, 1, 1),
         block_dim=block_dim,
@@ -319,5 +345,5 @@ def test_gateup_silu():
 
 if __name__ == "__main__":
     test_gateup_only()
-    # test_gateup_silu()
-    # test_gateup_silu_down()
+    test_gateup_silu()
+    test_gateup_silu_down()
