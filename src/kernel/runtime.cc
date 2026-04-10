@@ -421,16 +421,16 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.y;     // q_block
             }
             // MTP decode: grid=(sk, num_head_groups, B)
-            // request_id=gi (head_group from bid.y), kv_idx=si (split from bid.x)
-            // expert_offset stores hpb for TMA box dimension
+            // request_id=gi (head_group from bid.y), kv_idx=si (split from
+            // bid.x) expert_offset stores hpb for TMA box dimension
             if (task_type == TASK_MLA_MTP_DECODE_SM100) {
-              task.task_metadata.kv_idx = bid.x;      // si (split_idx)
-              task.task_metadata.request_id = bid.y;   // gi (head_group)
+              task.task_metadata.kv_idx = bid.x;     // si (split_idx)
+              task.task_metadata.request_id = bid.y; // gi (head_group)
             }
             // MTP reduce: grid=(D_V/RD_DV, num_head_groups, B)
             if (task_type == TASK_MLA_MTP_REDUCE_SM100) {
-              task.task_metadata.kv_idx = bid.x;      // dv_block_idx
-              task.task_metadata.request_id = bid.y;   // gi (head_group)
+              task.task_metadata.kv_idx = bid.x;     // dv_block_idx
+              task.task_metadata.request_id = bid.y; // gi (head_group)
             }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =

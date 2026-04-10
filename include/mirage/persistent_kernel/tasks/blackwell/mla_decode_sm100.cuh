@@ -61,7 +61,6 @@ __device__ __noinline__ void mla_decode_sm100_task_impl(
 ) {
   using namespace kernel::sm100_ptx;
 
-
   int const tid = threadIdx.x;
   if (tid >= MLA_TB) {
     return; // guard for MPK's 256-thread workers
