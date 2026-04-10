@@ -113,6 +113,85 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
+TEST_HARD_CODE = """
+#include <Python.h>
+#include <cuda_runtime.h>
+
+static PyObject *init_func(PyObject *self, PyObject *args) {
+  // Same signature as non-test init_func: parse all parameters,
+  // but pass empty meta_tensors (test mode allocates its own buffers).
+  PyObject *meta_list, *py_profiler_buffer;
+  std::vector<void*> meta_tensors;
+  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
+  long long eos_token_id;
+  int allocate_nvshmem_teams;
+  void *profiler_buffer;
+
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLi", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams)) {
+    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
+    return NULL;
+  }
+
+  profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
+
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams);
+
+  Py_RETURN_NONE;
+}
+
+static PyObject *init_request_func(PyObject *self, PyObject *args) {
+  Py_RETURN_NONE;
+}
+
+static PyObject *launch_func(PyObject *self, PyObject *args) {
+  PyObject *py_stream;
+  cudaStream_t stream;
+  if (!PyArg_ParseTuple(args, "O", &py_stream)) {
+    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
+    return NULL;
+  }
+  stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
+  launch_persistent_kernel(stream);
+
+  Py_RETURN_NONE;
+}
+
+static PyObject *finalize_func(PyObject *self, PyObject *args) {
+  finalize_persistent_kernel();
+
+  Py_RETURN_NONE;
+}
+
+static PyMethodDef ModuleMethods[] = {
+  {"init_func", init_func, METH_VARARGS, "initialize persistent kernel (test mode)"},
+  {"init_request_func", init_request_func, METH_VARARGS, "no-op in test mode"},
+  {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
+  {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
+  {NULL, NULL, 0, NULL} // sentinel
+};
+
+static struct PyModuleDef ModuleDef = {
+  PyModuleDef_HEAD_INIT,
+  "__mirage_launcher",
+  NULL, //documentation
+  -1, //size
+  ModuleMethods,
+  NULL, // m_slots
+  NULL, // m_traverse
+  NULL, // m_clear
+  NULL  // m_free
+};
+
+PyMODINIT_FUNC PyInit___mirage_launcher(void) {
+  PyObject *m = PyModule_Create(&ModuleDef);
+  if(m == NULL) {
+    return NULL;
+  }
+  PyModule_AddFunctions(m, ModuleMethods);
+  return m;
+}
+"""
+
 valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
 
 def _detect_cxx_standard():
@@ -148,6 +227,7 @@ def get_compile_command(
     num_local_schedulers=None,
     num_remote_schedulers=None,
     use_cutlass_kernel=True,
+    test_mode=False,
 ):
     max_worker_per_scheduler = 128
     if num_workers != None and num_local_schedulers != None and num_remote_schedulers != None:
@@ -201,6 +281,8 @@ def get_compile_command(
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
 
+    if test_mode:
+        flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
         flags = flags + ["-DMODE_OFFLINE"]
     elif mpk.mode == "online":
@@ -279,9 +361,12 @@ class PersistentKernel:
         spec_decode_config: SpecDecodeConfig,
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
+        test_mode: bool = False,
     ):
         self.__finalized__ = False
         self._is_compiled = False
+        self.test_mode = test_mode
+
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
         self.mode = mode
@@ -311,10 +396,20 @@ class PersistentKernel:
         }
         self.allocate_nvshmem_teams = 0
         # determine total number of requests for offline serving
-        self.total_num_requests = meta_tensors["tokens"].shape[0]
-        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
-        # Check tensor shapes
+
+        if test_mode:
+            # Skip all following checks
+            self.total_num_requests = 1
+            # Meta tensor is only used by e2e runtime, or attention layer.
+            # Currently we don't support testing attention kernels in test mode, leave it for future work.
+            assert self.meta_tensors is None, "meta_tensors is not yet supported in test mode"
+            return
+
+        self.total_num_requests = meta_tensors["tokens"].shape[0]
+
+        # Checks
+        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
@@ -326,7 +421,7 @@ class PersistentKernel:
         assert paged_kv_indices_buffer.shape[0] <= self.max_num_pages, f"paged_kv_indices_buffer.shape: {paged_kv_indices_buffer.shape}, max_num_pages: {self.max_num_pages}"
         paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer"]
         assert paged_kv_last_page_len_buffer.shape[0] <= self.max_num_batched_requests, f"paged_kv_last_page_len_buffer.shape: {paged_kv_last_page_len_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
-        
+
         # check type of meta_tensors
         assert self.meta_tensors["tokens"].dtype == torch.int64, f"tokens.dtype: {self.meta_tensors['tokens'].dtype}"
         assert self.meta_tensors["input_tokens"].dtype == torch.int64, f"input_tokens.dtype: {self.meta_tensors['input_tokens'].dtype}"
@@ -337,6 +432,28 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
+    
+    @classmethod
+    def get_default_init_parameters(cls):
+        return {
+            "mode": "offline",
+            "world_size": 1,
+            "mpi_rank": 0,
+            "num_workers": 1,
+            "num_local_schedulers": 4,
+            "num_remote_schedulers": 0,
+            "max_seq_length": 1,
+            "max_num_batched_requests": 1,
+            "max_num_batched_tokens": 1,
+            "max_num_pages": 1,
+            "page_size": 1,
+            "meta_tensors": None,
+            "profiler_tensor": None,
+            "trace_name": "test_trace",
+            "spec_decode_config": None,
+            "use_cutlass_kernel": False,
+            "eos_token_id": -1,
+        }
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -1068,12 +1185,14 @@ class PersistentKernel:
         assert moe_mask.num_dims == 1
         assert output.num_dims == 3
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
-        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
-        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
-        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
-        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        # Note: store_in_dmem=True for all inputs to work around a TBGraph
+        # segfault with 3D tensors when store_in_dmem=False.
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, True)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, True)
         tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale,
@@ -1108,12 +1227,14 @@ class PersistentKernel:
         assert moe_mask.num_dims == 1
         assert output.num_dims == 3
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
-        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
-        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
-        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
-        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        # Note: store_in_dmem=True for all inputs to work around a TBGraph
+        # segfault with 3D tensors when store_in_dmem=False.
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, True)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, True)
         tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale,
@@ -1604,8 +1725,9 @@ class PersistentKernel:
             
         with open(json_file_path, "w") as f:
             f.write(results["json_file"])
+        hard_code = TEST_HARD_CODE if self.test_mode else HARD_CODE
         with open(cuda_code_path, "w") as f:
-            f.write(results["cuda_code"] + HARD_CODE)
+            f.write(results["cuda_code"] + hard_code)
             
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
@@ -1716,9 +1838,10 @@ class PersistentKernel:
             profiling=True if self.profiler_tensor is not None else False,
             use_nvshmem=self.use_nvshmem,
             num_workers=self.num_workers,
-            num_local_schedulers=self.num_local_schedulers, 
+            num_local_schedulers=self.num_local_schedulers,
             num_remote_schedulers=self.num_remote_schedulers,
             use_cutlass_kernel=self.use_cutlass_kernel,
+            test_mode=self.test_mode,
         )
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)
@@ -1735,39 +1858,53 @@ class PersistentKernel:
         self.finalize_func = getattr(mod, "finalize_func")
         print("Finished megakernel compilation...")
 
-        #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
-        meta_tensors = list()
-        meta_tensors.append(self.meta_tensors["step"])
-        meta_tensors.append(self.meta_tensors["tokens"])
-        meta_tensors.append(self.meta_tensors["input_tokens"])
-        meta_tensors.append(self.meta_tensors["output_tokens"])
-        meta_tensors.append(self.meta_tensors["num_new_tokens"])
-        meta_tensors.append(self.meta_tensors["prompt_lengths"])
-        meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_indptr_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_indices_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_last_page_len_buffer"])
-        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
-        profiler_buffer_ptr = (
-            self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
-        )
-        self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
-        self.init_func(
-            meta_tensors_ptr,
-            profiler_buffer_ptr,
-            self.mpi_rank,
-            self.num_workers,
-            self.num_local_schedulers,
-            self.num_remote_schedulers,
-            self.max_seq_length,
-            self.total_num_requests,
-            self.eos_token_id,
-            self.allocate_nvshmem_teams,
-        )
+        if self.test_mode:
+            # Test mode: same init signature, but pass empty meta-tensors.
+            # The C++ side (MPK_TEST_MODE) allocates its own runtime buffers.
+            self.init_func(
+                [],  # empty meta_tensors
+                0,   # null profiler_buffer
+                self.mpi_rank,
+                self.num_workers,
+                self.num_local_schedulers,
+                self.num_remote_schedulers,
+                self.max_seq_length,
+                self.total_num_requests,
+                self.eos_token_id,
+                self.allocate_nvshmem_teams,
+            )
+        else:
+            #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
+            meta_tensors = list()
+            meta_tensors.append(self.meta_tensors["step"])
+            meta_tensors.append(self.meta_tensors["tokens"])
+            meta_tensors.append(self.meta_tensors["input_tokens"])
+            meta_tensors.append(self.meta_tensors["output_tokens"])
+            meta_tensors.append(self.meta_tensors["num_new_tokens"])
+            meta_tensors.append(self.meta_tensors["prompt_lengths"])
+            meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
+            meta_tensors.append(self.meta_tensors["paged_kv_indptr_buffer"])
+            meta_tensors.append(self.meta_tensors["paged_kv_indices_buffer"])
+            meta_tensors.append(self.meta_tensors["paged_kv_last_page_len_buffer"])
+            meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
+            profiler_buffer_ptr = (
+                self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
+            )
+            self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
+            self.init_func(
+                meta_tensors_ptr,
+                profiler_buffer_ptr,
+                self.mpi_rank,
+                self.num_workers,
+                self.num_local_schedulers,
+                self.num_remote_schedulers,
+                self.max_seq_length,
+                self.total_num_requests,
+                self.eos_token_id,
+                self.allocate_nvshmem_teams,
+            )
 
         self._is_compiled = True
-
-        # self.call_func = getattr(mod, "call_func")
 
     def __call__(self, **kwargs):
         stream = kwargs.get("default_stream", None)
@@ -1799,6 +1936,18 @@ class PersistentKernel:
             export_to_perfetto_trace(
                 self.profiler_tensor, trace_name
             )
+
+    def run(self):
+        """Test-mode execution: launch the task graph once and synchronize.
+
+        Input/output tensors must be pre-attached via attach_input() before
+        compile(). After run() returns, the output tensors contain the results.
+        """
+        assert self.test_mode, "run() is only available in test mode"
+        assert self._is_compiled, "Must call compile() before run()"
+        stream = torch.cuda.current_stream()
+        stream_ptr = int(stream.cuda_stream)
+        self.launch_func(stream_ptr)
 
     def __del__(self):
         if not self.__finalized__:

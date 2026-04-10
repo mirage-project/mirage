@@ -884,6 +884,28 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
+#ifdef MPK_TEST_MODE
+        // Test mode: run task graph exactly once, then terminate.
+        // iteration_num stays at 1 throughout the single pass so that
+        // event counter thresholds (num_triggers * iteration_num) are
+        // consistent: each event fires exactly num_triggers times.
+        if (iteration_num > 0) {
+          printf("[SCHD] Single pass finished, terminating schedulers.\n");
+          terminate_schedulers(config);
+        } else {
+          size_t last_task_id =
+              worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
+          st_relaxed_gpu_u64(
+              &config.worker_queues[next_worker]
+                                   [last_task_id % config.per_worker_queue_len],
+              compute_task_id(iteration_num + 1, 1 /*begin_task_graph*/));
+          atom_add_release_gpu_u64(
+              &config.worker_queue_last_ready_task_id[next_worker], 1);
+          next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
+                                                            : next_worker + 1;
+        }
+#else // MPK_TEST_MODE
+
         // Check if we want to continue
 #ifdef MODE_ONLINE_NOTOKEN
         if (!prepare_next_batch(config, iteration_num))
@@ -918,6 +940,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
+#endif // MPK_TEST_MODE
       } else if (e.event_type == EVENT_LAUNCH_DEPENDENT_TASKS) {
         iteration_num = iteration_num + 1;
         // assign event in a round-robin fashion
@@ -1096,6 +1119,23 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int total_num_requests,
                                        long long eos_token_id,
                                        int allocate_nvshmem_teams) {
+#ifdef MPK_TEST_MODE
+  // Test mode: meta_tensors may be empty or contain null pointers.
+  // Allocate runtime buffers that task kernels read (e.g., qo_indptr_buffer).
+  // You should register your test buffers here, depending on what
+  // layers you are testing.
+  global_runtime_config.step = nullptr;
+  global_runtime_config.tokens = nullptr;
+  global_runtime_config.input_tokens = nullptr;
+  global_runtime_config.output_tokens = nullptr;
+  global_runtime_config.new_token_nums = nullptr;
+  global_runtime_config.prompt_length = nullptr;
+  global_runtime_config.qo_indptr_buffer = nullptr;
+  global_runtime_config.paged_kv_indptr_buffer = nullptr;
+  global_runtime_config.paged_kv_indices_buffer = nullptr;
+  global_runtime_config.paged_kv_last_page_len_buffer = nullptr;
+  global_runtime_config.profiler_buffer = nullptr;
+#else // MPK_TEST_MODE
   assert(meta_tensors.size() == 10);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
@@ -1112,12 +1152,14 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       static_cast<int *>(meta_tensors[8]);
   global_runtime_config.paged_kv_last_page_len_buffer =
       static_cast<int *>(meta_tensors[9]);
+  global_runtime_config.profiler_buffer = profiler_buffer;
+#endif // MPK_TEST_MODE
+
+  global_runtime_config.max_seq_length = max_seq_length;
+  global_runtime_config.eos_token_id = eos_token_id;
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
-  global_runtime_config.max_seq_length = max_seq_length;
-  global_runtime_config.eos_token_id = eos_token_id;
-  global_runtime_config.profiler_buffer = profiler_buffer;
   int num_schedulers = num_local_schedulers + num_remote_schedulers;
 
   // Initialize nvshmem
@@ -1161,10 +1203,10 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                cudaMemcpyHostToDevice);
     printf("MPK: Rank%d finished allocating nvshmem teams\n", mype);
   }
-#else
+#else // USE_NVSHMEM
   int mype = 0;
   int npes = 1;
-#endif
+#endif // USE_NVSHMEM
 
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   global_runtime_config.request_ids =
@@ -1325,7 +1367,9 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
                            cudaEventDisableTiming);
 
+#ifndef MPK_TEST_MODE
   init_request_resources();
+#endif
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
