@@ -3355,6 +3355,77 @@ int TaskRegister::register_mla_prefill_sm100_task(
   return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
 }
 
+int TaskRegister::register_mla_mtp_decode_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_head_groups
+  // params[1]: q_len
+  // params[2]: kv_len
+  // params[3]: num_splits (sk)
+  assert(params.size() == 4);
+  int num_head_groups = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  // Compute single_tile: true when each split handles exactly 1 KV tile
+  int kvt = (kv_len + 128 - 1) / 128; // TILE_S = 128
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // Template dispatch on SINGLE_TILE
+  if (single_tile) {
+    code.e("kernel::mla_mtp_decode_sm100_task_impl<true>(");
+  } else {
+    code.e("kernel::mla_mtp_decode_sm100_task_impl<false>(");
+  }
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),"); // Oa
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");       // La
+  code.e("    $f,", 1.0f / sqrtf(576.0f));                             // ss
+  code.e("    $,", kv_len);
+  code.e("    $,", num_splits);
+  code.e("    $,", num_head_groups);
+  code.e("    $,", q_len);
+  // gi, si, bi from task metadata
+  code.e("    task_desc->task_metadata.request_id,"); // gi (head_group)
+  code.e("    task_desc->task_metadata.kv_idx,");     // si (split_idx)
+  code.e("    0);");                                  // bi (batch=0 for BS=1)
+  return register_task_variant(TASK_MLA_MTP_DECODE_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_head_groups
+  // params[1]: q_len
+  // params[2]: num_splits (sk)
+  // params[3]: rd_dv (D_V dims per block)
+  assert(params.size() == 4);
+  int num_head_groups = params[0];
+  int q_len = params[1];
+  int num_splits = params[2];
+  int rd_dv = params[3];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // 256 threads for MPK workers (default template is 512 for standalone)
+  code.e("kernel::mla_mtp_reduce_sm100_task_impl<256>(");
+  code.e(
+      "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Oa
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");    // La
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");   // O
+  code.e("    $,", num_splits);
+  code.e("    $,", num_head_groups);
+  code.e("    $,", q_len);
+  // dv_base, gi, bi from task metadata
+  code.e("    task_desc->task_metadata.kv_idx * $,", rd_dv); // dv_base
+  code.e("    task_desc->task_metadata.request_id,");        // gi
+  code.e("    0);");                                         // bi (batch=0)
+  return register_task_variant(TASK_MLA_MTP_REDUCE_SM100, code.to_string());
+}
 int TaskRegister::register_paged_attention_split_kv_hopper_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads

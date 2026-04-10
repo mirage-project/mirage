@@ -25,6 +25,7 @@
 #include "fp8_group_gemm_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
 #include "mla_dispatch_sm100.cuh"
+#include "mla_mtp_decode_sm100.cuh"
 #include "mla_prefill_sm100.cuh"
 #include "mla_reduce_sm100.cuh"
 #include "moe_linear_sm100.cuh"

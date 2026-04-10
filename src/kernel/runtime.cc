@@ -420,6 +420,18 @@ void register_mugraph(
               task.task_metadata.request_id = bid.x; // head
               task.task_metadata.kv_idx = bid.y;     // q_block
             }
+            // MTP decode: grid=(sk, num_head_groups, B)
+            // request_id=gi (head_group from bid.y), kv_idx=si (split from
+            // bid.x) expert_offset stores hpb for TMA box dimension
+            if (task_type == TASK_MLA_MTP_DECODE_SM100) {
+              task.task_metadata.kv_idx = bid.x;     // si (split_idx)
+              task.task_metadata.request_id = bid.y; // gi (head_group)
+            }
+            // MTP reduce: grid=(D_V/RD_DV, num_head_groups, B)
+            if (task_type == TASK_MLA_MTP_REDUCE_SM100) {
+              task.task_metadata.kv_idx = bid.x;     // dv_block_idx
+              task.task_metadata.request_id = bid.y; // gi (head_group)
+            }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
@@ -687,8 +699,9 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") < TASK_SM100_TMA_END_TASK) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
-    // MLA Decode (outside SM100_TMA range but needs TMA)
-    code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100) {");
+    // MLA kernels (outside SM100_TMA range but need TMA)
+    code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1253,6 +1266,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
   task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
   task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
+  task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

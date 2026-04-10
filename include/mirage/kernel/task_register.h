@@ -129,6 +129,10 @@ public:
                                      std::vector<int> const &params);
   int register_mla_prefill_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
+  int register_mla_mtp_decode_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(
