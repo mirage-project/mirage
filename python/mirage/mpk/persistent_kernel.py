@@ -24,12 +24,18 @@ HARD_CODE = """
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
-  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
+  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
+  int max_seq_length, total_num_requests;
   long long eos_token_id;
-  int allocate_nvshmem_teams;
+  int allocate_nvshmem_teams, is_test_mode;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLi", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams)) {
+  if (!PyArg_ParseTuple(args, 
+      "OOiiiiiiLii", 
+      &meta_list, &py_profiler_buffer, 
+      &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, 
+      &eos_token_id, 
+      &allocate_nvshmem_teams, &is_test_mode)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -44,7 +50,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor) {
+    if(!tensor && !is_test_mode) {
       PyErr_Format(PyExc_TypeError, "Failed to convert item %d (meta) to void pointer", i);
       return NULL;
     }
@@ -52,15 +58,8 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, is_test_mode);
 
-  Py_RETURN_NONE;
-}
-
-static PyObject *init_request_func(PyObject *self, PyObject *args) {
-  Py_BEGIN_ALLOW_THREADS
-  init_request_resources();
-  Py_END_ALLOW_THREADS
   Py_RETURN_NONE;
 }
 
@@ -85,86 +84,6 @@ static PyObject *finalize_func(PyObject *self, PyObject *args) {
 
 static PyMethodDef ModuleMethods[] = {
   {"init_func", init_func, METH_VARARGS, "initialize persistent kernel"},
-  {"init_request_func", init_request_func, METH_VARARGS, "initialize request resources"},
-  {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
-  {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
-  {NULL, NULL, 0, NULL} // sentinel
-};
-
-static struct PyModuleDef ModuleDef = {
-  PyModuleDef_HEAD_INIT,
-  "__mirage_launcher",
-  NULL, //documentation
-  -1, //size
-  ModuleMethods,
-  NULL, // m_slots
-  NULL, // m_traverse
-  NULL, // m_clear
-  NULL  // m_free
-};
-
-PyMODINIT_FUNC PyInit___mirage_launcher(void) {
-  PyObject *m = PyModule_Create(&ModuleDef);
-  if(m == NULL) {
-    return NULL;
-  }
-  PyModule_AddFunctions(m, ModuleMethods);
-  return m;
-}
-"""
-
-TEST_HARD_CODE = """
-#include <Python.h>
-#include <cuda_runtime.h>
-
-static PyObject *init_func(PyObject *self, PyObject *args) {
-  // Same signature as non-test init_func: parse all parameters,
-  // but pass empty meta_tensors (test mode allocates its own buffers).
-  PyObject *meta_list, *py_profiler_buffer;
-  std::vector<void*> meta_tensors;
-  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
-  long long eos_token_id;
-  int allocate_nvshmem_teams;
-  void *profiler_buffer;
-
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLi", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams)) {
-    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
-    return NULL;
-  }
-
-  profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
-
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams);
-
-  Py_RETURN_NONE;
-}
-
-static PyObject *init_request_func(PyObject *self, PyObject *args) {
-  Py_RETURN_NONE;
-}
-
-static PyObject *launch_func(PyObject *self, PyObject *args) {
-  PyObject *py_stream;
-  cudaStream_t stream;
-  if (!PyArg_ParseTuple(args, "O", &py_stream)) {
-    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
-    return NULL;
-  }
-  stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
-  launch_persistent_kernel(stream);
-
-  Py_RETURN_NONE;
-}
-
-static PyObject *finalize_func(PyObject *self, PyObject *args) {
-  finalize_persistent_kernel();
-
-  Py_RETURN_NONE;
-}
-
-static PyMethodDef ModuleMethods[] = {
-  {"init_func", init_func, METH_VARARGS, "initialize persistent kernel (test mode)"},
-  {"init_request_func", init_request_func, METH_VARARGS, "no-op in test mode"},
   {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
   {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
   {NULL, NULL, 0, NULL} // sentinel
@@ -401,9 +320,6 @@ class PersistentKernel:
         if test_mode:
             # Skip all following checks
             self.total_num_requests = 1
-            # Meta tensor is only used by e2e runtime, or attention layer.
-            # Currently we don't support testing attention kernels in test mode, leave it for future work.
-            assert self.meta_tensors is None, "meta_tensors is not yet supported in test mode"
             return
 
         self.total_num_requests = meta_tensors["tokens"].shape[0]
@@ -447,7 +363,7 @@ class PersistentKernel:
             "max_num_batched_tokens": 1,
             "max_num_pages": 1,
             "page_size": 1,
-            "meta_tensors": None,
+            "meta_tensors": dict(),
             "profiler_tensor": None,
             "trace_name": "test_trace",
             "spec_decode_config": None,
@@ -1725,7 +1641,7 @@ class PersistentKernel:
             
         with open(json_file_path, "w") as f:
             f.write(results["json_file"])
-        hard_code = TEST_HARD_CODE if self.test_mode else HARD_CODE
+        hard_code = HARD_CODE
         with open(cuda_code_path, "w") as f:
             f.write(results["cuda_code"] + hard_code)
             
@@ -1854,55 +1770,48 @@ class PersistentKernel:
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
-        self.init_request_func = getattr(mod, "init_request_func")
         self.finalize_func = getattr(mod, "finalize_func")
         print("Finished megakernel compilation...")
 
-        if self.test_mode:
-            # Test mode: same init signature, but pass empty meta-tensors.
-            # The C++ side (MPK_TEST_MODE) allocates its own runtime buffers.
-            self.init_func(
-                [],  # empty meta_tensors
-                0,   # null profiler_buffer
-                self.mpi_rank,
-                self.num_workers,
-                self.num_local_schedulers,
-                self.num_remote_schedulers,
-                self.max_seq_length,
-                self.total_num_requests,
-                self.eos_token_id,
-                self.allocate_nvshmem_teams,
-            )
-        else:
-            #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
-            meta_tensors = list()
-            meta_tensors.append(self.meta_tensors["step"])
-            meta_tensors.append(self.meta_tensors["tokens"])
-            meta_tensors.append(self.meta_tensors["input_tokens"])
-            meta_tensors.append(self.meta_tensors["output_tokens"])
-            meta_tensors.append(self.meta_tensors["num_new_tokens"])
-            meta_tensors.append(self.meta_tensors["prompt_lengths"])
-            meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
-            meta_tensors.append(self.meta_tensors["paged_kv_indptr_buffer"])
-            meta_tensors.append(self.meta_tensors["paged_kv_indices_buffer"])
-            meta_tensors.append(self.meta_tensors["paged_kv_last_page_len_buffer"])
-            meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
-            profiler_buffer_ptr = (
-                self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
-            )
-            self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
-            self.init_func(
-                meta_tensors_ptr,
-                profiler_buffer_ptr,
-                self.mpi_rank,
-                self.num_workers,
-                self.num_local_schedulers,
-                self.num_remote_schedulers,
-                self.max_seq_length,
-                self.total_num_requests,
-                self.eos_token_id,
-                self.allocate_nvshmem_teams,
-            )
+        expected_order = [
+            "step",
+            "tokens",
+            "input_tokens",
+            "output_tokens",
+            "num_new_tokens",
+            "prompt_lengths",
+            "qo_indptr_buffer",
+            "paged_kv_indptr_buffer",
+            "paged_kv_indices_buffer",
+            "paged_kv_last_page_len_buffer",
+        ]
+        meta_tensors_ptr = []
+        for key in expected_order:
+            if key not in self.meta_tensors:
+                if self.test_mode:
+                    # In test mode, we can allow missing meta tensors and pass null pointer
+                    meta_tensors_ptr.append(0)  
+                else:
+                  raise ValueError(f"Missing meta tensor: {key}")
+            else:
+              meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
+        profiler_buffer_ptr = (
+            self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
+        )
+        self.eos_token_id = kwargs.get("eos_token_id", self.eos_token_id)
+        self.init_func(
+            meta_tensors_ptr,
+            profiler_buffer_ptr,
+            self.mpi_rank,
+            self.num_workers,
+            self.num_local_schedulers,
+            self.num_remote_schedulers,
+            self.max_seq_length,
+            self.total_num_requests,
+            self.eos_token_id,
+            self.allocate_nvshmem_teams,
+            self.test_mode,
+        )
 
         self._is_compiled = True
 
@@ -1937,14 +1846,14 @@ class PersistentKernel:
                 self.profiler_tensor, trace_name
             )
 
-    def run(self):
+    def run_test_mode(self):
         """Test-mode execution: launch the task graph once and synchronize.
 
         Input/output tensors must be pre-attached via attach_input() before
-        compile(). After run() returns, the output tensors contain the results.
+        compile(). After run_test_mode() returns, the output tensors contain the results.
         """
-        assert self.test_mode, "run() is only available in test mode"
-        assert self._is_compiled, "Must call compile() before run()"
+        assert self.test_mode, "run_test_mode() is only available in test mode"
+        assert self._is_compiled, "Must call compile() before run_test_mode()"
         stream = torch.cuda.current_stream()
         stream_ptr = int(stream.cuda_stream)
         self.launch_func(stream_ptr)

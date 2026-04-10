@@ -94,7 +94,7 @@ def test_gateup_only():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run()
+    pk.run_test_mode()
     torch.cuda.synchronize()
 
     print(f"\nmlp_mid[0, :8]:   {mlp_mid[0, :8]}")
@@ -149,6 +149,9 @@ def test_gateup_silu_down():
     ref_out = (ref_silu @ w_down.float().T + residual.float()).to(dtype)
 
     # Build PersistentKernel
+    qo_indptr_buffer = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    qo_indptr_buffer[batch_size] = batch_size
+
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params["test_mode"] = True
@@ -158,6 +161,7 @@ def test_gateup_silu_down():
     params["world_size"] = 1
     params["max_num_batched_tokens"] = batch_size
     params["max_num_batched_requests"] = batch_size
+    params["meta_tensors"] = {"qo_indptr_buffer": qo_indptr_buffer}
     pk = PersistentKernel(**params)
 
     input_dt = pk.attach_input(input_act, name="input")
@@ -204,7 +208,7 @@ def test_gateup_silu_down():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run()
+    pk.run_test_mode()
     torch.cuda.synchronize()
 
     print(f"\nmlp_out[0, :8]:   {mlp_out[0, :8]}")
@@ -256,6 +260,11 @@ def test_gateup_silu():
     torch.cuda.synchronize()
 
     # Build PersistentKernel
+    # silu_mul kernel reads runtime_config.qo_indptr_buffer[max_num_batched_requests]
+    # as "num active tokens", so we must provide this meta tensor.
+    qo_indptr_buffer = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    qo_indptr_buffer[batch_size] = batch_size  # last element = num active tokens
+
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params["test_mode"] = True
@@ -265,6 +274,7 @@ def test_gateup_silu():
     params["world_size"] = 1
     params["max_num_batched_tokens"] = batch_size
     params["max_num_batched_requests"] = batch_size
+    params["meta_tensors"] = {"qo_indptr_buffer": qo_indptr_buffer}
     pk = PersistentKernel(**params)
 
     input_dt = pk.attach_input(input_act, name="input")
@@ -298,7 +308,7 @@ def test_gateup_silu():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run()
+    pk.run_test_mode()
     torch.cuda.synchronize()
 
     print(f"\nsilu_mul_out[0, :8]:   {silu_mul_out[0, :8]}")
@@ -319,5 +329,5 @@ def test_gateup_silu():
 
 if __name__ == "__main__":
     test_gateup_only()
-    # test_gateup_silu()
+    test_gateup_silu()
     # test_gateup_silu_down()

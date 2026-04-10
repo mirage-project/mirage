@@ -1118,24 +1118,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int max_seq_length,
                                        int total_num_requests,
                                        long long eos_token_id,
-                                       int allocate_nvshmem_teams) {
-#ifdef MPK_TEST_MODE
-  // Test mode: meta_tensors may be empty or contain null pointers.
-  // Allocate runtime buffers that task kernels read (e.g., qo_indptr_buffer).
-  // You should register your test buffers here, depending on what
-  // layers you are testing.
-  global_runtime_config.step = nullptr;
-  global_runtime_config.tokens = nullptr;
-  global_runtime_config.input_tokens = nullptr;
-  global_runtime_config.output_tokens = nullptr;
-  global_runtime_config.new_token_nums = nullptr;
-  global_runtime_config.prompt_length = nullptr;
-  global_runtime_config.qo_indptr_buffer = nullptr;
-  global_runtime_config.paged_kv_indptr_buffer = nullptr;
-  global_runtime_config.paged_kv_indices_buffer = nullptr;
-  global_runtime_config.paged_kv_last_page_len_buffer = nullptr;
-  global_runtime_config.profiler_buffer = nullptr;
-#else // MPK_TEST_MODE
+                                       int allocate_nvshmem_teams,
+                                       int is_test_mode) {
   assert(meta_tensors.size() == 10);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
@@ -1152,14 +1136,12 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       static_cast<int *>(meta_tensors[8]);
   global_runtime_config.paged_kv_last_page_len_buffer =
       static_cast<int *>(meta_tensors[9]);
-  global_runtime_config.profiler_buffer = profiler_buffer;
-#endif // MPK_TEST_MODE
-
-  global_runtime_config.max_seq_length = max_seq_length;
-  global_runtime_config.eos_token_id = eos_token_id;
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
+  global_runtime_config.max_seq_length = max_seq_length;
+  global_runtime_config.eos_token_id = eos_token_id;
+  global_runtime_config.profiler_buffer = profiler_buffer;
   int num_schedulers = num_local_schedulers + num_remote_schedulers;
 
   // Initialize nvshmem
@@ -1367,9 +1349,13 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
                            cudaEventDisableTiming);
 
-#ifndef MPK_TEST_MODE
-  init_request_resources();
-#endif
+  if (is_test_mode) {
+    printf("MPK is running in test mode. The persistent kernel will run exactly "
+           "one pass of the task graph, then terminate.\n");
+    printf("Skipping request resource initialization.\n");
+  } else {
+    init_request_resources();
+  }
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
