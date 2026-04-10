@@ -236,7 +236,6 @@ def get_compile_command(
 
     if target_cc == 90:
         specific_cmd = [
-            "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_HOPPER",
@@ -244,7 +243,6 @@ def get_compile_command(
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     elif target_cc == 100:
         specific_cmd = [
-            "-arch=sm_100a",
             "-gencode=arch=compute_100a,code=sm_100a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_BLACKWELL",
