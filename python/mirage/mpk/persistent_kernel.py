@@ -973,7 +973,43 @@ class PersistentKernel:
         self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
 
         self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100")
-        
+
+    def moe_topk_sigmoid_routing_layer(
+        self,
+        input: DTensor,
+        bias: DTensor,
+        output: tuple[DTensor, DTensor, DTensor],
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_groups: int = 8,
+        topk_group: int = 4,
+        routed_scaling_factor: float = 2.5,
+    ):
+        import struct
+
+        assert input.num_dims == 2  # (batch_size, num_experts)
+        assert bias.num_dims == 1  # (num_experts,)
+        assert len(output) == 3
+        moe_topk_weight, moe_routing_indices, moe_masks = output
+        assert moe_topk_weight.num_dims == 2  # (batch_size, num_experts_per_tok)
+        assert moe_routing_indices.num_dims == 2  # (num_experts, batch_size)
+        assert moe_masks.num_dims == 1  # (num_experts + 1)
+
+        scaling_bits = struct.unpack("i", struct.pack("f", routed_scaling_factor))[0]
+        params = [num_groups, topk_group, scaling_bits]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(bias, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_topk_weight, (0, -1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, bias, moe_topk_weight, moe_routing_indices, moe_masks],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "moe_topk_sigmoid_sm100", params)
+
     def moe_w13_linear_layer(
         self,
         input: DTensor,
@@ -1005,6 +1041,86 @@ class PersistentKernel:
         else:
             assert False
             
+    def moe_w13_fp8_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # input_fp8:           (batch_size, hidden_size)          FP8 E4M3
+        # input_scale:         (batch_size, hidden_size//128)     float32
+        # weight_fp8:          (num_experts, 2*intermediate_size, hidden_size)  FP8 E4M3
+        # weight_scale:        (num_experts, 2*intermediate_size, hidden_size//128)  float32
+        # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
+        # moe_mask:            (num_experts + 1,)         int32
+        # output:              (batch_size, num_experts_per_tok, 2*intermediate_size)  BF16
+        assert input_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert moe_routing_indices.num_dims == 2
+        assert moe_mask.num_dims == 1
+        assert output.num_dims == 3
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale,
+             moe_routing_indices, moe_mask, output], tb_graph)
+        assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
+        self.kn_graph.register_task(tb_graph, "moe_w13_fp8_sm100")
+
+    def moe_w2_fp8_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # input_fp8:           (batch_size, num_experts_per_tok, intermediate_size)  FP8 E4M3
+        # input_scale:         (batch_size, num_experts_per_tok, intermediate_size//128)  float32
+        # weight_fp8:          (num_experts, hidden_size, intermediate_size)  FP8 E4M3
+        # weight_scale:        (num_experts, hidden_size, intermediate_size//128)  float32
+        # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
+        # moe_mask:            (num_experts + 1,)         int32
+        # output:              (batch_size, num_experts_per_tok, hidden_size)  BF16
+        assert input_fp8.num_dims == 3
+        assert input_scale.num_dims == 3
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert moe_routing_indices.num_dims == 2
+        assert moe_mask.num_dims == 1
+        assert output.num_dims == 3
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale,
+             moe_routing_indices, moe_mask, output], tb_graph)
+        assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
+        self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
+
     def moe_silu_mul_layer(
         self,
         input: DTensor,

@@ -2172,6 +2172,74 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }
 
+int TaskRegister::register_moe_topk_sigmoid_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 3);
+  int num_groups = params[0];
+  int topk_group = params[1];
+  float scaling_factor;
+  memcpy(&scaling_factor, &params[2], sizeof(float));
+
+  int batch_size = 0, num_experts = 0, num_experts_per_tok = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // Validate output shapes
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  assert(output_ops[1]->output_tensors[0].num_dims == 2);
+  assert(output_ops[2]->output_tensors[0].num_dims == 1);
+  num_experts = output_ops[1]->output_tensors[0].dim[0];
+  batch_size = output_ops[1]->output_tensors[0].dim[1];
+  num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts + 1);
+  // Validate input shapes
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
+  // Validate bias shape
+  assert(input_ops[1]->output_tensors[0].num_dims == 1);
+  assert(input_ops[1]->output_tensors[0].dim[0] == num_experts);
+
+  assert(num_experts % num_groups == 0 &&
+         "Number of experts must be divisible by number of groups");
+  int experts_per_group = num_experts / num_groups;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
+         "$, $>(",
+         /*VPT=*/8,
+         /*EXPERTS=*/num_experts,
+         /*WARPS_PER_TB=*/8,
+         /*BYTES_PER_LDG=*/16,
+         /*NUM_GROUPS=*/num_groups,
+         /*TOPK_GROUP=*/topk_group,
+         /*EXPERTS_PER_GROUP=*/experts_per_group,
+         /*TOPK_EXPERTS=*/num_experts_per_tok);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    nullptr,");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    $,", batch_size);
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    task_desc->output_ptrs[2],");
+  code.e("    0,");
+  code.e("    $,", num_experts);
+  code.e("    $f);", scaling_factor);
+  return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
+}
+
 int TaskRegister::register_moe_linear_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
@@ -2363,6 +2431,241 @@ int TaskRegister::register_moe_linear_sm100_task(
     return register_task_variant(TASK_MOE_W13_LINEAR_SM100, code.to_string());
   } else {
     return register_task_variant(TASK_MOE_W2_LINEAR_SM100, code.to_string());
+  }
+}
+
+int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params,
+                                              bool w13_linear) {
+  assert(params.size() == 0);
+  // Input ordering (6 inputs, 1 output):
+  //   [0] input_fp8       [batch, K] or [batch, top_k, K]
+  //   [1] input_scale     [batch, K/128] or [batch, top_k, K/128]
+  //   [2] weight_fp8      [num_experts, N, K]
+  //   [3] weight_scale    [num_experts, N, K/128]
+  //   [4] routing_indices [num_experts, batch]
+  //   [5] expert_mask     [num_experts+1]
+  //   output              [batch, top_k, N]
+  int num_inputs = 6;
+  int num_outputs = 1;
+  int num_experts = 0, num_experts_per_tok = 0, batch_size = 0;
+  int output_size = 0, orig_output_size = 0, reduction_size = 0,
+      output_stride = 0;
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  // Output shape: [batch, top_k, N]
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  output_size = output_ops[0]->output_tensors[0].dim[2];
+
+  // Reduction size from input_fp8
+  if (w13_linear) {
+    assert(input_ops[0]->output_tensors[0].num_dims == 2);
+    reduction_size = input_ops[0]->output_tensors[0].dim[1];
+  } else {
+    assert(input_ops[0]->output_tensors[0].num_dims == 3);
+    reduction_size = input_ops[0]->output_tensors[0].dim[2];
+    assert(input_ops[0]->output_tensors[0].dim[1] == num_experts_per_tok);
+  }
+
+  // Weight: [num_experts, N, K]
+  assert(input_ops[2]->output_tensors[0].num_dims == 3);
+  num_experts = input_ops[2]->output_tensors[0].dim[0];
+  assert(input_ops[2]->output_tensors[0].dim[1] == output_size);
+  assert(input_ops[2]->output_tensors[0].dim[2] == reduction_size);
+
+  // Routing indices: [num_experts, batch]
+  assert(input_ops[4]->output_tensors[0].num_dims == 2);
+  assert(input_ops[4]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[4]->output_tensors[0].dim[1] == batch_size);
+
+  // Mask: [num_experts+1]
+  assert(input_ops[5]->output_tensors[0].num_dims == 1);
+  assert(input_ops[5]->output_tensors[0].dim[0] == num_experts + 1);
+
+  // Output stride
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  orig_output_size = input_ops[2]->dtensor.dim[1];
+
+  int k_scale = reduction_size / 128; // K/128 scale groups
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+
+  // MMA constants (same as BF16 MoE task)
+  constexpr int MMA_M = 128;
+  constexpr int MMA_N = 16;
+  constexpr int bK = 128; // FP8: bK=128 for one scale-block per k-tile
+  constexpr int num_ab_stages = 4;
+  constexpr int num_acc_stages = 2;
+  constexpr int num_c_stages = 4;
+  constexpr int num_tmem_columns = MMA_N * num_acc_stages; // 32
+  assert(num_tmem_columns <= 512);
+
+  // Expert stride: must match grid_dim.x so each CTA processes a distinct
+  // set of experts. With grid_dim=(X, Y, 1), X CTAs handle expert distribution
+  // (expert_offset = bid.x, stride = X) and Y CTAs split the N dimension.
+  int expert_stride = bgraph.grid_dim.x;
+
+  // TMA for FP8 weight (param_id=2, dtype=uint8_t→UINT8 format, bK=128 tile)
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+  code.e("using TMA_Weight = kernel::tma::tma_2d<uint8_t, $, $, $, $, $, "
+         "$, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         (num_experts - 1) * orig_output_size + output_size, /*GMEM_ROW_*/
+         reduction_size,                                     /*GMEM_COL_*/
+         MMA_M,                                              /*SMEM_ROW_*/
+         bK,                                                 /*SMEM_COL_*/
+         reduction_size, /*GMEM_STRIDE_ROW_*/
+         1,              /*GMEM_STRIDE_COL_*/
+         1,              /*SMEM_REPEAT_ROW_*/
+         1,              /*SMEM_REPEAT_COL_*/
+         MMA_M * bK      /*SMEM_STRIDE_*/
+  );
+
+  code.inc_indent();
+  code.e("TMA_Weight tma_weight(static_cast<CUtensorMap*>("
+         "task_desc->input_tma_desc_ptrs[2][0]));");
+
+  // Input FP8 activation tensor
+  if (w13_linear) {
+    code.e(
+        "cute::Layout layout_input = cute::make_layout(cute::make_shape($, $), "
+        "cute::make_stride($, cute::Int<1>{}));",
+        batch_size,
+        reduction_size,
+        reduction_size);
+  } else {
+    code.e("cute::Layout layout_input = cute::make_layout(cute::make_shape($, "
+           "$, $), "
+           "cute::make_stride($, cute::Int<1>{}, $));",
+           batch_size,
+           reduction_size,
+           num_experts_per_tok,
+           num_experts_per_tok * reduction_size,
+           reduction_size);
+  }
+  code.e("cute::Tensor mInput = cute::make_tensor("
+         "cute::make_gmem_ptr(static_cast<uint8_t*>("
+         "task_desc->input_ptrs[0])), layout_input);");
+
+  // Input scale tensor [batch, K/128] or [batch, top_k, K/128]
+  if (w13_linear) {
+    code.e("cute::Layout layout_input_scale = cute::make_layout("
+           "cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
+           batch_size,
+           k_scale,
+           k_scale);
+  } else {
+    code.e("cute::Layout layout_input_scale = cute::make_layout("
+           "cute::make_shape($, $, $), "
+           "cute::make_stride($, cute::Int<1>{}, $));",
+           batch_size,
+           k_scale,
+           num_experts_per_tok,
+           num_experts_per_tok * k_scale,
+           k_scale);
+  }
+  code.e("cute::Tensor mInputScale = cute::make_tensor("
+         "cute::make_gmem_ptr(static_cast<float*>("
+         "task_desc->input_ptrs[1])), layout_input_scale);");
+
+  // Weight scale tensor — flat 2D view with strided expert access.
+  // When grid_dim.y > 1, the runtime offsets the base pointer per bid.y.
+  // Row count = (E-1)*orig_output_size + output_size: expert e's rows start
+  // at offset e*orig_output_size, and only output_size rows per expert are
+  // accessible from this CTA's base pointer. Same pattern as TMA GMEM_ROW.
+  code.e("cute::Layout layout_weight_scale = cute::make_layout("
+         "cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
+         (num_experts - 1) * orig_output_size + output_size,
+         k_scale,
+         k_scale);
+  code.e("cute::Tensor mWeightScale = cute::make_tensor("
+         "cute::make_gmem_ptr(static_cast<float*>("
+         "task_desc->input_ptrs[3])), layout_weight_scale);");
+
+  // Routing indices [num_experts, batch]
+  code.e("cute::Layout layout_routing_indices = cute::make_layout("
+         "cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
+         num_experts,
+         batch_size,
+         batch_size);
+  code.e("cute::Tensor mRoutingIndices = cute::make_tensor("
+         "cute::make_gmem_ptr(static_cast<cute::int32_t*>("
+         "task_desc->input_ptrs[4])), layout_routing_indices);");
+
+  // Expert mask [num_experts+1]
+  code.e("cute::Layout layout_expert_mask = cute::make_layout("
+         "cute::make_shape($), cute::make_stride(cute::Int<1>{}));",
+         num_experts + 1);
+  code.e("cute::Tensor mMask = cute::make_tensor("
+         "cute::make_gmem_ptr(static_cast<cute::int32_t*>("
+         "task_desc->input_ptrs[5])), layout_expert_mask);");
+
+  // Output tensor [batch, top_k, N] in BF16
+  code.e("cute::Layout layout_output = cute::make_layout("
+         "cute::make_shape($, $, $), "
+         "cute::make_stride($, cute::Int<1>{}, $));",
+         batch_size,
+         output_size,
+         num_experts_per_tok,
+         num_experts_per_tok * output_stride,
+         output_stride);
+  code.e("cute::Tensor mOutput = cute::make_tensor("
+         "cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+         "task_desc->output_ptrs[0])), layout_output);");
+
+  // Kernel call
+  code.e("kernel::fp8_moe_group_gemm_sm100_task_impl<TMA_Weight, "
+         "decltype(mInput), decltype(mInputScale), decltype(mWeightScale), "
+         "decltype(mRoutingIndices), decltype(mMask), decltype(mOutput), "
+         "$, $, $, $, $, $, $, $, $, $, $, $, $>(",
+         MMA_M,
+         MMA_N,
+         batch_size,
+         output_size,
+         orig_output_size,
+         reduction_size,
+         num_experts,
+         num_experts_per_tok,
+         expert_stride,
+         w13_linear ? "true" : "false",
+         num_ab_stages,
+         num_acc_stages,
+         num_c_stages);
+  code.e("    tma_weight,");
+  code.e("    mInput,");
+  code.e("    mInputScale,");
+  code.e("    mWeightScale,");
+  code.e("    mRoutingIndices,");
+  code.e("    mMask,");
+  code.e("    mOutput,");
+  code.e("    task_desc->task_metadata.expert_offset);");
+
+  if (w13_linear) {
+    return register_task_variant(TASK_MOE_W13_FP8_SM100, code.to_string());
+  } else {
+    return register_task_variant(TASK_MOE_W2_FP8_SM100, code.to_string());
   }
 }
 
@@ -3052,6 +3355,7 @@ int TaskRegister::register_mla_prefill_sm100_task(
   return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
 }
 
+
 int TaskRegister::register_mla_mtp_decode_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_head_groups
@@ -3120,7 +3424,6 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
   code.e("    0);");                                            // bi (batch=0)
   return register_task_variant(TASK_MLA_MTP_REDUCE_SM100, code.to_string());
 }
-
 int TaskRegister::register_paged_attention_split_kv_hopper_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
