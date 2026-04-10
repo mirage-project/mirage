@@ -868,6 +868,68 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "mla_prefill_sm100", params)
 
+    def mla_mtp_decode_layer(
+        self,
+        q_input: DTensor,          # Q tensor [B*Q_LEN*H, D_K] (with TMA desc)
+        kv_input: DTensor,         # KV tensor [B*KL, D_K] (with TMA desc)
+        output_partial: DTensor,   # Oa: partial output buffer
+        output_lse: DTensor,       # La: partial LSE buffer
+        q_len: int,
+        kv_len: int,
+    ):
+        # Derive internal params (DeepSeek V3: 128 heads, TILE_S=128)
+        hpb = 128 // q_len
+        while 128 % hpb != 0:
+            hpb -= 1
+        num_head_groups = 128 // hpb
+        num_splits = (kv_len + 128 - 1) // 128
+
+        params = [num_head_groups, q_len, kv_len, num_splits]
+        grid_dim = (num_splits, num_head_groups, 1)  # (sk, groups, B=1)
+        block_dim = (128, 1, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_input, kv_input, output_partial, output_lse], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_mtp_decode_sm100", params)
+
+    def mla_mtp_reduce_layer(
+        self,
+        input_partial: DTensor,    # Oa from decode tasks
+        input_lse: DTensor,        # La from decode tasks
+        output: DTensor,           # final O [B, Q_LEN, H, D_V]
+        q_len: int,
+        kv_len: int,
+    ):
+        hpb = 128 // q_len
+        while 128 % hpb != 0:
+            hpb -= 1
+        num_head_groups = 128 // hpb
+        num_splits = (kv_len + 128 - 1) // 128
+        d_v = 512
+        # TODO: rd_dv=2 gives 256-1024 reduce blocks (many small tasks in MPK).
+        # Consider rd_dv=4 with loop to halve block count, but benchmarked slower.
+        # Revisit after MPK runtime refactor when task dispatch overhead is known.
+        rd_dv = 2
+
+        params = [num_head_groups, q_len, num_splits, rd_dv]
+        grid_dim = ((d_v + rd_dv - 1) // rd_dv, num_head_groups, 1)
+        block_dim = (256, 1, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_partial, input_lse, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_mtp_reduce_sm100", params)
+
     # MoE Layers
     def tensor_init_layer(
         self,

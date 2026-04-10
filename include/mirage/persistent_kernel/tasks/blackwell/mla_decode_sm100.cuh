@@ -43,70 +43,7 @@ static constexpr int MLA_MAX_STAGES = 4;
 
 static constexpr int MLA_TILE_BYTES = MLA_NUM_HEADS * MLA_BK * 2;
 
-namespace mla_ptx {
-
-__device__ __forceinline__ uint32_t elect_sync() {
-  uint32_t p = 0;
-  asm volatile("{\n\t.reg .pred %%px;\n\t"
-               "elect.sync _|%%px, 0xFFFFFFFF;\n\t"
-               "@%%px mov.s32 %0, 1;\n\t}"
-               : "+r"(p));
-  return p;
-}
-
-__device__ __forceinline__ void mbar_init(int addr, int count) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(addr),
-               "r"(count));
-}
-
-__device__ __forceinline__ void mbar_wait(int addr, int phase) {
-  asm volatile("{\n\t.reg .pred P;\n\t"
-               "WAIT: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, "
-               "[%0], %1, 0x989680;\n\t"
-               "@P bra DONE;\n\t"
-               "bra WAIT;\n\t"
-               "DONE:\n\t}" ::"r"(addr),
-               "r"(phase));
-}
-
-__device__ __forceinline__ void mbar_tx(int addr, int bytes) {
-  asm volatile(
-      "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" ::
-          "r"(addr),
-      "r"(bytes)
-      : "memory");
-}
-
-__device__ __forceinline__ constexpr uint64_t desc_enc(uint64_t x) {
-  return (x & 0x3FFFFULL) >> 4;
-}
-
-__device__ __forceinline__ uint64_t make_desc(int smem_addr) {
-  constexpr uint64_t SBO = 8ULL * 128;
-  return desc_enc(smem_addr) | (desc_enc(SBO) << 32) | (1ULL << 46) |
-         (2ULL << 61);
-}
-
-__device__ __forceinline__ void tcgen05_mma(
-    int taddr, uint64_t a_desc, uint64_t b_desc, uint32_t idesc, int acc) {
-  asm volatile(
-      "{\n\t.reg .pred p;\n\t"
-      "setp.ne.b32 p, %4, 0;\n\t"
-      "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p;\n\t}" ::"r"(
-          taddr),
-      "l"(a_desc),
-      "l"(b_desc),
-      "r"(idesc),
-      "r"(acc));
-}
-
-__device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
-  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
-               "cluster.b64 [%0];" ::"r"(mbar_addr)
-               : "memory");
-}
-
-} // namespace mla_ptx
+#include "sm100_ptx.cuh"
 
 // MLA decode device function.
 // split_idx (si) and batch_idx (bi) are passed as params.
@@ -122,7 +59,7 @@ __device__ __noinline__ void mla_decode_sm100_task_impl(
     int si,
     int bi // split_idx, batch_idx (were blockIdx.x, blockIdx.y)
 ) {
-  using namespace mla_ptx;
+  using namespace kernel::sm100_ptx;
 
   int const tid = threadIdx.x;
   if (tid >= MLA_TB) {

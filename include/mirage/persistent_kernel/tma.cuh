@@ -976,6 +976,48 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MLA_MTP_DECODE_SM100: {
+      // MTP decode: Q box height = hpb (varies with Q_LEN), KV box = TILE_S=128
+      // Q: [B*Q_LEN*NUM_HEADS, D_K], hpb derived from Q dim[0]
+      // KV: [B*KL, D_K], same as MLA decode
+      constexpr int BK = 64;
+      constexpr int NUM_H = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave = CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+
+      if (param_id == 0) {
+        // Q: derive hpb from tensor dimensions
+        int total_rows = tensor_desc.dim[0]; // B * Q_LEN * NUM_HEADS
+        int d_k = tensor_desc.dim[1];
+        int k_iters = d_k / BK;
+        int q_len = total_rows / NUM_H;  // assumes B=1
+        int hpb = NUM_H / q_len;
+        while (NUM_H % hpb != 0) hpb--;
+        uint64_t gd[3] = {(uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)hpb, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc, fmt, 3, tensor_desc.base_ptr,
+            gd, gs, bd, es, interleave, swizzle, l2, oob);
+        assert(err == CUDA_SUCCESS);
+      } else if (param_id == 1) {
+        // KV: same as MLA decode — box = {64, TILE_S=128, 1}
+        int total_rows = tensor_desc.dim[0];
+        int d_k = tensor_desc.dim[1];
+        int k_iters = d_k / BK;
+        uint64_t gd[3] = {(uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, 128, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc, fmt, 3, tensor_desc.base_ptr,
+            gd, gs, bd, es, interleave, swizzle, l2, oob);
+        assert(err == CUDA_SUCCESS);
+      }
+      break;
+    }
     default:
       assert(false);
   }
@@ -1084,6 +1126,19 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_MLA_REDUCE_SM100: {
       // no TMA needed — uses raw pointer reads
+      break;
+    }
+    case TASK_MLA_MTP_DECODE_SM100: {
+      // Q (input 0) and KV (input 1) each get 1 TMA desc
+      // Same as MLA_DECODE but Q box uses hpb (variable) instead of NUM_HEADS
+      for (size_t param_id = 0; param_id < 2; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MLA_MTP_REDUCE_SM100: {
+      // no TMA needed
       break;
     }
     default:
