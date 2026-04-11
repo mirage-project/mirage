@@ -59,9 +59,13 @@ static constexpr int MAX_SK = 32;
 // SMEM for main kernel
 static constexpr int MTP_SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES; // 160KB
 
+} // namespace mla_mtp
+} // namespace kernel
+
+// sm100_ptx.cuh defines kernel::sm100_ptx — must be included at global scope
 #include "sm100_ptx.cuh"
 
-} // namespace mla_mtp
+namespace kernel {
 
 // ============ MLA MTP Decode Device Function ============
 // blockIdx.x → decomposed into (gi, si) via params
@@ -82,7 +86,7 @@ __device__ __noinline__ void
                                    int bi // head_group, split_idx, batch_idx
     ) {
   using namespace mla_mtp;
-  using namespace kernel::sm100_ptx;
+  using namespace ::kernel::sm100_ptx;
 
   int const tid = threadIdx.x;
   // MPK workers have 256 threads but MLA kernel uses 128.
@@ -659,7 +663,7 @@ __device__ __noinline__ void
                                    int gi,
                                    int bi) {
   using namespace mla_mtp;
-  using namespace kernel::sm100_ptx;
+  using namespace ::kernel::sm100_ptx;
   int const tid = threadIdx.x;
 
   int const row = tid % 128;

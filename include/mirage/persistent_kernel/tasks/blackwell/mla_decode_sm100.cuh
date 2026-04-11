@@ -43,7 +43,12 @@ static constexpr int MLA_MAX_STAGES = 4;
 
 static constexpr int MLA_TILE_BYTES = MLA_NUM_HEADS * MLA_BK * 2;
 
+} // namespace kernel
+
+// sm100_ptx.cuh defines kernel::sm100_ptx — must be included at global scope
 #include "sm100_ptx.cuh"
+
+namespace kernel {
 
 // MLA decode device function.
 // split_idx (si) and batch_idx (bi) are passed as params.
@@ -59,7 +64,7 @@ __device__ __noinline__ void mla_decode_sm100_task_impl(
     int si,
     int bi // split_idx, batch_idx (were blockIdx.x, blockIdx.y)
 ) {
-  using namespace kernel::sm100_ptx;
+  using namespace ::kernel::sm100_ptx;
 
   int const tid = threadIdx.x;
   if (tid >= MLA_TB) {
