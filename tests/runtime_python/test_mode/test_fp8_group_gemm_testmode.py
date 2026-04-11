@@ -138,10 +138,10 @@ def test_moe_w13_fp8_testmode():
     params["max_num_batched_requests"] = batch_size
     pk = PersistentKernel(**params)
 
-    # Attach tensors (FP8 as uint8)
-    input_fp8_dt = pk.attach_input(input_fp8.view(torch.uint8), name="input_fp8")
+    # Attach tensors (FP8 natively supported)
+    input_fp8_dt = pk.attach_input(input_fp8, name="input_fp8")
     input_scale_dt = pk.attach_input(input_scale, name="input_scale")
-    weight_fp8_dt = pk.attach_input(weight_fp8.view(torch.uint8), name="weight_fp8")
+    weight_fp8_dt = pk.attach_input(weight_fp8, name="weight_fp8")
     weight_scale_dt = pk.attach_input(weight_scale, name="weight_scale")
     routing_dt = pk.attach_input(routing_indices, name="routing_indices")
     mask_dt = pk.attach_input(mask, name="mask")
@@ -162,8 +162,7 @@ def test_moe_w13_fp8_testmode():
 
     # Compile and run
     print("Compiling...")
-    file_path = os.path.dirname(__file__)
-    folder_path = os.path.dirname(file_path)
+    folder_path = os.path.dirname(__file__)
     pk.compile(output_dir=folder_path)
 
     print("Running...")
