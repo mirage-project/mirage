@@ -60,8 +60,7 @@ def test_rmsnorm_testmode():
 
     # Compile
     print("Compiling test kernel...")
-    file_path = os.path.dirname(__file__)
-    folder_path = os.path.dirname(file_path)
+    folder_path = os.path.dirname(__file__)
     pk.compile(output_dir=folder_path)
 
     # Run

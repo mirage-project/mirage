@@ -89,8 +89,7 @@ def test_gateup_only():
     )
 
     print("Compiling...")
-    file_path = os.path.dirname(__file__)
-    folder_path = os.path.dirname(file_path)
+    folder_path = os.path.dirname(__file__)
     pk.compile(output_dir=folder_path)
 
     print("Running...")
@@ -208,8 +207,7 @@ def test_gateup_silu_down():
     )
 
     print("Compiling...")
-    file_path = os.path.dirname(__file__)
-    folder_path = os.path.dirname(file_path)
+    folder_path = os.path.dirname(__file__)
     pk.compile(output_dir=folder_path)
 
     print("Running...")
@@ -319,8 +317,7 @@ def test_gateup_silu():
     )
 
     print("Compiling...")
-    file_path = os.path.dirname(__file__)
-    folder_path = os.path.dirname(file_path)
+    folder_path = os.path.dirname(__file__)
     pk.compile(output_dir=folder_path)
 
     print("Running...")
