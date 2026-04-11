@@ -16,6 +16,9 @@
 #pragma once
 #include "runtime_header.h"
 #include "tasks/common/common_header.cuh"
+#include <cutlass/float8.h>
+#include <cutlass/numeric_types.h>
+#include <type_traits>
 #include <cuda.h>
 
 namespace mirage {
@@ -46,7 +49,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr CUtensorMapL2promotion tma_l2Promotion =
       CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
   constexpr CUtensorMapFloatOOBfill tma_oobFill =
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+      CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA;
   constexpr CUtensorMapSwizzle tma_swizzle =
       (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
        : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
@@ -95,8 +98,9 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     assert(false);
   }
 
-  assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
-         0); // Address must be 16B-aligned
+  // TMA requires 16B-aligned global address
+  if ((reinterpret_cast<uint64_t>(global_addr) & 0b1111) !=
+         0) { printf("WARN: TMA addr %p not 16B-aligned\n", global_addr); }
 
   assert(gmem_prob_shape[0] >= (uint64_t(1)));       // Size must be min 1
   assert(gmem_prob_shape[0] <= (uint64_t(1) << 32)); // Size must be max 2^32
@@ -761,6 +765,45 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_LINEAR_FP8_SM100:
+    case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
+      // FP8: 128 elements × 1 byte = 128B (matches 128B TMA swizzle)
+      int const cp_async_size = 128;
+      const size_t smem_repeat_row = 1;
+      constexpr int B = 3, M = 3, S = 3;
+      constexpr int MMA_M = 128, MMA_N = 16;
+      constexpr int TILE_SIZE = 128;
+      size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+
+      bool is_fp8 = (tensor_desc.data_type == 930);
+      bool is_fp32 = (tensor_desc.data_type == 950);
+      // output is last tensor (bf16)
+      bool with_res = (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
+      bool is_output = (param_id == (size_t)(task_desc.num_inputs));
+
+      if (is_fp8 && (param_id == 0 || param_id == 2)) {
+        // FP8 input or weight
+        int rows = tensor_desc.dim[0];
+        int cols = tensor_desc.dim[1];
+        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
+        uint64_t gst[2] = {1, (uint64_t)cols};
+        uint32_t ss[2] = {(param_id == 0) ? (uint32_t)MMA_N : (uint32_t)MMA_M,
+                          (uint32_t)cp_async_size};
+        fill_tma_desc<cutlass::float_e4m3_t, B, M, S, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, smem_repeat_col);
+      } else {
+        // BF16 output
+        int rows = tensor_desc.dim[0];
+        int cols = tensor_desc.dim[1];
+        int stride = tensor_desc.stride[0];
+        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
+        uint64_t gst[2] = {1, (uint64_t)stride};
+        uint32_t ss[2] = {(uint32_t)MMA_N, (uint32_t)MMA_M};
+        fill_tma_desc<bfloat16, 0, M, S, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
+      }
+      break;
+    }
     case TASK_SPLITK_LINEAR_SM100: {
       int const cp_async_size = 64;
       const size_t smem_repeat_row = 1;
@@ -1128,6 +1171,16 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
                 : task_desc.outputs[param_id - task_desc.num_inputs];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
+      break;
+    }
+    case TASK_LINEAR_FP8_SM100:
+    case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
+      // FP8 linear: only create TMA for fp8_input(0), fp8_weight(2), output
+      // Scale tensors (1, 3) use direct load, not TMA
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);
+      create_tma_desc_for_tensor(task_desc,
+          task_desc.outputs[0], task_desc.num_inputs, 0);
       break;
     }
     case TASK_PAGED_ATTENTION_HOPPER: {

@@ -348,7 +348,9 @@ class PersistentKernel:
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
-        self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
+        # Sanitize name for C++ codegen (dots are illegal in identifiers)
+        safe_name = name.replace('.', '_')
+        self.kn_graph.attach_torch_tensor(t, torch_tensor, safe_name)
         return t
 
     def new_tensor(
@@ -366,8 +368,9 @@ class PersistentKernel:
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
+        safe_name = name.replace('.', '_') if name else name
         if io_category == "cuda_tensor":
-            self.kn_graph.attach_cuda_tensor(t, name)
+            self.kn_graph.attach_cuda_tensor(t, safe_name)
         elif io_category == "nvshmem_tensor":
             self.kn_graph.attach_nvshmem_tensor(t, name)
         else:
@@ -799,6 +802,27 @@ class PersistentKernel:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
     # MLA (Multi-head Latent Attention) Layers
+    def mla_kv_gather_layer(
+        self,
+        c_latent_new: DTensor,
+        k_pe_new: DTensor,
+        paged_cache: DTensor,
+        contiguous_kv: DTensor,
+        mla_params: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        d_k, d_v, page_size = mla_params
+        params = [d_k, d_v, page_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(paged_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(contiguous_kv, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [c_latent_new, k_pe_new, paged_cache, contiguous_kv], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mla_kv_gather_sm100", params)
+
     def mla_decode_layer(
         self,
         q_input: DTensor,         # Q tensor (attached with TMA desc)
@@ -1120,6 +1144,76 @@ class PersistentKernel:
              moe_routing_indices, moe_mask, output], tb_graph)
         assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
         self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
+
+    # === FP8 Dense Layers ===
+    def quantize_fp8_layer(
+        self,
+        input: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        scale_ue8m0: bool = True,
+    ):
+        """Quantize BF16 input to FP8 with block-wise scale.
+
+        scale_ue8m0=True: output scale is packed UE8M0 uint32 (for FP8 linear GEMM)
+        scale_ue8m0=False: output scale is float32 (for MoE group GEMM)
+        """
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output_fp8, output_scale], tb_graph)
+        task_name = "quantize_fp8_sm100" if scale_ue8m0 else "quantize_fp8_f32scale_sm100"
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def linear_fp8_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_fp8_sm100", params)
+
+    def linear_fp8_with_residual_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        params = [1]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(residual, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, residual, output],
+            tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "linear_fp8_with_residual_sm100", params)
 
     def moe_silu_mul_layer(
         self,
@@ -1578,6 +1672,92 @@ class PersistentKernel:
             raise ValueError(f"Invalid spec decode method: {method}")
         return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
+    # === MTP (Multi-Token Prediction) Layers ===
+    def mtp_token_scatter_layer(
+        self,
+        src: DTensor,
+        dst: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        batch_size: int,
+        num_slots: int,
+        slot_idx: int,
+    ):
+        params = [batch_size, num_slots, slot_idx]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(src, (-1, -1, -1), -1, True)
+        tb_graph.new_input(dst, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([src, dst], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_token_scatter", params)
+
+    def mtp_prepare_verify_layer(
+        self,
+        main_token: DTensor,
+        draft_tokens: DTensor,
+        tokens_buffer: DTensor,
+        step: DTensor,
+        num_new_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+        max_seq_len: int,
+    ):
+        params = [num_draft_tokens, max_seq_len]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(main_token, (-1, -1, -1), -1, True)
+        tb_graph.new_input(draft_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
+        tb_graph.new_input(step, (-1, -1, -1), -1, True)
+        tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [main_token, draft_tokens, tokens_buffer, step, num_new_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_prepare_verify", params)
+
+    def mtp_verify_strict_layer(
+        self,
+        draft_token_ids: DTensor,
+        target_token_ids: DTensor,
+        accepted_count: DTensor,
+        output_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+    ):
+        params = [num_draft_tokens]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(draft_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [draft_token_ids, target_token_ids, accepted_count, output_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_verify_strict", params)
+
+    def mtp_accept_commit_layer(
+        self,
+        accepted_count: DTensor,
+        output_tokens: DTensor,
+        current_position: DTensor,
+        new_position: DTensor,
+        final_output: DTensor,
+        num_new_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+    ):
+        params = [num_draft_tokens]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(current_position, (-1, -1, -1), -1, True)
+        tb_graph.new_input(new_position, (-1, -1, -1), -1, True)
+        tb_graph.new_input(final_output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [accepted_count, output_tokens, current_position,
+             new_position, final_output, num_new_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_accept_commit", params)
+
     def compile(
         self,
         **kwargs,
@@ -1720,9 +1900,18 @@ class PersistentKernel:
             num_remote_schedulers=self.num_remote_schedulers,
             use_cutlass_kernel=self.use_cutlass_kernel,
         )
-        print("Compiling megakernel using the following command line:")
-        print(cc_cmd)
-        subprocess.check_call(cc_cmd)
+        precompiled_so = os.environ.get("MPK_PRECOMPILED_SO")
+        if precompiled_so and os.path.exists(precompiled_so):
+            shutil.copy(precompiled_so, so_path)
+            # Also copy task_graph.json to the directory where __FILE__ points
+            # (the .so reads json from __FILE__'s parent directory)
+            precompiled_dir = os.path.dirname(precompiled_so)
+            shutil.copy(json_file_path, os.path.join(precompiled_dir, "task_graph.json"))
+            print(f"Using precompiled .so: {precompiled_so}")
+        else:
+            print("Compiling megakernel using the following command line:")
+            print(cc_cmd)
+            subprocess.check_call(cc_cmd)
 
         import importlib.util
 

@@ -701,6 +701,53 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(2, 1, TASK_MLA_MTP_REDUCE_SM100, variant_id);
   }
+  // FP8 tasks
+  else if (name == "quantize_fp8_sm100") {
+    int variant_id = task_register->register_quantize_fp8_sm100_task(
+        customized->bgraph, params, true /*scale_ue8m0*/);
+    task_config[op] = std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+  } else if (name == "quantize_fp8_f32scale_sm100") {
+    int variant_id = task_register->register_quantize_fp8_sm100_task(
+        customized->bgraph, params, false /*scale_ue8m0*/);
+    task_config[op] = std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+  } else if (name == "linear_fp8_sm100") {
+    int variant_id = task_register->register_linear_fp8_sm100_task(
+        customized->bgraph, params, false);
+    task_config[op] = std::make_tuple(4, 1, TASK_LINEAR_FP8_SM100, variant_id);
+  } else if (name == "linear_fp8_with_residual_sm100") {
+    int variant_id = task_register->register_linear_fp8_sm100_task(
+        customized->bgraph, params, true);
+    task_config[op] =
+        std::make_tuple(5, 1, TASK_LINEAR_FP8_WITH_RESIDUAL_SM100, variant_id);
+  }
+  // MLA KV gather
+  else if (name == "mla_kv_gather_sm100") {
+    int variant_id = task_register->register_mla_kv_gather_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 0, TASK_MLA_KV_GATHER_SM100, variant_id);
+  }
+  // MTP tasks
+  else if (name == "mtp_verify_strict") {
+    int variant_id = task_register->register_mtp_verify_strict_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MTP_VERIFY_STRICT, variant_id);
+  } else if (name == "mtp_accept_commit") {
+    int variant_id = task_register->register_mtp_accept_commit_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 3, TASK_MTP_ACCEPT_COMMIT, variant_id);
+  } else if (name == "mtp_token_scatter") {
+    int variant_id = task_register->register_mtp_token_scatter_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_MTP_TOKEN_SCATTER, variant_id);
+  } else if (name == "mtp_prepare_verify") {
+    int variant_id = task_register->register_mtp_prepare_verify_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MTP_PREPARE_VERIFY, variant_id);
+  }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {
     int variant_id = task_register->register_nvshmem_allgather_strided_put_task(

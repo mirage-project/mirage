@@ -133,6 +133,23 @@ public:
                                          std::vector<int> const &params);
   int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
+  int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params,
+                                      bool scale_ue8m0);
+  int register_linear_fp8_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params,
+                                     bool with_residual);
+  int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  // MTP tasks
+  int register_mtp_verify_strict_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_mtp_accept_commit_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_mtp_token_scatter_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_mtp_prepare_verify_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

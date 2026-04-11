@@ -26,7 +26,7 @@ from libcpp.string cimport string
 class dtype:
     SINT_TYPES = ['int8', 'int16', 'int32', 'int64']
     UINT_TYPES = ['uint8', 'uint16', 'uint32', 'uint64']
-    FP_TYPES = ['fp16', 'bf16', 'fp32', 'fp64']
+    FP_TYPES = ['fp16', 'bf16', 'fp32', 'fp64', 'fp8_e4m3']
 
     def __init__(self, name):
         self.name = name
@@ -101,6 +101,7 @@ float16 = dtype('fp16')
 bfloat16 = dtype('bf16')
 float32 = dtype('fp32')
 float64 = dtype('fp64')
+float8_e4m3 = dtype('fp8_e4m3')
 
 def get_kn_operator_type_string(int op_type):
     if op_type == KN_UNKOWN:
@@ -315,6 +316,8 @@ def convert_dtype_to_ctype(type : dtype):
         return DT_UINT64
     elif type.is_fp64():
         return DT_DOUBLE
+    elif type.name == 'fp8_e4m3':
+        return DT_FLOAT8
     else:
         raise RuntimeError(f"Unsupported dtype: {type}")
 
@@ -339,6 +342,8 @@ def convert_dtype_to_torch_type(type : dtype):
         return torch.int64
     elif type.is_fp64():
         return torch.float64
+    elif type.name == 'fp8_e4m3':
+        return torch.float8_e4m3fn
     else:
         assert False, "Unsupported dtype: {}".format(type)
 
@@ -367,6 +372,8 @@ def convert_ctype_to_dtype(type):
         return uint64
     elif type == DT_DOUBLE:
         return float64
+    elif type == DT_FLOAT8:
+        return float8_e4m3
     else:
         return None
 
@@ -391,6 +398,8 @@ def convert_torch_type_to_dtype(type):
         return int64
     elif type is torch.float64:
         return float64
+    elif type is torch.float8_e4m3fn:
+        return float8_e4m3
     else:
         raise RuntimeError(f"Unsupported dtype: {type}")
 
