@@ -1097,8 +1097,9 @@ class PersistentKernel:
         # weight_fp8:          (num_experts, 2*intermediate_size, hidden_size)  FP8 E4M3
         # weight_scale:        (num_experts, 2*intermediate_size, hidden_size//128)  float32
         # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
-        # moe_mask:            (num_experts + 1,)         int32
+        # moe_mask:            (num_experts + 1,)         int32  1-index, not 0-index!
         # output:              (batch_size, num_experts_per_tok, 2*intermediate_size)  BF16
+        # The scale factor is fixed to 128.
         assert input_fp8.num_dims == 2
         assert input_scale.num_dims == 2
         assert weight_fp8.num_dims == 3

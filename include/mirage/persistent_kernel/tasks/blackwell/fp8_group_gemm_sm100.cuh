@@ -1519,7 +1519,7 @@ __device__ __forceinline__ void
                 m_tile * MMA_M + threadIdx.x;   // output row for this thread
             int32_t n_idx = n_tile * MMA_N + i; // token index
             int32_t topk_idx = tRoutingIndex(n_idx); // routing check
-            if (n_idx < BATCH_SIZE && topk_idx > 0) {
+            if (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE) {
               // topk_idx is 1-indexed in routing table, convert to 0-indexed
               mOutput(n_idx, topk_idx - 1, m_idx) = tCrC[i];
             }

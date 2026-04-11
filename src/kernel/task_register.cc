@@ -2557,12 +2557,16 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
         reduction_size,
         reduction_size);
   } else {
+    // W2 input: tensor is [batch, topk, K] in memory with strides (topk*K, K,
+    // 1). Kernel indexes mInput(batch, topk_idx-1, k_offset), so:
+    //   dim 0 = batch (stride topk*K), dim 1 = topk (stride K), dim 2 = K
+    //   (stride 1).
     code.e("cute::Layout layout_input = cute::make_layout(cute::make_shape($, "
            "$, $), "
-           "cute::make_stride($, cute::Int<1>{}, $));",
+           "cute::make_stride($, $, cute::Int<1>{}));",
            batch_size,
-           reduction_size,
            num_experts_per_tok,
+           reduction_size,
            num_experts_per_tok * reduction_size,
            reduction_size);
   }
@@ -2578,12 +2582,14 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
            k_scale,
            k_scale);
   } else {
+    // W2 input scale: [batch, topk, K/128] with strides (topk*K_scale, K_scale,
+    // 1).
     code.e("cute::Layout layout_input_scale = cute::make_layout("
            "cute::make_shape($, $, $), "
-           "cute::make_stride($, cute::Int<1>{}, $));",
+           "cute::make_stride($, $, cute::Int<1>{}));",
            batch_size,
-           k_scale,
            num_experts_per_tok,
+           k_scale,
            num_experts_per_tok * k_scale,
            k_scale);
   }
