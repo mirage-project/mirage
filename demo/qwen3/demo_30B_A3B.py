@@ -19,8 +19,8 @@ def grid_for_rmsnorm_linear_layer(size: int):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
     if size / 96 > 400:
-        # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
-        # cutlass version will output unexpect result (not same out put for
+        # TODO: An ad-hoc workaround for linear kernel, both MPK ptx and
+        # cutlass version will output unexpected results (not same output for
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
         assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
         return size // 256

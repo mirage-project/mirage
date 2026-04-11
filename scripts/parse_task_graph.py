@@ -51,17 +51,41 @@ def parse_enum(prefix):
 
 # Data type enum from include/mirage/type.h
 DATA_TYPE_NAMES = {
+    920: "float4",
+    925: "int4",
+    926: "uint4",
+    930: "float8",
+    935: "int8",
+    936: "uint8",
     940: "float16",
     941: "bfloat16",
+    945: "int16",
+    946: "uint16",
     950: "float32",
+    955: "int32",
+    956: "uint32",
+    960: "double",
     965: "int64",
+    966: "uint64",
 }
 
 DATA_TYPE_SIZES = {
-    940: 2,
-    941: 2,
-    950: 4,
-    965: 8,
+    920: 1,   # float4 (packed, treat as 1 byte)
+    925: 1,   # int4
+    926: 1,   # uint4
+    930: 1,   # float8
+    935: 1,   # int8
+    936: 1,   # uint8
+    940: 2,   # float16
+    941: 2,   # bfloat16
+    945: 2,   # int16
+    946: 2,   # uint16
+    950: 4,   # float32
+    955: 4,   # int32
+    956: 4,   # uint32
+    960: 8,   # double
+    965: 8,   # int64
+    966: 8,   # uint64
 }
 
 
