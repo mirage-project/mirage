@@ -1003,22 +1003,20 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
       if (param_id == 0) {
-        // Q: global [B*NUM_HEADS, D_K], treat as 3D (BK, B*NUM_HEADS, D_K/BK)
-        int total_rows = tensor_desc.dim[0]; // B*NUM_HEADS
-        int d_k = tensor_desc.dim[1];        // D_K
+        // Q: may arrive as [B*NUM_HEADS, D_K] or flat [mbt, NUM_HEADS*D_K].
+        // For TMA, reinterpret as 3D (BK, B*NUM_HEADS, D_K/BK).
+        int num_heads = 128; // DeepSeek V3
+        int d_k = 576;       // DeepSeek V3 MLA: 512 latent + 64 rope
+        // Compute total elements from first 2 dims only (ignore padding dims)
+        int total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
+        int total_rows = total_elements / d_k; // B * NUM_HEADS
         int k_iters = d_k / BK;
-        // Box loads NUM_HEADS rows per TMA op.
-        // For batch>1, total_rows = B*NUM_HEADS but box height = NUM_HEADS (one
-        // batch).
-        // TODO: derive num_heads from tensor metadata when supporting other MLA
-        // configs.
-        int num_heads = 128;
         // gd: global dims, gs: global byte strides (dim0 stride is implicit
-        // sizeof(T)) gs[0] = row stride in bytes = D_K * sizeof(bf16) gs[1] =
-        // k_iter stride in bytes = BK * sizeof(bf16) = 128
+        // sizeof(T)) gs[0] = row stride in bytes = D_K * sizeof(bf16)
+        // gs[1] = k_iter stride in bytes = BK * sizeof(bf16) = 128
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
-        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, (uint64_t)BK * 2};
         uint32_t bd[3] = {(uint32_t)BK, (uint32_t)num_heads, 1};
         uint32_t es[3] = {1, 1, 1};
         CUresult err = cuTensorMapEncodeTiled(tma_desc,
