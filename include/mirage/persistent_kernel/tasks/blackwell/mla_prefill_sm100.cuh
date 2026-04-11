@@ -268,7 +268,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     }
 
     cp_async_commit();
-    cp_async_wait<0>();
+    mla_prefill::cp_async_wait<0>();
     __syncthreads();
   }
 
@@ -365,7 +365,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     int stage = kv_tile % PF_NUM_STAGES;
     int kv_base = kv_tile * PF_BN;
 
-    cp_async_wait<0>();
+    mla_prefill::cp_async_wait<0>();
     __syncthreads();
 
     {

@@ -831,7 +831,7 @@ __device__ __forceinline__ void
           // Optimistic peek: try to check if the MMA warp has already consumed
           // this buffer (ab_empty). If yes, we can skip the blocking wait
           // below.
-          bool peek_ab_empty_status = kernel::try_wait_barrier(
+          bool peek_ab_empty_status = try_wait_barrier(
               shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
               tma_wr_ab_empty_phase);
 
@@ -965,7 +965,7 @@ __device__ __forceinline__ void
             // available (MMA warp consumed it). This overlaps barrier checking
             // with the current K-tile's TMA/cp.async execution.
             if (tma_wr_k_tile_next < k_tile_count) {
-              peek_ab_empty_status = kernel::try_wait_barrier(
+              peek_ab_empty_status = try_wait_barrier(
                   shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
                   tma_wr_ab_empty_phase_next);
             }
@@ -1118,14 +1118,14 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Optimistic peeks: check if A/B/scales are already ready
-          bool peek_a = kernel::try_wait_barrier(
+          bool peek_a = try_wait_barrier(
               shared_storage.a_full_mbar_ptr[smem_rd_buf],
               mma_rd_ab_full_phase);
-          bool peek_b = kernel::try_wait_barrier(
+          bool peek_b = try_wait_barrier(
               shared_storage.b_full_mbar_ptr[smem_rd_buf],
               mma_rd_ab_full_phase);
           int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
-          bool peek_sf = kernel::try_wait_barrier(
+          bool peek_sf = try_wait_barrier(
               shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);
 
           // Wait for epilogue to finish reading the previous accumulator in
@@ -1282,15 +1282,15 @@ __device__ __forceinline__ void
 
             // Lookahead peek for the next K-tile's A/B/scale data
             if (mma_rd_k_tile_next < k_tile_count) {
-              peek_a = kernel::try_wait_barrier(
+              peek_a = try_wait_barrier(
                   shared_storage.a_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
-              peek_b = kernel::try_wait_barrier(
+              peek_b = try_wait_barrier(
                   shared_storage.b_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
               int sf_phase_next =
                   (num_prev_k_blk + mma_rd_k_tile_next) / NUM_AB_STAGE % 2;
-              peek_sf = kernel::try_wait_barrier(
+              peek_sf = try_wait_barrier(
                   shared_storage.sf_ready_mbar_ptr[smem_rd_buf_next],
                   sf_phase_next);
               sf_phase = sf_phase_next;
