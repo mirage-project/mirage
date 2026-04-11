@@ -603,10 +603,17 @@ __device__ __forceinline__ void
                           MMA_N,
                           bK>;
   extern __shared__ char shared_memory[];
+  // Align to 1024 bytes: SM100 UMMA with SWIZZLE_128B requires the smem
+  // buffer base to be aligned to at least 1024 bytes (the swizzle pattern
+  // repeats at 8 rows * 128B = 1024B). Without this, the UMMA descriptor's
+  // start_address interacts with absolute smem address bits, causing the
+  // hardware to misinterpret the swizzled layout when the dynamic smem base
+  // has non-zero bits in positions [7:9].
   uintptr_t aligned_smem =
-      (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
+      (reinterpret_cast<uintptr_t>(shared_memory) + 1023) / 1024 * 1024;
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
+
 
   // Identify which warp this thread belongs to (0-7 for 256-thread block).
   // canonical_warp_idx_sync uses __syncwarp to ensure consistent results.

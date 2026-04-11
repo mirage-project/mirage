@@ -2469,6 +2469,7 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 3);
   batch_size = output_ops[0]->output_tensors[0].dim[0];
   num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  // output_size is actually N // grid_dim.y
   output_size = output_ops[0]->output_tensors[0].dim[2];
 
   // Reduction size from input_fp8
@@ -2622,13 +2623,16 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
          "cute::make_gmem_ptr(static_cast<cute::int32_t*>("
          "task_desc->input_ptrs[5])), layout_expert_mask);");
 
-  // Output tensor [batch, top_k, N] in BF16
+  // Output tensor: kernel indexes mOutput(n_idx, topk_idx-1, m_idx)
+  // Shape (batch, topk, output_size) with strides (topk*output_stride,
+  // output_stride, 1) so that m_idx (output row) is contiguous within each
+  // (batch, topk) slot.
   code.e("cute::Layout layout_output = cute::make_layout("
          "cute::make_shape($, $, $), "
-         "cute::make_stride($, cute::Int<1>{}, $));",
+         "cute::make_stride($, $, cute::Int<1>{}));",
          batch_size,
-         output_size,
          num_experts_per_tok,
+         output_size,
          num_experts_per_tok * output_stride,
          output_stride);
   code.e("cute::Tensor mOutput = cute::make_tensor("

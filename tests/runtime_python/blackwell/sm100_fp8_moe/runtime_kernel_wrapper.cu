@@ -173,12 +173,16 @@ __global__ __launch_bounds__(256, 1) void dsv3_fp8_moe_2d_kernel(
   auto mMask = cute::make_tensor(
       cute::make_gmem_ptr(const_cast<cute::int32_t *>(mask)), MaskLayout{});
 
+  // Output layout: kernel indexes mOutput(n_idx, topk_idx-1, m_idx)
+  //   dim 0 = batch (stride topk*ORIG)
+  //   dim 1 = topk  (stride ORIG)
+  //   dim 2 = output_row (stride 1, contiguous)
   auto mOutput = cute::make_tensor(
       cute::make_gmem_ptr(output),
       cute::make_layout(
           cute::make_shape(cute::Int<DSV3_BATCH_SIZE>{},
-                           cute::Int<OUTPUT_SIZE_PER_CTA>{},
-                           cute::Int<DSV3_NUM_TOPK>{}),
+                           cute::Int<DSV3_NUM_TOPK>{},
+                           cute::Int<OUTPUT_SIZE_PER_CTA>{}),
           cute::make_stride(cute::Int<DSV3_NUM_TOPK * ORIG_OUTPUT_SIZE>{},
                             cute::Int<ORIG_OUTPUT_SIZE>{},
                             cute::Int<1>{})));
@@ -248,12 +252,13 @@ __global__ __launch_bounds__(256, 1) void dsv3_fp8_moe_1cta_kernel(
   auto mMask = cute::make_tensor(
       cute::make_gmem_ptr(const_cast<cute::int32_t *>(mask)), MaskLayout{});
 
+  // Output layout: kernel indexes mOutput(n_idx, topk_idx-1, m_idx)
   auto mOutput = cute::make_tensor(
       cute::make_gmem_ptr(output),
       cute::make_layout(
           cute::make_shape(cute::Int<DSV3_BATCH_SIZE>{},
-                           cute::Int<DSV3_OUTPUT_SIZE>{},
-                           cute::Int<DSV3_NUM_TOPK>{}),
+                           cute::Int<DSV3_NUM_TOPK>{},
+                           cute::Int<DSV3_OUTPUT_SIZE>{}),
           cute::make_stride(cute::Int<DSV3_NUM_TOPK * DSV3_OUTPUT_SIZE>{},
                             cute::Int<DSV3_OUTPUT_SIZE>{},
                             cute::Int<1>{})));
