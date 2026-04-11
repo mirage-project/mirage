@@ -798,6 +798,138 @@ class PersistentKernel:
         else:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
+    # MLA (Multi-head Latent Attention) Layers
+    def mla_decode_layer(
+        self,
+        q_input: DTensor,         # Q tensor (attached with TMA desc)
+        kv_input: DTensor,        # KV cache tensor (attached with TMA desc)
+        output_partial: DTensor,  # partial O: [B*sk, D_V*NUM_HEADS] float32
+        output_lse: DTensor,      # partial LSE: [B*sk, NUM_HEADS] float32
+        mla_params: tuple,        # (num_heads, d_k, d_v, num_splits, kv_len)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        num_heads, d_k, d_v, num_splits, kv_len = mla_params
+        params = [num_heads, d_k, d_v, num_splits, kv_len]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_input, kv_input, output_partial, output_lse], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_decode_sm100", params)
+
+    def mla_reduce_layer(
+        self,
+        input_partial: DTensor,   # partial O from decode tasks
+        input_lse: DTensor,       # partial LSE from decode tasks
+        output: DTensor,          # final O: [B, NUM_HEADS, D_V] bf16
+        mla_params: tuple,        # (num_heads, d_v, num_splits, d_start, d_count)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        num_heads, d_v, num_splits, d_start, d_count = mla_params
+        params = [num_heads, d_v, num_splits, d_start, d_count]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_partial, input_lse, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_reduce_sm100", params)
+
+    def mla_prefill_layer(
+        self,
+        q_nope: DTensor,   # [S, H, D_CKV]
+        q_pe: DTensor,     # [S, H, D_KPE]
+        ckv: DTensor,      # [S, D_CKV]
+        kpe: DTensor,      # [S, D_KPE]
+        output: DTensor,   # [S, H, D_V]
+        mla_params: tuple, # (num_heads, seq_len, d_ckv, d_kpe, d_v)
+        grid_dim: tuple,   # (H, num_q_blocks, B)
+        block_dim: tuple,  # (256, 1, 1)
+    ):
+        num_heads, seq_len, d_ckv, d_kpe, d_v = mla_params
+        params = [num_heads, seq_len, d_ckv, d_kpe, d_v]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (0, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (0, -1, -1), -1, True)
+        tb_graph.new_input(ckv, (0, -1, -1), -1, True)
+        tb_graph.new_input(kpe, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope, q_pe, ckv, kpe, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_prefill_sm100", params)
+
+    def mla_mtp_decode_layer(
+        self,
+        q_input: DTensor,          # Q tensor [B*Q_LEN*H, D_K] (with TMA desc)
+        kv_input: DTensor,         # KV tensor [B*KL, D_K] (with TMA desc)
+        output_partial: DTensor,   # Oa: partial output buffer
+        output_lse: DTensor,       # La: partial LSE buffer
+        q_len: int,
+        kv_len: int,
+    ):
+        # Derive internal params (DeepSeek V3: 128 heads, TILE_S=128)
+        hpb = 128 // q_len
+        while 128 % hpb != 0:
+            hpb -= 1
+        num_head_groups = 128 // hpb
+        num_splits = (kv_len + 128 - 1) // 128
+
+        params = [num_head_groups, q_len, kv_len, num_splits]
+        grid_dim = (num_splits, num_head_groups, 1)  # (sk, groups, B=1)
+        block_dim = (128, 1, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_input, kv_input, output_partial, output_lse], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_mtp_decode_sm100", params)
+
+    def mla_mtp_reduce_layer(
+        self,
+        input_partial: DTensor,    # Oa from decode tasks
+        input_lse: DTensor,        # La from decode tasks
+        output: DTensor,           # final O [B, Q_LEN, H, D_V]
+        q_len: int,
+        kv_len: int,
+    ):
+        hpb = 128 // q_len
+        while 128 % hpb != 0:
+            hpb -= 1
+        num_head_groups = 128 // hpb
+        num_splits = (kv_len + 128 - 1) // 128
+        d_v = 512
+        # TODO: rd_dv=2 gives 256-1024 reduce blocks (many small tasks in MPK).
+        # Consider rd_dv=4 with loop to halve block count, but benchmarked slower.
+        # Revisit after MPK runtime refactor when task dispatch overhead is known.
+        rd_dv = 2
+
+        params = [num_head_groups, q_len, num_splits, rd_dv]
+        grid_dim = ((d_v + rd_dv - 1) // rd_dv, num_head_groups, 1)
+        block_dim = (256, 1, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_partial, input_lse, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_mtp_reduce_sm100", params)
+
     # MoE Layers
     def tensor_init_layer(
         self,
@@ -841,7 +973,43 @@ class PersistentKernel:
         self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
 
         self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100")
-        
+
+    def moe_topk_sigmoid_routing_layer(
+        self,
+        input: DTensor,
+        bias: DTensor,
+        output: tuple[DTensor, DTensor, DTensor],
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_groups: int = 8,
+        topk_group: int = 4,
+        routed_scaling_factor: float = 2.5,
+    ):
+        import struct
+
+        assert input.num_dims == 2  # (batch_size, num_experts)
+        assert bias.num_dims == 1  # (num_experts,)
+        assert len(output) == 3
+        moe_topk_weight, moe_routing_indices, moe_masks = output
+        assert moe_topk_weight.num_dims == 2  # (batch_size, num_experts_per_tok)
+        assert moe_routing_indices.num_dims == 2  # (num_experts, batch_size)
+        assert moe_masks.num_dims == 1  # (num_experts + 1)
+
+        scaling_bits = struct.unpack("i", struct.pack("f", routed_scaling_factor))[0]
+        params = [num_groups, topk_group, scaling_bits]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(bias, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_topk_weight, (0, -1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, bias, moe_topk_weight, moe_routing_indices, moe_masks],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "moe_topk_sigmoid_sm100", params)
+
     def moe_w13_linear_layer(
         self,
         input: DTensor,
@@ -873,6 +1041,86 @@ class PersistentKernel:
         else:
             assert False
             
+    def moe_w13_fp8_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # input_fp8:           (batch_size, hidden_size)          FP8 E4M3
+        # input_scale:         (batch_size, hidden_size//128)     float32
+        # weight_fp8:          (num_experts, 2*intermediate_size, hidden_size)  FP8 E4M3
+        # weight_scale:        (num_experts, 2*intermediate_size, hidden_size//128)  float32
+        # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
+        # moe_mask:            (num_experts + 1,)         int32
+        # output:              (batch_size, num_experts_per_tok, 2*intermediate_size)  BF16
+        assert input_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert moe_routing_indices.num_dims == 2
+        assert moe_mask.num_dims == 1
+        assert output.num_dims == 3
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale,
+             moe_routing_indices, moe_mask, output], tb_graph)
+        assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
+        self.kn_graph.register_task(tb_graph, "moe_w13_fp8_sm100")
+
+    def moe_w2_fp8_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # input_fp8:           (batch_size, num_experts_per_tok, intermediate_size)  FP8 E4M3
+        # input_scale:         (batch_size, num_experts_per_tok, intermediate_size//128)  float32
+        # weight_fp8:          (num_experts, hidden_size, intermediate_size)  FP8 E4M3
+        # weight_scale:        (num_experts, hidden_size, intermediate_size//128)  float32
+        # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
+        # moe_mask:            (num_experts + 1,)         int32
+        # output:              (batch_size, num_experts_per_tok, hidden_size)  BF16
+        assert input_fp8.num_dims == 3
+        assert input_scale.num_dims == 3
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert moe_routing_indices.num_dims == 2
+        assert moe_mask.num_dims == 1
+        assert output.num_dims == 3
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale,
+             moe_routing_indices, moe_mask, output], tb_graph)
+        assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
+        self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
+
     def moe_silu_mul_layer(
         self,
         input: DTensor,
