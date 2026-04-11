@@ -707,10 +707,6 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(256, 1, 1),  # 8 warps required by topk kernel
         )
 
-        if skip_level == 2:
-            self.mlp_out = moe_output
-            return
-
         # Expert W1+W3 (gate + up projection)
         # Check if weights are FP8 (have scale_inv) or BF16 (post-dequant)
         w13_scale_key = f"{prefix}experts.w13.weight_scale_inv"
@@ -723,10 +719,11 @@ class DeepSeekV3Builder(GraphBuilder):
         # Kernel expects: scale [num_experts*out, K/128] (per-row, float32)
         if use_fp8_experts:
             raw_scale_inv = state_dict[w13_scale_key].float().clamp(min=1e-30)
-            w13_scale = 1.0 / raw_scale_inv  # [num_experts, out/128, K/128]
+            # scale_inv IS the dequant scale (weight_float = weight_fp8 * scale_inv)
+            # Group GEMM kernel expects this directly, NOT 1/scale_inv
             # Expand per-block to per-row: repeat each block row 128 times
             # Result: [num_experts, out_rows, K/128] — 3D (PR 652 format)
-            w13_scale_expanded = w13_scale.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+            w13_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
             s_experts_w13 = self._safe_attach(
                 w13_scale_expanded, f"layer_{layer_idx}_experts_w13_scale")
         else:
@@ -811,9 +808,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # Group GEMM expects per-row weight_scale
         if use_fp8_experts:
             raw_scale_inv = state_dict[w2_scale_key].float().clamp(min=1e-30)
-            w2_scale = 1.0 / raw_scale_inv
-            # Keep 3D: [num_experts, out_rows, K/128] (PR 652 format)
-            w2_scale_expanded = w2_scale.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+            # scale_inv IS the dequant scale, pass directly (no inversion)
+            w2_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
             s_experts_w2 = self._safe_attach(
                 w2_scale_expanded, f"layer_{layer_idx}_experts_w2_scale")
         else:
