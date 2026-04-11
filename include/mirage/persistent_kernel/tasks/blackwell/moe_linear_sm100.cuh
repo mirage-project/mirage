@@ -498,9 +498,9 @@ __device__ __forceinline__ void
           int tma_wr_ab_empty_phase =
               (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
-          bool peek_ab_empty_status = try_wait_barrier(
-              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-              tma_wr_ab_empty_phase);
+          bool peek_ab_empty_status =
+              try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+                               tma_wr_ab_empty_phase);
 
           // CUTE_UNROLL
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -595,12 +595,12 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Peek full phase
-          bool peek_a_full_status = try_wait_barrier(
-              shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-              mma_rd_ab_full_phase);
-          bool peek_b_full_status = try_wait_barrier(
-              shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-              mma_rd_ab_full_phase);
+          bool peek_a_full_status =
+              try_wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+                               mma_rd_ab_full_phase);
+          bool peek_b_full_status =
+              try_wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+                               mma_rd_ab_full_phase);
 
           int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
           cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
