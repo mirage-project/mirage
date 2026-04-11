@@ -39,7 +39,6 @@
 
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
-using namespace kernel;
 // Configurations for the MPK runtime
 // #define MPK_MAX_NUM_BATCHED_REQUESTS 16
 // #define MPK_MAX_NUM_BATCHED_TOKENS 64
@@ -602,14 +601,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
            i += blockDim.x) {
         int task_idx = i / TASK_SIZE;
         int offset = i % TASK_SIZE;
-        load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
+        ::kernel::load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
                   reinterpret_cast<char *>(
                       config.all_tasks +
                       get_task_position_index(task_ids[task_idx])) +
                       offset * 16);
       }
-      kernel::cp_async_fence();
-      kernel::cp_async_wait<0>();
+      ::kernel::cp_async_fence();
+      ::kernel::cp_async_wait<0>();
       __syncthreads();
       queue_pos = 0;
       queue_len = num_loaded_tasks;
