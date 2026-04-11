@@ -6,6 +6,12 @@ import torch.distributed as dist
 import argparse
 import os
 
+# ! Caveat
+# If you want to run this script, you should do this manual modification:
+# Change `include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh` line 43
+# from `int MAX_TOKENS = 8` to `int MAX_TOKENS = 1`.
+# And this demo currently cannot run with multigpu.
+
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
@@ -14,7 +20,7 @@ def grid_for_rmsnorm_linear_layer(size: int):
     # if you meet any incompatibility.
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
-        # cutlass version will output unexpected result (not same out put for
+        # cutlass version will output unexpect result (not same out put for
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
         assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
         return size // 256
@@ -240,7 +246,7 @@ if __name__ == "__main__":
         else:
             profiler_tensor = None
             
-        spec_decode_config = mi.speculative.spec_decode_class(
+        spec_decode_config = mi.mpk.spec_decode_class(
             args.spec_decode,
             ngram_size=args.ngram_size,
             spec_length=args.spec_length,
@@ -782,6 +788,7 @@ if __name__ == "__main__":
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
+            print(f"{generated_ids=}")
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
         
