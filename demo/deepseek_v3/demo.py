@@ -647,6 +647,7 @@ if __name__ == "__main__":
                                and not k.endswith("_scale_inv")]
                 if expert_keys:
                     n_exp = len(expert_keys)
+                    print(f"  Fusing {n_exp} experts for layer {li}")
                     w13_list, w2_list = [], []
                     s13_list, s2_list = [], []
                     has_scale = f"{ep}0.gate_proj.weight_scale_inv" in state_dict

@@ -665,11 +665,15 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_router_logits",
             io_category="cuda_tensor",
         )
+        # Router gate: output=NUM_EXPERTS=256, need grid small enough so each
+        # block handles ≥8 BF16 elements (16B alignment for TMA descriptor).
+        router_grid = min(grid_for_rmsnorm_linear_layer(w_gate.dim(0)),
+                          w_gate.dim(0) // 8)  # ≥8 elements per block
         self.mpk.linear_layer(
             input=self.rmsnorm_out,
             weight=w_gate,
             output=router_logits,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_gate.dim(0)), 1, 1),
+            grid_dim=(router_grid, 1, 1),
             block_dim=(128, 1, 1),
         )
 
