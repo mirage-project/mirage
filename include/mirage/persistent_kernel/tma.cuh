@@ -49,7 +49,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr CUtensorMapL2promotion tma_l2Promotion =
       CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
   constexpr CUtensorMapFloatOOBfill tma_oobFill =
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA;
+      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
   constexpr CUtensorMapSwizzle tma_swizzle =
       (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
        : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
