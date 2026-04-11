@@ -1,7 +1,4 @@
-import mirage as mi
 from mirage.engine import *
-from transformers import AutoTokenizer
-import torch
 import argparse
 
 """
@@ -9,7 +6,6 @@ Usage (single GPU)::
 
     config = RunnerConfig(model="Qwen/Qwen3-8B")
     runner = ModelRunner(config)
-    manager = runner.make_manager()
     engine  = LLMEngine(manager, runner, tokenizer)
 
 Usage (multi-GPU via mpirun)::
@@ -83,16 +79,20 @@ if __name__ == "__main__":
     runner = ModelRunner(runnerConfig)
     llm = LLMEngine(runner)
 
-    prompts = [ # all requests
-        "introduce yourself",
-        "list all prime numbers within 100",
+    # (prompt, delay_in_seconds) — delays are relative to the start of generate_incremental
+    arrivals = [
+        ("introduce yourself",               0.0),
+        ("What is buggy in CMU?",            0.0),
+        ("How to use ncu for profilling?",   0.2),
+        ("list all prime numbers within 100", 0.2),
+        ("what is the capital of France?",    0.3),
+        ("Tell me the difference between lpl and lck",0.1)
     ]
-    outputs = llm.generate(prompts)
 
-    for prompt,output in zip(prompts,outputs):
-        print("\n")
-        print(f"Prompt: {prompt!r}")
-        print(f"Completion: {output['text']!r}")
+    llm.start(len(arrivals))
+    outputs = llm.generate_incremental(arrivals)
 
-    
+    # for (prompt, _), output in zip(arrivals, outputs):
+    #     print(f"\nPrompt: {prompt!r}")
+    #     print(f"Completion: {output['text']!r}")
 
