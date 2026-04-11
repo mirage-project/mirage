@@ -1618,7 +1618,10 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
             # MLP: dense (layers 0-2) or MoE (layers 3-60)
-            if i < FIRST_MOE_LAYER:
+            if os.environ.get("MPK_SKIP_MOE") and i >= FIRST_MOE_LAYER:
+                # Skip MoE MLP entirely for debugging
+                self.mlp_out = self.x
+            elif i < FIRST_MOE_LAYER:
                 self._build_dense_mlp(i, state_dict)
             else:
                 self._build_moe_mlp(i, state_dict)
