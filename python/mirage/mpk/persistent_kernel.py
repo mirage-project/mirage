@@ -63,6 +63,13 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+static PyObject *init_request_func(PyObject *self, PyObject *args) {
+  Py_BEGIN_ALLOW_THREADS
+  init_request_resources();
+  Py_END_ALLOW_THREADS
+  Py_RETURN_NONE;
+}
+
 static PyObject *launch_func(PyObject *self, PyObject *args) {
   PyObject *py_stream;
   cudaStream_t stream;
@@ -84,6 +91,7 @@ static PyObject *finalize_func(PyObject *self, PyObject *args) {
 
 static PyMethodDef ModuleMethods[] = {
   {"init_func", init_func, METH_VARARGS, "initialize persistent kernel"},
+  {"init_request_func", init_request_func, METH_VARARGS, "initialize request resources"},
   {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
   {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
   {NULL, NULL, 0, NULL} // sentinel
@@ -1845,15 +1853,29 @@ class PersistentKernel:
             )
 
     def run_test_mode(self):
-        """Test-mode execution: launch the task graph once and synchronize.
+        """Test-mode execution: launch the task graph once.
 
         Input/output tensors must be pre-attached via attach_input() before
         compile(). After run_test_mode() returns, the output tensors contain the results.
         """
         assert self.test_mode, "run_test_mode() is only available in test mode"
         assert self._is_compiled, "Must call compile() before run_test_mode()"
+
         stream = torch.cuda.current_stream()
-        stream_ptr = int(stream.cuda_stream)
+        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
+        stream_ptr = 0
+        if hasattr(stream, "cuda_stream"):
+            try:
+                stream_ptr = int(stream.cuda_stream)
+            except Exception:
+                try:
+                    stream_ptr = int(stream.cuda_stream.value)
+                except Exception as e:
+                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
+        elif isinstance(stream, int):
+            stream_ptr = stream
+        else:
+            raise ValueError("Invalid stream object")
         self.launch_func(stream_ptr)
 
     def __del__(self):
