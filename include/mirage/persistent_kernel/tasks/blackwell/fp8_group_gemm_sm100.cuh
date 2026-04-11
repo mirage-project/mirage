@@ -614,6 +614,7 @@ __device__ __forceinline__ void
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
 
+
   // Identify which warp this thread belongs to (0-7 for 256-thread block).
   // canonical_warp_idx_sync uses __syncwarp to ensure consistent results.
   int warp_idx = cutlass::canonical_warp_idx_sync();
