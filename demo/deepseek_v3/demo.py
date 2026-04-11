@@ -190,28 +190,37 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
     print(f"Correctness Test: layers={layer_indices}, mtp={include_mtp}")
     print(f"{'='*60}")
 
-    # Run PyTorch reference — use same first token as MPK
-    print(f"  Using first_token_id={first_token_id}")
-    token_ids = torch.tensor([first_token_id], device=device, dtype=torch.long)
-    max_seq = 64
+    # Run PyTorch reference — process full prompt token-by-token (matching MPK offline mode)
+    from transformers import AutoTokenizer
+    tokenizer_ref = AutoTokenizer.from_pretrained(args.model_path)
+    messages = [{"role": "user", "content": args.prompt}]
+    text = tokenizer_ref.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    all_token_ids = tokenizer_ref([text], return_tensors="pt").input_ids[0].to(device)
+    prompt_len = len(all_token_ids)
+    print(f"  Full prompt: {prompt_len} tokens, ids[:5]={all_token_ids[:5].tolist()}")
+
+    max_seq = prompt_len + 16
     kv_caches = [torch.zeros(max_seq, QK_HEAD_DIM, device=device, dtype=torch.bfloat16)
                  for _ in range(num_layers + (1 if include_mtp else 0))]
 
-    hidden = F.embedding(token_ids, state_dict["model.embed_tokens.weight"])
-    if hidden.dim() == 1:
-        hidden = hidden.unsqueeze(0)
+    # Token-by-token prefill (matching persistent kernel offline mode)
+    for step in range(prompt_len):
+        tid = all_token_ids[step]
+        hidden = F.embedding(tid.unsqueeze(0), state_dict["model.embed_tokens.weight"])
+        if hidden.dim() == 1:
+            hidden = hidden.unsqueeze(0)
 
-    for cache_idx, layer_idx in enumerate(layer_indices):
-        prefix = f"model.layers.{layer_idx}."
-        normed = rms_norm(hidden, state_dict[f"{prefix}input_layernorm.weight"])
-        attn_out = mla_attention(normed, prefix, state_dict, kv_caches[cache_idx], 0, NUM_Q_HEADS)
-        hidden = hidden + attn_out
-        normed = rms_norm(hidden, state_dict[f"{prefix}post_attention_layernorm.weight"])
-        if layer_idx < FIRST_MOE:
-            mlp_out = dense_mlp(normed, prefix, state_dict)
-        else:
-            mlp_out = moe_mlp(normed, prefix, state_dict)
-        hidden = hidden + mlp_out
+        for cache_idx, layer_idx in enumerate(layer_indices):
+            prefix = f"model.layers.{layer_idx}."
+            normed = rms_norm(hidden, state_dict[f"{prefix}input_layernorm.weight"])
+            attn_out = mla_attention(normed, prefix, state_dict, kv_caches[cache_idx], step, NUM_Q_HEADS)
+            hidden = hidden + attn_out
+            normed = rms_norm(hidden, state_dict[f"{prefix}post_attention_layernorm.weight"])
+            if layer_idx < FIRST_MOE:
+                mlp_out = dense_mlp(normed, prefix, state_dict)
+            else:
+                mlp_out = moe_mlp(normed, prefix, state_dict)
+            hidden = hidden + mlp_out
 
     hidden = rms_norm(hidden, state_dict["model.norm.weight"])
     logits = F.linear(hidden.float(), state_dict["lm_head.weight"].float())
@@ -712,9 +721,12 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        # Correctness comparison
+        # Debug: check token buffers and step counter
+        prompt_len_val = prompt_lengths[0].item()
+        # Correctness comparison: first generated token is at tokens[0, prompt_len]
         if args.correctness and ref_token is not None:
-            mpk_token = output_tokens[0, 0].item()
+            mpk_token = tokens[0, prompt_len_val].item()
+            print(f"  tokens around prompt_len={prompt_len_val}: {tokens[0, max(0,prompt_len_val-2):prompt_len_val+3].tolist()}")
             print(f"\n{'='*60}")
             print(f"Correctness comparison:")
             print(f"  PyTorch reference token: {ref_token}")
