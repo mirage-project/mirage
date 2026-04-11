@@ -91,36 +91,36 @@ class LLMEngine:
             t = torch.tensor(token_ids, dtype=torch.int64)
             self.runtime.load_tokens(rid, t)
             self.runtime.submit_request(rid, prompt_len=len(token_ids))
-        # # activate if all requests are pre-loaded
-        # self.model_runner()
-        # completions = self.runtime.wait_all(n,timeout)
+        # activate if all requests are pre-loaded
+        self.model_runner()
+        completions = self.runtime.wait_all(n,timeout)
         
         # activate if submit requests incrementally
-        # 5. Launch kernel in background thread ───────────────────────────────
-        kernel_thread = threading.Thread(target=self.model_runner, daemon=True)
-        kernel_thread.start() # same to self.model_runner() but run in background thread
+        # # 5. Launch kernel in background thread ───────────────────────────────
+        # kernel_thread = threading.Thread(target=self.model_runner, daemon=True)
+        # kernel_thread.start() # same to self.model_runner() but run in background thread
 
-        # 6. Poll completion ring ─────────────────────────────────────────────
-        pbar = tqdm(total=n, desc="Generating", dynamic_ncols=True) if use_tqdm else None
-        completed: list[int] = []
-        t_start = perf_counter()
-        try:
-            while len(completed) < n:
-                newly_done = self.runtime.drain_completions() # collect all newly completed request IDs
-                if newly_done:
-                    completed.extend(newly_done)
-                    if pbar is not None:
-                        pbar.update(len(newly_done))
-                else:
-                    time.sleep(poll_interval)
-                if perf_counter() - t_start > timeout:
-                    raise TimeoutError(
-                        f"generate() timed out: {len(completed)}/{n} requests completed"
-                    )
-        finally:
-            if pbar is not None:
-                pbar.close()
-            kernel_thread.join(timeout=5.0)
+        # # 6. Poll completion ring ─────────────────────────────────────────────
+        # pbar = tqdm(total=n, desc="Generating", dynamic_ncols=True) if use_tqdm else None
+        # completed: list[int] = []
+        # t_start = perf_counter()
+        # try:
+        #     while len(completed) < n:
+        #         newly_done = self.runtime.drain_completions() # collect all newly completed request IDs
+        #         if newly_done:
+        #             completed.extend(newly_done)
+        #             if pbar is not None:
+        #                 pbar.update(len(newly_done))
+        #         else:
+        #             time.sleep(poll_interval)
+        #         if perf_counter() - t_start > timeout:
+        #             raise TimeoutError(
+        #                 f"generate() timed out: {len(completed)}/{n} requests completed"
+        #             )
+        # finally:
+        #     if pbar is not None:
+        #         pbar.close()
+        #     kernel_thread.join(timeout=5.0)
 
         # 7. Decode and return in original prompt order ───────────────────────
         results = []
@@ -169,15 +169,20 @@ class LLMEngine:
         timeout: float = 120.0,
         poll_interval: float = 1e-4,
     ) -> list[dict]:
-        """Submit prompts incrementally and collect completions.
+        """Initialize the kernel and submit prompts incrementally.
 
-        Requires :meth:`start` to have been called first.  Prompts are fed
-        into the ring buffer at the specified delays so the GPU can start on
-        early requests while later ones are still arriving.  Each request is
-        decoded as soon as it completes.
+        Handles the full lifecycle: init, kernel launch, and completion
+        collection.  Prompts are fed into the ring buffer at the specified
+        delays so the GPU can start on early requests while later ones are
+        still arriving.  Each request is decoded as soon as it completes.
+
+        The submit thread is started before the kernel so that at least one
+        request is in the ring buffer when the persistent kernel begins,
+        preventing it from seeing an empty batch on its first
+        EVENT_END_OF_TASK_GRAPH and terminating immediately.
 
         Args:
-            arrivals:      List of ``(prompt, delay_seconds)`` pairs.  Delays
+            arrivals:      List of ``(prompt, delay_microseconds)`` pairs.  Delays
                            are relative to the start of this call.
             use_template:  Apply the model's chat template before tokenizing.
             timeout:       Seconds to wait before raising :exc:`TimeoutError`.
@@ -188,35 +193,51 @@ class LLMEngine:
 
                 {"text": str, "token_ids": list[int]}
         """
-        assert self._kernel_thread is not None and self._kernel_thread.is_alive(), (
-            "Kernel is not running — call start() before generate_incremental()"
+        n = len(arrivals)
+        assert n <= self.model_runner.config.max_num_batched_requests, (
+            f"Too many arrivals ({n}); max_num_batched_requests="
+            f"{self.model_runner.config.max_num_batched_requests}"
         )
 
-        n = len(arrivals)
         prompts = [p for p, _ in arrivals]
         delays  = [d for _, d in arrivals]
 
-        # 1. Tokenize all prompts up front ────────────────────────────────────
+        # 1. Init for this session ─────────────────────────────────────────────
+        self.runtime.reset()
+        self.model_runner.init(n)
+
+        # 2. Tokenize all prompts up front ────────────────────────────────────
         all_token_ids: list[list[int]] = [
             self._tokenize(p, use_template) for p in prompts
         ]
 
-        # 2. Submit requests at their scheduled arrival times ─────────────────
+        # 3. Start submit thread first; wait until the first request is in the
+        #    ring before launching the kernel.  The GPU persistent kernel checks
+        #    for an empty batch on its very first EVENT_END_OF_TASK_GRAPH and
+        #    exits if none are found, so we must guarantee at least one request
+        #    is visible before the kernel starts.
         t0 = perf_counter()
+        first_submitted = threading.Event()
 
         def _submit_loop():
             for rid, (token_ids, delay) in enumerate(zip(all_token_ids, delays)):
-                wait = t0 + delay - perf_counter()
+                wait = t0 + delay / 1_000_000 - perf_counter()
                 if wait > 0:
                     time.sleep(wait)
                 t = torch.tensor(token_ids, dtype=torch.int64)
                 self.runtime.load_tokens(rid, t)
                 self.runtime.submit_request(rid, prompt_len=len(token_ids))
+                first_submitted.set()  # signal after first submission
 
         submit_thread = threading.Thread(target=_submit_loop, daemon=True)
         submit_thread.start()
+        first_submitted.wait()  # block until at least one request is in the ring
 
-        # 3. Poll completion ring — decode each request as soon as it completes
+        # 4. Launch kernel — ring buffer now has at least one request ──────────
+        self._kernel_thread = threading.Thread(target=self.model_runner, daemon=True)
+        self._kernel_thread.start()
+
+        # 5. Poll completion ring — decode each request as soon as it completes
         results: list[dict | None] = [None] * n
         num_completed = 0
         try:

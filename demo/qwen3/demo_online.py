@@ -79,17 +79,16 @@ if __name__ == "__main__":
     runner = ModelRunner(runnerConfig)
     llm = LLMEngine(runner)
 
-    # (prompt, delay_in_seconds) — delays are relative to the start of generate_incremental
+    # (prompt, delay_in_microseconds) — delays are relative to the start of generate_incremental
     arrivals = [
-        ("introduce yourself",               0.0),
-        ("What is buggy in CMU?",            0.0),
-        ("How to use ncu for profilling?",   0.2),
-        ("list all prime numbers within 100", 0.2),
-        ("what is the capital of France?",    0.3),
-        ("Tell me the difference between lpl and lck",0.1)
+        ("introduce yourself",               0),
+        ("What is buggy in CMU?",            0),
+        ("How to use ncu for profilling?",   200),
+        ("list all prime numbers within 100", 200),
+        ("what is the capital of France?",    300),
+        ("Tell me the difference between lpl and lck", 100)
     ]
 
-    llm.start(len(arrivals))
     outputs = llm.generate_incremental(arrivals)
 
     # for (prompt, _), output in zip(arrivals, outputs):
