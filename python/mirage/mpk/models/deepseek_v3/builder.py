@@ -652,7 +652,7 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         moe_mask = self.mpk.new_tensor(
-            dims=(NUM_EXPERTS + 1, 1),
+            dims=(NUM_EXPERTS + 1,),
             dtype=int32,
             name=f"layer_{layer_idx}_moe_mask",
             io_category="cuda_tensor",
@@ -721,12 +721,10 @@ class DeepSeekV3Builder(GraphBuilder):
             raw_scale_inv = state_dict[w13_scale_key].float().clamp(min=1e-30)
             w13_scale = 1.0 / raw_scale_inv  # [num_experts, out/128, K/128]
             # Expand per-block to per-row: repeat each block row 128 times
-            w13_scale_expanded = w13_scale.repeat_interleave(128, dim=1)
-            # Flatten to [num_experts*out, K/128]
-            ne, out_rows, sk = w13_scale_expanded.shape
-            w13_scale_flat = w13_scale_expanded.reshape(ne * out_rows, sk).contiguous().to(torch.float32)
+            # Result: [num_experts, out_rows, K/128] — 3D (PR 652 format)
+            w13_scale_expanded = w13_scale.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
             s_experts_w13 = self._safe_attach(
-                w13_scale_flat, f"layer_{layer_idx}_experts_w13_scale")
+                w13_scale_expanded, f"layer_{layer_idx}_experts_w13_scale")
         else:
             s_experts_w13 = None
         mbt = self.max_num_batched_tokens
@@ -810,11 +808,10 @@ class DeepSeekV3Builder(GraphBuilder):
         if use_fp8_experts:
             raw_scale_inv = state_dict[w2_scale_key].float().clamp(min=1e-30)
             w2_scale = 1.0 / raw_scale_inv
-            w2_scale_expanded = w2_scale.repeat_interleave(128, dim=1)
-            ne, out_rows, sk = w2_scale_expanded.shape
-            w2_scale_flat = w2_scale_expanded.reshape(ne * out_rows, sk).contiguous().to(torch.float32)
+            # Keep 3D: [num_experts, out_rows, K/128] (PR 652 format)
+            w2_scale_expanded = w2_scale.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
             s_experts_w2 = self._safe_attach(
-                w2_scale_flat, f"layer_{layer_idx}_experts_w2_scale")
+                w2_scale_expanded, f"layer_{layer_idx}_experts_w2_scale")
         else:
             s_experts_w2 = None
 
@@ -1163,7 +1160,7 @@ class DeepSeekV3Builder(GraphBuilder):
             dims=(NUM_EXPERTS, mbt), dtype=bfloat16,
             name="mtp_moe_routing_indices", io_category="cuda_tensor")
         moe_mask = self.mpk.new_tensor(
-            dims=(NUM_EXPERTS + 1, 1), dtype=bfloat16,
+            dims=(NUM_EXPERTS + 1,), dtype=int32,
             name="mtp_moe_mask", io_category="cuda_tensor")
         router_logits = self.mpk.new_tensor(
             dims=(mbt, NUM_EXPERTS), dtype=bfloat16,
