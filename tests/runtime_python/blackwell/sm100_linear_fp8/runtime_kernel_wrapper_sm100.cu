@@ -348,12 +348,14 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
   constexpr int kSwizzleAMode = 128;
   constexpr int kSwizzleBMode = 128;
   constexpr int kSwizzleCDMode = 32;
-  constexpr int kNumStages = 32;
+  constexpr int kNumStages = 31;
   constexpr int kNumNonEpilogueThreads = 128;
   constexpr int kNumEpilogueThreads = 128;
   constexpr int kNumMulticast = 1;
   constexpr bool kIsMulticastOnA = false;
   constexpr int kNumSMs = 8;
+  constexpr int kSm100MaxDynamicSmemBytes = 228 * 1024;
+  constexpr int kSchedulerSmemReservationBytes = 6 * 1024;
   constexpr int kDynamicSmemBytes =
       linear_fp8_dynamic_smem_bytes<BLOCK_M,
                                     BLOCK_N,
@@ -366,8 +368,11 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                                               BLOCK_K,
                                               kSwizzleCDMode,
                                               kNumStages,
-                                              false>() == 232236,
+                                              false>() == 225044,
                 "Unexpected no-residual dynamic shared memory size");
+  static_assert(kDynamicSmemBytes + kSchedulerSmemReservationBytes <=
+                    kSm100MaxDynamicSmemBytes,
+                "SM100 FP8 fast path must leave scheduler shared memory headroom");
 
   auto &cache = get_linear_fp8_descriptor_cache(LinearFp8RuntimeKey{
       BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, kWithResidual});
