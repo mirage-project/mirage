@@ -2,6 +2,7 @@
 
 #include <cuda/std/cstdint>
 #include <cuda/std/utility>
+#include <cuda_bf16.h>
 #include <cute/container/tuple.hpp>
 
 #include "linear_fp8_sm100_cute_tie.cuh"
@@ -116,6 +117,27 @@ __device__ __forceinline__ int cast_into_bf16_and_pack(old_t &x, old_t &y) {
   auto bf16x2 = __float22bfloat162_rn(
       {*reinterpret_cast<float *>(&x), *reinterpret_cast<float *>(&y)});
   return *reinterpret_cast<int *>(&bf16x2);
+}
+
+__device__ __forceinline__ void add_packed_bf16x2_into_fp32_bits(
+    uint32_t packed_residual, uint32_t &x_bits, uint32_t &y_bits) {
+  union BitsFloat {
+    uint32_t bits;
+    float value;
+  };
+  union PackedBf16x2 {
+    uint32_t bits;
+    __nv_bfloat162 value;
+  };
+
+  BitsFloat x{.bits = x_bits};
+  BitsFloat y{.bits = y_bits};
+  PackedBf16x2 residual{.bits = packed_residual};
+  float2 const residual_vals = __bfloat1622float2(residual.value);
+  x.value += residual_vals.x;
+  y.value += residual_vals.y;
+  x_bits = x.bits;
+  y_bits = y.bits;
 }
 
 } // namespace mirage::blackwell::linear_fp8_sm100

@@ -50,10 +50,14 @@ struct LinearFp8RuntimeKey {
   int batch_size;
   int output_size;
   int reduction_size;
+  bool has_residual;
 
   bool operator<(LinearFp8RuntimeKey const &other) const {
-    return std::tie(batch_size, output_size, reduction_size) <
-           std::tie(other.batch_size, other.output_size, other.reduction_size);
+    return std::tie(batch_size, output_size, reduction_size, has_residual) <
+           std::tie(other.batch_size,
+                    other.output_size,
+                    other.reduction_size,
+                    other.has_residual);
   }
 };
 
@@ -62,11 +66,13 @@ struct LinearFp8DescriptorCache {
   CUtensorMap host_weight_desc{};
   CUtensorMap host_input_scale_desc{};
   CUtensorMap host_weight_scale_desc{};
+  CUtensorMap host_residual_desc{};
   CUtensorMap host_output_desc{};
   void *last_input_ptr = nullptr;
   void *last_weight_ptr = nullptr;
   void *last_input_scale_ptr = nullptr;
   void *last_weight_scale_ptr = nullptr;
+  void *last_residual_ptr = nullptr;
   void *last_output_ptr = nullptr;
   bool initialized = false;
   bool kernel_configured = false;
@@ -238,6 +244,53 @@ CUtensorMap make_tma_sf_desc(torch::Tensor const &t,
       t, aligned_outer, packed_scale_k, block_outer, 1, aligned_outer, 0);
 }
 
+template <int BLOCK_M,
+          int BLOCK_N,
+          int BLOCK_K,
+          int kSwizzleCDMode,
+          int kNumStages,
+          bool kWithResidual>
+constexpr int linear_fp8_dynamic_smem_bytes() {
+  using Barrier = cutlass::arch::ClusterTransactionBarrier;
+  constexpr int kLayoutAdM = 128;
+  constexpr int kNumTmaStoreStages = kWithResidual ? 1 : 2;
+  constexpr int kNumUtccpAlignedElems = 128;
+  constexpr int kNumMwaves =
+      BLOCK_M / (BLOCK_M < kLayoutAdM ? BLOCK_M : kLayoutAdM);
+  constexpr int kStoreBlockM = BLOCK_M < kLayoutAdM ? BLOCK_M : kLayoutAdM;
+  constexpr int kSmemCdSizePerStage = kStoreBlockM * kSwizzleCDMode;
+  constexpr int kSmemCdSize = kSmemCdSizePerStage * kNumTmaStoreStages;
+  constexpr int kSmemResidualSize =
+      kWithResidual ? kStoreBlockM * kSwizzleCDMode : 0;
+  constexpr int kSfBlockM =
+      ((BLOCK_M + kNumUtccpAlignedElems - 1) / kNumUtccpAlignedElems) *
+      kNumUtccpAlignedElems;
+  constexpr int kSfBlockN =
+      ((BLOCK_N + kNumUtccpAlignedElems - 1) / kNumUtccpAlignedElems) *
+      kNumUtccpAlignedElems;
+  constexpr int kNumSfATmemCols = kSfBlockM / 32;
+  constexpr int kNumSfBTmemCols = kSfBlockN / 32;
+  constexpr int kNumEpilogueStages =
+      (2 * kNumMwaves * BLOCK_N + kNumSfATmemCols + kNumSfBTmemCols) > 512 ? 1
+                                                                           : 2;
+  constexpr int kSmemASize =
+      kNumStages * BLOCK_M * BLOCK_K * sizeof(cutlass::float_e4m3_t);
+  constexpr int kSmemBSize =
+      kNumStages * BLOCK_N * BLOCK_K * sizeof(cutlass::float_e4m3_t);
+  constexpr int kSmemSfASize = kNumStages * kSfBlockM * sizeof(uint32_t);
+  constexpr int kSmemSfBSize = kNumStages * kSfBlockN * sizeof(uint32_t);
+  constexpr int kNumBarriers =
+      kNumStages * 3 + kNumEpilogueStages * 2 + (kWithResidual ? 2 : 0);
+  constexpr int kSmemBytesBeforeBarriers = kSmemCdSize + kSmemResidualSize +
+                                           kSmemASize + kSmemBSize +
+                                           kSmemSfASize + kSmemSfBSize;
+  constexpr int kBarrierBytes = kNumBarriers * sizeof(Barrier);
+  constexpr int kTmemPtrBytes = sizeof(uint32_t);
+  constexpr int kPaddingBytes = 8;
+  return kSmemBytesBeforeBarriers + kBarrierBytes + kTmemPtrBytes +
+         kPaddingBytes;
+}
+
 template <typename KernelPtr, typename... Args>
 void launch_kernel_ex_cluster(dim3 grid_dim,
                               dim3 block_dim,
@@ -276,11 +329,15 @@ void launch_kernel_ex_cluster(dim3 grid_dim,
 
 } // namespace
 
-template <int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+template <int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          bool kWithResidual>
 void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                                   torch::Tensor const &input_scale,
                                   torch::Tensor const &weight_q,
                                   torch::Tensor const &weight_scale,
+                                  torch::Tensor const *residual,
                                   torch::Tensor &output) {
   static_assert(OUTPUT_SIZE == 128, "Current path requires N=128");
   constexpr int BLOCK_M = 32;
@@ -297,10 +354,23 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
   constexpr int kNumMulticast = 1;
   constexpr bool kIsMulticastOnA = false;
   constexpr int kNumSMs = 8;
-  constexpr int kDynamicSmemBytes = 232236;
+  constexpr int kDynamicSmemBytes =
+      linear_fp8_dynamic_smem_bytes<BLOCK_M,
+                                    BLOCK_N,
+                                    BLOCK_K,
+                                    kSwizzleCDMode,
+                                    kNumStages,
+                                    kWithResidual>();
+  static_assert(linear_fp8_dynamic_smem_bytes<BLOCK_M,
+                                              BLOCK_N,
+                                              BLOCK_K,
+                                              kSwizzleCDMode,
+                                              kNumStages,
+                                              false>() == 232236,
+                "Unexpected no-residual dynamic shared memory size");
 
-  auto &cache = get_linear_fp8_descriptor_cache(
-      LinearFp8RuntimeKey{BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE});
+  auto &cache = get_linear_fp8_descriptor_cache(LinearFp8RuntimeKey{
+      BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, kWithResidual});
   std::lock_guard<std::mutex> lock(cache.mutex);
 
   auto update_desc = [](CUtensorMap &desc, void *ptr, char const *name) {
@@ -311,6 +381,11 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
   void *weight_ptr = weight_q.data_ptr();
   void *input_scale_ptr = input_scale.data_ptr();
   void *weight_scale_ptr = weight_scale.data_ptr();
+  void *residual_ptr = nullptr;
+  if constexpr (kWithResidual) {
+    TORCH_CHECK(residual != nullptr, "residual tensor is required");
+    residual_ptr = residual->data_ptr();
+  }
   void *output_ptr = output.data_ptr();
 
   if (!cache.initialized) {
@@ -333,6 +408,16 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
         input_scale, BATCH_SIZE, REDUCTION_SIZE, BLOCK_M, kGranKA);
     cache.host_weight_scale_desc = make_tma_sf_desc(
         weight_scale, OUTPUT_SIZE, REDUCTION_SIZE, BLOCK_N, kGranKB);
+    if constexpr (kWithResidual) {
+      cache.host_residual_desc =
+          make_tma_cd_desc(*residual,
+                           BATCH_SIZE,
+                           OUTPUT_SIZE,
+                           BLOCK_M,
+                           BLOCK_N,
+                           static_cast<int>(residual->stride(0)),
+                           kSwizzleCDMode);
+    }
     cache.host_output_desc =
         make_tma_cd_desc(output,
                          BATCH_SIZE,
@@ -345,6 +430,7 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
     cache.last_weight_ptr = weight_ptr;
     cache.last_input_scale_ptr = input_scale_ptr;
     cache.last_weight_scale_ptr = weight_scale_ptr;
+    cache.last_residual_ptr = residual_ptr;
     cache.last_output_ptr = output_ptr;
     cache.initialized = true;
   } else {
@@ -370,6 +456,14 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                   weight_scale_ptr,
                   "cuTensorMapReplaceAddress(weight_scale)");
       cache.last_weight_scale_ptr = weight_scale_ptr;
+    }
+    if constexpr (kWithResidual) {
+      if (residual_ptr != cache.last_residual_ptr) {
+        update_desc(cache.host_residual_desc,
+                    residual_ptr,
+                    "cuTensorMapReplaceAddress(residual)");
+        cache.last_residual_ptr = residual_ptr;
+      }
     }
     if (output_ptr != cache.last_output_ptr) {
       update_desc(cache.host_output_desc,
@@ -400,6 +494,7 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                                                  kNumMulticast,
                                                  kIsMulticastOnA,
                                                  kNumSMs,
+                                                 kWithResidual,
                                                  fp8_linear::GemmType::Normal,
                                                  false,
                                                  cutlass::float_e4m3_t,
@@ -428,6 +523,7 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                                         kNumMulticast,
                                         kIsMulticastOnA,
                                         kNumSMs,
+                                        kWithResidual,
                                         fp8_linear::GemmType::Normal,
                                         false,
                                         cutlass::float_e4m3_t,
@@ -451,6 +547,8 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
   uint32_t shape_m = BATCH_SIZE;
   uint32_t shape_n = OUTPUT_SIZE;
   uint32_t shape_k = REDUCTION_SIZE;
+  CUtensorMap const &residual_desc =
+      kWithResidual ? cache.host_residual_desc : cache.host_output_desc;
   launch_kernel_ex_cluster(grid_dim,
                            block_dim,
                            cluster_dim,
@@ -465,8 +563,10 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                            cache.host_weight_desc,
                            cache.host_input_scale_desc,
                            cache.host_weight_scale_desc,
+                           residual_desc,
                            cache.host_output_desc);
-  check_last_launch("linear_fp8_1d1d_sm100");
+  check_last_launch(kWithResidual ? "linear_fp8_1d1d_sm100_with_residual"
+                                  : "linear_fp8_1d1d_sm100");
 }
 
 void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
@@ -554,42 +654,68 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
                 "]");
   }
 #define DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                               \
-    BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)                                   \
+    BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, WITH_RESIDUAL)                    \
   case REDUCTION_SIZE:                                                         \
-    launch_linear_fp8_1d1d_sm100<BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(     \
-        input_q, input_scale, weight_q, weight_scale, output);                 \
+    launch_linear_fp8_1d1d_sm100<BATCH_SIZE,                                   \
+                                 OUTPUT_SIZE,                                  \
+                                 REDUCTION_SIZE,                               \
+                                 WITH_RESIDUAL>(input_q,                       \
+                                                input_scale,                   \
+                                                weight_q,                      \
+                                                weight_scale,                  \
+                                                has_residual ? &(*residual)    \
+                                                             : nullptr,        \
+                                                output);                       \
     break;
 
-#define DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(BATCH_SIZE)                        \
+#define DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(BATCH_SIZE, WITH_RESIDUAL)         \
   case BATCH_SIZE:                                                             \
     switch (reduction_size) {                                                  \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 128)            \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 256)            \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 384)            \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 512)            \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 768)            \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1024)           \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 1536)           \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 2048)           \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 4096)           \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(BATCH_SIZE, 128, 7168)           \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 128, WITH_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 256, WITH_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 384, WITH_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 512, WITH_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 768, WITH_RESIDUAL)                                 \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 1024, WITH_RESIDUAL)                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 1536, WITH_RESIDUAL)                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 2048, WITH_RESIDUAL)                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 4096, WITH_RESIDUAL)                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE(                                 \
+          BATCH_SIZE, 128, 7168, WITH_RESIDUAL)                                \
       default:                                                                 \
         TORCH_CHECK(false, "Unsupported reduction_size dispatch");             \
     }                                                                          \
     break;
 
-  switch (batch_size) {
-    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(1)
-    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(2)
-    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(4)
-    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(8)
-    DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(16)
-    default:
-      TORCH_CHECK(false, "Unsupported batch_size dispatch");
-  }
-
   if (has_residual) {
-    output.add_(*residual);
+    switch (batch_size) {
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(1, true)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(2, true)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(4, true)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(8, true)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(16, true)
+      default:
+        TORCH_CHECK(false, "Unsupported batch_size dispatch");
+    }
+  } else {
+    switch (batch_size) {
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(1, false)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(2, false)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(4, false)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(8, false)
+      DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE(16, false)
+      default:
+        TORCH_CHECK(false, "Unsupported batch_size dispatch");
+    }
   }
 
 #undef DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE

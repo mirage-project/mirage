@@ -35,6 +35,7 @@ template <cute::UMMA::Major kMajorA,
           uint32_t kNumMulticast,
           bool kIsMulticastOnA,
           uint32_t kNumSMs,
+          bool kWithResidual,
           mirage::blackwell::linear_fp8_sm100::GemmType kGemmType,
           bool kWithAccumulation,
           typename a_dtype_t,
@@ -50,6 +51,7 @@ __device__ __noinline__ void
                                cute::TmaDescriptor const &tensor_map_b,
                                cute::TmaDescriptor const &tensor_map_sfa,
                                cute::TmaDescriptor const &tensor_map_sfb,
+                               cute::TmaDescriptor const &tensor_map_residual,
                                cute::TmaDescriptor const &tensor_map_cd) {
   using namespace mirage::blackwell::linear_fp8_sm100_detail;
 
@@ -64,11 +66,15 @@ __device__ __noinline__ void
     DG_STATIC_ASSERT(cute::is_same_v<cd_dtype_t, float>,
                      "Invalid C/D data dtype");
   }
+  if constexpr (kWithResidual) {
+    DG_STATIC_ASSERT(cute::is_same_v<cd_dtype_t, cutlass::bfloat16_t>,
+                     "Residual fusion requires BF16 output");
+  }
 
   constexpr uint32_t LAYOUT_AD_M = 128;
   constexpr uint32_t WAVE_BLOCK_M = cute::min<uint32_t>(BLOCK_M, LAYOUT_AD_M);
   constexpr uint32_t kNumMWaves = BLOCK_M / WAVE_BLOCK_M;
-  constexpr uint32_t kNumTMAStoreStages = 2;
+  constexpr uint32_t kNumTMAStoreStages = kWithResidual ? 1 : 2;
   constexpr uint32_t kNumUTCCPAlignedElems = 128;
   DG_STATIC_ASSERT(BLOCK_K == 128, "Invalid block K");
   DG_STATIC_ASSERT(BLOCK_M % WAVE_BLOCK_M == 0 && 2 % kNumMWaves == 0,
@@ -109,6 +115,8 @@ __device__ __noinline__ void
 
   constexpr uint32_t SMEM_CD_SIZE_PER_STAGE = STORE_BLOCK_M * kSwizzleCDMode;
   constexpr uint32_t SMEM_CD_SIZE = SMEM_CD_SIZE_PER_STAGE * kNumTMAStoreStages;
+  constexpr uint32_t SMEM_RESIDUAL_SIZE =
+      kWithResidual ? STORE_BLOCK_M * kSwizzleCDMode : 0;
   constexpr uint32_t SMEM_A_SIZE_PER_STAGE =
       LOAD_BLOCK_M * BLOCK_K * sizeof(a_dtype_t);
   constexpr uint32_t SMEM_B_SIZE_PER_STAGE =
@@ -151,6 +159,9 @@ __device__ __noinline__ void
     cute::prefetch_tma_descriptor(&tensor_map_b);
     cute::prefetch_tma_descriptor(&tensor_map_sfa);
     cute::prefetch_tma_descriptor(&tensor_map_sfb);
+    if constexpr (kWithResidual) {
+      cute::prefetch_tma_descriptor(&tensor_map_residual);
+    }
     cute::prefetch_tma_descriptor(&tensor_map_cd);
   }
 
@@ -158,18 +169,26 @@ __device__ __noinline__ void
     return reinterpret_cast<cd_dtype_t *>(smem_buffer +
                                           i * SMEM_CD_SIZE_PER_STAGE);
   });
+  if constexpr (kWithResidual) {
+    DG_STATIC_ASSERT(
+        kNumMWaves == 1 && BLOCK_N == STORE_BLOCK_N,
+        "Fused residual currently supports a single CD store tile");
+  }
+  auto smem_residual = reinterpret_cast<cd_dtype_t *>(
+      smem_buffer + kNumTMAStoreStages * SMEM_CD_SIZE_PER_STAGE);
   auto smem_a = PatternVisitor([&](uint32_t const &i) {
     return reinterpret_cast<a_dtype_t *>(smem_buffer + SMEM_CD_SIZE +
+                                         SMEM_RESIDUAL_SIZE +
                                          i * SMEM_A_SIZE_PER_STAGE);
   });
   auto smem_b = PatternVisitor([&](uint32_t const &i) {
-    return reinterpret_cast<b_dtype_t *>(smem_buffer + SMEM_CD_SIZE +
-                                         kNumStages * SMEM_A_SIZE_PER_STAGE +
-                                         i * SMEM_B_SIZE_PER_STAGE);
+    return reinterpret_cast<b_dtype_t *>(
+        smem_buffer + SMEM_CD_SIZE + SMEM_RESIDUAL_SIZE +
+        kNumStages * SMEM_A_SIZE_PER_STAGE + i * SMEM_B_SIZE_PER_STAGE);
   });
 
   auto sf_start_ptr =
-      smem_buffer + SMEM_CD_SIZE +
+      smem_buffer + SMEM_CD_SIZE + SMEM_RESIDUAL_SIZE +
       kNumStages * (SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE);
   auto smem_sfa = PatternVisitor([=](uint32_t const &i) {
     return reinterpret_cast<uint32_t *>(sf_start_ptr +
@@ -182,7 +201,7 @@ __device__ __noinline__ void
   });
 
   auto barrier_start_ptr = reinterpret_cast<Barrier *>(
-      smem_buffer + SMEM_CD_SIZE +
+      smem_buffer + SMEM_CD_SIZE + SMEM_RESIDUAL_SIZE +
       kNumStages * (SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE) +
       kNumStages * (SMEM_SFA_SIZE_PER_STAGE + SMEM_SFB_SIZE_PER_STAGE));
   auto full_barriers = PatternVisitor(
@@ -198,9 +217,14 @@ __device__ __noinline__ void
   auto tmem_empty_barriers = PatternVisitor([=](uint32_t const &i) {
     return barrier_start_ptr + (kNumStages * 3 + kNumEpilogueStages + i);
   });
+  auto residual_full_barrier =
+      barrier_start_ptr + (kNumStages * 3 + kNumEpilogueStages * 2);
+  auto residual_empty_barrier =
+      barrier_start_ptr + (kNumStages * 3 + kNumEpilogueStages * 2 + 1);
 
   auto tmem_ptr_in_smem = reinterpret_cast<uint32_t *>(
-      barrier_start_ptr + kNumStages * 3 + kNumEpilogueStages * 2);
+      barrier_start_ptr + kNumStages * 3 + kNumEpilogueStages * 2 +
+      (kWithResidual ? 2 : 0));
   DG_STATIC_ASSERT(32 <= kNumTmemCols && kNumTmemCols <= 512,
                    "Invalid tensor memory columns");
 
@@ -219,6 +243,10 @@ __device__ __noinline__ void
     for (uint32_t i = 0; i < kNumEpilogueStages; ++i) {
       tmem_full_barriers[i]->init(1);
       tmem_empty_barriers[i]->init(kNumMulticast * kNumUMMAStoreThreads);
+    }
+    if constexpr (kWithResidual) {
+      residual_full_barrier->init(1);
+      residual_empty_barrier->init(1);
     }
     cutlass::arch::fence_barrier_init();
   } else if (warp_idx == 2) {
@@ -245,8 +273,27 @@ __device__ __noinline__ void
 
   if (warp_idx == 0 && cute::elect_one_sync()) {
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
+      auto const accum_stage_idx = scheduler.current_iter % kNumEpilogueStages;
+      auto const accum_phase_idx =
+          (scheduler.current_iter / kNumEpilogueStages) & 1;
       auto const &num_total_k_blocks =
           ceil_div(scheduler.current_shape_k, BLOCK_K);
+      if constexpr (kWithResidual) {
+        auto const residual_phase = scheduler.current_iter & 1;
+        residual_empty_barrier->wait(residual_phase ^ 1);
+        uint32_t const m_idx = scheduler.template get_global_idx<
+            (kGemmType == GemmType::MGroupedMasked),
+            IndexType::MN>(shape_m, BLOCK_M, m_block_idx);
+        uint32_t const n_idx = epilogue_type_t::template apply_index_n<BLOCK_N>(
+            n_block_idx * BLOCK_N);
+        tma_copy<BLOCK_N, BLOCK_M, kSwizzleCDMode, cd_dtype_t>(
+            &tensor_map_residual,
+            residual_full_barrier,
+            smem_residual,
+            n_idx,
+            m_idx);
+        residual_full_barrier->arrive_and_expect_tx(SMEM_CD_SIZE_PER_STAGE);
+      }
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
         empty_barriers[stage_idx]->wait(phase ^ 1);
@@ -531,6 +578,10 @@ __device__ __noinline__ void
       auto accum_phase_idx = (scheduler.current_iter / kNumEpilogueStages) & 1;
 
       tmem_full_barriers[accum_stage_idx]->wait(accum_phase_idx);
+      if constexpr (kWithResidual) {
+        auto const residual_phase = scheduler.current_iter & 1;
+        residual_full_barrier->wait(residual_phase);
+      }
       tcgen05_after_thread_sync();
 
       DG_STATIC_ASSERT(kNumEpilogueThreads == 128,
@@ -574,6 +625,10 @@ __device__ __noinline__ void
                 reinterpret_cast<uint8_t *>(smem_cd[tma_stage_idx]) +
                 epilogue_warp_idx * 32 * kSwizzleCDMode +
                 row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;
+            auto residual_smem_ptr =
+                reinterpret_cast<uint8_t *>(smem_residual) +
+                epilogue_warp_idx * 32 * kSwizzleCDMode +
+                row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;
 
             uint32_t values[kNumElemsPerBankGroup];
             if constexpr (cute::is_same_v<cd_dtype_t, float>) {
@@ -597,6 +652,23 @@ __device__ __noinline__ void
                                                     values[6],
                                                     values[7]);
               cutlass::arch::fence_view_async_tmem_load();
+              if constexpr (kWithResidual) {
+                auto residual_words_ptr =
+                    reinterpret_cast<uint32_t const *>(residual_smem_ptr);
+                uint32_t residual_words[4];
+                residual_words[0] = ld_shared(residual_words_ptr + 0);
+                residual_words[1] = ld_shared(residual_words_ptr + 1);
+                residual_words[2] = ld_shared(residual_words_ptr + 2);
+                residual_words[3] = ld_shared(residual_words_ptr + 3);
+                add_packed_bf16x2_into_fp32_bits(
+                    residual_words[0], values[0], values[1]);
+                add_packed_bf16x2_into_fp32_bits(
+                    residual_words[1], values[2], values[3]);
+                add_packed_bf16x2_into_fp32_bits(
+                    residual_words[2], values[4], values[5]);
+                add_packed_bf16x2_into_fp32_bits(
+                    residual_words[3], values[6], values[7]);
+              }
               st_shared(smem_ptr,
                         cast_into_bf16_and_pack(values[0], values[1]),
                         cast_into_bf16_and_pack(values[2], values[3]),
@@ -635,6 +707,12 @@ __device__ __noinline__ void
           }
         }
       }
+      if constexpr (kWithResidual) {
+        cutlass::arch::NamedBarrier::sync(kNumUMMAStoreThreads, 0);
+        if (epilogue_warp_idx == 0 && cute::elect_one_sync()) {
+          residual_empty_barrier->arrive(0u);
+        }
+      }
     }
   }
 
@@ -670,6 +748,7 @@ template <cute::UMMA::Major kMajorA,
           uint32_t kNumMulticast,
           bool kIsMulticastOnA,
           uint32_t kNumSMs,
+          bool kWithResidual,
           mirage::blackwell::linear_fp8_sm100::GemmType kGemmType,
           bool kWithAccumulation,
           typename a_dtype_t,
@@ -687,6 +766,7 @@ __global__ void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads,
         const __grid_constant__ cute::TmaDescriptor tensor_map_b,
         const __grid_constant__ cute::TmaDescriptor tensor_map_sfa,
         const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
+        const __grid_constant__ cute::TmaDescriptor tensor_map_residual,
         const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
   linear_fp8_sm100_task_impl<kMajorA,
                              kMajorB,
@@ -708,6 +788,7 @@ __global__ void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads,
                              kNumMulticast,
                              kIsMulticastOnA,
                              kNumSMs,
+                             kWithResidual,
                              kGemmType,
                              kWithAccumulation,
                              a_dtype_t,
@@ -721,6 +802,7 @@ __global__ void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads,
                                               tensor_map_b,
                                               tensor_map_sfa,
                                               tensor_map_sfb,
+                                              tensor_map_residual,
                                               tensor_map_cd);
 }
 
