@@ -38,23 +38,12 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
+  // For 1-byte types (e.g., FP8 E4M3), use UINT8 — TMA only uses this for
+  // element size; semantics are irrelevant. For 2-byte types (BF16), use
+  // BFLOAT16.
   constexpr CUtensorMapDataType tma_format =
-      std::is_same_v<T, type::bfloat16_t>       ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-      : std::is_same_v<T, cutlass::bfloat16_t>  ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-      : std::is_same_v<T, cutlass::half_t>      ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
-      : std::is_same_v<T, __half>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
-      : std::is_same_v<T, float>                ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
-      : std::is_same_v<T, double>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
-      : std::is_same_v<T, cutlass::float_e4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cutlass::float_e5m2_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cutlass::float_ue8m0_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, uint8_t>              ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, uint16_t>             ? CU_TENSOR_MAP_DATA_TYPE_UINT16
-      : std::is_same_v<T, uint32_t>             ? CU_TENSOR_MAP_DATA_TYPE_UINT32
-      : std::is_same_v<T, int32_t>              ? CU_TENSOR_MAP_DATA_TYPE_INT32
-                                               : CUtensorMapDataType(-1);
-  static_assert(tma_format != CUtensorMapDataType(-1),
-                "Unsupported TMA data type");
+      (sizeof(T) == 1) ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+                       : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   constexpr CUtensorMapInterleave tma_interleave =
       CU_TENSOR_MAP_INTERLEAVE_NONE;
   constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -780,88 +769,39 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_LINEAR_FP8_SM100:
     case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
-      // New DeepGEMM-style FP8 kernel: 6 TMA descriptors
-      // A(input_fp8), B(weight_fp8), SFA(input_scale), SFB(weight_scale),
-      // residual, CD(output)
+      // FP8: 128 elements × 1 byte = 128B (matches 128B TMA swizzle)
+      int const cp_async_size = 128;
       const size_t smem_repeat_row = 1;
-      constexpr int BLOCK_M = 32, BLOCK_N = 16, BLOCK_K = 128;
+      constexpr int B = 3, M = 3, S = 3;
+      constexpr int MMA_M = 128, MMA_N = 16;
+      constexpr int TILE_SIZE = 128;
+      size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+
+      bool is_fp8 = (tensor_desc.data_type == 930);
+      bool is_fp32 = (tensor_desc.data_type == 950);
+      // output is last tensor (bf16)
       bool with_res = (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
       bool is_output = (param_id == (size_t)(task_desc.num_inputs));
 
-      if (param_id == 0) {
-        // A: input_fp8 [batch, K] — FP8, swizzle 128B
-        // TMA coords: inner=K (coord0), outer=batch (coord1)
-        int rows = tensor_desc.dim[0]; // batch
-        int cols = tensor_desc.dim[1]; // K
+      if (is_fp8 && (param_id == 0 || param_id == 2)) {
+        // FP8 input or weight
+        int rows = tensor_desc.dim[0];
+        int cols = tensor_desc.dim[1];
         uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
         uint64_t gst[2] = {1, (uint64_t)cols};
-        // box: [BLOCK_M rows, BLOCK_K cols]
-        uint32_t ss[2] = {(uint32_t)BLOCK_M, (uint32_t)BLOCK_K};
-        fill_tma_desc<cutlass::float_e4m3_t, 3, 3, 3, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
-      } else if (param_id == 1) {
-        // SFA: input_scale — packed UE8M0 uint32
-        // Builder stores as [aligned_batch, packed_k] row-major
-        // Physical memory layout: column-major [batch, packed_k]
-        // (i.e. batch is contiguous, packed_k strides by aligned_batch)
-        // TMA coords: inner=batch (coord0), outer=packed_k (coord1)
-        int aligned_outer = tensor_desc.dim[0]; // aligned_batch
-        int packed_k = tensor_desc.dim[1];      // already packed
-        // Column-major layout: [packed_k (rows/slow), aligned_outer (cols/fast)]
-        uint64_t gs[2] = {(uint64_t)packed_k, (uint64_t)aligned_outer};
-        uint64_t gst[2] = {1, (uint64_t)aligned_outer};
-        // box: [1 row, BLOCK_M cols] in (rows, cols) space
-        uint32_t ss[2] = {1, (uint32_t)BLOCK_M};
-        fill_tma_desc<uint32_t, 0, 3, 3, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
-      } else if (param_id == 2) {
-        // B: weight_fp8 [output, K] — FP8, swizzle 128B
-        // TMA coords: inner=K (coord0), outer=output (coord1)
-        int rows = tensor_desc.dim[0]; // output
-        int cols = tensor_desc.dim[1]; // K
-        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
-        uint64_t gst[2] = {1, (uint64_t)cols};
-        // box: [BLOCK_N rows, BLOCK_K cols]
-        uint32_t ss[2] = {(uint32_t)BLOCK_N, (uint32_t)BLOCK_K};
-        fill_tma_desc<cutlass::float_e4m3_t, 3, 3, 3, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
-      } else if (param_id == 3) {
-        // SFB: weight_scale — packed UE8M0 uint32
-        // Builder stores as [packed_k, aligned_output] row-major
-        // Physical memory layout: column-major [output, packed_k]
-        // TMA coords: inner=output (coord0), outer=packed_k (coord1)
-        int packed_k = tensor_desc.dim[0];       // already packed
-        int aligned_outer = tensor_desc.dim[1];  // aligned_output
-        // Column-major: [packed_k (rows/slow), aligned_outer (cols/fast)]
-        uint64_t gs[2] = {(uint64_t)packed_k, (uint64_t)aligned_outer};
-        uint64_t gst[2] = {1, (uint64_t)aligned_outer};
-        // box: [1 row, BLOCK_N cols]
-        uint32_t ss[2] = {1, (uint32_t)BLOCK_N};
-        fill_tma_desc<uint32_t, 0, 3, 3, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
-      } else if (param_id == 4 && with_res) {
-        // Residual: BF16 [batch, output], swizzle 32B
-        // TMA coords: inner=output (coord0), outer=batch (coord1)
-        int rows = tensor_desc.dim[0]; // batch
-        int cols = tensor_desc.dim[1]; // output
+        uint32_t ss[2] = {(param_id == 0) ? (uint32_t)MMA_N : (uint32_t)MMA_M,
+                          (uint32_t)cp_async_size};
+        fill_tma_desc<cutlass::float_e4m3_t, B, M, S, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, smem_repeat_col);
+      } else {
+        // BF16 output
+        int rows = tensor_desc.dim[0];
+        int cols = tensor_desc.dim[1];
         int stride = tensor_desc.stride[0];
         uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
         uint64_t gst[2] = {1, (uint64_t)stride};
-        // box: [BLOCK_M rows, BLOCK_N*2 bytes / 2 bytes_per_bf16 = BLOCK_N cols]
-        uint32_t ss[2] = {(uint32_t)BLOCK_M, (uint32_t)BLOCK_N};
-        fill_tma_desc<bfloat16, 1, 3, 3, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
-      } else if (is_output) {
-        // CD: BF16 output [batch, output], swizzle 32B
-        // TMA coords: inner=output (coord0), outer=batch (coord1)
-        int rows = tensor_desc.dim[0]; // batch
-        int cols = tensor_desc.dim[1]; // output
-        int stride = tensor_desc.stride[0];
-        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
-        uint64_t gst[2] = {1, (uint64_t)stride};
-        // box: [BLOCK_M rows, BLOCK_N cols]
-        uint32_t ss[2] = {(uint32_t)BLOCK_M, (uint32_t)BLOCK_N};
-        fill_tma_desc<bfloat16, 1, 3, 3, 2>(
+        uint32_t ss[2] = {(uint32_t)MMA_N, (uint32_t)MMA_M};
+        fill_tma_desc<bfloat16, 0, M, S, 2>(
             tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
       }
       break;
@@ -1240,17 +1180,10 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_LINEAR_FP8_SM100:
     case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
-      // New DeepGEMM-style FP8 kernel: TMA for all 6 tensors
-      // input[0]=A(fp8_input), input[1]=SFA(input_scale),
-      // input[2]=B(fp8_weight), input[3]=SFB(weight_scale),
-      // input[4]=residual (if with_residual), output[0]=CD
+      // FP8 linear: only create TMA for fp8_input(0), fp8_weight(2), output
+      // Scale tensors (1, 3) use direct load, not TMA
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0);
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[3], 3, 0);
-      if (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {
-        create_tma_desc_for_tensor(task_desc, task_desc.inputs[4], 4, 0);
-      }
       create_tma_desc_for_tensor(task_desc,
           task_desc.outputs[0], task_desc.num_inputs, 0);
       break;

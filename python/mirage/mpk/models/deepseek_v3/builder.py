@@ -120,10 +120,6 @@ class DeepSeekV3Builder(GraphBuilder):
         reduction_size = weight.dim(1) if weight.num_dims == 2 else weight.dim(-1)
         group_size = 128
         num_groups = (reduction_size + group_size - 1) // group_size
-        # Column-major packed UE8M0: pack 4 groups into 1 uint32
-        packed_k = (num_groups + 3) // 4
-        # Aligned batch for column-major stride
-        aligned_batch = ((mbt + 3) // 4) * 4
 
         if not hasattr(self, '_fp8_bufs'):
             self._fp8_bufs = {}
@@ -133,11 +129,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 name=f"fp8_input_{reduction_size}",
                 io_category="cuda_tensor",
             )
-            # Column-major packed UE8M0 scale: [aligned_batch, packed_k]
-            # Each uint32 holds 4 consecutive groups' UE8M0 bytes
-            # Layout: scale[row + col * aligned_batch] (column-major)
             scale_buf = self.mpk.new_tensor(
-                dims=(aligned_batch, packed_k), dtype=float32,
+                dims=(mbt, num_groups), dtype=float32,
                 name=f"fp8_scale_{reduction_size}",
                 io_category="cuda_tensor",
             )
@@ -361,22 +354,20 @@ class DeepSeekV3Builder(GraphBuilder):
         Checkpoint float32 scales are NOT powers of 2, so directly converting
         them to UE8M0 introduces up to 2x error per block.
 
-        Fix (same as SGLang/vLLM): dequant -> re-quantize with power-of-2 scales.
+        Fix (same as SGLang/vLLM): dequant → re-quantize with power-of-2 scales.
 
         Input:
-            weight_fp8: [M, K] float8_e4m3fn -- original checkpoint FP8 weight
-            scale_inv: [ceil(M/128), ceil(K/128)] float32 -- original block scale_inv
+            weight_fp8: [M, K] float8_e4m3fn — original checkpoint FP8 weight
+            scale_inv: [ceil(M/128), ceil(K/128)] float32 — original block scale_inv
 
         Output:
-            new_fp8: [M, K] float8_e4m3fn -- re-quantized weight
-            packed_ue8m0: [packed_k, aligned_M] int32 -- column-major packed UE8M0
-                where aligned_M = ceil(M/4)*4, packed_k = ceil(K/128/4)
-                Contiguous [packed_k, aligned_M] so that flat memory at
-                ptr[row + col * aligned_M] gives the packed scale for (row, col)
+            new_fp8: [M, K] float8_e4m3fn — re-quantized weight
+            packed_ue8m0: [M, padded_scale_k] int32 — packed UE8M0 per-row scale
         """
         M, K = weight_fp8.shape
         group_size = 128
         scale_k = K // group_size
+        padded_scale_k = ((scale_k + 3) // 4) * 4
 
         # Step 1: Dequant to float32
         # Expand block scale_inv [ceil(M/128), ceil(K/128)] to per-element [M, K]
@@ -385,7 +376,7 @@ class DeepSeekV3Builder(GraphBuilder):
             group_size, dim=1)[:, :K]
         w_float = weight_fp8.float() * scale_inv_expanded
 
-        # Step 2: Compute new UE8M0 scales (per 128-element group)
+        # Step 2: Compute new UE8M0 scales (per 128-element block)
         # Reshape to blocks, find max per block
         w_blocks = w_float.reshape(M, scale_k, group_size)
         block_amax = w_blocks.abs().amax(dim=2).clamp(min=1e-12)  # [M, scale_k]
@@ -400,33 +391,17 @@ class DeepSeekV3Builder(GraphBuilder):
         w_rescaled = (w_blocks / new_scale_expanded).clamp(-448, 448)
         new_fp8 = w_rescaled.reshape(M, K).to(torch.float8_e4m3fn)
 
-        # Step 4: Pack UE8M0 bytes into column-major format
-        # ue8m0_byte: [M, scale_k] int32 -- one byte per 128-element group
-        # Pack 4 consecutive groups into 1 uint32:
-        #   packed[m, pk] = byte[m, pk*4] | (byte[m, pk*4+1]<<8) |
-        #                   (byte[m, pk*4+2]<<16) | (byte[m, pk*4+3]<<24)
-        # Output: column-major [aligned_M, packed_k] with stride [1, aligned_M]
-        SCALE_PACK_SIZE = 4
-        packed_k = (scale_k + SCALE_PACK_SIZE - 1) // SCALE_PACK_SIZE
-        aligned_M = ((M + 3) // 4) * 4
-        # Pad scale_k to multiple of 4
-        if scale_k % SCALE_PACK_SIZE != 0:
-            pad = SCALE_PACK_SIZE - (scale_k % SCALE_PACK_SIZE)
-            ue8m0_byte = torch.cat([ue8m0_byte,
-                torch.full((M, pad), 0, dtype=torch.int32, device=ue8m0_byte.device)], dim=1)
-        # Reshape to [M, packed_k, 4] and pack into uint32
-        ue8m0_groups = ue8m0_byte.reshape(M, packed_k, SCALE_PACK_SIZE)
-        packed_row_major = (ue8m0_groups[:, :, 0]
-                            | (ue8m0_groups[:, :, 1] << 8)
-                            | (ue8m0_groups[:, :, 2] << 16)
-                            | (ue8m0_groups[:, :, 3] << 24))  # [M, packed_k]
-        # Convert to column-major: raw memory at ptr[row + col * aligned_M]
-        # Store as contiguous [packed_k, aligned_M] so that flat index
-        # col * aligned_M + row gives the correct packed scale for (row, col)
-        packed_colmajor = torch.zeros(packed_k, aligned_M, dtype=torch.int32,
-                                      device=weight_fp8.device)
-        packed_colmajor[:, :M] = packed_row_major.t()
-        return new_fp8.contiguous(), packed_colmajor.contiguous()
+        # Step 4: Pack UE8M0 bytes (4 identical per uint32, per-row)
+        packed = (ue8m0_byte
+                  | (ue8m0_byte << 8)
+                  | (ue8m0_byte << 16)
+                  | (ue8m0_byte << 24))
+        if padded_scale_k > scale_k:
+            padding = torch.zeros(M, padded_scale_k - scale_k,
+                                  dtype=torch.int32, device=packed.device)
+            packed = torch.cat([packed, padding], dim=1)
+
+        return new_fp8.contiguous(), packed.contiguous()
 
     @property
     def _weights_are_fp8(self):
@@ -530,13 +505,11 @@ class DeepSeekV3Builder(GraphBuilder):
             kv_rope_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_req
             w_kv_rope = self._safe_attach(kv_rope_padded,
                                           f"layer_{layer_idx}_kv_a_rope")
-            # Pad UE8M0 scale column-major: [packed_k, aligned_64] -> [packed_k, 128]
-            # rope_ue8m0_req shape: [packed_k, aligned_M] where aligned_M = ceil(64/4)*4 = 64
-            # Target: [packed_k, 128] (column-major with 128 rows)
-            rope_ue8m0_padded = torch.zeros(rope_ue8m0_req.shape[0], 128,
+            # Pad UE8M0 scale from [64, K] to [128, K]
+            rope_ue8m0_padded = torch.zeros(128, rope_ue8m0_req.shape[1],
                                             dtype=rope_ue8m0_req.dtype,
                                             device=rope_ue8m0_req.device)
-            rope_ue8m0_padded[:, :QK_ROPE_HEAD_DIM] = rope_ue8m0_req
+            rope_ue8m0_padded[:QK_ROPE_HEAD_DIM] = rope_ue8m0_req
             s_kv_rope = self._safe_attach(rope_ue8m0_padded,
                                           f"layer_{layer_idx}_kv_a_rope_scale")
         else:
@@ -1081,10 +1054,9 @@ class DeepSeekV3Builder(GraphBuilder):
                                      dtype=rope_fp8_req.dtype, device=rope_fp8_req.device)
         kv_rope_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_req
         w_kv_rope = self._safe_attach(kv_rope_padded, f"mtp_{attn}kv_a_rope")
-        # Pad UE8M0 scale column-major: [packed_k, aligned_64] -> [packed_k, 128]
-        rope_ue8m0_padded = torch.zeros(rope_ue8m0_req.shape[0], 128,
+        rope_ue8m0_padded = torch.zeros(128, rope_ue8m0_req.shape[1],
                                         dtype=rope_ue8m0_req.dtype, device=rope_ue8m0_req.device)
-        rope_ue8m0_padded[:, :QK_ROPE_HEAD_DIM] = rope_ue8m0_req
+        rope_ue8m0_padded[:QK_ROPE_HEAD_DIM] = rope_ue8m0_req
         s_kv_rope = self._safe_attach(rope_ue8m0_padded, f"mtp_{attn}kv_a_rope_scale")
 
         self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent, self.c_latent_out,

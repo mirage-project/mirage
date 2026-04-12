@@ -1204,13 +1204,8 @@ class PersistentKernel:
     ):
         """Quantize BF16 input to FP8 with block-wise scale.
 
-        scale_ue8m0=True: output scale is column-major packed UE8M0 uint32.
-            Expected output_scale dims: [aligned_batch, packed_k] where
-            aligned_batch = ceil(batch/4)*4, packed_k = ceil(hidden/128/4).
-            Each uint32 packs 4 consecutive groups' UE8M0 bytes.
-            Layout: scale[row + col * aligned_batch] (column-major).
-        scale_ue8m0=False: output scale is float32 (row-major, for MoE group GEMM).
-            Expected output_scale dims: [batch, hidden/128].
+        scale_ue8m0=True: output scale is packed UE8M0 uint32 (for FP8 linear GEMM)
+        scale_ue8m0=False: output scale is float32 (for MoE group GEMM)
         """
         params = []
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
