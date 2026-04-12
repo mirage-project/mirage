@@ -76,7 +76,8 @@ if __name__ == "__main__":
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
-    prompt = "Give me a short introduction to large language model."
+    #prompt = "Give me a short introduction to large language model."
+    prompt = "How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail."
     prompt_lengths = torch.full((total_num_requests,), 0, dtype=torch.int, device="cuda")
     
     # get all model weight tensors

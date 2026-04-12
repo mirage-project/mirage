@@ -81,12 +81,12 @@ if __name__ == "__main__":
 
     # (prompt, delay_in_microseconds) — delays are relative to the start of generate_incremental
     arrivals = [
-        ("introduce yourself",               0),
-        ("What is buggy in CMU?",            0),
-        ("How to use ncu for profilling?",   200),
-        ("list all prime numbers within 100", 200),
-        ("what is the capital of France?",    300),
-        ("Tell me the difference between lpl and lck", 100)
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",               0),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",            0),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",   0.1),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.1),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",    0.15),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.05)
     ]
 
     outputs = llm.generate_incremental(arrivals)
