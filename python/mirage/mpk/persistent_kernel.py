@@ -1235,12 +1235,12 @@ class PersistentKernel:
         # weight_fp8: partitioned along dim0 by grid.x (output dim)
         # weight_scale: partitioned along dim1 by grid.x (output dim, stored as [pk, aligned_M])
         # output: partitioned along dim1 by grid.x
-        # Grid partitions output along dim0 (weight) / dim1 (scale, output)
+        # Grid partitions: weight dim0=output, scale dim0=M (column-major), output dim1
         tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)    # grid.x splits dim0
-        tb_graph.new_input(weight_scale, (1, -1, -1), -1, True)  # grid.x splits dim1
-        tb_graph.new_input(output, (1, -1, -1), -1, True)        # grid.x splits dim1
+        tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)    # grid.x splits dim0 (output)
+        tb_graph.new_input(weight_scale, (0, -1, -1), -1, True)  # grid.x splits dim0 (M=output, col-major)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)        # grid.x splits dim1 (output)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_sm100", params)
@@ -1261,7 +1261,7 @@ class PersistentKernel:
         tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
         tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)    # grid.x splits dim0
-        tb_graph.new_input(weight_scale, (1, -1, -1), -1, True)  # grid.x splits dim1
+        tb_graph.new_input(weight_scale, (0, -1, -1), -1, True)  # grid.x splits dim0 (col-major M)
         tb_graph.new_input(residual, (1, -1, -1), -1, True)      # grid.x splits dim1
         tb_graph.new_input(output, (1, -1, -1), -1, True)        # grid.x splits dim1
         self.kn_graph.customized(
