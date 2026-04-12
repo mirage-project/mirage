@@ -383,9 +383,11 @@ class PersistentKernel:
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
         strides = tuple([s for s in torch_tensor.stride()])
-        # Assert a row-major layout
-        for d in range(len(dims) - 1):
-            assert strides[d] == strides[d + 1] * dims[d + 1]
+        # Check layout: row-major or column-major (for FP8 scale tensors)
+        is_row_major = all(strides[d] == strides[d + 1] * dims[d + 1] for d in range(len(dims) - 1))
+        is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
+        assert is_row_major or is_col_major, \
+            f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
         dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None

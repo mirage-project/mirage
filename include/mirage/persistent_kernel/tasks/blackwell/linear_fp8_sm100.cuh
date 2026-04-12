@@ -55,8 +55,6 @@ __device__ __noinline__ void
                                cute::TmaDescriptor const &tensor_map_cd) {
   using namespace mirage::blackwell::linear_fp8_sm100_detail;
 
-  // Debug print moved after smem_buffer declaration below
-
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) ||                    \
     defined(__CLION_IDE__)
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
@@ -100,10 +98,6 @@ __device__ __noinline__ void
   auto const lane_idx = get_lane_idx();
 
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
-  if (threadIdx.x == 0) {
-    printf("[FP8 SMEM] base=%p align1024=%lu\n",
-           smem_buffer, (unsigned long)((uintptr_t)smem_buffer % 1024));
-  }
 
   constexpr uint32_t LOAD_BLOCK_M =
       BLOCK_M / (kIsMulticastOnA ? kNumMulticast : 1);
@@ -238,24 +232,16 @@ __device__ __noinline__ void
     cute::cluster_sync();
   }
 
-  // Zero-initialize the barrier region in smem. Persistent kernel reuses smem
-  // across tasks; stale mbarrier state causes deadlocks. Fresh __global__ kernels
-  // get zero-initialized smem from CUDA runtime.
+  // Zero-initialize barrier region: persistent kernel reuses smem across tasks
   {
-    // Barrier region starts after pipeline data buffers
-    auto barrier_smem_start = smem_buffer + SMEM_CD_SIZE + SMEM_RESIDUAL_SIZE +
-        kNumStages * (SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE +
-                      SMEM_SFA_SIZE_PER_STAGE + SMEM_SFB_SIZE_PER_STAGE);
-    // Total barrier region: 3*stages + 2*epi_stages + (residual?2:0) + 1 (tmem_ptr)
-    constexpr uint32_t num_barriers =
-        kNumStages * 3 + kNumEpilogueStages * 2 + (kWithResidual ? 2 : 0) + 1;
-    constexpr uint32_t barrier_bytes = num_barriers * sizeof(uint64_t);
-    for (uint32_t i = threadIdx.x * 4; i < barrier_bytes; i += blockDim.x * 4) {
-      *reinterpret_cast<uint32_t*>(barrier_smem_start + i) = 0;
-    }
+    auto barrier_smem = reinterpret_cast<uint32_t*>(barrier_start_ptr);
+    constexpr uint32_t barrier_words =
+        (kNumStages * 3 + kNumEpilogueStages * 2 + (kWithResidual ? 2 : 0) + 1)
+        * sizeof(uint64_t) / sizeof(uint32_t);
+    for (uint32_t i = threadIdx.x; i < barrier_words; i += blockDim.x)
+      barrier_smem[i] = 0;
     __syncthreads();
   }
-  if (threadIdx.x == 0) printf("[FP8 CP1] before barrier init, warp_idx=%d\n", warp_idx);
   if (warp_idx == 1 && cute::elect_one_sync()) {
 #pragma unroll
     for (uint32_t i = 0; i < kNumStages; ++i) {
@@ -273,15 +259,10 @@ __device__ __noinline__ void
       residual_empty_barrier->init(1);
     }
     cutlass::arch::fence_barrier_init();
-    printf("[FP8 CP2] barrier init done\n");
   } else if (warp_idx == 2) {
-    printf("[FP8 CP2a] before TMEM alloc, cols=%u\n", kNumTmemCols);
     Allocator().allocate(kNumTmemCols, tmem_ptr_in_smem);
-    printf("[FP8 CP2b] TMEM alloc done\n");
   }
-  if (threadIdx.x == 0) printf("[FP8 CP3] before syncthreads\n");
   kNumMulticast > 1 ? cute::cluster_sync() : __syncthreads();
-  if (threadIdx.x == 0) printf("[FP8 CP4] after syncthreads\n");
 
   uint32_t m_block_idx, n_block_idx;
   auto scheduler =
@@ -301,7 +282,6 @@ __device__ __noinline__ void
   };
 
   if (warp_idx == 0 && cute::elect_one_sync()) {
-    printf("[FP8 CP5] warp0 TMA producer entering loop\n");
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
       auto const accum_stage_idx = scheduler.current_iter % kNumEpilogueStages;
       auto const accum_phase_idx =
@@ -326,11 +306,7 @@ __device__ __noinline__ void
       }
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
-        if (k_block_idx == 0 && scheduler.current_iter == 0)
-          printf("[FP8 CP7] warp0 first empty_barrier wait, stage=%u phase=%u\n", stage_idx, phase);
         empty_barriers[stage_idx]->wait(phase ^ 1);
-        if (k_block_idx == 0 && scheduler.current_iter == 0)
-          printf("[FP8 CP8] warp0 empty_barrier passed, starting TMA\n");
 
         uint32_t m_idx = scheduler.template get_global_idx<
             (kGemmType == GemmType::MGroupedMasked),
@@ -415,15 +391,10 @@ __device__ __noinline__ void
           num_arrival_bytes += BLOCK_N * sizeof(uint32_t);
         }
 
-        if (k_block_idx == 0 && scheduler.current_iter == 0)
-          printf("[FP8 CP9] warp0 before arrive_and_expect_tx bytes=%u\n", num_arrival_bytes);
         full_barriers[stage_idx]->arrive_and_expect_tx(num_arrival_bytes);
-        if (k_block_idx == 0 && scheduler.current_iter == 0)
-          printf("[FP8 CP10] warp0 after arrive_and_expect_tx\n");
       }
     }
   } else if (warp_idx == 1 && is_leader_cta) {
-    printf("[FP8 CP6] warp1 MMA consumer entering\n");
     constexpr uint32_t UMMA_M =
         LAYOUT_AD_M * (kIsMulticastOnA ? 1 : kNumMulticast);
     constexpr uint32_t UMMA_N = BLOCK_N * (kIsMulticastOnA ? kNumMulticast : 1);
@@ -462,9 +433,7 @@ __device__ __noinline__ void
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
       auto accum_stage_idx = scheduler.current_iter % kNumEpilogueStages;
       auto accum_phase_idx = (scheduler.current_iter / kNumEpilogueStages) & 1;
-      if (cute::elect_one_sync()) printf("[FP8 W1] before tmem_empty wait stage=%u phase=%u\n", accum_stage_idx, accum_phase_idx ^ 1);
       tmem_empty_barriers[accum_stage_idx]->wait(accum_phase_idx ^ 1);
-      if (cute::elect_one_sync()) printf("[FP8 W1] tmem_empty passed!\n");
       tcgen05_after_thread_sync();
 
       auto empty_barrier_arrive = [&](bool const &do_tmem_full_arrive) {

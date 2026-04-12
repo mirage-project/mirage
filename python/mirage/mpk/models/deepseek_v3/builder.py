@@ -409,14 +409,14 @@ class DeepSeekV3Builder(GraphBuilder):
                           | (ue8m0_groups[:, :, 1] << 8)
                           | (ue8m0_groups[:, :, 2] << 16)
                           | (ue8m0_groups[:, :, 3] << 24))  # [M, packed_k]
-        # Transpose to [packed_k, M] then pad M to aligned_M
-        packed_transposed = packed_per_row.t().contiguous()  # [packed_k, M]
-        if aligned_M > M:
-            pad_cols = torch.zeros(packed_k, aligned_M - M,
-                                   dtype=torch.int32, device=packed_transposed.device)
-            packed_transposed = torch.cat([packed_transposed, pad_cols], dim=1)
+        # Create column-major [M, packed_k] scale: physical layout has M contiguous
+        # allocate_packed_ue8m0_scale equivalent: strided (M, packed_k) stride (1, aligned_M)
+        packed_colmajor = torch.empty_strided(
+            (M, packed_k), (1, aligned_M),
+            dtype=torch.int32, device=packed_per_row.device)
+        packed_colmajor.copy_(packed_per_row)  # copy [M, packed_k] row-major into col-major storage
 
-        return new_fp8.contiguous(), packed_transposed.contiguous().view(torch.uint32)
+        return new_fp8.contiguous(), packed_colmajor.view(torch.uint32)
 
     @property
     def _weights_are_fp8(self):

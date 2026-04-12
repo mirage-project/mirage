@@ -835,10 +835,13 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         // SFB (weight scale): stored as [packed_k, aligned_output] row-major
         // = column-major [aligned_output, packed_k]
         printf("[TMA FP8 SFB] dim0=%d dim1=%d base=%p dtype=%d\n", tensor_desc.dim[0], tensor_desc.dim[1], tensor_desc.base_ptr, tensor_desc.data_type);
-        int packed_k = tensor_desc.dim[0];
-        int aligned_output = tensor_desc.dim[1];
+        // Column-major [M, packed_k] stride (1, aligned_M): M is dim[0], packed_k is dim[1]
+        int aligned_output = tensor_desc.dim[0]; // M (aligned_output after grid split)
+        int packed_k = tensor_desc.dim[1];        // packed_k
+        // stride[1] gives the physical outer stride (aligned_M in elements)
+        int outer_stride = tensor_desc.stride[1]; // aligned_M
         uint64_t gd[2] = {(uint64_t)aligned_output, (uint64_t)packed_k};
-        uint64_t gs[1] = {(uint64_t)aligned_output * 4};  // stride * sizeof(uint32)
+        uint64_t gs[1] = {(uint64_t)outer_stride * 4};  // stride * sizeof(uint32)
         uint32_t bd[2] = {(uint32_t)BLOCK_N_FP8, 1};
         uint32_t es[2] = {1, 1};
         CUresult result = cuTensorMapEncodeTiled(
