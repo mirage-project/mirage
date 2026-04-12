@@ -172,6 +172,10 @@ struct Scheduler {
   __device__ __forceinline__ bool get_next_block(uint32_t &m_block_idx,
                                                  uint32_t &n_block_idx) {
     auto const next_block_idx = (++current_iter) * kNumSMs + block_offset;
+    if (threadIdx.x == 0 && current_iter < 2) {
+      printf("[FP8 SCHED] iter=%d block_idx=%u num_blocks=%u kNumSMs=%u blockIdx.x=%u\n",
+             current_iter, next_block_idx, num_blocks, kNumSMs, blockIdx.x);
+    }
     if constexpr (kGemmType == GemmType::Normal) {
       if (next_block_idx >= num_blocks) {
         return false;

@@ -55,6 +55,11 @@ __device__ __noinline__ void
                                cute::TmaDescriptor const &tensor_map_cd) {
   using namespace mirage::blackwell::linear_fp8_sm100_detail;
 
+  if (threadIdx.x == 0) {
+    printf("[FP8 KERNEL ENTRY] blockIdx.x=%u shape_m=%u shape_n=%u shape_k=%u\n",
+           blockIdx.x, shape_m, shape_n, shape_k);
+  }
+
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) ||                    \
     defined(__CLION_IDE__)
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
