@@ -229,6 +229,7 @@ class LLMEngine:
                     t = torch.tensor(token_ids, dtype=torch.int64)
                     self.runtime.load_tokens(rid, t)
                     self.runtime.submit_request(rid, prompt_len=len(token_ids))
+                    print(f"request {rid} has been submitted!",flush=True)
                     first_submitted.set()  # signal after first submission
             except Exception as e:
                 submit_exc.append(e)
