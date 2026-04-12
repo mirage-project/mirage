@@ -518,13 +518,25 @@ __device__ __forceinline__ bool
 
   // ── Step 4: batched admission from pinned request ring ─────────────────────
   // Drain ALL ready entries until the batch is full or the ring is empty.
+  // When the batch is completely empty (no active requests and ring is empty),
+  // spin-wait instead of exiting so the kernel stays alive for future requests.
   while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
          num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
     int req_slot = gpu_req_head & ring_mask;
     // Acquire load: ensures we see data written by CPU before ready=1.
     int32_t rdy = ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]);
     if (rdy == 0) {
-      break; // ring empty
+      if (num_reqs > 0 || num_tokens > 0) {
+        break; // partial batch ready — proceed with what we have
+      }
+      // Completely empty batch: spin instead of exiting.
+      // Check CPU shutdown signal; if set, break out (num_tokens stays 0 →
+      // return false below, which terminates the kernel).
+      if (ld_acquire_sys_i32(config.pinned_shutdown) != 0) {
+        break;
+      }
+      __nanosleep(100);
+      continue; // retry ring read
     }
 
     int32_t new_rid      = config.pinned_req_request_id[req_slot];
@@ -583,30 +595,11 @@ __device__ __forceinline__ bool
   *config.gpu_req_head    = gpu_req_head;
   *config.gpu_comp_tail   = gpu_comp_tail;
 
-  if (num_tokens > 0) {
-    return true;
-  }
-
-  // ── Step 7: empty batch — spin-wait for a new request or shutdown ───────────
-  // All active requests finished and the ring is empty.  Rather than exiting,
-  // the scheduler polls here so the kernel stays alive for future requests.
-  // Workers are already idle (spinning on worker_queue_last_ready_task_id) and
-  // are not affected by this loop.
-  while (true) {
-    // Check CPU shutdown signal first.
-    if (ld_acquire_sys_i32(config.pinned_shutdown) != 0) {
-      return false;  // CPU requested termination
-    }
-    // Check whether a new request has arrived in the ring.
-    int req_slot = *config.gpu_req_head & ring_mask;
-    if (ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]) != 0) {
-      // A new request is ready — return true so the scheduler dispatches
-      // begin_task_graph; prepare_next_batch will be called again on the
-      // next EVENT_END_OF_TASK_GRAPH and will drain the ring in Step 4.
-      return true;
-    }
-    __nanosleep(100);
-  }
+  // Step 4's spin-wait ensures we only reach here with num_tokens > 0 (batch
+  // has work) or num_tokens == 0 (shutdown was signalled while batch was
+  // empty).  The return value drives whether the scheduler dispatches another
+  // begin_task_graph (true) or terminates (false).
+  return (num_tokens > 0);
 }
 #endif
 
