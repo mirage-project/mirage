@@ -3755,7 +3755,7 @@ int TaskRegister::register_linear_fp8_sm100_task(
   code.e("    32, 16, 128,");  // BLOCK_M, BLOCK_N, BLOCK_K
   code.e("    1,");  // kNumGroups
   code.e("    128, 128, 32,");  // kSwizzleAMode, kSwizzleBMode, kSwizzleCDMode
-  code.e("    31,");  // kNumStages
+  code.e("    25,");  // kNumStages (fit persistent kernel 207KB smem budget)
   code.e("    128, 128,");  // kNumNonEpilogueThreads, kNumEpilogueThreads
   code.e("    1, false,");  // kNumMulticast, kIsMulticastOnA
   code.e("    8,");  // kNumSMs
