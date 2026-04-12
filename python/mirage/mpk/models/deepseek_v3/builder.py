@@ -391,16 +391,24 @@ class DeepSeekV3Builder(GraphBuilder):
         w_rescaled = (w_blocks / new_scale_expanded).clamp(-448, 448)
         new_fp8 = w_rescaled.reshape(M, K).to(torch.float8_e4m3fn)
 
-        # Step 4: Pack UE8M0 bytes (4 identical per uint32, per-row)
-        packed = (ue8m0_byte
-                  | (ue8m0_byte << 8)
-                  | (ue8m0_byte << 16)
-                  | (ue8m0_byte << 24))
-        if padded_scale_k > scale_k:
-            padding = torch.zeros(M, padded_scale_k - scale_k,
-                                  dtype=torch.int32, device=packed.device)
-            packed = torch.cat([packed, padding], dim=1)
-
+        # Step 4: Pack UE8M0 bytes into DeepGEMM column-major format
+        # ue8m0_byte: [M, scale_k] int32
+        # DeepGEMM packs 4 consecutive k-blocks into 1 uint32:
+        #   packed[m, pk] = byte[m, pk*4] | (byte[m, pk*4+1]<<8) | (byte[m, pk*4+2]<<16) | (byte[m, pk*4+3]<<24)
+        # Output shape: [M, packed_k] with stride [1, aligned_M] (column-major)
+        SCALE_PACK_SIZE = 4
+        packed_k = (scale_k + SCALE_PACK_SIZE - 1) // SCALE_PACK_SIZE
+        # Pad scale_k to multiple of 4
+        if scale_k % SCALE_PACK_SIZE != 0:
+            pad = SCALE_PACK_SIZE - (scale_k % SCALE_PACK_SIZE)
+            ue8m0_byte = torch.cat([ue8m0_byte,
+                torch.full((M, pad), 127, dtype=torch.int32, device=ue8m0_byte.device)], dim=1)
+        # Reshape to [M, packed_k, 4] and pack
+        ue8m0_groups = ue8m0_byte.reshape(M, packed_k, SCALE_PACK_SIZE)
+        packed = (ue8m0_groups[:, :, 0]
+                  | (ue8m0_groups[:, :, 1] << 8)
+                  | (ue8m0_groups[:, :, 2] << 16)
+                  | (ue8m0_groups[:, :, 3] << 24))  # [M, packed_k]
         return new_fp8.contiguous(), packed.contiguous()
 
     @property
