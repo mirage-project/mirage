@@ -6,12 +6,9 @@
 export CUDA_VISIBLE_DEVICES=0
 
 nsys profile \
-  -o qwen3_profile \
-  --trace=cuda,nvtx,cublas,cudnn \
-  --cuda-memory-usage=true \
-  --stats=true \
-  -f \
-  python demo/qwen3/demo_online.py \
-    --model Qwen/Qwen3-0.6B \
-    --max-num-batched-requests 6 \
-    --max-seq-length 1024
+    --trace=cuda,nvtx \
+    --cuda-graph-trace=node \
+    --output=mirage_online \
+    python demo/qwen3/demo_online.py \
+        --max-num-batched-requests 6 \
+        --max-seq-length 1024 \
