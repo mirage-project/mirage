@@ -462,7 +462,9 @@ __device__ __noinline__ void
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
       auto accum_stage_idx = scheduler.current_iter % kNumEpilogueStages;
       auto accum_phase_idx = (scheduler.current_iter / kNumEpilogueStages) & 1;
+      if (cute::elect_one_sync()) printf("[FP8 W1] before tmem_empty wait stage=%u phase=%u\n", accum_stage_idx, accum_phase_idx ^ 1);
       tmem_empty_barriers[accum_stage_idx]->wait(accum_phase_idx ^ 1);
+      if (cute::elect_one_sync()) printf("[FP8 W1] tmem_empty passed!\n");
       tcgen05_after_thread_sync();
 
       auto empty_barrier_arrive = [&](bool const &do_tmem_full_arrive) {
