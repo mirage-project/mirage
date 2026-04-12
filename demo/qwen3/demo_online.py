@@ -83,10 +83,10 @@ if __name__ == "__main__":
     arrivals = [
         ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",               0),
         ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",            0),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",   0.1),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.1),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",    0.15),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.05)
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",   0.2),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.2),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",    0.35),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.15)
     ]
 
     outputs = llm.generate_incremental(arrivals)
