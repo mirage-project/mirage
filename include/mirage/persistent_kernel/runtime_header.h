@@ -116,10 +116,6 @@ enum TaskType {
   TASK_PAGED_ATTENTION_SPLIT_KV_SM100 = 263,
   TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SAMPLING_SM100 = 265,
-  // Expert Parallelism (EP) MoE Tasks
-  TASK_EP_MOE_ROUTING_DISTRIBUTED = 266,    // Distributed TopK routing
-  TASK_EP_MOE_ALL_TO_ALL_DISPATCH = 267,    // Token dispatch (send phase)
-  TASK_EP_MOE_ALL_TO_ALL_COMBINE = 268,     // Token combine (recv phase)
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,

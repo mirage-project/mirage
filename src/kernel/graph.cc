@@ -661,18 +661,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
-  }
-  // EP MoE tasks (single-GPU world_size=1, routing + combine)
-  else if (name == "ep_moe_routing_distributed") {
-    int variant_id = task_register->register_ep_moe_routing_distributed_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(1, 3, TASK_EP_MOE_ROUTING_DISTRIBUTED, variant_id);
-  } else if (name == "ep_moe_all_to_all_combine") {
-    int variant_id = task_register->register_ep_moe_all_to_all_combine_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(3, 1, TASK_EP_MOE_ALL_TO_ALL_COMBINE, variant_id);
   } else {
     printf("Unsupported task name: %s\n", name);
     assert(false && "Unsupported task type");

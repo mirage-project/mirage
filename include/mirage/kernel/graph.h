@@ -25,14 +25,6 @@
 namespace mirage {
 namespace kernel {
 
-// Enum shared between Graph::all_to_all() and KNAllToAll.
-// Defined here (rather than inside KNAllToAll) to avoid the circular include
-// between graph.h and all_to_all.h.
-enum class AllToAllType {
-  DISPATCH,
-  COMBINE
-};
-
 class Graph {
 private:
   struct pair_hash {
@@ -147,28 +139,6 @@ public:
   DTensor all_reduce(DTensor const &input, bool inplace = true);
   DTensor *all_reduce(DTensor const *input, bool inplace = true);
   KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
-  // all-to-all operator (Expert Parallelism MoE)
-  DTensor all_to_all(DTensor const &input,
-                     AllToAllType type,
-                     int num_experts,
-                     int experts_per_rank,
-                     int topk,
-                     DTensor const &routing_indices,
-                     DTensor const &routing_weights);
-  DTensor *all_to_all(DTensor const *input,
-                      AllToAllType type,
-                      int num_experts,
-                      int experts_per_rank,
-                      int topk,
-                      DTensor const *routing_indices,
-                      DTensor const *routing_weights);
-  KNOperator *create_all_to_all_op(DTensor const &input,
-                                   AllToAllType type,
-                                   int num_experts,
-                                   int experts_per_rank,
-                                   int topk,
-                                   DTensor const &routing_indices,
-                                   DTensor const &routing_weights);
   // chunk operator
   std::vector<DTensor> chunk(DTensor const &input, int chunk_size, int dim);
   int chunk(DTensor const *input, int chunk_size, int dim);

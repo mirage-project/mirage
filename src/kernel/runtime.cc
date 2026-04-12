@@ -1412,12 +1412,6 @@ TaskGraphResult print_task_graph(
       "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100";
   task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER] =
       "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER";
-  task_type_to_name[TASK_EP_MOE_ROUTING_DISTRIBUTED] =
-      "TASK_EP_MOE_ROUTING_DISTRIBUTED";
-  task_type_to_name[TASK_EP_MOE_ALL_TO_ALL_DISPATCH] =
-      "TASK_EP_MOE_ALL_TO_ALL_DISPATCH";
-  task_type_to_name[TASK_EP_MOE_ALL_TO_ALL_COMBINE] =
-      "TASK_EP_MOE_ALL_TO_ALL_COMBINE";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");
