@@ -105,16 +105,14 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=grid_dim, block_dim=block_dim)
             return
 
-        # FP8 path — clamp grid so per_block >= 128 (MMA_M alignment)
+        # New FP8 kernel (PR 647) handles internal tile scheduling.
+        # Use grid=(1,1,1): one CTA per task, kernel iterates over all tiles.
         output_size = weight.dim(0)
-        grid_x = grid_dim[0]
-        max_grid = output_size // 128
-        if max_grid < 1:
+        if output_size < 128:
             raise ValueError(
-                f"FP8 linear: output_size={output_size} < 128 (MMA_M). "
+                f"FP8 linear: output_size={output_size} < 128 (BLOCK_N). "
                 f"Must use BF16 linear for this dimension.")
-        if grid_x > max_grid:
-            grid_dim = (max_grid, grid_dim[1], grid_dim[2])
+        grid_dim = (1, 1, 1)  # kernel handles all tiles internally
 
         mbt = self.max_num_batched_tokens
         reduction_size = weight.dim(1) if weight.num_dims == 2 else weight.dim(-1)

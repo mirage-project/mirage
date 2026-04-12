@@ -3748,6 +3748,14 @@ int TaskRegister::register_linear_fp8_sm100_task(
   code.inc_indent();
 
   // New FP8 GEMM kernel call
+  // HACK: The new kernel uses blockIdx.x for internal tile scheduling.
+  // In persistent kernel, blockIdx.x is the worker index (0..num_workers-1),
+  // not the task's grid block index. We can't override blockIdx.x, so we
+  // set kNumSMs to a value large enough that blockIdx.x always maps to a
+  // valid initial tile. With kNumSMs >= num_workers, first block_idx =
+  // blockIdx.x which is always < kNumSMs, and the kernel handles all tiles
+  // for that CTA in one pass.
+  // We use MPK_MAX_NUM_WORKERS (defined at compile time) as kNumSMs.
   code.e("kernel::linear_fp8_sm100_task_impl<");
   code.e("    cute::UMMA::Major::K, cute::UMMA::Major::K,");
   code.e("    128, 128,");  // kGranKA, kGranKB
@@ -3758,7 +3766,7 @@ int TaskRegister::register_linear_fp8_sm100_task(
   code.e("    25,");  // kNumStages (fit persistent kernel 207KB smem budget)
   code.e("    128, 128,");  // kNumNonEpilogueThreads, kNumEpilogueThreads
   code.e("    1, false,");  // kNumMulticast, kIsMulticastOnA
-  code.e("    8,");  // kNumSMs
+  code.e("    1,");  // kNumSMs (persistent kernel: 1 CTA per task, processes all tiles)
   code.e("    $,", (with_residual && rank_with_residual) ? "true" : "false");  // kWithResidual
   code.e("    mirage::blackwell::linear_fp8_sm100::GemmType::Normal,");
   code.e("    false,");  // kWithAccumulation
