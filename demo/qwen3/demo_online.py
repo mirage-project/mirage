@@ -27,6 +27,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
+    parser.add_argument(
+        "--use-nsys", action="store_true", help="Use nsys for profiling"
+    )
     # lookahead or promptlookup
     parser.add_argument(
         "--spec-decode",
@@ -81,15 +84,22 @@ if __name__ == "__main__":
 
     # (prompt, delay_in_microseconds) — delays are relative to the start of generate_incremental
     arrivals = [
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",               0),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",            0),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",   0.2),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.2),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",    0.35),
-        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.", 0.15)
+        ("Introduce yourself",               0),
+        ("How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",            1000),
+        ("Explain the difference between lpl and lck",   23),
+        ("what is buggy in CMU? CMU means Carnegie Mellon University", 300),
+        ("Lebron James and Steven Curry, who is the goat?",    75),
+        ("Do you think Attack on Titan really have a good end?", 5)
     ]
+    if args.use_nsys:
+        import ctypes
+        _cudart = ctypes.CDLL("libcudart.so")
 
-    outputs = llm.generate_incremental(arrivals)
+        _cudart.cudaProfilerStart()
+        outputs = llm.generate_incremental(arrivals)
+        _cudart.cudaProfilerStop()
+    else:    
+        outputs = llm.generate_incremental(arrivals,timeout=60)
 
     # for (prompt, _), output in zip(arrivals, outputs):
     #     print(f"\nPrompt: {prompt!r}")
