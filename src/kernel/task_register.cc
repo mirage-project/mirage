@@ -3630,5 +3630,148 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   return register_task_variant(TASK_NVSHMEM_TILE_ALLREDUCE, c.to_string());
 }
 
+// =============================================================================
+// EP MoE (Expert Parallelism) Task Registration
+// =============================================================================
+
+int TaskRegister::register_ep_moe_routing_distributed_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [world_size, num_experts, experts_per_rank, normalize]
+  assert(params.size() == 4);
+  int world_size = params[0];
+  int num_experts = params[1];
+  int experts_per_rank = params[2];
+  bool normalize = params[3] != 0;
+
+  // bgraph: 1 input + 3 outputs
+  // input[0]  = router_logits   [batch_size, num_experts]
+  // output[0] = routing_indices [batch_size, topk]
+  // output[1] = routing_weights [batch_size, topk]
+  // output[2] = dispatch_counts [world_size]
+  int num_inputs = 1;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
+
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int topk = output_ops[0]->output_tensors[0].dim[1];
+  assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
+
+  assert(output_ops[1]->output_tensors[0].num_dims == 2);
+  assert(output_ops[1]->output_tensors[0].dim[0] == batch_size);
+  assert(output_ops[1]->output_tensors[0].dim[1] == topk);
+
+  assert(output_ops[2]->output_tensors[0].num_dims == 1);
+  assert(output_ops[2]->output_tensors[0].dim[0] == world_size);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (normalize) {
+    code.e("mirage::kernel::moe_routing_device_impl"
+           "<cute::bfloat16_t, $, $, $, true>(",
+           num_experts, topk, world_size);
+  } else {
+    code.e("mirage::kernel::moe_routing_device_impl"
+           "<cute::bfloat16_t, $, $, $, false>(",
+           num_experts, topk, world_size);
+  }
+  code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[0],");
+  code.e("    (int*)task_desc->output_ptrs[0],");
+  code.e("    (cute::bfloat16_t*)task_desc->output_ptrs[1],");
+  code.e("    (int*)task_desc->output_ptrs[2],");
+  code.e("    nullptr,"); // expert_counts: optional, nullptr for now
+  code.e("    $,", experts_per_rank);
+  code.e("    runtime_config.my_gpu_id,");
+  code.e("    1.0f);");
+  return register_task_variant(TASK_EP_MOE_ROUTING_DISTRIBUTED,
+                               code.to_string());
+}
+
+int TaskRegister::register_ep_moe_all_to_all_combine_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [world_size, num_experts, experts_per_rank, add_residual]
+  assert(params.size() == 4);
+  int world_size = params[0];
+  int num_experts = params[1];
+  int experts_per_rank = params[2];
+  bool add_residual = params[3] != 0;
+
+  // bgraph: 3 inputs + 1 output
+  // input[0]  = expert_outputs  [batch_size, topk, hidden_dim]
+  // input[1]  = routing_weights [batch_size, topk]
+  // input[2]  = residual        [batch_size, hidden_dim]
+  // output[0] = output          [batch_size, hidden_dim]
+  int num_inputs = 3;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
+
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  int topk = input_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[0]->output_tensors[0].dim[2] == hidden_dim);
+
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[1]->output_tensors[0].dim[1] == topk);
+
+  assert(input_ops[2]->output_tensors[0].num_dims == 2);
+  assert(input_ops[2]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[2]->output_tensors[0].dim[1] == hidden_dim);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (add_residual) {
+    code.e("mirage::kernel::all_to_all_combine_device_impl"
+           "<cute::bfloat16_t, $, $, $, true>(",
+           hidden_dim, topk, world_size);
+  } else {
+    code.e("mirage::kernel::all_to_all_combine_device_impl"
+           "<cute::bfloat16_t, $, $, $, false>(",
+           hidden_dim, topk, world_size);
+  }
+  code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[0],");
+  code.e("    nullptr,"); // routing_indices_row: unused in combine
+  code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[1],");
+  code.e("    (cute::bfloat16_t const*)task_desc->input_ptrs[2],");
+  code.e("    (cute::bfloat16_t*)task_desc->output_ptrs[0],");
+  code.e("    nullptr,"); // recv_counts: unused for single-block combine
+  code.e("    nullptr,"); // recv_offsets: unused
+  code.e("    $,", num_experts);
+  code.e("    $,", experts_per_rank);
+  code.e("    runtime_config.my_gpu_id,");
+  code.e("    nullptr);"); // sync_sigs: no-op for WORLD_SIZE=1
+  return register_task_variant(TASK_EP_MOE_ALL_TO_ALL_COMBINE,
+                               code.to_string());
+}
+
 } // namespace runtime
 } // namespace mirage

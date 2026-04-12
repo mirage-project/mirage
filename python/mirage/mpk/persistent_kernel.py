@@ -1235,6 +1235,70 @@ class PersistentKernel:
 
         self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100")
 
+    def ep_moe_routing_layer(
+        self,
+        input: DTensor,
+        output: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+        params: list,
+    ):
+        """EP MoE distributed routing: TopK selection + softmax normalization.
+
+        Args:
+            input: router_logits [batch_size, num_experts]
+            output: (routing_indices [batch_size, topk],
+                     routing_weights [batch_size, topk],
+                     dispatch_counts [world_size])
+            params: [world_size, num_experts, experts_per_rank, normalize(0/1)]
+        """
+        assert input.num_dims == 2
+        assert len(output) == 3
+        routing_indices, routing_weights, dispatch_counts = output
+        assert routing_indices.num_dims == 2
+        assert routing_weights.num_dims == 2
+        assert dispatch_counts.num_dims == 1
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(routing_indices, (0, -1, -1), -1, True)
+        tb_graph.new_input(routing_weights, (0, -1, -1), -1, True)
+        tb_graph.new_input(dispatch_counts, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, routing_indices, routing_weights, dispatch_counts], tb_graph)
+        self.kn_graph.register_task(tb_graph, "ep_moe_routing_distributed", params)
+
+    def ep_moe_combine_layer(
+        self,
+        expert_outputs: DTensor,
+        routing_weights: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        params: list,
+    ):
+        """EP MoE combine: weighted sum of expert outputs + residual.
+
+        Args:
+            expert_outputs: [batch_size, topk, hidden_dim]
+            routing_weights: [batch_size, topk]
+            residual: [batch_size, hidden_dim]
+            output: [batch_size, hidden_dim]
+            params: [world_size, num_experts, experts_per_rank, add_residual(0/1)]
+        """
+        assert expert_outputs.num_dims == 3
+        assert routing_weights.num_dims == 2
+        assert residual.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(expert_outputs, (0, -1, -1), -1, True)
+        tb_graph.new_input(routing_weights, (0, -1, -1), -1, True)
+        tb_graph.new_input(residual, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [expert_outputs, routing_weights, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "ep_moe_all_to_all_combine", params)
+
     def splitk_linear_layer(
         self,
         input: DTensor,

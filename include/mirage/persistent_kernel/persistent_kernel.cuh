@@ -37,6 +37,10 @@
 #include "tasks/ampere/task_header.cuh"
 #endif
 
+// EP MoE common kernels (architecture-agnostic)
+#include "tasks/common/moe_routing_distributed.cuh"
+#include "tasks/common/all_to_all_combine_task.cuh"
+
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 using namespace kernel;
