@@ -53,8 +53,8 @@ public:
                                    std::vector<int> const &params);
   int register_argmax_reduce_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
-  int register_reduce_task(threadblock::Graph const &bgraph,
-                           std::vector<int> const &params);
+  int register_reduction_task(threadblock::Graph const &bgraph,
+                              std::vector<int> const &params);
   int register_find_ngram_partial_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
   int register_find_ngram_global_task(threadblock::Graph const &bgraph,
@@ -107,9 +107,14 @@ public:
                                 std::vector<int> const &params);
   int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  int register_moe_topk_sigmoid_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
   int register_moe_linear_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params,
                                      bool w13_linear);
+  int register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params,
+                                  bool w13_linear);
   int register_moe_silu_mul_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params);
   int register_moe_mul_sum_add_sm100_task(threadblock::Graph const &bgraph,
@@ -118,7 +123,23 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_paged_attention_split_kv_merge_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_mla_decode_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_mla_reduce_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_mla_prefill_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_mla_mtp_decode_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
   // SM100 tasks end
+  // Multi-GPU tasks
+  int register_nvshmem_allgather_strided_put_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_nvshmem_tile_allreduce_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  // Multi-GPU tasks end
   int register_task_variant(TaskType type, std::string const &code);
 
 public:

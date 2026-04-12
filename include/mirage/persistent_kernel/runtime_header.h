@@ -18,6 +18,11 @@
 #include "mirage/config.h"
 #include <cuda_runtime.h>
 
+#ifdef USE_NVSHMEM
+#include <nvshmem.h>
+#include <nvshmemx.h>
+#endif
+
 namespace mirage {
 namespace runtime {
 
@@ -27,9 +32,25 @@ constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 #endif
 
+#if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
+// Have to be smaller for vllm compatibility, or program will stuck
 #if MPK_TARGET_CC >= 90
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    227 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+    220 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 86
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 80
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    160 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#else
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#endif
+#else
+#if MPK_TARGET_CC >= 90
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -39,6 +60,7 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #else
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#endif
 #endif
 
 typedef unsigned long long int TaskId;
@@ -65,7 +87,7 @@ enum TaskType {
   TASK_ATTENTION_1 = 103,
   TASK_ATTENTION_2 = 104,
   TASK_SILU_MUL_LINEAR_WITH_RESIDUAL = 105,
-  TASK_ALLREDUCE = 106,
+  TASK_ALLREDUCE = 106, // This legacy allreduce task will be removed soon
   TASK_REDUCE = 107,
   TASK_LINEAR_WITH_RESIDUAL = 108,
   TASK_ARGMAX = 109,
@@ -101,6 +123,8 @@ enum TaskType {
   // SM100 Tasks
   TASK_SM100_TASK_BEGIN = 230, // SM100 start placeholder, not a real task
   TASK_SM100_TMA_START_TASK = 231,
+  TASK_MOE_W13_FP8_SM100 = 248,
+  TASK_MOE_W2_FP8_SM100 = 249,
   TASK_SPLITK_LINEAR_SM100 = 251,
   TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
   TASK_LINEAR_SM100 = 253,
@@ -116,12 +140,22 @@ enum TaskType {
   TASK_PAGED_ATTENTION_SPLIT_KV_SM100 = 263,
   TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SAMPLING_SM100 = 265,
+  TASK_MLA_DECODE_SM100 = 266,
+  TASK_MLA_REDUCE_SM100 = 267,
+  TASK_MLA_PREFILL_SM100 = 268,
+  TASK_MLA_MTP_DECODE_SM100 = 269,
+  TASK_MLA_MTP_REDUCE_SM100 = 270,
+  TASK_MOE_TOPK_SIGMOID_SM100 = 280,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
-  TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
   TASK_GET_NEXT_TASK = 203,
+  // Multi-GPU tasks
+  TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
+  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
+  TASK_NVSHMEM_TILE_ALLREDUCE = 302,
+  TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
 };
 
 enum EventType {
@@ -182,7 +216,7 @@ struct FullTaskDesc {
       int merge_task_offset; // Used for paged attention split kv merge
     };
     struct {
-      size_t xfer_size_in_bytes; // Used for nvshmem
+      int task_offset; // Used for nvshmem team mapping
     };
     unsigned long long raw_payload;
   } task_metadata;
@@ -260,7 +294,8 @@ struct RuntimeConfig {
   int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
+    defined(MODE_ONLINE_NOTOKEN)
   int *prompt_length;     // Metadata for online/offline serving
   int *request_ids;       // Metadata for online/offline serving
   int *page_queue;        // Metadata for online/offline serving
@@ -272,6 +307,11 @@ struct RuntimeConfig {
   void *profiler_buffer;
   bool split_worker_scheduler;
   cudaStream_t worker_stream, scheduler_stream;
+  cudaEvent_t prepare_done_event;
+  cudaEvent_t worker_done_event, scheduler_done_event;
+#ifdef USE_NVSHMEM
+  nvshmem_team_t *nvshmem_teams;
+#endif
 };
 
 } // namespace runtime
