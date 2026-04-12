@@ -63,6 +63,24 @@ inline int aligned_scale_outer_dim(int outer_dim) {
   return get_tma_aligned_size(outer_dim, sizeof(uint32_t));
 }
 
+enum class PackedScaleLayout {
+  Invalid,
+  RowMajor,
+  DeepGemmColumnMajor,
+};
+
+inline bool is_valid_rowmajor_scale_layout(int outer_dim,
+                                           int reduction_size,
+                                           int64_t shape0,
+                                           int64_t shape1,
+                                           int64_t stride0,
+                                           int64_t stride1) {
+  return shape0 == outer_dim &&
+         shape1 == packed_scale_k_for_reduction_size(reduction_size) &&
+         stride0 == packed_scale_k_for_reduction_size(reduction_size) &&
+         stride1 == 1;
+}
+
 inline bool is_valid_deepgemm_scale_layout(int outer_dim,
                                            int reduction_size,
                                            int64_t shape0,
@@ -75,6 +93,23 @@ inline bool is_valid_deepgemm_scale_layout(int outer_dim,
          stride1 == aligned_scale_outer_dim(outer_dim);
 }
 
+inline PackedScaleLayout detect_scale_layout(int outer_dim,
+                                             int reduction_size,
+                                             int64_t shape0,
+                                             int64_t shape1,
+                                             int64_t stride0,
+                                             int64_t stride1) {
+  if (is_valid_rowmajor_scale_layout(
+          outer_dim, reduction_size, shape0, shape1, stride0, stride1)) {
+    return PackedScaleLayout::RowMajor;
+  }
+  if (is_valid_deepgemm_scale_layout(
+          outer_dim, reduction_size, shape0, shape1, stride0, stride1)) {
+    return PackedScaleLayout::DeepGemmColumnMajor;
+  }
+  return PackedScaleLayout::Invalid;
+}
+
 inline std::vector<int64_t>
 expected_deepgemm_scale_shape(int outer_dim, int reduction_size) {
   return {outer_dim, packed_scale_k_for_reduction_size(reduction_size)};
@@ -83,6 +118,16 @@ expected_deepgemm_scale_shape(int outer_dim, int reduction_size) {
 inline std::vector<int64_t>
 expected_deepgemm_scale_stride(int outer_dim) {
   return {1, aligned_scale_outer_dim(outer_dim)};
+}
+
+inline std::vector<int64_t>
+expected_rowmajor_scale_shape(int outer_dim, int reduction_size) {
+  return {outer_dim, packed_scale_k_for_reduction_size(reduction_size)};
+}
+
+inline std::vector<int64_t>
+expected_rowmajor_scale_stride(int reduction_size) {
+  return {packed_scale_k_for_reduction_size(reduction_size), 1};
 }
 
 inline bool is_supported_group_size(int group_size) {

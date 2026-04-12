@@ -15,7 +15,7 @@ import runtime_kernel_blackwell_quantize_fp8 as quantize_kernel
 from sm100_fp8_scale_layout import (
     BLOCK_K,
     allocate_packed_ue8m0_scale,
-    dequant_from_packed_ue8m0_deepgemm_style,
+    dequant_from_packed_ue8m0,
 )
 
 torch.set_printoptions(sci_mode=False, profile="full")
@@ -79,8 +79,8 @@ for batch_size, output_size, reduction_size in pipeline_shapes:
             x_q, x_scale, w_q, w_scale, residual, output
         )
 
-        x_ref = dequant_from_packed_ue8m0_deepgemm_style(x_q, x_scale)
-        w_ref = dequant_from_packed_ue8m0_deepgemm_style(w_q, w_scale)
+        x_ref = dequant_from_packed_ue8m0(x_q, x_scale)
+        w_ref = dequant_from_packed_ue8m0(w_q, w_scale)
         torch_out = torch.matmul(x_ref, torch.transpose(w_ref, 0, 1))
         if has_residual:
             torch_out = torch_out + residual.float()
@@ -103,7 +103,7 @@ for batch_size, output_size, reduction_size in pipeline_shapes:
             zero_x_q, zero_x_scale, w_q, w_scale, residual, zero_output
         )
 
-        zero_x_ref = dequant_from_packed_ue8m0_deepgemm_style(zero_x_q, zero_x_scale)
+        zero_x_ref = dequant_from_packed_ue8m0(zero_x_q, zero_x_scale)
         zero_torch_out = torch.matmul(zero_x_ref, torch.transpose(w_ref, 0, 1))
         if has_residual:
             zero_torch_out = zero_torch_out + residual.float()

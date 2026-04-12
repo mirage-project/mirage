@@ -31,12 +31,35 @@ def aligned_scale_outer_dim(outer_dim: int) -> int:
 
 
 def allocate_packed_ue8m0_scale(outer_dim: int, reduction_size: int, device):
+    return torch.empty(
+        (outer_dim, packed_scale_k_for_reduction_size(reduction_size)),
+        device=device,
+        dtype=torch.uint32,
+    )
+
+
+def allocate_packed_ue8m0_scale_deepgemm_style(
+    outer_dim: int, reduction_size: int, device
+):
     return torch.empty_strided(
         (outer_dim, packed_scale_k_for_reduction_size(reduction_size)),
         (1, aligned_scale_outer_dim(outer_dim)),
         device=device,
         dtype=torch.uint32,
     )
+
+
+def detect_packed_scale_layout(
+    packed_scales: torch.Tensor, outer_dim: int, reduction_size: int
+) -> str:
+    packed_k = packed_scale_k_for_reduction_size(reduction_size)
+    if packed_scales.shape != (outer_dim, packed_k):
+        return "invalid"
+    if tuple(packed_scales.stride()) == (packed_k, 1):
+        return "row_major"
+    if tuple(packed_scales.stride()) == (1, aligned_scale_outer_dim(outer_dim)):
+        return "deepgemm_col_major"
+    return "invalid"
 
 
 def encode_ue8m0(scale: float) -> int:
@@ -49,18 +72,25 @@ def decode_ue8m0(encoded: int) -> float:
     return 2.0 ** (encoded - 127)
 
 
-def quantize_to_fp8_deepgemm_style(x_bf16: torch.Tensor):
+def _quantize_to_fp8_packed_ue8m0(x_bf16: torch.Tensor, layout: str):
     assert x_bf16.dim() == 2
     outer_dim, reduction_size = x_bf16.shape
     assert reduction_size % BLOCK_K == 0
 
     logical_scale_k = logical_scale_k_for_reduction_size(reduction_size)
-    packed_scale_k = packed_scale_k_for_reduction_size(reduction_size)
-    outer_stride = aligned_scale_outer_dim(outer_dim)
 
     x_fp32 = x_bf16.float()
     x_q = torch.empty_like(x_fp32, dtype=torch.float8_e4m3fn)
-    packed_scales = allocate_packed_ue8m0_scale(outer_dim, reduction_size, x_bf16.device)
+    if layout == "row_major":
+        packed_scales = allocate_packed_ue8m0_scale(
+            outer_dim, reduction_size, x_bf16.device
+        )
+    elif layout == "deepgemm_col_major":
+        packed_scales = allocate_packed_ue8m0_scale_deepgemm_style(
+            outer_dim, reduction_size, x_bf16.device
+        )
+    else:
+        raise ValueError(f"Unsupported packed scale layout: {layout}")
     packed_scales.zero_()
 
     for outer_idx in range(outer_dim):
@@ -85,12 +115,20 @@ def quantize_to_fp8_deepgemm_style(x_bf16: torch.Tensor):
     return x_q, packed_scales
 
 
-def dequant_from_packed_ue8m0_deepgemm_style(x_q: torch.Tensor, packed_scales: torch.Tensor):
+def quantize_to_fp8_packed_ue8m0(x_bf16: torch.Tensor):
+    return _quantize_to_fp8_packed_ue8m0(x_bf16, layout="row_major")
+
+
+def quantize_to_fp8_deepgemm_style(x_bf16: torch.Tensor):
+    return _quantize_to_fp8_packed_ue8m0(x_bf16, layout="deepgemm_col_major")
+
+
+def dequant_from_packed_ue8m0(x_q: torch.Tensor, packed_scales: torch.Tensor):
     assert x_q.dim() == 2
     outer_dim, reduction_size = x_q.shape
     logical_scale_k = logical_scale_k_for_reduction_size(reduction_size)
-    assert packed_scales.shape == (outer_dim, packed_scale_k_for_reduction_size(reduction_size))
-    assert tuple(packed_scales.stride()) == (1, aligned_scale_outer_dim(outer_dim))
+    layout = detect_packed_scale_layout(packed_scales, outer_dim, reduction_size)
+    assert layout in ("row_major", "deepgemm_col_major")
 
     x_q_fp32 = x_q.float()
     out = torch.empty_like(x_q_fp32, dtype=torch.float32)
@@ -103,3 +141,12 @@ def dequant_from_packed_ue8m0_deepgemm_style(x_q: torch.Tensor, packed_scales: t
             k_end = k_start + BLOCK_K
             out[outer_idx, k_start:k_end] = x_q_fp32[outer_idx, k_start:k_end] * scale
     return out
+
+
+def dequant_from_packed_ue8m0_deepgemm_style(
+    x_q: torch.Tensor, packed_scales: torch.Tensor
+):
+    assert detect_packed_scale_layout(
+        packed_scales, x_q.shape[0], x_q.shape[1]
+    ) == "deepgemm_col_major"
+    return dequant_from_packed_ue8m0(x_q, packed_scales)

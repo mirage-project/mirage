@@ -39,6 +39,7 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
     void const *__restrict__ input_ptr,
     void *__restrict__ output_q_ptr,
     void *__restrict__ output_s_ptr,
+    int output_s_row_stride,
     int output_s_col_stride,
     float eps,
     float min_8bit,
@@ -48,7 +49,8 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
       static_cast<bfloat16 const *>(input_ptr) + row * HIDDEN_SIZE;
   fp8_e4m3fn *output_q =
       static_cast<fp8_e4m3fn *>(output_q_ptr) + row * HIDDEN_SIZE;
-  uint32_t *output_s = static_cast<uint32_t *>(output_s_ptr) + row;
+  uint32_t *output_s =
+      static_cast<uint32_t *>(output_s_ptr) + row * output_s_row_stride;
 
   kernel::per_token_group_quantize_fp8_task_impl</*BATCH_SIZE=*/1,
                                                  /*HIDDEN_SIZE=*/HIDDEN_SIZE,
@@ -73,6 +75,7 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
             input_ptr,                                                         \
             output_q_ptr,                                                      \
             output_s_ptr,                                                      \
+            output_s_stride_row,                                               \
             output_s_stride_col,                                               \
             kEps,                                                              \
             kMin8,                                                             \
@@ -127,6 +130,7 @@ void quantize_fp8_sm100(torch::Tensor input,
   void const *input_ptr = input.data_ptr();
   void *output_q_ptr = output_q.data_ptr();
   void *output_s_ptr = output_s.data_ptr();
+  int const output_s_stride_row = static_cast<int>(output_s.stride(0));
   int const output_s_stride_col = static_cast<int>(output_s.stride(1));
 
   constexpr float kEps = 0.0f;

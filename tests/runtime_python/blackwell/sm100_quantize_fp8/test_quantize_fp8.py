@@ -12,6 +12,8 @@ if COMMON_DIR not in sys.path:
 from sm100_fp8_scale_layout import (
     BLOCK_K,
     allocate_packed_ue8m0_scale,
+    allocate_packed_ue8m0_scale_deepgemm_style,
+    quantize_to_fp8_packed_ue8m0,
     quantize_to_fp8_deepgemm_style,
 )
 
@@ -46,7 +48,7 @@ for batch_size in batch_sizes:
 
         runtime_kernel_blackwell.quantize_fp8_sm100(x, output, scales, group_size=block_k)
 
-        quant_ref, scale_ref = quantize_to_fp8_deepgemm_style(x)
+        quant_ref, scale_ref = quantize_to_fp8_packed_ue8m0(x)
 
         assert scales.shape == scale_ref.shape
         assert scales.stride() == scale_ref.stride()
@@ -65,7 +67,7 @@ for batch_size in batch_sizes:
         runtime_kernel_blackwell.quantize_fp8_sm100(
             zero_x, zero_output, zero_scales, group_size=block_k
         )
-        zero_quant_ref, zero_scale_ref = quantize_to_fp8_deepgemm_style(zero_x)
+        zero_quant_ref, zero_scale_ref = quantize_to_fp8_packed_ue8m0(zero_x)
 
         assert zero_scales.shape == zero_scale_ref.shape
         assert zero_scales.stride() == zero_scale_ref.stride()
@@ -77,6 +79,37 @@ for batch_size in batch_sizes:
             atol=16.0,
         )
         print("Zero-input bring-up passed!")
+
+print("\n=== Legacy column-major compatibility test ===")
+
+legacy_batch_size = 4
+legacy_hidden_size = 2048
+legacy_x = torch.randn(
+    (legacy_batch_size, legacy_hidden_size),
+    device="cuda",
+    dtype=torch.bfloat16,
+    generator=g,
+)
+legacy_output = torch.empty(
+    (legacy_batch_size, legacy_hidden_size), device="cuda", dtype=torch.float8_e4m3fn
+)
+legacy_scales = allocate_packed_ue8m0_scale_deepgemm_style(
+    legacy_batch_size, legacy_hidden_size, legacy_x.device
+)
+runtime_kernel_blackwell.quantize_fp8_sm100(
+    legacy_x, legacy_output, legacy_scales, group_size=block_k
+)
+legacy_quant_ref, legacy_scale_ref = quantize_to_fp8_deepgemm_style(legacy_x)
+assert legacy_scales.shape == legacy_scale_ref.shape
+assert legacy_scales.stride() == legacy_scale_ref.stride()
+torch.testing.assert_close(legacy_scales, legacy_scale_ref, rtol=0, atol=0)
+torch.testing.assert_close(
+    legacy_output.float(),
+    legacy_quant_ref.float(),
+    rtol=1e-1,
+    atol=16.0,
+)
+print("Legacy column-major quantize compatibility test passed!")
 
 
 print("\n=== Negative tests ===")
