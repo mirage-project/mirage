@@ -239,18 +239,40 @@ __device__ __noinline__ void
     return shared_storage.SFB.begin() + stage * SF_BLOCK_N;
   };
 
+  // Column-major packed UE8M0 scale access:
+  // Scale is stored column-major: src[row + packed_k_idx * aligned_rows]
+  // Each uint32 packs 4 consecutive groups' UE8M0 bytes.
+  // For UMMA which needs per-32-subtile scales, we unpack the group's byte
+  // and replicate it 4 times (since all 4 subtiles in a 128-group share one scale).
+  constexpr int ALIGNED_OUTPUT_SIZE = ((OUTPUT_SIZE + 3) / 4) * 4;
+  constexpr int ALIGNED_BATCH_SIZE = ((BATCH_SIZE + 3) / 4) * 4;
+
   auto load_packed_scale_tile = [&](TypeScale *dst,
                                     TypeScale const *src,
                                     int row_base,
                                     int total_rows,
+                                    int aligned_rows,
                                     int block_rows,
                                     int k_tile) {
+    // k_tile indexes 128-element groups. The column-major packed array
+    // stores 4 groups per uint32 at column k_tile/4.
+    int packed_col = k_tile / 4;
+    int byte_idx = k_tile % 4;
+    int byte_shift = byte_idx * 8;
 #pragma unroll
     for (int i = lane_idx; i < block_rows; i += 32) {
       int global_row = row_base + i;
-      dst[i] = global_row < total_rows
-                   ? src[global_row * PADDED_SCALE_K + k_tile]
-                   : TypeScale(0);
+      if (global_row < total_rows) {
+        uint32_t packed = src[global_row + packed_col * aligned_rows];
+        uint8_t scale_byte = (packed >> byte_shift) & 0xFF;
+        // Replicate same byte 4 times for UMMA (per-128-group, not per-subtile)
+        dst[i] = static_cast<uint32_t>(scale_byte)
+               | (static_cast<uint32_t>(scale_byte) << 8)
+               | (static_cast<uint32_t>(scale_byte) << 16)
+               | (static_cast<uint32_t>(scale_byte) << 24);
+      } else {
+        dst[i] = TypeScale(0);
+      }
     }
   };
 
@@ -383,12 +405,14 @@ __device__ __noinline__ void
                                  weight_scale_ptr,
                                  m_base,
                                  OUTPUT_SIZE,
+                                 ALIGNED_OUTPUT_SIZE,
                                  SF_BLOCK_M,
                                  k_tile);
           load_packed_scale_tile(smem_sfb(smem_wr_buffer),
                                  input_scale_ptr,
                                  n_base,
                                  BATCH_SIZE,
+                                 ALIGNED_BATCH_SIZE,
                                  SF_BLOCK_N,
                                  k_tile);
           __syncwarp();

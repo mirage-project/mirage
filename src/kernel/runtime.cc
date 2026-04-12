@@ -436,6 +436,10 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.y;
             }
+            // FP8 quantize: request_id = row index (bid.x)
+            if (task_type == TASK_QUANTIZE_FP8_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +

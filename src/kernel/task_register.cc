@@ -3690,6 +3690,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   code.e("    task_desc->input_ptrs[0],");   // input bf16
   code.e("    task_desc->output_ptrs[0],");  // output fp8
   code.e("    task_desc->output_ptrs[1],");  // output scale
+  code.e("    task_desc->task_metadata.request_id,");  // row index
   code.e("    1e-10f, -448.0f, 448.0f);");
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
