@@ -781,7 +781,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         // A (input FP8): dim=[batch, K], stride=[K, 1]
         int batch = tensor_desc.dim[0];
         int K = tensor_desc.dim[1];
-        printf("[TMA FP8 A] batch=%d K=%d base=%p dtype=%d\n", batch, K, tensor_desc.base_ptr, tensor_desc.data_type);
         uint64_t gd[2] = {(uint64_t)K, (uint64_t)batch};
         uint64_t gs[1] = {(uint64_t)K * 1};  // stride0 * sizeof(uint8)
         uint32_t bd[2] = {(uint32_t)BLOCK_K_FP8, (uint32_t)min(BLOCK_M_FP8, batch)};
@@ -817,7 +816,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         // = column-major [aligned_batch, packed_k]
         int packed_k = tensor_desc.dim[0];
         int aligned_batch = tensor_desc.dim[1];
-        printf("[TMA FP8 SFA] packed_k=%d aligned_batch=%d base=%p dtype=%d\n", packed_k, aligned_batch, tensor_desc.base_ptr, tensor_desc.data_type);
         uint64_t gd[2] = {(uint64_t)aligned_batch, (uint64_t)packed_k};
         uint64_t gs[1] = {(uint64_t)aligned_batch * 4};  // stride * sizeof(uint32)
         // box must not exceed global dims
@@ -835,9 +833,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       } else if (is_uint32 && param_id == 3) {
         // SFB (weight scale): stored as [packed_k, aligned_output] row-major
         // = column-major [aligned_output, packed_k]
-        printf("[TMA FP8 SFB] dim0=%d dim1=%d stride0=%d stride1=%d base=%p dtype=%d\n",
-               tensor_desc.dim[0], tensor_desc.dim[1], tensor_desc.stride[0], tensor_desc.stride[1],
-               tensor_desc.base_ptr, tensor_desc.data_type);
         // Weight scale after grid partition: dim[0]=M_per_block, dim[1]=packed_k
         // Column-major: stride[1] is the physical outer stride (original aligned_M)
         int aligned_output = tensor_desc.dim[0]; // after grid split
@@ -854,8 +849,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
             CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (result != CUDA_SUCCESS) {
           char const *err; cuGetErrorString(result, &err);
-          printf("[SFB FAIL] gd={%lu,%lu} gs={%lu} bd={%u,%u} stride_elem=%d aligned=%d\n",
-                 gd[0], gd[1], gs[0], bd[0], bd[1], physical_outer_stride, aligned_output);
           std::cerr << "TMA FP8 scale SFB failed: " << err << std::endl;
         }
       } else if (with_res && param_id == 4) {
