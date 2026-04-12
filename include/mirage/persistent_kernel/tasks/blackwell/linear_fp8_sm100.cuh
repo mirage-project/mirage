@@ -232,16 +232,6 @@ __device__ __noinline__ void
     cute::cluster_sync();
   }
 
-  // Zero-initialize barrier region: persistent kernel reuses smem across tasks
-  {
-    auto barrier_smem = reinterpret_cast<uint32_t*>(barrier_start_ptr);
-    constexpr uint32_t barrier_words =
-        (kNumStages * 3 + kNumEpilogueStages * 2 + (kWithResidual ? 2 : 0) + 1)
-        * sizeof(uint64_t) / sizeof(uint32_t);
-    for (uint32_t i = threadIdx.x; i < barrier_words; i += blockDim.x)
-      barrier_smem[i] = 0;
-    __syncthreads();
-  }
   if (warp_idx == 1 && cute::elect_one_sync()) {
 #pragma unroll
     for (uint32_t i = 0; i < kNumStages; ++i) {
