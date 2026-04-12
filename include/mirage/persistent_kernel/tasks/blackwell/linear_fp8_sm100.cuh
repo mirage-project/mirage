@@ -237,6 +237,7 @@ __device__ __noinline__ void
     cute::cluster_sync();
   }
 
+  if (threadIdx.x == 0) printf("[FP8 CP1] before barrier init, warp_idx=%d\n", warp_idx);
   if (warp_idx == 1 && cute::elect_one_sync()) {
 #pragma unroll
     for (uint32_t i = 0; i < kNumStages; ++i) {
@@ -254,10 +255,15 @@ __device__ __noinline__ void
       residual_empty_barrier->init(1);
     }
     cutlass::arch::fence_barrier_init();
+    printf("[FP8 CP2] barrier init done\n");
   } else if (warp_idx == 2) {
+    printf("[FP8 CP2a] before TMEM alloc, cols=%u\n", kNumTmemCols);
     Allocator().allocate(kNumTmemCols, tmem_ptr_in_smem);
+    printf("[FP8 CP2b] TMEM alloc done\n");
   }
+  if (threadIdx.x == 0) printf("[FP8 CP3] before syncthreads\n");
   kNumMulticast > 1 ? cute::cluster_sync() : __syncthreads();
+  if (threadIdx.x == 0) printf("[FP8 CP4] after syncthreads\n");
 
   uint32_t m_block_idx, n_block_idx;
   auto scheduler =
@@ -277,6 +283,7 @@ __device__ __noinline__ void
   };
 
   if (warp_idx == 0 && cute::elect_one_sync()) {
+    printf("[FP8 CP5] warp0 TMA producer entering loop\n");
     while (scheduler.get_next_block(m_block_idx, n_block_idx)) {
       auto const accum_stage_idx = scheduler.current_iter % kNumEpilogueStages;
       auto const accum_phase_idx =
@@ -301,7 +308,11 @@ __device__ __noinline__ void
       }
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
+        if (k_block_idx == 0 && scheduler.current_iter == 0)
+          printf("[FP8 CP7] warp0 first empty_barrier wait, stage=%u phase=%u\n", stage_idx, phase);
         empty_barriers[stage_idx]->wait(phase ^ 1);
+        if (k_block_idx == 0 && scheduler.current_iter == 0)
+          printf("[FP8 CP8] warp0 empty_barrier passed, starting TMA\n");
 
         uint32_t m_idx = scheduler.template get_global_idx<
             (kGemmType == GemmType::MGroupedMasked),
@@ -386,10 +397,15 @@ __device__ __noinline__ void
           num_arrival_bytes += BLOCK_N * sizeof(uint32_t);
         }
 
+        if (k_block_idx == 0 && scheduler.current_iter == 0)
+          printf("[FP8 CP9] warp0 before arrive_and_expect_tx bytes=%u\n", num_arrival_bytes);
         full_barriers[stage_idx]->arrive_and_expect_tx(num_arrival_bytes);
+        if (k_block_idx == 0 && scheduler.current_iter == 0)
+          printf("[FP8 CP10] warp0 after arrive_and_expect_tx\n");
       }
     }
   } else if (warp_idx == 1 && is_leader_cta) {
+    printf("[FP8 CP6] warp1 MMA consumer entering\n");
     constexpr uint32_t UMMA_M =
         LAYOUT_AD_M * (kIsMulticastOnA ? 1 : kNumMulticast);
     constexpr uint32_t UMMA_N = BLOCK_N * (kIsMulticastOnA ? kNumMulticast : 1);
