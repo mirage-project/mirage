@@ -123,6 +123,13 @@ __device__ __noinline__ void
       (SHAPE_M != 0 && kAlignedShapeM < BLOCK_M)
           ? kAlignedShapeM
           : BLOCK_M;
+  // CD/residual TMA box: {STORE_BLOCK_N, min(STORE_BLOCK_M, SHAPE_M)} in bf16
+  // STORE_BLOCK_N = kSwizzleCDMode / sizeof(cd_dtype_t) = 32/2 = 16 bf16 elements
+  constexpr uint32_t kTmaBoxM_CD =
+      (SHAPE_M != 0) ? cute::min<uint32_t>(STORE_BLOCK_M, SHAPE_M) : STORE_BLOCK_M;
+  // Actual residual TMA bytes: box[0]*box[1]*sizeof(cd_dtype_t) = STORE_BLOCK_N * kTmaBoxM_CD * sizeof(cd_dtype_t)
+  // = kSwizzleCDMode / sizeof(cd_dtype_t) * kTmaBoxM_CD * sizeof(cd_dtype_t) = kSwizzleCDMode * kTmaBoxM_CD
+  constexpr uint32_t kTmaResidualBytes = kSwizzleCDMode * kTmaBoxM_CD;
 
   constexpr uint32_t SMEM_CD_SIZE_PER_STAGE = STORE_BLOCK_M * kSwizzleCDMode;
   constexpr uint32_t SMEM_CD_SIZE = SMEM_CD_SIZE_PER_STAGE * kNumTMAStoreStages;
@@ -303,7 +310,7 @@ __device__ __noinline__ void
             smem_residual,
             n_idx,
             m_idx);
-        residual_full_barrier->arrive_and_expect_tx(SMEM_CD_SIZE_PER_STAGE);
+        residual_full_barrier->arrive_and_expect_tx(kTmaResidualBytes);
       }
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
