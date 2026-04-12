@@ -55,10 +55,7 @@ __device__ __noinline__ void
                                cute::TmaDescriptor const &tensor_map_cd) {
   using namespace mirage::blackwell::linear_fp8_sm100_detail;
 
-  if (threadIdx.x == 0) {
-    printf("[FP8 KERNEL ENTRY] blockIdx.x=%u shape_m=%u shape_n=%u shape_k=%u\n",
-           blockIdx.x, shape_m, shape_n, shape_k);
-  }
+  // Debug print moved after smem_buffer declaration below
 
 #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) ||                    \
     defined(__CLION_IDE__)
@@ -103,6 +100,10 @@ __device__ __noinline__ void
   auto const lane_idx = get_lane_idx();
 
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
+  if (threadIdx.x == 0) {
+    printf("[FP8 SMEM] base=%p align1024=%lu\n",
+           smem_buffer, (unsigned long)((uintptr_t)smem_buffer % 1024));
+  }
 
   constexpr uint32_t LOAD_BLOCK_M =
       BLOCK_M / (kIsMulticastOnA ? kNumMulticast : 1);
@@ -237,6 +238,23 @@ __device__ __noinline__ void
     cute::cluster_sync();
   }
 
+  // Zero-initialize the barrier region in smem. Persistent kernel reuses smem
+  // across tasks; stale mbarrier state causes deadlocks. Fresh __global__ kernels
+  // get zero-initialized smem from CUDA runtime.
+  {
+    // Barrier region starts after pipeline data buffers
+    auto barrier_smem_start = smem_buffer + SMEM_CD_SIZE + SMEM_RESIDUAL_SIZE +
+        kNumStages * (SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE +
+                      SMEM_SFA_SIZE_PER_STAGE + SMEM_SFB_SIZE_PER_STAGE);
+    // Total barrier region: 3*stages + 2*epi_stages + (residual?2:0) + 1 (tmem_ptr)
+    constexpr uint32_t num_barriers =
+        kNumStages * 3 + kNumEpilogueStages * 2 + (kWithResidual ? 2 : 0) + 1;
+    constexpr uint32_t barrier_bytes = num_barriers * sizeof(uint64_t);
+    for (uint32_t i = threadIdx.x * 4; i < barrier_bytes; i += blockDim.x * 4) {
+      *reinterpret_cast<uint32_t*>(barrier_smem_start + i) = 0;
+    }
+    __syncthreads();
+  }
   if (threadIdx.x == 0) printf("[FP8 CP1] before barrier init, warp_idx=%d\n", warp_idx);
   if (warp_idx == 1 && cute::elect_one_sync()) {
 #pragma unroll
