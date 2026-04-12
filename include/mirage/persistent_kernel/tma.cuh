@@ -769,40 +769,120 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_LINEAR_FP8_SM100:
     case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
-      // FP8: 128 elements × 1 byte = 128B (matches 128B TMA swizzle)
-      int const cp_async_size = 128;
-      const size_t smem_repeat_row = 1;
-      constexpr int B = 3, M = 3, S = 3;
-      constexpr int MMA_M = 128, MMA_N = 16;
-      constexpr int TILE_SIZE = 128;
-      size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
-
-      bool is_fp8 = (tensor_desc.data_type == 930);
-      bool is_fp32 = (tensor_desc.data_type == 950);
-      // output is last tensor (bf16)
+      // New FP8 GEMM kernel: use cuTensorMapEncodeTiled directly
+      // BLOCK_M=32, BLOCK_N=16, BLOCK_K=128
+      constexpr int BLOCK_M_FP8 = 32, BLOCK_N_FP8 = 16, BLOCK_K_FP8 = 128;
       bool with_res = (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
       bool is_output = (param_id == (size_t)(task_desc.num_inputs));
+      bool is_uint32 = (tensor_desc.data_type == 956); // DT_UINT32
+      bool is_fp8 = (tensor_desc.data_type == 930);    // DT_FLOAT8
 
-      if (is_fp8 && (param_id == 0 || param_id == 2)) {
-        // FP8 input or weight
-        int rows = tensor_desc.dim[0];
-        int cols = tensor_desc.dim[1];
-        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
-        uint64_t gst[2] = {1, (uint64_t)cols};
-        uint32_t ss[2] = {(param_id == 0) ? (uint32_t)MMA_N : (uint32_t)MMA_M,
-                          (uint32_t)cp_async_size};
-        fill_tma_desc<cutlass::float_e4m3_t, B, M, S, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, smem_repeat_col);
-      } else {
-        // BF16 output
-        int rows = tensor_desc.dim[0];
-        int cols = tensor_desc.dim[1];
+      if (is_fp8 && param_id == 0) {
+        // A (input FP8): dim=[batch, K], stride=[K, 1]
+        int batch = tensor_desc.dim[0];
+        int K = tensor_desc.dim[1];
+        uint64_t gd[2] = {(uint64_t)K, (uint64_t)batch};
+        uint64_t gs[1] = {(uint64_t)K * 1};  // stride0 * sizeof(uint8)
+        uint32_t bd[2] = {(uint32_t)BLOCK_K_FP8, (uint32_t)BLOCK_M_FP8};
+        uint32_t es[2] = {1, 1};
+        CUresult result = cuTensorMapEncodeTiled(
+            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2,
+            tensor_desc.base_ptr, gd, gs, bd, es,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err; cuGetErrorString(result, &err);
+          std::cerr << "TMA FP8 input A failed: " << err << std::endl;
+        }
+      } else if (is_fp8 && param_id == 2) {
+        // B (weight FP8): dim=[output, K], stride=[K, 1]
+        int output = tensor_desc.dim[0];
+        int K = tensor_desc.dim[1];
+        uint64_t gd[2] = {(uint64_t)K, (uint64_t)output};
+        uint64_t gs[1] = {(uint64_t)K * 1};  // stride0 * sizeof(uint8)
+        uint32_t bd[2] = {(uint32_t)BLOCK_K_FP8, (uint32_t)BLOCK_N_FP8};
+        uint32_t es[2] = {1, 1};
+        CUresult result = cuTensorMapEncodeTiled(
+            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2,
+            tensor_desc.base_ptr, gd, gs, bd, es,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err; cuGetErrorString(result, &err);
+          std::cerr << "TMA FP8 weight B failed: " << err << std::endl;
+        }
+      } else if (is_uint32 && param_id == 1) {
+        // SFA (input scale): stored as [packed_k, aligned_batch] row-major
+        // = column-major [aligned_batch, packed_k]
+        int packed_k = tensor_desc.dim[0];
+        int aligned_batch = tensor_desc.dim[1];
+        uint64_t gd[2] = {(uint64_t)aligned_batch, (uint64_t)packed_k};
+        uint64_t gs[1] = {(uint64_t)aligned_batch * 4};  // stride * sizeof(uint32)
+        uint32_t bd[2] = {(uint32_t)BLOCK_M_FP8, 1};
+        uint32_t es[2] = {1, 1};
+        CUresult result = cuTensorMapEncodeTiled(
+            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT32, 2,
+            tensor_desc.base_ptr, gd, gs, bd, es,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
+            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err; cuGetErrorString(result, &err);
+          std::cerr << "TMA FP8 scale SFA failed: " << err << std::endl;
+        }
+      } else if (is_uint32 && param_id == 3) {
+        // SFB (weight scale): stored as [packed_k, aligned_output] row-major
+        // = column-major [aligned_output, packed_k]
+        int packed_k = tensor_desc.dim[0];
+        int aligned_output = tensor_desc.dim[1];
+        uint64_t gd[2] = {(uint64_t)aligned_output, (uint64_t)packed_k};
+        uint64_t gs[1] = {(uint64_t)aligned_output * 4};  // stride * sizeof(uint32)
+        uint32_t bd[2] = {(uint32_t)BLOCK_N_FP8, 1};
+        uint32_t es[2] = {1, 1};
+        CUresult result = cuTensorMapEncodeTiled(
+            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT32, 2,
+            tensor_desc.base_ptr, gd, gs, bd, es,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
+            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err; cuGetErrorString(result, &err);
+          std::cerr << "TMA FP8 scale SFB failed: " << err << std::endl;
+        }
+      } else if (with_res && param_id == 4) {
+        // Residual (BF16): dim=[batch, output], stride=[stride0, 1]
+        int batch = tensor_desc.dim[0];
+        int output = tensor_desc.dim[1];
         int stride = tensor_desc.stride[0];
-        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
-        uint64_t gst[2] = {1, (uint64_t)stride};
-        uint32_t ss[2] = {(uint32_t)MMA_N, (uint32_t)MMA_M};
-        fill_tma_desc<bfloat16, 0, M, S, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
+        uint64_t gd[2] = {(uint64_t)output, (uint64_t)batch};
+        uint64_t gs[1] = {(uint64_t)stride * 2};  // stride0 * sizeof(bf16)
+        uint32_t bd[2] = {16, (uint32_t)BLOCK_M_FP8};  // swizzle_32B / 2 = 16
+        uint32_t es[2] = {1, 1};
+        CUresult result = cuTensorMapEncodeTiled(
+            tma_desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            tensor_desc.base_ptr, gd, gs, bd, es,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_32B,
+            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err; cuGetErrorString(result, &err);
+          std::cerr << "TMA FP8 residual failed: " << err << std::endl;
+        }
+      } else if (is_output) {
+        // CD (output BF16): dim=[batch, output], stride=[stride0, 1]
+        int batch = tensor_desc.dim[0];
+        int output = tensor_desc.dim[1];
+        int stride = tensor_desc.stride[0];
+        uint64_t gd[2] = {(uint64_t)output, (uint64_t)batch};
+        uint64_t gs[1] = {(uint64_t)stride * 2};  // stride0 * sizeof(bf16)
+        uint32_t bd[2] = {16, (uint32_t)BLOCK_M_FP8};  // swizzle_32B / 2 = 16
+        uint32_t es[2] = {1, 1};
+        CUresult result = cuTensorMapEncodeTiled(
+            tma_desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            tensor_desc.base_ptr, gd, gs, bd, es,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_32B,
+            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err; cuGetErrorString(result, &err);
+          std::cerr << "TMA FP8 output CD failed: " << err << std::endl;
+        }
       }
       break;
     }
@@ -1180,12 +1260,20 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_LINEAR_FP8_SM100:
     case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
-      // FP8 linear: only create TMA for fp8_input(0), fp8_weight(2), output
-      // Scale tensors (1, 3) use direct load, not TMA
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);
+      // New FP8 GEMM kernel: TMA for all 6 tensors
+      // Inputs: 0=input_fp8, 1=input_scale, 2=weight_fp8, 3=weight_scale,
+      //         4=residual (if with_res)
+      // Output: 0=output_bf16
+      bool with_res = (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);  // A
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0);  // SFA
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);  // B
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[3], 3, 0);  // SFB
+      if (with_res) {
+        create_tma_desc_for_tensor(task_desc, task_desc.inputs[4], 4, 0);  // residual
+      }
       create_tma_desc_for_tensor(task_desc,
-          task_desc.outputs[0], task_desc.num_inputs, 0);
+          task_desc.outputs[0], task_desc.num_inputs, 0);  // CD
       break;
     }
     case TASK_PAGED_ATTENTION_HOPPER: {

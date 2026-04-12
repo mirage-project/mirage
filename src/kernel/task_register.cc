@@ -3681,16 +3681,25 @@ int TaskRegister::register_quantize_fp8_sm100_task(
                                   : input_ops[0]->dtensor.dim[1];
   constexpr int GROUP_SIZE = 128;
 
+  // For UE8M0 path, compute ALIGNED_BATCH for column-major scale output
+  int aligned_batch = scale_ue8m0 ? ((batch_size + 3) / 4) * 4 : 1;
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $,",
          batch_size, hidden_size, GROUP_SIZE, input_stride);
-  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $>(",
-         scale_ue8m0 ? "true" : "false");
+  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $, $>(",
+         scale_ue8m0 ? "true" : "false",
+         aligned_batch);
   code.e("    task_desc->input_ptrs[0],");   // input bf16
   code.e("    task_desc->output_ptrs[0],");  // output fp8
   code.e("    task_desc->output_ptrs[1],");  // output scale
-  code.e("    1e-10f, -448.0f, 448.0f);");
+  if (scale_ue8m0) {
+    code.e("    1e-10f, -448.0f, 448.0f,");
+    code.e("    task_desc->task_metadata.request_id);");
+  } else {
+    code.e("    1e-10f, -448.0f, 448.0f);");
+  }
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
 
@@ -3736,76 +3745,37 @@ int TaskRegister::register_linear_fp8_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  constexpr int MMA_M = 128;
-  constexpr int MMA_N = 16;
-  constexpr int bK = 64; // MMA K dimension
-  // Reduced stages to fit in 222KB dynamic smem (B200: 228KB - 6KB static)
-  constexpr int num_ab_stages = 4;
-  constexpr int num_acc_stages = 2;
-  constexpr int num_c_stages = 2;
-  constexpr int B = 3, M = 3, S = 3;
-  // FP8: 128 elements x 1 byte = 128B per TMA load (matches 128B swizzle)
-  constexpr int TMA_CP_ASYNC_SIZE = 128;
-  constexpr int TILE_SIZE = 128;
-  int const output_tma_cp_size = 128;
-  int const output_atom_size = 128;
-
-  // TMA_A: weight [output, reduction] -- FP8
-  code.e("using TMA_A = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, true>;",
-         B, M, S,
-         output_size, reduction_size,
-         MMA_M, TMA_CP_ASYNC_SIZE,
-         reduction_size, 1,
-         1, (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
-         MMA_M * TMA_CP_ASYNC_SIZE);
-  // TMA_B: input [batch, reduction] -- FP8
-  code.e("using TMA_B = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, true>;",
-         B, M, S,
-         batch_size, reduction_size,
-         MMA_N, TMA_CP_ASYNC_SIZE,
-         reduction_size, 1,
-         1, (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
-         MMA_N * TMA_CP_ASYNC_SIZE);
-  // TMA_OUT: output [batch, output] -- BF16
-  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, true>;",
-         0, M, S,
-         batch_size, output_size,
-         MMA_N, MMA_M,
-         output_stride, 1,
-         1, (output_atom_size + output_tma_cp_size - 1) / output_tma_cp_size,
-         MMA_N * MMA_M);
-
   code.inc_indent();
-  code.e("TMA_A tma_a(static_cast<CUtensorMap*>("
-         "task_desc->input_tma_desc_ptrs[2][0]));"); // weight
-  code.e("TMA_B tma_b(static_cast<CUtensorMap*>("
-         "task_desc->input_tma_desc_ptrs[0][0]));"); // input
-  code.e("TMA_OUT tma_out(static_cast<CUtensorMap*>("
-         "task_desc->output_tma_desc_ptrs[0][0]));");
-  // Bias tensor (residual)
-  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
-         "cute::make_stride($, cute::Int<1>{}));",
-         batch_size, output_size, output_stride);
-  code.e("cute::Tensor mBias = "
-         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
-         "$)), layout_Bias);",
-         (with_residual && rank_with_residual)
-             ? "task_desc->input_ptrs[4]" : "nullptr");
-  code.e("kernel::linear_fp8_1d2d_sm100_task_impl<cutlass::float_e4m3_t, "
-         "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
-         "$, $, $, $, $, $, $, $, $, $>(",
-         MMA_M, MMA_N,
-         batch_size, output_size, reduction_size,
-         (with_residual && rank_with_residual) ? "false" : "true",
-         "false", // SplitK
-         num_ab_stages, num_acc_stages, num_c_stages);
-  code.e("    tma_a, tma_b,");
-  code.e("    static_cast<uint32_t const*>(task_desc->input_ptrs[3]),"); // weight_scale
-  code.e("    static_cast<uint32_t const*>(task_desc->input_ptrs[1]),"); // input_scale
-  code.e("    mBias, tma_out);");
+
+  // New FP8 GEMM kernel call
+  code.e("kernel::linear_fp8_sm100_task_impl<");
+  code.e("    cute::UMMA::Major::K, cute::UMMA::Major::K,");
+  code.e("    128, 128,");  // kGranKA, kGranKB
+  code.e("    $, $, $,", batch_size, output_size, reduction_size);  // SHAPE_M, SHAPE_N, SHAPE_K
+  code.e("    32, 16, 128,");  // BLOCK_M, BLOCK_N, BLOCK_K
+  code.e("    1,");  // kNumGroups
+  code.e("    128, 128, 32,");  // kSwizzleAMode, kSwizzleBMode, kSwizzleCDMode
+  code.e("    31,");  // kNumStages
+  code.e("    128, 128,");  // kNumNonEpilogueThreads, kNumEpilogueThreads
+  code.e("    1, false,");  // kNumMulticast, kIsMulticastOnA
+  code.e("    8,");  // kNumSMs
+  code.e("    $,", (with_residual && rank_with_residual) ? "true" : "false");  // kWithResidual
+  code.e("    mirage::blackwell::linear_fp8_sm100::GemmType::Normal,");
+  code.e("    false,");  // kWithAccumulation
+  code.e("    cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t,");
+  code.e("    mirage::blackwell::linear_fp8_sm100::EpilogueIdentity>(");
+  code.e("    nullptr,");  // grouped_layout
+  code.e("    $, $, $,", batch_size, output_size, reduction_size);  // runtime dims
+  code.e("    *reinterpret_cast<cute::TmaDescriptor const*>(task_desc->input_tma_desc_ptrs[0][0]),");  // A
+  code.e("    *reinterpret_cast<cute::TmaDescriptor const*>(task_desc->input_tma_desc_ptrs[2][0]),");  // B
+  code.e("    *reinterpret_cast<cute::TmaDescriptor const*>(task_desc->input_tma_desc_ptrs[1][0]),");  // SFA
+  code.e("    *reinterpret_cast<cute::TmaDescriptor const*>(task_desc->input_tma_desc_ptrs[3][0]),");  // SFB
+  if (with_residual && rank_with_residual) {
+    code.e("    *reinterpret_cast<cute::TmaDescriptor const*>(task_desc->input_tma_desc_ptrs[4][0]),");  // residual
+  } else {
+    code.e("    *reinterpret_cast<cute::TmaDescriptor const*>(task_desc->output_tma_desc_ptrs[0][0]),");  // dummy
+  }
+  code.e("    *reinterpret_cast<cute::TmaDescriptor const*>(task_desc->output_tma_desc_ptrs[0][0]));");  // CD
 
   if (with_residual) {
     return register_task_variant(TASK_LINEAR_FP8_WITH_RESIDUAL_SM100,

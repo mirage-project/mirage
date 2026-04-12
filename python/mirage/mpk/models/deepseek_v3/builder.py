@@ -18,7 +18,7 @@ from ..utils import grid_for_rmsnorm_linear_layer
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
-from ....core import bfloat16, float8_e4m3, float32, int32, int64
+from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64
 
 
 # DeepSeek V3 architecture constants
@@ -129,8 +129,12 @@ class DeepSeekV3Builder(GraphBuilder):
                 name=f"fp8_input_{reduction_size}",
                 io_category="cuda_tensor",
             )
+            # Column-major UE8M0 scale stored as transposed row-major:
+            # physical shape=[packed_k, aligned_batch], dtype=uint32
+            packed_k = (num_groups + 3) // 4
+            aligned_batch = ((mbt + 3) // 4) * 4
             scale_buf = self.mpk.new_tensor(
-                dims=(mbt, num_groups), dtype=float32,
+                dims=(packed_k, aligned_batch), dtype=uint32,
                 name=f"fp8_scale_{reduction_size}",
                 io_category="cuda_tensor",
             )
@@ -391,17 +395,29 @@ class DeepSeekV3Builder(GraphBuilder):
         w_rescaled = (w_blocks / new_scale_expanded).clamp(-448, 448)
         new_fp8 = w_rescaled.reshape(M, K).to(torch.float8_e4m3fn)
 
-        # Step 4: Pack UE8M0 bytes (4 identical per uint32, per-row)
-        packed = (ue8m0_byte
-                  | (ue8m0_byte << 8)
-                  | (ue8m0_byte << 16)
-                  | (ue8m0_byte << 24))
+        # Step 4: Pack 4 consecutive UE8M0 bytes into uint32, column-major
+        # stored as transposed row-major [packed_k, aligned_M]
+        packed_k = padded_scale_k // 4
+        aligned_M = ((M + 3) // 4) * 4
+        # Pad ue8m0_byte to padded_scale_k columns if needed
         if padded_scale_k > scale_k:
             padding = torch.zeros(M, padded_scale_k - scale_k,
-                                  dtype=torch.int32, device=packed.device)
-            packed = torch.cat([packed, padding], dim=1)
+                                  dtype=torch.int32, device=ue8m0_byte.device)
+            ue8m0_byte = torch.cat([ue8m0_byte, padding], dim=1)
+        # ue8m0_byte is [M, padded_scale_k] — reshape to [M, packed_k, 4]
+        ue8m0_groups = ue8m0_byte.reshape(M, packed_k, 4)
+        packed_per_row = (ue8m0_groups[:, :, 0]
+                          | (ue8m0_groups[:, :, 1] << 8)
+                          | (ue8m0_groups[:, :, 2] << 16)
+                          | (ue8m0_groups[:, :, 3] << 24))  # [M, packed_k]
+        # Transpose to [packed_k, M] then pad M to aligned_M
+        packed_transposed = packed_per_row.t().contiguous()  # [packed_k, M]
+        if aligned_M > M:
+            pad_cols = torch.zeros(packed_k, aligned_M - M,
+                                   dtype=torch.int32, device=packed_transposed.device)
+            packed_transposed = torch.cat([packed_transposed, pad_cols], dim=1)
 
-        return new_fp8.contiguous(), packed.contiguous()
+        return new_fp8.contiguous(), packed_transposed.contiguous().view(torch.uint32)
 
     @property
     def _weights_are_fp8(self):
@@ -497,20 +513,20 @@ class DeepSeekV3Builder(GraphBuilder):
             # k_pe: requantize [64, hidden] → pad to [128, hidden]
             rope_fp8_raw = kv_a_w[self.kv_lora_rank:].contiguous()
             rope_scale_raw = kv_a_s[scale_rows_latent:].contiguous()
+            # Pad FP8 weight from [64, H] to [128, H] BEFORE requantize
+            rope_fp8_padded = torch.zeros(128, rope_fp8_raw.shape[1],
+                                          dtype=rope_fp8_raw.dtype, device=rope_fp8_raw.device)
+            rope_fp8_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_raw
+            # Pad scale_inv from [64/128_rows, K/128_cols] to [128/128_rows, K/128_cols]
+            rope_scale_padded = torch.zeros(
+                (128 + 127) // 128, rope_scale_raw.shape[1],
+                dtype=rope_scale_raw.dtype, device=rope_scale_raw.device)
+            rope_scale_padded[:rope_scale_raw.shape[0]] = rope_scale_raw
             rope_fp8_req, rope_ue8m0_req = self._requantize_fp8_for_ue8m0(
-                rope_fp8_raw, rope_scale_raw)
-            # Pad from [64, H] to [128, H]
-            kv_rope_padded = torch.zeros(128, rope_fp8_req.shape[1],
-                                         dtype=rope_fp8_req.dtype, device=rope_fp8_req.device)
-            kv_rope_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_req
-            w_kv_rope = self._safe_attach(kv_rope_padded,
+                rope_fp8_padded, rope_scale_padded)
+            w_kv_rope = self._safe_attach(rope_fp8_req,
                                           f"layer_{layer_idx}_kv_a_rope")
-            # Pad UE8M0 scale from [64, K] to [128, K]
-            rope_ue8m0_padded = torch.zeros(128, rope_ue8m0_req.shape[1],
-                                            dtype=rope_ue8m0_req.dtype,
-                                            device=rope_ue8m0_req.device)
-            rope_ue8m0_padded[:QK_ROPE_HEAD_DIM] = rope_ue8m0_req
-            s_kv_rope = self._safe_attach(rope_ue8m0_padded,
+            s_kv_rope = self._safe_attach(rope_ue8m0_req,
                                           f"layer_{layer_idx}_kv_a_rope_scale")
         else:
             w_kv_latent = self._safe_attach(
@@ -1047,17 +1063,20 @@ class DeepSeekV3Builder(GraphBuilder):
         w_kv_latent = self._safe_attach(latent_fp8, f"mtp_{attn}kv_a_latent")
         s_kv_latent = self._safe_attach(latent_ue8m0, f"mtp_{attn}kv_a_latent_scale")
         # kv_a_rope: requantize + pad to [128, H]
+        # Pad FP8 weight + scale before requantize (128 rows for SM100 MMA_M)
+        rope_fp8_raw = kv_a_w[self.kv_lora_rank:].contiguous()
+        rope_scale_raw = kv_a_s[scale_rows_latent:].contiguous()
+        rope_fp8_padded = torch.zeros(128, rope_fp8_raw.shape[1],
+                                      dtype=rope_fp8_raw.dtype, device=rope_fp8_raw.device)
+        rope_fp8_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_raw
+        rope_scale_padded = torch.zeros(
+            (128 + 127) // 128, rope_scale_raw.shape[1],
+            dtype=rope_scale_raw.dtype, device=rope_scale_raw.device)
+        rope_scale_padded[:rope_scale_raw.shape[0]] = rope_scale_raw
         rope_fp8_req, rope_ue8m0_req = self._requantize_fp8_for_ue8m0(
-            kv_a_w[self.kv_lora_rank:].contiguous(),
-            kv_a_s[scale_rows_latent:].contiguous())
-        kv_rope_padded = torch.zeros(128, rope_fp8_req.shape[1],
-                                     dtype=rope_fp8_req.dtype, device=rope_fp8_req.device)
-        kv_rope_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_req
-        w_kv_rope = self._safe_attach(kv_rope_padded, f"mtp_{attn}kv_a_rope")
-        rope_ue8m0_padded = torch.zeros(128, rope_ue8m0_req.shape[1],
-                                        dtype=rope_ue8m0_req.dtype, device=rope_ue8m0_req.device)
-        rope_ue8m0_padded[:QK_ROPE_HEAD_DIM] = rope_ue8m0_req
-        s_kv_rope = self._safe_attach(rope_ue8m0_padded, f"mtp_{attn}kv_a_rope_scale")
+            rope_fp8_padded, rope_scale_padded)
+        w_kv_rope = self._safe_attach(rope_fp8_req, f"mtp_{attn}kv_a_rope")
+        s_kv_rope = self._safe_attach(rope_ue8m0_req, f"mtp_{attn}kv_a_rope_scale")
 
         self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent, self.c_latent_out,
                          grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),

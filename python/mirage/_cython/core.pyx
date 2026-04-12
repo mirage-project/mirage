@@ -414,6 +414,8 @@ def convert_torch_type_to_dtype(type):
         return float32
     elif type is torch.int32:
         return int32
+    elif type is torch.uint32:
+        return uint32
     elif type is torch.int64:
         return int64
     elif type is torch.float64:
