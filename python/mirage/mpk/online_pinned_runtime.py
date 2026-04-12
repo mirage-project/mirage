@@ -61,6 +61,14 @@ class OnlinePinnedRuntime:
         self._cpu_req_tail  = 0  # next slot to write into the request ring
         self._cpu_comp_head = 0  # next slot to read from the completion ring
 
+        # Dedicated non-blocking stream for DtoH copies in get_output_tokens.
+        # launch_persistent_kernel inserts cudaStreamWaitEvent(default_stream,
+        # worker_done_event) so any CUDA op on the default stream blocks until
+        # every request finishes.  
+        # A separate stream to read each request's tokens as soon as its completion
+        # ring entry arrives.
+        self._read_stream = torch.cuda.Stream(device=mpk.tokens.device)
+
         # Completion tracking: request_id → final_step
         self._completions: Dict[int, int] = {}
         self._lock = threading.Lock()
@@ -175,13 +183,21 @@ class OnlinePinnedRuntime:
     def get_output_tokens(self, request_id: int) -> torch.Tensor:
         """Return the generated token sequence for a completed request.
 
-        Returns a 1-D int64 tensor of length final_step+1 (prompt + generated).
+        Returns a 1-D int64 CPU tensor of length final_step+1 (prompt +
+        generated).  The DtoH copy is issued on _read_stream (non-blocking
+        w.r.t. the default stream) and synchronised before returning, so the
+        caller gets a plain CPU tensor that needs no further CUDA ops.
+
         Raises KeyError if the request has not completed yet.
         """
         with self._lock:
             final_step = self._completions[request_id]
-        tokens = self._mpk.tokens
-        return tokens[request_id, : final_step + 1].clone()
+        gpu_slice = self._mpk.tokens[request_id, : final_step + 1]
+        cpu_tensor = torch.empty(gpu_slice.shape, dtype=gpu_slice.dtype, device="cpu")
+        with torch.cuda.stream(self._read_stream):
+            cpu_tensor.copy_(gpu_slice, non_blocking=True)
+        self._read_stream.synchronize()
+        return cpu_tensor
 
     def shutdown(self) -> None:
         """Signal the GPU persistent kernel to terminate.
