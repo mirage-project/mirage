@@ -155,6 +155,10 @@ enum TaskType {
   TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
   TASK_NVSHMEM_TILE_ALLREDUCE = 302,
+  // Expert Parallelism (EP) MoE tasks
+  TASK_EP_MOE_ROUTING_DISTRIBUTED = 303,
+  TASK_EP_MOE_ALL_TO_ALL_DISPATCH = 304,
+  TASK_EP_MOE_ALL_TO_ALL_COMBINE = 305,
   TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
 };
 

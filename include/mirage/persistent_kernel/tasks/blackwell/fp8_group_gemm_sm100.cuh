@@ -603,8 +603,14 @@ __device__ __forceinline__ void
                           MMA_N,
                           bK>;
   extern __shared__ char shared_memory[];
+  // Align to 1024 bytes: SM100 UMMA with SWIZZLE_128B requires the smem
+  // buffer base to be aligned to at least 1024 bytes (the swizzle pattern
+  // repeats at 8 rows * 128B = 1024B). Without this, the UMMA descriptor's
+  // start_address interacts with absolute smem address bits, causing the
+  // hardware to misinterpret the swizzled layout when the dynamic smem base
+  // has non-zero bits in positions [7:9].
   uintptr_t aligned_smem =
-      (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
+      (reinterpret_cast<uintptr_t>(shared_memory) + 1023) / 1024 * 1024;
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
 
@@ -831,9 +837,9 @@ __device__ __forceinline__ void
           // Optimistic peek: try to check if the MMA warp has already consumed
           // this buffer (ab_empty). If yes, we can skip the blocking wait
           // below.
-          bool peek_ab_empty_status = kernel::try_wait_barrier(
-              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-              tma_wr_ab_empty_phase);
+          bool peek_ab_empty_status =
+              try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+                               tma_wr_ab_empty_phase);
 
           // Inner loop: iterate over K-tiles for this (expert, m_tile, n_tile)
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -965,7 +971,7 @@ __device__ __forceinline__ void
             // available (MMA warp consumed it). This overlaps barrier checking
             // with the current K-tile's TMA/cp.async execution.
             if (tma_wr_k_tile_next < k_tile_count) {
-              peek_ab_empty_status = kernel::try_wait_barrier(
+              peek_ab_empty_status = try_wait_barrier(
                   shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
                   tma_wr_ab_empty_phase_next);
             }
@@ -1118,14 +1124,14 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Optimistic peeks: check if A/B/scales are already ready
-          bool peek_a = kernel::try_wait_barrier(
-              shared_storage.a_full_mbar_ptr[smem_rd_buf],
-              mma_rd_ab_full_phase);
-          bool peek_b = kernel::try_wait_barrier(
-              shared_storage.b_full_mbar_ptr[smem_rd_buf],
-              mma_rd_ab_full_phase);
+          bool peek_a =
+              try_wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buf],
+                               mma_rd_ab_full_phase);
+          bool peek_b =
+              try_wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buf],
+                               mma_rd_ab_full_phase);
           int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
-          bool peek_sf = kernel::try_wait_barrier(
+          bool peek_sf = try_wait_barrier(
               shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);
 
           // Wait for epilogue to finish reading the previous accumulator in
@@ -1282,15 +1288,15 @@ __device__ __forceinline__ void
 
             // Lookahead peek for the next K-tile's A/B/scale data
             if (mma_rd_k_tile_next < k_tile_count) {
-              peek_a = kernel::try_wait_barrier(
+              peek_a = try_wait_barrier(
                   shared_storage.a_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
-              peek_b = kernel::try_wait_barrier(
+              peek_b = try_wait_barrier(
                   shared_storage.b_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
               int sf_phase_next =
                   (num_prev_k_blk + mma_rd_k_tile_next) / NUM_AB_STAGE % 2;
-              peek_sf = kernel::try_wait_barrier(
+              peek_sf = try_wait_barrier(
                   shared_storage.sf_ready_mbar_ptr[smem_rd_buf_next],
                   sf_phase_next);
               sf_phase = sf_phase_next;
@@ -1513,7 +1519,7 @@ __device__ __forceinline__ void
                 m_tile * MMA_M + threadIdx.x;   // output row for this thread
             int32_t n_idx = n_tile * MMA_N + i; // token index
             int32_t topk_idx = tRoutingIndex(n_idx); // routing check
-            if (n_idx < BATCH_SIZE && topk_idx > 0) {
+            if (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE) {
               // topk_idx is 1-indexed in routing table, convert to 0-indexed
               mOutput(n_idx, topk_idx - 1, m_idx) = tCrC[i];
             }

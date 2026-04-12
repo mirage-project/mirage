@@ -139,6 +139,11 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_nvshmem_tile_allreduce_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  // EP MoE tasks
+  int register_ep_moe_routing_distributed_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_ep_moe_all_to_all_combine_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   // Multi-GPU tasks end
   int register_task_variant(TaskType type, std::string const &code);
 

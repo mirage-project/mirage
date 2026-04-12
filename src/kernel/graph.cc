@@ -713,6 +713,20 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(1, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
   }
+  // EP MoE tasks
+  else if (name == "ep_moe_routing_distributed") {
+    int variant_id =
+        task_register->register_ep_moe_routing_distributed_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        1, 3, TASK_EP_MOE_ROUTING_DISTRIBUTED, variant_id);
+  } else if (name == "ep_moe_all_to_all_combine") {
+    int variant_id =
+        task_register->register_ep_moe_all_to_all_combine_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        3, 1, TASK_EP_MOE_ALL_TO_ALL_COMBINE, variant_id);
+  }
 
   else {
     printf("Unsupported task name: %s\n", name);

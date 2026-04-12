@@ -1293,6 +1293,12 @@ TaskGraphResult print_task_graph(
       "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
   task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
+  task_type_to_name[TASK_EP_MOE_ROUTING_DISTRIBUTED] =
+      "TASK_EP_MOE_ROUTING_DISTRIBUTED";
+  task_type_to_name[TASK_EP_MOE_ALL_TO_ALL_DISPATCH] =
+      "TASK_EP_MOE_ALL_TO_ALL_DISPATCH";
+  task_type_to_name[TASK_EP_MOE_ALL_TO_ALL_COMBINE] =
+      "TASK_EP_MOE_ALL_TO_ALL_COMBINE";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");
