@@ -1647,10 +1647,6 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     cudaEventRecord(global_runtime_config.scheduler_done_event,
                     global_runtime_config.scheduler_stream);
 
-    cudaStreamWaitEvent(
-        default_stream, global_runtime_config.worker_done_event, 0);
-    cudaStreamWaitEvent(
-        default_stream, global_runtime_config.scheduler_done_event, 0);
     printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
     printf("a single persistent kernel\n");

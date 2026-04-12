@@ -61,17 +61,15 @@ class OnlinePinnedRuntime:
         self._cpu_req_tail  = 0  # next slot to write into the request ring
         self._cpu_comp_head = 0  # next slot to read from the completion ring
 
-        # Dedicated non-blocking stream for DtoH copies in get_output_tokens.
-        # launch_persistent_kernel inserts cudaStreamWaitEvent(default_stream,
-        # worker_done_event) so any CUDA op on the default stream blocks until
-        # every request finishes.  
-        # A separate stream to read each request's tokens as soon as its completion
-        # ring entry arrives.
-        self._read_stream = torch.cuda.Stream(device=mpk.tokens.device)
+        # Dedicated stream for HtoD copies in load_tokens. Using the default
+        # stream would deadlock: the persistent kernel runs on the default stream
+        # and copy_(non_blocking=False) would synchronize it, blocking until the
+        # kernel finishes — which never happens while waiting for more requests.
+        self._write_stream = torch.cuda.Stream(device=mpk.tokens.device)
 
         # Completion tracking: request_id → final_step
         self._completions: Dict[int, int] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.Lock() # protect self._completions from having concurrent threads access
 
     # ------------------------------------------------------------------
     # Public API
@@ -93,9 +91,9 @@ class OnlinePinnedRuntime:
         input_ids  : 1-D int64 tensor of prompt token IDs (CPU or CUDA)
         """
         prompt_len = input_ids.shape[0]
-        self._mpk.tokens[request_id, :prompt_len].copy_(input_ids)
-        # copy_() is synchronous by default (non_blocking=False), so the
-        # HtoD transfer is complete before this call returns.
+        with torch.cuda.stream(self._write_stream):
+            self._mpk.tokens[request_id, :prompt_len].copy_(input_ids, non_blocking=True)
+        self._write_stream.synchronize()
 
     def submit_request(
         self,
@@ -184,20 +182,16 @@ class OnlinePinnedRuntime:
         """Return the generated token sequence for a completed request.
 
         Returns a 1-D int64 CPU tensor of length final_step+1 (prompt +
-        generated).  The DtoH copy is issued on _read_stream (non-blocking
-        w.r.t. the default stream) and synchronised before returning, so the
-        caller gets a plain CPU tensor that needs no further CUDA ops.
+        generated).  Safe to call on the default stream because
+        cudaStreamWaitEvent has been removed from the kernel launch path;
+        the completion ring entry guarantees tokens are already in DRAM.
 
         Raises KeyError if the request has not completed yet.
         """
         with self._lock:
             final_step = self._completions[request_id]
-        gpu_slice = self._mpk.tokens[request_id, : final_step + 1]
-        cpu_tensor = torch.empty(gpu_slice.shape, dtype=gpu_slice.dtype, device="cpu")
-        with torch.cuda.stream(self._read_stream):
-            cpu_tensor.copy_(gpu_slice, non_blocking=True)
-        self._read_stream.synchronize()
-        return cpu_tensor
+        tokens = self._mpk.tokens
+        return tokens[request_id, : final_step + 1].clone()
 
     def shutdown(self) -> None:
         """Signal the GPU persistent kernel to terminate.
