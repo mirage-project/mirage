@@ -583,7 +583,30 @@ __device__ __forceinline__ bool
   *config.gpu_req_head    = gpu_req_head;
   *config.gpu_comp_tail   = gpu_comp_tail;
 
-  return (num_tokens > 0);
+  if (num_tokens > 0) {
+    return true;
+  }
+
+  // ── Step 7: empty batch — spin-wait for a new request or shutdown ───────────
+  // All active requests finished and the ring is empty.  Rather than exiting,
+  // the scheduler polls here so the kernel stays alive for future requests.
+  // Workers are already idle (spinning on worker_queue_last_ready_task_id) and
+  // are not affected by this loop.
+  while (true) {
+    // Check CPU shutdown signal first.
+    if (ld_acquire_sys_i32(config.pinned_shutdown) != 0) {
+      return false;  // CPU requested termination
+    }
+    // Check whether a new request has arrived in the ring.
+    int req_slot = *config.gpu_req_head & ring_mask;
+    if (ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]) != 0) {
+      // A new request is ready — return true so the scheduler dispatches
+      // begin_task_graph; prepare_next_batch will be called again on the
+      // next EVENT_END_OF_TASK_GRAPH and will drain the ring in Step 4.
+      return true;
+    }
+    __nanosleep(100);
+  }
 }
 #endif
 
@@ -1312,7 +1335,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   // meta_tensors[10..16]: pinned ring pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 17);
+  assert(meta_tensors.size() == 18);
 #else
   assert(meta_tensors.size() == 10);
 #endif
@@ -1346,6 +1369,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       static_cast<int32_t *>(meta_tensors[15]);
   global_runtime_config.pinned_comp_final_step =
       static_cast<int32_t *>(meta_tensors[16]);
+  global_runtime_config.pinned_shutdown =
+      static_cast<volatile int32_t *>(meta_tensors[17]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;

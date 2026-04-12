@@ -327,6 +327,9 @@ struct RuntimeConfig {
   // GPU-private ring cursors — allocated with gpu_malloc, never touched by CPU.
   int32_t *gpu_req_head;  // GPU consumer cursor into pinned request ring
   int32_t *gpu_comp_tail; // GPU producer cursor into pinned completion ring
+  // CPU→GPU shutdown signal: CPU writes 1 to request kernel termination.
+  // GPU polls with ld.acquire.sys when the batch is empty.
+  int32_t volatile *pinned_shutdown; // 0=running, 1=shutdown requested
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;

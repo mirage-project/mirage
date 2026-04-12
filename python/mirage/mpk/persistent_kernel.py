@@ -1512,6 +1512,7 @@ class PersistentKernel:
             meta_tensors.append(self.meta_tensors["pinned_comp_ready"])
             meta_tensors.append(self.meta_tensors["pinned_comp_request_id"])
             meta_tensors.append(self.meta_tensors["pinned_comp_final_step"])
+            meta_tensors.append(self.meta_tensors["pinned_shutdown"])
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0

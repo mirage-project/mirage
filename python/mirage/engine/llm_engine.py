@@ -219,6 +219,7 @@ class LLMEngine:
         t0 = perf_counter()
         first_submitted = threading.Event()
         submit_exc: list[BaseException] = []  # captures submit thread exceptions
+
         def _submit_loop():
             try:
                 for rid, (token_ids, delay) in enumerate(zip(all_token_ids, delays)):
@@ -268,6 +269,7 @@ class LLMEngine:
                     )
         finally:
             submit_thread.join()
+            self.runtime.shutdown()  # signal kernel to exit its spin-wait
 
         return results  # type: ignore[return-value]
 
