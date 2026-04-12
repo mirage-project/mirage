@@ -3681,25 +3681,24 @@ int TaskRegister::register_quantize_fp8_sm100_task(
                                   : input_ops[0]->dtensor.dim[1];
   constexpr int GROUP_SIZE = 128;
 
-  // For UE8M0 path, compute ALIGNED_BATCH for column-major scale output
+  // For UE8M0 path: scale_outer_stride is the stride between packed scale
+  // columns in the column-major output layout (= aligned_batch for UE8M0)
   int aligned_batch = scale_ue8m0 ? ((batch_size + 3) / 4) * 4 : 1;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $,",
          batch_size, hidden_size, GROUP_SIZE, input_stride);
-  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $, $>(",
-         scale_ue8m0 ? "true" : "false",
-         aligned_batch);
+  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $>(",
+         scale_ue8m0 ? "true" : "false");
   code.e("    task_desc->input_ptrs[0],");   // input bf16
   code.e("    task_desc->output_ptrs[0],");  // output fp8
   code.e("    task_desc->output_ptrs[1],");  // output scale
-  if (scale_ue8m0) {
-    code.e("    1e-10f, -448.0f, 448.0f,");
-    code.e("    task_desc->task_metadata.request_id);");
-  } else {
-    code.e("    1e-10f, -448.0f, 448.0f);");
-  }
+  // scale_outer_stride: for UE8M0 column-major layout [packed_k, aligned_batch],
+  // stride between consecutive packed_k entries = aligned_batch.
+  // For float32 scale (MoE), scale_outer_stride is unused (float32 writes directly).
+  code.e("    1e-10f, -448.0f, 448.0f,");
+  code.e("    $);", aligned_batch);
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
 

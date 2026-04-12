@@ -113,6 +113,21 @@ __device__ __noinline__ void
                    "Only support 1/2 multicast");
   DG_STATIC_ASSERT(kNumUMMAStoreThreads % 32 == 0, "Invalid store block M");
 
+  // TMA box dims are clamped to min(BLOCK, globalDim) in the TMA descriptor.
+  // arrive_and_expect_tx must match the actual TMA transfer size, not SMEM size.
+  constexpr uint32_t kTmaBoxM_A =
+      (SHAPE_M != 0) ? cute::min<uint32_t>(LOAD_BLOCK_M, SHAPE_M) : LOAD_BLOCK_M;
+  constexpr uint32_t kAlignedShapeM =
+      (SHAPE_M != 0) ? ((SHAPE_M + 3u) / 4u) * 4u : 0u;
+  constexpr uint32_t kTmaBoxM_SFA =
+      (SHAPE_M != 0 && kAlignedShapeM < BLOCK_M)
+          ? kAlignedShapeM
+          : BLOCK_M;
+  // CD/residual TMA box: clamped batch dim
+  constexpr uint32_t kTmaBoxM_CD =
+      (SHAPE_M != 0) ? cute::min<uint32_t>(STORE_BLOCK_M, SHAPE_M) : STORE_BLOCK_M;
+  constexpr uint32_t kTmaResidualBytes = kSwizzleCDMode * kTmaBoxM_CD;
+
   constexpr uint32_t SMEM_CD_SIZE_PER_STAGE = STORE_BLOCK_M * kSwizzleCDMode;
   constexpr uint32_t SMEM_CD_SIZE = SMEM_CD_SIZE_PER_STAGE * kNumTMAStoreStages;
   constexpr uint32_t SMEM_RESIDUAL_SIZE =
@@ -292,7 +307,7 @@ __device__ __noinline__ void
             smem_residual,
             n_idx,
             m_idx);
-        residual_full_barrier->arrive_and_expect_tx(SMEM_CD_SIZE_PER_STAGE);
+        residual_full_barrier->arrive_and_expect_tx(kTmaResidualBytes);
       }
       for (uint32_t k_block_idx = 0; k_block_idx < num_total_k_blocks;
            advance_pipeline(k_block_idx)) {
@@ -347,9 +362,9 @@ __device__ __noinline__ void
                                  1,
                                  batch_idx);
         }
+        // Actual TMA bytes: use clamped box dims (min(BLOCK, globalDim))
         auto num_arrival_bytes =
-            SMEM_A_SIZE_PER_STAGE /
-                (std::is_same_v<a_dtype_t, cutlass::float_e4m3_t> ? 1 : 2) +
+            BLOCK_K * kTmaBoxM_A * sizeof(a_dtype_t) +
             SMEM_B_SIZE_PER_STAGE /
                 (std::is_same_v<b_dtype_t, cutlass::float_e4m3_t> ? 1 : 2);
 
@@ -365,7 +380,7 @@ __device__ __noinline__ void
                   shape_sfa_k,
                   1,
                   ceil_div(k_idx, BLOCK_K * kNumSFAStagesPerLoad)));
-          num_arrival_bytes += BLOCK_M * sizeof(uint32_t);
+          num_arrival_bytes += kTmaBoxM_SFA * sizeof(uint32_t);
         }
         if (k_block_idx % kNumSFBStagesPerLoad == 0) {
           tma_copy<BLOCK_N, 1, 0>(
@@ -467,7 +482,7 @@ __device__ __noinline__ void
         }
         __syncwarp();
 
-        using mma_t = SM100_MMA_MXF8F6F4_SS;
+        using mma_t = mirage::blackwell::linear_fp8_sm100::sm100::SM100_MMA_MXF8F6F4_SS;
         auto const &a_desc_base_lo =
             __shfl_sync(0xffffffff, a_desc_lo, static_cast<int>(stage_idx));
         auto const &b_desc_base_lo =
