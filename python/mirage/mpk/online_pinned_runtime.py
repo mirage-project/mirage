@@ -55,6 +55,7 @@ class OnlinePinnedRuntime:
         self._comp_ready       = mpk.pinned_comp_ready       # int32, pinned
         self._comp_request_id  = mpk.pinned_comp_request_id  # int32, pinned
         self._comp_final_step  = mpk.pinned_comp_final_step  # int32, pinned
+        self._shutdown         = mpk.pinned_shutdown         # int32[1], pinned
 
         # CPU-private ring cursors (int, not tensors)
         self._cpu_req_tail  = 0  # next slot to write into the request ring
@@ -182,6 +183,15 @@ class OnlinePinnedRuntime:
         tokens = self._mpk.tokens
         return tokens[request_id, : final_step + 1].clone()
 
+    def shutdown(self) -> None:
+        """Signal the GPU persistent kernel to terminate.
+
+        The kernel will exit its spin-wait loop in ``prepare_next_batch``
+        after seeing this flag.  Call after all requests have been submitted
+        (i.e. after the submit thread finishes) so no in-flight work is lost.
+        """
+        self._shutdown[0] = 1
+
     def reset(self) -> None:
         """Clear completion bookkeeping for a new inference session.
 
@@ -191,5 +201,6 @@ class OnlinePinnedRuntime:
         """
         self._cpu_req_tail  = 0
         self._cpu_comp_head = 0
+        self._shutdown[0]   = 0  # clear shutdown flag for next session
         with self._lock:
             self._completions.clear()

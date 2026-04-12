@@ -234,6 +234,9 @@ class MPK:
             meta_tensors["pinned_comp_request_id"] = self.pinned_comp_request_id
             self.pinned_comp_final_step  = torch.zeros(cap, dtype=torch.int32).pin_memory()
             meta_tensors["pinned_comp_final_step"] = self.pinned_comp_final_step
+            # CPU→GPU shutdown signal (scalar): CPU writes 1 to request termination.
+            self.pinned_shutdown         = torch.zeros(1, dtype=torch.int32).pin_memory()
+            meta_tensors["pinned_shutdown"] = self.pinned_shutdown
         else:
             self.pinned_ring_capacity = 0
         self.persistent_kernel = PersistentKernel(
