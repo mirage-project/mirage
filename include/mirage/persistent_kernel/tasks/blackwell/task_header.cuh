@@ -22,6 +22,7 @@
 // Blackwell task impls
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
+#include "linear_fp8_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
 #include "linear_fp8_1d2d_sm100.cuh"
 #include "linear_fp8_sm100.cuh"

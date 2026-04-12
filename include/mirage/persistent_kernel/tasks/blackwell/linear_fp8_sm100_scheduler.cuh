@@ -167,9 +167,7 @@ struct Scheduler {
 
   __device__ __forceinline__ bool get_next_block(uint32_t &m_block_idx,
                                                  uint32_t &n_block_idx) {
-    // In persistent kernel: use block_offset=0 (each CTA handles its own
-    // 128-row slice, kNumSMs=1, processes all tiles sequentially)
-    auto const next_block_idx = (++current_iter) * kNumSMs + 0;
+    auto const next_block_idx = (++current_iter) * kNumSMs + blockIdx.x;
     if constexpr (kGemmType == GemmType::Normal) {
       if (next_block_idx >= num_blocks) {
         return false;
