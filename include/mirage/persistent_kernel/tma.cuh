@@ -780,39 +780,90 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_LINEAR_FP8_SM100:
     case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
-      // FP8: 128 elements × 1 byte = 128B (matches 128B TMA swizzle)
-      int const cp_async_size = 128;
+      // New DeepGEMM-style FP8 kernel: 6 TMA descriptors
+      // A(input_fp8), B(weight_fp8), SFA(input_scale), SFB(weight_scale),
+      // residual, CD(output)
       const size_t smem_repeat_row = 1;
-      constexpr int B = 3, M = 3, S = 3;
-      constexpr int MMA_M = 128, MMA_N = 16;
-      constexpr int TILE_SIZE = 128;
-      size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
-
-      bool is_fp8 = (tensor_desc.data_type == 930);
-      bool is_fp32 = (tensor_desc.data_type == 950);
-      // output is last tensor (bf16)
+      constexpr int BLOCK_M = 32, BLOCK_N = 16, BLOCK_K = 128;
       bool with_res = (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
       bool is_output = (param_id == (size_t)(task_desc.num_inputs));
 
-      if (is_fp8 && (param_id == 0 || param_id == 2)) {
-        // FP8 input or weight
-        int rows = tensor_desc.dim[0];
-        int cols = tensor_desc.dim[1];
+      if (param_id == 0) {
+        // A: input_fp8 [batch, K] — FP8, swizzle 128B
+        // TMA coords: inner=K (coord0), outer=batch (coord1)
+        int rows = tensor_desc.dim[0]; // batch
+        int cols = tensor_desc.dim[1]; // K
         uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
         uint64_t gst[2] = {1, (uint64_t)cols};
-        uint32_t ss[2] = {(param_id == 0) ? (uint32_t)MMA_N : (uint32_t)MMA_M,
-                          (uint32_t)cp_async_size};
-        fill_tma_desc<cutlass::float_e4m3_t, B, M, S, 2>(
-            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, smem_repeat_col);
-      } else {
-        // BF16 output
-        int rows = tensor_desc.dim[0];
-        int cols = tensor_desc.dim[1];
+        // box: [BLOCK_M rows, BLOCK_K cols]
+        uint32_t ss[2] = {(uint32_t)BLOCK_M, (uint32_t)BLOCK_K};
+        fill_tma_desc<cutlass::float_e4m3_t, 3, 3, 3, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
+      } else if (param_id == 1) {
+        // SFA: input_scale — packed UE8M0 uint32 [packed_k, batch] (column-major)
+        // The scale tensor is stored column-major: batch dim is contiguous,
+        // packed_k dim stride = aligned_batch.
+        // TMA coords: inner=batch (coord0), outer=packed_k (coord1)
+        int outer_dim = tensor_desc.dim[0]; // batch
+        int num_groups = tensor_desc.dim[1]; // K/128 groups
+        // packed_k = ceil(num_groups / 4) since 4 UE8M0 bytes per uint32
+        int packed_k = (num_groups + 3) / 4;
+        int aligned_outer = ((outer_dim + 3) / 4) * 4;
+        // Column-major layout: [packed_k (rows/slow), outer_dim (cols/fast)]
+        uint64_t gs[2] = {(uint64_t)packed_k, (uint64_t)outer_dim};
+        uint64_t gst[2] = {1, (uint64_t)aligned_outer};
+        // box: [1 row, BLOCK_M cols] in (rows, cols) space
+        uint32_t ss[2] = {1, (uint32_t)BLOCK_M};
+        fill_tma_desc<uint32_t, 0, 3, 3, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
+      } else if (param_id == 2) {
+        // B: weight_fp8 [output, K] — FP8, swizzle 128B
+        // TMA coords: inner=K (coord0), outer=output (coord1)
+        int rows = tensor_desc.dim[0]; // output
+        int cols = tensor_desc.dim[1]; // K
+        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
+        uint64_t gst[2] = {1, (uint64_t)cols};
+        // box: [BLOCK_N rows, BLOCK_K cols]
+        uint32_t ss[2] = {(uint32_t)BLOCK_N, (uint32_t)BLOCK_K};
+        fill_tma_desc<cutlass::float_e4m3_t, 3, 3, 3, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
+      } else if (param_id == 3) {
+        // SFB: weight_scale — packed UE8M0 uint32 [packed_k, output] (column-major)
+        // TMA coords: inner=output (coord0), outer=packed_k (coord1)
+        int outer_dim = tensor_desc.dim[0]; // output
+        int num_groups = tensor_desc.dim[1]; // K/128 groups
+        int packed_k = (num_groups + 3) / 4;
+        int aligned_outer = ((outer_dim + 3) / 4) * 4;
+        // Column-major: [packed_k (rows/slow), outer_dim (cols/fast)]
+        uint64_t gs[2] = {(uint64_t)packed_k, (uint64_t)outer_dim};
+        uint64_t gst[2] = {1, (uint64_t)aligned_outer};
+        // box: [1 row, BLOCK_N cols]
+        uint32_t ss[2] = {1, (uint32_t)BLOCK_N};
+        fill_tma_desc<uint32_t, 0, 3, 3, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
+      } else if (param_id == 4 && with_res) {
+        // Residual: BF16 [batch, output], swizzle 32B
+        // TMA coords: inner=output (coord0), outer=batch (coord1)
+        int rows = tensor_desc.dim[0]; // batch
+        int cols = tensor_desc.dim[1]; // output
         int stride = tensor_desc.stride[0];
         uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
         uint64_t gst[2] = {1, (uint64_t)stride};
-        uint32_t ss[2] = {(uint32_t)MMA_N, (uint32_t)MMA_M};
-        fill_tma_desc<bfloat16, 0, M, S, 2>(
+        // box: [BLOCK_M rows, BLOCK_N*2 bytes / 2 bytes_per_bf16 = BLOCK_N cols]
+        uint32_t ss[2] = {(uint32_t)BLOCK_M, (uint32_t)BLOCK_N};
+        fill_tma_desc<bfloat16, 1, 3, 3, 2>(
+            tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
+      } else if (is_output) {
+        // CD: BF16 output [batch, output], swizzle 32B
+        // TMA coords: inner=output (coord0), outer=batch (coord1)
+        int rows = tensor_desc.dim[0]; // batch
+        int cols = tensor_desc.dim[1]; // output
+        int stride = tensor_desc.stride[0];
+        uint64_t gs[2] = {(uint64_t)rows, (uint64_t)cols};
+        uint64_t gst[2] = {1, (uint64_t)stride};
+        // box: [BLOCK_M rows, BLOCK_N cols]
+        uint32_t ss[2] = {(uint32_t)BLOCK_M, (uint32_t)BLOCK_N};
+        fill_tma_desc<bfloat16, 1, 3, 3, 2>(
             tma_desc, tensor_desc.base_ptr, gs, gst, ss, smem_repeat_row, 1);
       }
       break;
@@ -1191,10 +1242,17 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_LINEAR_FP8_SM100:
     case TASK_LINEAR_FP8_WITH_RESIDUAL_SM100: {
-      // FP8 linear: only create TMA for fp8_input(0), fp8_weight(2), output
-      // Scale tensors (1, 3) use direct load, not TMA
+      // New DeepGEMM-style FP8 kernel: TMA for all 6 tensors
+      // input[0]=A(fp8_input), input[1]=SFA(input_scale),
+      // input[2]=B(fp8_weight), input[3]=SFB(weight_scale),
+      // input[4]=residual (if with_residual), output[0]=CD
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0);
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[3], 3, 0);
+      if (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {
+        create_tma_desc_for_tensor(task_desc, task_desc.inputs[4], 4, 0);
+      }
       create_tma_desc_for_tensor(task_desc,
           task_desc.outputs[0], task_desc.num_inputs, 0);
       break;

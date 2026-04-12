@@ -467,7 +467,7 @@ __device__ __noinline__ void
         }
         __syncwarp();
 
-        using mma_t = SM100_MMA_MXF8F6F4_SS;
+        using mma_t = mirage::blackwell::linear_fp8_sm100::sm100::SM100_MMA_MXF8F6F4_SS;
         auto const &a_desc_base_lo =
             __shfl_sync(0xffffffff, a_desc_lo, static_cast<int>(stage_idx));
         auto const &b_desc_base_lo =
