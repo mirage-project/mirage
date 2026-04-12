@@ -3734,79 +3734,92 @@ int TaskRegister::register_linear_fp8_sm100_task(
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  (void)output_stride; // Stride is embedded in tensor_desc for TMA
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  constexpr int MMA_M = 128;
-  constexpr int MMA_N = 16;
-  constexpr int bK = 64; // MMA K dimension
-  // Reduced stages to fit in 222KB dynamic smem (B200: 228KB - 6KB static)
-  constexpr int num_ab_stages = 4;
-  constexpr int num_acc_stages = 2;
-  constexpr int num_c_stages = 2;
-  constexpr int B = 3, M = 3, S = 3;
-  // FP8: 128 elements x 1 byte = 128B per TMA load (matches 128B swizzle)
-  constexpr int TMA_CP_ASYNC_SIZE = 128;
-  constexpr int TILE_SIZE = 128;
-  int const output_tma_cp_size = 128;
-  int const output_atom_size = 128;
 
-  // TMA_A: weight [output, reduction] -- FP8
-  code.e("using TMA_A = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, true>;",
-         B, M, S,
-         output_size, reduction_size,
-         MMA_M, TMA_CP_ASYNC_SIZE,
-         reduction_size, 1,
-         1, (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
-         MMA_M * TMA_CP_ASYNC_SIZE);
-  // TMA_B: input [batch, reduction] -- FP8
-  code.e("using TMA_B = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, true>;",
-         B, M, S,
-         batch_size, reduction_size,
-         MMA_N, TMA_CP_ASYNC_SIZE,
-         reduction_size, 1,
-         1, (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
-         MMA_N * TMA_CP_ASYNC_SIZE);
-  // TMA_OUT: output [batch, output] -- BF16
-  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, "
-         "$, $, $, $, $, $, $, $, $, true>;",
-         0, M, S,
-         batch_size, output_size,
-         MMA_N, MMA_M,
-         output_stride, 1,
-         1, (output_atom_size + output_tma_cp_size - 1) / output_tma_cp_size,
-         MMA_N * MMA_M);
+  // New DeepGEMM-style FP8 dense GEMM kernel (PR 647)
+  // Template parameters for linear_fp8_sm100_task_impl
+  constexpr int BLOCK_M = 32;
+  constexpr int BLOCK_N = 16;
+  constexpr int BLOCK_K = 128;
+  constexpr int kNumGroups = 1;
+  constexpr int kSwizzleAMode = 128;
+  constexpr int kSwizzleBMode = 128;
+  constexpr int kSwizzleCDMode = 32;
+  constexpr int kNumStages = 31;
+  constexpr int kNumNonEpilogueThreads = 128;
+  constexpr int kNumEpilogueThreads = 128;
+  constexpr int kNumMulticast = 1;
+  constexpr int kNumSMs = 8;
 
+  bool residual_active = with_residual && rank_with_residual;
+
+  code.e("{");
   code.inc_indent();
-  code.e("TMA_A tma_a(static_cast<CUtensorMap*>("
-         "task_desc->input_tma_desc_ptrs[2][0]));"); // weight
-  code.e("TMA_B tma_b(static_cast<CUtensorMap*>("
-         "task_desc->input_tma_desc_ptrs[0][0]));"); // input
-  code.e("TMA_OUT tma_out(static_cast<CUtensorMap*>("
-         "task_desc->output_tma_desc_ptrs[0][0]));");
-  // Bias tensor (residual)
-  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
-         "cute::make_stride($, cute::Int<1>{}));",
-         batch_size, output_size, output_stride);
-  code.e("cute::Tensor mBias = "
-         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
-         "$)), layout_Bias);",
-         (with_residual && rank_with_residual)
-             ? "task_desc->input_ptrs[4]" : "nullptr");
-  code.e("kernel::linear_fp8_1d2d_sm100_task_impl<cutlass::float_e4m3_t, "
-         "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
-         "$, $, $, $, $, $, $, $, $, $>(",
-         MMA_M, MMA_N,
-         batch_size, output_size, reduction_size,
-         (with_residual && rank_with_residual) ? "false" : "true",
-         "false", // SplitK
-         num_ab_stages, num_acc_stages, num_c_stages);
-  code.e("    tma_a, tma_b,");
-  code.e("    static_cast<uint32_t const*>(task_desc->input_ptrs[3]),"); // weight_scale
-  code.e("    static_cast<uint32_t const*>(task_desc->input_ptrs[1]),"); // input_scale
-  code.e("    mBias, tma_out);");
+  // Cast TMA descriptors from device pointers to references
+  code.e("// New FP8 dense GEMM kernel (DeepGEMM-style)");
+  code.e("auto const &tma_a = *reinterpret_cast<cute::TmaDescriptor const*>("
+         "task_desc->input_tma_desc_ptrs[0][0]);");   // input_fp8
+  code.e("auto const &tma_b = *reinterpret_cast<cute::TmaDescriptor const*>("
+         "task_desc->input_tma_desc_ptrs[2][0]);");   // weight_fp8
+  code.e("auto const &tma_sfa = *reinterpret_cast<cute::TmaDescriptor const*>("
+         "task_desc->input_tma_desc_ptrs[1][0]);");   // input_scale
+  code.e("auto const &tma_sfb = *reinterpret_cast<cute::TmaDescriptor const*>("
+         "task_desc->input_tma_desc_ptrs[3][0]);");   // weight_scale
+  if (with_residual) {
+    code.e("auto const &tma_residual = *reinterpret_cast<cute::TmaDescriptor const*>("
+           "task_desc->input_tma_desc_ptrs[4][0]);"); // residual
+  } else {
+    // Dummy reference for non-residual case (not accessed by kernel)
+    code.e("auto const &tma_residual = *reinterpret_cast<cute::TmaDescriptor const*>("
+           "task_desc->input_tma_desc_ptrs[0][0]);"); // unused placeholder
+  }
+  code.e("auto const &tma_cd = *reinterpret_cast<cute::TmaDescriptor const*>("
+         "task_desc->output_tma_desc_ptrs[0][0]);");  // output
+
+  code.e("kernel::linear_fp8_sm100_task_impl<");
+  code.e("    cute::UMMA::Major::K,");   // kMajorA
+  code.e("    cute::UMMA::Major::K,");   // kMajorB
+  code.e("    128,");                     // kGranKA
+  code.e("    128,");                     // kGranKB
+  code.e("    $,",  batch_size);          // SHAPE_M
+  code.e("    $,",  output_size);         // SHAPE_N
+  code.e("    $,",  reduction_size);      // SHAPE_K
+  code.e("    $,",  BLOCK_M);            // BLOCK_M
+  code.e("    $,",  BLOCK_N);            // BLOCK_N
+  code.e("    $,",  BLOCK_K);            // BLOCK_K
+  code.e("    $,",  kNumGroups);          // kNumGroups
+  code.e("    $,",  kSwizzleAMode);       // kSwizzleAMode
+  code.e("    $,",  kSwizzleBMode);       // kSwizzleBMode
+  code.e("    $,",  kSwizzleCDMode);      // kSwizzleCDMode
+  code.e("    $,",  kNumStages);          // kNumStages
+  code.e("    $,",  kNumNonEpilogueThreads); // kNumNonEpilogueThreads
+  code.e("    $,",  kNumEpilogueThreads); // kNumEpilogueThreads
+  code.e("    $,",  kNumMulticast);       // kNumMulticast
+  code.e("    false,");                   // kIsMulticastOnA
+  code.e("    $,",  kNumSMs);            // kNumSMs
+  code.e("    $,",  residual_active ? "true" : "false"); // kWithResidual
+  code.e("    mirage::blackwell::linear_fp8_sm100::GemmType::Normal,"); // kGemmType
+  code.e("    false,");                   // kWithAccumulation
+  code.e("    cutlass::float_e4m3_t,");   // a_dtype_t
+  code.e("    cutlass::float_e4m3_t,");   // b_dtype_t
+  code.e("    cutlass::bfloat16_t,");     // cd_dtype_t
+  code.e("    mirage::blackwell::linear_fp8_sm100::EpilogueIdentity"); // epilogue_type_t
+  code.e(">(");
+  code.e("    nullptr,");                 // grouped_layout (unused for Normal)
+  code.e("    static_cast<uint32_t>($),", batch_size);     // shape_m
+  code.e("    static_cast<uint32_t>($),", output_size);    // shape_n
+  code.e("    static_cast<uint32_t>($),", reduction_size); // shape_k
+  code.e("    tma_a,");                   // tensor_map_a (input_fp8)
+  code.e("    tma_b,");                   // tensor_map_b (weight_fp8)
+  code.e("    tma_sfa,");                 // tensor_map_sfa (input_scale)
+  code.e("    tma_sfb,");                 // tensor_map_sfb (weight_scale)
+  code.e("    tma_residual,");            // tensor_map_residual
+  code.e("    tma_cd);");                 // tensor_map_cd (output)
+  code.dec_indent();
+  code.e("}");
 
   if (with_residual) {
     return register_task_variant(TASK_LINEAR_FP8_WITH_RESIDUAL_SM100,
