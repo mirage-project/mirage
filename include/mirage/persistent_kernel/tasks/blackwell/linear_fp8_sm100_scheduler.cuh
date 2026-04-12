@@ -167,7 +167,7 @@ struct Scheduler {
 
   // In persistent kernel mode, each CTA is a single worker that processes
   // ALL tiles sequentially (kNumSMs=1, block_offset=0).
-  uint32_t block_offset = 0;  // overridable for persistent kernel
+  uint32_t block_offset = 0;  // persistent kernel: each CTA handles its own 128-row slice
 
   __device__ __forceinline__ bool get_next_block(uint32_t &m_block_idx,
                                                  uint32_t &n_block_idx) {
