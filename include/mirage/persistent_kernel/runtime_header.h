@@ -298,7 +298,7 @@ struct RuntimeConfig {
 #endif
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN) || defined(MODE_ONLINE_TEST)
-  int *next_request_id;   // Metadata for LLM serving (not used in PINNED mode)
+  int *next_request_id; // Metadata for LLM serving (not used in PINNED mode)
 #endif
 #if defined(MODE_ONLINE_TEST)
   // P3: written by the kernel when a request completes so Python can insert
@@ -309,24 +309,24 @@ struct RuntimeConfig {
   int *final_paged_kv_indices;
 #endif
 #if defined(MODE_ONLINE_PINNED)
-  // Lock-free pinned request ring (capacity = MPK_PINNED_RING_CAPACITY, power-of-2)
-  // CPU is producer, GPU is consumer.
-  // Handshake: CPU writes data fields then sets ready=1 (release); GPU reads
-  // ready with acquire, consumes, then clears to 0.
-  volatile int32_t *pinned_req_ready;     // 0=empty, 1=request ready
-  int32_t          *pinned_req_request_id;
-  int32_t          *pinned_req_prompt_len;
-  int32_t          *pinned_req_initial_step; // reserved for prefix-cache (always 0 now)
+  // Lock-free pinned request ring (capacity = MPK_PINNED_RING_CAPACITY,
+  // power-of-2) CPU is producer, GPU is consumer. Handshake: CPU writes data
+  // fields then sets ready=1 (release); GPU reads ready with acquire, consumes,
+  // then clears to 0.
+  int32_t volatile *pinned_req_ready; // 0=empty, 1=request ready
+  int32_t *pinned_req_request_id;
+  int32_t *pinned_req_prompt_len;
+  int32_t *pinned_req_initial_step; // reserved for prefix-cache (always 0 now)
   // Lock-free pinned completion ring (capacity = MPK_PINNED_RING_CAPACITY)
   // GPU is producer, CPU is consumer.
   // Handshake: GPU writes data fields then sets ready=1 (release); CPU reads
   // ready with acquire, processes, then clears to 0.
-  volatile int32_t *pinned_comp_ready;    // 0=empty, 1=completion ready
-  int32_t          *pinned_comp_request_id;
-  int32_t          *pinned_comp_final_step;
+  int32_t volatile *pinned_comp_ready; // 0=empty, 1=completion ready
+  int32_t *pinned_comp_request_id;
+  int32_t *pinned_comp_final_step;
   // GPU-private ring cursors — allocated with gpu_malloc, never touched by CPU.
-  int32_t          *gpu_req_head;   // GPU consumer cursor into pinned request ring
-  int32_t          *gpu_comp_tail;  // GPU producer cursor into pinned completion ring
+  int32_t *gpu_req_head;  // GPU consumer cursor into pinned request ring
+  int32_t *gpu_comp_tail; // GPU producer cursor into pinned completion ring
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;
