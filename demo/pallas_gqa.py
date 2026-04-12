@@ -61,9 +61,12 @@ if __name__ == "__main__":
             print(f"  - {err}")
         raise SystemExit(1)
 
-    Q = jnp.ones((num_heads, seq_len, head_dim), dtype=jnp.float16)
-    K = jnp.ones((num_kv_heads, head_dim, seq_len), dtype=jnp.float16)
-    V = jnp.ones((num_kv_heads, seq_len, head_dim), dtype=jnp.float16)
+    import jax
+    key = jax.random.PRNGKey(0)
+    scale = 0.1
+    Q = (jax.random.normal(key, (num_heads, seq_len, head_dim)) * scale).astype(jnp.float16)
+    K = (jax.random.normal(key, (num_kv_heads, head_dim, seq_len)) * scale).astype(jnp.float16)
+    V = (jax.random.normal(key, (num_kv_heads, seq_len, head_dim)) * scale).astype(jnp.float16)
 
     out = optimized_graph(inputs=[Q, K, V], debug=True)[0].block_until_ready()
     ref = reference(Q, K, V).block_until_ready()

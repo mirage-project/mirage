@@ -136,6 +136,12 @@ std::vector<dim3>
 #else
   cands = vector_concat(cands, generate_1d_grids(get_dims()));
   cands = vector_concat(cands, generate_2d_grids(get_dims()));
+  // For attention with GQA, add a grid split along the batch/head dimension
+  // (e.g. num_heads, 1, 1) so each block handles one head. This mirrors the
+  // CUDA path's `cands.push_back({batch, 1, 1})`.
+  if (batch != -1 && batch <= (int)config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
+    cands.push_back({batch, 1, 1});
+  }
 #endif
 
   cands = deduplicate(cands);
@@ -261,11 +267,13 @@ std::vector<std::vector<int3>>
         {0, 1, -1},
         {0, 2, -1},
         {-1, 1, -1},
+        // Needed for GQA: K/V have num_kv_heads < num_heads (dim[0]=1)
+        // and must be fully replicated when Q is split along the head dim.
+        {-1, -1, -1},
+        {0, -1, -1},
     };
     if (!config._enable_attention_specific_optimization) {
-      imap_to_explore.push_back({-1, -1, -1});
       imap_to_explore.push_back({1, -1, -1});
-      imap_to_explore.push_back({0, -1, -1});
     }
     generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   }

@@ -350,11 +350,16 @@ bool KNCustomizedOp::fingerprint(void) {
     // Perform the operation
     switch (op->op_type) {
       case type::TB_MATMUL_OP: {
-        int M = op->input_tensors[0].dim[0];
-        int N = op->input_tensors[1].dim[1];
-        int K = op->input_tensors[0].dim[1];
+        int ndims = op->input_tensors[0].num_dims;
+        int B = 1;
+        for (int i = 0; i < ndims - 2; ++i) {
+          B *= op->input_tensors[0].dim[i];
+        }
+        int M = op->input_tensors[0].dim[ndims - 2];
+        int N = op->input_tensors[1].dim[ndims - 1];
+        int K = op->input_tensors[0].dim[ndims - 1];
         utils::compute_matmul_fingerprint(
-            input_buffers[0], input_buffers[1], output_buffers[0], 1, M, N, K);
+            input_buffers[0], input_buffers[1], output_buffers[0], B, M, N, K);
         break;
       }
       case type::TB_EXP_OP: {
