@@ -218,20 +218,26 @@ class LLMEngine:
         #    is visible before the kernel starts.
         t0 = perf_counter()
         first_submitted = threading.Event()
-
+        submit_exc: list[BaseException] = []  # captures submit thread exceptions
         def _submit_loop():
-            for rid, (token_ids, delay) in enumerate(zip(all_token_ids, delays)):
-                wait = t0 + delay / 1_000_000 - perf_counter()
-                if wait > 0:
-                    time.sleep(wait)
-                t = torch.tensor(token_ids, dtype=torch.int64)
-                self.runtime.load_tokens(rid, t)
-                self.runtime.submit_request(rid, prompt_len=len(token_ids))
-                first_submitted.set()  # signal after first submission
+            try:
+                for rid, (token_ids, delay) in enumerate(zip(all_token_ids, delays)):
+                    wait = t0 + delay / 1_000_000 - perf_counter()
+                    if wait > 0:
+                        time.sleep(wait)
+                    t = torch.tensor(token_ids, dtype=torch.int64)
+                    self.runtime.load_tokens(rid, t)
+                    self.runtime.submit_request(rid, prompt_len=len(token_ids))
+                    first_submitted.set()  # signal after first submission
+            except Exception as e:
+                submit_exc.append(e)
+                first_submitted.set()  # unblock main thread so it doesn't hang
 
         submit_thread = threading.Thread(target=_submit_loop, daemon=True)
         submit_thread.start()
         first_submitted.wait()  # block until at least one request is in the ring
+        if submit_exc:
+            raise submit_exc[0]  # surface the exception immediately
 
         # 4. Launch kernel — ring buffer now has at least one request ──────────
         self._kernel_thread = threading.Thread(target=self.model_runner, daemon=True)
