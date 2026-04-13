@@ -47,16 +47,7 @@ class LLMEngine:
         poll_interval: float = 1e-4,
     ) -> list[dict]:
         """Tokenize, submit, run, and collect completions for a list of prompts.
-
-        Flow:
-          1. Tokenize all prompts.
-          2. Reset ring-buffer state for a fresh session.
-          3. Initialize the kernel for ``len(prompts)`` requests.
-          4. Load each prompt's tokens into GPU memory and write its ring entry.
-          5. Launch the persistent kernel in a background thread.
-          6. Poll the completion ring until all responses arrive.
-          7. Join the kernel thread and return decoded results.
-
+        TODO: OpenAI server add requests, feel free to modify anything in this function
         Args:
             prompts:       List of string prompts.
             use_template:  Apply the model's chat template before tokenizing.
@@ -134,34 +125,6 @@ class LLMEngine:
             })
         return results
 
-    def start(self, n: int) -> None:
-        """Initialize and launch the persistent kernel for *n* total requests.
-
-        Must be called once before :meth:`generate_incremental`.  The kernel
-        runs in a background thread and will exit after processing all *n*
-        requests submitted via the ring buffer.
-
-        Args:
-            n: Total number of requests that will be submitted across all
-               subsequent :meth:`generate_incremental` calls.
-        """
-        assert n <= self.model_runner.config.max_num_batched_requests, (
-            f"n={n} exceeds max_num_batched_requests="
-            f"{self.model_runner.config.max_num_batched_requests}"
-        )
-        self.runtime.reset()
-        self.model_runner.init(n)
-
-        self._kernel_started.clear()
-
-        def _kernel_loop():
-            self._kernel_started.set()  # signal that kernel is now running
-            self.model_runner()
-
-        self._kernel_thread = threading.Thread(target=_kernel_loop, daemon=True)
-        self._kernel_thread.start()
-        self._kernel_started.wait()  # block until kernel is live before returning
-
     def generate_incremental(
         self,
         arrivals: list[tuple[str, float]],
@@ -180,6 +143,8 @@ class LLMEngine:
         request is in the ring buffer when the persistent kernel begins,
         preventing it from seeing an empty batch on its first
         EVENT_END_OF_TASK_GRAPH and terminating immediately.
+
+        TODO: May be helpful to test streaming in the future
 
         Args:
             arrivals:      List of ``(prompt, delay_microseconds)`` pairs.  Delays
@@ -229,7 +194,7 @@ class LLMEngine:
                     t = torch.tensor(token_ids, dtype=torch.int64)
                     self.runtime.load_tokens(rid, t)
                     self.runtime.submit_request(rid, prompt_len=len(token_ids))
-                    print(f"request {rid} has been submitted!",flush=True)
+                    #print(f"request {rid} has been submitted!",flush=True) # DEBUG PRINT
                     first_submitted.set()  # signal after first submission
             except Exception as e:
                 submit_exc.append(e)
@@ -273,6 +238,9 @@ class LLMEngine:
             self.runtime.shutdown()  # signal kernel to exit its spin-wait
 
         return results  # type: ignore[return-value]
+
+    def close(self):
+        self.runtime.shutdown() # signal kernel to exit its spin-wait
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
