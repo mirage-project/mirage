@@ -938,6 +938,12 @@ if __name__ == "__main__":
                 for r in range(attn_out_buf.shape[0]):
                     row = attn_out_buf[r].float()
                     print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
+            qnope_buf = getattr(builder, "q_nope_pe_buf", None)
+            if qnope_buf is not None:
+                print("[Q_NOPE_PE] each row stats:")
+                for r in range(qnope_buf.shape[0]):
+                    row = qnope_buf[r].float()
+                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
             attn_proj_buf = getattr(builder, "attn_proj_out_buf", None)
             if attn_proj_buf is not None:
                 print("[ATTN_PROJ_OUT] each row stats:")

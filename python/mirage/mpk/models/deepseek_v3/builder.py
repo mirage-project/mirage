@@ -221,12 +221,20 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
-        self.q_nope_pe = self.mpk.new_tensor(
-            dims=(mbt, self.num_local_q_heads * self.qk_head_dim),
-            dtype=bfloat16,
-            name="q_nope_pe",
-            io_category="cuda_tensor",
-        )
+        if os.environ.get("MPK_DUMP_QNOPE", "0") == "1":
+            self.q_nope_pe_buf = torch.zeros(
+                mbt, self.num_local_q_heads * self.qk_head_dim,
+                dtype=torch.bfloat16, device="cuda")
+            self.q_nope_pe = self.mpk.attach_input(
+                torch_tensor=self.q_nope_pe_buf, name="q_nope_pe")
+        else:
+            self.q_nope_pe_buf = None
+            self.q_nope_pe = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * self.qk_head_dim),
+                dtype=bfloat16,
+                name="q_nope_pe",
+                io_category="cuda_tensor",
+            )
         # kv_a output split: c_latent [batch, 512] and k_pe [batch, 64]
         # We use two separate linear layers instead of one 576-dim output,
         # so we can apply kv_a_layernorm to c_latent only.
