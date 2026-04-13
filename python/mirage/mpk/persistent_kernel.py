@@ -232,6 +232,8 @@ def get_compile_command(
     # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
     if os.environ.get("MPK_DEBUG_CTA112", "0") == "1":
         flags = flags + ["-DMPK_DEBUG_CTA112"]
+    if os.environ.get("MPK_DEBUG_MLA", "0") == "1":
+        flags = flags + ["-DMPK_DEBUG_MLA"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -890,8 +892,12 @@ class PersistentKernel:
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_input, (0, -1, -1), -1, True)
         tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        # When q_len > 1, grid is (num_splits, num_head_groups, 1). grid.y
+        # blocks read the full output buffer and offset internally via
+        # block_linear (bi*num_head_groups*sk + gi*sk + si). Don't partition.
+        partial_map = (-1, -1, -1) if q_len > 1 else (0, -1, -1)
+        tb_graph.new_input(output_partial, partial_map, -1, True)
+        tb_graph.new_input(output_lse, partial_map, -1, True)
         self.kn_graph.customized(
             [q_input, kv_input, output_partial, output_lse], tb_graph
         )
@@ -914,9 +920,14 @@ class PersistentKernel:
         params = [num_heads, d_v, num_splits, d_start, d_count, q_len]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        # When q_len > 1, grid.x maps to head_group (not batch). The kernel
+        # uses block_linear = bi * num_head_groups * sk + gi * sk to
+        # offset into the same shared input buffer, so we must NOT partition
+        # input/output along grid.x — every block needs the full base pointer.
+        partial_map = (-1, -1, -1) if q_len > 1 else (0, -1, -1)
+        tb_graph.new_input(input_partial, partial_map, -1, True)
+        tb_graph.new_input(input_lse, partial_map, -1, True)
+        tb_graph.new_input(output, partial_map, -1, True)
         self.kn_graph.customized(
             [input_partial, input_lse, output], tb_graph
         )

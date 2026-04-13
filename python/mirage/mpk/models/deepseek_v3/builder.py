@@ -1858,15 +1858,21 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=self.output_tokens, name="output_token",
             )
             argmax_out = self.argmax_out_dtensor
+            # Argmax grid: matches Qwen3 pattern.
+            # Partial: (num_workers, 1, 1) splits vocab across all workers.
+            # Reduce: (1, 1, 1) — single block combines partials, iterates batches.
+            # Old (mbt, 1, 1) caused race for mbt>1: blocks wrote overlapping
+            # output_tokens slots because the kernel uses NUM_PARTIAL_TASKS for
+            # output offset but the buffer's actual stride is num_workers.
             self.mpk.argmax_partial_layer(
                 input=lm_head_out, output=(self.argmax_part_value, self.argmax_part_index),
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                grid_dim=(self.mpk.num_workers, 1, 1),
                 block_dim=(128, 1, 1),
             )
             self.mpk.argmax_reduce_layer(
                 input=(self.argmax_part_value, self.argmax_part_index),
                 output=argmax_out,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                grid_dim=(1, 1, 1),
                 block_dim=(128, 1, 1),
             )
 
