@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Nsys profiling script for Qwen3 demo
-# Usage: ./profile_qwen3.sh
+# Usage: ./profile_qwen3_online.sh
 
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=0
 export TMPDIR=~/vllm/mirage/nvidia
 
 nsys profile \

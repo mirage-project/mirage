@@ -6,14 +6,9 @@ Usage (single GPU)::
 
     config = RunnerConfig(model="Qwen/Qwen3-8B")
     runner = ModelRunner(config)
-    engine  = LLMEngine(manager, runner, tokenizer)
+    engine  = LLMEngine(runner)
 
-Usage (multi-GPU via mpirun)::
-    # this functionality needs further debug, now deprecated
-    # Launch: mpirun -n 2 python script.py
-    config = RunnerConfig(model="Qwen/Qwen3-8B", tensor_parallel_size=2)
-    runner = ModelRunner(config)
-    ...
+TODO: Usage (multiple GPU)
 """
 
 if __name__ == "__main__":
