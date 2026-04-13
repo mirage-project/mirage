@@ -1,7 +1,7 @@
 #pragma once
 
-#include "mirage/search/verification/verifier.h"
 #include "mirage/search/symbolic_graph/symbolic_graph.h"
+#include "mirage/search/verification/verifier.h"
 
 #include <mutex>
 
@@ -27,13 +27,11 @@ private:
   static std::mutex formal_verifier_mutex;
 };
 
-std::vector<std::string>
-    get_concrete_exprs(kernel::Graph const &graph,
-                       bool with_output_ops);
+std::vector<std::string> get_concrete_exprs(kernel::Graph const &graph,
+                                            bool with_output_ops);
 
-std::vector<std::string>
-    get_concrete_exprs(SymbolicKNGraph const &graph,
-                       bool with_output_ops);
+std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph,
+                                            bool with_output_ops);
 
 } // namespace search
 } // namespace mirage

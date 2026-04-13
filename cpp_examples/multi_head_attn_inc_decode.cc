@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
       ".json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
-  gen.generate_kernel_graphs();
+  gen.search();
 
   auto et = std::chrono::steady_clock::now();
 

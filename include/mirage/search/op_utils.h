@@ -55,10 +55,11 @@ TBOperator *create_op(threadblock::Graph &g,
                       std::vector<STensor> const &inputs);
 
 template <typename GraphType, typename OperatorType>
-size_t count_op_of_types(std::unordered_set<OperatorType> const &op_types, GraphType const &g) {
-  return filter(g.operators,[&](auto const &op) {
-    return contains(op_types, op->op_type);
-  }).size();
+size_t count_op_of_types(std::unordered_set<OperatorType> const &op_types,
+                         GraphType const &g) {
+  return filter(g.operators,
+                [&](auto const &op) { return contains(op_types, op->op_type); })
+      .size();
 }
 
 template <typename GraphType, typename OperatorType>
@@ -67,15 +68,18 @@ size_t count_op_of_type(OperatorType op_type, GraphType const &g) {
 }
 
 template <typename GraphType, typename OperatorType>
-size_t count_symbolic_op_of_types(std::unordered_set<OperatorType> const &op_types, GraphType const &g) {
-  return filter(g.operators,[&](auto const &op) {
-    return contains(op_types, op.op_type);
-  }).size();
+size_t
+    count_symbolic_op_of_types(std::unordered_set<OperatorType> const &op_types,
+                               GraphType const &g) {
+  return filter(g.operators,
+                [&](auto const &op) { return contains(op_types, op.op_type); })
+      .size();
 }
 
 template <typename GraphType, typename OperatorType>
 size_t count_symbolic_op_of_type(OperatorType op_type, GraphType const &g) {
-  return count_symbolic_op_of_types(std::unordered_set<OperatorType>{op_type}, g);
+  return count_symbolic_op_of_types(std::unordered_set<OperatorType>{op_type},
+                                    g);
 }
 
 } // namespace search

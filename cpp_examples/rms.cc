@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
   std::string checkpoint_file_name = "checkpoint_rms.json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
-  gen.generate_kernel_graphs();
+  gen.search();
 
   return 0;
 }

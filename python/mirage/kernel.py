@@ -557,7 +557,26 @@ class KNGraph:
         use_cached_graphs: bool = True,
         save_codes: bool = False,
         is_formal_verified: bool = False,
+        use_symbolic_search: bool = False,
+        symbolic_checkpoint: str = None,
+        search_time_limit_sec: float = -1.0,
     ):
+        if use_symbolic_search:
+            if symbolic_checkpoint is None:
+                symbolic_checkpoint = "mirage_sso_{:x}.json".format(
+                    self.cygraph.get_owner_independent_hash()
+                )
+            best = search_symbolic(
+                self.cygraph,
+                previous_checkpoint=symbolic_checkpoint,
+                verbose=verbose,
+                default_config=config,
+                time_limit_sec=search_time_limit_sec,
+            )
+            if best is None:
+                raise RuntimeError("Symbolic search found no valid kernels")
+            return KNGraph(best)
+
         if use_graph_dataset:
             cached_graph = graph_dataset.find(
                 self.cygraph,

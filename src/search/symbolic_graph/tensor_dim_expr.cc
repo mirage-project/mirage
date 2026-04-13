@@ -1,8 +1,8 @@
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
+#include "mirage/search/abstract_expr/abstract_expr.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/hash_utils.h"
 #include "mirage/utils/math_utils.h"
-#include "mirage/search/abstract_expr/abstract_expr.h"
 #include <unordered_set>
 
 namespace mirage {
@@ -52,70 +52,98 @@ std::shared_ptr<TensorDimDiv const>
   return std::make_shared<TensorDimDiv const>(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimAdd const> operator+(std::shared_ptr<TensorDimExpr const> lhs, std::shared_ptr<TensorDimExpr const> rhs) {
+std::shared_ptr<TensorDimAdd const>
+    operator+(std::shared_ptr<TensorDimExpr const> lhs,
+              std::shared_ptr<TensorDimExpr const> rhs) {
   return dim_expr_make_add(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimMul const> operator*(std::shared_ptr<TensorDimExpr const> lhs, std::shared_ptr<TensorDimExpr const> rhs) {
+std::shared_ptr<TensorDimMul const>
+    operator*(std::shared_ptr<TensorDimExpr const> lhs,
+              std::shared_ptr<TensorDimExpr const> rhs) {
   return dim_expr_make_mul(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimDiv const> operator/(std::shared_ptr<TensorDimExpr const> lhs, std::shared_ptr<TensorDimExpr const> rhs) {
+std::shared_ptr<TensorDimDiv const>
+    operator/(std::shared_ptr<TensorDimExpr const> lhs,
+              std::shared_ptr<TensorDimExpr const> rhs) {
   return dim_expr_make_div(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimExpr const> operator-(std::shared_ptr<TensorDimExpr const> lhs, std::shared_ptr<TensorDimExpr const> rhs) {
+std::shared_ptr<TensorDimExpr const>
+    operator-(std::shared_ptr<TensorDimExpr const> lhs,
+              std::shared_ptr<TensorDimExpr const> rhs) {
   return lhs + (dim_expr_make_const(-1) * rhs);
 }
 
-std::shared_ptr<TensorDimExpr const> TensorDimVar::with_partial_assignment(DimVarAssignment const &partial_assignment) const {
+std::shared_ptr<TensorDimExpr const> TensorDimVar::with_partial_assignment(
+    DimVarAssignment const &partial_assignment) const {
   if (partial_assignment.has_assignment(index)) {
     return dim_expr_make_const(partial_assignment.get_value(index));
   }
   return shared_from_this();
 }
 
-std::shared_ptr<TensorDimExpr const> TensorDimConst::with_partial_assignment(DimVarAssignment const &partial_assignment) const {
+std::shared_ptr<TensorDimExpr const> TensorDimConst::with_partial_assignment(
+    DimVarAssignment const &partial_assignment) const {
   return shared_from_this();
 }
 
-std::shared_ptr<TensorDimExpr const> TensorDimAdd::with_partial_assignment(DimVarAssignment const &partial_assignment) const {
-  std::shared_ptr<TensorDimExpr const> lhs_expr = lhs->with_partial_assignment(partial_assignment);
-  std::shared_ptr<TensorDimExpr const> rhs_expr = rhs->with_partial_assignment(partial_assignment);
+std::shared_ptr<TensorDimExpr const> TensorDimAdd::with_partial_assignment(
+    DimVarAssignment const &partial_assignment) const {
+  std::shared_ptr<TensorDimExpr const> lhs_expr =
+      lhs->with_partial_assignment(partial_assignment);
+  std::shared_ptr<TensorDimExpr const> rhs_expr =
+      rhs->with_partial_assignment(partial_assignment);
   if (lhs_expr->is_const() && rhs_expr->is_const()) {
-    std::shared_ptr<TensorDimConst const> lhs_const = std::static_pointer_cast<TensorDimConst const>(lhs_expr);
-    std::shared_ptr<TensorDimConst const> rhs_const = std::static_pointer_cast<TensorDimConst const>(rhs_expr);
+    std::shared_ptr<TensorDimConst const> lhs_const =
+        std::static_pointer_cast<TensorDimConst const>(lhs_expr);
+    std::shared_ptr<TensorDimConst const> rhs_const =
+        std::static_pointer_cast<TensorDimConst const>(rhs_expr);
     return dim_expr_make_const(lhs_const->value + rhs_const->value);
   }
   return dim_expr_make_add(lhs_expr, rhs_expr);
 }
 
-std::shared_ptr<TensorDimExpr const> TensorDimMul::with_partial_assignment(DimVarAssignment const &partial_assignment) const {
-  std::shared_ptr<TensorDimExpr const> lhs_expr = lhs->with_partial_assignment(partial_assignment);
-  std::shared_ptr<TensorDimExpr const> rhs_expr = rhs->with_partial_assignment(partial_assignment);
+std::shared_ptr<TensorDimExpr const> TensorDimMul::with_partial_assignment(
+    DimVarAssignment const &partial_assignment) const {
+  std::shared_ptr<TensorDimExpr const> lhs_expr =
+      lhs->with_partial_assignment(partial_assignment);
+  std::shared_ptr<TensorDimExpr const> rhs_expr =
+      rhs->with_partial_assignment(partial_assignment);
   if (lhs_expr->is_const() && rhs_expr->is_const()) {
-    std::shared_ptr<TensorDimConst const> lhs_const = std::static_pointer_cast<TensorDimConst const>(lhs_expr);
-    std::shared_ptr<TensorDimConst const> rhs_const = std::static_pointer_cast<TensorDimConst const>(rhs_expr);
+    std::shared_ptr<TensorDimConst const> lhs_const =
+        std::static_pointer_cast<TensorDimConst const>(lhs_expr);
+    std::shared_ptr<TensorDimConst const> rhs_const =
+        std::static_pointer_cast<TensorDimConst const>(rhs_expr);
     return dim_expr_make_const(lhs_const->value * rhs_const->value);
   }
   return dim_expr_make_mul(lhs_expr, rhs_expr);
 }
 
-std::shared_ptr<TensorDimExpr const> TensorDimDiv::with_partial_assignment(DimVarAssignment const &partial_assignment) const {
-  std::shared_ptr<TensorDimExpr const> lhs_expr = lhs->with_partial_assignment(partial_assignment);
-  std::shared_ptr<TensorDimExpr const> rhs_expr = rhs->with_partial_assignment(partial_assignment);
+std::shared_ptr<TensorDimExpr const> TensorDimDiv::with_partial_assignment(
+    DimVarAssignment const &partial_assignment) const {
+  std::shared_ptr<TensorDimExpr const> lhs_expr =
+      lhs->with_partial_assignment(partial_assignment);
+  std::shared_ptr<TensorDimExpr const> rhs_expr =
+      rhs->with_partial_assignment(partial_assignment);
   if (lhs_expr->is_const() && rhs_expr->is_const()) {
-    std::shared_ptr<TensorDimConst const> lhs_const = std::static_pointer_cast<TensorDimConst const>(lhs_expr);
-    std::shared_ptr<TensorDimConst const> rhs_const = std::static_pointer_cast<TensorDimConst const>(rhs_expr);
+    std::shared_ptr<TensorDimConst const> lhs_const =
+        std::static_pointer_cast<TensorDimConst const>(lhs_expr);
+    std::shared_ptr<TensorDimConst const> rhs_const =
+        std::static_pointer_cast<TensorDimConst const>(rhs_expr);
     return dim_expr_make_const(lhs_const->value / rhs_const->value);
   }
   return dim_expr_make_div(lhs_expr, rhs_expr);
 }
 
-std::optional<int> TensorDimExpr::maybe_get_value(DimVarAssignment const &assignments) const {
-  std::shared_ptr<TensorDimExpr const> expr = with_partial_assignment(assignments);
+std::optional<int>
+    TensorDimExpr::maybe_get_value(DimVarAssignment const &assignments) const {
+  std::shared_ptr<TensorDimExpr const> expr =
+      with_partial_assignment(assignments);
   if (expr->is_const()) {
-    std::shared_ptr<TensorDimConst const> const_expr = std::static_pointer_cast<TensorDimConst const>(expr);
+    std::shared_ptr<TensorDimConst const> const_expr =
+        std::static_pointer_cast<TensorDimConst const>(expr);
     return const_expr->value;
   }
   return std::nullopt;
@@ -175,7 +203,8 @@ bool TensorDimDiv::is_div() const {
   return true;
 }
 
-float TensorDimExpr::get_float_value(DimVarAssignment const &assignments) const {
+float TensorDimExpr::get_float_value(
+    DimVarAssignment const &assignments) const {
   assert(false);
 }
 
@@ -183,7 +212,8 @@ float TensorDimVar::get_float_value(DimVarAssignment const &assignments) const {
   return (float)get_value(assignments);
 }
 
-float TensorDimConst::get_float_value(DimVarAssignment const &assignments) const {
+float TensorDimConst::get_float_value(
+    DimVarAssignment const &assignments) const {
   return (float)value;
 }
 
@@ -230,8 +260,10 @@ void from_json(json const &j, SymbolicTensorDim &dim) {
   }
   std::string opt = j.at("opt").get<std::string>();
   if (opt == "var") {
-    bool is_boolean = j.contains("is_boolean") && j.at("is_boolean").get<bool>();
-    dim = std::make_shared<TensorDimVar>(j.at("index").get<tensor_dim_var_index_t>(), is_boolean);
+    bool is_boolean =
+        j.contains("is_boolean") && j.at("is_boolean").get<bool>();
+    dim = std::make_shared<TensorDimVar>(
+        j.at("index").get<tensor_dim_var_index_t>(), is_boolean);
   } else if (opt == "const") {
     dim = dim_expr_make_const(j.at("value").get<int>());
   } else if (opt == "add") {
@@ -372,36 +404,42 @@ std::string TensorDimDiv::to_egg() const {
   return "(/ " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-std::unordered_set<std::shared_ptr<TensorDimVar const>> TensorDimVar::get_all_vars() const {
-  std::shared_ptr<TensorDimVar const> var = std::static_pointer_cast<TensorDimVar const>(shared_from_this());
+std::unordered_set<std::shared_ptr<TensorDimVar const>>
+    TensorDimVar::get_all_vars() const {
+  std::shared_ptr<TensorDimVar const> var =
+      std::static_pointer_cast<TensorDimVar const>(shared_from_this());
   return {var};
 }
 
-std::unordered_set<std::shared_ptr<TensorDimVar const>> TensorDimConst::get_all_vars() const {
+std::unordered_set<std::shared_ptr<TensorDimVar const>>
+    TensorDimConst::get_all_vars() const {
   return {};
 }
 
-std::unordered_set<std::shared_ptr<TensorDimVar const>> TensorDimAdd::get_all_vars() const {
+std::unordered_set<std::shared_ptr<TensorDimVar const>>
+    TensorDimAdd::get_all_vars() const {
   return set_union(lhs->get_all_vars(), rhs->get_all_vars());
 }
 
-std::unordered_set<std::shared_ptr<TensorDimVar const>> TensorDimMul::get_all_vars() const {
+std::unordered_set<std::shared_ptr<TensorDimVar const>>
+    TensorDimMul::get_all_vars() const {
   return set_union(lhs->get_all_vars(), rhs->get_all_vars());
 }
 
-std::unordered_set<std::shared_ptr<TensorDimVar const>> TensorDimDiv::get_all_vars() const {
+std::unordered_set<std::shared_ptr<TensorDimVar const>>
+    TensorDimDiv::get_all_vars() const {
   return set_union(lhs->get_all_vars(), rhs->get_all_vars());
 }
 
 bool TensorDimExpr::symbolically_equivalent_to(
-  std::shared_ptr<TensorDimExpr const> other) const {
+    std::shared_ptr<TensorDimExpr const> other) const {
   std::string expr1 = this->to_egg();
   std::string expr2 = other->to_egg();
   return is_equiv(expr1.c_str(), expr2.c_str());
 }
 
 bool TensorDimExpr::can_be_symbolically_equivalent_to(
-  std::shared_ptr<TensorDimExpr const> other) const {
+    std::shared_ptr<TensorDimExpr const> other) const {
 
   int value1 = get_value_with_all_vars_being(0, shared_from_this());
   int value2 = get_value_with_all_vars_being(0, other);
@@ -414,14 +452,17 @@ bool TensorDimExpr::can_be_symbolically_equivalent_to(
 
 bool TensorDimExpr::is_one() const {
   if (this->is_const()) {
-    std::shared_ptr<TensorDimConst const> const_expr = std::static_pointer_cast<TensorDimConst const>(shared_from_this());
+    std::shared_ptr<TensorDimConst const> const_expr =
+        std::static_pointer_cast<TensorDimConst const>(shared_from_this());
     return const_expr->value == 1;
   }
   return false;
 }
 
-int get_value_with_all_vars_being(int value, std::shared_ptr<TensorDimExpr const> expr) {
-  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars = expr->get_all_vars();
+int get_value_with_all_vars_being(int value,
+                                  std::shared_ptr<TensorDimExpr const> expr) {
+  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars =
+      expr->get_all_vars();
   DimVarAssignment assignment;
   for (auto const &var : all_vars) {
     assignment.assign(var->index, value);
@@ -429,8 +470,10 @@ int get_value_with_all_vars_being(int value, std::shared_ptr<TensorDimExpr const
   return (int)expr->get_float_value(assignment);
 }
 
-int get_value_with_bool_vars_zero_others_one(std::shared_ptr<TensorDimExpr const> expr) {
-  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars = expr->get_all_vars();
+int get_value_with_bool_vars_zero_others_one(
+    std::shared_ptr<TensorDimExpr const> expr) {
+  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars =
+      expr->get_all_vars();
   DimVarAssignment assignment;
   for (auto const &var : all_vars) {
     assignment.assign(var->index, var->is_boolean ? 0 : 1);
@@ -438,8 +481,10 @@ int get_value_with_bool_vars_zero_others_one(std::shared_ptr<TensorDimExpr const
   return (int)expr->get_float_value(assignment);
 }
 
-int get_value_with_bool_vars_zero_others_random(std::shared_ptr<TensorDimExpr const> expr) {
-  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars = expr->get_all_vars();
+int get_value_with_bool_vars_zero_others_random(
+    std::shared_ptr<TensorDimExpr const> expr) {
+  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars =
+      expr->get_all_vars();
   DimVarAssignment assignment;
   for (auto const &var : all_vars) {
     assignment.assign(var->index, var->is_boolean ? 0 : (int)var->index + 2);
@@ -448,7 +493,8 @@ int get_value_with_bool_vars_zero_others_random(std::shared_ptr<TensorDimExpr co
 }
 
 int get_value_with_all_vars_random(std::shared_ptr<TensorDimExpr const> expr) {
-  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars = expr->get_all_vars();
+  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars =
+      expr->get_all_vars();
   DimVarAssignment assignment;
   for (auto const &var : all_vars) {
     assignment.assign(var->index, (int)var->index + 2);
@@ -461,15 +507,18 @@ int get_value_with_all_vars_random(std::shared_ptr<TensorDimExpr const> expr) {
 
 namespace std {
 
-size_t hash<mirage::search::TensorDimExpr>::operator()(mirage::search::TensorDimExpr const &expr) const {
+size_t hash<mirage::search::TensorDimExpr>::operator()(
+    mirage::search::TensorDimExpr const &expr) const {
   return expr.hash();
 }
 
-size_t hash<std::shared_ptr<mirage::search::TensorDimExpr const>>::operator()(std::shared_ptr<mirage::search::TensorDimExpr const> const &expr) const {
+size_t hash<std::shared_ptr<mirage::search::TensorDimExpr const>>::operator()(
+    std::shared_ptr<mirage::search::TensorDimExpr const> const &expr) const {
   return expr->hash();
 }
 
-size_t hash<std::shared_ptr<mirage::search::TensorDimVar const>>::operator()(std::shared_ptr<mirage::search::TensorDimVar const> const &var) const {
+size_t hash<std::shared_ptr<mirage::search::TensorDimVar const>>::operator()(
+    std::shared_ptr<mirage::search::TensorDimVar const> const &var) const {
   return var->hash();
 }
 

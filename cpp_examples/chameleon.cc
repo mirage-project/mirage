@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
   std::string results_filename =
       "results_chameleon_bs" + std::to_string(batch_size) + ".json";
   search::KernelGraphGenerator gen(ref_graph, config, results_filename.data());
-  gen.generate_kernel_graphs();
+  gen.search();
 
   auto et = std::chrono::steady_clock::now();
 

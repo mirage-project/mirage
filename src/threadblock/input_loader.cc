@@ -90,8 +90,8 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
   }
 
   TBInputOp *op = new TBInputOp(
-    this, dtensor, input_map, forloop_dim, layout, store_in_dmem);
-    
+      this, dtensor, input_map, forloop_dim, layout, store_in_dmem);
+
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
   if (smem_usage > mirage::config::MAX_SMEM_SIZE) {

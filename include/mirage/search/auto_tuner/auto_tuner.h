@@ -6,27 +6,21 @@
 namespace mirage {
 namespace search {
 
-struct AutoTunerConfig {
-  bool use_sa = false;            // simulated annealing refinement
-  bool use_evolutionary = false;  // evolutionary search refinement
-  // if both false: grid search only (fastest)
-};
-
 class AutoTuner {
 public:
-  AutoTuner(AutoTunerConfig const &config);
-  DimVarAssignment tune(SymbolicTBGraph const &symbolic_tb_graph);
-  DimVarAssignment tune(SymbolicKNGraph const &symbolic_kn_graph);
+  AutoTuner() = default;
+
+  // Tune a single TB graph: grid search with shape-aware candidates,
+  // parallel compilation, sequential profiling.
+  DimVarAssignment tune_tb(SymbolicTBGraph const &symbolic_tb_graph);
+
+  // Tune a single KN graph: calls tune_tb for each customized op.
+  DimVarAssignment tune_kn(SymbolicKNGraph const &symbolic_kn_graph);
+
+  // Tune multiple KN graphs in parallel (one thread per graph),
+  // then compile and profile to pick the best.
+  // This is the main entry point for SSO auto-tuning.
   kernel::Graph *tune(std::vector<SymbolicKNGraph> const &symbolic_kn_graphs);
-
-  /** Tune multiple graphs in parallel: one thread per graph, each calls tune()
-   *  on a single SymbolicKNGraph. GPU profiling is serialized (critical section)
-   *  to avoid resource conflict; CUDA compilation can run in parallel.
-   *  Returns the first graph tuned with its assignment. */
-  kernel::Graph *tune_multi_threaded(std::vector<SymbolicKNGraph> const &symbolic_kn_graphs);
-
-private:
-  AutoTunerConfig config;
 };
 
 } // namespace search

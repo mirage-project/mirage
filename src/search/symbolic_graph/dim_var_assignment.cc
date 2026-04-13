@@ -8,8 +8,7 @@ DimVarAssignment::DimVarAssignment(
     std::unordered_map<tensor_dim_var_index_t, int> const &assignments)
     : assignments(assignments) {}
 
-void DimVarAssignment::assign(tensor_dim_var_index_t dim_var_index,
-                               int value) {
+void DimVarAssignment::assign(tensor_dim_var_index_t dim_var_index, int value) {
   assignments[dim_var_index] = value;
 }
 
@@ -26,7 +25,8 @@ bool DimVarAssignment::has_assignment(
   return assignments.find(dim_var_index) != assignments.end();
 }
 
-std::unordered_map<tensor_dim_var_index_t, int> const &DimVarAssignment::get_assignments() const {
+std::unordered_map<tensor_dim_var_index_t, int> const &
+    DimVarAssignment::get_assignments() const {
   return assignments;
 }
 
@@ -40,14 +40,15 @@ bool DimVarAssignment::extend(DimVarAssignment const &rhs) {
   return true;
 }
 
-std::optional<DimVarAssignment> DimVarAssignment::combine(DimVarAssignment const &lhs, DimVarAssignment const &rhs) {
+std::optional<DimVarAssignment>
+    DimVarAssignment::combine(DimVarAssignment const &lhs,
+                              DimVarAssignment const &rhs) {
   DimVarAssignment combined_assignment = lhs;
   if (!combined_assignment.extend(rhs)) {
     return std::nullopt;
   }
   return combined_assignment;
 }
-
 
 } // namespace search
 } // namespace mirage

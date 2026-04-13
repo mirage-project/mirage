@@ -23,26 +23,35 @@
 //
 // Usage:
 //   ./symbolic_rmsnorm_mlp                        – sweep all (n, d) configs
-//   ./symbolic_rmsnorm_mlp -d                     – single debug config (n=8, d=4096)
+//   ./symbolic_rmsnorm_mlp -d                     – single debug config (n=8,
+//   d=4096)
 //   ./symbolic_rmsnorm_mlp --force-nonsym         – re-run non-symbolic search
 //   ./symbolic_rmsnorm_mlp --force-sym            – re-run symbolic search
-//   ./symbolic_rmsnorm_mlp --skip-nonsym          – skip non-symbolic search entirely
-//   ./symbolic_rmsnorm_mlp --sym-checkpoint <f>   – use <f> as symbolic checkpoint
-//   ./symbolic_rmsnorm_mlp --time-limit <sec>     – search time limit (default 3600)
+//   ./symbolic_rmsnorm_mlp --skip-nonsym          – skip non-symbolic search
+//   entirely
+//   ./symbolic_rmsnorm_mlp --sym-checkpoint <f>   – use <f> as symbolic
+//   checkpoint
+//   ./symbolic_rmsnorm_mlp --time-limit <sec>     – search time limit (default
+//   3600)
 //
 // Output files:
 //   checkpoints/rmsnorm_mlp/  – per-config and shared symbolic checkpoints
-//   results_rmsnorm_mlp.json  – best times for each (n, d) x {non-symbolic, symbolic}
+//   results_rmsnorm_mlp.json  – best times for each (n, d) x {non-symbolic,
+//   symbolic}
 
-struct RmsNormMlpConfig { int n, d; };
+struct RmsNormMlpConfig {
+  int n, d;
+};
 
 static RmsNormMlpConfig const kDebugConfig{16, 4096};
 
 static std::vector<RmsNormMlpConfig> get_configs() {
   std::vector<RmsNormMlpConfig> configs;
-  for (int n : {8, 16})
-  for (int d : {1024, 2048, 4096})
-    configs.push_back({n, d});
+  for (int n : {8, 16}) {
+    for (int d : {1024, 2048, 4096}) {
+      configs.push_back({n, d});
+    }
+  }
   return configs;
 }
 
@@ -55,9 +64,9 @@ static void build_ref_graph(kernel::Graph &g, int n, int d) {
   kernel::DTensor W_gate = g.new_input(
       {d, d}, {(size_t)d, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
   kernel::DTensor X_norm = g.rms_norm(X, {d});
-  kernel::DTensor U      = g.matmul(X_norm, W_up);
-  kernel::DTensor Gx     = g.matmul(X_norm, W_gate);
-  kernel::DTensor O      = g.mul(U, Gx);
+  kernel::DTensor U = g.matmul(X_norm, W_up);
+  kernel::DTensor Gx = g.matmul(X_norm, W_gate);
+  kernel::DTensor O = g.mul(U, Gx);
   g.mark_output(O);
 }
 
@@ -87,8 +96,8 @@ static void build_ref_graph(kernel::Graph &g, int n, int d) {
 //
 // Smem per TB: bX(1KB) + bW_up(8KB) + bW_gate(8KB) + intermediates ≈ 30KB
 static void build_fused_graph(kernel::Graph &g) {
-  int const n = kDebugConfig.n;  // 8
-  int const d = kDebugConfig.d;  // 4096
+  int const n = kDebugConfig.n; // 8
+  int const d = kDebugConfig.d; // 4096
 
   kernel::DTensor X = g.new_input(
       {n, d}, {(size_t)d, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
@@ -98,25 +107,24 @@ static void build_fused_graph(kernel::Graph &g) {
       {d, d}, {(size_t)d, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
 
   {
-    dim3 grid_dim  = {64, 1, 1};
+    dim3 grid_dim = {64, 1, 1};
     dim3 block_dim = {128, 1, 1};
-    threadblock::Graph bgraph(grid_dim, block_dim,
-                              /*forloop_range=*/64, /*reduction_dimx=*/64);
+    threadblock::Graph bgraph(grid_dim,
+                              block_dim,
+                              /*forloop_range=*/64,
+                              /*reduction_dimx=*/64);
 
     // bX: (8, 64) per iter – all TBs read the same X tiles (no grid partition)
-    threadblock::STensor bX =
-        bgraph.new_input(X, {-1, -1, -1}, /*forloop_dim=*/1,
-                         layout::SmemRowMajor);
+    threadblock::STensor bX = bgraph.new_input(
+        X, {-1, -1, -1}, /*forloop_dim=*/1, layout::SmemRowMajor);
     // bW_up / bW_gate: (64, 64) per iter – each TB reads its own column block
-    threadblock::STensor bW_up =
-        bgraph.new_input(W_up,   {1, -1, -1}, /*forloop_dim=*/0,
-                         layout::SmemRowMajor);
-    threadblock::STensor bW_gate =
-        bgraph.new_input(W_gate, {1, -1, -1}, /*forloop_dim=*/0,
-                         layout::SmemRowMajor);
+    threadblock::STensor bW_up = bgraph.new_input(
+        W_up, {1, -1, -1}, /*forloop_dim=*/0, layout::SmemRowMajor);
+    threadblock::STensor bW_gate = bgraph.new_input(
+        W_gate, {1, -1, -1}, /*forloop_dim=*/0, layout::SmemRowMajor);
 
     // Partial matmul results per K-tile
-    threadblock::STensor bM_up   = bgraph.matmul(bX, bW_up);   // (8, 64)
+    threadblock::STensor bM_up = bgraph.matmul(bX, bW_up);     // (8, 64)
     threadblock::STensor bM_gate = bgraph.matmul(bX, bW_gate); // (8, 64)
 
     // rms(X[i,:]) – reduces along last dim of each X tile, accumulates across
@@ -126,35 +134,35 @@ static void build_fused_graph(kernel::Graph &g) {
 
     // X @ W_up  and  X @ W_gate  via standard accumulation
     threadblock::STensor bAccUp =
-        bgraph.forloop_accum(bM_up,   type::TB_FORLOOP_ACCUM_NO_RED_OP); // (8,64)
-    threadblock::STensor bAccGate =
-        bgraph.forloop_accum(bM_gate, type::TB_FORLOOP_ACCUM_NO_RED_OP); // (8,64)
+        bgraph.forloop_accum(bM_up, type::TB_FORLOOP_ACCUM_NO_RED_OP); // (8,64)
+    threadblock::STensor bAccGate = bgraph.forloop_accum(
+        bM_gate, type::TB_FORLOOP_ACCUM_NO_RED_OP); // (8,64)
 
     // rms_norm(X) @ W_up   = (X @ W_up)   / rms(X)   (broadcasts (8,1) divisor)
-    threadblock::STensor bUp   = bgraph.div(bAccUp,   bAccRms); // (8,64)
+    threadblock::STensor bUp = bgraph.div(bAccUp, bAccRms); // (8,64)
     // rms_norm(X) @ W_gate = (X @ W_gate) / rms(X)
     threadblock::STensor bGate = bgraph.div(bAccGate, bAccRms); // (8,64)
 
     // GLU: element-wise multiply
-    threadblock::STensor bO = bgraph.mul(bUp, bGate);           // (8,64)
+    threadblock::STensor bO = bgraph.mul(bUp, bGate); // (8,64)
 
-    bgraph.mark_output(bO, {1, -1, -1}, /*forloop_dim=*/-1,
-                       type::TB_EPILOGUE_NONE);
+    bgraph.mark_output(
+        bO, {1, -1, -1}, /*forloop_dim=*/-1, type::TB_EPILOGUE_NONE);
     std::vector<kernel::DTensor> outs = g.customized({X, W_up, W_gate}, bgraph);
     assert(outs.size() == 1);
-    g.mark_output(outs[0]);  // O: (8, 4096)
+    g.mark_output(outs[0]); // O: (8, 4096)
   }
 }
 
 // ---------------------------------------------------------------------------
 
-static std::string const kCkptDir     = "checkpoints/rmsnorm_mlp";
-static std::string const kSymCkpt     = kCkptDir + "/checkpoint_symbolic.json";
+static std::string const kCkptDir = "checkpoints/rmsnorm_mlp";
+static std::string const kSymCkpt = kCkptDir + "/checkpoint_symbolic.json";
 static std::string const kResultsFile = "results_rmsnorm_mlp.json";
 
 static std::string nonsym_ckpt(RmsNormMlpConfig const &cfg) {
-  return kCkptDir + "/checkpoint_n" + std::to_string(cfg.n) +
-         "_d" + std::to_string(cfg.d) + ".json";
+  return kCkptDir + "/checkpoint_n" + std::to_string(cfg.n) + "_d" +
+         std::to_string(cfg.d) + ".json";
 }
 
 static int find_result_idx(json const &results, RmsNormMlpConfig const &cfg) {
@@ -168,7 +176,8 @@ static int find_result_idx(json const &results, RmsNormMlpConfig const &cfg) {
 }
 
 static void run_experiments(std::vector<RmsNormMlpConfig> const &configs,
-                            bool force_nonsym, bool force_sym,
+                            bool force_nonsym,
+                            bool force_sym,
                             bool skip_nonsym = false,
                             bool skip_sym = false,
                             std::string const &sym_ckpt_override = "",
@@ -189,13 +198,17 @@ static void run_experiments(std::vector<RmsNormMlpConfig> const &configs,
   {
     kernel::Graph ref;
     build_ref_graph(ref, kDebugConfig.n, kDebugConfig.d);
-    for (auto const &op : ref.operators) op->fingerprint();
+    for (auto const &op : ref.operators) {
+      op->fingerprint();
+    }
     mirage::cpu::CTensor ref_fp =
         ref.operators.back()->input_tensors[0].copy_fingerprint_to_ctensor();
 
     kernel::Graph fused;
     build_fused_graph(fused);
-    for (auto const &op : fused.operators) op->fingerprint();
+    for (auto const &op : fused.operators) {
+      op->fingerprint();
+    }
 
     bool correct =
         fused.operators.back()->input_tensors[0].has_same_fingerprint(ref_fp);
@@ -216,99 +229,121 @@ static void run_experiments(std::vector<RmsNormMlpConfig> const &configs,
 
   // ---- Experiment 1: non-symbolic search (per-config checkpoint) ---------
   if (skip_nonsym) {
-    std::cout << "\n=== rmsnorm_mlp: non-symbolic search (skipped) ===" << std::endl;
+    std::cout << "\n=== rmsnorm_mlp: non-symbolic search (skipped) ==="
+              << std::endl;
   } else {
-  std::cout << "\n=== rmsnorm_mlp: non-symbolic search ===" << std::endl;
-  for (auto const &cfg : configs) {
-    std::cout << "[n=" << cfg.n << " d=" << cfg.d << "]" << std::endl;
+    std::cout << "\n=== rmsnorm_mlp: non-symbolic search ===" << std::endl;
+    for (auto const &cfg : configs) {
+      std::cout << "[n=" << cfg.n << " d=" << cfg.d << "]" << std::endl;
 
-    int idx = find_result_idx(results, cfg);
-    if (!force_nonsym && idx != -1 && results[idx].contains("non_symbolic_ms")) {
-      std::cout << "  already recorded: " << results[idx]["non_symbolic_ms"]
-                << " ms, skipping" << std::endl;
-      continue;
+      int idx = find_result_idx(results, cfg);
+      if (!force_nonsym && idx != -1 &&
+          results[idx].contains("non_symbolic_ms")) {
+        std::cout << "  already recorded: " << results[idx]["non_symbolic_ms"]
+                  << " ms, skipping" << std::endl;
+        continue;
+      }
+
+      kernel::Graph ref;
+      build_ref_graph(ref, cfg.n, cfg.d);
+      for (auto const &op : ref.operators) {
+        op->fingerprint();
+      }
+
+      double ns_search_time = 0;
+      std::vector<json> graphs = execute_search(ref,
+                                                nonsym_ckpt(cfg),
+                                                /*use_symbolic=*/false,
+                                                /*for_attention=*/false,
+                                                time_limit_sec,
+                                                explore_all_mappings,
+                                                &ns_search_time);
+      if (search_only) {
+        std::cout << "  --search-only: skipping profiling" << std::endl;
+        continue;
+      }
+      double ns_cp_time = 0;
+      auto [best_time, so_path] = profile_best_with_so(graphs, &ns_cp_time);
+      std::cout << "  Best time (non-symbolic): " << best_time << " ms"
+                << std::endl;
+      std::cout << "  Best .so file: " << so_path << std::endl;
+
+      if (!so_path.empty()) {
+        best_nonsym_so = so_path;
+      }
+
+      if (idx == -1) {
+        results.push_back({{"n", cfg.n}, {"d", cfg.d}});
+        idx = (int)results.size() - 1;
+      }
+      results[idx]["non_symbolic_ms"] = best_time;
+      results[idx]["non_symbolic_so"] = so_path;
+      results[idx]["non_symbolic_search_s"] = ns_search_time;
+      results[idx]["non_symbolic_compile_profile_s"] = ns_cp_time;
+      save_results(kResultsFile, results);
     }
-
-    kernel::Graph ref;
-    build_ref_graph(ref, cfg.n, cfg.d);
-    for (auto const &op : ref.operators) op->fingerprint();
-
-    double ns_search_time = 0;
-    std::vector<json> graphs =
-        execute_search(ref, nonsym_ckpt(cfg), /*use_symbolic=*/false,
-                       /*for_attention=*/false, time_limit_sec, explore_all_mappings,
-                       &ns_search_time);
-    if (search_only) {
-      std::cout << "  --search-only: skipping profiling" << std::endl;
-      continue;
-    }
-    double ns_cp_time = 0;
-    auto [best_time, so_path] = profile_best_with_so(graphs, &ns_cp_time);
-    std::cout << "  Best time (non-symbolic): " << best_time << " ms" << std::endl;
-    std::cout << "  Best .so file: " << so_path << std::endl;
-
-    if (!so_path.empty()) best_nonsym_so = so_path;
-
-    if (idx == -1) {
-      results.push_back({{"n", cfg.n}, {"d", cfg.d}});
-      idx = (int)results.size() - 1;
-    }
-    results[idx]["non_symbolic_ms"] = best_time;
-    results[idx]["non_symbolic_so"] = so_path;
-    results[idx]["non_symbolic_search_s"] = ns_search_time;
-    results[idx]["non_symbolic_compile_profile_s"] = ns_cp_time;
-    save_results(kResultsFile, results);
-  }
   } // end if (!skip_nonsym)
 
   // ---- Experiment 2: symbolic search (one shared checkpoint) -------------
   if (skip_sym) {
-    std::cout << "\n=== rmsnorm_mlp: symbolic search (skipped) ===" << std::endl;
+    std::cout << "\n=== rmsnorm_mlp: symbolic search (skipped) ==="
+              << std::endl;
   } else {
-  std::cout << "\n=== rmsnorm_mlp: symbolic search ===" << std::endl;
-  double sym_search_time = 0;
-  {
-    kernel::Graph ref;
-    build_ref_graph(ref, kDebugConfig.n, kDebugConfig.d);
-    for (auto const &op : ref.operators) op->fingerprint();
-    execute_search(ref, sym_ckpt, /*use_symbolic=*/true,
-                   /*for_attention=*/false, time_limit_sec, explore_all_mappings,
-                   &sym_search_time, symbolic_maps);
-  }
-  if (search_only) {
-    std::cout << "  --search-only: skipping per-config tuning" << std::endl;
-    return;
-  }
-  for (auto const &cfg : configs) {
-    std::cout << "[n=" << cfg.n << " d=" << cfg.d << "]" << std::endl;
-
-    int idx = find_result_idx(results, cfg);
-    if (!force_sym && idx != -1 && results[idx].contains("symbolic_ms")) {
-      std::cout << "  already recorded: " << results[idx]["symbolic_ms"]
-                << " ms, skipping" << std::endl;
-      continue;
+    std::cout << "\n=== rmsnorm_mlp: symbolic search ===" << std::endl;
+    double sym_search_time = 0;
+    {
+      kernel::Graph ref;
+      build_ref_graph(ref, kDebugConfig.n, kDebugConfig.d);
+      for (auto const &op : ref.operators) {
+        op->fingerprint();
+      }
+      execute_search(ref,
+                     sym_ckpt,
+                     /*use_symbolic=*/true,
+                     /*for_attention=*/false,
+                     time_limit_sec,
+                     explore_all_mappings,
+                     &sym_search_time,
+                     symbolic_maps);
     }
-
-    std::vector<json> graphs = load_graphs(sym_ckpt);
-    graphs = apply_input_shapes(
-        graphs, {{cfg.n, cfg.d}, {cfg.d, cfg.d}, {cfg.d, cfg.d}});
-    double sym_tune_time = 0;
-    auto [best_time, so_path] = auto_tune_best_with_so(graphs, &sym_tune_time);
-    std::cout << "  Best time (symbolic): " << best_time << " ms" << std::endl;
-    std::cout << "  Best .so file: " << so_path << std::endl;
-
-    if (!so_path.empty()) best_sym_so = so_path;
-
-    if (idx == -1) {
-      results.push_back({{"n", cfg.n}, {"d", cfg.d}});
-      idx = (int)results.size() - 1;
+    if (search_only) {
+      std::cout << "  --search-only: skipping per-config tuning" << std::endl;
+      return;
     }
-    results[idx]["symbolic_ms"] = best_time;
-    results[idx]["symbolic_so"] = so_path;
-    results[idx]["symbolic_search_s"] = sym_search_time;
-    results[idx]["symbolic_tune_s"] = sym_tune_time;
-    save_results(kResultsFile, results);
-  }
+    for (auto const &cfg : configs) {
+      std::cout << "[n=" << cfg.n << " d=" << cfg.d << "]" << std::endl;
+
+      int idx = find_result_idx(results, cfg);
+      if (!force_sym && idx != -1 && results[idx].contains("symbolic_ms")) {
+        std::cout << "  already recorded: " << results[idx]["symbolic_ms"]
+                  << " ms, skipping" << std::endl;
+        continue;
+      }
+
+      std::vector<json> graphs = load_graphs(sym_ckpt);
+      graphs = apply_input_shapes(
+          graphs, {{cfg.n, cfg.d}, {cfg.d, cfg.d}, {cfg.d, cfg.d}});
+      double sym_tune_time = 0;
+      auto [best_time, so_path] =
+          auto_tune_best_with_so(graphs, &sym_tune_time);
+      std::cout << "  Best time (symbolic): " << best_time << " ms"
+                << std::endl;
+      std::cout << "  Best .so file: " << so_path << std::endl;
+
+      if (!so_path.empty()) {
+        best_sym_so = so_path;
+      }
+
+      if (idx == -1) {
+        results.push_back({{"n", cfg.n}, {"d", cfg.d}});
+        idx = (int)results.size() - 1;
+      }
+      results[idx]["symbolic_ms"] = best_time;
+      results[idx]["symbolic_so"] = so_path;
+      results[idx]["symbolic_search_s"] = sym_search_time;
+      results[idx]["symbolic_tune_s"] = sym_tune_time;
+      save_results(kResultsFile, results);
+    }
   } // end if (!skip_sym)
 
   // ---- Summary -----------------------------------------------------------
@@ -317,21 +352,21 @@ static void run_experiments(std::vector<RmsNormMlpConfig> const &configs,
   std::cout << "Symbolic:     " << best_sym_so << std::endl;
   if (!best_nonsym_so.empty() && !best_sym_so.empty()) {
     auto const &cfg = configs.back();
-    size_t x_size  = cfg.n * cfg.d;
-    size_t w_size  = cfg.d * cfg.d;
-    size_t o_size  = cfg.n * cfg.d;
+    size_t x_size = cfg.n * cfg.d;
+    size_t w_size = cfg.d * cfg.d;
+    size_t o_size = cfg.n * cfg.d;
     std::cout << "\nTo verify correctness, run:" << std::endl;
     std::cout << "./check_correctness " << best_nonsym_so << " " << best_sym_so
               << " --inputs " << x_size << "," << w_size << "," << w_size
-              << " --outputs " << o_size
-              << " --buf 0" << std::endl;
+              << " --outputs " << o_size << " --buf 0" << std::endl;
   }
 }
 
 // Ablation study: measure search time with different symbolization levels.
-// Uses fork() + hard kill for timeout since verification can block indefinitely.
-#include <sys/wait.h>
+// Uses fork() + hard kill for timeout since verification can block
+// indefinitely.
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
@@ -343,19 +378,27 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
   };
 
   std::vector<AblationConfig> configs = {
-    {"all_sym",                    {true,  true,  true,  true,  true}},
-    {"no_omap",                    {true,  true,  true,  true,  false}},
-    {"no_fmap",                    {true,  true,  true,  false, true}},
-    {"no_imap",                    {true,  true,  false, true,  true}},
-    {"no_omap_fmap",               {true,  true,  true,  false, false}},
-    {"no_imap_omap",               {true,  true,  false, true,  false}},
-    {"no_maps",                    {true,  true,  false, false, false}},
+      {"all_sym", {true, true, true, true, true}},
+      {"no_omap", {true, true, true, true, false}},
+      {"no_fmap", {true, true, true, false, true}},
+      {"no_imap", {true, true, false, true, true}},
+      {"no_omap_fmap", {true, true, true, false, false}},
+      {"no_imap_omap", {true, true, false, true, false}},
+      {"no_maps", {true, true, false, false, false}},
   };
 
   printf("\n=== Ablation Study: rmsnorm_mlp n=%d d=%d (timeout=%.0fs) ===\n",
-         cfg.n, cfg.d, time_limit_sec);
+         cfg.n,
+         cfg.d,
+         time_limit_sec);
   printf("%-25s %5s %5s %5s %5s %5s  %10s\n",
-         "Config", "grid", "frnge", "imap", "fmap", "omap", "Time(s)");
+         "Config",
+         "grid",
+         "frnge",
+         "imap",
+         "fmap",
+         "omap",
+         "Time(s)");
   fflush(stdout);
 
   for (auto const &ac : configs) {
@@ -369,15 +412,20 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
       // Child: run search, exit with 0 on completion
       kernel::Graph ref;
       build_ref_graph(ref, cfg.n, cfg.d);
-      for (auto const &op : ref.operators) op->fingerprint();
+      for (auto const &op : ref.operators) {
+        op->fingerprint();
+      }
 
       search::AbstractExpr::symbolic_expr = true;
       search::GeneratorConfig gen_config =
-          get_generator_config(/*use_symbolic=*/true, /*for_attention=*/false,
-                               time_limit_sec, /*explore_all_mappings=*/false,
-                               /*symbolic_maps=*/false, ac.flags);
+          get_generator_config(/*use_symbolic=*/true,
+                               /*for_attention=*/false,
+                               time_limit_sec,
+                               /*explore_all_mappings=*/false,
+                               /*symbolic_maps=*/false,
+                               ac.flags);
       search::KernelGraphGenerator gen(ref, gen_config, ckpt.data());
-      gen.generate_kernel_graphs_symbolic();
+      gen.search_symbolic();
       _exit(0);
     }
     // Parent: wait with hard timeout
@@ -385,7 +433,9 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
     while (true) {
       int status;
       pid_t w = waitpid(pid, &status, WNOHANG);
-      if (w > 0) break; // child finished
+      if (w > 0) {
+        break; // child finished
+      }
       auto now = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(now - wall_start).count();
       if (elapsed > time_limit_sec) {
@@ -397,15 +447,16 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
       usleep(500000); // check every 0.5s
     }
     auto wall_end = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(wall_end - wall_start).count();
+    double elapsed =
+        std::chrono::duration<double>(wall_end - wall_start).count();
 
     printf("%-25s %5s %5s %5s %5s %5s  %10.1f%s\n",
            ac.name.c_str(),
            ac.flags.grid_dim ? "sym" : "enum",
-           ac.flags.frange   ? "sym" : "enum",
-           ac.flags.imap     ? "sym" : "enum",
-           ac.flags.fmap     ? "sym" : "enum",
-           ac.flags.omap     ? "sym" : "enum",
+           ac.flags.frange ? "sym" : "enum",
+           ac.flags.imap ? "sym" : "enum",
+           ac.flags.fmap ? "sym" : "enum",
+           ac.flags.omap ? "sym" : "enum",
            elapsed,
            timed_out ? " (timeout)" : "");
     fflush(stdout);
@@ -415,30 +466,39 @@ static void run_ablation(RmsNormMlpConfig const &cfg, double time_limit_sec) {
 }
 
 int main(int argc, char **argv) {
-  bool debug        = false;
+  bool debug = false;
   bool force_nonsym = false;
-  bool force_sym    = false;
-  bool skip_nonsym  = false;
-  bool skip_sym     = false;
-  bool explore_all  = false;
-  bool search_only  = false;
-  bool sym_maps     = false;
-  bool ablation     = false;
+  bool force_sym = false;
+  bool skip_nonsym = false;
+  bool skip_sym = false;
+  bool explore_all = false;
+  bool search_only = false;
+  bool sym_maps = false;
+  bool ablation = false;
   double time_limit = -1; // negative = use default (3600s)
   std::string sym_ckpt_override;
   std::string config_str;
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i]);
-    if (arg == "-d")                  debug        = true;
-    else if (arg == "--force-nonsym") force_nonsym = true;
-    else if (arg == "--force-sym")    force_sym    = true;
-    else if (arg == "--skip-nonsym")  skip_nonsym  = true;
-    else if (arg == "--skip-sym")     skip_sym     = true;
-    else if (arg == "--explore-all-maps") explore_all = true;
-    else if (arg == "--search-only")     search_only = true;
-    else if (arg == "--symbolic-maps")   sym_maps    = true;
-    else if (arg == "--ablation")        ablation    = true;
-    else if (arg == "--config") {
+    if (arg == "-d") {
+      debug = true;
+    } else if (arg == "--force-nonsym") {
+      force_nonsym = true;
+    } else if (arg == "--force-sym") {
+      force_sym = true;
+    } else if (arg == "--skip-nonsym") {
+      skip_nonsym = true;
+    } else if (arg == "--skip-sym") {
+      skip_sym = true;
+    } else if (arg == "--explore-all-maps") {
+      explore_all = true;
+    } else if (arg == "--search-only") {
+      search_only = true;
+    } else if (arg == "--symbolic-maps") {
+      sym_maps = true;
+    } else if (arg == "--ablation") {
+      ablation = true;
+    } else if (arg == "--config") {
       if (i + 1 >= argc) {
         std::cerr << "--config requires n,d argument\n";
         return 1;
@@ -476,15 +536,23 @@ int main(int argc, char **argv) {
     }
     configs.push_back({n, d});
   } else {
-    configs = debug ? std::vector<RmsNormMlpConfig>{kDebugConfig} : get_configs();
+    configs =
+        debug ? std::vector<RmsNormMlpConfig>{kDebugConfig} : get_configs();
   }
   if (ablation) {
     RmsNormMlpConfig cfg = configs.empty() ? kDebugConfig : configs[0];
     run_ablation(cfg, time_limit >= 0 ? time_limit : 3600.0);
     return 0;
   }
-  run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
-                  sym_ckpt_override, time_limit, explore_all, search_only,
+  run_experiments(configs,
+                  force_nonsym,
+                  force_sym,
+                  skip_nonsym,
+                  skip_sym,
+                  sym_ckpt_override,
+                  time_limit,
+                  explore_all,
+                  search_only,
                   sym_maps);
   return 0;
 }

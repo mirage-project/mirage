@@ -122,7 +122,8 @@ std::unordered_set<T> set_union(std::unordered_set<T> const &lhs,
 }
 
 template <typename T>
-std::unordered_set<T> set_union(std::vector<std::unordered_set<T>> const &sets) {
+std::unordered_set<T>
+    set_union(std::vector<std::unordered_set<T>> const &sets) {
   std::unordered_set<T> s;
   for (auto const &set : sets) {
     for (auto const &x : set) {
@@ -152,11 +153,15 @@ Acc foldl(std::vector<T> const &vec, Acc init, F f) {
 }
 
 template <typename T>
-std::vector<std::vector<T>> cartesian_product(const std::vector<std::vector<T>> &vecs) {
-  if (vecs.empty()) return {{}};
+std::vector<std::vector<T>>
+    cartesian_product(std::vector<std::vector<T>> const &vecs) {
+  if (vecs.empty()) {
+    return {{}};
+  }
   return foldl<std::vector<T>, std::vector<std::vector<T>>>(
-      vecs, std::vector<std::vector<T>>{{}},
-      [](const std::vector<std::vector<T>> &acc, const std::vector<T> &vec) {
+      vecs,
+      std::vector<std::vector<T>>{{}},
+      [](std::vector<std::vector<T>> const &acc, std::vector<T> const &vec) {
         std::vector<std::vector<T>> result;
         for (const auto &x : acc) {
           for (const auto &y : vec) {

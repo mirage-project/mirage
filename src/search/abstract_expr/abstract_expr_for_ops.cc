@@ -1,6 +1,6 @@
 #include "mirage/search/abstract_expr/abstract_expr_for_ops.h"
-#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/search/symbolic_graph/op_args.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include <iostream>
 
 namespace mirage {
@@ -237,12 +237,14 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
+          forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_rms(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
+          forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
@@ -250,12 +252,14 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
       if (!g.reduction_degree) {
         return nullptr;
       }
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.reduction_degree;
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
+          g.reduction_degree;
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
+          forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_SQUARE_OP: {

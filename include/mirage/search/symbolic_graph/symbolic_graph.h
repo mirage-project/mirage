@@ -8,8 +8,8 @@
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/type.h"
-#include "mirage/vector_types.h"
 #include "mirage/utils/containers.h"
+#include "mirage/vector_types.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -19,7 +19,8 @@ namespace search {
 
 class SymbolicTBGraph {
 public:
-  SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base, int num_parallel_dims);
+  SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base,
+                  int num_parallel_dims);
 
   threadblock::Graph *
       to_threadblock_graph(DimVarAssignment const &assignment,
@@ -27,14 +28,21 @@ public:
   bool add_operator(type::TBOperatorType op_type,
                     std::vector<int> input_indices);
   bool add_input(SymbolicDTensor dtensor);
-  bool add_input(SymbolicDTensor dtensor, std::vector<int> input_map, int forloop_dim);
-  // Mixed symbolic/concrete: sym_imap controls grid rows, sym_fmap controls forloop row
-  bool add_input(SymbolicDTensor dtensor, std::vector<int> input_map, int forloop_dim,
-                 bool sym_imap, bool sym_fmap);
+  bool add_input(SymbolicDTensor dtensor,
+                 std::vector<int> input_map,
+                 int forloop_dim);
+  // Mixed symbolic/concrete: sym_imap controls grid rows, sym_fmap controls
+  // forloop row
+  bool add_input(SymbolicDTensor dtensor,
+                 std::vector<int> input_map,
+                 int forloop_dim,
+                 bool sym_imap,
+                 bool sym_fmap);
   bool add_output(int input_index, mirage::type::TBEpilogueType epilogue_type);
-  bool add_output(int input_index, std::vector<int> output_map, type::TBEpilogueType epilogue_type);
+  bool add_output(int input_index,
+                  std::vector<int> output_map,
+                  type::TBEpilogueType epilogue_type);
   bool remove_last_operator();
-  bool check_memory_usage();
 
   // Return a copy of this TB graph with updated input dtensor shapes.
   // The new_input_dtensors vector must have one entry per TB_INPUT_OP.
@@ -106,9 +114,8 @@ void from_json(json const &j, SymbolicTBGraph &symbolic_tb_graph);
 void from_json(json const &j, SymbolicKNGraph &symbolic_kn_graph);
 
 SymbolicKNGraph construct_graph_with_different_input_shapes(
-  SymbolicKNGraph const &ref_graph,
-  std::vector<std::vector<int>> const &input_shapes
-);
+    SymbolicKNGraph const &ref_graph,
+    std::vector<std::vector<int>> const &input_shapes);
 
 } // namespace search
 } // namespace mirage

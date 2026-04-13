@@ -20,7 +20,8 @@
 //
 // Usage:
 //   ./symbolic_lora                        – sweep all (n, d, r) configs
-//   ./symbolic_lora -d                     – single debug config (n=8, d=4096, r=64)
+//   ./symbolic_lora -d                     – single debug config (n=8, d=4096,
+//   r=64)
 //   ./symbolic_lora --force-nonsym         – re-run non-symbolic search
 //   ./symbolic_lora --force-sym            – re-run symbolic search
 //   ./symbolic_lora --skip-nonsym          – skip non-symbolic search entirely
@@ -29,9 +30,12 @@
 //
 // Output files:
 //   checkpoints/lora/  – per-config and shared symbolic checkpoints
-//   results_lora.json  – best times for each (n, d, r) x {non-symbolic, symbolic}
+//   results_lora.json  – best times for each (n, d, r) x {non-symbolic,
+//   symbolic}
 
-struct LoRAConfig { int n, d, r; };
+struct LoRAConfig {
+  int n, d, r;
+};
 
 static LoRAConfig const kDebugConfig{8, 4096, 64};
 
@@ -39,8 +43,9 @@ static std::vector<LoRAConfig> get_configs() {
   std::vector<LoRAConfig> configs;
   int n = 8;
   int d = 4096;
-  for (int r : {16, 64, 128})
+  for (int r : {16, 64, 128}) {
     configs.push_back({n, d, r});
+  }
   return configs;
 }
 
@@ -52,21 +57,20 @@ static void build_ref_graph(kernel::Graph &g, int n, int d, int r) {
       {d, r}, {(size_t)r, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
   kernel::DTensor B = g.new_input(
       {r, d}, {(size_t)d, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor H = g.matmul(X, A);   // (n, r)
-  kernel::DTensor O = g.matmul(H, B);   // (n, d)
+  kernel::DTensor H = g.matmul(X, A); // (n, r)
+  kernel::DTensor O = g.matmul(H, B); // (n, d)
   g.mark_output(O);
 }
 
 // ---------------------------------------------------------------------------
 
-static std::string const kCkptDir     = "checkpoints/lora";
-static std::string const kSymCkpt     = kCkptDir + "/checkpoint_symbolic.json";
+static std::string const kCkptDir = "checkpoints/lora";
+static std::string const kSymCkpt = kCkptDir + "/checkpoint_symbolic.json";
 static std::string const kResultsFile = "results_lora.json";
 
 static std::string nonsym_ckpt(LoRAConfig const &cfg) {
-  return kCkptDir + "/checkpoint_n" + std::to_string(cfg.n) +
-         "_d" + std::to_string(cfg.d) +
-         "_r" + std::to_string(cfg.r) + ".json";
+  return kCkptDir + "/checkpoint_n" + std::to_string(cfg.n) + "_d" +
+         std::to_string(cfg.d) + "_r" + std::to_string(cfg.r) + ".json";
 }
 
 static int find_result_idx(json const &results, LoRAConfig const &cfg) {
@@ -81,7 +85,8 @@ static int find_result_idx(json const &results, LoRAConfig const &cfg) {
 }
 
 static void run_experiments(std::vector<LoRAConfig> const &configs,
-                            bool force_nonsym, bool force_sym,
+                            bool force_nonsym,
+                            bool force_sym,
                             bool skip_nonsym = false,
                             bool skip_sym = false,
                             std::string const &sym_ckpt_override = "",
@@ -101,99 +106,119 @@ static void run_experiments(std::vector<LoRAConfig> const &configs,
   if (skip_nonsym) {
     std::cout << "\n=== lora: non-symbolic search (skipped) ===" << std::endl;
   } else {
-  std::cout << "\n=== lora: non-symbolic search ===" << std::endl;
-  for (auto const &cfg : configs) {
-    std::cout << "[n=" << cfg.n << " d=" << cfg.d << " r=" << cfg.r << "]"
-              << std::endl;
+    std::cout << "\n=== lora: non-symbolic search ===" << std::endl;
+    for (auto const &cfg : configs) {
+      std::cout << "[n=" << cfg.n << " d=" << cfg.d << " r=" << cfg.r << "]"
+                << std::endl;
 
-    int idx = find_result_idx(results, cfg);
-    if (!force_nonsym && idx != -1 && results[idx].contains("non_symbolic_ms")) {
-      std::cout << "  already recorded: " << results[idx]["non_symbolic_ms"]
-                << " ms, skipping" << std::endl;
-      continue;
+      int idx = find_result_idx(results, cfg);
+      if (!force_nonsym && idx != -1 &&
+          results[idx].contains("non_symbolic_ms")) {
+        std::cout << "  already recorded: " << results[idx]["non_symbolic_ms"]
+                  << " ms, skipping" << std::endl;
+        continue;
+      }
+
+      kernel::Graph ref;
+      build_ref_graph(ref, cfg.n, cfg.d, cfg.r);
+      for (auto const &op : ref.operators) {
+        op->fingerprint();
+      }
+
+      double ns_search_time = 0;
+      std::vector<json> graphs = execute_search(ref,
+                                                nonsym_ckpt(cfg),
+                                                /*use_symbolic=*/false,
+                                                /*for_attention=*/false,
+                                                time_limit_sec,
+                                                explore_all_mappings,
+                                                &ns_search_time);
+      if (search_only) {
+        std::cout << "  --search-only: skipping profiling" << std::endl;
+        continue;
+      }
+      double ns_cp_time = 0;
+      auto [best_time, so_path] = profile_best_with_so(graphs, &ns_cp_time);
+      std::cout << "  Best time (non-symbolic): " << best_time << " ms"
+                << std::endl;
+      std::cout << "  Best .so file: " << so_path << std::endl;
+
+      if (!so_path.empty()) {
+        best_nonsym_so = so_path;
+      }
+
+      if (idx == -1) {
+        results.push_back({{"n", cfg.n}, {"d", cfg.d}, {"r", cfg.r}});
+        idx = (int)results.size() - 1;
+      }
+      results[idx]["non_symbolic_ms"] = best_time;
+      results[idx]["non_symbolic_so"] = so_path;
+      results[idx]["non_symbolic_search_s"] = ns_search_time;
+      results[idx]["non_symbolic_compile_profile_s"] = ns_cp_time;
+      save_results(kResultsFile, results);
     }
-
-    kernel::Graph ref;
-    build_ref_graph(ref, cfg.n, cfg.d, cfg.r);
-    for (auto const &op : ref.operators) op->fingerprint();
-
-    double ns_search_time = 0;
-    std::vector<json> graphs =
-        execute_search(ref, nonsym_ckpt(cfg), /*use_symbolic=*/false,
-                       /*for_attention=*/false, time_limit_sec, explore_all_mappings,
-                       &ns_search_time);
-    if (search_only) {
-      std::cout << "  --search-only: skipping profiling" << std::endl;
-      continue;
-    }
-    double ns_cp_time = 0;
-    auto [best_time, so_path] = profile_best_with_so(graphs, &ns_cp_time);
-    std::cout << "  Best time (non-symbolic): " << best_time << " ms" << std::endl;
-    std::cout << "  Best .so file: " << so_path << std::endl;
-
-    if (!so_path.empty()) best_nonsym_so = so_path;
-
-    if (idx == -1) {
-      results.push_back({{"n", cfg.n}, {"d", cfg.d}, {"r", cfg.r}});
-      idx = (int)results.size() - 1;
-    }
-    results[idx]["non_symbolic_ms"] = best_time;
-    results[idx]["non_symbolic_so"] = so_path;
-    results[idx]["non_symbolic_search_s"] = ns_search_time;
-    results[idx]["non_symbolic_compile_profile_s"] = ns_cp_time;
-    save_results(kResultsFile, results);
-  }
   } // end if (!skip_nonsym)
 
   // ---- Experiment 2: symbolic search (one shared checkpoint) -------------
   if (skip_sym) {
     std::cout << "\n=== lora: symbolic search (skipped) ===" << std::endl;
   } else {
-  std::cout << "\n=== lora: symbolic search ===" << std::endl;
-  double sym_search_time = 0;
-  {
-    kernel::Graph ref;
-    build_ref_graph(ref, kDebugConfig.n, kDebugConfig.d, kDebugConfig.r);
-    for (auto const &op : ref.operators) op->fingerprint();
-    execute_search(ref, sym_ckpt, /*use_symbolic=*/true,
-                   /*for_attention=*/false, time_limit_sec, explore_all_mappings,
-                   &sym_search_time, symbolic_maps);
-  }
-  if (search_only) {
-    std::cout << "  --search-only: skipping per-config tuning" << std::endl;
-    return;
-  }
-  for (auto const &cfg : configs) {
-    std::cout << "[n=" << cfg.n << " d=" << cfg.d << " r=" << cfg.r << "]"
-              << std::endl;
-
-    int idx = find_result_idx(results, cfg);
-    if (!force_sym && idx != -1 && results[idx].contains("symbolic_ms")) {
-      std::cout << "  already recorded: " << results[idx]["symbolic_ms"]
-                << " ms, skipping" << std::endl;
-      continue;
+    std::cout << "\n=== lora: symbolic search ===" << std::endl;
+    double sym_search_time = 0;
+    {
+      kernel::Graph ref;
+      build_ref_graph(ref, kDebugConfig.n, kDebugConfig.d, kDebugConfig.r);
+      for (auto const &op : ref.operators) {
+        op->fingerprint();
+      }
+      execute_search(ref,
+                     sym_ckpt,
+                     /*use_symbolic=*/true,
+                     /*for_attention=*/false,
+                     time_limit_sec,
+                     explore_all_mappings,
+                     &sym_search_time,
+                     symbolic_maps);
     }
-
-    std::vector<json> graphs = load_graphs(sym_ckpt);
-    graphs = apply_input_shapes(
-        graphs, {{cfg.n, cfg.d}, {cfg.d, cfg.r}, {cfg.r, cfg.d}});
-    double sym_tune_time = 0;
-    auto [best_time, so_path] = auto_tune_best_with_so(graphs, &sym_tune_time);
-    std::cout << "  Best time (symbolic): " << best_time << " ms" << std::endl;
-    std::cout << "  Best .so file: " << so_path << std::endl;
-
-    if (!so_path.empty()) best_sym_so = so_path;
-
-    if (idx == -1) {
-      results.push_back({{"n", cfg.n}, {"d", cfg.d}, {"r", cfg.r}});
-      idx = (int)results.size() - 1;
+    if (search_only) {
+      std::cout << "  --search-only: skipping per-config tuning" << std::endl;
+      return;
     }
-    results[idx]["symbolic_ms"] = best_time;
-    results[idx]["symbolic_so"] = so_path;
-    results[idx]["symbolic_search_s"] = sym_search_time;
-    results[idx]["symbolic_tune_s"] = sym_tune_time;
-    save_results(kResultsFile, results);
-  }
+    for (auto const &cfg : configs) {
+      std::cout << "[n=" << cfg.n << " d=" << cfg.d << " r=" << cfg.r << "]"
+                << std::endl;
+
+      int idx = find_result_idx(results, cfg);
+      if (!force_sym && idx != -1 && results[idx].contains("symbolic_ms")) {
+        std::cout << "  already recorded: " << results[idx]["symbolic_ms"]
+                  << " ms, skipping" << std::endl;
+        continue;
+      }
+
+      std::vector<json> graphs = load_graphs(sym_ckpt);
+      graphs = apply_input_shapes(
+          graphs, {{cfg.n, cfg.d}, {cfg.d, cfg.r}, {cfg.r, cfg.d}});
+      double sym_tune_time = 0;
+      auto [best_time, so_path] =
+          auto_tune_best_with_so(graphs, &sym_tune_time);
+      std::cout << "  Best time (symbolic): " << best_time << " ms"
+                << std::endl;
+      std::cout << "  Best .so file: " << so_path << std::endl;
+
+      if (!so_path.empty()) {
+        best_sym_so = so_path;
+      }
+
+      if (idx == -1) {
+        results.push_back({{"n", cfg.n}, {"d", cfg.d}, {"r", cfg.r}});
+        idx = (int)results.size() - 1;
+      }
+      results[idx]["symbolic_ms"] = best_time;
+      results[idx]["symbolic_so"] = so_path;
+      results[idx]["symbolic_search_s"] = sym_search_time;
+      results[idx]["symbolic_tune_s"] = sym_tune_time;
+      save_results(kResultsFile, results);
+    }
   } // end if (!skip_sym)
 
   // ---- Summary -----------------------------------------------------------
@@ -202,41 +227,48 @@ static void run_experiments(std::vector<LoRAConfig> const &configs,
   std::cout << "Symbolic:     " << best_sym_so << std::endl;
   if (!best_nonsym_so.empty() && !best_sym_so.empty()) {
     auto const &cfg = configs.back();
-    size_t x_size  = cfg.n * cfg.d;
-    size_t a_size  = cfg.d * cfg.r;
-    size_t b_size  = cfg.r * cfg.d;
-    size_t o_size  = cfg.n * cfg.d;
+    size_t x_size = cfg.n * cfg.d;
+    size_t a_size = cfg.d * cfg.r;
+    size_t b_size = cfg.r * cfg.d;
+    size_t o_size = cfg.n * cfg.d;
     std::cout << "\nTo verify correctness, run:" << std::endl;
     std::cout << "./check_correctness " << best_nonsym_so << " " << best_sym_so
               << " --inputs " << x_size << "," << a_size << "," << b_size
-              << " --outputs " << o_size
-              << " --buf 0" << std::endl;
+              << " --outputs " << o_size << " --buf 0" << std::endl;
   }
 }
 
 int main(int argc, char **argv) {
-  bool debug        = false;
+  bool debug = false;
   bool force_nonsym = false;
-  bool force_sym    = false;
-  bool skip_nonsym  = false;
-  bool skip_sym     = false;
-  bool explore_all  = false;
-  bool search_only  = false;
-  bool sym_maps     = false;
+  bool force_sym = false;
+  bool skip_nonsym = false;
+  bool skip_sym = false;
+  bool explore_all = false;
+  bool search_only = false;
+  bool sym_maps = false;
   double time_limit = -1;
   std::string sym_ckpt_override;
   std::string config_str;
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i]);
-    if (arg == "-d")                  debug        = true;
-    else if (arg == "--force-nonsym") force_nonsym = true;
-    else if (arg == "--force-sym")    force_sym    = true;
-    else if (arg == "--skip-nonsym")  skip_nonsym  = true;
-    else if (arg == "--skip-sym")     skip_sym     = true;
-    else if (arg == "--explore-all-maps") explore_all = true;
-    else if (arg == "--search-only")     search_only = true;
-    else if (arg == "--symbolic-maps")   sym_maps    = true;
-    else if (arg == "--config") {
+    if (arg == "-d") {
+      debug = true;
+    } else if (arg == "--force-nonsym") {
+      force_nonsym = true;
+    } else if (arg == "--force-sym") {
+      force_sym = true;
+    } else if (arg == "--skip-nonsym") {
+      skip_nonsym = true;
+    } else if (arg == "--skip-sym") {
+      skip_sym = true;
+    } else if (arg == "--explore-all-maps") {
+      explore_all = true;
+    } else if (arg == "--search-only") {
+      search_only = true;
+    } else if (arg == "--symbolic-maps") {
+      sym_maps = true;
+    } else if (arg == "--config") {
       if (i + 1 >= argc) {
         std::cerr << "--config requires n,d,r argument\n";
         return 1;
@@ -276,8 +308,15 @@ int main(int argc, char **argv) {
   } else {
     configs = debug ? std::vector<LoRAConfig>{kDebugConfig} : get_configs();
   }
-  run_experiments(configs, force_nonsym, force_sym, skip_nonsym, skip_sym,
-                  sym_ckpt_override, time_limit, explore_all, search_only,
+  run_experiments(configs,
+                  force_nonsym,
+                  force_sym,
+                  skip_nonsym,
+                  skip_sym,
+                  sym_ckpt_override,
+                  time_limit,
+                  explore_all,
+                  search_only,
                   sym_maps);
   return 0;
 }

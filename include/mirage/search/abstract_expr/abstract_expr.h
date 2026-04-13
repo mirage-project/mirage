@@ -41,7 +41,8 @@ bool subexpr_to_final_expr(std::shared_ptr<AbstractExpr const> expr);
 std::vector<bool> subexpr_to_final_expr(
     std::vector<std::shared_ptr<AbstractExpr const>> const &exprs);
 
-bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1, std::shared_ptr<AbstractExpr const> expr2);
+bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1,
+                   std::shared_ptr<AbstractExpr const> expr2);
 
 class Var : public AbstractExpr {
 public:

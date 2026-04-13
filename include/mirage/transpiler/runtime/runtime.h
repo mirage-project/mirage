@@ -29,10 +29,10 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 
 // Entrypoint for C/C++
 extern "C" int execute_mugraph(std::vector<void const *> input_tensors,
-                                std::vector<void *> output_tensors,
-                                void *buf,
-                                cudaStream_t stream,
-                                void *profiler_buffer) {
+                               std::vector<void *> output_tensors,
+                               void *buf,
+                               cudaStream_t stream,
+                               void *profiler_buffer) {
 
   static bool inited = false;
   if (!inited) {

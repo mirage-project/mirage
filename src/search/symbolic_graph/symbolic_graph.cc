@@ -18,17 +18,20 @@
 namespace mirage {
 namespace search {
 
-SymbolicTBGraph::SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base, int num_parallel_dims)
+SymbolicTBGraph::SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base,
+                                 int num_parallel_dims)
     : dim_variable_index_base(dim_variable_index_base),
       next_dim_variable_index(dim_variable_index_base) {
   assert(num_parallel_dims <= 3);
   for (int i = 0; i < num_parallel_dims; ++i) {
-    grid_dim.push_back(std::make_shared<TensorDimVar>(next_dim_variable_index++));
+    grid_dim.push_back(
+        std::make_shared<TensorDimVar>(next_dim_variable_index++));
   }
   block_dim.push_back(std::make_shared<TensorDimConst>(128));
   block_dim.push_back(std::make_shared<TensorDimConst>(1));
   block_dim.push_back(std::make_shared<TensorDimConst>(1));
-  forloop_range = SymbolicTensorDim(std::make_shared<TensorDimVar>(next_dim_variable_index++));
+  forloop_range = SymbolicTensorDim(
+      std::make_shared<TensorDimVar>(next_dim_variable_index++));
 }
 
 bool SymbolicTBGraph::remove_last_operator() {
@@ -61,10 +64,15 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
   int reduction_dimx = [&]() {
     std::unordered_set<int> reduction_dimx_candidates;
     for (size_t i = 0; i < this->operators.size(); ++i) {
-      if (this->operators[i].op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
-        std::shared_ptr<TBReductionOpArgs const> args = std::static_pointer_cast<TBReductionOpArgs const>(this->operators[i].args);
-        SymbolicSTensor reduced_tensor = this->tensors[this->output_indices[i][0]];
-        int reduction_dimx = assignment.get_value(reduced_tensor.dims[args->reduce_dim]);
+      if (this->operators[i].op_type ==
+          type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
+        std::shared_ptr<TBReductionOpArgs const> args =
+            std::static_pointer_cast<TBReductionOpArgs const>(
+                this->operators[i].args);
+        SymbolicSTensor reduced_tensor =
+            this->tensors[this->output_indices[i][0]];
+        int reduction_dimx =
+            assignment.get_value(reduced_tensor.dims[args->reduce_dim]);
         reduction_dimx_candidates.insert(reduction_dimx);
       }
     }
@@ -89,16 +97,20 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
 
     if (this->operators[i].op_type == type::TBOperatorType::TB_INPUT_OP) {
       kernel::DTensor dtensor = inputs[i];
-      TBInputOpArgs const *args = static_cast<TBInputOpArgs const *>(this->operators[i].args.get());
+      TBInputOpArgs const *args =
+          static_cast<TBInputOpArgs const *>(this->operators[i].args.get());
       int3 input_map = vec_to_int3(args->input_map.to_legacy_map());
       int forloop_dim = args->input_map.to_legacy_forloop_dim();
-      op = graph->create_input_op(dtensor, input_map, forloop_dim, layout::SmemRowMajor, false);
-    } else if (this->operators[i].op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+      op = graph->create_input_op(
+          dtensor, input_map, forloop_dim, layout::SmemRowMajor, false);
+    } else if (this->operators[i].op_type ==
+               type::TBOperatorType::TB_OUTPUT_OP) {
       std::vector<threadblock::STensor> input_tensors;
       for (int input_index : this->input_indices[i]) {
         input_tensors.push_back(tensors_val[input_index]);
       }
-      TBOutputOpArgs const *args = static_cast<TBOutputOpArgs const *>(this->operators[i].args.get());
+      TBOutputOpArgs const *args =
+          static_cast<TBOutputOpArgs const *>(this->operators[i].args.get());
       int3 output_map = vec_to_int3(args->output_map.to_legacy_map());
       mirage::type::TBEpilogueType epilogue = args->epilogue;
       op = graph->create_output_op(input_tensors[0], output_map, -1, epilogue);
@@ -119,19 +131,13 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
     }
   }
   return graph;
-} 
-
-bool SymbolicTBGraph::check_memory_usage() {
-  assert(false && "TBD");
-  return true;
 }
 
 // Recursively walk an expression tree; for every node of the form
 // TensorDimDiv(const C, var v) where v->index == var_index, push C.
-static void collect_divisor_constants(
-    SymbolicTensorDim const &expr,
-    tensor_dim_var_index_t var_index,
-    std::vector<int> &out) {
+static void collect_divisor_constants(SymbolicTensorDim const &expr,
+                                      tensor_dim_var_index_t var_index,
+                                      std::vector<int> &out) {
   if (expr->is_div()) {
     auto d = std::static_pointer_cast<TensorDimDiv const>(expr);
     if (d->rhs->is_var() && d->lhs->is_const()) {
@@ -163,7 +169,9 @@ static bool check_dim_divisibility(SymbolicTensorDim const &expr,
     auto d = std::static_pointer_cast<TensorDimDiv const>(expr);
     auto lv = d->lhs->maybe_get_value(assignment);
     auto rv = d->rhs->maybe_get_value(assignment);
-    if (lv && rv && (*rv == 0 || *lv % *rv != 0)) return false;
+    if (lv && rv && (*rv == 0 || *lv % *rv != 0)) {
+      return false;
+    }
     return check_dim_divisibility(d->lhs, assignment) &&
            check_dim_divisibility(d->rhs, assignment);
   }
@@ -205,7 +213,9 @@ SymbolicTBGraph SymbolicTBGraph::with_updated_input_shapes(
                                     ? new_input_dtensors[input_idx]
                                     : args->dtensor;
       if (args->input_map.is_concrete()) {
-        result.add_input(dtensor, args->input_map.to_legacy_map(), args->input_map.to_legacy_forloop_dim());
+        result.add_input(dtensor,
+                         args->input_map.to_legacy_map(),
+                         args->input_map.to_legacy_forloop_dim());
       } else {
         // Symbolic map: rebuild with the same SymbolicMap but new dtensor
         result.add_input(dtensor);
@@ -216,7 +226,8 @@ SymbolicTBGraph SymbolicTBGraph::with_updated_input_shapes(
           static_cast<TBOutputOpArgs const *>(op.args.get());
       int tb_input_index = this->input_indices[i][0];
       if (args->output_map.is_concrete()) {
-        result.add_output(tb_input_index, args->output_map.to_legacy_map(), args->epilogue);
+        result.add_output(
+            tb_input_index, args->output_map.to_legacy_map(), args->epilogue);
       } else {
         result.add_output(tb_input_index, args->epilogue);
       }
@@ -235,12 +246,14 @@ int SymbolicTBGraph::get_initial_value_for_var(
       collect_divisor_constants(dim, var_index, constants);
     }
   }
-  if (constants.empty()) return 4;  // no divisibility constraint; safe default
+  if (constants.empty()) {
+    return 4; // no divisibility constraint; safe default
+  }
   int g = constants[0];
   for (size_t i = 1; i < constants.size(); ++i) {
     g = std::gcd(g, constants[i]);
   }
-  return g;  // largest value that divides all constants exactly
+  return g; // largest value that divides all constants exactly
 }
 
 bool SymbolicTBGraph::is_valid_assignment(
@@ -248,11 +261,13 @@ bool SymbolicTBGraph::is_valid_assignment(
   // (a) Divisibility: every C/v node must divide evenly.
   for (auto const &tensor : tensors) {
     for (auto const &dim : tensor.dims) {
-      if (!check_dim_divisibility(dim, assignment)) return false;
+      if (!check_dim_divisibility(dim, assignment)) {
+        return false;
+      }
     }
   }
-  // (b) Smem: mirror get_memory_usage_constraint() logic but in bytes (fp16 = 2).
-  // get_tensor_size() returns element count; multiply by 2 to get bytes.
+  // (b) Smem: mirror get_memory_usage_constraint() logic but in bytes (fp16 =
+  // 2). get_tensor_size() returns element count; multiply by 2 to get bytes.
   SymbolicTensorDim total_elems = dim_expr_make_const(0);
   for (size_t i = 0; i < operators.size(); ++i) {
     if (is_unary(operators[i].op_type) ||
@@ -265,8 +280,10 @@ bool SymbolicTBGraph::is_valid_assignment(
     }
   }
   auto elems = total_elems->maybe_get_value(assignment);
-  if (!elems.has_value()) return false;          // unresolved variable
-  return (*elems * 2) <= (int)mirage::config::MAX_SMEM_SIZE;  // fp16 = 2 bytes
+  if (!elems.has_value()) {
+    return false; // unresolved variable
+  }
+  return (*elems * 2) <= (int)mirage::config::MAX_SMEM_SIZE; // fp16 = 2 bytes
 }
 
 bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
@@ -320,7 +337,8 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           }
           return false;
         }
-        dim_equalities.insert(dim_equalities.end(), new_eq.begin(), new_eq.end());
+        dim_equalities.insert(
+            dim_equalities.end(), new_eq.begin(), new_eq.end());
       }
       this->operators.push_back(SymbolicTBOp(op_type));
       this->tensors.push_back(A);
@@ -383,11 +401,14 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           }
           return false;
         }
-        if (!A.dims[A.dims.size() - 1]->can_be_symbolically_equivalent_to(B.dims[B.dims.size() - 2])) {
+        if (!A.dims[A.dims.size() - 1]->can_be_symbolically_equivalent_to(
+                B.dims[B.dims.size() - 2])) {
           return false;
         }
-        new_eq.push_back({A.dims[A.dims.size() - 1], B.dims[B.dims.size() - 2]});
-        dim_equalities.insert(dim_equalities.end(), new_eq.begin(), new_eq.end());
+        new_eq.push_back(
+            {A.dims[A.dims.size() - 1], B.dims[B.dims.size() - 2]});
+        dim_equalities.insert(
+            dim_equalities.end(), new_eq.begin(), new_eq.end());
       }
       this->operators.push_back(SymbolicTBOp(op_type));
       {
@@ -410,8 +431,10 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
       if ((int)A.dims.size() <= reduction_dim) {
         return false;
       }
-      this->operators.push_back(SymbolicTBOp(
-          op_type, std::make_shared<TBReductionOpArgs>(reduction_dim, dim_expr_make_const(1))));
+      this->operators.push_back(
+          SymbolicTBOp(op_type,
+                       std::make_shared<TBReductionOpArgs>(
+                           reduction_dim, dim_expr_make_const(1))));
       {
         std::vector<SymbolicTensorDim> dim_templates = A.dims;
         dim_templates[reduction_dim] = dim_expr_make_const(1);
@@ -441,10 +464,10 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
 
 bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor) {
   SymbolicMap sym_map(
-    /*num_grid_dims=*/grid_dim.size(),
-    /*num_data_dims=*/dtensor.dims.size(),
-    /*has_forloop=*/true,
-    /*index_counter=*/next_dim_variable_index);
+      /*num_grid_dims=*/grid_dim.size(),
+      /*num_data_dims=*/dtensor.dims.size(),
+      /*has_forloop=*/true,
+      /*index_counter=*/next_dim_variable_index);
   std::shared_ptr<OpArgs const> args =
       std::make_shared<TBInputOpArgs const>(dtensor, sym_map);
   SymbolicTBOp op(type::TBOperatorType::TB_INPUT_OP, args);
@@ -461,8 +484,9 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor) {
       }
       // forloop: same pattern with forloop_range
       SymbolicTensorDim forloop_entry = sym_map.at(sym_map.forloop_row(), d);
-      SymbolicTensorDim forloop_divisor =
-          dim_expr_make_const(1) - forloop_entry + forloop_entry * forloop_range;
+      SymbolicTensorDim forloop_divisor = dim_expr_make_const(1) -
+                                          forloop_entry +
+                                          forloop_entry * forloop_range;
       divisor = divisor * forloop_divisor;
       dim_templates[d] = dim_templates[d] / divisor;
     }
@@ -480,7 +504,9 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor) {
   return true;
 }
 
-bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor, std::vector<int> imap, int forloop_dim) {
+bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
+                                std::vector<int> imap,
+                                int forloop_dim) {
   SymbolicMap sym_map(grid_dim.size(), dtensor.dims.size(), imap, forloop_dim);
   std::shared_ptr<OpArgs const> args =
       std::make_shared<TBInputOpArgs const>(dtensor, sym_map);
@@ -522,9 +548,12 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
     return add_input(dtensor, imap, forloop_dim);
   }
   // Mixed case: use mixed SymbolicMap constructor
-  SymbolicMap sym_map(grid_dim.size(), dtensor.dims.size(),
-                      sym_imap, sym_fmap,
-                      imap, forloop_dim,
+  SymbolicMap sym_map(grid_dim.size(),
+                      dtensor.dims.size(),
+                      sym_imap,
+                      sym_fmap,
+                      imap,
+                      forloop_dim,
                       next_dim_variable_index);
   std::shared_ptr<OpArgs const> args =
       std::make_shared<TBInputOpArgs const>(dtensor, sym_map);
@@ -540,8 +569,9 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
         divisor = divisor + sym_map.at(p, d) * grid_dim[p];
       }
       SymbolicTensorDim forloop_entry = sym_map.at(sym_map.forloop_row(), d);
-      SymbolicTensorDim forloop_divisor =
-          dim_expr_make_const(1) - forloop_entry + forloop_entry * forloop_range;
+      SymbolicTensorDim forloop_divisor = dim_expr_make_const(1) -
+                                          forloop_entry +
+                                          forloop_entry * forloop_range;
       divisor = divisor * forloop_divisor;
       dim_templates[d] = dim_templates[d] / divisor;
     }
@@ -559,17 +589,20 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
   return true;
 }
 
-bool SymbolicTBGraph::add_output(int input_index, type::TBEpilogueType epilogue_type) {
+bool SymbolicTBGraph::add_output(int input_index,
+                                 type::TBEpilogueType epilogue_type) {
   SymbolicMap sym_map(
-    /*num_grid_dims=*/grid_dim.size(),
-    /*num_data_dims=*/this->tensors[input_index].dims.size(),
-    /*has_forloop=*/false,
-    /*index_counter=*/next_dim_variable_index);
+      /*num_grid_dims=*/grid_dim.size(),
+      /*num_data_dims=*/this->tensors[input_index].dims.size(),
+      /*has_forloop=*/false,
+      /*index_counter=*/next_dim_variable_index);
 
   auto compute_symbolic_dtensor = [&]() {
-    std::vector<SymbolicTensorDim> dim_templates = this->tensors[input_index].dims;
+    std::vector<SymbolicTensorDim> dim_templates =
+        this->tensors[input_index].dims;
     for (size_t d = 0; d < dim_templates.size(); ++d) {
-      // multiplier = product over grid dims of: (1 - entry) + entry * grid_dim[p]
+      // multiplier = product over grid dims of: (1 - entry) + entry *
+      // grid_dim[p]
       //            = 1 when entry=0, grid_dim[p] when entry=1
       SymbolicTensorDim multiplier = dim_expr_make_const(1);
       for (size_t p = 0; p < grid_dim.size(); ++p) {
@@ -592,9 +625,12 @@ bool SymbolicTBGraph::add_output(int input_index, type::TBEpilogueType epilogue_
   return true;
 }
 
-bool SymbolicTBGraph::add_output(int input_index, std::vector<int> omap, type::TBEpilogueType epilogue_type) {
+bool SymbolicTBGraph::add_output(int input_index,
+                                 std::vector<int> omap,
+                                 type::TBEpilogueType epilogue_type) {
   auto compute_symbolic_dtensor = [&]() {
-    std::vector<SymbolicTensorDim> dim_templates = this->tensors[input_index].dims;
+    std::vector<SymbolicTensorDim> dim_templates =
+        this->tensors[input_index].dims;
     for (size_t i = 0; i < omap.size(); ++i) {
       if (omap[i] != -1) {
         dim_templates[omap[i]] = dim_templates[omap[i]] * grid_dim[i];
@@ -604,7 +640,8 @@ bool SymbolicTBGraph::add_output(int input_index, std::vector<int> omap, type::T
   };
 
   SymbolicDTensor dtensor = compute_symbolic_dtensor();
-  SymbolicMap sym_map(grid_dim.size(), this->tensors[input_index].dims.size(), omap);
+  SymbolicMap sym_map(
+      grid_dim.size(), this->tensors[input_index].dims.size(), omap);
   std::shared_ptr<OpArgs const> args =
       std::make_shared<TBOutputOpArgs const>(dtensor, sym_map, epilogue_type);
   SymbolicTBOp op(type::TBOperatorType::TB_OUTPUT_OP, args);
@@ -615,8 +652,8 @@ bool SymbolicTBGraph::add_output(int input_index, std::vector<int> omap, type::T
   return true;
 }
 
-mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(
-    DimVarAssignment const &assignment) const {
+mirage::kernel::Graph *
+    SymbolicKNGraph::to_kernel_graph(DimVarAssignment const &assignment) const {
   kernel::Graph *graph = new kernel::Graph();
   std::vector<kernel::DTensor> tensors_val;
   for (size_t i = 0; i < this->operators.size(); ++i) {
@@ -629,8 +666,10 @@ mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(
       std::shared_ptr<KNInputOpArgs const> args =
           std::static_pointer_cast<KNInputOpArgs const>(
               this->operators[i].args);
-      op = graph->create_input_op(args->input_dims, args->input_strides, args->data_type, args->layout);
-    } else if (this->operators[i].op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
+      op = graph->create_input_op(
+          args->input_dims, args->input_strides, args->data_type, args->layout);
+    } else if (this->operators[i].op_type ==
+               type::KNOperatorType::KN_CUSTOMIZED_OP) {
       std::shared_ptr<KNCustomizedOpArgs const> args =
           std::static_pointer_cast<KNCustomizedOpArgs const>(
               this->operators[i].args);
@@ -743,7 +782,8 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
           }
           return false;
         }
-        if (!A.dims[A.dims.size() - 1]->can_be_symbolically_equivalent_to(B.dims[B.dims.size() - 2])) {
+        if (!A.dims[A.dims.size() - 1]->can_be_symbolically_equivalent_to(
+                B.dims[B.dims.size() - 2])) {
           return false;
         }
       }
@@ -818,14 +858,14 @@ bool SymbolicKNGraph::add_input(std::vector<int> input_dims,
                                 mirage::type::DataType data_type,
                                 mirage::layout::DmemLayout layout,
                                 int3 input_map) {
-  this->operators.push_back(
-      SymbolicKNOp(type::KNOperatorType::KN_INPUT_OP,
-                   std::make_shared<KNInputOpArgs>(input_dims, input_strides, data_type, layout, input_map)));
+  this->operators.push_back(SymbolicKNOp(
+      type::KNOperatorType::KN_INPUT_OP,
+      std::make_shared<KNInputOpArgs>(
+          input_dims, input_strides, data_type, layout, input_map)));
   {
     std::vector<SymbolicTensorDim> dim_templates;
     for (size_t i = 0; i < input_dims.size(); i++) {
-      dim_templates.push_back(
-          dim_expr_make_const(input_dims[i]));
+      dim_templates.push_back(dim_expr_make_const(input_dims[i]));
     }
     SymbolicDTensor tensor(dim_templates);
     this->tensors.push_back(tensor);
@@ -914,8 +954,10 @@ void from_json(json const &j, SymbolicTBGraph &symbolic_tb_graph) {
     from_json(jt, t);
     symbolic_tb_graph.tensors.push_back(t);
   }
-  symbolic_tb_graph.input_indices = j.at("input_indices").get<std::vector<std::vector<int>>>();
-  symbolic_tb_graph.output_indices = j.at("output_indices").get<std::vector<std::vector<int>>>();
+  symbolic_tb_graph.input_indices =
+      j.at("input_indices").get<std::vector<std::vector<int>>>();
+  symbolic_tb_graph.output_indices =
+      j.at("output_indices").get<std::vector<std::vector<int>>>();
 }
 
 void from_json(json const &j, SymbolicKNGraph &symbolic_kn_graph) {
@@ -931,8 +973,10 @@ void from_json(json const &j, SymbolicKNGraph &symbolic_kn_graph) {
     from_json(jt, t);
     symbolic_kn_graph.tensors.push_back(t);
   }
-  symbolic_kn_graph.input_indices = j.at("input_indices").get<std::vector<std::vector<int>>>();
-  symbolic_kn_graph.output_indices = j.at("output_indices").get<std::vector<std::vector<int>>>();
+  symbolic_kn_graph.input_indices =
+      j.at("input_indices").get<std::vector<std::vector<int>>>();
+  symbolic_kn_graph.output_indices =
+      j.at("output_indices").get<std::vector<std::vector<int>>>();
 }
 
 namespace {
@@ -954,8 +998,7 @@ std::optional<std::vector<int>> get_concrete_dims(SymbolicDTensor const &t) {
     if (!d->is_const()) {
       return std::nullopt;
     }
-    dims.push_back(
-        std::static_pointer_cast<TensorDimConst const>(d)->value);
+    dims.push_back(std::static_pointer_cast<TensorDimConst const>(d)->value);
   }
   return dims;
 }
@@ -982,8 +1025,11 @@ SymbolicKNGraph construct_graph_with_different_input_shapes(
             std::static_pointer_cast<KNInputOpArgs const>(ref_op.args);
         std::vector<int> new_dims = input_shapes[input_op_idx++];
         std::vector<size_t> new_strides = default_strides_from_dims(new_dims);
-        if (!result.add_input(new_dims, new_strides, args->data_type,
-                             args->layout, args->input_map)) {
+        if (!result.add_input(new_dims,
+                              new_strides,
+                              args->data_type,
+                              args->layout,
+                              args->input_map)) {
           return SymbolicKNGraph();
         }
         break;

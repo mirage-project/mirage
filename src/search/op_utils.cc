@@ -20,8 +20,7 @@ bool is_binary(type::TBOperatorType op) {
 
 bool is_commutative(type::TBOperatorType op) {
   std::unordered_set<type::TBOperatorType> true_values{
-      type::TBOperatorType::TB_ADD_OP,
-      type::TBOperatorType::TB_MUL_OP};
+      type::TBOperatorType::TB_ADD_OP, type::TBOperatorType::TB_MUL_OP};
   return contains(true_values, op);
 }
 
@@ -61,8 +60,7 @@ bool is_binary(type::KNOperatorType op) {
 
 bool is_commutative(type::KNOperatorType op) {
   std::unordered_set<type::KNOperatorType> true_values{
-      type::KNOperatorType::KN_ADD_OP,
-      type::KNOperatorType::KN_MUL_OP};
+      type::KNOperatorType::KN_ADD_OP, type::KNOperatorType::KN_MUL_OP};
   return contains(true_values, op);
 }
 

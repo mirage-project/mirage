@@ -17,10 +17,13 @@ struct DimStrategy {
   std::vector<std::vector<int3>>
       get_input_map_cand(std::vector<DTensor> const &tensors, dim3 grid_dim);
   std::vector<std::vector<std::vector<int>>>
-      get_input_map_cand(std::vector<SymbolicDTensor> const &tensors, size_t num_parallel_dims);
+      get_input_map_cand(std::vector<SymbolicDTensor> const &tensors,
+                         size_t num_parallel_dims);
   std::vector<int3> get_output_map_cand(std::vector<STensor> const &tensors,
                                         dim3 grid_dim);
-  std::vector<std::vector<std::vector<int>>> get_output_map_cand(std::vector<SymbolicSTensor> const &tensors, size_t num_parallel_dims);
+  std::vector<std::vector<std::vector<int>>>
+      get_output_map_cand(std::vector<SymbolicSTensor> const &tensors,
+                          size_t num_parallel_dims);
   std::vector<dim3> get_grid_dim_cand(std::vector<DTensor> const &tensors);
   std::vector<dim3> get_block_dim_cand(std::vector<DTensor> const &tensors,
                                        dim3 grid_dim);
@@ -34,13 +37,15 @@ struct DimStrategy {
                              dim3 grid_dim,
                              dim3 block_dim,
                              std::vector<int> const &forloop_dim);
-  std::vector<SymbolicTensorDim> get_reduction_degree_cand(SymbolicKNGraph const &kn_graph);
+  std::vector<SymbolicTensorDim>
+      get_reduction_degree_cand(SymbolicKNGraph const &kn_graph);
   std::vector<std::vector<int>> get_unary_input(int num_tensors);
   std::vector<std::vector<int>> get_binary_input(int num_tensors);
   std::vector<std::vector<int>> get_binary_input_commutative(int num_tensors);
   std::vector<std::vector<int>> get_nary_input(int num_tensors, int n);
 
-  std::vector<size_t> get_num_parallel_dims_cand(std::vector<SymbolicDTensor> const &tensors);
+  std::vector<size_t>
+      get_num_parallel_dims_cand(std::vector<SymbolicDTensor> const &tensors);
 
   template <typename OpType, typename TensorType>
   std::vector<std::vector<int>>

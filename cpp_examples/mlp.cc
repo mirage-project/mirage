@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
   config.grid_dim_to_explore = {{32, 1, 1}, {64, 1, 1}};
   config.reduction_dimx = 8;
   search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_mlp.json");
-  gen.generate_kernel_graphs();
+  gen.search();
 
   auto et = std::chrono::steady_clock::now();
 

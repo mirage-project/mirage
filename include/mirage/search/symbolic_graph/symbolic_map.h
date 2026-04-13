@@ -10,15 +10,17 @@ namespace mirage {
 namespace search {
 
 class SymbolicMap {
-  int num_grid_dims_;   // k
-  int num_data_dims_;   // n
-  bool has_forloop_;    // if true, last row (index k) is forloop
+  int num_grid_dims_; // k
+  int num_data_dims_; // n
+  bool has_forloop_;  // if true, last row (index k) is forloop
   // Flat num_rows*n matrix, row-major: mat_[row * num_data_dims_ + d]
   // num_rows = num_grid_dims_ + (has_forloop_ ? 1 : 0)
   // Entry is TensorDimVar (symbolic) or TensorDimConst(0/1) (concrete)
   std::vector<SymbolicTensorDim> mat_;
 
-  int num_rows() const { return num_grid_dims_ + (has_forloop_ ? 1 : 0); }
+  int num_rows() const {
+    return num_grid_dims_ + (has_forloop_ ? 1 : 0);
+  }
 
 public:
   // All-symbolic: each cell gets a fresh TensorDimVar
@@ -27,8 +29,7 @@ public:
               bool has_forloop,
               tensor_dim_var_index_t &index_counter)
       : num_grid_dims_(num_grid_dims), num_data_dims_(num_data_dims),
-        has_forloop_(has_forloop),
-        mat_(num_rows() * num_data_dims) {
+        has_forloop_(has_forloop), mat_(num_rows() * num_data_dims) {
     for (int i = 0; i < (int)mat_.size(); ++i) {
       mat_[i] = dim_expr_make_var(index_counter++, /*is_boolean=*/true);
     }
@@ -39,8 +40,7 @@ public:
               int num_data_dims,
               std::vector<int> const &legacy_map)
       : num_grid_dims_(num_grid_dims), num_data_dims_(num_data_dims),
-        has_forloop_(false),
-        mat_(num_grid_dims * num_data_dims) {
+        has_forloop_(false), mat_(num_grid_dims * num_data_dims) {
     assert((int)legacy_map.size() == num_grid_dims_);
     for (int p = 0; p < num_grid_dims_; ++p) {
       for (int d = 0; d < num_data_dims_; ++d) {
@@ -57,8 +57,7 @@ public:
               std::vector<int> const &legacy_map,
               int forloop_dim)
       : num_grid_dims_(num_grid_dims), num_data_dims_(num_data_dims),
-        has_forloop_(true),
-        mat_(num_rows() * num_data_dims) {
+        has_forloop_(true), mat_(num_rows() * num_data_dims) {
     assert((int)legacy_map.size() == num_grid_dims_);
     // Grid rows
     for (int p = 0; p < num_grid_dims_; ++p) {
@@ -86,15 +85,16 @@ public:
               int forloop_dim,
               tensor_dim_var_index_t &index_counter)
       : num_grid_dims_(num_grid_dims), num_data_dims_(num_data_dims),
-        has_forloop_(true),
-        mat_(num_rows() * num_data_dims) {
+        has_forloop_(true), mat_(num_rows() * num_data_dims) {
     // Grid rows
     for (int p = 0; p < num_grid_dims_; ++p) {
       for (int d = 0; d < num_data_dims_; ++d) {
         if (sym_grid_rows) {
-          mat_[p * num_data_dims_ + d] = dim_expr_make_var(index_counter++, /*is_boolean=*/true);
+          mat_[p * num_data_dims_ + d] =
+              dim_expr_make_var(index_counter++, /*is_boolean=*/true);
         } else {
-          mat_[p * num_data_dims_ + d] = dim_expr_make_const(legacy_map[p] == d ? 1 : 0);
+          mat_[p * num_data_dims_ + d] =
+              dim_expr_make_const(legacy_map[p] == d ? 1 : 0);
         }
       }
     }
@@ -102,17 +102,28 @@ public:
     int fr = forloop_row();
     for (int d = 0; d < num_data_dims_; ++d) {
       if (sym_forloop_row) {
-        mat_[fr * num_data_dims_ + d] = dim_expr_make_var(index_counter++, /*is_boolean=*/true);
+        mat_[fr * num_data_dims_ + d] =
+            dim_expr_make_var(index_counter++, /*is_boolean=*/true);
       } else {
-        mat_[fr * num_data_dims_ + d] = dim_expr_make_const(forloop_dim == d ? 1 : 0);
+        mat_[fr * num_data_dims_ + d] =
+            dim_expr_make_const(forloop_dim == d ? 1 : 0);
       }
     }
   }
 
-  int num_grid_dims() const { return num_grid_dims_; }
-  int num_data_dims() const { return num_data_dims_; }
-  bool has_forloop() const { return has_forloop_; }
-  int forloop_row() const { assert(has_forloop_); return num_grid_dims_; }
+  int num_grid_dims() const {
+    return num_grid_dims_;
+  }
+  int num_data_dims() const {
+    return num_data_dims_;
+  }
+  bool has_forloop() const {
+    return has_forloop_;
+  }
+  int forloop_row() const {
+    assert(has_forloop_);
+    return num_grid_dims_;
+  }
 
   SymbolicTensorDim at(int row, int data_dim) const {
     assert(row >= 0 && row < num_rows());
@@ -158,7 +169,9 @@ public:
 
   // Forloop row → legacy forloop_dim (-1 if no forloop or none mapped)
   int to_legacy_forloop_dim(DimVarAssignment const &a) const {
-    if (!has_forloop_) return -1;
+    if (!has_forloop_) {
+      return -1;
+    }
     return data_dim_for(forloop_row(), a);
   }
 
@@ -169,7 +182,9 @@ public:
 
   bool is_concrete() const {
     for (auto const &entry : mat_) {
-      if (!entry->is_const()) return false;
+      if (!entry->is_const()) {
+        return false;
+      }
     }
     return true;
   }
@@ -177,8 +192,7 @@ public:
   bool operator==(SymbolicMap const &other) const {
     return num_grid_dims_ == other.num_grid_dims_ &&
            num_data_dims_ == other.num_data_dims_ &&
-           has_forloop_ == other.has_forloop_ &&
-           mat_ == other.mat_;
+           has_forloop_ == other.has_forloop_ && mat_ == other.mat_;
   }
 
   operator json() const {

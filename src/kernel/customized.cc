@@ -278,16 +278,21 @@ size_t KNCustomizedOp::get_owner_independent_hash() const {
     hash_combine(ret, static_cast<int>(t.data_type));
     hash_combine(ret, static_cast<int>(t.layout));
     hash_combine(ret, t.num_dims);
-    for (int i = 0; i < t.num_dims; ++i)
+    for (int i = 0; i < t.num_dims; ++i) {
       hash_combine(ret, t.dim[i]);
+    }
     hash_combine(ret, t.after_accum);
     hash_combine(ret, t.store_in_dmem);
   };
 
   for (threadblock::TBOperator const *op : bg.operators) {
     hash_combine(ret, static_cast<int>(op->op_type));
-    for (auto const &t : op->input_tensors)  hash_stensor(t);
-    for (auto const &t : op->output_tensors) hash_stensor(t);
+    for (auto const &t : op->input_tensors) {
+      hash_stensor(t);
+    }
+    for (auto const &t : op->output_tensors) {
+      hash_stensor(t);
+    }
 
     if (op->op_type == type::TB_INPUT_OP) {
       auto const *iop = static_cast<threadblock::TBInputOp const *>(op);

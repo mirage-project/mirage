@@ -1,9 +1,9 @@
 #include "mirage/search/dim_strategy.h"
 #include "mirage/config.h"
+#include "mirage/search/symbolic_graph/op_args.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
 #include "mirage/type.h"
 #include "mirage/utils/containers.h"
-#include "mirage/search/symbolic_graph/op_args.h"
 #include <algorithm>
 #include <iostream>
 #include <numeric>
@@ -145,7 +145,9 @@ std::vector<dim3>
     // 2D grids: (x, y, 1) with x >= y to break symmetry
     for (int x : divisors) {
       for (int y : divisors) {
-        if (x < y) continue;
+        if (x < y) {
+          continue;
+        }
         long long total = (long long)x * y;
         if (total <= (int)config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
           cands.push_back({(unsigned)x, (unsigned)y, 1});
@@ -155,27 +157,28 @@ std::vector<dim3>
   } else {
 
 #ifdef MIRAGE_BACKEND_USE_CUDA
-  cands = vector_concat(cands, generate_1d_grids(get_dims()));
-  if (config._enable_attention_specific_optimization) {
-    if (batch != -1) {
-      cands = vector_concat(cands, generate_2d_grids_with_x(batch, get_dims()));
+    cands = vector_concat(cands, generate_1d_grids(get_dims()));
+    if (config._enable_attention_specific_optimization) {
+      if (batch != -1) {
+        cands =
+            vector_concat(cands, generate_2d_grids_with_x(batch, get_dims()));
+      }
+      if (tensors.size() > 2) {
+        cands.push_back({batch, 16, 4});
+      }
     }
-    if (tensors.size() > 2) {
-      cands.push_back({batch, 16, 4});
-    }
-  }
-  cands = filter(cands, [](dim3 const &dim) {
-    int num_threadblocks = dim.x * dim.y * dim.z;
-    return 32 <= num_threadblocks &&
-           num_threadblocks <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
-  });
+    cands = filter(cands, [](dim3 const &dim) {
+      int num_threadblocks = dim.x * dim.y * dim.z;
+      return 32 <= num_threadblocks &&
+             num_threadblocks <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
+    });
 
-  if (batch != -1 && batch <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
-    cands.push_back({batch, 1, 1});
-  }
+    if (batch != -1 && batch <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
+      cands.push_back({batch, 1, 1});
+    }
 #else
-  cands = vector_concat(cands, generate_1d_grids(get_dims()));
-  cands = vector_concat(cands, generate_2d_grids(get_dims()));
+    cands = vector_concat(cands, generate_1d_grids(get_dims()));
+    cands = vector_concat(cands, generate_2d_grids(get_dims()));
 #endif
 
   } // end if (!explore_all_mappings)
@@ -297,23 +300,27 @@ std::vector<std::vector<int3>>
       max_dims = std::max(max_dims, t.num_dims);
     }
     std::vector<int3> imap_to_explore;
-    for (int x = -1; x < max_dims; ++x)
-      for (int y = -1; y < max_dims; ++y)
+    for (int x = -1; x < max_dims; ++x) {
+      for (int y = -1; y < max_dims; ++y) {
         for (int z = -1; z < max_dims; ++z) {
-          if (x != -1 && (x == y || x == z)) continue;
-          if (y != -1 && y == z) continue;
+          if (x != -1 && (x == y || x == z)) {
+            continue;
+          }
+          if (y != -1 && y == z) {
+            continue;
+          }
           imap_to_explore.push_back({x, y, z});
         }
+      }
+    }
     generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   } else {
-    std::vector<int3> imap_to_explore = {
-        {0, -1, 1},
-        {0, 1, -1},
-        {0, 2, -1},
-        {-1, 1, -1},
-        {0, -1, -1},
-        {0, -1, 2}
-    };
+    std::vector<int3> imap_to_explore = {{0, -1, 1},
+                                         {0, 1, -1},
+                                         {0, 2, -1},
+                                         {-1, 1, -1},
+                                         {0, -1, -1},
+                                         {0, -1, 2}};
     if (!config._enable_attention_specific_optimization) {
       imap_to_explore.push_back({-1, -1, -1});
       imap_to_explore.push_back({1, -1, -1});
@@ -356,13 +363,19 @@ std::vector<int3>
     for (auto const &t : tensors) {
       max_dims = std::max(max_dims, t.num_dims);
     }
-    for (int x = -1; x < max_dims; ++x)
-      for (int y = -1; y < max_dims; ++y)
+    for (int x = -1; x < max_dims; ++x) {
+      for (int y = -1; y < max_dims; ++y) {
         for (int z = -1; z < max_dims; ++z) {
-          if (x != -1 && (x == y || x == z)) continue;
-          if (y != -1 && y == z) continue;
+          if (x != -1 && (x == y || x == z)) {
+            continue;
+          }
+          if (y != -1 && y == z) {
+            continue;
+          }
           omap_to_explore.push_back({x, y, z});
         }
+      }
+    }
   } else {
     omap_to_explore = vector_concat(omap_to_explore,
                                     {
@@ -508,7 +521,8 @@ std::vector<std::vector<int>> DimStrategy::get_binary_input(int num_tensors) {
   return result;
 }
 
-std::vector<std::vector<int>> DimStrategy::get_binary_input_commutative(int num_tensors) {
+std::vector<std::vector<int>>
+    DimStrategy::get_binary_input_commutative(int num_tensors) {
   std::vector<std::vector<int>> result;
   for (int i = 0; i < num_tensors; ++i) {
     for (int j = i; j < num_tensors; ++j) {
@@ -558,110 +572,126 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   }
 }
 
-std::vector<std::vector<std::vector<int>>> DimStrategy::get_input_map_cand(
-    std::vector<SymbolicDTensor> const &tensors,
-    size_t num_parallel_dims) {
+std::vector<std::vector<std::vector<int>>>
+    DimStrategy::get_input_map_cand(std::vector<SymbolicDTensor> const &tensors,
+                                    size_t num_parallel_dims) {
 
-  auto get_input_map_cand_for_one_dimension = [&](SymbolicDTensor const &tensor) {
-    std::vector<int> result;
-    result.push_back(-1);
-    for (size_t i = 0; i < tensor.dims.size(); ++i) {
-      result.push_back(i);
-    }
-    return result;
-  };
+  auto get_input_map_cand_for_one_dimension =
+      [&](SymbolicDTensor const &tensor) {
+        std::vector<int> result;
+        result.push_back(-1);
+        for (size_t i = 0; i < tensor.dims.size(); ++i) {
+          result.push_back(i);
+        }
+        return result;
+      };
 
   auto get_input_map_cand_for_one_tensor = [&](SymbolicDTensor const &tensor) {
-    std::vector<int> input_map_cand_for_one_dimension = get_input_map_cand_for_one_dimension(tensor);
-    std::vector<std::vector<int>> input_map_cand_for_each_dimension(num_parallel_dims, input_map_cand_for_one_dimension);
-    return filter(cartesian_product(input_map_cand_for_each_dimension), [&](std::vector<int> const &input_cand) {
-      for (size_t i = 0; i < input_cand.size(); ++i) {
-        for (size_t j = 0; j < i; ++j) {
-          if (input_cand[i] != -1 && input_cand[i] == input_cand[j]) {
+    std::vector<int> input_map_cand_for_one_dimension =
+        get_input_map_cand_for_one_dimension(tensor);
+    std::vector<std::vector<int>> input_map_cand_for_each_dimension(
+        num_parallel_dims, input_map_cand_for_one_dimension);
+    return filter(cartesian_product(input_map_cand_for_each_dimension),
+                  [&](std::vector<int> const &input_cand) {
+                    for (size_t i = 0; i < input_cand.size(); ++i) {
+                      for (size_t j = 0; j < i; ++j) {
+                        if (input_cand[i] != -1 &&
+                            input_cand[i] == input_cand[j]) {
+                          return false;
+                        }
+                      }
+                    }
+                    return true;
+                  });
+  };
+
+  auto no_redundant_parallel_dim =
+      [&](std::vector<std::vector<int>> const &input_cand) {
+        for (size_t i = 0; i < num_parallel_dims; ++i) {
+          bool is_used = false;
+          for (auto const &imap : input_cand) {
+            if (imap[i] != -1) {
+              is_used = true;
+              break;
+            }
+          }
+          if (!is_used) {
             return false;
           }
         }
-      }
-      return true;
-    });
-  };
-
-  auto no_redundant_parallel_dim = [&](std::vector<std::vector<int>> const &input_cand) {
-    for (size_t i = 0; i < num_parallel_dims; ++i) {
-      bool is_used = false;
-      for (auto const &imap : input_cand) {
-        if (imap[i] != -1) {
-          is_used = true;
-          break;
-        }
-      }
-      if (!is_used) {
-        return false;
-      }
-    }
-    return true;
-  };
+        return true;
+      };
 
   // Reject mapping combos that are not the lexicographically smallest
   // representative under permutation of parallel dim indices.
   // This prunes symmetric duplicates (e.g., swapping grid dims 0 and 1).
-  auto is_canonical_parallel_dim_order = [&](std::vector<std::vector<int>> const &combo) {
-    std::vector<size_t> perm(num_parallel_dims);
-    std::iota(perm.begin(), perm.end(), 0);
-    // std::next_permutation skips the identity (initial sorted order),
-    // so we only compare against non-trivial permutations.
-    while (std::next_permutation(perm.begin(), perm.end())) {
-      // Lexicographic comparison: iterate tensors, then parallel dims.
-      for (size_t t = 0; t < combo.size(); ++t) {
-        for (size_t p = 0; p < num_parallel_dims; ++p) {
-          int orig = combo[t][p];
-          int permuted = combo[t][perm[p]];
-          if (permuted < orig) {
-            return false; // permuted combo is smaller → not canonical
+  auto is_canonical_parallel_dim_order =
+      [&](std::vector<std::vector<int>> const &combo) {
+        std::vector<size_t> perm(num_parallel_dims);
+        std::iota(perm.begin(), perm.end(), 0);
+        // std::next_permutation skips the identity (initial sorted order),
+        // so we only compare against non-trivial permutations.
+        while (std::next_permutation(perm.begin(), perm.end())) {
+          // Lexicographic comparison: iterate tensors, then parallel dims.
+          for (size_t t = 0; t < combo.size(); ++t) {
+            for (size_t p = 0; p < num_parallel_dims; ++p) {
+              int orig = combo[t][p];
+              int permuted = combo[t][perm[p]];
+              if (permuted < orig) {
+                return false; // permuted combo is smaller → not canonical
+              }
+              if (permuted > orig) {
+                goto next_perm; // permuted is larger → this perm can't beat
+                                // original
+              }
+            }
           }
-          if (permuted > orig) {
-            goto next_perm; // permuted is larger → this perm can't beat original
-          }
+        next_perm:;
         }
-      }
-      next_perm:;
-    }
-    return true;
-  };
+        return true;
+      };
 
-  std::vector<std::vector<std::vector<int>>> input_map_cand_for_each_tensor = vector_map(tensors, get_input_map_cand_for_one_tensor);
-  return filter(cartesian_product(input_map_cand_for_each_tensor), [&](std::vector<std::vector<int>> const &combo) {
-    return no_redundant_parallel_dim(combo) && is_canonical_parallel_dim_order(combo);
-  });
+  std::vector<std::vector<std::vector<int>>> input_map_cand_for_each_tensor =
+      vector_map(tensors, get_input_map_cand_for_one_tensor);
+  return filter(cartesian_product(input_map_cand_for_each_tensor),
+                [&](std::vector<std::vector<int>> const &combo) {
+                  return no_redundant_parallel_dim(combo) &&
+                         is_canonical_parallel_dim_order(combo);
+                });
 }
 
-std::vector<std::vector<std::vector<int>>>
-    DimStrategy::get_output_map_cand(std::vector<SymbolicSTensor> const &tensors, size_t num_parallel_dims) {
+std::vector<std::vector<std::vector<int>>> DimStrategy::get_output_map_cand(
+    std::vector<SymbolicSTensor> const &tensors, size_t num_parallel_dims) {
 
-  auto get_output_map_cand_for_one_dimension = [&](SymbolicSTensor const &tensor) {
-    std::vector<int> result;
-    for (size_t i = 0; i < tensor.dims.size(); ++i) {
-      result.push_back(i);
-    }
-    return result;
-  };
+  auto get_output_map_cand_for_one_dimension =
+      [&](SymbolicSTensor const &tensor) {
+        std::vector<int> result;
+        for (size_t i = 0; i < tensor.dims.size(); ++i) {
+          result.push_back(i);
+        }
+        return result;
+      };
 
   auto get_output_map_cand_for_one_tensor = [&](SymbolicSTensor const &tensor) {
-    std::vector<int> input_map_cand_for_one_dimension = get_output_map_cand_for_one_dimension(tensor);
-    std::vector<std::vector<int>> output_map_cand_for_each_dimension(num_parallel_dims, input_map_cand_for_one_dimension);
-    return filter(cartesian_product(output_map_cand_for_each_dimension), [&](std::vector<int> const &input_cand) {
-      for (size_t i = 0; i < input_cand.size(); ++i) {
-        for (size_t j = 0; j < i; ++j) {
-          if (input_cand[i] == input_cand[j]) {
-            return false;
-          }
-        }
-      }
-      return true;
-    });
+    std::vector<int> input_map_cand_for_one_dimension =
+        get_output_map_cand_for_one_dimension(tensor);
+    std::vector<std::vector<int>> output_map_cand_for_each_dimension(
+        num_parallel_dims, input_map_cand_for_one_dimension);
+    return filter(cartesian_product(output_map_cand_for_each_dimension),
+                  [&](std::vector<int> const &input_cand) {
+                    for (size_t i = 0; i < input_cand.size(); ++i) {
+                      for (size_t j = 0; j < i; ++j) {
+                        if (input_cand[i] == input_cand[j]) {
+                          return false;
+                        }
+                      }
+                    }
+                    return true;
+                  });
   };
 
-  std::vector<std::vector<std::vector<int>>> output_map_cand_for_each_tensor = vector_map(tensors, get_output_map_cand_for_one_tensor);
+  std::vector<std::vector<std::vector<int>>> output_map_cand_for_each_tensor =
+      vector_map(tensors, get_output_map_cand_for_one_tensor);
   return cartesian_product(output_map_cand_for_each_tensor);
 }
 
@@ -677,7 +707,8 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
     return result;
   };
 
-  std::vector<std::vector<int>> forloop_dim_cand_for_each_tensor = vector_map(input_tensers, get_forloop_dim_for_one_tensor);
+  std::vector<std::vector<int>> forloop_dim_cand_for_each_tensor =
+      vector_map(input_tensers, get_forloop_dim_for_one_tensor);
   return cartesian_product(forloop_dim_cand_for_each_tensor);
 }
 
@@ -692,7 +723,8 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   }
 }
 
-std::vector<size_t> DimStrategy::get_num_parallel_dims_cand(std::vector<SymbolicDTensor> const &tensors) {
+std::vector<size_t> DimStrategy::get_num_parallel_dims_cand(
+    std::vector<SymbolicDTensor> const &tensors) {
   size_t max_num_data_dims = 0;
   for (SymbolicDTensor const &tensor : tensors) {
     max_num_data_dims = std::max(max_num_data_dims, tensor.dims.size());
@@ -704,7 +736,8 @@ std::vector<size_t> DimStrategy::get_num_parallel_dims_cand(std::vector<Symbolic
   return results;
 }
 
-std::vector<SymbolicTensorDim> DimStrategy::get_reduction_degree_cand(SymbolicKNGraph const &kn_graph) {
+std::vector<SymbolicTensorDim>
+    DimStrategy::get_reduction_degree_cand(SymbolicKNGraph const &kn_graph) {
   std::vector<SymbolicTensorDim> results;
   for (auto const &op : kn_graph.operators) {
     if (op.op_type == type::KN_CUSTOMIZED_OP) {

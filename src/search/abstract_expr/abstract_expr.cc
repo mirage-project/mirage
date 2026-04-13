@@ -52,7 +52,8 @@ std::vector<bool> subexpr_to_final_expr(
   return results;
 }
 
-bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1, std::shared_ptr<AbstractExpr const> expr2) {
+bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1,
+                   std::shared_ptr<AbstractExpr const> expr2) {
   std::string expr1_str = expr1->to_egg();
   std::string expr2_str = expr2->to_egg();
   return is_equiv(expr1_str.c_str(), expr2_str.c_str());

@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
   config.frange_to_explore = {4, 8, 16, 32};
   config.reduction_dimx = 64;
   search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_moe.json");
-  gen.generate_kernel_graphs();
+  gen.search();
 
   auto et = std::chrono::steady_clock::now();
 

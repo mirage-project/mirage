@@ -41,22 +41,25 @@ struct GeneratorConfig {
   std::vector<int> fmap_to_explore;
   std::vector<int> frange_to_explore;
   int reduction_dimx;
-  double search_time_limit_sec; // Maximum wall-clock seconds for search (0 = no limit)
-  bool
-      randomized_branches; // Only for developers to tune the search performance
+  double search_time_limit_sec; // Maximum wall-clock seconds for search (0 = no
+                                // limit)
   bool _enable_attention_specific_optimization;
   bool _enable_concat_matmul_transformation;
   bool explore_all_mappings;
   bool symbolic_maps; // legacy: sets all sym_* flags below
   // Fine-grained symbolization flags for ablation study
-  bool sym_grid_dim;  // symbolic grid dim sizes (vs exhaustive enumeration)
-  bool sym_frange;    // symbolic forloop range (vs exhaustive enumeration)
-  bool sym_imap;      // symbolic input grid-dim maps
-  bool sym_fmap;      // symbolic forloop maps
-  bool sym_omap;      // symbolic output grid-dim maps
+  bool sym_grid_dim; // symbolic grid dim sizes (vs exhaustive enumeration)
+  bool sym_frange;   // symbolic forloop range (vs exhaustive enumeration)
+  bool sym_imap;     // symbolic input grid-dim maps
+  bool sym_fmap;     // symbolic forloop maps
+  bool sym_omap;     // symbolic output grid-dim maps
 
-  bool any_symbolic_maps() const { return sym_imap || sym_fmap || sym_omap; }
-  bool all_symbolic_maps() const { return sym_imap && sym_fmap && sym_omap; }
+  bool any_symbolic_maps() const {
+    return sym_imap || sym_fmap || sym_omap;
+  }
+  bool all_symbolic_maps() const {
+    return sym_imap && sym_fmap && sym_omap;
+  }
 
   void show() const;
   void enable_attention_specific_optimization();

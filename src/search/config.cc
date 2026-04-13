@@ -64,7 +64,6 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       3600.0 /* search_time_limit_sec (1 hour) */,
       false /* enable_attention_specific_optimization */,
       false /* enable_concat_matmul_transformation */,
-      false /* randomized_branches */,
       false /* explore_all_mappings */,
       false /* symbolic_maps */,
       false /* sym_grid_dim */,
@@ -127,7 +126,8 @@ void GeneratorConfig::show() const {
     printf("%d ", frange);
   }
   printf("\n");
-  printf("  explore_all_mappings: %s\n", explore_all_mappings ? "true" : "false");
+  printf("  explore_all_mappings: %s\n",
+         explore_all_mappings ? "true" : "false");
 }
 
 bool TBGraphConfig::operator==(TBGraphConfig const &other) const {

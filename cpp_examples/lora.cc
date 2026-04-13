@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
       search::GeneratorConfig::get_default_config();
   config.enable_concat_matmul_transformation();
   search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_lora.json");
-  gen.generate_kernel_graphs();
+  gen.search();
 
   auto et = std::chrono::steady_clock::now();
 

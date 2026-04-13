@@ -27,7 +27,11 @@ public:
 
 class KNInputOpArgs : public OpArgs {
 public:
-  KNInputOpArgs(std::vector<int> input_dims, std::vector<size_t> input_strides, mirage::type::DataType data_type, mirage::layout::DmemLayout layout, int3 input_map);
+  KNInputOpArgs(std::vector<int> input_dims,
+                std::vector<size_t> input_strides,
+                mirage::type::DataType data_type,
+                mirage::layout::DmemLayout layout,
+                int3 input_map);
   std::vector<int> input_dims;
   std::vector<size_t> input_strides;
   mirage::type::DataType data_type;
@@ -83,7 +87,9 @@ public:
 
 class TBOutputOpArgs : public OpArgs {
 public:
-  TBOutputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &output_map, type::TBEpilogueType epilogue);
+  TBOutputOpArgs(SymbolicDTensor dtensor,
+                 SymbolicMap const &output_map,
+                 type::TBEpilogueType epilogue);
   SymbolicDTensor dtensor;
   SymbolicMap output_map;
   type::TBEpilogueType epilogue;
@@ -125,10 +131,10 @@ public:
   operator json() const override;
 };
 
-std::shared_ptr<OpArgs const> op_args_from_json_tb(json const &j,
-                                                   type::TBOperatorType op_type);
-std::shared_ptr<OpArgs const> op_args_from_json_kn(json const &j,
-                                                   type::KNOperatorType op_type);
+std::shared_ptr<OpArgs const>
+    op_args_from_json_tb(json const &j, type::TBOperatorType op_type);
+std::shared_ptr<OpArgs const>
+    op_args_from_json_kn(json const &j, type::KNOperatorType op_type);
 
 } // namespace search
 } // namespace mirage
