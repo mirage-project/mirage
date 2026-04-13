@@ -43,6 +43,9 @@ wheelhouse/
 # Bundled native libs we build
 /python/mirage/lib/
 
+# Temporary include staging dir created by setup.py
+/python/mirage/include/
+
 # Mac OS .DS_Store
 .DS_Store
 
