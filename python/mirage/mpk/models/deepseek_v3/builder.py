@@ -656,7 +656,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # MPK_FUSE_RESIDUAL=1 enables down_proj-only residual (FP8 with_residual).
         w_o, s_o = self._attach_fp8_weight(
             state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
-        _o_residual = self.x if os.environ.get("MPK_FUSE_RESIDUAL", "0") == "2" else None
+        _fr = os.environ.get("MPK_FUSE_RESIDUAL", "0")
+        _o_residual = self.x if _fr in ("2", "3") else None
         self._fp8_linear(self.attn_out, w_o, s_o, self.attn_proj_out,
                          grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
                          block_dim=(128, 1, 1),
@@ -684,7 +685,8 @@ class DeepSeekV3Builder(GraphBuilder):
         w_down, s_down = self._attach_fp8_weight(
             state_dict, f"{prefix}mlp.down_proj.weight",
             f"layer_{layer_idx}_down_proj")
-        _d_residual = self.x if os.environ.get("MPK_FUSE_RESIDUAL", "0") == "1" else None
+        _fr_d = os.environ.get("MPK_FUSE_RESIDUAL", "0")
+        _d_residual = self.x if _fr_d in ("1", "3") else None
         self._fp8_linear(self.silu_mul_out, w_down, s_down, self.mlp_out,
                          grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
                          block_dim=(128, 1, 1),
