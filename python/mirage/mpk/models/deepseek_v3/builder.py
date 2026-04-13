@@ -1314,10 +1314,20 @@ class DeepSeekV3Builder(GraphBuilder):
             output=(moe_topk_weights, moe_routing_indices, moe_mask),
             grid_dim=(1, 1, 1), block_dim=(256, 1, 1))
 
-        # Expert W13 (FP8)
-        w_w13, s_w13 = self._attach_fp8_weight(
-            state_dict, f"{mlp_prefix}experts.w13.weight",
-            f"mtp_{mlp_prefix}experts_w13")
+        # Expert W13 (FP8) — 3D weight (num_experts, 2*intermediate, hidden).
+        # Use _safe_attach + manual scale expansion (same as main MoE path); the
+        # _attach_fp8_weight helper assumes 2D and would fail to unpack 3D shape.
+        w13_key = f"{mlp_prefix}experts.w13.weight"
+        w13_scale_key = f"{mlp_prefix}experts.w13.weight_scale_inv"
+        w_w13 = self._safe_attach(state_dict[w13_key],
+                                  f"mtp_{mlp_prefix}experts_w13")
+        if w13_scale_key in state_dict and not os.environ.get("MPK_BF16_BYPASS"):
+            raw_scale_inv = state_dict[w13_scale_key].float().clamp(min=1e-30)
+            w13_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+            s_w13 = self._safe_attach(w13_scale_expanded,
+                                      f"mtp_{mlp_prefix}experts_w13_scale")
+        else:
+            s_w13 = None
         moe_input_fp8 = self.mpk.new_tensor(
             dims=(mbt, self.hidden_size), dtype=bfloat16,
             name="mtp_moe_input_fp8", io_category="cuda_tensor")
@@ -1346,10 +1356,18 @@ class DeepSeekV3Builder(GraphBuilder):
             input=moe_mid, output=moe_silu_out,
             grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1), block_dim=(128, 1, 1))
 
-        # Expert W2 (FP8) — quantize 3D silu_out first
-        w_w2, s_w2 = self._attach_fp8_weight(
-            state_dict, f"{mlp_prefix}experts.w2.weight",
-            f"mtp_{mlp_prefix}experts_w2")
+        # Expert W2 (FP8) — 3D weight, same pattern as W13 above.
+        w2_key = f"{mlp_prefix}experts.w2.weight"
+        w2_scale_key = f"{mlp_prefix}experts.w2.weight_scale_inv"
+        w_w2 = self._safe_attach(state_dict[w2_key],
+                                 f"mtp_{mlp_prefix}experts_w2")
+        if w2_scale_key in state_dict and not os.environ.get("MPK_BF16_BYPASS"):
+            raw_scale_inv = state_dict[w2_scale_key].float().clamp(min=1e-30)
+            w2_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+            s_w2 = self._safe_attach(w2_scale_expanded,
+                                     f"mtp_{mlp_prefix}experts_w2_scale")
+        else:
+            s_w2 = None
         mtp_silu_fp8 = self.mpk.new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
             dtype=float8_e4m3, name="mtp_moe_silu_fp8", io_category="cuda_tensor")
