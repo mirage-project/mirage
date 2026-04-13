@@ -26,16 +26,21 @@ size_t get_datatype_size(DataType type) {
       return 1;
     case DT_BFLOAT16:
     case DT_FLOAT16:
+    case DT_INT16:
+    case DT_UINT16:
       return 2;
     case DT_INT32:
+    case DT_UINT32:
     case DT_FLOAT32:
       return 4;
     case DT_INT64:
+    case DT_UINT64:
     case DT_DOUBLE:
       return 8;
     case DT_UNKNOWN:
     default:
       assert(false && "Unsupported datatype");
+      return 0;
   }
 }
 

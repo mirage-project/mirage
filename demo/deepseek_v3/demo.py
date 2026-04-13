@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 import argparse
 import os
+import sys
 import json
 
 from mirage.mpk.models.deepseek_v3.builder import DeepSeekV3Builder
@@ -77,17 +78,43 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         return (weight.float() * x.float() * torch.rsqrt(v + eps)).to(orig)
 
     def sigmoid_topk(logits, bias, k):
-        scores = torch.sigmoid(logits.float())
-        routing = scores + bias.float().unsqueeze(0)
-        _, idx = torch.topk(routing, k, dim=-1)
-        w = torch.gather(scores, 1, idx)
-        return w / w.sum(dim=-1, keepdim=True), idx
+        """DeepSeek V3 MoE routing: noaux_tc (grouped topk) + norm + scaling.
+        Matches `MoEGate.forward` in modeling_deepseek.py:425-471."""
+        # Read MoE routing config from real model
+        cfg = config.to_dict() if hasattr(config, "to_dict") else config
+        n_group = cfg.get("n_group", 8)
+        topk_group = cfg.get("topk_group", 4)
+        n_routed_experts = cfg.get("n_routed_experts", 256)
+        norm_topk = cfg.get("norm_topk_prob", True)
+        routed_scaling = cfg.get("routed_scaling_factor", 2.5)
+
+        scores = torch.sigmoid(logits.float())  # [bs, n_experts]
+        bs = scores.shape[0]
+        # Group selection: top-2 scores per group, sum them, pick top topk_group groups
+        scores_for_choice = scores + bias.float().unsqueeze(0)
+        group_scores = scores_for_choice.view(bs, n_group, -1).topk(2, dim=-1)[0].sum(dim=-1)  # [bs, n_group]
+        group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]  # [bs, topk_group]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(bs, n_group, n_routed_experts // n_group)
+            .reshape(bs, -1)
+        )
+        tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+        _, topk_idx = torch.topk(tmp_scores, k=k, dim=-1, sorted=False)
+        topk_weight = scores.gather(1, topk_idx)
+        if k > 1 and norm_topk:
+            topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
+        topk_weight = topk_weight * routed_scaling
+        return topk_weight, topk_idx
 
     QK_NOPE = 128   # per-head nope dim (before absorption)
     V_ORIG = 128     # per-head V dim (before absorption)
+    Q_HEAD_DIM = QK_NOPE + QK_ROPE_HEAD_DIM  # 192 — used for softmax scale (NOT 576)
 
     def dequant_fp8(weight, scale, block_k=128):
-        """Dequantize FP8 weight using block-wise scale_inv.
+        """Dequantize FP8 weight using block-wise scale_inv (checkpoint format).
 
         Weight: [M, K], Scale: [M/block_k, K/block_k].
         Each scale element covers a block_k × block_k tile.
@@ -100,10 +127,110 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
             s = s.repeat_interleave(block_k, dim=1)[:, :w.shape[1]]
         return (w * s).to(torch.bfloat16)
 
+    # ---- MPK-matched precision path -------------------------------------
+    # MPK uses re-quantized FP8 weights with per-row UE8M0 (power-of-2) scale
+    # in 128-wide K blocks, and quantizes inputs the same way. To produce a
+    # PyTorch reference whose precision matches MPK exactly, we replicate the
+    # quantize → dequant round-trip on both sides before doing the matmul.
+    _w_cache = {}
+
+    def _requant_weight_to_ue8m0(weight_fp8, scale_inv, block_k=128):
+        """Match builder._requantize_fp8_for_ue8m0:
+        dequant 2D-block scale_inv → re-quantize as per-row 1D UE8M0
+        (block_k along K) → return (new_fp8, power_of_2_scale[M, K/block_k])."""
+        M, K = weight_fp8.shape
+        scale_k = K // block_k
+        scale_inv_expanded = scale_inv.float().repeat_interleave(
+            block_k, dim=0)[:M].repeat_interleave(block_k, dim=1)[:, :K]
+        w_float = weight_fp8.float() * scale_inv_expanded
+        w_blocks = w_float.reshape(M, scale_k, block_k)
+        block_amax = w_blocks.abs().amax(dim=2).clamp(min=1e-12)
+        raw_scale = block_amax / 448.0
+        ue8m0_exp = torch.ceil(torch.log2(raw_scale.clamp(min=1e-30)))
+        new_scale = torch.pow(2.0, ue8m0_exp)  # [M, scale_k]
+        new_scale_expanded = new_scale.unsqueeze(2).expand_as(w_blocks)
+        w_rescaled = (w_blocks / new_scale_expanded).clamp(-448, 448)
+        new_fp8 = w_rescaled.reshape(M, K).to(torch.float8_e4m3fn)
+        return new_fp8, new_scale
+
+    def _dequant_ue8m0_weight(weight_fp8, ue8m0_scale, block_k=128):
+        """Per-row UE8M0 dequant: weight[M, K] * scale[M, K/block_k]."""
+        s = ue8m0_scale.repeat_interleave(block_k, dim=1)[:, :weight_fp8.shape[1]]
+        return weight_fp8.float() * s
+
+    def _quant_dequant_input_ue8m0(x_bf16, block_k=128):
+        """Per-token UE8M0 quant + dequant round-trip on the input.
+
+        x: [batch, K] bf16 → quantize per (token, K-block) to FP8 + UE8M0
+        scale → dequant back. Returns float32 tensor that mirrors what MPK
+        sees inside the GEMM (i.e. fp8 × fp8 with block-scaled accumulation)."""
+        bs, K = x_bf16.shape
+        sk = K // block_k
+        x_blocks = x_bf16.float().reshape(bs, sk, block_k)
+        amax = x_blocks.abs().amax(dim=2).clamp(min=1e-12)
+        raw_scale = amax / 448.0
+        ue8m0_exp = torch.ceil(torch.log2(raw_scale.clamp(min=1e-30)))
+        scale = torch.pow(2.0, ue8m0_exp)  # [bs, sk]
+        scale_exp = scale.unsqueeze(2).expand_as(x_blocks)
+        x_q = (x_blocks / scale_exp).clamp(-448, 448).to(torch.float8_e4m3fn)
+        x_deq = x_q.float() * scale_exp
+        return x_deq.reshape(bs, K)
+
     def fp8_linear(x, weight_key, sd, block_k=128):
-        """Dequant FP8 weight then matmul."""
-        w = dequant_fp8(sd[weight_key], sd[f"{weight_key}_scale_inv"], block_k)
-        return F.linear(x.float(), w.float()).to(x.dtype)
+        """FP8 matmul. MPK_REF_NO_QUANT=1 → use raw checkpoint dequant
+        (skip UE8M0 round-trip — useful to test if my UE8M0 reference is
+        the cause of MPK mismatches)."""
+        if os.environ.get("MPK_REF_NO_QUANT", "0") == "1":
+            w = dequant_fp8(sd[weight_key], sd[f"{weight_key}_scale_inv"], block_k)
+            return F.linear(x.float(), w.float()).to(x.dtype)
+        if weight_key not in _w_cache:
+            new_fp8, new_scale = _requant_weight_to_ue8m0(
+                sd[weight_key], sd[f"{weight_key}_scale_inv"], block_k)
+            w_dequant = _dequant_ue8m0_weight(new_fp8, new_scale, block_k)
+            _w_cache[weight_key] = w_dequant
+        w_deq = _w_cache[weight_key]
+        x_deq = _quant_dequant_input_ue8m0(x.reshape(-1, x.shape[-1]), block_k)
+        out = F.linear(x_deq, w_deq).to(x.dtype)
+        return out.reshape(*x.shape[:-1], w_deq.shape[0])
+
+    # Precompute RoPE cos/sin with the same formula as MPK builder
+    # (use args.max_seq_length so we cover all positions).
+    _rope_theta = 10000.0
+    _rope_half = QK_ROPE_HEAD_DIM // 2
+    _rope_max_seq = args.max_seq_length
+    _rope_freqs = 1.0 / (_rope_theta ** (torch.arange(0, _rope_half, dtype=torch.float32, device=device) / _rope_half))
+    _rope_positions = torch.arange(_rope_max_seq, dtype=torch.float32, device=device)
+    _rope_angles = torch.outer(_rope_positions, _rope_freqs)  # [max_seq, half]
+    _rope_cos = torch.cat([_rope_angles.cos(), _rope_angles.cos()], dim=-1).to(torch.bfloat16)
+    _rope_sin = torch.cat([-_rope_angles.sin(), _rope_angles.sin()], dim=-1).to(torch.bfloat16)
+
+    # DeepSeek V3 softmax_scale (modeling_deepseek.py:689-695):
+    #   softmax_scale = q_head_dim^-0.5 * mscale^2  (where q_head_dim = 192, NOT 576)
+    #   mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
+    #         = 0.1 * mscale_all_dim * log(scaling_factor) + 1.0
+    cfg_d = config.to_dict() if hasattr(config, "to_dict") else config
+    rope_scale = cfg_d.get("rope_scaling", None)
+    if rope_scale and rope_scale.get("type") == "yarn":
+        mscale_all_dim = rope_scale.get("mscale_all_dim", 0)
+        scaling_factor = rope_scale.get("factor", 1.0)
+        if mscale_all_dim:
+            _ms = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
+            _softmax_scale = (Q_HEAD_DIM ** -0.5) * _ms * _ms
+        else:
+            _softmax_scale = Q_HEAD_DIM ** -0.5
+    else:
+        _softmax_scale = Q_HEAD_DIM ** -0.5
+    print(f"  [REF] Q_HEAD_DIM={Q_HEAD_DIM}, softmax_scale={_softmax_scale:.6f}")
+
+    def apply_rope(x, position):
+        """Apply RoPE to x [..., rope_dim] at the given position(s).
+        Matches MPK's half-spliced formulation."""
+        cos = _rope_cos[position]  # [..., rope_dim]
+        sin = _rope_sin[position]
+        # rotate_half: split into halves, swap
+        half = x.shape[-1] // 2
+        rotated = torch.cat([x[..., half:], x[..., :half]], dim=-1)
+        return (x.float() * cos.float() + rotated.float() * sin.float()).to(x.dtype)
 
     def mla_attention(hidden, prefix, sd, kv_cache, seq_pos, num_heads):
         """MLA attention following raw checkpoint flow (no weight absorption)."""
@@ -117,15 +244,19 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         q_full = q_full.view(bs, num_heads, QK_NOPE + QK_ROPE_HEAD_DIM)  # [bs, H, 192]
         q_nope = q_full[:, :, :QK_NOPE]   # [bs, H, 128]
         q_pe = q_full[:, :, QK_NOPE:]      # [bs, H, 64]
+        # Apply RoPE to q_pe at position seq_pos (single token at a time)
+        q_pe = apply_rope(q_pe, seq_pos)
 
         # KV path: kv_a_proj → split → norm(c_latent)
         kv_full = fp8_linear(hidden, f"{p}kv_a_proj_with_mqa.weight", sd)
         c_lat = kv_full[:, :KV_LORA_RANK]   # [bs, 512]
         k_pe_raw = kv_full[:, KV_LORA_RANK:]  # [bs, 64]
         c_lat = rms_norm(c_lat, sd[f"{p}kv_a_layernorm.weight"])
+        # Apply RoPE to k_pe at position seq_pos BEFORE writing to cache
+        k_pe_rotated = apply_rope(k_pe_raw, seq_pos)
 
-        # Cache write
-        kv_new = torch.cat([c_lat, k_pe_raw], dim=-1)  # [bs, 576]
+        # Cache write (store rotated k_pe so reads get already-rotated values)
+        kv_new = torch.cat([c_lat, k_pe_rotated], dim=-1)  # [bs, 576]
         for b in range(bs):
             kv_cache[seq_pos + b] = kv_new[b]
         kv_all = kv_cache[:seq_pos + bs]  # [kv_len, 576]
@@ -140,12 +271,13 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         # Absorbed Q: q_nope_abs = q_nope @ W_UK → [bs, H, 512]
         q_nope_abs = torch.einsum('bhd,hdk->bhk', q_nope.float(), W_UK.float()).to(hidden.dtype)
 
-        # Attention: Q_abs × c_kv^T + q_pe × k_pe^T
+        # Attention: Q_abs × c_kv^T + q_pe × k_pe^T (RoPE already applied to both)
         k_nope = kv_all[:, :KV_LORA_RANK]   # [kv_len, 512]
         k_pe_all = kv_all[:, KV_LORA_RANK:]  # [kv_len, 64]
         s = (torch.einsum('bhd,sd->bhs', q_nope_abs.float(), k_nope.float()) +
              torch.einsum('bhd,sd->bhs', q_pe.float(), k_pe_all.float()))
-        s = s / math.sqrt(QK_HEAD_DIM)
+        # NOTE: Use precomputed softmax_scale matching DeepSeek V3 (q_head_dim=192 + YARN mscale).
+        s = s * _softmax_scale
         attn_probs = F.softmax(s, dim=-1)
 
         # V absorption: attn @ c_kv → [bs, H, 512], then × W_UV^T → [bs, H, 128]
@@ -168,6 +300,13 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         # Router (BF16)
         logits = F.linear(hidden.float(), sd[f"{p}gate.weight"].float()).to(hidden.dtype)
         weights, topk_idx = sigmoid_topk(logits, sd[f"{p}gate.e_score_correction_bias"], TOPK)
+        # MPK_DUMP_MOE=<layer_idx>: print routing for last token to verify MPK alignment
+        _dmp = os.environ.get("MPK_DUMP_MOE", "")
+        if _dmp and prefix == f"model.layers.{int(_dmp)}.":
+            for b in range(bs):
+                w_sorted, idx_sort = weights[b].sort(descending=True)
+                topk_sorted = topk_idx[b][idx_sort]
+                print(f"  [REF L{_dmp} b={b}] experts={topk_sorted.tolist()} weights={[f'{x:.4f}' for x in w_sorted.tolist()]}")
         out = torch.zeros(bs, HIDDEN, device=device, dtype=hidden.dtype)
         # Routed experts (per-expert individual weights, FP8)
         for b in range(bs):
@@ -203,6 +342,14 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
     kv_caches = [torch.zeros(max_seq, QK_HEAD_DIM, device=device, dtype=torch.bfloat16)
                  for _ in range(num_layers + (1 if include_mtp else 0))]
 
+    # Ablation env vars (must match the same vars in builder.py for fair comparison)
+    skip_layer = os.environ.get("MPK_SKIP_LAYER", "0") == "1"
+    skip_attn = os.environ.get("MPK_SKIP_ATTN", "0") == "1"
+    skip_mlp = os.environ.get("MPK_SKIP_MLP", "0") == "1"
+    # MPK_NO_RESIDUAL=1: drop the residual `+` so the reference matches the
+    # current MPK builder (which OVERWRITES self.x instead of adding).
+    no_residual = os.environ.get("MPK_NO_RESIDUAL", "0") == "1"
+
     # Token-by-token prefill (matching persistent kernel offline mode)
     for step in range(prompt_len):
         tid = all_token_ids[step]
@@ -212,15 +359,24 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
 
         for cache_idx, layer_idx in enumerate(layer_indices):
             prefix = f"model.layers.{layer_idx}."
+            if skip_layer:
+                continue
             normed = rms_norm(hidden, state_dict[f"{prefix}input_layernorm.weight"])
-            attn_out = mla_attention(normed, prefix, state_dict, kv_caches[cache_idx], step, NUM_Q_HEADS)
-            hidden = hidden + attn_out
-            normed = rms_norm(hidden, state_dict[f"{prefix}post_attention_layernorm.weight"])
-            if layer_idx < FIRST_MOE:
-                mlp_out = dense_mlp(normed, prefix, state_dict)
+            if skip_attn:
+                # bypass attention: hidden unchanged
+                pass
             else:
-                mlp_out = moe_mlp(normed, prefix, state_dict)
-            hidden = hidden + mlp_out
+                attn_out = mla_attention(normed, prefix, state_dict, kv_caches[cache_idx], step, NUM_Q_HEADS)
+                hidden = attn_out if no_residual else (hidden + attn_out)
+            normed = rms_norm(hidden, state_dict[f"{prefix}post_attention_layernorm.weight"])
+            if skip_mlp:
+                pass
+            else:
+                if layer_idx < FIRST_MOE:
+                    mlp_out = dense_mlp(normed, prefix, state_dict)
+                else:
+                    mlp_out = moe_mlp(normed, prefix, state_dict)
+                hidden = mlp_out if no_residual else (hidden + mlp_out)
 
     hidden = rms_norm(hidden, state_dict["model.norm.weight"])
     logits = F.linear(hidden.float(), state_dict["lm_head.weight"].float())
@@ -228,7 +384,9 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
     print(f"PyTorch reference output token: {ref_token}")
     print(f"PyTorch logits[0,:5]: {logits[0,:5].tolist()}")
     print(f"PyTorch reference completed successfully.")
-    return ref_token
+    # Return both: the logits (last position, full vocab) and the argmax token.
+    # The logits tensor lets the caller compare distributions, not just argmax.
+    return ref_token, logits[0].detach().clone()
 
 
 if __name__ == "__main__":
@@ -536,10 +694,11 @@ if __name__ == "__main__":
 
         # Correctness test: run PyTorch reference first (on raw weights)
         ref_token = None
+        ref_logits = None
         if args.correctness:
             test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
             first_tok = model_inputs.input_ids[0, 0].item()
-            ref_token = run_correctness_test(
+            ref_token, ref_logits = run_correctness_test(
                 args, state_dict, test_layers, rank, world_size,
                 first_token_id=first_tok)
 
@@ -624,20 +783,34 @@ if __name__ == "__main__":
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
 
-            # Fuse gate_proj + up_proj for dense MLP layers (keep FP8)
+            # Fuse gate_proj + up_proj for dense MLP layers (keep FP8).
+            # IMPORTANT: silu_mul kernel reads `gate` from the first half of
+            # each block and `up` from the second half (per-block layout). The
+            # FP8 linear partitions the output dim by `grid_for_rmsnorm_linear_layer`
+            # into N tasks, so silu_mul uses N/2 tasks. We must INTERLEAVE
+            # gate/up at granularity = N/2 chunks per tensor (NOT torch.cat).
+            from mirage.mpk.models.utils import shuffle_tensors as _shuffle_tensors
+            from mirage.mpk.models.utils import grid_for_rmsnorm_linear_layer as _grid_fn
             for li in absorb_layers:
                 prefix = f"model.layers.{li}.mlp."
                 gate_key = f"{prefix}gate_proj.weight"
                 up_key = f"{prefix}up_proj.weight"
                 if gate_key in state_dict and up_key in state_dict:
-                    state_dict[f"{prefix}gate_up_proj.weight"] = torch.cat(
-                        [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=0)
-                    # Fuse scales if present
+                    g = state_dict.pop(gate_key)
+                    u = state_dict.pop(up_key)
+                    out_dim_total = g.shape[0] + u.shape[0]
+                    split = _grid_fn(out_dim_total) // 2
+                    state_dict[f"{prefix}gate_up_proj.weight"] = _shuffle_tensors(
+                        [g, u], split=split, dim=0)
+                    # Fuse scales with the SAME interleave (each scale row covers
+                    # 128 weight rows, so the chunk-row count = chunk_weight_rows/128).
                     gs_key = f"{gate_key}_scale_inv"
                     us_key = f"{up_key}_scale_inv"
                     if gs_key in state_dict and us_key in state_dict:
-                        state_dict[f"{prefix}gate_up_proj.weight_scale_inv"] = torch.cat(
-                            [state_dict.pop(gs_key), state_dict.pop(us_key)], dim=0)
+                        gs = state_dict.pop(gs_key)
+                        us = state_dict.pop(us_key)
+                        state_dict[f"{prefix}gate_up_proj.weight_scale_inv"] = (
+                            _shuffle_tensors([gs, us], split=split, dim=0))
 
             # Fuse per-expert weights into experts.w13/w2 tensors (keep FP8)
             for li in absorb_layers:
@@ -702,6 +875,12 @@ if __name__ == "__main__":
 
         # Build the computation graph using the DeepSeek V3 builder
         builder = DeepSeekV3Builder(mpk)
+        if os.environ.get("MPK_SKIP_LM_HEAD", "0") == "1":
+            model_config.with_lm_head = False
+        # In correctness mode, automatically expose lm_head_out so we can
+        # compare logits distributions (not just argmax tokens).
+        if args.correctness:
+            os.environ["MPK_DUMP_LOGITS"] = "1"
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
 
         results = mpk.kn_graph.generate_task_graph(
@@ -711,6 +890,11 @@ if __name__ == "__main__":
             f.write(results["json_file"])
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
+
+        # ABLATION: MPK_DRY_RUN=1 → stop after task_graph gen (for inspecting offsets without kernel launch)
+        if os.environ.get("MPK_DRY_RUN", "0") == "1":
+            print(f"[DRY RUN] task_graph_{rank}.json written. Exiting before kernel launch.")
+            sys.exit(0)
 
         mpk.compile(output_dir=args.output_dir)
 
@@ -737,6 +921,72 @@ if __name__ == "__main__":
             else:
                 print(f"  FAIL: tokens differ!")
             print(f"{'='*60}\n")
+
+            # Distribution comparison (logits, before argmax)
+            # NOTE: MPK reuses lm_head_out across iterations (mbt rows). After
+            # 4000+ iterations only the last few steps' logits remain. To find
+            # the row matching ref_logits, scan all mbt rows by cosine sim.
+            mlp_out_buf = getattr(builder, "mlp_out_buf", None)
+            if mlp_out_buf is not None:
+                print("[MLP_OUT] each row stats:")
+                for r in range(mlp_out_buf.shape[0]):
+                    row = mlp_out_buf[r].float()
+                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
+            attn_out_buf = getattr(builder, "attn_out_buf", None)
+            if attn_out_buf is not None:
+                print("[ATTN_OUT] each row stats:")
+                for r in range(attn_out_buf.shape[0]):
+                    row = attn_out_buf[r].float()
+                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
+            attn_proj_buf = getattr(builder, "attn_proj_out_buf", None)
+            if attn_proj_buf is not None:
+                print("[ATTN_PROJ_OUT] each row stats:")
+                for r in range(attn_proj_buf.shape[0]):
+                    row = attn_proj_buf[r].float()
+                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
+            # MPK_DUMP_MOE: print MPK's selected experts and weights to compare with ref
+            moe_w = getattr(builder, "moe_topk_weights_buf", None)
+            moe_idx_buf = getattr(builder, "moe_routing_indices_buf", None)
+            if moe_w is not None and moe_idx_buf is not None:
+                _dmp_layer = os.environ.get("MPK_DUMP_MOE", "?")
+                # routing_indices is [NUM_EXPERTS, batch], values 0=not selected, k+1 = rank k
+                idx = moe_idx_buf.cpu()  # [NUM_EXPERTS, batch]
+                w = moe_w.cpu()  # [batch, TOPK]
+                for b in range(idx.shape[1]):
+                    selected = []  # list of (k_rank, expert_id)
+                    for e in range(idx.shape[0]):
+                        rank = idx[e, b].item()
+                        if rank > 0:
+                            selected.append((rank - 1, e))
+                    selected.sort()  # by k_rank (matches output order)
+                    expert_order = [e for _, e in selected]
+                    weight_order = [w[b, k].item() for k, _ in selected]
+                    # Sort by weight descending for easier comparison with ref
+                    pairs = sorted(zip(weight_order, expert_order), reverse=True)
+                    if pairs:
+                        s_experts = [p[1] for p in pairs]
+                        s_weights = [f'{p[0]:.4f}' for p in pairs]
+                        print(f"  [MPK L{_dmp_layer} b={b}] experts={s_experts} weights={s_weights}")
+            mpk_logits_buf = getattr(builder, "lm_head_out_buf", None)
+            if mpk_logits_buf is not None and ref_logits is not None:
+                ref_logits_cpu = ref_logits.detach().float().cpu()
+                vocab = ref_logits.shape[-1]
+                mpk_all = mpk_logits_buf[:, :vocab].detach().float().cpu()
+                print(f"Scanning {mpk_all.shape[0]} mbt rows of lm_head_out for best match:")
+                for r in range(mpk_all.shape[0]):
+                    row = mpk_all[r]
+                    cs = torch.nn.functional.cosine_similarity(
+                        row.unsqueeze(0), ref_logits_cpu.unsqueeze(0), dim=1
+                    ).item()
+                    top1 = row.argmax().item()
+                    top1_val = row.max().item()
+                    print(f"  row {r}: cosine={cs:+.4f} top1=token_{top1} val={top1_val:.3f} range=[{row.min():.2f},{row.max():.2f}]")
+
+                # Also show ref top-5
+                top5_ref = ref_logits_cpu.topk(5)
+                print(f"  ref top-5: {top5_ref.indices.tolist()} values={[f'{v:.3f}' for v in top5_ref.values.tolist()]}")
+                print(f"  ref range: [{ref_logits_cpu.min():.3f}, {ref_logits_cpu.max():.3f}]")
+                print(f"{'='*60}\n")
 
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):

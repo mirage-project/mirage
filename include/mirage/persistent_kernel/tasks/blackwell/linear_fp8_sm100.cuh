@@ -350,6 +350,18 @@ __device__ __noinline__ void
                                  batch_idx);
         }
         if constexpr (kMajorB == cute::UMMA::Major::K) {
+#ifdef MPK_DEBUG_CTA112
+          if (blockIdx.x == 112 && threadIdx.x == 0) {
+            void const* sb = static_cast<void const*>(smem_b[stage_idx]);
+            void const* fb = static_cast<void const*>(full_barriers[stage_idx]);
+            printf("[CTA112 TMA_B pre] iter=%u stage=%u k_blk=%u n_blk=%u m_blk=%u "
+                   "k_b_idx=%u n_idx=%u smem_b=%p full_bar=%p SHAPE_N=%u SHAPE_K=%u\n",
+                   (unsigned)scheduler.current_iter, (unsigned)stage_idx,
+                   (unsigned)k_block_idx, (unsigned)n_block_idx, (unsigned)m_block_idx,
+                   (unsigned)k_b_idx, (unsigned)n_idx,
+                   sb, fb, (unsigned)SHAPE_N, (unsigned)SHAPE_K);
+          }
+#endif
           tma_copy<BLOCK_K,
                    LOAD_BLOCK_N,
                    kSwizzleBMode,

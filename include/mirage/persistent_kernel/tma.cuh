@@ -1101,20 +1101,33 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
 
       if (param_id == 0) {
         // Q: may arrive as [B*NUM_HEADS, D_K] or flat [mbt, NUM_HEADS*D_K].
-        // For TMA, reinterpret as 3D (BK, B*NUM_HEADS, D_K/BK).
+        // For TMA, reinterpret as 3D (BK, B*Q_LEN*NUM_HEADS, D_K/BK).
+        // Box height = hpb (heads per block) which depends on Q_LEN. For Q_LEN=1,
+        // hpb=NUM_HEADS=128 (matches single-query decode). For Q_LEN>1 (prefill
+        // batching), hpb=NUM_HEADS/Q_LEN — must NOT be 128 or adjacent queries
+        // overlap in shared memory and cause hangs / wrong results.
         int num_heads = 128; // DeepSeek V3
         int d_k = 576;       // DeepSeek V3 MLA: 512 latent + 64 rope
         // Compute total elements from first 2 dims only (ignore padding dims)
         int total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
-        int total_rows = total_elements / d_k; // B * NUM_HEADS
+        int total_rows = total_elements / d_k; // B * Q_LEN * NUM_HEADS
         int k_iters = d_k / BK;
+        // Derive hpb from total_rows (assumes B=1):
+        //   total_rows = Q_LEN * NUM_HEADS  →  Q_LEN = total_rows / NUM_HEADS
+        //   hpb = NUM_HEADS / Q_LEN
+        int q_len = total_rows / num_heads;
+        if (q_len < 1) q_len = 1;
+        int hpb = num_heads / q_len;
+        while (num_heads % hpb != 0) {
+          hpb--;
+        }
         // gd: global dims, gs: global byte strides (dim0 stride is implicit
         // sizeof(T)) gs[0] = row stride in bytes = D_K * sizeof(bf16)
         // gs[1] = k_iter stride in bytes = BK * sizeof(bf16) = 128
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
         uint64_t gs[2] = {(uint64_t)d_k * 2, (uint64_t)BK * 2};
-        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)num_heads, 1};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)hpb, 1};
         uint32_t es[3] = {1, 1, 1};
         CUresult err = cuTensorMapEncodeTiled(tma_desc,
                                               fmt,

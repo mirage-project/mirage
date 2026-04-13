@@ -3270,22 +3270,52 @@ int TaskRegister::register_mla_decode_sm100_task(
   // params[2]: d_v (e.g. 512)
   // params[3]: num_splits
   // params[4]: kv_len (max, not used — runtime kv_len from page table)
-  assert(params.size() == 5);
+  // params[5]: q_len (number of queries per block, for prefill batching;
+  //                   default 1 for decode-only)
+  assert(params.size() >= 5 && params.size() <= 6);
   int num_heads = params[0];
   int d_k = params[1];
   int d_v = params[2];
   int num_splits = params[3];
+  int q_len = (params.size() >= 6) ? params[5] : 1;
+  // num_head_groups derived from q_len: each block handles q_len queries × hpb heads.
+  // hpb = 128 / q_len (must divide 128). num_head_groups = NUM_HEADS / hpb.
+  int hpb = 128 / q_len;
+  while (128 % hpb != 0) {
+    hpb--;
+  }
+  int num_head_groups = num_heads / hpb;
+  // For BS > 1 we'd need a separate batch dispatch; current single-request
+  // setup uses request_id as either bi (q_len=1) or gi (q_len>1). When q_len>1,
+  // BS is implicitly 1.
+  bool const single_query = (q_len == 1);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // Compute kv_len from page table at runtime (same as KV gather kernel)
+  // Compute kv_len and q_len from page/qo indptrs at runtime.
+  // Q_LEN is dynamic: prefill iters have Q_LEN=mbt new tokens, decode has Q_LEN=1.
+  // The TMA descriptor's box height is fixed at compile time (hpb=128/Q_LEN_COMPILE),
+  // so runtime Q_LEN must be ≤ compile-time Q_LEN. Kernel only iterates q<Q_LEN_RT.
+  // The causal mask uses Q_LEN_RT to compute correct causal_limit per query.
   code.e("{");
-  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  if (single_query) {
+    code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  } else {
+    code.e("  int bi_ = 0;  // BS=1 when q_len>1");
+    code.e("  int gi_ = task_desc->task_metadata.request_id;  // head group idx");
+  }
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
   code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
   code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
          "runtime_config.paged_kv_last_page_len_buffer[bi_];");
-  // Use PR 651 MLA MTP decode kernel (supports single-query decode)
+  if (!single_query) {
+    code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+    code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+    code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");  // actual new tokens this iter
+    code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+    code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
+  }
+  // Use PR 651 MLA MTP decode kernel (supports Q_LEN=1..mbt prefill batching)
   code.e("  kernel::mla_mtp_decode_sm100_task_impl<false>(");
   code.e("      static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // Q
@@ -3293,12 +3323,28 @@ int TaskRegister::register_mla_decode_sm100_task(
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),"); // KV
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),"); // Oa (bf16)
   code.e("      static_cast<float*>(task_desc->output_ptrs[1]),");       // La
-  code.e("      $f,", 1.0f / sqrtf((float)d_k));  // softmax scale
+  // DeepSeek V3 MLA softmax_scale = q_head_dim^-0.5 * mscale^2
+  //   q_head_dim = 128 (qk_nope) + 64 (qk_rope) = 192  (NOT 576!)
+  //   mscale = 0.1 * mscale_all_dim(1.0) * log(scaling_factor=40) + 1.0
+  //          ≈ 1.36889; mscale^2 ≈ 1.87385
+  //   sm_scale = 1/sqrt(192) * 1.87385 ≈ 0.13525
+  // (See modeling_deepseek.py:689-695. d_k=576 is the absorbed latent dim,
+  // not the original head dim used to scale the dot product.)
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("      $f,", _sm);  // softmax scale (DeepSeek V3 YARN-adjusted)
+  }
   code.e("      kv_len_,");                  // kv_len from runtime
   code.e("      $,", num_splits);            // sk
-  code.e("      1,");                        // num_head_groups (1 for single-GPU decode)
-  code.e("      1,");                        // Q_LEN (1 for decode)
-  code.e("      0,");                        // gi (head group 0)
+  code.e("      $,", num_head_groups);       // num_head_groups
+  if (single_query) {
+    code.e("      $,", q_len);                 // Q_LEN (compile-time 1)
+    code.e("      0,");                      // gi (head group 0)
+  } else {
+    code.e("      q_len_rt_,");              // Q_LEN (runtime)
+    code.e("      gi_,");                    // gi (from request_id)
+  }
   code.e("      (int)task_desc->task_metadata.kv_idx,"); // si (split_idx)
   code.e("      bi_);");                     // bi (batch_idx)
   code.e("}");
@@ -3312,26 +3358,55 @@ int TaskRegister::register_mla_reduce_sm100_task(
   // params[2]: num_splits
   // params[3]: d_start (start dim index for this task)
   // params[4]: d_count (num dims this task handles)
-  assert(params.size() == 5);
+  // params[5]: q_len (number of queries per block; default 1 for decode)
+  assert(params.size() >= 5 && params.size() <= 6);
   int num_heads = params[0];
   int d_v = params[1];
   int num_splits = params[2];
   int d_start = params[3];
   int d_count = params[4];
+  int q_len = (params.size() >= 6) ? params[5] : 1;
+  // Match decode kernel head_group derivation
+  int hpb = 128 / q_len;
+  while (128 % hpb != 0) {
+    hpb--;
+  }
+  int num_head_groups = num_heads / hpb;
+  bool const single_query = (q_len == 1);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // PR 651 MLA MTP reduce kernel (256 threads for MPK)
+  if (!single_query) {
+    // Use runtime Q_LEN from qo_indptr so reduce output layout matches what the
+    // decode kernel produced for this iter (1 row for decode, mbt rows for prefill).
+    code.e("{");
+    code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[0];");
+    code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[1];");
+    code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+    code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+    code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
+  }
   code.e("kernel::mla_mtp_reduce_sm100_task_impl<256>(");
   code.e("    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Oa (bf16)
   code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");       // La
   code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");      // O
   code.e("    $,", num_splits);            // sk
-  code.e("    1,");                        // num_head_groups
-  code.e("    1,");                        // Q_LEN (decode)
+  code.e("    $,", num_head_groups);       // num_head_groups
+  if (single_query) {
+    code.e("    $,", q_len);                 // Q_LEN (compile-time 1)
+  } else {
+    code.e("    q_len_rt_,");                // Q_LEN (runtime)
+  }
   code.e("    $,", d_start);               // dv_base
-  code.e("    0,");                        // gi (head group 0)
-  code.e("    (int)task_desc->task_metadata.request_id);"); // bi
+  if (single_query) {
+    code.e("    0,");                      // gi (head group 0)
+    code.e("    (int)task_desc->task_metadata.request_id);"); // bi
+  } else {
+    code.e("    (int)task_desc->task_metadata.request_id,"); // gi
+    code.e("    0);");                                       // bi (BS=1)
+    code.e("}");
+  }
   return register_task_variant(TASK_MLA_REDUCE_SM100, code.to_string());
 }
 
@@ -3348,7 +3423,13 @@ int TaskRegister::register_mla_prefill_sm100_task(
   int d_ckv = params[2];
   int d_kpe = params[3];
   int d_v = params[4];
-  float sm_scale = 1.0f / sqrtf((float)(d_ckv + d_kpe));
+  // DeepSeek V3 MLA softmax_scale = q_head_dim^-0.5 * mscale^2 (≈ 0.13525)
+  // d_ckv+d_kpe (576) is the absorbed latent dim, NOT the dot-product scale.
+  // q_head_dim = 192 (qk_nope=128 + qk_rope=64); mscale from YARN.
+  float const _mscale_pf = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_pf * _mscale_pf;
+  (void)d_ckv;
+  (void)d_kpe;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   // MLA prefill: grid = (H, num_q_blocks, B)
@@ -3409,7 +3490,14 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
   code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),"); // Oa
   code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");       // La
-  code.e("    $f,", 1.0f / sqrtf(576.0f));                             // ss
+  // DeepSeek V3 MLA softmax_scale = q_head_dim^-0.5 * mscale^2 ≈ 0.13525
+  // (NOT 1/sqrt(576) — d_k=576 is the absorbed latent dim, not the dot-product
+  // scaling dim. q_head_dim=192=128+64 per modeling_deepseek.py:689-695.)
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("    $f,", _sm);                                             // ss
+  }
   code.e("    $,", kv_len);
   code.e("    $,", num_splits);
   code.e("    $,", num_head_groups);

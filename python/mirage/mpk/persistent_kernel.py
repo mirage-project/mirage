@@ -230,6 +230,8 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
     # Use when debugging
     # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
+    if os.environ.get("MPK_DEBUG_CTA112", "0") == "1":
+        flags = flags + ["-DMPK_DEBUG_CTA112"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -871,14 +873,19 @@ class PersistentKernel:
         self,
         q_input: DTensor,         # Q tensor (attached with TMA desc)
         kv_input: DTensor,        # KV cache tensor (attached with TMA desc)
-        output_partial: DTensor,  # partial O: [B*sk, D_V*NUM_HEADS] float32
-        output_lse: DTensor,      # partial LSE: [B*sk, NUM_HEADS] float32
-        mla_params: tuple,        # (num_heads, d_k, d_v, num_splits, kv_len)
+        output_partial: DTensor,  # partial O: [B*Q_LEN*sk, D_V*NUM_HEADS] float32 (or bf16)
+        output_lse: DTensor,      # partial LSE: [B*Q_LEN*sk, NUM_HEADS] float32
+        mla_params: tuple,        # (num_heads, d_k, d_v, num_splits, kv_len) or (..., q_len)
         grid_dim: tuple,
         block_dim: tuple,
+        q_len: int = 1,
     ):
-        num_heads, d_k, d_v, num_splits, kv_len = mla_params
-        params = [num_heads, d_k, d_v, num_splits, kv_len]
+        # Allow q_len passed via mla_params 6-tuple as well as separate arg.
+        if len(mla_params) == 6:
+            num_heads, d_k, d_v, num_splits, kv_len, q_len = mla_params
+        else:
+            num_heads, d_k, d_v, num_splits, kv_len = mla_params
+        params = [num_heads, d_k, d_v, num_splits, kv_len, q_len]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_input, (0, -1, -1), -1, True)
@@ -894,13 +901,17 @@ class PersistentKernel:
         self,
         input_partial: DTensor,   # partial O from decode tasks
         input_lse: DTensor,       # partial LSE from decode tasks
-        output: DTensor,          # final O: [B, NUM_HEADS, D_V] bf16
-        mla_params: tuple,        # (num_heads, d_v, num_splits, d_start, d_count)
+        output: DTensor,          # final O: [B*Q_LEN, NUM_HEADS, D_V] bf16
+        mla_params: tuple,        # (num_heads, d_v, num_splits, d_start, d_count) or (..., q_len)
         grid_dim: tuple,
         block_dim: tuple,
+        q_len: int = 1,
     ):
-        num_heads, d_v, num_splits, d_start, d_count = mla_params
-        params = [num_heads, d_v, num_splits, d_start, d_count]
+        if len(mla_params) == 6:
+            num_heads, d_v, num_splits, d_start, d_count, q_len = mla_params
+        else:
+            num_heads, d_v, num_splits, d_start, d_count = mla_params
+        params = [num_heads, d_v, num_splits, d_start, d_count, q_len]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
