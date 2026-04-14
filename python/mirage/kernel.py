@@ -361,7 +361,7 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
-        prodiler_buffer_tensor = torch.empty(
+        profiler_buffer_tensor = torch.empty(
             results["profiler_buf_size"],
             dtype=torch.uint64,
             device=input_tensors[0].device,
@@ -370,13 +370,13 @@ class KNGraph:
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
-        prodiler_buffer_tensor_ptr = prodiler_buffer_tensor.data_ptr()
+        profiler_buffer_tensor_ptr = profiler_buffer_tensor.data_ptr()
         self.run(
             input_tensors_ptr,
             output_tensors_ptr,
             buffer_tensor_ptr,
             stream.cuda_stream,
-            prodiler_buffer_tensor_ptr,
+            profiler_buffer_tensor_ptr,
         )
 
         if results["profiler_buf_size"] > 0:
@@ -387,7 +387,7 @@ class KNGraph:
                 profiler_result_dir, "mirage.perfetto-trace"
             )
             os.makedirs(profiler_result_dir, exist_ok=True)
-            export_to_perfetto_trace(prodiler_buffer_tensor, profiler_result_file)
+            export_to_perfetto_trace(profiler_buffer_tensor, profiler_result_file)
             print(
                 f"Exported profiling results to {profiler_result_file}, please view it with perfetto: https://ui.perfetto.dev/"
             )
@@ -625,8 +625,6 @@ class KNGraph:
                                 )
                                 x = torch.as_strided(x, size=dims, stride=strides)
                                 input_tensors.append(x)
-                            starter = torch.cuda.Event(enable_timing=True)
-                            ender = torch.cuda.Event(enable_timing=True)
                             new_g = g
                             if len(handles) == MAX_THREADS:
                                 handles.popleft().wait()
@@ -652,8 +650,6 @@ class KNGraph:
                         )
                         x = torch.as_strided(x, size=dims, stride=strides)
                         input_tensors.append(x)
-                    starter = torch.cuda.Event(enable_timing=True)
-                    ender = torch.cuda.Event(enable_timing=True)
                     if len(handles) == MAX_THREADS:
                         handles.popleft().wait()
                     handle = g.compile(async_=True, inputs=input_tensors)
