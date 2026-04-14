@@ -309,14 +309,36 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
                 print(f"  [REF L{_dmp} b={b}] experts={topk_sorted.tolist()} weights={[f'{x:.4f}' for x in w_sorted.tolist()]}")
         out = torch.zeros(bs, HIDDEN, device=device, dtype=hidden.dtype)
         # Routed experts (per-expert individual weights, FP8)
+        # MPK_MOE_RAW_DEQUANT=1: use raw checkpoint dequant for expert GEMMs
+        # (float32 per-block scale, matching MPK's group GEMM scale format)
+        # instead of UE8M0 round-trip. If this gives same cosine as default,
+        # the gap is NOT from quantization scheme difference.
+        _moe_raw = os.environ.get("MPK_MOE_RAW_DEQUANT", "0") == "1"
+        def _expert_linear(x, weight_key, sd_dict, block_k=128):
+            """Expert FP8 linear: raw dequant when _moe_raw, else UE8M0 sim."""
+            if _moe_raw:
+                w = dequant_fp8(sd_dict[weight_key],
+                                sd_dict[f"{weight_key}_scale_inv"], block_k)
+                # Also quant-dequant input with float32 scale (not UE8M0)
+                bs_, K = x.shape
+                sk = K // block_k
+                x_blocks = x.float().reshape(bs_, sk, block_k)
+                amax = x_blocks.abs().amax(dim=2).clamp(min=1e-12)
+                scale = amax / 448.0  # float32 scale (NOT power-of-2)
+                scale_exp = scale.unsqueeze(2).expand_as(x_blocks)
+                x_q = (x_blocks / scale_exp).clamp(-448, 448).to(torch.float8_e4m3fn)
+                x_deq = x_q.float() * scale_exp
+                return F.linear(x_deq.reshape(bs_, K), w.float()).to(x.dtype)
+            else:
+                return fp8_linear(x, weight_key, sd_dict, block_k)
         for b in range(bs):
             for ki in range(TOPK):
                 eid = topk_idx[b, ki].item()
                 w = weights[b, ki].item()
                 ep = f"{p}experts.{eid}."
-                gate = F.silu(fp8_linear(hidden[b:b+1], f"{ep}gate_proj.weight", sd))
-                up = fp8_linear(hidden[b:b+1], f"{ep}up_proj.weight", sd)
-                down = fp8_linear(gate * up, f"{ep}down_proj.weight", sd)
+                gate = F.silu(_expert_linear(hidden[b:b+1], f"{ep}gate_proj.weight", sd))
+                up = _expert_linear(hidden[b:b+1], f"{ep}up_proj.weight", sd)
+                down = _expert_linear(gate * up, f"{ep}down_proj.weight", sd)
                 out[b] += w * down.squeeze(0)
         # Shared expert (FP8)
         sp = p + "shared_experts."
