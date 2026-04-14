@@ -25,11 +25,27 @@ import sys
 import time
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
 # Kernel definitions
-# ---------------------------------------------------------------------------
+
+def _attn_shape_keys(s):
+    return {
+        "batch": s[0], "num_heads": s[1], "query_seq_len": s[2],
+        "kv_seq_len": s[3], "head_dim": s[4],
+    }
+
 
 KERNELS = {
+    "rms_norm": {
+        "binary": "symbolic_rms_norm",
+        "shapes": [
+            (8, 1024), (8, 2048), (8, 4096), (16, 1024), (16, 4096),
+        ],
+        "config_fmt": lambda s: f"{s[0]},{s[1]}",
+        "shape_label": lambda s: f"n={s[0]},d={s[1]}",
+        "shape_keys": lambda s: {"n": s[0], "d": s[1]},
+        "ckpt_dir": "checkpoints/rms_norm",
+        "results_file": "results_rms_norm.json",
+    },
     "rmsnorm_mlp": {
         "binary": "symbolic_rmsnorm_mlp",
         "shapes": [
@@ -52,34 +68,33 @@ KERNELS = {
         "ckpt_dir": "checkpoints/swiglu",
         "results_file": "results_swiglu.json",
     },
-    "lora": {
-        "binary": "symbolic_lora",
+    "attention": {
+        "binary": "symbolic_attention",
         "shapes": [
-            (8, 4096, 16), (8, 4096, 64), (8, 4096, 128),
-            (8, 2048, 64), (16, 4096, 64),
+            (2, 8, 1, 1024, 128), (2, 8, 128, 1024, 128),
+            (2, 32, 1, 1024, 128), (4, 8, 1, 1024, 128),
         ],
-        "config_fmt": lambda s: f"{s[0]},{s[1]},{s[2]}",
-        "shape_label": lambda s: f"n={s[0]},d={s[1]},r={s[2]}",
-        "shape_keys": lambda s: {"n": s[0], "d": s[1], "r": s[2]},
-        "ckpt_dir": "checkpoints/lora",
-        "results_file": "results_lora.json",
+        "config_fmt": lambda s: f"{s[0]},{s[1]},{s[2]},{s[3]},{s[4]}",
+        "shape_label": lambda s: f"b={s[0]},h={s[1]},q={s[2]},kv={s[3]},d={s[4]}",
+        "shape_keys": _attn_shape_keys,
+        "ckpt_dir": "checkpoints/attention",
+        "results_file": "results_attention.json",
     },
-    "two_layer_mlp": {
-        "binary": "symbolic_two_layer_mlp",
+    "qk_norm_attention": {
+        "binary": "symbolic_qk_norm_attention",
         "shapes": [
-            (8, 1024), (8, 2048), (8, 4096), (16, 1024), (16, 4096),
+            (2, 8, 1, 1024, 128), (2, 8, 128, 1024, 128),
+            (2, 32, 1, 1024, 128), (4, 8, 1, 1024, 128),
         ],
-        "config_fmt": lambda s: f"{s[0]},{s[1]}",
-        "shape_label": lambda s: f"n={s[0]},d={s[1]}",
-        "shape_keys": lambda s: {"n": s[0], "d": s[1]},
-        "ckpt_dir": "checkpoints/two_layer_mlp",
-        "results_file": "results_two_layer_mlp.json",
+        "config_fmt": lambda s: f"{s[0]},{s[1]},{s[2]},{s[3]},{s[4]}",
+        "shape_label": lambda s: f"b={s[0]},h={s[1]},q={s[2]},kv={s[3]},d={s[4]}",
+        "shape_keys": _attn_shape_keys,
+        "ckpt_dir": "checkpoints/qk_norm_attention",
+        "results_file": "results_qk_norm_attention.json",
     },
 }
 
-# ---------------------------------------------------------------------------
 # Stdout parsers
-# ---------------------------------------------------------------------------
 
 def parse_search_time(stdout: str) -> float | None:
     """Parse '[Search] ... Time elapsed: Xsec' or 'Symbolic search ... Time elapsed: Xsec'."""
@@ -105,9 +120,7 @@ def parse_num_graphs(stdout: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-# ---------------------------------------------------------------------------
 # Subprocess runner
-# ---------------------------------------------------------------------------
 
 def run_command(cmd: list[str], cwd: str, timeout: float,
                 dry_run: bool = False) -> dict:
@@ -155,9 +168,7 @@ def run_command(cmd: list[str], cwd: str, timeout: float,
         }
 
 
-# ---------------------------------------------------------------------------
 # Results file helpers
-# ---------------------------------------------------------------------------
 
 def load_eval_results(path: str) -> dict:
     if os.path.exists(path):
@@ -171,9 +182,7 @@ def save_eval_results(path: str, data: dict):
         json.dump(data, f, indent=2)
 
 
-# ---------------------------------------------------------------------------
 # Main evaluation logic
-# ---------------------------------------------------------------------------
 
 def evaluate_kernel(kernel_name: str, kdef: dict, args, build_dir: str,
                     bin_dir: str, eval_results: dict):
@@ -358,9 +367,7 @@ def print_summary_table(eval_results: dict):
         print()
 
 
-# ---------------------------------------------------------------------------
 # Entry point
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(

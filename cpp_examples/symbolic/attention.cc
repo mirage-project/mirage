@@ -1,57 +1,12 @@
 #include "common.h"
 
-// Attention
-//
-// Computes: O = softmax(Q @ K^T) @ V
-//   Q:  (batch, g, head_dim)   g = num_heads * query_seq_len
-//   Kt: (batch, head_dim, h)   h = num_heads * kv_seq_len
-//   V:  (batch, h, head_dim)
-//   O:  (batch, g, head_dim)
-//
-// Usage:
-//   ./symbolic_attention                        – sweep all attention configs
-//   ./symbolic_attention -d                     – single debug config
-//   ./symbolic_attention --force-nonsym         – re-run non-symbolic search
-//   ./symbolic_attention --force-sym            – re-run symbolic search
-//   ./symbolic_attention --skip-nonsym          – skip non-symbolic search
-//   entirely
-//   ./symbolic_attention --skip-sym             – skip symbolic search entirely
-//   ./symbolic_attention --sym-checkpoint <f>   – use <f> as symbolic
-//   checkpoint
-//   ./symbolic_attention --time-limit <sec>     – search time limit (default
-//   3600)
-//
-// Output files:
-//   checkpoints/attention/      – per-config and shared symbolic checkpoints
-//   results_attention.json      – best times for each config x {non-symbolic,
-//   symbolic}
+// O = softmax(Q @ K^T) @ V
 
 struct AttentionConfig {
   int batch, num_heads, query_seq_len, kv_seq_len, head_dim;
 };
 
-static AttentionConfig const kDebugConfig{2, 8, 1, 1024, 128};
-
-static std::vector<AttentionConfig> get_configs() {
-  // Real-world shapes: g = num_heads * q_seq, h = num_heads * kv_seq
-  // GQA models (LLaMA-7B/Mistral): 8 KV heads, head_dim=128
-  // Full-head models (LLaMA-7B): 32 heads, head_dim=128
-  // Decode: q_seq=1; Prefill: q_seq=128
-  // batch >= 2 needed for parallelization opportunities
-  std::vector<AttentionConfig> configs;
-  for (int batch : {2, 4}) {
-    for (int num_heads : {8, 32}) {
-      for (int q_seq : {1, 128}) {
-        for (int kv_seq : {128, 1024}) {
-          for (int head_dim : {128}) {
-            configs.push_back({batch, num_heads, q_seq, kv_seq, head_dim});
-          }
-        }
-      }
-    }
-  }
-  return configs;
-}
+static AttentionConfig const kDefaultConfig{2, 8, 1, 1024, 128};
 
 static std::vector<std::vector<int>>
     get_input_shapes(AttentionConfig const &cfg) {
@@ -126,16 +81,16 @@ static void print_config(AttentionConfig const &cfg) {
             << " head_dim=" << cfg.head_dim << "]" << std::endl;
 }
 
-static void run_experiments(std::vector<AttentionConfig> const &configs,
+static void run_experiments(AttentionConfig const &cfg,
                             bool force_nonsym,
                             bool force_sym,
-                            bool skip_nonsym = false,
-                            bool skip_sym = false,
-                            std::string const &sym_ckpt_override = "",
-                            double time_limit_sec = -1,
-                            bool explore_all_mappings = false,
-                            bool search_only = false,
-                            bool symbolic_maps = false) {
+                            bool skip_nonsym,
+                            bool skip_sym,
+                            std::string const &sym_ckpt_override,
+                            double time_limit_sec,
+                            bool explore_all_mappings,
+                            bool search_only,
+                            bool symbolic_maps) {
   ensure_dir(kCkptDir);
   std::string const sym_ckpt =
       sym_ckpt_override.empty() ? kSymCkpt : sym_ckpt_override;
@@ -144,23 +99,19 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
   std::string best_nonsym_so;
   std::string best_sym_so;
 
-  // ---- Experiment 1: non-symbolic search (per-config checkpoint) ----
   if (skip_nonsym) {
     std::cout << "\n=== attention: non-symbolic search (skipped) ==="
               << std::endl;
   } else {
     std::cout << "\n=== attention: non-symbolic search ===" << std::endl;
-    for (auto const &cfg : configs) {
-      print_config(cfg);
+    print_config(cfg);
 
-      int idx = find_result_idx(results, cfg);
-      if (!force_nonsym && idx != -1 &&
-          results[idx].contains("non_symbolic_ms")) {
-        std::cout << "  already recorded: " << results[idx]["non_symbolic_ms"]
-                  << " ms, skipping" << std::endl;
-        continue;
-      }
-
+    int idx = find_result_idx(results, cfg);
+    if (!force_nonsym && idx != -1 &&
+        results[idx].contains("non_symbolic_ms")) {
+      std::cout << "  already recorded: " << results[idx]["non_symbolic_ms"]
+                << " ms, skipping" << std::endl;
+    } else {
       kernel::Graph ref;
       build_ref_graph(ref, cfg);
       for (auto const &op : ref.operators) {
@@ -175,33 +126,30 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
                                                 time_limit_sec,
                                                 explore_all_mappings,
                                                 &ns_search_time);
-      if (search_only) {
-        std::cout << "  --search-only: skipping profiling" << std::endl;
-        continue;
-      }
-      double ns_cp_time = 0;
-      auto [best_time, so_path] = profile_best_with_so(graphs, &ns_cp_time);
-      std::cout << "  Best time (non-symbolic): " << best_time << " ms"
-                << std::endl;
-      std::cout << "  Best .so file: " << so_path << std::endl;
+      if (!search_only) {
+        double ns_cp_time = 0;
+        auto [best_time, so_path] = profile_best_with_so(graphs, &ns_cp_time);
+        std::cout << "  Best time (non-symbolic): " << best_time << " ms"
+                  << std::endl;
+        std::cout << "  Best .so file: " << so_path << std::endl;
 
-      if (!so_path.empty()) {
-        best_nonsym_so = so_path;
-      }
+        if (!so_path.empty()) {
+          best_nonsym_so = so_path;
+        }
 
-      if (idx == -1) {
-        results.push_back(config_key(cfg));
-        idx = (int)results.size() - 1;
+        if (idx == -1) {
+          results.push_back(config_key(cfg));
+          idx = (int)results.size() - 1;
+        }
+        results[idx]["non_symbolic_ms"] = best_time;
+        results[idx]["non_symbolic_so"] = so_path;
+        results[idx]["non_symbolic_search_s"] = ns_search_time;
+        results[idx]["non_symbolic_compile_profile_s"] = ns_cp_time;
+        save_results(kResultsFile, results);
       }
-      results[idx]["non_symbolic_ms"] = best_time;
-      results[idx]["non_symbolic_so"] = so_path;
-      results[idx]["non_symbolic_search_s"] = ns_search_time;
-      results[idx]["non_symbolic_compile_profile_s"] = ns_cp_time;
-      save_results(kResultsFile, results);
     }
-  } // end if (!skip_nonsym)
+  }
 
-  // ---- Experiment 2: symbolic search (one shared checkpoint) ----
   if (skip_sym) {
     std::cout << "\n=== attention: symbolic search (skipped) ===" << std::endl;
   } else {
@@ -209,7 +157,7 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
     double sym_search_time = 0;
     {
       kernel::Graph ref;
-      build_ref_graph(ref, kDebugConfig);
+      build_ref_graph(ref, cfg);
       for (auto const &op : ref.operators) {
         op->fingerprint();
       }
@@ -222,46 +170,40 @@ static void run_experiments(std::vector<AttentionConfig> const &configs,
                      &sym_search_time,
                      symbolic_maps);
     }
-    if (search_only) {
-      std::cout << "  --search-only: skipping per-config tuning" << std::endl;
-      return;
-    }
-    for (auto const &cfg : configs) {
+    if (!search_only) {
       print_config(cfg);
 
       int idx = find_result_idx(results, cfg);
       if (!force_sym && idx != -1 && results[idx].contains("symbolic_ms")) {
         std::cout << "  already recorded: " << results[idx]["symbolic_ms"]
                   << " ms, skipping" << std::endl;
-        continue;
-      }
+      } else {
+        std::vector<json> graphs = load_graphs(sym_ckpt);
+        graphs = apply_input_shapes(graphs, get_input_shapes(cfg));
+        double sym_tune_time = 0;
+        auto [best_time, so_path] =
+            auto_tune_best_with_so(graphs, &sym_tune_time);
+        std::cout << "  Best time (symbolic): " << best_time << " ms"
+                  << std::endl;
+        std::cout << "  Best .so file: " << so_path << std::endl;
 
-      std::vector<json> graphs = load_graphs(sym_ckpt);
-      graphs = apply_input_shapes(graphs, get_input_shapes(cfg));
-      double sym_tune_time = 0;
-      auto [best_time, so_path] =
-          auto_tune_best_with_so(graphs, &sym_tune_time);
-      std::cout << "  Best time (symbolic): " << best_time << " ms"
-                << std::endl;
-      std::cout << "  Best .so file: " << so_path << std::endl;
+        if (!so_path.empty()) {
+          best_sym_so = so_path;
+        }
 
-      if (!so_path.empty()) {
-        best_sym_so = so_path;
+        if (idx == -1) {
+          results.push_back(config_key(cfg));
+          idx = (int)results.size() - 1;
+        }
+        results[idx]["symbolic_ms"] = best_time;
+        results[idx]["symbolic_so"] = so_path;
+        results[idx]["symbolic_search_s"] = sym_search_time;
+        results[idx]["symbolic_tune_s"] = sym_tune_time;
+        save_results(kResultsFile, results);
       }
-
-      if (idx == -1) {
-        results.push_back(config_key(cfg));
-        idx = (int)results.size() - 1;
-      }
-      results[idx]["symbolic_ms"] = best_time;
-      results[idx]["symbolic_so"] = so_path;
-      results[idx]["symbolic_search_s"] = sym_search_time;
-      results[idx]["symbolic_tune_s"] = sym_tune_time;
-      save_results(kResultsFile, results);
     }
-  } // end if (!skip_sym)
+  }
 
-  // ---- Summary -----------------------------------------------------------
   std::cout << "\n=== Best Kernel .so Files ===" << std::endl;
   std::cout << "Non-symbolic: " << best_nonsym_so << std::endl;
   std::cout << "Symbolic:     " << best_sym_so << std::endl;
@@ -285,8 +227,6 @@ static void run_ablation(AttentionConfig const &cfg, double time_limit_sec) {
       {"no_maps", {true, true, false, false, false}},
   };
 
-  int g = cfg.num_heads * cfg.query_seq_len;
-  int h = cfg.num_heads * cfg.kv_seq_len;
   kernel::Graph ref;
   build_ref_graph(ref, cfg);
   for (auto const &op : ref.operators) {
@@ -343,7 +283,7 @@ static void run_ablation(AttentionConfig const &cfg, double time_limit_sec) {
 }
 
 int main(int argc, char **argv) {
-  bool debug = false;
+  AttentionConfig cfg = kDefaultConfig;
   bool force_nonsym = false;
   bool force_sym = false;
   bool skip_nonsym = false;
@@ -354,11 +294,25 @@ int main(int argc, char **argv) {
   bool ablation = false;
   double time_limit = -1;
   std::string sym_ckpt_override;
-  std::string config_str;
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i]);
-    if (arg == "-d") {
-      debug = true;
+    auto require = [&](char const *name) {
+      if (i + 1 >= argc) {
+        std::cerr << name << " requires a value\n";
+        std::exit(1);
+      }
+      return argv[++i];
+    };
+    if (arg == "--batch") {
+      cfg.batch = std::atoi(require("--batch"));
+    } else if (arg == "--num-heads") {
+      cfg.num_heads = std::atoi(require("--num-heads"));
+    } else if (arg == "--query-seq-len") {
+      cfg.query_seq_len = std::atoi(require("--query-seq-len"));
+    } else if (arg == "--kv-seq-len") {
+      cfg.kv_seq_len = std::atoi(require("--kv-seq-len"));
+    } else if (arg == "--head-dim") {
+      cfg.head_dim = std::atoi(require("--head-dim"));
     } else if (arg == "--force-nonsym") {
       force_nonsym = true;
     } else if (arg == "--force-sym") {
@@ -376,54 +330,26 @@ int main(int argc, char **argv) {
     } else if (arg == "--ablation") {
       ablation = true;
     } else if (arg == "--sym-checkpoint") {
-      if (i + 1 >= argc) {
-        std::cerr << "--sym-checkpoint requires a path argument\n";
-        return 1;
-      }
-      sym_ckpt_override = argv[++i];
+      sym_ckpt_override = require("--sym-checkpoint");
     } else if (arg == "--time-limit") {
-      if (i + 1 >= argc) {
-        std::cerr << "--time-limit requires a value in seconds\n";
-        return 1;
-      }
-      time_limit = std::stod(argv[++i]);
-    } else if (arg == "--config") {
-      if (i + 1 >= argc) {
-        std::cerr << "--config requires batch,heads,q_seq,kv_seq,head_dim\n";
-        return 1;
-      }
-      config_str = argv[++i];
+      time_limit = std::stod(require("--time-limit"));
     } else {
-      std::cerr << "Unknown argument: " << arg << "\n"
+      std::cerr << "Unknown argument: " << arg << '\n'
                 << "Usage: " << argv[0]
-                << " [-d] [--force-nonsym] [--force-sym] [--skip-nonsym]"
+                << " [--batch <b>] [--num-heads <h>] [--query-seq-len <q>]"
+                << " [--kv-seq-len <kv>] [--head-dim <d>]"
+                << " [--force-nonsym] [--force-sym] [--skip-nonsym]"
                 << " [--skip-sym] [--search-only] [--explore-all-maps]"
-                << " [--symbolic-maps]"
-                << " [--config <batch,heads,q_seq,kv_seq,head_dim>]"
+                << " [--symbolic-maps] [--ablation]"
                 << " [--sym-checkpoint <path>] [--time-limit <seconds>]\n";
       return 1;
     }
   }
-  std::vector<AttentionConfig> configs;
-  if (!config_str.empty()) {
-    int b, h, q, kv, hd;
-    if (sscanf(config_str.c_str(), "%d,%d,%d,%d,%d", &b, &h, &q, &kv, &hd) !=
-        5) {
-      std::cerr << "Invalid --config format, expected "
-                   "batch,heads,q_seq,kv_seq,head_dim\n";
-      return 1;
-    }
-    configs.push_back({b, h, q, kv, hd});
-  } else {
-    configs =
-        debug ? std::vector<AttentionConfig>{kDebugConfig} : get_configs();
-  }
   if (ablation) {
-    AttentionConfig cfg = configs.empty() ? kDebugConfig : configs[0];
     run_ablation(cfg, time_limit >= 0 ? time_limit : 3600.0);
     return 0;
   }
-  run_experiments(configs,
+  run_experiments(cfg,
                   force_nonsym,
                   force_sym,
                   skip_nonsym,
