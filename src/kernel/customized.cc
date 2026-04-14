@@ -314,36 +314,148 @@ bool KNCustomizedOp::fingerprint(void) {
       output_buffers.push_back(
           reinterpret_cast<FPType *>(smem_buffer + output.smem_offset));
     }
+    auto compute_unary = [&](auto fn) {
+      for (size_t i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+        output_buffers[0][i] = fn(input_buffers[0][i]);
+      }
+    };
+    auto compute_binary = [&](auto fn) {
+      for (size_t i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+        int input1_stride = 1, input1_idx = 0;
+        int input2_stride = 1, input2_idx = 0;
+        int idx = i;
+        for (int d = op->input_tensors[0].num_dims - 1; d >= 0; --d) {
+          input1_idx += (idx % op->input_tensors[0].dim[d]) * input1_stride;
+          input1_stride *= op->input_tensors[0].dim[d];
+          input2_idx += (idx % op->input_tensors[1].dim[d]) * input2_stride;
+          input2_stride *= op->input_tensors[1].dim[d];
+          idx /= op->input_tensors[0].dim[d];
+        }
+        output_buffers[0][i] =
+            fn(input_buffers[0][input1_idx], input_buffers[1][input2_idx]);
+      }
+    };
+    auto compute_reduction = [&](int reduction_degree, int inner_range, auto preprocess) {
+      for (int i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+        int pos = (i / inner_range) * (inner_range * reduction_degree) +
+                  i % inner_range;
+        FPType result = 0;
+        for (int k = 0; k < reduction_degree; ++k) {
+          result = utils::compute_add_fingerprint(result, preprocess(input_buffers[0][pos]));
+          pos += inner_range;
+        }
+        output_buffers[0][i] = result;
+      }
+    };
     // Perform the operation
     switch (op->op_type) {
       case type::TB_MATMUL_OP: {
-        int M = op->input_tensors[0].dim[0];
-        int N = op->input_tensors[1].dim[1];
-        int K = op->input_tensors[0].dim[1];
+        int ndims = op->input_tensors[0].num_dims;
+        int B = 1;
+        for (int i = 0; i < ndims - 2; ++i) {
+          B *= op->input_tensors[0].dim[i];
+        }
+        int M = op->input_tensors[0].dim[ndims - 2];
+        int N = op->input_tensors[1].dim[ndims - 1];
+        int K = op->input_tensors[0].dim[ndims - 1];
         utils::compute_matmul_fingerprint(
-            input_buffers[0], input_buffers[1], output_buffers[0], 1, M, N, K);
+            input_buffers[0], input_buffers[1], output_buffers[0], B, M, N, K);
+        break;
+      }
+      case type::TB_EXP_OP: {
+        compute_unary([&](FPType x) {
+          return utils::compute_exp_fingerprint(x, dmm->exp_lookup_table);
+        });
+        break;
+      }
+      case type::TB_SQUARE_OP: {
+        compute_unary([&](FPType x) { return utils::compute_square_fingerprint(x); });
+        break;
+      }
+      case type::TB_SQRT_OP: {
+        compute_unary([&](FPType x) {
+          return utils::compute_sqrt_fingerprint(
+              x, dmm->sqrt_p_lookup_table, dmm->sqrt_q_lookup_table);
+        });
+        break;
+      }
+      case type::TB_SILU_OP: {
+        compute_unary([&](FPType x) {
+          return utils::compute_silu_fingerprint(x, dmm->exp_lookup_table);
+        });
+        break;
+      }
+      case type::TB_GELU_OP: {
+        compute_unary([&](FPType x) {
+          return utils::compute_gelu_fingerprint(x, dmm->exp_lookup_table);
+        });
+        break;
+      }
+      case type::TB_RELU_OP: {
+        compute_unary([&](FPType x) { return utils::compute_relu_fingerprint(x); });
+        break;
+      }
+      case type::TB_CLAMP_OP: {
+        compute_unary([&](FPType x) { return utils::compute_clamp_fingerprint(x); });
+        break;
+      }
+      case type::TB_MUL_SCALAR_OP: {
+        auto const *unary = dynamic_cast<threadblock::TBElementUnaryOp const *>(op);
+        assert(unary != nullptr);
+        compute_unary([&](FPType x) {
+          return utils::compute_mul_fingerprint(x, static_cast<FPType>(unary->scalar));
+        });
+        break;
+      }
+      case type::TB_ADD_OP: {
+        compute_binary([&](FPType a, FPType b) {
+          return utils::compute_add_fingerprint(a, b);
+        });
+        break;
+      }
+      case type::TB_MUL_OP: {
+        compute_binary([&](FPType a, FPType b) {
+          return utils::compute_mul_fingerprint(a, b);
+        });
         break;
       }
       case type::TB_DIV_OP: {
-        for (int i = 0; i < op->output_tensors[0].num_elements(); ++i) {
-          int input1_stride = 1, input1_idx = 0;
-          int input2_stride = 1, input2_idx = 0;
-          {
-            int idx = i;
-            for (int d = op->input_tensors[0].num_dims - 1; d >= 0; --d) {
-              input1_idx += (idx % op->input_tensors[0].dim[d]) * input1_stride;
-              input1_stride *= op->input_tensors[0].dim[d];
-              input2_idx += (idx % op->input_tensors[1].dim[d]) * input2_stride;
-              input2_stride *= op->input_tensors[1].dim[d];
-              idx /= op->input_tensors[0].dim[d];
-            }
-          }
-          output_buffers[0][i] =
-              utils::compute_div_fingerprint(input_buffers[0][input1_idx],
-                                             input_buffers[1][input2_idx],
-                                             dmm->div_p_lookup_table,
-                                             dmm->div_q_lookup_table);
+        compute_binary([&](FPType a, FPType b) {
+          return utils::compute_div_fingerprint(
+              a, b, dmm->div_p_lookup_table, dmm->div_q_lookup_table);
+        });
+        break;
+      }
+      case type::TB_POW_OP: {
+        compute_binary([&](FPType a, FPType b) {
+          return utils::compute_pow_fingerprint(a, b);
+        });
+        break;
+      }
+      case type::TB_REDUCTION_0_OP:
+      case type::TB_REDUCTION_1_OP:
+      case type::TB_REDUCTION_2_OP: {
+        int reduce_dim = op->op_type - type::TB_REDUCTION_0_OP;
+        int reduction_degree =
+            op->input_tensors[0].dim[reduce_dim] / op->output_tensors[0].dim[reduce_dim];
+        int inner_range = 1;
+        for (int i = reduce_dim + 1; i < op->output_tensors[0].num_dims; ++i) {
+          inner_range *= op->output_tensors[0].dim[i];
         }
+        compute_reduction(reduction_degree, inner_range, [&](FPType x) { return x; });
+        break;
+      }
+      case type::TB_REDUCTION_0_TO_DIMX_OP:
+      case type::TB_REDUCTION_1_TO_DIMX_OP:
+      case type::TB_REDUCTION_2_TO_DIMX_OP: {
+        int reduce_dim = op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP;
+        int reduction_degree =
+            op->input_tensors[0].dim[reduce_dim] / op->output_tensors[0].dim[reduce_dim];
+        int inner_range = 1;
+        for (int i = reduce_dim + 1; i < op->output_tensors[0].num_dims; ++i) {
+          inner_range *= op->output_tensors[0].dim[i];
+        }
+        compute_reduction(reduction_degree, inner_range, [&](FPType x) { return x; });
         break;
       }
       case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
@@ -355,6 +467,44 @@ bool KNCustomizedOp::fingerprint(void) {
         for (size_t i = 0; i < op->output_tensors[0].num_elements(); ++i) {
           output_buffers[0][i] = utils::compute_add_fingerprint(
               output_buffers[0][i], input_buffers[0][i]);
+        }
+        break;
+      }
+      case type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+      case type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
+        if (is_first_iteration) {
+          memset(output_buffers[0],
+                 0,
+                 sizeof(FPType) * op->output_tensors[0].num_elements());
+        }
+        int reduce_dim = op->input_tensors[0].num_dims - 1;
+        int reduction_degree =
+            op->input_tensors[0].dim[reduce_dim] / op->output_tensors[0].dim[reduce_dim];
+        int inner_range = 1;
+        for (int i = reduce_dim + 1; i < op->output_tensors[0].num_dims; ++i) {
+          inner_range *= op->output_tensors[0].dim[i];
+        }
+        for (int i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+          int pos = (i / inner_range) * (inner_range * reduction_degree) +
+                    i % inner_range;
+          FPType result = 0;
+          for (int k = 0; k < reduction_degree; ++k) {
+            result = utils::compute_add_fingerprint(result, input_buffers[0][pos]);
+            pos += inner_range;
+          }
+          output_buffers[0][i] =
+              utils::compute_add_fingerprint(output_buffers[0][i], result);
+        }
+        if (is_last_iteration && op->op_type == type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP) {
+          FPType n = (bgraph.forloop_range * reduction_degree) % config::FP_PQ;
+          for (int i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+            output_buffers[0][i] = utils::compute_div_fingerprint(
+                output_buffers[0][i],
+                n,
+                dmm->div_p_lookup_table,
+                dmm->div_q_lookup_table);
+          }
         }
         break;
       }
@@ -387,6 +537,33 @@ bool KNCustomizedOp::fingerprint(void) {
                 utils::compute_sqrt_fingerprint(output_buffers[0][i],
                                                 dmm->sqrt_p_lookup_table,
                                                 dmm->sqrt_q_lookup_table);
+          }
+        }
+        break;
+      }
+      case type::TB_RMS_NORM_OP: {
+        size_t reduction_degree =
+            op->input_tensors[0].dim[op->input_tensors[0].num_dims - 1];
+        size_t num_rows =
+            op->input_tensors[0].num_elements() / reduction_degree;
+        FPType n = reduction_degree % config::FP_PQ;
+        for (size_t row = 0; row < num_rows; ++row) {
+          FPType rms = 0;
+          for (size_t col = 0; col < reduction_degree; ++col) {
+            utils::accum_square_fingerprint(
+                rms, input_buffers[0][row * reduction_degree + col]);
+          }
+          rms = utils::compute_div_fingerprint(
+              rms, n, dmm->div_p_lookup_table, dmm->div_q_lookup_table);
+          rms = utils::compute_sqrt_fingerprint(
+              rms, dmm->sqrt_p_lookup_table, dmm->sqrt_q_lookup_table);
+          for (size_t col = 0; col < reduction_degree; ++col) {
+            output_buffers[0][row * reduction_degree + col] =
+                utils::compute_div_fingerprint(
+                    input_buffers[0][row * reduction_degree + col],
+                    rms,
+                    dmm->div_p_lookup_table,
+                    dmm->div_q_lookup_table);
           }
         }
         break;
@@ -526,6 +703,7 @@ bool KNCustomizedOp::fingerprint(void) {
       }
     }
   }
+  return true;
 }
 #endif
 

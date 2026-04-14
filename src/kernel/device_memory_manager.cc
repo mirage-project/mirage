@@ -73,6 +73,11 @@ DeviceMemoryManager *DeviceMemoryManager::get_instance() {
   }
   return singleton;
 }
+
+void cython_set_gpu_device_id(int /*gpu_id*/) {
+  // Non-CUDA builds do not manage GPU devices. Keep the symbol available so
+  // the Python extension can import on CPU/TPU-only environments.
+}
 #endif
 
 } // namespace kernel

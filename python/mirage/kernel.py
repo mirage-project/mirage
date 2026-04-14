@@ -1,4 +1,7 @@
-import torch
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 import os
 import tempfile
@@ -18,6 +21,14 @@ from .graph_dataset import graph_dataset
 from collections import deque
 
 MAX_THREADS = os.cpu_count()
+
+
+def _require_torch():
+    if torch is None:
+        raise ModuleNotFoundError(
+            "torch is required for Mirage CUDA runtime features"
+        )
+    return torch
 
 HARD_CODE = """
 #include <Python.h>
@@ -189,8 +200,13 @@ def check_stride(dims, strides, layout="row-major"):
     return True
 
 
-def gen_empty_tensor(alloc_size, shape, stride, device, dtype=torch.float16):
-    return torch.empty(alloc_size, dtype=dtype, device=device).as_strided(shape, stride)
+def gen_empty_tensor(alloc_size, shape, stride, device, dtype=None):
+    torch_mod = _require_torch()
+    if dtype is None:
+        dtype = torch_mod.float16
+    return torch_mod.empty(alloc_size, dtype=dtype, device=device).as_strided(
+        shape, stride
+    )
 
 
 class Handle:
@@ -214,6 +230,7 @@ class KNGraph:
         self._valid_cuda_kernels = False
         self._cached_results = None
         self.visualizer = None
+        self._pallas_tempdir = None
 
         self.backend = "cuda"
 
@@ -299,6 +316,8 @@ class KNGraph:
             return self.cuda_call(**kwargs)
         elif self.backend == "nki":
             raise NotImplementedError("NKI backend is not implemented yet")
+        elif self.backend == "pallas":
+            return self.pallas_call(**kwargs)
         elif self.backend == "triton":
             return self.triton_call(**kwargs)
 
@@ -324,6 +343,46 @@ class KNGraph:
 
         self.run(*input_tensors, *output_tensors)
         return output_tensors
+
+    def pallas_call(self, **kwargs):
+        results = self.compile(**kwargs)
+        assert self.run is not None, "The graph is not compiled to pallas yet."
+
+        try:
+            import jax
+            import jax.numpy as jnp
+        except ImportError as exc:
+            raise ImportError(
+                "JAX is required to run the Pallas backend. Install a JAX build "
+                "compatible with your TPU environment."
+            ) from exc
+
+        input_tensors = kwargs.get("inputs", [])
+        if len(input_tensors) != self.cygraph.get_num_inputs():
+            raise AssertionError(
+                "Expected {} input tensors, got {}".format(
+                    self.cygraph.get_num_inputs(), len(input_tensors)
+                )
+            )
+
+        if "device" in kwargs and kwargs["device"] is not None:
+            device = kwargs["device"]
+        else:
+            tpu_devices = [d for d in jax.devices() if d.platform == "tpu"]
+            device = tpu_devices[0] if tpu_devices else jax.devices()[0]
+
+        converted_inputs = []
+        for tensor in input_tensors:
+            if torch is not None and isinstance(tensor, torch.Tensor):
+                arr = jnp.asarray(tensor.detach().cpu().numpy())
+            else:
+                arr = jnp.asarray(tensor)
+            converted_inputs.append(jax.device_put(arr, device))
+
+        outputs = self.run(*converted_inputs)
+        if not isinstance(outputs, (tuple, list)):
+            outputs = (outputs,)
+        return list(outputs)
 
     def cuda_call(self, **kwargs):
         results = self.compile(**kwargs)
@@ -394,6 +453,8 @@ class KNGraph:
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
+        if self.backend == "pallas":
+            return self._compile_pallas(**kwargs)
         if self._is_compiled:
             return self._cached_results
 
@@ -539,6 +600,40 @@ class KNGraph:
             return remain_op()
 
         # so_path = './test.cpython-38-x86_64-linux-gnu.so'
+
+    def _compile_pallas(self, **kwargs):
+        if self._is_compiled:
+            return self._cached_results
+
+        result = generate_pallas_program(
+            self.cygraph,
+            target_chip=kwargs.get("target_chip"),
+            debug=kwargs.get("debug", False),
+        )
+        if result["errors"]:
+            self._is_compiled = True
+            self._valid_cuda_kernels = False
+            self._cached_results = None
+            self._error_message = "\n".join(result["errors"])
+            raise RuntimeError(self._error_message)
+
+        tempdir_obj = tempfile.TemporaryDirectory()
+        module_path = os.path.join(tempdir_obj.name, "pallas_generated.py")
+        with open(module_path, "w") as f:
+            f.write(result["code"])
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("__mirage_pallas_launcher", module_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.run = getattr(mod, "execute_mugraph")
+        self._is_compiled = True
+        self._valid_cuda_kernels = True
+        self._cached_results = result
+        self._error_message = "No error"
+        self._pallas_tempdir = tempdir_obj
+        return self._cached_results
 
     def superoptimize(
         self,
@@ -703,6 +798,48 @@ class KNGraph:
             return best_graph
         elif backend == "nki":
             return all_graphs
+        elif backend == "pallas":
+            if not all_graphs:
+                raise RuntimeError(
+                    "Search did not produce any candidate graphs for backend='pallas'"
+                )
+
+            best_graph = None
+            for idx, g in enumerate(all_graphs):
+                result = generate_pallas_program(
+                    g.cygraph,
+                    debug=verbose,
+                )
+                if result["errors"]:
+                    if verbose:
+                        print(
+                            "muGraph {} rejected by Pallas transpiler:\n{}".format(
+                                idx, "\n".join(result["errors"])
+                            )
+                        )
+                    continue
+                best_graph = g
+                break
+
+            if best_graph is None:
+                raise RuntimeError(
+                    "No superoptimized graph could be transpiled by the Pallas backend"
+                )
+
+            best_graph.backend = "pallas"
+            if use_graph_dataset:
+                graph_dataset.store(
+                    input_graph=self.cygraph,
+                    optimized_graph=best_graph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend,
+                )
+            return best_graph
         elif backend == "triton":
             from .triton_profiler import profile_and_select_best_graph
 
@@ -770,7 +907,7 @@ class KNGraph:
         self.cygraph = cy_from_json(filename)
 
     # Persistent Kernel functions
-    def attach_torch_tensor(self, t: DTensor, torch_tensor: torch.Tensor, name: str):
+    def attach_torch_tensor(self, t: DTensor, torch_tensor, name: str):
         return self.cygraph.attach_torch_tensor(t, torch_tensor, name)
 
     def attach_cuda_tensor(self, t: DTensor, name: str):

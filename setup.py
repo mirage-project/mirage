@@ -89,43 +89,51 @@ def config_cython():
         mirage_path = ''
         config_path = path.join(mirage_path, "config.cmake")
         macros = get_backend_macros(config_path)
+        use_cuda_backend = any(name == "MIRAGE_BACKEND_USE_CUDA"
+                               for name, _ in macros)
         cython_path = path.join(mirage_path, "python/mirage/_cython")
         for fn in os.listdir(cython_path):
             if not fn.endswith(".pyx"):
                 continue
+            include_dirs = [
+                path.join(mirage_path, "include"),
+                path.join(mirage_path, "deps", "json", "include"),
+                path.join(mirage_path, "deps", "cutlass", "include"),
+                path.join(mirage_path, "deps", "cutlass", "tools", "util", "include"),
+                path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                path.join(mirage_path, "build", "formal_verifier", "release"),
+                path.join(z3_path, "include"),
+            ]
+            libraries = [
+                "mirage_runtime",
+                "z3",
+                "gomp",
+                "rt",
+                "abstract_subexpr",
+                "formal_verifier",
+            ]
+            library_dirs = [
+                path.join(mirage_path, "build"),
+                path.join(z3_path, "lib"),
+                path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                path.join(mirage_path, "build", "formal_verifier", "release"),
+            ]
+            if use_cuda_backend:
+                include_dirs.append(cuda_include_dir)
+                libraries.extend([
+                    "cudadevrt",
+                    "cudart_static",
+                    "cudart",
+                    "cuda",
+                ])
+                library_dirs.extend(cuda_library_dirs)
             ret.append(
                 Extension(
                     "mirage.%s" % fn[:-4],
                     ["%s/%s" % (cython_path, fn)],
-                    include_dirs=[
-                        path.join(mirage_path, "include"),
-                        path.join(mirage_path, "deps", "json", "include"),
-                        path.join(mirage_path, "deps", "cutlass", "include"),
-                        path.join(mirage_path, "deps", "cutlass", "tools", "util", "include"),
-                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
-                        path.join(mirage_path, "build", "formal_verifier", "release"),
-                        path.join(z3_path, "include"),
-                        cuda_include_dir,
-                    ],
-                    libraries=[
-                        "mirage_runtime",
-                        "cudadevrt",
-                        "cudart_static",
-                        "cudart",
-                        "cuda",
-                        "z3",
-                        "gomp",
-                        "rt",
-                        "abstract_subexpr",
-                        "formal_verifier",
-                    ],
-                    library_dirs=[
-                        path.join(mirage_path, "build"),
-                        path.join(z3_path, "lib"),
-                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
-                        path.join(mirage_path, "build", "formal_verifier", "release"),
-                    ]
-                    + cuda_library_dirs,
+                    include_dirs=include_dirs,
+                    libraries=libraries,
+                    library_dirs=library_dirs,
                     define_macros=macros,
                     extra_compile_args=["-std=c++17", "-fopenmp"],
                     extra_link_args=[

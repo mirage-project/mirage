@@ -511,4 +511,19 @@ void Graph::generate_triton_program(char const *file_path) {
 } // namespace kernel
 } // namespace mirage
 
+#else
+
+#include <cassert>
+#include "mirage/kernel/graph.h"
+
+namespace mirage {
+namespace kernel {
+
+void Graph::generate_triton_program(char const * /*file_path*/) {
+  assert(false && "Triton program generation requires a CUDA-enabled build");
+}
+
+} // namespace kernel
+} // namespace mirage
+
 #endif // MIRAGE_BACKEND_USE_CUDA

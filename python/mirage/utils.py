@@ -1,4 +1,7 @@
-import torch
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 # This function returns the shared memory limit (in bytes)
 # for the given GPU hardware architecture
@@ -31,6 +34,8 @@ def get_scheduler(sm_cnt, worker):
 # This method auto probe GPUs and return the worker and scheduler count for
 # them.
 def get_configurations_from_gpu(rank):
+    if torch is None:
+        raise ModuleNotFoundError("torch is required for GPU auto-configuration")
     # Reference: https://github.com/mirage-project/mirage/issues/354
     props = torch.cuda.get_device_properties(rank)
     sm_cnt = props.multi_processor_count

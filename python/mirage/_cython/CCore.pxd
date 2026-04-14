@@ -402,5 +402,18 @@ cdef extern from "mirage/triton_transpiler/transpile.h" namespace "mirage::trito
     cdef TritonTranspileResult transpile(const CppKNGraph *graph,
                                          const TritonTranspilerConfig config)
 
+cdef extern from "mirage/pallas_transpiler/transpile.h" namespace "mirage::pallas_transpiler":
+    ctypedef struct PallasTranspilerConfig:
+        string target_chip
+        bint debug
+    ctypedef struct PallasErrorInfo:
+        vector[string] errors
+    ctypedef struct PallasTranspileResult:
+        string code
+        vector[vector[int]] output_shapes
+        PallasErrorInfo error_state
+    cdef PallasTranspileResult transpile(const CppKNGraph *graph,
+                                         const PallasTranspilerConfig config)
+
 cdef extern from "mirage/kernel/device_memory_manager.h" namespace "mirage::kernel":
     cdef int cython_set_gpu_device_id(int gpu_id)

@@ -17,6 +17,7 @@
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/layout.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -90,7 +91,35 @@ KNReductionOp::operator json() const {
 
 #ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNReductionOp::fingerprint(void) {
-  assert(false && "To be implemented");
+  kernel::DeviceMemoryManager *dmm =
+      kernel::DeviceMemoryManager::get_instance();
+
+  int reduction_degree =
+      input_tensors[0].dim[reduction_dim_idx] / output_tensors[0].dim[reduction_dim_idx];
+  int inner_range = 1;
+  for (int i = reduction_dim_idx + 1; i < output_tensors[0].num_dims; ++i) {
+    inner_range *= output_tensors[0].dim[i];
+  }
+
+  for (int device_id = 0; device_id < dmm->num_devices; ++device_id) {
+    type::FPType *input_ptr = reinterpret_cast<type::FPType *>(
+        dmm->fp_base_ptr[device_id] + input_tensors[0].fp_offset);
+    type::FPType *output_ptr = reinterpret_cast<type::FPType *>(
+        dmm->fp_base_ptr[device_id] + output_tensors[0].fp_offset);
+
+    for (int i = 0; i < output_tensors[0].num_elements(); ++i) {
+      int pos = (i / inner_range) * (inner_range * reduction_degree) +
+                i % inner_range;
+      FPType result = 0;
+      for (int k = 0; k < reduction_degree; ++k) {
+        result = utils::compute_add_fingerprint(result, input_ptr[pos]);
+        pos += inner_range;
+      }
+      output_ptr[i] = result;
+    }
+  }
+
+  return true;
 }
 #endif
 
