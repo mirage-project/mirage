@@ -19,8 +19,8 @@ namespace search {
 
 namespace {
 
-using AbsExprMap = std::unordered_map<type::GuidType,
-                                      std::shared_ptr<AbstractExpr const>>;
+using AbsExprMap =
+    std::unordered_map<type::GuidType, std::shared_ptr<AbstractExpr const>>;
 
 AbsExprMap compute_concrete_abs_exprs(kernel::Graph const &kn,
                                       threadblock::Graph const *tb) {
@@ -33,30 +33,28 @@ AbsExprMap compute_concrete_abs_exprs(kernel::Graph const &kn,
 }
 
 template <typename TensorT, typename OpType>
-std::shared_ptr<AbstractExpr const> concrete_infer_expr(
-    std::vector<TensorT> const &input_tensors,
-    OpType op_type,
-    AbsExprMap const &exprs) {
-  std::vector<std::shared_ptr<AbstractExpr const>> input_exprs =
-      vector_map(input_tensors,
-                 [&](auto const &t) { return exprs.at(t.guid); });
+std::shared_ptr<AbstractExpr const>
+    concrete_infer_expr(std::vector<TensorT> const &input_tensors,
+                        OpType op_type,
+                        AbsExprMap const &exprs) {
+  std::vector<std::shared_ptr<AbstractExpr const>> input_exprs = vector_map(
+      input_tensors, [&](auto const &t) { return exprs.at(t.guid); });
   return get_abstract_expr(op_type, input_tensors, input_exprs);
 }
 
 template <typename Graph, typename Tensor, typename OpType, typename RecurseFn>
-void try_enumerate_concrete_op(
-    Graph &g,
-    OpType op_type,
-    std::vector<int> const &input_idx,
-    std::vector<Tensor> const &all_tensors,
-    AbsExprMap const &exprs,
-    KernelGraphGenerator &gen,
-    RecurseFn &&recurse) {
+void try_enumerate_concrete_op(Graph &g,
+                               OpType op_type,
+                               std::vector<int> const &input_idx,
+                               std::vector<Tensor> const &all_tensors,
+                               AbsExprMap const &exprs,
+                               KernelGraphGenerator &gen,
+                               RecurseFn &&recurse) {
   if (!check_order(input_idx, op_type, g)) {
     return;
   }
-  std::vector<Tensor> input_tensors = vector_map(
-      input_idx, [&](int index) { return all_tensors[index]; });
+  std::vector<Tensor> input_tensors =
+      vector_map(input_idx, [&](int index) { return all_tensors[index]; });
   if (!gen.check_abstract_expr(
           concrete_infer_expr(input_tensors, op_type, exprs))) {
     return;
@@ -99,10 +97,7 @@ void KernelGraphGenerator::enumerate_ops(
 #if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp task
 #endif
-    {
-      enumerate_ops(
-          c_copied, verify, verified_graphs, search_depth, true);
-    }
+    { enumerate_ops(c_copied, verify, verified_graphs, search_depth, true); }
     return;
   }
 
@@ -120,7 +115,11 @@ void KernelGraphGenerator::enumerate_ops(
         for (auto const &input_idx :
              dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
           try_enumerate_concrete_op(
-              *c.kn_graph, op_type, input_idx, all_tensors, algebraic_expr,
+              *c.kn_graph,
+              op_type,
+              input_idx,
+              all_tensors,
+              algebraic_expr,
               *this,
               [&]() {
                 enumerate_ops(c, verify, verified_graphs, search_depth + 1);
@@ -137,8 +136,8 @@ void KernelGraphGenerator::enumerate_ops(
           if (!check_order(input_tensor_idx, op_type, *c.kn_graph)) {
             continue;
           }
-          enumerate_tb_config(c, verify, verified_graphs, search_depth,
-                              input_tensor_idx);
+          enumerate_tb_config(
+              c, verify, verified_graphs, search_depth, input_tensor_idx);
         }
       }
     }
@@ -161,7 +160,11 @@ void KernelGraphGenerator::enumerate_ops(
       for (auto const &input_idx :
            dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
         try_enumerate_concrete_op(
-            *c.tb_graph, op_type, input_idx, all_tensors, algebraic_expr,
+            *c.tb_graph,
+            op_type,
+            input_idx,
+            all_tensors,
+            algebraic_expr,
             *this,
             [&]() {
               enumerate_ops(c, verify, verified_graphs, search_depth + 1);
@@ -191,20 +194,20 @@ void KernelGraphGenerator::enumerate_tb_config(
              dim_strategy.get_forloop_dim_cand(input_tensors)) {
           for (int forloop_range :
                dim_strategy.get_forloop_range_cand(input_tensors,
-                                                    input_map,
-                                                    grid_dim,
-                                                    block_dim,
-                                                    forloop_dim)) {
+                                                   input_map,
+                                                   grid_dim,
+                                                   block_dim,
+                                                   forloop_dim)) {
             c.tb_graph = std::make_shared<threadblock::Graph>(
                 grid_dim, block_dim, forloop_range, config.reduction_dimx);
             bool input_created = true;
             for (size_t i = 0; i < input_tensors.size(); ++i) {
               TBOperator *input_op =
                   c.tb_graph->create_input_op(input_tensors[i],
-                                               input_map[i],
-                                               forloop_dim[i],
-                                               layout::SmemRowMajor,
-                                               false /*store_in_dmem*/);
+                                              input_map[i],
+                                              forloop_dim[i],
+                                              layout::SmemRowMajor,
+                                              false /*store_in_dmem*/);
               if (input_op == nullptr) {
                 input_created = false;
                 break;
@@ -245,18 +248,26 @@ void KernelGraphGenerator::emit_tb_graph(
       }
     }
   }
-  if (output_tensors.empty()) return;
-  if (output_tensors.size() > config.max_num_threadblock_graph_outputs) return;
+  if (output_tensors.empty()) {
+    return;
+  }
+  if (output_tensors.size() > config.max_num_threadblock_graph_outputs) {
+    return;
+  }
 
-  for (int3 output_map : dim_strategy.get_output_map_cand(
-           output_tensors, c.tb_graph->grid_dim)) {
+  for (int3 output_map :
+       dim_strategy.get_output_map_cand(output_tensors, c.tb_graph->grid_dim)) {
     bool ok = true;
     for (STensor const &stensor : output_tensors) {
       TBOperator *new_op =
-          c.tb_graph->create_output_op(stensor, output_map,
-                                        -1 /*forloop_dim*/,
-                                        mirage::type::TB_EPILOGUE_NONE);
-      if (!new_op) { ok = false; break; }
+          c.tb_graph->create_output_op(stensor,
+                                       output_map,
+                                       -1 /*forloop_dim*/,
+                                       mirage::type::TB_EPILOGUE_NONE);
+      if (!new_op) {
+        ok = false;
+        break;
+      }
       c.tb_graph->operators.push_back(new_op);
     }
     if (ok) {

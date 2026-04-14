@@ -12,6 +12,9 @@ from .speculative import (
     SpecDecodeConfig,
     PromptLookupConfig,
 )
+from .multigpu import (
+  auto_select_allreduce_implementation
+)
 from typing import Optional
 
 HARD_CODE = """
@@ -23,9 +26,10 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   std::vector<void*> meta_tensors;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
+  int allocate_nvshmem_teams;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiL", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLi", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -48,7 +52,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams);
 
   Py_RETURN_NONE;
 }
@@ -111,6 +115,19 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 
 valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
 
+def _detect_cxx_standard():
+    """Use c++20 if the host compiler supports it, otherwise fall back to c++17."""
+    try:
+        result = subprocess.run(
+            ["g++", "-std=c++20", "-x", "c++", "-E", "-"],
+            input="", capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return "-std=c++20"
+    except FileNotFoundError:
+        pass
+    return "-std=c++17"
+
 def get_compile_command(
     mpk,
     target_cc,
@@ -164,17 +181,19 @@ def get_compile_command(
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/tools/util/include')}",
-        f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
+        f"-I{os.path.join(mirage_deps_path, 'json/include')}",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
 
     flags = [
         "-shared",
-        "-std=c++17",
+        _detect_cxx_standard(),
         "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
+        "-lcudart",
+        "-lstdc++fs",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
@@ -290,6 +309,7 @@ class PersistentKernel:
         self._spec_verify_handlers = {
             "promptlookup": self.prompt_lookup_verify_handler,
         }
+        self.allocate_nvshmem_teams = 0
         # determine total number of requests for offline serving
         self.total_num_requests = meta_tensors["tokens"].shape[0]
         assert self.max_seq_length == meta_tensors["tokens"].shape[1]
@@ -966,18 +986,18 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
 
-        if self.target_cc == 100:
+        if self.target_cc >= 100 and self.target_cc < 120:
             self.kn_graph.register_task(tb_graph, "linear_sm100")
-        elif self.target_cc == 90:
+        elif self.target_cc >= 90 and self.target_cc < 100:
             if weight.dim(0) // grid_dim[0] <= 64:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
                 # self.kn_graph.register_task(tb_graph, "linear_cutlass_hopper")
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
-        elif self.target_cc == 80:
+        elif self.target_cc >= 80 and self.target_cc < 90:
             self.kn_graph.register_task(tb_graph, "linear")
         else:
-            assert False
+            assert False, f"Unsupported compute capability: {self.target_cc}"
 
     def linear_with_residual_layer(
         self,
@@ -1000,23 +1020,23 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
         
-        if self.target_cc == 100:
-            self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100")
-        elif self.target_cc == 90:
-            params = []
-            enable_residual = 1
-            if self.world_size > 1 and self.mpi_rank != 0:
-                enable_residual = 0
-            params.append(enable_residual)
+        params = []
+        enable_residual = 1
+        if self.world_size > 1 and self.mpi_rank != 0:
+            enable_residual = 0
+        params.append(enable_residual)
+        if self.target_cc >= 100 and self.target_cc < 120:
+            self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100", params)
+        elif self.target_cc >= 90 and self.target_cc < 100:
             if weight.dim(0) // grid_dim[0] <= 64:
                 # self.kn_graph.register_task(tb_graph, "linear_cutlass_with_residual_hopper")
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
-        elif self.target_cc == 80:
+        elif self.target_cc >= 80 and self.target_cc < 90:
             self.kn_graph.register_task(tb_graph, "linear_with_residual")
         else:
-            assert False
+            assert False, f"Unsupported compute capability: {self.target_cc}"
 
     def allreduce_layer(
         self,
@@ -1032,26 +1052,16 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size)
         # params[0]: num_gpus
         # params[1]: my_gpu_id
-        if self.target_cc < 90:
-            params = [self.world_size, self.mpi_rank]
-            allgather_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            allgather_tb_graph.new_input(input, (1, -1, -1), -1, True)
-            allgather_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-            self.kn_graph.customized([input, buffer], allgather_tb_graph)
-            self.kn_graph.register_task(allgather_tb_graph, 
-                "nvshmem_allgather_strided_put", params)
+        best_implementation = auto_select_allreduce_implementation(self.world_size, self.mpi_rank)
+        tensors = {
+            "input": input,
+            "buffer": buffer,
+            "output": output,
+        }
+        params = [self.world_size, self.mpi_rank]
+        best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim, 
+                                           block_dim=block_dim, params=params)
 
-            reduction_tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            reduction_tb_graph.new_input(input, (1, -1, -1), -1, True)
-            reduction_tb_graph.new_input(buffer, (2, -1, -1), -1, True)
-            reduction_tb_graph.new_input(output, (1, -1, -1), -1, True)
-            self.kn_graph.customized([input, buffer, output], 
-                                     reduction_tb_graph)
-            self.kn_graph.register_task(reduction_tb_graph, "reduction", params)
-        else:
-            # TODO(Zepeng): Add nvshmem tile based allreduce
-            raise NotImplementedError(
-                "Allreduce layer is not yet implemented for SM90 and above.")
 
     def silu_mul_layer(
         self,
@@ -1339,7 +1349,7 @@ class PersistentKernel:
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
-        so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
+        so_path = os.path.join(tempdir, "test" + sysconfig.get_config_var("EXT_SUFFIX"))
         # check json file
         json_file_path = os.path.join(tempdir, "task_graph.json")
         # build if files are not exist
@@ -1370,13 +1380,8 @@ class PersistentKernel:
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
 
-        # find mirage home
-        if "MIRAGE_HOME" in os.environ:
-            MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME")
-        else:
-            raise RuntimeError(
-                "MIRAGE_HOME unspecified; Please set MIRAGE_HOME to be the root of the Mirage folder"
-            )
+        # find mirage home (fall back to MIRAGE_ROOT from get_key_paths)
+        MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME", MIRAGE_ROOT)
 
         NVSHMEM_INC_PATH = None
         NVSHMEM_LIB_PATH = None
@@ -1509,6 +1514,7 @@ class PersistentKernel:
             self.max_seq_length,
             self.total_num_requests,
             self.eos_token_id,
+            self.allocate_nvshmem_teams,
         )
 
         self._is_compiled = True

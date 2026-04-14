@@ -52,43 +52,6 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
                                    int forloop_dim,
                                    mirage::layout::SmemLayout layout,
                                    bool store_in_dmem) {
-
-  STensor stensor;
-  stensor.layout = layout;
-  stensor.num_dims = dtensor.num_dims;
-  stensor.data_type = dtensor.data_type;
-  for (int i = 0; i < stensor.num_dims; i++) {
-    stensor.dim[i] = dtensor.dim[i];
-  }
-  for (int d = 0; d < 3; d++) {
-    int dim_idx = -1;
-    int dim_div = 1;
-    if (d == 0 && grid_dim.x > 1) {
-      dim_idx = input_map.x;
-      dim_div = grid_dim.x;
-    }
-    if (d == 1 && grid_dim.y > 1) {
-      dim_idx = input_map.y;
-      dim_div = grid_dim.y;
-    }
-    if (d == 2 && grid_dim.z > 1) {
-      dim_idx = input_map.z;
-      dim_div = grid_dim.z;
-    }
-    if (dim_idx >= 0) {
-      if (dtensor.dim[dim_idx] % dim_div != 0) {
-        return nullptr;
-      }
-      stensor.dim[dim_idx] /= dim_div;
-    }
-  }
-  if (forloop_dim >= 0) {
-    if (stensor.dim[forloop_dim] % forloop_range != 0) {
-      return nullptr;
-    }
-    stensor.dim[forloop_dim] /= forloop_range;
-  }
-
   TBInputOp *op = new TBInputOp(
       this, dtensor, input_map, forloop_dim, layout, store_in_dmem);
 

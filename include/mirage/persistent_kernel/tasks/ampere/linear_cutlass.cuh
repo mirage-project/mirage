@@ -29,6 +29,13 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
+// Use PIPE_MAX=2 for sm89 (Ada Lovelace) to avoid out of shared memory
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 890)
+constexpr int DEFAULT_PIPE_MAX = 2;
+#else
+constexpr int DEFAULT_PIPE_MAX = 3;
+#endif
+
 // Modified from
 // https://github.com/reed-lau/cute-gemm/blob/main/gemm-multi-stage.cu
 template <typename T_,
@@ -36,7 +43,7 @@ template <typename T_,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           int O_STRIDE = OUTPUT_SIZE,
-          int PIPE_MAX = 3>
+          int PIPE_MAX = DEFAULT_PIPE_MAX>
 __device__ __noinline__ void linear_kernel(void const *input_ptr,
                                            void const *weight_ptr,
                                            void const *residual_ptr,

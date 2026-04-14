@@ -217,9 +217,13 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
             case TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
               assert(stensor_inputs.size() == 1);
               assert(bop->output_tensors.size() == 1);
-              threadblock::STensor st = tbg->forloop_accum(
-                  stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
-              st = tbg->reduction(st, st.num_dims - 1);
+              // threadblock::STensor st = tbg->forloop_accum(
+              //     stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
+              // st = tbg->reduction(st, st.num_dims - 1);
+              // stensor_mapping[bop->output_tensors[0].guid] = st;
+              threadblock::STensor st = tbg->reduction(
+                  stensor_inputs[0], stensor_inputs[0].num_dims - 1);
+              st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
@@ -235,8 +239,10 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
               size_t normalization_factor =
                   st.dim[st.num_dims - 1] * customized_op->bgraph.forloop_range;
               st = tbg->mul_scalar(st, (1.0f / normalization_factor));
-              st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
+              // st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
+              // st = tbg->reduction(st, st.num_dims - 1);
               st = tbg->reduction(st, st.num_dims - 1);
+              st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
               st = tbg->sqrt(st);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
@@ -367,6 +373,8 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
             // TODO: does the cost of loading stensor from HBM to SBUF
             // depend on the partition dimension???
             // Currently do nothing
+            tb::STensor const &stensor = tb_op->output_tensors.at(0);
+            opt.add(!s_is_partition[stensor.guid][stensor.num_dims - 1]);
             break;
           }
           case type::TB_OUTPUT_OP: {
@@ -406,15 +414,16 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
                                        ceil_div(input1.dim[num_dims - 1], 512);
             int num_matmul_for_case2 = ceil_div(input1.dim[num_dims - 1], 128) *
                                        ceil_div(input0.dim[num_dims - 2], 512);
-            if (num_matmul_for_case1 < num_matmul_for_case2) {
-              // Enforce using case 1 by setting output.dim[num_dims-2] as
-              // the partition dim for the output
-              opt.add(s_is_partition[output.guid][num_dims - 2]);
-            } else if (num_matmul_for_case1 > num_matmul_for_case2) {
-              // Enforce using case 2 by setting output.dim[num_dims-1] as
-              // the partition dim for the output
-              opt.add(s_is_partition[output.guid][num_dims - 1]);
-            }
+            // if (num_matmul_for_case1 < num_matmul_for_case2) {
+            //   // Enforce using case 1 by setting output.dim[num_dims-2] as
+            //   // the partition dim for the output
+            //   opt.add(s_is_partition[output.guid][num_dims - 2]);
+            // } else if (num_matmul_for_case1 > num_matmul_for_case2) {
+            //   // Enforce using case 2 by setting output.dim[num_dims-1] as
+            //   // the partition dim for the output
+            //   opt.add(s_is_partition[output.guid][num_dims - 1]);
+            // }
+            opt.add(s_is_partition[output.guid][num_dims - 2]);
             break;
           }
           case type::TB_EXP_OP:
@@ -466,6 +475,17 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
           }
           case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
             // Do nothing
+            tb::STensor const &input = tb_op->input_tensors.at(0);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            assert(input.num_dims == output.num_dims);
+            int num_dims = input.num_dims;
+            // Need a transpose is input and output pick different partition dim
+            for (int i = 0; i < num_dims; i++) {
+              costs.push_back(z3::ite(!s_is_partition[input.guid][i] &&
+                                          s_is_partition[output.guid][i],
+                                      ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                      ctx.int_val(0)));
+            }
             break;
           }
           case type::TB_REDUCTION_0_OP:
@@ -569,8 +589,9 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   CodeKeeper helper;
   std::vector<HelperFunction> helper_functions;
   helper_functions.push_back(tiled_transpose_function());
-  helper_functions.push_back(tiled_matmul_function());
+  helper_functions.push_back(divide_function());
   helper_functions.push_back(tiled_matmul_accum_function());
+  helper_functions.push_back(tiled_matmul_function());
   for (HelperFunction const &hf : helper_functions) {
     helper.e(hf.get_code());
   }

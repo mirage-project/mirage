@@ -40,6 +40,9 @@ wheelhouse/
 # Cython
 /python/mirage/_cython/core.cpp
 
+# Bundled native libs we build
+/python/mirage/lib/
+
 # Mac OS .DS_Store
 .DS_Store
 
@@ -55,6 +58,10 @@ benchmark/*generated*
 
 # Rust
 Cargo.lock
+# Nix
+/result
+
+/.direnv
 
 # Output files of runtime
 output/

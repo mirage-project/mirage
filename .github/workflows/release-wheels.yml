@@ -1,0 +1,206 @@
+name: Build and Release Wheels
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish_pypi:
+        description: 'Publish to PyPI'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-wheels:
+    name: Build wheel (Python ${{ matrix.python }}, CUDA ${{ matrix.cuda }})
+    runs-on: ubuntu-22.04
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12']
+        cuda: ['12.1.1', '12.4.1', '12.6.2', '12.8.1']
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: .github/workflows/helpers/install_dependencies_manylinux.sh "${{ matrix.cuda }}" "${{ matrix.python }}"
+
+      - name: Setup environment variables
+        run: |
+          # Set compiler and CUDA env vars
+          CUDA_MAJOR=$(echo "${{ matrix.cuda }}" | cut -d. -f1)
+          CUDA_MINOR=$(echo "${{ matrix.cuda }}" | cut -d. -f2)
+          CUDA_PATH="/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}"
+
+          echo "CUDACXX=${CUDA_PATH}/bin/nvcc" >> $GITHUB_ENV
+          echo "CUDA_HOME=${CUDA_PATH}" >> $GITHUB_ENV
+          # CC and CXX are already set by install_dependencies_manylinux.sh
+          # (pointing to gcc-toolset-12 for CUDA compatibility)
+          echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+
+      - name: Build wheel
+        run: |
+          # Extract CUDA short version (e.g., 12.1.1 -> cu121)
+          CUDA_SHORT=$(echo "${{ matrix.cuda }}" | cut -d. -f1,2 | tr -d '.')
+          echo "CUDA_SHORT=cu${CUDA_SHORT}" >> $GITHUB_ENV
+
+          # Strip git+ URLs from requirements.txt before building
+          # (PyPI rejects packages with git+ dependencies in metadata)
+          sed -i '/git+/d' requirements.txt
+
+          pip wheel . --no-deps -w raw-dist/
+
+      - name: Repair wheel with auditwheel
+        run: |
+          CUDA_MAJOR=$(echo "${{ matrix.cuda }}" | cut -d. -f1)
+          CUDA_MINOR=$(echo "${{ matrix.cuda }}" | cut -d. -f2)
+          CUDA_LIB="/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}/lib64"
+
+          # Add CUDA and Z3 library paths so auditwheel can find shared libs
+          export LD_LIBRARY_PATH="${Z3_LIB_DIR}:${CUDA_LIB}:${LD_LIBRARY_PATH:-}"
+
+          mkdir -p dist/
+          for whl in raw-dist/*.whl; do
+            # Repair and bundle shared libraries
+            auditwheel repair "$whl" \
+              --plat manylinux_2_28_x86_64 \
+              -w repaired/ \
+              --exclude libcuda.so.1 \
+              --exclude libnvidia-ml.so.1 \
+              || {
+                echo "WARNING: auditwheel repair failed, using original wheel"
+                cp "$whl" repaired/
+              }
+          done
+
+          # Rename wheels to include CUDA version
+          for whl in repaired/*.whl; do
+            base=$(basename "$whl")
+            new_name=$(echo "$base" | sed "s/\(mirage_project-[0-9.]*\)/\1+${CUDA_SHORT}/")
+            cp "$whl" "dist/${new_name}"
+          done
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py${{ matrix.python }}-cu${{ matrix.cuda }}
+          path: dist/*.whl
+
+  release:
+    name: Create GitHub Release
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Get version
+        run: |
+          version=$(python3 -c "exec(open('python/mirage/version.py').read()); print(__version__)")
+          echo "VERSION=${version}" >> $GITHUB_ENV
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -la wheels/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ env.VERSION }}
+          body: |
+            ## Mirage v${{ env.VERSION }}
+
+            ### Install
+
+            Pick the wheel matching your Python version and CUDA version:
+
+            ```bash
+            pip install <wheel-filename>.whl
+            ```
+
+            ### Wheel naming convention
+
+            `mirage_project-${{ env.VERSION }}+cuXXX-cpYYY-cpYYY-manylinux_2_28_x86_64.whl`
+            > Note: actual platform tag may vary
+            - `cuXXX`: CUDA version (e.g., `cu121` = CUDA 12.1, `cu124` = CUDA 12.4, `cu126` = CUDA 12.6, `cu128` = CUDA 12.8)
+            - `cpYYY`: Python version (e.g., `cp310` = Python 3.10)
+          files: wheels/*.whl
+          generate_release_notes: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    if: >
+      (startsWith(github.ref, 'refs/tags/v') || inputs.publish_pypi) &&
+      vars.DEPLOY_TO_TEST_PYPI != ''
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Prepare wheels for PyPI (strip local version)
+        run: |
+          pip install wheel
+          mkdir -p dist/
+
+          # PyPI rejects local versions (+cuXXX), so we upload only the
+          # cu121 wheels (one per Python version) with the +cuXXX stripped.
+          # Users needing other CUDA versions can install from GitHub Releases.
+          for whl in wheels/*+cu121*.whl; do
+            [ -f "$whl" ] || continue
+            base=$(basename "$whl")
+            # Strip the +cu121 local version segment
+            clean_name=$(echo "$base" | sed 's/+cu[0-9]*//')
+            cp "$whl" "dist/${clean_name}"
+          done
+
+          echo "Wheels prepared for PyPI:"
+          ls -la dist/
+
+      - name: Build source distribution
+        run: |
+          pip install build
+          python -m build --sdist --outdir dist/ .
+
+      - name: Publish to Test PyPI
+        if: vars.DEPLOY_TO_TEST_PYPI == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: vars.DEPLOY_TO_TEST_PYPI == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1

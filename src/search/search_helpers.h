@@ -88,7 +88,7 @@ std::vector<typename GraphType::TensorType>
 }
 
 inline std::vector<kernel::DTensor>
-get_input_tensors(threadblock::Graph const &g) {
+    get_input_tensors(threadblock::Graph const &g) {
   std::vector<kernel::DTensor> input_tensors;
   for (auto const &op : g.operators) {
     if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {

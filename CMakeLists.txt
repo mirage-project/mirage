@@ -9,60 +9,6 @@ else()
   endif()
 endif()
 
-# Default USE_CUDA to OFF if not set
-if(NOT DEFINED USE_CUDA)
-  set(USE_CUDA "OFF")
-endif()
-
-# Check if CUDA compiler exists if USE_CUDA is enabled
-if (NOT "${USE_CUDA}" STREQUAL "OFF")
-  # First check if CUDACXX environment variable is set and points to a valid file
-  set(CUDA_NVCC_EXECUTABLE "")
-  if(DEFINED ENV{CUDACXX})
-    if(EXISTS $ENV{CUDACXX})
-      set(CUDA_NVCC_EXECUTABLE $ENV{CUDACXX})
-    else()
-      message(WARNING "CUDACXX environment variable is set to $ENV{CUDACXX} but file does not exist.")
-    endif()
-  endif()
-  # If not found, search in PATH and common locations
-  if(NOT CUDA_NVCC_EXECUTABLE)
-    # First try common CUDA installation paths
-    find_program(CUDA_NVCC_EXECUTABLE 
-      NAMES nvcc
-      PATHS 
-        /usr/local/cuda/bin
-        /usr/bin
-        /opt/cuda/bin
-      NO_DEFAULT_PATH
-    )
-    # If still not found, search in system PATH (this will find nvcc in conda environments, etc.)
-    if(NOT CUDA_NVCC_EXECUTABLE)
-      find_program(CUDA_NVCC_EXECUTABLE nvcc)
-    endif()
-    if(CUDA_NVCC_EXECUTABLE)
-      # Verify the file actually exists
-      if(NOT EXISTS ${CUDA_NVCC_EXECUTABLE})
-        set(CUDA_NVCC_EXECUTABLE "")
-      endif()
-    endif()
-  endif()
-  if(NOT CUDA_NVCC_EXECUTABLE)
-    message(WARNING "USE_CUDA is ON but CUDA compiler (nvcc) not found. Disabling CUDA support.")
-    set(USE_CUDA "OFF")
-  else()
-    message(STATUS "Found CUDA compiler: ${CUDA_NVCC_EXECUTABLE}")
-    # Set CMAKE_CUDA_COMPILER explicitly to override invalid CUDACXX env var
-    set(CMAKE_CUDA_COMPILER ${CUDA_NVCC_EXECUTABLE} CACHE FILEPATH "CUDA compiler")
-  endif()
-endif()
-
-# Set CUDA architectures BEFORE project() call to prevent auto-detection
-# of unsupported architectures (compute_100, compute_103, compute_120, compute_121)
-if (NOT "${USE_CUDA}" STREQUAL "OFF")
-  set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90" CACHE STRING "CUDA architectures" FORCE)
-endif()
-
 if (NOT "${USE_CUDA}" STREQUAL "OFF")
   project(MIRAGE LANGUAGES C CXX CUDA)
 else()
@@ -105,8 +51,6 @@ check_cxx_compiler_flag("-std=c++17" SUPPORT_CXX17)
 
 #set CUDA version
 if (NOT "${USE_CUDA}" STREQUAL "OFF")
-  # Override CUTLASS architecture detection to use only valid architectures
-  set(CUTLASS_NVCC_ARCHS "75;80;86;89;90" CACHE STRING "The SM architectures requested." FORCE)
   include(deps/cutlass/CUDA.cmake)
   string(REPLACE "." ";" CUDA_VERSION_PARTS ${CUDA_VERSION})
   list(GET CUDA_VERSION_PARTS 0 CUDA_VERSION_MAJOR)
