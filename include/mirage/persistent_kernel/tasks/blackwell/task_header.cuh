@@ -39,6 +39,7 @@
 #include "moe_linear_sm100.cuh"
 #include "mul_sum_add_sm100.cuh"
 #include "elementwise_add_sm100.cuh"
+#include "softmax_gather_sm100.cuh"
 #include "per_token_group_quantize_fp8.cuh"
 #include "tasks/common/sampling.cuh"
 #include "tasks/speculative_decoding/target_verify_mtp.cuh"

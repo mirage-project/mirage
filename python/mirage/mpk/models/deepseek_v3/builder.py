@@ -1753,7 +1753,51 @@ class DeepSeekV3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
                 num_draft_tokens=num_draft_steps,
             )
-        # TODO: add probabilistic and synthetic verify paths
+        elif method == "probabilistic":
+            # Probabilistic rejection sampling: P_target(x) > u * P_draft(x)
+            # Needs softmax+gather to extract probabilities at draft token positions.
+            padded_vocab_size = 129280  # DeepSeek V3 vocab
+
+            # Compute target probs at draft positions: softmax(target_logits)[draft_id]
+            # target_logits are in the last LM head output (lm_head_out from verify forward)
+            # For each draft position, we need the target model's logits.
+            # NOTE: this requires that the target forward already ran on all draft+1 tokens
+            # and produced lm_head_out[num_draft_steps+1, vocab].
+
+            # Buffers for per-position probabilities
+            target_probs = self._cached_new_tensor(
+                dims=(mbt, num_draft_steps), dtype=float32,
+                name="mtp_target_probs")
+            draft_probs = self._cached_new_tensor(
+                dims=(mbt, num_draft_steps), dtype=float32,
+                name="mtp_draft_probs")
+            rng_seed = self._cached_new_tensor(
+                dims=(mbt, 1), dtype=uint64,
+                name="mtp_rng_seed")
+
+            # For each draft position, compute softmax_gather on the corresponding logits
+            # This requires per-position logits from both draft and target models.
+            # Draft logits: stored per step during draft generation (mtp_step{k}_logits)
+            # Target logits: stored per position during verify forward pass
+            #
+            # TODO: The verify forward pass doesn't currently output per-position logits.
+            # For now, fall back to strict verification with a warning.
+            import warnings
+            warnings.warn("Probabilistic MTP verification requires per-position "
+                          "logits from the verify forward pass. Falling back to "
+                          "strict verification. To implement: store per-position "
+                          "target logits during the verify forward, then call "
+                          "softmax_gather_layer for each position.")
+            # Fallback to strict
+            self.mpk.mtp_verify_strict_layer(
+                draft_token_ids=all_draft_ids,
+                target_token_ids=target_token_ids,
+                accepted_count=accepted_count,
+                output_tokens=verified_output_tokens,
+                grid_dim=(mbt, 1, 1),
+                block_dim=(128, 1, 1),
+                num_draft_tokens=num_draft_steps,
+            )
 
         # Accept/commit: update position and output final tokens
         step_raw = self.mpk.meta_tensors.get("step", None)

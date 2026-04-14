@@ -1810,6 +1810,51 @@ class PersistentKernel:
             [main_token, draft_tokens, tokens_buffer, step, num_new_tokens], tb_graph)
         self.kn_graph.register_task(tb_graph, "mtp_prepare_verify", params)
 
+    def softmax_gather_layer(
+        self,
+        logits: DTensor,          # [batch, vocab_size] BF16
+        token_ids: DTensor,       # [batch, 1] int64
+        output_probs: DTensor,    # [batch, 1] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Fused softmax + gather: output[b] = softmax(logits[b])[token_id[b]]."""
+        assert logits.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (-1, -1, -1), -1, True)
+        tb_graph.new_input(token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_probs, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([logits, token_ids, output_probs], tb_graph)
+        self.kn_graph.register_task(tb_graph, "softmax_gather_sm100")
+
+    def mtp_verify_probabilistic_layer(
+        self,
+        draft_token_ids: DTensor,
+        target_token_ids: DTensor,
+        target_probs: DTensor,
+        draft_probs: DTensor,
+        seed: DTensor,
+        accepted_count: DTensor,
+        output_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+    ):
+        """Probabilistic verification: accept if P_target > u * P_draft."""
+        params = [num_draft_tokens]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(draft_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_probs, (-1, -1, -1), -1, True)
+        tb_graph.new_input(draft_probs, (-1, -1, -1), -1, True)
+        tb_graph.new_input(seed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [draft_token_ids, target_token_ids, target_probs, draft_probs,
+             seed, accepted_count, output_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_verify_probabilistic", params)
+
     def mtp_verify_strict_layer(
         self,
         draft_token_ids: DTensor,
