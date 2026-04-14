@@ -1063,12 +1063,10 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_shared_residual",
             io_category="cuda_tensor",
         )
-        # Disable MoE internal residual when:
-        # - MPK_NO_RESIDUAL=1 (reference doesn't add residual)
-        # - MPK_PROPER_RESIDUAL=1 (we add residual externally via elementwise_add)
-        _no_internal_res = (os.environ.get("MPK_NO_RESIDUAL", "0") == "1" or
-                            os.environ.get("MPK_PROPER_RESIDUAL", "0") == "1")
-        _shared_resid_input = None if _no_internal_res else self.x
+        # MoE internal residual is always OFF — residual is handled externally
+        # by elementwise_add (default) or skipped entirely (MPK_NO_RESIDUAL=1).
+        # Having it ON here would double-add the residual.
+        _shared_resid_input = None
         self._fp8_linear(shared_silu_out, w_shared_down, s_shared_down,
                          shared_residual,
                          grid_dim=(self.hidden_size // 64, 1, 1),
@@ -1128,8 +1126,20 @@ class DeepSeekV3Builder(GraphBuilder):
         # MLA attention (same structure as main model, own weights)
         self._build_mla_attention_layer_with_prefix(prefix, state_dict)
 
-        # Residual (attn output is in self.attn_proj_out)
-        self.mtp_x = self.attn_proj_out
+        # Residual: self.mtp_x = self.mtp_x + attn_proj_out
+        if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+            self.mtp_x = self.attn_proj_out
+        else:
+            mtp_attn_residual = self._cached_new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="mtp_attn_residual", io_category="cuda_tensor")
+            self.mpk.elementwise_add_layer(
+                input_a=self.mtp_x, input_b=self.attn_proj_out, output=mtp_attn_residual,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            self.mtp_x = mtp_attn_residual
 
         # AllReduce after attention
         if self.world_size > 1:
@@ -1163,7 +1173,20 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             self._build_dense_mlp_with_prefix(prefix, state_dict)
 
-        self.mtp_x = self.mlp_out
+        # MLP residual: self.mtp_x = self.mtp_x + mlp_out
+        if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+            self.mtp_x = self.mlp_out
+        else:
+            mtp_mlp_residual = self._cached_new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="mtp_mlp_residual", io_category="cuda_tensor")
+            self.mpk.elementwise_add_layer(
+                input_a=self.mtp_x, input_b=self.mlp_out, output=mtp_mlp_residual,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            self.mtp_x = mtp_mlp_residual
         if self.world_size > 1:
             self.mpk.allreduce_layer(
                 input=self.mlp_out, buffer=self.allreduce_buf,
@@ -1488,8 +1511,8 @@ class DeepSeekV3Builder(GraphBuilder):
         shared_residual = self._cached_new_tensor(
             dims=(mbt, self.hidden_size), dtype=bfloat16,
             name="mtp_shared_residual", io_category="cuda_tensor")
-        # Same gate as main MoE: when MPK_NO_RESIDUAL=1, drop the residual add.
-        _mtp_resid = None if os.environ.get("MPK_NO_RESIDUAL", "0") == "1" else self.mtp_x
+        # MoE internal residual always OFF (handled by external elementwise_add)
+        _mtp_resid = None
         self._fp8_linear(shared_silu, w_s_down, s_s_down, shared_residual,
                          grid_dim=(self.hidden_size // 64, 1, 1),
                          block_dim=(128, 1, 1), residual=_mtp_resid)
@@ -1902,10 +1925,11 @@ class DeepSeekV3Builder(GraphBuilder):
             # MLA attention
             if not skip_attn:
                 self._build_mla_attention_layer(i, state_dict)
-                # Residual: MPK_PROPER_RESIDUAL=1 uses separate elementwise_add op.
-                # Default OVERWRITES (broken fused with_residual workaround).
-                if os.environ.get("MPK_PROPER_RESIDUAL", "0") == "1":
-                    # self.x = self.x + attn_proj_out (proper residual via add op)
+                # Residual: self.x = self.x + attn_proj_out (always, unless debug)
+                # MPK_NO_RESIDUAL=1: skip all residual connections (debug only)
+                if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+                    self.x = self.attn_proj_out
+                else:
                     residual_out = self.mpk.new_tensor(
                         dims=(self.max_num_batched_tokens, self.hidden_size),
                         dtype=bfloat16,
@@ -1918,8 +1942,6 @@ class DeepSeekV3Builder(GraphBuilder):
                         block_dim=(128, 1, 1),
                     )
                     self.x = residual_out
-                else:
-                    self.x = self.attn_proj_out
             # If skip_attn, self.x stays as previous value (effectively skip attention)
 
             # AllReduce after attention
@@ -1953,8 +1975,9 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.x = self.mlp_out
             elif i < FIRST_MOE_LAYER:
                 self._build_dense_mlp(i, state_dict)
-                if os.environ.get("MPK_PROPER_RESIDUAL", "0") == "1":
-                    # self.x = self.x + mlp_out (proper residual)
+                if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+                    self.x = self.mlp_out
+                else:
                     mlp_residual_out = self.mpk.new_tensor(
                         dims=(self.max_num_batched_tokens, self.hidden_size),
                         dtype=bfloat16,
@@ -1967,13 +1990,11 @@ class DeepSeekV3Builder(GraphBuilder):
                         block_dim=(128, 1, 1),
                     )
                     self.x = mlp_residual_out
-                else:
-                    self.x = self.mlp_out
             else:
                 self._build_moe_mlp(i, state_dict)
-                if os.environ.get("MPK_PROPER_RESIDUAL", "0") == "1":
-                    # self.x = self.x + mlp_out (proper residual — MoE output already
-                    # includes shared_expert but NOT self.x when MPK_NO_RESIDUAL=1)
+                if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+                    self.x = self.mlp_out
+                else:
                     moe_residual_out = self.mpk.new_tensor(
                         dims=(self.max_num_batched_tokens, self.hidden_size),
                         dtype=bfloat16,
@@ -1986,8 +2007,6 @@ class DeepSeekV3Builder(GraphBuilder):
                         block_dim=(128, 1, 1),
                     )
                     self.x = moe_residual_out
-                else:
-                    self.x = self.mlp_out
             if self.world_size > 1:
                 self.mpk.allreduce_layer(
                     input=self.mlp_out, buffer=self.allreduce_buf,

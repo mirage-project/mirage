@@ -481,8 +481,8 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
     skip_layer = os.environ.get("MPK_SKIP_LAYER", "0") == "1"
     skip_attn = os.environ.get("MPK_SKIP_ATTN", "0") == "1"
     skip_mlp = os.environ.get("MPK_SKIP_MLP", "0") == "1"
-    # MPK_NO_RESIDUAL=1: drop the residual `+` so the reference matches the
-    # current MPK builder (which OVERWRITES self.x instead of adding).
+    # MPK_NO_RESIDUAL=1: debug mode — drop residual `+` in both reference and MPK.
+    # Default: residual connections are ON (matching standard transformer architecture).
     no_residual = os.environ.get("MPK_NO_RESIDUAL", "0") == "1"
 
     # Token-by-token prefill (matching persistent kernel offline mode)
@@ -974,12 +974,13 @@ if __name__ == "__main__":
                     # Keep BF16 copies for V un-absorption (o_proj needs kv_b in BF16 format)
                     kv_bf16 = kv_f32.to(torch.bfloat16)
                     absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)  # float32 inputs
-                    # Quantize absorbed weight to FP8 in checkpoint format so MPK uses
-                    # FP8 GEMM (which matches reference at cosine=1.0) instead of
-                    # BF16 GEMM (which diverges due to different implementations).
-                    absorbed, absorbed_scale = _quantize_f32_to_checkpoint_fp8(absorbed_f32)
-                    state_dict[q_s_key] = absorbed_scale
-                    print(f"  FP8 absorbed q_b: {absorbed.shape} scale={absorbed_scale.shape}")
+                    # Keep absorbed weight in BF16 (no FP8 requantization).
+                    # FP8 requantization adds compounding error across residual layers.
+                    # BF16 GEMM is used — matches reference and vLLM/SGLang.
+                    absorbed = absorbed_f32.to(torch.bfloat16)
+                    if q_s_key in state_dict:
+                        del state_dict[q_s_key]  # remove FP8 scale → triggers BF16 GEMM
+                    print(f"  BF16 absorbed q_b: {absorbed.shape}")
                     # Fuse V un-absorption into o_proj:
                     # o_proj_fused[h] = o_proj[h] @ W_UV[h]
                     # where W_UV[h] = kv_b_proj V part: [v_orig, kv_lora_rank]
