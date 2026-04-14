@@ -1114,8 +1114,11 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # MLP: DeepSeek V3 MTP block uses MoE MLP (same as main layers 3-60)
         # Check if MoE weights exist, fallback to dense
+        # MPK_SKIP_MTP_MLP=1: skip MTP decoder MLP for crash isolation
         mlp_gate_key = f"{prefix}mlp.gate.weight"
-        if mlp_gate_key in state_dict:
+        if os.environ.get("MPK_SKIP_MTP_MLP", "0") == "1":
+            pass  # skip MTP MLP
+        elif mlp_gate_key in state_dict:
             self._build_moe_mlp_with_prefix(prefix, state_dict)
         else:
             self._build_dense_mlp_with_prefix(prefix, state_dict)
@@ -1287,10 +1290,10 @@ class DeepSeekV3Builder(GraphBuilder):
             torch_tensor=state_dict[f"{mlp_prefix}gate.weight"],
             name=f"mtp_{mlp_prefix}gate")
         moe_topk_weights = self.mpk.new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK), dtype=bfloat16,
+            dims=(mbt, NUM_EXPERTS_PER_TOK), dtype=float32,
             name="mtp_moe_topk_weights", io_category="cuda_tensor")
         moe_routing_indices = self.mpk.new_tensor(
-            dims=(NUM_EXPERTS, mbt), dtype=bfloat16,
+            dims=(NUM_EXPERTS, mbt), dtype=int32,
             name="mtp_moe_routing_indices", io_category="cuda_tensor")
         moe_mask = self.mpk.new_tensor(
             dims=(NUM_EXPERTS + 1,), dtype=int32,
@@ -1298,9 +1301,13 @@ class DeepSeekV3Builder(GraphBuilder):
         router_logits = self.mpk.new_tensor(
             dims=(mbt, NUM_EXPERTS), dtype=bfloat16,
             name="mtp_router_logits", io_category="cuda_tensor")
+        # Clamp grid so each block handles ≥8 BF16 elements (16B TMA alignment).
+        # Matches main MoE router at line ~715 that uses min(grid, dim(0) // 8).
+        mtp_router_grid = min(grid_for_rmsnorm_linear_layer(w_gate.dim(0)),
+                              w_gate.dim(0) // 8)
         self.mpk.linear_layer(
             input=self.rmsnorm_out, weight=w_gate, output=router_logits,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_gate.dim(0)), 1, 1),
+            grid_dim=(mtp_router_grid, 1, 1),
             block_dim=(128, 1, 1))
 
         moe_output = self.mpk.new_tensor(
@@ -1334,7 +1341,7 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             s_w13 = None
         moe_input_fp8 = self.mpk.new_tensor(
-            dims=(mbt, self.hidden_size), dtype=bfloat16,
+            dims=(mbt, self.hidden_size), dtype=float8_e4m3,
             name="mtp_moe_input_fp8", io_category="cuda_tensor")
         moe_input_scale = self.mpk.new_tensor(
             dims=(mbt, self.hidden_size // 128), dtype=float32,
