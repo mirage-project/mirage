@@ -176,22 +176,74 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         x_deq = x_q.float() * scale_exp
         return x_deq.reshape(bs, K)
 
+    def _fp8_block_scaled_mm(x_fp8, x_scale, w_fp8, w_scale, block_k=128):
+        """Block-scaled FP8 matmul using torch._scaled_mm per K-block.
+        Matches MPK's UMMA: per-block FP8×FP8 with scale applied per block.
+        x_fp8: (M, K) fp8, x_scale: (M, K//block_k) float32
+        w_fp8: (N, K) fp8, w_scale: (N, K//block_k) float32
+        Returns: (M, N) bfloat16."""
+        M, K = x_fp8.shape
+        N = w_fp8.shape[0]
+        num_blocks = K // block_k
+        acc = torch.zeros(M, N, dtype=torch.float32, device=x_fp8.device)
+        for bi in range(num_blocks):
+            ks, ke = bi * block_k, (bi + 1) * block_k
+            # _scaled_mm: (M, block_k) @ (block_k, N) with per-row scales
+            # _scaled_mm requires scale_a stride(0)==1; force contiguous layout
+            sa = x_scale[:, bi:bi+1].clone().view(-1, 1).contiguous()   # (M, 1)
+            sb = w_scale[:, bi:bi+1].clone().view(1, -1).contiguous()   # (1, N)
+            block_out = torch._scaled_mm(
+                x_fp8[:, ks:ke].contiguous(),
+                w_fp8[:, ks:ke].contiguous().t(),
+                scale_a=sa, scale_b=sb,
+                out_dtype=torch.bfloat16,
+            )
+            acc += block_out.float()
+        return acc.to(torch.bfloat16)
+
     def fp8_linear(x, weight_key, sd, block_k=128):
-        """FP8 matmul. MPK_REF_NO_QUANT=1 → use raw checkpoint dequant
-        (skip UE8M0 round-trip — useful to test if my UE8M0 reference is
-        the cause of MPK mismatches)."""
+        """FP8 matmul. MPK_REF_NO_QUANT=1 → use raw checkpoint dequant.
+        MPK_REF_TRUE_FP8=1 → use torch._scaled_mm per K-block (matches
+        MPK's actual FP8×FP8 tensor core precision, not float32 sim)."""
         if os.environ.get("MPK_REF_NO_QUANT", "0") == "1":
             w = dequant_fp8(sd[weight_key], sd[f"{weight_key}_scale_inv"], block_k)
             return F.linear(x.float(), w.float()).to(x.dtype)
+        # Prepare UE8M0 requantized weight (cached)
         if weight_key not in _w_cache:
             new_fp8, new_scale = _requant_weight_to_ue8m0(
                 sd[weight_key], sd[f"{weight_key}_scale_inv"], block_k)
-            w_dequant = _dequant_ue8m0_weight(new_fp8, new_scale, block_k)
-            _w_cache[weight_key] = w_dequant
-        w_deq = _w_cache[weight_key]
-        x_deq = _quant_dequant_input_ue8m0(x.reshape(-1, x.shape[-1]), block_k)
-        out = F.linear(x_deq, w_deq).to(x.dtype)
-        return out.reshape(*x.shape[:-1], w_deq.shape[0])
+            _w_cache[weight_key] = (new_fp8, new_scale)
+        cached = _w_cache[weight_key]
+        if isinstance(cached, tuple):
+            w_fp8, w_scale = cached
+        else:
+            # Legacy: was storing dequanted weight. Re-cache as (fp8, scale).
+            new_fp8, new_scale = _requant_weight_to_ue8m0(
+                sd[weight_key], sd[f"{weight_key}_scale_inv"], block_k)
+            _w_cache[weight_key] = (new_fp8, new_scale)
+            w_fp8, w_scale = new_fp8, new_scale
+
+        if os.environ.get("MPK_REF_TRUE_FP8", "0") == "1":
+            # True FP8 matmul: quantize input to FP8+UE8M0 scale, then
+            # use _scaled_mm per K-block (matches MPK UMMA precision).
+            x_flat = x.reshape(-1, x.shape[-1])
+            bs, K = x_flat.shape
+            sk = K // block_k
+            x_blocks = x_flat.float().reshape(bs, sk, block_k)
+            amax = x_blocks.abs().amax(dim=2).clamp(min=1e-12)
+            raw_s = amax / 448.0
+            ue8m0_exp = torch.ceil(torch.log2(raw_s.clamp(min=1e-30)))
+            x_scale = torch.pow(2.0, ue8m0_exp)  # (bs, sk) UE8M0 scale
+            x_fp8 = (x_blocks / x_scale.unsqueeze(2)).clamp(-448, 448).to(torch.float8_e4m3fn)
+            x_fp8 = x_fp8.reshape(bs, K)
+            out = _fp8_block_scaled_mm(x_fp8, x_scale, w_fp8, w_scale, block_k)
+            return out.reshape(*x.shape[:-1], w_fp8.shape[0])
+        else:
+            # Default: dequant both to float32, matmul in float32 (higher precision).
+            w_deq = _dequant_ue8m0_weight(w_fp8, w_scale, block_k)
+            x_deq = _quant_dequant_input_ue8m0(x.reshape(-1, x.shape[-1]), block_k)
+            out = F.linear(x_deq, w_deq).to(x.dtype)
+            return out.reshape(*x.shape[:-1], w_deq.shape[0])
 
     # Precompute RoPE cos/sin with the same formula as MPK builder
     # (use args.max_seq_length so we cover all positions).
