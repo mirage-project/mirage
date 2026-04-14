@@ -1300,6 +1300,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MOE_W13_FP8_SM100] = "TASK_MOE_W13_FP8_SM100";
   task_type_to_name[TASK_MOE_W2_FP8_SM100] = "TASK_MOE_W2_FP8_SM100";
   task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
+  task_type_to_name[TASK_ELEMENTWISE_ADD_SM100] = "TASK_ELEMENTWISE_ADD_SM100";
   task_type_to_name[TASK_MOE_W13_LINEAR_SM90] = "TASK_MOE_W13_LINEAR_SM90";
   task_type_to_name[TASK_MOE_W2_LINEAR_SM90] = "TASK_MOE_W2_LINEAR_SM90";
   task_type_to_name[TASK_SPLITK_LINEAR_SWAPAB_HOPPER] =

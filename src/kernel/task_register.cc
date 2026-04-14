@@ -2113,6 +2113,36 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_TENSOR_INIT, code.to_string());
 }
 
+int TaskRegister::register_elementwise_add_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  int output_stride = output_ops[0]->dtensor.dim[1];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::elementwise_add_task_impl<cute::bfloat16_t, $, $, $>(",
+         batch_size, output_size, output_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_ELEMENTWISE_ADD_SM100, code.to_string());
+}
+
 int TaskRegister::register_moe_topk_softmax_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);

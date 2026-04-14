@@ -1519,6 +1519,26 @@ class PersistentKernel:
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "identity")
 
+    def elementwise_add_layer(
+        self,
+        input_a: DTensor,
+        input_b: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Element-wise add: output = input_a + input_b.
+        Used for residual connections when fused with_residual kernels are broken."""
+        assert input_a.num_dims == 2
+        assert input_b.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_a, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_b, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([input_a, input_b, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
+
     def silu_mul_linear_with_residual_layer(
         self,
         input: DTensor,
