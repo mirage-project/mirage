@@ -284,6 +284,11 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         rotated = torch.cat([x[..., half:], x[..., :half]], dim=-1)
         return (x.float() * cos.float() + rotated.float() * sin.float()).to(x.dtype)
 
+    _mla_ckpt = os.environ.get("MPK_MLA_CHECKPOINT", "0") == "1"
+    global _g_mla_ckpt_data
+    _g_mla_ckpt_data = {}  # Store last-token ref intermediates for comparison
+    _mla_ckpt_data = _g_mla_ckpt_data
+
     def mla_attention(hidden, prefix, sd, kv_cache, seq_pos, num_heads):
         """MLA attention following raw checkpoint flow (no weight absorption)."""
         bs = hidden.shape[0]
@@ -291,8 +296,14 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
 
         # Q path: q_a_proj → norm → q_b_proj → split(q_nope, q_pe)
         q_a = fp8_linear(hidden, f"{p}q_a_proj.weight", sd)
+        if _mla_ckpt:
+            _mla_ckpt_data['q_a_post_proj'] = q_a.detach().clone()
         q_a = rms_norm(q_a, sd[f"{p}q_a_layernorm.weight"])
+        if _mla_ckpt:
+            _mla_ckpt_data['q_a_post_norm'] = q_a.detach().clone()
         q_full = fp8_linear(q_a, f"{p}q_b_proj.weight", sd)
+        if _mla_ckpt:
+            _mla_ckpt_data['q_nope_pe'] = q_full.detach().clone()
         q_full = q_full.view(bs, num_heads, QK_NOPE + QK_ROPE_HEAD_DIM)  # [bs, H, 192]
         q_nope = q_full[:, :, :QK_NOPE]   # [bs, H, 128]
         q_pe = q_full[:, :, QK_NOPE:]      # [bs, H, 64]
@@ -303,7 +314,11 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         kv_full = fp8_linear(hidden, f"{p}kv_a_proj_with_mqa.weight", sd)
         c_lat = kv_full[:, :KV_LORA_RANK]   # [bs, 512]
         k_pe_raw = kv_full[:, KV_LORA_RANK:]  # [bs, 64]
+        if _mla_ckpt:
+            _mla_ckpt_data['c_lat_pre_norm'] = c_lat.detach().clone()
         c_lat = rms_norm(c_lat, sd[f"{p}kv_a_layernorm.weight"])
+        if _mla_ckpt:
+            _mla_ckpt_data['c_lat_post_norm'] = c_lat.detach().clone()
         # Apply RoPE to k_pe at position seq_pos BEFORE writing to cache
         k_pe_rotated = apply_rope(k_pe_raw, seq_pos)
 
@@ -335,10 +350,19 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         # V absorption: attn @ c_kv → [bs, H, 512], then × W_UV^T → [bs, H, 128]
         attn_v = torch.einsum('bhs,sd->bhd', attn_probs, kv_all[:, :KV_LORA_RANK].float())
         attn_out = torch.einsum('bhd,hkd->bhk', attn_v, W_UV.float()).to(hidden.dtype)
+        if _mla_ckpt:
+            # Store the PRE-o_proj attention output (after V un-absorption)
+            # MPK stores this in attn_out which is [bs, H*kv_lora_rank=65536] (absorbed)
+            # Ref stores [bs, H, 128] (un-absorbed). These have different shapes.
+            # For fair comparison, store ref's attn_v (latent space) [bs, H, 512]
+            _mla_ckpt_data['attn_v_latent'] = attn_v.detach().clone()  # [bs, H, 512]
 
         # o_proj
         flat = attn_out.reshape(bs, num_heads * V_ORIG)
-        return fp8_linear(flat, f"{p}o_proj.weight", sd)
+        result = fp8_linear(flat, f"{p}o_proj.weight", sd)
+        if _mla_ckpt:
+            _mla_ckpt_data['attn_proj_out'] = result.detach().clone()
+        return result
 
     def dense_mlp(hidden, prefix, sd):
         p = prefix + "mlp."
@@ -1006,6 +1030,46 @@ if __name__ == "__main__":
                 for r in range(mlp_out_buf.shape[0]):
                     row = mlp_out_buf[r].float()
                     print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
+            # MPK_MLA_CHECKPOINT: compare per-step MLA intermediates
+            _mla_ckpt_mode = os.environ.get("MPK_MLA_CHECKPOINT", "0") == "1"
+            _mla_ckpt_data = globals().get('_g_mla_ckpt_data', {})
+            if _mla_ckpt_mode and _mla_ckpt_data:
+                print("\n[MLA CHECKPOINT] Comparing last-token ref vs MPK intermediates:")
+                def _cos(a, b):
+                    return torch.nn.functional.cosine_similarity(
+                        a.float().flatten().unsqueeze(0),
+                        b.float().flatten().unsqueeze(0)).item()
+                print(f"  ref keys: {list(_mla_ckpt_data.keys())}")
+                print(f"  builder bufs: q_a={getattr(builder, 'q_a_out_buf', None) is not None}, "
+                      f"qnope={getattr(builder, 'q_nope_pe_buf', None) is not None}, "
+                      f"clat={getattr(builder, 'c_latent_out_buf', None) is not None}, "
+                      f"attn_proj={getattr(builder, 'attn_proj_out_buf', None) is not None}")
+                # Compare step by step. MPK buffers show POST-NORM values
+                # (rmsnorm overwrites q_a_out and c_latent_out in-place).
+                comparisons = [
+                    # (label, ref_key, mpk_buf)
+                    ("1. q_a (post-norm, FP8 GEMM+norm)", "q_a_post_norm",
+                     getattr(builder, "q_a_out_buf", None)),
+                    # q_nope_pe: SKIP — shapes differ (ref=non-absorbed [H,192], MPK=absorbed [H*576])
+                    ("3. c_lat (post-norm, FP8 GEMM+norm)", "c_lat_post_norm",
+                     getattr(builder, "c_latent_out_buf", None)),
+                    ("4. attn_proj_out (MLA+o_proj)", "attn_proj_out",
+                     getattr(builder, "attn_proj_out_buf", None)),
+                ]
+                for label, ref_key, mpk_buf in comparisons:
+                    if mpk_buf is None:
+                        print(f"  {label}: [MPK buf not attached]")
+                        continue
+                    mpk_val = mpk_buf[0].float()
+                    mpk_amax = mpk_val.abs().max().item()
+                    if ref_key and ref_key in _mla_ckpt_data:
+                        ref_val = _mla_ckpt_data[ref_key][0].float()
+                        cs = _cos(ref_val.unsqueeze(0), mpk_val.unsqueeze(0))
+                        ref_amax = ref_val.abs().max().item()
+                        print(f"  {label}: cosine={cs:.6f} ref_amax={ref_amax:.4f} mpk_amax={mpk_amax:.4f}")
+                    else:
+                        print(f"  {label}: mpk_amax={mpk_amax:.4f} (no ref checkpoint)")
+
             attn_out_buf = getattr(builder, "attn_out_buf", None)
             if attn_out_buf is not None:
                 print("[ATTN_OUT] each row stats:")

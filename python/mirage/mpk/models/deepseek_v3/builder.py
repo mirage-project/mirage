@@ -214,12 +214,18 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # MLA projections
         # q_a output: [batch, q_lora_rank]
-        self.q_a_out = self.mpk.new_tensor(
-            dims=(mbt, self.q_lora_rank),
-            dtype=bfloat16,
-            name="q_a_out",
-            io_category="cuda_tensor",
-        )
+        _mla_ckpt = os.environ.get("MPK_MLA_CHECKPOINT", "0") == "1"
+        if _mla_ckpt:
+            self.q_a_out_buf = torch.zeros(mbt, self.q_lora_rank, dtype=torch.bfloat16, device="cuda")
+            self.q_a_out = self.mpk.attach_input(torch_tensor=self.q_a_out_buf, name="q_a_out")
+        else:
+            self.q_a_out_buf = None
+            self.q_a_out = self.mpk.new_tensor(
+                dims=(mbt, self.q_lora_rank),
+                dtype=bfloat16,
+                name="q_a_out",
+                io_category="cuda_tensor",
+            )
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
         if os.environ.get("MPK_DUMP_QNOPE", "0") == "1":
             self.q_nope_pe_buf = torch.zeros(
@@ -238,12 +244,17 @@ class DeepSeekV3Builder(GraphBuilder):
         # kv_a output split: c_latent [batch, 512] and k_pe [batch, 64]
         # We use two separate linear layers instead of one 576-dim output,
         # so we can apply kv_a_layernorm to c_latent only.
-        self.c_latent_out = self.mpk.new_tensor(
-            dims=(mbt, self.kv_lora_rank),  # [batch, 512]
-            dtype=bfloat16,
-            name="c_latent_out",
-            io_category="cuda_tensor",
-        )
+        if _mla_ckpt:
+            self.c_latent_out_buf = torch.zeros(mbt, self.kv_lora_rank, dtype=torch.bfloat16, device="cuda")
+            self.c_latent_out = self.mpk.attach_input(torch_tensor=self.c_latent_out_buf, name="c_latent_out")
+        else:
+            self.c_latent_out_buf = None
+            self.c_latent_out = self.mpk.new_tensor(
+                dims=(mbt, self.kv_lora_rank),  # [batch, 512]
+                dtype=bfloat16,
+                name="c_latent_out",
+                io_category="cuda_tensor",
+            )
         # Pad to 128 for SM100 MMA_M alignment (real data is first 64 elements)
         self.k_pe_out = self.mpk.new_tensor(
             dims=(mbt, 128),  # [batch, 128] — padded from 64
