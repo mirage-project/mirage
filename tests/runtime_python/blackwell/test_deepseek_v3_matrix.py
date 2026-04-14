@@ -36,7 +36,8 @@ for i in range(num_tests):
     if use_mtp:
         cmd += ["--mtp", "--num-speculative-tokens", str(spec)]
     
-    env = dict(os.environ, MPK_NO_RESIDUAL="1", CUDA_VISIBLE_DEVICES=gpu)
+    env = dict(os.environ, MPK_NO_RESIDUAL="1", CUDA_VISIBLE_DEVICES=gpu,
+                LD_LIBRARY_PATH="/usr/mpi/gcc/openmpi-4.1.9a1/lib:" + os.environ.get("LD_LIBRARY_PATH", ""))
     
     t0 = time.time()
     try:
