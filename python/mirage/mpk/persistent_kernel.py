@@ -1827,6 +1827,24 @@ class PersistentKernel:
         self.kn_graph.customized([logits, token_ids, output_probs], tb_graph)
         self.kn_graph.register_task(tb_graph, "softmax_gather_sm100")
 
+    def prob_scatter_layer(
+        self,
+        prob: DTensor,           # [batch, 1] float32
+        step_counter: DTensor,   # [batch] int32 (runtime step position)
+        buffer: DTensor,         # [batch, max_positions] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+        max_positions: int,
+    ):
+        """Scatter current prob into per-position buffer at runtime step position."""
+        params = [max_positions]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(prob, (-1, -1, -1), -1, True)
+        tb_graph.new_input(step_counter, (-1, -1, -1), -1, True)
+        tb_graph.new_input(buffer, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([prob, step_counter, buffer], tb_graph)
+        self.kn_graph.register_task(tb_graph, "prob_scatter_sm100", params)
+
     def mtp_verify_probabilistic_layer(
         self,
         draft_token_ids: DTensor,

@@ -2202,6 +2202,33 @@ int TaskRegister::register_mtp_verify_probabilistic_task(
   return register_task_variant(TASK_MTP_VERIFY_PROBABILISTIC, code.to_string());
 }
 
+int TaskRegister::register_prob_scatter_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 1);
+  int max_positions = params[0];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;  // prob + step_counter
+  int num_outputs = 1; // buffer
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::prob_scatter_task_impl<$, $>(", batch_size, max_positions);
+  code.e("    task_desc->input_ptrs[0],");   // prob
+  code.e("    task_desc->output_ptrs[0],");  // buffer
+  code.e("    static_cast<int const*>(task_desc->input_ptrs[1]));"); // step
+  return register_task_variant(TASK_PROB_SCATTER_SM100, code.to_string());
+}
+
 int TaskRegister::register_moe_topk_softmax_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);

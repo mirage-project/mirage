@@ -671,6 +671,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(5, 2, TASK_MTP_VERIFY_PROBABILISTIC, variant_id);
+  } else if (name == "prob_scatter_sm100") {
+    int variant_id = task_register->register_prob_scatter_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_PROB_SCATTER_SM100, variant_id);
   } else if (name == "moe_mul_sum_add_sm100") {
     int variant_id = task_register->register_moe_mul_sum_add_sm100_task(
         customized->bgraph, params);

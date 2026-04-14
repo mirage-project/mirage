@@ -1755,40 +1755,42 @@ class DeepSeekV3Builder(GraphBuilder):
             )
         elif method == "probabilistic":
             # Probabilistic rejection sampling: P_target(x) > u * P_draft(x)
-            # Needs softmax+gather to extract probabilities at draft token positions.
-            padded_vocab_size = 129280  # DeepSeek V3 vocab
+            #
+            # Target probs: accumulated by softmax_gather + prob_scatter in the main
+            # model graph during verify forward pass (inserted in build_from_dict).
+            # Each verify iteration writes P_target(input_token) to target_prob_buffer[step].
+            #
+            # Draft probs: computed here from the per-step draft logits stored during
+            # draft generation.
 
-            # Compute target probs at draft positions: softmax(target_logits)[draft_id]
-            # target_logits are in the last LM head output (lm_head_out from verify forward)
-            # For each draft position, we need the target model's logits.
-            # NOTE: this requires that the target forward already ran on all draft+1 tokens
-            # and produced lm_head_out[num_draft_steps+1, vocab].
-
-            # Buffers for per-position probabilities
-            target_probs = self._cached_new_tensor(
-                dims=(mbt, num_draft_steps), dtype=float32,
-                name="mtp_target_probs")
+            # Extract draft probs from per-step logits via softmax_gather
             draft_probs = self._cached_new_tensor(
                 dims=(mbt, num_draft_steps), dtype=float32,
                 name="mtp_draft_probs")
+            for step_idx in range(num_draft_steps):
+                # Draft logits for this step are in mtp_step{step_idx}_logits
+                # The draft token for this step is all_draft_ids[:, step_idx]
+                # TODO: need per-step draft token extraction from all_draft_ids
+                pass  # draft prob extraction needs per-column gather — see below
+
+            # For now: use target_prob_buffer from main graph + dummy draft_probs
             rng_seed = self._cached_new_tensor(
                 dims=(mbt, 1), dtype=uint64,
                 name="mtp_rng_seed")
 
-            # For each draft position, compute softmax_gather on the corresponding logits
-            # This requires per-position logits from both draft and target models.
-            # Draft logits: stored per step during draft generation (mtp_step{k}_logits)
-            # Target logits: stored per position during verify forward pass
-            #
-            # TODO: The verify forward pass doesn't currently output per-position logits.
-            # For now, fall back to strict verification with a warning.
+            # Extract target probs from the accumulation buffer
+            # target_prob_buffer[batch, pos] has P_target(input_token) at each position.
+            # The verify positions are step+1..step+K+1 (set by prepare_verify).
+            # We need target_probs[0..K-1] = target_prob_buffer[step+1..step+K].
+            # TODO: need a "slice by runtime offset" kernel to extract these.
+
+            # For now fall back to strict (all infrastructure ready, just needs
+            # the prob extraction kernels to be wired)
             import warnings
-            warnings.warn("Probabilistic MTP verification requires per-position "
-                          "logits from the verify forward pass. Falling back to "
-                          "strict verification. To implement: store per-position "
-                          "target logits during the verify forward, then call "
-                          "softmax_gather_layer for each position.")
-            # Fallback to strict
+            warnings.warn("Probabilistic MTP: softmax_gather and prob_scatter "
+                          "are wired into main graph. Still need draft prob "
+                          "extraction and runtime-offset slice. Falling back "
+                          "to strict.")
             self.mpk.mtp_verify_strict_layer(
                 draft_token_ids=all_draft_ids,
                 target_token_ids=target_token_ids,
@@ -2037,17 +2039,44 @@ class DeepSeekV3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
             )
 
+            # Probabilistic MTP: insert softmax_gather + prob_scatter before argmax.
+            # This accumulates P_target(input_token) at each iteration's position.
+            _prob_method = getattr(self, 'mtp_config', None)
+            _use_prob_mtp = (_prob_method is not None and
+                             getattr(_prob_method, 'rejection_sample_method', 'strict') == 'probabilistic')
+            if _use_prob_mtp:
+                mbt = self.max_num_batched_tokens
+                # Buffer: accumulate probs across iterations [mbt, max_seq]
+                self._target_prob_buffer = self.mpk.new_tensor(
+                    dims=(mbt, self.mpk.max_seq_length), dtype=float32,
+                    name="target_prob_buffer", io_category="cuda_tensor")
+                # Per-iteration prob scratch [mbt, 1]
+                self._target_prob_current = self.mpk.new_tensor(
+                    dims=(mbt, 1), dtype=float32,
+                    name="target_prob_current", io_category="cuda_tensor")
+                # softmax_gather: lm_head_out + input_tokens → prob_current
+                self.mpk.softmax_gather_layer(
+                    logits=lm_head_out,
+                    token_ids=self.mpk.attach_input(
+                        torch_tensor=self.input_tokens, name="input_tokens_for_prob"),
+                    output_probs=self._target_prob_current,
+                    grid_dim=(1, 1, 1), block_dim=(256, 1, 1))
+                # prob_scatter: write prob_current to buffer[step_position]
+                step_tensor = self.mpk.meta_tensors.get("step", None)
+                if step_tensor is not None:
+                    self.mpk.prob_scatter_layer(
+                        prob=self._target_prob_current,
+                        step_counter=self.mpk.attach_input(
+                            torch_tensor=step_tensor, name="step_for_prob_scatter"),
+                        buffer=self._target_prob_buffer,
+                        grid_dim=(1, 1, 1), block_dim=(1, 1, 1),
+                        max_positions=self.mpk.max_seq_length)
+
             # Argmax
             self.argmax_out_dtensor = self.mpk.attach_input(
                 torch_tensor=self.output_tokens, name="output_token",
             )
             argmax_out = self.argmax_out_dtensor
-            # Argmax grid: matches Qwen3 pattern.
-            # Partial: (num_workers, 1, 1) splits vocab across all workers.
-            # Reduce: (1, 1, 1) — single block combines partials, iterates batches.
-            # Old (mbt, 1, 1) caused race for mbt>1: blocks wrote overlapping
-            # output_tokens slots because the kernel uses NUM_PARTIAL_TASKS for
-            # output offset but the buffer's actual stride is num_workers.
             self.mpk.argmax_partial_layer(
                 input=lm_head_out, output=(self.argmax_part_value, self.argmax_part_index),
                 grid_dim=(self.mpk.num_workers, 1, 1),
