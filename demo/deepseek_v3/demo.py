@@ -337,6 +337,11 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
 
         # Absorbed Q: q_nope_abs = q_nope @ W_UK → [bs, H, 512]
         q_nope_abs = torch.einsum('bhd,hdk->bhk', q_nope.float(), W_UK.float()).to(hidden.dtype)
+        if _mla_ckpt:
+            # Construct ref's "absorbed Q" in same layout as MPK's q_nope_pe:
+            # MPK: [bs, H*576] where per-head 576 = absorbed_nope(512) + rope(64)
+            q_absorbed_full = torch.cat([q_nope_abs, q_pe], dim=-1)  # [bs, H, 576]
+            _mla_ckpt_data['q_absorbed'] = q_absorbed_full.reshape(bs, -1).detach().clone()  # [bs, H*576]
 
         # Attention: Q_abs × c_kv^T + q_pe × k_pe^T (RoPE already applied to both)
         k_nope = kv_all[:, :KV_LORA_RANK]   # [kv_len, 512]
@@ -838,7 +843,24 @@ if __name__ == "__main__":
                         kv_bf16 = dequantize_fp8(kv_w.cuda(), state_dict[kv_s_key].cuda()).to(torch.bfloat16)
                     else:
                         kv_bf16 = kv_w.cuda().to(torch.bfloat16)
-                    absorbed = absorb_kv_into_q(q_bf16, kv_bf16, mp).to(torch.bfloat16)
+                    absorbed_f32 = absorb_kv_into_q(q_bf16, kv_bf16, mp)  # float32
+                    # MPK_FP8_ABSORB=1: requantize absorbed weight to FP8 (instead
+                    # of BF16 truncation) so MPK uses FP8 GEMM for q_b_proj too.
+                    if os.environ.get("MPK_FP8_ABSORB", "0") == "1":
+                        # Quantize the float32 absorbed weight to FP8 + scale_inv
+                        absorbed_bf16 = absorbed_f32.to(torch.bfloat16)
+                        block_k = 128
+                        M, K = absorbed_bf16.shape
+                        sk = K // block_k
+                        blocks = absorbed_f32.reshape(M, sk, block_k)
+                        amax = blocks.abs().amax(dim=2).clamp(min=1e-12)
+                        scale_inv = amax / 448.0  # per-block scale
+                        w_q = (blocks / scale_inv.unsqueeze(2)).clamp(-448, 448).to(torch.float8_e4m3fn)
+                        absorbed = w_q.reshape(M, K)
+                        state_dict[q_s_key] = scale_inv  # restore scale_inv key
+                        print(f"  FP8 absorbed q_b: shape={absorbed.shape} scale={scale_inv.shape}")
+                    else:
+                        absorbed = absorbed_f32.to(torch.bfloat16)
                     # Fuse V un-absorption into o_proj:
                     # o_proj_fused[h] = o_proj[h] @ W_UV[h]
                     # where W_UV[h] = kv_b_proj V part: [v_orig, kv_lora_rank]
@@ -1051,6 +1073,8 @@ if __name__ == "__main__":
                     ("1. q_a (post-norm, FP8 GEMM+norm)", "q_a_post_norm",
                      getattr(builder, "q_a_out_buf", None)),
                     # q_nope_pe: SKIP — shapes differ (ref=non-absorbed [H,192], MPK=absorbed [H*576])
+                    ("2. Q absorbed (q_b + W_UK + RoPE)", "q_absorbed",
+                     getattr(builder, "q_nope_pe_buf", None)),
                     ("3. c_lat (post-norm, FP8 GEMM+norm)", "c_lat_post_norm",
                      getattr(builder, "c_latent_out_buf", None)),
                     ("4. attn_proj_out (MLA+o_proj)", "attn_proj_out",
