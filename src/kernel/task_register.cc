@@ -2202,6 +2202,50 @@ int TaskRegister::register_mtp_verify_probabilistic_task(
   return register_task_variant(TASK_MTP_VERIFY_PROBABILISTIC, code.to_string());
 }
 
+int TaskRegister::register_mtp_float_scatter_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 3);
+  int batch_size = params[0];
+  int num_slots = params[1];
+  int slot_idx = params[2];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mtp_float_scatter_kernel<$, $, $>(",
+         batch_size, num_slots, slot_idx);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_MTP_FLOAT_SCATTER, code.to_string());
+}
+
+int TaskRegister::register_prob_extract_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 2);
+  int max_positions = params[0];
+  int num_extract = params[1];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::prob_extract_task_impl<$, $, $>(",
+         batch_size, max_positions, num_extract);
+  code.e("    task_desc->input_ptrs[0],");   // buffer
+  code.e("    task_desc->output_ptrs[0],");  // output
+  code.e("    static_cast<int const*>(task_desc->input_ptrs[1]));"); // offset
+  return register_task_variant(TASK_PROB_EXTRACT_SM100, code.to_string());
+}
+
 int TaskRegister::register_prob_scatter_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 1);

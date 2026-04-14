@@ -45,4 +45,29 @@ __device__ __forceinline__ void
   }
 }
 
+// --- Extract slice from prob buffer at runtime offset ---
+// Reads buffer[batch, offset..offset+K-1] into output[batch, 0..K-1].
+// Used to extract target_probs for verify positions from the accumulated buffer.
+template <int BATCH_SIZE, int MAX_POSITIONS, int NUM_EXTRACT>
+__device__ __forceinline__ void
+    prob_extract_task_impl(void const *__restrict__ buffer_ptr,
+                           void *__restrict__ output_ptr,
+                           int const *__restrict__ offset_ptr) {
+  float const *__restrict__ buffer = static_cast<float const *>(buffer_ptr);
+  float *__restrict__ output = static_cast<float *>(output_ptr);
+
+  int const tid = threadIdx.x;
+  if (tid >= NUM_EXTRACT) return;
+
+  for (int b = 0; b < BATCH_SIZE; ++b) {
+    int const offset = offset_ptr[b] + 1;  // +1 because verify starts at step+1
+    int const src_pos = offset + tid;
+    if (src_pos >= 0 && src_pos < MAX_POSITIONS) {
+      output[b * NUM_EXTRACT + tid] = buffer[b * MAX_POSITIONS + src_pos];
+    } else {
+      output[b * NUM_EXTRACT + tid] = 0.0f;
+    }
+  }
+}
+
 } // namespace kernel

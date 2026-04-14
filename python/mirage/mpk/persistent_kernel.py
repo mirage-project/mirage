@@ -1827,6 +1827,24 @@ class PersistentKernel:
         self.kn_graph.customized([logits, token_ids, output_probs], tb_graph)
         self.kn_graph.register_task(tb_graph, "softmax_gather_sm100")
 
+    def mtp_float_scatter_layer(
+        self,
+        src: DTensor,       # [batch, 1] float32
+        dst: DTensor,       # [batch, num_slots] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+        batch_size: int,
+        num_slots: int,
+        slot_idx: int,
+    ):
+        """Copy single float value to specific slot in buffer (compile-time index)."""
+        params = [batch_size, num_slots, slot_idx]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(src, (-1, -1, -1), -1, True)
+        tb_graph.new_input(dst, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([src, dst], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_float_scatter", params)
+
     def prob_scatter_layer(
         self,
         prob: DTensor,           # [batch, 1] float32
@@ -1844,6 +1862,25 @@ class PersistentKernel:
         tb_graph.new_input(buffer, (-1, -1, -1), -1, True)
         self.kn_graph.customized([prob, step_counter, buffer], tb_graph)
         self.kn_graph.register_task(tb_graph, "prob_scatter_sm100", params)
+
+    def prob_extract_layer(
+        self,
+        buffer: DTensor,         # [batch, max_positions] float32
+        offset: DTensor,         # [batch] int32 (runtime offset)
+        output: DTensor,         # [batch, num_extract] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+        max_positions: int,
+        num_extract: int,
+    ):
+        """Extract buffer[batch, offset+1..offset+num_extract] into contiguous output."""
+        params = [max_positions, num_extract]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(buffer, (-1, -1, -1), -1, True)
+        tb_graph.new_input(offset, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([buffer, offset, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "prob_extract_sm100", params)
 
     def mtp_verify_probabilistic_layer(
         self,

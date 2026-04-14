@@ -1599,6 +1599,9 @@ class DeepSeekV3Builder(GraphBuilder):
         # ---- Save main model state ----
         main_hidden_states = self.x  # After all 61 layers + final norm
 
+        # Verification method: needed early (draft loop uses it for prob computation)
+        method = getattr(self.mtp_config, 'rejection_sample_method', 'strict')
+
         # ---- Draft generation loop (statically unrolled) ----
         for step in range(num_draft_steps):
             # 1. Get draft token: step 0 from main argmax, step 1+ from prev MTP
@@ -1680,6 +1683,25 @@ class DeepSeekV3Builder(GraphBuilder):
                 output=draft_token_ids,
                 grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
             )
+
+            # Probabilistic: compute P_draft(draft_token) from this step's logits
+            if method == "probabilistic":
+                draft_prob_current = self._cached_new_tensor(
+                    dims=(mbt, 1), dtype=float32,
+                    name="mtp_draft_prob_current")
+                self.mpk.softmax_gather_layer(
+                    logits=lm_head_out, token_ids=draft_token_ids,
+                    output_probs=draft_prob_current,
+                    grid_dim=(1, 1, 1), block_dim=(256, 1, 1))
+                if not hasattr(self, '_draft_prob_buffer'):
+                    self._draft_prob_buffer = self._cached_new_tensor(
+                        dims=(mbt, num_draft_steps), dtype=float32,
+                        name="mtp_draft_prob_buffer")
+                # Scatter to buffer[batch, step] with compile-time slot index
+                self.mpk.mtp_float_scatter_layer(
+                    src=draft_prob_current, dst=self._draft_prob_buffer,
+                    grid_dim=(1, 1, 1), block_dim=(128, 1, 1),
+                    batch_size=mbt, num_slots=num_draft_steps, slot_idx=step)
 
             # Scatter this step's draft token into the collection buffer
             if os.environ.get("MPK_SKIP_MTP_VERIFY"):
@@ -1784,16 +1806,32 @@ class DeepSeekV3Builder(GraphBuilder):
             # We need target_probs[0..K-1] = target_prob_buffer[step+1..step+K].
             # TODO: need a "slice by runtime offset" kernel to extract these.
 
-            # For now fall back to strict (all infrastructure ready, just needs
-            # the prob extraction kernels to be wired)
-            import warnings
-            warnings.warn("Probabilistic MTP: softmax_gather and prob_scatter "
-                          "are wired into main graph. Still need draft prob "
-                          "extraction and runtime-offset slice. Falling back "
-                          "to strict.")
-            self.mpk.mtp_verify_strict_layer(
+            # Extract target probs from accumulation buffer at verify positions
+            target_probs = self._cached_new_tensor(
+                dims=(mbt, num_draft_steps), dtype=float32,
+                name="mtp_target_probs_extracted")
+            step_tensor = self.mpk.meta_tensors.get("step", None)
+            if step_tensor is not None and hasattr(self, '_target_prob_buffer'):
+                self.mpk.prob_extract_layer(
+                    buffer=self._target_prob_buffer,
+                    offset=self._cached_attach(step_tensor, "step_for_prob_extract"),
+                    output=target_probs,
+                    grid_dim=(1, 1, 1), block_dim=(128, 1, 1),
+                    max_positions=self.mpk.max_seq_length,
+                    num_extract=num_draft_steps)
+
+            # RNG seed for rejection sampling
+            rng_seed = self._cached_new_tensor(
+                dims=(mbt, 1), dtype=uint64,
+                name="mtp_rng_seed")
+
+            # Probabilistic verify
+            self.mpk.mtp_verify_probabilistic_layer(
                 draft_token_ids=all_draft_ids,
                 target_token_ids=target_token_ids,
+                target_probs=target_probs,
+                draft_probs=self._draft_prob_buffer,
+                seed=rng_seed,
                 accepted_count=accepted_count,
                 output_tokens=verified_output_tokens,
                 grid_dim=(mbt, 1, 1),

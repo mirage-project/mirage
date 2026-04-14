@@ -671,6 +671,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(5, 2, TASK_MTP_VERIFY_PROBABILISTIC, variant_id);
+  } else if (name == "mtp_float_scatter") {
+    int variant_id = task_register->register_mtp_float_scatter_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_MTP_FLOAT_SCATTER, variant_id);
+  } else if (name == "prob_extract_sm100") {
+    int variant_id = task_register->register_prob_extract_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_PROB_EXTRACT_SM100, variant_id);
   } else if (name == "prob_scatter_sm100") {
     int variant_id = task_register->register_prob_scatter_sm100_task(
         customized->bgraph, params);

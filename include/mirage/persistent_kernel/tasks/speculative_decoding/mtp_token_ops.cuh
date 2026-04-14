@@ -49,6 +49,21 @@ __device__ __forceinline__ void mtp_token_scatter_kernel(
   }
 }
 
+// --- Float Scatter (for draft probabilities) ---
+// Same pattern as token scatter but for float32 values.
+// Used to accumulate P_draft(token) per draft step.
+template <int BATCH_SIZE, int NUM_SLOTS, int SLOT_IDX>
+__device__ __forceinline__ void mtp_float_scatter_kernel(
+    void const *__restrict__ src_ptr,
+    void *__restrict__ dst_ptr) {
+  float const *__restrict__ src = static_cast<float const *>(src_ptr);
+  float *__restrict__ dst = static_cast<float *>(dst_ptr);
+  int b = threadIdx.x;
+  if (b < BATCH_SIZE) {
+    dst[b * NUM_SLOTS + SLOT_IDX] = src[b];
+  }
+}
+
 // --- Draft Tokens to Sequence Buffer ---
 // After MTP draft generation, copy K draft tokens from all_draft_ids into the
 // main token sequence buffer (config.tokens) at the correct positions.
