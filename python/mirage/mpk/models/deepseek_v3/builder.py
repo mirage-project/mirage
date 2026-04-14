@@ -1400,28 +1400,49 @@ class DeepSeekV3Builder(GraphBuilder):
             moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
             output=moe_down_out, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
 
-        # Shared expert (FP8)
+        # Shared expert (FP8) — same pattern as main MoE shared expert:
+        # interleave gate+up, requantize for UE8M0, proper silu_mul grid.
         sp = f"{mlp_prefix}shared_experts."
         shared_gate_w = state_dict[f"{sp}gate_proj.weight"]
         shared_up_w = state_dict[f"{sp}up_proj.weight"]
-        shared_gate_s = state_dict[f"{sp}gate_proj.weight_scale_inv"]
-        shared_up_s = state_dict[f"{sp}up_proj.weight_scale_inv"]
-        w_s_gu = self._safe_attach(
-            torch.cat([shared_gate_w, shared_up_w], dim=0), f"mtp_{sp}gate_up")
-        s_s_gu = self._safe_attach(
-            torch.cat([shared_gate_s, shared_up_s], dim=0), f"mtp_{sp}gate_up_scale")
+        gate_scale_key = f"{sp}gate_proj.weight_scale_inv"
+        has_shared_scale = gate_scale_key in state_dict
+        # Interleave gate/up at split granularity (Bug 2+5 fix for MTP)
+        from ..utils import shuffle_tensors as _shuffle_tensors
+        out_dim_total = shared_gate_w.shape[0] + shared_up_w.shape[0]
+        linear_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
+        scale_dim_0 = shared_gate_w.shape[0] // 128
+        shared_split = min(linear_grid // 2, scale_dim_0)
+        while shared_gate_w.shape[0] % shared_split != 0 or scale_dim_0 % shared_split != 0:
+            shared_split -= 1
+            if shared_split < 1:
+                shared_split = 1; break
+        fused_key = f"mtp_{sp}gate_up_fused"
+        fused_w = _shuffle_tensors([shared_gate_w, shared_up_w], split=shared_split, dim=0)
+        if has_shared_scale:
+            fused_s = _shuffle_tensors(
+                [state_dict[f"{sp}gate_proj.weight_scale_inv"],
+                 state_dict[f"{sp}up_proj.weight_scale_inv"]],
+                split=shared_split, dim=0)
+            state_dict[f"{fused_key}.weight"] = fused_w
+            state_dict[f"{fused_key}.weight_scale_inv"] = fused_s
+        else:
+            state_dict[f"{fused_key}.weight"] = fused_w
+        w_s_gu, s_s_gu = self._attach_fp8_weight(
+            state_dict, f"{fused_key}.weight", f"mtp_{sp}gate_up")
         shared_mid = self.mpk.new_tensor(
             dims=(mbt, 2 * self.moe_intermediate_size), dtype=bfloat16,
             name="mtp_shared_mid", io_category="cuda_tensor")
+        gate_up_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
         self._fp8_linear(self.rmsnorm_out, w_s_gu, s_s_gu, shared_mid,
-                         grid_dim=(grid_for_rmsnorm_linear_layer(w_s_gu.dim(0)), 1, 1),
+                         grid_dim=(gate_up_grid, 1, 1),
                          block_dim=(128, 1, 1))
         shared_silu = self.mpk.new_tensor(
             dims=(mbt, self.moe_intermediate_size), dtype=bfloat16,
             name="mtp_shared_silu", io_category="cuda_tensor")
         self.mpk.silu_mul_layer(
             input=shared_mid, output=shared_silu,
-            grid_dim=(self.moe_intermediate_size // 64, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=(shared_split, 1, 1), block_dim=(128, 1, 1))
         w_s_down, s_s_down = self._attach_fp8_weight(
             state_dict, f"{sp}down_proj.weight", f"mtp_{sp}down_proj")
         shared_residual = self.mpk.new_tensor(
