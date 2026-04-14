@@ -215,12 +215,12 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
         # Handle BF16 weights (no FP8 scale) — used for absorbed q_b_proj / fused o_proj
         scale_key = f"{weight_key}_scale_inv"
         if scale_key not in sd:
-            # BF16 weight (no FP8 scale) → direct BF16 matmul
+            # BF16 weight → matmul. Use BF16 precision to match MPK's linear_sm100.
             if weight_key not in sd:
                 print(f"[fp8_linear] MISSING: {weight_key}. Keys with same layer: {[k for k in sd if weight_key.rsplit('.', 2)[0] in k][:5]}")
                 raise KeyError(weight_key)
             w = sd[weight_key]
-            return F.linear(x.float(), w.float()).to(x.dtype)
+            return F.linear(x.to(torch.bfloat16), w.to(torch.bfloat16)).to(x.dtype)
         # Prepare UE8M0 requantized weight (cached)
         if weight_key not in _w_cache:
             new_fp8, new_scale = _requant_weight_to_ue8m0(
@@ -846,6 +846,23 @@ if __name__ == "__main__":
             absorb_layers = list(test_layers)
             if args.mtp:
                 absorb_layers.append(num_layers)
+
+            def _quantize_f32_to_checkpoint_fp8(w_f32, block_size=128):
+                """Quantize float32 weight to FP8 + per-2D-block scale_inv."""
+                M, K = w_f32.shape
+                bM = (M + block_size - 1) // block_size
+                bK = (K + block_size - 1) // block_size
+                w_pad = torch.zeros(bM * block_size, bK * block_size,
+                                    dtype=torch.float32, device=w_f32.device)
+                w_pad[:M, :K] = w_f32
+                blocks = w_pad.reshape(bM, block_size, bK, block_size)
+                amax = blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)
+                scale_inv = amax / 448.0
+                scale_exp = scale_inv.unsqueeze(1).unsqueeze(3).expand_as(blocks)
+                w_q = (blocks / scale_exp).clamp(-448, 448)
+                w_fp8 = w_q.reshape(bM * block_size, bK * block_size)[:M, :K].to(torch.float8_e4m3fn)
+                return w_fp8, scale_inv
+
             for li in absorb_layers:
                 attn = f"model.layers.{li}.self_attn."
                 q_key = f"{attn}q_b_proj.weight"
@@ -887,9 +904,12 @@ if __name__ == "__main__":
                             o_bf16 = o_w.cuda().to(torch.bfloat16)
                         hidden_dim = o_bf16.shape[0]
                         o_reshaped = o_bf16.reshape(hidden_dim, num_heads_loc, v_dim)
-                        o_fused = torch.einsum('dhn,hnk->dhk', o_reshaped.float(), W_UV.float())
-                        state_dict[o_key] = o_fused.reshape(hidden_dim, num_heads_loc * kv_lora_rank).to(torch.bfloat16)
-                        print(f"  L{li}: absorbed q_b [{absorbed.shape}], fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
+                        o_fused_f32 = torch.einsum('dhn,hnk->dhk', o_reshaped.float(), W_UV.float())
+                        o_flat = o_fused_f32.reshape(hidden_dim, num_heads_loc * kv_lora_rank)
+                        o_fp8, o_scale = _quantize_f32_to_checkpoint_fp8(o_flat)
+                        state_dict[o_key] = o_fp8
+                        state_dict[o_s_key] = o_scale
+                        print(f"  L{li}: FP8 absorbed q_b {absorbed.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
@@ -947,12 +967,12 @@ if __name__ == "__main__":
                     # Keep BF16 copies for V un-absorption (o_proj needs kv_b in BF16 format)
                     kv_bf16 = kv_f32.to(torch.bfloat16)
                     absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)  # float32 inputs
-                    # Store absorbed weight as BF16 (matching vLLM/SGLang approach).
-                    # Both vLLM and SGLang also pre-absorb offline and store in BF16.
-                    absorbed = absorbed_f32.to(torch.bfloat16)
-                    # Delete q_b_proj scale (absorbed weight is BF16, not FP8)
-                    if q_s_key in state_dict:
-                        del state_dict[q_s_key]
+                    # Quantize absorbed weight to FP8 in checkpoint format so MPK uses
+                    # FP8 GEMM (which matches reference at cosine=1.0) instead of
+                    # BF16 GEMM (which diverges due to different implementations).
+                    absorbed, absorbed_scale = _quantize_f32_to_checkpoint_fp8(absorbed_f32)
+                    state_dict[q_s_key] = absorbed_scale
+                    print(f"  FP8 absorbed q_b: {absorbed.shape} scale={absorbed_scale.shape}")
                     # Fuse V un-absorption into o_proj:
                     # o_proj_fused[h] = o_proj[h] @ W_UV[h]
                     # where W_UV[h] = kv_b_proj V part: [v_orig, kv_lora_rank]
