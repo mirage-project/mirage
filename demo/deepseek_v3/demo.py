@@ -832,6 +832,12 @@ if __name__ == "__main__":
         if args.correctness:
             test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
 
+            # Skip PyTorch reference in TP mode (reference doesn't support TP).
+            # Run single-GPU reference separately and compare tokens.
+            if world_size > 1:
+                print(f"\n[TP={world_size}] Skipping PyTorch reference (not supported in TP mode).")
+                print(f"[TP={world_size}] Run single-GPU first to get reference token, then compare.")
+
             # Phase 1: Absorption only (before reference, so ref uses absorbed weights)
             # This matches vLLM/SGLang where both runtime and reference use absorption.
             print("\nPhase 1: Weight absorption (q_b + o_proj fusion)...")
@@ -919,11 +925,12 @@ if __name__ == "__main__":
             print(f"  gate_proj in state_dict: {gate_check in state_dict}")
             print(f"  state_dict keys with 'layers.0.mlp': {[k for k in state_dict if 'layers.0.mlp' in k]}")
 
-            # Run reference with absorbed weights
-            first_tok = model_inputs.input_ids[0, 0].item()
-            ref_token, ref_logits = run_correctness_test(
-                args, state_dict, test_layers, rank, world_size,
-                first_token_id=first_tok)
+            # Run reference with absorbed weights (skip in TP mode)
+            if world_size == 1:
+                first_tok = model_inputs.input_ids[0, 0].item()
+                ref_token, ref_logits = run_correctness_test(
+                    args, state_dict, test_layers, rank, world_size,
+                    first_token_id=first_tok)
 
             # Phase 2: Convert remaining weights for MPK builder
             # (gate+up fusion, expert fusion, alignment)
