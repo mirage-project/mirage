@@ -21,6 +21,22 @@ HARD_CODE = """
 #include <Python.h>
 #include <cuda_runtime.h>
 
+// Stubs for host symbols from libnvshmem_device.a that collective_launch.cpp.o
+// references. We don't link the full device archive (it forces -rdc=true), so
+// Host-side stubs for symbols normally in libnvshmem_device.a.
+// We don't link the .a (it forces rdc=true → 255 regs on SM100a).
+// Init is done via nvshmemid_hostlib_init_attr + our callback.
+#ifdef NVSHMEM_NO_DEVICE_LIB
+// Stubs for host-side symbols from libnvshmem_device.a needed by collective_launch.cpp.o
+struct nvshmemi_device_only_state_stub { char data[1024]; };
+nvshmemi_device_only_state_stub nvshmemi_device_only_state;
+extern "C" {
+  void nvshmemi_finalize() {}
+  void _Z31nvshmemi_check_state_and_init_dv() {}
+  void* nvshmemi_get_device_state_ptrs() { return nullptr; }
+}
+#endif
+
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
@@ -180,7 +196,7 @@ def get_compile_command(
         # "-O0",
         # "-g",
         # "-G",
-        # "--ptxas-options=-v",
+        "--ptxas-options=-v",
         # "-Xptxas=-v",
         "-lineinfo",
         f"-I{py_include_dir}",
@@ -196,7 +212,7 @@ def get_compile_command(
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if not use_nvshmem else "-rdc=true",
+        "-rdc=false",  # Always rdc=false (NVSHMEM_NO_DEVICE_LIB: our own device state + callback init)
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -229,11 +245,14 @@ def get_compile_command(
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
     # Use when debugging
-    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
+    if os.environ.get("MPK_ENABLE_VERBOSE", "0") == "1":
+        flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
     if os.environ.get("MPK_DEBUG_CTA112", "0") == "1":
         flags = flags + ["-DMPK_DEBUG_CTA112"]
     if os.environ.get("MPK_DEBUG_MLA", "0") == "1":
         flags = flags + ["-DMPK_DEBUG_MLA"]
+    if os.environ.get("MPK_AR_LOCAL_COPY", "0") == "1":
+        flags = flags + ["-DMPK_AR_LOCAL_COPY"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -242,7 +261,20 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        nvshmem_flags = ["-DUSE_NVSHMEM", "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi"]
+        # Extract collective_launch host stub from device .a (no device code in this .o)
+        _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
+        _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
+        os.makedirs(_host_obj_dir, exist_ok=True)
+        _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
+        if not os.path.exists(_coll_obj):
+            import subprocess as _sp
+            _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
+        nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
+                         "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
+                         _coll_obj,  # host-only .o for nvshmemx_collective_launch
+                         "-Xlinker", "--disable-new-dtags",
+                         "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                         "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -317,7 +349,7 @@ class PersistentKernel:
         self.meta_tensors = meta_tensors
         self.profiler_tensor = profiler_tensor
         self.trace_name = trace_name
-        self.use_nvshmem = True if world_size > 1 else False
+        self.use_nvshmem = True if (world_size > 1 and os.environ.get("MPK_NO_NVSHMEM", "0") != "1") else False
         self.spec_decode_config = spec_decode_config
         self.use_cutlass_kernel = use_cutlass_kernel
         self._spec_decode_handlers = {
@@ -1465,6 +1497,9 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
+        # MPK_SKIP_ALLREDUCE=1: debug mode — skip allreduce to isolate crashes
+        if os.environ.get("MPK_SKIP_ALLREDUCE", "0") == "1":
+            return
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size)
         assert buffer.num_dims == 3  # (world_size, batch_size, hidden_size)
@@ -1478,7 +1513,7 @@ class PersistentKernel:
             "output": output,
         }
         params = [self.world_size, self.mpi_rank]
-        best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim, 
+        best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim,
                                            block_dim=block_dim, params=params)
 
 
@@ -2070,7 +2105,7 @@ class PersistentKernel:
                         f"Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
                     )
             else:
-                NVSHMEM_LIB_PATH = "/usr/lib/"
+                MPI_LIB_PATH = "/usr/lib/"
                 lib_file_path = os.path.join(MPI_LIB_PATH, "libmpi.so")
                 if not os.path.exists(lib_file_path):
                     raise RuntimeError(
@@ -2113,6 +2148,10 @@ class PersistentKernel:
             subprocess.check_call(cc_cmd)
 
         import importlib.util
+
+        # Set MPK_SO_PATH so init_persistent_kernel() can load the module via
+        # cuLibraryLoadFromFile for nvshmemx_culibrary_init (NVSHMEM_NO_DEVICE_LIB mode).
+        os.environ["MPK_SO_PATH"] = so_path
 
         spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
         mod = importlib.util.module_from_spec(spec)

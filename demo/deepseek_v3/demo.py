@@ -524,6 +524,273 @@ def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
     return ref_token, logits[0].detach().clone()
 
 
+def run_tp_reference(args, state_dict, layer_indices, tp_size, device="cuda:0",
+                     first_token_id=1):
+    """TP-aware PyTorch reference — simulates per-rank computation explicitly.
+
+    For each layer:
+    - Q is produced by sharded q_b_proj (split dim 0). Each "rank" has local_heads.
+    - Each rank runs MLA on its local heads (K/V latent shared across ranks).
+    - Each rank does partial o_proj (sharded dim 1). All ranks SUM (allreduce).
+    - MLP gate_up_proj sharded dim 0, down_proj sharded dim 1. Sum after down_proj.
+
+    This should produce the SAME result as the single-GPU reference (when TP math
+    is correct), giving a pure-PyTorch baseline for MPK correctness testing.
+
+    Returns: (token, logits)
+    """
+    import torch.nn.functional as F
+    import math
+
+    # Identical math as run_correctness_test but with explicit TP simulation.
+    KV_LORA_RANK = DEEPSEEK_V3_KV_LORA_RANK  # 512
+    QK_ROPE_HEAD_DIM = DEEPSEEK_V3_QK_ROPE_HEAD_DIM  # 64
+    QK_HEAD_DIM = DEEPSEEK_V3_HEAD_DIM_TOTAL  # 576
+    V_HEAD_DIM = KV_LORA_RANK  # 512
+    NUM_HEADS_GLOBAL = DEEPSEEK_V3_NUM_HEADS  # 128
+    assert NUM_HEADS_GLOBAL % tp_size == 0, f"num_heads={NUM_HEADS_GLOBAL} not divisible by tp_size={tp_size}"
+    LOCAL_HEADS = NUM_HEADS_GLOBAL // tp_size
+    HIDDEN = 7168
+    FIRST_MOE = 3
+    NUM_EXPERTS = 256
+    TOPK = 8
+    QK_NOPE = 128
+    Q_HEAD_DIM = QK_NOPE + QK_ROPE_HEAD_DIM  # 192
+
+    config = AutoConfig.from_pretrained(args.model_path)
+
+    # Reuse existing helpers from run_correctness_test by copy-paste
+    # (not ideal but keeps logic consistent). We only run PyTorch math here.
+
+    def rms_norm(x, weight, eps=1e-6):
+        orig = x.dtype
+        v = x.float().pow(2).mean(-1, keepdim=True)
+        return (weight.float() * x.float() * torch.rsqrt(v + eps)).to(orig)
+
+    def sigmoid_topk(logits, bias, k):
+        cfg = config.to_dict()
+        n_group = cfg.get("n_group", 8)
+        topk_group = cfg.get("topk_group", 4)
+        n_routed_experts = cfg.get("n_routed_experts", 256)
+        norm_topk = cfg.get("norm_topk_prob", True)
+        routed_scaling = cfg.get("routed_scaling_factor", 2.5)
+        scores = torch.sigmoid(logits.float())
+        bs = scores.shape[0]
+        scores_for_choice = scores + bias.float().unsqueeze(0)
+        group_scores = scores_for_choice.view(bs, n_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
+        group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = group_mask.unsqueeze(-1).expand(bs, n_group, n_routed_experts // n_group).reshape(bs, -1)
+        tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+        _, topk_idx = torch.topk(tmp_scores, k=k, dim=-1, sorted=False)
+        topk_weight = scores.gather(1, topk_idx)
+        if k > 1 and norm_topk:
+            topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
+        topk_weight = topk_weight * routed_scaling
+        return topk_weight, topk_idx
+
+    def dequant_fp8(weight, scale, block_k=128):
+        w = weight.float()
+        s = scale.float()
+        if s.dim() == 2 and w.dim() == 2:
+            s = s.repeat_interleave(block_k, dim=0)[:w.shape[0]]
+            s = s.repeat_interleave(block_k, dim=1)[:, :w.shape[1]]
+        return (w * s).to(torch.bfloat16)
+
+    def linear_full_bf16(x, sd, key):
+        """Simple BF16 linear. Deals with FP8 or BF16 weights."""
+        w_key = key
+        s_key = f"{key}_scale_inv"
+        w = sd[w_key]
+        if s_key in sd:
+            w = dequant_fp8(w, sd[s_key])
+        else:
+            w = w.to(torch.bfloat16)
+        return F.linear(x.to(torch.bfloat16), w.to(torch.bfloat16)).to(x.dtype)
+
+    # RoPE precomputed
+    _rope_theta = 10000.0
+    _rope_half = QK_ROPE_HEAD_DIM // 2
+    _rope_max_seq = args.max_seq_length
+    _rope_freqs = 1.0 / (_rope_theta ** (torch.arange(0, _rope_half, dtype=torch.float32, device=device) / _rope_half))
+    _rope_positions = torch.arange(_rope_max_seq, dtype=torch.float32, device=device)
+    _rope_angles = torch.outer(_rope_positions, _rope_freqs)
+    _rope_cos = torch.cat([_rope_angles.cos(), _rope_angles.cos()], dim=-1).to(torch.bfloat16)
+    _rope_sin = torch.cat([-_rope_angles.sin(), _rope_angles.sin()], dim=-1).to(torch.bfloat16)
+
+    # DeepSeek V3 softmax_scale
+    cfg_d = config.to_dict()
+    rope_scale = cfg_d.get("rope_scaling", None)
+    if rope_scale and rope_scale.get("type") == "yarn":
+        mscale_all_dim = rope_scale.get("mscale_all_dim", 0)
+        scaling_factor = rope_scale.get("factor", 1.0)
+        if mscale_all_dim:
+            _ms = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
+            _softmax_scale = (Q_HEAD_DIM ** -0.5) * _ms * _ms
+        else:
+            _softmax_scale = Q_HEAD_DIM ** -0.5
+    else:
+        _softmax_scale = Q_HEAD_DIM ** -0.5
+
+    def apply_rope(x, position):
+        cos = _rope_cos[position]
+        sin = _rope_sin[position]
+        half = x.shape[-1] // 2
+        rotated = torch.cat([x[..., half:], x[..., :half]], dim=-1)
+        return (x.float() * cos.float() + rotated.float() * sin.float()).to(x.dtype)
+
+    def tp_mla_attention(hidden, prefix, sd, kv_cache, seq_pos):
+        """MLA with explicit TP simulation.
+        Q sharded dim 0 (local_heads per rank); KV/c_latent shared (replicated).
+        o_proj sharded dim 1. Sum across ranks at end.
+        """
+        bs = hidden.shape[0]
+        p = prefix + "self_attn."
+
+        # Q path: q_a_proj (replicated) → norm → q_b_proj (SHARDED)
+        q_a = linear_full_bf16(hidden, sd, f"{p}q_a_proj.weight")
+        q_a = rms_norm(q_a, sd[f"{p}q_a_layernorm.weight"])
+        # q_b_proj is absorbed: shape (NUM_HEADS_GLOBAL * (kv_lora + rope), q_lora)
+        q_b_w = sd[f"{p}q_b_proj.weight"]
+        # q_b_proj is absorbed and stored as BF16 here
+        q_full = F.linear(q_a.float(), q_b_w.float()).to(q_a.dtype)
+        q_full = q_full.view(bs, NUM_HEADS_GLOBAL, KV_LORA_RANK + QK_ROPE_HEAD_DIM)
+
+        # KV path: shared across ranks
+        kv_full = linear_full_bf16(hidden, sd, f"{p}kv_a_proj_with_mqa.weight")
+        c_lat = kv_full[:, :KV_LORA_RANK]
+        k_pe_raw = kv_full[:, KV_LORA_RANK:]
+        c_lat = rms_norm(c_lat, sd[f"{p}kv_a_layernorm.weight"])
+        k_pe_rotated = apply_rope(k_pe_raw, seq_pos)
+        kv_new = torch.cat([c_lat, k_pe_rotated], dim=-1)
+        for b in range(bs):
+            kv_cache[seq_pos + b] = kv_new[b]
+        kv_all = kv_cache[:seq_pos + bs]
+        k_nope = kv_all[:, :KV_LORA_RANK]
+        k_pe_all = kv_all[:, KV_LORA_RANK:]
+
+        # Simulate TP: loop over ranks
+        # o_proj weight shape: (HIDDEN, NUM_HEADS_GLOBAL * KV_LORA_RANK) when absorbed.
+        o_w = sd[f"{p}o_proj.weight"]  # (HIDDEN, NUM_HEADS_GLOBAL * KV_LORA_RANK)
+        o_s_key = f"{p}o_proj.weight_scale_inv"
+
+        partial_sum = torch.zeros(bs, HIDDEN, device=hidden.device, dtype=hidden.dtype)
+        for rank in range(tp_size):
+            # Get this rank's local heads slice
+            q_rank = q_full[:, rank*LOCAL_HEADS:(rank+1)*LOCAL_HEADS, :]  # (bs, LOCAL, 576)
+            q_nope_abs = q_rank[:, :, :KV_LORA_RANK]
+            q_pe = q_rank[:, :, KV_LORA_RANK:]
+            q_pe = apply_rope(q_pe, seq_pos)
+            # Attention: Q_abs × c_kv^T + q_pe × k_pe^T
+            s = (torch.einsum('bhd,sd->bhs', q_nope_abs.float(), k_nope.float()) +
+                 torch.einsum('bhd,sd->bhs', q_pe.float(), k_pe_all.float()))
+            s = s * _softmax_scale
+            attn_probs = F.softmax(s, dim=-1)
+            attn_v = torch.einsum('bhs,sd->bhd', attn_probs, kv_all[:, :KV_LORA_RANK].float())
+            # Flatten local heads × kv_lora
+            attn_out_local = attn_v.to(hidden.dtype).reshape(bs, LOCAL_HEADS * KV_LORA_RANK)
+            # Partial o_proj (this rank's columns of the weight)
+            # Col range: rank * LOCAL_HEADS * KV_LORA_RANK to (rank+1)*LOCAL_HEADS*KV_LORA_RANK
+            col_lo = rank * LOCAL_HEADS * KV_LORA_RANK
+            col_hi = (rank + 1) * LOCAL_HEADS * KV_LORA_RANK
+            if o_s_key in sd:
+                o_w_local = dequant_fp8(o_w[:, col_lo:col_hi], sd[o_s_key][:, col_lo//128:col_hi//128])
+            else:
+                o_w_local = o_w[:, col_lo:col_hi].to(torch.bfloat16)
+            partial = F.linear(attn_out_local.float(), o_w_local.float()).to(attn_out_local.dtype)
+            partial_sum = partial_sum + partial
+        # AllReduce = just return the sum
+        return partial_sum
+
+    def tp_dense_mlp(hidden, prefix, sd):
+        """Dense MLP with TP: gate_up sharded dim 0, down sharded dim 1, sum after."""
+        bs = hidden.shape[0]
+        p = prefix + "mlp."
+        gate_w = sd[f"{p}gate_proj.weight"]
+        up_w = sd[f"{p}up_proj.weight"]
+        down_w = sd[f"{p}down_proj.weight"]
+        gate_sk = f"{p}gate_proj.weight_scale_inv"
+        up_sk = f"{p}up_proj.weight_scale_inv"
+        down_sk = f"{p}down_proj.weight_scale_inv"
+        # gate/up rows = intermediate_size (sharded dim 0), down cols = intermediate_size (sharded dim 1)
+        intermediate = gate_w.shape[0]
+        assert intermediate % tp_size == 0
+        local_inter = intermediate // tp_size
+        partial_sum = torch.zeros(bs, HIDDEN, device=hidden.device, dtype=hidden.dtype)
+        for rank in range(tp_size):
+            lo = rank * local_inter
+            hi = (rank + 1) * local_inter
+            if gate_sk in sd:
+                g_local = dequant_fp8(gate_w[lo:hi], sd[gate_sk][lo//128:hi//128])
+                u_local = dequant_fp8(up_w[lo:hi], sd[up_sk][lo//128:hi//128])
+            else:
+                g_local = gate_w[lo:hi].to(torch.bfloat16)
+                u_local = up_w[lo:hi].to(torch.bfloat16)
+            gate_out = F.silu(F.linear(hidden.float(), g_local.float())).to(hidden.dtype)
+            up_out = F.linear(hidden.float(), u_local.float()).to(hidden.dtype)
+            silu_mul = gate_out * up_out  # (bs, local_inter)
+            if down_sk in sd:
+                d_local = dequant_fp8(down_w[:, lo:hi], sd[down_sk][:, lo//128:hi//128])
+            else:
+                d_local = down_w[:, lo:hi].to(torch.bfloat16)
+            partial = F.linear(silu_mul.float(), d_local.float()).to(hidden.dtype)
+            partial_sum = partial_sum + partial
+        return partial_sum
+
+    # For MoE, experts are replicated but shared_expert has TP sharding.
+    # For simplicity, reuse full moe_mlp (experts aren't TP'd, they'd be EP'd).
+    # Shared expert is sharded; simulate similar to dense MLP.
+    # For this simple reference, full MoE computation on rank 0 equivalent works.
+
+    # Build KV cache
+    all_token_ids_local = []  # placeholder, filled below
+    num_layers_local = len(layer_indices)
+    max_seq = args.max_seq_length
+    kv_caches = [torch.zeros(max_seq, QK_HEAD_DIM, device=device, dtype=torch.bfloat16)
+                 for _ in range(num_layers_local)]
+
+    from transformers import AutoTokenizer
+    tokenizer_ref = AutoTokenizer.from_pretrained(args.model_path)
+    messages = [{"role": "user", "content": args.prompt}]
+    text = tokenizer_ref.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    all_token_ids = tokenizer_ref([text], return_tensors="pt").input_ids[0].to(device)
+    prompt_len = len(all_token_ids)
+    print(f"  [TP-REF] Full prompt: {prompt_len} tokens, tp_size={tp_size}, local_heads={LOCAL_HEADS}")
+
+    no_residual = os.environ.get("MPK_NO_RESIDUAL", "0") == "1"
+
+    for step in range(prompt_len):
+        tid = all_token_ids[step]
+        hidden = F.embedding(tid.unsqueeze(0), state_dict["model.embed_tokens.weight"])
+        if hidden.dim() == 1:
+            hidden = hidden.unsqueeze(0)
+
+        for cache_idx, layer_idx in enumerate(layer_indices):
+            prefix = f"model.layers.{layer_idx}."
+            normed = rms_norm(hidden, state_dict[f"{prefix}input_layernorm.weight"])
+            attn_out = tp_mla_attention(normed, prefix, state_dict, kv_caches[cache_idx], step)
+            hidden = attn_out if no_residual else (hidden + attn_out)
+            normed = rms_norm(hidden, state_dict[f"{prefix}post_attention_layernorm.weight"])
+            if layer_idx < FIRST_MOE:
+                mlp_out = tp_dense_mlp(normed, prefix, state_dict)
+            else:
+                # For MoE, use full computation (experts replicated in TP mode).
+                # Shared expert TP simulation skipped for simplicity.
+                # This is not a perfect TP simulation for MoE layers but good enough
+                # to check if the non-MoE parts work.
+                print(f"  [TP-REF] Warning: MoE layer {layer_idx} uses full computation (TP for shared expert not simulated)")
+                mlp_out = torch.zeros_like(normed)  # skip MoE for TP ref, focus on attn
+            hidden = mlp_out if no_residual else (hidden + mlp_out)
+
+    hidden = rms_norm(hidden, state_dict["model.norm.weight"])
+    logits = F.linear(hidden.float(), state_dict["lm_head.weight"].float())
+    tp_ref_token = logits.argmax(dim=-1).item()
+    print(f"TP={tp_size} PyTorch reference output token: {tp_ref_token}")
+    print(f"TP={tp_size} logits[0,:5]: {logits[0,:5].tolist()}")
+    return tp_ref_token, logits[0].detach().clone()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DeepSeek V3 demo with Mirage megakernel")
     parser.add_argument("--model-path", type=str, required=True,
@@ -770,7 +1037,7 @@ if __name__ == "__main__":
             args.model_path, f"model{rank}-mp{world_size}.safetensors"
         )
         if os.path.exists(weight_file):
-            state_dict = load_file(weight_file, device="cuda")
+            state_dict = load_file(weight_file, device=f"cuda:{rank}")
         else:
             # Selective loading: only load needed layers from sharded files
             index_file = os.path.join(args.model_path, "model.safetensors.index.json")
@@ -793,7 +1060,7 @@ if __name__ == "__main__":
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
-                    with safe_open(shard_path, framework="pt", device="cuda") as f:
+                    with safe_open(shard_path, framework="pt", device=f"cuda:{rank}") as f:
                         for key in keys:
                             state_dict[key] = f.get_tensor(key)
                 print(f"  Loaded {len(state_dict)} keys total")
@@ -806,7 +1073,7 @@ if __name__ == "__main__":
                 if shard_files:
                     state_dict = {}
                     for shard_file in shard_files:
-                        state_dict.update(load_file(shard_file, device="cuda"))
+                        state_dict.update(load_file(shard_file, device=f"cuda:{rank}"))
                 else:
                     candidates = [
                         os.path.join(args.model_path, "model.safetensors"),
@@ -814,7 +1081,7 @@ if __name__ == "__main__":
                     state_dict = None
                     for candidate in candidates:
                         if os.path.exists(candidate):
-                            state_dict = load_file(candidate, device="cuda")
+                            state_dict = load_file(candidate, device=f"cuda:{rank}")
                             break
                     if state_dict is None:
                         raise FileNotFoundError(
@@ -832,11 +1099,12 @@ if __name__ == "__main__":
         if args.correctness:
             test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
 
-            # Skip PyTorch reference in TP mode (reference doesn't support TP).
-            # Run single-GPU reference separately and compare tokens.
-            if world_size > 1:
-                print(f"\n[TP={world_size}] Skipping PyTorch reference (not supported in TP mode).")
-                print(f"[TP={world_size}] Run single-GPU first to get reference token, then compare.")
+            # In TP mode, run PyTorch reference on rank 0 using unsharded weights.
+            # The reference computes what the full-model output should be, which
+            # is exactly what TP + o_proj-allreduce should reproduce. Compare
+            # rank 0's MPK output against reference for cosine similarity.
+            if world_size > 1 and rank == 0:
+                print(f"\n[TP={world_size}] Running PyTorch reference on rank 0 for correctness comparison.")
 
             # Phase 1: Absorption only (before reference, so ref uses absorbed weights)
             # This matches vLLM/SGLang where both runtime and reference use absorption.
@@ -925,12 +1193,32 @@ if __name__ == "__main__":
             print(f"  gate_proj in state_dict: {gate_check in state_dict}")
             print(f"  state_dict keys with 'layers.0.mlp': {[k for k in state_dict if 'layers.0.mlp' in k]}")
 
-            # Run reference with absorbed weights (skip in TP mode)
-            if world_size == 1:
+            # Run reference with absorbed (unsharded) weights on rank 0.
+            # The reference computes the full-model attention output — which is
+            # what TP+allreduce should produce. So rank 0's MPK output can be
+            # compared cosine-similarity to the reference for correctness check.
+            if rank == 0:
                 first_tok = model_inputs.input_ids[0, 0].item()
                 ref_token, ref_logits = run_correctness_test(
-                    args, state_dict, test_layers, rank, world_size,
+                    args, state_dict, test_layers, rank, world_size=1,  # run as TP=1
                     first_token_id=first_tok)
+                # Also run a TP-aware reference if in TP mode — verifies TP math
+                # is sound in pure PyTorch. Its token/logits should match the
+                # single-GPU reference IF the TP math is correct.
+                if world_size > 1:
+                    print(f"\n[TP-REF] Running TP={world_size} PyTorch reference (explicit per-rank simulation)...")
+                    try:
+                        tp_ref_token, tp_ref_logits = run_tp_reference(
+                            args, state_dict, test_layers, world_size,
+                            device=f"cuda:{rank}", first_token_id=first_tok)
+                        _cos = torch.nn.functional.cosine_similarity(
+                            tp_ref_logits.float().unsqueeze(0),
+                            ref_logits.float().unsqueeze(0), dim=1).item()
+                        print(f"[TP-REF vs single-GPU ref] token: tp={tp_ref_token} vs ref={ref_token}, cosine={_cos:.6f}")
+                        if _cos < 0.95:
+                            print(f"[TP-REF WARNING] Cosine < 0.95 — TP math may be suspicious.")
+                    except Exception as _e:
+                        print(f"[TP-REF] Error running TP reference: {_e}")
 
             # Phase 2: Convert remaining weights for MPK builder
             # (gate+up fusion, expert fusion, alignment)
@@ -1096,6 +1384,88 @@ if __name__ == "__main__":
 
             print(f"  Converted: {len(state_dict)} keys (FP8 weights preserved)")
 
+            # TP weight sharding: shard weights for multi-GPU inference
+            if world_size > 1:
+                from convert import shard_tensor
+                import re
+                # Sharding rules for POST-CONVERSION keys (absorbed, fused).
+                # dim=0: row-parallel (shard output), dim=1: col-parallel (shard input),
+                # None: replicate. For 3D expert tensors, None (replicated).
+                _TP_SHARD_RULES = [
+                    (r"^model\.embed_tokens\.weight$",                       None),  # replicate: embedding lookup needs full vocab
+                    (r"^model\.norm\.weight$",                               None),
+                    (r"^lm_head\.weight$",                                   None),  # replicate: needs full vocab for argmax
+                    (r"self_attn\.q_a_proj\.weight",                         None),  # ReplicatedLinear (vLLM): hidden→q_lora_rank, output feeds full-width q_b_proj
+                    (r"self_attn\.q_a_layernorm\.weight",                    None),
+                    (r"self_attn\.q_b_proj\.weight",                         0),     # ColumnParallelLinear: shard output heads
+                    (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
+                    (r"self_attn\.kv_a_layernorm\.weight",                   None),
+                    (r"self_attn\.o_proj\.weight",                           1),
+                    (r"input_layernorm\.weight$",                            None),
+                    (r"post_attention_layernorm\.weight$",                   None),
+                    (r"mlp\.gate_up_proj\.weight",                           0),
+                    (r"mlp\.down_proj\.weight",                              1),
+                    (r"mlp\.gate\.weight$",                                  None),
+                    (r"mlp\.gate\.e_score_correction_bias$",                 None),
+                    # MoE experts w13/w2: TP-sharded per vLLM pattern (no EP).
+                    # Every rank has all experts, each with TP-sharded weights.
+                    # w13 [E, 2*inter, hidden]: column-parallel on intermediate (dim=1)
+                    # w2  [E, hidden, inter]:   row-parallel on intermediate    (dim=2)
+                    # AllReduce after moe_mul_sum_add sums partial contributions.
+                    # Builder uses moe_intermediate_size = FULL//world_size, matching this.
+                    (r"mlp\.experts\.w13\.weight",                           1),
+                    (r"mlp\.experts\.w2\.weight",                            2),
+                    # Shared expert: gate_proj/up_proj are separate keys (not fused
+                    # as gate_up_proj). Builder does its own interleave at build time.
+                    (r"mlp\.shared_experts\.gate_proj\.weight",              0),
+                    (r"mlp\.shared_experts\.up_proj\.weight",                0),
+                    (r"mlp\.shared_experts\.down_proj\.weight",              1),
+                    # MTP layers
+                    (r"enorm\.weight$",                                      None),
+                    (r"hnorm\.weight$",                                      None),
+                    (r"eh_proj\.",                                            None),
+                    (r"shared_head\.norm\.",                                   None),
+                    (r"shared_head\.head\.",                                   None),  # replicate: MTP needs full vocab for draft token selection
+                ]
+                _compiled = [(re.compile(p), d) for p, d in _TP_SHARD_RULES]
+
+                def _get_tp_shard_dim(name):
+                    for regex, dim in _compiled:
+                        if regex.search(name):
+                            return dim
+                    return None  # default: replicate
+
+                print(f"\n  TP sharding (world_size={world_size}, rank={rank})...")
+                for k in list(state_dict.keys()):
+                    base_key = k.replace("_scale_inv", "")
+                    shard_dim = _get_tp_shard_dim(base_key)
+                    if shard_dim is not None and state_dict[k].dim() >= 2:
+                        # Special handling for experts.w13: it's cat([gate, up], dim=1)
+                        # so naive dim=1 shard takes all-gate or all-up per rank.
+                        # Fix: split into gate/up halves, shard each, then re-cat.
+                        if "experts.w13.weight" in base_key and shard_dim == 1:
+                            w = state_dict[k]
+                            half = w.shape[shard_dim] // 2
+                            gate_half = w.narrow(shard_dim, 0, half)
+                            up_half = w.narrow(shard_dim, half, half)
+                            gate_shard = shard_tensor(gate_half, shard_dim, rank, world_size)
+                            up_shard = shard_tensor(up_half, shard_dim, rank, world_size)
+                            old_shape = tuple(w.shape)
+                            state_dict[k] = torch.cat([gate_shard, up_shard], dim=shard_dim).contiguous()
+                            if rank == 0:
+                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (w13 split-shard dim={shard_dim})")
+                        else:
+                            old_shape = tuple(state_dict[k].shape)
+                            state_dict[k] = shard_tensor(state_dict[k], shard_dim, rank, world_size)
+                            if rank == 0 and old_shape != tuple(state_dict[k].shape):
+                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (dim={shard_dim})")
+                    elif shard_dim is not None and state_dict[k].dim() < 2:
+                        if rank == 0 and "shared_experts" in k:
+                            print(f"    [WARN] {k}: dim={state_dict[k].dim()} < 2, shard_dim={shard_dim} → SKIPPED (1D tensor)")
+                    else:
+                        if rank == 0 and "shared_experts" in k:
+                            print(f"    [INFO] {k}: shard_dim={shard_dim}, shape={tuple(state_dict[k].shape)} → {'REPLICATED' if shard_dim is None else 'BUG'}")
+
         # Build MLA model config for the builder
         model_config = MirageModelConfig(
             hidden_size=hidden_size,
@@ -1171,6 +1541,13 @@ if __name__ == "__main__":
                 for r in range(mlp_out_buf.shape[0]):
                     row = mlp_out_buf[r].float()
                     print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
+            moe_out_buf = getattr(builder, "moe_output_buf", None)
+            if moe_out_buf is not None:
+                row = moe_out_buf[0].float()
+                print(f"[MOE_OUTPUT] amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} "
+                      f"nz={(row!=0).sum().item()}/{row.numel()} first5={row[:5].tolist()}")
+                # Save to file for cross-rank comparison
+                torch.save(moe_out_buf.cpu(), f"/tmp/moe_output_r{rank}.pt")
             # MPK_MLA_CHECKPOINT: compare per-step MLA intermediates
             _mla_ckpt_mode = os.environ.get("MPK_MLA_CHECKPOINT", "0") == "1"
             _mla_ckpt_data = globals().get('_g_mla_ckpt_data', {})

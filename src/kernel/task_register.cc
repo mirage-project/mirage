@@ -3439,11 +3439,14 @@ int TaskRegister::register_mla_decode_sm100_task(
   int num_splits = params[3];
   int q_len = (params.size() >= 6) ? params[5] : 1;
   // num_head_groups derived from q_len: each block handles q_len queries × hpb heads.
-  // hpb = 128 / q_len (must divide 128). num_head_groups = NUM_HEADS / hpb.
-  int hpb = 128 / q_len;
-  while (128 % hpb != 0) {
+  // TP-aware: hpb = min(128/q_len, num_heads). In single-GPU (num_heads=128),
+  // this equals 128/q_len (original behavior). In TP, caps hpb at local heads.
+  // Kernel uses local_num_heads (=num_heads here) for indexing.
+  int hpb = std::min(128 / q_len, num_heads);
+  while (hpb > 0 && num_heads % hpb != 0) {
     hpb--;
   }
+  if (hpb <= 0) hpb = 1;
   int num_head_groups = num_heads / hpb;
   // For BS > 1 we'd need a separate batch dispatch; current single-request
   // setup uses request_id as either bi (q_len=1) or gi (q_len>1). When q_len>1,
@@ -3506,7 +3509,8 @@ int TaskRegister::register_mla_decode_sm100_task(
     code.e("      gi_,");                    // gi (from request_id)
   }
   code.e("      (int)task_desc->task_metadata.kv_idx,"); // si (split_idx)
-  code.e("      bi_);");                     // bi (batch_idx)
+  code.e("      bi_,");                      // bi (batch_idx)
+  code.e("      $);", num_heads);            // local_num_heads (TP-aware)
   code.e("}");
   return register_task_variant(TASK_MLA_DECODE_SM100, code.to_string());
 }
@@ -3526,11 +3530,12 @@ int TaskRegister::register_mla_reduce_sm100_task(
   int d_start = params[3];
   int d_count = params[4];
   int q_len = (params.size() >= 6) ? params[5] : 1;
-  // Match decode kernel head_group derivation
-  int hpb = 128 / q_len;
-  while (128 % hpb != 0) {
+  // Match decode kernel head_group derivation (TP-aware).
+  int hpb = std::min(128 / q_len, num_heads);
+  while (hpb > 0 && num_heads % hpb != 0) {
     hpb--;
   }
+  if (hpb <= 0) hpb = 1;
   int num_head_groups = num_heads / hpb;
   bool const single_query = (q_len == 1);
 
@@ -3561,10 +3566,12 @@ int TaskRegister::register_mla_reduce_sm100_task(
   code.e("    $,", d_start);               // dv_base
   if (single_query) {
     code.e("    0,");                      // gi (head group 0)
-    code.e("    (int)task_desc->task_metadata.request_id);"); // bi
+    code.e("    (int)task_desc->task_metadata.request_id,"); // bi
+    code.e("    $);", num_heads);          // local_num_heads (TP-aware)
   } else {
     code.e("    (int)task_desc->task_metadata.request_id,"); // gi
-    code.e("    0);");                                       // bi (BS=1)
+    code.e("    0,");                      // bi (BS=1)
+    code.e("    $);", num_heads);          // local_num_heads (TP-aware)
     code.e("}");
   }
   return register_task_variant(TASK_MLA_REDUCE_SM100, code.to_string());
@@ -3830,7 +3837,7 @@ int TaskRegister::register_nvshmem_allgather_strided_put_task(
   c.inc_indent();
   c.e("int target_gpu_id = "
       "static_cast<int>(get_event_gpu_id(task_desc->trigger_event));");
-  c.e("nvshmem_allgather_strided_put<bfloat16, $, $, $>(",
+  c.e("kernel::nvshmem_allgather_strided_put<bfloat16, $, $, $>(",
       batch_size,
       output_size,
       output_stride);
@@ -3880,7 +3887,7 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   // Register tile allreduce task
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
-  c.e("nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
+  c.e("kernel::nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
       batch_size,
       output_size,
       output_stride);

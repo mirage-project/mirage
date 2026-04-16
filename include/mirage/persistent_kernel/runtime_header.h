@@ -19,8 +19,11 @@
 #include <cuda_runtime.h>
 
 #ifdef USE_NVSHMEM
-#include <nvshmem.h>
-#include <nvshmemx.h>
+// Include ONLY host API headers -- NOT <nvshmem.h> which pulls in hundreds
+// of __noinline__ device functions that inflate register count with rdc=true.
+// Device-side allreduce is self-contained in tasks/hopper/allreduce.cuh.
+#include <nvshmem_host.h>
+#include "device_host/nvshmem_types.h"
 #endif
 
 namespace mirage {

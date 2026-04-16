@@ -1102,25 +1102,28 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       if (param_id == 0) {
         // Q: may arrive as [B*NUM_HEADS, D_K] or flat [mbt, NUM_HEADS*D_K].
         // For TMA, reinterpret as 3D (BK, B*Q_LEN*NUM_HEADS, D_K/BK).
-        // Box height = hpb (heads per block) which depends on Q_LEN. For Q_LEN=1,
-        // hpb=NUM_HEADS=128 (matches single-query decode). For Q_LEN>1 (prefill
-        // batching), hpb=NUM_HEADS/Q_LEN — must NOT be 128 or adjacent queries
-        // overlap in shared memory and cause hangs / wrong results.
-        int num_heads = 128; // DeepSeek V3
+        // TP-aware: derive num_heads from tensor shape (= local heads in TP mode),
+        // NOT hardcoded 128. Without this, TMA box height is wrong for TP and
+        // causes OOB loads when kernel reads Q.
         int d_k = 576;       // DeepSeek V3 MLA: 512 latent + 64 rope
         // Compute total elements from first 2 dims only (ignore padding dims)
         int total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
-        int total_rows = total_elements / d_k; // B * Q_LEN * NUM_HEADS
+        int total_rows = total_elements / d_k; // mbt * (local_)NUM_HEADS
         int k_iters = d_k / BK;
-        // Derive hpb from total_rows (assumes B=1):
-        //   total_rows = Q_LEN * NUM_HEADS  →  Q_LEN = total_rows / NUM_HEADS
-        //   hpb = NUM_HEADS / Q_LEN
+        // Derive num_heads (local) from tensor's hidden dim:
+        //   tensor_desc.dim[1] = num_heads * d_k  →  num_heads = dim[1] / d_k
+        int num_heads = tensor_desc.dim[1] / d_k;
+        if (num_heads < 1) num_heads = 128; // safety fallback
+        // Derive hpb (assumes B=1):
+        //   total_rows = Q_LEN * num_heads  →  Q_LEN = total_rows / num_heads
+        //   hpb = num_heads / Q_LEN
         int q_len = total_rows / num_heads;
         if (q_len < 1) q_len = 1;
         int hpb = num_heads / q_len;
-        while (num_heads % hpb != 0) {
+        while (hpb > 0 && num_heads % hpb != 0) {
           hpb--;
         }
+        if (hpb <= 0) hpb = num_heads;
         // gd: global dims, gs: global byte strides (dim0 stride is implicit
         // sizeof(T)) gs[0] = row stride in bytes = D_K * sizeof(bf16)
         // gs[1] = k_iter stride in bytes = BK * sizeof(bf16) = 128
@@ -1183,15 +1186,23 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
       if (param_id == 0) {
-        // Q: derive hpb from tensor dimensions
+        // Q: derive hpb from tensor dimensions.
+        // TP-aware: num_heads derived from total_rows (= mbt * local_heads for
+        // Q_LEN=1, or Q_LEN * local_heads for multi-query). Here we assume
+        // dim[0] carries rows directly (3D TMA format).
         int total_rows = tensor_desc.dim[0]; // B * Q_LEN * NUM_HEADS
         int d_k = tensor_desc.dim[1];
         int k_iters = d_k / BK;
-        int q_len = total_rows / NUM_H; // assumes B=1
-        int hpb = NUM_H / q_len;
-        while (NUM_H % hpb != 0) {
+        // For MTP, the tensor layout may be (total_rows, d_k) directly.
+        // num_heads (local) = total_rows / Q_LEN, but we don't know Q_LEN here.
+        // Conservative: assume num_heads = min(NUM_H, total_rows) for single-query.
+        int num_heads = (total_rows <= NUM_H) ? total_rows : NUM_H;
+        int q_len = total_rows / num_heads; if (q_len < 1) q_len = 1;
+        int hpb = num_heads / q_len;
+        while (hpb > 0 && num_heads % hpb != 0) {
           hpb--;
         }
+        if (hpb <= 0) hpb = num_heads;
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
         uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
