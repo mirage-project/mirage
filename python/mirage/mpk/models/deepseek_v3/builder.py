@@ -1832,15 +1832,20 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
             # Argmax → draft_token_ids
+            # Use the same grid size (num_workers) as the main model's argmax
+            # to properly fill all entries of the shared argmax_part_value/index
+            # buffers. Using grid=(mbt,1,1) only writes 1 of num_workers entries,
+            # leaving stale values that argmax_reduce reads and may select.
+            _argmax_grid = self.mpk.num_workers
             self.mpk.argmax_partial_layer(
                 input=lm_head_out,
                 output=(self.argmax_part_value, self.argmax_part_index),
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=(_argmax_grid, 1, 1), block_dim=(128, 1, 1),
             )
             self.mpk.argmax_reduce_layer(
                 input=(self.argmax_part_value, self.argmax_part_index),
                 output=draft_token_ids,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=(1, 1, 1), block_dim=(128, 1, 1),
             )
 
             # Probabilistic: compute P_draft(draft_token) from this step's logits

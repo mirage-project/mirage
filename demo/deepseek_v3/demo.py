@@ -1027,7 +1027,7 @@ if __name__ == "__main__":
 
         # Determine which layers we need
         layer_indices_for_load = None
-        if args.correctness and args.layers:
+        if args.layers:
             layer_indices_for_load = [int(x) for x in args.layers.split(',')]
             # Also need MTP layer if --mtp
             if args.mtp:
@@ -1091,12 +1091,16 @@ if __name__ == "__main__":
 
         # Parse layer indices for correctness mode
         layer_indices_arg = None
-        if args.correctness and args.layers:
+        if args.layers:
             layer_indices_arg = [int(x) for x in args.layers.split(',')]
 
         ref_token = None
         ref_logits = None
-        if args.correctness:
+
+        # Weight conversion (absorption + fusion) is needed for both correctness
+        # and normal mode when --layers is used for selective loading.
+        _need_conversion = args.correctness or args.layers
+        if _need_conversion:
             test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
 
             # In TP mode, run PyTorch reference on rank 0 using unsharded weights.
@@ -1193,11 +1197,8 @@ if __name__ == "__main__":
             print(f"  gate_proj in state_dict: {gate_check in state_dict}")
             print(f"  state_dict keys with 'layers.0.mlp': {[k for k in state_dict if 'layers.0.mlp' in k]}")
 
-            # Run reference with absorbed (unsharded) weights on rank 0.
-            # The reference computes the full-model attention output — which is
-            # what TP+allreduce should produce. So rank 0's MPK output can be
-            # compared cosine-similarity to the reference for correctness check.
-            if rank == 0:
+            # Run reference (only in correctness mode)
+            if args.correctness and rank == 0:
                 first_tok = model_inputs.input_ids[0, 0].item()
                 ref_token, ref_logits = run_correctness_test(
                     args, state_dict, test_layers, rank, world_size=1,  # run as TP=1

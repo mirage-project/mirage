@@ -108,14 +108,22 @@ __device__ __forceinline__ void mtp_prepare_verify_input_kernel(
 
   // Thread 0: write main token at step+1, set num_new_tokens
   if (t_id == 0) {
-    tokens[req * MAX_SEQ_LEN + cur_step + 1] = main_token[req];
-    num_new_tokens[req] = NUM_DRAFT + 1;
+    if (cur_step + 1 < MAX_SEQ_LEN) {
+      tokens[req * MAX_SEQ_LEN + cur_step + 1] = main_token[req];
+    }
+    // Clamp num_new_tokens so we don't exceed MAX_SEQ_LEN
+    int max_new = MAX_SEQ_LEN - cur_step - 1;
+    if (max_new < 0) max_new = 0;
+    num_new_tokens[req] = (NUM_DRAFT + 1 < max_new) ? NUM_DRAFT + 1 : max_new;
   }
 
-  // Threads 0..NUM_DRAFT-1: write draft tokens
+  // Threads 0..NUM_DRAFT-1: write draft tokens (bounds-checked)
   if (t_id < NUM_DRAFT) {
-    tokens[req * MAX_SEQ_LEN + cur_step + 2 + t_id] =
-        draft_tokens[req * NUM_DRAFT + t_id];
+    int write_pos = cur_step + 2 + t_id;
+    if (write_pos < MAX_SEQ_LEN) {
+      tokens[req * MAX_SEQ_LEN + write_pos] =
+          draft_tokens[req * NUM_DRAFT + t_id];
+    }
   }
 }
 
