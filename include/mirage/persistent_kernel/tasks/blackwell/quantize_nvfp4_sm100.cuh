@@ -45,6 +45,29 @@ __device__ __forceinline__ int interleaved_nvfp4_scale_offset(int row_idx,
          (group_idx & 3);
 }
 
+// Offset into the per-tile swapAB layout: [num_n_tiles, sf_k_outer, 32, 4, 4]
+//   n_tile   = row_idx / mma_n
+//   i        = row_idx % mma_n  (row within tile)
+//   row_group = i / 32,  within_32 = i % 32
+//   k_outer  = group_idx / 4,  k_inner = group_idx % 4
+__device__ __forceinline__ int swapab_nvfp4_scale_offset(int row_idx,
+                                                         int group_idx,
+                                                         int num_k_outer,
+                                                         int mma_n) {
+  int n_tile    = row_idx / mma_n;
+  int i         = row_idx % mma_n;
+  int row_group = i >> 5;
+  int within_32 = i & 31;
+  int k_outer   = group_idx >> 2;
+  int k_inner   = group_idx & 3;
+  // stride of [num_n_tiles, sf_k_outer, 32, 4, 4]: innermost = 1, then 4, 16, 32*4*4, ...
+  return n_tile * (num_k_outer * 32 * 4 * 4) +
+         k_outer * (32 * 4 * 4) +
+         within_32 * 16 +
+         row_group * 4 +
+         k_inner;
+}
+
 // One CTA handles one row. Launch over ceil_div(BATCH_SIZE, 128) * 128 rows so
 // padded rows can be filled with zero data and scale=1.
 //
@@ -72,7 +95,8 @@ quantize_nvfp4_sm100_task_impl(const void *__restrict__ input_ptr,
                                float eps,
                                float min_4bit = -6.0f,
                                float max_4bit = 6.0f,
-                               int scale_outer_stride = 32 * 4 * 4) {
+                               int scale_outer_stride = 32 * 4 * 4,
+                               int mma_n = 0) {
   static_assert(GROUP_SIZE == 16, "NVFP4 requires GROUP_SIZE == 16");
   static_assert(HIDDEN_SIZE % GROUP_SIZE == 0,
                 "HIDDEN_SIZE must be divisible by GROUP_SIZE");
@@ -127,9 +151,11 @@ quantize_nvfp4_sm100_task_impl(const void *__restrict__ input_ptr,
         valid_row ? group_max / max_4bit : 1.0f);
     const float applied_scale = static_cast<float>(scale_quant);
 
-    if (sublane_idx == 0) {
-      output_s[interleaved_nvfp4_scale_offset(
-          row_idx, group_idx, num_k_outer, scale_outer_stride)] = scale_quant.raw();
+    if (sublane_idx == 0 && (mma_n == 0 || valid_row)) {
+      int sf_offset = (mma_n > 0)
+          ? swapab_nvfp4_scale_offset(row_idx, group_idx, num_k_outer, mma_n)
+          : interleaved_nvfp4_scale_offset(row_idx, group_idx, num_k_outer, scale_outer_stride);
+      output_s[sf_offset] = scale_quant.raw();
     }
 
     const uint8_t nibble = static_cast<uint8_t>(

@@ -186,6 +186,11 @@ def main() -> None:
         action="store_true",
         help="Skip torch._scaled_mm baseline",
     )
+    parser.add_argument(
+        "--residual",
+        action="store_true",
+        help="Add a residual (bias add) to the custom kernel",
+    )
     args = parser.parse_args()
 
     use_flashinfer = _FLASHINFER_AVAILABLE and not args.no_flashinfer
@@ -202,9 +207,11 @@ def main() -> None:
         _, weight, _, weight_scale = make_random_nvfp4_tensors(1, n, k, device=DEVICE)
         weight_scale_interleaved = interleave_sf_tensor(weight_scale)
         output = torch.empty((m, n), device=DEVICE, dtype=DTYPE_OUT)
+        residual = torch.randn((m, n), device=DEVICE, dtype=DTYPE_OUT) if args.residual else None
 
-        # Pre-quantize activations once — timing measures GEMM only, not quantization.
-        x_q_list = runtime_kernel_blackwell.quantize_nvfp4_sm100(x)
+        # Pre-quantize activations once into swapAB per-tile layout — timing measures GEMM only.
+        mma_n = (8 if m <= 8 else 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128) if m <= SMALL_M_MAX else 0
+        x_q_list = runtime_kernel_blackwell.quantize_nvfp4_sm100(x, mma_n)
         x_q, x_sf = x_q_list[0], x_q_list[1]
 
         smm_us = float("nan")
@@ -221,7 +228,7 @@ def main() -> None:
 
         custom_us = benchmark_us(
             lambda: runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(
-                x_q, x_sf, weight, weight_scale_interleaved, None, output
+                x_q, x_sf, weight, weight_scale_interleaved, residual, output
             ),
             args.warmup,
             args.reps,

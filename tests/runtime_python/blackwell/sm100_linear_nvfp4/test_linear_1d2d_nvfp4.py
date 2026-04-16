@@ -1,236 +1,146 @@
 import torch
 import runtime_kernel_blackwell_linear_nvfp4 as runtime_kernel_blackwell
-from nvfp4_util import make_sequential_nvfp4_tensors, nvfp4_block_scaled_matmul, nvfp4_scaled_mm, make_random_nvfp4_tensors, interleave_sf_tensor, make_unit_scale_factors
+from nvfp4_util import (
+    interleave_sf_tensor,
+    make_random_nvfp4_tensors,
+    make_sequential_nvfp4_tensors,
+    nvfp4_scaled_mm,
+)
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
-# BATCH_SIZE must be divisible by MMA_M = 128
-# OUTPUT_SIZE must be divisible by MMA_N = 128
-# REDUCTION_SIZE must be divisible by bK = 256
 REDUCTION_SIZE = 768
 OUTPUT_SIZE = 128
-BATCH_SIZE = 1024*4
+BATCH_SIZE = 1024 * 4
+
+SMALL_M_VALUES = list(range(1, 9)) + [16, 24, 32, 48, 64, 80, 96, 112, 120, 128]
+RTOL, ATOL = 1e-2, 1e-2
+
+
+def select_mma_n(m: int) -> int:
+    if m <= 8:   return 8
+    if m <= 16:  return 16
+    if m <= 32:  return 32
+    if m <= 64:  return 64
+    return 128
+
+
+def check_close(output: torch.Tensor, ref: torch.Tensor, label: str) -> None:
+    torch.testing.assert_close(output, ref.to(output.device), rtol=RTOL, atol=ATOL)
+    print(f"{label} passed!")
+
+
+def run_1d2d(x, w, x_sf, w_sf, residual=None):
+    """Run the 1d2d kernel (M=BATCH_SIZE). SF in interleaved layout."""
+    output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
+    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(
+        x, interleave_sf_tensor(x_sf),
+        w, interleave_sf_tensor(w_sf),
+        residual, output,
+    )
+    return output
+
 
 if __name__ == "__main__":
-    print(
-        f"\n=== Testing BATCH_SIZE = {BATCH_SIZE} OUTPUT_SIZE = {OUTPUT_SIZE} REDUCTION_SIZE = {REDUCTION_SIZE} ==="
-    )
+    print(f"\n=== BATCH={BATCH_SIZE} N={OUTPUT_SIZE} K={REDUCTION_SIZE} ===\n")
 
-    # Test 1: Sequential nvfp4 tensors
-    x, w, x_sf, w_sf = make_sequential_nvfp4_tensors(
-        BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE
-    )
-    x_sf_interleaved = interleave_sf_tensor(x_sf)
-    w_sf_interleaved = interleave_sf_tensor(w_sf)
-    residual = None
-    output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
+    # ------------------------------------------------------------------
+    # Tests 1–4: 1d2d path (M=4096), sequential and random, with/without residual
+    # ------------------------------------------------------------------
+    for label, use_sequential, use_residual in [
+        ("Test 1: 1d2d sequential, no residual",  True,  False),
+        ("Test 2: 1d2d random,     no residual",  False, False),
+        ("Test 3: 1d2d sequential, residual",     True,  True),
+        ("Test 4: 1d2d random,     residual",     False, True),
+    ]:
+        make = make_sequential_nvfp4_tensors if use_sequential else make_random_nvfp4_tensors
+        x, w, x_sf, w_sf = make(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)
+        residual = torch.randn(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32) if use_residual else None
 
-    torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
-    torch_out_cuda = torch_out.to(output.device)
-    error = (output - torch_out_cuda).abs()
+        ref, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
+        output = run_1d2d(x, w, x_sf, w_sf, residual)
+        check_close(output, ref, label)
 
-    print("\n--- TEST 1 ---")
-    print("max error:", error.max())
-    print("mean error:", error.mean())
-    print("relative max:", (error / torch_out_cuda.abs().clamp_min(1e-5)).max())
-    torch.testing.assert_close(
-        output,
-        torch_out_cuda,
-        rtol=1e-2,
-        atol=1e-2,
-    )
-    print("\nTest 1 passed!")
-
-    # Test 2: Random nvfp4 tensors
-    x, w, x_sf, w_sf = make_random_nvfp4_tensors(
-        BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE
-    )
-    x_sf_interleaved = interleave_sf_tensor(x_sf)
-    w_sf_interleaved = interleave_sf_tensor(w_sf)
-    residual = None
-    output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
-
-    torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
-    torch_out_cuda = torch_out.to(output.device)
-    error = (output - torch_out_cuda).abs()
-
-    print("\n--- TEST 2 ---")
-    print("max error:", error.max())
-    print("mean error:", error.mean())
-    print("relative max:", (error / torch_out_cuda.abs().clamp_min(1e-5)).max())
-    torch.testing.assert_close(
-        output,
-        torch_out_cuda,
-        rtol=1e-2,
-        atol=1e-2,
-    )
-    print("\nTest 2 passed!")
-
-    # Test 3: Sequential nvfp4 tensors with residual
-    x, w, x_sf, w_sf = make_sequential_nvfp4_tensors(
-        BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE
-    )
-    x_sf_interleaved = interleave_sf_tensor(x_sf)
-    w_sf_interleaved = interleave_sf_tensor(w_sf)
-    residual = torch.randn(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
-    output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
-
-    torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
-    torch_out_cuda = torch_out.to(output.device)
-    error = (output - torch_out_cuda).abs()
-
-    print("\n--- TEST 3 ---")
-    print("max error:", error.max())
-    print("mean error:", error.mean())
-    print("relative max:", (error / torch_out_cuda.abs().clamp_min(1e-5)).max())
-    torch.testing.assert_close(
-        output,
-        torch_out_cuda,
-        rtol=1e-2,
-        atol=1e-2,
-    )
-    print("\nTest 3 passed!")
-
-    # Test 4: Random nvfp4 tensors with residual
-    x, w, x_sf, w_sf = make_random_nvfp4_tensors(
-        BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE
-    )
-    x_sf_interleaved = interleave_sf_tensor(x_sf)
-    w_sf_interleaved = interleave_sf_tensor(w_sf)
-    residual = torch.randn(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
-    output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
-
-    torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
-    torch_out_cuda = torch_out.to(output.device)
-    error = (output - torch_out_cuda).abs()
-
-    print("\n--- TEST 4 ---")
-    print("max error:", error.max())
-    print("mean error:", error.mean())
-    print("relative max:", (error / torch_out_cuda.abs().clamp_min(1e-5)).max())
-    torch.testing.assert_close(
-        output,
-        torch_out_cuda,
-        rtol=1e-2,
-        atol=1e-2,
-    )
-    print("\nTest 4 passed!")
-
-    # Test 5: Random nvfp4 tensors through the small-batch swapAB path (M=1..128)
-    for small_batch_size in list(range(1, 9)) + [16, 24, 32, 48, 64, 80, 96, 112, 120, 128]:
-        x, w, x_sf, w_sf = make_random_nvfp4_tensors(
-            small_batch_size, OUTPUT_SIZE, REDUCTION_SIZE
-        )
-        x_sf_interleaved = interleave_sf_tensor(x_sf)
+    # ------------------------------------------------------------------
+    # Test 5: swapAB path (M=1..128), no residual, against nvfp4_scaled_mm
+    # Use float32 activations so the GPU quantizer produces consistent packed data
+    # and SF in both layouts from the same input.
+    # ------------------------------------------------------------------
+    for m in SMALL_M_VALUES:
+        x_fp32 = torch.randn(m, REDUCTION_SIZE, device="cuda", dtype=torch.float32)
+        _, w, _, w_sf = make_random_nvfp4_tensors(OUTPUT_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)
         w_sf_interleaved = interleave_sf_tensor(w_sf)
-        output = torch.empty(
-            small_batch_size, OUTPUT_SIZE, device="cuda", dtype=torch.float32
-        )
+        mma_n = select_mma_n(m)
 
-        torch_out, _ = nvfp4_scaled_mm(
-            w, w_sf, x, x_sf, REDUCTION_SIZE, residual=None
-        )
+        # Per-tile SF for the swapAB kernel
+        x_q, x_sf_pertile = runtime_kernel_blackwell.quantize_nvfp4_sm100(x_fp32, mma_n)
+
+        # Interleaved SF for the reference: inverse of interleave_sf_tensor is the same
+        # permutation (dims 1 and 3 are swapped in both directions).
+        _, x_sf_il_5d = runtime_kernel_blackwell.quantize_nvfp4_sm100(x_fp32, 0)
+        padded_m = x_sf_il_5d.shape[0] * 128
+        sf_k = x_sf_il_5d.shape[1] * 4
+        x_sf_2d = x_sf_il_5d.permute(0, 3, 2, 1, 4).reshape(padded_m, sf_k)[:m]
+
+        ref, _ = nvfp4_scaled_mm(w, w_sf, x_q[:m], x_sf_2d, REDUCTION_SIZE, residual=None)
+
+        output = torch.empty(m, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
         runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(
-            x, x_sf_interleaved, w, w_sf_interleaved, None, output
+            x_q, x_sf_pertile, w, w_sf_interleaved, None, output
         )
-        torch_out_cuda = torch_out.to(output.device)
-        error = (output - torch_out_cuda).abs()
+        check_close(output, ref, f"Test 5 (M={m})")
 
-        print(f"\n--- TEST 5 (M={small_batch_size}) ---")
-        print("max error:", error.max())
-        print("mean error:", error.mean())
-        print("relative max:", (error / torch_out_cuda.abs().clamp_min(1e-5)).max())
-        torch.testing.assert_close(
-            output,
-            torch_out_cuda,
-            rtol=1e-2,
-            atol=1e-2,
-        )
+    print("Test 5 passed!")
 
-    print("\nTest 5 passed!")
-
-    # Test 6: Auto-quantized entry point matches explicit quantize + no-quant path (M=1..128)
-    for small_batch_size in list(range(1, 9)) + [16, 24, 32, 48, 64, 80, 96, 112, 120, 128]:
-        x = torch.randn(
-            small_batch_size, REDUCTION_SIZE, device="cuda", dtype=torch.float32
-        )
-        _, w, _, w_sf = make_random_nvfp4_tensors(
-            1, OUTPUT_SIZE, REDUCTION_SIZE
-        )
+    # ------------------------------------------------------------------
+    # Test 6: auto-quantize entry point matches explicit quantize + no-quant
+    # ------------------------------------------------------------------
+    for m in SMALL_M_VALUES:
+        x = torch.randn(m, REDUCTION_SIZE, device="cuda", dtype=torch.float32)
+        _, w, _, w_sf = make_random_nvfp4_tensors(OUTPUT_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)
         w_sf_interleaved = interleave_sf_tensor(w_sf)
-        explicit_output = torch.empty(
-            small_batch_size, OUTPUT_SIZE, device="cuda", dtype=torch.float32
-        )
-        auto_output = torch.empty_like(explicit_output)
 
-        x_quantized, x_scale = runtime_kernel_blackwell.quantize_nvfp4_sm100(x)
+        mma_n = select_mma_n(m)
+        x_q, x_sf = runtime_kernel_blackwell.quantize_nvfp4_sm100(x, mma_n)
+
+        explicit = torch.empty(m, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
         runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(
-            x_quantized,
-            x_scale,
-            w,
-            w_sf_interleaved,
-            None,
-            explicit_output,
+            x_q, x_sf, w, w_sf_interleaved, None, explicit
         )
-        runtime_kernel_blackwell.linear_nvfp4_sm100(
-            x, w, w_sf_interleaved, None, auto_output
-        )
+        auto = torch.empty_like(explicit)
+        runtime_kernel_blackwell.linear_nvfp4_sm100(x, w, w_sf_interleaved, None, auto)
 
-        print(f"\n--- TEST 6 (M={small_batch_size}) ---")
-        assert torch.equal(auto_output, explicit_output)
+        assert torch.equal(auto, explicit), f"Test 6 mismatch at M={m}"
 
-    print("\nTest 6 passed!")
+    print("Test 6 passed!")
 
-    # Performance Tests
+    # ------------------------------------------------------------------
+    # Performance (1d2d path, M=4096)
+    # ------------------------------------------------------------------
+    WARMUP, REPS = 10, 100
+    x, w, x_sf, w_sf = make_random_nvfp4_tensors(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)
+    x_sf_il = interleave_sf_tensor(x_sf)
+    w_sf_il = interleave_sf_tensor(w_sf)
+    output  = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
+
+    print("\n--- PERFORMANCE ---")
+
+    for _ in range(WARMUP):
+        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_il, w, w_sf_il, None, output)
+    start = torch.cuda.Event(enable_timing=True)
+    end   = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(REPS):
+        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_il, w, w_sf_il, None, output)
+    end.record()
     torch.cuda.synchronize()
-    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    WARM_UP = 10
-    REPETITIONS = 100
-    
-    x, w, x_sf, w_sf = make_random_nvfp4_tensors(
-        BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE
-    )
-    x_sf_interleaved = interleave_sf_tensor(x_sf)
-    w_sf_interleaved = interleave_sf_tensor(w_sf)
-    residual = None
-    output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
-    
-    print("\n--- PERFORMANCE ---")        
+    avg_ms = start.elapsed_time(end) / REPS
+    tflops = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_ms * 1e-3) / 1e12
+    print(f"[Custom (NVFP4)]           {avg_ms:.6f} ms  ({tflops:.2f} TFLOP/s)")
 
-    # Custom implementation
-    for _ in range(WARM_UP):
-        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
-    starter.record()
-    for rep in range(REPETITIONS):
-        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
-    ender.record()
-    torch.cuda.synchronize()
-    avg_time = starter.elapsed_time(ender) / REPETITIONS
-    tflops = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_time * 1e-3) / 1e12
-    print(f"[Custom (NVFP4)]                        Average time over {REPETITIONS} runs: {avg_time:.6f} ms  ({tflops:.2f} TFLOP/s)")
-
-    # torch._scaled_mm implementation
-    for _ in range(WARM_UP):
-        nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    scaled_mm_times = []
-    for rep in range(REPETITIONS):
-        _, elapsed = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-        scaled_mm_times.append(elapsed)
-    avg_time_scaled_mm = sum(scaled_mm_times) / REPETITIONS
-    tflops_scaled_mm = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_time_scaled_mm * 1e-3) / 1e12
-    print(f"[Reference - torch._scaled_mm (NVFP4)]  Average time over {REPETITIONS} runs: {avg_time_scaled_mm:.6f} ms  ({tflops_scaled_mm:.2f} TFLOP/s)")
-
-    # torch.matmul implementation
-    # for _ in range(WARM_UP):
-    #     nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    # ref_times = []
-    # for rep in range(REPETITIONS):
-    #     _, elapsed = nvfp4_block_scaled_matmul(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    #     ref_times.append(elapsed)
-    # avg_time_ref = sum(ref_times) / REPETITIONS
-    # tflops_ref = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_time_ref * 1e-3) / 1e12
-    # print(f"[Reference - torch.matmul (FP32)]       Average time over {REPETITIONS} runs: {avg_time_ref:.6f} ms  ({tflops_ref:.2f} TFLOP/s)\n")
+    for _ in range(WARMUP):
+        nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE)
+    times = [nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE)[1] for _ in range(REPS)]
+    avg_ms_ref = sum(times) / REPS
+    tflops_ref = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_ms_ref * 1e-3) / 1e12
+    print(f"[torch._scaled_mm (NVFP4)] {avg_ms_ref:.6f} ms  ({tflops_ref:.2f} TFLOP/s)")

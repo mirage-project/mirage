@@ -45,10 +45,6 @@
 using float_e2m1  = cute::float_e2m1_t;
 using float_ue4m3 = cute::float_ue4m3_t;
 
-// ============================================================
-// 1D2D kernel wrapper
-// ============================================================
-
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
@@ -119,15 +115,6 @@ void linear_nvfp4_1d2d_sm100_wrapper(void *tma_a_desc_ptr,
       tma_a, tma_b, tma_sfa, tma_sfb, mBias, mOutput, tma_out);
 }
 
-// ============================================================
-// 1D2D descriptor cache
-// Keyed by (OUTPUT_SIZE, REDUCTION_SIZE). Device descriptor memory is
-// allocated once. On pointer changes, cuTensorMapReplaceAddress updates
-// the host copy and cudaMemcpyAsync uploads it asynchronously (no sync,
-// no cudaMalloc/cudaFree per call). On the hot path (same pointers),
-// zero CUDA API calls are made.
-// ============================================================
-
 struct LinearNVFP4DescriptorCache {
   CUtensorMap host_i_desc{};
   CUtensorMap host_i_sf_desc{};
@@ -148,8 +135,8 @@ struct LinearNVFP4DescriptorCache {
   void *last_output_ptr    = nullptr;
 
   bool initialized                = false;
-  bool kernel_configured_no_bias  = false;  // cudaFuncSetAttribute done for NoBias=true kernel
-  bool kernel_configured_bias     = false;  // cudaFuncSetAttribute done for NoBias=false kernel
+  bool kernel_configured_no_bias  = false;  
+  bool kernel_configured_bias     = false;  
 };
 
 static std::map<std::tuple<int,int>, std::unique_ptr<LinearNVFP4DescriptorCache>> s_1d2d_caches;
@@ -339,16 +326,8 @@ void launch_linear_nvfp4_1d2d_sm100(void *input_ptr,
   }
 }
 
-// ============================================================
-// SwapAB kernel wrapper
-// Computes C^T = W * X^T  (W is [OUTPUT_SIZE, K], X is [M, K])
-// In swapAB: A=W (weight, OUTPUT_SIZE rows), B=X (input, small batch MMA_N rows)
-// Output is written through mOutput(batch_row, output_col) with physical index
-// batch_row + output_col * MMA_N.
-// ============================================================
-
 template <typename T,
-          int MMA_N,          // padded batch size tile (8/16/32/64/128)
+          int MMA_N,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           class BiasTensor,
@@ -358,10 +337,10 @@ template <typename T,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
 __global__ __launch_bounds__(256, 1)
-void linear_nvfp4_swapAB_sm100_wrapper(void *tma_a_desc_ptr,   // weight
-                                       void *tma_b_desc_ptr,   // input (padded to MMA_N rows)
-                                       void *tma_sfa_desc_ptr, // weight SF
-                                       void *tma_sfb_desc_ptr, // input SF (padded to 128 rows)
+void linear_nvfp4_swapAB_sm100_wrapper(void *tma_a_desc_ptr,
+                                       void *tma_b_desc_ptr,
+                                       void *tma_sfa_desc_ptr,
+                                       void *tma_sfb_desc_ptr,
                                        BiasTensor mBias,
                                        OutputTensor mOutput,
                                        int logical_batch_size) {
@@ -410,13 +389,6 @@ void linear_nvfp4_swapAB_sm100_wrapper(void *tma_a_desc_ptr,   // weight
       tma_a, tma_b, tma_sfa, tma_sfb, mBias, mOutput, logical_batch_size);
 }
 
-// ============================================================
-// SwapAB descriptor cache
-// Keyed by (MMA_N, OUTPUT_SIZE, REDUCTION_SIZE). Device descriptor
-// memory is allocated once; subsequent calls patch only changed
-// pointers via cuTensorMapReplaceAddress (no malloc/free/memcpy).
-// ============================================================
-
 struct LinearNVFP4SwapABDescriptorCache {
   CUtensorMap host_w_desc{};
   CUtensorMap host_x_desc{};
@@ -432,11 +404,11 @@ struct LinearNVFP4SwapABDescriptorCache {
   void *last_input_ptr     = nullptr;
   void *last_weight_sf_ptr = nullptr;
   void *last_input_sf_ptr  = nullptr;
-  int   last_padded_m      = 0;  // B descriptor gmem row count (padded_M)
+  int   last_padded_m      = 0;
 
   bool initialized                = false;
-  bool kernel_configured_no_bias  = false;  // cudaFuncSetAttribute done for NoBias=true kernel
-  bool kernel_configured_bias     = false;  // cudaFuncSetAttribute done for NoBias=false kernel
+  bool kernel_configured_no_bias  = false; 
+  bool kernel_configured_bias     = false; 
 };
 
 static std::map<std::tuple<int,int,int>, std::unique_ptr<LinearNVFP4SwapABDescriptorCache>> s_swapAB_caches;
@@ -479,13 +451,8 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
 
   LinearNVFP4SwapABDescriptorCache &cache = get_linear_nvfp4_swapAB_descriptor_cache(MMA_N, OUTPUT_SIZE, REDUCTION_SIZE);
 
-  // Grid Y = ceil(batch_size / MMA_N) CTAs. TMA descriptors use the real
-  // batch_size; the hardware OOB fill (zeros) handles any partial last tile.
   const int num_n_tiles = (logical_batch_size + MMA_N - 1) / MMA_N;
-
   auto rebuild_x_descs = [&]() {
-    // B descriptor: gmem shape uses real batch_size rows. TMA OOB-fills with
-    // zero for rows >= batch_size when the last tile is partial.
     {
       uint64_t gmem_shape[2]  = {(uint64_t)logical_batch_size, (uint64_t)REDUCTION_SIZE};
       uint64_t gmem_stride[2] = {1, (uint64_t)REDUCTION_SIZE};
@@ -494,9 +461,6 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
           &cache.host_x_desc, static_cast<cute::float_e2m1_t *>(input_ptr),
           gmem_shape, gmem_stride, smem_shape, 1, 1);
     }
-    // SFB descriptor: outer dim = num_n_tiles (real tiles only). TMA OOB-fills
-    // with zero for any SF elements beyond num_n_tiles.
-    // tma_coords_SFB = {n_tile, k*4, 0} selects the right slice.
     {
       uint64_t gmem_shape[3]  = {(uint64_t)num_n_tiles,
                                  (uint64_t)(REDUCTION_SIZE / MMA_K),
@@ -517,7 +481,6 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
   };
 
   if (!cache.initialized) {
-    // First call: build host descriptors, allocate device copies, upload once.
     {
       uint64_t gmem_shape[2]  = {(uint64_t)OUTPUT_SIZE, (uint64_t)REDUCTION_SIZE};
       uint64_t gmem_stride[2] = {1, (uint64_t)REDUCTION_SIZE};
@@ -546,10 +509,9 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
     cudaMemcpy(cache.desc_w_sf_ptr, &cache.host_w_sf_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
     cache.last_weight_ptr    = weight_ptr;
     cache.last_weight_sf_ptr = weight_sf_ptr;
-    rebuild_x_descs();  // uploads desc_x and desc_x_sf with sync copies
+    rebuild_x_descs(); 
     cache.initialized = true;
   } else {
-    // Subsequent calls: patch changed descriptors.
     if (weight_ptr != cache.last_weight_ptr) {
       cuTensorMapReplaceAddress(&cache.host_w_desc, weight_ptr);
       cudaMemcpyAsync(cache.desc_w_ptr, &cache.host_w_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
@@ -560,9 +522,6 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
       cudaMemcpyAsync(cache.desc_w_sf_ptr, &cache.host_w_sf_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
       cache.last_weight_sf_ptr = weight_sf_ptr;
     }
-    // B/SFB descriptor must be rebuilt when batch_size changes (gmem_shape changes).
-    // When only the pointer changes we can use cuTensorMapReplaceAddress; when
-    // batch_size also changes we must rebuild the full descriptor.
     if (logical_batch_size != cache.last_padded_m) {
       rebuild_x_descs();
     } else {
@@ -579,16 +538,12 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
     }
   }
 
-  // Grid: X = one CTA per weight output-row tile, Y = one CTA per input n_tile.
-  // Each CTA handles one [MMA_M, MMA_N] output tile.
   constexpr int num_output_tiles = OUTPUT_SIZE / MMA_M;
   dim3 grid_dim(num_output_tiles, num_n_tiles, 1);
   dim3 block_dim(256, 1, 1);
   dim3 cluster_dim(1, 1, 1);
   int smemBytes = 224 * 1024;
 
-  // Row-major layout: output[batch_row, output_col] → output_ptr[batch_row * OUTPUT_SIZE + output_col]
-  // This writes directly into the caller's output buffer (no tmp_output staging needed).
   cute::Layout layout_Out = cute::make_layout(
       cute::make_shape(MMA_N, OUTPUT_SIZE),
       cute::make_stride((int)OUTPUT_SIZE, cute::Int<1>{}));
@@ -806,30 +761,47 @@ __global__ __launch_bounds__(QUANTIZE_THREADS, 1)
 void quantize_nvfp4_sm100_wrapper(T const *input_ptr,
                                   uint8_t *output_q_ptr,
                                   uint8_t *output_s_ptr,
-                                  int batch_size) {
+                                  int batch_size,
+                                  int mma_n) {
   kernel::quantize_nvfp4_sm100_task_impl<HIDDEN_SIZE,
                                          SCALE_VEC_SIZE,
                                          HIDDEN_SIZE,
                                          T>(
-      input_ptr, output_q_ptr, output_s_ptr, batch_size, 1.0e-6f);
+      input_ptr, output_q_ptr, output_s_ptr, batch_size, 1.0e-6f,
+      /*min_4bit=*/-6.0f, /*max_4bit=*/6.0f,
+      /*scale_outer_stride=*/32 * 4 * 4, mma_n);
 }
 
+// mma_n == 0  → interleaved layout [padded/128, K/64, 32, 4, 4]  (for 1d2d path)
+// mma_n >  0  → per-tile swapAB layout [ceil(batch/mma_n), K/64, 32, 4, 4]
 template <int HIDDEN_SIZE>
-std::vector<torch::Tensor> launch_quantize_nvfp4_sm100(torch::Tensor const &input) {
+std::vector<torch::Tensor> launch_quantize_nvfp4_sm100(torch::Tensor const &input,
+                                                       int mma_n) {
   const int batch_size = static_cast<int>(input.size(0));
   const int padded_batch_size = ((batch_size + 127) / 128) * 128;
+  const int sf_k_outer = HIDDEN_SIZE / 64;
+
   auto output_q = torch::empty({padded_batch_size, HIDDEN_SIZE / 2},
                                input.options().dtype(torch::kUInt8));
-  auto output_s = torch::empty(
-      {padded_batch_size / 128, HIDDEN_SIZE / 64, 32, 4, 4},
-      input.options().dtype(torch::kUInt8));
+
+  at::Tensor output_s;
+  if (mma_n > 0) {
+    // layout for swapAB
+    const int num_n_tiles = (batch_size + mma_n - 1) / mma_n;
+    output_s = torch::empty({num_n_tiles, sf_k_outer, 32, 4, 4},
+                            input.options().dtype(torch::kUInt8));
+  } else {
+    // layout for 1d2d path
+    output_s = torch::empty({padded_batch_size / 128, sf_k_outer, 32, 4, 4},
+                            input.options().dtype(torch::kUInt8));
+  }
 
   quantize_nvfp4_sm100_wrapper<float, HIDDEN_SIZE>
       <<<dim3(padded_batch_size), dim3(QUANTIZE_THREADS)>>>(
           static_cast<float const *>(input.data_ptr()),
           static_cast<uint8_t *>(output_q.data_ptr()),
           static_cast<uint8_t *>(output_s.data_ptr()),
-          batch_size);
+          batch_size, mma_n);
 
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
@@ -838,64 +810,29 @@ std::vector<torch::Tensor> launch_quantize_nvfp4_sm100(torch::Tensor const &inpu
   return {output_q, output_s};
 }
 
-std::vector<torch::Tensor> dispatch_quantize_nvfp4_sm100(torch::Tensor const &input) {
+std::vector<torch::Tensor> dispatch_quantize_nvfp4_sm100(torch::Tensor const &input,
+                                                         int mma_n = 0) {
   const int hidden_size = static_cast<int>(input.size(1));
   TORCH_CHECK(hidden_size % 64 == 0,
               "input.shape[1] must be divisible by 64");
 
   switch (hidden_size) {
-    case 128:
-      return launch_quantize_nvfp4_sm100<128>(input);
-    case 256:
-      return launch_quantize_nvfp4_sm100<256>(input);
-    case 384:
-      return launch_quantize_nvfp4_sm100<384>(input);
-    case 512:
-      return launch_quantize_nvfp4_sm100<512>(input);
-    case 768:
-      return launch_quantize_nvfp4_sm100<768>(input);
-    case 1024:
-      return launch_quantize_nvfp4_sm100<1024>(input);
-    case 1536:
-      return launch_quantize_nvfp4_sm100<1536>(input);
-    case 2048:
-      return launch_quantize_nvfp4_sm100<2048>(input);
-    case 4096:
-      return launch_quantize_nvfp4_sm100<4096>(input);
-    case 7168:
-      return launch_quantize_nvfp4_sm100<7168>(input);
+    case 128:  return launch_quantize_nvfp4_sm100<128>(input, mma_n);
+    case 256:  return launch_quantize_nvfp4_sm100<256>(input, mma_n);
+    case 384:  return launch_quantize_nvfp4_sm100<384>(input, mma_n);
+    case 512:  return launch_quantize_nvfp4_sm100<512>(input, mma_n);
+    case 768:  return launch_quantize_nvfp4_sm100<768>(input, mma_n);
+    case 1024: return launch_quantize_nvfp4_sm100<1024>(input, mma_n);
+    case 1536: return launch_quantize_nvfp4_sm100<1536>(input, mma_n);
+    case 2048: return launch_quantize_nvfp4_sm100<2048>(input, mma_n);
+    case 4096: return launch_quantize_nvfp4_sm100<4096>(input, mma_n);
+    case 7168: return launch_quantize_nvfp4_sm100<7168>(input, mma_n);
     default:
       TORCH_CHECK(
           false,
           "quantize_nvfp4_sm100 supports K in {128, 256, 384, 512, 768, 1024, 1536, 2048, 4096, 7168}. Got K=",
           hidden_size);
   }
-}
-
-// Persistent scratch buffer for the small-M swapAB path.
-// Holds the restructured SFB tensor only; allocated once and reused.
-struct SmallBatchSFScratch {
-  // prepared_x_sf: [num_n_tiles, sf_k_outer, 32, 4, 4] uint8 —
-  //   SFB restructured so slice [t] contains the SF for rows t*MMA_N..(t+1)*MMA_N-1.
-  //   Each tile always holds 128 rows of SF space (MMA_N_SFB=128); only the
-  //   first MMA_N rows are populated, the rest are padded with UE4M3_ONE.
-  //   Required because the TMA indexes it as [n_tile, k, 0].
-  at::Tensor prepared_x_sf;
-  void *last_x_sf_ptr    = nullptr;
-  int   last_batch_size  = 0;
-  int   last_mma_n       = 0;
-};
-
-static std::map<int, std::unique_ptr<SmallBatchSFScratch>> s_sf_scratch_caches;
-static std::mutex s_sf_scratch_mutex;
-
-static SmallBatchSFScratch &get_sf_scratch(int reduction_size) {
-  std::lock_guard<std::mutex> guard(s_sf_scratch_mutex);
-  auto &entry = s_sf_scratch_caches[reduction_size];
-  if (!entry) {
-    entry = std::make_unique<SmallBatchSFScratch>();
-  }
-  return *entry;
 }
 
 void launch_linear_nvfp4_small_batch(torch::Tensor const& input,
@@ -909,108 +846,15 @@ void launch_linear_nvfp4_small_batch(torch::Tensor const& input,
   TORCH_CHECK(batch_size >= 1 && batch_size <= 128,
               "launch_linear_nvfp4_small_batch supports 1 <= batch_size <= 128, got ", batch_size);
   const int output_size = static_cast<int>(weight.size(0));
-  const int mma_n = select_mma_n(batch_size);
-  const int num_n_tiles = (batch_size + mma_n - 1) / mma_n;
 
-  // --- Restructure SFB for n_tile grid access ---
-  // input_sf shape: [REST_M, sf_k_outer, 32, 4, 4]  (REST_M = padded_batch/128)
-  // Original interleaved layout (from interleave_sf_tensor):
-  //   input_sf[block, k_outer, k_pos_in_32, row_group_of_32, k_inner]
-  //   where block=0 covers rows 0..127, row_group_of_32 ∈ {0,1,2,3} → rows 0..31, 32..63, 64..95, 96..127
-  //
-  // For MMA_N rows per tile, tile t covers rows [t*MMA_N .. (t+1)*MMA_N - 1].
-  // The kernel TMA accesses prepared_x_sf as [n_tile, k, 0] — each tile slice
-  // has the same shape [sf_k_outer, 32, 4, 4] representing 128 rows of SFs.
-  // We populate the first MMA_N rows of each tile slice from input_sf.
-  //
-  // For MMA_N ≤ 32: all rows of tile t fall within one row_group.
-  //   row_group = (t * MMA_N) / 32
-  //   within_start = (t * MMA_N) % 32  (start within the 32-row group's k-positions)
-  //
-  // For MMA_N = 64: tile t spans 2 row_groups (row_groups t*2 and t*2+1).
-  // For MMA_N = 128: tile t spans 4 row_groups (all 4 in block t).
-  SmallBatchSFScratch &sf_scratch = get_sf_scratch(reduction_size);
-  void *current_sf_raw_ptr = input_sf.data_ptr();
-  if (current_sf_raw_ptr != sf_scratch.last_x_sf_ptr ||
-      batch_size != sf_scratch.last_batch_size ||
-      mma_n != sf_scratch.last_mma_n) {
-    const int sf_k_outer = (int)input_sf.size(1);
-    constexpr long long UE4M3_ONE = 56;  // encode_ue4m3(1.0)
-
-    // Max num_n_tiles = ceil(128 / mma_n) ≤ 16. Allocate 16 slots always.
-    if (!sf_scratch.prepared_x_sf.defined()) {
-      sf_scratch.prepared_x_sf = torch::full(
-          {16, sf_k_outer, 32, 4, 4}, UE4M3_ONE, input_sf.options());
-    } else {
-      sf_scratch.prepared_x_sf.fill_(UE4M3_ONE);
-    }
-
-    // Rows per row_group in the interleaved SF layout = 32.
-    // k-positions per row_group in the 32-dim = 32 / (32 / 8) ... actually
-    // the "32" dim in [sf_k_outer, 32, 4, 4] is MMA_K_SF = MMA_K/SCALE_VECTOR_SIZE = 64/16 = 4,
-    // replicated across 8 positions... let's re-derive from the interleave function:
-    //   out = sf.reshape(REST_M, 4, 32, NUM_K_OUTER, 4)
-    //   out = out.permute(0, 3, 2, 1, 4)  → [REST_M, NUM_K_OUTER, 32, 4, 4]
-    // So input_sf[block, k_outer, within_32, row_group, k_inner]
-    //   row_group ∈ {0,1,2,3} → 32 rows each
-    //   within_32 ∈ {0..31} → 32 positions for 32 rows within the row_group
-    // Each (row_group, within_32) pair → one specific row within the 128-row block.
-    //   row = row_group * 32 + within_32
-    //
-    // For tile t with MMA_N rows, rows are [t*MMA_N .. (t+1)*MMA_N-1].
-    // These rows span ceil(MMA_N/32) row_groups.
-    //
-    // In prepared_x_sf[t], we place the SFs for these rows at the same
-    // (row_group, within_32) positions within the tile's 128-row slot.
-    // So: prepared_x_sf[t, k_outer, within_32, row_group, k_inner]
-    //       = input_sf[block, k_outer, within_32 + (row_group_offset)*32, dst_row_group, k_inner]
-    // where dst_row_group = 0 always (we pack everything into row_group 0..ceil(MMA_N/32)-1).
-    //
-    // Simpler: just copy the (row_group, within_32) slices directly at their
-    // natural positions — since prepared_x_sf has the same shape per tile,
-    // and a row at global row r belongs to:
-    //   block = r / 128, row_group = (r % 128) / 32, within_32 = (r % 128) % 32
-    // For tile t, row r = t*MMA_N + i for i in [0, MMA_N).
-    // In prepared_x_sf[t], we put it at: row_group = i / 32, within_32 = i % 32
-    // In input_sf: block = (t*MMA_N + i) / 128, row_group = ((t*MMA_N + i) % 128) / 32, within_32 = ((t*MMA_N+i)%128)%32
-
-    for (int t = 0; t < num_n_tiles; ++t) {
-      int row_start = t * mma_n;
-      // Copy MMA_N rows from input_sf into prepared_x_sf[t] at dst positions.
-      // Group by contiguous ranges that share the same (block, row_group) in source.
-      for (int rg = 0; rg < (mma_n + 31) / 32; ++rg) {
-        int src_row_first = row_start + rg * 32;
-        int src_row_last  = std::min(row_start + (rg + 1) * 32, row_start + mma_n) - 1;
-        int src_block     = src_row_first / 128;
-        int src_rg        = (src_row_first % 128) / 32;
-        int src_w32_start = (src_row_first % 128) % 32;
-        int src_w32_end   = (src_row_last  % 128) % 32 + 1;
-        // In dst: rows i*32..(i+1)*32-1 → row_group rg, within_32 0..count-1
-        int dst_w32_count = src_w32_end - src_w32_start;
-        sf_scratch.prepared_x_sf[t]
-            .select(/*dim=*/2, rg)
-            .slice(/*dim=*/1, 0, dst_w32_count)
-            .copy_(
-                input_sf[src_block]
-                    .select(/*dim=*/2, src_rg)
-                    .slice(/*dim=*/1, src_w32_start, src_w32_end)
-            );
-      }
-    }
-    sf_scratch.last_x_sf_ptr   = current_sf_raw_ptr;
-    sf_scratch.last_batch_size = batch_size;
-    sf_scratch.last_mma_n      = mma_n;
-  }
-
-  // FP4 input is passed directly. The TMA descriptor is built with real
-  // batch_size rows; hardware OOB fill (zeros) handles any partial last tile.
-  // The epilogue predicate (batch_row < batch_size) discards padded-row outputs.
+  // input_sf is already in per-tile swapAB layout [num_n_tiles, sf_k_outer, 32, 4, 4]
+  // produced directly by the quantizer — no restructuring needed.
   dispatch_linear_nvfp4_swapAB<cute::float_e2m1_t>(
       output_size,
       reduction_size,
       batch_size,
       input.data_ptr(),
-      sf_scratch.prepared_x_sf.data_ptr(),
+      input_sf.data_ptr(),
       weight.data_ptr(),
       weight_sf.data_ptr(),
       output.data_ptr(),
@@ -1105,8 +949,9 @@ void check_cuda_sync(char const *label) {
 
 }  // namespace
 
-std::vector<torch::Tensor> quantize_nvfp4_sm100_kernel(torch::Tensor input) {
-  return dispatch_quantize_nvfp4_sm100(input);
+std::vector<torch::Tensor> quantize_nvfp4_sm100_kernel(torch::Tensor input,
+                                                       int64_t mma_n = 0) {
+  return dispatch_quantize_nvfp4_sm100(input, static_cast<int>(mma_n));
 }
 
 void linear_nvfp4_sm100_no_quantization_kernel(torch::Tensor input,
@@ -1132,8 +977,6 @@ void linear_nvfp4_sm100_no_quantization_kernel(torch::Tensor input,
   const int reduction_size = static_cast<int>(input.size(1) * 2);
   TORCH_CHECK(input.size(0) >= batch_size,
               "input must provide at least output.shape[0] rows");
-  TORCH_CHECK(input_sf.size(0) * 128 >= batch_size,
-              "input_sf must provide enough rows for output.shape[0]");
   validate_linear_tensors(weight, weight_sf, residual, output, batch_size);
   dispatch_linear_nvfp4(
       input, input_sf, weight, weight_sf, residual, output,
@@ -1164,7 +1007,8 @@ void linear_nvfp4_sm100_kernel(torch::Tensor input,
   const int batch_size = static_cast<int>(input.size(0));
   const int output_size = static_cast<int>(weight.size(0));
   const int reduction_size = static_cast<int>(input.size(1));
-  auto quantized_input = dispatch_quantize_nvfp4_sm100(input);
+  const int mma_n = (batch_size <= 128) ? select_mma_n(batch_size) : 0;
+  auto quantized_input = dispatch_quantize_nvfp4_sm100(input, mma_n);
   dispatch_linear_nvfp4(
       quantized_input[0], quantized_input[1], weight, weight_sf, residual, output,
       batch_size, output_size, reduction_size);
@@ -1173,7 +1017,9 @@ void linear_nvfp4_sm100_kernel(torch::Tensor input,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("quantize_nvfp4_sm100", &quantize_nvfp4_sm100_kernel,
-        "SM100 NVFP4 quantize entry point returning packed FP4 bytes and interleaved ue4m3 scale factors.");
+        "SM100 NVFP4 quantize. mma_n=0 → interleaved layout for 1d2d path; "
+        "mma_n>0 → per-tile swapAB layout [ceil(M/mma_n), K/64, 32, 4, 4].",
+        pybind11::arg("input"), pybind11::arg("mma_n") = 0);
   m.def("linear_nvfp4_sm100_no_quantization", &linear_nvfp4_sm100_no_quantization_kernel,
         "SM100 NVFP4 linear entry point expecting uint8 activations plus interleaved activation scale factors.");
   m.def("linear_nvfp4_sm100", &linear_nvfp4_sm100_kernel,
