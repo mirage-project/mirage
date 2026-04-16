@@ -7,8 +7,8 @@ torch.set_printoptions(sci_mode=False, profile="full")
 # BATCH_SIZE must be divisible by MMA_M = 128
 # OUTPUT_SIZE must be divisible by MMA_N = 128
 # REDUCTION_SIZE must be divisible by bK = 256
-REDUCTION_SIZE = 1024*4
-OUTPUT_SIZE = 1024*4
+REDUCTION_SIZE = 768
+OUTPUT_SIZE = 128
 BATCH_SIZE = 1024*4
 
 if __name__ == "__main__":
@@ -26,7 +26,7 @@ if __name__ == "__main__":
     output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
 
     torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
+    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
     torch_out_cuda = torch_out.to(output.device)
     error = (output - torch_out_cuda).abs()
 
@@ -52,7 +52,7 @@ if __name__ == "__main__":
     output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
 
     torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
+    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
     torch_out_cuda = torch_out.to(output.device)
     error = (output - torch_out_cuda).abs()
 
@@ -78,7 +78,7 @@ if __name__ == "__main__":
     output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
 
     torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
+    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
     torch_out_cuda = torch_out.to(output.device)
     error = (output - torch_out_cuda).abs()
 
@@ -104,7 +104,7 @@ if __name__ == "__main__":
     output = torch.empty(BATCH_SIZE, OUTPUT_SIZE, device="cuda", dtype=torch.float32)
 
     torch_out, _ = nvfp4_scaled_mm(w, w_sf, x, x_sf, REDUCTION_SIZE, residual=residual)
-    runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
+    runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
     torch_out_cuda = torch_out.to(output.device)
     error = (output - torch_out_cuda).abs()
 
@@ -119,6 +119,71 @@ if __name__ == "__main__":
         atol=1e-2,
     )
     print("\nTest 4 passed!")
+
+    # Test 5: Random nvfp4 tensors through the small-batch swapAB path (M=1..128)
+    for small_batch_size in list(range(1, 9)) + [16, 24, 32, 48, 64, 80, 96, 112, 120, 128]:
+        x, w, x_sf, w_sf = make_random_nvfp4_tensors(
+            small_batch_size, OUTPUT_SIZE, REDUCTION_SIZE
+        )
+        x_sf_interleaved = interleave_sf_tensor(x_sf)
+        w_sf_interleaved = interleave_sf_tensor(w_sf)
+        output = torch.empty(
+            small_batch_size, OUTPUT_SIZE, device="cuda", dtype=torch.float32
+        )
+
+        torch_out, _ = nvfp4_scaled_mm(
+            w, w_sf, x, x_sf, REDUCTION_SIZE, residual=None
+        )
+        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(
+            x, x_sf_interleaved, w, w_sf_interleaved, None, output
+        )
+        torch_out_cuda = torch_out.to(output.device)
+        error = (output - torch_out_cuda).abs()
+
+        print(f"\n--- TEST 5 (M={small_batch_size}) ---")
+        print("max error:", error.max())
+        print("mean error:", error.mean())
+        print("relative max:", (error / torch_out_cuda.abs().clamp_min(1e-5)).max())
+        torch.testing.assert_close(
+            output,
+            torch_out_cuda,
+            rtol=1e-2,
+            atol=1e-2,
+        )
+
+    print("\nTest 5 passed!")
+
+    # Test 6: Auto-quantized entry point matches explicit quantize + no-quant path (M=1..128)
+    for small_batch_size in list(range(1, 9)) + [16, 24, 32, 48, 64, 80, 96, 112, 120, 128]:
+        x = torch.randn(
+            small_batch_size, REDUCTION_SIZE, device="cuda", dtype=torch.float32
+        )
+        _, w, _, w_sf = make_random_nvfp4_tensors(
+            1, OUTPUT_SIZE, REDUCTION_SIZE
+        )
+        w_sf_interleaved = interleave_sf_tensor(w_sf)
+        explicit_output = torch.empty(
+            small_batch_size, OUTPUT_SIZE, device="cuda", dtype=torch.float32
+        )
+        auto_output = torch.empty_like(explicit_output)
+
+        x_quantized, x_scale = runtime_kernel_blackwell.quantize_nvfp4_sm100(x)
+        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(
+            x_quantized,
+            x_scale,
+            w,
+            w_sf_interleaved,
+            None,
+            explicit_output,
+        )
+        runtime_kernel_blackwell.linear_nvfp4_sm100(
+            x, w, w_sf_interleaved, None, auto_output
+        )
+
+        print(f"\n--- TEST 6 (M={small_batch_size}) ---")
+        assert torch.equal(auto_output, explicit_output)
+
+    print("\nTest 6 passed!")
 
     # Performance Tests
     torch.cuda.synchronize()
@@ -138,10 +203,10 @@ if __name__ == "__main__":
 
     # Custom implementation
     for _ in range(WARM_UP):
-        runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
+        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
     starter.record()
     for rep in range(REPETITIONS):
-        runtime_kernel_blackwell.linear_nvfp4_1d2d_sm100(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
+        runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(x, x_sf_interleaved, w, w_sf_interleaved, residual, output)
     ender.record()
     torch.cuda.synchronize()
     avg_time = starter.elapsed_time(ender) / REPETITIONS
@@ -169,4 +234,3 @@ if __name__ == "__main__":
     # avg_time_ref = sum(ref_times) / REPETITIONS
     # tflops_ref = 2 * BATCH_SIZE * OUTPUT_SIZE * REDUCTION_SIZE / (avg_time_ref * 1e-3) / 1e12
     # print(f"[Reference - torch.matmul (FP32)]       Average time over {REPETITIONS} runs: {avg_time_ref:.6f} ms  ({tflops_ref:.2f} TFLOP/s)\n")
-

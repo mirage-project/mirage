@@ -118,6 +118,19 @@ def _to_blocked_sf(sf: torch.Tensor) -> torch.Tensor:
     return rearranged.flatten().view(torch.float8_e4m3fn)
 
 
+def _pad_rows_uint8(tensor: torch.Tensor, padded_rows: int, fill_value: int = 0) -> torch.Tensor:
+    if tensor.shape[0] == padded_rows:
+        return tensor
+    padded = torch.full(
+        (padded_rows, tensor.shape[1]),
+        fill_value,
+        device=tensor.device,
+        dtype=tensor.dtype,
+    )
+    padded[: tensor.shape[0]].copy_(tensor)
+    return padded
+
+
 def nvfp4_scaled_mm(
     packed_a: torch.Tensor,
     sf_a: torch.Tensor,
@@ -132,12 +145,18 @@ def nvfp4_scaled_mm(
     packed_b: (batch_size,  K/2) uint8  — activation matrix (x)
     sf_b:     (batch_size,  K/16) uint8 — activation scale factors
     """
+    logical_rows = packed_b.shape[0]
+    # torch._scaled_mm accepts any M, but _to_blocked_sf requires scale factor
+    # rows to be a multiple of 128. Pad only the scale factors, not the data.
+    padded_rows = ((logical_rows + 127) // 128) * 128
+    sf_b_padded = _pad_rows_uint8(sf_b.cuda(), padded_rows, fill_value=encode_ue4m3(1.0))
+
     # Reinterpret uint8 packed bytes as float4_e2m1fn_x2
     a_fp4 = packed_a.cuda().view(torch.float4_e2m1fn_x2)  # (output_size, K/2)
     b_fp4 = packed_b.cuda().view(torch.float4_e2m1fn_x2)  # (batch_size,  K/2)
 
-    scale_a = _to_blocked_sf(sf_a.cuda())  # flattened blocked float8
-    scale_b = _to_blocked_sf(sf_b.cuda())
+    scale_a = _to_blocked_sf(sf_a.cuda())        # flattened blocked float8
+    scale_b = _to_blocked_sf(sf_b_padded)
 
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
@@ -256,8 +275,27 @@ def make_unit_scale_factors(rows: int, cols: int) -> torch.Tensor:
     UE4M3_ONE = encode_ue4m3(1.0)   # should be 56
     return torch.full((rows, cols), UE4M3_ONE, device="cuda", dtype=torch.uint8)
 
-def interleave_sf_tensor(sf: torch.Tensor) -> torch.Tensor:
+def interleave_sf_tensor(
+    sf: torch.Tensor,
+    pad_rows_to_multiple_of: int | None = None,
+    pad_value: int | None = None,
+) -> torch.Tensor:
     M, SF_K = sf.shape
+    if pad_rows_to_multiple_of is None and M < 128:
+        pad_rows_to_multiple_of = 128
+    if pad_rows_to_multiple_of is not None and M % pad_rows_to_multiple_of != 0:
+        padded_m = ((M + pad_rows_to_multiple_of - 1) // pad_rows_to_multiple_of) * pad_rows_to_multiple_of
+        if pad_value is None:
+            pad_value = encode_ue4m3(1.0)
+        padded = torch.full(
+            (padded_m, SF_K),
+            pad_value,
+            device=sf.device,
+            dtype=sf.dtype,
+        )
+        padded[:M].copy_(sf)
+        sf = padded
+        M = padded_m
     REST_M = M // 128
     NUM_K_OUTER = SF_K // 4
     out = sf.reshape(REST_M, 4, 32, NUM_K_OUTER, 4)
