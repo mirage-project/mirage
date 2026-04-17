@@ -133,32 +133,13 @@ class ModelRunner:
         """
         self.mpk()
 
-    def warmup(self) -> None:
-        """Optional explicit warmup call.
-
-        The MPK compile step already triggers a warmup pass, so this is a
-        no-op by default.  Override or extend in a subclass if you need
-        additional warm-up iterations.
-        """
-        torch.cuda.synchronize()
-
-    def exit(self) -> None:
-        """Release GPU resources and tear down the process group."""
-        del self.mpk
-        torch.cuda.synchronize()
-        if self.world_size > 1 and dist.is_initialized():
-            dist.destroy_process_group()
-
     # ── Private helpers ───────────────────────────────────────────────────────
 
     @staticmethod
     def _init_distributed(
         rank: Optional[int],
     ) -> tuple[int, int]:
-        """Detect MPI rank / world-size and, if needed, init NCCL.
-
-        All ranks run the same Python process when launched via ``mpirun``.
-        There is no master-worker split.
+        """Helper method for future multi-GPU online serving
         """
         try:
             from mpi4py import MPI  # type: ignore[import-untyped]

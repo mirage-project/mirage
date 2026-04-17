@@ -1,12 +1,4 @@
 """LLMEngine — serving loop built on OnlinePinnedRuntime.
-
-Usage::
-
-    runner = ModelRunner(RunnerConfig(model="Qwen/Qwen3-0.6B", ...))
-    engine = LLMEngine(runner)
-    results = engine.generate(["Hello, world!", "What is 2+2?"])
-    for r in results:
-        print(r["text"])
 """
 
 from __future__ import annotations
