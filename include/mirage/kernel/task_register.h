@@ -110,7 +110,7 @@ public:
   int register_softmax_gather_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_mtp_verify_probabilistic_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params);
+                                             std::vector<int> const &params);
   int register_mtp_float_scatter_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
   int register_prob_extract_sm100_task(threadblock::Graph const &bgraph,
@@ -146,8 +146,8 @@ public:
   int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
-                                      std::vector<int> const &params,
-                                      bool scale_ue8m0);
+                                       std::vector<int> const &params,
+                                       bool scale_ue8m0);
   int register_linear_fp8_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params,
                                      bool with_residual);

@@ -294,9 +294,10 @@ __device__ __noinline__ void
   // } __syncthreads();
 
   // TMA bytes must match actual clamped box dims.
-  // When BATCH_SIZE < MMA_N, TMA input box is clamped to min(MMA_N, BATCH_SIZE).
-  // size<1>(mma_tiler)=bN corresponds to the input (B) TMA dimension.
-  // size<0>(mma_tiler)=bM corresponds to the weight (A) TMA dimension.
+  // When BATCH_SIZE < MMA_N, TMA input box is clamped to min(MMA_N,
+  // BATCH_SIZE). size<1>(mma_tiler)=bN corresponds to the input (B) TMA
+  // dimension. size<0>(mma_tiler)=bM corresponds to the weight (A) TMA
+  // dimension.
   constexpr int kClampedBN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
   int tma_transaction_bytes =
       sizeof(T_) * kClampedBN * cute::size<2>(mma_tiler) +

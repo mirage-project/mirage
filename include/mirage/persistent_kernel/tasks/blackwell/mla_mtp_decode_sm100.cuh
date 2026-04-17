@@ -304,48 +304,13 @@ __device__ __noinline__ void
     // Pass 1 + Pass 2: softmax — only active threads (tid < 128)
     // Threads 128-255 must NOT access TMEM or write to P smem, because:
     // - tcgen05 with tid>=128 accesses invalid TMEM rows
-    // - P smem writes at row_base = p_base + tid*128 would overflow into V[vc=0]
+    // - P smem writes at row_base = p_base + tid*128 would overflow into
+    // V[vc=0]
     float tile_max = -1e30f;
     float tile_sum = 0.0f;
     if (active) {
-    // Pass 1: Find global max
-    for (int c = 0; c < TILE_S; c += 16) {
-      float t16[16];
-      int addr = taddr + (tid << 16) + c;
-      asm volatile(
-          "tcgen05.ld.sync.aligned.32x32b.x16.b32 "
-          "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
-          : "=f"(t16[0]),
-            "=f"(t16[1]),
-            "=f"(t16[2]),
-            "=f"(t16[3]),
-            "=f"(t16[4]),
-            "=f"(t16[5]),
-            "=f"(t16[6]),
-            "=f"(t16[7]),
-            "=f"(t16[8]),
-            "=f"(t16[9]),
-            "=f"(t16[10]),
-            "=f"(t16[11]),
-            "=f"(t16[12]),
-            "=f"(t16[13]),
-            "=f"(t16[14]),
-            "=f"(t16[15])
-          : "r"(addr));
-      asm volatile("tcgen05.wait::ld.sync.aligned;");
-#pragma unroll
-      for (int i = 0; i < 16; i++) {
-        float v = (c + i < effective_len) ? t16[i] * ss : -1e30f;
-        tile_max = fmaxf(tile_max, v);
-      }
-    }
-
-    // Pass 2: Compute exp, write P, accumulate sum
-    for (int half = 0; half < 2; half++) {
-      int p_base = (half == 0) ? P0_smem : P1_smem;
-      int row_base = p_base + tid * 128;
-
-      for (int c = half * 64; c < half * 64 + 64; c += 16) {
+      // Pass 1: Find global max
+      for (int c = 0; c < TILE_S; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
         asm volatile(
@@ -369,56 +334,92 @@ __device__ __noinline__ void
               "=f"(t16[15])
             : "r"(addr));
         asm volatile("tcgen05.wait::ld.sync.aligned;");
-
 #pragma unroll
         for (int i = 0; i < 16; i++) {
-          float e =
-              (c + i < effective_len) ? __expf(t16[i] * ss - tile_max) : 0.0f;
-          t16[i] = e;
-          tile_sum += e;
-        }
-
-        int g_start = (c % 64);
-#pragma unroll
-        for (int gg = 0; gg < 16; gg += 8) {
-          int g = g_start + gg;
-          uint32_t w0, w1, w2, w3;
-          {
-            nv_bfloat16 b0 = __float2bfloat16(t16[gg + 0]);
-            nv_bfloat16 b1 = __float2bfloat16(t16[gg + 1]);
-            w0 = (uint32_t)(*(uint16_t *)&b0) |
-                 ((uint32_t)(*(uint16_t *)&b1) << 16);
-          }
-          {
-            nv_bfloat16 b0 = __float2bfloat16(t16[gg + 2]);
-            nv_bfloat16 b1 = __float2bfloat16(t16[gg + 3]);
-            w1 = (uint32_t)(*(uint16_t *)&b0) |
-                 ((uint32_t)(*(uint16_t *)&b1) << 16);
-          }
-          {
-            nv_bfloat16 b0 = __float2bfloat16(t16[gg + 4]);
-            nv_bfloat16 b1 = __float2bfloat16(t16[gg + 5]);
-            w2 = (uint32_t)(*(uint16_t *)&b0) |
-                 ((uint32_t)(*(uint16_t *)&b1) << 16);
-          }
-          {
-            nv_bfloat16 b0 = __float2bfloat16(t16[gg + 6]);
-            nv_bfloat16 b1 = __float2bfloat16(t16[gg + 7]);
-            w3 = (uint32_t)(*(uint16_t *)&b0) |
-                 ((uint32_t)(*(uint16_t *)&b1) << 16);
-          }
-          int byte_off = g * 2;
-          int swizzled =
-              (byte_off & ~0xF) ^ ((tid & 7) << 4) | (byte_off & 0xF);
-          int saddr = row_base + swizzled;
-          asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(saddr),
-                       "r"(w0),
-                       "r"(w1),
-                       "r"(w2),
-                       "r"(w3));
+          float v = (c + i < effective_len) ? t16[i] * ss : -1e30f;
+          tile_max = fmaxf(tile_max, v);
         }
       }
-    }
+
+      // Pass 2: Compute exp, write P, accumulate sum
+      for (int half = 0; half < 2; half++) {
+        int p_base = (half == 0) ? P0_smem : P1_smem;
+        int row_base = p_base + tid * 128;
+
+        for (int c = half * 64; c < half * 64 + 64; c += 16) {
+          float t16[16];
+          int addr = taddr + (tid << 16) + c;
+          asm volatile(
+              "tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+              "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+              : "=f"(t16[0]),
+                "=f"(t16[1]),
+                "=f"(t16[2]),
+                "=f"(t16[3]),
+                "=f"(t16[4]),
+                "=f"(t16[5]),
+                "=f"(t16[6]),
+                "=f"(t16[7]),
+                "=f"(t16[8]),
+                "=f"(t16[9]),
+                "=f"(t16[10]),
+                "=f"(t16[11]),
+                "=f"(t16[12]),
+                "=f"(t16[13]),
+                "=f"(t16[14]),
+                "=f"(t16[15])
+              : "r"(addr));
+          asm volatile("tcgen05.wait::ld.sync.aligned;");
+
+#pragma unroll
+          for (int i = 0; i < 16; i++) {
+            float e =
+                (c + i < effective_len) ? __expf(t16[i] * ss - tile_max) : 0.0f;
+            t16[i] = e;
+            tile_sum += e;
+          }
+
+          int g_start = (c % 64);
+#pragma unroll
+          for (int gg = 0; gg < 16; gg += 8) {
+            int g = g_start + gg;
+            uint32_t w0, w1, w2, w3;
+            {
+              nv_bfloat16 b0 = __float2bfloat16(t16[gg + 0]);
+              nv_bfloat16 b1 = __float2bfloat16(t16[gg + 1]);
+              w0 = (uint32_t)(*(uint16_t *)&b0) |
+                   ((uint32_t)(*(uint16_t *)&b1) << 16);
+            }
+            {
+              nv_bfloat16 b0 = __float2bfloat16(t16[gg + 2]);
+              nv_bfloat16 b1 = __float2bfloat16(t16[gg + 3]);
+              w1 = (uint32_t)(*(uint16_t *)&b0) |
+                   ((uint32_t)(*(uint16_t *)&b1) << 16);
+            }
+            {
+              nv_bfloat16 b0 = __float2bfloat16(t16[gg + 4]);
+              nv_bfloat16 b1 = __float2bfloat16(t16[gg + 5]);
+              w2 = (uint32_t)(*(uint16_t *)&b0) |
+                   ((uint32_t)(*(uint16_t *)&b1) << 16);
+            }
+            {
+              nv_bfloat16 b0 = __float2bfloat16(t16[gg + 6]);
+              nv_bfloat16 b1 = __float2bfloat16(t16[gg + 7]);
+              w3 = (uint32_t)(*(uint16_t *)&b0) |
+                   ((uint32_t)(*(uint16_t *)&b1) << 16);
+            }
+            int byte_off = g * 2;
+            int swizzled =
+                (byte_off & ~0xF) ^ ((tid & 7) << 4) | (byte_off & 0xF);
+            int saddr = row_base + swizzled;
+            asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(saddr),
+                         "r"(w0),
+                         "r"(w1),
+                         "r"(w2),
+                         "r"(w3));
+          }
+        }
+      }
     } // end if (active) for softmax
 
     float nm = fmaxf(row_max, tile_max);
@@ -539,10 +540,14 @@ __device__ __noinline__ void
     }
 
     __syncthreads();
-    if (active) mbar_wait(mainloop_bar, 0);
+    if (active) {
+      mbar_wait(mainloop_bar, 0);
+    }
 
     // Merge saved O[0:127]
-    if (active) asm volatile("tcgen05.fence::after_thread_sync;");
+    if (active) {
+      asm volatile("tcgen05.fence::after_thread_sync;");
+    }
     if (active && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
         float t16[16];
@@ -599,45 +604,46 @@ __device__ __noinline__ void
 
   // Epilogue: normalize and write to Oa
   if (active) {
-  asm volatile("tcgen05.fence::after_thread_sync;");
-  float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
-  for (int vc = 0; vc < V_CHUNKS; vc++) {
-    int out_taddr = taddr + vc * BK;
-    for (int c = 0; c < BK; c += 16) {
-      float t16[16];
-      int addr = out_taddr + (tid << 16) + c;
-      asm volatile(
-          "tcgen05.ld.sync.aligned.32x32b.x16.b32 "
-          "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
-          : "=f"(t16[0]),
-            "=f"(t16[1]),
-            "=f"(t16[2]),
-            "=f"(t16[3]),
-            "=f"(t16[4]),
-            "=f"(t16[5]),
-            "=f"(t16[6]),
-            "=f"(t16[7]),
-            "=f"(t16[8]),
-            "=f"(t16[9]),
-            "=f"(t16[10]),
-            "=f"(t16[11]),
-            "=f"(t16[12]),
-            "=f"(t16[13]),
-            "=f"(t16[14]),
-            "=f"(t16[15])
-          : "r"(addr));
-      asm volatile("tcgen05.wait::ld.sync.aligned;");
-      int base_d = (vc * BK + c) * 128 + tid;
+    asm volatile("tcgen05.fence::after_thread_sync;");
+    float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
+    for (int vc = 0; vc < V_CHUNKS; vc++) {
+      int out_taddr = taddr + vc * BK;
+      for (int c = 0; c < BK; c += 16) {
+        float t16[16];
+        int addr = out_taddr + (tid << 16) + c;
+        asm volatile(
+            "tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+            "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+            : "=f"(t16[0]),
+              "=f"(t16[1]),
+              "=f"(t16[2]),
+              "=f"(t16[3]),
+              "=f"(t16[4]),
+              "=f"(t16[5]),
+              "=f"(t16[6]),
+              "=f"(t16[7]),
+              "=f"(t16[8]),
+              "=f"(t16[9]),
+              "=f"(t16[10]),
+              "=f"(t16[11]),
+              "=f"(t16[12]),
+              "=f"(t16[13]),
+              "=f"(t16[14]),
+              "=f"(t16[15])
+            : "r"(addr));
+        asm volatile("tcgen05.wait::ld.sync.aligned;");
+        int base_d = (vc * BK + c) * 128 + tid;
 #pragma unroll
-      for (int i = 0; i < 16; i++) {
-        nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
-        Oout[base_d + i * 128] = val;
+        for (int i = 0; i < 16; i++) {
+          nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
+          Oout[base_d + i * 128] = val;
+        }
       }
     }
-  }
 
-  if (active)
-    La[block_linear * 128 + tid] = logf(fmaxf(row_sum, 1e-30f)) + row_max;
+    if (active) {
+      La[block_linear * 128 + tid] = logf(fmaxf(row_sum, 1e-30f)) + row_max;
+    }
   } // end if (active) for epilogue
 
   __syncthreads();

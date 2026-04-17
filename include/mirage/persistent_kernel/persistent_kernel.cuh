@@ -602,10 +602,10 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         int task_idx = i / TASK_SIZE;
         int offset = i % TASK_SIZE;
         ::kernel::load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
-                  reinterpret_cast<char *>(
-                      config.all_tasks +
-                      get_task_position_index(task_ids[task_idx])) +
-                      offset * 16);
+                            reinterpret_cast<char *>(
+                                config.all_tasks +
+                                get_task_position_index(task_ids[task_idx])) +
+                                offset * 16);
       }
       ::kernel::cp_async_fence();
       ::kernel::cp_async_wait<0>();

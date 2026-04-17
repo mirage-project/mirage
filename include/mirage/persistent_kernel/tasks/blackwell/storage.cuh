@@ -55,9 +55,9 @@ struct PipedSharedStorage {
 };
 
 // Linear task storage with scale factors (SFA/SFB).
-template <class TypeA, // Tensor A data type
-          class TypeB, // Tensor B data type
-          class TypeC, // Tensor C data type
+template <class TypeA,  // Tensor A data type
+          class TypeB,  // Tensor B data type
+          class TypeC,  // Tensor C data type
           class TypeSF, // Scale factor data type
           class ASmemLayout,
           class BSmemLayout,

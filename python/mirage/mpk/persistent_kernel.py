@@ -230,10 +230,6 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
     # Use when debugging
     # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-    if os.environ.get("MPK_DEBUG_CTA112", "0") == "1":
-        flags = flags + ["-DMPK_DEBUG_CTA112"]
-    if os.environ.get("MPK_DEBUG_MLA", "0") == "1":
-        flags = flags + ["-DMPK_DEBUG_MLA"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -258,9 +254,6 @@ def get_compile_command(
             "-gencode=arch=compute_100a,code=sm_100a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_BLACKWELL",
-            # CUDA 13+ dropped __CUDA_ARCH_FEAT_SM100_ALL; define CUTLASS
-            # SM100a feature flags manually for CUTLASS v4.2.1 compatibility
-            "-DCUTLASS_ARCH_MMA_SM100A_ENABLED=1",
         ]
     else:
         specific_cmd = [

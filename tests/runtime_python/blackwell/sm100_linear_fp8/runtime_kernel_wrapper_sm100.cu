@@ -23,10 +23,10 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <cstdlib>
 #include <tuple>
 #include <vector>
 
@@ -137,10 +137,11 @@ int read_forced_split_k_override() {
   TORCH_CHECK(end_ptr != env_value && *end_ptr == '\0',
               "MIRAGE_FORCE_SM100_FP8_SPLIT_K must be an integer, got: ",
               env_value);
-  TORCH_CHECK(parsed_value == 1 || parsed_value == 2 || parsed_value == 4 ||
-                  parsed_value == 8,
-              "MIRAGE_FORCE_SM100_FP8_SPLIT_K must be one of {1, 2, 4, 8}, got: ",
-              parsed_value);
+  TORCH_CHECK(
+      parsed_value == 1 || parsed_value == 2 || parsed_value == 4 ||
+          parsed_value == 8,
+      "MIRAGE_FORCE_SM100_FP8_SPLIT_K must be one of {1, 2, 4, 8}, got: ",
+      parsed_value);
   return static_cast<int>(parsed_value);
 }
 
@@ -160,23 +161,24 @@ int choose_split_k(int batch_size, int reduction_size, bool has_residual) {
   return batch_size <= 4 ? 4 : 8;
 }
 
-torch::Tensor allocate_legacy_col_major_scale_buffer(torch::Tensor const &source,
-                                                     int outer_dim,
-                                                     int reduction_size) {
+torch::Tensor allocate_legacy_col_major_scale_buffer(
+    torch::Tensor const &source, int outer_dim, int reduction_size) {
   return torch::empty_strided(
-      {outer_dim, fp8_runtime::packed_scale_k_for_reduction_size(reduction_size)},
+      {outer_dim,
+       fp8_runtime::packed_scale_k_for_reduction_size(reduction_size)},
       {1, fp8_runtime::aligned_scale_outer_dim(outer_dim)},
       source.options());
 }
 
-torch::Tensor const &materialize_internal_scale_tensor(
-    LinearFp8DescriptorCache &cache,
-    torch::Tensor const &scale,
-    int outer_dim,
-    int reduction_size,
-    bool is_input_scale) {
-  auto const layout = mirage::blackwell::sm100_fp8_scale_layout::
-      detect_scale_tensor_layout(scale, outer_dim, reduction_size);
+torch::Tensor const &
+    materialize_internal_scale_tensor(LinearFp8DescriptorCache &cache,
+                                      torch::Tensor const &scale,
+                                      int outer_dim,
+                                      int reduction_size,
+                                      bool is_input_scale) {
+  auto const layout =
+      mirage::blackwell::sm100_fp8_scale_layout::detect_scale_tensor_layout(
+          scale, outer_dim, reduction_size);
   TORCH_CHECK(layout != fp8_runtime::PackedScaleLayout::Invalid,
               "Invalid packed scale tensor layout");
   if (layout == fp8_runtime::PackedScaleLayout::DeepGemmColumnMajor) {
@@ -189,10 +191,11 @@ torch::Tensor const &materialize_internal_scale_tensor(
       fp8_runtime::packed_scale_k_for_reduction_size(reduction_size);
   int const aligned_outer = fp8_runtime::aligned_scale_outer_dim(outer_dim);
   if (!buffer.defined() || buffer.device() != scale.device() ||
-      buffer.scalar_type() != scale.scalar_type() || buffer.size(0) != outer_dim ||
-      buffer.size(1) != packed_scale_k || buffer.stride(0) != 1 ||
-      buffer.stride(1) != aligned_outer) {
-    buffer = allocate_legacy_col_major_scale_buffer(scale, outer_dim, reduction_size);
+      buffer.scalar_type() != scale.scalar_type() ||
+      buffer.size(0) != outer_dim || buffer.size(1) != packed_scale_k ||
+      buffer.stride(0) != 1 || buffer.stride(1) != aligned_outer) {
+    buffer = allocate_legacy_col_major_scale_buffer(
+        scale, outer_dim, reduction_size);
   }
   buffer.copy_(scale);
   return buffer;
@@ -457,9 +460,10 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                                               kNumStages,
                                               true>() == 203484,
                 "Unexpected fused-residual dynamic shared memory size");
-  static_assert(kDynamicSmemBytes + kSchedulerSmemReservationBytes <=
-                    kSm100MaxDynamicSmemBytes,
-                "SM100 FP8 fast path must leave scheduler shared memory headroom");
+  static_assert(
+      kDynamicSmemBytes + kSchedulerSmemReservationBytes <=
+          kSm100MaxDynamicSmemBytes,
+      "SM100 FP8 fast path must leave scheduler shared memory headroom");
 
   auto &cache = get_linear_fp8_descriptor_cache(LinearFp8RuntimeKey{
       BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 1, kWithResidual});
@@ -473,8 +477,9 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
   void *weight_ptr = weight_q.data_ptr();
   torch::Tensor const &internal_input_scale = materialize_internal_scale_tensor(
       cache, input_scale, BATCH_SIZE, REDUCTION_SIZE, true);
-  torch::Tensor const &internal_weight_scale = materialize_internal_scale_tensor(
-      cache, weight_scale, OUTPUT_SIZE, REDUCTION_SIZE, false);
+  torch::Tensor const &internal_weight_scale =
+      materialize_internal_scale_tensor(
+          cache, weight_scale, OUTPUT_SIZE, REDUCTION_SIZE, false);
   void *input_scale_ptr = internal_input_scale.data_ptr();
   void *weight_scale_ptr = internal_weight_scale.data_ptr();
   void *residual_ptr = nullptr;
@@ -665,10 +670,7 @@ void launch_linear_fp8_1d1d_sm100(torch::Tensor const &input_q,
                                   : "linear_fp8_1d1d_sm100");
 }
 
-template <int BATCH_SIZE,
-          int OUTPUT_SIZE,
-          int REDUCTION_SIZE,
-          int SPLIT_K>
+template <int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE, int SPLIT_K>
 void launch_linear_fp8_1d1d_sm100_splitk(torch::Tensor const &input_q,
                                          torch::Tensor const &input_scale,
                                          torch::Tensor const &weight_q,
@@ -706,9 +708,10 @@ void launch_linear_fp8_1d1d_sm100_splitk(torch::Tensor const &input_q,
                                               kNumStages,
                                               false>() == 205516,
                 "Unexpected split-K dynamic shared memory size");
-  static_assert(kDynamicSmemBytes + kSchedulerSmemReservationBytes <=
-                    kSm100MaxDynamicSmemBytes,
-                "SM100 FP8 split-K path must leave scheduler shared memory headroom");
+  static_assert(
+      kDynamicSmemBytes + kSchedulerSmemReservationBytes <=
+          kSm100MaxDynamicSmemBytes,
+      "SM100 FP8 split-K path must leave scheduler shared memory headroom");
 
   auto &cache = get_linear_fp8_descriptor_cache(LinearFp8RuntimeKey{
       BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, SPLIT_K, false});
@@ -722,8 +725,9 @@ void launch_linear_fp8_1d1d_sm100_splitk(torch::Tensor const &input_q,
   void *weight_ptr = weight_q.data_ptr();
   torch::Tensor const &internal_input_scale = materialize_internal_scale_tensor(
       cache, input_scale, BATCH_SIZE, REDUCTION_SIZE, true);
-  torch::Tensor const &internal_weight_scale = materialize_internal_scale_tensor(
-      cache, weight_scale, OUTPUT_SIZE, REDUCTION_SIZE, false);
+  torch::Tensor const &internal_weight_scale =
+      materialize_internal_scale_tensor(
+          cache, weight_scale, OUTPUT_SIZE, REDUCTION_SIZE, false);
   void *input_scale_ptr = internal_input_scale.data_ptr();
   void *weight_scale_ptr = internal_weight_scale.data_ptr();
   if (!cache.splitk_accum_buffer.defined() ||
@@ -837,9 +841,8 @@ void launch_linear_fp8_1d1d_sm100_splitk(torch::Tensor const &input_q,
     cache.kernel_configured = true;
   }
 
-  constexpr int kNumOutputTiles =
-      ((BATCH_SIZE + BLOCK_M - 1) / BLOCK_M) *
-      ((OUTPUT_SIZE + BLOCK_N - 1) / BLOCK_N);
+  constexpr int kNumOutputTiles = ((BATCH_SIZE + BLOCK_M - 1) / BLOCK_M) *
+                                  ((OUTPUT_SIZE + BLOCK_N - 1) / BLOCK_N);
 
   cache.splitk_accum_buffer.zero_();
 
@@ -982,11 +985,14 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
     BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)                                   \
   case REDUCTION_SIZE:                                                         \
     switch (split_k) {                                                         \
-      DISPATCH_LINEAR_FP8_SPLITK_CASE(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 2) \
-      DISPATCH_LINEAR_FP8_SPLITK_CASE(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 4) \
-      DISPATCH_LINEAR_FP8_SPLITK_CASE(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 8) \
+      DISPATCH_LINEAR_FP8_SPLITK_CASE(                                         \
+          BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 2)                          \
+      DISPATCH_LINEAR_FP8_SPLITK_CASE(                                         \
+          BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 4)                          \
+      DISPATCH_LINEAR_FP8_SPLITK_CASE(                                         \
+          BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 8)                          \
       default:                                                                 \
-        TORCH_CHECK(false, "Unsupported split_k dispatch");                   \
+        TORCH_CHECK(false, "Unsupported split_k dispatch");                    \
     }                                                                          \
     break;
 
@@ -1021,16 +1027,26 @@ void linear_fp8_1d2d_sm100_kernel(torch::Tensor input_q,
 #define DISPATCH_LINEAR_FP8_BATCH_SIZE_CASE_WITH_SPLITK(BATCH_SIZE)            \
   case BATCH_SIZE:                                                             \
     switch (reduction_size) {                                                  \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 128) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 256) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 384) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 512) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 768) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 1024) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 1536) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 2048) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 4096) \
-      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(BATCH_SIZE, 128, 7168) \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 128)                                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 256)                                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 384)                                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 512)                                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 768)                                                \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 1024)                                               \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 1536)                                               \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 2048)                                               \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 4096)                                               \
+      DISPATCH_LINEAR_FP8_REDUCTION_SIZE_CASE_WITH_SPLITK(                     \
+          BATCH_SIZE, 128, 7168)                                               \
       default:                                                                 \
         TORCH_CHECK(false, "Unsupported reduction_size dispatch");             \
     }                                                                          \

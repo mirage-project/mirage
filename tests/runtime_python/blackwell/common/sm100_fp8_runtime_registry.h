@@ -89,8 +89,7 @@ inline bool is_valid_deepgemm_scale_layout(int outer_dim,
                                            int64_t stride1) {
   return shape0 == outer_dim &&
          shape1 == packed_scale_k_for_reduction_size(reduction_size) &&
-         stride0 == 1 &&
-         stride1 == aligned_scale_outer_dim(outer_dim);
+         stride0 == 1 && stride1 == aligned_scale_outer_dim(outer_dim);
 }
 
 inline PackedScaleLayout detect_scale_layout(int outer_dim,
@@ -110,23 +109,21 @@ inline PackedScaleLayout detect_scale_layout(int outer_dim,
   return PackedScaleLayout::Invalid;
 }
 
-inline std::vector<int64_t>
-expected_deepgemm_scale_shape(int outer_dim, int reduction_size) {
+inline std::vector<int64_t> expected_deepgemm_scale_shape(int outer_dim,
+                                                          int reduction_size) {
   return {outer_dim, packed_scale_k_for_reduction_size(reduction_size)};
 }
 
-inline std::vector<int64_t>
-expected_deepgemm_scale_stride(int outer_dim) {
+inline std::vector<int64_t> expected_deepgemm_scale_stride(int outer_dim) {
   return {1, aligned_scale_outer_dim(outer_dim)};
 }
 
-inline std::vector<int64_t>
-expected_rowmajor_scale_shape(int outer_dim, int reduction_size) {
+inline std::vector<int64_t> expected_rowmajor_scale_shape(int outer_dim,
+                                                          int reduction_size) {
   return {outer_dim, packed_scale_k_for_reduction_size(reduction_size)};
 }
 
-inline std::vector<int64_t>
-expected_rowmajor_scale_stride(int reduction_size) {
+inline std::vector<int64_t> expected_rowmajor_scale_stride(int reduction_size) {
   return {packed_scale_k_for_reduction_size(reduction_size), 1};
 }
 

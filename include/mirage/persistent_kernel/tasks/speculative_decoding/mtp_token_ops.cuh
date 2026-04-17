@@ -35,12 +35,11 @@ namespace kernel {
 //   SLOT_IDX: which column to write (compile-time, from static unroll)
 //   NUM_SLOTS: total columns in dst
 template <int BATCH_SIZE, int NUM_SLOTS, int SLOT_IDX>
-__device__ __forceinline__ void mtp_token_scatter_kernel(
-    void const *__restrict__ src_ptr,
-    void *__restrict__ dst_ptr) {
+__device__ __forceinline__ void
+    mtp_token_scatter_kernel(void const *__restrict__ src_ptr,
+                             void *__restrict__ dst_ptr) {
 
-  long long const *__restrict__ src =
-      static_cast<long long const *>(src_ptr);
+  long long const *__restrict__ src = static_cast<long long const *>(src_ptr);
   long long *__restrict__ dst = static_cast<long long *>(dst_ptr);
 
   int b = threadIdx.x;
@@ -53,9 +52,9 @@ __device__ __forceinline__ void mtp_token_scatter_kernel(
 // Same pattern as token scatter but for float32 values.
 // Used to accumulate P_draft(token) per draft step.
 template <int BATCH_SIZE, int NUM_SLOTS, int SLOT_IDX>
-__device__ __forceinline__ void mtp_float_scatter_kernel(
-    void const *__restrict__ src_ptr,
-    void *__restrict__ dst_ptr) {
+__device__ __forceinline__ void
+    mtp_float_scatter_kernel(void const *__restrict__ src_ptr,
+                             void *__restrict__ dst_ptr) {
   float const *__restrict__ src = static_cast<float const *>(src_ptr);
   float *__restrict__ dst = static_cast<float *>(dst_ptr);
   int b = threadIdx.x;
@@ -83,22 +82,20 @@ __device__ __forceinline__ void mtp_float_scatter_kernel(
 // Outputs:
 //   num_new_tokens: [MAX_REQUESTS] int32 — set to NUM_DRAFT + 1
 template <int NUM_DRAFT, int MAX_SEQ_LEN>
-__device__ __forceinline__ void mtp_prepare_verify_input_kernel(
-    void const *__restrict__ main_token_ptr,
-    void const *__restrict__ draft_tokens_ptr,
-    void *__restrict__ tokens_buffer_ptr,
-    void const *__restrict__ step_ptr,
-    void *__restrict__ num_new_tokens_ptr) {
+__device__ __forceinline__ void
+    mtp_prepare_verify_input_kernel(void const *__restrict__ main_token_ptr,
+                                    void const *__restrict__ draft_tokens_ptr,
+                                    void *__restrict__ tokens_buffer_ptr,
+                                    void const *__restrict__ step_ptr,
+                                    void *__restrict__ num_new_tokens_ptr) {
 
   long long const *__restrict__ main_token =
       static_cast<long long const *>(main_token_ptr);
   long long const *__restrict__ draft_tokens =
       static_cast<long long const *>(draft_tokens_ptr);
-  long long *__restrict__ tokens =
-      static_cast<long long *>(tokens_buffer_ptr);
+  long long *__restrict__ tokens = static_cast<long long *>(tokens_buffer_ptr);
   int const *__restrict__ step = static_cast<int const *>(step_ptr);
-  int *__restrict__ num_new_tokens =
-      static_cast<int *>(num_new_tokens_ptr);
+  int *__restrict__ num_new_tokens = static_cast<int *>(num_new_tokens_ptr);
 
   int t_id = threadIdx.x;
   // blockIdx.x = request index
