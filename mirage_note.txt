@@ -1,2 +1,0 @@
-test demo:
---use-mirage --output-dir ~/mirage/compiled_kernels --model Qwen/Qwen3-0.6B
