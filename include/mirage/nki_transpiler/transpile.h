@@ -46,8 +46,6 @@ struct STensorMeta {
 struct NKITranspilerConfig {
   // Target compute capability
   int target_cc;
-  // Whether use double buffer
-  bool use_double_buffer;
 };
 
 struct NeuronArch {

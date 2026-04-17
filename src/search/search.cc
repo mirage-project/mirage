@@ -180,8 +180,6 @@ void KernelGraphGenerator::generate_next_operator(
     for (type::KNOperatorType op_type : dim_strategy.get_knop_cand()) {
       if (op_type != type::KNOperatorType::KN_CUSTOMIZED_OP) {
         // Case K2: generate a pre-defined kernel operator
-        std::vector<std::shared_ptr<AbstractExpr>> inputs;
-        std::vector<std::vector<DTensor>> tensors;
         for (auto const &input_idx :
              dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
           if (!check_order(input_idx, op_type, *c.kn_graph)) {
@@ -365,8 +363,6 @@ void KernelGraphGenerator::generate_next_operator(
           op_type == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
         continue;
       }
-      std::vector<std::shared_ptr<AbstractExpr>> inputs;
-      std::vector<std::vector<STensor>> tensors;
       for (auto const &input_idx :
            dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
         if (!check_order(input_idx, op_type, *c.tb_graph)) {

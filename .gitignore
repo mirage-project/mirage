@@ -43,9 +43,6 @@ wheelhouse/
 # Bundled native libs we build
 /python/mirage/lib/
 
-# Bundled native libs we build
-/python/mirage/lib/
-
 # Mac OS .DS_Store
 .DS_Store
 
@@ -59,8 +56,6 @@ demo/mirage_search_checkpoint.json
 demo/*generated*
 benchmark/*generated*
 
-# Rust
-src/search/abstract_expr/abstract_subexpr/*.lock
 # Nix
 /result
 
@@ -83,4 +78,3 @@ ncu_tmp
 #nsys
 *.nsys-rep
 *.sqlite
-nvidia/
