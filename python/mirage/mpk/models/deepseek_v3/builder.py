@@ -1080,14 +1080,9 @@ class DeepSeekV3Builder(GraphBuilder):
         shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
         gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
         has_shared_scale = gate_scale_key in state_dict
-              f"up_proj={tuple(shared_up_w.shape)} "
-              f"expected_local_inter={self.moe_intermediate_size} "
-              f"world_size={self.world_size}", flush=True)
         # Verify shard was applied: gate_proj.shape[0] should equal moe_intermediate_size
         if shared_gate_w.shape[0] != self.moe_intermediate_size:
-                  f"gate_proj.shape[0]={shared_gate_w.shape[0]} != "
-                  f"moe_intermediate_size={self.moe_intermediate_size}. "
-                  f"Expected {self.moe_intermediate_size} after TP shard.", flush=True)
+            pass  # shard mismatch warning removed
         # Interleave gate/up at split = min(linear_grid//2, scale_dim_0).
         # Scale dim 0 is moe_intermediate_size/128. For small intermediate (2048),
         # scale_dim_0 = 16 which limits the split.
@@ -1101,8 +1096,6 @@ class DeepSeekV3Builder(GraphBuilder):
             shared_split -= 1
             if shared_split < 1:
                 shared_split = 1; break
-              f"linear_grid={linear_grid} scale_dim_0={scale_dim_0} "
-              f"shared_split={shared_split}", flush=True)
         fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
         state_dict[f"{fused_key}.weight"] = _shuffle_tensors(
             [shared_gate_w, shared_up_w], split=shared_split, dim=0)
@@ -1120,8 +1113,6 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_shared_mid",
             io_category="cuda_tensor",
         )
-              f"shared_mid_dim1={2*self.moe_intermediate_size} "
-              f"silu_grid={shared_split}", flush=True)
         self._fp8_linear(self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
                          shared_mid,
                          grid_dim=(grid_for_rmsnorm_linear_layer(
@@ -1145,12 +1136,8 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict, f"{shared_prefix}down_proj.weight",
             f"layer_{layer_idx}_shared_expert_down")
         _down_w = state_dict[f"{shared_prefix}down_proj.weight"]
-              f"silu_out_dim1={self.moe_intermediate_size} "
-              f"down_input_K_should_match={_down_w.shape[1]}=={self.moe_intermediate_size}",
-              flush=True)
         if _down_w.shape[1] != self.moe_intermediate_size:
-                  f"down_proj.shape[1]={_down_w.shape[1]} != "
-                  f"moe_intermediate_size={self.moe_intermediate_size}", flush=True)
+            pass  # shard mismatch warning removed
         shared_residual = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
             dtype=bfloat16,
@@ -1907,7 +1894,7 @@ class DeepSeekV3Builder(GraphBuilder):
         step_raw = self.mpk.meta_tensors.get("step", None)
         num_new_raw = self.mpk.meta_tensors.get("num_new_tokens", None)
 
-        if tokens_buf_raw is not None and step_raw is not None:
+        if tokens_buf_raw is not None and step_raw is not None and not os.environ.get("MPK_SKIP_PREPARE_VERIFY"):
             d_tokens_buf = self.mpk.attach_input(
                 torch_tensor=tokens_buf_raw, name="mtp_tokens_buffer")
             d_step = self.mpk.attach_input(
