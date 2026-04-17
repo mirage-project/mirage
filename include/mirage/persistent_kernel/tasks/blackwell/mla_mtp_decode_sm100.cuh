@@ -59,9 +59,13 @@ static constexpr int MAX_SK = 32;
 // SMEM for main kernel
 static constexpr int MTP_SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES; // 160KB
 
+} // namespace mla_mtp
+} // namespace kernel
+
+// sm100_ptx.cuh defines kernel::sm100_ptx — must be included at global scope
 #include "sm100_ptx.cuh"
 
-} // namespace mla_mtp
+namespace kernel {
 
 // ============ MLA MTP Decode Device Function ============
 // blockIdx.x → decomposed into (gi, si) via params
@@ -82,14 +86,16 @@ __device__ __noinline__ void
                                    int bi // head_group, split_idx, batch_idx
     ) {
   using namespace mla_mtp;
-  using namespace kernel::sm100_ptx;
+  using namespace ::kernel::sm100_ptx;
 
   int const tid = threadIdx.x;
-  if (tid >= TB) {
-    return; // guard for MPK's 256-thread workers
-  }
+  // MPK workers have 256 threads but MLA kernel uses 128.
+  // Cannot return early — must participate in all __syncthreads().
+  bool const active = (tid < TB);
   int const wid = tid / 32;
 
+  // gi/t0/t1 checks are uniform across all threads (same params).
+  // If condition is true, ALL threads return — no syncthreads mismatch.
   if (gi >= num_head_groups) {
     return;
   }
@@ -154,7 +160,7 @@ __device__ __noinline__ void
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
 
-    if (tile > t0) {
+    if (active && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
         int addr = taddr + (tid << 16) + c;
         asm volatile(
@@ -295,8 +301,14 @@ __device__ __noinline__ void
     int P0_smem = work_smem;
     int P1_smem = work_smem + TILE_BYTES;
 
-    // Pass 1: Find global max
+    // Pass 1 + Pass 2: softmax — only active threads (tid < 128)
+    // Threads 128-255 must NOT access TMEM or write to P smem, because:
+    // - tcgen05 with tid>=128 accesses invalid TMEM rows
+    // - P smem writes at row_base = p_base + tid*128 would overflow into V[vc=0]
     float tile_max = -1e30f;
+    float tile_sum = 0.0f;
+    if (active) {
+    // Pass 1: Find global max
     for (int c = 0; c < TILE_S; c += 16) {
       float t16[16];
       int addr = taddr + (tid << 16) + c;
@@ -329,7 +341,6 @@ __device__ __noinline__ void
     }
 
     // Pass 2: Compute exp, write P, accumulate sum
-    float tile_sum = 0.0f;
     for (int half = 0; half < 2; half++) {
       int p_base = (half == 0) ? P0_smem : P1_smem;
       int row_base = p_base + tid * 128;
@@ -408,6 +419,7 @@ __device__ __noinline__ void
         }
       }
     }
+    } // end if (active) for softmax
 
     float nm = fmaxf(row_max, tile_max);
     float corr = __expf(row_max - nm);
@@ -415,7 +427,7 @@ __device__ __noinline__ void
     __syncthreads();
 
     // Scale O[128:511] in TMEM
-    if (tile > t0) {
+    if (active && tile > t0) {
       for (int c = TILE_S; c < D_V; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
@@ -527,11 +539,11 @@ __device__ __noinline__ void
     }
 
     __syncthreads();
-    mbar_wait(mainloop_bar, 0);
+    if (active) mbar_wait(mainloop_bar, 0);
 
     // Merge saved O[0:127]
-    asm volatile("tcgen05.fence::after_thread_sync;");
-    if (tile > t0) {
+    if (active) asm volatile("tcgen05.fence::after_thread_sync;");
+    if (active && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
@@ -586,6 +598,7 @@ __device__ __noinline__ void
   }
 
   // Epilogue: normalize and write to Oa
+  if (active) {
   asm volatile("tcgen05.fence::after_thread_sync;");
   float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
   for (int vc = 0; vc < V_CHUNKS; vc++) {
@@ -623,7 +636,9 @@ __device__ __noinline__ void
     }
   }
 
-  La[block_linear * 128 + tid] = logf(fmaxf(row_sum, 1e-30f)) + row_max;
+  if (active)
+    La[block_linear * 128 + tid] = logf(fmaxf(row_sum, 1e-30f)) + row_max;
+  } // end if (active) for epilogue
 
   __syncthreads();
   if (wid == 0) {
@@ -648,7 +663,7 @@ __device__ __noinline__ void
                                    int gi,
                                    int bi) {
   using namespace mla_mtp;
-  using namespace kernel::sm100_ptx;
+  using namespace ::kernel::sm100_ptx;
   int const tid = threadIdx.x;
 
   int const row = tid % 128;

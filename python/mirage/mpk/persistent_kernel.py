@@ -24,12 +24,18 @@ HARD_CODE = """
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
-  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
+  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
+  int max_seq_length, total_num_requests;
   long long eos_token_id;
-  int allocate_nvshmem_teams;
+  int allocate_nvshmem_teams, is_test_mode;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLi", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams)) {
+  if (!PyArg_ParseTuple(args, 
+      "OOiiiiiiLii", 
+      &meta_list, &py_profiler_buffer, 
+      &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, 
+      &eos_token_id, 
+      &allocate_nvshmem_teams, &is_test_mode)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -44,7 +50,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor) {
+    if(!tensor && !is_test_mode) {
       PyErr_Format(PyExc_TypeError, "Failed to convert item %d (meta) to void pointer", i);
       return NULL;
     }
@@ -52,7 +58,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, is_test_mode);
 
   Py_RETURN_NONE;
 }
@@ -148,6 +154,7 @@ def get_compile_command(
     num_local_schedulers=None,
     num_remote_schedulers=None,
     use_cutlass_kernel=True,
+    test_mode=False,
 ):
     max_worker_per_scheduler = 128
     if num_workers != None and num_local_schedulers != None and num_remote_schedulers != None:
@@ -201,6 +208,8 @@ def get_compile_command(
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
 
+    if test_mode:
+        flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
         flags = flags + ["-DMODE_OFFLINE"]
     elif mpk.mode == "online":
@@ -221,6 +230,10 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
     # Use when debugging
     # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
+    if os.environ.get("MPK_DEBUG_CTA112", "0") == "1":
+        flags = flags + ["-DMPK_DEBUG_CTA112"]
+    if os.environ.get("MPK_DEBUG_MLA", "0") == "1":
+        flags = flags + ["-DMPK_DEBUG_MLA"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -235,7 +248,6 @@ def get_compile_command(
 
     if target_cc == 90:
         specific_cmd = [
-            "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_HOPPER",
@@ -243,10 +255,12 @@ def get_compile_command(
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     elif target_cc == 100:
         specific_cmd = [
-            "-arch=sm_100a",
             "-gencode=arch=compute_100a,code=sm_100a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_BLACKWELL",
+            # CUDA 13+ dropped __CUDA_ARCH_FEAT_SM100_ALL; define CUTLASS
+            # SM100a feature flags manually for CUTLASS v4.2.1 compatibility
+            "-DCUTLASS_ARCH_MMA_SM100A_ENABLED=1",
         ]
     else:
         specific_cmd = [
@@ -279,9 +293,12 @@ class PersistentKernel:
         spec_decode_config: SpecDecodeConfig,
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
+        test_mode: bool = False,
     ):
         self.__finalized__ = False
         self._is_compiled = False
+        self.test_mode = test_mode
+
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
         self.mode = mode
@@ -311,10 +328,17 @@ class PersistentKernel:
         }
         self.allocate_nvshmem_teams = 0
         # determine total number of requests for offline serving
-        self.total_num_requests = meta_tensors["tokens"].shape[0]
-        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
-        # Check tensor shapes
+
+        if test_mode:
+            # Skip all following checks
+            self.total_num_requests = 1
+            return
+
+        self.total_num_requests = meta_tensors["tokens"].shape[0]
+
+        # Checks
+        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
@@ -326,7 +350,7 @@ class PersistentKernel:
         assert paged_kv_indices_buffer.shape[0] <= self.max_num_pages, f"paged_kv_indices_buffer.shape: {paged_kv_indices_buffer.shape}, max_num_pages: {self.max_num_pages}"
         paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer"]
         assert paged_kv_last_page_len_buffer.shape[0] <= self.max_num_batched_requests, f"paged_kv_last_page_len_buffer.shape: {paged_kv_last_page_len_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
-        
+
         # check type of meta_tensors
         assert self.meta_tensors["tokens"].dtype == torch.int64, f"tokens.dtype: {self.meta_tensors['tokens'].dtype}"
         assert self.meta_tensors["input_tokens"].dtype == torch.int64, f"input_tokens.dtype: {self.meta_tensors['input_tokens'].dtype}"
@@ -337,18 +361,44 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
+    
+    @classmethod
+    def get_default_init_parameters(cls):
+        return {
+            "mode": "offline",
+            "world_size": 1,
+            "mpi_rank": 0,
+            "num_workers": 1,
+            "num_local_schedulers": 4,
+            "num_remote_schedulers": 0,
+            "max_seq_length": 1,
+            "max_num_batched_requests": 1,
+            "max_num_batched_tokens": 1,
+            "max_num_pages": 1,
+            "page_size": 1,
+            "meta_tensors": dict(),
+            "profiler_tensor": None,
+            "trace_name": "test_trace",
+            "spec_decode_config": None,
+            "use_cutlass_kernel": False,
+            "eos_token_id": -1,
+        }
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
         strides = tuple([s for s in torch_tensor.stride()])
-        # Assert a row-major layout
-        for d in range(len(dims) - 1):
-            assert strides[d] == strides[d + 1] * dims[d + 1]
+        # Check layout: row-major or column-major (for FP8 scale tensors)
+        is_row_major = all(strides[d] == strides[d + 1] * dims[d + 1] for d in range(len(dims) - 1))
+        is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
+        assert is_row_major or is_col_major, \
+            f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
         dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
-        self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
+        # Sanitize name for C++ codegen (dots are illegal in identifiers)
+        safe_name = name.replace('.', '_')
+        self.kn_graph.attach_torch_tensor(t, torch_tensor, safe_name)
         return t
 
     def new_tensor(
@@ -366,8 +416,9 @@ class PersistentKernel:
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
+        safe_name = name.replace('.', '_') if name else name
         if io_category == "cuda_tensor":
-            self.kn_graph.attach_cuda_tensor(t, name)
+            self.kn_graph.attach_cuda_tensor(t, safe_name)
         elif io_category == "nvshmem_tensor":
             self.kn_graph.attach_nvshmem_tensor(t, name)
         else:
@@ -799,24 +850,54 @@ class PersistentKernel:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
     # MLA (Multi-head Latent Attention) Layers
+    def mla_kv_gather_layer(
+        self,
+        c_latent_new: DTensor,
+        k_pe_new: DTensor,
+        paged_cache: DTensor,
+        contiguous_kv: DTensor,
+        mla_params: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        d_k, d_v, page_size = mla_params
+        params = [d_k, d_v, page_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(paged_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(contiguous_kv, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [c_latent_new, k_pe_new, paged_cache, contiguous_kv], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mla_kv_gather_sm100", params)
+
     def mla_decode_layer(
         self,
         q_input: DTensor,         # Q tensor (attached with TMA desc)
         kv_input: DTensor,        # KV cache tensor (attached with TMA desc)
-        output_partial: DTensor,  # partial O: [B*sk, D_V*NUM_HEADS] float32
-        output_lse: DTensor,      # partial LSE: [B*sk, NUM_HEADS] float32
-        mla_params: tuple,        # (num_heads, d_k, d_v, num_splits, kv_len)
+        output_partial: DTensor,  # partial O: [B*Q_LEN*sk, D_V*NUM_HEADS] float32 (or bf16)
+        output_lse: DTensor,      # partial LSE: [B*Q_LEN*sk, NUM_HEADS] float32
+        mla_params: tuple,        # (num_heads, d_k, d_v, num_splits, kv_len) or (..., q_len)
         grid_dim: tuple,
         block_dim: tuple,
+        q_len: int = 1,
     ):
-        num_heads, d_k, d_v, num_splits, kv_len = mla_params
-        params = [num_heads, d_k, d_v, num_splits, kv_len]
+        # Allow q_len passed via mla_params 6-tuple as well as separate arg.
+        if len(mla_params) == 6:
+            num_heads, d_k, d_v, num_splits, kv_len, q_len = mla_params
+        else:
+            num_heads, d_k, d_v, num_splits, kv_len = mla_params
+        params = [num_heads, d_k, d_v, num_splits, kv_len, q_len]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_input, (0, -1, -1), -1, True)
         tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        # When q_len > 1, grid is (num_splits, num_head_groups, 1). grid.y
+        # blocks read the full output buffer and offset internally via
+        # block_linear (bi*num_head_groups*sk + gi*sk + si). Don't partition.
+        partial_map = (-1, -1, -1) if q_len > 1 else (0, -1, -1)
+        tb_graph.new_input(output_partial, partial_map, -1, True)
+        tb_graph.new_input(output_lse, partial_map, -1, True)
         self.kn_graph.customized(
             [q_input, kv_input, output_partial, output_lse], tb_graph
         )
@@ -826,18 +907,27 @@ class PersistentKernel:
         self,
         input_partial: DTensor,   # partial O from decode tasks
         input_lse: DTensor,       # partial LSE from decode tasks
-        output: DTensor,          # final O: [B, NUM_HEADS, D_V] bf16
-        mla_params: tuple,        # (num_heads, d_v, num_splits, d_start, d_count)
+        output: DTensor,          # final O: [B*Q_LEN, NUM_HEADS, D_V] bf16
+        mla_params: tuple,        # (num_heads, d_v, num_splits, d_start, d_count) or (..., q_len)
         grid_dim: tuple,
         block_dim: tuple,
+        q_len: int = 1,
     ):
-        num_heads, d_v, num_splits, d_start, d_count = mla_params
-        params = [num_heads, d_v, num_splits, d_start, d_count]
+        if len(mla_params) == 6:
+            num_heads, d_v, num_splits, d_start, d_count, q_len = mla_params
+        else:
+            num_heads, d_v, num_splits, d_start, d_count = mla_params
+        params = [num_heads, d_v, num_splits, d_start, d_count, q_len]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        # When q_len > 1, grid.x maps to head_group (not batch). The kernel
+        # uses block_linear = bi * num_head_groups * sk + gi * sk to
+        # offset into the same shared input buffer, so we must NOT partition
+        # input/output along grid.x — every block needs the full base pointer.
+        partial_map = (-1, -1, -1) if q_len > 1 else (0, -1, -1)
+        tb_graph.new_input(input_partial, partial_map, -1, True)
+        tb_graph.new_input(input_lse, partial_map, -1, True)
+        tb_graph.new_input(output, partial_map, -1, True)
         self.kn_graph.customized(
             [input_partial, input_lse, output], tb_graph
         )
@@ -1058,8 +1148,9 @@ class PersistentKernel:
         # weight_fp8:          (num_experts, 2*intermediate_size, hidden_size)  FP8 E4M3
         # weight_scale:        (num_experts, 2*intermediate_size, hidden_size//128)  float32
         # moe_routing_indices: (num_experts, batch_size)  int32, expert-major
-        # moe_mask:            (num_experts + 1,)         int32
+        # moe_mask:            (num_experts + 1,)         int32  1-index, not 0-index!
         # output:              (batch_size, num_experts_per_tok, 2*intermediate_size)  BF16
+        # The scale factor is fixed to 128.
         assert input_fp8.num_dims == 2
         assert input_scale.num_dims == 2
         assert weight_fp8.num_dims == 3
@@ -1068,12 +1159,14 @@ class PersistentKernel:
         assert moe_mask.num_dims == 1
         assert output.num_dims == 3
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
-        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
-        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
-        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
-        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        # Note: store_in_dmem=True for all inputs to work around a TBGraph
+        # segfault with 3D tensors when store_in_dmem=False.
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, True)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, True)
         tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale,
@@ -1108,18 +1201,96 @@ class PersistentKernel:
         assert moe_mask.num_dims == 1
         assert output.num_dims == 3
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, False)
-        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, False)
-        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, False)
-        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, False)
-        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, False)
-        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, False)
+        # Note: store_in_dmem=True for all inputs to work around a TBGraph
+        # segfault with 3D tensors when store_in_dmem=False.
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, True)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, True)
         tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale,
              moe_routing_indices, moe_mask, output], tb_graph)
         assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
         self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
+
+    # === FP8 Dense Layers ===
+    def quantize_fp8_layer(
+        self,
+        input: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        scale_ue8m0: bool = True,
+    ):
+        """Quantize BF16 input to FP8 with block-wise scale.
+
+        scale_ue8m0=True: output scale is packed UE8M0 uint32 (for FP8 linear GEMM)
+        scale_ue8m0=False: output scale is float32 (for MoE group GEMM)
+        """
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output_fp8, output_scale], tb_graph)
+        task_name = "quantize_fp8_sm100" if scale_ue8m0 else "quantize_fp8_f32scale_sm100"
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def linear_fp8_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Grid partitions output along dim0 (output_size): each block handles 128 rows
+        # input_fp8 and input_scale: not partitioned (all blocks read same input)
+        # weight_fp8: partitioned along dim0 by grid.x (output dim)
+        # weight_scale: partitioned along dim1 by grid.x (output dim, stored as [pk, aligned_M])
+        # output: partitioned along dim1 by grid.x
+        # Grid partitions: weight dim0=output, scale dim0=M (column-major), output dim1
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)    # grid.x splits dim0 (output)
+        tb_graph.new_input(weight_scale, (0, -1, -1), -1, True)  # grid.x splits dim0 (M=output, col-major)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)        # grid.x splits dim1 (output)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_fp8_sm100", params)
+
+    def linear_fp8_with_residual_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        params = [1]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)    # grid.x splits dim0
+        tb_graph.new_input(weight_scale, (0, -1, -1), -1, True)  # grid.x splits dim0 (col-major M)
+        tb_graph.new_input(residual, (1, -1, -1), -1, True)      # grid.x splits dim1
+        tb_graph.new_input(output, (1, -1, -1), -1, True)        # grid.x splits dim1
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, residual, output],
+            tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "linear_fp8_with_residual_sm100", params)
 
     def moe_silu_mul_layer(
         self,
@@ -1347,6 +1518,26 @@ class PersistentKernel:
         tb_graph.new_input(output, (last_dim, -1, -1), 1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "identity")
+
+    def elementwise_add_layer(
+        self,
+        input_a: DTensor,
+        input_b: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Element-wise add: output = input_a + input_b.
+        Used for residual connections when fused with_residual kernels are broken."""
+        assert input_a.num_dims == 2
+        assert input_b.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_a, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_b, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([input_a, input_b, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
 
     def silu_mul_linear_with_residual_layer(
         self,
@@ -1578,6 +1769,192 @@ class PersistentKernel:
             raise ValueError(f"Invalid spec decode method: {method}")
         return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
+    # === MTP (Multi-Token Prediction) Layers ===
+    def mtp_token_scatter_layer(
+        self,
+        src: DTensor,
+        dst: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        batch_size: int,
+        num_slots: int,
+        slot_idx: int,
+    ):
+        params = [batch_size, num_slots, slot_idx]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(src, (-1, -1, -1), -1, True)
+        tb_graph.new_input(dst, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([src, dst], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_token_scatter", params)
+
+    def mtp_prepare_verify_layer(
+        self,
+        main_token: DTensor,
+        draft_tokens: DTensor,
+        tokens_buffer: DTensor,
+        step: DTensor,
+        num_new_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+        max_seq_len: int,
+    ):
+        params = [num_draft_tokens, max_seq_len]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(main_token, (-1, -1, -1), -1, True)
+        tb_graph.new_input(draft_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
+        tb_graph.new_input(step, (-1, -1, -1), -1, True)
+        tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [main_token, draft_tokens, tokens_buffer, step, num_new_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_prepare_verify", params)
+
+    def softmax_gather_layer(
+        self,
+        logits: DTensor,          # [batch, vocab_size] BF16
+        token_ids: DTensor,       # [batch, 1] int64
+        output_probs: DTensor,    # [batch, 1] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Fused softmax + gather: output[b] = softmax(logits[b])[token_id[b]]."""
+        assert logits.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (-1, -1, -1), -1, True)
+        tb_graph.new_input(token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_probs, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([logits, token_ids, output_probs], tb_graph)
+        self.kn_graph.register_task(tb_graph, "softmax_gather_sm100")
+
+    def mtp_float_scatter_layer(
+        self,
+        src: DTensor,       # [batch, 1] float32
+        dst: DTensor,       # [batch, num_slots] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+        batch_size: int,
+        num_slots: int,
+        slot_idx: int,
+    ):
+        """Copy single float value to specific slot in buffer (compile-time index)."""
+        params = [batch_size, num_slots, slot_idx]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(src, (-1, -1, -1), -1, True)
+        tb_graph.new_input(dst, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([src, dst], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_float_scatter", params)
+
+    def prob_scatter_layer(
+        self,
+        prob: DTensor,           # [batch, 1] float32
+        step_counter: DTensor,   # [batch] int32 (runtime step position)
+        buffer: DTensor,         # [batch, max_positions] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+        max_positions: int,
+    ):
+        """Scatter current prob into per-position buffer at runtime step position."""
+        params = [max_positions]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(prob, (-1, -1, -1), -1, True)
+        tb_graph.new_input(step_counter, (-1, -1, -1), -1, True)
+        tb_graph.new_input(buffer, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([prob, step_counter, buffer], tb_graph)
+        self.kn_graph.register_task(tb_graph, "prob_scatter_sm100", params)
+
+    def prob_extract_layer(
+        self,
+        buffer: DTensor,         # [batch, max_positions] float32
+        offset: DTensor,         # [batch] int32 (runtime offset)
+        output: DTensor,         # [batch, num_extract] float32
+        grid_dim: tuple,
+        block_dim: tuple,
+        max_positions: int,
+        num_extract: int,
+    ):
+        """Extract buffer[batch, offset+1..offset+num_extract] into contiguous output."""
+        params = [max_positions, num_extract]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(buffer, (-1, -1, -1), -1, True)
+        tb_graph.new_input(offset, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([buffer, offset, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "prob_extract_sm100", params)
+
+    def mtp_verify_probabilistic_layer(
+        self,
+        draft_token_ids: DTensor,
+        target_token_ids: DTensor,
+        target_probs: DTensor,
+        draft_probs: DTensor,
+        seed: DTensor,
+        accepted_count: DTensor,
+        output_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+    ):
+        """Probabilistic verification: accept if P_target > u * P_draft."""
+        params = [num_draft_tokens]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(draft_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_probs, (-1, -1, -1), -1, True)
+        tb_graph.new_input(draft_probs, (-1, -1, -1), -1, True)
+        tb_graph.new_input(seed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [draft_token_ids, target_token_ids, target_probs, draft_probs,
+             seed, accepted_count, output_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_verify_probabilistic", params)
+
+    def mtp_verify_strict_layer(
+        self,
+        draft_token_ids: DTensor,
+        target_token_ids: DTensor,
+        accepted_count: DTensor,
+        output_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+    ):
+        params = [num_draft_tokens]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(draft_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [draft_token_ids, target_token_ids, accepted_count, output_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_verify_strict", params)
+
+    def mtp_accept_commit_layer(
+        self,
+        accepted_count: DTensor,
+        output_tokens: DTensor,
+        current_position: DTensor,
+        new_position: DTensor,
+        final_output: DTensor,
+        num_new_tokens: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,
+    ):
+        params = [num_draft_tokens]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(current_position, (-1, -1, -1), -1, True)
+        tb_graph.new_input(new_position, (-1, -1, -1), -1, True)
+        tb_graph.new_input(final_output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [accepted_count, output_tokens, current_position,
+             new_position, final_output, num_new_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_accept_commit", params)
+
     def compile(
         self,
         **kwargs,
@@ -1604,8 +1981,9 @@ class PersistentKernel:
             
         with open(json_file_path, "w") as f:
             f.write(results["json_file"])
+        hard_code = HARD_CODE
         with open(cuda_code_path, "w") as f:
-            f.write(results["cuda_code"] + HARD_CODE)
+            f.write(results["cuda_code"] + hard_code)
             
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
@@ -1716,13 +2094,23 @@ class PersistentKernel:
             profiling=True if self.profiler_tensor is not None else False,
             use_nvshmem=self.use_nvshmem,
             num_workers=self.num_workers,
-            num_local_schedulers=self.num_local_schedulers, 
+            num_local_schedulers=self.num_local_schedulers,
             num_remote_schedulers=self.num_remote_schedulers,
             use_cutlass_kernel=self.use_cutlass_kernel,
+            test_mode=self.test_mode,
         )
-        print("Compiling megakernel using the following command line:")
-        print(cc_cmd)
-        subprocess.check_call(cc_cmd)
+        precompiled_so = os.environ.get("MPK_PRECOMPILED_SO")
+        if precompiled_so and os.path.exists(precompiled_so):
+            shutil.copy(precompiled_so, so_path)
+            # Also copy task_graph.json to the directory where __FILE__ points
+            # (the .so reads json from __FILE__'s parent directory)
+            precompiled_dir = os.path.dirname(precompiled_so)
+            shutil.copy(json_file_path, os.path.join(precompiled_dir, "task_graph.json"))
+            print(f"Using precompiled .so: {precompiled_so}")
+        else:
+            print("Compiling megakernel using the following command line:")
+            print(cc_cmd)
+            subprocess.check_call(cc_cmd)
 
         import importlib.util
 
@@ -1731,23 +2119,31 @@ class PersistentKernel:
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
-        self.init_request_func = getattr(mod, "init_request_func")
         self.finalize_func = getattr(mod, "finalize_func")
         print("Finished megakernel compilation...")
 
-        #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
-        meta_tensors = list()
-        meta_tensors.append(self.meta_tensors["step"])
-        meta_tensors.append(self.meta_tensors["tokens"])
-        meta_tensors.append(self.meta_tensors["input_tokens"])
-        meta_tensors.append(self.meta_tensors["output_tokens"])
-        meta_tensors.append(self.meta_tensors["num_new_tokens"])
-        meta_tensors.append(self.meta_tensors["prompt_lengths"])
-        meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_indptr_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_indices_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_last_page_len_buffer"])
-        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
+        expected_order = [
+            "step",
+            "tokens",
+            "input_tokens",
+            "output_tokens",
+            "num_new_tokens",
+            "prompt_lengths",
+            "qo_indptr_buffer",
+            "paged_kv_indptr_buffer",
+            "paged_kv_indices_buffer",
+            "paged_kv_last_page_len_buffer",
+        ]
+        meta_tensors_ptr = []
+        for key in expected_order:
+            if key not in self.meta_tensors:
+                if self.test_mode:
+                    # In test mode, we can allow missing meta tensors and pass null pointer
+                    meta_tensors_ptr.append(0)  
+                else:
+                  raise ValueError(f"Missing meta tensor: {key}")
+            else:
+              meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
@@ -1763,11 +2159,10 @@ class PersistentKernel:
             self.total_num_requests,
             self.eos_token_id,
             self.allocate_nvshmem_teams,
+            self.test_mode,
         )
 
         self._is_compiled = True
-
-        # self.call_func = getattr(mod, "call_func")
 
     def __call__(self, **kwargs):
         stream = kwargs.get("default_stream", None)
@@ -1799,6 +2194,32 @@ class PersistentKernel:
             export_to_perfetto_trace(
                 self.profiler_tensor, trace_name
             )
+
+    def run_test_mode(self):
+        """Test-mode execution: launch the task graph once.
+
+        Input/output tensors must be pre-attached via attach_input() before
+        compile(). After run_test_mode() returns, the output tensors contain the results.
+        """
+        assert self.test_mode, "run_test_mode() is only available in test mode"
+        assert self._is_compiled, "Must call compile() before run_test_mode()"
+
+        stream = torch.cuda.current_stream()
+        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
+        stream_ptr = 0
+        if hasattr(stream, "cuda_stream"):
+            try:
+                stream_ptr = int(stream.cuda_stream)
+            except Exception:
+                try:
+                    stream_ptr = int(stream.cuda_stream.value)
+                except Exception as e:
+                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
+        elif isinstance(stream, int):
+            stream_ptr = stream
+        else:
+            raise ValueError("Invalid stream object")
+        self.launch_func(stream_ptr)
 
     def __del__(self):
         if not self.__finalized__:

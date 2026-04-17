@@ -68,21 +68,29 @@ def pytorch_mla_ref(Q, KV, sm_scale, kv_len, q_len):
 
 def test_correctness(kv_len=4096):
     B = 1
-    sm_scale = 1.0 / math.sqrt(D_K)
     device = "cuda"
 
-    print("\n  --- MPK MLA vs PyTorch ---")
-    for q_len in [1, 2, 3, 4]:
-        torch.manual_seed(42)
-        Q = torch.randn(B, q_len, NUM_HEADS, D_K, device=device, dtype=torch.bfloat16) * 0.1
-        KV = torch.randn(B, kv_len, D_K, device=device, dtype=torch.bfloat16) * 0.1
-        O = torch.zeros(B, q_len, NUM_HEADS, D_V, device=device, dtype=torch.bfloat16)
-        O_ref = pytorch_mla_ref(Q, KV, sm_scale, kv_len, q_len)
+    # Test with both original scale and DeepSeek V3's actual scale
+    scales = {
+        "original (1/sqrt(576))": 1.0 / math.sqrt(D_K),
+        "DeepSeek V3 (0.135)": 0.135234,
+    }
+    for scale_name, sm_scale in scales.items():
+        print(f"\n  --- MPK MLA vs PyTorch [scale={scale_name}] ---")
+        for q_len in [1, 2, 3, 4]:
+            torch.manual_seed(42)
+            Q = torch.randn(B, q_len, NUM_HEADS, D_K, device=device, dtype=torch.bfloat16) * 0.1
+            KV = torch.randn(B, kv_len, D_K, device=device, dtype=torch.bfloat16) * 0.1
+            O = torch.zeros(B, q_len, NUM_HEADS, D_V, device=device, dtype=torch.bfloat16)
+            O_ref = pytorch_mla_ref(Q, KV, sm_scale, kv_len, q_len)
 
-        runtime_kernel_mla_mtp.mla_mtp_test(Q, KV, O, kv_len, sm_scale, q_len)
-        diff = (O.float() - O_ref.float()).abs()
-        status = "PASSED" if diff.max().item() < 0.01 else "FAILED"
-        print(f"  Q_LEN={q_len}: max_diff={diff.max().item():.6f}  {status}")
+            runtime_kernel_mla_mtp.mla_mtp_test(Q, KV, O, kv_len, sm_scale, q_len)
+            diff = (O.float() - O_ref.float()).abs()
+            cosine = torch.nn.functional.cosine_similarity(
+                O.float().flatten().unsqueeze(0),
+                O_ref.float().flatten().unsqueeze(0)).item()
+            status = "PASSED" if diff.max().item() < 0.01 else "FAILED"
+            print(f"  Q_LEN={q_len}: max_diff={diff.max().item():.6f} cosine={cosine:.6f}  {status}")
 
     if HAS_TRTLLM:
         print("\n  --- trtllm-gen vs PyTorch (causal check) ---")
