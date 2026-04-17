@@ -230,10 +230,6 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
     # Use when debugging
     # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-    if os.environ.get("MPK_DEBUG_CTA112", "0") == "1":
-        flags = flags + ["-DMPK_DEBUG_CTA112"]
-    if os.environ.get("MPK_DEBUG_MLA", "0") == "1":
-        flags = flags + ["-DMPK_DEBUG_MLA"]
 
     if use_nvshmem:
         nvshmem_cmd = [
