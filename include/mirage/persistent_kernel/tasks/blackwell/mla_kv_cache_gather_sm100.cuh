@@ -33,14 +33,14 @@
 
 namespace kernel {
 
-template <int D_K,        // Total KV dim (576 = 512 latent + 64 rope)
-          int D_V,        // Latent dim (512)
-          int PAGE_SIZE>  // Page size (e.g., 128)
+template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
+          int D_V,       // Latent dim (512)
+          int PAGE_SIZE> // Page size (e.g., 128)
 __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
-    void const *c_latent_new_ptr,   // [num_tokens, D_V] new c_latent (normed)
-    void const *k_pe_new_ptr,       // [num_tokens, D_K - D_V] new k_pe
-    void *paged_cache_ptr,          // [num_pages, PAGE_SIZE, D_K] paged KV cache
-    void *contiguous_kv_ptr,        // [max_seq_len, D_K] output: contiguous KV
+    void const *c_latent_new_ptr, // [num_tokens, D_V] new c_latent (normed)
+    void const *k_pe_new_ptr,     // [num_tokens, D_K - D_V] new k_pe
+    void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged KV cache
+    void *contiguous_kv_ptr,      // [max_seq_len, D_K] output: contiguous KV
     int const *qo_indptr_buffer_ptr,
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
@@ -49,7 +49,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   using T = __nv_bfloat16;
   int const tid = threadIdx.x;
   int const NUM_THREADS = 128;
-  int const ROPE_DIM = D_K - D_V;  // 64
+  int const ROPE_DIM = D_K - D_V; // 64
 
   // Get sequence metadata for this request
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];
@@ -63,7 +63,8 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   int const seq_len = (num_pages - 1) * PAGE_SIZE + last_page_len;
 
   // Bounds check: skip if page table looks uninitialized
-  bool valid = (num_pages > 0 && num_pages <= 512 && num_new_tokens > 0 && seq_len > 0);
+  bool valid =
+      (num_pages > 0 && num_pages <= 512 && num_new_tokens > 0 && seq_len > 0);
 
   T *paged_cache = reinterpret_cast<T *>(paged_cache_ptr);
   T *contiguous_kv = reinterpret_cast<T *>(contiguous_kv_ptr);
@@ -78,7 +79,9 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
     }
   }
   __syncthreads();
-  if (!valid) return;
+  if (!valid) {
+    return;
+  }
 
   // Step 1: Append new tokens to paged cache
   // Write c_latent (D_V=512 dims) + k_pe (ROPE_DIM=64 dims) into the correct

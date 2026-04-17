@@ -26,10 +26,8 @@
 namespace kernel {
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int STRIDE>
-__device__ __forceinline__ void
-    elementwise_add_task_impl(void const *input_a_ptr,
-                              void const *input_b_ptr,
-                              void *output_ptr) {
+__device__ __forceinline__ void elementwise_add_task_impl(
+    void const *input_a_ptr, void const *input_b_ptr, void *output_ptr) {
   T const *__restrict__ a = static_cast<T const *>(input_a_ptr);
   T const *__restrict__ b = static_cast<T const *>(input_b_ptr);
   T *__restrict__ out = static_cast<T *>(output_ptr);

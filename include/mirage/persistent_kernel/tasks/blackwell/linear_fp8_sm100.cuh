@@ -114,18 +114,19 @@ __device__ __noinline__ void
   DG_STATIC_ASSERT(kNumUMMAStoreThreads % 32 == 0, "Invalid store block M");
 
   // TMA box dims are clamped to min(BLOCK, globalDim) in the TMA descriptor.
-  // arrive_and_expect_tx must match the actual TMA transfer size, not SMEM size.
+  // arrive_and_expect_tx must match the actual TMA transfer size, not SMEM
+  // size.
   constexpr uint32_t kTmaBoxM_A =
-      (SHAPE_M != 0) ? cute::min<uint32_t>(LOAD_BLOCK_M, SHAPE_M) : LOAD_BLOCK_M;
+      (SHAPE_M != 0) ? cute::min<uint32_t>(LOAD_BLOCK_M, SHAPE_M)
+                     : LOAD_BLOCK_M;
   constexpr uint32_t kAlignedShapeM =
       (SHAPE_M != 0) ? ((SHAPE_M + 3u) / 4u) * 4u : 0u;
   constexpr uint32_t kTmaBoxM_SFA =
-      (SHAPE_M != 0 && kAlignedShapeM < BLOCK_M)
-          ? kAlignedShapeM
-          : BLOCK_M;
+      (SHAPE_M != 0 && kAlignedShapeM < BLOCK_M) ? kAlignedShapeM : BLOCK_M;
   // CD/residual TMA box: clamped batch dim
   constexpr uint32_t kTmaBoxM_CD =
-      (SHAPE_M != 0) ? cute::min<uint32_t>(STORE_BLOCK_M, SHAPE_M) : STORE_BLOCK_M;
+      (SHAPE_M != 0) ? cute::min<uint32_t>(STORE_BLOCK_M, SHAPE_M)
+                     : STORE_BLOCK_M;
   constexpr uint32_t kTmaResidualBytes = kSwizzleCDMode * kTmaBoxM_CD;
 
   constexpr uint32_t SMEM_CD_SIZE_PER_STAGE = STORE_BLOCK_M * kSwizzleCDMode;
@@ -482,7 +483,8 @@ __device__ __noinline__ void
         }
         __syncwarp();
 
-        using mma_t = mirage::blackwell::linear_fp8_sm100::sm100::SM100_MMA_MXF8F6F4_SS;
+        using mma_t =
+            mirage::blackwell::linear_fp8_sm100::sm100::SM100_MMA_MXF8F6F4_SS;
         auto const &a_desc_base_lo =
             __shfl_sync(0xffffffff, a_desc_lo, static_cast<int>(stage_idx));
         auto const &b_desc_base_lo =

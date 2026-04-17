@@ -16,10 +16,10 @@
 #pragma once
 #include "runtime_header.h"
 #include "tasks/common/common_header.cuh"
+#include <cuda.h>
 #include <cutlass/float8.h>
 #include <cutlass/numeric_types.h>
 #include <type_traits>
-#include <cuda.h>
 
 namespace mirage {
 namespace runtime {
@@ -39,20 +39,22 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   void *global_addr = src;
 
   constexpr CUtensorMapDataType tma_format =
-      std::is_same_v<T, type::bfloat16_t>       ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-      : std::is_same_v<T, cutlass::bfloat16_t>  ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-      : std::is_same_v<T, cutlass::half_t>      ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
-      : std::is_same_v<T, __half>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
-      : std::is_same_v<T, float>                ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
-      : std::is_same_v<T, double>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
+      std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
+      : std::is_same_v<T, cutlass::bfloat16_t>
+          ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
+      : std::is_same_v<T, cutlass::half_t> ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+      : std::is_same_v<T, __half>          ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+      : std::is_same_v<T, float>           ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
+      : std::is_same_v<T, double>          ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
       : std::is_same_v<T, cutlass::float_e4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
       : std::is_same_v<T, cutlass::float_e5m2_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cutlass::float_ue8m0_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, uint8_t>              ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, uint16_t>             ? CU_TENSOR_MAP_DATA_TYPE_UINT16
-      : std::is_same_v<T, uint32_t>             ? CU_TENSOR_MAP_DATA_TYPE_UINT32
-      : std::is_same_v<T, int32_t>              ? CU_TENSOR_MAP_DATA_TYPE_INT32
-                                               : CUtensorMapDataType(-1);
+      : std::is_same_v<T, cutlass::float_ue8m0_t>
+          ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, uint8_t>  ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, uint16_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT16
+      : std::is_same_v<T, uint32_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT32
+      : std::is_same_v<T, int32_t>  ? CU_TENSOR_MAP_DATA_TYPE_INT32
+                                    : CUtensorMapDataType(-1);
   static_assert(tma_format != CUtensorMapDataType(-1),
                 "Unsupported TMA data type");
   constexpr CUtensorMapInterleave tma_interleave =
@@ -110,8 +112,9 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   }
 
   // TMA requires 16B-aligned global address
-  if ((reinterpret_cast<uint64_t>(global_addr) & 0b1111) !=
-         0) { printf("WARN: TMA addr %p not 16B-aligned\n", global_addr); }
+  if ((reinterpret_cast<uint64_t>(global_addr) & 0b1111) != 0) {
+    printf("WARN: TMA addr %p not 16B-aligned\n", global_addr);
+  }
 
   assert(gmem_prob_shape[0] >= (uint64_t(1)));       // Size must be min 1
   assert(gmem_prob_shape[0] <= (uint64_t(1) << 32)); // Size must be max 2^32
@@ -783,7 +786,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // New FP8 GEMM kernel: use cuTensorMapEncodeTiled directly
       // BLOCK_M=32, BLOCK_N=16, BLOCK_K=128
       constexpr int BLOCK_M_FP8 = 32, BLOCK_N_FP8 = 16, BLOCK_K_FP8 = 128;
-      bool with_res = (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
+      bool with_res =
+          (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
       bool is_output = (param_id == (size_t)(task_desc.num_inputs));
       bool is_uint32 = (tensor_desc.data_type == 956); // DT_UINT32
       bool is_fp8 = (tensor_desc.data_type == 930);    // DT_FLOAT8
@@ -793,16 +797,26 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int batch = tensor_desc.dim[0];
         int K = tensor_desc.dim[1];
         uint64_t gd[2] = {(uint64_t)K, (uint64_t)batch};
-        uint64_t gs[1] = {(uint64_t)K * 1};  // stride0 * sizeof(uint8)
-        uint32_t bd[2] = {(uint32_t)BLOCK_K_FP8, (uint32_t)min(BLOCK_M_FP8, batch)};
+        uint64_t gs[1] = {(uint64_t)K * 1}; // stride0 * sizeof(uint8)
+        uint32_t bd[2] = {(uint32_t)BLOCK_K_FP8,
+                          (uint32_t)min(BLOCK_M_FP8, batch)};
         uint32_t es[2] = {1, 1};
-        CUresult result = cuTensorMapEncodeTiled(
-            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2,
-            tensor_desc.base_ptr, gd, gs, bd, es,
-            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
-            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                   2,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (result != CUDA_SUCCESS) {
-          char const *err; cuGetErrorString(result, &err);
+          char const *err;
+          cuGetErrorString(result, &err);
           std::cerr << "TMA FP8 input A failed: " << err << std::endl;
         }
       } else if (is_fp8 && param_id == 2) {
@@ -810,16 +824,25 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int output = tensor_desc.dim[0];
         int K = tensor_desc.dim[1];
         uint64_t gd[2] = {(uint64_t)K, (uint64_t)output};
-        uint64_t gs[1] = {(uint64_t)K * 1};  // stride0 * sizeof(uint8)
+        uint64_t gs[1] = {(uint64_t)K * 1}; // stride0 * sizeof(uint8)
         uint32_t bd[2] = {(uint32_t)BLOCK_K_FP8, (uint32_t)BLOCK_N_FP8};
         uint32_t es[2] = {1, 1};
-        CUresult result = cuTensorMapEncodeTiled(
-            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2,
-            tensor_desc.base_ptr, gd, gs, bd, es,
-            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
-            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                   2,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (result != CUDA_SUCCESS) {
-          char const *err; cuGetErrorString(result, &err);
+          char const *err;
+          cuGetErrorString(result, &err);
           std::cerr << "TMA FP8 weight B failed: " << err << std::endl;
         }
       } else if (is_uint32 && param_id == 1) {
@@ -828,38 +851,59 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int packed_k = tensor_desc.dim[0];
         int aligned_batch = tensor_desc.dim[1];
         uint64_t gd[2] = {(uint64_t)aligned_batch, (uint64_t)packed_k};
-        uint64_t gs[1] = {(uint64_t)aligned_batch * 4};  // stride * sizeof(uint32)
+        uint64_t gs[1] = {(uint64_t)aligned_batch *
+                          4}; // stride * sizeof(uint32)
         // box must not exceed global dims
         uint32_t bd[2] = {(uint32_t)min(BLOCK_M_FP8, aligned_batch), 1};
         uint32_t es[2] = {1, 1};
-        CUresult result = cuTensorMapEncodeTiled(
-            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT32, 2,
-            tensor_desc.base_ptr, gd, gs, bd, es,
-            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
-            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT32,
+                                   2,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_NONE,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (result != CUDA_SUCCESS) {
-          char const *err; cuGetErrorString(result, &err);
+          char const *err;
+          cuGetErrorString(result, &err);
           std::cerr << "TMA FP8 scale SFA failed: " << err << std::endl;
         }
       } else if (is_uint32 && param_id == 3) {
         // SFB (weight scale): stored as [packed_k, aligned_output] row-major
         // = column-major [aligned_output, packed_k]
-        // Weight scale after grid partition: dim[0]=M_per_block, dim[1]=packed_k
-        // Column-major: stride[1] is the physical outer stride (original aligned_M)
+        // Weight scale after grid partition: dim[0]=M_per_block,
+        // dim[1]=packed_k Column-major: stride[1] is the physical outer stride
+        // (original aligned_M)
         int aligned_output = tensor_desc.dim[0]; // after grid split
         int packed_k = tensor_desc.dim[1];
         int physical_outer_stride = tensor_desc.stride[1]; // original aligned_M
         uint64_t gd[2] = {(uint64_t)aligned_output, (uint64_t)packed_k};
-        uint64_t gs[1] = {(uint64_t)physical_outer_stride * 4};  // stride * sizeof(uint32)
+        uint64_t gs[1] = {(uint64_t)physical_outer_stride *
+                          4}; // stride * sizeof(uint32)
         uint32_t bd[2] = {(uint32_t)BLOCK_N_FP8, 1};
         uint32_t es[2] = {1, 1};
-        CUresult result = cuTensorMapEncodeTiled(
-            tma_desc, CU_TENSOR_MAP_DATA_TYPE_UINT32, 2,
-            tensor_desc.base_ptr, gd, gs, bd, es,
-            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
-            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT32,
+                                   2,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_NONE,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (result != CUDA_SUCCESS) {
-          char const *err; cuGetErrorString(result, &err);
+          char const *err;
+          cuGetErrorString(result, &err);
           std::cerr << "TMA FP8 scale SFB failed: " << err << std::endl;
         }
       } else if (with_res && param_id == 4) {
@@ -868,16 +912,26 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int output = tensor_desc.dim[1];
         int stride = tensor_desc.stride[0];
         uint64_t gd[2] = {(uint64_t)output, (uint64_t)batch};
-        uint64_t gs[1] = {(uint64_t)stride * 2};  // stride0 * sizeof(bf16)
-        uint32_t bd[2] = {16, (uint32_t)min(BLOCK_M_FP8, batch)};  // clamp to global
+        uint64_t gs[1] = {(uint64_t)stride * 2}; // stride0 * sizeof(bf16)
+        uint32_t bd[2] = {16,
+                          (uint32_t)min(BLOCK_M_FP8, batch)}; // clamp to global
         uint32_t es[2] = {1, 1};
-        CUresult result = cuTensorMapEncodeTiled(
-            tma_desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
-            tensor_desc.base_ptr, gd, gs, bd, es,
-            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_32B,
-            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                   2,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_32B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (result != CUDA_SUCCESS) {
-          char const *err; cuGetErrorString(result, &err);
+          char const *err;
+          cuGetErrorString(result, &err);
           std::cerr << "TMA FP8 residual failed: " << err << std::endl;
         }
       } else if (is_output) {
@@ -886,16 +940,26 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int output = tensor_desc.dim[1];
         int stride = tensor_desc.stride[0];
         uint64_t gd[2] = {(uint64_t)output, (uint64_t)batch};
-        uint64_t gs[1] = {(uint64_t)stride * 2};  // stride0 * sizeof(bf16)
-        uint32_t bd[2] = {16, (uint32_t)min(BLOCK_M_FP8, batch)};  // clamp to global
+        uint64_t gs[1] = {(uint64_t)stride * 2}; // stride0 * sizeof(bf16)
+        uint32_t bd[2] = {16,
+                          (uint32_t)min(BLOCK_M_FP8, batch)}; // clamp to global
         uint32_t es[2] = {1, 1};
-        CUresult result = cuTensorMapEncodeTiled(
-            tma_desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
-            tensor_desc.base_ptr, gd, gs, bd, es,
-            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_32B,
-            CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                   2,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_32B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (result != CUDA_SUCCESS) {
-          char const *err; cuGetErrorString(result, &err);
+          char const *err;
+          cuGetErrorString(result, &err);
           std::cerr << "TMA FP8 output CD failed: " << err << std::endl;
         }
       }
@@ -1102,10 +1166,10 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       if (param_id == 0) {
         // Q: may arrive as [B*NUM_HEADS, D_K] or flat [mbt, NUM_HEADS*D_K].
         // For TMA, reinterpret as 3D (BK, B*Q_LEN*NUM_HEADS, D_K/BK).
-        // Box height = hpb (heads per block) which depends on Q_LEN. For Q_LEN=1,
-        // hpb=NUM_HEADS=128 (matches single-query decode). For Q_LEN>1 (prefill
-        // batching), hpb=NUM_HEADS/Q_LEN — must NOT be 128 or adjacent queries
-        // overlap in shared memory and cause hangs / wrong results.
+        // Box height = hpb (heads per block) which depends on Q_LEN. For
+        // Q_LEN=1, hpb=NUM_HEADS=128 (matches single-query decode). For Q_LEN>1
+        // (prefill batching), hpb=NUM_HEADS/Q_LEN — must NOT be 128 or adjacent
+        // queries overlap in shared memory and cause hangs / wrong results.
         int num_heads = 128; // DeepSeek V3
         int d_k = 576;       // DeepSeek V3 MLA: 512 latent + 64 rope
         // Compute total elements from first 2 dims only (ignore padding dims)
@@ -1116,7 +1180,9 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         //   total_rows = Q_LEN * NUM_HEADS  →  Q_LEN = total_rows / NUM_HEADS
         //   hpb = NUM_HEADS / Q_LEN
         int q_len = total_rows / num_heads;
-        if (q_len < 1) q_len = 1;
+        if (q_len < 1) {
+          q_len = 1;
+        }
         int hpb = num_heads / q_len;
         while (num_heads % hpb != 0) {
           hpb--;
@@ -1251,8 +1317,12 @@ __host__ inline void create_tma_desc_for_tensor(FullTaskDesc &task_desc,
   CUtensorMap *desc_ptr;
   if ((reinterpret_cast<uint64_t>(tensor_desc.base_ptr) & 0xF) != 0) {
     printf("[TMA ALIGN] task_type=%d param=%zu base=%p dims=[%d,%d,%d]\n",
-           task_desc.task_type, param_id, tensor_desc.base_ptr,
-           tensor_desc.dim[0], tensor_desc.dim[1], tensor_desc.dim[2]);
+           task_desc.task_type,
+           param_id,
+           tensor_desc.base_ptr,
+           tensor_desc.dim[0],
+           tensor_desc.dim[1],
+           tensor_desc.dim[2]);
   }
   fill_tma_desc_by_task(&host_desc,
                         task_desc,
@@ -1292,16 +1362,18 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // Inputs: 0=input_fp8, 1=input_scale, 2=weight_fp8, 3=weight_scale,
       //         4=residual (if with_res)
       // Output: 0=output_bf16
-      bool with_res = (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);  // A
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0);  // SFA
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);  // B
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[3], 3, 0);  // SFB
+      bool with_res =
+          (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100);
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // SFA
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0); // B
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[3], 3, 0); // SFB
       if (with_res) {
-        create_tma_desc_for_tensor(task_desc, task_desc.inputs[4], 4, 0);  // residual
+        create_tma_desc_for_tensor(
+            task_desc, task_desc.inputs[4], 4, 0); // residual
       }
-      create_tma_desc_for_tensor(task_desc,
-          task_desc.outputs[0], task_desc.num_inputs, 0);  // CD
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.outputs[0], task_desc.num_inputs, 0); // CD
       break;
     }
     case TASK_PAGED_ATTENTION_HOPPER: {

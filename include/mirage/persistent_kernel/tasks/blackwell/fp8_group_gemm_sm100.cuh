@@ -837,9 +837,9 @@ __device__ __forceinline__ void
           // Optimistic peek: try to check if the MMA warp has already consumed
           // this buffer (ab_empty). If yes, we can skip the blocking wait
           // below.
-          bool peek_ab_empty_status =
-              ::kernel::try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                               tma_wr_ab_empty_phase);
+          bool peek_ab_empty_status = ::kernel::try_wait_barrier(
+              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+              tma_wr_ab_empty_phase);
 
           // Inner loop: iterate over K-tiles for this (expert, m_tile, n_tile)
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -1124,12 +1124,12 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Optimistic peeks: check if A/B/scales are already ready
-          bool peek_a =
-              ::kernel::try_wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buf],
-                               mma_rd_ab_full_phase);
-          bool peek_b =
-              ::kernel::try_wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buf],
-                               mma_rd_ab_full_phase);
+          bool peek_a = ::kernel::try_wait_barrier(
+              shared_storage.a_full_mbar_ptr[smem_rd_buf],
+              mma_rd_ab_full_phase);
+          bool peek_b = ::kernel::try_wait_barrier(
+              shared_storage.b_full_mbar_ptr[smem_rd_buf],
+              mma_rd_ab_full_phase);
           int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
           bool peek_sf = ::kernel::try_wait_barrier(
               shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);

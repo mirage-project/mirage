@@ -59,27 +59,20 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
                                                  bfloat16,
                                                  fp8_e4m3fn,
                                                  /*SCALE_UE8M0=*/true>(
-      input,
-      output_q,
-      output_s,
-      eps,
-      min_8bit,
-      max_8bit,
-      output_s_col_stride);
+      input, output_q, output_s, eps, min_8bit, max_8bit, output_s_col_stride);
 }
 
 #define DISPATCH_QUANTIZE_FP8_SM100_GROUP_SIZE_CASE(HIDDEN_SIZE, GROUP_SIZE)   \
   case GROUP_SIZE:                                                             \
     quantize_fp8_sm100_kernel<HIDDEN_SIZE, GROUP_SIZE>                         \
-        <<<grid_dim, block_dim, 0, stream>>>(                                  \
-            input_ptr,                                                         \
-            output_q_ptr,                                                      \
-            output_s_ptr,                                                      \
-            output_s_stride_row,                                               \
-            output_s_stride_col,                                               \
-            kEps,                                                              \
-            kMin8,                                                             \
-            kMax8);                                                            \
+        <<<grid_dim, block_dim, 0, stream>>>(input_ptr,                        \
+                                             output_q_ptr,                     \
+                                             output_s_ptr,                     \
+                                             output_s_stride_row,              \
+                                             output_s_stride_col,              \
+                                             kEps,                             \
+                                             kMin8,                            \
+                                             kMax8);                           \
     break;
 
 #define DISPATCH_QUANTIZE_FP8_SM100_GROUP_SIZE(HIDDEN_SIZE)                    \
