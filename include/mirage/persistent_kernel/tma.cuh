@@ -35,9 +35,12 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
-  constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  //  (std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-  //                                       : CUtensorMapDataType(-1));
+  // For 1-byte types (e.g., FP8 E4M3), use UINT8 — TMA only uses this for
+  // element size; semantics are irrelevant. For 2-byte types (BF16), use
+  // BFLOAT16.
+  constexpr CUtensorMapDataType tma_format =
+      (sizeof(T) == 1) ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+                       : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   constexpr CUtensorMapInterleave tma_interleave =
       CU_TENSOR_MAP_INTERLEAVE_NONE;
   constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -865,6 +868,45 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MOE_W13_FP8_SM100:
+    case TASK_MOE_W2_FP8_SM100: {
+      // FP8 E4M3 weight TMA (param_id == 2 is the weight tensor)
+      // bK=128 tiles, MMA_M=128 rows per tile; FP8 = 1 byte per element.
+      constexpr int FP8_BK = 128;
+      const size_t smem_repeat_row_fp8 = 1;
+      constexpr int B = 3;
+      constexpr int M = 3;
+      constexpr int S = 3;
+      constexpr int MMA_M = 128;
+
+      if (param_id == 2) {
+        // TMA_WEIGHT (fp8): inputs are [input_fp8, input_scale, weight_fp8,
+        // ...]
+        int const num_experts = tensor_desc.dim[0];
+        int const output_size = tensor_desc.dim[1];
+        int const reduction_size = tensor_desc.dim[2];
+        int const orig_output_size =
+            tensor_desc.stride[0] / tensor_desc.stride[1];
+        uint64_t gmem_shape[2] = {
+            static_cast<uint64_t>((num_experts - 1) * orig_output_size +
+                                  output_size),
+            static_cast<uint64_t>(reduction_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),
+                                  static_cast<uint32_t>(FP8_BK)};
+        size_t smem_repeat_col_fp8 = 1; // FP8_BK is the full tile width
+        // Use uint8_t as the element type (sizeof=1) so fill_tma_desc selects
+        // UINT8 format
+        fill_tma_desc<uint8_t, B, M, S, 2>(tma_desc,
+                                           tensor_desc.base_ptr,
+                                           gmem_shape,
+                                           gmem_stride,
+                                           smem_shape,
+                                           smem_repeat_row_fp8,
+                                           smem_repeat_col_fp8);
+      }
+      break;
+    }
     case TASK_MOE_W13_LINEAR_SM90:
     case TASK_MOE_W2_LINEAR_SM90: {
       int const cp_async_size = 64;
@@ -898,6 +940,148 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_shape,
                                             smem_repeat_row,
                                             smem_repeat_col);
+      }
+      break;
+    }
+    case TASK_MLA_DECODE_SM100: {
+      // MLA uses 3D TMA descriptors with 128B swizzle.
+      // Q tensor: [B*NUM_HEADS, D_K] → 3D TMA (BK=64, B*NUM_HEADS, D_K/BK)
+      // KV tensor: [B*KL, D_K] → 3D TMA (BK=64, B*KL, D_K/BK)
+      //
+      // The kernel loads tiles of shape (BK, NUM_HEADS_or_TILE_S, 1) per TMA
+      // op. cuTensorMapEncodeTiled is called directly since fill_tma_desc's
+      // generic path doesn't handle the MLA-specific layout.
+      constexpr int BK = 64;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+
+      if (param_id == 0) {
+        // Q: global [B*NUM_HEADS, D_K], treat as 3D (BK, B*NUM_HEADS, D_K/BK)
+        int total_rows = tensor_desc.dim[0]; // B*NUM_HEADS
+        int d_k = tensor_desc.dim[1];        // D_K
+        int k_iters = d_k / BK;
+        // Box loads NUM_HEADS rows per TMA op.
+        // For batch>1, total_rows = B*NUM_HEADS but box height = NUM_HEADS (one
+        // batch).
+        // TODO: derive num_heads from tensor metadata when supporting other MLA
+        // configs.
+        int num_heads = 128;
+        // gd: global dims, gs: global byte strides (dim0 stride is implicit
+        // sizeof(T)) gs[0] = row stride in bytes = D_K * sizeof(bf16) gs[1] =
+        // k_iter stride in bytes = BK * sizeof(bf16) = 128
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)num_heads, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      } else if (param_id == 1) {
+        // KV: global [B*KL, D_K], treat as 3D (BK, B*KL, D_K/BK)
+        int total_rows = tensor_desc.dim[0]; // B*KL
+        int d_k = tensor_desc.dim[1];        // D_K
+        int k_iters = d_k / BK;
+        int tile_s = 128; // TILE_S
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)tile_s, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      }
+      break;
+    }
+    case TASK_MLA_MTP_DECODE_SM100: {
+      // MTP decode: Q box height = hpb (varies with Q_LEN), KV box = TILE_S=128
+      // Q: [B*Q_LEN*NUM_HEADS, D_K], hpb derived from Q dim[0]
+      // KV: [B*KL, D_K], same as MLA decode
+      constexpr int BK = 64;
+      constexpr int NUM_H = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+
+      if (param_id == 0) {
+        // Q: derive hpb from tensor dimensions
+        int total_rows = tensor_desc.dim[0]; // B * Q_LEN * NUM_HEADS
+        int d_k = tensor_desc.dim[1];
+        int k_iters = d_k / BK;
+        int q_len = total_rows / NUM_H; // assumes B=1
+        int hpb = NUM_H / q_len;
+        while (NUM_H % hpb != 0) {
+          hpb--;
+        }
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)hpb, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      } else if (param_id == 1) {
+        // KV: same as MLA decode — box = {64, TILE_S=128, 1}
+        int total_rows = tensor_desc.dim[0];
+        int d_k = tensor_desc.dim[1];
+        int k_iters = d_k / BK;
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, 128, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
       }
       break;
     }
@@ -995,7 +1179,45 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       break;
     }
+    case TASK_MOE_W13_FP8_SM100:
+    case TASK_MOE_W2_FP8_SM100: {
+      // only weight_fp8 (param_id=2) has 1 tma_desc
+      // inputs order: [input_fp8, input_scale, weight_fp8, weight_scale,
+      //                routing_indices, mask]
+      size_t param_id = 2;
+      TensorDesc &tensor_desc =
+          (param_id < task_desc.num_inputs)
+              ? task_desc.inputs[param_id]
+              : task_desc.outputs[param_id - task_desc.num_inputs];
+      create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      break;
+    }
     case TASK_RMS_NORM_HOPPER: {
+      // no TMA needed
+      break;
+    }
+    case TASK_MLA_DECODE_SM100: {
+      // Q (input 0) and KV (input 1) each get 1 TMA desc
+      for (size_t param_id = 0; param_id < 2; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MLA_REDUCE_SM100: {
+      // no TMA needed — uses raw pointer reads
+      break;
+    }
+    case TASK_MLA_MTP_DECODE_SM100: {
+      // Q (input 0) and KV (input 1) each get 1 TMA desc
+      // Same as MLA_DECODE but Q box uses hpb (variable) instead of NUM_HEADS
+      for (size_t param_id = 0; param_id < 2; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MLA_MTP_REDUCE_SM100: {
       // no TMA needed
       break;
     }
