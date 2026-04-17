@@ -1230,6 +1230,11 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         # MLA attention (same structure as main model, own weights)
+        # Set self.x = self.mtp_x so that _build_mla_attention_layer_with_prefix
+        # uses the correct hidden state for fuse_residual (it reads self.x for
+        # the residual in o_proj and down_proj when _fuse_residual=True).
+        _saved_x = self.x
+        self.x = self.mtp_x
         if os.environ.get("MPK_SKIP_MTP_MLA", "0") != "1":
             self._build_mla_attention_layer_with_prefix(prefix, state_dict)
 
@@ -1247,8 +1252,12 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             _mtp_attn_contrib = self.attn_proj_out
 
-        # Residual: self.mtp_x = self.mtp_x + _mtp_attn_contrib
-        if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+        # Residual: update mtp_x with attention output
+        if self._fuse_residual:
+            # Residual already fused into o_proj by _build_mla_attention_layer.
+            # self.x was updated to attn_proj_out (which includes residual).
+            self.mtp_x = self.x
+        elif os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
             self.mtp_x = _mtp_attn_contrib
         else:
             mtp_attn_residual = self._cached_new_tensor(
@@ -1261,6 +1270,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
             )
             self.mtp_x = mtp_attn_residual
+        # Restore self.x to main model's hidden state
+        self.x = _saved_x
 
         # Post-attention layernorm
         w_post_norm = self._cached_attach(
@@ -1276,6 +1287,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # MLP: DeepSeek V3 MTP block uses MoE MLP (same as main layers 3-60)
         # Check if MoE weights exist, fallback to dense
         # MPK_SKIP_MTP_MLP=1: skip MTP decoder MLP for crash isolation
+        # Set self.x = self.mtp_x so MLP's fuse_residual uses correct hidden state
+        self.x = self.mtp_x
         mlp_gate_key = f"{prefix}mlp.gate.weight"
         if os.environ.get("MPK_SKIP_MTP_MLP", "0") == "1":
             pass  # skip MTP MLP
@@ -1284,31 +1297,36 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             self._build_dense_mlp_with_prefix(prefix, state_dict)
 
-        # MLP residual: self.mtp_x = self.mtp_x + mlp_out.
-        # In TP>1, AllReduce first, THEN residual.
-        if self.world_size > 1:
-            self.mpk.allreduce_layer(
-                input=self.mlp_out, buffer=self.allreduce_buf,
-                output=self.allreduce_out,
-                grid_dim=(self.hidden_size // 128, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            _mtp_mlp_contrib = self.allreduce_out
+        # MLP residual: update mtp_x
+        if self._fuse_residual:
+            # Residual already fused into down_proj. self.x was updated by MLP builder.
+            self.mtp_x = self.x
         else:
-            _mtp_mlp_contrib = self.mlp_out
-        if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
-            self.mtp_x = _mtp_mlp_contrib
-        else:
-            mtp_mlp_residual = self._cached_new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name="mtp_mlp_residual", io_category="cuda_tensor")
-            self.mpk.elementwise_add_layer(
-                input_a=self.mtp_x, input_b=_mtp_mlp_contrib, output=mtp_mlp_residual,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            self.mtp_x = mtp_mlp_residual
+            if self.world_size > 1:
+                self.mpk.allreduce_layer(
+                    input=self.mlp_out, buffer=self.allreduce_buf,
+                    output=self.allreduce_out,
+                    grid_dim=(self.hidden_size // 128, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                _mtp_mlp_contrib = self.allreduce_out
+            else:
+                _mtp_mlp_contrib = self.mlp_out
+            if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+                self.mtp_x = _mtp_mlp_contrib
+            else:
+                mtp_mlp_residual = self._cached_new_tensor(
+                    dims=(self.max_num_batched_tokens, self.hidden_size),
+                    dtype=bfloat16,
+                    name="mtp_mlp_residual", io_category="cuda_tensor")
+                self.mpk.elementwise_add_layer(
+                    input_a=self.mtp_x, input_b=_mtp_mlp_contrib, output=mtp_mlp_residual,
+                    grid_dim=(self.max_num_batched_tokens, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                self.mtp_x = mtp_mlp_residual
+        # Restore main model's hidden state
+        self.x = _saved_x
 
     def _build_mla_attention_layer_with_prefix(self, prefix: str, state_dict: dict):
         """Build MLA attention using a custom weight prefix (FP8, for MTP reuse)."""
