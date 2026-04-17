@@ -196,8 +196,8 @@ def get_compile_command(
         # "-O0",
         # "-g",
         # "-G",
-        "--ptxas-options=-v",
-        # "-Xptxas=-v",
+        # ptxas verbose: use MPK_PTXAS_VERBOSE=1 to enable (heavy perf impact on large kernels)
+        *(["--ptxas-options=-v"] if os.environ.get("MPK_PTXAS_VERBOSE") == "1" else []),
         "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",

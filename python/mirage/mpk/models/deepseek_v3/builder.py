@@ -951,7 +951,6 @@ class DeepSeekV3Builder(GraphBuilder):
         if skip_routed:
             pass  # Skip all routed expert computation; moe_down_out created below as zero
         elif use_fp8_experts:
-            print(f"[DEBUG] before moe_w13_fp8", flush=True)
             self.mpk.moe_w13_fp8_layer(
                 input_fp8=moe_input_fp8,
                 input_scale=moe_input_scale,
@@ -1081,13 +1080,11 @@ class DeepSeekV3Builder(GraphBuilder):
         shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
         gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
         has_shared_scale = gate_scale_key in state_dict
-        print(f"[SHARED_EXPERT L{layer_idx}] gate_proj={tuple(shared_gate_w.shape)} "
               f"up_proj={tuple(shared_up_w.shape)} "
               f"expected_local_inter={self.moe_intermediate_size} "
               f"world_size={self.world_size}", flush=True)
         # Verify shard was applied: gate_proj.shape[0] should equal moe_intermediate_size
         if shared_gate_w.shape[0] != self.moe_intermediate_size:
-            print(f"[SHARED_EXPERT L{layer_idx}] *** SHARD MISMATCH *** "
                   f"gate_proj.shape[0]={shared_gate_w.shape[0]} != "
                   f"moe_intermediate_size={self.moe_intermediate_size}. "
                   f"Expected {self.moe_intermediate_size} after TP shard.", flush=True)
@@ -1104,7 +1101,6 @@ class DeepSeekV3Builder(GraphBuilder):
             shared_split -= 1
             if shared_split < 1:
                 shared_split = 1; break
-        print(f"[SHARED_EXPERT L{layer_idx}] out_dim_total={out_dim_total} "
               f"linear_grid={linear_grid} scale_dim_0={scale_dim_0} "
               f"shared_split={shared_split}", flush=True)
         fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
@@ -1124,7 +1120,6 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_shared_mid",
             io_category="cuda_tensor",
         )
-        print(f"[SHARED_EXPERT L{layer_idx}] fused_w_dim0={w_shared_gate_up.dim(0)} "
               f"shared_mid_dim1={2*self.moe_intermediate_size} "
               f"silu_grid={shared_split}", flush=True)
         self._fp8_linear(self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
@@ -1150,12 +1145,10 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict, f"{shared_prefix}down_proj.weight",
             f"layer_{layer_idx}_shared_expert_down")
         _down_w = state_dict[f"{shared_prefix}down_proj.weight"]
-        print(f"[SHARED_EXPERT L{layer_idx}] down_proj={tuple(_down_w.shape)} "
               f"silu_out_dim1={self.moe_intermediate_size} "
               f"down_input_K_should_match={_down_w.shape[1]}=={self.moe_intermediate_size}",
               flush=True)
         if _down_w.shape[1] != self.moe_intermediate_size:
-            print(f"[SHARED_EXPERT L{layer_idx}] *** DOWN_PROJ SHARD MISMATCH *** "
                   f"down_proj.shape[1]={_down_w.shape[1]} != "
                   f"moe_intermediate_size={self.moe_intermediate_size}", flush=True)
         shared_residual = self.mpk.new_tensor(
