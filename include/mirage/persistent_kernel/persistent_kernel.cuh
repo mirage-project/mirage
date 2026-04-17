@@ -192,7 +192,7 @@ __global__ void prepare_kernel(RuntimeConfig config,
 // TODO: parallelize this processing
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
-  __shared__ int smem_kv_indices[MPK_MAX_NUM_PAGES];
+  // Page indices snapshot in global memory (for in-place compaction)
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
   // Step 1: finalize previous batch
@@ -235,10 +235,11 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Step 2: copy kv_indices to shared mem
+  // Step 2: snapshot kv_indices into global memory buffer (needed for
+  // in-place compaction where destination may overlap source)
   int num_pages = config.paged_kv_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];
   for (int i = 0; i < num_pages; i++) {
-    smem_kv_indices[i] = config.paged_kv_indices_buffer[i];
+    config.paged_kv_indices_snapshot[i] = config.paged_kv_indices_buffer[i];
   }
 
   // Step 3: prepare next batch
@@ -277,7 +278,7 @@ __device__ __forceinline__ bool
       }
       for (int j = 0; j < num_old_pages; j++) {
         config.paged_kv_indices_buffer[num_pages + j] =
-            smem_kv_indices[kv_indptr + j];
+            config.paged_kv_indices_snapshot[kv_indptr + j];
       }
       for (int j = num_old_pages; j < num_new_pages; j++) {
         config.paged_kv_indices_buffer[num_pages + j] =
@@ -1147,7 +1148,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        long long eos_token_id,
                                        int allocate_nvshmem_teams,
                                        int is_test_mode) {
-  assert(meta_tensors.size() == 10);
+  assert(meta_tensors.size() == 11);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
   global_runtime_config.input_tokens =
@@ -1163,6 +1164,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       static_cast<int *>(meta_tensors[8]);
   global_runtime_config.paged_kv_last_page_len_buffer =
       static_cast<int *>(meta_tensors[9]);
+  global_runtime_config.paged_kv_indices_snapshot =
+      static_cast<int *>(meta_tensors[10]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;

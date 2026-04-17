@@ -347,6 +347,10 @@ class PersistentKernel:
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         self.meta_tensors = meta_tensors
+        # Auto-allocate scheduler snapshot buffer for in-place compaction
+        if "paged_kv_indices_snapshot" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indices_snapshot"] = torch.empty(
+                max_num_pages, dtype=torch.int32, device="cuda")
         self.profiler_tensor = profiler_tensor
         self.trace_name = trace_name
         self.use_nvshmem = True if (world_size > 1 and os.environ.get("MPK_NO_NVSHMEM", "0") != "1") else False
@@ -2172,6 +2176,7 @@ class PersistentKernel:
             "paged_kv_indptr_buffer",
             "paged_kv_indices_buffer",
             "paged_kv_last_page_len_buffer",
+            "paged_kv_indices_snapshot",
         ]
         meta_tensors_ptr = []
         for key in expected_order:

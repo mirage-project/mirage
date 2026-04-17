@@ -63,20 +63,15 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   int const seq_len = (num_pages - 1) * PAGE_SIZE + last_page_len;
 
   // Bounds check: skip if page table looks uninitialized
-  bool valid = (num_pages > 0 && num_pages <= 512 && num_new_tokens > 0 && seq_len > 0);
+  bool valid = (num_pages > 0 && num_new_tokens > 0 && seq_len > 0);
 
   T *paged_cache = reinterpret_cast<T *>(paged_cache_ptr);
   T *contiguous_kv = reinterpret_cast<T *>(contiguous_kv_ptr);
   T const *c_latent_new = reinterpret_cast<T const *>(c_latent_new_ptr);
   T const *k_pe_new = reinterpret_cast<T const *>(k_pe_new_ptr);
 
-  // Load page indices into shared memory
-  __shared__ int page_indices[512]; // max pages per request
-  if (valid) {
-    for (int i = tid; i < num_pages; i += NUM_THREADS) {
-      page_indices[i] = paged_kv_indices_buffer_ptr[first_page_pos + i];
-    }
-  }
+  // Page indices are read directly from global memory (L2-cached)
+  int const *page_indices = paged_kv_indices_buffer_ptr + first_page_pos;
   __syncthreads();
   if (!valid) return;
 

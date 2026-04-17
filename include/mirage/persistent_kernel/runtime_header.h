@@ -313,6 +313,7 @@ struct RuntimeConfig {
   int *qo_indptr_buffer;        // Metadata for LLM serving (paged attention)
   int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_snapshot; // Scheduler snapshot for in-place compaction
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN)
