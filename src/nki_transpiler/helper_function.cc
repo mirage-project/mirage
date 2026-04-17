@@ -50,25 +50,6 @@ HelperFunction tiled_transpose_function() {
   return tiled_transpose;
 }
 
-HelperFunction divide_function() {
-  HelperFunction divide;
-  divide.deps = {};
-  divide.name = "divide";
-  divide.params = {"lhs", "rhs"};
-  divide.body = "\
-  assert lhs.shape[1] == rhs.shape[1]\n\
-  if rhs.shape[-1] == 1:\n\
-    res = nl.ndarray(lhs.shape, dtype=lhs.dtype, buffer=nl.sbuf)\n\
-    for i in nl.affine_range(lhs.shape[1]):\n\
-      reci = nisa.reciprocal(rhs[:, i, :])\n\
-      res[:, i, :] = nisa.tensor_scalar(lhs[:, i, :], nl.multiply, reci)\n\
-    return res\n\
-  else:\n\
-    assert rhs.shape[-1] == lhs.shape[-1]\n\
-    return nl.divide(lhs, rhs)\n";
-  return divide;
-}
-
 HelperFunction tiled_matmul_function() {
   HelperFunction tiled_matmul;
   tiled_matmul.deps = {"tiled_transpose", "tiled_matmul_accum"};
@@ -102,19 +83,38 @@ HelperFunction tiled_matmul_accum_function() {
   tiled_matmul_accum.name = "tiled_matmul_accum";
   tiled_matmul_accum.params = {"_lhs", "rhs", "result", "lhs_transposed"};
   tiled_matmul_accum.body = "\
-  lhsT = tiled_transpose(_lhs) if not lhs_transposed else _lhs\n\
-  assert lhsT.shape[0] == rhs.shape[0] and lhsT.shape[1] == rhs.shape[1], \"Matrix dimensions do not match for multiplication\"\n\
-  num_ktiles, M, N = lhsT.shape[1], lhsT.shape[-1], rhs.shape[-1]\n\
-  TILE_M, TILE_N, TILE_K = min(M, 128), min(N, 512), 128\n\
-  assert lhsT.shape[0] == TILE_K\n\
-  for tile_id_M in nl.affine_range(M // TILE_M):\n\
-    for tile_id_N in nl.affine_range(N // TILE_N):\n\
-      result_tile = nl.zeros((TILE_M, TILE_N), dtype=nl.float32, buffer=nl.psum)\n\
-      for tile_id_K in nl.affine_range(num_ktiles):\n\
-        lhsT_tile = lhsT[:, tile_id_K, tile_id_M * TILE_M : tile_id_M * TILE_M + TILE_M]\n\
-        rhs_tile = rhs[:, tile_id_K, tile_id_N * TILE_N : tile_id_N * TILE_N + TILE_N]\n\
-        result_tile += nisa.nc_matmul(lhsT_tile, rhs_tile)\n\
-      result[:, tile_id_M, tile_id_N * TILE_N : tile_id_N * TILE_N + TILE_N] += result_tile\n\
+  if lhs_transposed:\n\
+    lhsT = _lhs\n\
+    assert lhsT.shape[0] == rhs.shape[0] and lhsT.shape[1] == rhs.shape[1], \"Matrix dimensions do not match for multiplication\"\n\
+    num_ktiles, M, N = lhsT.shape[1], lhsT.shape[-1], rhs.shape[-1]\n\
+    TILE_M, TILE_N, TILE_K = min(M, 128), min(N, 512), 128\n\
+    num_mtiles = M // TILE_M\n\
+    # result = nl.zeros((TILE_M, num_mtiles, N), dtype=dtype, buffer=nl.sbuf)\n\
+    assert lhsT.shape[0] == TILE_K\n\
+    for tile_id_M in nl.affine_range(M // TILE_M):\n\
+      for tile_id_N in nl.affine_range(N // TILE_N):\n\
+        result_tile = nl.zeros((TILE_M, TILE_N), dtype=nl.float32, buffer=nl.psum)\n\
+        for tile_id_K in nl.affine_range(num_ktiles):\n\
+          lhsT_tile = lhsT[:, tile_id_K, tile_id_M * TILE_M : tile_id_M * TILE_M + TILE_M]\n\
+          rhs_tile = rhs[:, tile_id_K, tile_id_N * TILE_N : tile_id_N * TILE_N + TILE_N]\n\
+          result_tile += nisa.nc_matmul(lhsT_tile, rhs_tile)\n\
+        result[:, tile_id_M, tile_id_N * TILE_N : tile_id_N * TILE_N + TILE_N] += result_tile\n\
+  else:\n\
+    lhs = _lhs\n\
+    TILE_M, num_mtiles, K = lhs.shape[0], lhs.shape[1], lhs.shape[2]\n\
+    TILE_K, num_ktiles, N = rhs.shape[0], rhs.shape[1], rhs.shape[2]\n\
+    assert TILE_K * num_ktiles == K, \"Matrix dimensions do not match for multiplication\"\n\
+    TILE_N = min(N, 512)\n\
+    num_ntiles = N // TILE_N\n\
+    for tile_id_M in nl.affine_range(num_mtiles):\n\
+      for tile_id_N in nl.affine_range(num_ntiles):\n\
+        result_tile = nl.zeros((TILE_M, TILE_N), dtype=nl.float32, buffer=nl.psum)\n\
+        for tile_id_K in nl.affine_range(num_ktiles):\n\
+          lhs_tile = lhs[:, tile_id_M, tile_id_K * TILE_K:(tile_id_K + 1) * TILE_K]\n\
+          lhsT_tile = nisa.nc_transpose(lhs_tile)\n\
+          rhs_tile = rhs[:, tile_id_K, tile_id_N * TILE_N:(tile_id_N + 1) * TILE_N]\n\
+          result_tile += nisa.nc_matmul(lhsT_tile, rhs_tile)\n\
+        result[:, tile_id_M, tile_id_N * TILE_N : tile_id_N * TILE_N + TILE_N] += result_tile\n\
 ";
   return tiled_matmul_accum;
 }

@@ -243,35 +243,33 @@ if __name__ == "__main__":
             tokens[r, i] = model_inputs.input_ids[0, i]
     prompt_lengths = torch.full((total_num_requests,), model_inputs.input_ids.shape[-1], dtype=torch.int, device="cuda")
     positions = torch.arange(32768).unsqueeze(0).to(model.device)
-    position_embeddings = model.model.rotary_emb(positions) # rope
+    position_embeddings = model.model.rotary_emb(positions)
 
     # get all model weight tensors
-    # input tokens for each step
     input_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
     output_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
     prev_pos = 0
-    # measure running time of GPU ops
+
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
         enable_timing=True
     )
-    # token position for each request
     step = torch.full((total_num_requests, ), 0, dtype=torch.int32, device="cuda")
-    num_new_tokens = torch.full((total_num_requests, ), 1, dtype=torch.int32, device="cuda") # tokens to generate per requests
+    num_new_tokens = torch.full((total_num_requests, ), 1, dtype=torch.int32, device="cuda")
 
     if args.use_mirage:
         import mirage as mi
 
-        hidden_size = model.config.hidden_size 
-        intermediate_size = model.config.intermediate_size # FFN hidden size
+        hidden_size = model.config.hidden_size
+        intermediate_size = model.config.intermediate_size
         # pad vocab_size to facilitate task graph creation
         lm_head_weight = torch.cat(
             (
-                model.lm_head.weight, # [vocab_size, hidden_size], embedding layer weight
+                model.lm_head.weight,
                 torch.full(
                     (153600 - model.config.vocab_size, hidden_size), 0, device="cuda"
                 ),
             ),
-            0, 
+            0,
         )
         assert lm_head_weight.stride()[0] == hidden_size
         vocab_size = 153600
@@ -280,9 +278,9 @@ if __name__ == "__main__":
         num_local_q_heads = num_q_heads // world_size
         num_local_kv_heads = num_kv_heads // world_size
         head_dim = model.config.head_dim
-        fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim # QKV fused projection output dim
-        fused_outdim_2 = 2 * intermediate_size # Gated-MLP fused projection output dim
-        num_kv_cache_chunks = max(1, args.max_seq_length // 256) # each chunk contains 256 tokens
+        fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
+        fused_outdim_2 = 2 * intermediate_size
+        num_kv_cache_chunks = max(1, args.max_seq_length // 256)
 
         if args.profiling:
             profiler_tensor = torch.zeros(
@@ -346,7 +344,7 @@ if __name__ == "__main__":
         # TODO: Make the code run well even if 96 % max_num_batched_tokens != 0
         # assert(96 % args.max_num_batched_tokens == 0)
         
-        x = mpk.attach_input(torch_tensor=input_tokens, name="input_token") # register pytorch tensor to mirage computational graph
+        x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
             torch_tensor=position_embeddings[0][0, :4096, :],
             name="cos_position_embedding",
@@ -356,7 +354,7 @@ if __name__ == "__main__":
             name="sin_position_embedding",
         )
 
-        y = mpk.new_tensor( # declare a new tensor in mpk current computational graph
+        y = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="embed_out",
@@ -374,7 +372,7 @@ if __name__ == "__main__":
             name="attn_in",
             io_category="cuda_tensor",
         )
-        lse = mpk.new_tensor( # log-sum-exp
+        lse = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads, num_local_kv_heads),
             strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads),
             dtype=mi.float32,
@@ -471,7 +469,7 @@ if __name__ == "__main__":
                 block_dim=(128, 1, 1),
             )
             x = spec_tokens
-        # Add Embedding layer weight
+        # Add Embed
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )

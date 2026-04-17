@@ -12,18 +12,6 @@ CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d. -f2)
 CUDA_SHORT="${CUDA_MAJOR}${CUDA_MINOR}"
 TORCH_CUDA="cu${CUDA_SHORT}"
 
-# Usage: install_dependencies.sh [CUDA_VERSION]
-#   CUDA_VERSION: e.g. "12.1.1", "12.4.1", "12.6.3" (default: "12.1.1")
-
-set -e
-
-CUDA_VERSION="${1:-12.1.1}"
-# Extract major.minor for torch index (e.g., 12.1.1 -> cu121, 12.4.1 -> cu124)
-CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d. -f1)
-CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d. -f2)
-CUDA_SHORT="${CUDA_MAJOR}${CUDA_MINOR}"
-TORCH_CUDA="cu${CUDA_SHORT}"
-
 sudo apt update
 sudo apt install -y software-properties-common lsb-release wget python3-pip g++ make libboost-all-dev
 
@@ -55,27 +43,9 @@ esac
 echo "Installing PyTorch for CUDA ${CUDA_VERSION} (using ${TORCH_INDEX} index)..."
 pip3 install torch torchvision torchaudio \
   --index-url https://download.pytorch.org/whl/${TORCH_INDEX}
-# Install PyTorch matching the target CUDA version
-# PyTorch wheel indices don't always match every CUDA toolkit version.
-# CUDA is backward compatible within a major version, so we map to the
-# closest available PyTorch index.
-TORCH_INDEX="cu${CUDA_SHORT}"
-case "${CUDA_SHORT}" in
-  121) TORCH_INDEX="cu124" ;;  # PyTorch dropped cu121 from 2.6.0+
-  128) TORCH_INDEX="cu126" ;;  # cu128 index doesn't exist yet
-esac
-echo "Installing PyTorch for CUDA ${CUDA_VERSION} (using ${TORCH_INDEX} index)..."
-pip3 install torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/${TORCH_INDEX}
 
 # Install project requirements (skip git+ dependencies that break wheel metadata)
-# Install project requirements (skip git+ dependencies that break wheel metadata)
 if [ -f requirements.txt ]; then
-  grep -v '^[[:space:]]*#' requirements.txt | grep -v 'git+' | pip3 install -r /dev/stdin
-  # Install git+ dependencies separately (won't be in wheel metadata)
-  grep 'git+' requirements.txt | while read -r dep; do
-    pip3 install "$dep" || echo "WARNING: Failed to install $dep"
-  done
   grep -v '^[[:space:]]*#' requirements.txt | grep -v 'git+' | pip3 install -r /dev/stdin
   # Install git+ dependencies separately (won't be in wheel metadata)
   grep 'git+' requirements.txt | while read -r dep; do

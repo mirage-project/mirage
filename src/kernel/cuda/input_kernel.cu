@@ -50,6 +50,7 @@ bool KNInputOp::fingerprint(void) {
   // assert a 1-D GPU mesh
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
+
   // Input's relative index among all Input ops
   int input_idx = 0;
   for (size_t i = 0; i < kgraph->operators.size(); i++) {
@@ -60,6 +61,7 @@ bool KNInputOp::fingerprint(void) {
       input_idx++;
     }
   }
+
   int const num_threads_per_blk = 1024;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();

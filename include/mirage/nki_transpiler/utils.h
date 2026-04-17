@@ -39,11 +39,6 @@ std::string get_tensor_shape_tuple(T const &tensor, int partition_dim) {
                   get_partition_dimension_degree(tensor, partition_dim));
   }
   for (int i = 0; i < tensor.num_dims; i++) {
-    // FIXME: only support 2D stensors for now
-    if (partition_dim != -1 && i < tensor.num_dims - 2) {
-      assert(tensor.dim[i] == 1);
-      continue;
-    }
     if (i != partition_dim) {
       result += std::to_string(tensor.dim[i]) + ",";
     }
@@ -54,8 +49,7 @@ std::string get_tensor_shape_tuple(T const &tensor, int partition_dim) {
 std::string get_python_literal(bool value);
 
 std::string get_tensor_variable_name(kernel::DTensor const &tensor);
-std::string get_tensor_variable_name(threadblock::STensor const &tensor,
-                                     int buffer_id);
+std::string get_tensor_variable_name(threadblock::STensor const &tensor);
 
 template <typename T, typename U>
 std::string get_dim_start_end(T const &start, U const &end) {

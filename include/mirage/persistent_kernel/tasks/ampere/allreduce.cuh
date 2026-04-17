@@ -51,15 +51,9 @@ __device__ __forceinline__ void
   __syncthreads();
   if (threadIdx.x == 0) {
     nvshmemx_signal_op(reinterpret_cast<uint64_t *>(sig_addr),
-<<<<<<< HEAD
-                      1,
-                      NVSHMEM_SIGNAL_ADD,
-                      target_gpu_id);
-=======
                        1,
                        NVSHMEM_SIGNAL_ADD,
                        target_gpu_id);
->>>>>>> 1ed93827eed08290141cf825f7adf491702e84b1
   }
 }
 

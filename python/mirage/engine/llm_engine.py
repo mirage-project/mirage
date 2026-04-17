@@ -177,10 +177,8 @@ class LLMEngine:
         ]
 
         # 3. Start submit thread first; wait until the first request is in the
-        #    ring before launching the kernel.  The GPU persistent kernel checks
-        #    for an empty batch on its very first EVENT_END_OF_TASK_GRAPH and
-        #    exits if none are found, so we must guarantee at least one request
-        #    is visible before the kernel starts.
+        #    ring before launching the kernel. We must guarantee there is at least
+        #    one request at GPU side
         t0 = perf_counter()
         first_submitted = threading.Event()
         submit_exc: list[BaseException] = []  # captures submit thread exceptions
