@@ -346,6 +346,9 @@ class PersistentKernel:
         self.page_size = page_size
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
+        # Prevent GC of PyTorch tensors whose GPU pointers are baked into the
+        # generated persistent-kernel code (attach_input stores raw pointers).
+        self._torch_tensor_refs = []
         self.meta_tensors = meta_tensors
         # Auto-allocate scheduler snapshot buffer for in-place compaction
         if "paged_kv_indices_snapshot" not in self.meta_tensors:
@@ -435,6 +438,10 @@ class PersistentKernel:
         # Sanitize name for C++ codegen (dots are illegal in identifiers)
         safe_name = name.replace('.', '_')
         self.kn_graph.attach_torch_tensor(t, torch_tensor, safe_name)
+        # Keep a reference to the PyTorch tensor so it is not garbage-collected.
+        # The generated persistent kernel code stores the raw GPU data pointer;
+        # if the tensor is freed, the pointer becomes dangling.
+        self._torch_tensor_refs.append(torch_tensor)
         return t
 
     def new_tensor(

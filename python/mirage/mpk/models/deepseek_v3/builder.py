@@ -200,15 +200,17 @@ class DeepSeekV3Builder(GraphBuilder):
         positions = torch.arange(max_seq, dtype=torch.float32)
         angles = torch.outer(positions, freqs)  # [max_seq, half]
         # Expand to full rope_dim: [max_seq, rope_dim] = [cos_half, cos_half]
-        cos_embed = torch.cat([angles.cos(), angles.cos()], dim=-1).to(
+        # Keep PyTorch tensors alive on self — the persistent kernel stores
+        # raw GPU pointers, so the tensors must not be garbage-collected.
+        self._rope_cos_buf = torch.cat([angles.cos(), angles.cos()], dim=-1).to(
             dtype=torch.bfloat16, device="cuda")
-        sin_embed = torch.cat([-angles.sin(), angles.sin()], dim=-1).to(
+        self._rope_sin_buf = torch.cat([-angles.sin(), angles.sin()], dim=-1).to(
             dtype=torch.bfloat16, device="cuda")
         # Attach as DTensors
         self.cos_pos_embed = self.mpk.attach_input(
-            torch_tensor=cos_embed, name="rope_cos")
+            torch_tensor=self._rope_cos_buf, name="rope_cos")
         self.sin_pos_embed = self.mpk.attach_input(
-            torch_tensor=sin_embed, name="rope_sin")
+            torch_tensor=self._rope_sin_buf, name="rope_sin")
 
     def _new_intermediate_tensors(self):
         """Allocate intermediate computation buffers."""
@@ -1474,6 +1476,8 @@ class DeepSeekV3Builder(GraphBuilder):
         mbt = self.max_num_batched_tokens
 
         # Skip MoE if flagged (group GEMM kernel has batch_size issues)
+        # MPK_SKIP_MTP_MOE=1: skip all MTP MoE (zero output)
+        # MPK_SKIP_MTP_MOE=2: skip only routed experts (keep shared expert)
         skip_level = max(int(os.environ.get("MPK_SKIP_MOE_EXPERTS", "0")),
                          int(os.environ.get("MPK_SKIP_MTP_MOE", "0")))
         if skip_level >= 1:
@@ -1533,76 +1537,82 @@ class DeepSeekV3Builder(GraphBuilder):
         # Expert W13 (FP8) — 3D weight (num_experts, 2*intermediate, hidden).
         # Use _safe_attach + manual scale expansion (same as main MoE path); the
         # _attach_fp8_weight helper assumes 2D and would fail to unpack 3D shape.
-        w13_key = f"{mlp_prefix}experts.w13.weight"
-        w13_scale_key = f"{mlp_prefix}experts.w13.weight_scale_inv"
-        w_w13 = self._safe_attach(state_dict[w13_key],
-                                  f"mtp_{mlp_prefix}experts_w13")
-        if w13_scale_key in state_dict and not os.environ.get("MPK_BF16_BYPASS"):
-            raw_scale_inv = state_dict[w13_scale_key].float().clamp(min=1e-30)
-            w13_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
-            s_w13 = self._safe_attach(w13_scale_expanded,
-                                      f"mtp_{mlp_prefix}experts_w13_scale")
+        _skip_routed = (skip_level >= 2)
+        if not _skip_routed:
+            w13_key = f"{mlp_prefix}experts.w13.weight"
+            w13_scale_key = f"{mlp_prefix}experts.w13.weight_scale_inv"
+            w_w13 = self._safe_attach(state_dict[w13_key],
+                                      f"mtp_{mlp_prefix}experts_w13")
+            if w13_scale_key in state_dict and not os.environ.get("MPK_BF16_BYPASS"):
+                raw_scale_inv = state_dict[w13_scale_key].float().clamp(min=1e-30)
+                w13_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+                s_w13 = self._safe_attach(w13_scale_expanded,
+                                          f"mtp_{mlp_prefix}experts_w13_scale")
+            else:
+                s_w13 = None
+            moe_input_fp8 = self._cached_new_tensor(
+                dims=(mbt, self.hidden_size), dtype=float8_e4m3,
+                name="mtp_moe_input_fp8", io_category="cuda_tensor")
+            moe_input_scale = self._cached_new_tensor(
+                dims=(mbt, self.hidden_size // 128), dtype=float32,
+                name="mtp_moe_input_scale", io_category="cuda_tensor")
+            self.mpk.quantize_fp8_layer(
+                input=self.rmsnorm_out, output_fp8=moe_input_fp8,
+                output_scale=moe_input_scale,
+                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                scale_ue8m0=False)
+
+            moe_mid = self._cached_new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.moe_intermediate_size),
+                dtype=bfloat16, name="mtp_moe_mid", io_category="cuda_tensor")
+            self.mpk.moe_w13_fp8_layer(
+                input_fp8=moe_input_fp8, input_scale=moe_input_scale,
+                weight_fp8=w_w13, weight_scale=s_w13,
+                moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
+                output=moe_mid, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
+
+            moe_silu_out = self._cached_new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
+                dtype=bfloat16, name="mtp_moe_silu", io_category="cuda_tensor")
+            self.mpk.moe_silu_mul_layer(
+                input=moe_mid, output=moe_silu_out,
+                grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1), block_dim=(128, 1, 1))
+
+            w2_key = f"{mlp_prefix}experts.w2.weight"
+            w2_scale_key = f"{mlp_prefix}experts.w2.weight_scale_inv"
+            w_w2 = self._safe_attach(state_dict[w2_key],
+                                     f"mtp_{mlp_prefix}experts_w2")
+            if w2_scale_key in state_dict and not os.environ.get("MPK_BF16_BYPASS"):
+                raw_scale_inv = state_dict[w2_scale_key].float().clamp(min=1e-30)
+                w2_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+                s_w2 = self._safe_attach(w2_scale_expanded,
+                                         f"mtp_{mlp_prefix}experts_w2_scale")
+            else:
+                s_w2 = None
+            mtp_silu_fp8 = self._cached_new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
+                dtype=float8_e4m3, name="mtp_moe_silu_fp8", io_category="cuda_tensor")
+            mtp_silu_scale = self._cached_new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size // 128),
+                dtype=float32, name="mtp_moe_silu_scale", io_category="cuda_tensor")
+            self.mpk.quantize_fp8_layer(
+                input=moe_silu_out, output_fp8=mtp_silu_fp8,
+                output_scale=mtp_silu_scale,
+                grid_dim=(mbt * NUM_EXPERTS_PER_TOK, 1, 1), block_dim=(128, 1, 1),
+                scale_ue8m0=False)
+            moe_down_out = self._cached_new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
+                dtype=bfloat16, name="mtp_moe_down", io_category="cuda_tensor")
+            self.mpk.moe_w2_fp8_layer(
+                input_fp8=mtp_silu_fp8, input_scale=mtp_silu_scale,
+                weight_fp8=w_w2, weight_scale=s_w2,
+                moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
+                output=moe_down_out, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
         else:
-            s_w13 = None
-        moe_input_fp8 = self._cached_new_tensor(
-            dims=(mbt, self.hidden_size), dtype=float8_e4m3,
-            name="mtp_moe_input_fp8", io_category="cuda_tensor")
-        moe_input_scale = self._cached_new_tensor(
-            dims=(mbt, self.hidden_size // 128), dtype=float32,
-            name="mtp_moe_input_scale", io_category="cuda_tensor")
-        self.mpk.quantize_fp8_layer(
-            input=self.rmsnorm_out, output_fp8=moe_input_fp8,
-            output_scale=moe_input_scale,
-            grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
-            scale_ue8m0=False)  # MoE group GEMM expects float32 scale
-
-        moe_mid = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.moe_intermediate_size),
-            dtype=bfloat16, name="mtp_moe_mid", io_category="cuda_tensor")
-        self.mpk.moe_w13_fp8_layer(
-            input_fp8=moe_input_fp8, input_scale=moe_input_scale,
-            weight_fp8=w_w13, weight_scale=s_w13,
-            moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
-            output=moe_mid, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
-
-        moe_silu_out = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
-            dtype=bfloat16, name="mtp_moe_silu", io_category="cuda_tensor")
-        self.mpk.moe_silu_mul_layer(
-            input=moe_mid, output=moe_silu_out,
-            grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1), block_dim=(128, 1, 1))
-
-        # Expert W2 (FP8) — 3D weight, same pattern as W13 above.
-        w2_key = f"{mlp_prefix}experts.w2.weight"
-        w2_scale_key = f"{mlp_prefix}experts.w2.weight_scale_inv"
-        w_w2 = self._safe_attach(state_dict[w2_key],
-                                 f"mtp_{mlp_prefix}experts_w2")
-        if w2_scale_key in state_dict and not os.environ.get("MPK_BF16_BYPASS"):
-            raw_scale_inv = state_dict[w2_scale_key].float().clamp(min=1e-30)
-            w2_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
-            s_w2 = self._safe_attach(w2_scale_expanded,
-                                     f"mtp_{mlp_prefix}experts_w2_scale")
-        else:
-            s_w2 = None
-        mtp_silu_fp8 = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
-            dtype=float8_e4m3, name="mtp_moe_silu_fp8", io_category="cuda_tensor")
-        mtp_silu_scale = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size // 128),
-            dtype=float32, name="mtp_moe_silu_scale", io_category="cuda_tensor")
-        self.mpk.quantize_fp8_layer(
-            input=moe_silu_out, output_fp8=mtp_silu_fp8,
-            output_scale=mtp_silu_scale,
-            grid_dim=(mbt * NUM_EXPERTS_PER_TOK, 1, 1), block_dim=(128, 1, 1),
-            scale_ue8m0=False)  # MoE group GEMM expects float32 scale
-        moe_down_out = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
-            dtype=bfloat16, name="mtp_moe_down", io_category="cuda_tensor")
-        self.mpk.moe_w2_fp8_layer(
-            input_fp8=mtp_silu_fp8, input_scale=mtp_silu_scale,
-            weight_fp8=w_w2, weight_scale=s_w2,
-            moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
-            output=moe_down_out, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
+            # Skip routed experts: create zero moe_down_out
+            moe_down_out = self._cached_new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
+                dtype=bfloat16, name="mtp_moe_down", io_category="cuda_tensor")
 
         # Shared expert (FP8) — same pattern as main MoE shared expert:
         # interleave gate+up, requantize for UE8M0, proper silu_mul grid.
@@ -1706,23 +1716,30 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         # eh_proj: [hidden_size, 2*hidden_size] → split into W1 (embed) + W2 (hidden)
+        # IMPORTANT: .contiguous() creates new tensors — must keep references alive
+        # so the GPU memory is not freed and reused by later allocations (the
+        # persistent kernel stores raw data pointers, not PyTorch tensor refs).
         eh_proj_full = state_dict[f"{mtp_prefix}eh_proj.weight"]
+        self._mtp_eh_proj_embed_tensor = eh_proj_full[:, :self.hidden_size].contiguous()
+        self._mtp_eh_proj_hidden_tensor = eh_proj_full[:, self.hidden_size:].contiguous()
         w_eh_proj_1 = self.mpk.attach_input(
-            torch_tensor=eh_proj_full[:, :self.hidden_size].contiguous(),
+            torch_tensor=self._mtp_eh_proj_embed_tensor,
             name="mtp_eh_proj_embed",
         )
         w_eh_proj_2 = self.mpk.attach_input(
-            torch_tensor=eh_proj_full[:, self.hidden_size:].contiguous(),
+            torch_tensor=self._mtp_eh_proj_hidden_tensor,
             name="mtp_eh_proj_hidden",
         )
 
         # ---- MTP KV cache (separate from main model) ----
-        mtp_ckv_kpe_cache = torch.zeros(
+        # IMPORTANT: keep the PyTorch tensor alive on self so GPU memory is not
+        # freed — the persistent kernel stores the raw data pointer.
+        self._mtp_ckv_kpe_cache_buf = torch.zeros(
             (self.mpk.max_num_pages, self.mpk.page_size, self.qk_head_dim),
             dtype=torch.bfloat16, device="cuda",
         )
         self.mtp_ckv_kpe_cache_tensor = self.mpk.attach_input(
-            torch_tensor=mtp_ckv_kpe_cache,
+            torch_tensor=self._mtp_ckv_kpe_cache_buf,
             name="mtp_ckv_kpe_cache",
         )
 
@@ -2256,8 +2273,11 @@ class DeepSeekV3Builder(GraphBuilder):
                                 dtype=lm_head_weight.dtype),
                 ], dim=0)
 
+            # Keep the (possibly padded) weight alive — persistent kernel stores
+            # the raw GPU pointer, not a PyTorch tensor reference.
+            self._lm_head_weight_buf = lm_head_weight
             self.w_lm_head = self.mpk.attach_input(
-                torch_tensor=lm_head_weight, name="lm_head",
+                torch_tensor=self._lm_head_weight_buf, name="lm_head",
             )
             w_lm_head = self.w_lm_head
             # MPK_DUMP_LOGITS=1 → allocate a torch tensor and attach it so the
