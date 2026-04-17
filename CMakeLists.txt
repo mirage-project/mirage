@@ -154,6 +154,10 @@ if(NOT CARGO_RESULT EQUAL 0)
     "and follow the instructions on the screen.")
 endif()
 
+set(ABSTRACT_SUBEXPR_LIBRARIES ${PROJECT_SOURCE_DIR}/build/abstract_subexpr/release/libabstract_subexpr.so)
+set(FORMAL_VERIFIER_LIBRARIES ${PROJECT_SOURCE_DIR}/build/formal_verifier/release/libformal_verifier.so)
+list(APPEND MIRAGE_LINK_LIBS "-lstdc++fs")
+
 #set RUST
 if(ABSTRACT_SUBEXPR_LIB AND ABSTRACT_SUBEXPR_LIBRARIES)
   message(STATUS "ABSTRACT_SUBEXPR_LIB: ${ABSTRACT_SUBEXPR_LIB}")
@@ -207,188 +211,13 @@ install(FILES ${ABSTRACT_SUBEXPR_LIBRARIES}
 
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN dnn)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Multi-Query Attention Incremental Decoding
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN multi_query_attn_inc_decode)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Multi-Query Attention Speculative Decoding
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN multi_query_attn_spec_decode)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Multi-Query Attention Prefilling
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN multi_query_attn_prefill)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Group-Query Attention Incremental Decoding
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN group_query_attn_inc_decode)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Group-Query Attention Spec Decoding
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN group_query_attn_spec_decode)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Group-Query Attention Prefilling
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN group_query_attn_prefill)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Multi-Head Attention Incremental Decoding
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN multi_head_attn_inc_decode)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Multi-Head Attention Speculative Decoding
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN multi_head_attn_spec_decode)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Multi-Head Attention Prefilling
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN multi_head_attn_prefill)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# LoRA
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN lora)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# MLP
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN mlp)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# MoE
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN moe)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# RMS
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN rms)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# GatedMLP
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN gated_mlp)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# Chameleon
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN chameleon)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
-
-# egg_tests
-if("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN egg_tests)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+  foreach(target IN ITEMS rms_norm rmsnorm_mlp swiglu attention qk_norm_attention)
+    add_executable(symbolic_${target}
+      ${CPP_EXAMPLES_DIR}/symbolic/${target}.cc)
+    set_target_properties(symbolic_${target}
+      PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR}/symbolic)
+    target_link_libraries(symbolic_${target} mirage_runtime)
+  endforeach()
 endif()
 
 option(MIRAGE_BUILD_UNIT_TEST "build unit tests" OFF)

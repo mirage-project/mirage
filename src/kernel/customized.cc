@@ -262,7 +262,50 @@ KNCustomizedOp::operator json() const {
 }
 
 size_t KNCustomizedOp::get_owner_independent_hash() const {
-  assert(false && "To be implemented");
+  // Start with the base class hash (op_type + input/output DTensor shapes).
+  size_t ret = KNOperator::get_owner_independent_hash();
+
+  // Hash the TB graph configuration.
+  threadblock::Graph const &bg = bgraph;
+  hash_combine(ret, bg.grid_dim);
+  hash_combine(ret, bg.block_dim);
+  hash_combine(ret, bg.cluster_dim);
+  hash_combine(ret, bg.forloop_range);
+  hash_combine(ret, bg.reduction_dimx);
+
+  // Hash each TB operator: type, then per-tensor (shape, dtype, layout, flags).
+  auto hash_stensor = [&](threadblock::STensor const &t) {
+    hash_combine(ret, static_cast<int>(t.data_type));
+    hash_combine(ret, static_cast<int>(t.layout));
+    hash_combine(ret, t.num_dims);
+    for (int i = 0; i < t.num_dims; ++i) {
+      hash_combine(ret, t.dim[i]);
+    }
+    hash_combine(ret, t.after_accum);
+    hash_combine(ret, t.store_in_dmem);
+  };
+
+  for (threadblock::TBOperator const *op : bg.operators) {
+    hash_combine(ret, static_cast<int>(op->op_type));
+    for (auto const &t : op->input_tensors) {
+      hash_stensor(t);
+    }
+    for (auto const &t : op->output_tensors) {
+      hash_stensor(t);
+    }
+
+    if (op->op_type == type::TB_INPUT_OP) {
+      auto const *iop = static_cast<threadblock::TBInputOp const *>(op);
+      hash_combine(ret, iop->input_map);
+      hash_combine(ret, iop->forloop_dim);
+    } else if (op->op_type == type::TB_OUTPUT_OP) {
+      auto const *oop = static_cast<threadblock::TBOutputOp const *>(op);
+      hash_combine(ret, oop->output_map);
+      hash_combine(ret, oop->forloop_dim);
+      hash_combine(ret, static_cast<int>(oop->epilogue));
+    }
+  }
+  return ret;
 }
 
 #ifdef MIRAGE_FINGERPRINT_USE_CPU

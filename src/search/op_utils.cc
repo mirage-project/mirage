@@ -1,5 +1,8 @@
 #include "mirage/search/op_utils.h"
+#include "mirage/type.h"
 #include "mirage/utils/containers.h"
+
+#include <iostream>
 
 namespace mirage {
 namespace search {
@@ -12,6 +15,12 @@ bool is_binary(type::TBOperatorType op) {
       type::TBOperatorType::TB_DIV_OP,
       type::TBOperatorType::TB_POW_OP,
       type::TBOperatorType::TB_MUL_OP};
+  return contains(true_values, op);
+}
+
+bool is_commutative(type::TBOperatorType op) {
+  std::unordered_set<type::TBOperatorType> true_values{
+      type::TBOperatorType::TB_ADD_OP, type::TBOperatorType::TB_MUL_OP};
   return contains(true_values, op);
 }
 
@@ -46,6 +55,12 @@ bool is_binary(type::KNOperatorType op) {
       type::KNOperatorType::KN_POW_OP,
       type::KNOperatorType::KN_MUL_OP,
   };
+  return contains(true_values, op);
+}
+
+bool is_commutative(type::KNOperatorType op) {
+  std::unordered_set<type::KNOperatorType> true_values{
+      type::KNOperatorType::KN_ADD_OP, type::KNOperatorType::KN_MUL_OP};
   return contains(true_values, op);
 }
 
@@ -143,6 +158,7 @@ KNOperator *create_op(kernel::Graph &g,
   if (inputs.size() == 2) {
     return create_op(g, type, inputs[0], inputs[1]);
   }
+  assert(false && "Unsupported operator arity");
   return nullptr;
 }
 
@@ -196,6 +212,7 @@ TBOperator *create_op(threadblock::Graph &g,
       return g.create_forloop_accum_op(input, type);
     }
     default:
+      std::cerr << "Unsupported operator: " << json(type) << std::endl;
       assert(false && "Unsupported operator");
   }
 }
@@ -253,49 +270,6 @@ TBOperator *create_op(threadblock::Graph &g,
     return matmul;
   }
   return nullptr;
-}
-
-size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op->op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
-}
-
-size_t count_op_of_type(type::TBOperatorType op_type,
-                        threadblock::Graph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op->op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
-}
-
-size_t count_op_of_type(type::KNOperatorType op_type,
-                        SymbolicKNGraph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op.op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
-}
-
-size_t count_op_of_type(type::TBOperatorType op_type,
-                        SymbolicTBGraph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op.op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
 }
 
 } // namespace search

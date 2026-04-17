@@ -1,10 +1,9 @@
 #pragma once
 
-#include "mirage/search/symbolic_graph/dim_var_assignments.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/utils/hash_utils.h"
 #include "mirage/utils/json_utils.h"
-#include "z3++.h"
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -19,7 +18,8 @@ struct KVPair {
 };
 
 void get_egraph(char const *expr);
-bool *egg_equiv(char const **inputs, int len);
+bool *is_subexpr(char const **inputs, int len);
+bool is_equiv(char const *expr1, char const *expr2);
 }
 
 namespace mirage {
@@ -32,12 +32,17 @@ public:
 
   virtual std::string to_string() const = 0;
   virtual std::string to_egg() const = 0;
+
+  static bool symbolic_expr;
 };
 
 void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr);
 bool subexpr_to_final_expr(std::shared_ptr<AbstractExpr const> expr);
 std::vector<bool> subexpr_to_final_expr(
     std::vector<std::shared_ptr<AbstractExpr const>> const &exprs);
+
+bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1,
+                   std::shared_ptr<AbstractExpr const> expr2);
 
 class Var : public AbstractExpr {
 public:
@@ -201,9 +206,6 @@ std::shared_ptr<AbstractExpr const>
 std::shared_ptr<AbstractExpr const> abstract_expr_make_rms(
     std::shared_ptr<TensorDimExpr const> reduction_degree,
     std::shared_ptr<AbstractExpr const> elems);
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> elems);
 
 class Red : public AbstractExpr {
 public:
@@ -222,10 +224,6 @@ std::shared_ptr<AbstractExpr const>
 std::shared_ptr<AbstractExpr const> abstract_expr_make_red(
     std::shared_ptr<TensorDimExpr const> reduction_degree,
     std::shared_ptr<AbstractExpr const> summand);
-
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> summand);
 
 } // namespace search
 } // namespace mirage

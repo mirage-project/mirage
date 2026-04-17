@@ -1,5 +1,6 @@
 #include "mirage/search/symbolic_graph/symbolic_op.h"
 #include "mirage/search/symbolic_graph/op_args.h"
+#include "mirage/utils/json_utils.h"
 
 namespace mirage {
 namespace search {
@@ -30,6 +31,16 @@ SymbolicTBOp::operator json() const {
       {"op_type", op_type},
       {"args", *args},
   };
+}
+
+void from_json(json const &j, SymbolicTBOp &op) {
+  op.op_type = j.at("op_type").get<type::TBOperatorType>();
+  op.args = op_args_from_json_tb(j.at("args"), op.op_type);
+}
+
+void from_json(json const &j, SymbolicKNOp &op) {
+  op.op_type = j.at("op_type").get<type::KNOperatorType>();
+  op.args = op_args_from_json_kn(j.at("args"), op.op_type);
 }
 
 } // namespace search

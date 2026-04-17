@@ -1,32 +1,36 @@
 #pragma once
 
-#include "mirage/search/symbolic_graph/types.h"
-#include <unordered_map>
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
+#include <optional>
+#include <vector>
 
 namespace mirage {
 namespace search {
 
-class SymbolicTensorDim;
-
 class DimVarAssignments {
 public:
   DimVarAssignments() = default;
-  DimVarAssignments(
-      std::unordered_map<tensor_dim_var_index_t, int> const &assignments);
+  DimVarAssignments(std::vector<DimVarAssignment> const &assignments);
 
-  void assign(tensor_dim_var_index_t dim_var_index, int value);
-  int get_value(SymbolicTensorDim const &dim_expr) const;
-  int get_value(tensor_dim_var_index_t dim_var_index) const;
-  bool has_assignment(tensor_dim_var_index_t dim_var_index) const;
+  void append(DimVarAssignment const &assignment);
+  size_t size() const;
 
-  DimVarAssignments combine(DimVarAssignments const &) const;
+  std::vector<DimVarAssignment>::const_iterator begin() const;
+  std::vector<DimVarAssignment>::const_iterator end() const;
+
+  static std::optional<DimVarAssignments>
+      maybe_cartesian_product(DimVarAssignments const &lhs,
+                              DimVarAssignments const &rhs);
+  static std::optional<DimVarAssignments> maybe_cartesian_product(
+      std::vector<DimVarAssignments> const &assignments);
+  static DimVarAssignments cartesian_product(DimVarAssignments const &lhs,
+                                             DimVarAssignments const &rhs);
+  static DimVarAssignments
+      cartesian_product(std::vector<DimVarAssignments> const &assignments);
 
 private:
-  std::unordered_map<tensor_dim_var_index_t, int> assignments;
+  std::vector<DimVarAssignment> assignments;
 };
-
-DimVarAssignments combine_assignments(DimVarAssignments const &lhs,
-                                      DimVarAssignments const &rhs);
 
 } // namespace search
 } // namespace mirage

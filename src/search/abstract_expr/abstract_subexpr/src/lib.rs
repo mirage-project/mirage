@@ -11,9 +11,11 @@ pub type Constant = i32;
 define_language! {
     pub enum Expr {
         "+" = Add([Id; 2]),
-        "-" = Sub([Id; 2]),
         "*" = SMul([Id; 2]),
         "/" = Div([Id; 2]),
+        "==" = Eq([Id; 2]),
+
+        "ite" = Ite([Id; 3]),
 
         "sum" = Sum([Id; 2]),
         "exp" = Exp(Id),
@@ -25,6 +27,9 @@ define_language! {
         "relu" = Relu(Id),
         "clamp" = Clamp([Id; 3]),
         "rms" = Rms([Id; 2]),
+        
+        "gsum" = Gsum(Id),
+        "grms" = Grms(Id),
 
         Constant(Constant),
         Symbol(Symbol),
@@ -52,16 +57,26 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
         rw!("div-div"; "(/ (/ ?a ?b) ?c)" => "(/ ?a (* ?b ?c))" ),
         rw!("div-div-inv"; "(/ ?a (* ?b ?c))" => "(/ (/ ?a ?b) ?c)" ),
 
+        rw!("div-mul-common-denom"; "(* (/ ?a ?c) (/ ?b ?c))" => "(/ (* ?a ?b) (* ?c ?c))"),
+        rw!("div-mul-common-denom-inv"; "(/ (* ?a ?b) (* ?c ?c))" => "(* (/ ?a ?c) (/ ?b ?c))"),
+
         rw!("comm-sum"; "(sum ?i (sum ?j ?a))" => "(sum ?j (sum ?i ?a))" ),
         rw!("sum-add"; "(sum ?i (+ ?a ?b))" => "(+ (sum ?i ?a) (sum ?i ?b))"),
         rw!("sum-add-inv"; "(+ (sum ?i ?a) (sum ?i ?b))" => "(sum ?i (+ ?a ?b))" ),
         rw!("sum-mul"; "(sum ?i (* ?a ?b))" => "(* (sum ?i ?a) ?b)" ),
-        rw!("sum-mul-2"; "(sum ?i (* ?a ?b))" => "(* (sum ?i ?b) ?a)" ),
+        // rw!("sum-mul-2"; "(sum ?i (* ?a ?b))" => "(* (sum ?i ?b) ?a)" ),
         rw!("sum-mul-inv"; "(* (sum ?i ?a) ?b)" => "(sum ?i (* ?a ?b))" ),
         rw!("sum-div"; "(sum ?i (/ ?a ?b))" => "(/ (sum ?i ?a) ?b)" ), 
         rw!("sum-div-inv"; "(/ (sum ?i ?a) ?b)" => "(sum ?i (/ ?a ?b))"),
 
+        rw!("gsum-mul"; "(gsum (* ?a ?b))" => "(* (gsum ?a) ?b)"),
+        rw!("gsum-mul-inv"; "(* (gsum ?a) ?b)" => "(gsum (* ?a ?b))"),
+        rw!("gsum-div"; "(gsum (/ ?a ?b))" => "(/ (gsum ?a) ?b)"),
+        rw!("gsum-div-inv"; "(/ (gsum ?a) ?b)" => "(gsum (/ ?a ?b))"),
+        rw!("gsum-gsum"; "(gsum (gsum ?a))" => "(gsum ?a)"),
+        rw!("gsum-gsum-inv"; "(gsum ?a)" => "(gsum (gsum ?a))"),
     ];
+
     let sum_rules = vec![
         rw!("sum-mul-mul"; "(sum ?i (sum ?j (* ?a ?b)))" => "(* (sum ?i ?a) (sum ?j ?b))"),
         rw!("sum-mul-mul-inv"; "(* (sum ?i ?a) (sum ?j ?b))" => "(sum ?i (sum ?j (* ?a ?b)))"),
@@ -146,7 +161,7 @@ pub extern "C" fn get_egraph(expr: *const c_char) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut bool {
+pub extern "C" fn is_subexpr(subexprs: *const *const c_char, len: c_int) -> *mut bool {
     
     let subexpr_vec: Vec<String> = unsafe {
         (0..len)
@@ -180,4 +195,39 @@ pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut 
     let boxed = data.into_boxed_slice();
 
     Box::into_raw(boxed) as *mut bool
+}
+
+#[no_mangle]
+pub extern "C" fn is_equiv(expr1: *const c_char, expr2: *const c_char) -> bool {
+    let expr_str: &str = unsafe {
+            CStr::from_ptr(expr1)
+        }.to_str().unwrap_or("");
+
+    let expr2_str: &str = unsafe {
+            CStr::from_ptr(expr2)
+        }.to_str().unwrap_or("");
+
+    let re = Regex::new(r"\(sum (\d+)\b").unwrap();
+
+    let nums: Vec<u32> = re.captures_iter(&format!("{}{}", expr_str, expr2_str))
+        .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
+        .collect();
+
+    let expr1: RecExpr<Expr> = expr_str.parse().unwrap();
+    let expr2: RecExpr<Expr> = expr2_str.parse().unwrap();
+
+    let runner: Runner<Expr, ()> = Runner::default()
+        .with_iter_limit(100_000)
+        .with_node_limit(100_000)
+        .with_time_limit(Duration::from_secs(10))
+        .with_expr(&expr1)
+        .with_expr(&expr2)
+        .run(&rules(nums));
+
+    let id = runner.egraph.equivs(&expr1, &expr2);
+    if id.len() > 0 {
+        return true;
+    }
+
+    false
 }

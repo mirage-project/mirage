@@ -355,7 +355,13 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            bool verbose,
                            const char * default_config,
                            bool is_formal_verified)
-    
+
+    cdef CppKNGraph *cython_search_symbolic(const CppKNGraph *input_graph,
+                                             const char *checkpoint_filename,
+                                             bool verbose,
+                                             const char *default_config,
+                                             double time_limit_sec)
+
     cdef void cython_to_json(const CppKNGraph *input_graph,
                              const char *filename)
     cdef CppKNGraph *cython_from_json(const char *filename)

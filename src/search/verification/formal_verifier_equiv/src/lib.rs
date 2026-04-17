@@ -166,6 +166,10 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
         rw!("rms_definition";
             "(rms ?t0 ?d0)"
             <=> "(sqrt (sum (square ?t0) ?d0))"),
+
+        rw!("bc_div_mul_common_denom";
+            "(ew_mul (bc_div ?a ?c) (bc_div ?b ?c))"
+            <=> "(bc_div (ew_mul ?a ?b) (ew_mul ?c ?c))"),
     ].concat();
 
     let mut rules1 = vec![
@@ -224,6 +228,11 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
             "(sum (replicate ?t0 ?d1 ?i0) ?d0)"
             => "(replicate (sum ?t0 ?d0) ?d1 ?i0)" ),
 
+        rw!("replicate_reduce"; 
+            "(reduce (replicate ?t0 ?d1 ?i0) ?d0)"
+            => "(replicate (reduce ?t0 ?d0) ?d1 ?i0)"
+            if is_unique(&["?d0", "?d1"]) ),
+
         rw!("combine_sum"; 
             "(combine (sum ?t0 ?d0) ?d1 ?d2)" 
             => "(sum (combine ?t0 ?d1 ?d2) ?d0)" 
@@ -250,6 +259,10 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
             "(matmul (partition ?t0 ?d0 ?d1 ?i0) (partition ?t1 ?d0 ?d1 ?i0))"
             => "(partition (matmul ?t0 ?t1) ?d0 ?d1 ?i0)"
             if is_datadim(&["?d0"], vec!["data_dim2".to_string()]) ),
+
+        rw!("replicated_matmul";
+            "(matmul (replicate ?t0 ?d1 ?i0) (replicate ?t1 ?d1 ?i0))"
+            => "(replicate (matmul ?t0 ?t1) ?d1 ?i0)" ),
     ];
 
    let mut rules4 = vec![
@@ -465,12 +478,17 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
     ].concat();
 
     let mut rules9 = vec![
-
         rw!("bc-div-commute-partition";
             "(bc_div (partition ?t0 ?d0 ?d1 ?i0) ?t1)"
-            <=> "(partition (bc_div ?t0 ?t1) ?d0 ?d1 ?i0)" 
+            <=> "(partition (bc_div ?t0 ?t1) ?d0 ?d1 ?i0)"
             if is_datadim(&["?d0"], vec!["data_dim0".to_string()]) ),
 
+
+        vec![
+            rw!("replicate-select-one";
+                "(replicate ?t0 ?d0 ?i0)"
+                => "?t0" ),
+        ],
     ].concat();
 
     for i in 0..nums.len() {
@@ -504,7 +522,7 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
 }
 
 #[no_mangle]
-pub extern "C" fn check_equiv(expr1: *const c_char, expr2: *const c_char) -> bool {
+pub extern "C" fn check_equiv(expr1: *const c_char, expr2: *const c_char, is_symbolic: bool) -> bool {
     let expr1_str: &str = unsafe {
             CStr::from_ptr(expr1)
         }.to_str().unwrap_or("");
@@ -515,9 +533,13 @@ pub extern "C" fn check_equiv(expr1: *const c_char, expr2: *const c_char) -> boo
 
     let re = Regex::new(r" (\d+)\)").unwrap();
 
-    let mut nums: Vec<u32> = re.captures_iter(expr2_str)
-        .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
-        .collect();
+    let mut nums: Vec<u32> = if is_symbolic {
+        vec![]
+    } else {
+        re.captures_iter(expr2_str)
+            .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
+            .collect()
+    };
 
     let runner = Runner::default()
     .with_iter_limit(100_000)

@@ -27,8 +27,15 @@ public:
 
 class KNInputOpArgs : public OpArgs {
 public:
-  KNInputOpArgs(std::vector<size_t> input_strides, int3 input_map);
+  KNInputOpArgs(std::vector<int> input_dims,
+                std::vector<size_t> input_strides,
+                mirage::type::DataType data_type,
+                mirage::layout::DmemLayout layout,
+                int3 input_map);
+  std::vector<int> input_dims;
   std::vector<size_t> input_strides;
+  mirage::type::DataType data_type;
+  mirage::layout::DmemLayout layout;
   int3 input_map;
 
   operator json() const override;
@@ -71,9 +78,9 @@ public:
 
 class TBInputOpArgs : public OpArgs {
 public:
-  TBInputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &imap);
+  TBInputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &input_map);
   SymbolicDTensor dtensor;
-  SymbolicMap imap;
+  SymbolicMap input_map; // has_forloop=true, last row is forloop
 
   operator json() const override;
 };
@@ -81,13 +88,11 @@ public:
 class TBOutputOpArgs : public OpArgs {
 public:
   TBOutputOpArgs(SymbolicDTensor dtensor,
-                 int3 output_map,
-                 int forloop_dim,
-                 mirage::type::TBEpilogueType epilogue);
+                 SymbolicMap const &output_map,
+                 type::TBEpilogueType epilogue);
   SymbolicDTensor dtensor;
-  int3 output_map;
-  int forloop_dim;
-  mirage::type::TBEpilogueType epilogue;
+  SymbolicMap output_map;
+  type::TBEpilogueType epilogue;
 
   operator json() const override;
 };
@@ -110,6 +115,7 @@ public:
 };
 
 class TBElementBinaryOpArgs : public OpArgs {
+public:
   TBElementBinaryOpArgs(mirage::type::TBOperatorType op_type);
   mirage::type::TBOperatorType op_type;
 
@@ -118,11 +124,17 @@ class TBElementBinaryOpArgs : public OpArgs {
 
 class TBReductionOpArgs : public OpArgs {
 public:
-  TBReductionOpArgs(int reduce_dim, int reduce_size);
-  int reduce_dim, reduce_size;
+  TBReductionOpArgs(int reduce_dim, SymbolicTensorDim reduce_degree);
+  int reduce_dim;
+  SymbolicTensorDim reduce_degree;
 
   operator json() const override;
 };
+
+std::shared_ptr<OpArgs const>
+    op_args_from_json_tb(json const &j, type::TBOperatorType op_type);
+std::shared_ptr<OpArgs const>
+    op_args_from_json_kn(json const &j, type::KNOperatorType op_type);
 
 } // namespace search
 } // namespace mirage

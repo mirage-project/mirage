@@ -1275,6 +1275,27 @@ def search(CyKNGraph input_graph, *, str backend = "cuda", int max_num_new_graph
 
     return new_graphs
 
+def search_symbolic(CyKNGraph input_graph, *, str previous_checkpoint = None, bool verbose = False, str default_config = None, double time_limit_sec = -1.0):
+    cdef char* cprevious_checkpoint = NULL
+    if previous_checkpoint is not None:
+        py_byte_string_cp = previous_checkpoint.encode('UTF-8')
+        cprevious_checkpoint = py_byte_string_cp
+    cdef char* cconfig = NULL
+    if default_config is not None:
+        py_byte_string_config = default_config.encode('UTF-8')
+        cconfig = py_byte_string_config
+    cverbose = verbose
+    cdef CppKNGraph* tuned = cython_search_symbolic(
+        input_graph.p_kgraph,
+        cprevious_checkpoint,
+        cverbose,
+        cconfig,
+        time_limit_sec)
+    if tuned is NULL:
+        return None
+    ptr = ctypes.cast(<unsigned long long>tuned, ctypes.c_void_p)
+    return CyKNGraph(ptr)
+
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
 def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1, bool profiling = False, bool enable_online_softmax = False) -> dict:

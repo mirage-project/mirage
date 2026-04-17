@@ -1,12 +1,14 @@
 #pragma once
 
 #include "mirage/kernel/graph.h"
-#include "mirage/search/symbolic_graph/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
 #include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/search/symbolic_graph/symbolic_op.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/threadblock/graph.h"
+#include "mirage/type.h"
+#include "mirage/utils/containers.h"
 #include "mirage/vector_types.h"
 
 #include <unordered_map>
@@ -17,40 +19,64 @@ namespace search {
 
 class SymbolicTBGraph {
 public:
-  SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base);
-  std::vector<DimVarAssignments> enumerate_assignments() const;
+  SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base,
+                  int num_parallel_dims);
 
   threadblock::Graph *
-      to_threadblock_graph(DimVarAssignments const &assignments,
+      to_threadblock_graph(DimVarAssignment const &assignment,
                            std::vector<kernel::DTensor> const &inputs) const;
   bool add_operator(type::TBOperatorType op_type,
                     std::vector<int> input_indices);
-  bool add_input(SymbolicDTensor dtensor, SymbolicMap const &imap);
   bool add_input(SymbolicDTensor dtensor);
-  bool add_input(SymbolicDTensor dtensor, int3 input_map, int forloop_dim);
-  // bool add_output(int input_index,
-  //                 SymbolicMap const &omap,
-  //                 mirage::type::TBEpilogueType epilogue_type);
-  // bool add_output(int input_index, mirage::type::TBEpilogueType
-  // epilogue_type);
+  bool add_input(SymbolicDTensor dtensor,
+                 std::vector<int> input_map,
+                 int forloop_dim);
+  // Mixed symbolic/concrete: sym_imap controls grid rows, sym_fmap controls
+  // forloop row
+  bool add_input(SymbolicDTensor dtensor,
+                 std::vector<int> input_map,
+                 int forloop_dim,
+                 bool sym_imap,
+                 bool sym_fmap);
+  bool add_output(int input_index, mirage::type::TBEpilogueType epilogue_type);
   bool add_output(int input_index,
-                  int3 output_map,
-                  int forloop_dim,
-                  mirage::type::TBEpilogueType epilogue_type);
+                  std::vector<int> output_map,
+                  type::TBEpilogueType epilogue_type);
   bool remove_last_operator();
+
+  // Return a copy of this TB graph with updated input dtensor shapes.
+  // The new_input_dtensors vector must have one entry per TB_INPUT_OP.
+  // All downstream STensor dims are recomputed by replaying the operators.
+  SymbolicTBGraph with_updated_input_shapes(
+      std::vector<SymbolicDTensor> const &new_input_dtensors) const;
+
+  // Returns the largest value for `var_index` that exactly divides every
+  // constant C for which (C / var_index) appears in the tensor dims.
+  // Falls back to 4 if the variable appears in no division expression.
+  int get_initial_value_for_var(tensor_dim_var_index_t var_index) const;
+
+  // Returns true iff the assignment satisfies:
+  //   (a) every TensorDimDiv node evaluates with zero remainder, and
+  //   (b) total smem (in bytes, assuming fp16) <= MAX_SMEM_SIZE.
+  // Uses maybe_get_value to avoid assert-on-unassigned-var.
+  bool is_valid_assignment(DimVarAssignment const &assignment) const;
 
   tensor_dim_var_index_t dim_variable_index_base;
   tensor_dim_var_index_t next_dim_variable_index;
 
   std::vector<SymbolicTensorDim> grid_dim, block_dim;
   SymbolicTensorDim forloop_range;
-  int reduction_dimx;
+  SymbolicTensorDim reduction_degree;
   std::vector<SymbolicTBOp> operators;
   std::vector<SymbolicSTensor> tensors;
   std::vector<std::vector<int>> input_indices;
   std::vector<std::vector<int>> output_indices;
 
-  TensorDimConstraints conds;
+  // Pairs of symbolic dims that must be equal, recorded when
+  // can_be_symbolically_equivalent_to succeeds during add_operator.
+  std::vector<std::pair<SymbolicTensorDim, SymbolicTensorDim>> dim_equalities;
+  // dim_equalities.size() before each operator was added, for backtracking.
+  std::vector<size_t> dim_equalities_watermarks;
 
   operator json() const;
 };
@@ -59,14 +85,15 @@ class SymbolicKNGraph {
 public:
   SymbolicKNGraph() = default;
 
-  kernel::Graph *to_kernel_graph(DimVarAssignments const &assignments) const;
-  // std::vector<DimVarAssignments> enumerate_assignments() const;
+  kernel::Graph *to_kernel_graph(DimVarAssignment const &assignment) const;
   bool add_operator(type::KNOperatorType op_type,
                     std::vector<int> input_indices);
   bool add_customized_operator(SymbolicTBGraph tb_graph,
                                std::vector<int> input_indices);
   bool add_input(std::vector<int> input_dims,
                  std::vector<size_t> input_strides,
+                 mirage::type::DataType data_type,
+                 mirage::layout::DmemLayout layout,
                  int3 input_map = {-1, -1, -1});
   bool add_output(int input_index,
                   std::vector<size_t> output_strides,
@@ -80,15 +107,15 @@ public:
   std::vector<std::vector<int>> input_indices;
   std::vector<std::vector<int>> output_indices;
 
-  std::vector<std::unordered_set<TensorDimConstraint>> conds_from_op;
-  std::unordered_set<TensorDimConstraint> conds;
-
   operator json() const;
-
-private:
-  bool add_conds_for_new_op(
-      std::unordered_set<TensorDimConstraint> const &new_conds);
 };
+
+void from_json(json const &j, SymbolicTBGraph &symbolic_tb_graph);
+void from_json(json const &j, SymbolicKNGraph &symbolic_kn_graph);
+
+SymbolicKNGraph construct_graph_with_different_input_shapes(
+    SymbolicKNGraph const &ref_graph,
+    std::vector<std::vector<int>> const &input_shapes);
 
 } // namespace search
 } // namespace mirage

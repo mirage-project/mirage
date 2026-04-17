@@ -28,11 +28,11 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "utils.h"
 
 // Entrypoint for C/C++
-extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
-                                std::vector<void *> output_tensors,
-                                void *buf,
-                                cudaStream_t stream,
-                                void *profiler_buffer) {
+extern "C" int execute_mugraph(std::vector<void const *> input_tensors,
+                               std::vector<void *> output_tensors,
+                               void *buf,
+                               cudaStream_t stream,
+                               void *profiler_buffer) {
 
   static bool inited = false;
   if (!inited) {
@@ -40,6 +40,8 @@ extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
     inited = true;
   }
   _execute_mugraph(input_tensors, output_tensors, buf, stream, profiler_buffer);
+  cudaError_t err = cudaGetLastError();
+  return (int)err;
 }
 
 // A wrappr around `execute_mugraph` which uses C arrays instead of vectors

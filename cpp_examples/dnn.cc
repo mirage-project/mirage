@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
   //     search::GeneratorConfig::get_attention_default_config();
   // config.grid_dim_to_explore = {{40, 8, 1}, {40, 1, 1}};
   // search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_dnn.json");
-  // gen.generate_kernel_graphs();
+  // gen.search();
 
   // auto et = std::chrono::steady_clock::now();
 

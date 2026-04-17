@@ -3,15 +3,19 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <vector>
 
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/z3_utils.h"
 
 namespace mirage {
 namespace search {
+
+bool AbstractExpr::symbolic_expr = false;
 
 void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr) {
   get_egraph(expr->to_egg().c_str());
@@ -36,7 +40,7 @@ std::vector<bool> subexpr_to_final_expr(
   }
 
   bool *results_in_raw_array =
-      egg_equiv(exprs_c_str, static_cast<int>(exprs.size()));
+      is_subexpr(exprs_c_str, static_cast<int>(exprs.size()));
 
   std::vector<bool> results;
   for (size_t i = 0; i < exprs.size(); ++i) {
@@ -46,6 +50,13 @@ std::vector<bool> subexpr_to_final_expr(
   delete[] exprs_c_str;
 
   return results;
+}
+
+bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1,
+                   std::shared_ptr<AbstractExpr const> expr2) {
+  std::string expr1_str = expr1->to_egg();
+  std::string expr2_str = expr2->to_egg();
+  return is_equiv(expr1_str.c_str(), expr2_str.c_str());
 }
 
 Var::Var(std::string const &name) : name(name) {}
@@ -220,6 +231,13 @@ std::string RMS::to_string() const {
 }
 
 std::string RMS::to_egg() const {
+  if (AbstractExpr::symbolic_expr) {
+    int value = get_value_with_bool_vars_zero_others_one(reduction_degree);
+    if (value == 1) {
+      return elems->to_egg();
+    }
+    return "(rms " + std::to_string(value) + " " + elems->to_egg() + ")";
+  }
   return "(rms " + reduction_degree->to_string() + " " + elems->to_egg() + ")";
 }
 
@@ -236,6 +254,13 @@ std::string Red::to_string() const {
 }
 
 std::string Red::to_egg() const {
+  if (AbstractExpr::symbolic_expr) {
+    int value = get_value_with_bool_vars_zero_others_one(reduction_degree);
+    if (value == 1) {
+      return summand->to_egg();
+    }
+    return "(sum " + std::to_string(value) + " " + summand->to_egg() + ")";
+  }
   return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() +
          ")";
 }
@@ -317,12 +342,6 @@ std::shared_ptr<AbstractExpr const> abstract_expr_make_rms(
 }
 
 std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> elems) {
-  return abstract_expr_make_rms(reduction_dim.dim_expr, elems);
-}
-
-std::shared_ptr<AbstractExpr const>
     abstract_expr_make_red(int reduction_degree,
                            std::shared_ptr<AbstractExpr const> summand) {
   if (reduction_degree == 1) {
@@ -335,11 +354,6 @@ std::shared_ptr<AbstractExpr const> abstract_expr_make_red(
     std::shared_ptr<TensorDimExpr const> reduction_degree,
     std::shared_ptr<AbstractExpr const> summand) {
   return std::make_shared<Red>(reduction_degree, summand);
-}
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> summand) {
-  return abstract_expr_make_red(reduction_dim.dim_expr, summand);
 }
 
 } // namespace search

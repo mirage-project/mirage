@@ -5,26 +5,27 @@ namespace search {
 
 GeneratorConfig GeneratorConfig::get_default_config() {
   return {
-      9 /* max_num_threadblock_graph_op */,
+      11 /* max_num_threadblock_graph_op */,
       5 /* max_num_kernel_graph_op */,
       1 /* max_num_threadblock_graphs */,
       3 /* max_num_threadblock_graph_inputs */,
-      2 /* max_num_threadblock_graph_outputs */,
-      16 /* search_thread */,
+      1 /* max_num_threadblock_graph_outputs */,
+      96 /* search_thread */,
+      // 1 /* search_thread */,
       VerifierType::PROBABILISTIC_VERIFIER,
       {
-          type::KN_MATMUL_OP,
-          type::KN_EXP_OP,
-          type::KN_SQUARE_OP,
-          type::KN_SQRT_OP,
-          type::KN_SILU_OP,
-          type::KN_GELU_OP,
-          type::KN_RELU_OP,
-          type::KN_CLAMP_OP,
-          type::KN_ADD_OP,
-          type::KN_MUL_OP,
-          type::KN_DIV_OP,
-          type::KN_POW_OP,
+          // type::KN_MATMUL_OP,
+          // type::KN_EXP_OP,
+          // type::KN_SQUARE_OP,
+          // type::KN_SQRT_OP,
+          // type::KN_SILU_OP,
+          // type::KN_GELU_OP,
+          // type::KN_RELU_OP,
+          // type::KN_CLAMP_OP,
+          // type::KN_ADD_OP,
+          // type::KN_MUL_OP,
+          // type::KN_DIV_OP,
+          // type::KN_POW_OP,
           // type::KN_REDUCTION_2_OP,
           type::KN_CUSTOMIZED_OP,
       } /* knop_to_explore */,
@@ -60,16 +61,21 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           64,
       } /* frange_to_explore */,
       64 /* reduction_dimx */,
+      3600.0 /* search_time_limit_sec (1 hour) */,
       false /* enable_attention_specific_optimization */,
       false /* enable_concat_matmul_transformation */,
-      false /* randomized_branches */,
+      false /* explore_all_mappings */,
+      false /* symbolic_maps */,
+      false /* sym_grid_dim */,
+      false /* sym_frange */,
+      false /* sym_imap */,
+      false /* sym_fmap */,
+      false /* sym_omap */,
   };
 }
 
 void GeneratorConfig::enable_attention_specific_optimization() {
   _enable_attention_specific_optimization = true;
-  max_num_threadblock_graphs = 2;
-  tbop_to_explore.push_back(type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
   deduplicate(tbop_to_explore);
 }
 
@@ -120,6 +126,8 @@ void GeneratorConfig::show() const {
     printf("%d ", frange);
   }
   printf("\n");
+  printf("  explore_all_mappings: %s\n",
+         explore_all_mappings ? "true" : "false");
 }
 
 bool TBGraphConfig::operator==(TBGraphConfig const &other) const {
