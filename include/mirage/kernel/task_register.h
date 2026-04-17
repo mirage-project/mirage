@@ -105,6 +105,18 @@ public:
                                    std::vector<int> const &params);
   int register_tensor_init_task(threadblock::Graph const &bgraph,
                                 std::vector<int> const &params);
+  int register_elementwise_add_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
+  int register_softmax_gather_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_mtp_verify_probabilistic_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params);
+  int register_mtp_float_scatter_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_prob_extract_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_prob_scatter_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
   int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
   int register_moe_topk_sigmoid_sm100_task(threadblock::Graph const &bgraph,
@@ -133,6 +145,23 @@ public:
                                          std::vector<int> const &params);
   int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
+  int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params,
+                                       bool scale_ue8m0);
+  int register_linear_fp8_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params,
+                                     bool with_residual);
+  int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  // MTP tasks
+  int register_mtp_verify_strict_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_mtp_accept_commit_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_mtp_token_scatter_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_mtp_prepare_verify_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(
