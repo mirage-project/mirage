@@ -1322,6 +1322,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   //            0,
   //            all_events.size() * sizeof(EventCounter));
   //  Initialize all tasks
+  fprintf(stderr, "[MPK INIT] Total tasks: %zu, Total events: %zu\n",
+          all_tasks.size(), all_events.size());
   global_runtime_config.all_tasks =
       gpu_malloc<TaskDesc>(all_tasks.size() * sizeof(TaskDesc));
   cudaMemcpy(global_runtime_config.all_tasks,

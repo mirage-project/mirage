@@ -282,7 +282,8 @@ void register_mugraph(
       std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
       std::vector<int> consumer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
       int num_shared_tensors = 0;
-      int3 input_map, output_map;
+      int3 input_map = make_int3(-1, -1, -1);
+      int3 output_map = make_int3(-1, -1, -1);
       for (auto const &input : input_ops) {
         for (auto const &output : pre_output_ops) {
           if (input->dtensor.guid == output->dtensor.guid) {
@@ -292,8 +293,11 @@ void register_mugraph(
           }
         }
       }
-      // assert that their is at least a single tensor shared between ops
-      assert(num_shared_tensors >= 1);
+      // When consecutive ops share no tensors (e.g., enorm and hnorm in MTP
+      // which read independent inputs), create a full barrier event connecting
+      // all producer tasks to all consumer tasks. The -1 initialized maps
+      // ensure no dimension partitioning, so a single event covers everything.
+      // assert(num_shared_tensors >= 1); // relaxed: allow barrier-only deps
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         // ! Note: If two block dimensions are mapped to the same tensor dim,
         // ! then the partitioning will be incorrect.

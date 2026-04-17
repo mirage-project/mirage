@@ -699,7 +699,7 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(num_splits, grid_y_mla, 1),
             block_dim=(128, 1, 1),
         )
-        # PR 651 reduce: 256 threads handle 2 V-dims per call (256/128=2 lanes)
+        # MLA reduce: loop over V-dims. 256 threads / 128 heads = 2 lanes per call.
         lanes_per_reduce = 256 // 128  # 2
         for d_start in range(0, self.v_head_dim, lanes_per_reduce):
             self.mpk.mla_reduce_layer(
@@ -1248,7 +1248,8 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         # MLA attention (same structure as main model, own weights)
-        self._build_mla_attention_layer_with_prefix(prefix, state_dict)
+        if os.environ.get("MPK_SKIP_MTP_MLA", "0") != "1":
+            self._build_mla_attention_layer_with_prefix(prefix, state_dict)
 
         # TP>1: AllReduce partial attn_proj_out first, THEN residual add
         # (residual must come after AllReduce, otherwise adding partial then
@@ -1427,10 +1428,7 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(num_splits, grid_y_mla, 1),
             block_dim=(128, 1, 1),
         )
-        # PR 651 reduce: 256 threads handle 2 V-dims per call (256/128=2 lanes).
-        # Must loop over d_start like the main model to cover all V dimensions.
-        # Previously called once with d_start=0, d_count=512, which only reduced
-        # d=0,1 (2 of 512 dims) — leaving stale main-model data in attn_out.
+        # MLA reduce: loop over V-dims for MTP path.
         lanes_per_reduce = 256 // 128  # 2
         for d_start in range(0, self.v_head_dim, lanes_per_reduce):
             self.mpk.mla_reduce_layer(
@@ -1476,7 +1474,8 @@ class DeepSeekV3Builder(GraphBuilder):
         mbt = self.max_num_batched_tokens
 
         # Skip MoE if flagged (group GEMM kernel has batch_size issues)
-        skip_level = int(os.environ.get("MPK_SKIP_MOE_EXPERTS", "0"))
+        skip_level = max(int(os.environ.get("MPK_SKIP_MOE_EXPERTS", "0")),
+                         int(os.environ.get("MPK_SKIP_MTP_MOE", "0")))
         if skip_level >= 1:
             self.mlp_out = self._cached_new_tensor(
                 dims=(mbt, self.hidden_size), dtype=bfloat16,
