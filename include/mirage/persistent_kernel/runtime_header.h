@@ -19,11 +19,17 @@
 #include <cuda_runtime.h>
 
 #ifdef USE_NVSHMEM
-// Include ONLY host API headers -- NOT <nvshmem.h> which pulls in hundreds
-// of __noinline__ device functions that inflate register count with rdc=true.
-// Device-side allreduce is self-contained in tasks/hopper/allreduce.cuh.
+#if defined(MIRAGE_GRACE_BLACKWELL)
+// Blackwell (SM100a): include only host API + types.
+// Device-side allreduce is self-contained in tasks/blackwell/allreduce.cuh
+// to avoid rdc=true register inflation (166 vs 255 regs).
 #include <nvshmem_host.h>
 #include "device_host/nvshmem_types.h"
+#else
+// Hopper/Ampere: use standard NVSHMEM includes (rdc=true is fine on SM90).
+#include <nvshmem.h>
+#include <nvshmemx.h>
+#endif
 #endif
 
 namespace mirage {

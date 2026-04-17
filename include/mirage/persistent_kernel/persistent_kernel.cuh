@@ -22,10 +22,16 @@
 #include "runtime_header.h"
 #ifdef USE_NVSHMEM
 #include <mpi.h>
-// Host-only headers (device allreduce is self-contained in allreduce.cuh)
+#if defined(MIRAGE_GRACE_BLACKWELL)
+// Blackwell: host-only headers (device allreduce in tasks/blackwell/allreduce.cuh)
 #include <nvshmem_host.h>
 #include "device_host/nvshmem_types.h"
-#include "device/nvshmemx_collective_launch_apis.h"  // nvshmemx_collective_launch
+#include "device/nvshmemx_collective_launch_apis.h"
+#else
+// Hopper/Ampere: full NVSHMEM includes
+#include <nvshmem.h>
+#include <nvshmemx.h>
+#endif
 #endif
 #include <thread>
 #include <unistd.h>

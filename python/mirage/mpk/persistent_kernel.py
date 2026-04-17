@@ -212,7 +212,9 @@ def get_compile_command(
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false",  # Always rdc=false (NVSHMEM_NO_DEVICE_LIB: our own device state + callback init)
+        # Blackwell: rdc=false (self-contained allreduce, avoids 255-reg inflation)
+        # Hopper/Ampere: rdc=true when NVSHMEM (needed for libnvshmem_device.a)
+        "-rdc=false" if (not use_nvshmem or target_cc >= 100) else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -261,20 +263,28 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        # Extract collective_launch host stub from device .a (no device code in this .o)
-        _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
-        _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
-        os.makedirs(_host_obj_dir, exist_ok=True)
-        _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
-        if not os.path.exists(_coll_obj):
-            import subprocess as _sp
-            _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
-        nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
-                         "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
-                         _coll_obj,  # host-only .o for nvshmemx_collective_launch
-                         "-Xlinker", "--disable-new-dtags",
-                         "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                         "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        if target_cc >= 100:
+            # Blackwell: self-contained allreduce, no libnvshmem_device.a
+            _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
+            _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
+            os.makedirs(_host_obj_dir, exist_ok=True)
+            _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
+            if not os.path.exists(_coll_obj):
+                import subprocess as _sp
+                _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
+            nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
+                             "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
+                             _coll_obj,
+                             "-Xlinker", "--disable-new-dtags",
+                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        else:
+            # Hopper/Ampere: standard NVSHMEM with device library + rdc=true
+            nvshmem_flags = ["-DUSE_NVSHMEM",
+                             "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
+                             "-Xlinker", "--disable-new-dtags",
+                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 

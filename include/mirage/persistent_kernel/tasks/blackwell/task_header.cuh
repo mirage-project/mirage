@@ -3,9 +3,6 @@
 #include "tasks/ampere/merge_splitkv.cuh"
 #include "tasks/ampere/multitoken_paged_attention_split_kv.cuh"
 #include "tasks/ampere/silu_mul.cuh"
-#ifdef USE_NVSHMEM
-#include "tasks/ampere/allreduce.cuh"
-#endif // USE_NVSHMEM
 // Hopper task impls
 #include "tasks/cute/hopper/gemm_ws.cuh"
 #include "tasks/cute/hopper/gemm_ws_cooperative.cuh"
@@ -16,8 +13,10 @@
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/rotary_embedding_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
+// AllReduce: Blackwell uses self-contained NVLS implementation (rdc=false, 166 regs).
+// Ampere/Hopper allreduce uses NVSHMEM tile API (rdc=true, works on SM90).
 #ifdef USE_NVSHMEM
-#include "tasks/hopper/allreduce.cuh"
+#include "allreduce.cuh"  // tasks/blackwell/allreduce.cuh
 #endif // USE_NVSHMEM
 // Blackwell task impls
 #include "argmax_sm100.cuh"

@@ -15,14 +15,14 @@
 #pragma once
 #include "tasks/common/common_header.cuh"
 
-namespace kernel {
-
-// Old put-based allreduce — only available with the full NVSHMEM device library.
-// With NVSHMEM_NO_DEVICE_LIB (rdc=false mode), the self-contained tile allreduce
-// in hopper/allreduce.cuh is used instead.
-#if defined(USE_NVSHMEM) && !defined(NVSHMEM_NO_DEVICE_LIB)
+#ifdef USE_NVSHMEM
 #include <nvshmem.h>
 #include <nvshmemx.h>
+#endif
+
+namespace kernel {
+
+#ifdef USE_NVSHMEM
 
 /**
  * NVSHMEM-based Allgather using put operations.
@@ -91,7 +91,7 @@ __device__ __forceinline__ void reduction_kernel(void const *input_ptr,
   }
 }
 
-#endif // USE_NVSHMEM && !NVSHMEM_NO_DEVICE_LIB
+#endif // USE_NVSHMEM
 
 // Reduction function resides in reduction.cuh
 
