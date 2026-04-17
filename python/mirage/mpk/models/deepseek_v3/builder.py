@@ -1427,16 +1427,22 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(num_splits, grid_y_mla, 1),
             block_dim=(128, 1, 1),
         )
-        self.mpk.mla_reduce_layer(
-            input_partial=self.mla_partial_o,
-            input_lse=self.mla_partial_lse,
-            output=self.attn_out,
-            mla_params=(self.num_local_q_heads, self.v_head_dim,
-                        num_splits, 0, self.v_head_dim, q_len_mla),
-            grid_dim=(grid_y_mla, 1, 1) if q_len_mla > 1 else
-                (self.mpk.max_num_batched_requests, 1, 1),
-            block_dim=(128, 1, 1),
-        )
+        # PR 651 reduce: 256 threads handle 2 V-dims per call (256/128=2 lanes).
+        # Must loop over d_start like the main model to cover all V dimensions.
+        # Previously called once with d_start=0, d_count=512, which only reduced
+        # d=0,1 (2 of 512 dims) — leaving stale main-model data in attn_out.
+        lanes_per_reduce = 256 // 128  # 2
+        for d_start in range(0, self.v_head_dim, lanes_per_reduce):
+            self.mpk.mla_reduce_layer(
+                input_partial=self.mla_partial_o,
+                input_lse=self.mla_partial_lse,
+                output=self.attn_out,
+                mla_params=(self.num_local_q_heads, self.v_head_dim,
+                            num_splits, d_start, lanes_per_reduce, q_len_mla),
+                grid_dim=(grid_y_mla, 1, 1) if q_len_mla > 1 else
+                    (self.mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+            )
 
         # o_proj (FP8)
         w_o, s_o = self._attach_fp8_weight(

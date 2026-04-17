@@ -270,8 +270,11 @@ __device__ __forceinline__ bool
       // Prepare page indptrs
       int num_new_pages =
           (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-      config.paged_kv_last_page_len_buffer[num_reqs] =
-          (step + num_new_tokens) % MPK_PAGE_SIZE;
+      {
+        int _lpl = (step + num_new_tokens) % MPK_PAGE_SIZE;
+        config.paged_kv_last_page_len_buffer[num_reqs] =
+            (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+      }
       for (int j = 0; j < num_old_pages; j++) {
         config.paged_kv_indices_buffer[num_pages + j] =
             smem_kv_indices[kv_indptr + j];
@@ -306,8 +309,11 @@ __device__ __forceinline__ bool
           config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
     }
     int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-    config.paged_kv_last_page_len_buffer[num_reqs] =
-        num_new_tokens % MPK_PAGE_SIZE;
+    {
+      int _lpl = num_new_tokens % MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[num_reqs] =
+          (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+    }
     for (int j = 0; j < num_new_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
           config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
