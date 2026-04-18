@@ -4146,7 +4146,8 @@ int TaskRegister::register_mtp_prepare_verify_task(
   code.e("    task_desc->input_ptrs[1],");   // draft_tokens
   code.e("    task_desc->input_ptrs[2],");   // tokens_buffer
   code.e("    task_desc->input_ptrs[3],");   // step
-  code.e("    task_desc->output_ptrs[0]);"); // num_new_tokens
+  code.e("    task_desc->output_ptrs[0],");  // num_new_tokens
+  code.e("    task_desc->task_metadata.request_id);"); // request_id (not blockIdx.x)
   return register_task_variant(TASK_MTP_PREPARE_VERIFY, code.to_string());
 }
 

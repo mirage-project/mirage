@@ -88,7 +88,8 @@ __device__ __forceinline__ void mtp_prepare_verify_input_kernel(
     void const *__restrict__ draft_tokens_ptr,
     void *__restrict__ tokens_buffer_ptr,
     void const *__restrict__ step_ptr,
-    void *__restrict__ num_new_tokens_ptr) {
+    void *__restrict__ num_new_tokens_ptr,
+    int request_id) {
 
   long long const *__restrict__ main_token =
       static_cast<long long const *>(main_token_ptr);
@@ -101,8 +102,9 @@ __device__ __forceinline__ void mtp_prepare_verify_input_kernel(
       static_cast<int *>(num_new_tokens_ptr);
 
   int t_id = threadIdx.x;
-  // blockIdx.x = request index
-  int req = blockIdx.x;
+  // Use task metadata request_id (not blockIdx.x which is worker block ID
+  // in persistent kernel)
+  int req = request_id;
 
   int cur_step = step[req];
 
