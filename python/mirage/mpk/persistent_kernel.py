@@ -249,10 +249,6 @@ def get_compile_command(
     # Use when debugging
     if os.environ.get("MPK_ENABLE_VERBOSE", "0") == "1":
         flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-    if os.environ.get("MPK_DEBUG_CTA112", "0") == "1":
-        flags = flags + ["-DMPK_DEBUG_CTA112"]
-    if os.environ.get("MPK_DEBUG_MLA", "0") == "1":
-        flags = flags + ["-DMPK_DEBUG_MLA"]
     if os.environ.get("MPK_AR_LOCAL_COPY", "0") == "1":
         flags = flags + ["-DMPK_AR_LOCAL_COPY"]
 
