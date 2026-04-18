@@ -405,6 +405,8 @@ class MPK:
             self.persistent_kernel.max_seq_length,
             self.persistent_kernel.total_num_requests,
             self.persistent_kernel.eos_token_id,
+            self.persistent_kernel.allocate_nvshmem_teams,
+            self.persistent_kernel.test_mode,
         )
         
     def run(self, prompt):

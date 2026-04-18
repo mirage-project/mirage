@@ -3,7 +3,7 @@
 # run qwen3 online serving test script
 # Usage: ./run_qwen3_online.sh
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 python demo/qwen3/demo_online.py \
     --model Qwen/Qwen3-0.6B \

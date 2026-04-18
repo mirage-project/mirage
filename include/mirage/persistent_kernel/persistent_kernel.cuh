@@ -1345,7 +1345,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int max_seq_length,
                                        int total_num_requests,
                                        long long eos_token_id,
-                                       int allocate_nvshmem_teams) {
+                                       int allocate_nvshmem_teams,
+                                       int is_test_mode) {
   // meta_tensors[0..9] are always required.
   // meta_tensors[10..16]: pinned ring pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)

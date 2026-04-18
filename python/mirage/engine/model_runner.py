@@ -121,6 +121,7 @@ class ModelRunner:
             n,
             pk.eos_token_id,
             pk.allocate_nvshmem_teams,
+            pk.test_mode,
         )
 
     def __call__(self) -> None:

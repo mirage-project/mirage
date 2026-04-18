@@ -290,6 +290,7 @@ class PersistentKernel:
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
+        test_mode: bool = False,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -2152,7 +2153,7 @@ class PersistentKernel:
               meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
         if self.mode=="online_pinned":
             for key in pinned_extra_order:
-                meta_tensors_ptr.append(self.meta_tensors[key].data_prt())
+                meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
