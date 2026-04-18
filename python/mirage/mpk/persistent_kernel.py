@@ -2519,6 +2519,9 @@ class PersistentKernel:
                   raise ValueError(f"Missing meta tensor: {key}")
             else:
               meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
+        if self.mode=="online_pinned":
+            for key in pinned_extra_order:
+                meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
