@@ -928,7 +928,10 @@ __device__ __forceinline__ void
                 int row = byte_off / bK;
                 int col = byte_off % bK;
                 int32_t token_idx_n = n_tile * MMA_N + row;
-                int32_t topk_idx_n = tRoutingIndex(token_idx_n);
+                // Guard routing index read: MMA tile may exceed BATCH_SIZE
+                int32_t topk_idx_n = (token_idx_n < BATCH_SIZE)
+                                         ? tRoutingIndex(token_idx_n)
+                                         : 0;
 
                 // SWIZZLE_128B: swizzled = linear ^ ((row%8)*16)
                 int linear_off = row * bK + col;
@@ -1371,7 +1374,10 @@ __device__ __forceinline__ void
               uint32_t ue8m0 = 0x7F; // default: UE8M0(1.0) for padding
               if (i < MMA_N) {
                 int32_t token_idx_n = n_tile * MMA_N + i;
-                int32_t topk_idx = tRoutingIndex(token_idx_n);
+                // Guard: MMA_N tile may exceed BATCH_SIZE
+                int32_t topk_idx = (token_idx_n < BATCH_SIZE)
+                                       ? tRoutingIndex(token_idx_n)
+                                       : 0;
                 if (token_idx_n < BATCH_SIZE && topk_idx > 0) {
                   float sf_val;
                   if constexpr (W13_LINEAR) {
@@ -1518,7 +1524,10 @@ __device__ __forceinline__ void
             int32_t m_idx =
                 m_tile * MMA_M + threadIdx.x;   // output row for this thread
             int32_t n_idx = n_tile * MMA_N + i; // token index
-            int32_t topk_idx = tRoutingIndex(n_idx); // routing check
+            // Guard: MMA_N tile may exceed BATCH_SIZE
+            int32_t topk_idx = (n_idx < BATCH_SIZE)
+                                   ? tRoutingIndex(n_idx)
+                                   : 0;
             if (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE) {
               // topk_idx is 1-indexed in routing table, convert to 0-indexed
               mOutput(n_idx, topk_idx - 1, m_idx) = tCrC[i];
