@@ -173,12 +173,16 @@ __global__ __launch_bounds__(256, 1) void dsv3_fp8_moe_2d_kernel(
   auto mMask = cute::make_tensor(
       cute::make_gmem_ptr(const_cast<cute::int32_t *>(mask)), MaskLayout{});
 
+  // Output layout: kernel indexes mOutput(n_idx, topk_idx-1, m_idx)
+  //   dim 0 = batch (stride topk*ORIG)
+  //   dim 1 = topk  (stride ORIG)
+  //   dim 2 = output_row (stride 1, contiguous)
   auto mOutput = cute::make_tensor(
       cute::make_gmem_ptr(output),
       cute::make_layout(
           cute::make_shape(cute::Int<DSV3_BATCH_SIZE>{},
-                           cute::Int<OUTPUT_SIZE_PER_CTA>{},
-                           cute::Int<DSV3_NUM_TOPK>{}),
+                           cute::Int<DSV3_NUM_TOPK>{},
+                           cute::Int<OUTPUT_SIZE_PER_CTA>{}),
           cute::make_stride(cute::Int<DSV3_NUM_TOPK * ORIG_OUTPUT_SIZE>{},
                             cute::Int<ORIG_OUTPUT_SIZE>{},
                             cute::Int<1>{})));
@@ -248,12 +252,13 @@ __global__ __launch_bounds__(256, 1) void dsv3_fp8_moe_1cta_kernel(
   auto mMask = cute::make_tensor(
       cute::make_gmem_ptr(const_cast<cute::int32_t *>(mask)), MaskLayout{});
 
+  // Output layout: kernel indexes mOutput(n_idx, topk_idx-1, m_idx)
   auto mOutput = cute::make_tensor(
       cute::make_gmem_ptr(output),
       cute::make_layout(
           cute::make_shape(cute::Int<DSV3_BATCH_SIZE>{},
-                           cute::Int<DSV3_OUTPUT_SIZE>{},
-                           cute::Int<DSV3_NUM_TOPK>{}),
+                           cute::Int<DSV3_NUM_TOPK>{},
+                           cute::Int<DSV3_OUTPUT_SIZE>{}),
           cute::make_stride(cute::Int<DSV3_NUM_TOPK * DSV3_OUTPUT_SIZE>{},
                             cute::Int<DSV3_OUTPUT_SIZE>{},
                             cute::Int<1>{})));
@@ -636,10 +641,160 @@ void fp8_moe_gemm_bench_cleanup() {
   }
 }
 
+// ================================================================
+// W2 kernel: [B, topk, I] @ [E, K, I].T → [B, topk, K]
+// W13_LINEAR=false, REDUCTION_SIZE=I, OUTPUT_SIZE=K
+// ================================================================
+constexpr int W2_OUTPUT_SIZE =
+    DSV3_REDUCTION_SIZE;                // K=7168 is the output dim for W2
+constexpr int W2_REDUCTION_SIZE = 2048; // I=2048 is the reduction dim
+constexpr int W2_K_SCALE = W2_REDUCTION_SIZE / 128; // 16
+
+__global__ __launch_bounds__(256, 1) void dsv3_fp8_moe_w2_1cta_kernel(
+    CUtensorMap const *__restrict__ tma_weight_desc,
+    uint8_t const *input_fp8,  // [B, topk, I]
+    float const *input_scale,  // [B, topk, I/128]
+    float const *weight_scale, // [E, K, I/128]
+    cute::int32_t const *routing_indices,
+    cute::int32_t const *mask,
+    cute::bfloat16_t *output, // [B, topk, K]
+    int expert_offset) {
+
+  using TMA_t = kernel::tma::tma_2d<uint8_t,
+                                    3,
+                                    3,
+                                    3,
+                                    DSV3_NUM_EXPERTS * W2_OUTPUT_SIZE,
+                                    W2_REDUCTION_SIZE,
+                                    DSV3_MMA_M,
+                                    128,
+                                    W2_REDUCTION_SIZE,
+                                    1,
+                                    1,
+                                    1,
+                                    DSV3_MMA_M * 128,
+                                    true>;
+  TMA_t tma_weight(const_cast<CUtensorMap *>(tma_weight_desc));
+
+  // Input: [B, topk, K] with strides (topk*K, K, 1)
+  // Kernel indexes mInput(batch, topk_idx-1, k_offset)
+  auto mInput = cute::make_tensor(
+      cute::make_gmem_ptr(const_cast<uint8_t *>(input_fp8)),
+      cute::make_layout(
+          cute::make_shape(cute::Int<DSV3_BATCH_SIZE>{},
+                           cute::Int<DSV3_NUM_TOPK>{},
+                           cute::Int<W2_REDUCTION_SIZE>{}),
+          cute::make_stride(cute::Int<DSV3_NUM_TOPK * W2_REDUCTION_SIZE>{},
+                            cute::Int<W2_REDUCTION_SIZE>{},
+                            cute::Int<1>{})));
+
+  // Input scale: [B, topk, K/128] with strides (topk*K_scale, K_scale, 1)
+  auto mInputScale = cute::make_tensor(
+      cute::make_gmem_ptr(const_cast<float *>(input_scale)),
+      cute::make_layout(
+          cute::make_shape(cute::Int<DSV3_BATCH_SIZE>{},
+                           cute::Int<DSV3_NUM_TOPK>{},
+                           cute::Int<W2_K_SCALE>{}),
+          cute::make_stride(cute::Int<DSV3_NUM_TOPK * W2_K_SCALE>{},
+                            cute::Int<W2_K_SCALE>{},
+                            cute::Int<1>{})));
+
+  // Weight scale: flat 2D [E*K, I/128]
+  constexpr int WS_ROWS = DSV3_NUM_EXPERTS * W2_OUTPUT_SIZE;
+  auto mWeightScale = cute::make_tensor(
+      cute::make_gmem_ptr(const_cast<float *>(weight_scale)),
+      cute::make_layout(
+          cute::make_shape(cute::Int<WS_ROWS>{}, cute::Int<W2_K_SCALE>{}),
+          cute::make_stride(cute::Int<W2_K_SCALE>{}, cute::Int<1>{})));
+
+  auto mRoutingIndices = cute::make_tensor(
+      cute::make_gmem_ptr(const_cast<cute::int32_t *>(routing_indices)),
+      IndicesLayout{});
+  auto mMask = cute::make_tensor(
+      cute::make_gmem_ptr(const_cast<cute::int32_t *>(mask)), MaskLayout{});
+
+  // Output: [B, topk, K] — kernel indexes mOutput(n_idx, topk_idx-1, m_idx)
+  auto mOutput = cute::make_tensor(
+      cute::make_gmem_ptr(output),
+      cute::make_layout(
+          cute::make_shape(cute::Int<DSV3_BATCH_SIZE>{},
+                           cute::Int<DSV3_NUM_TOPK>{},
+                           cute::Int<W2_OUTPUT_SIZE>{}),
+          cute::make_stride(cute::Int<DSV3_NUM_TOPK * W2_OUTPUT_SIZE>{},
+                            cute::Int<W2_OUTPUT_SIZE>{},
+                            cute::Int<1>{})));
+
+  kernel::fp8_moe_group_gemm_sm100_task_impl<TMA_t,
+                                             decltype(mInput),
+                                             decltype(mInputScale),
+                                             decltype(mWeightScale),
+                                             decltype(mRoutingIndices),
+                                             decltype(mMask),
+                                             decltype(mOutput),
+                                             DSV3_MMA_M,
+                                             DSV3_MMA_N,
+                                             DSV3_BATCH_SIZE,
+                                             W2_OUTPUT_SIZE,
+                                             W2_OUTPUT_SIZE,
+                                             W2_REDUCTION_SIZE,
+                                             DSV3_NUM_EXPERTS,
+                                             DSV3_NUM_TOPK,
+                                             1,     // EXPERT_STRIDE=1
+                                             false, // W13_LINEAR=false (W2)
+                                             DSV3_NUM_AB_STAGE,
+                                             DSV3_NUM_ACC_STAGE,
+                                             DSV3_NUM_C_STAGE>(tma_weight,
+                                                               mInput,
+                                                               mInputScale,
+                                                               mWeightScale,
+                                                               mRoutingIndices,
+                                                               mMask,
+                                                               mOutput,
+                                                               expert_offset);
+}
+
+void fp8_moe_w2_gemm_test(torch::Tensor input_fp8,    // [B, topk, I]
+                          torch::Tensor input_scale,  // [B, topk, I/128]
+                          torch::Tensor weight_fp8,   // [E, K, I]
+                          torch::Tensor weight_scale, // [E, K, I/128]
+                          torch::Tensor routing_indices,
+                          torch::Tensor mask,
+                          torch::Tensor output, // [B, topk, K]
+                          int expert_offset) {
+  c10::cuda::CUDAGuard guard(input_fp8.device());
+  int total_rows = weight_fp8.size(0) * weight_fp8.size(1); // E * K
+  int cols = weight_fp8.size(2);                            // I
+
+  CUtensorMap *tma = create_tma_desc(weight_fp8.data_ptr(), total_rows, cols);
+  constexpr int smem_size = compute_smem_size();
+  cudaFuncSetAttribute(dsv3_fp8_moe_w2_1cta_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  dsv3_fp8_moe_w2_1cta_kernel<<<dim3(1, 1, 1), dim3(256, 1, 1), smem_size>>>(
+      tma,
+      reinterpret_cast<uint8_t *>(input_fp8.data_ptr()),
+      reinterpret_cast<float *>(input_scale.data_ptr()),
+      reinterpret_cast<float *>(weight_scale.data_ptr()),
+      reinterpret_cast<cute::int32_t *>(routing_indices.data_ptr()),
+      reinterpret_cast<cute::int32_t *>(mask.data_ptr()),
+      reinterpret_cast<cute::bfloat16_t *>(output.data_ptr()),
+      expert_offset);
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA error (W2): %s\n", cudaGetErrorString(err));
+  }
+  cudaFree(tma);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_moe_gemm_test",
         &fp8_moe_gemm_test,
-        "FP8 MoE GEMM - single CTA correctness test");
+        "FP8 MoE GEMM - single CTA correctness test (W13)");
+  m.def("fp8_moe_w2_gemm_test",
+        &fp8_moe_w2_gemm_test,
+        "FP8 MoE GEMM - single CTA correctness test (W2)");
   m.def("fp8_moe_gemm_2d",
         &fp8_moe_gemm_2d,
         "FP8 MoE GEMM - 2D grid (expert_stride x n_splits), single launch");
