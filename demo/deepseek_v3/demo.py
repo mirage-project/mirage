@@ -1057,13 +1057,17 @@ if __name__ == "__main__":
                     if any(key.startswith(p) for p in needed_prefixes):
                         shard_to_keys.setdefault(shard, []).append(key)
                 # Load only needed shards and keys
+                # Load to CPU first, then move to GPU. This avoids GPU OOM when
+                # multiple TP ranks each load full (un-sharded) weights — the
+                # builder will shard them later during weight conversion.
+                _load_device = "cpu" if world_size > 1 else f"cuda:{rank}"
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
-                    with safe_open(shard_path, framework="pt", device=f"cuda:{rank}") as f:
+                    with safe_open(shard_path, framework="pt", device=_load_device) as f:
                         for key in keys:
                             state_dict[key] = f.get_tensor(key)
-                print(f"  Loaded {len(state_dict)} keys total")
+                print(f"  Loaded {len(state_dict)} keys total (device={_load_device})")
             else:
                 # Full loading (no index or no layer filter)
                 import glob
@@ -1198,7 +1202,11 @@ if __name__ == "__main__":
             print(f"  state_dict keys with 'layers.0.mlp': {[k for k in state_dict if 'layers.0.mlp' in k]}")
 
             # Run reference (only in correctness mode)
-            if args.correctness and rank == 0:
+            # In TP>1 mode, state_dict is on CPU (OOM avoidance); also, the
+            # single-GPU reference needs unsharded weights on one GPU, which
+            # OOMs for large layer counts. Skip in-process reference in TP
+            # mode — correctness is validated separately (smaller configs).
+            if args.correctness and rank == 0 and world_size == 1:
                 first_tok = model_inputs.input_ids[0, 0].item()
                 ref_token, ref_logits = run_correctness_test(
                     args, state_dict, test_layers, rank, world_size=1,  # run as TP=1
@@ -1466,6 +1474,15 @@ if __name__ == "__main__":
                     else:
                         if rank == 0 and "shared_experts" in k:
                             print(f"    [INFO] {k}: shard_dim={shard_dim}, shape={tuple(state_dict[k].shape)} → {'REPLICATED' if shard_dim is None else 'BUG'}")
+
+        # Move state_dict to GPU after conversion + TP sharding.
+        # Loading to CPU first (when TP>1) avoids single-GPU OOM from
+        # holding full un-sharded weights before the sharding step above.
+        if world_size > 1:
+            print(f"  Moving {len(state_dict)} tensors to cuda:{rank}...")
+            for k in state_dict:
+                if state_dict[k].device.type == "cpu":
+                    state_dict[k] = state_dict[k].to(f"cuda:{rank}")
 
         # Build MLA model config for the builder
         model_config = MirageModelConfig(
