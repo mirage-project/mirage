@@ -58,8 +58,8 @@ std::array<int, 3> derive_last3(
 }
 
 // Build per-tensor-dim partition vector from a layer's grid_dim and a map.
-std::array<int, mirage::config::MAX_TENSOR_DIMS> build_partition(
-    dim3 const &grid, int3 const &m) {
+std::array<int, mirage::config::MAX_TENSOR_DIMS>
+    build_partition(dim3 const &grid, int3 const &m) {
   std::array<int, mirage::config::MAX_TENSOR_DIMS> part{};
   for (int d = 0; d < (int)mirage::config::MAX_TENSOR_DIMS; d++) {
     part[d] = 1;
@@ -316,18 +316,16 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     for (int i = 0; i < V; i++) {
       auto &in_e = ag.layers[i].in_edges;
-      in_e.erase(std::remove_if(in_e.begin(),
-                                in_e.end(),
-                                [&](int e) {
-                                  return ag.edges[e].is_residual_stripped;
-                                }),
+      in_e.erase(std::remove_if(
+                     in_e.begin(),
+                     in_e.end(),
+                     [&](int e) { return ag.edges[e].is_residual_stripped; }),
                  in_e.end());
       auto &out_e = ag.layers[i].out_edges;
-      out_e.erase(std::remove_if(out_e.begin(),
-                                 out_e.end(),
-                                 [&](int e) {
-                                   return ag.edges[e].is_residual_stripped;
-                                 }),
+      out_e.erase(std::remove_if(
+                      out_e.begin(),
+                      out_e.end(),
+                      [&](int e) { return ag.edges[e].is_residual_stripped; }),
                   out_e.end());
     }
   }
@@ -503,7 +501,8 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     for (int g = 0; g < 3; g++) {
       int acc = 1;
       for (int eidx : fg.outgoing_edges) {
-        acc = (int)std::lcm<long long>(acc, ag.edges[eidx].producer_side_view.last3[g]);
+        acc = (int)std::lcm<long long>(
+            acc, ag.edges[eidx].producer_side_view.last3[g]);
       }
       lcm_last3[g] = acc;
     }
@@ -513,8 +512,8 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         lcm_last3[1] > (int)pg.y || (int)pg.y % lcm_last3[1] != 0 ||
         lcm_last3[2] > (int)pg.z || (int)pg.z % lcm_last3[2] != 0) {
       std::ostringstream msg;
-      msg << "build_annotated_graph: fork LCM last3 ("
-          << lcm_last3[0] << "," << lcm_last3[1] << "," << lcm_last3[2]
+      msg << "build_annotated_graph: fork LCM last3 (" << lcm_last3[0] << ","
+          << lcm_last3[1] << "," << lcm_last3[2]
           << ") does not divide producer grid_dim (" << pg.x << "," << pg.y
           << "," << pg.z << ") at layer " << i;
       throw std::runtime_error(msg.str());
@@ -580,7 +579,8 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     for (int g = 0; g < 3; g++) {
       int acc = 1;
       for (int eidx : jg.incoming_edges) {
-        acc = (int)std::lcm<long long>(acc, ag.edges[eidx].consumer_side_view.last3[g]);
+        acc = (int)std::lcm<long long>(
+            acc, ag.edges[eidx].consumer_side_view.last3[g]);
       }
       lcm_last3[g] = acc;
     }
@@ -590,7 +590,8 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         lcm_last3[2] > (int)cg.z || (int)cg.z % lcm_last3[2] != 0) {
       std::ostringstream msg;
       msg << "build_annotated_graph: join LCM last3 doesn't divide consumer "
-             "grid_dim at layer " << i;
+             "grid_dim at layer "
+          << i;
       throw std::runtime_error(msg.str());
     }
     jg.lcm_last3 = lcm_last3;
@@ -652,19 +653,16 @@ std::string maybe_dump_annotated_graph(AnnotatedGraph const &ag) {
     return "";
   }
   std::ostringstream os;
-  os << "AnnotatedGraph: " << ag.layers.size() << " layers, "
-     << ag.edges.size() << " edges ("
-     << ag.stripped_residual_edges.size() << " residuals stripped), "
-     << ag.fork_groups.size() << " fork groups, "
+  os << "AnnotatedGraph: " << ag.layers.size() << " layers, " << ag.edges.size()
+     << " edges (" << ag.stripped_residual_edges.size()
+     << " residuals stripped), " << ag.fork_groups.size() << " fork groups, "
      << ag.join_groups.size() << " join groups\n";
   for (int i = 0; i < (int)ag.layers.size(); i++) {
     auto const &L = ag.layers[i];
     os << "  layer " << i << " in=" << L.in_edges.size()
-       << " out=" << L.out_edges.size()
-       << (L.is_fork_producer ? " [FORK]" : "")
+       << " out=" << L.out_edges.size() << (L.is_fork_producer ? " [FORK]" : "")
        << (L.is_join_consumer ? " [JOIN]" : "")
-       << (L.fork_parent_group >= 0 ? " [fork-consumer]" : "")
-       << "\n";
+       << (L.fork_parent_group >= 0 ? " [fork-consumer]" : "") << "\n";
   }
   return os.str();
 }

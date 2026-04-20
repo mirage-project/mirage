@@ -150,9 +150,9 @@ struct AnnotatedGraph {
   std::vector<EdgeInfo> stripped_residual_edges;
 };
 
-using TaskConfigMap = std::unordered_map<
-    mirage::kernel::KNOperator const *,
-    std::tuple<int, int, mirage::runtime::TaskType, int>>;
+using TaskConfigMap =
+    std::unordered_map<mirage::kernel::KNOperator const *,
+                       std::tuple<int, int, mirage::runtime::TaskType, int>>;
 
 // Build the AnnotatedGraph from a KNGraph.
 //

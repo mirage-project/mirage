@@ -272,8 +272,7 @@ void register_mugraph(
   // tasks interleaved per fork event.
   std::vector<bool> bundle_emitted(ag.fork_groups.size(), false);
 
-  auto get_tensor_desc =
-      [](tb::TBInputOp *const &tb_op) -> TensorDesc {
+  auto get_tensor_desc = [](tb::TBInputOp *const &tb_op) -> TensorDesc {
     TensorDesc desc;
     assert(tb_op->output_tensors.size() == 1);
     tb::STensor stensor = tb_op->output_tensors[0];
@@ -311,13 +310,12 @@ void register_mugraph(
 
   // Build the bid-lex ordered task vector for a layer (same metadata logic as
   // the original code).
-  auto build_tasks_bid_lex =
-      [&](kn::KNCustomizedOp const *cur_op,
-          TaskType task_type,
-          int variant_id,
-          int num_subtasks,
-          std::vector<tb::TBInputOp *> const &input_ops,
-          std::vector<tb::TBInputOp *> const &output_ops)
+  auto build_tasks_bid_lex = [&](kn::KNCustomizedOp const *cur_op,
+                                 TaskType task_type,
+                                 int variant_id,
+                                 int num_subtasks,
+                                 std::vector<tb::TBInputOp *> const &input_ops,
+                                 std::vector<tb::TBInputOp *> const &output_ops)
       -> std::vector<FullTaskDesc> {
     std::vector<FullTaskDesc> tasks;
     tb::Graph const &bgraph = cur_op->bgraph;
@@ -458,8 +456,7 @@ void register_mugraph(
     return bid.x * grid.y * grid.z + bid.y * grid.z + bid.z;
   };
 
-  auto axis_of_tensor_dim =
-      [](int3 const &m, int tensor_dim) -> int {
+  auto axis_of_tensor_dim = [](int3 const &m, int tensor_dim) -> int {
     if (m.x == tensor_dim) {
       return 0;
     }
@@ -505,10 +502,11 @@ void register_mugraph(
 
   // Given an event index (ex, ey, ez) in a grid-axis event frame with last3
   // block size, returns (lo, hi) on that grid.
-  auto grid_subrange_for_event =
-      [](int ex, int ey, int ez,
-         std::array<int, 3> const &last3,
-         dim3 grid) -> std::pair<dim3, dim3> {
+  auto grid_subrange_for_event = [](int ex,
+                                    int ey,
+                                    int ez,
+                                    std::array<int, 3> const &last3,
+                                    dim3 grid) -> std::pair<dim3, dim3> {
     dim3 lo(ex * last3[0], ey * last3[1], ez * last3[2]);
     dim3 hi((ex + 1) * last3[0], (ey + 1) * last3[1], (ez + 1) * last3[2]);
     (void)grid;
@@ -531,8 +529,9 @@ void register_mugraph(
           dim3 cons_grid) -> std::pair<dim3, dim3> {
     int c_ev[3] = {0, 0, 0};
     for (int g_c = 0; g_c < 3; g_c++) {
-      int d = (g_c == 0 ? edge.input_map.x
-                        : g_c == 1 ? edge.input_map.y : edge.input_map.z);
+      int d = (g_c == 0   ? edge.input_map.x
+               : g_c == 1 ? edge.input_map.y
+                          : edge.input_map.z);
       if (d < 0 || d >= (int)mirage::config::MAX_TENSOR_DIMS) {
         c_ev[g_c] = 0;
         continue;
@@ -541,8 +540,9 @@ void register_mugraph(
       if (g_p < 0) {
         c_ev[g_c] = 0;
       } else {
-        c_ev[g_c] = (g_p == 0 ? p_ev_idx.x
-                              : g_p == 1 ? p_ev_idx.y : p_ev_idx.z);
+        c_ev[g_c] = (g_p == 0   ? p_ev_idx.x
+                     : g_p == 1 ? p_ev_idx.y
+                                : p_ev_idx.z);
       }
     }
     (void)cons_grid;
@@ -564,8 +564,9 @@ void register_mugraph(
           dim3 prod_grid) -> std::pair<dim3, dim3> {
     int p_ev[3] = {0, 0, 0};
     for (int g_p = 0; g_p < 3; g_p++) {
-      int d = (g_p == 0 ? edge.output_map.x
-                        : g_p == 1 ? edge.output_map.y : edge.output_map.z);
+      int d = (g_p == 0   ? edge.output_map.x
+               : g_p == 1 ? edge.output_map.y
+                          : edge.output_map.z);
       if (d < 0 || d >= (int)mirage::config::MAX_TENSOR_DIMS) {
         p_ev[g_p] = 0;
         continue;
@@ -574,8 +575,9 @@ void register_mugraph(
       if (g_c < 0) {
         p_ev[g_p] = 0;
       } else {
-        p_ev[g_p] = (g_c == 0 ? c_ev_idx.x
-                              : g_c == 1 ? c_ev_idx.y : c_ev_idx.z);
+        p_ev[g_p] = (g_c == 0   ? c_ev_idx.x
+                     : g_c == 1 ? c_ev_idx.y
+                                : c_ev_idx.z);
       }
     }
     (void)prod_grid;
@@ -659,8 +661,12 @@ void register_mugraph(
 
     // ---- First layer (no in-edges after residual stripping): lex emit.
     if (L.in_edges.empty() && L.fork_parent_group < 0) {
-      std::vector<FullTaskDesc> tasks = build_tasks_bid_lex(
-          cur_op, task_type, variant_id, cur_num_subtasks, input_ops, output_ops);
+      std::vector<FullTaskDesc> tasks = build_tasks_bid_lex(cur_op,
+                                                            task_type,
+                                                            variant_id,
+                                                            cur_num_subtasks,
+                                                            input_ops,
+                                                            output_ops);
       dim3 b;
       for (b.x = 0; b.x < cur_grid.x; b.x++) {
         for (b.y = 0; b.y < cur_grid.y; b.y++) {
@@ -745,11 +751,15 @@ void register_mugraph(
             for (size_t b = 0; b < fg.outgoing_edges.size(); b++) {
               EdgeInfo const &e = ag.edges[fg.outgoing_edges[b]];
               LayerInfo const &B = ag.layers[e.cons_layer];
-              auto [c_lo, c_hi] =
-                  consumer_subrange_from_fork_event(p_ev, e, B.op->bgraph.grid_dim);
-              push_bids_lex(c_lo, c_hi, B.op->bgraph.grid_dim,
-                            branch_num_subtasks[b], branch_is_multigpu[b],
-                            branch_tasks[b], layer_task_maps[e.cons_layer]);
+              auto [c_lo, c_hi] = consumer_subrange_from_fork_event(
+                  p_ev, e, B.op->bgraph.grid_dim);
+              push_bids_lex(c_lo,
+                            c_hi,
+                            B.op->bgraph.grid_dim,
+                            branch_num_subtasks[b],
+                            branch_is_multigpu[b],
+                            branch_tasks[b],
+                            layer_task_maps[e.cons_layer]);
             }
             event_desc.last_task_id = all_tasks.size();
             // Set trigger_event on producer tasks in the producer sub-range.
@@ -760,10 +770,12 @@ void register_mugraph(
                       (ey + 1) * fg.lcm_last3[1],
                       (ez + 1) * fg.lcm_last3[2]);
             bool nvshmem_event_flag = layer_is_multigpu[fg.producer_layer];
-            set_producer_triggers(p_lo, p_hi,
+            set_producer_triggers(p_lo,
+                                  p_hi,
                                   layer_task_maps[fg.producer_layer],
                                   all_events.size(),
-                                  nvshmem_event_flag, event_desc);
+                                  nvshmem_event_flag,
+                                  event_desc);
             if (nvshmem_event_flag) {
               nvshmem_events_idx.insert(all_events.size());
             }
@@ -779,8 +791,8 @@ void register_mugraph(
       for (int eidx : fg.outgoing_edges) {
         EdgeInfo const &e = ag.edges[eidx];
         all_task_maps.emplace(
-            const_cast<kn::KNOperator *>(
-                static_cast<kn::KNOperator const *>(ag.layers[e.cons_layer].op)),
+            const_cast<kn::KNOperator *>(static_cast<kn::KNOperator const *>(
+                ag.layers[e.cons_layer].op)),
             layer_task_maps[e.cons_layer]);
       }
       bundle_emitted[fg_id] = true;
@@ -797,8 +809,12 @@ void register_mugraph(
       int jg_id = ag.edges[L.in_edges[0]].join_group_id;
       assert(jg_id >= 0);
       JoinGroupInfo const &jg = ag.join_groups[jg_id];
-      std::vector<FullTaskDesc> tasks = build_tasks_bid_lex(
-          cur_op, task_type, variant_id, cur_num_subtasks, input_ops, output_ops);
+      std::vector<FullTaskDesc> tasks = build_tasks_bid_lex(cur_op,
+                                                            task_type,
+                                                            variant_id,
+                                                            cur_num_subtasks,
+                                                            input_ops,
+                                                            output_ops);
       int ex_max = cur_grid.x / std::max(jg.lcm_last3[0], 1);
       int ey_max = cur_grid.y / std::max(jg.lcm_last3[1], 1);
       int ez_max = cur_grid.z / std::max(jg.lcm_last3[2], 1);
@@ -811,8 +827,13 @@ void register_mugraph(
             event_desc.first_task_id = all_tasks.size();
             auto [c_lo, c_hi] =
                 grid_subrange_for_event(ex, ey, ez, jg.lcm_last3, cur_grid);
-            push_bids_lex(c_lo, c_hi, cur_grid, cur_num_subtasks,
-                          cur_is_multigpu, tasks, layer_task_maps[layer_idx]);
+            push_bids_lex(c_lo,
+                          c_hi,
+                          cur_grid,
+                          cur_num_subtasks,
+                          cur_is_multigpu,
+                          tasks,
+                          layer_task_maps[layer_idx]);
             event_desc.last_task_id = all_tasks.size();
             bool any_nvshmem = false;
             for (int eidx : jg.incoming_edges) {
@@ -821,10 +842,12 @@ void register_mugraph(
               any_nvshmem = any_nvshmem || nvshmem_event_flag;
               auto [p_lo, p_hi] = producer_subrange_from_join_event(
                   c_ev, e, ag.layers[e.prod_layer].op->bgraph.grid_dim);
-              set_producer_triggers(p_lo, p_hi,
+              set_producer_triggers(p_lo,
+                                    p_hi,
                                     layer_task_maps[e.prod_layer],
                                     all_events.size(),
-                                    nvshmem_event_flag, event_desc);
+                                    nvshmem_event_flag,
+                                    event_desc);
             }
             if (any_nvshmem) {
               nvshmem_events_idx.insert(all_events.size());
