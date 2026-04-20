@@ -4151,5 +4151,218 @@ int TaskRegister::register_mtp_prepare_verify_task(
   return register_task_variant(TASK_MTP_PREPARE_VERIFY, code.to_string());
 }
 
+// ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
+//
+// Three variants (TP=2/4/8) share structure but differ:
+//   - NUM_HEADS hardcoded inside namespace (64/32/16) → not a runtime param
+//   - TP=4 splits V across two CTAs via blockIdx.z (z=2 grid)
+//   - TP=8 takes Q_LEN_real (Q_LEN is padded to even at the call site)
+//
+// Each TP has a paired (decode, reduce) task. params layout for decode:
+//   [num_groups, q_len, kv_len, num_splits]                 (TP=2)
+//   [num_groups, q_len, kv_len, num_splits, v_half]         (TP=4)
+//   [num_groups, q_len_padded, kv_len, num_splits, q_len_real]  (TP=8)
+// reduce params: [num_groups, q_len, num_splits, rd_dv]
+
+int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  int kvt = (kv_len + 128 - 1) / 128;
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+  int qpg = (q_len < 2) ? q_len : 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (single_tile) {
+    code.e("kernel::mla_mtp_tp2::mla_mtp_tp2_main<true>(");
+  } else {
+    code.e("kernel::mla_mtp_tp2::mla_mtp_tp2_main<false>(");
+  }
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("    $f,", _sm);
+  }
+  code.e("    $,", kv_len);
+  code.e("    $,", num_splits);
+  code.e("    $,", q_len);
+  code.e("    $,", qpg);
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP2_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int num_splits = params[2];
+  int rd_dv = params[3];
+  int qpg = (q_len < 2) ? q_len : 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_mtp_tp2::mla_mtp_tp2_reduce(");
+  code.e("    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    $,", num_splits);
+  code.e("    $,", num_groups);
+  code.e("    $,", q_len);
+  code.e("    $,", qpg);
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    0);");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  int kvt = (kv_len + 128 - 1) / 128;
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+  int qpg = (q_len < 4) ? q_len : 4;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (single_tile) {
+    code.e("kernel::mla_mtp_tp4::mla_mtp_tp4_main<true>(");
+  } else {
+    code.e("kernel::mla_mtp_tp4::mla_mtp_tp4_main<false>(");
+  }
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("    $f,", _sm);
+  }
+  code.e("    $,", kv_len);
+  code.e("    $,", num_splits);
+  code.e("    $,", q_len);
+  code.e("    $,", qpg);
+  // V-half is folded into block_x's low bit (no z-dim launch in MPK).
+  // Python layer doubles the grid; kernel unpacks v_half = block_x & 1.
+  code.e(
+      "    task_desc->task_metadata.kv_idx,"); // packed (block_x<<1 | v_half)
+  code.e("    task_desc->task_metadata.request_id);"); // batch
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP4_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int num_splits = params[2];
+  int rd_dv = params[3];
+  int qpg = (q_len < 4) ? q_len : 4;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_mtp_tp4::mla_mtp_tp4_reduce(");
+  code.e("    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    $,", num_splits);
+  code.e("    $,", num_groups);
+  code.e("    $,", q_len);
+  code.e("    $,", qpg);
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    0);");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 5);
+  int num_groups = params[0];
+  int q_len_padded = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  int q_len_real = params[4];
+  int kvt = (kv_len + 128 - 1) / 128;
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+  int qpg = 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (single_tile) {
+    code.e("kernel::mla_mtp_tp8::mla_mtp_tp8_main<true>(");
+  } else {
+    code.e("kernel::mla_mtp_tp8::mla_mtp_tp8_main<false>(");
+  }
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("    $f,", _sm);
+  }
+  code.e("    $,", kv_len);
+  code.e("    $,", num_splits);
+  code.e("    $,", q_len_padded);
+  code.e("    $,", qpg);
+  code.e("    $,", q_len_real);
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP8_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len_padded = params[1];
+  int num_splits = params[2];
+  int rd_dv = params[3];
+  int qpg = 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_mtp_tp8::mla_mtp_tp8_reduce(");
+  code.e("    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    $,", num_splits);
+  code.e("    $,", num_groups);
+  code.e("    $,", q_len_padded);
+  code.e("    $,", qpg);
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    0);");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100,
+                               code.to_string());
+}
+
 } // namespace runtime
 } // namespace mirage

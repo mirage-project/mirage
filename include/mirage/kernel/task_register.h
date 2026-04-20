@@ -145,6 +145,21 @@ public:
                                          std::vector<int> const &params);
   int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
+  // MLA-MTP TP variants (ferret-derived, no-PDL). Each: TP=2/4/8, with paired
+  // reduce. Differ in NUM_HEADS (64/32/16); TP=4 also splits V across two
+  // CTAs (z=2); TP=8 takes Q_LEN_real (Q_LEN padded to even).
+  int register_mla_mtp_decode_tp2_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params);
+  int register_mla_mtp_decode_tp2_reduce_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_mla_mtp_decode_tp4_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params);
+  int register_mla_mtp_decode_tp4_reduce_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_mla_mtp_decode_tp8_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params);
+  int register_mla_mtp_decode_tp8_reduce_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
                                        bool scale_ue8m0);

@@ -1066,6 +1066,137 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "mla_mtp_reduce_sm100", params)
 
+    # ─────────── MLA-MTP TP variants (ferret-derived, no PDL) ───────────
+    # Shape: NUM_HEADS = 128/TP per rank, D_K=576, D_V=512
+    # Three variants (TP=2/4/8) — each is a (decode + reduce) pair.
+
+    def _mla_mtp_decode_tp_layer(
+        self,
+        q_input, kv_input, output_partial, output_lse,
+        q_len, kv_len, num_heads,
+        task_name, has_v_split=False, q_len_real=None,
+    ):
+        """Internal helper for TP=2/4/8 decode dispatch.
+          q_len: padded Q_LEN passed to the kernel
+          q_len_real: TP=8 only — actual unpadded Q_LEN
+          num_heads: 64/32/16 per TP variant
+          has_v_split: TP=4 only — block_x doubled to encode v_half in low bit
+        """
+        if num_heads == 64:
+            qpg = min(2, q_len)
+        elif num_heads == 32:
+            qpg = min(4, q_len)
+        else:  # TP=8
+            qpg = 2
+        num_groups = (q_len + qpg - 1) // qpg
+        num_splits = (kv_len + 128 - 1) // 128  # TILE_S=128
+        # TP=4 packs v_half into block_x low bit → 2× tasks. Kernel unpacks.
+        x_mul = 2 if has_v_split else 1
+        grid_dim = (num_groups * num_splits * x_mul, 1, 1)
+        block_dim = (128, 1, 1)
+
+        if num_heads == 16:  # TP=8
+            params = [num_groups, q_len, kv_len, num_splits,
+                      q_len_real if q_len_real is not None else q_len]
+        else:  # TP=2 and TP=4
+            params = [num_groups, q_len, kv_len, num_splits]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_input, kv_input, output_partial, output_lse], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def _mla_mtp_reduce_tp_layer(
+        self,
+        input_partial, input_lse, output,
+        q_len, kv_len, num_heads, task_name,
+    ):
+        if num_heads == 64:
+            qpg = min(2, q_len)
+        elif num_heads == 32:
+            qpg = min(4, q_len)
+        else:
+            qpg = 2
+        num_groups = (q_len + qpg - 1) // qpg
+        num_splits = (kv_len + 128 - 1) // 128
+        d_v = 512
+        rd_dv = 2
+
+        params = [num_groups, q_len, num_splits, rd_dv]
+        grid_dim = ((d_v + rd_dv - 1) // rd_dv, num_groups, 1)
+        block_dim = (256, 1, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_partial, input_lse, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def mla_mtp_decode_tp2_layer(
+        self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+    ):
+        self._mla_mtp_decode_tp_layer(
+            q_input, kv_input, output_partial, output_lse,
+            q_len, kv_len, num_heads=64,
+            task_name="mla_mtp_decode_tp2_sm100",
+        )
+
+    def mla_mtp_decode_tp2_reduce_layer(
+        self, input_partial, input_lse, output, q_len, kv_len,
+    ):
+        self._mla_mtp_reduce_tp_layer(
+            input_partial, input_lse, output, q_len, kv_len, num_heads=64,
+            task_name="mla_mtp_decode_tp2_reduce_sm100",
+        )
+
+    def mla_mtp_decode_tp4_layer(
+        self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+    ):
+        # TP=4 V-split: 2× tasks (v_half=0,1). Each writes to a disjoint TMEM
+        # column range; output_partial is a single buffer covering both.
+        self._mla_mtp_decode_tp_layer(
+            q_input, kv_input, output_partial, output_lse,
+            q_len, kv_len, num_heads=32,
+            task_name="mla_mtp_decode_tp4_sm100", has_v_split=True,
+        )
+
+    def mla_mtp_decode_tp4_reduce_layer(
+        self, input_partial, input_lse, output, q_len, kv_len,
+    ):
+        self._mla_mtp_reduce_tp_layer(
+            input_partial, input_lse, output, q_len, kv_len, num_heads=32,
+            task_name="mla_mtp_decode_tp4_reduce_sm100",
+        )
+
+    def mla_mtp_decode_tp8_layer(
+        self, q_input, kv_input, output_partial, output_lse,
+        q_len_real, kv_len,
+    ):
+        # TP=8 pads Q_LEN to even
+        q_len = (q_len_real + 1) & ~1
+        self._mla_mtp_decode_tp_layer(
+            q_input, kv_input, output_partial, output_lse,
+            q_len, kv_len, num_heads=16,
+            task_name="mla_mtp_decode_tp8_sm100", q_len_real=q_len_real,
+        )
+
+    def mla_mtp_decode_tp8_reduce_layer(
+        self, input_partial, input_lse, output, q_len_real, kv_len,
+    ):
+        q_len = (q_len_real + 1) & ~1
+        self._mla_mtp_reduce_tp_layer(
+            input_partial, input_lse, output, q_len, kv_len, num_heads=16,
+            task_name="mla_mtp_decode_tp8_reduce_sm100",
+        )
+
     # MoE Layers
     def tensor_init_layer(
         self,
