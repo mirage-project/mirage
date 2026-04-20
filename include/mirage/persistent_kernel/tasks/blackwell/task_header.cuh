@@ -16,10 +16,13 @@
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/rotary_embedding_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
-#ifdef USE_NVSHMEM
+#if defined(USE_NVSHMEM) && !defined(MIRAGE_GRACE_BLACKWELL)
 #include "tasks/hopper/allreduce.cuh"
-#endif // USE_NVSHMEM
+#endif
 // Blackwell task impls
+#if defined(USE_NVSHMEM) && defined(MIRAGE_GRACE_BLACKWELL)
+#include "allreduce.cuh"
+#endif
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"

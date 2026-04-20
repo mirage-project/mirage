@@ -23,8 +23,16 @@
 // Blackwell (SM100a): include only host API + types.
 // Device-side allreduce is self-contained in tasks/blackwell/allreduce.cuh
 // to avoid rdc=true register inflation (166 vs 255 regs).
-#include <nvshmem_host.h>
+//
+// Define nvshmemi_device_state_d BEFORE any NVSHMEM headers so that any
+// transitively-included device code (proxy_device.cuh etc.) can resolve it.
+// In standard NVSHMEM this comes from libnvshmem_device.a, but we skip that
+// library to avoid rdc=true.
 #include "device_host/nvshmem_types.h"
+#ifdef NVSHMEM_NO_DEVICE_LIB
+__managed__ nvshmemi_device_host_state_t nvshmemi_device_state_d;
+#endif
+#include <nvshmem_host.h>
 #else
 // Hopper/Ampere: use standard NVSHMEM includes (rdc=true is fine on SM90).
 #include <nvshmem.h>

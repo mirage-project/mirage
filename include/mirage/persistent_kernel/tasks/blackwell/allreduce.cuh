@@ -35,14 +35,8 @@
 #include "device_host/nvshmem_types.h"
 #include "device_host/nvshmem_tensor.h"
 
-// In NVSHMEM_NO_DEVICE_LIB mode (rdc=false), we define the device state ourselves.
-// It's populated at init time by our callback in nvshmemid_hostlib_init_attr.
-// In standard mode (rdc=true), it comes from libnvshmem_device.a.
-#ifdef NVSHMEM_NO_DEVICE_LIB
-__managed__ nvshmemi_device_host_state_t nvshmemi_device_state_d;
-#else
-extern __device__ nvshmemi_device_host_state_t nvshmemi_device_state_d;
-#endif
+// nvshmemi_device_state_d is defined in runtime_header.h (before any NVSHMEM
+// headers) to ensure visibility for proxy_device.cuh etc.
 
 namespace kernel {
 
