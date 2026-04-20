@@ -1755,6 +1755,97 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   }
 }
 
+// v2 linear: emits a call to kernel::linear_v2::linear_task, which is the
+// hand-written swapAB kernel in blackwell_v2/linear_sm100_v2.cuh.
+// Unlike v1, each task handles ONE BLOCK_M=128 output tile determined at
+// runtime from task_metadata.task_offset (set to bid.x in runtime.cc).
+// The TMA descriptors describe the FULL W and A tensors (shared across tiles
+// of the same op); the kernel internally computes tile offsets.
+// params: [M_real, SPLIT_K]
+// If M_real or SPLIT_K absent in params, defaults apply (M_real=16, SPLIT_K=1).
+int TaskRegister::register_linear_sm100_v2_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool with_residual) {
+  // M_REAL defaults to batch_size from bgraph (NOT the MMA_N=16 pad). Writing
+  // beyond batch_size would OOB the output tensor because Qwen3 allocates
+  // output with `max_num_batched_tokens` rows, not padded to 16. If caller
+  // passes params[0], trust it (allows override for e.g. specialized tests).
+  int m_real_override = -1;
+  int split_k = 1;
+  int tiles_per_task = 1;
+  bool rank_with_residual = with_residual;
+  if (params.size() >= 1) m_real_override = params[0];
+  if (params.size() >= 2) split_k = params[1];
+  if (params.size() >= 3) tiles_per_task = params[2];
+
+  int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = with_residual ? 3 : 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  reduction_size = input_ops[0]->dtensor.dim[1];
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+
+  // For v2, each task sees the FULL output (no tile partition in TBGraph).
+  // So output_size == output_stride and bgraph per-task dims == full dims.
+  // Validate this to catch misconfigurations early.
+  assert(output_size == output_stride &&
+         "linear_sm100_v2 requires unpartitioned output "
+         "(tb_graph.new_input(output, (-1,-1,-1), ...)).");
+  int const N_real = output_size;
+  int const K = reduction_size;
+  // M_REAL = actual batch_size from bgraph by default. Overrideable via params[0].
+  // Must not exceed batch_size, or the epilogue would OOB write the output
+  // (linear_v2 unconditionally writes M_REAL rows).
+  int const m_real = (m_real_override > 0) ? m_real_override : batch_size;
+  assert(m_real <= batch_size &&
+         "m_real override must not exceed output tensor's dim[0] (OOB write).");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("::kernel::linear_v2::linear_task<$, $, $, 0, $>(",
+         rank_with_residual ? "true" : "false",
+         m_real,
+         split_k,
+         tiles_per_task);
+  // TBGraph ordering: inputs[0]=activation, inputs[1]=weight.
+  // linear_v2 signature: (W_tmap_ptr, A_tmap_ptr, ...) — weight first.
+  code.e("    static_cast<const CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<const nv_bfloat16*>($),",
+         rank_with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
+  code.e("    $, $,", N_real, K);
+  code.e("    static_cast<int>(task_desc->task_metadata.task_offset) * $,", tiles_per_task);
+  code.e("    $);",
+         split_k > 1 ? "static_cast<float*>(task_desc->output_ptrs[1])"
+                     : "nullptr");
+
+  if (with_residual) {
+    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_SM100_V2,
+                                 code.to_string());
+  } else {
+    return register_task_variant(TASK_LINEAR_SM100_V2, code.to_string());
+  }
+}
+
 int TaskRegister::register_splitk_linear_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
@@ -3618,6 +3709,239 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   c.e("  task_desc->task_metadata.task_offset,");
   c.e("  runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_NVSHMEM_TILE_ALLREDUCE, c.to_string());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v2 dispatch variants for non-linear Qwen3 tasks.
+// Each emits the same kernel call as its v1 peer but registers under
+// TASK_X_V2 so the whole task graph is dispatched through v2 codegen.
+// ─────────────────────────────────────────────────────────────────────────────
+
+int TaskRegister::register_rmsnorm_hopper_v2_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = 2, num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::rmsnorm_v2::rms_norm_task<bfloat16, $, $>(",
+         batch_size,
+         hidden_dim);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    1e-6f);");
+  return register_task_variant(TASK_RMS_NORM_HOPPER_V2, code.to_string());
+}
+
+int TaskRegister::register_silu_mul_v2_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Mirrors register_silu_mul_task (not _hopper) — Qwen3 path on Blackwell.
+  assert(params.size() == 0);
+  int batch_size = 0, output_size = 0, input_stride = 0, output_stride = 0;
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = 1, num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
+  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
+  input_stride = input_ops[0]->dtensor.dim[1];
+  assert(input_stride == static_cast<int>(kn_input_op->input_strides[0]));
+  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::v2::silu_mul_task_impl_hopper<bfloat16, $, $, $, $>(",
+         batch_size,
+         output_size,
+         input_stride,
+         output_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  return register_task_variant(TASK_SILU_MUL_V2, code.to_string());
+}
+
+int TaskRegister::register_embedding_v2_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Mirrors register_embedding_task (not _hopper) — Qwen3 path on Blackwell.
+  assert(params.size() == 1);
+  int batch_size = 0, output_size = 0, output_stride = 0;
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = 2, num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size = output_ops[0]->output_tensors[0].dim[1];
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::v2::embedding_kernel_hopper<bfloat16, $, $, $>(",
+         batch_size,
+         output_size,
+         output_stride);
+  if (params[0] == 0) {
+    code.e("    runtime_config.tokens + runtime_config.step[0], ");
+  } else if (params[0] == 1) {
+    code.e("    task_desc->input_ptrs[0],");
+  }
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_EMBEDDING_V2, code.to_string());
+}
+
+int TaskRegister::register_paged_attention_sm100_v2_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 6);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = 7, num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int output_size = output_ops[0]->dtensor.dim[1];
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int head_dim = output_size / num_q_heads;
+  int kv_stride = head_dim * num_kv_heads;
+  int max_seq_len = params[4];
+  int page_size = params[5];
+  assert(input_ops[1]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
+  assert(input_ops[2]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::v2::multitoken_paged_attention_sm100_task_impl<bfloat16, $, "
+         "$, $, $, $, $, $, $>(",
+         num_q_heads / num_kv_heads,
+         1,
+         kv_stride,
+         qkv_stride,
+         output_size,
+         head_dim,
+         max_seq_len,
+         page_size);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $,", params[2] > 0);
+  code.e("    $,", params[3] > 0);
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->input_ptrs[4],");
+  code.e("    task_desc->input_ptrs[5],");
+  code.e("    task_desc->input_ptrs[6],");
+  code.e("    1e-6f,");
+  code.e("    1e-6f);");
+  return register_task_variant(TASK_ATTN_SM100_V2, code.to_string());
+}
+
+int TaskRegister::register_argmax_partial_sm100_v2_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = 1, num_outputs = 2;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int num_elements = input_ops[0]->output_tensors[0].dim[1];
+  int num_partial_tasks = params[0];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::v2::argmax_partial_sm100_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         num_elements,
+         num_partial_tasks);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  return register_task_variant(TASK_ARGMAX_PARTIAL_SM100_V2, code.to_string());
+}
+
+int TaskRegister::register_argmax_reduce_sm100_v2_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = 2, num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int num_parts = input_ops[0]->output_tensors[0].dim[1];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::v2::argmax_reduce_sm100_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         params[0],
+         num_parts);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  return register_task_variant(TASK_ARGMAX_REDUCE_SM100_V2, code.to_string());
 }
 
 } // namespace runtime

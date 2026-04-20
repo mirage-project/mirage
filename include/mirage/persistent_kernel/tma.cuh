@@ -689,6 +689,53 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_LINEAR_SM100_V2:
+    case TASK_LINEAR_WITH_RESIDUAL_SM100_V2: {
+      // v2 linear uses rank=3 TMA descriptors matching blackwell_v2/
+      // linear_sm100_v2.cuh's init_tmap in the standalone test.
+      // Layout: [64 (col chunk), rows, K/64 (k-chunks)] with 128B swizzle.
+      constexpr int BK = 64;
+      constexpr int BLOCK_K = 128;  // must match linear_sm100_v2.cuh
+      constexpr int BLOCK_M = 128;
+      constexpr int BLOCK_N = 16;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave = CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+
+      if (param_id == 0) {
+        // Input A: [M=batch, K]. A is small, always L2-promoted.
+        int batch = tensor_desc.dim[0];
+        int K = tensor_desc.dim[1];
+        uint64_t gd[3] = {(uint64_t)BK, (uint64_t)batch, (uint64_t)(K / BK)};
+        uint64_t gs[2] = {(uint64_t)K * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BLOCK_N, (uint32_t)(BLOCK_K / BK)};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(
+            tma_desc, fmt, 3, tensor_desc.base_ptr, gd, gs, bd, es,
+            interleave, swizzle, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, oob);
+        assert(err == CUDA_SUCCESS);
+      } else if (param_id == 1) {
+        // Weight W: [N, K]. L2-promote when total size fits (< 96 MB).
+        int N = tensor_desc.dim[0];
+        int K = tensor_desc.dim[1];
+        bool promote = ((size_t)N * K * 2 <= 96ULL * 1024 * 1024);
+        uint64_t gd[3] = {(uint64_t)BK, (uint64_t)N, (uint64_t)(K / BK)};
+        uint64_t gs[2] = {(uint64_t)K * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BLOCK_M, (uint32_t)(BLOCK_K / BK)};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(
+            tma_desc, fmt, 3, tensor_desc.base_ptr, gd, gs, bd, es,
+            interleave, swizzle,
+            promote ? CU_TENSOR_MAP_L2_PROMOTION_L2_128B
+                    : CU_TENSOR_MAP_L2_PROMOTION_NONE,
+            oob);
+        assert(err == CUDA_SUCCESS);
+      }
+      // Residual (param_id==2) and output don't need TMA — linear_sm100_v2
+      // accesses them via raw stores.
+      break;
+    }
     case TASK_LINEAR_SM100:
     case TASK_LINEAR_WITH_RESIDUAL_SM100: {
       int const cp_async_size = 64;
@@ -1126,6 +1173,16 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
             (param_id < task_desc.num_inputs)
                 ? task_desc.inputs[param_id]
                 : task_desc.outputs[param_id - task_desc.num_inputs];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_LINEAR_SM100_V2:
+    case TASK_LINEAR_WITH_RESIDUAL_SM100_V2: {
+      // Only inputs 0 (A) and 1 (W) get TMA descriptors. Residual (input 2)
+      // and output go through raw pointer stores in linear_sm100_v2.cuh.
+      for (size_t param_id = 0; param_id < 2; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
       break;

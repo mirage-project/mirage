@@ -77,6 +77,25 @@ static PyObject *launch_func(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+#ifdef USE_RUNTIME_V2
+static PyObject *init_v2_func(PyObject *self, PyObject *args) {
+  init_persistent_kernel_v2();
+  Py_RETURN_NONE;
+}
+
+static PyObject *launch_v2_func(PyObject *self, PyObject *args) {
+  PyObject *py_stream;
+  cudaStream_t stream;
+  if (!PyArg_ParseTuple(args, "O", &py_stream)) {
+    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
+    return NULL;
+  }
+  stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
+  launch_persistent_kernel_v2(stream);
+  Py_RETURN_NONE;
+}
+#endif
+
 static PyObject *finalize_func(PyObject *self, PyObject *args) {
   finalize_persistent_kernel();
 
@@ -87,6 +106,10 @@ static PyMethodDef ModuleMethods[] = {
   {"init_func", init_func, METH_VARARGS, "initialize persistent kernel"},
   {"init_request_func", init_request_func, METH_VARARGS, "initialize request resources"},
   {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
+#ifdef USE_RUNTIME_V2
+  {"init_v2_func", init_v2_func, METH_NOARGS, "initialize v2 static task plan"},
+  {"launch_v2_func", launch_v2_func, METH_VARARGS, "launch v2 persistent kernel"},
+#endif
   {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
   {NULL, NULL, 0, NULL} // sentinel
 };
@@ -219,6 +242,8 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
+    if getattr(mpk, "use_v2_runtime", False):
+        flags = flags + ["-DUSE_RUNTIME_V2"]
     # Use when debugging
     # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
 
@@ -243,7 +268,9 @@ def get_compile_command(
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     elif target_cc == 100:
         specific_cmd = [
-            "-arch=sm_100a",
+            # NOTE: do NOT also pass -arch=sm_100a. On CUDA 13.2 that combo
+            # silently downgrades the virtual target to compute_100 (no 'a'),
+            # breaking tcgen05.* and other sm_100a-only PTX.
             "-gencode=arch=compute_100a,code=sm_100a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_BLACKWELL",
@@ -279,6 +306,7 @@ class PersistentKernel:
         spec_decode_config: SpecDecodeConfig,
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
+        use_v2_runtime: bool = False,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -303,6 +331,7 @@ class PersistentKernel:
         self.use_nvshmem = True if world_size > 1 else False
         self.spec_decode_config = spec_decode_config
         self.use_cutlass_kernel = use_cutlass_kernel
+        self.use_v2_runtime = use_v2_runtime
         self._spec_decode_handlers = {
             "promptlookup": self.prompt_lookup_spec_handler,
         }
@@ -411,7 +440,11 @@ class PersistentKernel:
         tb_graph.new_input(weight, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "embedding" if self.target_cc == 90 else "embedding", [input_source])
+        self.kn_graph.register_task(
+            tb_graph,
+            "embedding_v2" if self.use_v2_runtime else "embedding",
+            [input_source],
+        )
 
     def rmsnorm_layer(
         self,
@@ -429,7 +462,13 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm")
+        if self.use_v2_runtime:
+            self.kn_graph.register_task(tb_graph, "rmsnorm_hopper_v2")
+        else:
+            self.kn_graph.register_task(
+                tb_graph,
+                "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm",
+            )
 
     def rmsnorm_linear_layer(
         self,
@@ -664,7 +703,11 @@ class PersistentKernel:
         if self.target_cc == 90:
             self.kn_graph.register_task(tb_graph, "paged_attention_hopper", params)
         elif self.target_cc == 100:
-            self.kn_graph.register_task(tb_graph, "paged_attention_sm100", params)
+            self.kn_graph.register_task(
+                tb_graph,
+                "paged_attention_sm100_v2" if self.use_v2_runtime else "paged_attention_sm100",
+                params,
+            )
         else:
             self.kn_graph.register_task(tb_graph, "paged_attention", params)
 
@@ -1247,6 +1290,61 @@ class PersistentKernel:
         else:
             assert False, f"Unsupported compute capability: {self.target_cc}"
 
+    def linear_layer_v2(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        block_dim: tuple = (192, 1, 1),
+        tiles_per_task: int = 1,
+    ):
+        """v2 linear: BLOCK_M=128. With tiles_per_task=1, one tile per task.
+        With tiles_per_task>1, each task processes that many contiguous tiles
+        (reducing dispatch overhead). grid_dim derived from N/128/tiles_per_task."""
+        assert input.num_dims == 2
+        assert weight.num_dims == 2
+        assert output.num_dims == 2
+        N = weight.dim(0)
+        assert N % 128 == 0, f"linear_layer_v2 requires N divisible by 128, got {N}"
+        num_tiles = N // 128
+        # ceil(num_tiles / tiles_per_task) — last task clamps if not divisible
+        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
+        grid_dim = (num_tasks, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # No partitioning — each task sees the full weight and output
+        tb_graph.new_input(input,  (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        # params: [M_real, SPLIT_K, TILES_PER_TASK] — defaults -1, 1, 1
+        # M_real = -1 means task_register uses batch_size from bgraph
+        self.kn_graph.register_task(tb_graph, "linear_sm100_v2",
+                                     [-1, 1, tiles_per_task])
+
+    def linear_with_residual_layer_v2(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        block_dim: tuple = (192, 1, 1),
+    ):
+        """v2 linear with residual."""
+        assert input.num_dims == 2
+        assert weight.num_dims == 2
+        assert residual.num_dims == 2
+        assert output.num_dims == 2
+        N = weight.dim(0)
+        assert N % 128 == 0, f"linear_with_residual_layer_v2 requires N divisible by 128, got {N}"
+        grid_dim = (N // 128, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input,    (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight,   (-1, -1, -1), 1, True)
+        tb_graph.new_input(residual, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output,   (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100_v2", [])
+
     def linear_with_residual_layer(
         self,
         input: DTensor,
@@ -1325,7 +1423,9 @@ class PersistentKernel:
         tb_graph.new_input(input, (1, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), 1, True)
         self.kn_graph.customized([input, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "silu_mul" if self.target_cc == 90 else "silu_mul")
+        self.kn_graph.register_task(
+            tb_graph, "silu_mul_v2" if self.use_v2_runtime else "silu_mul"
+        )
 
     def identity_layer(
         self,
@@ -1402,7 +1502,11 @@ class PersistentKernel:
         tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
         if self.target_cc == 100 or self.target_cc == 90:
-            self.kn_graph.register_task(tb_graph, "argmax_partial_sm100", [num_tasks])
+            self.kn_graph.register_task(
+                tb_graph,
+                "argmax_partial_sm100_v2" if self.use_v2_runtime else "argmax_partial_sm100",
+                [num_tasks],
+            )
         else:
             self.kn_graph.register_task(tb_graph, "argmax_partial", [num_tasks])
 
@@ -1426,7 +1530,9 @@ class PersistentKernel:
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
         if self.target_cc == 100:
             self.kn_graph.register_task(
-                tb_graph, "argmax_reduce_sm100", [self.argmax_partial_output_size]
+                tb_graph,
+                "argmax_reduce_sm100_v2" if self.use_v2_runtime else "argmax_reduce_sm100",
+                [self.argmax_partial_output_size],
             )
         else:
             self.kn_graph.register_task(
@@ -1604,8 +1710,28 @@ class PersistentKernel:
             
         with open(json_file_path, "w") as f:
             f.write(results["json_file"])
+        v2_include = '#include "persistent_kernel_v2.cuh"\n' if self.use_v2_runtime else ""
+        # Disambiguate "kernel::" in generated code so it always resolves to
+        # the global ::kernel namespace. On the mla branch, cutlass pulls in
+        # another "kernel" namespace that makes unqualified "kernel::" ambiguous.
+        import re
+        cuda_code_fixed = re.sub(r'\bkernel::', '::kernel::', results["cuda_code"])
+        # Avoid double-prefixing anything that was already ::kernel::
+        cuda_code_fixed = cuda_code_fixed.replace("::::kernel::", "::kernel::")
+        # Inject v2 include RIGHT AFTER the top persistent_kernel.cuh include so
+        # that namespaces like kernel::linear_v2 are in scope when generated
+        # _execute_task function body references them.
+        if v2_include:
+            cuda_code_fixed = cuda_code_fixed.replace(
+                '#include "persistent_kernel.cuh"\n',
+                '#include "persistent_kernel.cuh"\n' + v2_include,
+                1,
+            )
+            v2_include_at_end = ""
+        else:
+            v2_include_at_end = v2_include
         with open(cuda_code_path, "w") as f:
-            f.write(results["cuda_code"] + HARD_CODE)
+            f.write(cuda_code_fixed + v2_include_at_end + HARD_CODE)
             
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
@@ -1733,6 +1859,9 @@ class PersistentKernel:
         self.launch_func = getattr(mod, "launch_func")
         self.init_request_func = getattr(mod, "init_request_func")
         self.finalize_func = getattr(mod, "finalize_func")
+        if self.use_v2_runtime:
+            self.init_v2_func = getattr(mod, "init_v2_func")
+            self.launch_v2_func = getattr(mod, "launch_v2_func")
         print("Finished megakernel compilation...")
 
         #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
@@ -1765,6 +1894,9 @@ class PersistentKernel:
             self.allocate_nvshmem_teams,
         )
 
+        if self.use_v2_runtime:
+            self.init_v2_func()
+
         self._is_compiled = True
 
         # self.call_func = getattr(mod, "call_func")
@@ -1787,7 +1919,10 @@ class PersistentKernel:
             stream_ptr = stream
         else:
             raise ValueError("Invalid stream object")
-        self.launch_func(stream_ptr)
+        if self.use_v2_runtime:
+            self.launch_v2_func(stream_ptr)
+        else:
+            self.launch_func(stream_ptr)
         if self.profiler_tensor is not None:
             from .profiler_persistent import export_to_perfetto_trace
             

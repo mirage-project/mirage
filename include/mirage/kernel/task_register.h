@@ -95,6 +95,27 @@ public:
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params,
                                  bool with_residual);
+  // v2 linear: hand-written swapAB kernel in blackwell_v2/linear_sm100_v2.cuh.
+  // Uses one TMA descriptor per op (full W & A), runtime tile_idx from
+  // task_metadata.task_offset. Requires grid_dim[0] = N / BLOCK_M(=128).
+  int register_linear_sm100_v2_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params,
+                                    bool with_residual);
+  // v2 dispatch variants for non-linear tasks. Emit same kernel calls as the
+  // v1 versions, but register under TASK_X_V2 enums so the whole pipeline
+  // goes through v2 codegen (no mixed v1/v2 dispatch in the task graph).
+  int register_rmsnorm_hopper_v2_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_silu_mul_v2_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params);
+  int register_embedding_v2_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
+  int register_paged_attention_sm100_v2_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params);
+  int register_argmax_partial_sm100_v2_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
+  int register_argmax_reduce_sm100_v2_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
   int register_paged_attention_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
   int register_argmax_partial_sm100_task(threadblock::Graph const &bgraph,

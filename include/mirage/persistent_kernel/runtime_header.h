@@ -125,6 +125,12 @@ enum TaskType {
   TASK_SM100_TMA_START_TASK = 231,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
+  // v2 hand-written linear (blackwell_v2/linear_sm100_v2.cuh).
+  // Uses rank=3 TMA descriptors and runtime tile_idx from task_metadata.
+  // Values placed inside TASK_SM100_TMA range (231..256) so
+  // create_tma_desc_by_task fires via the range check in the generated .cu.
+  TASK_LINEAR_SM100_V2 = 246,
+  TASK_LINEAR_WITH_RESIDUAL_SM100_V2 = 247,
   TASK_SPLITK_LINEAR_SM100 = 251,
   TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
   TASK_LINEAR_SM100 = 253,
@@ -146,6 +152,16 @@ enum TaskType {
   TASK_MLA_MTP_DECODE_SM100 = 269,
   TASK_MLA_MTP_REDUCE_SM100 = 270,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
+  // v2 dispatch enums for non-linear Qwen3 tasks. Emit the same kernel calls
+  // as v1 (the blackwell_v2/ variants are near-identical), just through the
+  // v2 codegen path so the whole pipeline is dispatched uniformly. See
+  // register_X_v2_task functions in task_register.cc.
+  TASK_RMS_NORM_HOPPER_V2 = 281,
+  TASK_SILU_MUL_V2 = 282,
+  TASK_EMBEDDING_V2 = 283,
+  TASK_ATTN_SM100_V2 = 284,
+  TASK_ARGMAX_PARTIAL_SM100_V2 = 285,
+  TASK_ARGMAX_REDUCE_SM100_V2 = 286,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -312,6 +328,17 @@ struct RuntimeConfig {
 #ifdef USE_NVSHMEM
   nvshmem_team_t *nvshmem_teams;
 #endif
+  // v2 runtime: static per-SM task plan
+  // Per-SM plan covers ONE iteration; kernel loops iters on device.
+  size_t *v2_per_sm_task_positions;   // flat array; size = sum of per-SM counts
+  size_t *v2_per_sm_task_offsets;     // size = num_workers+1; [start_i, end_i)
+  // Device-side iter barrier:
+  //   iter_sync_counter: all SMs atomic-add 1 at end of their iter
+  //   iter_go_counter:   SM 0 atomic-adds 1 after running prepare_next_batch
+  unsigned long long *v2_iter_sync_counter;  // device memory, init 0
+  unsigned long long *v2_iter_go_counter;    // device memory, init 0
+  int v2_max_iters;                   // cap on decode steps (= max_seq_length)
+  bool v2_enabled;                    // true when launched by launch_persistent_kernel_v2
 };
 
 } // namespace runtime

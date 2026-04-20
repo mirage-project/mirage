@@ -116,6 +116,7 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--use-v2", action="store_true", help="Use v2 runtime (static per-SM task plan, no scheduler)")
 
     # -------- Args for CI tests ----------
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Decode cap for CI determinism")
@@ -332,7 +333,8 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
-            use_cutlass_kernel=args.use_cutlass_kernel
+            use_cutlass_kernel=args.use_cutlass_kernel,
+            use_v2_runtime=args.use_v2,
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -514,13 +516,20 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer(
-                input=rmsnorm_out,
-                weight=w_qkv,
-                output=attn_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0), args.use_cutlass_kernel), 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if args.use_v2:
+                mpk.linear_layer_v2(
+                    input=rmsnorm_out,
+                    weight=w_qkv,
+                    output=attn_in,
+                )
+            else:
+                mpk.linear_layer(
+                    input=rmsnorm_out,
+                    weight=w_qkv,
+                    output=attn_in,
+                    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0), args.use_cutlass_kernel), 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             #mpk.rmsnorm_linear_layer(
             #    input=x,
             #    weight_norm=w_norm,
@@ -599,14 +608,22 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
-            mpk.linear_with_residual_layer(
-                input=attn_out,
-                weight=w,
-                residual=x,
-                output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if args.use_v2:
+                mpk.linear_with_residual_layer_v2(
+                    input=attn_out,
+                    weight=w,
+                    residual=x,
+                    output=attn_proj_out,
+                )
+            else:
+                mpk.linear_with_residual_layer(
+                    input=attn_out,
+                    weight=w,
+                    residual=x,
+                    output=attn_proj_out,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             # reset residual input as x
             x = attn_proj_out
             # add allreduce if needed
@@ -644,13 +661,31 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer(
-                input=rmsnorm_out,
-                weight=w_gatedup,
-                output=mlp_mid,
-                grid_dim=(rmsnorm_num_tasks, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            # # GateUp: keep v1 (v2 variant hangs in mirage integration context —
+            # # still under investigation; v2 linear_v2 works standalone).
+            # mpk.linear_layer(
+            #     input=rmsnorm_out,
+            #     weight=w_gatedup,
+            #     output=mlp_mid,
+            #     grid_dim=(rmsnorm_num_tasks, 1, 1),
+            #     block_dim=(128, 1, 1),
+            # )
+
+            if args.use_v2:
+                mpk.linear_layer_v2(
+                    input=rmsnorm_out,
+                    weight=w_gatedup,
+                    output=mlp_mid,
+                    tiles_per_task=3,
+                )
+            else:
+                mpk.linear_layer(
+                    input=rmsnorm_out,
+                    weight=w_gatedup,
+                    output=mlp_mid,
+                    grid_dim=(rmsnorm_num_tasks, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             #mpk.rmsnorm_linear_layer(
             #    input=x,
             #    weight_norm=w_norm,
@@ -669,14 +704,22 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.linear_with_residual_layer(
-                input=silu_mul_out,
-                weight=w,
-                residual=x,
-                output=mlp_out,
-                grid_dim=(hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if args.use_v2:
+                mpk.linear_with_residual_layer_v2(
+                    input=silu_mul_out,
+                    weight=w,
+                    residual=x,
+                    output=mlp_out,
+                )
+            else:
+                mpk.linear_with_residual_layer(
+                    input=silu_mul_out,
+                    weight=w,
+                    residual=x,
+                    output=mlp_out,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             # reset residual input as x
             x = mlp_out
             if world_size > 1:
@@ -701,13 +744,20 @@ if __name__ == "__main__":
             grid_dim=(mpk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
-        mpk.linear_layer(
-            input=rmsnorm_out,
-            weight=w_proj,
-            output=argmax_in,
-            grid_dim=(mpk.num_workers, 1, 1),
-            block_dim=(128, 1, 1),
-        )
+        if args.use_v2:
+            mpk.linear_layer_v2(
+                input=rmsnorm_out,
+                weight=w_proj,
+                output=argmax_in,
+            )
+        else:
+            mpk.linear_layer(
+                input=rmsnorm_out,
+                weight=w_proj,
+                output=argmax_in,
+                grid_dim=(mpk.num_workers, 1, 1),
+                block_dim=(128, 1, 1),
+            )
         #mpk.rmsnorm_linear_layer(
         #    input=x,
         #    weight_norm=w_norm,

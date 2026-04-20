@@ -608,8 +608,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                       get_task_position_index(task_ids[task_idx])) +
                       offset * 16);
       }
-      kernel::cp_async_fence();
-      kernel::cp_async_wait<0>();
+      ::kernel::cp_async_fence();
+      ::kernel::cp_async_wait<0>();
       __syncthreads();
       queue_pos = 0;
       queue_len = num_loaded_tasks;

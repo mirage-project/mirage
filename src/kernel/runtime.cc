@@ -383,7 +383,8 @@ void register_mugraph(
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
                 (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) ||
-                (task_type == TASK_ATTN_SM100)) {
+                (task_type == TASK_ATTN_SM100) ||
+                (task_type == TASK_ATTN_SM100_V2)) {
               // Note that we assume grid_dim.x corresponds to
               // the request dimension
               task.task_metadata.request_id = bid.x;
@@ -436,6 +437,11 @@ void register_mugraph(
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
                   bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
+            }
+            // v2 linear reads tile_idx from task_offset (= spatial_idx * BLOCK_M).
+            if (task_type == TASK_LINEAR_SM100_V2 ||
+                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100_V2) {
+              task.task_metadata.task_offset = bid.x;
             }
             // Initialize input tensors to the task
             for (auto const &input : input_ops) {
@@ -1258,6 +1264,17 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_SM100] = "TASK_LINEAR_SM100";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_LINEAR_SM100_V2] = "TASK_LINEAR_SM100_V2";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100_V2] =
+      "TASK_LINEAR_WITH_RESIDUAL_SM100_V2";
+  task_type_to_name[TASK_RMS_NORM_HOPPER_V2] = "TASK_RMS_NORM_HOPPER_V2";
+  task_type_to_name[TASK_SILU_MUL_V2] = "TASK_SILU_MUL_V2";
+  task_type_to_name[TASK_EMBEDDING_V2] = "TASK_EMBEDDING_V2";
+  task_type_to_name[TASK_ATTN_SM100_V2] = "TASK_ATTN_SM100_V2";
+  task_type_to_name[TASK_ARGMAX_PARTIAL_SM100_V2] =
+      "TASK_ARGMAX_PARTIAL_SM100_V2";
+  task_type_to_name[TASK_ARGMAX_REDUCE_SM100_V2] =
+      "TASK_ARGMAX_REDUCE_SM100_V2";
   task_type_to_name[TASK_SPLITK_LINEAR_SM100] = "TASK_SPLITK_LINEAR_SM100";
   task_type_to_name[TASK_ATTN_SM100] = "TASK_ATTN_SM100";
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
