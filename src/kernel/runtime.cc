@@ -432,6 +432,22 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.x;     // dv_block_idx
               task.task_metadata.request_id = bid.y; // gi (head_group)
             }
+            // MLA-MTP TP variants: decode grid=(num_groups*sk[*2 if TP=4], B,
+            // 1) Python layer encodes block_x = gi*sk+si (or
+            // (block_x<<1)|v_half for TP=4) into kv_idx, batch into request_id.
+            // Kernel unpacks v_half from low bit of block_x for TP=4.
+            if (task_type == TASK_MLA_MTP_DECODE_TP2_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP4_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
+              task.task_metadata.kv_idx = bid.x;     // (gi*sk+si) or packed
+              task.task_metadata.request_id = bid.y; // batch
+            }
+            if (task_type == TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100) {
+              task.task_metadata.kv_idx = bid.x;     // dv_block_idx
+              task.task_metadata.request_id = bid.y; // gi
+            }
             // MLA KV gather: request_id = bid.y
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.y;
@@ -710,7 +726,10 @@ TaskGraphResult print_task_graph(
     code.e("}");
     // MLA kernels (outside SM100_TMA range but need TMA)
     code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_SM100) {");
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP2_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP4_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP8_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     // FP8 linear tasks need TMA (outside SM100_TMA range)
@@ -1282,6 +1301,18 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
+      "TASK_MLA_MTP_DECODE_TP2_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_SM100] =
+      "TASK_MLA_MTP_DECODE_TP4_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP8_SM100] =
+      "TASK_MLA_MTP_DECODE_TP8_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
   task_type_to_name[TASK_MTP_VERIFY_STRICT] = "TASK_MTP_VERIFY_STRICT";
   task_type_to_name[TASK_MTP_ACCEPT_COMMIT] = "TASK_MTP_ACCEPT_COMMIT";

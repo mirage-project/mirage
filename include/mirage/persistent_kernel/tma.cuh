@@ -1235,6 +1235,73 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MLA_MTP_DECODE_TP2_SM100:
+    case TASK_MLA_MTP_DECODE_TP4_SM100:
+    case TASK_MLA_MTP_DECODE_TP8_SM100: {
+      // TP variants: Q box height = NUM_HEADS-per-TP (64/32/16),
+      // KV box = TILE_S=128. Same encoding as v037/v007/v001 host code.
+      constexpr int BK = 64;
+      constexpr int TILE_S = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+
+      int num_heads =
+          (task_desc.task_type == TASK_MLA_MTP_DECODE_TP2_SM100)   ? 64
+          : (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) ? 32
+                                                                   : 16;
+      if (param_id == 0) {
+        // Q: gd = {BK, B*Q_LEN*NUM_HEADS, K_ITERS}, bd = {BK, num_heads, 1}
+        int total_rows = tensor_desc.dim[0];
+        int d_k = tensor_desc.dim[1];
+        int k_iters = d_k / BK;
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)num_heads, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      } else if (param_id == 1) {
+        // KV: gd = {BK, B*KL, K_ITERS}, bd = {BK, TILE_S, 1}
+        int total_rows = tensor_desc.dim[0];
+        int d_k = tensor_desc.dim[1];
+        int k_iters = d_k / BK;
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)TILE_S, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      }
+      break;
+    }
     case TASK_MLA_MTP_DECODE_SM100: {
       // MTP decode: Q box height = hpb (varies with Q_LEN), KV box = TILE_S=128
       // Q: [B*Q_LEN*NUM_HEADS, D_K], hpb derived from Q dim[0]
@@ -1464,6 +1531,22 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       break;
     }
     case TASK_MLA_MTP_REDUCE_SM100: {
+      // no TMA needed
+      break;
+    }
+    case TASK_MLA_MTP_DECODE_TP2_SM100:
+    case TASK_MLA_MTP_DECODE_TP4_SM100:
+    case TASK_MLA_MTP_DECODE_TP8_SM100: {
+      // Q (input 0) and KV (input 1) each get 1 TMA desc
+      for (size_t param_id = 0; param_id < 2; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100:
+    case TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100:
+    case TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100: {
       // no TMA needed
       break;
     }

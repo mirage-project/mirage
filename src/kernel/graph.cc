@@ -730,6 +730,41 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(2, 1, TASK_MLA_MTP_REDUCE_SM100, variant_id);
   }
+  // MLA-MTP TP variants (ferret-derived, no-PDL)
+  else if (name == "mla_mtp_decode_tp2_sm100") {
+    int variant_id = task_register->register_mla_mtp_decode_tp2_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP2_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp2_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_mtp_decode_tp2_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp4_sm100") {
+    int variant_id = task_register->register_mla_mtp_decode_tp4_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP4_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp4_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_mtp_decode_tp4_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp8_sm100") {
+    int variant_id = task_register->register_mla_mtp_decode_tp8_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP8_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp8_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_mtp_decode_tp8_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100, variant_id);
+  }
   // FP8 tasks
   else if (name == "quantize_fp8_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
