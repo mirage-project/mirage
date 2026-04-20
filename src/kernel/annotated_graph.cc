@@ -35,8 +35,10 @@ int grid_lookup(dim3 const &d, int g) {
 }
 
 // Compute last3 for a task_view: last3[g] = grid[g] / event_dim[axis_map[g]]
-// when axis_map[g] >= 0 (axis participates in event partition); else
-// last3[g] = grid[g] (replicated / unmapped axis).
+// when axis_map[g] >= 0 (axis partitions a tensor dim that carries events);
+// else last3[g] = grid[g] (the axis is replicated across the tensor, so
+// every block on this axis observes the whole tensor and falls into the
+// same event slot — the whole axis is inside one "task block").
 std::array<int, 3> derive_last3(
     std::array<int, mirage::config::MAX_TENSOR_DIMS> const &event_dim,
     dim3 const &grid,
@@ -102,9 +104,18 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
 
   // ---------------------------------------------------------------------
   // Step (a): DAG construction with most-recent-writer rule.
+  //
+  // Why not identify edges by guid alone: qwen3 (and most real MPK models)
+  // reuses DTensor buffers across layers — the same guid can be written by
+  // multiple customized ops over the course of the graph. Pure guid matching
+  // would create spurious cycles (later writer reads the same guid that
+  // an earlier reader in a "down" edge also reads).
+  //
+  // Rule: when layer L reads tensor g, bind the edge to whichever producer
+  // wrote g MOST RECENTLY before L. After L is processed, L's outputs update
+  // last_writer. Subsequent reads see L as the new writer. This is exactly
+  // SSA-style def-use: we're implicitly renaming the reused buffer.
   // ---------------------------------------------------------------------
-  // last_writer[guid] = (layer_idx, out_slot). Updated after each layer's
-  // inputs are bound, so reads before the write see the previous writer.
   std::unordered_map<size_t, std::pair<int, int>> last_writer;
 
   // Map KNCustomizedOp* -> layer index so downstream passes can locate by op.
@@ -235,9 +246,24 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
 
   // ---------------------------------------------------------------------
   // Step (c): residual stripping.
-  // Strip direct edge u->v whenever any path u->w->...->v of length >=2 exists.
-  // Single-shot: compute reachable[u] on the original edge set, then test each
-  // edge in isolation.
+  //
+  // A "residual" edge u->v is the direct shortcut in a transformer-like
+  // pattern: u forks to a computed path u->w->...->v and also directly to
+  // v (where v adds the residual). We strip the direct edge because the
+  // longer path's chain of events transitively forces u to complete before
+  // v starts, so the direct edge contributes no scheduling information —
+  // keeping it would just force v to be classified as a join-consumer and
+  // potentially propagate a case-2 violation.
+  //
+  // Single-shot semantics matter: if we stripped iteratively we might drop
+  // the longer path before the direct edge, leaving the direct edge intact
+  // (and the pattern undetected). So we compute reachability ONCE on the
+  // original edge set, then mark all residuals to strip, then remove them
+  // atomically.
+  //
+  // Cost: O(V * (V+E)) for the BFS; for qwen3 (~300 layers, ~400 edges)
+  // this is sub-millisecond and doesn't merit a smarter transitive-reduction
+  // algorithm. Revisit if V grows past ~50k.
   // ---------------------------------------------------------------------
   std::vector<std::unordered_set<int>> reachable(V);
   for (int s = 0; s < V; s++) {
@@ -308,9 +334,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
 
   // ---------------------------------------------------------------------
   // Step (d): per-layer role classification (post-strip).
-  // A layer is a fork producer only if it has edges to >=2 DISTINCT consumer
-  // layers (multiple tensors to the same consumer is not a fork — it's just
-  // a multi-output dependency). Symmetric for join.
+  //
+  // Why "distinct" layers (not raw edge count): a layer can produce >1
+  // output tensor, all feeding the same consumer (e.g. a fused attention
+  // layer with 2 outputs that both feed the next block). Counting out_edges
+  // raw would flag this as a fork with trivially redundant branches,
+  // creating a false case-3 violation when the real dependency model is a
+  // plain chain. This showed up when dry-running qwen3 and was the cause
+  // of the first wave of spurious compile errors.
   // ---------------------------------------------------------------------
   for (int i = 0; i < V; i++) {
     std::unordered_set<int> distinct_cons, distinct_prod;
@@ -326,10 +357,26 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
 
   // ---------------------------------------------------------------------
   // Step (e): case 2 / 3 validation.
-  //   is_fork_consumer[L] := any in-edge comes from a fork-producer
-  //   is_join_producer[L] := any out-edge goes to a join-consumer
-  //   Case 2: is_join_consumer && is_fork_consumer  -> needs two trigger_events
-  //   Case 3: is_join_producer && is_fork_producer  -> needs two dependent_events
+  //
+  // FullTaskDesc has exactly one `trigger_event` slot (the event a task
+  // fires on completion) and one `dependent_event` slot (the event a task
+  // waits for, post-prelaunch). The disallowed combinations are the ones
+  // that would need two of either slot on the same task:
+  //
+  //   Case 2 (join-consumer + fork-consumer): X's tasks would need to be
+  //     triggered by TWO events (the upstream fork event and the join
+  //     event at X itself). Not representable.
+  //   Case 3 (join-producer + fork-producer): L's tasks would need to
+  //     FIRE two events (the fork event at L and the downstream join
+  //     event). Not representable.
+  //
+  // Note: cases 2 and 3 always co-occur — a case-2 violation at X implies
+  // one of X's producers is a case-3 violator (its edge to X makes it a
+  // join-producer, and its multiple consumers make it a fork-producer).
+  // We detect whichever comes first in layer order and reject.
+  //
+  // is_fork_consumer[L] := any in-edge comes from a fork-producer.
+  // is_join_producer[L] := any out-edge goes to a join-consumer.
   // ---------------------------------------------------------------------
   std::vector<char> is_fork_consumer(V, 0), is_join_producer(V, 0);
   for (int i = 0; i < V; i++) {
@@ -424,9 +471,24 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   }
 
   // ---------------------------------------------------------------------
-  // Step (h): fork LCM pass. For each fork-producer layer, LCM across
-  // branches' producer-side last3 on grid axes. Absorb the factor into each
-  // branch's event_dim (reducing it), then recompute consumer-side last3.
+  // Step (h): fork LCM pass.
+  //
+  // For each fork producer F, unify the producer-side last3 across all
+  // outgoing branches. The "factor" we gain on last3 (= lcm / branch_last3)
+  // is absorbed by REDUCING each branch's event_dim on the tensor dim that
+  // maps to that grid axis; so the number of events shrinks and each event
+  // now triggers a larger block of producer/consumer tasks.
+  //
+  // Why grid-axis LCM: F's grid is shared across branches, but each branch
+  // has its own bridging tensor (possibly different output slots of F) and
+  // its own consumer grid/input_map. Grid-axis space is the common frame;
+  // tensor-dim space is per-edge. LCM on grid axes + propagation through
+  // output_map/input_map gives a consistent per-branch event_dim.
+  //
+  // Safety: lcm_last3[g] must divide F.grid_dim[g]. This is guaranteed
+  // for well-formed inputs because each branch_last3[g] divides grid_dim[g]
+  // (it's grid_dim / event_dim where event_dim is a GCD of divisors of
+  // grid_dim), and the LCM of divisors of N is a divisor of N.
   // ---------------------------------------------------------------------
   for (int i = 0; i < V; i++) {
     if (!ag.layers[i].is_fork_producer) {
