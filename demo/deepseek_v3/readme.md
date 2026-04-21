@@ -23,19 +23,28 @@ nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
 
 ## Environment Setup
 
+Set the following paths to point at your local install locations (shown as
+placeholders; adjust to match your environment).
+
 ```bash
-source /raid/user_data/muhengl/.venv/bin/activate
+# Your Python venv with PyTorch 2.6+ and the mirage package installed editable.
+source "${MIRAGE_VENV:-/path/to/mirage-venv}/bin/activate"
 
-# MPI (for TP > 1)
-export PATH=/usr/mpi/gcc/openmpi-4.1.9a1/bin:$PATH
-export MPI_INC_PATH=/usr/mpi/gcc/openmpi-4.1.9a1/include
-export MPI_LIB_PATH=/usr/mpi/gcc/openmpi-4.1.9a1/lib
+# OpenMPI 4.1+ (for TP > 1)
+export MPI_HOME=${MPI_HOME:-/usr/mpi/gcc/openmpi-4.1.9a1}
+export PATH=$MPI_HOME/bin:$PATH
+export MPI_INC_PATH=$MPI_HOME/include
+export MPI_LIB_PATH=$MPI_HOME/lib
 
-# NVSHMEM 3.6.5 (for TP > 1)
-export NVSHMEM_INC_PATH=/home/muhengl/local/nvshmem-3.6.5-dev/usr/include/nvshmem_13
-export NVSHMEM_LIB_PATH=/home/muhengl/local/nvshmem-3.6.5-dev/usr/lib/x86_64-linux-gnu/nvshmem/13
-export LD_LIBRARY_PATH=$NVSHMEM_LIB_PATH:/usr/mpi/gcc/openmpi-4.1.9a1/lib:$LD_LIBRARY_PATH
-export LD_PRELOAD=/home/muhengl/local/nvshmem-3.6.5-extract/usr/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.so.3.6.5
+# NVSHMEM 3.6.5 (for TP > 1, AllReduce via NVLS).
+# Point NVSHMEM_HOME at the install prefix for your machine.
+export NVSHMEM_HOME=${NVSHMEM_HOME:-/path/to/nvshmem-3.6.5}
+export NVSHMEM_INC_PATH=$NVSHMEM_HOME/include/nvshmem_13
+export NVSHMEM_LIB_PATH=$NVSHMEM_HOME/lib/x86_64-linux-gnu/nvshmem/13
+export LD_LIBRARY_PATH=$NVSHMEM_LIB_PATH:$MPI_HOME/lib:$LD_LIBRARY_PATH
+# libnvshmem_host is needed at load time — adjust if your package puts it
+# under a different prefix (some distros split headers and host lib).
+export LD_PRELOAD=$NVSHMEM_HOME/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.so.3.6.5
 ```
 
 ## Quickstart
@@ -67,6 +76,32 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
     --use-mirage --layers 0-39 \
     --max-num-batched-tokens 1 --max-seq-length 4096
 ```
+
+### Full Model on 8 GPUs (TP=8, all 61 layers + MTP)
+
+Use TP=8 when you want to hold the **complete** DeepSeek V3 weights (61
+decoder layers + MTP) on a single node. All 8 GPUs must be idle beforehand.
+
+```bash
+# Verify all 8 GPUs are idle first.
+nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
+
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 mpirun --allow-run-as-root -np 8 \
+    -x CUDA_VISIBLE_DEVICES -x LD_LIBRARY_PATH -x LD_PRELOAD -x PATH \
+    -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
+    python demo/deepseek_v3/demo.py \
+    --model-path /path/to/DeepSeek-V3 \
+    --use-mirage --layers 0-60 --mtp --num-speculative-tokens 3 \
+    --max-num-batched-tokens 128 --max-seq-length 16384 \
+    --max-num-pages 160
+```
+
+Notes:
+- `--max-num-batched-tokens 128` enables chunked prefill (see
+  `MPK_USE_PREFILL` below). Drop to `1` if you want the pure decode path.
+- `--max-num-pages 160` ≈ `(16384 / 128) + 32` page headroom at `--page-size 128`.
+- MTP with `--num-speculative-tokens 3` keeps spec_length ≤ 7 and stays on the
+  MLA TP decode kernel; larger spec lengths currently aren't validated.
 
 ## CLI Flags
 
@@ -113,6 +148,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
 | `MPK_NO_NVSHMEM` | 0 | Compile without NVSHMEM (TP=1 only) |
 | `MPK_DRY_RUN` | 0 | Stop after task graph generation (inspect offsets) |
 | `MPK_SO_PATH` | auto | Override compiled .so path for cumodule init |
+| `MPK_USE_PREFILL` | 1 | Dispatch `mla_prefill_sm100` when `max_num_batched_tokens >= 32`. Set to `0` to force the decode kernel for all Q_LEN (debug/bisect flag). |
 
 ## Known Limitations
 

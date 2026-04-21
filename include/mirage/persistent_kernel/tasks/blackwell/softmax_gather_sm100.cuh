@@ -16,7 +16,8 @@
 #include "tasks/common/common_header.cuh"
 
 // Fused softmax + gather: given logits [BATCH_SIZE, VOCAB_SIZE] and
-// token_ids [BATCH_SIZE], output prob[batch] = softmax(logits[batch])[token_id].
+// token_ids [BATCH_SIZE], output prob[batch] =
+// softmax(logits[batch])[token_id].
 //
 // Does NOT materialize the full probability distribution — computes:
 //   max_val = max(logits[batch, :])
@@ -54,8 +55,8 @@ __device__ __forceinline__ void
     }
     // Warp shuffle reduce max
     for (int mask = 16; mask > 0; mask >>= 1) {
-      local_max = fmaxf(local_max,
-                         __shfl_xor_sync(0xffffffff, local_max, mask));
+      local_max =
+          fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, mask));
     }
     // Cross-warp reduce via shared memory
     __shared__ float smem_max[8]; // max 8 warps

@@ -715,8 +715,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "mla_prefill_sm100") {
     int variant_id = task_register->register_mla_prefill_sm100_task(
         customized->bgraph, params);
-    // 4 inputs (Q_nope, Q_pe, CKV, KPE), 1 output (O)
-    task_config[op] = std::make_tuple(4, 1, TASK_MLA_PREFILL_SM100, variant_id);
+    // 5 inputs via Python new_input (Q_nope, Q_pe, CKV, KPE, O) — output is
+    // attached with store_in_dmem=True, MPK convention (same as mla_decode).
+    // Task register dispatches input_ptrs[4] as the O pointer.
+    task_config[op] = std::make_tuple(5, 0, TASK_MLA_PREFILL_SM100, variant_id);
   } else if (name == "mla_mtp_decode_sm100") {
     int variant_id = task_register->register_mla_mtp_decode_sm100_task(
         customized->bgraph, params);
@@ -792,6 +794,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 0, TASK_MLA_KV_GATHER_SM100, variant_id);
+  } else if (name == "mla_kv_gather_split_sm100") {
+    int variant_id = task_register->register_mla_kv_gather_split_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
   }
   // MTP tasks
   else if (name == "mtp_verify_strict") {

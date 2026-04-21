@@ -19,6 +19,9 @@
 namespace kernel {
 namespace mla_mtp_tp8 {
 
+// See mla_mtp_decode_tp2_sm100.cuh for rationale.
+#define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 1, 128;" ::: "memory")
+
 static constexpr int NUM_HEADS = 16;
 static constexpr int D_K = 576;
 static constexpr int D_V = 512;
@@ -144,6 +147,10 @@ __device__ __noinline__ void mla_mtp_tp8_main(
   int const t0 = si * tps;
   int const t1 = min(t0 + tps, kvt);
   if (t0 >= t1) {
+    int block_linear = bi * num_groups * sk + gi * sk + si;
+    if (tid < 128) {
+      La[block_linear * 128 + tid] = -1e30f;
+    }
     return;
   }
 
@@ -160,21 +167,23 @@ __device__ __noinline__ void mla_mtp_tp8_main(
   int const mma_bar = __cvta_generic_to_shared(&mbar_buf[MAX_STAGES]);
   int const mainloop_bar = __cvta_generic_to_shared(&mbar_buf[2 * MAX_STAGES]);
 
-  if (wid == 0 && ptx::elect_sync()) {
-    for (int i = 0; i < MAX_STAGES; i++) {
-      ptx::mbar_init(tma_bar + i * 8, 1);
-      ptx::mbar_init(mma_bar + i * 8, 1);
+  // Warp 0 does both mbar_init + tcgen05.alloc (matches CuTe convention).
+  if (wid == 0) {
+    if (ptx::elect_sync()) {
+      for (int i = 0; i < MAX_STAGES; i++) {
+        ptx::mbar_init(tma_bar + i * 8, 1);
+        ptx::mbar_init(mma_bar + i * 8, 1);
+      }
+      ptx::mbar_init(mainloop_bar, 1);
+      asm volatile("fence.mbarrier_init.release.cluster;");
     }
-    ptx::mbar_init(mainloop_bar, 1);
-    asm volatile("fence.mbarrier_init.release.cluster;");
-  } else if (wid == 1) {
     int addr_smem = __cvta_generic_to_shared(tmem_addr_buf);
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
             "r"(addr_smem),
         "r"(D_V));
   }
-  __syncthreads();
+  MLA_TP_SYNC_ACTIVE();
   int const taddr = tmem_addr_buf[0];
 
   int const hpb_bytes = hpb * BK * 2;
@@ -225,7 +234,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
       }
     }
 
-    __syncthreads();
+    MLA_TP_SYNC_ACTIVE();
     if (wid == 0 && ptx::elect_sync()) {
       for (int i = 0; i < NUM_QK_STAGES; i++) {
         ptx::mbar_init(tma_bar + i * 8, 1);
@@ -234,7 +243,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
       ptx::mbar_init(mainloop_bar, 1);
       asm volatile("fence.mbarrier_init.release.cluster;");
     }
-    __syncthreads();
+    MLA_TP_SYNC_ACTIVE();
 
     if (wid == 0 && ptx::elect_sync()) {
       int phase = 0;
@@ -297,7 +306,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
       ptx::tcgen05_commit(mainloop_bar);
     }
 
-    __syncthreads();
+    MLA_TP_SYNC_ACTIVE();
     ptx::mbar_wait(mainloop_bar, 0);
 
     asm volatile("tcgen05.fence::after_thread_sync;");
@@ -463,7 +472,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
     float ts = tile_sum * exp2f(tile_max - nm);
 
     if (!SINGLE_TILE && tile > t0) {
-      __syncthreads();
+      MLA_TP_SYNC_ACTIVE();
       for (int c = TILE_S; c < D_V; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
@@ -522,7 +531,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
     int V_buf_base = work_smem + 2 * TILE_BYTES;
     int pv_acc_base = (!SINGLE_TILE && tile > t0) ? 1 : 0;
 
-    __syncthreads();
+    MLA_TP_SYNC_ACTIVE();
 
     if (wid == 0 && ptx::elect_sync()) {
       int phase = 0;
@@ -582,7 +591,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
       ptx::tcgen05_commit(mainloop_bar);
     }
 
-    __syncthreads();
+    MLA_TP_SYNC_ACTIVE();
     ptx::mbar_wait(mainloop_bar, 0);
 
     asm volatile("tcgen05.fence::after_thread_sync;");
@@ -684,7 +693,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
     La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
   }
 
-  __syncthreads();
+  MLA_TP_SYNC_ACTIVE();
   if (wid == 0) {
     asm volatile(
         "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
@@ -732,8 +741,7 @@ __device__ __noinline__ void
   float sumVal = 0.0f;
   float acc = 0.0f;
 
-#pragma unroll
-  for (int s = 0; s < 32; s++) {
+  for (int s = 0; s < sk; s++) {
     float localMax = la_ptr[s * 128];
     float oa_val = __bfloat162float(oa_ptr[(size_t)s * D_V * 128]);
 

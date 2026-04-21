@@ -294,9 +294,10 @@ __device__ __noinline__ void
   // } __syncthreads();
 
   // TMA bytes must match actual clamped box dims.
-  // When BATCH_SIZE < MMA_N, TMA input box is clamped to min(MMA_N, BATCH_SIZE).
-  // size<1>(mma_tiler)=bN corresponds to the input (B) TMA dimension.
-  // size<0>(mma_tiler)=bM corresponds to the weight (A) TMA dimension.
+  // When BATCH_SIZE < MMA_N, TMA input box is clamped to min(MMA_N,
+  // BATCH_SIZE). size<1>(mma_tiler)=bN corresponds to the input (B) TMA
+  // dimension. size<0>(mma_tiler)=bM corresponds to the weight (A) TMA
+  // dimension.
   constexpr int kClampedBN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
   int tma_transaction_bytes =
       sizeof(T_) * kClampedBN * cute::size<2>(mma_tiler) +
@@ -624,7 +625,8 @@ __device__ __noinline__ void
         // T2R and register operations
         if constexpr (!NOBIAS) {
           // Epilogue has 128 threads but bias may have fewer than 128 columns
-          // (OUTPUT_SIZE). Threads beyond OUTPUT_SIZE must not read global memory.
+          // (OUTPUT_SIZE). Threads beyond OUTPUT_SIZE must not read global
+          // memory.
           if (threadIdx.x < OUTPUT_SIZE) {
             cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
           }

@@ -837,9 +837,9 @@ __device__ __forceinline__ void
           // Optimistic peek: try to check if the MMA warp has already consumed
           // this buffer (ab_empty). If yes, we can skip the blocking wait
           // below.
-          bool peek_ab_empty_status =
-              ::kernel::try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                               tma_wr_ab_empty_phase);
+          bool peek_ab_empty_status = ::kernel::try_wait_barrier(
+              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+              tma_wr_ab_empty_phase);
 
           // Inner loop: iterate over K-tiles for this (expert, m_tile, n_tile)
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -929,9 +929,8 @@ __device__ __forceinline__ void
                 int col = byte_off % bK;
                 int32_t token_idx_n = n_tile * MMA_N + row;
                 // Guard routing index read: MMA tile may exceed BATCH_SIZE
-                int32_t topk_idx_n = (token_idx_n < BATCH_SIZE)
-                                         ? tRoutingIndex(token_idx_n)
-                                         : 0;
+                int32_t topk_idx_n =
+                    (token_idx_n < BATCH_SIZE) ? tRoutingIndex(token_idx_n) : 0;
 
                 // SWIZZLE_128B: swizzled = linear ^ ((row%8)*16)
                 int linear_off = row * bK + col;
@@ -1127,12 +1126,12 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Optimistic peeks: check if A/B/scales are already ready
-          bool peek_a =
-              ::kernel::try_wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buf],
-                               mma_rd_ab_full_phase);
-          bool peek_b =
-              ::kernel::try_wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buf],
-                               mma_rd_ab_full_phase);
+          bool peek_a = ::kernel::try_wait_barrier(
+              shared_storage.a_full_mbar_ptr[smem_rd_buf],
+              mma_rd_ab_full_phase);
+          bool peek_b = ::kernel::try_wait_barrier(
+              shared_storage.b_full_mbar_ptr[smem_rd_buf],
+              mma_rd_ab_full_phase);
           int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
           bool peek_sf = ::kernel::try_wait_barrier(
               shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);
@@ -1375,9 +1374,8 @@ __device__ __forceinline__ void
               if (i < MMA_N) {
                 int32_t token_idx_n = n_tile * MMA_N + i;
                 // Guard: MMA_N tile may exceed BATCH_SIZE
-                int32_t topk_idx = (token_idx_n < BATCH_SIZE)
-                                       ? tRoutingIndex(token_idx_n)
-                                       : 0;
+                int32_t topk_idx =
+                    (token_idx_n < BATCH_SIZE) ? tRoutingIndex(token_idx_n) : 0;
                 if (token_idx_n < BATCH_SIZE && topk_idx > 0) {
                   float sf_val;
                   if constexpr (W13_LINEAR) {
@@ -1525,9 +1523,7 @@ __device__ __forceinline__ void
                 m_tile * MMA_M + threadIdx.x;   // output row for this thread
             int32_t n_idx = n_tile * MMA_N + i; // token index
             // Guard: MMA_N tile may exceed BATCH_SIZE
-            int32_t topk_idx = (n_idx < BATCH_SIZE)
-                                   ? tRoutingIndex(n_idx)
-                                   : 0;
+            int32_t topk_idx = (n_idx < BATCH_SIZE) ? tRoutingIndex(n_idx) : 0;
             if (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE) {
               // topk_idx is 1-indexed in routing table, convert to 0-indexed
               mOutput(n_idx, topk_idx - 1, m_idx) = tCrC[i];

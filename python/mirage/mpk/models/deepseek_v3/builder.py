@@ -216,6 +216,28 @@ class DeepSeekV3Builder(GraphBuilder):
         """Allocate intermediate computation buffers."""
         mbt = self.max_num_batched_tokens
 
+        # Pick the MLA kernel at compile time based on max_num_batched_tokens.
+        # Large Q_LEN uses the mla_prefill_sm100 chunked-prefill kernel (which
+        # is designed for that regime); small Q_LEN uses the MLA decode / MTP
+        # decode kernels. The threshold of 32 is chosen so MTP decode
+        # (spec_length ≤ 7) always goes through the decode path, and any
+        # realistic chunked-prefill chunk size (≥ 128 typically) goes through
+        # prefill. The MPK scheduler still dynamically caps per-iter
+        # num_new_tokens via paged_kv_indptr — prefill phase uses chunk=mbt,
+        # decode phase uses chunk=1 — so a single compiled graph handles both
+        # phases correctly at the same mbt budget.
+        # Default: prefill ON when mbt >= 32 (anything smaller is almost
+        # certainly pure decode / MTP-spec). Set MPK_USE_PREFILL=0 to force
+        # the decode/MTP kernel for all Q_LEN (debug / bisection flag).
+        _prefill_env = os.environ.get("MPK_USE_PREFILL", "1") == "1"
+        self._use_prefill = _prefill_env and mbt >= 32
+        if self._use_prefill:
+            print(f"  [MLA path] Q_LEN={mbt} → mla_prefill_sm100 (chunked prefill)")
+        elif mbt >= 32:
+            print(f"  [MLA path] Q_LEN={mbt} → MLA decode (prefill disabled by MPK_USE_PREFILL=0)")
+        else:
+            print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
+
         # RMSNorm output
         self.rmsnorm_out = self.mpk.new_tensor(
             dims=(mbt, self.hidden_size),
@@ -253,6 +275,21 @@ class DeepSeekV3Builder(GraphBuilder):
                 name="q_nope_pe",
                 io_category="cuda_tensor",
             )
+        # Prefill-path Q tensors: split per-head [nope(512) | pe(64)]. For the
+        # mla_prefill_sm100 kernel which expects them as two separate dense
+        # tensors (shape [S, H, D_CKV] and [S, H, D_KPE]).
+        if self._use_prefill:
+            self.q_nope = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * self.kv_lora_rank),
+                dtype=bfloat16, name="q_nope", io_category="cuda_tensor",
+            )
+            self.q_pe = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
+                dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
+            )
+        else:
+            self.q_nope = None
+            self.q_pe = None
         # kv_a output split: c_latent [batch, 512] and k_pe [batch, 64]
         # We use two separate linear layers instead of one 576-dim output,
         # so we can apply kv_a_layernorm to c_latent only.
@@ -288,16 +325,40 @@ class DeepSeekV3Builder(GraphBuilder):
             name="contiguous_kv",
             io_category="cuda_tensor",
         )
+        # Prefill-path KV: split into CKV [S, 512] and KPE [S, 64]. The
+        # mla_prefill_sm100 kernel expects these as two dense tensors, so the
+        # builder uses mla_kv_gather_split_sm100 to write directly into them.
+        if self._use_prefill:
+            self.ckv_sep = self.mpk.new_tensor(
+                dims=(self.mpk.max_seq_length, self.kv_lora_rank),
+                dtype=bfloat16, name="ckv_sep", io_category="cuda_tensor",
+            )
+            self.kpe_sep = self.mpk.new_tensor(
+                dims=(self.mpk.max_seq_length, QK_ROPE_HEAD_DIM),
+                dtype=bfloat16, name="kpe_sep", io_category="cuda_tensor",
+            )
+        else:
+            self.ckv_sep = None
+            self.kpe_sep = None
         # MLA decode partial outputs (PR 651: bf16 for partials)
-        # MLA kernel writes blocks at stride D_V*128 (still hardcoded for buffer)
-        # and LSE at stride 128. Each block uses 128 head slots regardless of hpb.
-        # Total blocks = bi_max * num_head_groups * num_splits.
-        # For single_query (q_len=1): bi_max=mbr, gi=0 (so num_head_groups=1 effective)
-        # For multi-query (q_len>1): bi_max=1, gi=0..num_head_groups-1
-        # Allocate worst case: mbr * mbt * num_splits blocks with full 128-stride.
-        max_splits = 1  # single split for decode
+        # MLA kernel writes blocks at stride D_V*128 and LSE at stride 128.
+        # TP kernels use split-K: each split handles one KV tile (128 tokens).
+        # Buffer = mbr * num_groups * max_splits blocks.
         mbr = self.mpk.max_num_batched_requests
-        _partial_blocks = mbr * mbt * max_splits
+        if self.world_size > 1:
+            max_splits = (self.mpk.max_seq_length + 127) // 128
+            if self.world_size == 2:
+                _qpg = min(2, mbt)
+            elif self.world_size == 4:
+                _qpg = min(4, mbt)
+            else:  # TP=8
+                _qpg = 2
+            _q_for_groups = mbt + (mbt % 2) if self.world_size == 8 else mbt
+            _num_groups = (_q_for_groups + _qpg - 1) // _qpg
+            _partial_blocks = mbr * _num_groups * max_splits
+        else:
+            max_splits = 1
+            _partial_blocks = mbr * mbt * max_splits
         self.mla_partial_o = self.mpk.new_tensor(
             dims=(_partial_blocks, self.v_head_dim * 128),
             dtype=bfloat16,
@@ -571,11 +632,35 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
         # Step 3: q_b_proj absorbed (BF16 — scale deleted after absorption)
-        w_q_b, s_q_b = self._attach_fp8_weight(
-            state_dict, f"{attn}q_b_proj.weight", f"layer_{layer_idx}_q_b_proj")
-        self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
-                         grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
-                         block_dim=(128, 1, 1))
+        # Two paths:
+        #  - _use_prefill = False (decode/MTP): one linear, fused [H*576] output
+        #    consumed by the MLA decode kernel.
+        #  - _use_prefill = True: TWO linears → separate q_nope [H*512] and
+        #    q_pe [H*64] tensors consumed by mla_prefill_sm100. Split weights
+        #    (q_b_nope, q_b_pe) are produced at load time in demo.py's Phase 2
+        #    absorption.
+        if self._use_prefill:
+            w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_nope.weight",
+                f"layer_{layer_idx}_q_b_nope")
+            self._fp8_linear(
+                self.q_a_out, w_q_b_nope, s_q_b_nope, self.q_nope,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
+                block_dim=(128, 1, 1))
+            w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_pe.weight",
+                f"layer_{layer_idx}_q_b_pe")
+            self._fp8_linear(
+                self.q_a_out, w_q_b_pe, s_q_b_pe, self.q_pe,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
+                block_dim=(128, 1, 1))
+        else:
+            w_q_b, s_q_b = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_proj.weight",
+                f"layer_{layer_idx}_q_b_proj")
+            self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
+                             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
+                             block_dim=(128, 1, 1))
 
         # Step 4: kv_a_proj split — c_latent (FP8) + k_pe (BF16 padded)
         # k_pe output=64 < MMA_M=128, so dequant to BF16 and pad weight to [128, H]
@@ -667,54 +752,102 @@ class DeepSeekV3Builder(GraphBuilder):
         layer_cache = self.mpk.attach_input(
             torch_tensor=self.ckv_kpe_cache[layer_idx],
             name=f"layer_{layer_idx}_kv_cache")
-        self.mpk.mla_kv_gather_layer(
-            c_latent_new=self.c_latent_out,
-            k_pe_new=self.k_pe_out,
-            paged_cache=layer_cache,
-            contiguous_kv=self.contiguous_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-            grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        num_splits = self.mla_max_splits
-        # Q_LEN = mbt: process all batched tokens in one MLA decode call.
-        # When mbt>1, the kernel does multi-query MLA with causal masking.
-        # When mbt=1, behavior matches the original single-query decode.
         q_len_mla = self.max_num_batched_tokens
-        # TP-aware: kernel takes local_num_heads (=num_local_q_heads) as runtime param.
-        # hpb = min(128/q_len, local_heads). In single-GPU (local=128), equals 128/q_len.
-        _hpb = min(128 // q_len_mla, self.num_local_q_heads)
-        while _hpb > 0 and self.num_local_q_heads % _hpb != 0:
-            _hpb -= 1
-        if _hpb <= 0:
-            _hpb = 1
-        num_head_groups_mla = self.num_local_q_heads // _hpb
-        grid_y_mla = num_head_groups_mla
-        self.mpk.mla_decode_layer(
-            q_input=self.q_nope_pe,
-            kv_input=self.contiguous_kv,
-            output_partial=self.mla_partial_o,
-            output_lse=self.mla_partial_lse,
-            mla_params=(self.num_local_q_heads, self.qk_head_dim,
-                        self.v_head_dim, num_splits, self.mpk.max_seq_length,
-                        q_len_mla),
-            grid_dim=(num_splits, grid_y_mla, 1),
-            block_dim=(128, 1, 1),
-        )
-        # MLA reduce: loop over V-dims. 256 threads / 128 heads = 2 lanes per call.
-        lanes_per_reduce = 256 // 128  # 2
-        for d_start in range(0, self.v_head_dim, lanes_per_reduce):
-            self.mpk.mla_reduce_layer(
-                input_partial=self.mla_partial_o,
-                input_lse=self.mla_partial_lse,
-                output=self.attn_out,
-                mla_params=(self.num_local_q_heads, self.v_head_dim,
-                            num_splits, d_start, lanes_per_reduce, q_len_mla),
-                grid_dim=(grid_y_mla, 1, 1)
-                    if q_len_mla > 1 else
-                    (self.mpk.max_num_batched_requests, 1, 1),
+        kv_len_max = self.mpk.max_seq_length
+        if self._use_prefill:
+            # Prefill path: gather into SPLIT CKV / KPE buffers, then run
+            # mla_prefill_sm100 (no split-K, no partial-reduce). Attention
+            # output lands directly in self.attn_out.
+            self.mpk.mla_kv_gather_split_layer(
+                c_latent_new=self.c_latent_out,
+                k_pe_new=self.k_pe_out,
+                paged_cache=layer_cache,
+                ckv_sep=self.ckv_sep,
+                kpe_sep=self.kpe_sep,
+                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
+            num_q_blocks = (q_len_mla + 64 - 1) // 64  # PF_BM=64 in kernel
+            self.mpk.mla_prefill_layer(
+                q_nope=self.q_nope,
+                q_pe=self.q_pe,
+                ckv=self.ckv_sep,
+                kpe=self.kpe_sep,
+                output=self.attn_out,
+                mla_params=(self.num_local_q_heads, kv_len_max,
+                            self.kv_lora_rank, QK_ROPE_HEAD_DIM,
+                            self.v_head_dim),
+                grid_dim=(self.num_local_q_heads, num_q_blocks, 1),
+                block_dim=(256, 1, 1),
+            )
+        else:
+            self.mpk.mla_kv_gather_layer(
+                c_latent_new=self.c_latent_out,
+                k_pe_new=self.k_pe_out,
+                paged_cache=layer_cache,
+                contiguous_kv=self.contiguous_kv,
+                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            num_splits = self.mla_max_splits
+            if self.world_size == 2:
+                self.mpk.mla_mtp_decode_tp2_layer(
+                    self.q_nope_pe, self.contiguous_kv,
+                    self.mla_partial_o, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 4:
+                self.mpk.mla_mtp_decode_tp4_layer(
+                    self.q_nope_pe, self.contiguous_kv,
+                    self.mla_partial_o, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 8:
+                self.mpk.mla_mtp_decode_tp8_layer(
+                    self.q_nope_pe, self.contiguous_kv,
+                    self.mla_partial_o, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
+            else:
+                _hpb = min(128 // q_len_mla, self.num_local_q_heads)
+                while _hpb > 0 and self.num_local_q_heads % _hpb != 0:
+                    _hpb -= 1
+                if _hpb <= 0:
+                    _hpb = 1
+                num_head_groups_mla = self.num_local_q_heads // _hpb
+                grid_y_mla = num_head_groups_mla
+                self.mpk.mla_decode_layer(
+                    q_input=self.q_nope_pe,
+                    kv_input=self.contiguous_kv,
+                    output_partial=self.mla_partial_o,
+                    output_lse=self.mla_partial_lse,
+                    mla_params=(self.num_local_q_heads, self.qk_head_dim,
+                                self.v_head_dim, num_splits, kv_len_max,
+                                q_len_mla),
+                    grid_dim=(num_splits, grid_y_mla, 1),
+                    block_dim=(128, 1, 1),
+                )
+                lanes_per_reduce = 256 // 128
+                for d_start in range(0, self.v_head_dim, lanes_per_reduce):
+                    self.mpk.mla_reduce_layer(
+                        input_partial=self.mla_partial_o,
+                        input_lse=self.mla_partial_lse,
+                        output=self.attn_out,
+                        mla_params=(self.num_local_q_heads, self.v_head_dim,
+                                    num_splits, d_start, lanes_per_reduce, q_len_mla),
+                        grid_dim=(grid_y_mla, 1, 1)
+                            if q_len_mla > 1 else
+                            (self.mpk.max_num_batched_requests, 1, 1),
+                        block_dim=(128, 1, 1),
+                    )
 
         # Step 7: O projection (V un-absorption fused into o_proj during conversion)
         # o_proj_fused: [7168, H*kv_lora_rank] — directly takes attn_out [N, H*kv_lora_rank]
@@ -1346,12 +1479,28 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
-        # q_b_proj (FP8)
-        w_q_b, s_q_b = self._attach_fp8_weight(
-            state_dict, f"{attn}q_b_proj.weight", f"mtp_{attn}q_b_proj")
-        self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
-                         grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
-                         block_dim=(128, 1, 1))
+        # q_b_proj (FP8) — mirror the main MLA builder: split into q_b_nope +
+        # q_b_pe when _use_prefill so downstream mla_prefill_sm100 sees separate
+        # Q_nope / Q_pe tensors.
+        if self._use_prefill:
+            w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_nope.weight", f"mtp_{attn}q_b_nope")
+            self._fp8_linear(
+                self.q_a_out, w_q_b_nope, s_q_b_nope, self.q_nope,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
+                block_dim=(128, 1, 1))
+            w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_pe.weight", f"mtp_{attn}q_b_pe")
+            self._fp8_linear(
+                self.q_a_out, w_q_b_pe, s_q_b_pe, self.q_pe,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
+                block_dim=(128, 1, 1))
+        else:
+            w_q_b, s_q_b = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_proj.weight", f"mtp_{attn}q_b_proj")
+            self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
+                             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
+                             block_dim=(128, 1, 1))
 
         # kv_a_proj split (FP8)
         kv_a_w = state_dict[f"{attn}kv_a_proj_with_mqa.weight"]
@@ -1397,6 +1546,33 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
         # MTP attention uses its own KV cache (new MLA flow)
+        q_len_mla = self.max_num_batched_tokens
+        kv_len_max = self.mpk.max_seq_length
+        if self._use_prefill:
+            self.mpk.mla_kv_gather_split_layer(
+                c_latent_new=self.c_latent_out,
+                k_pe_new=self.k_pe_out,
+                paged_cache=self.mtp_ckv_kpe_cache_tensor,
+                ckv_sep=self.ckv_sep,
+                kpe_sep=self.kpe_sep,
+                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            num_q_blocks = (q_len_mla + 64 - 1) // 64
+            self.mpk.mla_prefill_layer(
+                q_nope=self.q_nope,
+                q_pe=self.q_pe,
+                ckv=self.ckv_sep,
+                kpe=self.kpe_sep,
+                output=self.attn_out,
+                mla_params=(self.num_local_q_heads, kv_len_max,
+                            self.kv_lora_rank, QK_ROPE_HEAD_DIM,
+                            self.v_head_dim),
+                grid_dim=(self.num_local_q_heads, num_q_blocks, 1),
+                block_dim=(256, 1, 1),
+            )
+            return
         self.mpk.mla_kv_gather_layer(
             c_latent_new=self.c_latent_out,
             k_pe_new=self.k_pe_out,
@@ -1407,40 +1583,61 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
         )
         num_splits = self.mla_max_splits
-        # Mirror main builder: Q_LEN=mbt for prefill batching support.
-        # TP-aware num_head_groups computation (matches main MLA path).
-        q_len_mla = self.max_num_batched_tokens
-        _hpb = min(128 // q_len_mla, self.num_local_q_heads)
-        while _hpb > 0 and self.num_local_q_heads % _hpb != 0:
-            _hpb -= 1
-        if _hpb <= 0:
-            _hpb = 1
-        num_head_groups_mla = self.num_local_q_heads // _hpb
-        grid_y_mla = num_head_groups_mla
-        self.mpk.mla_decode_layer(
-            q_input=self.q_nope_pe,
-            kv_input=self.contiguous_kv,
-            output_partial=self.mla_partial_o,
-            output_lse=self.mla_partial_lse,
-            mla_params=(self.num_local_q_heads, self.qk_head_dim,
-                        self.v_head_dim, num_splits, self.mpk.max_seq_length,
-                        q_len_mla),
-            grid_dim=(num_splits, grid_y_mla, 1),
-            block_dim=(128, 1, 1),
-        )
-        # MLA reduce: loop over V-dims for MTP path.
-        lanes_per_reduce = 256 // 128  # 2
-        for d_start in range(0, self.v_head_dim, lanes_per_reduce):
-            self.mpk.mla_reduce_layer(
-                input_partial=self.mla_partial_o,
-                input_lse=self.mla_partial_lse,
-                output=self.attn_out,
-                mla_params=(self.num_local_q_heads, self.v_head_dim,
-                            num_splits, d_start, lanes_per_reduce, q_len_mla),
-                grid_dim=(grid_y_mla, 1, 1) if q_len_mla > 1 else
-                    (self.mpk.max_num_batched_requests, 1, 1),
+        if self.world_size == 2:
+            self.mpk.mla_mtp_decode_tp2_layer(
+                self.q_nope_pe, self.contiguous_kv,
+                self.mla_partial_o, self.mla_partial_lse,
+                q_len_mla, kv_len_max)
+            self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                self.mla_partial_o, self.mla_partial_lse,
+                self.attn_out, q_len_mla, kv_len_max)
+        elif self.world_size == 4:
+            self.mpk.mla_mtp_decode_tp4_layer(
+                self.q_nope_pe, self.contiguous_kv,
+                self.mla_partial_o, self.mla_partial_lse,
+                q_len_mla, kv_len_max)
+            self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                self.mla_partial_o, self.mla_partial_lse,
+                self.attn_out, q_len_mla, kv_len_max)
+        elif self.world_size == 8:
+            self.mpk.mla_mtp_decode_tp8_layer(
+                self.q_nope_pe, self.contiguous_kv,
+                self.mla_partial_o, self.mla_partial_lse,
+                q_len_mla, kv_len_max)
+            self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                self.mla_partial_o, self.mla_partial_lse,
+                self.attn_out, q_len_mla, kv_len_max)
+        else:
+            _hpb = min(128 // q_len_mla, self.num_local_q_heads)
+            while _hpb > 0 and self.num_local_q_heads % _hpb != 0:
+                _hpb -= 1
+            if _hpb <= 0:
+                _hpb = 1
+            num_head_groups_mla = self.num_local_q_heads // _hpb
+            grid_y_mla = num_head_groups_mla
+            self.mpk.mla_decode_layer(
+                q_input=self.q_nope_pe,
+                kv_input=self.contiguous_kv,
+                output_partial=self.mla_partial_o,
+                output_lse=self.mla_partial_lse,
+                mla_params=(self.num_local_q_heads, self.qk_head_dim,
+                            self.v_head_dim, num_splits, kv_len_max,
+                            q_len_mla),
+                grid_dim=(num_splits, grid_y_mla, 1),
                 block_dim=(128, 1, 1),
             )
+            lanes_per_reduce = 256 // 128
+            for d_start in range(0, self.v_head_dim, lanes_per_reduce):
+                self.mpk.mla_reduce_layer(
+                    input_partial=self.mla_partial_o,
+                    input_lse=self.mla_partial_lse,
+                    output=self.attn_out,
+                    mla_params=(self.num_local_q_heads, self.v_head_dim,
+                                num_splits, d_start, lanes_per_reduce, q_len_mla),
+                    grid_dim=(grid_y_mla, 1, 1) if q_len_mla > 1 else
+                        (self.mpk.max_num_batched_requests, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
 
         # o_proj (FP8)
         w_o, s_o = self._attach_fp8_weight(

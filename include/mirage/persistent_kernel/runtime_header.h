@@ -187,6 +187,8 @@ enum TaskType {
   TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 = 290,
   TASK_MLA_MTP_DECODE_TP8_SM100 = 291,
   TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
+  // KV gather variant that writes split CKV/KPE output (for chunked prefill):
+  TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -324,16 +326,16 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
-  int *step;                    // Metadata for LLM serving
-  long long *tokens;            // Metadata for LLM serving
-  long long *input_tokens;      // Metadata for LLM serving
-  long long *output_tokens;     // Metadata for LLM serving
-  long long eos_token_id;       // Metadata for LLM serving
-  int max_seq_length;           // Metadata for LLM serving
-  int *new_token_nums;          // Metadata for LLM serving
-  int *qo_indptr_buffer;        // Metadata for LLM serving (paged attention)
-  int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
+  int *step;                      // Metadata for LLM serving
+  long long *tokens;              // Metadata for LLM serving
+  long long *input_tokens;        // Metadata for LLM serving
+  long long *output_tokens;       // Metadata for LLM serving
+  long long eos_token_id;         // Metadata for LLM serving
+  int max_seq_length;             // Metadata for LLM serving
+  int *new_token_nums;            // Metadata for LLM serving
+  int *qo_indptr_buffer;          // Metadata for LLM serving (paged attention)
+  int *paged_kv_indptr_buffer;    // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_buffer;   // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_snapshot; // Scheduler snapshot for in-place compaction
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \

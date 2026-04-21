@@ -41,7 +41,14 @@ static constexpr int PF_BN = 64;
 static constexpr int PF_NUM_THREADS = 256;
 static constexpr int PF_NUM_WARPS = 8;
 static constexpr int PF_WARP_SIZE = 32;
-static constexpr int PF_NUM_STAGES = 2;
+// PF_NUM_STAGES=2 requires ~221KB smem (2 KV double-buffering stages +
+// Q_nope/Q_pe + softmax state). MPK's per-worker dynamic smem budget on B200
+// is 207KB - 3KB static = 204KB, so 2 stages overflows and triggers
+// "Invalid __shared__ write of size 16 bytes" from cp.async stores.
+// Dropping to 1 stage fits in 148KB and still correctly pipelines (KV loads
+// now serialize with compute instead of overlapping, but no correctness
+// change). Performance impact measured later.
+static constexpr int PF_NUM_STAGES = 1;
 
 static constexpr int PF_MMA_M = 16;
 static constexpr int PF_MMA_N = 8;
@@ -196,12 +203,13 @@ __host__ __device__ __forceinline__ int cdiv(int a, int b) {
 // No TMA — uses cp.async, same as original.
 // 256 threads = matches MPK Blackwell worker thread count exactly.
 __device__ __noinline__ void mla_prefill_sm100_task_impl(
-    __nv_bfloat16 const *__restrict__ Q_nope, // [S, H, D_CKV]
-    __nv_bfloat16 const *__restrict__ Q_pe,   // [S, H, D_KPE]
-    __nv_bfloat16 const *__restrict__ CKV,    // [S, D_CKV]
-    __nv_bfloat16 const *__restrict__ KPE,    // [S, D_KPE]
-    __nv_bfloat16 *__restrict__ O,            // [S, H, D_V]
-    int const S,
+    __nv_bfloat16 const *__restrict__ Q_nope, // [Q_LEN, H, D_CKV]
+    __nv_bfloat16 const *__restrict__ Q_pe,   // [Q_LEN, H, D_KPE]
+    __nv_bfloat16 const *__restrict__ CKV,    // [S,     D_CKV]
+    __nv_bfloat16 const *__restrict__ KPE,    // [S,     D_KPE]
+    __nv_bfloat16 *__restrict__ O,            // [Q_LEN, H, D_V]
+    int const S,     // total KV length (history + current chunk)
+    int const Q_LEN, // current chunk length (Q rows)
     int const H,
     float const sm_scale_log2,
     int const head,
@@ -210,6 +218,11 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
   using namespace mla_prefill;
 
   int const q_start = q_block * PF_BM;
+  // Global position in the full sequence = (history) + position within chunk.
+  // History length = S - Q_LEN. When Q_LEN == S (single-chunk prefill with no
+  // history), q_pos_in_seq == q_pos_in_chunk and the math collapses to the
+  // original kernel.
+  int const q_hist = S - Q_LEN;
 
   int const tid = threadIdx.x;
   int const warp_id = tid / PF_WARP_SIZE;
@@ -246,7 +259,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int smem_addr = q_nope_smem + swizzle<STRIDE_NOPE>(row, col);
       bf16 const *gmem_ptr = Q_nope + (long long)q_idx * H * PF_D_CKV +
                              (long long)head * PF_D_CKV + col * 8;
-      if (q_idx < S) {
+      if (q_idx < Q_LEN) {
         cp_async_128b(smem_addr, gmem_ptr);
       } else {
         asm volatile("st.shared.v4.u32 [%0], {0, 0, 0, 0};\n" ::"r"(smem_addr));
@@ -260,7 +273,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int smem_addr = q_pe_smem + swizzle<STRIDE_PE>(row, col);
       bf16 const *gmem_ptr = Q_pe + (long long)q_idx * H * PF_D_KPE +
                              (long long)head * PF_D_KPE + col * 8;
-      if (q_idx < S) {
+      if (q_idx < Q_LEN) {
         cp_async_128b(smem_addr, gmem_ptr);
       } else {
         asm volatile("st.shared.v4.u32 [%0], {0, 0, 0, 0};\n" ::"r"(smem_addr));
@@ -297,10 +310,14 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
   constexpr int NUM_N_SHARD_GLOBAL = PF_NUM_MMA_N16 / 2;
   float s_frag[NUM_N_SHARD_GLOBAL][8];
 
-  // KV tile range with causal masking
-  int kv_end = min(S, q_start + PF_BM);
+  // KV tile range with causal masking.
+  // Q chunk spans sequence positions [q_hist + q_start, q_hist + q_start +
+  // PF_BM). Max KV index needed under causal mask = q_hist + q_start + PF_BM
+  // - 1. Clamp to S. When Q_LEN == S (single-chunk prefill, q_hist == 0) this
+  // collapses back to min(S, q_start + PF_BM).
+  int kv_end = min(S, q_hist + q_start + PF_BM);
   int num_kv_tiles = cdiv(kv_end, PF_BN);
-  int num_safe_tiles = q_start / PF_BN;
+  int num_safe_tiles = (q_hist + q_start) / PF_BN;
 
   // Prefetch first KV tile
   auto load_kv_tile = [&](int kv_tile, int stage) {
@@ -368,12 +385,13 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     mla_prefill::cp_async_wait<0>();
     __syncthreads();
 
-    {
-      int next_tile = kv_tile + 1;
-      if (next_tile < num_kv_tiles) {
-        load_kv_tile(next_tile, next_tile % PF_NUM_STAGES);
-      }
-    }
+    // NOTE: with PF_NUM_STAGES=1, next_stage == stage, so prefetching the
+    // next KV tile here would overwrite the just-loaded stage before compute
+    // reads it. Moved the prefetch to the *end* of this iteration (after the
+    // PV matmul), behind a __syncthreads(), so the current tile's compute
+    // completes on stale-but-correct data before we overwrite. When
+    // PF_NUM_STAGES >= 2 the two positions are equivalent because the stages
+    // rotate; only the 1-stage case was silently corrupting tile N>=1.
 
     // Fused QK
     {
@@ -432,8 +450,11 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       }
     }
 
-    // Causal Masking
-    if (kv_base + PF_BN > q_start) {
+    // Causal Masking. Q position within the FULL sequence = q_hist + q_pos,
+    // so kv_pos must be <= q_hist + q_pos. Also drop Q rows past Q_LEN (these
+    // were zero-padded at load time, but we still must clamp their scores so
+    // they don't pollute the softmax maximum).
+    if (kv_base + PF_BN > q_hist + q_start) {
       int q_row_base = q_start + warp_m * 16;
 #pragma unroll
       for (int nl = 0; nl < NUM_N_SHARD; nl++) {
@@ -445,8 +466,9 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
           int kv_col =
               2 * (lane_id % 4) + ((reg_id & 4) ? 8 : 0) + (reg_id & 1);
           int q_pos = q_row_base + row_in_tile;
+          int q_pos_seq = q_hist + q_pos;
           int kv_pos = kv_base + mma_n_global * 16 + kv_col;
-          if (!((kv_pos <= q_pos) && (kv_pos < S))) {
+          if (!((kv_pos <= q_pos_seq) && (kv_pos < S) && (q_pos < Q_LEN))) {
             s_frag[nl][reg_id] = -INFINITY;
           }
         }
@@ -567,6 +589,18 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         }
       }
     }
+
+    // Prefetch the next KV tile AFTER compute done. With PF_NUM_STAGES=1
+    // this is required for correctness (next_stage == current stage); with
+    // PF_NUM_STAGES >= 2 it's no-op w.r.t. correctness and just trades
+    // overlap for ordering — fine for now.
+    {
+      __syncthreads(); // ensure all warps have finished reading this tile
+      int next_tile = kv_tile + 1;
+      if (next_tile < num_kv_tiles) {
+        load_kv_tile(next_tile, next_tile % PF_NUM_STAGES);
+      }
+    }
   }
 
   // Normalize O
@@ -618,7 +652,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int d_base = warp_d * (PF_D_V / 2) + mma_d * 16;
       {
         int q_pos = q_start + warp_m * 16 + g;
-        if (q_pos < S) {
+        if (q_pos < Q_LEN) {
           long long base_offset =
               (long long)q_pos * H * PF_D_V + (long long)head * PF_D_V + d_base;
           bf16_2 val0 = __float22bfloat162_rn(
@@ -631,7 +665,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       }
       {
         int q_pos = q_start + warp_m * 16 + g + 8;
-        if (q_pos < S) {
+        if (q_pos < Q_LEN) {
           long long base_offset =
               (long long)q_pos * H * PF_D_V + (long long)head * PF_D_V + d_base;
           bf16_2 val2 = __float22bfloat162_rn(

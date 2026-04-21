@@ -917,6 +917,35 @@ class PersistentKernel:
             [c_latent_new, k_pe_new, paged_cache, contiguous_kv], tb_graph)
         self.kn_graph.register_task(tb_graph, "mla_kv_gather_sm100", params)
 
+    def mla_kv_gather_split_layer(
+        self,
+        c_latent_new: DTensor,
+        k_pe_new: DTensor,
+        paged_cache: DTensor,
+        ckv_sep: DTensor,     # [max_seq_len, D_V=512] output
+        kpe_sep: DTensor,     # [max_seq_len, D_K-D_V=64] output
+        mla_params: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Gather paged KV into SEPARATE CKV / KPE contiguous buffers.
+
+        Variant of ``mla_kv_gather_layer`` that writes the gathered sequence
+        to two dense tensors instead of a single concatenated [S, D_K] buffer.
+        This is the layout ``mla_prefill_sm100`` expects.
+        """
+        d_k, d_v, page_size = mla_params
+        params = [d_k, d_v, page_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(paged_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(ckv_sep, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kpe_sep, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [c_latent_new, k_pe_new, paged_cache, ckv_sep, kpe_sep], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mla_kv_gather_split_sm100", params)
+
     def mla_decode_layer(
         self,
         q_input: DTensor,         # Q tensor (attached with TMA desc)
@@ -994,11 +1023,15 @@ class PersistentKernel:
         params = [num_heads, seq_len, d_ckv, d_kpe, d_v]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_nope, (0, -1, -1), -1, True)
-        tb_graph.new_input(q_pe, (0, -1, -1), -1, True)
-        tb_graph.new_input(ckv, (0, -1, -1), -1, True)
-        tb_graph.new_input(kpe, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        # Kernel reads based on task_metadata.{request_id=head, kv_idx=q_block}
+        # and computes its own (S, H, D) offsets, so MPK must NOT try to
+        # auto-partition dim 0 by grid.x (grid.x is H, not S). Use -1 on all
+        # dims → full barrier event semantics.
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ckv, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kpe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [q_nope, q_pe, ckv, kpe, output], tb_graph
         )
@@ -1102,10 +1135,10 @@ class PersistentKernel:
             params = [num_groups, q_len, kv_len, num_splits]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [q_input, kv_input, output_partial, output_lse], tb_graph
         )
@@ -1132,9 +1165,9 @@ class PersistentKernel:
         block_dim = (256, 1, 1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [input_partial, input_lse, output], tb_graph
         )

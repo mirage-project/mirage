@@ -23,10 +23,11 @@
 #ifdef USE_NVSHMEM
 #include <mpi.h>
 #if defined(MIRAGE_GRACE_BLACKWELL)
-// Blackwell: host-only headers (device allreduce in tasks/blackwell/allreduce.cuh)
-#include <nvshmem_host.h>
-#include "device_host/nvshmem_types.h"
+// Blackwell: host-only headers (device allreduce in
+// tasks/blackwell/allreduce.cuh)
 #include "device/nvshmemx_collective_launch_apis.h"
+#include "device_host/nvshmem_types.h"
+#include <nvshmem_host.h>
 #else
 // Hopper/Ampere: full NVSHMEM includes
 #include <nvshmem.h>
@@ -617,10 +618,10 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         int task_idx = i / TASK_SIZE;
         int offset = i % TASK_SIZE;
         ::kernel::load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
-                  reinterpret_cast<char *>(
-                      config.all_tasks +
-                      get_task_position_index(task_ids[task_idx])) +
-                      offset * 16);
+                            reinterpret_cast<char *>(
+                                config.all_tasks +
+                                get_task_position_index(task_ids[task_idx])) +
+                                offset * 16);
       }
       ::kernel::cp_async_fence();
       ::kernel::cp_async_wait<0>();
@@ -650,8 +651,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
               needed_counts);
 #elif defined(USE_NVSHMEM)
           // NVSHMEM_NO_DEVICE_LIB: spin-wait equivalent
-          while (ld_acquire_sys_u64(&config.all_event_counters[event_index])
-                 < needed_counts) {
+          while (ld_acquire_sys_u64(&config.all_event_counters[event_index]) <
+                 needed_counts) {
             __nanosleep(10);
           }
 #endif
@@ -685,6 +686,18 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                task_desc->task_type);
       }
 #endif
+      // Dispatch trace: D=dispatch start, F=finish
+      bool _trace_t =
+          task_desc->task_type == 275 || task_desc->task_type == 276 ||
+          task_desc->task_type == 277 || task_desc->task_type == 287 ||
+          task_desc->task_type == 288 || task_desc->task_type == 248 ||
+          task_desc->task_type == 249 || task_desc->task_type == 302 ||
+          task_desc->task_type == 278 || task_desc->task_type == 154 ||
+          task_desc->task_type == 280 || task_desc->task_type == 118 ||
+          task_desc->task_type == 281 || task_desc->task_type == 253 ||
+          task_desc->task_type == 258 || task_desc->task_type == 259 ||
+          task_desc->task_type == 261 || task_desc->task_type == 262 ||
+          task_desc->task_type == 101;
       _execute_task(task_desc, config);
     }
     __syncthreads();
@@ -1106,12 +1119,16 @@ void gpu_free(void *ptr) {
 #ifdef NVSHMEM_NO_DEVICE_LIB
 // Callback for hostlib init: return pointer to our __managed__ device state.
 // nvshmemi_device_state_d is __managed__ (defined in allreduce.cuh, same TU),
-// so &nvshmemi_device_state_d is a valid host pointer that maps to device memory.
-static int mpk_nvshmem_device_init_cb(void **dev_state_ptr, void **transport_dev_state_ptr) {
+// so &nvshmemi_device_state_d is a valid host pointer that maps to device
+// memory.
+static int mpk_nvshmem_device_init_cb(void **dev_state_ptr,
+                                      void **transport_dev_state_ptr) {
   // nvshmemi_device_state_d is __managed__ (defined in allreduce.cuh, same TU).
   // Host library will cudaMemcpy the state to this address.
   *dev_state_ptr = (void *)&nvshmemi_device_state_d;
-  if (transport_dev_state_ptr) *transport_dev_state_ptr = nullptr;
+  if (transport_dev_state_ptr) {
+    *transport_dev_state_ptr = nullptr;
+  }
   printf("MPK: device_init_cb OK, managed_ptr=%p\n", &nvshmemi_device_state_d);
   return 0;
 }
@@ -1182,6 +1199,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
+  // Increase printf FIFO to avoid losing debug messages from device.
+  cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 128 * 1024 * 1024);
 
 #ifdef USE_NVSHMEM
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
@@ -1196,10 +1215,12 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
     nvshmemi_version_t ver = {NVSHMEM_VENDOR_MAJOR_VERSION,
                               NVSHMEM_VENDOR_MINOR_VERSION,
                               NVSHMEM_VENDOR_PATCH_VERSION};
-    int status = nvshmemid_hostlib_init_attr(
-        NVSHMEM_THREAD_SERIALIZED, &provided,
-        NVSHMEMX_INIT_WITH_MPI_COMM, &attr, ver,
-        mpk_nvshmem_device_init_cb);
+    int status = nvshmemid_hostlib_init_attr(NVSHMEM_THREAD_SERIALIZED,
+                                             &provided,
+                                             NVSHMEMX_INIT_WITH_MPI_COMM,
+                                             &attr,
+                                             ver,
+                                             mpk_nvshmem_device_init_cb);
     if (status != 0) {
       printf("MPK: nvshmemid_hostlib_init_attr failed: %d\n", status);
     }
@@ -1212,7 +1233,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   printf("MPK: Rank%d is Ready. Worldsize=%d\n", mype, npes);
-
 
   // Create nvshmem teams
   if (allocate_nvshmem_teams > 0) {
@@ -1328,8 +1348,10 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   //            0,
   //            all_events.size() * sizeof(EventCounter));
   //  Initialize all tasks
-  fprintf(stderr, "[MPK INIT] Total tasks: %zu, Total events: %zu\n",
-          all_tasks.size(), all_events.size());
+  fprintf(stderr,
+          "[MPK INIT] Total tasks: %zu, Total events: %zu\n",
+          all_tasks.size(),
+          all_events.size());
   global_runtime_config.all_tasks =
       gpu_malloc<TaskDesc>(all_tasks.size() * sizeof(TaskDesc));
   cudaMemcpy(global_runtime_config.all_tasks,

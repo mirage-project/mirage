@@ -853,7 +853,7 @@ if __name__ == "__main__":
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12355"
+        os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12357")
     except ImportError:
         world_size = 1
         rank = 0
@@ -1025,10 +1025,20 @@ if __name__ == "__main__":
         from safetensors.torch import load_file
         from safetensors import safe_open
 
+        def _parse_layers(spec):
+            result = []
+            for part in spec.split(','):
+                if '-' in part:
+                    lo, hi = part.split('-', 1)
+                    result.extend(range(int(lo), int(hi) + 1))
+                else:
+                    result.append(int(part))
+            return result
+
         # Determine which layers we need
         layer_indices_for_load = None
         if args.layers:
-            layer_indices_for_load = [int(x) for x in args.layers.split(',')]
+            layer_indices_for_load = _parse_layers(args.layers)
             # Also need MTP layer if --mtp
             if args.mtp:
                 layer_indices_for_load.append(num_layers)  # layer 61
@@ -1096,7 +1106,7 @@ if __name__ == "__main__":
         # Parse layer indices for correctness mode
         layer_indices_arg = None
         if args.layers:
-            layer_indices_arg = [int(x) for x in args.layers.split(',')]
+            layer_indices_arg = _parse_layers(args.layers)
 
         ref_token = None
         ref_logits = None
@@ -1104,6 +1114,7 @@ if __name__ == "__main__":
         # Weight conversion (absorption + fusion) is needed for both correctness
         # and normal mode when --layers is used for selective loading.
         _need_conversion = args.correctness or args.layers
+        print(f"[DEBUG] _need_conversion={_need_conversion}, args.correctness={args.correctness}, args.layers={args.layers!r}", flush=True)
         if _need_conversion:
             test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
 
@@ -1172,6 +1183,16 @@ if __name__ == "__main__":
                     qk_nope = mp["qk_nope_head_dim"]
                     v_dim = mp["v_head_dim"]
                     kv_lora_rank = mp["kv_lora_rank"]
+                    # Split absorbed q_b into q_b_nope (H*D_CKV=512) and
+                    # q_b_pe (H*D_KPE=64). Required by the chunked-prefill
+                    # MLA kernel which takes Q_nope / Q_pe as separate tensors.
+                    # Absorbed layout is per-head [nope(512) | pe(64)].
+                    H_ = num_heads_loc
+                    absorbed_r = absorbed.reshape(H_, 576, -1)
+                    q_b_nope = absorbed_r[:, :kv_lora_rank, :].contiguous().reshape(H_ * kv_lora_rank, -1)
+                    q_b_pe = absorbed_r[:, kv_lora_rank:, :].contiguous().reshape(H_ * (576 - kv_lora_rank), -1)
+                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
+                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
                     kv_head_dim = qk_nope + v_dim
                     kv_b_reshaped = kv_bf16.reshape(num_heads_loc, kv_head_dim, kv_lora_rank)
                     W_UV = kv_b_reshaped[:, :v_dim, :]
@@ -1234,6 +1255,7 @@ if __name__ == "__main__":
             # - Keep FP8 weights + scale_inv as-is (builder uses FP8 GEMM pipeline)
             # - Only dequant kv_b_proj for absorption into q_b_proj
             # - Fuse gate+up for dense layers and per-expert weights
+            print(f"[DEBUG] Phase 2 starting, test_layers={test_layers}", flush=True)
             print("\nConverting weights for MPK builder (in-memory, FP8 preserved)...")
             import sys
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
@@ -1252,6 +1274,7 @@ if __name__ == "__main__":
                 attn = f"model.layers.{li}.self_attn."
                 q_key = f"{attn}q_b_proj.weight"
                 kv_key = f"{attn}kv_b_proj.weight"
+                print(f"[DEBUG2] li={li}: q_key in state_dict={q_key in state_dict}, kv_key in state_dict={kv_key in state_dict}", flush=True)
                 if q_key in state_dict and kv_key in state_dict:
                     # Dequant both for absorption (GPU)
                     q_w = state_dict[q_key]
@@ -1314,6 +1337,21 @@ if __name__ == "__main__":
                     # Replace q_b_proj with absorbed FP8 version (scale_inv already set above)
                     state_dict[q_key] = absorbed
                     # q_s_key kept (set during FP8 quantization above)
+
+                    # Split absorbed q_b into q_b_nope_absorbed (H*D_CKV=512) and
+                    # q_b_pe (H*D_KPE=64) for the chunked-prefill path. The
+                    # mla_prefill kernel takes Q_nope and Q_pe as SEPARATE dense
+                    # tensors, while the decode kernel consumes the fused
+                    # [H*576] tensor. Keeping both forms lets the builder
+                    # dispatch to the right kernel based on max_num_batched_tokens.
+                    # Per-head layout of `absorbed`: [nope(512) | pe(64)] rows.
+                    H = num_heads_loc
+                    absorbed_r = absorbed.reshape(H, 576, -1)
+                    q_b_nope = absorbed_r[:, :512, :].contiguous().reshape(H * 512, -1)
+                    q_b_pe = absorbed_r[:, 512:, :].contiguous().reshape(H * 64, -1)
+                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
+                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
+
                     # Remove kv_b_proj (absorbed into q)
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
@@ -1407,6 +1445,12 @@ if __name__ == "__main__":
                     (r"self_attn\.q_a_proj\.weight",                         None),  # ReplicatedLinear (vLLM): hidden→q_lora_rank, output feeds full-width q_b_proj
                     (r"self_attn\.q_a_layernorm\.weight",                    None),
                     (r"self_attn\.q_b_proj\.weight",                         0),     # ColumnParallelLinear: shard output heads
+                    # Split q_b_proj (absorbed) for the chunked-prefill MLA
+                    # kernel, which expects Q_nope and Q_pe as separate dense
+                    # tensors. Both are column-parallel on the head dim (same
+                    # sharding as q_b_proj).
+                    (r"self_attn\.q_b_nope\.weight",                         0),
+                    (r"self_attn\.q_b_pe\.weight",                           0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
                     (r"self_attn\.o_proj\.weight",                           1),
@@ -1532,6 +1576,21 @@ if __name__ == "__main__":
         ender.record()
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
+
+        # Optional: dump builder buffers to disk for cross-rank / cross-TP
+        # comparison (regardless of world_size or --correctness).
+        if os.environ.get("MPK_DUMP_BUFFERS", "0") == "1":
+            _dump_suffix = os.environ.get("MPK_DUMP_TAG", f"tp{world_size}_r{rank}")
+            _dump_dir = os.environ.get("MPK_DUMP_DIR", "/tmp")
+            for _name in ("mlp_out_buf", "attn_out_buf", "lm_head_out_buf",
+                          "moe_output_buf", "q_nope_pe_buf", "attn_proj_out_buf",
+                          "q_a_out_buf", "c_latent_out_buf"):
+                _buf = getattr(builder, _name, None)
+                if _buf is not None:
+                    torch.save(_buf.detach().cpu(),
+                               f"{_dump_dir}/mpk_{_name}_{_dump_suffix}.pt")
+                    print(f"[MPK_DUMP_BUFFERS] saved {_name} shape={tuple(_buf.shape)} "
+                          f"→ {_dump_dir}/mpk_{_name}_{_dump_suffix}.pt")
 
         # Debug: check token buffers and step counter
         prompt_len_val = prompt_lengths[0].item()

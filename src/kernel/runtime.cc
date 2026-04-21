@@ -453,10 +453,12 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y; // gi
             }
             // MLA KV gather: request_id = bid.y
-            if (task_type == TASK_MLA_KV_GATHER_SM100) {
+            if (task_type == TASK_MLA_KV_GATHER_SM100 ||
+                task_type == TASK_MLA_KV_GATHER_SPLIT_SM100) {
               task.task_metadata.request_id = bid.y;
             }
-            // Set request_id for FP8 quantize (row index for column-major scale output)
+            // Set request_id for FP8 quantize (row index for column-major scale
+            // output)
             if (task_type == TASK_QUANTIZE_FP8_SM100) {
               task.task_metadata.request_id = bid.x;
             }
@@ -1317,6 +1319,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100] =
       "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
+  task_type_to_name[TASK_MLA_KV_GATHER_SPLIT_SM100] =
+      "TASK_MLA_KV_GATHER_SPLIT_SM100";
   task_type_to_name[TASK_MTP_VERIFY_STRICT] = "TASK_MTP_VERIFY_STRICT";
   task_type_to_name[TASK_MTP_ACCEPT_COMMIT] = "TASK_MTP_ACCEPT_COMMIT";
   task_type_to_name[TASK_MTP_TOKEN_SCATTER] = "TASK_MTP_TOKEN_SCATTER";
@@ -1337,7 +1341,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
   task_type_to_name[TASK_ELEMENTWISE_ADD_SM100] = "TASK_ELEMENTWISE_ADD_SM100";
   task_type_to_name[TASK_SOFTMAX_GATHER_SM100] = "TASK_SOFTMAX_GATHER_SM100";
-  task_type_to_name[TASK_MTP_VERIFY_PROBABILISTIC] = "TASK_MTP_VERIFY_PROBABILISTIC";
+  task_type_to_name[TASK_MTP_VERIFY_PROBABILISTIC] =
+      "TASK_MTP_VERIFY_PROBABILISTIC";
   task_type_to_name[TASK_PROB_SCATTER_SM100] = "TASK_PROB_SCATTER_SM100";
   task_type_to_name[TASK_MTP_FLOAT_SCATTER] = "TASK_MTP_FLOAT_SCATTER";
   task_type_to_name[TASK_PROB_EXTRACT_SM100] = "TASK_PROB_EXTRACT_SM100";
