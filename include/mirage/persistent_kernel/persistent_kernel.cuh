@@ -24,10 +24,15 @@
 #include <mpi.h>
 #if defined(MIRAGE_GRACE_BLACKWELL)
 // Blackwell: host-only headers (device allreduce in
-// tasks/blackwell/allreduce.cuh)
-#include "device/nvshmemx_collective_launch_apis.h"
-#include "device_host/nvshmem_types.h"
+// tasks/blackwell/allreduce.cuh). ORDER IS LOAD-BEARING — the device_host
+// and device sub-headers depend on symbols declared by <nvshmem_host.h>.
+// Letting clang-format reorder them causes silent bad codegen that
+// manifests as an mbt>=32 decode hang.
+// clang-format off
 #include <nvshmem_host.h>
+#include "device_host/nvshmem_types.h"
+#include "device/nvshmemx_collective_launch_apis.h"
+// clang-format on
 #else
 // Hopper/Ampere: full NVSHMEM includes
 #include <nvshmem.h>

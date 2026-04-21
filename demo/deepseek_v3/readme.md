@@ -148,7 +148,7 @@ Notes:
 | `MPK_NO_NVSHMEM` | 0 | Compile without NVSHMEM (TP=1 only) |
 | `MPK_DRY_RUN` | 0 | Stop after task graph generation (inspect offsets) |
 | `MPK_SO_PATH` | auto | Override compiled .so path for cumodule init |
-| `MPK_USE_PREFILL` | 1 | Dispatch `mla_prefill_sm100` when `max_num_batched_tokens >= 32`. Set to `0` to force the decode kernel for all Q_LEN (debug/bisect flag). |
+| `MPK_USE_PREFILL` | 0 | Opt-in: set to `1` to dispatch `mla_prefill_sm100` when `max_num_batched_tokens >= 32`. Default is decode-only. Prefill path is WIP — works at narrow configs (e.g. `mbt=64 max_seq<=250 pages>=10`), but hangs at many (mbt, max_seq, num_pages) combinations post-launch. See bugfix.md Bug 18 for ablation. |
 
 ## Known Limitations
 

@@ -226,15 +226,19 @@ class DeepSeekV3Builder(GraphBuilder):
         # num_new_tokens via paged_kv_indptr — prefill phase uses chunk=mbt,
         # decode phase uses chunk=1 — so a single compiled graph handles both
         # phases correctly at the same mbt budget.
-        # Default: prefill ON when mbt >= 32 (anything smaller is almost
-        # certainly pure decode / MTP-spec). Set MPK_USE_PREFILL=0 to force
-        # the decode/MTP kernel for all Q_LEN (debug / bisection flag).
-        _prefill_env = os.environ.get("MPK_USE_PREFILL", "1") == "1"
+        # MPK_USE_PREFILL=1 opt-in to route `mbt >= 32` through the chunked
+        # prefill kernel. Default OFF while the prefill path is still being
+        # debugged (WIP 2026-04-21): (mbt, max_seq_length, max_num_pages)
+        # triples above roughly {mbt*max_seq >= 16K} or {mbt=128 and seq>128}
+        # currently hang in MPK's persistent kernel loop post-launch. The
+        # failures are param-combinatoric and not fully root-caused yet;
+        # see bugfix.md Bug 18 for the ablation summary.
+        _prefill_env = os.environ.get("MPK_USE_PREFILL", "0") == "1"
         self._use_prefill = _prefill_env and mbt >= 32
         if self._use_prefill:
-            print(f"  [MLA path] Q_LEN={mbt} → mla_prefill_sm100 (chunked prefill)")
+            print(f"  [MLA path] Q_LEN={mbt} → mla_prefill_sm100 (chunked prefill, MPK_USE_PREFILL=1)")
         elif mbt >= 32:
-            print(f"  [MLA path] Q_LEN={mbt} → MLA decode (prefill disabled by MPK_USE_PREFILL=0)")
+            print(f"  [MLA path] Q_LEN={mbt} → MLA decode (prefill opt-in via MPK_USE_PREFILL=1)")
         else:
             print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
 

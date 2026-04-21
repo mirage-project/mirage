@@ -26,25 +26,24 @@
 
 namespace kernel {
 
-template <int D_K,        // Total KV dim (576 = 512 latent + 64 rope)
-          int D_V,        // Latent dim (512)
-          int PAGE_SIZE>  // Page size (e.g., 128)
-__device__ __forceinline__ void
-    mla_kv_cache_gather_split_sm100_task_impl(
-        void const *c_latent_new_ptr,   // [num_tokens, D_V] new c_latent
-        void const *k_pe_new_ptr,       // [num_tokens, D_K - D_V] new k_pe
-        void *paged_cache_ptr,          // [num_pages, PAGE_SIZE, D_K] paged cache
-        void *ckv_sep_ptr,              // [max_seq_len, D_V=512] output
-        void *kpe_sep_ptr,              // [max_seq_len, D_K-D_V=64] output
-        int const *qo_indptr_buffer_ptr,
-        int const *paged_kv_indptr_buffer_ptr,
-        int const *paged_kv_indices_buffer_ptr,
-        int const *paged_kv_last_page_len_buffer_ptr,
-        int request_id) {
+template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
+          int D_V,       // Latent dim (512)
+          int PAGE_SIZE> // Page size (e.g., 128)
+__device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
+    void const *c_latent_new_ptr, // [num_tokens, D_V] new c_latent
+    void const *k_pe_new_ptr,     // [num_tokens, D_K - D_V] new k_pe
+    void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged cache
+    void *ckv_sep_ptr,            // [max_seq_len, D_V=512] output
+    void *kpe_sep_ptr,            // [max_seq_len, D_K-D_V=64] output
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_indices_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
+    int request_id) {
   using T = __nv_bfloat16;
   int const tid = threadIdx.x;
   int const NUM_THREADS = 128;
-  constexpr int ROPE_DIM = D_K - D_V;  // 64
+  constexpr int ROPE_DIM = D_K - D_V; // 64
 
   // Sequence metadata
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];
@@ -67,7 +66,9 @@ __device__ __forceinline__ void
 
   int const *page_indices = paged_kv_indices_buffer_ptr + first_page_pos;
   __syncthreads();
-  if (!valid) return;
+  if (!valid) {
+    return;
+  }
 
   // Step 1: append new tokens to paged cache (identical to non-split variant —
   // the cache layout is still [c_latent | k_pe] concatenated per position).
