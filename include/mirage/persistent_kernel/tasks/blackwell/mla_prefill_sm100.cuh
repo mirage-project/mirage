@@ -497,7 +497,13 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
           m_wg[warp_d * PF_BM + warp_m * 16 + j * 8 + lane_id / 4] = m_state[j];
         }
       }
-      asm volatile("bar.sync %0, 64;" ::"r"(1 + warp_m));
+      // Use barrier IDs 8..11 (CUTLASS FirstUserBarrier=8). IDs 1..7 are
+      // reserved by CUTLASS (EpilogueBarrier=1, TransposeBarrier=2,
+      // TransformBarrier=3, StreamkBarrier0=4, StreamkBarrier1=5,
+      // TmemAllocBarrier=6, Sm120MainloopBarrier=7). Using reserved IDs
+      // leaves stale barrier state that corrupts subsequent linear/MoE
+      // tasks sharing the same MPK worker CTA.
+      asm volatile("bar.sync %0, 64;" ::"r"(8 + warp_m));
 #pragma unroll
       for (int j = 0; j < 2; j++) {
         m_state[j] = fmaxf(m_wg[0 * PF_BM + warp_m * 16 + j * 8 + lane_id / 4],
@@ -564,7 +570,8 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a3),
                    "r"(p_f16_local[nl][3]));
     }
-    asm volatile("bar.sync %0, 64;" ::"r"(1 + warp_m));
+    // User barrier IDs 8..11 (see above comment on CUTLASS reserved range).
+    asm volatile("bar.sync %0, 64;" ::"r"(8 + warp_m));
 
     // PV Matmul
     {

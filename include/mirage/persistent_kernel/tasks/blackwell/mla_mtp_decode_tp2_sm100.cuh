@@ -27,9 +27,15 @@ namespace mla_mtp_tp2 {
 // Independent Thread Scheduling, the half-CTA that returned early drifts
 // ahead in the outer worker loop, so subsequent __syncthreads() (bar 0)
 // fire without warps 4..7 and those warps silently skip the next task's
-// body, causing hangs (see bugfix.md Bug 14). bar.sync 1, 128 only syncs
-// the active half of the CTA.
-#define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 1, 128;" ::: "memory")
+// body, causing hangs (see bugfix.md Bug 14). bar.sync syncs only the
+// active half of the CTA.
+//
+// ID 12 is picked inside the CUTLASS user-barrier range (FirstUserBarrier=8;
+// prefill uses 8..11). IDs 1..7 are CUTLASS reserved (EpilogueBarrier=1,
+// TmemAllocBarrier=6, etc.) — using them leaves stale barrier state that
+// deadlocks the next FP8 linear task in the same MPK worker CTA
+// (bugfix.md Bug 19 localisation via compute-sanitizer synccheck).
+#define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 12, 128;" ::: "memory")
 
 static constexpr int NUM_HEADS = 64;
 static constexpr int D_K = 576;

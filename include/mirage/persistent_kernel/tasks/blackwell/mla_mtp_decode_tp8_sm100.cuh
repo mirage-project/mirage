@@ -19,8 +19,9 @@
 namespace kernel {
 namespace mla_mtp_tp8 {
 
-// See mla_mtp_decode_tp2_sm100.cuh for rationale.
-#define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 1, 128;" ::: "memory")
+// See mla_mtp_decode_tp2_sm100.cuh for rationale. ID 12 = CUTLASS user
+// range; IDs 1..7 are reserved (bugfix.md Bug 19).
+#define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 12, 128;" ::: "memory")
 
 static constexpr int NUM_HEADS = 16;
 static constexpr int D_K = 576;

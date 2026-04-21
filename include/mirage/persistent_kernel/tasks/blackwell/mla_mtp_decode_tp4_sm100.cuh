@@ -19,10 +19,12 @@
 namespace kernel {
 namespace mla_mtp_tp4 {
 
-// See mla_mtp_decode_tp2_sm100.cuh for the rationale of bar.sync 1, 128 vs.
+// See mla_mtp_decode_tp2_sm100.cuh for the rationale of bar.sync vs.
 // __syncthreads() — MPK's worker CTAs are 256 threads but this kernel only
 // uses threads 0..127. The other 128 threads must not block __syncthreads().
-#define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 1, 128;" ::: "memory")
+// ID 12 picked in CUTLASS user-barrier range (ids 1..7 reserved, leaving
+// stale barrier state corrupts subsequent FP8 linear — bugfix.md Bug 19).
+#define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 12, 128;" ::: "memory")
 
 static constexpr int NUM_HEADS = 32;
 static constexpr int D_K = 576;
