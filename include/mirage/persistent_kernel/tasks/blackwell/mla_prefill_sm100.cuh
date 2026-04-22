@@ -224,6 +224,19 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
   // original kernel.
   int const q_hist = S - Q_LEN;
 
+  // Fast-path skip: if this q_block's first row is already beyond the actual
+  // chunk length, the whole tile would produce only zero-padded Q and the
+  // result O rows would be discarded by the epilogue's `q_pos < Q_LEN`
+  // guard anyway. Bail out to avoid burning the full PF_BM-tile worth of
+  // MMA + KV-tile loads on rows that are masked to -INF / never written.
+  // Critical for decode-step cost when MPK runs the prefill kernel with
+  // Q_LEN=1: without this guard, any q_block > 0 does ~O(KV_len) of
+  // wasted compute per layer, making overall wall time O(max_seq²) as the
+  // scheduler iterates. See bugfix.md Bug 20.
+  if (q_start >= Q_LEN) {
+    return;
+  }
+
   int const tid = threadIdx.x;
   int const warp_id = tid / PF_WARP_SIZE;
   int const lane_id = tid % PF_WARP_SIZE;
