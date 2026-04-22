@@ -209,12 +209,18 @@ def get_compile_command(
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
 
+    # rdc=true is the default on every NVSHMEM build. The old Blackwell
+    # rdc=false + self-contained-allreduce workaround (hand-rolled
+    # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
+    # because rdc=true previously inflated registers 166→255 on sm_100a) is
+    # kept behind MPK_RDC_FALSE=1 as a safety escape hatch — on CUDA 13.2 +
+    # NVSHMEM 3.6.5 the register-spill issue is gone (verified 2026-04-22 at
+    # TP=2 and TP=4 across mbt∈{1,64} and MTP spec∈{0,1,3}).
+    _rdc_false = os.environ.get("MPK_RDC_FALSE", "0") == "1" and target_cc >= 100
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        # Blackwell: rdc=false (self-contained allreduce, avoids 255-reg inflation)
-        # Hopper/Ampere: rdc=true when NVSHMEM (needed for libnvshmem_device.a)
-        "-rdc=false" if (not use_nvshmem or target_cc >= 100) else "-rdc=true",
+        "-rdc=false" if (not use_nvshmem or _rdc_false) else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -259,8 +265,10 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        if target_cc >= 100:
-            # Blackwell: self-contained allreduce, no libnvshmem_device.a
+        if _rdc_false:
+            # Blackwell MPK_RDC_FALSE=1 escape hatch: self-contained allreduce,
+            # no libnvshmem_device.a (kept for regression isolation; see the
+            # block above for when this path is needed).
             _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
             _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
             os.makedirs(_host_obj_dir, exist_ok=True)
@@ -275,7 +283,8 @@ def get_compile_command(
                              "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
                              "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         else:
-            # Hopper/Ampere: standard NVSHMEM with device library + rdc=true
+            # Default path: standard NVSHMEM link with device library +
+            # rdc=true. Used everywhere unless MPK_RDC_FALSE=1 on Blackwell.
             nvshmem_flags = ["-DUSE_NVSHMEM",
                              "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
                              "-Xlinker", "--disable-new-dtags",
