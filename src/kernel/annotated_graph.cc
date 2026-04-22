@@ -409,16 +409,66 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   }
 
   // ---------------------------------------------------------------------
-  // Step (f): topological ordering (Kahn's). Tiebreaker: prefer the smallest
-  // layer index, which preserves original insertion order when unconstrained.
+  // Step (f): topological ordering (Kahn's) with a (depth, index) tie-break.
+  //
+  // Why depth, not just layer index: for a symmetric fork like
+  // A -> B -> C -> D and A -> E -> F -> G, an index-only tie-break yields
+  // [A, B, C, D, E, F, G] (chain alpha emitted fully before chain beta).
+  // That means C and F's chain events end up on opposite ends of the
+  // prelaunch queue, even though they are ready to run at the same depth.
+  // Using depth-first-ascending, index-second gives [A, B, E, C, F, D, G]:
+  // within each depth stratum we still respect original insertion order,
+  // but across strata we advance both chains in lockstep. B and E are
+  // (required) interleaved within a single fork event by the bundle-head
+  // emission (runtime.cc); the downstream layers C/F/D/G are interleaved
+  // here via the topo order. For pure chain graphs (e.g. qwen3 after
+  // residual stripping) depth == layer index, so the output matches the
+  // previous insertion-order behaviour.
+  //
+  // Depth is defined as 0 for layers with no incoming edge, and
+  // depth[v] = max_{(u, v) in E} (depth[u] + 1) otherwise. We compute it
+  // by a first Kahn pass (any valid order suffices) and then run a second
+  // Kahn pass using the depth array as the primary tie-break key.
   // ---------------------------------------------------------------------
+  std::vector<int> depth(V, 0);
   {
+    // First pass: any valid topo order to compute depth.
+    std::vector<int> in_deg_tmp(V, 0);
+    for (int i = 0; i < V; i++) {
+      in_deg_tmp[i] = (int)ag.layers[i].in_edges.size();
+    }
+    std::queue<int> q;
+    for (int i = 0; i < V; i++) {
+      if (in_deg_tmp[i] == 0) {
+        q.push(i);
+      }
+    }
+    while (!q.empty()) {
+      int u = q.front();
+      q.pop();
+      for (int eidx : ag.layers[u].out_edges) {
+        int v = ag.edges[eidx].cons_layer;
+        depth[v] = std::max(depth[v], depth[u] + 1);
+        if (--in_deg_tmp[v] == 0) {
+          q.push(v);
+        }
+      }
+    }
+  }
+  {
+    // Second pass: min-heap keyed by (depth, index). Smaller depth first;
+    // within the same depth, smaller original-insertion index first.
     std::vector<int> in_deg(V, 0);
     for (int i = 0; i < V; i++) {
       in_deg[i] = (int)ag.layers[i].in_edges.size();
     }
-    // min-heap priority queue by layer index
-    std::priority_queue<int, std::vector<int>, std::greater<int>> pq;
+    auto cmp = [&depth](int a, int b) {
+      if (depth[a] != depth[b]) {
+        return depth[a] > depth[b];
+      }
+      return a > b;
+    };
+    std::priority_queue<int, std::vector<int>, decltype(cmp)> pq(cmp);
     for (int i = 0; i < V; i++) {
       if (in_deg[i] == 0) {
         pq.push(i);
@@ -664,6 +714,14 @@ std::string maybe_dump_annotated_graph(AnnotatedGraph const &ag) {
        << (L.is_join_consumer ? " [JOIN]" : "")
        << (L.fork_parent_group >= 0 ? " [fork-consumer]" : "") << "\n";
   }
+  os << "  ordered_layers: [";
+  for (size_t i = 0; i < ag.ordered_layers.size(); i++) {
+    if (i > 0) {
+      os << ", ";
+    }
+    os << ag.ordered_layers[i];
+  }
+  os << "]\n";
   return os.str();
 }
 
