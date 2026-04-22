@@ -21,26 +21,48 @@ LAYERS="0-39"
 MEM_THRESHOLD=500
 
 # ── GPU selection ────────────────────────────────────────────────
-if [[ -z "${GPUS:-}" ]]; then
-    echo "Scanning for $TP idle GPUs (memory < ${MEM_THRESHOLD} MiB)..."
-    IDLE_GPUS=()
+# If GPUS is not set, poll until $TP GPUs are idle (mem < MEM_THRESHOLD MiB,
+# util < UTIL_THRESHOLD). Shared-cluster-friendly: other users coming and
+# going won't fail the script — it waits up to MAX_WAIT seconds. Set
+# GPUS=... to bypass the wait.
+UTIL_THRESHOLD="${UTIL_THRESHOLD:-5}"
+MAX_WAIT="${MAX_WAIT:-7200}"          # default 2 hours
+POLL_INTERVAL="${POLL_INTERVAL:-30}"  # re-scan every 30s
+
+find_idle_gpus() {
+    local idle=()
     while IFS=', ' read -r idx mem util; do
         mem_val=${mem%% *}
-        if (( mem_val < MEM_THRESHOLD )); then
-            IDLE_GPUS+=("$idx")
+        util_val=${util%% *}
+        if (( mem_val < MEM_THRESHOLD )) && (( util_val < UTIL_THRESHOLD )); then
+            idle+=("$idx")
         fi
     done < <(nvidia-smi --query-gpu=index,memory.used,utilization.gpu \
                         --format=csv,noheader,nounits)
+    echo "${idle[@]}"
+}
 
-    if (( ${#IDLE_GPUS[@]} < TP )); then
-        echo "FATAL: Only ${#IDLE_GPUS[@]} idle GPUs found, need $TP."
-        nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
-        exit 1
-    fi
-
-    SELECTED=("${IDLE_GPUS[@]:0:$TP}")
-    GPUS=$(IFS=,; echo "${SELECTED[*]}")
-    echo "Selected GPUs: $GPUS"
+if [[ -z "${GPUS:-}" ]]; then
+    echo "Polling for $TP idle GPUs (mem<${MEM_THRESHOLD}MiB, util<${UTIL_THRESHOLD}%, max wait ${MAX_WAIT}s)..."
+    start_wait=$(date +%s)
+    while :; do
+        IDLE_GPUS=($(find_idle_gpus))
+        n=${#IDLE_GPUS[@]}
+        elapsed=$(( $(date +%s) - start_wait ))
+        if (( n >= TP )); then
+            SELECTED=("${IDLE_GPUS[@]:0:$TP}")
+            GPUS=$(IFS=,; echo "${SELECTED[*]}")
+            echo "Found $TP idle GPUs after ${elapsed}s: $GPUS"
+            break
+        fi
+        if (( elapsed >= MAX_WAIT )); then
+            echo "FATAL: timed out after ${elapsed}s; only $n/$TP idle."
+            nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
+            exit 1
+        fi
+        echo "  waiting... idle=[${IDLE_GPUS[*]}] ($n/$TP)"
+        sleep "$POLL_INTERVAL"
+    done
 else
     echo "Using user-specified GPUs: $GPUS"
 fi
@@ -101,22 +123,27 @@ run_profile() {
     local out_dir="${PROFILE_DIR}/${config_name}"
     mkdir -p "$out_dir"
 
+    # max_seq_length must fit prompt + decode + some slack (+MTP verify tokens)
+    local seq_needed=$(( input_seq + decode + 32 ))
     local max_pages
-    max_pages=$(max_pages_for_seq "$input_seq")
+    max_pages=$(max_pages_for_seq "$seq_needed")
 
     local trace_name="${out_dir}/trace"
 
     echo ""
     echo "================================================================"
     echo "PROFILE: $config_name"
-    echo "  batch=$batch input_seq=$input_seq decode=$decode mtp=$mtp_spec"
-    echo "  max_pages=$max_pages output=$out_dir"
+    echo "  batch=$batch prompt_len=$input_seq decode=$decode mtp=$mtp_spec"
+    echo "  max_seq_length=$seq_needed max_pages=$max_pages output=$out_dir"
     echo "================================================================"
 
     local start_ts
     start_ts=$(date +%s)
 
-    # Run with nsys for system-level profiling
+    # --prompt-length forces demo.py to synthesize an exact-length prompt
+    # (instead of using the default 14-token string). This is what actually
+    # stress-tests the prefill path. Without it, "input_seq=65536" just
+    # enlarged the KV cache buffer and prefill was still ~14 tokens.
     nsys profile \
         --output "${out_dir}/nsys_report" \
         --force-overwrite true \
@@ -127,7 +154,8 @@ run_profile() {
         --model-path "$MODEL_PATH" --use-mirage --layers "$LAYERS" \
         --profiling --trace-name "$trace_name" \
         --max-num-batched-tokens "$batch" \
-        --max-seq-length "$input_seq" \
+        --prompt-length "$input_seq" \
+        --max-seq-length "$seq_needed" \
         --max-num-pages "$max_pages" \
         --max-new-tokens "$decode" \
         "${mtp_args[@]}" \

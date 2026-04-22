@@ -812,6 +812,13 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str,
                         default="Give me a short introduction to large language model.",
                         help="Input prompt text")
+    parser.add_argument("--prompt-length", type=int, default=0,
+                        help="If >0, override the --prompt with a synthetic "
+                             "prompt of exactly this many tokens. Useful for "
+                             "stress-testing prefill throughput independent of "
+                             "actual prompt text. The generated tokens are a "
+                             "deterministic cycle over a small vocab subset so "
+                             "numerical behavior is reproducible across runs.")
     parser.add_argument("--mtp", action="store_true",
                         help="Enable MTP speculative decoding")
     parser.add_argument("--num-speculative-tokens", default=1, type=int,
@@ -912,21 +919,37 @@ if __name__ == "__main__":
         (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda"
     )
 
-    # Tokenize prompt
-    messages = [
-        {"role": "user", "content": args.prompt},
-    ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to("cuda")
-    for r in range(total_num_requests):
-        for i in range(model_inputs.input_ids.shape[-1]):
-            tokens[r, i] = model_inputs.input_ids[0, i]
-    prompt_lengths = torch.full(
-        (total_num_requests,), model_inputs.input_ids.shape[-1],
-        dtype=torch.int, device="cuda"
-    )
+    # Tokenize prompt (or synthesize a fixed-length prompt for stress tests)
+    if args.prompt_length > 0:
+        pl = min(args.prompt_length, args.max_seq_length - 16)
+        # Deterministic synthetic prompt: cycle over a small subset of the
+        # vocab. Excludes special IDs (pad, bos, eos, etc.) by staying in
+        # [1024, 1024 + 4096) which is safely inside any tokenizer's main
+        # text vocabulary for DeepSeek V3 (vocab_size = 129280).
+        synth = torch.arange(pl, dtype=torch.long, device="cuda") % 4096 + 1024
+        for r in range(total_num_requests):
+            tokens[r, :pl] = synth
+        prompt_lengths = torch.full(
+            (total_num_requests,), pl,
+            dtype=torch.int, device="cuda"
+        )
+        print(f"[stress] Using synthetic prompt of length {pl} "
+              f"(max_seq_length={args.max_seq_length}).")
+    else:
+        messages = [
+            {"role": "user", "content": args.prompt},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        model_inputs = tokenizer([text], return_tensors="pt").to("cuda")
+        for r in range(total_num_requests):
+            for i in range(model_inputs.input_ids.shape[-1]):
+                tokens[r, i] = model_inputs.input_ids[0, i]
+        prompt_lengths = torch.full(
+            (total_num_requests,), model_inputs.input_ids.shape[-1],
+            dtype=torch.int, device="cuda"
+        )
 
     step = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
     num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
