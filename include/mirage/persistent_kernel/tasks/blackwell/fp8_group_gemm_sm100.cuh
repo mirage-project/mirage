@@ -1354,6 +1354,19 @@ __device__ __forceinline__ void
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
             int smem_buf = (num_prev_k_blk + k_tile) % NUM_AB_STAGE;
 
+            // FIX 2026-04-22: wait ab_empty BEFORE overwriting sfa/sfb_smem.
+            // Previously, scale warp wrote sfa/sfb_smem without waiting for
+            // MMA to finish UTCCP. At TP=4 w2 with mbt=64 (k_tile_count==
+            // NUM_AB_STAGE==8), scale warp could wrap back and overwrite
+            // sfa/sfb_smem[buf] while UTCCP was still reading. ab_empty is
+            // signaled by MMA's umma_arrive (tcgen05.commit) which waits for
+            // all tcgen05 ops (UMMA + UTCCP) to complete, so this correctly
+            // gates scale warp against the UTCCP read.
+            int sf_wr_ab_empty_phase =
+                (num_prev_k_blk + k_tile) / NUM_AB_STAGE % 2 ^ 1;
+            cute::wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_buf],
+                               sf_wr_ab_empty_phase);
+
             // ---- Load + convert + pack SFA (weight scales) ----
             uint32_t *sfa_buf = shared_storage.sfa_smem[smem_buf];
 #pragma unroll
@@ -1545,6 +1558,9 @@ __device__ __forceinline__ void
   // Only warp 0 performs the deallocation (matching the allocation).
   if (warp_idx == 0) {
     tmem_allocator.free(shared_storage.tmem_base_ptr, kNumTmemColsTotal);
+    // NOTE: intentionally no release_allocation_lock() here — MPK persistent
+    // kernels keep the TMEM allocator locked to warp 0 across tasks. See
+    // moe_linear_sm100.cuh "don't do relinquish for megakernel" comment.
   }
 } // end fp8_moe_group_gemm_sm100_task_impl
 

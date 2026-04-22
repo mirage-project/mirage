@@ -2688,7 +2688,13 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
   constexpr int bK = 128; // FP8: bK=128 for one scale-block per k-tile
-  constexpr int num_ab_stages = 4;
+  // NUM_AB_STAGE=8 (was 4): at TP=4, moe_w2_fp8 has fp8_k_tile_count=8 +
+  // fp8_num_m_tiles=56 + fp8_num_n_tiles=4. With 4 stages the pipeline hung
+  // (TP=4 mbt>=40 MoE hang). With 8 stages it passes at 26.9 ms/tok. Matches
+  // BF16 moe_linear_sm100's existing pipeline depth. Total smem ≈ 148KB, fits
+  // under the 205KB dynamic-smem budget. See project_tp4_moe_hang.md
+  // (2026-04-22).
+  constexpr int num_ab_stages = 8;
   constexpr int num_acc_stages = 2;
   constexpr int num_c_stages = 4;
   constexpr int num_tmem_columns = MMA_N * num_acc_stages; // 32

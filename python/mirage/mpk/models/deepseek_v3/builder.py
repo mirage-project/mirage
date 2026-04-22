@@ -1080,9 +1080,10 @@ class DeepSeekV3Builder(GraphBuilder):
             return
 
         skip_routed = os.environ.get("MPK_SKIP_ROUTED_EXPERTS", "0") == "1"
+        skip_w13_fp8 = os.environ.get("MPK_SKIP_W13_FP8", "0") == "1"
         if skip_routed:
             pass  # Skip all routed expert computation; moe_down_out created below as zero
-        elif use_fp8_experts:
+        elif use_fp8_experts and not skip_w13_fp8:
             self.mpk.moe_w13_fp8_layer(
                 input_fp8=moe_input_fp8,
                 input_scale=moe_input_scale,
@@ -1094,6 +1095,11 @@ class DeepSeekV3Builder(GraphBuilder):
                 grid_dim=(NUM_EXPERTS, 1, 1),
                 block_dim=(128, 1, 1),
             )
+        elif use_fp8_experts and skip_w13_fp8:
+            # Ablation: skip moe_w13_fp8 (moe_mid will be uninitialized garbage,
+            # but subsequent kernels still run. Used to isolate whether w13_fp8
+            # or w2_fp8 causes the TP=4 MoE hang.)
+            pass
         else:
             self.mpk.moe_w13_linear_layer(
                 input=self.rmsnorm_out,
@@ -1172,7 +1178,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 name=f"layer_{layer_idx}_moe_down",
                 io_category="cuda_tensor",
             )
-            if use_fp8_experts:
+            skip_w2_fp8 = os.environ.get("MPK_SKIP_W2_FP8", "0") == "1"
+            if use_fp8_experts and not skip_w2_fp8:
                 self.mpk.moe_w2_fp8_layer(
                     input_fp8=moe_silu_fp8,
                     input_scale=moe_silu_scale,
@@ -1184,6 +1191,9 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=(NUM_EXPERTS, 1, 1),
                     block_dim=(128, 1, 1),
                 )
+            elif use_fp8_experts and skip_w2_fp8:
+                # Ablation: skip moe_w2_fp8. moe_down_out uninitialized.
+                pass
             else:
                 self.mpk.moe_w2_linear_layer(
                     input=moe_silu_out,
