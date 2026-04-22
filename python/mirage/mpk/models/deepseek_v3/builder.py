@@ -1380,38 +1380,41 @@ class DeepSeekV3Builder(GraphBuilder):
         if os.environ.get("MPK_SKIP_MTP_MLA", "0") != "1":
             self._build_mla_attention_layer_with_prefix(prefix, state_dict)
 
-        # TP>1: AllReduce partial attn_proj_out first, THEN residual add
-        # (residual must come after AllReduce, otherwise adding partial then
-        # overwriting with allreduce_out destroys the residual stream).
-        if self.world_size > 1:
-            self.mpk.allreduce_layer(
-                input=self.attn_proj_out, buffer=self.allreduce_buf,
-                output=self.allreduce_out,
-                grid_dim=(self.hidden_size // 128, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            _mtp_attn_contrib = self.allreduce_out
-        else:
-            _mtp_attn_contrib = self.attn_proj_out
-
-        # Residual: update mtp_x with attention output
+        # Match main layer's residual handling for MLA o_proj (vLLM-aligned):
+        # - fuse_residual=True: o_proj used linear_fp8_with_residual kernel,
+        #   so attn_proj_out already = (W_o @ attn_out + residual) per-rank.
+        #   No external AllReduce (mirrors main layer line 2301-2303).
+        # - fuse_residual=False: o_proj returned partial matmul; we AllReduce
+        #   then elementwise_add the residual (same as main layer line 2304+).
+        _skip_mtp_allreduce = os.environ.get("MPK_SKIP_MTP_ALLREDUCE", "0") == "1"
         if self._fuse_residual:
-            # Residual already fused into o_proj by _build_mla_attention_layer.
-            # self.x was updated to attn_proj_out (which includes residual).
-            self.mtp_x = self.x
-        elif os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
-            self.mtp_x = _mtp_attn_contrib
+            # Residual fused inside o_proj (with_residual kernel). attn_proj_out
+            # already includes self.x as the residual.
+            self.mtp_x = self.attn_proj_out
         else:
-            mtp_attn_residual = self._cached_new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name="mtp_attn_residual", io_category="cuda_tensor")
-            self.mpk.elementwise_add_layer(
-                input_a=self.mtp_x, input_b=_mtp_attn_contrib, output=mtp_attn_residual,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            self.mtp_x = mtp_attn_residual
+            if self.world_size > 1 and not _skip_mtp_allreduce:
+                self.mpk.allreduce_layer(
+                    input=self.attn_proj_out, buffer=self.allreduce_buf,
+                    output=self.allreduce_out,
+                    grid_dim=(self.hidden_size // 128, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                _mtp_attn_contrib = self.allreduce_out
+            else:
+                _mtp_attn_contrib = self.attn_proj_out
+            if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+                self.mtp_x = _mtp_attn_contrib
+            else:
+                mtp_attn_residual = self._cached_new_tensor(
+                    dims=(self.max_num_batched_tokens, self.hidden_size),
+                    dtype=bfloat16,
+                    name="mtp_attn_residual", io_category="cuda_tensor")
+                self.mpk.elementwise_add_layer(
+                    input_a=self.mtp_x, input_b=_mtp_attn_contrib, output=mtp_attn_residual,
+                    grid_dim=(self.max_num_batched_tokens, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                self.mtp_x = mtp_attn_residual
         # Restore self.x to main model's hidden state
         self.x = _saved_x
 
@@ -1439,34 +1442,35 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             self._build_dense_mlp_with_prefix(prefix, state_dict)
 
-        # MLP residual: update mtp_x
-        if self._fuse_residual:
-            # Residual already fused into down_proj. self.x was updated by MLP builder.
-            self.mtp_x = self.x
+        # MLP residual: MTP uses MoE MLP (same as main layers 3-60). MoE has no
+        # fused-residual linear variant — the shared_expert's down_proj returns
+        # partial output and moe_mul_sum_add combines routed+shared but does
+        # not add the MLP-input residual. So match main layer's MoE pattern
+        # (builder.py line 2390+): always AllReduce + external elementwise_add,
+        # regardless of _fuse_residual.
+        if self.world_size > 1 and not _skip_mtp_allreduce:
+            self.mpk.allreduce_layer(
+                input=self.mlp_out, buffer=self.allreduce_buf,
+                output=self.allreduce_out,
+                grid_dim=(self.hidden_size // 128, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            _mtp_mlp_contrib = self.allreduce_out
         else:
-            if self.world_size > 1:
-                self.mpk.allreduce_layer(
-                    input=self.mlp_out, buffer=self.allreduce_buf,
-                    output=self.allreduce_out,
-                    grid_dim=(self.hidden_size // 128, 1, 1),
-                    block_dim=(128, 1, 1),
-                )
-                _mtp_mlp_contrib = self.allreduce_out
-            else:
-                _mtp_mlp_contrib = self.mlp_out
-            if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
-                self.mtp_x = _mtp_mlp_contrib
-            else:
-                mtp_mlp_residual = self._cached_new_tensor(
-                    dims=(self.max_num_batched_tokens, self.hidden_size),
-                    dtype=bfloat16,
-                    name="mtp_mlp_residual", io_category="cuda_tensor")
-                self.mpk.elementwise_add_layer(
-                    input_a=self.mtp_x, input_b=_mtp_mlp_contrib, output=mtp_mlp_residual,
-                    grid_dim=(self.max_num_batched_tokens, 1, 1),
-                    block_dim=(128, 1, 1),
-                )
-                self.mtp_x = mtp_mlp_residual
+            _mtp_mlp_contrib = self.mlp_out
+        if os.environ.get("MPK_NO_RESIDUAL", "0") == "1":
+            self.mtp_x = _mtp_mlp_contrib
+        else:
+            mtp_mlp_residual = self._cached_new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="mtp_mlp_residual", io_category="cuda_tensor")
+            self.mpk.elementwise_add_layer(
+                input_a=self.mtp_x, input_b=_mtp_mlp_contrib, output=mtp_mlp_residual,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            self.mtp_x = mtp_mlp_residual
         # Restore main model's hidden state
         self.x = _saved_x
 
@@ -1648,12 +1652,26 @@ class DeepSeekV3Builder(GraphBuilder):
                     block_dim=(128, 1, 1),
                 )
 
-        # o_proj (FP8)
+        # o_proj (FP8). Match main layer's pattern (_build_mla_attention_layer):
+        # when _fuse_residual=True, use the with_residual kernel to fuse
+        # (matmul + residual) in one pass; when False, return partial matmul
+        # and rely on external AllReduce + elementwise_add in the caller.
         w_o, s_o = self._attach_fp8_weight(
             state_dict, f"{attn}o_proj.weight", f"mtp_{attn}o_proj")
+        _o_residual = self.x if self._fuse_residual else None
+        if self._fuse_residual:
+            # Per-call output tensor to avoid aliasing self.mtp_x ↔
+            # self.attn_proj_out across MTP draft steps.
+            self.attn_proj_out = self._cached_new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name=f"mtp_{attn}attn_proj_fused",
+                io_category="cuda_tensor",
+            )
         self._fp8_linear(self.attn_out, w_o, s_o, self.attn_proj_out,
                          grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
-                         block_dim=(128, 1, 1))
+                         block_dim=(128, 1, 1),
+                         residual=_o_residual)
 
     def _build_dense_mlp_with_prefix(self, prefix: str, state_dict: dict):
         """Build dense MLP using a custom weight prefix (FP8, for MTP reuse)."""
