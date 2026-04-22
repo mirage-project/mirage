@@ -148,7 +148,7 @@ Notes:
 | `MPK_NO_NVSHMEM` | 0 | Compile without NVSHMEM (TP=1 only) |
 | `MPK_DRY_RUN` | 0 | Stop after task graph generation (inspect offsets) |
 | `MPK_SO_PATH` | auto | Override compiled .so path for cumodule init |
-| `MPK_USE_PREFILL` | 1 | Dispatch `mla_prefill_sm100` when `max_num_batched_tokens >= 32` (chunked prefill). Set to `0` for decode-only debug. Verified: real 1K-token prompt + mbt=64 + seq=2048 pages=24 → 74ms/tok. Perf caveat: prefill kernel is ~10x slower than the decode kernel for Q_LEN=1 decode steps, so total wall time scales O(max_seq²) when the offline driver generates to `max_seq_length`. Use `max_seq_length ≈ prompt_len + max_new_tokens` for best latency. See bugfix.md Bug 20. |
+| `MPK_USE_PREFILL` | 1 | Dispatch `mla_prefill_sm100` when `max_num_batched_tokens >= 32` (chunked prefill). Set to `0` for decode-only debug. **Use `max_seq_length ≈ prompt_len + max_new_tokens` for best latency** — MPK's offline driver generates to `max_seq_length`, so over-allocating the budget costs O(max_seq²) decode time because the prefill kernel is sub-optimal for Q_LEN=1 decode steps (per-token cost scales with KV length). Verified: real 4K-token prompt + mbt=64 + seq=4500 pages=40 → **21 ms/tok avg** end-to-end (4K prefill + 495 decode in 133s inference). See bugfix.md Bug 20. |
 
 ## Known Limitations
 
