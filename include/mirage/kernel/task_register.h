@@ -179,6 +179,8 @@ public:
                                       std::vector<int> const &params);
   int register_mtp_prepare_verify_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
+  int register_mtp_build_embed_input_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

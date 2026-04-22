@@ -1996,6 +1996,18 @@ class DeepSeekV3Builder(GraphBuilder):
             name="mtp_all_draft_ids", io_category="cuda_tensor",
         )
 
+        # vLLM-aligned MTP embedding input buffer (Task #29). At step 0 MTP
+        # should embed shifted ground-truth prompt tokens during prefill (not
+        # main's argmax which is only accurate for a fully-trained model).
+        # `mtp_build_embed_input_layer` populates this per iteration:
+        #   mtp_input_tokens[i] = tokens[step+i+1]  for i < mbt-1 (ground truth)
+        #                       = output_tokens[i]  for i == mbt-1 (current argmax)
+        # Matches vLLM/v1/spec_decode/eagle.py L666-669 behavior.
+        mtp_step0_input_tokens = self.mpk.new_tensor(
+            dims=(mbt, 1), dtype=int64,
+            name="mtp_step0_input_tokens", io_category="cuda_tensor",
+        )
+
         # ---- Shared embed weight reference (saved during build_from_dict) ----
         w_embed = self.w_embed
 
@@ -2005,10 +2017,25 @@ class DeepSeekV3Builder(GraphBuilder):
         # Verification method: needed early (draft loop uses it for prob computation)
         method = getattr(self.mtp_config, 'rejection_sample_method', 'strict')
 
+        # Build the MTP step-0 input tokens buffer ONCE per MPK iteration, before
+        # the draft loop. Reads main's argmax (output_tokens) via task_desc input;
+        # reads tokens + step from runtime_config internally.
+        self.mpk.mtp_build_embed_input_layer(
+            output_tokens=self.argmax_out_dtensor,
+            mtp_input_tokens=mtp_step0_input_tokens,
+            grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+            block_dim=(128, 1, 1),
+            batch_size=mbt,
+            max_seq_len=self.mpk.max_seq_length,
+        )
+
         # ---- Draft generation loop (statically unrolled) ----
         for step in range(num_draft_steps):
-            # 1. Get draft token: step 0 from main argmax, step 1+ from prev MTP
-            draft_input = self.argmax_out_dtensor if step == 0 else draft_token_ids
+            # 1. Get draft token: step 0 uses the vLLM-aligned shifted tokens
+            # (ground-truth prompt during prefill, main argmax during decode
+            # via the prep task above). step 1+ uses the previous MTP iter's
+            # argmax draft_token_ids (standard autoregressive draft chain).
+            draft_input = mtp_step0_input_tokens if step == 0 else draft_token_ids
 
             # 2. Embed draft token (shared embed_tokens weight)
             self.mpk.embed_layer(

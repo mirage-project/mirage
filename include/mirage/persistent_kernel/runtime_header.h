@@ -189,6 +189,9 @@ enum TaskType {
   TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
   // KV gather variant that writes split CKV/KPE output (for chunked prefill):
   TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
+  // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
+  // input tokens = shifted ground-truth prompt + current iter's argmax tail.
+  TASK_MTP_BUILD_EMBED_INPUT = 294,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

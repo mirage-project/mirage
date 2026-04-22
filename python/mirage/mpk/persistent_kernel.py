@@ -2023,6 +2023,28 @@ class PersistentKernel:
             [main_token, draft_tokens, tokens_buffer, step, num_new_tokens], tb_graph)
         self.kn_graph.register_task(tb_graph, "mtp_prepare_verify", params)
 
+    def mtp_build_embed_input_layer(
+        self,
+        output_tokens: DTensor,       # [mbt, 1] int64 — main model's argmax
+        mtp_input_tokens: DTensor,    # [mbt, 1] int64 — MTP embed input (written)
+        grid_dim: tuple,
+        block_dim: tuple,
+        batch_size: int,
+        max_seq_len: int,
+    ):
+        """Build MTP's per-iteration embedding input token buffer.
+        vLLM-aligned (eagle.py L666-669): positions [0..mbt-2] read from shifted
+        ground-truth prompt tokens (`runtime_config.tokens[step[0] + i + 1]`),
+        position mbt-1 reads from `output_tokens[mbt-1]` (current iter's argmax).
+        `tokens` buffer and `step` are read via runtime_config, not attached.
+        """
+        params = [batch_size, max_seq_len]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(mtp_input_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([output_tokens, mtp_input_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_build_embed_input", params)
+
     def softmax_gather_layer(
         self,
         logits: DTensor,          # [batch, vocab_size] BF16

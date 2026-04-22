@@ -4257,6 +4257,25 @@ int TaskRegister::register_mtp_prepare_verify_task(
   return register_task_variant(TASK_MTP_PREPARE_VERIFY, code.to_string());
 }
 
+int TaskRegister::register_mtp_build_embed_input_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: batch_size (mbt), params[1]: max_seq_len
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int max_seq_len = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e(
+      "kernel::mtp_build_embed_input_kernel<$, $>(", batch_size, max_seq_len);
+  code.e("    task_desc->output_ptrs[0],"); // mtp_input_tokens (output)
+  code.e("    runtime_config.tokens,");     // tokens_buffer (global)
+  code.e("    task_desc->input_ptrs[0],");  // output_tokens (main argmax)
+  code.e("    runtime_config.step,");       // step (global)
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_MTP_BUILD_EMBED_INPUT, code.to_string());
+}
+
 // ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
 //
 // Three variants (TP=2/4/8) share structure but differ:

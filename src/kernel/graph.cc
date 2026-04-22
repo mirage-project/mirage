@@ -818,6 +818,13 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_MTP_PREPARE_VERIFY, variant_id);
+  } else if (name == "mtp_build_embed_input") {
+    // Inputs: output_tokens (main argmax). Output: mtp_input_tokens.
+    // (tokens buffer + step are read via runtime_config, not as task inputs.)
+    int variant_id = task_register->register_mtp_build_embed_input_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_MTP_BUILD_EMBED_INPUT, variant_id);
   }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {
