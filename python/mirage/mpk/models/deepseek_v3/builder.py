@@ -41,34 +41,6 @@ FIRST_MOE_LAYER = 3
 VOCAB_SIZE = 129280
 RMS_NORM_EPS = 1e-6
 
-# FP8 MoE group-GEMM kernel tile constants (see fp8_group_gemm_sm100.cuh).
-_MOE_FP8_MMA_M = 128  # UMMA M-tile size (weight-rows per tile)
-
-
-def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
-    """Pick grid_dim.y for the FP8 MoE group GEMM so that the per-CTA slice
-    divides output_size evenly AND still contains at least one full MMA_M tile.
-
-    The kernel already handles 2D work distribution (grid_dim=(NUM_EXPERTS, Y, 1)):
-    each expert-row CTA loops over its own m-tiles, and bid.y selects which
-    m-slice of the expert's N rows it owns. This turns the inner m-loop (which
-    was fully serial at Y=1) into fp8_num_m_tiles / Y iterations per CTA — a
-    Tensor-Core parallelism win, since each expert had to do 16+ m-tiles x 56
-    k-tiles serially before, and now multiple CTAs share that work.
-
-    Constraints from the runtime/kernel side:
-      - output_size must be divisible by Y (runtime input_map.y slicing).
-      - output_size / Y must be >= MMA_M (kernel's m-tile granularity).
-    We pick the largest Y <= preferred that satisfies both.
-    """
-    # Largest divisor of output_size that is <= preferred and keeps >= MMA_M
-    # per CTA. Walk down from the preferred value.
-    max_y = min(preferred, max(1, output_size // _MOE_FP8_MMA_M))
-    for y in range(max_y, 0, -1):
-        if output_size % y == 0 and (output_size // y) % _MOE_FP8_MMA_M == 0:
-            return y
-    return 1
-
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
 class DeepSeekV3Builder(GraphBuilder):
@@ -966,10 +938,6 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         if use_fp8_experts:
-            # M-dim split: per-expert output N = 2*moe_intermediate_size.
-            # Use grid_dim.y to split the M-loop across CTAs (see kernel header).
-            w13_n = 2 * self.moe_intermediate_size
-            w13_m_split = _moe_fp8_m_split(w13_n, preferred=8)
             self.mpk.moe_w13_fp8_layer(
                 input_fp8=moe_input_fp8,
                 input_scale=moe_input_scale,
@@ -978,7 +946,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_mid,
-                grid_dim=(NUM_EXPERTS, w13_m_split, 1),
+                grid_dim=(NUM_EXPERTS, 1, 1),
                 block_dim=(128, 1, 1),
             )
         else:
@@ -1047,9 +1015,6 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         if use_fp8_experts:
-            # M-dim split: per-expert output N = hidden_size (7168, TP-indep).
-            # 7168 / 14 = 512 = 4*MMA_M — matches the tested test-mode config.
-            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
             self.mpk.moe_w2_fp8_layer(
                 input_fp8=moe_silu_fp8,
                 input_scale=moe_silu_scale,
@@ -1058,7 +1023,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_down_out,
-                grid_dim=(NUM_EXPERTS, w2_m_split, 1),
+                grid_dim=(NUM_EXPERTS, 1, 1),
                 block_dim=(128, 1, 1),
             )
         else:
@@ -1557,16 +1522,11 @@ class DeepSeekV3Builder(GraphBuilder):
         moe_mid = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.moe_intermediate_size),
             dtype=bfloat16, name="mtp_moe_mid", io_category="cuda_tensor")
-        # M-dim split (see _moe_fp8_m_split + fp8_group_gemm_sm100.cuh header).
-        mtp_w13_n = 2 * self.moe_intermediate_size
-        mtp_w13_m_split = _moe_fp8_m_split(mtp_w13_n, preferred=8)
         self.mpk.moe_w13_fp8_layer(
             input_fp8=moe_input_fp8, input_scale=moe_input_scale,
             weight_fp8=w_w13, weight_scale=s_w13,
             moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
-            output=moe_mid,
-            grid_dim=(NUM_EXPERTS, mtp_w13_m_split, 1),
-            block_dim=(128, 1, 1))
+            output=moe_mid, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
 
         moe_silu_out = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
@@ -1600,14 +1560,11 @@ class DeepSeekV3Builder(GraphBuilder):
         moe_down_out = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
             dtype=bfloat16, name="mtp_moe_down", io_category="cuda_tensor")
-        mtp_w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
         self.mpk.moe_w2_fp8_layer(
             input_fp8=mtp_silu_fp8, input_scale=mtp_silu_scale,
             weight_fp8=w_w2, weight_scale=s_w2,
             moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
-            output=moe_down_out,
-            grid_dim=(NUM_EXPERTS, mtp_w2_m_split, 1),
-            block_dim=(128, 1, 1))
+            output=moe_down_out, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
 
         # Shared expert (FP8) — same pattern as main MoE shared expert:
         # interleave gate+up, requantize for UE8M0, proper silu_mul grid.
