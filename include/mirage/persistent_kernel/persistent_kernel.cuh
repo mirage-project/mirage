@@ -1172,8 +1172,14 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
   global_runtime_config.total_num_requests = total_num_requests;
 #endif
-  global_runtime_config.per_worker_queue_len = 1024;
-  global_runtime_config.per_sched_queue_len = 1024;
+  // 136-worker B200 runs can temporarily outpace the default queue depth on
+  // the "fast" schedulers that only feed 2 workers. Doubling the queue keeps
+  // those runs from overflowing while preserving the same scheduling model.
+  // MoE m-split (grid_dim.y>1) multiplies per-worker dispatch count — w2 at
+  // Y=14 adds ~28 tasks per worker per MoE layer per iter, so 2048 is not
+  // enough at 21 layers × multiple iters. Bump to 8192.
+  global_runtime_config.per_worker_queue_len = 8192;
+  global_runtime_config.per_sched_queue_len = 4096;
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
