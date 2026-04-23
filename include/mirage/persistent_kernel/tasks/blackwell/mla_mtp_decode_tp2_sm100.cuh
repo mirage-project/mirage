@@ -143,6 +143,13 @@ __device__ __noinline__ void mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
   if (threadIdx.x >= TB) {
     return;
   }
+  // Dual-dispatch gate (opt/mla-dual-dispatch): this MTP decode kernel is
+  // tuned for Q_LEN=1..8 (spec decoding verify). If runtime Q_LEN is large
+  // (chunked prefill), let the co-registered mla_prefill kernel handle it.
+  // Threshold 8 matches the kernel file's "q1to8" design (qpg cap = 2).
+  if (Q_LEN > 8) {
+    return;
+  }
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
@@ -734,6 +741,12 @@ __device__ __noinline__ void
                        int block_y,
                        int block_z) {
   if (threadIdx.x >= RD_TB) {
+    return;
+  }
+  // Dual-dispatch gate: skip reduce when the decode main kernel skipped.
+  // Without this, a stale La/Oa state from a previous iteration could
+  // overwrite the prefill kernel's output in attn_out.
+  if (Q_LEN > 8) {
     return;
   }
   int const dv_base = block_x * RD_DV;

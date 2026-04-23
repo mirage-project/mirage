@@ -217,6 +217,18 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
 ) {
   using namespace mla_prefill;
 
+  // Dual-dispatch gate (opt/mla-dual-dispatch): when both the prefill and
+  // the MLA/MTP decode kernels are registered for the same attention step,
+  // the prefill kernel only handles large chunks. For small Q_LEN (decode /
+  // MTP verify) the dedicated decode kernel is ~10x faster; skip prefill
+  // entirely and let the decode kernel write attn_out. See builder.py's
+  // dual-dispatch comment. Threshold 16 is matched against the decode
+  // kernels' Q_LEN > 8 skip so decode (Q_LEN ≤ 8) and prefill (Q_LEN ≥ 16)
+  // have non-overlapping domains.
+  if (Q_LEN < 16) {
+    return;
+  }
+
   int const q_start = q_block * PF_BM;
   // Global position in the full sequence = (history) + position within chunk.
   // History length = S - Q_LEN. When Q_LEN == S (single-chunk prefill with no

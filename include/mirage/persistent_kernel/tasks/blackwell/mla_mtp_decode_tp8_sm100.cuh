@@ -131,6 +131,11 @@ __device__ __noinline__ void mla_mtp_tp8_main(
   if (threadIdx.x >= TB) {
     return;
   }
+  // Dual-dispatch gate (opt/mla-dual-dispatch): see tp2 kernel for details.
+  // Use Q_LEN_real (the unpadded runtime value) for the check.
+  if (Q_LEN_real > 8) {
+    return;
+  }
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
@@ -715,6 +720,12 @@ __device__ __noinline__ void
                        int block_y,
                        int block_z) {
   if (threadIdx.x >= RD_TB) {
+    return;
+  }
+  // Dual-dispatch gate: see tp2 reduce. TP=8 reduce sees Q_LEN (padded) as
+  // its Q_LEN param; the bound is still 8 since Q_LEN_real ≤ Q_LEN ≤ 8 for
+  // the MTP decode regime.
+  if (Q_LEN > 8) {
     return;
   }
   int const dv_base = block_x * RD_DV;

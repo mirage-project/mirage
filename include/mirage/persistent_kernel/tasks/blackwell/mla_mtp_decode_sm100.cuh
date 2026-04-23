@@ -104,6 +104,13 @@ __device__ __noinline__ void
     return;
   }
 
+  // Dual-dispatch gate (opt/mla-dual-dispatch): see tp2 kernel. When both
+  // the prefill and this MLA decode kernel are registered for the same
+  // attention step, skip decode if runtime Q_LEN exceeds the decode regime.
+  if (Q_LEN > 8) {
+    return;
+  }
+
   int const kvt = (kv_len + TILE_S - 1) / TILE_S;
   int const tps = (kvt + sk - 1) / sk;
   int const t0 = si * tps;
@@ -691,6 +698,14 @@ __device__ __noinline__ void
   int q = row / hpb;
   int h_local = row % hpb;
   int h_global = gi * hpb + h_local;
+
+  // Dual-dispatch gate (opt/mla-dual-dispatch): if Q_LEN is in the prefill
+  // regime (> 8), the co-registered mla_prefill kernel has already written
+  // attn_out. Skip reduce so we don't overwrite with stale/partial Oa/La.
+  // Done BEFORE __syncthreads to ensure uniform return across all threads.
+  if (Q_LEN > 8) {
+    return;
+  }
 
   __shared__ float la_smem[MAX_SK * 128];
   int la_block_base = (bi * num_head_groups * sk + gi * sk) * 128;

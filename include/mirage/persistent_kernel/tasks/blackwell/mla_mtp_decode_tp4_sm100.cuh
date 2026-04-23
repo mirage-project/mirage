@@ -132,6 +132,10 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
   if (threadIdx.x >= TB) {
     return;
   }
+  // Dual-dispatch gate (opt/mla-dual-dispatch): see tp2 kernel for details.
+  if (Q_LEN > 8) {
+    return;
+  }
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
@@ -730,6 +734,10 @@ __device__ __noinline__ void
                        int block_y,
                        int block_z) {
   if (threadIdx.x >= RD_TB) {
+    return;
+  }
+  // Dual-dispatch gate: see tp2 reduce.
+  if (Q_LEN > 8) {
     return;
   }
   int const dv_base = block_x * RD_DV;
