@@ -54,13 +54,13 @@ export LD_PRELOAD=$NVSHMEM_HOME/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.
 ```bash
 # Full model, 40 layers + MTP
 python demo/deepseek_v3/demo.py \
-    --model-path /raid/catalyst/models/DeepSeek-V3 \
+    --model-path /path/to/DeepSeek-V3 \
     --use-mirage --layers 0-39 --mtp 3 \
     --max-num-batched-tokens 1 --max-seq-length 4096
 
 # Single MoE layer
 python demo/deepseek_v3/demo.py \
-    --model-path /raid/catalyst/models/DeepSeek-V3 \
+    --model-path /path/to/DeepSeek-V3 \
     --use-mirage --layers 3 \
     --max-num-batched-tokens 1 --max-seq-length 512
 ```
@@ -128,13 +128,3 @@ Notes:
 | `--max-new-tokens` | None | Cap on generated tokens |
 | `--save-tokens` | off | Dump generated tokens to JSON |
 | `--output-dir` | None | Output directory for compiled kernel |
-
-## Known Limitations
-
-- **MLA TP efficiency**: The generic MLA kernel (M=128 MMA tile) works correctly
-  for all TP sizes by masking unused rows via `effective_len=0`. Dedicated TP
-  kernels (tp2/tp4/tp8, from PR #663) use smaller MMA tiles for better efficiency
-  but are not yet wired into the builder. This is a performance optimization, not
-  a correctness issue.
-- **FP8 precision drift**: Single-layer MLA cosine ~0.93 vs BF16 reference
-  (inherent FP8 quantization). Compounds over layers.
