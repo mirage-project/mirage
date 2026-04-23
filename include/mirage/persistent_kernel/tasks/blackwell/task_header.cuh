@@ -21,7 +21,7 @@
 #endif
 // Blackwell task impls
 #if defined(USE_NVSHMEM) && defined(MIRAGE_GRACE_BLACKWELL)
-#include "allreduce.cuh"
+#include "tasks/blackwell/allreduce.cuh"
 #endif
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"

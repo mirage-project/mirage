@@ -229,6 +229,10 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
+    # Uncomment to enable verbose scheduler/worker/event debug prints from
+    # persistent_kernel.cuh (all gated on MPK_ENABLE_VERBOSE). Noisy; meant for
+    # local debugging only.
+    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
 
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
