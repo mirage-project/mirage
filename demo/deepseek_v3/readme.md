@@ -55,13 +55,13 @@ export LD_PRELOAD=$NVSHMEM_HOME/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.
 # Full model, 40 layers + MTP
 python demo/deepseek_v3/demo.py \
     --model-path /raid/catalyst/models/DeepSeek-V3 \
-    --use-mirage --layers 0-39 --mtp --num-speculative-tokens 3 \
+    --use-mirage --layers 0-39 --mtp 3 \
     --max-num-batched-tokens 1 --max-seq-length 4096
 
-# Single MoE layer, correctness test
+# Single MoE layer
 python demo/deepseek_v3/demo.py \
     --model-path /raid/catalyst/models/DeepSeek-V3 \
-    --use-mirage --correctness --layers 3 \
+    --use-mirage --layers 3 \
     --max-num-batched-tokens 1 --max-seq-length 512
 ```
 
@@ -91,17 +91,17 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 mpirun --allow-run-as-root -np 8 \
     -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
     python demo/deepseek_v3/demo.py \
     --model-path /path/to/DeepSeek-V3 \
-    --use-mirage --layers 0-60 --mtp --num-speculative-tokens 3 \
+    --use-mirage --layers 0-60 --mtp 3 \
     --max-num-batched-tokens 128 --max-seq-length 16384 \
     --max-num-pages 160
 ```
 
 Notes:
-- `--max-num-batched-tokens 128` enables chunked prefill (see
-  `MPK_USE_PREFILL` below). Drop to `1` if you want the pure decode path.
+- `--max-num-batched-tokens 128` enables the chunked-prefill MLA kernel
+  (auto-selected when `max_num_batched_tokens >= 32`). Drop to `1` for the
+  pure decode path.
 - `--max-num-pages 160` ≈ `(16384 / 128) + 32` page headroom at `--page-size 128`.
-- MTP with `--num-speculative-tokens 3` keeps spec_length ≤ 7 and stays on the
-  MLA TP decode kernel; larger spec lengths currently aren't validated.
+- `--mtp 3` draft 3 speculative tokens per step. Set `0` to disable MTP.
 
 ## CLI Flags
 
@@ -110,45 +110,24 @@ Notes:
 | `--model-path` | (required) | Path to DeepSeek V3 safetensors weights |
 | `--use-mirage` | off | Use Mirage persistent kernel (vs native PyTorch) |
 | `--layers` | all 61 | Comma-separated layer indices (e.g. `0,3,60`) or range `0-39` |
-| `--correctness` | off | Run PyTorch reference comparison (single token) |
-| `--mtp` | off | Enable MTP speculative decoding |
-| `--num-speculative-tokens` | 1 | Draft tokens per MTP step (1-7) |
-| `--max-num-batched-tokens` | 8 | Batch size (tokens per decode step) |
+| `--mtp` | 0 | MTP speculative decoding draft length (0=disabled, 1-3) |
+| `--rejection-sample-method` | strict | MTP rejection sampling mode (strict / probabilistic / synthetic) |
+| `--max-num-batched-tokens` | 8 | Batch size (tokens per decode step). `>=32` selects the chunked-prefill MLA kernel. |
 | `--max-num-batched-requests` | 1 | Max concurrent requests |
-| `--max-seq-length` | 4096 | Max sequence length (affects KV cache allocation) |
+| `--max-seq-length` | 4096 | Max sequence length (affects KV cache allocation). **Use `max_seq_length ≈ prompt_len + max_new_tokens`** — MPK's offline driver generates to `max_seq_length`, so over-allocating costs O(max_seq²) decode time. |
 | `--max-num-pages` | 64 | Max KV cache pages |
 | `--page-size` | 128 | Tokens per KV cache page |
 | `--profiling` | off | Attach profiler tensor for Perfetto trace |
 | `--trace-name` | "" | Output name for Perfetto trace file |
 | `--prompt` | (default) | Input prompt text |
+| `--prompt-length` | 0 | If >0, synthesize a prompt of exactly N tokens (stress test) |
 | `--temperature` | 0.0 | Sampling temperature (0 = greedy) |
+| `--top_p` | 1.0 | Top-p sampling |
 | `--do-sample` | off | Enable sampling |
 | `--ignore-eos` | off | Don't stop at EOS token |
 | `--max-new-tokens` | None | Cap on generated tokens |
 | `--save-tokens` | off | Dump generated tokens to JSON |
 | `--output-dir` | None | Output directory for compiled kernel |
-
-## Debug Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MPK_SKIP_ATTN` | 0 | Skip MLA attention (test MLP/MoE path only) |
-| `MPK_FUSE_RESIDUAL` | 1 | Use fused residual kernel (0 = separate elementwise_add) |
-| `MPK_SKIP_MLA_ONLY` | 0 | Skip post-attention MLP/MoE (test attention path only) |
-| `MPK_SKIP_SHARED_EXPERT` | 0 | Skip MoE shared expert |
-| `MPK_SKIP_ROUTED_EXPERTS` | 0 | Skip MoE routed experts |
-| `MPK_SKIP_LM_HEAD` | 0 | Skip lm_head linear |
-| `MPK_DUMP_LOGITS` | 0 | Expose lm_head output buffer for inspection |
-| `MPK_DUMP_MOE_OUTPUT` | 0 | Expose MoE output buffer |
-| `MPK_MLA_CHECKPOINT` | 0 | Compare per-step MLA intermediates vs reference |
-| `MPK_REF_NO_QUANT` | 0 | PyTorch reference: skip FP8 requant (use raw dequant) |
-| `MPK_REF_TRUE_FP8` | 0 | PyTorch reference: use per-block FP8 matmul |
-| `MPK_AR_LOCAL_COPY` | 0 | Replace AllReduce with local copy (no-op comms) |
-| `MPK_SKIP_ALLREDUCE` | 0 | Remove AllReduce tasks from builder entirely |
-| `MPK_NO_NVSHMEM` | 0 | Compile without NVSHMEM (TP=1 only) |
-| `MPK_DRY_RUN` | 0 | Stop after task graph generation (inspect offsets) |
-| `MPK_SO_PATH` | auto | Override compiled .so path for cumodule init |
-| `MPK_USE_PREFILL` | 1 | Dispatch `mla_prefill_sm100` when `max_num_batched_tokens >= 32` (chunked prefill). Set to `0` for decode-only debug. **Use `max_seq_length ≈ prompt_len + max_new_tokens` for best latency** — MPK's offline driver generates to `max_seq_length`, so over-allocating the budget costs O(max_seq²) decode time because the prefill kernel is sub-optimal for Q_LEN=1 decode steps (per-token cost scales with KV length). Verified: real 4K-token prompt + mbt=64 + seq=4500 pages=40 → **21 ms/tok avg** end-to-end (4K prefill + 495 decode in 133s inference). See bugfix.md Bug 20. |
 
 ## Known Limitations
 

@@ -116,7 +116,7 @@ run_profile() {
     local mtp_args=()
     if (( mtp_spec > 0 )); then
         mtp_tag="mtp${mtp_spec}"
-        mtp_args=(--mtp --num-speculative-tokens "$mtp_spec")
+        mtp_args=(--mtp "$mtp_spec")
     fi
 
     local config_name="tp${TP}_b${batch}_s${input_seq}_d${decode}_${mtp_tag}"

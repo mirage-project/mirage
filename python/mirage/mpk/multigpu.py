@@ -236,13 +236,12 @@ def auto_select_allreduce_implementation(
         An AllReduceStrategy instance ready to register tasks
     """
     capabilities = get_collective_capabilities(num_gpus, device_id)
-    
+
     # For SM >= 90, prefer tile-based allreduce if available
-    if os.environ.get("MPK_FORCE_ALLGATHER_REDUCE", "0") != "1":
-        if capabilities.target_cc >= 90:
-            if (capabilities.vmm_supported and capabilities.multicast_supported
-                and capabilities.peer_access_supported):
-                return AllReduceStrategy_NvshmemTile()
+    if capabilities.target_cc >= 90:
+        if (capabilities.vmm_supported and capabilities.multicast_supported
+            and capabilities.peer_access_supported):
+            return AllReduceStrategy_NvshmemTile()
 
     # Default to allgather + reduction
     return AllReduceStrategy_AllgatherReduce()

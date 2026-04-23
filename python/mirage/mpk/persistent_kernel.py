@@ -196,8 +196,6 @@ def get_compile_command(
         # "-O0",
         # "-g",
         # "-G",
-        # ptxas verbose: use MPK_PTXAS_VERBOSE=1 to enable (heavy perf impact on large kernels)
-        *(["--ptxas-options=-v"] if os.environ.get("MPK_PTXAS_VERBOSE") == "1" else []),
         "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
@@ -252,11 +250,6 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
-    # Use when debugging
-    if os.environ.get("MPK_ENABLE_VERBOSE", "0") == "1":
-        flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-    if os.environ.get("MPK_AR_LOCAL_COPY", "0") == "1":
-        flags = flags + ["-DMPK_AR_LOCAL_COPY"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -368,7 +361,7 @@ class PersistentKernel:
                 max_num_pages, dtype=torch.int32, device="cuda")
         self.profiler_tensor = profiler_tensor
         self.trace_name = trace_name
-        self.use_nvshmem = True if (world_size > 1 and os.environ.get("MPK_NO_NVSHMEM", "0") != "1") else False
+        self.use_nvshmem = world_size > 1
         self.spec_decode_config = spec_decode_config
         self.use_cutlass_kernel = use_cutlass_kernel
         self._spec_decode_handlers = {
@@ -1684,9 +1677,6 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # MPK_SKIP_ALLREDUCE=1: debug mode — skip allreduce to isolate crashes
-        if os.environ.get("MPK_SKIP_ALLREDUCE", "0") == "1":
-            return
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size)
         assert buffer.num_dims == 3  # (world_size, batch_size, hidden_size)
@@ -2343,18 +2333,9 @@ class PersistentKernel:
             use_cutlass_kernel=self.use_cutlass_kernel,
             test_mode=self.test_mode,
         )
-        precompiled_so = os.environ.get("MPK_PRECOMPILED_SO")
-        if precompiled_so and os.path.exists(precompiled_so):
-            shutil.copy(precompiled_so, so_path)
-            # Also copy task_graph.json to the directory where __FILE__ points
-            # (the .so reads json from __FILE__'s parent directory)
-            precompiled_dir = os.path.dirname(precompiled_so)
-            shutil.copy(json_file_path, os.path.join(precompiled_dir, "task_graph.json"))
-            print(f"Using precompiled .so: {precompiled_so}")
-        else:
-            print("Compiling megakernel using the following command line:")
-            print(cc_cmd)
-            subprocess.check_call(cc_cmd)
+        print("Compiling megakernel using the following command line:")
+        print(cc_cmd)
+        subprocess.check_call(cc_cmd)
 
         import importlib.util
 

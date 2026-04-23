@@ -103,7 +103,6 @@ using namespace mirage::runtime;
 #endif
 #endif
 
-// #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
@@ -370,16 +369,6 @@ __device__ __forceinline__ bool
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-#ifdef MPK_ENABLE_VERBOSE
-  printf("step: %d, new_token_num(%p): %d, new_token_ids:\n",
-         step,
-         config.new_token_nums,
-         config.new_token_nums[0]);
-  for (int i = 0; i < config.new_token_nums[0]; i++) {
-    printf("%lld ", config.tokens[step + 1 + i]);
-  }
-  printf("\n");
-#endif
   config.step[0] = step + config.new_token_nums[0];
 
 #ifdef MPK_ENABLE_PROFILING
@@ -594,25 +583,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       }
       __syncthreads();
       if (threadIdx.x == 0) {
-#ifdef MPK_ENABLE_VERBOSE
-        for (int i = 0; i < num_loaded_tasks; i++) {
-          printf(
-              "[%d][FTCH] worker_id(%d) queue_idx(%d) next_task_pos(%llu, "
-              "%llu) last_task_pos(%llu, %llu) "
-              "task_id(%llu) task_type(%d) event_id(%llx) \n",
-              config.my_gpu_id,
-              worker_id,
-              queue_idx,
-              next_task_pos[0],
-              next_task_pos[1],
-              last_task_pos[0],
-              last_task_pos[1],
-              get_task_position_index(task_ids[i]),
-              config.all_tasks[get_task_position_index(task_ids[i])].task_type,
-              config.all_tasks[get_task_position_index(task_ids[i])]
-                  .trigger_event);
-        }
-#endif
         next_task_pos[queue_idx] += num_loaded_tasks;
       }
       // Load task descs
@@ -685,12 +655,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     } else if (task_desc->task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
     } else {
-#ifdef MPK_ENABLE_VERBOSE
-      if (threadIdx.x == 0) {
-        printf("[worker] _execute_task EXECUTE_TASK %d\n",
-               task_desc->task_type);
-      }
-#endif
       // Dispatch trace: D=dispatch start, F=finish
       bool _trace_t =
           task_desc->task_type == 275 || task_desc->task_type == 276 ||
@@ -725,17 +689,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         EventCounter count = atom_add_release_gpu_u64(
             &config.all_event_counters[event_index], 1);
         int num_triggers = config.all_event_num_triggers[event_index];
-#ifdef MPK_ENABLE_VERBOSE
-        printf("[%d][DONE] worker_id(%d) iter_num(%llu) task_idx(%llu) "
-               "event_id(%llu) "
-               "event_type(local) count(%llu)\n",
-               config.my_gpu_id,
-               worker_id,
-               get_task_iteration_num(task_ids[queue_pos]),
-               get_task_position_index(task_ids[queue_pos]),
-               event_id,
-               count);
-#endif
 
         if ((count + 1) == static_cast<EventCounter>(num_triggers) *
                                get_task_iteration_num(task_ids[queue_pos])) {
@@ -792,14 +745,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         assert(task_desc->task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
-#ifdef MPK_ENABLE_VERBOSE
-        printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
-               "event_type(remote)\n",
-               config.my_gpu_id,
-               worker_id,
-               get_task_position_index(task_ids[queue_pos]),
-               event_id);
-#endif
       }
     }
     queue_pos += 1;
@@ -851,13 +796,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
       my_last_worker += config.num_workers;
     }
 
-    // ONLY can run when comment this chunk
-#ifdef MPK_ENABLE_VERBOSE
-    printf("[SCHD] sched_id(%d) first_worker(%llu) last_worker(%llu)\n",
-           sched_id,
-           my_first_worker,
-           my_last_worker);
-#endif
     size_t cur_event_pos[2], last_event_pos[2];
     for (int i = 0; i < 2; i++) {
       cur_event_pos[i] = 0;
@@ -919,9 +857,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
       }
       // This is the ending task of the current task graph
       if (e.event_type == EVENT_END_OF_TASK_GRAPH) {
-#ifdef MPK_ENABLE_VERBOSE
-        printf("[SCHD] END_OF_TASK_GRAPH\n");
-#endif
 #ifdef MPK_TEST_MODE
         // Test mode: run task graph exactly once, then terminate.
         // iteration_num stays at 1 throughout the single pass so that
@@ -964,17 +899,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           // worker CTAs before we increase its last_ready_task_id
           atom_add_release_gpu_u64(
               &config.worker_queue_last_ready_task_id[next_worker], 1);
-#ifdef MPK_ENABLE_VERBOSE
-          printf("[%d][SCHD]EVENT_END_OF_TASK_GRAPH schd_id(%d) "
-                 "iter_num(%llu) task_idx(1) "
-                 "worker_id(%d) "
-                 "worker_last_ready_pos(%llu)\n",
-                 config.my_gpu_id,
-                 sched_id,
-                 iteration_num + 1,
-                 next_worker,
-                 last_task_id + 1);
-#endif
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
@@ -1005,25 +929,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
               atom_add_release_gpu_u64(
                   &config.worker_queue_last_ready_task_id[next_worker], 1);
 
-#ifdef MPK_ENABLE_VERBOSE
-              if (sched_id == 0) {
-                printf("[%d][SCHD] EVENT_LAUNCH_DEPENDENT_TASKS schd_id(%d) "
-                       "iter_num(%llu) task_idx(%llu) "
-                       "worker_id(%d) "
-                       "worker_last_ready_pos(%llu)"
-                       "event_id(%llu)"
-                       "event_range(%llu-%llu)\n",
-                       config.my_gpu_id,
-                       sched_id,
-                       iteration_num,
-                       position_index,
-                       next_worker,
-                       last_task_id + 1,
-                       event_id,
-                       e.first_task_id,
-                       e.last_task_id);
-              }
-#endif
               next_worker = (next_worker == my_last_worker - 1)
                                 ? my_first_worker
                                 : next_worker + 1;
@@ -1058,19 +963,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           // worker CTAs before we increase its last_ready_task_id
           atom_add_release_gpu_u64(
               &config.worker_queue_last_ready_task_id[next_worker], 1);
-
-#ifdef MPK_ENABLE_VERBOSE
-          printf("[%d][SCHD] EXECUTE_TASK schd_id(%d) iter_num(%llu) "
-                 "task_idx(%llu) "
-                 "worker_id(%d) "
-                 "worker_last_ready_pos(%llu)\n",
-                 config.my_gpu_id,
-                 sched_id,
-                 iteration_num,
-                 i,
-                 next_worker,
-                 last_task_id + 1);
-#endif
 
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;

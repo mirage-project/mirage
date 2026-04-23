@@ -467,14 +467,6 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
   nvshmem_team_t *teams = reinterpret_cast<nvshmem_team_t *>(_teams);
   nvshmem_team_t team = teams[task_offset];
 
-#ifdef MPK_AR_LOCAL_COPY
-  // ABLATION: replace AllReduce with local copy (output=input).
-  // This isolates whether the bug is in AllReduce or in the MLP computation.
-  int const n_elems = OUTPUT_SIZE * active_tokens;
-  for (int i = threadIdx.x; i < n_elems; i += blockDim.x) {
-    reinterpret_cast<T *>(output_ptr)[i] = reinterpret_cast<T *>(input_ptr)[i];
-  }
-#else
   // --- Phase 1: ensure local data is visible, then cross-GPU barrier ---
   __threadfence();
   mpkar_sync_block(team);
@@ -519,7 +511,6 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
   // __threadfence_system()) is sufficient.
   __threadfence();
   __syncthreads();
-#endif
 }
 
 } // namespace kernel
