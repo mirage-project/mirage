@@ -5,6 +5,7 @@ import argparse
 import os
 import sys
 import json
+import socket
 
 from mirage.mpk.models.deepseek_v3.builder import DeepSeekV3Builder
 from mirage.mpk.models.graph_builder import MirageModelConfig
@@ -109,7 +110,14 @@ if __name__ == "__main__":
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12357")
+        master_port = os.environ.get("MASTER_PORT")
+        if master_port is None:
+            if rank == 0:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    master_port = str(sock.getsockname()[1])
+            master_port = comm.bcast(master_port, root=0)
+        os.environ["MASTER_PORT"] = master_port
     except ImportError:
         world_size = 1
         rank = 0

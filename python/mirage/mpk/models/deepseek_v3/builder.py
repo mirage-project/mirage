@@ -56,6 +56,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # Weight attach cache: avoid re-declaring same C++ variable in MTP draft loop
         self._attach_cache = {}
         self.max_num_batched_tokens = mpk.max_num_batched_tokens
+        self._profiling = mpk.profiler_tensor is not None
 
         # DeepSeek V3 dimensions
         self.hidden_size = HIDDEN_SIZE
@@ -148,13 +149,15 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_bufs[cache_key] = (fp8_buf, scale_buf)
         self._fp8_input_buf, self._fp8_scale_buf = self._fp8_bufs[cache_key]
 
-        # Quantize kernel: each CTA handles one batch row via blockIdx.x, so
-        # launch grid_dim=(mbt, 1, 1) to parallelize quantization across rows.
+        # Keep profiling on the pre-change single-CTA path: the persistent
+        # profiler buffer is fixed-size, so the wider quantize launch can make
+        # TP=2 profile runs overflow the trace budget before decode starts.
+        quantize_grid_dim = (1, 1, 1) if self._profiling else (mbt, 1, 1)
         self.mpk.quantize_fp8_layer(
             input=input_bf16,
             output_fp8=self._fp8_input_buf,
             output_scale=self._fp8_scale_buf,
-            grid_dim=(mbt, 1, 1),
+            grid_dim=quantize_grid_dim,
             block_dim=(128, 1, 1),
         )
 
