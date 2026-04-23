@@ -74,3 +74,24 @@ __device__ __forceinline__ void st_relaxed_gpu_u64(unsigned long long int *addr,
                                                    unsigned long long int val) {
   asm volatile("st.relaxed.gpu.u64 [%0], %1;" : : "l"(addr), "l"(val));
 }
+
+// System-scope acquire load (int32): safe to use for pinned CPU↔GPU rings.
+__device__ __forceinline__ int32_t
+    ld_acquire_sys_i32(volatile int32_t const *addr) {
+  int32_t val;
+  asm volatile("ld.acquire.sys.b32 %0, [%1];"
+               : "=r"(val)
+               : "l"(addr)
+               : "memory");
+  return val;
+}
+
+// System-scope release store (int32): ensures prior writes are visible to CPU
+// before the handshake flag is updated.
+__device__ __forceinline__ void st_release_sys_i32(volatile int32_t *addr,
+                                                   int32_t val) {
+  asm volatile("st.release.sys.b32 [%0], %1;"
+               :
+               : "l"(addr), "r"(val)
+               : "memory");
+}

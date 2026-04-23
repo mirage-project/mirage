@@ -312,14 +312,49 @@ struct RuntimeConfig {
   int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
-    defined(MODE_ONLINE_NOTOKEN)
+    defined(MODE_ONLINE_NOTOKEN) || defined(MODE_ONLINE_TEST) ||               \
+    defined(MODE_ONLINE_PINNED)
   int *prompt_length;     // Metadata for online/offline serving
   int *request_ids;       // Metadata for online/offline serving
   int *page_queue;        // Metadata for online/offline serving
   int *page_queue_head;   // Metadata for online/offline serving
-  int *page_queue_tail;   // Metadata for oneline/offline serving
-  int *next_request_id;   // Metadata for LLM serving
+  int *page_queue_tail;   // Metadata for online/offline serving
   int total_num_requests; // Metadata for LLM serving
+#endif
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
+    defined(MODE_ONLINE_NOTOKEN) || defined(MODE_ONLINE_TEST)
+  int *next_request_id; // Metadata for LLM serving (not used in PINNED mode)
+#endif
+#if defined(MODE_ONLINE_TEST)
+  // P3: written by the kernel when a request completes so Python can insert
+  // the final KV pages into the prefix cache.
+  // final_paged_kv_num_pages[request_id]                  : page count
+  // final_paged_kv_indices [request_id * MPK_MAX_NUM_PAGES + j] : page index j
+  int *final_paged_kv_num_pages;
+  int *final_paged_kv_indices;
+#endif
+#if defined(MODE_ONLINE_PINNED)
+  // Lock-free pinned request ring (capacity = MPK_PINNED_RING_CAPACITY,
+  // power-of-2) CPU is producer, GPU is consumer. Handshake: CPU writes data
+  // fields then sets ready=1 (release); GPU reads ready with acquire, consumes,
+  // then clears to 0.
+  int32_t volatile *pinned_req_ready; // 0=empty, 1=request ready
+  int32_t *pinned_req_request_id;
+  int32_t *pinned_req_prompt_len;
+  int32_t *pinned_req_initial_step; // reserved for prefix-cache (always 0 now)
+  // Lock-free pinned completion ring (capacity = MPK_PINNED_RING_CAPACITY)
+  // GPU is producer, CPU is consumer.
+  // Handshake: GPU writes data fields then sets ready=1 (release); CPU reads
+  // ready with acquire, processes, then clears to 0.
+  int32_t volatile *pinned_comp_ready; // 0=empty, 1=completion ready
+  int32_t *pinned_comp_request_id;
+  int32_t *pinned_comp_final_step;
+  // GPU-private ring cursors — allocated with gpu_malloc, never touched by CPU.
+  int32_t *gpu_req_head;  // GPU consumer cursor into pinned request ring
+  int32_t *gpu_comp_tail; // GPU producer cursor into pinned completion ring
+  // CPU→GPU shutdown signal: CPU writes 1 to request kernel termination.
+  // GPU polls with ld.acquire.sys when the batch is empty.
+  int32_t volatile *pinned_shutdown; // 0=running, 1=shutdown requested
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;

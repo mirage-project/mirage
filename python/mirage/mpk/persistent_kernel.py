@@ -119,7 +119,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn"}
+valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass", "online_multi_turn", "online_pinned"}
 
 def _detect_cxx_standard():
     """Use c++20 if the host compiler supports it, otherwise fall back to c++17."""
@@ -220,6 +220,9 @@ def get_compile_command(
         flags = flags + ["-DMODE_ONEPASS"]
     elif mpk.mode == "online_multi_turn":
         flags = flags + ["-DMODE_MULTI_TURN"]
+    elif mpk.mode == "online_pinned":
+        flags = flags + ["-DMODE_ONLINE_PINNED",
+                         f"-DMPK_PINNED_RING_CAPACITY={mpk.pinned_ring_capacity}"]
     else:
         raise ValueError(f"Invalid persistent kernel mode: {mpk.mode}")
 
@@ -286,7 +289,7 @@ class PersistentKernel:
         spec_decode_config: SpecDecodeConfig,
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
-        test_mode: bool = False,
+        pinned_ring_capacity: int = 0,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -295,6 +298,7 @@ class PersistentKernel:
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
         self.mode = mode
+        self.pinned_ring_capacity = pinned_ring_capacity
         self.world_size = world_size
         self.mpi_rank = mpi_rank
         self.num_workers = num_workers
@@ -1957,7 +1961,7 @@ class PersistentKernel:
         output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        if self.mode == "online_notoken" or self.mode == "online" or self.mode == "multi_turn":
+        if self.mode == "online_notoken" or self.mode == "online" or self.mode == "multi_turn" or self.mode=="online_pinned":
             # We will init for multiple times so the output directory should be permanent
             tempdir = "./permanent_output_dir/"
         else:
@@ -2114,7 +2118,6 @@ class PersistentKernel:
         self.launch_func = getattr(mod, "launch_func")
         self.finalize_func = getattr(mod, "finalize_func")
         print("Finished megakernel compilation...")
-
         expected_order = [
             "step",
             "tokens",
@@ -2127,6 +2130,16 @@ class PersistentKernel:
             "paged_kv_indices_buffer",
             "paged_kv_last_page_len_buffer",
         ]
+        pinned_extra_order=[
+            "pinned_req_ready",
+            "pinned_req_request_id",
+            "pinned_req_prompt_len",
+            "pinned_req_initial_step",
+            "pinned_comp_ready",
+            "pinned_comp_request_id",
+            "pinned_comp_final_step",
+            "pinned_shutdown"
+        ]
         meta_tensors_ptr = []
         for key in expected_order:
             if key not in self.meta_tensors:
@@ -2137,6 +2150,9 @@ class PersistentKernel:
                   raise ValueError(f"Missing meta tensor: {key}")
             else:
               meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
+        if self.mode=="online_pinned":
+            for key in pinned_extra_order:
+                meta_tensors_ptr.append(self.meta_tensors[key].data_prt())
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
