@@ -148,13 +148,13 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_bufs[cache_key] = (fp8_buf, scale_buf)
         self._fp8_input_buf, self._fp8_scale_buf = self._fp8_bufs[cache_key]
 
-        # Quantize kernel now loops over BATCH_SIZE internally, so launch one block
-        # per call (was grid=(mbt,1,1) which redundantly quantized all rows mbt times).
+        # Quantize kernel: each CTA handles one batch row via blockIdx.x, so
+        # launch grid_dim=(mbt, 1, 1) to parallelize quantization across rows.
         self.mpk.quantize_fp8_layer(
             input=input_bf16,
             output_fp8=self._fp8_input_buf,
             output_scale=self._fp8_scale_buf,
-            grid_dim=(1, 1, 1),
+            grid_dim=(mbt, 1, 1),
             block_dim=(128, 1, 1),
         )
 
