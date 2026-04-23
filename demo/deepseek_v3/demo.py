@@ -643,10 +643,14 @@ if __name__ == "__main__":
                         state_dict[f"{ep}w13.weight_scale_inv"] = torch.stack(s13_list)
                         state_dict[f"{ep}w2.weight_scale_inv"] = torch.stack(s2_list)
 
-            # Ensure all tensors are on GPU and 16B-aligned
+            # Contiguous + 16B-align. For TP>1 keep tensors on CPU here —
+            # the TP sharding step below halves them, and the post-shard
+            # block (after line ~750) moves the small sharded copies to GPU.
+            # Pushing full un-sharded weights to GPU here OOMs once the
+            # layer count × world_size exceeds per-GPU capacity.
             for k in list(state_dict.keys()):
                 t = state_dict[k]
-                if not t.is_cuda:
+                if world_size == 1 and not t.is_cuda:
                     t = t.cuda()
                 if not t.is_contiguous():
                     t = t.contiguous()
