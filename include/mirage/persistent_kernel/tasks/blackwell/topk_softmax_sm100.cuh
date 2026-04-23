@@ -95,7 +95,9 @@ __device__ __forceinline__ void topk_softmax_task_impl(
       mpk_active_expert_ids[expert - start_expert] = -1;
     }
   }
-  if (threadIdx.x == NUM_EXPERTS && mpk_active_expert_ids != nullptr) {
+  // Thread 0 always exists, unlike threadIdx.x == NUM_EXPERTS when
+  // NUM_EXPERTS == blockDim.x == 256.
+  if (threadIdx.x == 0 && mpk_active_expert_ids != nullptr) {
     mpk_active_expert_ids[NUM_EXPERTS] = 0;
   }
   __syncthreads();
@@ -140,9 +142,16 @@ __device__ __forceinline__ void topk_softmax_task_impl(
 
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
   int const thread_row = warp_base_row + thread_row_in_warp;
-  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
-                                 ? 0x0000ffff
-                                 : 0xffffffff;
+  uint32_t warp_mask = 0xffffffffu;
+  if constexpr (THREADS_PER_ROW != WARP_SIZE) {
+    constexpr uint32_t subgroup_mask = (1u << THREADS_PER_ROW) - 1u;
+    // The final warp can contain a single live sub-group when num_rows is odd.
+    // Restrict the shuffle mask to that sub-group instead of hard-coding the
+    // lower 16 lanes.
+    if ((num_rows % ROWS_PER_WARP) != 0 && thread_row == num_rows - 1) {
+      warp_mask = subgroup_mask << (thread_row_in_warp * THREADS_PER_ROW);
+    }
+  }
   if (thread_row < num_rows) {
 
     bool const row_is_active = finished ? !finished[thread_row] : true;
