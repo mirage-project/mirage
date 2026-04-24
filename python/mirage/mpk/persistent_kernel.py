@@ -1043,6 +1043,35 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "mla_prefill_sm100", params)
 
+    def mla_prefill_tp8_layer(
+        self,
+        q_nope: DTensor,   # [B, S, H, D_QK_NOPE=128]
+        q_pe: DTensor,     # [B, S, H, D_QK_ROPE=64]
+        k: DTensor,        # [B, S, D_QK=192] (nope+rope concat along last dim)
+        v: DTensor,        # [B, S, D_V=128]
+        output: DTensor,   # [B, S, H, D_V=128]
+        mla_params: tuple, # (num_heads, seq_len)
+        grid_dim: tuple,   # (H, num_q_blocks, B)
+        block_dim: tuple,  # (128, 1, 1)
+    ):
+        # MLA Prefill TP=8 (unabsorbed, TMA K/V). NUM_HEADS per rank = 16.
+        # Grid: (H, ceil(S/BM), B) where BM=64.
+        num_heads, seq_len = mla_params
+        params = [num_heads, seq_len]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Kernel does its own per-block slicing (head, q_block, batch come via
+        # task metadata). Each input is presented as the full tensor.
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope, q_pe, k, v, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_prefill_tp8_sm100", params)
+
     def mla_mtp_decode_layer(
         self,
         q_input: DTensor,          # Q tensor [B*Q_LEN*H, D_K] (with TMA desc)

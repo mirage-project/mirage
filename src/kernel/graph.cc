@@ -719,6 +719,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // attached with store_in_dmem=True, MPK convention (same as mla_decode).
     // Task register dispatches input_ptrs[4] as the O pointer.
     task_config[op] = std::make_tuple(5, 0, TASK_MLA_PREFILL_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_sm100") {
+    int variant_id = task_register->register_mla_prefill_tp8_sm100_task(
+        customized->bgraph, params);
+    // 4 inputs (Q_nope, Q_pe, K, V), 1 output (O). K and V carry TMA descriptors.
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MLA_PREFILL_TP8_SM100, variant_id);
   } else if (name == "mla_mtp_decode_sm100") {
     int variant_id = task_register->register_mla_mtp_decode_sm100_task(
         customized->bgraph, params);

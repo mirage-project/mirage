@@ -192,6 +192,8 @@ enum TaskType {
   // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
   // input tokens = shifted ground-truth prompt + current iter's argmax tail.
   TASK_MTP_BUILD_EMBED_INPUT = 294,
+  // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
+  TASK_MLA_PREFILL_TP8_SM100 = 295,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
