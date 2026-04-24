@@ -35,10 +35,11 @@ namespace kernel {
 
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
-          int PAGE_SIZE> // Page size (e.g., 128)
+          int PAGE_SIZE, // Page size (e.g., 128)
+          int K_PE_ROW_STRIDE = D_K - D_V>
 __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
     void const *c_latent_new_ptr, // [num_tokens, D_V] new c_latent (normed)
-    void const *k_pe_new_ptr,     // [num_tokens, D_K - D_V] new k_pe
+    void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] new k_pe
     void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged KV cache
     void *contiguous_kv_ptr,      // [max_seq_len, D_K] output: contiguous KV
     int const *qo_indptr_buffer_ptr,
@@ -87,7 +88,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
     int const pos_in_page = seq_pos % PAGE_SIZE;
     T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
     T const *src_lat = c_latent_new + tok * D_V;
-    T const *src_pe = k_pe_new + tok * ROPE_DIM;
+    T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
 
     // Copy c_latent (512 dims) — vectorized uint4 loads (8 bf16 per load)
     for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {

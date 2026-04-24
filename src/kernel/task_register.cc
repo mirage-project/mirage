@@ -3471,9 +3471,8 @@ int TaskRegister::register_mla_decode_sm100_task(
     hpb = 1;
   }
   int num_head_groups = num_heads / hpb;
-  // For BS > 1 we'd need a separate batch dispatch; current single-request
-  // setup uses request_id as either bi (q_len=1) or gi (q_len>1). When q_len>1,
-  // BS is implicitly 1.
+  // q_len=1 keeps the legacy mapping where request_id is batch. For q_len>1,
+  // grid.y is head group and grid.z is batch (stored in merge_task_offset).
   bool const single_query = (q_len == 1);
 
   mirage::transpiler::CodeKeeper code;
@@ -3488,7 +3487,7 @@ int TaskRegister::register_mla_decode_sm100_task(
   if (single_query) {
     code.e("  int bi_ = task_desc->task_metadata.request_id;");
   } else {
-    code.e("  int bi_ = 0;  // BS=1 when q_len>1");
+    code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
     code.e(
         "  int gi_ = task_desc->task_metadata.request_id;  // head group idx");
   }
@@ -3576,8 +3575,10 @@ int TaskRegister::register_mla_reduce_sm100_task(
     // decode kernel produced for this iter (1 row for decode, mbt rows for
     // prefill).
     code.e("{");
-    code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[0];");
-    code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[1];");
+    code.e("  int gi_ = task_desc->task_metadata.request_id;");
+    code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+    code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+    code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
     code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
     code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
     code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
@@ -3601,8 +3602,8 @@ int TaskRegister::register_mla_reduce_sm100_task(
     code.e("    (int)task_desc->task_metadata.request_id,"); // bi
     code.e("    $);", num_heads); // local_num_heads (TP-aware)
   } else {
-    code.e("    (int)task_desc->task_metadata.request_id,"); // gi
-    code.e("    0,");                                        // bi (BS=1)
+    code.e("    gi_,");
+    code.e("    bi_,");
     code.e("    $);", num_heads); // local_num_heads (TP-aware)
     code.e("}");
   }
@@ -3714,11 +3715,22 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   // Template dispatch on SINGLE_TILE
   if (single_tile) {
-    code.e("kernel::mla_mtp_decode_sm100_task_impl<true>(");
+    code.e("  kernel::mla_mtp_decode_sm100_task_impl<true>(");
   } else {
-    code.e("kernel::mla_mtp_decode_sm100_task_impl<false>(");
+    code.e("  kernel::mla_mtp_decode_sm100_task_impl<false>(");
   }
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
@@ -3734,14 +3746,15 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
     float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
     code.e("    $f,", _sm); // ss
   }
-  code.e("    $,", kv_len);
+  code.e("    kv_len_,");
   code.e("    $,", num_splits);
   code.e("    $,", num_head_groups);
-  code.e("    $,", q_len);
+  code.e("    q_len_rt_,");
   // gi, si, bi from task metadata
   code.e("    task_desc->task_metadata.request_id,"); // gi (head_group)
   code.e("    task_desc->task_metadata.kv_idx,");     // si (split_idx)
-  code.e("    0);");                                  // bi (batch=0 for BS=1)
+  code.e("    bi_);");
+  code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_SM100, code.to_string());
 }
 
@@ -3759,19 +3772,27 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   // 256 threads for MPK workers (default template is 512 for standalone)
-  code.e("kernel::mla_mtp_reduce_sm100_task_impl<256>(");
+  code.e("  kernel::mla_mtp_reduce_sm100_task_impl<256>(");
   code.e(
       "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Oa
   code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");    // La
   code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");   // O
   code.e("    $,", num_splits);
   code.e("    $,", num_head_groups);
-  code.e("    $,", q_len);
+  code.e("    q_len_rt_,");
   // dv_base, gi, bi from task metadata
   code.e("    task_desc->task_metadata.kv_idx * $,", rd_dv); // dv_base
   code.e("    task_desc->task_metadata.request_id,");        // gi
-  code.e("    0);");                                         // bi (batch=0)
+  code.e("    bi_);");
+  code.e("}");
   return register_task_variant(TASK_MLA_MTP_REDUCE_SM100, code.to_string());
 }
 int TaskRegister::register_paged_attention_split_kv_hopper_task(
@@ -4150,19 +4171,43 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $>(",
+  // k_pe_out is allocated with a padded row stride of 128 (real ROPE dim is
+  // 64). Slice the per-request token window before appending/gathering.
+  constexpr int k_pe_row_stride = 128;
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  auto *c_latent_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         d_v);
+  code.e("  auto *k_pe_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         k_pe_row_stride);
+  code.e("  auto *contiguous_kv_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]) + "
+         "bi_ * S_ * $;",
+         d_k);
+  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $, $>(",
          d_k,
          d_v,
-         page_size);
-  code.e("    task_desc->input_ptrs[0],"); // c_latent_new
-  code.e("    task_desc->input_ptrs[1],"); // k_pe_new
+         page_size,
+         k_pe_row_stride);
+  code.e("    c_latent_new_ptr_,");
+  code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache
-  code.e("    task_desc->input_ptrs[3],"); // contiguous_kv
+  code.e("    contiguous_kv_ptr_,");
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    task_desc->task_metadata.request_id);");
+  code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_SM100, code.to_string());
 }
 
@@ -4399,8 +4444,9 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.inc_indent();
   // Dual-dispatch: pass runtime Q_LEN so reduce early-exit mirrors main.
   code.e("{");
-  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[0];");
-  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[1];");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
@@ -4414,7 +4460,7 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.e("      $,", qpg);
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id,");
-  code.e("      0);");
+  code.e("      bi_);");
   code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100,
                                code.to_string());
@@ -4488,8 +4534,9 @@ int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
   code.inc_indent();
   // Dual-dispatch: pass runtime Q_LEN so reduce early-exit mirrors main.
   code.e("{");
-  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[0];");
-  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[1];");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
@@ -4503,7 +4550,7 @@ int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
   code.e("      $,", qpg);
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id,");
-  code.e("      0);");
+  code.e("      bi_);");
   code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100,
                                code.to_string());
@@ -4578,8 +4625,9 @@ int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
   code.inc_indent();
   // Dual-dispatch: pass runtime q_len_padded (even-padded runtime Q_LEN).
   code.e("{");
-  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[0];");
-  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[1];");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_real_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_real_rt_ < 1) q_len_real_rt_ = 1;");
   code.e("  if (q_len_real_rt_ > $) q_len_real_rt_ = $;",
@@ -4596,7 +4644,7 @@ int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
   code.e("      $,", qpg);
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id,");
-  code.e("      0);");
+  code.e("      bi_);");
   code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100,
                                code.to_string());

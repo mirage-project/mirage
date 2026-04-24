@@ -1060,14 +1060,14 @@ class PersistentKernel:
         num_splits = (kv_len + 128 - 1) // 128
 
         params = [num_head_groups, q_len, kv_len, num_splits]
-        grid_dim = (num_splits, num_head_groups, 1)  # (sk, groups, B=1)
+        grid_dim = (num_splits, num_head_groups, self.max_num_batched_requests)
         block_dim = (128, 1, 1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [q_input, kv_input, output_partial, output_lse], tb_graph
         )
@@ -1093,13 +1093,15 @@ class PersistentKernel:
         rd_dv = 2
 
         params = [num_head_groups, q_len, num_splits, rd_dv]
-        grid_dim = ((d_v + rd_dv - 1) // rd_dv, num_head_groups, 1)
+        grid_dim = ((d_v + rd_dv - 1) // rd_dv,
+                    num_head_groups,
+                    self.max_num_batched_requests)
         block_dim = (256, 1, 1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [input_partial, input_lse, output], tb_graph
         )
@@ -1131,7 +1133,9 @@ class PersistentKernel:
         num_splits = (kv_len + 128 - 1) // 128  # TILE_S=128
         # TP=4 packs v_half into block_x low bit → 2× tasks. Kernel unpacks.
         x_mul = 2 if has_v_split else 1
-        grid_dim = (num_groups * num_splits * x_mul, 1, 1)
+        grid_dim = (num_groups * num_splits * x_mul,
+                    self.max_num_batched_requests,
+                    1)
         block_dim = (128, 1, 1)
 
         if num_heads == 16:  # TP=8
@@ -1167,7 +1171,9 @@ class PersistentKernel:
         rd_dv = 2
 
         params = [num_groups, q_len, num_splits, rd_dv]
-        grid_dim = ((d_v + rd_dv - 1) // rd_dv, num_groups, 1)
+        grid_dim = ((d_v + rd_dv - 1) // rd_dv,
+                    num_groups,
+                    self.max_num_batched_requests)
         block_dim = (256, 1, 1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))

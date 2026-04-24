@@ -411,12 +411,14 @@ void register_mugraph(
             // Set MLA decode metadata: request_id=batch (bid.y), kv_idx=split
             // (bid.x)
             if (task_type == TASK_MLA_DECODE_SM100) {
-              task.task_metadata.request_id = bid.y; // batch_idx
+              task.task_metadata.request_id = bid.y; // batch_idx or head group
               task.task_metadata.kv_idx = bid.x;     // split_idx
+              task.task_metadata.merge_task_offset = bid.z; // batch for q_len>1
             }
             // Set MLA reduce metadata: request_id=batch (bid.x)
             if (task_type == TASK_MLA_REDUCE_SM100) {
-              task.task_metadata.request_id = bid.x; // batch_idx
+              task.task_metadata.request_id = bid.x; // batch_idx or head group
+              task.task_metadata.merge_task_offset = bid.z; // batch for q_len>1
             }
             // Set MLA prefill metadata: request_id=batch (bid.z),
             // kv_idx=q_block (bid.y), merge_task_offset=head (bid.x).
@@ -429,13 +431,15 @@ void register_mugraph(
             // request_id=gi (head_group from bid.y), kv_idx=si (split from
             // bid.x) expert_offset stores hpb for TMA box dimension
             if (task_type == TASK_MLA_MTP_DECODE_SM100) {
-              task.task_metadata.kv_idx = bid.x;     // si (split_idx)
-              task.task_metadata.request_id = bid.y; // gi (head_group)
+              task.task_metadata.kv_idx = bid.x;            // si (split_idx)
+              task.task_metadata.request_id = bid.y;        // gi (head_group)
+              task.task_metadata.merge_task_offset = bid.z; // batch
             }
             // MTP reduce: grid=(D_V/RD_DV, num_head_groups, B)
             if (task_type == TASK_MLA_MTP_REDUCE_SM100) {
-              task.task_metadata.kv_idx = bid.x;     // dv_block_idx
-              task.task_metadata.request_id = bid.y; // gi (head_group)
+              task.task_metadata.kv_idx = bid.x;            // dv_block_idx
+              task.task_metadata.request_id = bid.y;        // gi (head_group)
+              task.task_metadata.merge_task_offset = bid.z; // batch
             }
             // MLA-MTP TP variants: decode grid=(num_groups*sk[*2 if TP=4], B,
             // 1) Python layer encodes block_x = gi*sk+si (or
@@ -450,17 +454,19 @@ void register_mugraph(
             if (task_type == TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 ||
                 task_type == TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 ||
                 task_type == TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100) {
-              task.task_metadata.kv_idx = bid.x;     // dv_block_idx
-              task.task_metadata.request_id = bid.y; // gi
+              task.task_metadata.kv_idx = bid.x;            // dv_block_idx
+              task.task_metadata.request_id = bid.y;        // gi
+              task.task_metadata.merge_task_offset = bid.z; // batch
             }
             // MLA KV gather split: request_id = bid.x (builder uses
             // grid=(max_num_batched_requests, 1, 1))
             if (task_type == TASK_MLA_KV_GATHER_SPLIT_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            // MLA KV gather: request_id = bid.y
+            // MLA KV gather: request_id = bid.x (builder uses
+            // grid=(max_num_batched_requests, 1, 1))
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
-              task.task_metadata.request_id = bid.y;
+              task.task_metadata.request_id = bid.x;
             }
             // Set request_id for FP8 quantize (row index for column-major scale
             // output)

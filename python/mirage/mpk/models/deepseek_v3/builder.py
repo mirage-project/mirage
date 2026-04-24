@@ -296,7 +296,8 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         # Contiguous KV buffer for new MLA decode (gathered from paged cache)
         self.contiguous_kv = self.mpk.new_tensor(
-            dims=(self.mpk.max_seq_length, self.qk_head_dim),
+            dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
+                  self.qk_head_dim),
             dtype=bfloat16,
             name="contiguous_kv",
             io_category="cuda_tensor",
@@ -335,8 +336,12 @@ class DeepSeekV3Builder(GraphBuilder):
             _num_groups = (_q_for_groups + _qpg - 1) // _qpg
             _partial_blocks = mbr * _num_groups * max_splits
         else:
-            max_splits = 1
-            _partial_blocks = mbr * mbt * max_splits
+            max_splits = (self.mpk.max_seq_length + 127) // 128
+            _hpb = 128 // mbt
+            while 128 % _hpb != 0:
+                _hpb -= 1
+            _num_groups = 128 // _hpb
+            _partial_blocks = mbr * _num_groups * max_splits
         self.mla_partial_o = self.mpk.new_tensor(
             dims=(_partial_blocks, self.v_head_dim * 128),
             dtype=bfloat16,
@@ -742,37 +747,13 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
         else:
-            _hpb = min(128 // q_len_mla, self.num_local_q_heads)
-            while _hpb > 0 and self.num_local_q_heads % _hpb != 0:
-                _hpb -= 1
-            if _hpb <= 0:
-                _hpb = 1
-            num_head_groups_mla = self.num_local_q_heads // _hpb
-            grid_y_mla = num_head_groups_mla
-            self.mpk.mla_decode_layer(
-                q_input=self.q_nope_pe,
-                kv_input=self.contiguous_kv,
-                output_partial=self.mla_partial_o,
-                output_lse=self.mla_partial_lse,
-                mla_params=(self.num_local_q_heads, self.qk_head_dim,
-                            self.v_head_dim, num_splits, kv_len_max,
-                            q_len_mla),
-                grid_dim=(num_splits, grid_y_mla, 1),
-                block_dim=(128, 1, 1),
-            )
-            lanes_per_reduce = 256 // 128
-            for d_start in range(0, self.v_head_dim, lanes_per_reduce):
-                self.mpk.mla_reduce_layer(
-                    input_partial=self.mla_partial_o,
-                    input_lse=self.mla_partial_lse,
-                    output=self.attn_out,
-                    mla_params=(self.num_local_q_heads, self.v_head_dim,
-                                num_splits, d_start, lanes_per_reduce, q_len_mla),
-                    grid_dim=(grid_y_mla, 1, 1)
-                        if q_len_mla > 1 else
-                        (self.mpk.max_num_batched_requests, 1, 1),
-                    block_dim=(128, 1, 1),
-                )
+            self.mpk.mla_mtp_decode_layer(
+                self.q_nope_pe, self.contiguous_kv,
+                self.mla_partial_o, self.mla_partial_lse,
+                q_len_mla, kv_len_max)
+            self.mpk.mla_mtp_reduce_layer(
+                self.mla_partial_o, self.mla_partial_lse,
+                self.attn_out, q_len_mla, kv_len_max)
 
         # Step 7: O projection (V un-absorption fused into o_proj during conversion)
         # o_proj_fused: [7168, H*kv_lora_rank] — directly takes attn_out [N, H*kv_lora_rank]
@@ -1402,36 +1383,13 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
         else:
-            _hpb = min(128 // q_len_mla, self.num_local_q_heads)
-            while _hpb > 0 and self.num_local_q_heads % _hpb != 0:
-                _hpb -= 1
-            if _hpb <= 0:
-                _hpb = 1
-            num_head_groups_mla = self.num_local_q_heads // _hpb
-            grid_y_mla = num_head_groups_mla
-            self.mpk.mla_decode_layer(
-                q_input=self.q_nope_pe,
-                kv_input=self.contiguous_kv,
-                output_partial=self.mla_partial_o,
-                output_lse=self.mla_partial_lse,
-                mla_params=(self.num_local_q_heads, self.qk_head_dim,
-                            self.v_head_dim, num_splits, kv_len_max,
-                            q_len_mla),
-                grid_dim=(num_splits, grid_y_mla, 1),
-                block_dim=(128, 1, 1),
-            )
-            lanes_per_reduce = 256 // 128
-            for d_start in range(0, self.v_head_dim, lanes_per_reduce):
-                self.mpk.mla_reduce_layer(
-                    input_partial=self.mla_partial_o,
-                    input_lse=self.mla_partial_lse,
-                    output=self.attn_out,
-                    mla_params=(self.num_local_q_heads, self.v_head_dim,
-                                num_splits, d_start, lanes_per_reduce, q_len_mla),
-                    grid_dim=(grid_y_mla, 1, 1) if q_len_mla > 1 else
-                        (self.mpk.max_num_batched_requests, 1, 1),
-                    block_dim=(128, 1, 1),
-                )
+            self.mpk.mla_mtp_decode_layer(
+                self.q_nope_pe, self.contiguous_kv,
+                self.mla_partial_o, self.mla_partial_lse,
+                q_len_mla, kv_len_max)
+            self.mpk.mla_mtp_reduce_layer(
+                self.mla_partial_o, self.mla_partial_lse,
+                self.attn_out, q_len_mla, kv_len_max)
 
         # o_proj (FP8). Match main layer's pattern: use the with_residual kernel
         # to fuse (matmul + residual) in one pass.
