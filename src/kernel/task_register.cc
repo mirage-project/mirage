@@ -3635,6 +3635,42 @@ int TaskRegister::register_mla_prefill_sm100_task(
   return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
 }
 
+int TaskRegister::register_mla_prefill_tp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_heads per TP rank (e.g. 16 for TP=8)
+  // params[1]: seq_len (must be <= 4096)
+  // Inputs: [0] Q_nope [B,S,H,128], [1] Q_pe [B,S,H,64],
+  //         [2] K [B,S,192] (nope+rope concat), [3] V [B,S,128]
+  // Output: [0] O [B,S,H,128]
+  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V (input_tma_desc_ptrs[3][0]).
+  assert(params.size() == 2);
+  int num_heads = params[0];
+  int seq_len = params[1];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+  float sm_scale_log2 = sm_scale * 1.44269504089f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_prefill_tp8::mla_prefill_tp8_sm100_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K TMA
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),");           // Qn
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");           // Qp
+  code.e(
+      "    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
+  code.e("    $,", seq_len);                                          // S
+  code.e("    $,", num_heads);                                        // H
+  code.e("    $f,", sm_scale_log2);                                   // sml2
+  code.e("    task_desc->task_metadata.request_id,"); // head (bid.x)
+  code.e("    task_desc->task_metadata.kv_idx,");     // q_block (bid.y)
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch (bid.z)
+  return register_task_variant(TASK_MLA_PREFILL_TP8_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_mtp_decode_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_head_groups
