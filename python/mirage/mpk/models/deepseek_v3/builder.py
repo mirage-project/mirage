@@ -41,6 +41,24 @@ FIRST_MOE_LAYER = 3
 VOCAB_SIZE = 129280
 RMS_NORM_EPS = 1e-6
 
+# FP8 MoE group GEMM N-split helper. Picks grid_dim.y so the kernel's per-CTA
+# N-slice (ORIG_OUTPUT_SIZE / Y) stays a multiple of MMA_M=128 and has at
+# least one full tile. Without this each active-expert CTA serializes all
+# m-tiles. Empirically Y=2 gives ~20% speedup on TP=2 MTP=2 stress (6.6 ms/tok
+# vs 8.3 ms/tok baseline). Higher Y regressed in earlier tests, but those
+# regressions now look like they were GPU-pair/contention artifacts, not the
+# kernel itself — Y=2 is a conservative landing. Queue bumped to 8192 in
+# 11f45fd so Y=2 has headroom.
+_MOE_FP8_MMA_M = 128
+
+
+def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
+    max_y = min(preferred, max(1, output_size // _MOE_FP8_MMA_M))
+    for y in range(max_y, 0, -1):
+        if output_size % y == 0 and (output_size // y) % _MOE_FP8_MMA_M == 0:
+            return y
+    return 1
+
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
 class DeepSeekV3Builder(GraphBuilder):
@@ -941,6 +959,8 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         if use_fp8_experts:
+            w13_m_split = _moe_fp8_m_split(2 * self.moe_intermediate_size,
+                                           preferred=2)
             self.mpk.moe_w13_fp8_layer(
                 input_fp8=moe_input_fp8,
                 input_scale=moe_input_scale,
@@ -949,7 +969,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_mid,
-                grid_dim=(NUM_EXPERTS, 1, 1),
+                grid_dim=(NUM_EXPERTS, w13_m_split, 1),
                 block_dim=(128, 1, 1),
             )
         else:
@@ -1018,6 +1038,7 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         if use_fp8_experts:
+            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=2)
             self.mpk.moe_w2_fp8_layer(
                 input_fp8=moe_silu_fp8,
                 input_scale=moe_silu_scale,
@@ -1026,7 +1047,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_down_out,
-                grid_dim=(NUM_EXPERTS, 1, 1),
+                grid_dim=(NUM_EXPERTS, w2_m_split, 1),
                 block_dim=(128, 1, 1),
             )
         else:
@@ -1505,11 +1526,15 @@ class DeepSeekV3Builder(GraphBuilder):
         moe_mid = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.moe_intermediate_size),
             dtype=bfloat16, name="mtp_moe_mid", io_category="cuda_tensor")
+        mtp_w13_m_split = _moe_fp8_m_split(2 * self.moe_intermediate_size,
+                                           preferred=2)
         self.mpk.moe_w13_fp8_layer(
             input_fp8=moe_input_fp8, input_scale=moe_input_scale,
             weight_fp8=w_w13, weight_scale=s_w13,
             moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
-            output=moe_mid, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
+            output=moe_mid,
+            grid_dim=(NUM_EXPERTS, mtp_w13_m_split, 1),
+            block_dim=(128, 1, 1))
 
         moe_silu_out = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
@@ -1543,11 +1568,14 @@ class DeepSeekV3Builder(GraphBuilder):
         moe_down_out = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
             dtype=bfloat16, name="mtp_moe_down", io_category="cuda_tensor")
+        mtp_w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=2)
         self.mpk.moe_w2_fp8_layer(
             input_fp8=mtp_silu_fp8, input_scale=mtp_silu_scale,
             weight_fp8=w_w2, weight_scale=s_w2,
             moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
-            output=moe_down_out, grid_dim=(NUM_EXPERTS, 1, 1), block_dim=(128, 1, 1))
+            output=moe_down_out,
+            grid_dim=(NUM_EXPERTS, mtp_w2_m_split, 1),
+            block_dim=(128, 1, 1))
 
         # Shared expert (FP8) — same pattern as main MoE shared expert:
         # interleave gate+up, requantize for UE8M0, proper silu_mul grid.
