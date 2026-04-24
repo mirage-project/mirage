@@ -418,11 +418,12 @@ void register_mugraph(
             if (task_type == TASK_MLA_REDUCE_SM100) {
               task.task_metadata.request_id = bid.x; // batch_idx
             }
-            // Set MLA prefill metadata: request_id=head (bid.x), kv_idx=q_block
-            // (bid.y)
+            // Set MLA prefill metadata: request_id=batch (bid.z),
+            // kv_idx=q_block (bid.y), merge_task_offset=head (bid.x).
             if (task_type == TASK_MLA_PREFILL_SM100) {
-              task.task_metadata.request_id = bid.x; // head
-              task.task_metadata.kv_idx = bid.y;     // q_block
+              task.task_metadata.request_id = bid.z;        // batch_idx
+              task.task_metadata.kv_idx = bid.y;            // q_block
+              task.task_metadata.merge_task_offset = bid.x; // head
             }
             // MTP decode: grid=(sk, num_head_groups, B)
             // request_id=gi (head_group from bid.y), kv_idx=si (split from
@@ -452,9 +453,13 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.x;     // dv_block_idx
               task.task_metadata.request_id = bid.y; // gi
             }
+            // MLA KV gather split: request_id = bid.x (builder uses
+            // grid=(max_num_batched_requests, 1, 1))
+            if (task_type == TASK_MLA_KV_GATHER_SPLIT_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // MLA KV gather: request_id = bid.y
-            if (task_type == TASK_MLA_KV_GATHER_SM100 ||
-                task_type == TASK_MLA_KV_GATHER_SPLIT_SM100) {
+            if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.y;
             }
             // Set request_id for FP8 quantize (row index for column-major scale

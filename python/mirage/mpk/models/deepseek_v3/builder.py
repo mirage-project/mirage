@@ -49,6 +49,7 @@ class DeepSeekV3Builder(GraphBuilder):
         self.max_num_pages = mpk.max_num_pages
         self.page_size = mpk.page_size
         self.world_size = mpk.world_size
+        self.num_workers = mpk.num_workers
         self._use_nvshmem = mpk.use_nvshmem  # True only if nvshmem is actually enabled
         self.input_tokens = mpk.meta_tensors["input_tokens"]
         self.output_tokens = mpk.meta_tensors["output_tokens"]
@@ -56,7 +57,6 @@ class DeepSeekV3Builder(GraphBuilder):
         # Weight attach cache: avoid re-declaring same C++ variable in MTP draft loop
         self._attach_cache = {}
         self.max_num_batched_tokens = mpk.max_num_batched_tokens
-        self._profiling = mpk.profiler_tensor is not None
 
         # DeepSeek V3 dimensions
         self.hidden_size = HIDDEN_SIZE
@@ -119,8 +119,16 @@ class DeepSeekV3Builder(GraphBuilder):
             raise ValueError(
                 f"FP8 linear: output_size={output_size} < 128 (BLOCK_N). "
                 f"Must use BF16 linear for this dimension.")
-        if grid_dim[0] > max_grid:
-            grid_dim = (max_grid, grid_dim[1], grid_dim[2])
+        # Each FP8 linear task serializes all of the output tiles in its shard.
+        # Large layers were still using the old 64/96-task heuristic, which
+        # leaves many workers idle on B200. Keep the caller's grid for small
+        # layers, but raise the task count for large layers so we at least fill
+        # the available worker pool without oversharding past the kernel's tile
+        # granularity (one 128-row output shard per task).
+        target_grid_x = min(max_grid, self.num_workers)
+        grid_dim = (min(max_grid, max(grid_dim[0], target_grid_x)),
+                    grid_dim[1],
+                    grid_dim[2])
 
         mbt = self.max_num_batched_tokens
         reduction_size = weight.dim(1) if weight.num_dims == 2 else weight.dim(-1)
@@ -149,15 +157,11 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_bufs[cache_key] = (fp8_buf, scale_buf)
         self._fp8_input_buf, self._fp8_scale_buf = self._fp8_bufs[cache_key]
 
-        # Keep profiling on the pre-change single-CTA path: the persistent
-        # profiler buffer is fixed-size, so the wider quantize launch can make
-        # TP=2 profile runs overflow the trace budget before decode starts.
-        quantize_grid_dim = (1, 1, 1) if self._profiling else (mbt, 1, 1)
         self.mpk.quantize_fp8_layer(
             input=input_bf16,
             output_fp8=self._fp8_input_buf,
             output_scale=self._fp8_scale_buf,
-            grid_dim=quantize_grid_dim,
+            grid_dim=(mbt, 1, 1),
             block_dim=(128, 1, 1),
         )
 
@@ -297,16 +301,18 @@ class DeepSeekV3Builder(GraphBuilder):
             name="contiguous_kv",
             io_category="cuda_tensor",
         )
-        # Prefill-path KV: split into CKV [S, 512] and KPE [S, 64]. The
-        # mla_prefill_sm100 kernel expects these as two dense tensors, so the
-        # builder uses mla_kv_gather_split_sm100 to write directly into them.
+        # Prefill-path KV: split into CKV [B, S, 512] and KPE [B, S, 64]. The
+        # prefill kernel itself is single-request; task registration offsets
+        # each request to its own [S, *] window inside this flattened buffer.
         if self._use_prefill:
             self.ckv_sep = self.mpk.new_tensor(
-                dims=(self.mpk.max_seq_length, self.kv_lora_rank),
+                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
+                      self.kv_lora_rank),
                 dtype=bfloat16, name="ckv_sep", io_category="cuda_tensor",
             )
             self.kpe_sep = self.mpk.new_tensor(
-                dims=(self.mpk.max_seq_length, QK_ROPE_HEAD_DIM),
+                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
+                      QK_ROPE_HEAD_DIM),
                 dtype=bfloat16, name="kpe_sep", io_category="cuda_tensor",
             )
         else:
@@ -681,7 +687,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 mla_params=(self.num_local_q_heads, kv_len_max,
                             self.kv_lora_rank, QK_ROPE_HEAD_DIM,
                             self.v_head_dim),
-                grid_dim=(self.num_local_q_heads, num_q_blocks, 1),
+                grid_dim=(self.num_local_q_heads, num_q_blocks,
+                          self.mpk.max_num_batched_requests),
                 block_dim=(256, 1, 1),
             )
         else:

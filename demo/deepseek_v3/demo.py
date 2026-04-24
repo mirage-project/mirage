@@ -67,6 +67,10 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str,
                         default="Give me a short introduction to large language model.",
                         help="Input prompt text")
+    parser.add_argument("--prompts-json", type=str, default=None,
+                        help="JSON array of prompts for batched-request testing. "
+                             "When set with --use-mirage, its length must equal "
+                             "--max-num-batched-requests.")
     parser.add_argument("--prompt-length", type=int, default=0,
                         help="If >0, override the --prompt with a synthetic "
                              "prompt of exactly this many tokens. Useful for "
@@ -192,6 +196,41 @@ if __name__ == "__main__":
         )
         print(f"[stress] Using synthetic prompt of length {pl} "
               f"(max_seq_length={args.max_seq_length}).")
+    elif args.prompts_json:
+        prompt_list = json.loads(args.prompts_json)
+        if not isinstance(prompt_list, list) or not prompt_list:
+            raise ValueError("--prompts-json must be a non-empty JSON array")
+        if len(prompt_list) != total_num_requests:
+            raise ValueError(
+                f"--prompts-json length ({len(prompt_list)}) must equal "
+                f"total_num_requests ({total_num_requests})"
+            )
+        messages_batch = [
+            [{"role": "user", "content": prompt}]
+            for prompt in prompt_list
+        ]
+        texts = [
+            tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            for messages in messages_batch
+        ]
+        prompt_lens = []
+        for r, text in enumerate(texts):
+            model_inputs = tokenizer([text], return_tensors="pt").to("cuda")
+            prompt_width = model_inputs.input_ids.shape[-1]
+            if prompt_width > args.max_seq_length:
+                raise ValueError(
+                    f"Prompt width {prompt_width} exceeds max_seq_length "
+                    f"{args.max_seq_length}"
+                )
+            tokens[r, :prompt_width] = model_inputs.input_ids[0, :prompt_width]
+            prompt_lens.append(prompt_width)
+        prompt_lengths = torch.tensor(
+            prompt_lens, dtype=torch.int, device="cuda"
+        )
+        print(f"[batch] Using {len(prompt_list)} distinct prompts; "
+              f"prompt_lengths={prompt_lengths.tolist()}")
     else:
         messages = [
             {"role": "user", "content": args.prompt},
@@ -809,6 +848,8 @@ if __name__ == "__main__":
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            if total_num_requests > 1:
+                print(f"[request {r}]")
             print(response)
 
         if total_num_requests > 1:
@@ -821,23 +862,28 @@ if __name__ == "__main__":
 
         # Dump outputs to json
         if save_path and rank == 0:
-            end_idx = step[0].item() + 1
-            prompt_len = prompt_lengths[0].item()
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
-            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
-            token_ids = tokens[0, prompt_len:slice_end].tolist()
-            response_text = tokenizer.decode(
-                tokens[0, :end_idx], skip_special_tokens=True
-            )
-            out = {
-                "token_ids": token_ids,
-                "text": response_text,
-                "latency_ms_per_token": per_tok_ms,
-                "prompt_length": prompt_len,
-                "generate_length": tokens_generated,
-                "mode": "mpk",
-            }
+            out = []
+            for r in range(total_num_requests):
+                end_idx = step[r].item() + 1
+                prompt_len = prompt_lengths[r].item()
+                tokens_generated = max(0, end_idx - prompt_len)
+                per_tok_ms = run_time / max(tokens_generated, 1)
+                slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
+                token_ids = tokens[r, prompt_len:slice_end].tolist()
+                response_text = tokenizer.decode(
+                    tokens[r, :end_idx], skip_special_tokens=True
+                )
+                out.append({
+                    "request_id": r,
+                    "token_ids": token_ids,
+                    "text": response_text,
+                    "latency_ms_per_token": per_tok_ms,
+                    "prompt_length": prompt_len,
+                    "generate_length": tokens_generated,
+                    "mode": "mpk",
+                })
+            if total_num_requests == 1:
+                out = out[0]
             with open(save_path, "w") as f:
                 json.dump(out, f, indent=2)
             print(f"Saved tokens to {save_path}")

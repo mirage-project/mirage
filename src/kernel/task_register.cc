@@ -3632,12 +3632,14 @@ int TaskRegister::register_mla_prefill_sm100_task(
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   // MLA prefill: grid = (H, num_q_blocks, B)
-  // task_metadata.request_id = head (bid.x)
+  // task_metadata.request_id = batch (bid.z)
   // task_metadata.kv_idx = q_block (bid.y)
+  // task_metadata.merge_task_offset = head (bid.x)
   //
   // Inputs: Q_nope [S,H,D_CKV], Q_pe [S,H,D_KPE], CKV [S,D_CKV], KPE [S,D_KPE]
   // Output: O [S,H,D_V]
-  // All tensors are passed as raw pointers — no TMA.
+  // The kernel itself is single-request; we slice each request's Q / KV /
+  // output window before calling it.
 
   (void)seq_len;
   mirage::transpiler::CodeKeeper code;
@@ -3647,33 +3649,49 @@ int TaskRegister::register_mla_prefill_sm100_task(
   // progresses. Q_LEN = qo_indptr[bi+1] - qo_indptr[bi] = num_new_tokens
   // this iteration (can be smaller than mbt).
   code.e("{");
-  // DeepSeek demo uses max_num_batched_requests = 1; prefill's
-  // task_metadata.request_id is head index, not batch index. Use batch 0.
-  code.e("  int bi_ = 0;");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int head_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
   code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
   code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
          "runtime_config.paged_kv_last_page_len_buffer[bi_];");
   code.e("  int Q_LEN_ = runtime_config.qo_indptr_buffer[bi_ + 1] - "
          "runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  auto *q_nope_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         num_heads * d_ckv);
+  code.e("  auto *q_pe_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         num_heads * d_kpe);
+  code.e("  auto *ckv_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[2]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_ckv);
+  code.e("  auto *kpe_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[3]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_kpe);
+  code.e("  auto *out_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]) + "
+         "qo_fp_ * $;",
+         num_heads * d_v);
   code.e("  kernel::mla_prefill_sm100_task_impl(");
-  code.e(
-      "      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Q_nope
-  code.e(
-      "      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[1]),"); // Q_pe
-  code.e(
-      "      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[2]),"); // CKV
-  code.e(
-      "      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[3]),"); // KPE
+  code.e("      q_nope_ptr_,");
+  code.e("      q_pe_ptr_,");
+  code.e("      ckv_ptr_,");
+  code.e("      kpe_ptr_,");
   // O attached via new_input(store_in_dmem=True) on the Python side (MPK
   // convention shared with mla_decode_layer), so use input_ptrs[4].
-  code.e("      static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]),"); // O
-  code.e("      S_,");                                  // runtime S
-  code.e("      Q_LEN_,");                              // runtime Q_LEN
-  code.e("      $,", num_heads);                        // H
-  code.e("      $f,", sm_scale_log2);                   // sm_scale_log2
-  code.e("      task_desc->task_metadata.request_id,"); // head
-  code.e("      task_desc->task_metadata.kv_idx);");    // q_block
+  code.e("      out_ptr_,");
+  code.e("      S_,");                // runtime S
+  code.e("      Q_LEN_,");            // runtime Q_LEN
+  code.e("      $,", num_heads);      // H
+  code.e("      $f,", sm_scale_log2); // sm_scale_log2
+  code.e("      head_,");
+  code.e("      task_desc->task_metadata.kv_idx);"); // q_block
   code.e("}");
   return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
 }
@@ -4162,23 +4180,49 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::mla_kv_cache_gather_split_sm100_task_impl<$, $, $>(",
+  // k_pe_out in DeepSeek V3 builder is allocated as [mbt, 128] (padded from
+  // ROPE_DIM=64 to MMA_M=128 for SM100 linear alignment). Real rope data is
+  // in the first 64 cols per row; cols 64..127 are zero padding. Hence per-
+  // token stride is K_PE_ROW_STRIDE=128, not ROPE_DIM=64.
+  constexpr int k_pe_row_stride = 128;
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  auto *c_latent_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         d_v);
+  code.e("  auto *k_pe_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         k_pe_row_stride);
+  code.e("  auto *ckv_sep_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_v);
+  code.e("  auto *kpe_sep_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_k - d_v);
+  code.e("kernel::mla_kv_cache_gather_split_sm100_task_impl<$, $, $, $>(",
          d_k,
          d_v,
-         page_size);
-  code.e("    task_desc->input_ptrs[0],"); // c_latent_new
-  code.e("    task_desc->input_ptrs[1],"); // k_pe_new
+         page_size,
+         k_pe_row_stride);
+  code.e("    c_latent_new_ptr_,");
+  code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache
   // ckv_sep and kpe_sep attached as new_input (store_in_dmem=True) on the
   // Python side — same convention as the non-split variant which treats
   // contiguous_kv as input.
-  code.e("    task_desc->input_ptrs[3],"); // ckv_sep
-  code.e("    task_desc->input_ptrs[4],"); // kpe_sep
+  code.e("    ckv_sep_ptr_,");
+  code.e("    kpe_sep_ptr_,");
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    task_desc->task_metadata.request_id);");
+  code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_SPLIT_SM100,
                                code.to_string());
 }

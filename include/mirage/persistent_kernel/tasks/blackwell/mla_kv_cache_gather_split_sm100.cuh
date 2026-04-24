@@ -28,10 +28,17 @@ namespace kernel {
 
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
-          int PAGE_SIZE> // Page size (e.g., 128)
+          int PAGE_SIZE, // Page size (e.g., 128)
+          int K_PE_ROW_STRIDE = D_K - D_V>
+// Row stride of the `k_pe_new_ptr` buffer, in bf16 elements. DeepSeek
+// V3's builder allocates k_pe_out as [mbt, 128] (padded to MMA_M=128
+// alignment, real rope data is first 64 cols). If row stride isn't
+// specified, default to ROPE_DIM for back-compat with contiguous
+// [N, ROPE_DIM] callers.
 __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
     void const *c_latent_new_ptr, // [num_tokens, D_V] new c_latent
-    void const *k_pe_new_ptr,     // [num_tokens, D_K - D_V] new k_pe
+    void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] (first
+                                  //  D_K-D_V=64 cols are real rope data)
     void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged cache
     void *ckv_sep_ptr,            // [max_seq_len, D_V=512] output
     void *kpe_sep_ptr,            // [max_seq_len, D_K-D_V=64] output
@@ -72,6 +79,8 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
 
   // Step 1: append new tokens to paged cache (identical to non-split variant —
   // the cache layout is still [c_latent | k_pe] concatenated per position).
+  // Read k_pe_new with row stride K_PE_ROW_STRIDE (padded to MMA_M=128 for
+  // DeepSeek V3); only first ROPE_DIM=64 cols are real.
   int const kv_start_pos = seq_len - num_new_tokens;
   for (int tok = 0; tok < num_new_tokens; tok++) {
     int const seq_pos = kv_start_pos + tok;
@@ -79,7 +88,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
     int const pos_in_page = seq_pos % PAGE_SIZE;
     T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
     T const *src_lat = c_latent_new + tok * D_V;
-    T const *src_pe = k_pe_new + tok * ROPE_DIM;
+    T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
     for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
       if (d + 8 <= D_V) {
         *reinterpret_cast<uint4 *>(dst + d) =
