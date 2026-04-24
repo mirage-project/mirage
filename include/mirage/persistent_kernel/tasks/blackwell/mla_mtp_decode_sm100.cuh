@@ -70,6 +70,10 @@ namespace kernel {
 // ============ MLA MTP Decode Device Function ============
 // blockIdx.x → decomposed into (gi, si) via params
 // blockIdx.y → bi via param
+// local_num_heads: runtime parameter for TP support. In single-GPU this equals
+// mla_mtp::NUM_HEADS=128. In TP mode, this is num_heads/tp_size.
+// Used for Q-tensor indexing and bounds checks so the kernel correctly handles
+// the per-rank local head count without needing padded buffers.
 template <bool SINGLE_TILE>
 __device__ __noinline__ void
     mla_mtp_decode_sm100_task_impl(CUtensorMap const *Q_tm_ptr,
@@ -83,8 +87,8 @@ __device__ __noinline__ void
                                    int Q_LEN,
                                    int gi,
                                    int si,
-                                   int bi // head_group, split_idx, batch_idx
-    ) {
+                                   int bi, // head_group, split_idx, batch_idx
+                                   int local_num_heads = mla_mtp::NUM_HEADS) {
   using namespace mla_mtp;
   using namespace ::kernel::sm100_ptx;
 
@@ -100,6 +104,13 @@ __device__ __noinline__ void
     return;
   }
 
+  // Dual-dispatch gate (opt/mla-dual-dispatch): see tp2 kernel. When both
+  // the prefill and this MLA decode kernel are registered for the same
+  // attention step, skip decode if runtime Q_LEN exceeds the decode regime.
+  if (Q_LEN > 8) {
+    return;
+  }
+
   int const kvt = (kv_len + TILE_S - 1) / TILE_S;
   int const tps = (kvt + sk - 1) / sk;
   int const t0 = si * tps;
@@ -108,7 +119,9 @@ __device__ __noinline__ void
     return;
   }
 
-  int const hpb = NUM_HEADS / num_head_groups;
+  // hpb (heads per block): use local_num_heads for TP-aware partitioning.
+  // In single-GPU, local_num_heads == NUM_HEADS so behavior matches original.
+  int const hpb = local_num_heads / num_head_groups;
 
   extern __shared__ __align__(1024) char smem_buf[];
   int const smem_base = __cvta_generic_to_shared(smem_buf);
@@ -222,7 +235,10 @@ __device__ __noinline__ void
                      "r"(tma_bar + stage * 8)
                      : "memory");
         for (int q = 0; q < Q_LEN; q++) {
-          int global_row = bi * Q_LEN * NUM_HEADS + q * NUM_HEADS + gi * hpb;
+          // Q tensor indexed by local_num_heads (Q buffer sized for local
+          // heads).
+          int global_row =
+              bi * Q_LEN * local_num_heads + q * local_num_heads + gi * hpb;
           asm volatile(
               "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_"
               "tx::bytes "
@@ -667,7 +683,8 @@ __device__ __noinline__ void
                                    int Q_LEN,
                                    int dv_base,
                                    int gi,
-                                   int bi) {
+                                   int bi,
+                                   int local_num_heads = mla_mtp::NUM_HEADS) {
   using namespace mla_mtp;
   using namespace ::kernel::sm100_ptx;
   int const tid = threadIdx.x;
@@ -676,10 +693,19 @@ __device__ __noinline__ void
   int const lane = tid / 128;
   int const d = dv_base + lane;
 
-  int hpb = NUM_HEADS / num_head_groups;
+  // hpb: heads per block, use local_num_heads for TP.
+  int hpb = local_num_heads / num_head_groups;
   int q = row / hpb;
   int h_local = row % hpb;
   int h_global = gi * hpb + h_local;
+
+  // Dual-dispatch gate (opt/mla-dual-dispatch): if Q_LEN is in the prefill
+  // regime (> 8), the co-registered mla_prefill kernel has already written
+  // attn_out. Skip reduce so we don't overwrite with stale/partial Oa/La.
+  // Done BEFORE __syncthreads to ensure uniform return across all threads.
+  if (Q_LEN > 8) {
+    return;
+  }
 
   __shared__ float la_smem[MAX_SK * 128];
   int la_block_base = (bi * num_head_groups * sk + gi * sk) * 128;
@@ -689,11 +715,13 @@ __device__ __noinline__ void
   }
   __syncthreads();
 
-  if (q >= Q_LEN || h_global >= NUM_HEADS) {
+  // Bounds check against local_num_heads (O buffer sized for local heads).
+  if (q >= Q_LEN || h_global >= local_num_heads) {
     return;
   }
 
-  int o_base = (bi * Q_LEN + q) * NUM_HEADS * D_V + h_global * D_V;
+  // O indexed by local_num_heads.
+  int o_base = (bi * Q_LEN + q) * local_num_heads * D_V + h_global * D_V;
 
   float lse_max = -1e30f;
   float sum_exp = 0.0f;

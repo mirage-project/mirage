@@ -87,7 +87,8 @@ __device__ __forceinline__ void
                                     void const *__restrict__ draft_tokens_ptr,
                                     void *__restrict__ tokens_buffer_ptr,
                                     void const *__restrict__ step_ptr,
-                                    void *__restrict__ num_new_tokens_ptr) {
+                                    void *__restrict__ num_new_tokens_ptr,
+                                    int request_id) {
 
   long long const *__restrict__ main_token =
       static_cast<long long const *>(main_token_ptr);
@@ -98,21 +99,92 @@ __device__ __forceinline__ void
   int *__restrict__ num_new_tokens = static_cast<int *>(num_new_tokens_ptr);
 
   int t_id = threadIdx.x;
-  // blockIdx.x = request index
-  int req = blockIdx.x;
+  // Use task metadata request_id (not blockIdx.x which is worker block ID
+  // in persistent kernel)
+  int req = request_id;
 
   int cur_step = step[req];
 
   // Thread 0: write main token at step+1, set num_new_tokens
   if (t_id == 0) {
-    tokens[req * MAX_SEQ_LEN + cur_step + 1] = main_token[req];
-    num_new_tokens[req] = NUM_DRAFT + 1;
+    if (cur_step + 1 < MAX_SEQ_LEN) {
+      tokens[req * MAX_SEQ_LEN + cur_step + 1] = main_token[req];
+    }
+    // Clamp num_new_tokens so we don't exceed MAX_SEQ_LEN
+    int max_new = MAX_SEQ_LEN - cur_step - 1;
+    if (max_new < 0) {
+      max_new = 0;
+    }
+    num_new_tokens[req] = (NUM_DRAFT + 1 < max_new) ? NUM_DRAFT + 1 : max_new;
   }
 
-  // Threads 0..NUM_DRAFT-1: write draft tokens
+  // Threads 0..NUM_DRAFT-1: write draft tokens (bounds-checked)
   if (t_id < NUM_DRAFT) {
-    tokens[req * MAX_SEQ_LEN + cur_step + 2 + t_id] =
-        draft_tokens[req * NUM_DRAFT + t_id];
+    int write_pos = cur_step + 2 + t_id;
+    if (write_pos < MAX_SEQ_LEN) {
+      tokens[req * MAX_SEQ_LEN + write_pos] =
+          draft_tokens[req * NUM_DRAFT + t_id];
+    }
+  }
+}
+
+// --- Build MTP Embedding Input (vLLM-aligned) ---
+// vLLM's MTP (see vllm/v1/spec_decode/eagle.py L666-669) embeds shifted
+// ground-truth prompt tokens during prefill, falling back to generated tokens
+// for positions past the prompt boundary. Prior MPK behavior used main model's
+// argmax for all mbt positions, which equals ground-truth only when main is
+// trained accurately (wrong for partial-layer tests).
+//
+// This kernel constructs MTP's per-iteration embedding input:
+//   For i in [0..BATCH_SIZE-2]: read tokens[req, step+i+1] (shifted prompt
+//       positions, populated in demo.py's tokens buffer from the actual prompt
+//       and, for later iterations, from previous iterations'
+//       prepare_next_batch copies).
+//   For i == BATCH_SIZE-1: read output_tokens[i] = main's argmax for the
+//       current iteration's last position. This is the token that would have
+//       been appended to the sequence had prepare_next_batch run first.
+//
+// Prefill (step=0, mbt=M, prompt fills tokens[0..M-1]):
+//   i < M-1 → tokens[step+i+1] = prompt[i+1]  (ground truth)
+//   i == M-1 → output_tokens[M-1] = main's first generated token
+//
+// Decode (step=N, mbt=1):
+//   Only i == BATCH_SIZE-1 = 0 path runs → output_tokens[0] = current argmax
+//
+// Inputs:
+//   tokens_buffer:   [MAX_REQUESTS, MAX_SEQ_LEN] int64 — full sequence buffer
+//   output_tokens:   [BATCH_SIZE, 1] int64 — current iter's argmax
+//   step:            [MAX_REQUESTS] int32 — per-request step
+// Outputs:
+//   mtp_input_tokens: [BATCH_SIZE, 1] int64 — MTP's embed input
+template <int BATCH_SIZE, int MAX_SEQ_LEN>
+__device__ __forceinline__ void
+    mtp_build_embed_input_kernel(void *__restrict__ mtp_input_tokens_ptr,
+                                 void const *__restrict__ tokens_buffer_ptr,
+                                 void const *__restrict__ output_tokens_ptr,
+                                 void const *__restrict__ step_ptr,
+                                 int request_id) {
+  long long *__restrict__ mtp_input =
+      static_cast<long long *>(mtp_input_tokens_ptr);
+  long long const *__restrict__ tokens =
+      static_cast<long long const *>(tokens_buffer_ptr);
+  long long const *__restrict__ output_tokens =
+      static_cast<long long const *>(output_tokens_ptr);
+  int const *__restrict__ step = static_cast<int const *>(step_ptr);
+
+  int req = request_id;
+  int cur_step = step[req];
+
+  // Each thread handles multiple positions if BATCH_SIZE > blockDim.x.
+  for (int i = threadIdx.x; i < BATCH_SIZE; i += blockDim.x) {
+    long long val;
+    if (i < BATCH_SIZE - 1) {
+      int pos = cur_step + i + 1;
+      val = (pos < MAX_SEQ_LEN) ? tokens[req * MAX_SEQ_LEN + pos] : 0LL;
+    } else {
+      val = output_tokens[i];
+    }
+    mtp_input[i] = val;
   }
 }
 

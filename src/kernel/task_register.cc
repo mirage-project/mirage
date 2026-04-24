@@ -1718,11 +1718,15 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
   // Bias Tensor setup
+  // When batch_size < MMA_N, the MMA tile reads MMA_N rows but only
+  // batch_size rows exist.  Use stride 0 so every tile-row reads from
+  // the single valid batch row, avoiding an out-of-bounds global read.
+  int bias_batch_stride = (batch_size < MMA_N) ? 0 : output_stride;
   code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
          "cute::make_stride($, cute::Int<1>{}));",
          batch_size,
          output_size,
-         output_stride);
+         bias_batch_stride);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
@@ -1872,11 +1876,15 @@ int TaskRegister::register_splitk_linear_sm100_task(
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
   // Bias Tensor setup
+  // When batch_size < MMA_N, the MMA tile reads MMA_N rows but only
+  // batch_size rows exist.  Use stride 0 so every tile-row reads from
+  // the single valid batch row, avoiding an out-of-bounds global read.
+  int bias_batch_stride_sk = (batch_size < MMA_N) ? 0 : output_stride;
   code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
          "cute::make_stride($, cute::Int<1>{}));",
          batch_size,
          output_size,
-         output_stride);
+         bias_batch_stride_sk);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
@@ -2680,7 +2688,13 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
   constexpr int bK = 128; // FP8: bK=128 for one scale-block per k-tile
-  constexpr int num_ab_stages = 4;
+  // NUM_AB_STAGE=8 (was 4): at TP=4, moe_w2_fp8 has fp8_k_tile_count=8 +
+  // fp8_num_m_tiles=56 + fp8_num_n_tiles=4. With 4 stages the pipeline hung
+  // (TP=4 mbt>=40 MoE hang). With 8 stages it passes at 26.9 ms/tok. Matches
+  // BF16 moe_linear_sm100's existing pipeline depth. Total smem ≈ 148KB, fits
+  // under the 205KB dynamic-smem budget. See project_tp4_moe_hang.md
+  // (2026-04-22).
+  constexpr int num_ab_stages = 8;
   constexpr int num_acc_stages = 2;
   constexpr int num_c_stages = 4;
   constexpr int num_tmem_columns = MMA_N * num_acc_stages; // 32
@@ -3446,16 +3460,19 @@ int TaskRegister::register_mla_decode_sm100_task(
   int num_splits = params[3];
   int q_len = (params.size() >= 6) ? params[5] : 1;
   // num_head_groups derived from q_len: each block handles q_len queries × hpb
-  // heads. hpb = 128 / q_len (must divide 128). num_head_groups = NUM_HEADS /
-  // hpb.
-  int hpb = 128 / q_len;
-  while (128 % hpb != 0) {
+  // heads. TP-aware: hpb = min(128/q_len, num_heads). In single-GPU
+  // (num_heads=128), this equals 128/q_len (original behavior). In TP, caps hpb
+  // at local heads. Kernel uses local_num_heads (=num_heads here) for indexing.
+  int hpb = std::min(128 / q_len, num_heads);
+  while (hpb > 0 && num_heads % hpb != 0) {
     hpb--;
   }
+  if (hpb <= 0) {
+    hpb = 1;
+  }
   int num_head_groups = num_heads / hpb;
-  // For BS > 1 we'd need a separate batch dispatch; current single-request
-  // setup uses request_id as either bi (q_len=1) or gi (q_len>1). When q_len>1,
-  // BS is implicitly 1.
+  // q_len=1 keeps the legacy mapping where request_id is batch. For q_len>1,
+  // grid.y is head group and grid.z is batch (stored in merge_task_offset).
   bool const single_query = (q_len == 1);
 
   mirage::transpiler::CodeKeeper code;
@@ -3470,7 +3487,7 @@ int TaskRegister::register_mla_decode_sm100_task(
   if (single_query) {
     code.e("  int bi_ = task_desc->task_metadata.request_id;");
   } else {
-    code.e("  int bi_ = 0;  // BS=1 when q_len>1");
+    code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
     code.e(
         "  int gi_ = task_desc->task_metadata.request_id;  // head group idx");
   }
@@ -3518,7 +3535,8 @@ int TaskRegister::register_mla_decode_sm100_task(
     code.e("      gi_,");       // gi (from request_id)
   }
   code.e("      (int)task_desc->task_metadata.kv_idx,"); // si (split_idx)
-  code.e("      bi_);");                                 // bi (batch_idx)
+  code.e("      bi_,");                                  // bi (batch_idx)
+  code.e("      $);", num_heads); // local_num_heads (TP-aware)
   code.e("}");
   return register_task_variant(TASK_MLA_DECODE_SM100, code.to_string());
 }
@@ -3538,10 +3556,13 @@ int TaskRegister::register_mla_reduce_sm100_task(
   int d_start = params[3];
   int d_count = params[4];
   int q_len = (params.size() >= 6) ? params[5] : 1;
-  // Match decode kernel head_group derivation
-  int hpb = 128 / q_len;
-  while (128 % hpb != 0) {
+  // Match decode kernel head_group derivation (TP-aware).
+  int hpb = std::min(128 / q_len, num_heads);
+  while (hpb > 0 && num_heads % hpb != 0) {
     hpb--;
+  }
+  if (hpb <= 0) {
+    hpb = 1;
   }
   int num_head_groups = num_heads / hpb;
   bool const single_query = (q_len == 1);
@@ -3554,8 +3575,10 @@ int TaskRegister::register_mla_reduce_sm100_task(
     // decode kernel produced for this iter (1 row for decode, mbt rows for
     // prefill).
     code.e("{");
-    code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[0];");
-    code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[1];");
+    code.e("  int gi_ = task_desc->task_metadata.request_id;");
+    code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+    code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+    code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
     code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
     code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
     code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
@@ -3576,10 +3599,12 @@ int TaskRegister::register_mla_reduce_sm100_task(
   code.e("    $,", d_start); // dv_base
   if (single_query) {
     code.e("    0,"); // gi (head group 0)
-    code.e("    (int)task_desc->task_metadata.request_id);"); // bi
+    code.e("    (int)task_desc->task_metadata.request_id,"); // bi
+    code.e("    $);", num_heads); // local_num_heads (TP-aware)
   } else {
-    code.e("    (int)task_desc->task_metadata.request_id,"); // gi
-    code.e("    0);");                                       // bi (BS=1)
+    code.e("    gi_,");
+    code.e("    bi_,");
+    code.e("    $);", num_heads); // local_num_heads (TP-aware)
     code.e("}");
   }
   return register_task_variant(TASK_MLA_REDUCE_SM100, code.to_string());
@@ -3608,31 +3633,104 @@ int TaskRegister::register_mla_prefill_sm100_task(
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   // MLA prefill: grid = (H, num_q_blocks, B)
-  // task_metadata.request_id = head (bid.x)
+  // task_metadata.request_id = batch (bid.z)
   // task_metadata.kv_idx = q_block (bid.y)
+  // task_metadata.merge_task_offset = head (bid.x)
   //
   // Inputs: Q_nope [S,H,D_CKV], Q_pe [S,H,D_KPE], CKV [S,D_CKV], KPE [S,D_KPE]
   // Output: O [S,H,D_V]
-  // All tensors are passed as raw pointers — no TMA.
+  // The kernel itself is single-request; we slice each request's Q / KV /
+  // output window before calling it.
+
+  (void)seq_len;
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // Compute S (total KV length) and Q_LEN (this iteration's chunk length)
+  // at runtime. S = pages*page_size + last_page_len, grows as prefill
+  // progresses. Q_LEN = qo_indptr[bi+1] - qo_indptr[bi] = num_new_tokens
+  // this iteration (can be smaller than mbt).
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int head_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int Q_LEN_ = runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  auto *q_nope_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         num_heads * d_ckv);
+  code.e("  auto *q_pe_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         num_heads * d_kpe);
+  code.e("  auto *ckv_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[2]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_ckv);
+  code.e("  auto *kpe_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[3]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_kpe);
+  code.e("  auto *out_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]) + "
+         "qo_fp_ * $;",
+         num_heads * d_v);
+  code.e("  kernel::mla_prefill_sm100_task_impl(");
+  code.e("      q_nope_ptr_,");
+  code.e("      q_pe_ptr_,");
+  code.e("      ckv_ptr_,");
+  code.e("      kpe_ptr_,");
+  // O attached via new_input(store_in_dmem=True) on the Python side (MPK
+  // convention shared with mla_decode_layer), so use input_ptrs[4].
+  code.e("      out_ptr_,");
+  code.e("      S_,");                // runtime S
+  code.e("      Q_LEN_,");            // runtime Q_LEN
+  code.e("      $,", num_heads);      // H
+  code.e("      $f,", sm_scale_log2); // sm_scale_log2
+  code.e("      head_,");
+  code.e("      task_desc->task_metadata.kv_idx);"); // q_block
+  code.e("}");
+  return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_prefill_tp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_heads per TP rank (e.g. 16 for TP=8)
+  // params[1]: seq_len (must be <= 4096)
+  // Inputs: [0] Q_nope [B,S,H,128], [1] Q_pe [B,S,H,64],
+  //         [2] K [B,S,192] (nope+rope concat), [3] V [B,S,128]
+  // Output: [0] O [B,S,H,128]
+  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V (input_tma_desc_ptrs[3][0]).
+  assert(params.size() == 2);
+  int num_heads = params[0];
+  int seq_len = params[1];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+  float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::mla_prefill_sm100_task_impl(");
+  code.e("kernel::mla_prefill_tp8::mla_prefill_tp8_sm100_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K TMA
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),");           // Qn
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");           // Qp
   code.e(
-      "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Q_nope
-  code.e(
-      "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[1]),"); // Q_pe
-  code.e(
-      "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[2]),"); // CKV
-  code.e(
-      "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[3]),"); // KPE
-  code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");   // O
-  code.e("    $,", seq_len);                                             // S
-  code.e("    $,", num_heads);                                           // H
-  code.e("    $f,", sm_scale_log2);                   // sm_scale_log2
-  code.e("    task_desc->task_metadata.request_id,"); // head
-  code.e("    task_desc->task_metadata.kv_idx);");    // q_block
-  return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
+      "    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
+  code.e("    $,", seq_len);                                          // S
+  code.e("    $,", num_heads);                                        // H
+  code.e("    $f,", sm_scale_log2);                                   // sml2
+  code.e("    task_desc->task_metadata.request_id,"); // head (bid.x)
+  code.e("    task_desc->task_metadata.kv_idx,");     // q_block (bid.y)
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch (bid.z)
+  return register_task_variant(TASK_MLA_PREFILL_TP8_SM100, code.to_string());
 }
 
 int TaskRegister::register_mla_mtp_decode_sm100_task(
@@ -3653,11 +3751,22 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   // Template dispatch on SINGLE_TILE
   if (single_tile) {
-    code.e("kernel::mla_mtp_decode_sm100_task_impl<true>(");
+    code.e("  kernel::mla_mtp_decode_sm100_task_impl<true>(");
   } else {
-    code.e("kernel::mla_mtp_decode_sm100_task_impl<false>(");
+    code.e("  kernel::mla_mtp_decode_sm100_task_impl<false>(");
   }
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
@@ -3673,14 +3782,15 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
     float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
     code.e("    $f,", _sm); // ss
   }
-  code.e("    $,", kv_len);
+  code.e("    kv_len_,");
   code.e("    $,", num_splits);
   code.e("    $,", num_head_groups);
-  code.e("    $,", q_len);
+  code.e("    q_len_rt_,");
   // gi, si, bi from task metadata
   code.e("    task_desc->task_metadata.request_id,"); // gi (head_group)
   code.e("    task_desc->task_metadata.kv_idx,");     // si (split_idx)
-  code.e("    0);");                                  // bi (batch=0 for BS=1)
+  code.e("    bi_);");
+  code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_SM100, code.to_string());
 }
 
@@ -3698,19 +3808,27 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   // 256 threads for MPK workers (default template is 512 for standalone)
-  code.e("kernel::mla_mtp_reduce_sm100_task_impl<256>(");
+  code.e("  kernel::mla_mtp_reduce_sm100_task_impl<256>(");
   code.e(
       "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Oa
   code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");    // La
   code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");   // O
   code.e("    $,", num_splits);
   code.e("    $,", num_head_groups);
-  code.e("    $,", q_len);
+  code.e("    q_len_rt_,");
   // dv_base, gi, bi from task metadata
   code.e("    task_desc->task_metadata.kv_idx * $,", rd_dv); // dv_base
   code.e("    task_desc->task_metadata.request_id,");        // gi
-  code.e("    0);");                                         // bi (batch=0)
+  code.e("    bi_);");
+  code.e("}");
   return register_task_variant(TASK_MLA_MTP_REDUCE_SM100, code.to_string());
 }
 int TaskRegister::register_paged_attention_split_kv_hopper_task(
@@ -3845,7 +3963,7 @@ int TaskRegister::register_nvshmem_allgather_strided_put_task(
   c.inc_indent();
   c.e("int target_gpu_id = "
       "static_cast<int>(get_event_gpu_id(task_desc->trigger_event));");
-  c.e("nvshmem_allgather_strided_put<bfloat16, $, $, $>(",
+  c.e("kernel::nvshmem_allgather_strided_put<bfloat16, $, $, $>(",
       batch_size,
       output_size,
       output_stride);
@@ -3895,7 +4013,7 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   // Register tile allreduce task
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
-  c.e("nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
+  c.e("kernel::nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
       batch_size,
       output_size,
       output_stride);
@@ -4089,20 +4207,105 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $>(",
+  // k_pe_out is allocated with a padded row stride of 128 (real ROPE dim is
+  // 64). Slice the per-request token window before appending/gathering.
+  constexpr int k_pe_row_stride = 128;
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  auto *c_latent_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         d_v);
+  code.e("  auto *k_pe_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         k_pe_row_stride);
+  code.e("  auto *contiguous_kv_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]) + "
+         "bi_ * S_ * $;",
+         d_k);
+  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $, $>(",
          d_k,
          d_v,
-         page_size);
-  code.e("    task_desc->input_ptrs[0],"); // c_latent_new
-  code.e("    task_desc->input_ptrs[1],"); // k_pe_new
+         page_size,
+         k_pe_row_stride);
+  code.e("    c_latent_new_ptr_,");
+  code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache
-  code.e("    task_desc->input_ptrs[3],"); // contiguous_kv
+  code.e("    contiguous_kv_ptr_,");
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    task_desc->task_metadata.request_id);");
+  code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_kv_gather_split_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Split-output variant for the chunked-prefill MLA kernel. Same inputs as
+  // the non-split variant plus TWO separate output pointers: ckv_sep and
+  // kpe_sep. Layout: ckv_sep [max_seq, D_V=512], kpe_sep [max_seq, D_K-D_V=64].
+  // params[0]: d_k, params[1]: d_v, params[2]: page_size
+  assert(params.size() == 3);
+
+  int d_k = params[0];
+  int d_v = params[1];
+  int page_size = params[2];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // k_pe_out in DeepSeek V3 builder is allocated as [mbt, 128] (padded from
+  // ROPE_DIM=64 to MMA_M=128 for SM100 linear alignment). Real rope data is
+  // in the first 64 cols per row; cols 64..127 are zero padding. Hence per-
+  // token stride is K_PE_ROW_STRIDE=128, not ROPE_DIM=64.
+  constexpr int k_pe_row_stride = 128;
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  auto *c_latent_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         d_v);
+  code.e("  auto *k_pe_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         k_pe_row_stride);
+  code.e("  auto *ckv_sep_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_v);
+  code.e("  auto *kpe_sep_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_k - d_v);
+  code.e("kernel::mla_kv_cache_gather_split_sm100_task_impl<$, $, $, $>(",
+         d_k,
+         d_v,
+         page_size,
+         k_pe_row_stride);
+  code.e("    c_latent_new_ptr_,");
+  code.e("    k_pe_new_ptr_,");
+  code.e("    task_desc->input_ptrs[2],"); // paged_cache
+  // ckv_sep and kpe_sep attached as new_input (store_in_dmem=True) on the
+  // Python side — same convention as the non-split variant which treats
+  // contiguous_kv as input.
+  code.e("    ckv_sep_ptr_,");
+  code.e("    kpe_sep_ptr_,");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_KV_GATHER_SPLIT_SM100,
+                               code.to_string());
 }
 
 int TaskRegister::register_mtp_verify_strict_task(
@@ -4169,12 +4372,318 @@ int TaskRegister::register_mtp_prepare_verify_task(
   code.inc_indent();
   code.e(
       "kernel::mtp_prepare_verify_input_kernel<$, $>(", num_draft, max_seq_len);
-  code.e("    task_desc->input_ptrs[0],");   // main_token
-  code.e("    task_desc->input_ptrs[1],");   // draft_tokens
-  code.e("    task_desc->input_ptrs[2],");   // tokens_buffer
-  code.e("    task_desc->input_ptrs[3],");   // step
-  code.e("    task_desc->output_ptrs[0]);"); // num_new_tokens
+  code.e("    task_desc->input_ptrs[0],");             // main_token
+  code.e("    task_desc->input_ptrs[1],");             // draft_tokens
+  code.e("    task_desc->input_ptrs[2],");             // tokens_buffer
+  code.e("    task_desc->input_ptrs[3],");             // step
+  code.e("    task_desc->output_ptrs[0],");            // num_new_tokens
+  code.e("    task_desc->task_metadata.request_id);"); // request_id (not
+                                                       // blockIdx.x)
   return register_task_variant(TASK_MTP_PREPARE_VERIFY, code.to_string());
+}
+
+int TaskRegister::register_mtp_build_embed_input_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: batch_size (mbt), params[1]: max_seq_len
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int max_seq_len = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e(
+      "kernel::mtp_build_embed_input_kernel<$, $>(", batch_size, max_seq_len);
+  code.e("    task_desc->output_ptrs[0],"); // mtp_input_tokens (output)
+  code.e("    runtime_config.tokens,");     // tokens_buffer (global)
+  code.e("    task_desc->input_ptrs[0],");  // output_tokens (main argmax)
+  code.e("    runtime_config.step,");       // step (global)
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_MTP_BUILD_EMBED_INPUT, code.to_string());
+}
+
+// ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
+//
+// Three variants (TP=2/4/8) share structure but differ:
+//   - NUM_HEADS hardcoded inside namespace (64/32/16) → not a runtime param
+//   - TP=4 splits V across two CTAs via blockIdx.z (z=2 grid)
+//   - TP=8 takes Q_LEN_real (Q_LEN is padded to even at the call site)
+//
+// Each TP has a paired (decode, reduce) task. params layout for decode:
+//   [num_groups, q_len, kv_len, num_splits]                 (TP=2)
+//   [num_groups, q_len, kv_len, num_splits, v_half]         (TP=4)
+//   [num_groups, q_len_padded, kv_len, num_splits, q_len_real]  (TP=8)
+// reduce params: [num_groups, q_len, num_splits, rd_dv]
+
+int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  int kvt = (kv_len + 128 - 1) / 128;
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+  int qpg = (q_len < 2) ? q_len : 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // Compute runtime Q_LEN from qo_indptr (dual-dispatch: kernel uses this
+  // to apply the Q_LEN>8 early-exit and correct causal masking).
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
+  if (single_tile) {
+    code.e("  kernel::mla_mtp_tp2::mla_mtp_tp2_main<true>(");
+  } else {
+    code.e("  kernel::mla_mtp_tp2::mla_mtp_tp2_main<false>(");
+  }
+  code.e("      static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("      static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("      static_cast<float*>(task_desc->output_ptrs[1]),");
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("      $f,", _sm);
+  }
+  code.e("      kv_len_,");
+  code.e("      $,", num_splits);
+  code.e("      q_len_rt_,");
+  code.e("      $,", qpg);
+  code.e("      task_desc->task_metadata.kv_idx,");
+  code.e("      task_desc->task_metadata.request_id);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP2_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int num_splits = params[2];
+  int rd_dv = params[3];
+  int qpg = (q_len < 2) ? q_len : 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // Dual-dispatch: pass runtime Q_LEN so reduce early-exit mirrors main.
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
+  code.e("  kernel::mla_mtp_tp2::mla_mtp_tp2_reduce(");
+  code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
+  code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
+  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("      $,", num_splits);
+  code.e("      $,", num_groups);
+  code.e("      q_len_rt_,");
+  code.e("      $,", qpg);
+  code.e("      task_desc->task_metadata.kv_idx,");
+  code.e("      task_desc->task_metadata.request_id,");
+  code.e("      bi_);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  int kvt = (kv_len + 128 - 1) / 128;
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+  int qpg = (q_len < 4) ? q_len : 4;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // Dual-dispatch: pass runtime Q_LEN from qo_indptr for early-exit gate.
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
+  if (single_tile) {
+    code.e("  kernel::mla_mtp_tp4::mla_mtp_tp4_main<true>(");
+  } else {
+    code.e("  kernel::mla_mtp_tp4::mla_mtp_tp4_main<false>(");
+  }
+  code.e("      static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("      static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("      static_cast<float*>(task_desc->output_ptrs[1]),");
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("      $f,", _sm);
+  }
+  code.e("      kv_len_,");
+  code.e("      $,", num_splits);
+  code.e("      q_len_rt_,");
+  code.e("      $,", qpg);
+  // V-half is folded into block_x's low bit (no z-dim launch in MPK).
+  // Python layer doubles the grid; kernel unpacks v_half = block_x & 1.
+  code.e(
+      "      task_desc->task_metadata.kv_idx,"); // packed (block_x<<1 | v_half)
+  code.e("      task_desc->task_metadata.request_id);"); // batch
+  code.e("}");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP4_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len = params[1];
+  int num_splits = params[2];
+  int rd_dv = params[3];
+  int qpg = (q_len < 4) ? q_len : 4;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // Dual-dispatch: pass runtime Q_LEN so reduce early-exit mirrors main.
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
+  code.e("  kernel::mla_mtp_tp4::mla_mtp_tp4_reduce(");
+  code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
+  code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
+  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("      $,", num_splits);
+  code.e("      $,", num_groups);
+  code.e("      q_len_rt_,");
+  code.e("      $,", qpg);
+  code.e("      task_desc->task_metadata.kv_idx,");
+  code.e("      task_desc->task_metadata.request_id,");
+  code.e("      bi_);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 5);
+  int num_groups = params[0];
+  int q_len_padded = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  int q_len_real = params[4];
+  int kvt = (kv_len + 128 - 1) / 128;
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+  int qpg = 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // Dual-dispatch: pass runtime Q_LEN_real; pad to even for Q_LEN_padded.
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_real_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_real_rt_ < 1) q_len_real_rt_ = 1;");
+  code.e(
+      "  if (q_len_real_rt_ > $) q_len_real_rt_ = $;", q_len_real, q_len_real);
+  code.e("  int q_len_padded_rt_ = q_len_real_rt_ + (q_len_real_rt_ & 1);");
+  if (single_tile) {
+    code.e("  kernel::mla_mtp_tp8::mla_mtp_tp8_main<true>(");
+  } else {
+    code.e("  kernel::mla_mtp_tp8::mla_mtp_tp8_main<false>(");
+  }
+  code.e("      static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("      static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("      static_cast<float*>(task_desc->output_ptrs[1]),");
+  {
+    float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+    float const _sm = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+    code.e("      $f,", _sm);
+  }
+  code.e("      kv_len_,");
+  code.e("      $,", num_splits);
+  code.e("      q_len_padded_rt_,");
+  code.e("      $,", qpg);
+  code.e("      q_len_real_rt_,");
+  code.e("      task_desc->task_metadata.kv_idx,");
+  code.e("      task_desc->task_metadata.request_id);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP8_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int num_groups = params[0];
+  int q_len_padded = params[1];
+  int num_splits = params[2];
+  int rd_dv = params[3];
+  int qpg = 2;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // Dual-dispatch: pass runtime q_len_padded (even-padded runtime Q_LEN).
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
+  code.e("  int q_len_real_rt_ = qo_lp_ - qo_fp_;");
+  code.e("  if (q_len_real_rt_ < 1) q_len_real_rt_ = 1;");
+  code.e("  if (q_len_real_rt_ > $) q_len_real_rt_ = $;",
+         q_len_padded,
+         q_len_padded);
+  code.e("  int q_len_padded_rt_ = q_len_real_rt_ + (q_len_real_rt_ & 1);");
+  code.e("  kernel::mla_mtp_tp8::mla_mtp_tp8_reduce(");
+  code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
+  code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
+  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("      $,", num_splits);
+  code.e("      $,", num_groups);
+  code.e("      q_len_padded_rt_,");
+  code.e("      $,", qpg);
+  code.e("      task_desc->task_metadata.kv_idx,");
+  code.e("      task_desc->task_metadata.request_id,");
+  code.e("      bi_);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100,
+                               code.to_string());
 }
 
 } // namespace runtime

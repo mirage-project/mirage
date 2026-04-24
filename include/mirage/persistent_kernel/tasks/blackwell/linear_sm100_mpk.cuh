@@ -624,9 +624,12 @@ __device__ __noinline__ void
 
         // T2R and register operations
         if constexpr (!NOBIAS) {
-          // this copy might conflict with TMA load, might add a wait barrier if
-          // needed
-          cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
+          // Epilogue has 128 threads but bias may have fewer than 128 columns
+          // (OUTPUT_SIZE). Threads beyond OUTPUT_SIZE must not read global
+          // memory.
+          if (threadIdx.x < OUTPUT_SIZE) {
+            cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
+          }
           // optimize with vectorized type conversion
 
           CUTE_UNROLL

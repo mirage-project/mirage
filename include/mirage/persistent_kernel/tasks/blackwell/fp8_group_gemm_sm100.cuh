@@ -928,7 +928,9 @@ __device__ __forceinline__ void
                 int row = byte_off / bK;
                 int col = byte_off % bK;
                 int32_t token_idx_n = n_tile * MMA_N + row;
-                int32_t topk_idx_n = tRoutingIndex(token_idx_n);
+                // Guard routing index read: MMA tile may exceed BATCH_SIZE
+                int32_t topk_idx_n =
+                    (token_idx_n < BATCH_SIZE) ? tRoutingIndex(token_idx_n) : 0;
 
                 // SWIZZLE_128B: swizzled = linear ^ ((row%8)*16)
                 int linear_off = row * bK + col;
@@ -1352,6 +1354,19 @@ __device__ __forceinline__ void
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
             int smem_buf = (num_prev_k_blk + k_tile) % NUM_AB_STAGE;
 
+            // FIX 2026-04-22: wait ab_empty BEFORE overwriting sfa/sfb_smem.
+            // Previously, scale warp wrote sfa/sfb_smem without waiting for
+            // MMA to finish UTCCP. At TP=4 w2 with mbt=64 (k_tile_count==
+            // NUM_AB_STAGE==8), scale warp could wrap back and overwrite
+            // sfa/sfb_smem[buf] while UTCCP was still reading. ab_empty is
+            // signaled by MMA's umma_arrive (tcgen05.commit) which waits for
+            // all tcgen05 ops (UMMA + UTCCP) to complete, so this correctly
+            // gates scale warp against the UTCCP read.
+            int sf_wr_ab_empty_phase =
+                (num_prev_k_blk + k_tile) / NUM_AB_STAGE % 2 ^ 1;
+            cute::wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_buf],
+                               sf_wr_ab_empty_phase);
+
             // ---- Load + convert + pack SFA (weight scales) ----
             uint32_t *sfa_buf = shared_storage.sfa_smem[smem_buf];
 #pragma unroll
@@ -1371,7 +1386,9 @@ __device__ __forceinline__ void
               uint32_t ue8m0 = 0x7F; // default: UE8M0(1.0) for padding
               if (i < MMA_N) {
                 int32_t token_idx_n = n_tile * MMA_N + i;
-                int32_t topk_idx = tRoutingIndex(token_idx_n);
+                // Guard: MMA_N tile may exceed BATCH_SIZE
+                int32_t topk_idx =
+                    (token_idx_n < BATCH_SIZE) ? tRoutingIndex(token_idx_n) : 0;
                 if (token_idx_n < BATCH_SIZE && topk_idx > 0) {
                   float sf_val;
                   if constexpr (W13_LINEAR) {
@@ -1518,7 +1535,8 @@ __device__ __forceinline__ void
             int32_t m_idx =
                 m_tile * MMA_M + threadIdx.x;   // output row for this thread
             int32_t n_idx = n_tile * MMA_N + i; // token index
-            int32_t topk_idx = tRoutingIndex(n_idx); // routing check
+            // Guard: MMA_N tile may exceed BATCH_SIZE
+            int32_t topk_idx = (n_idx < BATCH_SIZE) ? tRoutingIndex(n_idx) : 0;
             if (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE) {
               // topk_idx is 1-indexed in routing table, convert to 0-indexed
               mOutput(n_idx, topk_idx - 1, m_idx) = tCrC[i];
@@ -1540,6 +1558,9 @@ __device__ __forceinline__ void
   // Only warp 0 performs the deallocation (matching the allocation).
   if (warp_idx == 0) {
     tmem_allocator.free(shared_storage.tmem_base_ptr, kNumTmemColsTotal);
+    // NOTE: intentionally no release_allocation_lock() here — MPK persistent
+    // kernels keep the TMEM allocator locked to warp 0 across tasks. See
+    // moe_linear_sm100.cuh "don't do relinquish for megakernel" comment.
   }
 } // end fp8_moe_group_gemm_sm100_task_impl
 

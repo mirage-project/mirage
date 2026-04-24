@@ -21,6 +21,22 @@ HARD_CODE = """
 #include <Python.h>
 #include <cuda_runtime.h>
 
+// Stubs for host symbols from libnvshmem_device.a that collective_launch.cpp.o
+// references. We don't link the full device archive (it forces -rdc=true), so
+// Host-side stubs for symbols normally in libnvshmem_device.a.
+// We don't link the .a (it forces rdc=true → 255 regs on SM100a).
+// Init is done via nvshmemid_hostlib_init_attr + our callback.
+#ifdef NVSHMEM_NO_DEVICE_LIB
+// Stubs for host-side symbols from libnvshmem_device.a needed by collective_launch.cpp.o
+struct nvshmemi_device_only_state_stub { char data[1024]; };
+nvshmemi_device_only_state_stub nvshmemi_device_only_state;
+extern "C" {
+  void nvshmemi_finalize() {}
+  void _Z31nvshmemi_check_state_and_init_dv() {}
+  void* nvshmemi_get_device_state_ptrs() { return nullptr; }
+}
+#endif
+
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
@@ -180,8 +196,6 @@ def get_compile_command(
         # "-O0",
         # "-g",
         # "-G",
-        # "--ptxas-options=-v",
-        # "-Xptxas=-v",
         "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
@@ -193,10 +207,18 @@ def get_compile_command(
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
 
+    # rdc=true is the default on every NVSHMEM build. The old Blackwell
+    # rdc=false + self-contained-allreduce workaround (hand-rolled
+    # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
+    # because rdc=true previously inflated registers 166→255 on sm_100a) is
+    # kept behind MPK_RDC_FALSE=1 as a safety escape hatch — on CUDA 13.2 +
+    # NVSHMEM 3.6.5 the register-spill issue is gone (verified 2026-04-22 at
+    # TP=2 and TP=4 across mbt∈{1,64} and MTP spec∈{0,1,3}).
+    _rdc_false = os.environ.get("MPK_RDC_FALSE", "0") == "1" and target_cc >= 100
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if not use_nvshmem else "-rdc=true",
+        "-rdc=false" if (not use_nvshmem or _rdc_false) else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -207,6 +229,10 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
+    # Uncomment to enable verbose scheduler/worker/event debug prints from
+    # persistent_kernel.cuh (all gated on MPK_ENABLE_VERBOSE). Noisy; meant for
+    # local debugging only.
+    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
 
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
@@ -228,8 +254,6 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
-    # Use when debugging
-    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -238,7 +262,31 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        nvshmem_flags = ["-DUSE_NVSHMEM", "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi"]
+        if _rdc_false:
+            # Blackwell MPK_RDC_FALSE=1 escape hatch: self-contained allreduce,
+            # no libnvshmem_device.a (kept for regression isolation; see the
+            # block above for when this path is needed).
+            _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
+            _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
+            os.makedirs(_host_obj_dir, exist_ok=True)
+            _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
+            if not os.path.exists(_coll_obj):
+                import subprocess as _sp
+                _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
+            nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
+                             "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
+                             _coll_obj,
+                             "-Xlinker", "--disable-new-dtags",
+                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        else:
+            # Default path: standard NVSHMEM link with device library +
+            # rdc=true. Used everywhere unless MPK_RDC_FALSE=1 on Blackwell.
+            nvshmem_flags = ["-DUSE_NVSHMEM",
+                             "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
+                             "-Xlinker", "--disable-new-dtags",
+                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -307,10 +355,17 @@ class PersistentKernel:
         self.page_size = page_size
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
+        # Prevent GC of PyTorch tensors whose GPU pointers are baked into the
+        # generated persistent-kernel code (attach_input stores raw pointers).
+        self._torch_tensor_refs = []
         self.meta_tensors = meta_tensors
+        # Auto-allocate scheduler snapshot buffer for in-place compaction
+        if "paged_kv_indices_snapshot" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indices_snapshot"] = torch.empty(
+                max_num_pages, dtype=torch.int32, device="cuda")
         self.profiler_tensor = profiler_tensor
         self.trace_name = trace_name
-        self.use_nvshmem = True if world_size > 1 else False
+        self.use_nvshmem = world_size > 1
         self.spec_decode_config = spec_decode_config
         self.use_cutlass_kernel = use_cutlass_kernel
         self._spec_decode_handlers = {
@@ -392,6 +447,10 @@ class PersistentKernel:
         # Sanitize name for C++ codegen (dots are illegal in identifiers)
         safe_name = name.replace('.', '_')
         self.kn_graph.attach_torch_tensor(t, torch_tensor, safe_name)
+        # Keep a reference to the PyTorch tensor so it is not garbage-collected.
+        # The generated persistent kernel code stores the raw GPU data pointer;
+        # if the tensor is freed, the pointer becomes dangling.
+        self._torch_tensor_refs.append(torch_tensor)
         return t
 
     def new_tensor(
@@ -864,6 +923,35 @@ class PersistentKernel:
             [c_latent_new, k_pe_new, paged_cache, contiguous_kv], tb_graph)
         self.kn_graph.register_task(tb_graph, "mla_kv_gather_sm100", params)
 
+    def mla_kv_gather_split_layer(
+        self,
+        c_latent_new: DTensor,
+        k_pe_new: DTensor,
+        paged_cache: DTensor,
+        ckv_sep: DTensor,     # [max_seq_len, D_V=512] output
+        kpe_sep: DTensor,     # [max_seq_len, D_K-D_V=64] output
+        mla_params: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Gather paged KV into SEPARATE CKV / KPE contiguous buffers.
+
+        Variant of ``mla_kv_gather_layer`` that writes the gathered sequence
+        to two dense tensors instead of a single concatenated [S, D_K] buffer.
+        This is the layout ``mla_prefill_sm100`` expects.
+        """
+        d_k, d_v, page_size = mla_params
+        params = [d_k, d_v, page_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(paged_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(ckv_sep, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kpe_sep, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [c_latent_new, k_pe_new, paged_cache, ckv_sep, kpe_sep], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mla_kv_gather_split_sm100", params)
+
     def mla_decode_layer(
         self,
         q_input: DTensor,         # Q tensor (attached with TMA desc)
@@ -941,15 +1029,48 @@ class PersistentKernel:
         params = [num_heads, seq_len, d_ckv, d_kpe, d_v]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_nope, (0, -1, -1), -1, True)
-        tb_graph.new_input(q_pe, (0, -1, -1), -1, True)
-        tb_graph.new_input(ckv, (0, -1, -1), -1, True)
-        tb_graph.new_input(kpe, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        # Kernel reads based on task_metadata.{request_id=head, kv_idx=q_block}
+        # and computes its own (S, H, D) offsets, so MPK must NOT try to
+        # auto-partition dim 0 by grid.x (grid.x is H, not S). Use -1 on all
+        # dims → full barrier event semantics.
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ckv, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kpe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [q_nope, q_pe, ckv, kpe, output], tb_graph
         )
         self.kn_graph.register_task(tb_graph, "mla_prefill_sm100", params)
+
+    def mla_prefill_tp8_layer(
+        self,
+        q_nope: DTensor,   # [B, S, H, D_QK_NOPE=128]
+        q_pe: DTensor,     # [B, S, H, D_QK_ROPE=64]
+        k: DTensor,        # [B, S, D_QK=192] (nope+rope concat along last dim)
+        v: DTensor,        # [B, S, D_V=128]
+        output: DTensor,   # [B, S, H, D_V=128]
+        mla_params: tuple, # (num_heads, seq_len)
+        grid_dim: tuple,   # (H, num_q_blocks, B)
+        block_dim: tuple,  # (128, 1, 1)
+    ):
+        # MLA Prefill TP=8 (unabsorbed, TMA K/V). NUM_HEADS per rank = 16.
+        # Grid: (H, ceil(S/BM), B) where BM=64.
+        num_heads, seq_len = mla_params
+        params = [num_heads, seq_len]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Kernel does its own per-block slicing (head, q_block, batch come via
+        # task metadata). Each input is presented as the full tensor.
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope, q_pe, k, v, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mla_prefill_tp8_sm100", params)
 
     def mla_mtp_decode_layer(
         self,
@@ -968,14 +1089,14 @@ class PersistentKernel:
         num_splits = (kv_len + 128 - 1) // 128
 
         params = [num_head_groups, q_len, kv_len, num_splits]
-        grid_dim = (num_splits, num_head_groups, 1)  # (sk, groups, B=1)
+        grid_dim = (num_splits, num_head_groups, self.max_num_batched_requests)
         block_dim = (128, 1, 1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(output_lse, (0, -1, -1), -1, True)
+        tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [q_input, kv_input, output_partial, output_lse], tb_graph
         )
@@ -1001,17 +1122,154 @@ class PersistentKernel:
         rd_dv = 2
 
         params = [num_head_groups, q_len, num_splits, rd_dv]
-        grid_dim = ((d_v + rd_dv - 1) // rd_dv, num_head_groups, 1)
+        grid_dim = ((d_v + rd_dv - 1) // rd_dv,
+                    num_head_groups,
+                    self.max_num_batched_requests)
         block_dim = (256, 1, 1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_partial, (0, -1, -1), -1, True)
-        tb_graph.new_input(input_lse, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        tb_graph.new_input(input_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [input_partial, input_lse, output], tb_graph
         )
         self.kn_graph.register_task(tb_graph, "mla_mtp_reduce_sm100", params)
+
+    # ─────────── MLA-MTP TP variants (ferret-derived, no PDL) ───────────
+    # Shape: NUM_HEADS = 128/TP per rank, D_K=576, D_V=512
+    # Three variants (TP=2/4/8) — each is a (decode + reduce) pair.
+
+    def _mla_mtp_decode_tp_layer(
+        self,
+        q_input, kv_input, output_partial, output_lse,
+        q_len, kv_len, num_heads,
+        task_name, has_v_split=False, q_len_real=None,
+    ):
+        """Internal helper for TP=2/4/8 decode dispatch.
+          q_len: padded Q_LEN passed to the kernel
+          q_len_real: TP=8 only — actual unpadded Q_LEN
+          num_heads: 64/32/16 per TP variant
+          has_v_split: TP=4 only — block_x doubled to encode v_half in low bit
+        """
+        if num_heads == 64:
+            qpg = min(2, q_len)
+        elif num_heads == 32:
+            qpg = min(4, q_len)
+        else:  # TP=8
+            qpg = 2
+        num_groups = (q_len + qpg - 1) // qpg
+        num_splits = (kv_len + 128 - 1) // 128  # TILE_S=128
+        # TP=4 packs v_half into block_x low bit → 2× tasks. Kernel unpacks.
+        x_mul = 2 if has_v_split else 1
+        grid_dim = (num_groups * num_splits * x_mul,
+                    self.max_num_batched_requests,
+                    1)
+        block_dim = (128, 1, 1)
+
+        if num_heads == 16:  # TP=8
+            params = [num_groups, q_len, kv_len, num_splits,
+                      q_len_real if q_len_real is not None else q_len]
+        else:  # TP=2 and TP=4
+            params = [num_groups, q_len, kv_len, num_splits]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_input, kv_input, output_partial, output_lse], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def _mla_mtp_reduce_tp_layer(
+        self,
+        input_partial, input_lse, output,
+        q_len, kv_len, num_heads, task_name,
+    ):
+        if num_heads == 64:
+            qpg = min(2, q_len)
+        elif num_heads == 32:
+            qpg = min(4, q_len)
+        else:
+            qpg = 2
+        num_groups = (q_len + qpg - 1) // qpg
+        num_splits = (kv_len + 128 - 1) // 128
+        d_v = 512
+        rd_dv = 2
+
+        params = [num_groups, q_len, num_splits, rd_dv]
+        grid_dim = ((d_v + rd_dv - 1) // rd_dv,
+                    num_groups,
+                    self.max_num_batched_requests)
+        block_dim = (256, 1, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_lse, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_partial, input_lse, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def mla_mtp_decode_tp2_layer(
+        self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+    ):
+        self._mla_mtp_decode_tp_layer(
+            q_input, kv_input, output_partial, output_lse,
+            q_len, kv_len, num_heads=64,
+            task_name="mla_mtp_decode_tp2_sm100",
+        )
+
+    def mla_mtp_decode_tp2_reduce_layer(
+        self, input_partial, input_lse, output, q_len, kv_len,
+    ):
+        self._mla_mtp_reduce_tp_layer(
+            input_partial, input_lse, output, q_len, kv_len, num_heads=64,
+            task_name="mla_mtp_decode_tp2_reduce_sm100",
+        )
+
+    def mla_mtp_decode_tp4_layer(
+        self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+    ):
+        # TP=4 V-split: 2× tasks (v_half=0,1). Each writes to a disjoint TMEM
+        # column range; output_partial is a single buffer covering both.
+        self._mla_mtp_decode_tp_layer(
+            q_input, kv_input, output_partial, output_lse,
+            q_len, kv_len, num_heads=32,
+            task_name="mla_mtp_decode_tp4_sm100", has_v_split=True,
+        )
+
+    def mla_mtp_decode_tp4_reduce_layer(
+        self, input_partial, input_lse, output, q_len, kv_len,
+    ):
+        self._mla_mtp_reduce_tp_layer(
+            input_partial, input_lse, output, q_len, kv_len, num_heads=32,
+            task_name="mla_mtp_decode_tp4_reduce_sm100",
+        )
+
+    def mla_mtp_decode_tp8_layer(
+        self, q_input, kv_input, output_partial, output_lse,
+        q_len_real, kv_len,
+    ):
+        # TP=8 pads Q_LEN to even
+        q_len = (q_len_real + 1) & ~1
+        self._mla_mtp_decode_tp_layer(
+            q_input, kv_input, output_partial, output_lse,
+            q_len, kv_len, num_heads=16,
+            task_name="mla_mtp_decode_tp8_sm100", q_len_real=q_len_real,
+        )
+
+    def mla_mtp_decode_tp8_reduce_layer(
+        self, input_partial, input_lse, output, q_len_real, kv_len,
+    ):
+        q_len = (q_len_real + 1) & ~1
+        self._mla_mtp_reduce_tp_layer(
+            input_partial, input_lse, output, q_len, kv_len, num_heads=16,
+            task_name="mla_mtp_decode_tp8_reduce_sm100",
+        )
 
     # MoE Layers
     def tensor_init_layer(
@@ -1471,7 +1729,7 @@ class PersistentKernel:
             "output": output,
         }
         params = [self.world_size, self.mpi_rank]
-        best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim, 
+        best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim,
                                            block_dim=block_dim, params=params)
 
 
@@ -1803,6 +2061,28 @@ class PersistentKernel:
             [main_token, draft_tokens, tokens_buffer, step, num_new_tokens], tb_graph)
         self.kn_graph.register_task(tb_graph, "mtp_prepare_verify", params)
 
+    def mtp_build_embed_input_layer(
+        self,
+        output_tokens: DTensor,       # [mbt, 1] int64 — main model's argmax
+        mtp_input_tokens: DTensor,    # [mbt, 1] int64 — MTP embed input (written)
+        grid_dim: tuple,
+        block_dim: tuple,
+        batch_size: int,
+        max_seq_len: int,
+    ):
+        """Build MTP's per-iteration embedding input token buffer.
+        vLLM-aligned (eagle.py L666-669): positions [0..mbt-2] read from shifted
+        ground-truth prompt tokens (`runtime_config.tokens[step[0] + i + 1]`),
+        position mbt-1 reads from `output_tokens[mbt-1]` (current iter's argmax).
+        `tokens` buffer and `step` are read via runtime_config, not attached.
+        """
+        params = [batch_size, max_seq_len]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(output_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(mtp_input_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([output_tokens, mtp_input_tokens], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mtp_build_embed_input", params)
+
     def softmax_gather_layer(
         self,
         logits: DTensor,          # [batch, vocab_size] BF16
@@ -2063,7 +2343,7 @@ class PersistentKernel:
                         f"Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
                     )
             else:
-                NVSHMEM_LIB_PATH = "/usr/lib/"
+                MPI_LIB_PATH = "/usr/lib/"
                 lib_file_path = os.path.join(MPI_LIB_PATH, "libmpi.so")
                 if not os.path.exists(lib_file_path):
                     raise RuntimeError(
@@ -2092,20 +2372,15 @@ class PersistentKernel:
             use_cutlass_kernel=self.use_cutlass_kernel,
             test_mode=self.test_mode,
         )
-        precompiled_so = os.environ.get("MPK_PRECOMPILED_SO")
-        if precompiled_so and os.path.exists(precompiled_so):
-            shutil.copy(precompiled_so, so_path)
-            # Also copy task_graph.json to the directory where __FILE__ points
-            # (the .so reads json from __FILE__'s parent directory)
-            precompiled_dir = os.path.dirname(precompiled_so)
-            shutil.copy(json_file_path, os.path.join(precompiled_dir, "task_graph.json"))
-            print(f"Using precompiled .so: {precompiled_so}")
-        else:
-            print("Compiling megakernel using the following command line:")
-            print(cc_cmd)
-            subprocess.check_call(cc_cmd)
+        print("Compiling megakernel using the following command line:")
+        print(cc_cmd)
+        subprocess.check_call(cc_cmd)
 
         import importlib.util
+
+        # Set MPK_SO_PATH so init_persistent_kernel() can load the module via
+        # cuLibraryLoadFromFile for nvshmemx_culibrary_init (NVSHMEM_NO_DEVICE_LIB mode).
+        os.environ["MPK_SO_PATH"] = so_path
 
         spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
         mod = importlib.util.module_from_spec(spec)
@@ -2126,6 +2401,7 @@ class PersistentKernel:
             "paged_kv_indptr_buffer",
             "paged_kv_indices_buffer",
             "paged_kv_last_page_len_buffer",
+            "paged_kv_indices_snapshot",
         ]
         meta_tensors_ptr = []
         for key in expected_order:

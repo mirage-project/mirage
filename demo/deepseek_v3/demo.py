@@ -5,6 +5,7 @@ import argparse
 import os
 import sys
 import json
+import socket
 
 from mirage.mpk.models.deepseek_v3.builder import DeepSeekV3Builder
 from mirage.mpk.models.graph_builder import MirageModelConfig
@@ -45,485 +46,6 @@ def max_factor_leq_n(m: int, n: int) -> int:
     return max_factor
 
 
-def run_correctness_test(args, state_dict, layer_indices, rank, world_size,
-                         first_token_id=1):
-    """Run PyTorch reference on selected layers and compare against MPK.
-
-    Both use the SAME real weights from the checkpoint.
-    Layer indices specify which layers to include (e.g., [0, 3] = 1 dense + 1 MoE).
-    The MTP layer (index 61) is included if --mtp is set.
-    """
-    import torch.nn.functional as F
-    import math
-
-    device = f"cuda:{rank}"
-    layer_indices = sorted(layer_indices)
-    num_layers = len(layer_indices)
-    include_mtp = args.mtp
-
-    # DeepSeek V3 constants (after weight absorption)
-    KV_LORA_RANK = DEEPSEEK_V3_KV_LORA_RANK  # 512
-    QK_ROPE_HEAD_DIM = DEEPSEEK_V3_QK_ROPE_HEAD_DIM  # 64
-    QK_HEAD_DIM = DEEPSEEK_V3_HEAD_DIM_TOTAL  # 576
-    V_HEAD_DIM = KV_LORA_RANK  # 512
-    NUM_Q_HEADS = DEEPSEEK_V3_NUM_HEADS // world_size
-    HIDDEN = 7168
-    FIRST_MOE = 3
-    NUM_EXPERTS = 256
-    TOPK = 8
-
-    def rms_norm(x, weight, eps=1e-6):
-        orig = x.dtype
-        v = x.float().pow(2).mean(-1, keepdim=True)
-        return (weight.float() * x.float() * torch.rsqrt(v + eps)).to(orig)
-
-    def sigmoid_topk(logits, bias, k):
-        """DeepSeek V3 MoE routing: noaux_tc (grouped topk) + norm + scaling.
-        Matches `MoEGate.forward` in modeling_deepseek.py:425-471."""
-        # Read MoE routing config from real model
-        cfg = config.to_dict() if hasattr(config, "to_dict") else config
-        n_group = cfg.get("n_group", 8)
-        topk_group = cfg.get("topk_group", 4)
-        n_routed_experts = cfg.get("n_routed_experts", 256)
-        norm_topk = cfg.get("norm_topk_prob", True)
-        routed_scaling = cfg.get("routed_scaling_factor", 2.5)
-
-        scores = torch.sigmoid(logits.float())  # [bs, n_experts]
-        bs = scores.shape[0]
-        # Group selection: top-2 scores per group, sum them, pick top topk_group groups
-        scores_for_choice = scores + bias.float().unsqueeze(0)
-        group_scores = scores_for_choice.view(bs, n_group, -1).topk(2, dim=-1)[0].sum(dim=-1)  # [bs, n_group]
-        group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]  # [bs, topk_group]
-        group_mask = torch.zeros_like(group_scores)
-        group_mask.scatter_(1, group_idx, 1)
-        score_mask = (
-            group_mask.unsqueeze(-1)
-            .expand(bs, n_group, n_routed_experts // n_group)
-            .reshape(bs, -1)
-        )
-        tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
-        _, topk_idx = torch.topk(tmp_scores, k=k, dim=-1, sorted=False)
-        topk_weight = scores.gather(1, topk_idx)
-        if k > 1 and norm_topk:
-            topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
-        topk_weight = topk_weight * routed_scaling
-        return topk_weight, topk_idx
-
-    QK_NOPE = 128   # per-head nope dim (before absorption)
-    V_ORIG = 128     # per-head V dim (before absorption)
-    Q_HEAD_DIM = QK_NOPE + QK_ROPE_HEAD_DIM  # 192 — used for softmax scale (NOT 576)
-
-    def dequant_fp8(weight, scale, block_k=128):
-        """Dequantize FP8 weight using block-wise scale_inv (checkpoint format).
-
-        Weight: [M, K], Scale: [M/block_k, K/block_k].
-        Each scale element covers a block_k × block_k tile.
-        """
-        w = weight.float()
-        s = scale.float()
-        if s.dim() == 2 and w.dim() == 2:
-            # Expand scale to match weight shape
-            s = s.repeat_interleave(block_k, dim=0)[:w.shape[0]]
-            s = s.repeat_interleave(block_k, dim=1)[:, :w.shape[1]]
-        return (w * s).to(torch.bfloat16)
-
-    # ---- MPK-matched precision path -------------------------------------
-    # MPK uses re-quantized FP8 weights with per-row UE8M0 (power-of-2) scale
-    # in 128-wide K blocks, and quantizes inputs the same way. To produce a
-    # PyTorch reference whose precision matches MPK exactly, we replicate the
-    # quantize → dequant round-trip on both sides before doing the matmul.
-    _w_cache = {}
-
-    def _requant_weight_to_ue8m0(weight_fp8, scale_inv, block_k=128):
-        """Match builder._requantize_fp8_for_ue8m0:
-        dequant 2D-block scale_inv → re-quantize as per-row 1D UE8M0
-        (block_k along K) → return (new_fp8, power_of_2_scale[M, K/block_k])."""
-        M, K = weight_fp8.shape
-        scale_k = K // block_k
-        scale_inv_expanded = scale_inv.float().repeat_interleave(
-            block_k, dim=0)[:M].repeat_interleave(block_k, dim=1)[:, :K]
-        w_float = weight_fp8.float() * scale_inv_expanded
-        w_blocks = w_float.reshape(M, scale_k, block_k)
-        block_amax = w_blocks.abs().amax(dim=2).clamp(min=1e-12)
-        raw_scale = block_amax / 448.0
-        ue8m0_exp = torch.ceil(torch.log2(raw_scale.clamp(min=1e-30)))
-        new_scale = torch.pow(2.0, ue8m0_exp)  # [M, scale_k]
-        new_scale_expanded = new_scale.unsqueeze(2).expand_as(w_blocks)
-        w_rescaled = (w_blocks / new_scale_expanded).clamp(-448, 448)
-        new_fp8 = w_rescaled.reshape(M, K).to(torch.float8_e4m3fn)
-        return new_fp8, new_scale
-
-    def _dequant_ue8m0_weight(weight_fp8, ue8m0_scale, block_k=128):
-        """Per-row UE8M0 dequant: weight[M, K] * scale[M, K/block_k]."""
-        s = ue8m0_scale.repeat_interleave(block_k, dim=1)[:, :weight_fp8.shape[1]]
-        return weight_fp8.float() * s
-
-    def _quant_dequant_input_ue8m0(x_bf16, block_k=128):
-        """Per-token UE8M0 quant + dequant round-trip on the input.
-
-        x: [batch, K] bf16 → quantize per (token, K-block) to FP8 + UE8M0
-        scale → dequant back. Returns float32 tensor that mirrors what MPK
-        sees inside the GEMM (i.e. fp8 × fp8 with block-scaled accumulation)."""
-        bs, K = x_bf16.shape
-        sk = K // block_k
-        x_blocks = x_bf16.float().reshape(bs, sk, block_k)
-        amax = x_blocks.abs().amax(dim=2).clamp(min=1e-12)
-        raw_scale = amax / 448.0
-        ue8m0_exp = torch.ceil(torch.log2(raw_scale.clamp(min=1e-30)))
-        scale = torch.pow(2.0, ue8m0_exp)  # [bs, sk]
-        scale_exp = scale.unsqueeze(2).expand_as(x_blocks)
-        x_q = (x_blocks / scale_exp).clamp(-448, 448).to(torch.float8_e4m3fn)
-        x_deq = x_q.float() * scale_exp
-        return x_deq.reshape(bs, K)
-
-    def _fp8_block_scaled_mm(x_fp8, x_scale, w_fp8, w_scale, block_k=128):
-        """Block-scaled FP8 matmul using torch._scaled_mm per K-block.
-        Matches MPK's UMMA: per-block FP8×FP8 with scale applied per block.
-        x_fp8: (M, K) fp8, x_scale: (M, K//block_k) float32
-        w_fp8: (N, K) fp8, w_scale: (N, K//block_k) float32
-        Returns: (M, N) bfloat16."""
-        M, K = x_fp8.shape
-        N = w_fp8.shape[0]
-        num_blocks = K // block_k
-        acc = torch.zeros(M, N, dtype=torch.float32, device=x_fp8.device)
-        for bi in range(num_blocks):
-            ks, ke = bi * block_k, (bi + 1) * block_k
-            # _scaled_mm: (M, block_k) @ (block_k, N) with per-row scales
-            # _scaled_mm requires scale_a stride(0)==1; force contiguous layout
-            sa = x_scale[:, bi:bi+1].clone().view(-1, 1).contiguous()   # (M, 1)
-            sb = w_scale[:, bi:bi+1].clone().view(1, -1).contiguous()   # (1, N)
-            block_out = torch._scaled_mm(
-                x_fp8[:, ks:ke].contiguous(),
-                w_fp8[:, ks:ke].contiguous().t(),
-                scale_a=sa, scale_b=sb,
-                out_dtype=torch.bfloat16,
-            )
-            acc += block_out.float()
-        return acc.to(torch.bfloat16)
-
-    def fp8_linear(x, weight_key, sd, block_k=128):
-        """FP8 matmul. MPK_REF_NO_QUANT=1 → use raw checkpoint dequant.
-        MPK_REF_TRUE_FP8=1 → use torch._scaled_mm per K-block (matches
-        MPK's actual FP8×FP8 tensor core precision, not float32 sim)."""
-        if os.environ.get("MPK_REF_NO_QUANT", "0") == "1":
-            scale_key = f"{weight_key}_scale_inv"
-            if scale_key in sd:
-                w = dequant_fp8(sd[weight_key], sd[scale_key], block_k)
-            else:
-                w = sd[weight_key]  # already BF16 (e.g., absorbed weight)
-            return F.linear(x.float(), w.float()).to(x.dtype)
-        # Handle BF16 weights (no FP8 scale) — used for absorbed q_b_proj / fused o_proj
-        scale_key = f"{weight_key}_scale_inv"
-        if scale_key not in sd:
-            # BF16 weight → matmul. Use BF16 precision to match MPK's linear_sm100.
-            if weight_key not in sd:
-                print(f"[fp8_linear] MISSING: {weight_key}. Keys with same layer: {[k for k in sd if weight_key.rsplit('.', 2)[0] in k][:5]}")
-                raise KeyError(weight_key)
-            w = sd[weight_key]
-            return F.linear(x.to(torch.bfloat16), w.to(torch.bfloat16)).to(x.dtype)
-        # Prepare UE8M0 requantized weight (cached)
-        if weight_key not in _w_cache:
-            new_fp8, new_scale = _requant_weight_to_ue8m0(
-                sd[weight_key], sd[scale_key], block_k)
-            _w_cache[weight_key] = (new_fp8, new_scale)
-        cached = _w_cache[weight_key]
-        if isinstance(cached, tuple):
-            w_fp8, w_scale = cached
-        else:
-            # Legacy: was storing dequanted weight. Re-cache as (fp8, scale).
-            new_fp8, new_scale = _requant_weight_to_ue8m0(
-                sd[weight_key], sd[f"{weight_key}_scale_inv"], block_k)
-            _w_cache[weight_key] = (new_fp8, new_scale)
-            w_fp8, w_scale = new_fp8, new_scale
-
-        if os.environ.get("MPK_REF_TRUE_FP8", "0") == "1":
-            # True FP8 matmul: quantize input to FP8+UE8M0 scale, then
-            # use _scaled_mm per K-block (matches MPK UMMA precision).
-            x_flat = x.reshape(-1, x.shape[-1])
-            bs, K = x_flat.shape
-            sk = K // block_k
-            x_blocks = x_flat.float().reshape(bs, sk, block_k)
-            amax = x_blocks.abs().amax(dim=2).clamp(min=1e-12)
-            raw_s = amax / 448.0
-            ue8m0_exp = torch.ceil(torch.log2(raw_s.clamp(min=1e-30)))
-            x_scale = torch.pow(2.0, ue8m0_exp)  # (bs, sk) UE8M0 scale
-            x_fp8 = (x_blocks / x_scale.unsqueeze(2)).clamp(-448, 448).to(torch.float8_e4m3fn)
-            x_fp8 = x_fp8.reshape(bs, K)
-            out = _fp8_block_scaled_mm(x_fp8, x_scale, w_fp8, w_scale, block_k)
-            return out.reshape(*x.shape[:-1], w_fp8.shape[0])
-        else:
-            # Default: dequant both to float32, matmul in float32 (higher precision).
-            w_deq = _dequant_ue8m0_weight(w_fp8, w_scale, block_k)
-            x_deq = _quant_dequant_input_ue8m0(x.reshape(-1, x.shape[-1]), block_k)
-            out = F.linear(x_deq, w_deq).to(x.dtype)
-            return out.reshape(*x.shape[:-1], w_deq.shape[0])
-
-    # Precompute RoPE cos/sin with the same formula as MPK builder
-    # (use args.max_seq_length so we cover all positions).
-    _rope_theta = 10000.0
-    _rope_half = QK_ROPE_HEAD_DIM // 2
-    _rope_max_seq = args.max_seq_length
-    _rope_freqs = 1.0 / (_rope_theta ** (torch.arange(0, _rope_half, dtype=torch.float32, device=device) / _rope_half))
-    _rope_positions = torch.arange(_rope_max_seq, dtype=torch.float32, device=device)
-    _rope_angles = torch.outer(_rope_positions, _rope_freqs)  # [max_seq, half]
-    _rope_cos = torch.cat([_rope_angles.cos(), _rope_angles.cos()], dim=-1).to(torch.bfloat16)
-    _rope_sin = torch.cat([-_rope_angles.sin(), _rope_angles.sin()], dim=-1).to(torch.bfloat16)
-
-    # DeepSeek V3 softmax_scale (modeling_deepseek.py:689-695):
-    #   softmax_scale = q_head_dim^-0.5 * mscale^2  (where q_head_dim = 192, NOT 576)
-    #   mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
-    #         = 0.1 * mscale_all_dim * log(scaling_factor) + 1.0
-    cfg_d = config.to_dict() if hasattr(config, "to_dict") else config
-    rope_scale = cfg_d.get("rope_scaling", None)
-    if rope_scale and rope_scale.get("type") == "yarn":
-        mscale_all_dim = rope_scale.get("mscale_all_dim", 0)
-        scaling_factor = rope_scale.get("factor", 1.0)
-        if mscale_all_dim:
-            _ms = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
-            _softmax_scale = (Q_HEAD_DIM ** -0.5) * _ms * _ms
-        else:
-            _softmax_scale = Q_HEAD_DIM ** -0.5
-    else:
-        _softmax_scale = Q_HEAD_DIM ** -0.5
-    print(f"  [REF] Q_HEAD_DIM={Q_HEAD_DIM}, softmax_scale={_softmax_scale:.6f}")
-
-    def apply_rope(x, position):
-        """Apply RoPE to x [..., rope_dim] at the given position(s).
-        Matches MPK's half-spliced formulation."""
-        cos = _rope_cos[position]  # [..., rope_dim]
-        sin = _rope_sin[position]
-        # rotate_half: split into halves, swap
-        half = x.shape[-1] // 2
-        rotated = torch.cat([x[..., half:], x[..., :half]], dim=-1)
-        return (x.float() * cos.float() + rotated.float() * sin.float()).to(x.dtype)
-
-    _mla_ckpt = os.environ.get("MPK_MLA_CHECKPOINT", "0") == "1"
-    global _g_mla_ckpt_data
-    _g_mla_ckpt_data = {}  # Store last-token ref intermediates for comparison
-    _mla_ckpt_data = _g_mla_ckpt_data
-
-    def mla_attention(hidden, prefix, sd, kv_cache, seq_pos, num_heads):
-        """MLA attention with weight absorption (matching vLLM/SGLang approach).
-        Uses pre-absorbed q_b_proj and fused o_proj when available."""
-        bs = hidden.shape[0]
-        p = prefix + "self_attn."
-
-        # Q path: q_a_proj → norm → q_b_proj (absorbed or original)
-        q_a = fp8_linear(hidden, f"{p}q_a_proj.weight", sd)
-        if _mla_ckpt:
-            _mla_ckpt_data['q_a_post_proj'] = q_a.detach().clone()
-        q_a = rms_norm(q_a, sd[f"{p}q_a_layernorm.weight"])
-        if _mla_ckpt:
-            _mla_ckpt_data['q_a_post_norm'] = q_a.detach().clone()
-
-        # Check if q_b_proj is absorbed (kv_b_proj deleted during conversion)
-        kv_b_key = f"{p}kv_b_proj.weight"
-        q_b_absorbed = kv_b_key not in sd
-        q_b_w = sd[f"{p}q_b_proj.weight"]
-
-        if q_b_absorbed:
-            # ABSORBED path (matching MPK, vLLM, SGLang):
-            # q_b_proj is already [H*(kv_lora_rank+rope), q_lora_rank]
-            # o_proj is already fused with W_UV: [hidden, H*kv_lora_rank]
-            q_b_s_key = f"{p}q_b_proj.weight_scale_inv"
-            if q_b_s_key in sd:
-                q_full = fp8_linear(q_a, f"{p}q_b_proj.weight", sd)
-            else:
-                # BF16 absorbed weight — direct BF16 matmul
-                q_full = F.linear(q_a.float(), q_b_w.float()).to(q_a.dtype)
-            if _mla_ckpt:
-                _mla_ckpt_data['q_absorbed'] = q_full.detach().clone()
-            # Split: [bs, H*(kv_lora_rank + rope)] → per-head [kv_lora_rank, rope]
-            q_full = q_full.view(bs, num_heads, KV_LORA_RANK + QK_ROPE_HEAD_DIM)
-            q_nope_abs = q_full[:, :, :KV_LORA_RANK]  # [bs, H, 512] — already absorbed
-            q_pe = q_full[:, :, KV_LORA_RANK:]         # [bs, H, 64]
-            q_pe = apply_rope(q_pe, seq_pos)
-        else:
-            # NON-ABSORBED path (original checkpoint flow):
-            q_full = fp8_linear(q_a, f"{p}q_b_proj.weight", sd)
-            q_full = q_full.view(bs, num_heads, QK_NOPE + QK_ROPE_HEAD_DIM)
-            q_nope = q_full[:, :, :QK_NOPE]
-            q_pe = q_full[:, :, QK_NOPE:]
-            q_pe = apply_rope(q_pe, seq_pos)
-            kv_b = dequant_fp8(sd[kv_b_key], sd[f"{kv_b_key}_scale_inv"])
-            kv_b = kv_b.view(num_heads, V_ORIG + QK_NOPE, KV_LORA_RANK)
-            W_UK = kv_b[:, V_ORIG:, :]
-            q_nope_abs = torch.einsum('bhd,hdk->bhk', q_nope.float(), W_UK.float()).to(hidden.dtype)
-            if _mla_ckpt:
-                q_absorbed_full = torch.cat([q_nope_abs, q_pe], dim=-1)
-                _mla_ckpt_data['q_absorbed'] = q_absorbed_full.reshape(bs, -1).detach().clone()
-
-        # KV path: kv_a_proj → split → norm(c_latent)
-        kv_full = fp8_linear(hidden, f"{p}kv_a_proj_with_mqa.weight", sd)
-        c_lat = kv_full[:, :KV_LORA_RANK]
-        k_pe_raw = kv_full[:, KV_LORA_RANK:]
-        if _mla_ckpt:
-            _mla_ckpt_data['c_lat_pre_norm'] = c_lat.detach().clone()
-        c_lat = rms_norm(c_lat, sd[f"{p}kv_a_layernorm.weight"])
-        if _mla_ckpt:
-            _mla_ckpt_data['c_lat_post_norm'] = c_lat.detach().clone()
-        k_pe_rotated = apply_rope(k_pe_raw, seq_pos)
-
-        # Cache write
-        kv_new = torch.cat([c_lat, k_pe_rotated], dim=-1)
-        for b in range(bs):
-            kv_cache[seq_pos + b] = kv_new[b]
-        kv_all = kv_cache[:seq_pos + bs]
-
-        # Attention: Q_abs × c_kv^T + q_pe × k_pe^T
-        k_nope = kv_all[:, :KV_LORA_RANK]
-        k_pe_all = kv_all[:, KV_LORA_RANK:]
-        s = (torch.einsum('bhd,sd->bhs', q_nope_abs.float(), k_nope.float()) +
-             torch.einsum('bhd,sd->bhs', q_pe.float(), k_pe_all.float()))
-        s = s * _softmax_scale
-        attn_probs = F.softmax(s, dim=-1)
-
-        # V path: depends on whether o_proj is fused
-        attn_v = torch.einsum('bhs,sd->bhd', attn_probs, kv_all[:, :KV_LORA_RANK].float())
-
-        if q_b_absorbed:
-            # ABSORBED: o_proj already fused with W_UV → takes latent-space input
-            flat = attn_v.to(hidden.dtype).reshape(bs, num_heads * KV_LORA_RANK)
-            o_w = sd[f"{p}o_proj.weight"]
-            o_s_key = f"{p}o_proj.weight_scale_inv"
-            if o_s_key in sd:
-                result = fp8_linear(flat, f"{p}o_proj.weight", sd)
-            else:
-                result = F.linear(flat.float(), o_w.float()).to(flat.dtype)
-        else:
-            # NON-ABSORBED: un-absorb V, then original o_proj
-            W_UV = kv_b[:, :V_ORIG, :]
-            attn_out = torch.einsum('bhd,hkd->bhk', attn_v, W_UV.float()).to(hidden.dtype)
-            flat = attn_out.reshape(bs, num_heads * V_ORIG)
-            result = fp8_linear(flat, f"{p}o_proj.weight", sd)
-
-        if _mla_ckpt:
-            _mla_ckpt_data['attn_proj_out'] = result.detach().clone()
-        return result
-
-    def dense_mlp(hidden, prefix, sd):
-        p = prefix + "mlp."
-        gate = F.silu(fp8_linear(hidden, f"{p}gate_proj.weight", sd))
-        up = fp8_linear(hidden, f"{p}up_proj.weight", sd)
-        return fp8_linear(gate * up, f"{p}down_proj.weight", sd)
-
-    def moe_mlp(hidden, prefix, sd):
-        bs = hidden.shape[0]
-        p = prefix + "mlp."
-        # Router (BF16)
-        logits = F.linear(hidden.float(), sd[f"{p}gate.weight"].float()).to(hidden.dtype)
-        weights, topk_idx = sigmoid_topk(logits, sd[f"{p}gate.e_score_correction_bias"], TOPK)
-        # MPK_DUMP_MOE=<layer_idx>: print routing for last token to verify MPK alignment
-        _dmp = os.environ.get("MPK_DUMP_MOE", "")
-        if _dmp and prefix == f"model.layers.{int(_dmp)}.":
-            for b in range(bs):
-                w_sorted, idx_sort = weights[b].sort(descending=True)
-                topk_sorted = topk_idx[b][idx_sort]
-                print(f"  [REF L{_dmp} b={b}] experts={topk_sorted.tolist()} weights={[f'{x:.4f}' for x in w_sorted.tolist()]}")
-        out = torch.zeros(bs, HIDDEN, device=device, dtype=hidden.dtype)
-        # Routed experts (per-expert individual weights, FP8)
-        # MPK_MOE_RAW_DEQUANT=1: use raw checkpoint dequant for expert GEMMs
-        # (float32 per-block scale, matching MPK's group GEMM scale format)
-        # instead of UE8M0 round-trip. If this gives same cosine as default,
-        # the gap is NOT from quantization scheme difference.
-        _moe_raw = os.environ.get("MPK_MOE_RAW_DEQUANT", "0") == "1"
-        def _expert_linear(x, weight_key, sd_dict, block_k=128):
-            """Expert FP8 linear: raw dequant when _moe_raw, else UE8M0 sim."""
-            if _moe_raw:
-                w = dequant_fp8(sd_dict[weight_key],
-                                sd_dict[f"{weight_key}_scale_inv"], block_k)
-                # Also quant-dequant input with float32 scale (not UE8M0)
-                bs_, K = x.shape
-                sk = K // block_k
-                x_blocks = x.float().reshape(bs_, sk, block_k)
-                amax = x_blocks.abs().amax(dim=2).clamp(min=1e-12)
-                scale = amax / 448.0  # float32 scale (NOT power-of-2)
-                scale_exp = scale.unsqueeze(2).expand_as(x_blocks)
-                x_q = (x_blocks / scale_exp).clamp(-448, 448).to(torch.float8_e4m3fn)
-                x_deq = x_q.float() * scale_exp
-                return F.linear(x_deq.reshape(bs_, K), w.float()).to(x.dtype)
-            else:
-                return fp8_linear(x, weight_key, sd_dict, block_k)
-        for b in range(bs):
-            for ki in range(TOPK):
-                eid = topk_idx[b, ki].item()
-                w = weights[b, ki].item()
-                ep = f"{p}experts.{eid}."
-                gate = F.silu(_expert_linear(hidden[b:b+1], f"{ep}gate_proj.weight", sd))
-                up = _expert_linear(hidden[b:b+1], f"{ep}up_proj.weight", sd)
-                down = _expert_linear(gate * up, f"{ep}down_proj.weight", sd)
-                out[b] += w * down.squeeze(0)
-        # Shared expert (FP8)
-        sp = p + "shared_experts."
-        sg = F.silu(fp8_linear(hidden, f"{sp}gate_proj.weight", sd))
-        su = fp8_linear(hidden, f"{sp}up_proj.weight", sd)
-        sd_out = fp8_linear(sg * su, f"{sp}down_proj.weight", sd)
-        return out + sd_out
-
-    print(f"\n{'='*60}")
-    print(f"Correctness Test: layers={layer_indices}, mtp={include_mtp}")
-    print(f"{'='*60}")
-
-    # Run PyTorch reference — process full prompt token-by-token (matching MPK offline mode)
-    from transformers import AutoTokenizer
-    tokenizer_ref = AutoTokenizer.from_pretrained(args.model_path)
-    messages = [{"role": "user", "content": args.prompt}]
-    text = tokenizer_ref.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    all_token_ids = tokenizer_ref([text], return_tensors="pt").input_ids[0].to(device)
-    prompt_len = len(all_token_ids)
-    print(f"  Full prompt: {prompt_len} tokens, ids[:5]={all_token_ids[:5].tolist()}")
-
-    max_seq = prompt_len + 16
-    kv_caches = [torch.zeros(max_seq, QK_HEAD_DIM, device=device, dtype=torch.bfloat16)
-                 for _ in range(num_layers + (1 if include_mtp else 0))]
-
-    # Ablation env vars (must match the same vars in builder.py for fair comparison)
-    skip_layer = os.environ.get("MPK_SKIP_LAYER", "0") == "1"
-    skip_attn = os.environ.get("MPK_SKIP_ATTN", "0") == "1"
-    skip_mlp = os.environ.get("MPK_SKIP_MLP", "0") == "1"
-    # MPK_NO_RESIDUAL=1: debug mode — drop residual `+` in both reference and MPK.
-    # Default: residual connections are ON (matching standard transformer architecture).
-    no_residual = os.environ.get("MPK_NO_RESIDUAL", "0") == "1"
-
-    # Token-by-token prefill (matching persistent kernel offline mode)
-    for step in range(prompt_len):
-        tid = all_token_ids[step]
-        hidden = F.embedding(tid.unsqueeze(0), state_dict["model.embed_tokens.weight"])
-        if hidden.dim() == 1:
-            hidden = hidden.unsqueeze(0)
-
-        for cache_idx, layer_idx in enumerate(layer_indices):
-            prefix = f"model.layers.{layer_idx}."
-            if skip_layer:
-                continue
-            normed = rms_norm(hidden, state_dict[f"{prefix}input_layernorm.weight"])
-            if skip_attn:
-                # bypass attention: hidden unchanged
-                pass
-            else:
-                attn_out = mla_attention(normed, prefix, state_dict, kv_caches[cache_idx], step, NUM_Q_HEADS)
-                hidden = attn_out if no_residual else (hidden + attn_out)
-            normed = rms_norm(hidden, state_dict[f"{prefix}post_attention_layernorm.weight"])
-            if skip_mlp:
-                pass
-            else:
-                if layer_idx < FIRST_MOE:
-                    mlp_out = dense_mlp(normed, prefix, state_dict)
-                else:
-                    mlp_out = moe_mlp(normed, prefix, state_dict)
-                hidden = mlp_out if no_residual else (hidden + mlp_out)
-
-    hidden = rms_norm(hidden, state_dict["model.norm.weight"])
-    logits = F.linear(hidden.float(), state_dict["lm_head.weight"].float())
-    ref_token = logits.argmax(dim=-1).item()
-    print(f"PyTorch reference output token: {ref_token}")
-    print(f"PyTorch logits[0,:5]: {logits[0,:5].tolist()}")
-    print(f"PyTorch reference completed successfully.")
-    # Return both: the logits (last position, full vocab) and the argmax token.
-    # The logits tensor lets the caller compare distributions, not just argmax.
-    return ref_token, logits[0].detach().clone()
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DeepSeek V3 demo with Mirage megakernel")
     parser.add_argument("--model-path", type=str, required=True,
@@ -545,11 +67,20 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str,
                         default="Give me a short introduction to large language model.",
                         help="Input prompt text")
-    parser.add_argument("--mtp", action="store_true",
-                        help="Enable MTP speculative decoding")
-    parser.add_argument("--num-speculative-tokens", default=1, type=int,
-                        choices=range(1, 8),
-                        help="Number of speculative tokens for MTP (1-7)")
+    parser.add_argument("--prompts-json", type=str, default=None,
+                        help="JSON array of prompts for batched-request testing. "
+                             "When set with --use-mirage, its length must equal "
+                             "--max-num-batched-requests.")
+    parser.add_argument("--prompt-length", type=int, default=0,
+                        help="If >0, override the --prompt with a synthetic "
+                             "prompt of exactly this many tokens. Useful for "
+                             "stress-testing prefill throughput independent of "
+                             "actual prompt text. The generated tokens are a "
+                             "deterministic cycle over a small vocab subset so "
+                             "numerical behavior is reproducible across runs.")
+    parser.add_argument("--mtp", type=int, default=0, choices=[0, 1, 2, 3],
+                        help="MTP speculative decoding. 0=disabled, 1-3=number of "
+                             "speculative tokens drafted per step.")
     parser.add_argument("--rejection-sample-method", default="strict", type=str,
                         choices=["strict", "probabilistic", "synthetic"],
                         help="Rejection sampling method for speculative decoding")
@@ -568,12 +99,9 @@ if __name__ == "__main__":
                             "Optionally dump first N generated token_ids, text, and latency to JSON. "
                             "If path omitted, saves to outputs/deepseek_v3/{torch_output.json|mpk_output.json}."
                         ))
-    # Developer correctness testing
-    parser.add_argument("--correctness", action="store_true",
-                        help="Run correctness test: compare MPK output against PyTorch reference")
     parser.add_argument("--layers", type=str, default=None,
-                        help="Comma-separated list of layer indices to load (e.g. '0,3,60'). "
-                             "Used with --correctness to test a reduced model.")
+                        help="Comma-separated list of layer indices to load (e.g. '0,3,60') "
+                             "or a range '0-39'.")
 
     args = parser.parse_args()
 
@@ -586,7 +114,14 @@ if __name__ == "__main__":
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12355"
+        master_port = os.environ.get("MASTER_PORT")
+        if master_port is None:
+            if rank == 0:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    master_port = str(sock.getsockname()[1])
+            master_port = comm.bcast(master_port, root=0)
+        os.environ["MASTER_PORT"] = master_port
     except ImportError:
         world_size = 1
         rank = 0
@@ -645,21 +180,72 @@ if __name__ == "__main__":
         (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda"
     )
 
-    # Tokenize prompt
-    messages = [
-        {"role": "user", "content": args.prompt},
-    ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to("cuda")
-    for r in range(total_num_requests):
-        for i in range(model_inputs.input_ids.shape[-1]):
-            tokens[r, i] = model_inputs.input_ids[0, i]
-    prompt_lengths = torch.full(
-        (total_num_requests,), model_inputs.input_ids.shape[-1],
-        dtype=torch.int, device="cuda"
-    )
+    # Tokenize prompt (or synthesize a fixed-length prompt for stress tests)
+    if args.prompt_length > 0:
+        pl = min(args.prompt_length, args.max_seq_length - 16)
+        # Deterministic synthetic prompt: cycle over a small subset of the
+        # vocab. Excludes special IDs (pad, bos, eos, etc.) by staying in
+        # [1024, 1024 + 4096) which is safely inside any tokenizer's main
+        # text vocabulary for DeepSeek V3 (vocab_size = 129280).
+        synth = torch.arange(pl, dtype=torch.long, device="cuda") % 4096 + 1024
+        for r in range(total_num_requests):
+            tokens[r, :pl] = synth
+        prompt_lengths = torch.full(
+            (total_num_requests,), pl,
+            dtype=torch.int, device="cuda"
+        )
+        print(f"[stress] Using synthetic prompt of length {pl} "
+              f"(max_seq_length={args.max_seq_length}).")
+    elif args.prompts_json:
+        prompt_list = json.loads(args.prompts_json)
+        if not isinstance(prompt_list, list) or not prompt_list:
+            raise ValueError("--prompts-json must be a non-empty JSON array")
+        if len(prompt_list) != total_num_requests:
+            raise ValueError(
+                f"--prompts-json length ({len(prompt_list)}) must equal "
+                f"total_num_requests ({total_num_requests})"
+            )
+        messages_batch = [
+            [{"role": "user", "content": prompt}]
+            for prompt in prompt_list
+        ]
+        texts = [
+            tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            for messages in messages_batch
+        ]
+        prompt_lens = []
+        for r, text in enumerate(texts):
+            model_inputs = tokenizer([text], return_tensors="pt").to("cuda")
+            prompt_width = model_inputs.input_ids.shape[-1]
+            if prompt_width > args.max_seq_length:
+                raise ValueError(
+                    f"Prompt width {prompt_width} exceeds max_seq_length "
+                    f"{args.max_seq_length}"
+                )
+            tokens[r, :prompt_width] = model_inputs.input_ids[0, :prompt_width]
+            prompt_lens.append(prompt_width)
+        prompt_lengths = torch.tensor(
+            prompt_lens, dtype=torch.int, device="cuda"
+        )
+        print(f"[batch] Using {len(prompt_list)} distinct prompts; "
+              f"prompt_lengths={prompt_lengths.tolist()}")
+    else:
+        messages = [
+            {"role": "user", "content": args.prompt},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        model_inputs = tokenizer([text], return_tensors="pt").to("cuda")
+        for r in range(total_num_requests):
+            for i in range(model_inputs.input_ids.shape[-1]):
+                tokens[r, i] = model_inputs.input_ids[0, i]
+        prompt_lengths = torch.full(
+            (total_num_requests,), model_inputs.input_ids.shape[-1],
+            dtype=torch.int, device="cuda"
+        )
 
     step = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
     num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
@@ -683,11 +269,11 @@ if __name__ == "__main__":
             profiler_tensor = None
 
         # MTP speculative decoding config
-        if args.mtp:
+        if args.mtp > 0:
             spec_decode_config = mi.spec_decode_class(
                 "lookahead",
                 ngram_size=3,
-                spec_length=args.num_speculative_tokens,
+                spec_length=args.mtp,
             )
         else:
             spec_decode_config = None
@@ -748,7 +334,9 @@ if __name__ == "__main__":
                 "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
             },
             profiler_tensor=profiler_tensor,
-            trace_name=args.trace_name,
+            trace_name=(
+                f"{args.trace_name}_rank{rank}" if args.trace_name else ""
+            ),
             spec_decode_config=spec_decode_config,
             use_cutlass_kernel=True,
         )
@@ -758,19 +346,29 @@ if __name__ == "__main__":
         from safetensors.torch import load_file
         from safetensors import safe_open
 
+        def _parse_layers(spec):
+            result = []
+            for part in spec.split(','):
+                if '-' in part:
+                    lo, hi = part.split('-', 1)
+                    result.extend(range(int(lo), int(hi) + 1))
+                else:
+                    result.append(int(part))
+            return result
+
         # Determine which layers we need
         layer_indices_for_load = None
-        if args.correctness and args.layers:
-            layer_indices_for_load = [int(x) for x in args.layers.split(',')]
+        if args.layers:
+            layer_indices_for_load = _parse_layers(args.layers)
             # Also need MTP layer if --mtp
-            if args.mtp:
+            if args.mtp > 0:
                 layer_indices_for_load.append(num_layers)  # layer 61
 
         weight_file = os.path.join(
             args.model_path, f"model{rank}-mp{world_size}.safetensors"
         )
         if os.path.exists(weight_file):
-            state_dict = load_file(weight_file, device="cuda")
+            state_dict = load_file(weight_file, device=f"cuda:{rank}")
         else:
             # Selective loading: only load needed layers from sharded files
             index_file = os.path.join(args.model_path, "model.safetensors.index.json")
@@ -790,13 +388,17 @@ if __name__ == "__main__":
                     if any(key.startswith(p) for p in needed_prefixes):
                         shard_to_keys.setdefault(shard, []).append(key)
                 # Load only needed shards and keys
+                # Load to CPU first, then move to GPU. This avoids GPU OOM when
+                # multiple TP ranks each load full (un-sharded) weights — the
+                # builder will shard them later during weight conversion.
+                _load_device = "cpu" if world_size > 1 else f"cuda:{rank}"
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
-                    with safe_open(shard_path, framework="pt", device="cuda") as f:
+                    with safe_open(shard_path, framework="pt", device=_load_device) as f:
                         for key in keys:
                             state_dict[key] = f.get_tensor(key)
-                print(f"  Loaded {len(state_dict)} keys total")
+                print(f"  Loaded {len(state_dict)} keys total (device={_load_device})")
             else:
                 # Full loading (no index or no layer filter)
                 import glob
@@ -806,7 +408,7 @@ if __name__ == "__main__":
                 if shard_files:
                     state_dict = {}
                     for shard_file in shard_files:
-                        state_dict.update(load_file(shard_file, device="cuda"))
+                        state_dict.update(load_file(shard_file, device=f"cuda:{rank}"))
                 else:
                     candidates = [
                         os.path.join(args.model_path, "model.safetensors"),
@@ -814,7 +416,7 @@ if __name__ == "__main__":
                     state_dict = None
                     for candidate in candidates:
                         if os.path.exists(candidate):
-                            state_dict = load_file(candidate, device="cuda")
+                            state_dict = load_file(candidate, device=f"cuda:{rank}")
                             break
                     if state_dict is None:
                         raise FileNotFoundError(
@@ -822,24 +424,18 @@ if __name__ == "__main__":
                             f"Expected {weight_file} or model.safetensors or model-*.safetensors"
                         )
 
-        # Parse layer indices for correctness mode
+        # Parse layer indices
         layer_indices_arg = None
-        if args.correctness and args.layers:
-            layer_indices_arg = [int(x) for x in args.layers.split(',')]
+        if args.layers:
+            layer_indices_arg = _parse_layers(args.layers)
 
-        ref_token = None
-        ref_logits = None
-        if args.correctness:
+        # Weight conversion (absorption + fusion) is needed whenever --layers
+        # is used for selective loading.
+        _need_conversion = bool(args.layers)
+        if _need_conversion:
             test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
 
-            # Skip PyTorch reference in TP mode (reference doesn't support TP).
-            # Run single-GPU reference separately and compare tokens.
-            if world_size > 1:
-                print(f"\n[TP={world_size}] Skipping PyTorch reference (not supported in TP mode).")
-                print(f"[TP={world_size}] Run single-GPU first to get reference token, then compare.")
-
-            # Phase 1: Absorption only (before reference, so ref uses absorbed weights)
-            # This matches vLLM/SGLang where both runtime and reference use absorption.
+            # Phase 1: Absorption. Matches vLLM/SGLang where runtime uses absorption.
             print("\nPhase 1: Weight absorption (q_b + o_proj fusion)...")
             import sys
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
@@ -850,7 +446,7 @@ if __name__ == "__main__":
             config_dict = AutoConfig.from_pretrained(args.model_path).to_dict()
             mp = get_model_params(config_dict)
             absorb_layers = list(test_layers)
-            if args.mtp:
+            if args.mtp > 0:
                 absorb_layers.append(num_layers)
 
             def _quantize_f32_to_checkpoint_fp8(w_f32, block_size=128):
@@ -896,6 +492,16 @@ if __name__ == "__main__":
                     qk_nope = mp["qk_nope_head_dim"]
                     v_dim = mp["v_head_dim"]
                     kv_lora_rank = mp["kv_lora_rank"]
+                    # Split absorbed q_b into q_b_nope (H*D_CKV=512) and
+                    # q_b_pe (H*D_KPE=64). Required by the chunked-prefill
+                    # MLA kernel which takes Q_nope / Q_pe as separate tensors.
+                    # Absorbed layout is per-head [nope(512) | pe(64)].
+                    H_ = num_heads_loc
+                    absorbed_r = absorbed.reshape(H_, 576, -1)
+                    q_b_nope = absorbed_r[:, :kv_lora_rank, :].contiguous().reshape(H_ * kv_lora_rank, -1)
+                    q_b_pe = absorbed_r[:, kv_lora_rank:, :].contiguous().reshape(H_ * (576 - kv_lora_rank), -1)
+                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
+                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
                     kv_head_dim = qk_nope + v_dim
                     kv_b_reshaped = kv_bf16.reshape(num_heads_loc, kv_head_dim, kv_lora_rank)
                     W_UV = kv_b_reshaped[:, :v_dim, :]
@@ -920,18 +526,6 @@ if __name__ == "__main__":
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
 
-            # Debug: verify gate_proj exists
-            gate_check = 'model.layers.0.mlp.gate_proj.weight'
-            print(f"  gate_proj in state_dict: {gate_check in state_dict}")
-            print(f"  state_dict keys with 'layers.0.mlp': {[k for k in state_dict if 'layers.0.mlp' in k]}")
-
-            # Run reference with absorbed weights (skip in TP mode)
-            if world_size == 1:
-                first_tok = model_inputs.input_ids[0, 0].item()
-                ref_token, ref_logits = run_correctness_test(
-                    args, state_dict, test_layers, rank, world_size,
-                    first_token_id=first_tok)
-
             # Phase 2: Convert remaining weights for MPK builder
             # (gate+up fusion, expert fusion, alignment)
             # - Keep FP8 weights + scale_inv as-is (builder uses FP8 GEMM pipeline)
@@ -949,7 +543,7 @@ if __name__ == "__main__":
 
             # Absorption already done in Phase 1. Skip layers already absorbed.
             absorb_layers = list(test_layers)
-            if args.mtp:
+            if args.mtp > 0:
                 absorb_layers.append(num_layers)
             for li in absorb_layers:
                 attn = f"model.layers.{li}.self_attn."
@@ -1017,6 +611,21 @@ if __name__ == "__main__":
                     # Replace q_b_proj with absorbed FP8 version (scale_inv already set above)
                     state_dict[q_key] = absorbed
                     # q_s_key kept (set during FP8 quantization above)
+
+                    # Split absorbed q_b into q_b_nope_absorbed (H*D_CKV=512) and
+                    # q_b_pe (H*D_KPE=64) for the chunked-prefill path. The
+                    # mla_prefill kernel takes Q_nope and Q_pe as SEPARATE dense
+                    # tensors, while the decode kernel consumes the fused
+                    # [H*576] tensor. Keeping both forms lets the builder
+                    # dispatch to the right kernel based on max_num_batched_tokens.
+                    # Per-head layout of `absorbed`: [nope(512) | pe(64)] rows.
+                    H = num_heads_loc
+                    absorbed_r = absorbed.reshape(H, 576, -1)
+                    q_b_nope = absorbed_r[:, :512, :].contiguous().reshape(H * 512, -1)
+                    q_b_pe = absorbed_r[:, 512:, :].contiguous().reshape(H * 64, -1)
+                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
+                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
+
                     # Remove kv_b_proj (absorbed into q)
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
@@ -1081,10 +690,14 @@ if __name__ == "__main__":
                         state_dict[f"{ep}w13.weight_scale_inv"] = torch.stack(s13_list)
                         state_dict[f"{ep}w2.weight_scale_inv"] = torch.stack(s2_list)
 
-            # Ensure all tensors are on GPU and 16B-aligned
+            # Contiguous + 16B-align. For TP>1 keep tensors on CPU here —
+            # the TP sharding step below halves them, and the post-shard
+            # block (after line ~750) moves the small sharded copies to GPU.
+            # Pushing full un-sharded weights to GPU here OOMs once the
+            # layer count × world_size exceeds per-GPU capacity.
             for k in list(state_dict.keys()):
                 t = state_dict[k]
-                if not t.is_cuda:
+                if world_size == 1 and not t.is_cuda:
                     t = t.cuda()
                 if not t.is_contiguous():
                     t = t.contiguous()
@@ -1095,6 +708,103 @@ if __name__ == "__main__":
                 state_dict[k] = t
 
             print(f"  Converted: {len(state_dict)} keys (FP8 weights preserved)")
+
+            # TP weight sharding: shard weights for multi-GPU inference
+            if world_size > 1:
+                from convert import shard_tensor
+                import re
+                # Sharding rules for POST-CONVERSION keys (absorbed, fused).
+                # dim=0: row-parallel (shard output), dim=1: col-parallel (shard input),
+                # None: replicate. For 3D expert tensors, None (replicated).
+                _TP_SHARD_RULES = [
+                    (r"^model\.embed_tokens\.weight$",                       None),  # replicate: embedding lookup needs full vocab
+                    (r"^model\.norm\.weight$",                               None),
+                    (r"^lm_head\.weight$",                                   None),  # replicate: needs full vocab for argmax
+                    (r"self_attn\.q_a_proj\.weight",                         None),  # ReplicatedLinear (vLLM): hidden→q_lora_rank, output feeds full-width q_b_proj
+                    (r"self_attn\.q_a_layernorm\.weight",                    None),
+                    (r"self_attn\.q_b_proj\.weight",                         0),     # ColumnParallelLinear: shard output heads
+                    # Split q_b_proj (absorbed) for the chunked-prefill MLA
+                    # kernel, which expects Q_nope and Q_pe as separate dense
+                    # tensors. Both are column-parallel on the head dim (same
+                    # sharding as q_b_proj).
+                    (r"self_attn\.q_b_nope\.weight",                         0),
+                    (r"self_attn\.q_b_pe\.weight",                           0),
+                    (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
+                    (r"self_attn\.kv_a_layernorm\.weight",                   None),
+                    (r"self_attn\.o_proj\.weight",                           1),
+                    (r"input_layernorm\.weight$",                            None),
+                    (r"post_attention_layernorm\.weight$",                   None),
+                    (r"mlp\.gate_up_proj\.weight",                           0),
+                    (r"mlp\.down_proj\.weight",                              1),
+                    (r"mlp\.gate\.weight$",                                  None),
+                    (r"mlp\.gate\.e_score_correction_bias$",                 None),
+                    # MoE experts w13/w2: TP-sharded per vLLM pattern (no EP).
+                    # Every rank has all experts, each with TP-sharded weights.
+                    # w13 [E, 2*inter, hidden]: column-parallel on intermediate (dim=1)
+                    # w2  [E, hidden, inter]:   row-parallel on intermediate    (dim=2)
+                    # AllReduce after moe_mul_sum_add sums partial contributions.
+                    # Builder uses moe_intermediate_size = FULL//world_size, matching this.
+                    (r"mlp\.experts\.w13\.weight",                           1),
+                    (r"mlp\.experts\.w2\.weight",                            2),
+                    # Shared expert: gate_proj/up_proj are separate keys (not fused
+                    # as gate_up_proj). Builder does its own interleave at build time.
+                    (r"mlp\.shared_experts\.gate_proj\.weight",              0),
+                    (r"mlp\.shared_experts\.up_proj\.weight",                0),
+                    (r"mlp\.shared_experts\.down_proj\.weight",              1),
+                    # MTP layers
+                    (r"enorm\.weight$",                                      None),
+                    (r"hnorm\.weight$",                                      None),
+                    (r"eh_proj\.",                                            None),
+                    (r"shared_head\.norm\.",                                   None),
+                    (r"shared_head\.head\.",                                   None),  # replicate: MTP needs full vocab for draft token selection
+                ]
+                _compiled = [(re.compile(p), d) for p, d in _TP_SHARD_RULES]
+
+                def _get_tp_shard_dim(name):
+                    for regex, dim in _compiled:
+                        if regex.search(name):
+                            return dim
+                    return None  # default: replicate
+
+                print(f"\n  TP sharding (world_size={world_size}, rank={rank})...")
+                for k in list(state_dict.keys()):
+                    base_key = k.replace("_scale_inv", "")
+                    shard_dim = _get_tp_shard_dim(base_key)
+                    if shard_dim is not None and state_dict[k].dim() >= 2:
+                        # Special handling for experts.w13: it's cat([gate, up], dim=1)
+                        # so naive dim=1 shard takes all-gate or all-up per rank.
+                        # Fix: split into gate/up halves, shard each, then re-cat.
+                        if "experts.w13.weight" in base_key and shard_dim == 1:
+                            w = state_dict[k]
+                            half = w.shape[shard_dim] // 2
+                            gate_half = w.narrow(shard_dim, 0, half)
+                            up_half = w.narrow(shard_dim, half, half)
+                            gate_shard = shard_tensor(gate_half, shard_dim, rank, world_size)
+                            up_shard = shard_tensor(up_half, shard_dim, rank, world_size)
+                            old_shape = tuple(w.shape)
+                            state_dict[k] = torch.cat([gate_shard, up_shard], dim=shard_dim).contiguous()
+                            if rank == 0:
+                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (w13 split-shard dim={shard_dim})")
+                        else:
+                            old_shape = tuple(state_dict[k].shape)
+                            state_dict[k] = shard_tensor(state_dict[k], shard_dim, rank, world_size)
+                            if rank == 0 and old_shape != tuple(state_dict[k].shape):
+                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (dim={shard_dim})")
+                    elif shard_dim is not None and state_dict[k].dim() < 2:
+                        if rank == 0 and "shared_experts" in k:
+                            print(f"    [WARN] {k}: dim={state_dict[k].dim()} < 2, shard_dim={shard_dim} → SKIPPED (1D tensor)")
+                    else:
+                        if rank == 0 and "shared_experts" in k:
+                            print(f"    [INFO] {k}: shard_dim={shard_dim}, shape={tuple(state_dict[k].shape)} → {'REPLICATED' if shard_dim is None else 'BUG'}")
+
+        # Move state_dict to GPU after conversion + TP sharding.
+        # Loading to CPU first (when TP>1) avoids single-GPU OOM from
+        # holding full un-sharded weights before the sharding step above.
+        if world_size > 1:
+            print(f"  Moving {len(state_dict)} tensors to cuda:{rank}...")
+            for k in state_dict:
+                if state_dict[k].device.type == "cpu":
+                    state_dict[k] = state_dict[k].to(f"cuda:{rank}")
 
         # Build MLA model config for the builder
         model_config = MirageModelConfig(
@@ -1114,12 +824,6 @@ if __name__ == "__main__":
 
         # Build the computation graph using the DeepSeek V3 builder
         builder = DeepSeekV3Builder(mpk)
-        if os.environ.get("MPK_SKIP_LM_HEAD", "0") == "1":
-            model_config.with_lm_head = False
-        # In correctness mode, automatically expose lm_head_out so we can
-        # compare logits distributions (not just argmax tokens).
-        if args.correctness:
-            os.environ["MPK_DUMP_LOGITS"] = "1"
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
 
         results = mpk.kn_graph.generate_task_graph(
@@ -1129,11 +833,6 @@ if __name__ == "__main__":
             f.write(results["json_file"])
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
-
-        # ABLATION: MPK_DRY_RUN=1 → stop after task_graph gen (for inspecting offsets without kernel launch)
-        if os.environ.get("MPK_DRY_RUN", "0") == "1":
-            print(f"[DRY RUN] task_graph_{rank}.json written. Exiting before kernel launch.")
-            sys.exit(0)
 
         mpk.compile(output_dir=args.output_dir)
 
@@ -1145,140 +844,12 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        # Debug: check token buffers and step counter
-        prompt_len_val = prompt_lengths[0].item()
-        # Correctness comparison: first generated token is at tokens[0, prompt_len]
-        if args.correctness and ref_token is not None:
-            mpk_token = tokens[0, prompt_len_val].item()
-            print(f"  tokens around prompt_len={prompt_len_val}: {tokens[0, max(0,prompt_len_val-2):prompt_len_val+3].tolist()}")
-            print(f"\n{'='*60}")
-            print(f"Correctness comparison:")
-            print(f"  PyTorch reference token: {ref_token}")
-            print(f"  MPK output token:        {mpk_token}")
-            if ref_token == mpk_token:
-                print(f"  PASS: tokens match!")
-            else:
-                print(f"  FAIL: tokens differ!")
-            print(f"{'='*60}\n")
-
-            # Distribution comparison (logits, before argmax)
-            # NOTE: MPK reuses lm_head_out across iterations (mbt rows). After
-            # 4000+ iterations only the last few steps' logits remain. To find
-            # the row matching ref_logits, scan all mbt rows by cosine sim.
-            mlp_out_buf = getattr(builder, "mlp_out_buf", None)
-            if mlp_out_buf is not None:
-                print("[MLP_OUT] each row stats:")
-                for r in range(mlp_out_buf.shape[0]):
-                    row = mlp_out_buf[r].float()
-                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
-            # MPK_MLA_CHECKPOINT: compare per-step MLA intermediates
-            _mla_ckpt_mode = os.environ.get("MPK_MLA_CHECKPOINT", "0") == "1"
-            _mla_ckpt_data = globals().get('_g_mla_ckpt_data', {})
-            if _mla_ckpt_mode and _mla_ckpt_data:
-                print("\n[MLA CHECKPOINT] Comparing last-token ref vs MPK intermediates:")
-                def _cos(a, b):
-                    return torch.nn.functional.cosine_similarity(
-                        a.float().flatten().unsqueeze(0),
-                        b.float().flatten().unsqueeze(0)).item()
-                print(f"  ref keys: {list(_mla_ckpt_data.keys())}")
-                print(f"  builder bufs: q_a={getattr(builder, 'q_a_out_buf', None) is not None}, "
-                      f"qnope={getattr(builder, 'q_nope_pe_buf', None) is not None}, "
-                      f"clat={getattr(builder, 'c_latent_out_buf', None) is not None}, "
-                      f"attn_proj={getattr(builder, 'attn_proj_out_buf', None) is not None}")
-                # Compare step by step. MPK buffers show POST-NORM values
-                # (rmsnorm overwrites q_a_out and c_latent_out in-place).
-                comparisons = [
-                    # (label, ref_key, mpk_buf)
-                    ("1. q_a (post-norm, FP8 GEMM+norm)", "q_a_post_norm",
-                     getattr(builder, "q_a_out_buf", None)),
-                    # q_nope_pe: SKIP — shapes differ (ref=non-absorbed [H,192], MPK=absorbed [H*576])
-                    ("2. Q absorbed (q_b + W_UK + RoPE)", "q_absorbed",
-                     getattr(builder, "q_nope_pe_buf", None)),
-                    ("3. c_lat (post-norm, FP8 GEMM+norm)", "c_lat_post_norm",
-                     getattr(builder, "c_latent_out_buf", None)),
-                    ("4. attn_proj_out (MLA+o_proj)", "attn_proj_out",
-                     getattr(builder, "attn_proj_out_buf", None)),
-                ]
-                for label, ref_key, mpk_buf in comparisons:
-                    if mpk_buf is None:
-                        print(f"  {label}: [MPK buf not attached]")
-                        continue
-                    mpk_val = mpk_buf[0].float()
-                    mpk_amax = mpk_val.abs().max().item()
-                    if ref_key and ref_key in _mla_ckpt_data:
-                        ref_val = _mla_ckpt_data[ref_key][0].float()
-                        cs = _cos(ref_val.unsqueeze(0), mpk_val.unsqueeze(0))
-                        ref_amax = ref_val.abs().max().item()
-                        print(f"  {label}: cosine={cs:.6f} ref_amax={ref_amax:.4f} mpk_amax={mpk_amax:.4f}")
-                    else:
-                        print(f"  {label}: mpk_amax={mpk_amax:.4f} (no ref checkpoint)")
-
-            attn_out_buf = getattr(builder, "attn_out_buf", None)
-            if attn_out_buf is not None:
-                print("[ATTN_OUT] each row stats:")
-                for r in range(attn_out_buf.shape[0]):
-                    row = attn_out_buf[r].float()
-                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
-            qnope_buf = getattr(builder, "q_nope_pe_buf", None)
-            if qnope_buf is not None:
-                print("[Q_NOPE_PE] each row stats:")
-                for r in range(qnope_buf.shape[0]):
-                    row = qnope_buf[r].float()
-                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
-            attn_proj_buf = getattr(builder, "attn_proj_out_buf", None)
-            if attn_proj_buf is not None:
-                print("[ATTN_PROJ_OUT] each row stats:")
-                for r in range(attn_proj_buf.shape[0]):
-                    row = attn_proj_buf[r].float()
-                    print(f"  row {r}: amax={row.abs().max().item():.4f} mean_abs={row.abs().mean().item():.6f} nonzero={(row != 0).sum().item()}/{row.numel()}")
-            # MPK_DUMP_MOE: print MPK's selected experts and weights to compare with ref
-            moe_w = getattr(builder, "moe_topk_weights_buf", None)
-            moe_idx_buf = getattr(builder, "moe_routing_indices_buf", None)
-            if moe_w is not None and moe_idx_buf is not None:
-                _dmp_layer = os.environ.get("MPK_DUMP_MOE", "?")
-                # routing_indices is [NUM_EXPERTS, batch], values 0=not selected, k+1 = rank k
-                idx = moe_idx_buf.cpu()  # [NUM_EXPERTS, batch]
-                w = moe_w.cpu()  # [batch, TOPK]
-                for b in range(idx.shape[1]):
-                    selected = []  # list of (k_rank, expert_id)
-                    for e in range(idx.shape[0]):
-                        rank = idx[e, b].item()
-                        if rank > 0:
-                            selected.append((rank - 1, e))
-                    selected.sort()  # by k_rank (matches output order)
-                    expert_order = [e for _, e in selected]
-                    weight_order = [w[b, k].item() for k, _ in selected]
-                    # Sort by weight descending for easier comparison with ref
-                    pairs = sorted(zip(weight_order, expert_order), reverse=True)
-                    if pairs:
-                        s_experts = [p[1] for p in pairs]
-                        s_weights = [f'{p[0]:.4f}' for p in pairs]
-                        print(f"  [MPK L{_dmp_layer} b={b}] experts={s_experts} weights={s_weights}")
-            mpk_logits_buf = getattr(builder, "lm_head_out_buf", None)
-            if mpk_logits_buf is not None and ref_logits is not None:
-                ref_logits_cpu = ref_logits.detach().float().cpu()
-                vocab = ref_logits.shape[-1]
-                mpk_all = mpk_logits_buf[:, :vocab].detach().float().cpu()
-                print(f"Scanning {mpk_all.shape[0]} mbt rows of lm_head_out for best match:")
-                for r in range(mpk_all.shape[0]):
-                    row = mpk_all[r]
-                    cs = torch.nn.functional.cosine_similarity(
-                        row.unsqueeze(0), ref_logits_cpu.unsqueeze(0), dim=1
-                    ).item()
-                    top1 = row.argmax().item()
-                    top1_val = row.max().item()
-                    print(f"  row {r}: cosine={cs:+.4f} top1=token_{top1} val={top1_val:.3f} range=[{row.min():.2f},{row.max():.2f}]")
-
-                # Also show ref top-5
-                top5_ref = ref_logits_cpu.topk(5)
-                print(f"  ref top-5: {top5_ref.indices.tolist()} values={[f'{v:.3f}' for v in top5_ref.values.tolist()]}")
-                print(f"  ref range: [{ref_logits_cpu.min():.3f}, {ref_logits_cpu.max():.3f}]")
-                print(f"{'='*60}\n")
-
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            if total_num_requests > 1:
+                print(f"[request {r}]")
             print(response)
 
         if total_num_requests > 1:
@@ -1291,23 +862,28 @@ if __name__ == "__main__":
 
         # Dump outputs to json
         if save_path and rank == 0:
-            end_idx = step[0].item() + 1
-            prompt_len = prompt_lengths[0].item()
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
-            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
-            token_ids = tokens[0, prompt_len:slice_end].tolist()
-            response_text = tokenizer.decode(
-                tokens[0, :end_idx], skip_special_tokens=True
-            )
-            out = {
-                "token_ids": token_ids,
-                "text": response_text,
-                "latency_ms_per_token": per_tok_ms,
-                "prompt_length": prompt_len,
-                "generate_length": tokens_generated,
-                "mode": "mpk",
-            }
+            out = []
+            for r in range(total_num_requests):
+                end_idx = step[r].item() + 1
+                prompt_len = prompt_lengths[r].item()
+                tokens_generated = max(0, end_idx - prompt_len)
+                per_tok_ms = run_time / max(tokens_generated, 1)
+                slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
+                token_ids = tokens[r, prompt_len:slice_end].tolist()
+                response_text = tokenizer.decode(
+                    tokens[r, :end_idx], skip_special_tokens=True
+                )
+                out.append({
+                    "request_id": r,
+                    "token_ids": token_ids,
+                    "text": response_text,
+                    "latency_ms_per_token": per_tok_ms,
+                    "prompt_length": prompt_len,
+                    "generate_length": tokens_generated,
+                    "mode": "mpk",
+                })
+            if total_num_requests == 1:
+                out = out[0]
             with open(save_path, "w") as f:
                 json.dump(out, f, indent=2)
             print(f"Saved tokens to {save_path}")

@@ -19,8 +19,25 @@
 #include <cuda_runtime.h>
 
 #ifdef USE_NVSHMEM
+#if defined(MIRAGE_GRACE_BLACKWELL)
+// Blackwell (SM100a): include only host API + types.
+// Device-side allreduce is self-contained in tasks/blackwell/allreduce.cuh
+// to avoid rdc=true register inflation (166 vs 255 regs).
+//
+// Define nvshmemi_device_state_d BEFORE any NVSHMEM headers so that any
+// transitively-included device code (proxy_device.cuh etc.) can resolve it.
+// In standard NVSHMEM this comes from libnvshmem_device.a, but we skip that
+// library to avoid rdc=true.
+#include "device_host/nvshmem_types.h"
+#ifdef NVSHMEM_NO_DEVICE_LIB
+__managed__ nvshmemi_device_host_state_t nvshmemi_device_state_d;
+#endif
+#include <nvshmem_host.h>
+#else
+// Hopper/Ampere: use standard NVSHMEM includes (rdc=true is fine on SM90).
 #include <nvshmem.h>
 #include <nvshmemx.h>
+#endif
 #endif
 
 namespace mirage {
@@ -163,6 +180,20 @@ enum TaskType {
   TASK_PROB_SCATTER_SM100 = 284,
   TASK_MTP_FLOAT_SCATTER = 285,
   TASK_PROB_EXTRACT_SM100 = 286,
+  // MLA-MTP TP variants (q1..q4, kv4096; ferret-derived, no-PDL):
+  TASK_MLA_MTP_DECODE_TP2_SM100 = 287,
+  TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 = 288,
+  TASK_MLA_MTP_DECODE_TP4_SM100 = 289,
+  TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 = 290,
+  TASK_MLA_MTP_DECODE_TP8_SM100 = 291,
+  TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
+  // KV gather variant that writes split CKV/KPE output (for chunked prefill):
+  TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
+  // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
+  // input tokens = shifted ground-truth prompt + current iter's argmax tail.
+  TASK_MTP_BUILD_EMBED_INPUT = 294,
+  // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
+  TASK_MLA_PREFILL_TP8_SM100 = 295,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -300,16 +331,17 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
-  int *step;                    // Metadata for LLM serving
-  long long *tokens;            // Metadata for LLM serving
-  long long *input_tokens;      // Metadata for LLM serving
-  long long *output_tokens;     // Metadata for LLM serving
-  long long eos_token_id;       // Metadata for LLM serving
-  int max_seq_length;           // Metadata for LLM serving
-  int *new_token_nums;          // Metadata for LLM serving
-  int *qo_indptr_buffer;        // Metadata for LLM serving (paged attention)
-  int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
+  int *step;                      // Metadata for LLM serving
+  long long *tokens;              // Metadata for LLM serving
+  long long *input_tokens;        // Metadata for LLM serving
+  long long *output_tokens;       // Metadata for LLM serving
+  long long eos_token_id;         // Metadata for LLM serving
+  int max_seq_length;             // Metadata for LLM serving
+  int *new_token_nums;            // Metadata for LLM serving
+  int *qo_indptr_buffer;          // Metadata for LLM serving (paged attention)
+  int *paged_kv_indptr_buffer;    // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_buffer;   // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_snapshot; // Scheduler snapshot for in-place compaction
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN)

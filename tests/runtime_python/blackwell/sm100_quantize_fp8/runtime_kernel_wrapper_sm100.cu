@@ -39,19 +39,12 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
     void const *__restrict__ input_ptr,
     void *__restrict__ output_q_ptr,
     void *__restrict__ output_s_ptr,
-    int output_s_row_stride,
     int output_s_col_stride,
     float eps,
     float min_8bit,
     float max_8bit) {
-  int row = static_cast<int>(blockIdx.x);
-  bfloat16 const *input =
-      static_cast<bfloat16 const *>(input_ptr) + row * HIDDEN_SIZE;
-  fp8_e4m3fn *output_q =
-      static_cast<fp8_e4m3fn *>(output_q_ptr) + row * HIDDEN_SIZE;
-  uint32_t *output_s =
-      static_cast<uint32_t *>(output_s_ptr) + row * output_s_row_stride;
-
+  // The impl picks its row via blockIdx.x; grid_dim.x == batch_size covers
+  // all rows. BATCH_SIZE template arg is only a documentation hint now.
   kernel::per_token_group_quantize_fp8_task_impl</*BATCH_SIZE=*/1,
                                                  /*HIDDEN_SIZE=*/HIDDEN_SIZE,
                                                  /*GROUP_SIZE=*/GROUP_SIZE,
@@ -59,7 +52,13 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
                                                  bfloat16,
                                                  fp8_e4m3fn,
                                                  /*SCALE_UE8M0=*/true>(
-      input, output_q, output_s, eps, min_8bit, max_8bit, output_s_col_stride);
+      input_ptr,
+      output_q_ptr,
+      output_s_ptr,
+      eps,
+      min_8bit,
+      max_8bit,
+      output_s_col_stride);
 }
 
 #define DISPATCH_QUANTIZE_FP8_SM100_GROUP_SIZE_CASE(HIDDEN_SIZE, GROUP_SIZE)   \
@@ -68,7 +67,6 @@ __global__ __launch_bounds__(256) void quantize_fp8_sm100_kernel(
         <<<grid_dim, block_dim, 0, stream>>>(input_ptr,                        \
                                              output_q_ptr,                     \
                                              output_s_ptr,                     \
-                                             output_s_stride_row,              \
                                              output_s_stride_col,              \
                                              kEps,                             \
                                              kMin8,                            \
@@ -123,7 +121,6 @@ void quantize_fp8_sm100(torch::Tensor input,
   void const *input_ptr = input.data_ptr();
   void *output_q_ptr = output_q.data_ptr();
   void *output_s_ptr = output_s.data_ptr();
-  int const output_s_stride_row = static_cast<int>(output_s.stride(0));
   int const output_s_stride_col = static_cast<int>(output_s.stride(1));
 
   constexpr float kEps = 0.0f;
