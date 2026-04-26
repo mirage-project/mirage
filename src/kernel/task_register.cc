@@ -392,6 +392,11 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("int num_active_tokens_ = $;", batch_size);
+  code.e("#ifndef MPK_TEST_MODE");
+  code.e("num_active_tokens_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("#endif");
   code.e("kernel::silu_mul_task_impl<bfloat16, $, $, $, $>(",
          batch_size,
          output_size,
@@ -399,7 +404,7 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
          output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  code.e("    num_active_tokens_);");
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
