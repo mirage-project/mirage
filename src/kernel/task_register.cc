@@ -1718,15 +1718,11 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
   // Bias Tensor setup
-  // When batch_size < MMA_N, the MMA tile reads MMA_N rows but only
-  // batch_size rows exist.  Use stride 0 so every tile-row reads from
-  // the single valid batch row, avoiding an out-of-bounds global read.
-  int bias_batch_stride = (batch_size < MMA_N) ? 0 : output_stride;
   code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
          "cute::make_stride($, cute::Int<1>{}));",
          batch_size,
          output_size,
-         bias_batch_stride);
+         output_stride);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
@@ -1876,15 +1872,11 @@ int TaskRegister::register_splitk_linear_sm100_task(
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
   // Bias Tensor setup
-  // When batch_size < MMA_N, the MMA tile reads MMA_N rows but only
-  // batch_size rows exist.  Use stride 0 so every tile-row reads from
-  // the single valid batch row, avoiding an out-of-bounds global read.
-  int bias_batch_stride_sk = (batch_size < MMA_N) ? 0 : output_stride;
   code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
          "cute::make_stride($, cute::Int<1>{}));",
          batch_size,
          output_size,
-         bias_batch_stride_sk);
+         output_stride);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",

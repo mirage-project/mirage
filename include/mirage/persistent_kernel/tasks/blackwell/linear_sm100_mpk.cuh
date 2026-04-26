@@ -106,6 +106,8 @@ __device__ __noinline__ void
       cute::make_stride(cute::E<1>{},
                         cute::E<0>{}))); // ArithTuple(_0,_0) o
                                          // (batch_size,output_size):(_1@1,_1@0)
+  cute::Tensor mBiasCoord = cute::make_identity_tensor(
+      cute::make_shape(cute::Int<BATCH_SIZE>{}, cute::Int<OUTPUT_SIZE>{}));
 
   cute::Tensor gA = cute::local_tile(
       mA,
@@ -131,6 +133,11 @@ __device__ __noinline__ void
                  cute::_1,
                  cute::X>{}); // gmem_ptr[16b](0x7704bd040000) o
                               // (_32,_128,1,8):(1024,_1,32768,_128)
+  cute::Tensor gBiasCoord =
+      cute::local_tile(mBiasCoord,
+                       cd_tiler,
+                       mma_coord,
+                       cute::Step<cute::_1, cute::_1, cute::X>{});
   cute::Tensor gC = cute::local_tile(
       mC,
       cd_tiler,
@@ -624,11 +631,27 @@ __device__ __noinline__ void
 
         // T2R and register operations
         if constexpr (!NOBIAS) {
+          cute::Tensor tCgBiasCoord =
+              gBiasCoord(cute::_, cute::_, n_tile, m_tile);
+          cute::Tensor tCgBiasPred =
+              cute::lazy::transform(tCgBiasCoord, [&](auto const &coord) {
+                return cute::elem_less(
+                    coord,
+                    cute::make_shape(cute::Int<BATCH_SIZE>{},
+                                     cute::Int<OUTPUT_SIZE>{}));
+              });
+          CUTE_UNROLL
+          for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
+            tCrBiasTypeBias[i] = TypeBias(0);
+          }
           // Epilogue has 128 threads but bias may have fewer than 128 columns
-          // (OUTPUT_SIZE). Threads beyond OUTPUT_SIZE must not read global
-          // memory.
+          // (OUTPUT_SIZE), and the MMA_N tile may have more rows than the
+          // runtime batch capacity. Guard both dimensions before reading the
+          // residual tensor.
           if (threadIdx.x < OUTPUT_SIZE) {
-            cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
+            cute::copy_if(tCgBiasPred(cute::_, threadIdx.x),
+                          tCgBias(cute::_, threadIdx.x),
+                          tCrBiasTypeBias);
           }
           // optimize with vectorized type conversion
 
