@@ -25,16 +25,7 @@ Python (user API)
 
 ### Step 1 — `include/mirage/persistent_kernel/runtime_header.h`
 
-Add a new value to the `TaskType` enum. Pick a number in the appropriate range:
-- **100–149**: Ampere (baseline)
-- **150–198**: Hopper (SM90)
-- **230–298**: Blackwell (SM100)
-- **300–349**: Multi-GPU
-
-```cpp
-// Example: adding TASK_MY_OP in the Ampere range
-TASK_MY_OP = 122,  // pick next available number in your range
-```
+Add a new value to the `TaskType` enum.
 
 ---
 
@@ -93,26 +84,11 @@ __device__ __forceinline__ void my_op_impl(
 
 Add an `#include` for your new file if the architecture's `task_header.cuh` does not already pull it in via a wildcard:
 
-```cpp
-#include "tasks/ampere/my_task.cuh"   // add this line
-```
-
-Also add your `TaskType` to the `task_type_to_name` map in `src/kernel/runtime.cc` (search for the existing map entries like `{TASK_RMS_NORM, "TASK_RMS_NORM"}`):
-
-```cpp
-{TASK_MY_OP, "TASK_MY_OP"},
-```
-
 ---
 
 ### Step 4 — `include/mirage/kernel/task_register.h`
 
 Declare the new registration function in the `TaskRegister` class:
-
-```cpp
-int register_my_op_task(threadblock::Graph const &bgraph,
-                        std::vector<int> const &params);
-```
 
 ---
 
@@ -296,7 +272,9 @@ The runtime handles the mapping from grid coordinates to task metadata during ta
 
 ## Verification
 
-Adding a new task requires **three parts**:
+For each kernel, there should be a dedicated folder in `tests/runtime_python/{arch}/` for it, hosting all verification scripts. Name the folder after the kernel name.
+
+Adding a **standard unit test** for a new task requires **three parts** for verification and benchmarking:
 1. **Kernel correctness** (Steps A–C) — Test the CUDA kernel directly via a pybind11 wrapper
 2. **Pipeline correctness** (Step 8) — Test the full Python API → code generation → runtime path via test mode
 3. **Performance benchmark** (Step 9) — Measure latency/throughput across representative shapes
@@ -321,7 +299,7 @@ __global__ void my_op_kernel_wrapper(void const *input_ptr,
 template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
 void launch_my_op(void const *input_ptr, void const *weight_ptr,
                   void *output_ptr, float eps) {
-  dim3 grid_dim(1, 1, 1);                 // Adjust as needed for testing your op
+  dim3 grid_dim(X, Y, Z);                 // Adjust as needed for testing your op
   dim3 block_dim(128, 1, 1);              // 128 for Ampere; 256 for Hopper/Blackwell
   size_t smem_size = 3 * HIDDEN_DIM * sizeof(T) + 128;  // input + weight + output buffers
 
@@ -400,7 +378,9 @@ A ratio close to 1.0 everywhere (or max abs error within bfloat16 rounding, ~1e-
 
 After verifying the kernel in isolation (Steps A–C), test it through the full MPK compilation pipeline using test mode. This validates the Python layer method (Step 7), task registration (Steps 5–6), code generation, and runtime dispatch end-to-end.
 
-Create `tests/runtime_python/test_mode/test_my_op_testmode.py`. See the `/test-mode` skill for the complete API guide, examples, and debugging tips.
+Per-layer test_mode files live in the same folder as the kernel-wrapper test, at `tests/runtime_python/<arch>/sm100_<layer>/test_<layer>_testmode.py`. Each folder must also contain a `pytorch_reference.py` with the canonical PyTorch reference implementations — both the kernel-wrapper test (Step C) and the test_mode test import from it via `from pytorch_reference import <fn>`. This keeps the two tests aligned on a single source. If `pytorch_reference.py` does not yet exist for the layer, create it (extracting any inline ref from the kernel-wrapper test, then refactoring that test to use the import).
+
+Multi-layer pipeline tests that don't correspond to a single layer (e.g., a fused MLP combining several layers) live in `tests/runtime_python/test_mode/`. See the `/test-mode` skill for the complete API guide, examples, and debugging tips.
 
 ---
 
@@ -409,6 +389,6 @@ Create `tests/runtime_python/test_mode/test_my_op_testmode.py`. See the `/test-m
 Create a benchmark alongside the kernel wrapper test at `tests/runtime_python/blackwell/<task>/bench_<task>.py`. It should:
 
 1. Define at least 3–4 representative shape configurations (small, medium, production-scale).
-2. Warm up the kernel (16+ iterations).
+2. Warm up the kernel.
 3. Measure latency using `torch.cuda.Event(enable_timing=True)` over 100+ repetitions.
 4. Report average time (ms) per configuration.
