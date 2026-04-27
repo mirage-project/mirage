@@ -2965,7 +2965,7 @@ int TaskRegister::register_moe_mul_sum_add_sm100_task(
   assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[2];
+  input_stride = static_cast<int>(kn_input_op->input_strides[1]);
   assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);

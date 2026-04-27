@@ -74,6 +74,15 @@ def _moe_expert_grid_x(max_num_batched_tokens: int,
     return min(group_cap, active_slots)
 
 
+def _moe_hidden_split(hidden_size: int, preferred: int = 14) -> int:
+    """Pick a valid hidden-dimension split for lightweight MoE epilogues."""
+    max_y = min(preferred, max(1, hidden_size // 128))
+    for y in range(max_y, 0, -1):
+        if hidden_size % y == 0 and (hidden_size // y) % 128 == 0:
+            return y
+    return 1
+
+
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
 class DeepSeekV3Builder(GraphBuilder):
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
@@ -1258,7 +1267,7 @@ class DeepSeekV3Builder(GraphBuilder):
             weight=moe_topk_weights,
             residual=shared_residual,
             output=moe_output,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=(self.max_num_batched_tokens, _moe_hidden_split(self.hidden_size), 1),
             block_dim=(128, 1, 1),
         )
         self.mlp_out = moe_output
@@ -1787,7 +1796,8 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mpk.moe_mul_sum_add_layer(
             input=moe_down_out, weight=moe_topk_weights,
             residual=shared_residual, output=moe_output,
-            grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=(mbt, _moe_hidden_split(self.hidden_size), 1),
+            block_dim=(128, 1, 1))
         self.mlp_out = moe_output
 
     def _build_mtp_layer(self, state_dict: dict):
