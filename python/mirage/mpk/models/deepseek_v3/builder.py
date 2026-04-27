@@ -21,6 +21,7 @@ from ...model_registry import register_model_builder
 from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64
 
 
+# FIXME: Let's always read the constants from the config file
 # DeepSeek V3 architecture constants
 HIDDEN_SIZE = 7168
 NUM_LAYERS = 61
@@ -52,6 +53,7 @@ RMS_NORM_EPS = 1e-6
 _MOE_FP8_MMA_M = 128
 
 
+# TODO: The current heuristic is not ideal. We need to benchmark to find a better grid_dim.
 def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
     max_y = min(preferred, max(1, output_size // _MOE_FP8_MMA_M))
     for y in range(max_y, 0, -1):
@@ -85,6 +87,8 @@ class DeepSeekV3Builder(GraphBuilder):
         self.v_head_dim = V_HEAD_DIM_TOTAL     # 512 after absorption
         self.q_lora_rank = Q_LORA_RANK
         self.kv_lora_rank = KV_LORA_RANK
+        # FIXME: This naming convention is a bit confusing, let's try to distinguish between
+        # the original one and splitted one.
         self.intermediate_size = INTERMEDIATE_SIZE // self.world_size
         self.moe_intermediate_size = MOE_INTERMEDIATE_SIZE // self.world_size
 
@@ -106,6 +110,7 @@ class DeepSeekV3Builder(GraphBuilder):
         Args:
             layer_indices: If provided, only build these specific layer indices.
         """
+        # FIXME: Also set None as placeholder for these in the __init__
         self.ckv_kpe_cache = model_config.k_cache  # [num_layers, num_pages, page_size, 576]
         self.position_embeddings = model_config.position_embeddings
 
@@ -119,6 +124,7 @@ class DeepSeekV3Builder(GraphBuilder):
                      grid_dim, block_dim, residual=None):
         """Quantize BF16 input → FP8, then run FP8 GEMM."""
         if weight_scale is None:
+        # FIXME: I think we should throw error if no weight scale is provided, why allow bf16 in this function?
             # BF16 path (post-dequant weights)
             if residual is not None:
                 self.mpk.linear_with_residual_layer(
@@ -130,13 +136,17 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=grid_dim, block_dim=block_dim)
             return
 
+        # FIXME: Let's add more checks here, to ensure the input dtype, weight dtype and
+        # FIXME: weight scale factor dtype, output dtype
+
+
         # New FP8 kernel: each CTA processes output_size=128. Grid splits output.
         output_size = weight.dim(0)
         max_grid = output_size // 128
         if max_grid < 1:
             raise ValueError(
                 f"FP8 linear: output_size={output_size} < 128 (BLOCK_N). "
-                f"Must use BF16 linear for this dimension.")
+                f"Not supported yet.")
         # Each FP8 linear task serializes all of the output tiles in its shard.
         # Large layers were still using the old 64/96-task heuristic, which
         # leaves many workers idle on B200. Keep the caller's grid for small
@@ -167,6 +177,7 @@ class DeepSeekV3Builder(GraphBuilder):
             # physical shape=[packed_k, aligned_batch], dtype=uint32
             packed_k = (num_groups + 3) // 4
             aligned_batch = ((mbt + 3) // 4) * 4
+            # FIXME: Let's double check the layout requirement here?
             scale_buf = self.mpk.new_tensor(
                 dims=(packed_k, aligned_batch), dtype=uint32,
                 name=f"fp8_scale_{reduction_size}_shared",
@@ -232,6 +243,7 @@ class DeepSeekV3Builder(GraphBuilder):
         """Allocate intermediate computation buffers."""
         mbt = self.max_num_batched_tokens
 
+        # FIXME: What are these???
         # Pick the MLA kernel at compile time based on max_num_batched_tokens.
         # Large Q_LEN uses the mla_prefill_sm100 chunked-prefill kernel (which
         # is designed for that regime); small Q_LEN uses the MLA decode / MTP
@@ -298,6 +310,7 @@ class DeepSeekV3Builder(GraphBuilder):
             name="c_latent_out",
             io_category="cuda_tensor",
         )
+        # FIXME: Check this padding?
         # Pad to 128 for SM100 MMA_M alignment (real data is first 64 elements)
         self.k_pe_out = self.mpk.new_tensor(
             dims=(mbt, 128),  # [batch, 128] — padded from 64
@@ -312,6 +325,7 @@ class DeepSeekV3Builder(GraphBuilder):
             name="kv_combined",
             io_category="cuda_tensor",
         )
+        # FIXME: Why gathering at the cost of extra memory and copy?
         # Contiguous KV buffer for new MLA decode (gathered from paged cache)
         self.contiguous_kv = self.mpk.new_tensor(
             dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
@@ -341,6 +355,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # MLA kernel writes blocks at stride D_V*128 and LSE at stride 128.
         # TP kernels use split-K: each split handles one KV tile (128 tokens).
         # Buffer = mbr * num_groups * max_splits blocks.
+        # FIXME: TP splits along K???
         mbr = self.mpk.max_num_batched_requests
         if self.world_size > 1:
             max_splits = (self.mpk.max_seq_length + 127) // 128
@@ -551,11 +566,13 @@ class DeepSeekV3Builder(GraphBuilder):
         scale_key = f"{key}_scale_inv"
         if scale_key in state_dict:
             # Requantize: dequant with float32 scale, re-quantize with UE8M0 scale
+            # FIXME: Let's first assert the input weight and sf dtype are what we expect
             new_fp8, packed_ue8m0 = self._requantize_fp8_for_ue8m0(
                 state_dict[key], state_dict[scale_key])
             w = self._safe_attach(new_fp8, name)
             s = self._safe_attach(packed_ue8m0, f"{name}_scale")
         else:
+            # FIXME: I think we should never reach here?
             w = self._safe_attach(state_dict[key], name)
             s = None  # weight is already BF16 (post-dequant)
         return w, s
@@ -665,6 +682,7 @@ class DeepSeekV3Builder(GraphBuilder):
                                           f"layer_{layer_idx}_kv_a_rope")
             s_kv_rope = None
 
+        # FIXME: Can we fuse these two linears into one?
         # FP8 GEMM for c_latent [N, 512]
         self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent,
                          self.c_latent_out,
@@ -795,6 +813,7 @@ class DeepSeekV3Builder(GraphBuilder):
         """Build dense MLP for layers 0-2 (FP8 weights)."""
         prefix = f"model.layers.{layer_idx}."
 
+        # FIXME: I think we have completed the weight shuffle, so this should be correct?
         w_gate_up, s_gate_up = self._attach_fp8_weight(
             state_dict, f"{prefix}mlp.gate_up_proj.weight",
             f"layer_{layer_idx}_gate_up_proj")
@@ -887,6 +906,8 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_moe_output",
             io_category=_moe_io,
         )
+        # FIXME: This layer requires dummy input and output, which is not ideal.
+        # FIXME: Let's try to fuse this function into
         self.mpk.tensor_init_layer(
             input=moe_output,
             dummy_input=self.rmsnorm_out,
@@ -902,6 +923,7 @@ class DeepSeekV3Builder(GraphBuilder):
             torch_tensor=state_dict[bias_key],
             name=f"layer_{layer_idx}_moe_gate_bias",
         )
+        # TODO: This layer is correctly configured, but still very slow. We should optimize it.
         self.mpk.moe_topk_sigmoid_routing_layer(
             input=router_logits,
             bias=w_bias,
@@ -959,8 +981,12 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         if use_fp8_experts:
+            # FIXME: T
             w13_m_split = _moe_fp8_m_split(2 * self.moe_intermediate_size,
-                                           preferred=2)
+                                           preferred=16)
+            num_exp_groups = 8
+            # We should try to keep num_exp_groups * m_split as large as possible to maximize parallelism,
+            # but still <= total number of workers (140 in this case), for best performance.
             self.mpk.moe_w13_fp8_layer(
                 input_fp8=moe_input_fp8,
                 input_scale=moe_input_scale,
@@ -969,10 +995,11 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_mid,
-                grid_dim=(NUM_EXPERTS, w13_m_split, 1),
+                grid_dim=(num_exp_groups, w13_m_split, 1),
                 block_dim=(128, 1, 1),
             )
         else:
+            raise RuntimeError("No bf16 moe experts for now.")
             self.mpk.moe_w13_linear_layer(
                 input=self.rmsnorm_out,
                 weight=w_experts_w13,
@@ -1022,6 +1049,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 name=f"layer_{layer_idx}_moe_silu_scale",
                 io_category="cuda_tensor",
             )
+            # FIXME: This is fine for small batchsize <= 16, but for larger batchsize we need better solution.
             self.mpk.quantize_fp8_layer(
                 input=moe_silu_out,
                 output_fp8=moe_silu_fp8,
@@ -1038,7 +1066,8 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         if use_fp8_experts:
-            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=2)
+            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
+            num_exp_groups = 10
             self.mpk.moe_w2_fp8_layer(
                 input_fp8=moe_silu_fp8,
                 input_scale=moe_silu_scale,
@@ -1047,10 +1076,11 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_down_out,
-                grid_dim=(NUM_EXPERTS, w2_m_split, 1),
+                grid_dim=(num_exp_groups, w2_m_split, 1),
                 block_dim=(128, 1, 1),
             )
         else:
+            raise RuntimeError("No bf16 moe experts for now.")
             self.mpk.moe_w2_linear_layer(
                 input=moe_silu_out,
                 weight=w_experts_w2,
@@ -1143,6 +1173,7 @@ class DeepSeekV3Builder(GraphBuilder):
                          residual=None)
 
         # Final: moe_output = sum(routed_experts * weights) + shared_residual
+        # TODO: Let's also add the real residual here.
         self.mpk.moe_mul_sum_add_layer(
             input=moe_down_out,
             weight=moe_topk_weights,
@@ -1221,6 +1252,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # Set self.x = self.mtp_x so MLP's fuse_residual uses correct hidden state
         self.x = self.mtp_x
         mlp_gate_key = f"{prefix}mlp.gate.weight"
+        # FIXME: I don't think we have a dense_mlp MTP layer?
+        # FIXME: Can we just reuse the main model's construction logic?
         if mlp_gate_key in state_dict:
             self._build_moe_mlp_with_prefix(prefix, state_dict)
         else:
@@ -2080,6 +2113,7 @@ class DeepSeekV3Builder(GraphBuilder):
             if i < FIRST_MOE_LAYER:
                 self._build_dense_mlp(i, state_dict)
                 self.x = self.mlp_out
+                # FIXME: Why no allreduce after mlp?
             else:
                 self._build_moe_mlp(i, state_dict)
                 # MoE: always use explicit residual add (not fused into shared_expert).
@@ -2096,6 +2130,7 @@ class DeepSeekV3Builder(GraphBuilder):
                         name=f"layer_{i}_moe_residual",
                         io_category="cuda_tensor",
                     )
+                    # FIXME: Can we just fuse this residual into the moe_mul_sum_add_layer?
                     self.mpk.elementwise_add_layer(
                         input_a=self.x, input_b=self.allreduce_out,
                         output=moe_residual_out,
@@ -2110,6 +2145,7 @@ class DeepSeekV3Builder(GraphBuilder):
                         name=f"layer_{i}_moe_residual",
                         io_category="cuda_tensor",
                     )
+                    # FIXME: Can we just fuse this residual into the moe_mul_sum_add_layer?
                     self.mpk.elementwise_add_layer(
                         input_a=self.x, input_b=self.mlp_out,
                         output=moe_residual_out,
@@ -2128,6 +2164,7 @@ class DeepSeekV3Builder(GraphBuilder):
         padded_vocab_size = 129280  # DeepSeek V3 vocab size (already aligned)
 
         # Embed layer
+        # FIXME: Do we really need to assign these to self? I guess to don't reuse most of these objects?
         self.x = self.mpk.attach_input(
             torch_tensor=self.input_tokens, name="input_token"
         )
@@ -2166,6 +2203,8 @@ class DeepSeekV3Builder(GraphBuilder):
 
         if with_lm_head:
             lm_head_weight = state_dict["lm_head.weight"]
+            # FIXME: Why want this padding?
+            # FIXME: And how to determine the padded size? The current pad size is the same as the orginal!
             if lm_head_weight.shape[0] < padded_vocab_size:
                 lm_head_weight = torch.cat([
                     lm_head_weight,
@@ -2243,4 +2282,5 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
         # Optional MTP layer
+        # TODO(Zep): mtp will be reviewed after the main model is working.
         self._build_mtp_layer(state_dict)

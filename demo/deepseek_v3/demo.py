@@ -356,13 +356,12 @@ if __name__ == "__main__":
                     result.append(int(part))
             return result
 
-        # Determine which layers we need
-        layer_indices_for_load = None
-        if args.layers:
-            layer_indices_for_load = _parse_layers(args.layers)
-            # Also need MTP layer if --mtp
-            if args.mtp > 0:
-                layer_indices_for_load.append(num_layers)  # layer 61
+        # `layer_indices_arg` is what the builder consumes; `_for_load` is
+        # the same set plus the MTP layer (we still have to load its weights).
+        layer_indices_arg = _parse_layers(args.layers) if args.layers else None
+        layer_indices_for_load = list(layer_indices_arg) if layer_indices_arg else None
+        if layer_indices_for_load is not None and args.mtp > 0:
+            layer_indices_for_load.append(num_layers)
 
         weight_file = os.path.join(
             args.model_path, f"model{rank}-mp{world_size}.safetensors"
@@ -371,6 +370,7 @@ if __name__ == "__main__":
             state_dict = load_file(weight_file, device=f"cuda:{rank}")
         else:
             # Selective loading: only load needed layers from sharded files
+            # * selective loading is what we want
             index_file = os.path.join(args.model_path, "model.safetensors.index.json")
             if os.path.exists(index_file) and layer_indices_for_load is not None:
                 # Smart loading: use index to only load relevant shards/keys
@@ -395,57 +395,31 @@ if __name__ == "__main__":
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
+                    # FIXME: Seems to be loading the whole tensor?
+                    # FIXME: We need a more efficient method
                     with safe_open(shard_path, framework="pt", device=_load_device) as f:
                         for key in keys:
                             state_dict[key] = f.get_tensor(key)
                 print(f"  Loaded {len(state_dict)} keys total (device={_load_device})")
             else:
-                # Full loading (no index or no layer filter)
-                import glob
-                shard_files = sorted(glob.glob(
-                    os.path.join(args.model_path, "model-*.safetensors")
-                ))
-                if shard_files:
-                    state_dict = {}
-                    for shard_file in shard_files:
-                        state_dict.update(load_file(shard_file, device=f"cuda:{rank}"))
-                else:
-                    candidates = [
-                        os.path.join(args.model_path, "model.safetensors"),
-                    ]
-                    state_dict = None
-                    for candidate in candidates:
-                        if os.path.exists(candidate):
-                            state_dict = load_file(candidate, device=f"cuda:{rank}")
-                            break
-                    if state_dict is None:
-                        raise FileNotFoundError(
-                            f"Could not find model weights at {args.model_path}. "
-                            f"Expected {weight_file} or model.safetensors or model-*.safetensors"
-                        )
+                raise RuntimeError("No valid weight files found for selective loading.")
 
-        # Parse layer indices
-        layer_indices_arg = None
+        # Weight conversion (absorption + gate/up + expert fusion) runs only
+        # for selective loading. The pre-converted single-file path
+        # (`model{rank}-mp{world_size}.safetensors`) is already absorbed/fused.
         if args.layers:
-            layer_indices_arg = _parse_layers(args.layers)
-
-        # Weight conversion (absorption + fusion) is needed whenever --layers
-        # is used for selective loading.
-        _need_conversion = bool(args.layers)
-        if _need_conversion:
-            test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
-
-            # Phase 1: Absorption. Matches vLLM/SGLang where runtime uses absorption.
-            print("\nPhase 1: Weight absorption (q_b + o_proj fusion)...")
-            import sys
+            # Absorb kv_b_proj into q_b_proj and fuse V un-absorption into
+            # o_proj (matches vLLM/SGLang runtime). FP8 weights stay FP8;
+            # absorbed q_b becomes BF16 (FP8 requantization compounds error
+            # across residual layers).
+            print("\nConverting weights for MPK builder (FP8 preserved)...")
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
             from convert import (
                 dequantize_fp8, absorb_kv_into_q, get_model_params, is_fp8,
-                find_scale_for_weight,
             )
             config_dict = AutoConfig.from_pretrained(args.model_path).to_dict()
             mp = get_model_params(config_dict)
-            absorb_layers = list(test_layers)
+            absorb_layers = list(layer_indices_arg) if layer_indices_arg else list(range(num_layers))
             if args.mtp > 0:
                 absorb_layers.append(num_layers)
 
@@ -485,6 +459,7 @@ if __name__ == "__main__":
                     kv_bf16 = kv_f32.to(torch.bfloat16)
                     absorbed = absorb_kv_into_q(q_f32, kv_f32, mp).to(torch.bfloat16)
                     state_dict[q_key] = absorbed
+                    # * scale factor is no longer needed after absorption
                     if q_s_key in state_dict:
                         del state_dict[q_s_key]
                     # Fuse V un-absorption into o_proj
@@ -493,9 +468,11 @@ if __name__ == "__main__":
                     v_dim = mp["v_head_dim"]
                     kv_lora_rank = mp["kv_lora_rank"]
                     # Split absorbed q_b into q_b_nope (H*D_CKV=512) and
-                    # q_b_pe (H*D_KPE=64). Required by the chunked-prefill
-                    # MLA kernel which takes Q_nope / Q_pe as separate tensors.
-                    # Absorbed layout is per-head [nope(512) | pe(64)].
+                    # q_b_pe (H*D_KPE=64) for the chunked-prefill MLA kernel,
+                    # which takes Q_nope / Q_pe as separate tensors. Decode
+                    # still uses the fused [H*576] q_b_proj — keeping both
+                    # forms lets the builder dispatch based on
+                    # max_num_batched_tokens. Per-head layout: [nope(512) | pe(64)].
                     H_ = num_heads_loc
                     absorbed_r = absorbed.reshape(H_, 576, -1)
                     q_b_nope = absorbed_r[:, :kv_lora_rank, :].contiguous().reshape(H_ * kv_lora_rank, -1)
@@ -521,112 +498,7 @@ if __name__ == "__main__":
                         o_fp8, o_scale = _quantize_f32_to_checkpoint_fp8(o_flat)
                         state_dict[o_key] = o_fp8
                         state_dict[o_s_key] = o_scale
-                        print(f"  L{li}: FP8 absorbed q_b {absorbed.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
-                    del state_dict[kv_key]
-                    if kv_s_key in state_dict:
-                        del state_dict[kv_s_key]
-
-            # Phase 2: Convert remaining weights for MPK builder
-            # (gate+up fusion, expert fusion, alignment)
-            # - Keep FP8 weights + scale_inv as-is (builder uses FP8 GEMM pipeline)
-            # - Only dequant kv_b_proj for absorption into q_b_proj
-            # - Fuse gate+up for dense layers and per-expert weights
-            print("\nConverting weights for MPK builder (in-memory, FP8 preserved)...")
-            import sys
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
-            from convert import (
-                dequantize_fp8, absorb_kv_into_q, get_model_params, is_fp8,
-                find_scale_for_weight,
-            )
-            config_dict = AutoConfig.from_pretrained(args.model_path).to_dict()
-            mp = get_model_params(config_dict)
-
-            # Absorption already done in Phase 1. Skip layers already absorbed.
-            absorb_layers = list(test_layers)
-            if args.mtp > 0:
-                absorb_layers.append(num_layers)
-            for li in absorb_layers:
-                attn = f"model.layers.{li}.self_attn."
-                q_key = f"{attn}q_b_proj.weight"
-                kv_key = f"{attn}kv_b_proj.weight"
-                if q_key in state_dict and kv_key in state_dict:
-                    # Dequant both for absorption (GPU)
-                    q_w = state_dict[q_key]
-                    kv_w = state_dict[kv_key]
-                    q_s_key = f"{q_key}_scale_inv"
-                    kv_s_key = f"{kv_key}_scale_inv"
-                    # Keep dequanted weights in float32 for absorption (not BF16).
-                    # BF16 truncation was causing cosine 0.831 for Q absorbed.
-                    if is_fp8(q_w) and q_s_key in state_dict:
-                        q_f32 = dequantize_fp8(q_w.cuda(), state_dict[q_s_key].cuda())  # float32
-                    else:
-                        q_f32 = q_w.cuda().float()
-                    if is_fp8(kv_w) and kv_s_key in state_dict:
-                        kv_f32 = dequantize_fp8(kv_w.cuda(), state_dict[kv_s_key].cuda())  # float32
-                    else:
-                        kv_f32 = kv_w.cuda().float()
-                    # Keep BF16 copies for V un-absorption (o_proj needs kv_b in BF16 format)
-                    kv_bf16 = kv_f32.to(torch.bfloat16)
-                    absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)  # float32 inputs
-                    # Keep absorbed weight in BF16 (no FP8 requantization).
-                    # FP8 requantization adds compounding error across residual layers.
-                    # BF16 GEMM is used — matches reference and vLLM/SGLang.
-                    absorbed = absorbed_f32.to(torch.bfloat16)
-                    if q_s_key in state_dict:
-                        del state_dict[q_s_key]  # remove FP8 scale → triggers BF16 GEMM
-                    print(f"  BF16 absorbed q_b: {absorbed.shape}")
-                    # Fuse V un-absorption into o_proj:
-                    # o_proj_fused[h] = o_proj[h] @ W_UV[h]
-                    # where W_UV[h] = kv_b_proj V part: [v_orig, kv_lora_rank]
-                    num_heads_loc = mp["num_heads"]  # use full heads, shard later
-                    qk_nope = mp["qk_nope_head_dim"]
-                    v_dim = mp["v_head_dim"]
-                    kv_lora_rank = mp["kv_lora_rank"]
-                    kv_head_dim = qk_nope + v_dim
-                    kv_b_reshaped = kv_bf16.reshape(num_heads_loc, kv_head_dim, kv_lora_rank)
-                    W_UV = kv_b_reshaped[:, :v_dim, :]  # [H, v_dim, kv_lora_rank]
-
-                    # Fuse into o_proj: o_proj [hidden, H*v_dim] → o_proj_fused [hidden, H*kv_lora]
-                    o_key = f"{attn}o_proj.weight"
-                    if o_key in state_dict:
-                        o_w = state_dict[o_key]
-                        if is_fp8(o_w):
-                            o_s_key = f"{o_key}_scale_inv"
-                            if o_s_key in state_dict:
-                                o_bf16 = dequantize_fp8(o_w.cuda(), state_dict[o_s_key].cuda()).to(torch.bfloat16)
-                                del state_dict[o_s_key]
-                            else:
-                                o_bf16 = o_w.cuda().to(torch.bfloat16)
-                        else:
-                            o_bf16 = o_w.cuda().to(torch.bfloat16)
-                        # o_bf16: [hidden, H*v_dim] → reshape [hidden, H, v_dim]
-                        hidden = o_bf16.shape[0]
-                        o_reshaped = o_bf16.reshape(hidden, num_heads_loc, v_dim)
-                        # o_fused[h] = o_reshaped[:, h, :] @ W_UV[h] → [hidden, kv_lora_rank]
-                        # Batched: o_fused = einsum('dhn,hnk->dhk', o_reshaped, W_UV) → [hidden, H, kv_lora]
-                        o_fused = torch.einsum('dhn,hnk->dhk', o_reshaped.float(), W_UV.float())
-                        state_dict[o_key] = o_fused.reshape(hidden, num_heads_loc * kv_lora_rank).to(torch.bfloat16)
-                        print(f"  Fused o_proj: [{hidden}, {num_heads_loc*v_dim}] → [{hidden}, {num_heads_loc*kv_lora_rank}]")
-
-                    # Replace q_b_proj with absorbed FP8 version (scale_inv already set above)
-                    state_dict[q_key] = absorbed
-                    # q_s_key kept (set during FP8 quantization above)
-
-                    # Split absorbed q_b into q_b_nope_absorbed (H*D_CKV=512) and
-                    # q_b_pe (H*D_KPE=64) for the chunked-prefill path. The
-                    # mla_prefill kernel takes Q_nope and Q_pe as SEPARATE dense
-                    # tensors, while the decode kernel consumes the fused
-                    # [H*576] tensor. Keeping both forms lets the builder
-                    # dispatch to the right kernel based on max_num_batched_tokens.
-                    # Per-head layout of `absorbed`: [nope(512) | pe(64)] rows.
-                    H = num_heads_loc
-                    absorbed_r = absorbed.reshape(H, 576, -1)
-                    q_b_nope = absorbed_r[:, :512, :].contiguous().reshape(H * 512, -1)
-                    q_b_pe = absorbed_r[:, 512:, :].contiguous().reshape(H * 64, -1)
-                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
-                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
-
-                    # Remove kv_b_proj (absorbed into q)
+                        print(f"  L{li}: BF16 absorbed q_b {absorbed.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
@@ -710,6 +582,8 @@ if __name__ == "__main__":
             print(f"  Converted: {len(state_dict)} keys (FP8 weights preserved)")
 
             # TP weight sharding: shard weights for multi-GPU inference
+            # FIXME: If we do sharding here, every rank will have to load the full weights first, which may OOM.
+            # FIXME: We need a more efficient method, like spliting the absorption/fusion work across ranks.
             if world_size > 1:
                 from convert import shard_tensor
                 import re
@@ -817,6 +691,7 @@ if __name__ == "__main__":
             num_layers=num_layers,
             k_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
             v_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
+            # FIXME: Why position embedding is None?
             position_embeddings=None,
             state_dict=state_dict,
             with_lm_head=True,
@@ -826,6 +701,7 @@ if __name__ == "__main__":
         builder = DeepSeekV3Builder(mpk)
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
 
+        # TODO(Zep): Remove this, duplicate graph gen
         results = mpk.kn_graph.generate_task_graph(
             num_gpus=world_size, my_gpu_id=rank
         )
@@ -889,6 +765,7 @@ if __name__ == "__main__":
             print(f"Saved tokens to {save_path}")
 
     else:
+        raise RuntimeError("Pytorch ref is not allowed for now, which may cause OOM.")
         # Native PyTorch path (without Mirage)
         # DeepSeek V3 requires the model implementation for non-Mirage inference
         try:

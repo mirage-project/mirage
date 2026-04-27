@@ -1,8 +1,11 @@
 import abc
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING
 
 from dataclasses import dataclass
 import torch
+
+if TYPE_CHECKING:
+    from mirage import PersistentKernel
 
 @dataclass
 class MirageModelConfig:
@@ -42,7 +45,7 @@ class MirageModelConfig:
 
 
 class GraphBuilder(abc.ABC):
-    def __init__(self, mpk, weights: Optional[Dict[str, Any]] = None):
+    def __init__(self, mpk: "PersistentKernel", weights: Optional[Dict[str, Any]] = None):
         self.mpk = mpk
         self.weights = weights or {}
 
