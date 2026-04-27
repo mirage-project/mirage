@@ -1364,17 +1364,14 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
       if (param_id == 0) {
-        // Q: derive hpb from tensor dimensions.
-        // TP-aware: num_heads derived from total_rows (= mbt * local_heads for
-        // Q_LEN=1, or Q_LEN * local_heads for multi-query). Here we assume
-        // dim[0] carries rows directly (3D TMA format).
-        int total_rows = tensor_desc.dim[0]; // B * Q_LEN * NUM_HEADS
-        int d_k = tensor_desc.dim[1];
+        // Q is allocated by the DeepSeek builder as flat [MBT, H * D_K].
+        // Reinterpret it as [MBT * H, D_K] for TMA so the box height matches
+        // the kernel's hpb rows. This mirrors the TP2/4/8 descriptor path.
+        constexpr int D_K = 576;
+        int const total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
+        int total_rows = total_elements / D_K; // B * Q_LEN * NUM_HEADS
+        int d_k = D_K;
         int k_iters = d_k / BK;
-        // For MTP, the tensor layout may be (total_rows, d_k) directly.
-        // num_heads (local) = total_rows / Q_LEN, but we don't know Q_LEN here.
-        // Conservative: assume num_heads = min(NUM_H, total_rows) for
-        // single-query.
         int num_heads = (total_rows <= NUM_H) ? total_rows : NUM_H;
         int q_len = total_rows / num_heads;
         if (q_len < 1) {
@@ -1389,7 +1386,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         }
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
-        uint64_t gs[2] = {(uint64_t)d_k * 2, 128};
+        uint64_t gs[2] = {(uint64_t)d_k * 2, (uint64_t)BK * 2};
         uint32_t bd[3] = {(uint32_t)BK, (uint32_t)hpb, 1};
         uint32_t es[3] = {1, 1, 1};
         CUresult err = cuTensorMapEncodeTiled(tma_desc,

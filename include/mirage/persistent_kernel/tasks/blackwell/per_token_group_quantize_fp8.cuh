@@ -52,7 +52,8 @@ __device__ __forceinline__ void
                                            float const eps,
                                            float const min_8bit,
                                            float const max_8bit,
-                                           int const scale_outer_stride) {
+                                           int const scale_outer_stride,
+                                           int const row_idx) {
   // Pointers
   T const *input = static_cast<T const *>(input_ptr);
   DST_T *output_q = static_cast<DST_T *>(output_q_ptr);
@@ -84,11 +85,13 @@ __device__ __forceinline__ void
   int const warp_idx = thread_idx / WARP_SIZE;
   int const num_groups_per_block = blockDim.x / WARP_SIZE;
 
-  // Each CTA quantizes exactly ONE batch row, selected by blockIdx.x.
-  // Callers must launch grid_dim=(BATCH_SIZE, 1, 1) — one block per row.
-  // BATCH_SIZE is retained as a template parameter for callers to assert
-  // intent, but only blockIdx.x controls which row this CTA processes.
-  int const batch_idx = static_cast<int>(blockIdx.x);
+  // Each MPK task quantizes exactly one logical row. In a persistent kernel
+  // blockIdx.x is the worker CTA id, not the task-grid x coordinate, so the row
+  // index must come from task metadata.
+  int const batch_idx = row_idx;
+  if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
+    return;
+  }
   int const row_base = batch_idx * GLOBAL_STRIDE;
 
 #pragma unroll

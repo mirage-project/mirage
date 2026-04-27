@@ -135,15 +135,16 @@ __device__ __noinline__ void
   int const mainloop_bar = __cvta_generic_to_shared(&mbar_buf[2 * MAX_STAGES]);
   int const q_bar = __cvta_generic_to_shared(&mbar_buf[2 * MAX_STAGES + 1]);
 
-  if (wid == 0 && elect_sync()) {
-    for (int i = 0; i < MAX_STAGES; i++) {
-      mbar_init(tma_bar + i * 8, 1);
-      mbar_init(mma_bar + i * 8, 1);
+  if (wid == 0) {
+    if (elect_sync()) {
+      for (int i = 0; i < MAX_STAGES; i++) {
+        mbar_init(tma_bar + i * 8, 1);
+        mbar_init(mma_bar + i * 8, 1);
+      }
+      mbar_init(mainloop_bar, 1);
+      mbar_init(q_bar, 1);
+      asm volatile("fence.mbarrier_init.release.cluster;");
     }
-    mbar_init(mainloop_bar, 1);
-    mbar_init(q_bar, 1);
-    asm volatile("fence.mbarrier_init.release.cluster;");
-  } else if (wid == 1) {
     int addr_smem = __cvta_generic_to_shared(tmem_addr_buf);
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::

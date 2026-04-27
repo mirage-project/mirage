@@ -4099,7 +4099,8 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // aligned_batch. For float32 scale (MoE), scale_outer_stride is unused
   // (float32 writes directly).
   code.e("    1e-10f, -448.0f, 448.0f,");
-  code.e("    $);", aligned_batch);
+  code.e("    $,", aligned_batch);
+  code.e("    task_desc->task_metadata.request_id);");
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
 
