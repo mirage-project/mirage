@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "mirage/kernel/annotated_graph.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/kernel/task_register.h"
 #include "mirage/transpiler/utils.h"
@@ -232,6 +233,20 @@ void register_mugraph(
     std::unordered_map<kn::KNOperator const *,
                        std::tuple<int, int, TaskType, int>> const
         &task_configs) {
+  // Build the AnnotatedGraph. This replaces the old chain-only matching
+  // (based on guid equality between pre_output_ops and current input_ops)
+  // with a full DAG analysis: residual stripping, fork/join classification,
+  // per-edge event_dim via GCD, and N-way LCM unification at fork/join
+  // boundaries. Any error (cycle, disallowed role combination, ill-formed
+  // LCM) aborts compilation here so we fail early with a clear message
+  // instead of silently producing a wrong schedule.
+  AnnotatedGraph ag = build_annotated_graph(graph, task_configs);
+  if (char const *env = std::getenv("MIRAGE_DUMP_ANNOTATED_GRAPH");
+      env != nullptr && std::string(env) != "0") {
+    std::string dump = maybe_dump_annotated_graph(ag);
+    std::fprintf(stderr, "%s", dump.c_str());
+  }
+
   // push a begin-graph task and a event to launch dependent asks
   {
     EventDesc e(EVENT_LAUNCH_DEPENDENT_TASKS, 1, 0, 0);
@@ -240,138 +255,75 @@ void register_mugraph(
     all_tasks.push_back(t);
     all_events.push_back(e);
   }
-  std::vector<tb::TBInputOp *> pre_output_ops;
-  kn::KNCustomizedOp const *pre_op = nullptr;
-  std::map<dim3, std::vector<TaskId>, Dim3Comparator> pre_task_map;
+
   std::unordered_set<size_t> nvshmem_events_idx;
-  bool prev_op_is_multigpu = false;
-  for (auto const &op : graph.operators) {
-    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
-      continue;
+  int const V = (int)ag.layers.size();
+  // Per-layer task map: bid -> task_id(s). Indexed by layer index instead of
+  // KNOperator* so that downstream edges can look up a producer's tasks by
+  // layer index (the AnnotatedGraph's natural key). We still populate
+  // `all_task_maps` at the end for the legacy KNOperator*-keyed consumers
+  // (print_task_graph).
+  std::vector<std::map<dim3, std::vector<TaskId>, Dim3Comparator>>
+      layer_task_maps(V);
+  std::vector<bool> layer_is_multigpu(V, false);
+  // Each fork group's consumer-bundle is emitted exactly once — when we
+  // encounter branch 0 (the head) in the topo walk. Other branches of the
+  // same group are skipped because the head already laid out ALL branches'
+  // tasks interleaved per fork event.
+  std::vector<bool> bundle_emitted(ag.fork_groups.size(), false);
+
+  auto get_tensor_desc = [](tb::TBInputOp *const &tb_op) -> TensorDesc {
+    TensorDesc desc;
+    assert(tb_op->output_tensors.size() == 1);
+    tb::STensor stensor = tb_op->output_tensors[0];
+    kn::KNInputOp *kernel_input_op =
+        static_cast<kn::KNInputOp *>(tb_op->dtensor.owner_op);
+    desc.num_dims = stensor.num_dims;
+    desc.data_type = stensor.data_type;
+    for (int d = stensor.num_dims - 1; d >= 0; d--) {
+      desc.dim[d] = stensor.dim[d];
+      desc.stride[d] = kernel_input_op->input_strides[d];
     }
-    std::tuple<int, int, TaskType, int> task_config =
-        task_configs.find(op)->second;
-    assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
-    // Customized op
-    kn::KNCustomizedOp const *cur_op =
-        dynamic_cast<kn::KNCustomizedOp const *>(op);
+    return desc;
+  };
+
+  // Split a customized op's bgraph into input_ops / output_ops (same quirk
+  // as before: outputs live as TBInputOps after the num_inputs mark).
+  auto split_ops = [](kn::KNCustomizedOp const *op,
+                      int num_inputs,
+                      int num_outputs,
+                      std::vector<tb::TBInputOp *> &input_ops,
+                      std::vector<tb::TBInputOp *> &output_ops) {
+    input_ops.clear();
+    output_ops.clear();
+    for (auto const &sub_op : op->bgraph.operators) {
+      assert(sub_op->op_type == mirage::type::TB_INPUT_OP);
+      if ((int)input_ops.size() < num_inputs) {
+        input_ops.push_back(static_cast<tb::TBInputOp *>(sub_op));
+      } else {
+        output_ops.push_back(static_cast<tb::TBInputOp *>(sub_op));
+      }
+    }
+    assert((int)input_ops.size() == num_inputs);
+    assert((int)output_ops.size() == num_outputs);
+  };
+
+  // Build the bid-lex ordered task vector for a layer (same metadata logic as
+  // the original code).
+  auto build_tasks_bid_lex = [&](kn::KNCustomizedOp const *cur_op,
+                                 TaskType task_type,
+                                 int variant_id,
+                                 int num_subtasks,
+                                 std::vector<tb::TBInputOp *> const &input_ops,
+                                 std::vector<tb::TBInputOp *> const &output_ops)
+      -> std::vector<FullTaskDesc> {
+    std::vector<FullTaskDesc> tasks;
     tb::Graph const &bgraph = cur_op->bgraph;
     dim3 bid;
-    std::vector<tb::TBInputOp *> input_ops;
-    std::vector<tb::TBInputOp *> output_ops;
-    int num_inputs = std::get<0>(task_config);
-    int num_outputs = std::get<1>(task_config);
-    TaskType task_type = std::get<2>(task_config);
-    int variant_id = std::get<3>(task_config);
-    assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
-    for (auto const &op : bgraph.operators) {
-      assert(op->op_type == mirage::type::TB_INPUT_OP);
-      if (input_ops.size() < (size_t)num_inputs) {
-        input_ops.push_back(static_cast<tb::TBInputOp *>(op));
-      } else {
-        output_ops.push_back(static_cast<tb::TBInputOp *>(op));
-      }
-    }
-
-    auto add_events_for_denpendency =
-        [&](std::vector<FullTaskDesc> const &cur_op_tasks,
-            bool nvshmem_event,
-            bool multigpu_task)
-        -> std::map<dim3, std::vector<TaskId>, Dim3Comparator> {
-      std::map<dim3, std::vector<TaskId>, Dim3Comparator> cur_task_map;
-      std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
-      std::vector<int> consumer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
-      int num_shared_tensors = 0;
-      int3 input_map, output_map;
-      for (auto const &input : input_ops) {
-        for (auto const &output : pre_output_ops) {
-          if (input->dtensor.guid == output->dtensor.guid) {
-            input_map = input->input_map;
-            output_map = output->input_map;
-            num_shared_tensors++;
-          }
-        }
-      }
-      // assert that their is at least a single tensor shared between ops
-      assert(num_shared_tensors >= 1);
-      for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        // ! Note: If two block dimensions are mapped to the same tensor dim,
-        // ! then the partitioning will be incorrect.
-        if (d == input_map.x) {
-          consumer_partition[d] = bgraph.grid_dim.x;
-        }
-        if (d == input_map.y) {
-          consumer_partition[d] = bgraph.grid_dim.y;
-        }
-        if (d == input_map.z) {
-          consumer_partition[d] = bgraph.grid_dim.z;
-        }
-        if (d == output_map.x) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.x;
-        }
-        if (d == output_map.y) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.y;
-        }
-        if (d == output_map.z) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.z;
-        }
-      }
-      // Step 2.2: create events and add tasks
-      // number of events is the product of gcd of producer/consumer
-      std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
-      for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
-      }
-      dfs_create_events_add_tasks(0,         /*depth*/
-                                  my_gpu_id, /*my_gpu_id*/
-                                  num_gpus,
-                                  event_dims,              /*event_dims*/
-                                  input_map,               /*input_map*/
-                                  output_map,              /*output_map*/
-                                  bgraph.grid_dim,         /*consumer_grid_dim*/
-                                  pre_op->bgraph.grid_dim, /*producer_grid_dim*/
-                                  dim3(0, 0, 0),           /*consumer_lo_bid*/
-                                  bgraph.grid_dim,         /*consumer_hi_bid*/
-                                  dim3(0, 0, 0),           /*producer_lo_bid*/
-                                  pre_op->bgraph.grid_dim, /*producer_hi_bid*/
-                                  all_events,
-                                  all_tasks,
-                                  cur_op_tasks,
-                                  pre_task_map, /*pre_task_map*/
-                                  cur_task_map /*cur_task_map)*/,
-                                  nvshmem_events_idx,
-                                  nvshmem_event,
-                                  multigpu_task);
-      return cur_task_map;
-    };
-
-    auto get_tensor_desc =
-        [](threadblock::TBInputOp *const &tb_op) -> TensorDesc {
-      TensorDesc desc;
-      assert(tb_op->output_tensors.size() == 1);
-      tb::STensor stensor = tb_op->output_tensors[0];
-      kn::KNInputOp *kernel_input_op =
-          static_cast<kn::KNInputOp *>(tb_op->dtensor.owner_op);
-      desc.num_dims = stensor.num_dims;
-      desc.data_type = stensor.data_type;
-      for (int d = stensor.num_dims - 1; d >= 0; d--) {
-        desc.dim[d] = stensor.dim[d];
-        desc.stride[d] = kernel_input_op->input_strides[d];
-      }
-      return desc;
-    };
-
-    int cur_op_num_subtasks = get_num_subtasks(num_gpus, task_type);
-    bool cur_op_is_multigpu = (task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
-
-    std::vector<FullTaskDesc> tasks;
-    // Step 1: add all tasks based on their blockIdx
-    // (bid.x, bid.y, bid.z) ordering
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-          for (int subtask_id = 0; subtask_id < cur_op_num_subtasks;
-               subtask_id++) {
+          for (int subtask_id = 0; subtask_id < num_subtasks; subtask_id++) {
             FullTaskDesc task(task_type, variant_id);
             // Set request_id for attention and paged_attention
             if ((task_type == TASK_ATTENTION_1) ||
@@ -392,7 +344,9 @@ void register_mugraph(
             if (task_type == TASK_MOE_W13_LINEAR_SM100 ||
                 task_type == TASK_MOE_W2_LINEAR_SM100 ||
                 task_type == TASK_MOE_W13_LINEAR_SM90 ||
-                task_type == TASK_MOE_W2_LINEAR_SM90) {
+                task_type == TASK_MOE_W2_LINEAR_SM90 ||
+                task_type == TASK_MOE_W13_FP8_SM100 ||
+                task_type == TASK_MOE_W2_FP8_SM100) {
               task.task_metadata.expert_offset = bid.x;
             }
             // Set paged attention split kv task kv_idx
@@ -401,6 +355,81 @@ void register_mugraph(
                 task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) {
               task.task_metadata.kv_idx = bid.z;
               task.task_metadata.merge_task_offset = bid.y;
+            }
+            // Set MLA decode metadata: request_id=batch (bid.y), kv_idx=split
+            // (bid.x)
+            if (task_type == TASK_MLA_DECODE_SM100) {
+              task.task_metadata.request_id = bid.y; // batch_idx or head group
+              task.task_metadata.kv_idx = bid.x;     // split_idx
+              task.task_metadata.merge_task_offset = bid.z; // batch for q_len>1
+            }
+            // Set MLA reduce metadata: request_id=batch (bid.x)
+            if (task_type == TASK_MLA_REDUCE_SM100) {
+              task.task_metadata.request_id = bid.x; // batch_idx or head group
+              task.task_metadata.merge_task_offset = bid.z; // batch for q_len>1
+            }
+            // Set MLA prefill metadata: request_id=batch (bid.z),
+            // kv_idx=q_block (bid.y), merge_task_offset=head (bid.x).
+            if (task_type == TASK_MLA_PREFILL_SM100) {
+              task.task_metadata.request_id = bid.z;        // batch_idx
+              task.task_metadata.kv_idx = bid.y;            // q_block
+              task.task_metadata.merge_task_offset = bid.x; // head
+            }
+            // MLA prefill TP8: grid=(H, num_q_blocks, B)
+            //   request_id        = head    (bid.x, fits in int16_t)
+            //   kv_idx            = q_block (bid.y, fits in uint16_t)
+            //   merge_task_offset = batch   (bid.z) — lives at union offset 4
+            //   so it doesn't alias request_id/kv_idx (unlike expert_offset).
+            if (task_type == TASK_MLA_PREFILL_TP8_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
+            // MTP decode: grid=(sk, num_head_groups, B)
+            // request_id=gi (head_group from bid.y), kv_idx=si (split from
+            // bid.x) expert_offset stores hpb for TMA box dimension
+            if (task_type == TASK_MLA_MTP_DECODE_SM100) {
+              task.task_metadata.kv_idx = bid.x;            // si (split_idx)
+              task.task_metadata.request_id = bid.y;        // gi (head_group)
+              task.task_metadata.merge_task_offset = bid.z; // batch
+            }
+            // MTP reduce: grid=(D_V/RD_DV, num_head_groups, B)
+            if (task_type == TASK_MLA_MTP_REDUCE_SM100) {
+              task.task_metadata.kv_idx = bid.x;            // dv_block_idx
+              task.task_metadata.request_id = bid.y;        // gi (head_group)
+              task.task_metadata.merge_task_offset = bid.z; // batch
+            }
+            // MLA-MTP TP variants: decode grid=(num_groups*sk[*2 if TP=4], B,
+            // 1) Python layer encodes block_x = gi*sk+si (or
+            // (block_x<<1)|v_half for TP=4) into kv_idx, batch into request_id.
+            // Kernel unpacks v_half from low bit of block_x for TP=4.
+            if (task_type == TASK_MLA_MTP_DECODE_TP2_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP4_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
+              task.task_metadata.kv_idx = bid.x;     // (gi*sk+si) or packed
+              task.task_metadata.request_id = bid.y; // batch
+            }
+            if (task_type == TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 ||
+                task_type == TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100) {
+              task.task_metadata.kv_idx = bid.x;            // dv_block_idx
+              task.task_metadata.request_id = bid.y;        // gi
+              task.task_metadata.merge_task_offset = bid.z; // batch
+            }
+            // MLA KV gather split: request_id = bid.x (builder uses
+            // grid=(max_num_batched_requests, 1, 1))
+            if (task_type == TASK_MLA_KV_GATHER_SPLIT_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
+            // MLA KV gather: request_id = bid.x (builder uses
+            // grid=(max_num_batched_requests, 1, 1))
+            if (task_type == TASK_MLA_KV_GATHER_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
+            // Set request_id for FP8 quantize (row index for column-major scale
+            // output)
+            if (task_type == TASK_QUANTIZE_FP8_SM100) {
+              task.task_metadata.request_id = bid.x;
             }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
@@ -420,44 +449,494 @@ void register_mugraph(
         }
       }
     }
-    // Step 2: create events between operators
-    std::map<dim3, std::vector<TaskId>, Dim3Comparator> cur_task_map;
-    std::map<dim3, TaskId, Dim3Comparator> cur_task_map_single;
-    if (pre_op == nullptr) {
-      dim3 bid;
-      for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
-        for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
-          for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-            cur_task_map[bid] = {all_tasks.size()};
+    return tasks;
+  };
 
-            int offset = bid.x * bgraph.grid_dim.y * bgraph.grid_dim.z +
-                         bid.y * bgraph.grid_dim.z + bid.z;
+  auto bid_offset = [](dim3 bid, dim3 grid) -> int {
+    return bid.x * grid.y * grid.z + bid.y * grid.z + bid.z;
+  };
 
-            first_tasks.push_back(all_tasks.size());
-            all_tasks.push_back(tasks[offset]);
+  auto axis_of_tensor_dim = [](int3 const &m, int tensor_dim) -> int {
+    if (m.x == tensor_dim) {
+      return 0;
+    }
+    if (m.y == tensor_dim) {
+      return 1;
+    }
+    if (m.z == tensor_dim) {
+      return 2;
+    }
+    return -1;
+  };
+
+  // Given a (lo, hi) on the consumer grid represented as dim3, push each bid
+  // (lex order) into all_tasks, recording in task_map. Honors multigpu
+  // num_subtasks in the pre-built tasks vector.
+  auto push_bids_lex =
+      [&](dim3 lo,
+          dim3 hi,
+          dim3 grid,
+          int num_subtasks,
+          bool is_multigpu,
+          std::vector<FullTaskDesc> const &bid_lex_tasks,
+          std::map<dim3, std::vector<TaskId>, Dim3Comparator> &task_map) {
+        dim3 b;
+        for (b.x = lo.x; b.x < hi.x; b.x++) {
+          for (b.y = lo.y; b.y < hi.y; b.y++) {
+            for (b.z = lo.z; b.z < hi.z; b.z++) {
+              int off = bid_offset(b, grid);
+              if (is_multigpu) {
+                task_map[b] = std::vector<TaskId>();
+                for (int i = 0; i < num_subtasks; i++) {
+                  task_map[b].push_back(all_tasks.size());
+                  all_tasks.push_back(bid_lex_tasks[off * num_subtasks + i]);
+                }
+              } else {
+                task_map[b] = std::vector<TaskId>{(TaskId)all_tasks.size()};
+                all_tasks.push_back(bid_lex_tasks[off]);
+              }
+            }
+          }
+        }
+      };
+
+  // Given an event index (ex, ey, ez) in a grid-axis event frame with last3
+  // block size, returns (lo, hi) on that grid.
+  auto grid_subrange_for_event = [](int ex,
+                                    int ey,
+                                    int ez,
+                                    std::array<int, 3> const &last3,
+                                    dim3 grid) -> std::pair<dim3, dim3> {
+    dim3 lo(ex * last3[0], ey * last3[1], ez * last3[2]);
+    dim3 hi((ex + 1) * last3[0], (ey + 1) * last3[1], (ez + 1) * last3[2]);
+    (void)grid;
+    return {lo, hi};
+  };
+
+  // Map a fork-event index (in producer grid axis frame via lcm_last3) to
+  // a consumer branch's bid sub-range.
+  //
+  // The translation goes: producer grid axis -> (via output_map) tensor
+  // dim -> (via input_map) consumer grid axis. For each consumer grid axis
+  // g_c: find which tensor dim d = input_map[g_c], then which producer
+  // grid axis g_p has output_map[g_p] == d. The event index on g_p
+  // equals the event index on g_c. Multiply by post-LCM consumer last3
+  // to get the bid offset. Axes unmapped on either side collapse to 0
+  // (a single event slot along that axis).
+  auto consumer_subrange_from_fork_event =
+      [&](int3 const &p_ev_idx,
+          EdgeInfo const &edge,
+          dim3 cons_grid) -> std::pair<dim3, dim3> {
+    int c_ev[3] = {0, 0, 0};
+    for (int g_c = 0; g_c < 3; g_c++) {
+      int d = (g_c == 0   ? edge.input_map.x
+               : g_c == 1 ? edge.input_map.y
+                          : edge.input_map.z);
+      if (d < 0 || d >= (int)mirage::config::MAX_TENSOR_DIMS) {
+        c_ev[g_c] = 0;
+        continue;
+      }
+      int g_p = axis_of_tensor_dim(edge.output_map, d);
+      if (g_p < 0) {
+        c_ev[g_c] = 0;
+      } else {
+        c_ev[g_c] = (g_p == 0   ? p_ev_idx.x
+                     : g_p == 1 ? p_ev_idx.y
+                                : p_ev_idx.z);
+      }
+    }
+    (void)cons_grid;
+    dim3 lo(c_ev[0] * edge.consumer_side_view.last3[0],
+            c_ev[1] * edge.consumer_side_view.last3[1],
+            c_ev[2] * edge.consumer_side_view.last3[2]);
+    dim3 hi((c_ev[0] + 1) * edge.consumer_side_view.last3[0],
+            (c_ev[1] + 1) * edge.consumer_side_view.last3[1],
+            (c_ev[2] + 1) * edge.consumer_side_view.last3[2]);
+    return {lo, hi};
+  };
+
+  // Map a join-event index (expressed in consumer grid axis frame via
+  // jg.lcm_last3) to a producer's bid sub-range, via input_map/output_map
+  // and the edge's post-LCM producer-side last3.
+  auto producer_subrange_from_join_event =
+      [&](int3 const &c_ev_idx,
+          EdgeInfo const &edge,
+          dim3 prod_grid) -> std::pair<dim3, dim3> {
+    int p_ev[3] = {0, 0, 0};
+    for (int g_p = 0; g_p < 3; g_p++) {
+      int d = (g_p == 0   ? edge.output_map.x
+               : g_p == 1 ? edge.output_map.y
+                          : edge.output_map.z);
+      if (d < 0 || d >= (int)mirage::config::MAX_TENSOR_DIMS) {
+        p_ev[g_p] = 0;
+        continue;
+      }
+      int g_c = axis_of_tensor_dim(edge.input_map, d);
+      if (g_c < 0) {
+        p_ev[g_p] = 0;
+      } else {
+        p_ev[g_p] = (g_c == 0   ? c_ev_idx.x
+                     : g_c == 1 ? c_ev_idx.y
+                                : c_ev_idx.z);
+      }
+    }
+    (void)prod_grid;
+    dim3 lo(p_ev[0] * edge.producer_side_view.last3[0],
+            p_ev[1] * edge.producer_side_view.last3[1],
+            p_ev[2] * edge.producer_side_view.last3[2]);
+    dim3 hi((p_ev[0] + 1) * edge.producer_side_view.last3[0],
+            (p_ev[1] + 1) * edge.producer_side_view.last3[1],
+            (p_ev[2] + 1) * edge.producer_side_view.last3[2]);
+    return {lo, hi};
+  };
+
+  // Walk producer bids in [lo, hi), set trigger_event, count num_triggers.
+  // Handles NVSHMEM multigpu (task_ids.size() == num_gpus - 1) exactly like
+  // the chain dfs does.
+  auto set_producer_triggers =
+      [&](dim3 lo,
+          dim3 hi,
+          std::map<dim3, std::vector<TaskId>, Dim3Comparator> const &prod_map,
+          size_t event_pos,
+          bool nvshmem_event,
+          EventDesc &event_desc) {
+        dim3 b;
+        for (b.x = lo.x; b.x < hi.x; b.x++) {
+          for (b.y = lo.y; b.y < hi.y; b.y++) {
+            for (b.z = lo.z; b.z < hi.z; b.z++) {
+              auto it = prod_map.find(b);
+              assert(it != prod_map.end());
+              std::vector<TaskId> const &task_ids = it->second;
+              if (all_tasks[task_ids[0]].task_type ==
+                  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT) {
+                assert(task_ids.size() == (size_t)num_gpus - 1);
+                for (int tgt = 0; tgt < num_gpus; tgt++) {
+                  if (tgt == my_gpu_id) {
+                    continue;
+                  }
+                  size_t idx = tgt < my_gpu_id ? tgt : tgt - 1;
+                  all_tasks[task_ids[idx]].trigger_event =
+                      get_event_id(tgt, event_pos, nvshmem_event);
+                  event_desc.num_triggers++;
+                }
+              } else {
+                assert(task_ids.size() == 1);
+                all_tasks[task_ids[0]].trigger_event =
+                    get_event_id(my_gpu_id, event_pos, nvshmem_event);
+                event_desc.num_triggers++;
+              }
+            }
+          }
+        }
+      };
+
+  // -------------------------------------------------------------------
+  // Pass: iterate ordered_layers, emitting tasks + events per layer role.
+  // -------------------------------------------------------------------
+  for (int layer_idx : ag.ordered_layers) {
+    LayerInfo const &L = ag.layers[layer_idx];
+    kn::KNCustomizedOp const *cur_op = L.op;
+    TaskType task_type = L.task_type;
+    int variant_id = L.variant_id;
+    int num_inputs = L.num_inputs;
+    int num_outputs = L.num_outputs;
+    tb::Graph const &bgraph = cur_op->bgraph;
+    dim3 cur_grid = bgraph.grid_dim;
+
+    std::vector<tb::TBInputOp *> input_ops, output_ops;
+    split_ops(cur_op, num_inputs, num_outputs, input_ops, output_ops);
+
+    int cur_num_subtasks = get_num_subtasks(num_gpus, task_type);
+    bool cur_is_multigpu = (task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
+    layer_is_multigpu[layer_idx] = cur_is_multigpu;
+
+    // Skip non-head branches of a fork-consumer bundle. The head (branch
+    // index 0) emits tasks for ALL branches interleaved per fork event so
+    // each fork event's consumer-range is contiguous in all_tasks. If we
+    // let each branch run here, their tasks would land in separate blocks
+    // and no single EventDesc could span them.
+    if (L.fork_parent_group >= 0 && L.fork_branch_index != 0) {
+      continue;
+    }
+
+    // ---- First layer (no in-edges after residual stripping): lex emit.
+    if (L.in_edges.empty() && L.fork_parent_group < 0) {
+      std::vector<FullTaskDesc> tasks = build_tasks_bid_lex(cur_op,
+                                                            task_type,
+                                                            variant_id,
+                                                            cur_num_subtasks,
+                                                            input_ops,
+                                                            output_ops);
+      dim3 b;
+      for (b.x = 0; b.x < cur_grid.x; b.x++) {
+        for (b.y = 0; b.y < cur_grid.y; b.y++) {
+          for (b.z = 0; b.z < cur_grid.z; b.z++) {
+            int off = bid_offset(b, cur_grid);
+            if (cur_is_multigpu) {
+              layer_task_maps[layer_idx][b] = std::vector<TaskId>();
+              for (int i = 0; i < cur_num_subtasks; i++) {
+                layer_task_maps[layer_idx][b].push_back(all_tasks.size());
+                first_tasks.push_back(all_tasks.size());
+                all_tasks.push_back(tasks[off * cur_num_subtasks + i]);
+              }
+            } else {
+              layer_task_maps[layer_idx][b] =
+                  std::vector<TaskId>{(TaskId)all_tasks.size()};
+              first_tasks.push_back(all_tasks.size());
+              all_tasks.push_back(tasks[off]);
+            }
           }
         }
       }
-    } else {
-      bool cur_task_trigger_nvshmem_event = prev_op_is_multigpu;
-      cur_task_map = add_events_for_denpendency(
-          tasks, cur_task_trigger_nvshmem_event, cur_op_is_multigpu);
+      all_task_maps.emplace(const_cast<kn::KNOperator *>(
+                                static_cast<kn::KNOperator const *>(cur_op)),
+                            layer_task_maps[layer_idx]);
+      continue;
     }
-    pre_output_ops = output_ops;
-    pre_op = cur_op;
-    pre_task_map = cur_task_map;
-    all_task_maps.emplace(op, cur_task_map);
-    prev_op_is_multigpu = cur_op_is_multigpu;
+
+    // ---- Fork consumer bundle (head branch only reaches here).
+    if (L.fork_parent_group >= 0) {
+      int fg_id = L.fork_parent_group;
+      if (bundle_emitted[fg_id]) {
+        continue;
+      }
+      ForkGroupInfo const &fg = ag.fork_groups[fg_id];
+      LayerInfo const &P = ag.layers[fg.producer_layer];
+      tb::Graph const &pgraph = P.op->bgraph;
+      // Build bid-lex tasks for every branch in advance.
+      std::vector<std::vector<FullTaskDesc>> branch_tasks;
+      std::vector<std::vector<tb::TBInputOp *>> branch_inputs, branch_outputs;
+      std::vector<int> branch_num_subtasks;
+      std::vector<bool> branch_is_multigpu;
+      branch_tasks.reserve(fg.outgoing_edges.size());
+      branch_inputs.reserve(fg.outgoing_edges.size());
+      branch_outputs.reserve(fg.outgoing_edges.size());
+      for (int eidx : fg.outgoing_edges) {
+        EdgeInfo const &e = ag.edges[eidx];
+        LayerInfo const &B = ag.layers[e.cons_layer];
+        std::vector<tb::TBInputOp *> b_in, b_out;
+        split_ops(B.op, B.num_inputs, B.num_outputs, b_in, b_out);
+        int b_ns = get_num_subtasks(num_gpus, B.task_type);
+        bool b_mg = (B.task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
+        branch_num_subtasks.push_back(b_ns);
+        branch_is_multigpu.push_back(b_mg);
+        branch_inputs.push_back(b_in);
+        branch_outputs.push_back(b_out);
+        branch_tasks.push_back(build_tasks_bid_lex(
+            B.op, B.task_type, B.variant_id, b_ns, b_in, b_out));
+      }
+      // Fork event grid (in producer grid axis frame) is
+      // (p_grid / lcm_last3) per axis. The loop below walks events in
+      // (ex, ey, ez) order; this order is the one that defines task_ids
+      // for consumer tasks, so downstream event emission iterating in the
+      // same order yields contiguous consumer ranges by construction.
+      int ex_max = pgraph.grid_dim.x / std::max(fg.lcm_last3[0], 1);
+      int ey_max = pgraph.grid_dim.y / std::max(fg.lcm_last3[1], 1);
+      int ez_max = pgraph.grid_dim.z / std::max(fg.lcm_last3[2], 1);
+      for (int ex = 0; ex < ex_max; ex++) {
+        for (int ey = 0; ey < ey_max; ey++) {
+          for (int ez = 0; ez < ez_max; ez++) {
+            int3 p_ev{ex, ey, ez};
+            EventDesc event_desc;
+            event_desc.num_triggers = 0;
+            // Mark the start of this fork event's consumer range. All
+            // tasks pushed between here and last_task_id below will be
+            // triggered by this one EventDesc — hence the contiguity
+            // requirement that forces interleaving of branch tasks.
+            event_desc.first_task_id = all_tasks.size();
+            // Emit branch consumer tasks interleaved: for this single fork
+            // event, push branch 0's per-event sub-block, then branch 1's,
+            // ..., then branch N-1's. This keeps all tasks triggered by
+            // this event contiguous in all_tasks.
+            for (size_t b = 0; b < fg.outgoing_edges.size(); b++) {
+              EdgeInfo const &e = ag.edges[fg.outgoing_edges[b]];
+              LayerInfo const &B = ag.layers[e.cons_layer];
+              auto [c_lo, c_hi] = consumer_subrange_from_fork_event(
+                  p_ev, e, B.op->bgraph.grid_dim);
+              push_bids_lex(c_lo,
+                            c_hi,
+                            B.op->bgraph.grid_dim,
+                            branch_num_subtasks[b],
+                            branch_is_multigpu[b],
+                            branch_tasks[b],
+                            layer_task_maps[e.cons_layer]);
+            }
+            event_desc.last_task_id = all_tasks.size();
+            // Set trigger_event on producer tasks in the producer sub-range.
+            dim3 p_lo(ex * fg.lcm_last3[0],
+                      ey * fg.lcm_last3[1],
+                      ez * fg.lcm_last3[2]);
+            dim3 p_hi((ex + 1) * fg.lcm_last3[0],
+                      (ey + 1) * fg.lcm_last3[1],
+                      (ez + 1) * fg.lcm_last3[2]);
+            bool nvshmem_event_flag = layer_is_multigpu[fg.producer_layer];
+            set_producer_triggers(p_lo,
+                                  p_hi,
+                                  layer_task_maps[fg.producer_layer],
+                                  all_events.size(),
+                                  nvshmem_event_flag,
+                                  event_desc);
+            if (nvshmem_event_flag) {
+              nvshmem_events_idx.insert(all_events.size());
+            }
+            event_desc.event_type =
+                event_desc.last_task_id >= event_desc.first_task_id + 8
+                    ? EVENT_LAUNCH_MASSIVE_TASKS
+                    : EVENT_LAUNCH_TASKS;
+            all_events.push_back(event_desc);
+          }
+        }
+      }
+      // Register each branch's task_map in all_task_maps.
+      for (int eidx : fg.outgoing_edges) {
+        EdgeInfo const &e = ag.edges[eidx];
+        all_task_maps.emplace(
+            const_cast<kn::KNOperator *>(static_cast<kn::KNOperator const *>(
+                ag.layers[e.cons_layer].op)),
+            layer_task_maps[e.cons_layer]);
+      }
+      bundle_emitted[fg_id] = true;
+      continue;
+    }
+
+    // ---- Join consumer: emit the single consumer layer's tasks in
+    // join-event-major order (one contiguous sub-block per join event),
+    // then create ONE EventDesc per join event with num_triggers accumulated
+    // from ALL incoming edges (each incoming producer contributes a slice
+    // of bids that fire this same event). Consumer tasks are in one layer,
+    // so their ranges are naturally contiguous without any interleaving.
+    if (L.is_join_consumer) {
+      int jg_id = ag.edges[L.in_edges[0]].join_group_id;
+      assert(jg_id >= 0);
+      JoinGroupInfo const &jg = ag.join_groups[jg_id];
+      std::vector<FullTaskDesc> tasks = build_tasks_bid_lex(cur_op,
+                                                            task_type,
+                                                            variant_id,
+                                                            cur_num_subtasks,
+                                                            input_ops,
+                                                            output_ops);
+      int ex_max = cur_grid.x / std::max(jg.lcm_last3[0], 1);
+      int ey_max = cur_grid.y / std::max(jg.lcm_last3[1], 1);
+      int ez_max = cur_grid.z / std::max(jg.lcm_last3[2], 1);
+      for (int ex = 0; ex < ex_max; ex++) {
+        for (int ey = 0; ey < ey_max; ey++) {
+          for (int ez = 0; ez < ez_max; ez++) {
+            int3 c_ev{ex, ey, ez};
+            EventDesc event_desc;
+            event_desc.num_triggers = 0;
+            event_desc.first_task_id = all_tasks.size();
+            auto [c_lo, c_hi] =
+                grid_subrange_for_event(ex, ey, ez, jg.lcm_last3, cur_grid);
+            push_bids_lex(c_lo,
+                          c_hi,
+                          cur_grid,
+                          cur_num_subtasks,
+                          cur_is_multigpu,
+                          tasks,
+                          layer_task_maps[layer_idx]);
+            event_desc.last_task_id = all_tasks.size();
+            bool any_nvshmem = false;
+            for (int eidx : jg.incoming_edges) {
+              EdgeInfo const &e = ag.edges[eidx];
+              bool nvshmem_event_flag = layer_is_multigpu[e.prod_layer];
+              any_nvshmem = any_nvshmem || nvshmem_event_flag;
+              auto [p_lo, p_hi] = producer_subrange_from_join_event(
+                  c_ev, e, ag.layers[e.prod_layer].op->bgraph.grid_dim);
+              set_producer_triggers(p_lo,
+                                    p_hi,
+                                    layer_task_maps[e.prod_layer],
+                                    all_events.size(),
+                                    nvshmem_event_flag,
+                                    event_desc);
+            }
+            if (any_nvshmem) {
+              nvshmem_events_idx.insert(all_events.size());
+            }
+            event_desc.event_type =
+                event_desc.last_task_id >= event_desc.first_task_id + 8
+                    ? EVENT_LAUNCH_MASSIVE_TASKS
+                    : EVENT_LAUNCH_TASKS;
+            all_events.push_back(event_desc);
+          }
+        }
+      }
+      all_task_maps.emplace(const_cast<kn::KNOperator *>(
+                                static_cast<kn::KNOperator const *>(cur_op)),
+                            layer_task_maps[layer_idx]);
+      continue;
+    }
+
+    // ---- Chain layer (single distinct producer, not fork-consumer-bundle,
+    // not join). This path exercises the exact same dfs_create_events_add_tasks
+    // the old code used, just with edge info sourced from AnnotatedGraph
+    // rather than rediscovered via guid matching. For graphs that are
+    // already chains (qwen3 today), this produces bit-identical output to
+    // the previous implementation.
+    //
+    // There may be multiple in-edges to this layer from the SAME producer
+    // (multi-tensor bridge — e.g. a producer with 2 output tensors both
+    // feeding this consumer). We use the FIRST non-stripped in-edge as the
+    // event driver; the other edges share the same (prod, cons) pair and
+    // hence the same event grid, so a single event covers them implicitly.
+    assert(!L.in_edges.empty());
+    EdgeInfo const &edge = ag.edges[L.in_edges[0]];
+    LayerInfo const &P = ag.layers[edge.prod_layer];
+    std::vector<FullTaskDesc> tasks = build_tasks_bid_lex(
+        cur_op, task_type, variant_id, cur_num_subtasks, input_ops, output_ops);
+    std::vector<int> event_dims_v(mirage::config::MAX_TENSOR_DIMS, 1);
+    for (int d = 0; d < (int)mirage::config::MAX_TENSOR_DIMS; d++) {
+      event_dims_v[d] = edge.event_dim[d];
+    }
+    bool cur_task_trigger_nvshmem_event = layer_is_multigpu[edge.prod_layer];
+    dfs_create_events_add_tasks(0,
+                                my_gpu_id,
+                                num_gpus,
+                                event_dims_v,
+                                edge.input_map,
+                                edge.output_map,
+                                cur_grid,
+                                P.op->bgraph.grid_dim,
+                                dim3(0, 0, 0),
+                                cur_grid,
+                                dim3(0, 0, 0),
+                                P.op->bgraph.grid_dim,
+                                all_events,
+                                all_tasks,
+                                tasks,
+                                layer_task_maps[edge.prod_layer],
+                                layer_task_maps[layer_idx],
+                                nvshmem_events_idx,
+                                cur_task_trigger_nvshmem_event,
+                                cur_is_multigpu);
+    all_task_maps.emplace(const_cast<kn::KNOperator *>(
+                              static_cast<kn::KNOperator const *>(cur_op)),
+                          layer_task_maps[layer_idx]);
   }
 
-  // Update the trigger event for all tasks in pre_task_map
-  for (auto const &it : pre_task_map) {
-    assert(it.second.size() == 1);
-    all_tasks[it.second[0]].trigger_event =
-        get_event_id(my_gpu_id, all_events.size(), false /*nvshmem_event*/);
+  // Update the trigger event for all tasks in every LEAF layer's task map
+  // (drives EVENT_END_OF_TASK_GRAPH).
+  //
+  // For chain graphs this is the single final layer (what the old code
+  // handled). For DAGs with multiple terminal branches (e.g. an unjoined
+  // fork where each branch ends at its own output), EVERY leaf layer's
+  // tasks must contribute their completion to the END event; otherwise
+  // the non-last leaves' tasks end up with trigger_event = INVALID and
+  // the runtime can't correctly count graph completion. This was a bug
+  // caught by the fork unit test.
+  size_t end_num_triggers = 0;
+  for (int i = 0; i < V; i++) {
+    if (!ag.layers[i].out_edges.empty()) {
+      continue;
+    }
+    for (auto const &it : layer_task_maps[i]) {
+      assert(it.second.size() == 1);
+      all_tasks[it.second[0]].trigger_event =
+          get_event_id(my_gpu_id, all_events.size(), false /*nvshmem_event*/);
+      end_num_triggers++;
+    }
   }
   all_events.push_back(
-      EventDesc(EVENT_END_OF_TASK_GRAPH, pre_task_map.size(), 0, 0));
+      EventDesc(EVENT_END_OF_TASK_GRAPH, end_num_triggers, 0, 0));
 
   // Prelaunch all tasks at the begining of an iteration
   all_events[1].first_task_id = 2;
@@ -690,6 +1169,20 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") < TASK_SM100_TMA_END_TASK) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
+    // MLA kernels (outside SM100_TMA range but need TMA)
+    code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP2_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP4_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP8_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
+    // FP8 linear tasks need TMA (outside SM100_TMA range)
+    code.e("if (task.at(\"task_type\") == TASK_LINEAR_FP8_SM100 || "
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
     code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
@@ -858,6 +1351,24 @@ TaskGraphResult print_task_graph(
              {"task_offset", -1}});
   }
   // generate all other tasks
+  // Global buffer of (task_id -> json_task).
+  //
+  // The old code wrote `json_tasks[task_id - starting_task_id] = ...` with
+  // json_tasks sized to a single op's grid volume, assuming each op's
+  // tasks were a contiguous block in all_tasks. With DAG-level fork
+  // emission, a fork-consumer layer's tasks are INTERLEAVED with its
+  // siblings (e.g. layer B's tasks live at indices 18, 20, 22, ...; layer
+  // C's at 19, 21, 23, ...). Writing into a per-op vector with task_id -
+  // starting_task_id offsets then overflows (layer B's offset 30 into a
+  // vector sized 16), causing heap corruption — the double-free we saw
+  // the first time the fork test ran.
+  //
+  // Fix: buffer every task's json by global task_id; after visiting every
+  // op, flush in strict task_id order so that the JSON's "all_tasks"
+  // array index matches the runtime's all_tasks vector index.
+  std::vector<json> global_json_tasks(all_tasks.size());
+  std::vector<char> global_json_filled(all_tasks.size(), 0);
+
   size_t task_pos = 2;
   for (auto const &op : graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
@@ -891,12 +1402,11 @@ TaskGraphResult print_task_graph(
 
     unsigned cur_op_num_subtasks = get_num_subtasks(num_gpus, task_type);
 
-    // There is no guarantee that the tasks are added in (x,y,z) order,
-    // so, to keep the final tasks array in order, we need to re-order them
-    // here. ! tgbody-based gen is still prone to ordering issue.
-    std::vector<json> json_tasks(bgraph.grid_dim.x * bgraph.grid_dim.y *
-                                 bgraph.grid_dim.z * cur_op_num_subtasks);
-    TaskId starting_task_id = task_pos;
+    // Tasks may be non-contiguous in all_tasks (DAG fork interleaving), so we
+    // write directly into the global task-id-indexed buffer.
+    size_t op_total_subtasks = (size_t)bgraph.grid_dim.x * bgraph.grid_dim.y *
+                               bgraph.grid_dim.z * cur_op_num_subtasks;
+    (void)op_total_subtasks;
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -1171,19 +1681,26 @@ TaskGraphResult print_task_graph(
 
             tgbody.e("all_tasks.push_back(task_desc);");
             tgbody.e("}");
-            // json_task_graph["all_tasks"].push_back(json_task);
-            json_tasks[task_id - starting_task_id] = json_task;
+            assert((size_t)task_id < global_json_tasks.size());
+            assert(!global_json_filled[task_id]);
+            global_json_tasks[task_id] = json_task;
+            global_json_filled[task_id] = 1;
           } // subtask_id
         }   // bid.z
       }     // bid.y
     }       // bid.x
 
-    for (int i = 0; i < json_tasks.size(); i++) {
-      json_task_graph["all_tasks"].push_back(json_tasks[i]);
-    }
-    task_pos += json_tasks.size();
+    task_pos += op_total_subtasks;
   }
   assert(task_pos == all_tasks.size());
+
+  // Flush tasks 2..N-1 in task_id order. Tasks 0 (TASK_TERMINATE) and 1
+  // (TASK_BEGIN_TASK_GRAPH) are prelude and handled by the generated
+  // construct_task_graph loader (not in JSON all_tasks).
+  for (size_t task_id = 2; task_id < all_tasks.size(); task_id++) {
+    assert(global_json_filled[task_id]);
+    json_task_graph["all_tasks"].push_back(global_json_tasks[task_id]);
+  }
   // Add all events
   for (auto const &event : all_events) {
     tgbody.e(
@@ -1259,12 +1776,53 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";
+  task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
+  task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_TP8_SM100] = "TASK_MLA_PREFILL_TP8_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
+  task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
+      "TASK_MLA_MTP_DECODE_TP2_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_SM100] =
+      "TASK_MLA_MTP_DECODE_TP4_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP8_SM100] =
+      "TASK_MLA_MTP_DECODE_TP8_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
+  task_type_to_name[TASK_MLA_KV_GATHER_SPLIT_SM100] =
+      "TASK_MLA_KV_GATHER_SPLIT_SM100";
+  task_type_to_name[TASK_MTP_VERIFY_STRICT] = "TASK_MTP_VERIFY_STRICT";
+  task_type_to_name[TASK_MTP_ACCEPT_COMMIT] = "TASK_MTP_ACCEPT_COMMIT";
+  task_type_to_name[TASK_MTP_TOKEN_SCATTER] = "TASK_MTP_TOKEN_SCATTER";
+  task_type_to_name[TASK_MTP_PREPARE_VERIFY] = "TASK_MTP_PREPARE_VERIFY";
+  task_type_to_name[TASK_MTP_BUILD_EMBED_INPUT] = "TASK_MTP_BUILD_EMBED_INPUT";
+  task_type_to_name[TASK_QUANTIZE_FP8_SM100] = "TASK_QUANTIZE_FP8_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_SM100] = "TASK_LINEAR_FP8_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_WITH_RESIDUAL_SM100] =
+      "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";
+  task_type_to_name[TASK_MOE_TOPK_SIGMOID_SM100] =
+      "TASK_MOE_TOPK_SIGMOID_SM100";
   task_type_to_name[TASK_MOE_W13_LINEAR_SM100] = "TASK_MOE_W13_LINEAR_SM100";
   task_type_to_name[TASK_MOE_W2_LINEAR_SM100] = "TASK_MOE_W2_LINEAR_SM100";
+  task_type_to_name[TASK_MOE_W13_FP8_SM100] = "TASK_MOE_W13_FP8_SM100";
+  task_type_to_name[TASK_MOE_W2_FP8_SM100] = "TASK_MOE_W2_FP8_SM100";
   task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
+  task_type_to_name[TASK_ELEMENTWISE_ADD_SM100] = "TASK_ELEMENTWISE_ADD_SM100";
+  task_type_to_name[TASK_SOFTMAX_GATHER_SM100] = "TASK_SOFTMAX_GATHER_SM100";
+  task_type_to_name[TASK_MTP_VERIFY_PROBABILISTIC] =
+      "TASK_MTP_VERIFY_PROBABILISTIC";
+  task_type_to_name[TASK_PROB_SCATTER_SM100] = "TASK_PROB_SCATTER_SM100";
+  task_type_to_name[TASK_MTP_FLOAT_SCATTER] = "TASK_MTP_FLOAT_SCATTER";
+  task_type_to_name[TASK_PROB_EXTRACT_SM100] = "TASK_PROB_EXTRACT_SM100";
   task_type_to_name[TASK_MOE_W13_LINEAR_SM90] = "TASK_MOE_W13_LINEAR_SM90";
   task_type_to_name[TASK_MOE_W2_LINEAR_SM90] = "TASK_MOE_W2_LINEAR_SM90";
   task_type_to_name[TASK_SPLITK_LINEAR_SWAPAB_HOPPER] =

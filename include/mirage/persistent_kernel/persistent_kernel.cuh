@@ -22,8 +22,22 @@
 #include "runtime_header.h"
 #ifdef USE_NVSHMEM
 #include <mpi.h>
+#if defined(MIRAGE_GRACE_BLACKWELL)
+// Blackwell: host-only headers (device allreduce in
+// tasks/blackwell/allreduce.cuh). ORDER IS LOAD-BEARING — the device_host
+// and device sub-headers depend on symbols declared by <nvshmem_host.h>.
+// Letting clang-format reorder them causes silent bad codegen that
+// manifests as an mbt>=32 decode hang.
+// clang-format off
+#include <nvshmem_host.h>
+#include "device_host/nvshmem_types.h"
+#include "device/nvshmemx_collective_launch_apis.h"
+// clang-format on
+#else
+// Hopper/Ampere: full NVSHMEM includes
 #include <nvshmem.h>
 #include <nvshmemx.h>
+#endif
 #endif
 #include <thread>
 #include <unistd.h>
@@ -39,7 +53,6 @@
 
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
-using namespace kernel;
 // Configurations for the MPK runtime
 // #define MPK_MAX_NUM_BATCHED_REQUESTS 16
 // #define MPK_MAX_NUM_BATCHED_TOKENS 64
@@ -91,6 +104,7 @@ using namespace kernel;
 #endif
 
 // #define MPK_ENABLE_VERBOSE
+
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
@@ -191,7 +205,7 @@ __global__ void prepare_kernel(RuntimeConfig config,
 // TODO: parallelize this processing
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
-  __shared__ int smem_kv_indices[MPK_MAX_NUM_PAGES];
+  // Page indices snapshot in global memory (for in-place compaction)
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
   // Step 1: finalize previous batch
@@ -234,10 +248,11 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Step 2: copy kv_indices to shared mem
+  // Step 2: snapshot kv_indices into global memory buffer (needed for
+  // in-place compaction where destination may overlap source)
   int num_pages = config.paged_kv_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];
   for (int i = 0; i < num_pages; i++) {
-    smem_kv_indices[i] = config.paged_kv_indices_buffer[i];
+    config.paged_kv_indices_snapshot[i] = config.paged_kv_indices_buffer[i];
   }
 
   // Step 3: prepare next batch
@@ -269,11 +284,14 @@ __device__ __forceinline__ bool
       // Prepare page indptrs
       int num_new_pages =
           (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-      config.paged_kv_last_page_len_buffer[num_reqs] =
-          (step + num_new_tokens) % MPK_PAGE_SIZE;
+      {
+        int _lpl = (step + num_new_tokens) % MPK_PAGE_SIZE;
+        config.paged_kv_last_page_len_buffer[num_reqs] =
+            (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+      }
       for (int j = 0; j < num_old_pages; j++) {
         config.paged_kv_indices_buffer[num_pages + j] =
-            smem_kv_indices[kv_indptr + j];
+            config.paged_kv_indices_snapshot[kv_indptr + j];
       }
       for (int j = num_old_pages; j < num_new_pages; j++) {
         config.paged_kv_indices_buffer[num_pages + j] =
@@ -305,8 +323,11 @@ __device__ __forceinline__ bool
           config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
     }
     int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-    config.paged_kv_last_page_len_buffer[num_reqs] =
-        num_new_tokens % MPK_PAGE_SIZE;
+    {
+      int _lpl = num_new_tokens % MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[num_reqs] =
+          (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+    }
     for (int j = 0; j < num_new_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
           config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
@@ -602,14 +623,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
            i += blockDim.x) {
         int task_idx = i / TASK_SIZE;
         int offset = i % TASK_SIZE;
-        load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
-                  reinterpret_cast<char *>(
-                      config.all_tasks +
-                      get_task_position_index(task_ids[task_idx])) +
-                      offset * 16);
+        ::kernel::load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
+                            reinterpret_cast<char *>(
+                                config.all_tasks +
+                                get_task_position_index(task_ids[task_idx])) +
+                                offset * 16);
       }
-      kernel::cp_async_fence();
-      kernel::cp_async_wait<0>();
+      ::kernel::cp_async_fence();
+      ::kernel::cp_async_wait<0>();
       __syncthreads();
       queue_pos = 0;
       queue_len = num_loaded_tasks;
@@ -628,12 +649,18 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
             get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
         if (is_nvshmem_event(event_id)) {
-#ifdef USE_NVSHMEM
+#if defined(USE_NVSHMEM) && !defined(NVSHMEM_NO_DEVICE_LIB)
           nvshmem_signal_wait_until(
               reinterpret_cast<uint64_t *>(
                   &config.all_event_counters[event_index]),
               NVSHMEM_CMP_EQ,
               needed_counts);
+#elif defined(USE_NVSHMEM)
+          // NVSHMEM_NO_DEVICE_LIB: spin-wait equivalent
+          while (ld_acquire_sys_u64(&config.all_event_counters[event_index]) <
+                 needed_counts) {
+            __nanosleep(10);
+          }
 #endif
         } else {
           while (actual_counts < needed_counts) {
@@ -659,6 +686,18 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     } else if (task_desc->task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
     } else {
+      // Dispatch trace: D=dispatch start, F=finish
+      bool _trace_t =
+          task_desc->task_type == 275 || task_desc->task_type == 276 ||
+          task_desc->task_type == 277 || task_desc->task_type == 287 ||
+          task_desc->task_type == 288 || task_desc->task_type == 248 ||
+          task_desc->task_type == 249 || task_desc->task_type == 302 ||
+          task_desc->task_type == 278 || task_desc->task_type == 154 ||
+          task_desc->task_type == 280 || task_desc->task_type == 118 ||
+          task_desc->task_type == 281 || task_desc->task_type == 253 ||
+          task_desc->task_type == 258 || task_desc->task_type == 259 ||
+          task_desc->task_type == 261 || task_desc->task_type == 262 ||
+          task_desc->task_type == 101;
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0) {
         printf("[worker] _execute_task EXECUTE_TASK %d\n",
@@ -884,6 +923,28 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
+#ifdef MPK_TEST_MODE
+        // Test mode: run task graph exactly once, then terminate.
+        // iteration_num stays at 1 throughout the single pass so that
+        // event counter thresholds (num_triggers * iteration_num) are
+        // consistent: each event fires exactly num_triggers times.
+        if (iteration_num > 0) {
+          printf("[SCHD] Single pass finished, terminating schedulers.\n");
+          terminate_schedulers(config);
+        } else {
+          size_t last_task_id =
+              worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
+          st_relaxed_gpu_u64(
+              &config.worker_queues[next_worker]
+                                   [last_task_id % config.per_worker_queue_len],
+              compute_task_id(iteration_num + 1, 1 /*begin_task_graph*/));
+          atom_add_release_gpu_u64(
+              &config.worker_queue_last_ready_task_id[next_worker], 1);
+          next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
+                                                            : next_worker + 1;
+        }
+#else // MPK_TEST_MODE
+
         // Check if we want to continue
 #ifdef MODE_ONLINE_NOTOKEN
         if (!prepare_next_batch(config, iteration_num))
@@ -918,6 +979,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
+#endif // MPK_TEST_MODE
       } else if (e.event_type == EVENT_LAUNCH_DEPENDENT_TASKS) {
         iteration_num = iteration_num + 1;
         // assign event in a round-robin fashion
@@ -958,7 +1020,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
                        position_index,
                        next_worker,
                        last_task_id + 1,
-                       event_id,
+                       cur_event_pos[queue_idx],
                        e.first_task_id,
                        e.last_task_id);
               }
@@ -1010,7 +1072,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
                  next_worker,
                  last_task_id + 1);
 #endif
-
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
@@ -1060,6 +1121,24 @@ void gpu_free(void *ptr) {
 #endif
 }
 
+#ifdef NVSHMEM_NO_DEVICE_LIB
+// Callback for hostlib init: return pointer to our __managed__ device state.
+// nvshmemi_device_state_d is __managed__ (defined in allreduce.cuh, same TU),
+// so &nvshmemi_device_state_d is a valid host pointer that maps to device
+// memory.
+static int mpk_nvshmem_device_init_cb(void **dev_state_ptr,
+                                      void **transport_dev_state_ptr) {
+  // nvshmemi_device_state_d is __managed__ (defined in allreduce.cuh, same TU).
+  // Host library will cudaMemcpy the state to this address.
+  *dev_state_ptr = (void *)&nvshmemi_device_state_d;
+  if (transport_dev_state_ptr) {
+    *transport_dev_state_ptr = nullptr;
+  }
+  printf("MPK: device_init_cb OK, managed_ptr=%p\n", &nvshmemi_device_state_d);
+  return 0;
+}
+#endif
+
 // The following function will be generated by the transpiler
 static void
     _init_persistent_kernel(std::vector<FullTaskDesc> &all_tasks,
@@ -1102,6 +1181,7 @@ extern "C" void
                            int total_num_requests,
                            long long eos_token_id,
                            int allocate_nvshmem_teams,
+                           int is_test_mode,
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs) {
   assert(meta_tensors.size() == 10);
@@ -1112,7 +1192,6 @@ extern "C" void
   for (size_t i = 0; i < model_tensor_names.size(); i++) {
     global_model_tensors[model_tensor_names[i]] = model_tensor_ptrs[i];
   }
-
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
   global_runtime_config.input_tokens =
@@ -1128,6 +1207,8 @@ extern "C" void
       static_cast<int *>(meta_tensors[8]);
   global_runtime_config.paged_kv_last_page_len_buffer =
       static_cast<int *>(meta_tensors[9]);
+  global_runtime_config.paged_kv_indices_snapshot =
+      static_cast<int *>(meta_tensors[10]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
@@ -1138,20 +1219,42 @@ extern "C" void
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
+  // Increase printf FIFO to avoid losing debug messages from device.
+  cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 128 * 1024 * 1024);
 
 #ifdef USE_NVSHMEM
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
   nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
   attr.mpi_comm = &mpi_comm;
+#ifdef NVSHMEM_NO_DEVICE_LIB
+  // rdc=false mode: call nvshmemid_hostlib_init_attr directly with our own
+  // callback that returns the device pointer for nvshmemi_device_state_d.
+  // The host library will cudaMemcpy the state to this address.
+  {
+    int provided;
+    nvshmemi_version_t ver = {NVSHMEM_VENDOR_MAJOR_VERSION,
+                              NVSHMEM_VENDOR_MINOR_VERSION,
+                              NVSHMEM_VENDOR_PATCH_VERSION};
+    int status = nvshmemid_hostlib_init_attr(NVSHMEM_THREAD_SERIALIZED,
+                                             &provided,
+                                             NVSHMEMX_INIT_WITH_MPI_COMM,
+                                             &attr,
+                                             ver,
+                                             mpk_nvshmem_device_init_cb);
+    if (status != 0) {
+      printf("MPK: nvshmemid_hostlib_init_attr failed: %d\n", status);
+    }
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+#else
   nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
   nvshmem_barrier_all();
+#endif
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   printf("MPK: Rank%d is Ready. Worldsize=%d\n", mype, npes);
 
   // Create nvshmem teams
-  // For now, we assume we always need these teams. In the future, we should
-  // determine the numebr of teams by scanning kernels.
   if (allocate_nvshmem_teams > 0) {
     int num_teams = allocate_nvshmem_teams;
     printf("MPK: Rank%d is allocating %d nvshmem teams. The more gpus "
@@ -1177,10 +1280,10 @@ extern "C" void
                cudaMemcpyHostToDevice);
     printf("MPK: Rank%d finished allocating nvshmem teams\n", mype);
   }
-#else
+#else  // USE_NVSHMEM
   int mype = 0;
   int npes = 1;
-#endif
+#endif // USE_NVSHMEM
 
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   global_runtime_config.request_ids =
@@ -1192,8 +1295,14 @@ extern "C" void
   global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
   global_runtime_config.total_num_requests = total_num_requests;
 #endif
-  global_runtime_config.per_worker_queue_len = 1024;
-  global_runtime_config.per_sched_queue_len = 1024;
+  // 136-worker B200 runs can temporarily outpace the default queue depth on
+  // the "fast" schedulers that only feed 2 workers. Doubling the queue keeps
+  // those runs from overflowing while preserving the same scheduling model.
+  // MoE m-split (grid_dim.y>1) multiplies per-worker dispatch count — w2 at
+  // Y=14 adds ~28 tasks per worker per MoE layer per iter, so 2048 is not
+  // enough at 21 layers × multiple iters. Bump to 8192.
+  global_runtime_config.per_worker_queue_len = 8192;
+  global_runtime_config.per_sched_queue_len = 4096;
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
@@ -1266,6 +1375,10 @@ extern "C" void
   //            0,
   //            all_events.size() * sizeof(EventCounter));
   //  Initialize all tasks
+  fprintf(stderr,
+          "[MPK INIT] Total tasks: %zu, Total events: %zu\n",
+          all_tasks.size(),
+          all_events.size());
   global_runtime_config.all_tasks =
       gpu_malloc<TaskDesc>(all_tasks.size() * sizeof(TaskDesc));
   cudaMemcpy(global_runtime_config.all_tasks,
@@ -1342,7 +1455,14 @@ extern "C" void
   cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
                            cudaEventDisableTiming);
 
-  init_request_resources();
+  if (is_test_mode) {
+    printf(
+        "MPK is running in test mode. The persistent kernel will run exactly "
+        "one pass of the task graph, then terminate.\n");
+    printf("Skipping request resource initialization.\n");
+  } else {
+    init_request_resources();
+  }
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();

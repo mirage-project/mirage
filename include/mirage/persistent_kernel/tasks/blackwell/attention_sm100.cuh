@@ -75,9 +75,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
 
     constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
     constexpr int KV_TILE_SIZE = 64;
-    constexpr int MAX_PAGES_PER_REQUEST =
-        (MAX_SEQ_LEN + PAGE_SIZE - 1) / PAGE_SIZE;
-
     // NOTE(Jinchen): we use m16n16k16 mma to compute matrix multiplication
     constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 15) / 16;
 
@@ -106,25 +103,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                         paged_kv_last_page_len_buffer_ptr[request_id];
     // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
 
-    // Load the paged KV indices into shared memory
-    __shared__ __align__(16) int page_indices[MAX_PAGES_PER_REQUEST];
-#pragma unroll
-    for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
-         i += NUM_THREADS) {
-      __uint128_t const *src_ptr =
-          reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr) +
-          i;
-      __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
-      *dst_ptr = *src_ptr;
-    }
-    if (num_pages % (16 / sizeof(int)) != 0) {
-      int tail_pages = num_pages % (16 / sizeof(int));
-      int tail_offset = num_pages - tail_pages;
-      for (int i = threadIdx.x; i < tail_pages; i += NUM_THREADS) {
-        page_indices[tail_offset + i] =
-            paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
-      }
-    }
+    // Page indices are read directly from global memory (L2-cached)
+    int const *page_indices = paged_kv_indices_buffer_ptr + first_page_pos;
     wg_barrier.arrive_and_wait();
 
     T const *__restrict__ d_q =

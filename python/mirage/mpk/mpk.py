@@ -185,6 +185,7 @@ class MPK:
                 "paged_kv_indptr_buffer": self.paged_kv_indptr_buffer,
                 "paged_kv_indices_buffer": self.paged_kv_indices_buffer,
                 "paged_kv_last_page_len_buffer": self.paged_kv_last_page_len_buffer,
+                "paged_kv_indices_snapshot": self.paged_kv_indices_snapshot,
             },
             profiler_tensor=self.profiler_tensor,
             trace_name=args.trace_name,
@@ -202,6 +203,7 @@ class MPK:
             self.paged_kv_indptr_buffer,
             self.paged_kv_indices_buffer,
             self.paged_kv_last_page_len_buffer,
+            self.paged_kv_indices_snapshot,
         ]
         self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         self.profiler_buffer_ptr = (
@@ -260,6 +262,9 @@ class MPK:
         if self.paged_kv_indices_buffer is None:
             print(f"Compensating paged kv indices buffer tensor")
             self.paged_kv_indices_buffer = torch.empty(
+                self.max_num_pages, dtype=torch.int32, device="cuda")
+        if not hasattr(self, 'paged_kv_indices_snapshot') or self.paged_kv_indices_snapshot is None:
+            self.paged_kv_indices_snapshot = torch.empty(
                 self.max_num_pages, dtype=torch.int32, device="cuda")
         if self.paged_kv_last_page_len_buffer is None:
             print(f"Compensating paged kv last page len buffer tensor")

@@ -19,8 +19,25 @@
 #include <cuda_runtime.h>
 
 #ifdef USE_NVSHMEM
+#if defined(MIRAGE_GRACE_BLACKWELL)
+// Blackwell (SM100a): include only host API + types.
+// Device-side allreduce is self-contained in tasks/blackwell/allreduce.cuh
+// to avoid rdc=true register inflation (166 vs 255 regs).
+//
+// Define nvshmemi_device_state_d BEFORE any NVSHMEM headers so that any
+// transitively-included device code (proxy_device.cuh etc.) can resolve it.
+// In standard NVSHMEM this comes from libnvshmem_device.a, but we skip that
+// library to avoid rdc=true.
+#include "device_host/nvshmem_types.h"
+#ifdef NVSHMEM_NO_DEVICE_LIB
+__managed__ nvshmemi_device_host_state_t nvshmemi_device_state_d;
+#endif
+#include <nvshmem_host.h>
+#else
+// Hopper/Ampere: use standard NVSHMEM includes (rdc=true is fine on SM90).
 #include <nvshmem.h>
 #include <nvshmemx.h>
+#endif
 #endif
 
 namespace mirage {
@@ -49,8 +66,10 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #endif
 #else
 #if MPK_TARGET_CC >= 90
+// B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
+// (la_smem[MAX_SK*128]). Reduce dynamic budget to stay under total limit.
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+    207 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -76,7 +95,8 @@ typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
 int const MAX_OUTPUTS_PER_TASK = 3;
-int const MAX_NUM_WORKERS = 128;
+// B200 has 148 SMs — need more workers than the default 128
+int const MAX_NUM_WORKERS = 160;
 
 enum TaskType {
   TASK_TERMINATE = 0,
@@ -123,6 +143,8 @@ enum TaskType {
   // SM100 Tasks
   TASK_SM100_TASK_BEGIN = 230, // SM100 start placeholder, not a real task
   TASK_SM100_TMA_START_TASK = 231,
+  TASK_MOE_W13_FP8_SM100 = 248,
+  TASK_MOE_W2_FP8_SM100 = 249,
   TASK_SPLITK_LINEAR_SM100 = 251,
   TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
   TASK_LINEAR_SM100 = 253,
@@ -138,6 +160,40 @@ enum TaskType {
   TASK_PAGED_ATTENTION_SPLIT_KV_SM100 = 263,
   TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SAMPLING_SM100 = 265,
+  TASK_MLA_DECODE_SM100 = 266,
+  TASK_MLA_REDUCE_SM100 = 267,
+  TASK_MLA_PREFILL_SM100 = 268,
+  TASK_MLA_MTP_DECODE_SM100 = 269,
+  TASK_MLA_MTP_REDUCE_SM100 = 270,
+  TASK_MTP_VERIFY_STRICT = 271,
+  TASK_MTP_ACCEPT_COMMIT = 272,
+  TASK_MTP_TOKEN_SCATTER = 273,
+  TASK_MTP_PREPARE_VERIFY = 274,
+  TASK_QUANTIZE_FP8_SM100 = 275,
+  TASK_LINEAR_FP8_SM100 = 276,
+  TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 = 277,
+  TASK_MLA_KV_GATHER_SM100 = 278,
+  TASK_MOE_TOPK_SIGMOID_SM100 = 280,
+  TASK_ELEMENTWISE_ADD_SM100 = 281,
+  TASK_SOFTMAX_GATHER_SM100 = 282,
+  TASK_MTP_VERIFY_PROBABILISTIC = 283,
+  TASK_PROB_SCATTER_SM100 = 284,
+  TASK_MTP_FLOAT_SCATTER = 285,
+  TASK_PROB_EXTRACT_SM100 = 286,
+  // MLA-MTP TP variants (q1..q4, kv4096; ferret-derived, no-PDL):
+  TASK_MLA_MTP_DECODE_TP2_SM100 = 287,
+  TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 = 288,
+  TASK_MLA_MTP_DECODE_TP4_SM100 = 289,
+  TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 = 290,
+  TASK_MLA_MTP_DECODE_TP8_SM100 = 291,
+  TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
+  // KV gather variant that writes split CKV/KPE output (for chunked prefill):
+  TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
+  // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
+  // input tokens = shifted ground-truth prompt + current iter's argmax tail.
+  TASK_MTP_BUILD_EMBED_INPUT = 294,
+  // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
+  TASK_MLA_PREFILL_TP8_SM100 = 295,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -275,16 +331,17 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
-  int *step;                    // Metadata for LLM serving
-  long long *tokens;            // Metadata for LLM serving
-  long long *input_tokens;      // Metadata for LLM serving
-  long long *output_tokens;     // Metadata for LLM serving
-  long long eos_token_id;       // Metadata for LLM serving
-  int max_seq_length;           // Metadata for LLM serving
-  int *new_token_nums;          // Metadata for LLM serving
-  int *qo_indptr_buffer;        // Metadata for LLM serving (paged attention)
-  int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
+  int *step;                      // Metadata for LLM serving
+  long long *tokens;              // Metadata for LLM serving
+  long long *input_tokens;        // Metadata for LLM serving
+  long long *output_tokens;       // Metadata for LLM serving
+  long long eos_token_id;         // Metadata for LLM serving
+  int max_seq_length;             // Metadata for LLM serving
+  int *new_token_nums;            // Metadata for LLM serving
+  int *qo_indptr_buffer;          // Metadata for LLM serving (paged attention)
+  int *paged_kv_indptr_buffer;    // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_buffer;   // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_snapshot; // Scheduler snapshot for in-place compaction
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN)

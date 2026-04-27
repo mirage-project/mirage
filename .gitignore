@@ -79,3 +79,8 @@ ncu_tmp
 #nsys
 *.nsys-rep
 *.sqlite
+.claude/
+
+# Local-only Claude docs / scratch PR description — never push
+/CLAUDE.md
+/pr.md

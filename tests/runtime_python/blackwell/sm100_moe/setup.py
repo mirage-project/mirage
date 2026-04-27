@@ -6,8 +6,11 @@ from os import path
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
-nvcc_path = "/usr/local/cuda-12.8/bin/nvcc"
-cuda_home = "/usr/local/cuda-12.8"  
+nvcc_path = shutil.which("nvcc")
+if nvcc_path:
+    cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+else:
+    cuda_home = "/usr/local/cuda"
 
 cuda_include_dir = os.path.join(cuda_home, "include")
 cuda_library_dirs = [

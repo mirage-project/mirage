@@ -106,6 +106,8 @@ __device__ __noinline__ void
       cute::make_stride(cute::E<1>{},
                         cute::E<0>{}))); // ArithTuple(_0,_0) o
                                          // (batch_size,output_size):(_1@1,_1@0)
+  cute::Tensor mBiasCoord = cute::make_identity_tensor(
+      cute::make_shape(cute::Int<BATCH_SIZE>{}, cute::Int<OUTPUT_SIZE>{}));
 
   cute::Tensor gA = cute::local_tile(
       mA,
@@ -131,6 +133,11 @@ __device__ __noinline__ void
                  cute::_1,
                  cute::X>{}); // gmem_ptr[16b](0x7704bd040000) o
                               // (_32,_128,1,8):(1024,_1,32768,_128)
+  cute::Tensor gBiasCoord =
+      cute::local_tile(mBiasCoord,
+                       cd_tiler,
+                       mma_coord,
+                       cute::Step<cute::_1, cute::_1, cute::X>{});
   cute::Tensor gC = cute::local_tile(
       mC,
       cd_tiler,
@@ -293,11 +300,14 @@ __device__ __noinline__ void
   //   cute::print("sC_epi:\t"); cute::print(sC_epi); cute::print("\n");
   // } __syncthreads();
 
-  // int tma_trans_bytes_A = sizeof(T_) * cute::size<1>(mma_tiler) *
-  // cute::size<2>(mma_tiler); int tma_trans_bytes_B = sizeof(T_) *
-  // cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
+  // TMA bytes must match actual clamped box dims.
+  // When BATCH_SIZE < MMA_N, TMA input box is clamped to min(MMA_N,
+  // BATCH_SIZE). size<1>(mma_tiler)=bN corresponds to the input (B) TMA
+  // dimension. size<0>(mma_tiler)=bM corresponds to the weight (A) TMA
+  // dimension.
+  constexpr int kClampedBN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
   int tma_transaction_bytes =
-      sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler) +
+      sizeof(T_) * kClampedBN * cute::size<2>(mma_tiler) +
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 
   constexpr int TILE_SIZE = 64;
@@ -415,9 +425,9 @@ __device__ __noinline__ void
         int tma_wr_ab_empty_phase =
             (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
-        bool peek_ab_empty_status = kernel::try_wait_barrier(
-            shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-            tma_wr_ab_empty_phase);
+        bool peek_ab_empty_status =
+            try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+                             tma_wr_ab_empty_phase);
 
         // CUTE_UNROLL
         for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -457,7 +467,7 @@ __device__ __noinline__ void
           }
 
           if (tma_wr_k_tile_next < k_tile_count) {
-            peek_ab_empty_status = kernel::try_wait_barrier(
+            peek_ab_empty_status = try_wait_barrier(
                 shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
                 tma_wr_ab_empty_phase_next);
           }
@@ -494,9 +504,9 @@ __device__ __noinline__ void
             (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
         // Peek full phase
-        bool peek_ab_full_status = kernel::try_wait_barrier(
-            shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
-            mma_rd_ab_full_phase);
+        bool peek_ab_full_status =
+            try_wait_barrier(shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
+                             mma_rd_ab_full_phase);
 
         int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
         cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
@@ -535,7 +545,7 @@ __device__ __noinline__ void
               &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
 
           if (mma_rd_k_tile_next < k_tile_count) {
-            peek_ab_full_status = kernel::try_wait_barrier(
+            peek_ab_full_status = try_wait_barrier(
                 shared_storage.ab_full_mbar_ptr[smem_rd_buffer_next],
                 mma_rd_ab_full_phase_next);
           }
@@ -621,9 +631,28 @@ __device__ __noinline__ void
 
         // T2R and register operations
         if constexpr (!NOBIAS) {
-          // this copy might conflict with TMA load, might add a wait barrier if
-          // needed
-          cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
+          cute::Tensor tCgBiasCoord =
+              gBiasCoord(cute::_, cute::_, n_tile, m_tile);
+          cute::Tensor tCgBiasPred =
+              cute::lazy::transform(tCgBiasCoord, [&](auto const &coord) {
+                return cute::elem_less(
+                    coord,
+                    cute::make_shape(cute::Int<BATCH_SIZE>{},
+                                     cute::Int<OUTPUT_SIZE>{}));
+              });
+          CUTE_UNROLL
+          for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
+            tCrBiasTypeBias[i] = TypeBias(0);
+          }
+          // Epilogue has 128 threads but bias may have fewer than 128 columns
+          // (OUTPUT_SIZE), and the MMA_N tile may have more rows than the
+          // runtime batch capacity. Guard both dimensions before reading the
+          // residual tensor.
+          if (threadIdx.x < OUTPUT_SIZE) {
+            cute::copy_if(tCgBiasPred(cute::_, threadIdx.x),
+                          tCgBias(cute::_, threadIdx.x),
+                          tCrBiasTypeBias);
+          }
           // optimize with vectorized type conversion
 
           CUTE_UNROLL

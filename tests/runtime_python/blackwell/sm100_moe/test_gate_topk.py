@@ -8,7 +8,7 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-num_experts_list = [128]
+num_experts_list = [128, 256]
 num_topks = [8]
 batch_size = 1
 

@@ -629,6 +629,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 3, TASK_MOE_TOPK_SOFTMAX_SM100, variant_id);
+  } else if (name == "moe_topk_sigmoid_sm100") {
+    int variant_id = task_register->register_moe_topk_sigmoid_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 3, TASK_MOE_TOPK_SIGMOID_SM100, variant_id);
   } else if (name == "moe_w13_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, true /*w13_linear*/);
@@ -643,6 +648,43 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, false /*w13_linear*/);
     task_config[op] =
         std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM100, variant_id);
+  } else if (name == "moe_w13_fp8_sm100") {
+    int variant_id = task_register->register_moe_fp8_sm100_task(
+        customized->bgraph, params, true /*w13_linear*/);
+    task_config[op] = std::make_tuple(6, 1, TASK_MOE_W13_FP8_SM100, variant_id);
+  } else if (name == "moe_w2_fp8_sm100") {
+    int variant_id = task_register->register_moe_fp8_sm100_task(
+        customized->bgraph, params, false /*w13_linear*/);
+    task_config[op] = std::make_tuple(6, 1, TASK_MOE_W2_FP8_SM100, variant_id);
+  } else if (name == "elementwise_add_sm100") {
+    int variant_id = task_register->register_elementwise_add_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_ELEMENTWISE_ADD_SM100, variant_id);
+  } else if (name == "softmax_gather_sm100") {
+    int variant_id = task_register->register_softmax_gather_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SOFTMAX_GATHER_SM100, variant_id);
+  } else if (name == "mtp_verify_probabilistic") {
+    int variant_id = task_register->register_mtp_verify_probabilistic_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(5, 2, TASK_MTP_VERIFY_PROBABILISTIC, variant_id);
+  } else if (name == "mtp_float_scatter") {
+    int variant_id = task_register->register_mtp_float_scatter_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_MTP_FLOAT_SCATTER, variant_id);
+  } else if (name == "prob_extract_sm100") {
+    int variant_id = task_register->register_prob_extract_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_PROB_EXTRACT_SM100, variant_id);
+  } else if (name == "prob_scatter_sm100") {
+    int variant_id = task_register->register_prob_scatter_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_PROB_SCATTER_SM100, variant_id);
   } else if (name == "moe_mul_sum_add_sm100") {
     int variant_id = task_register->register_moe_mul_sum_add_sm100_task(
         customized->bgraph, params);
@@ -660,6 +702,135 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
+  } else if (name == "mla_decode_sm100") {
+    int variant_id = task_register->register_mla_decode_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs (Q TMA, KV TMA), 2 outputs (Oa, La)
+    task_config[op] = std::make_tuple(2, 2, TASK_MLA_DECODE_SM100, variant_id);
+  } else if (name == "mla_reduce_sm100") {
+    int variant_id = task_register->register_mla_reduce_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs (Oa, La), 1 output (O)
+    task_config[op] = std::make_tuple(2, 1, TASK_MLA_REDUCE_SM100, variant_id);
+  } else if (name == "mla_prefill_sm100") {
+    int variant_id = task_register->register_mla_prefill_sm100_task(
+        customized->bgraph, params);
+    // 5 inputs via Python new_input (Q_nope, Q_pe, CKV, KPE, O) — output is
+    // attached with store_in_dmem=True, MPK convention (same as mla_decode).
+    // Task register dispatches input_ptrs[4] as the O pointer.
+    task_config[op] = std::make_tuple(5, 0, TASK_MLA_PREFILL_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_sm100") {
+    int variant_id = task_register->register_mla_prefill_tp8_sm100_task(
+        customized->bgraph, params);
+    // 4 inputs (Q_nope, Q_pe, K, V), 1 output (O). K and V carry TMA descriptors.
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MLA_PREFILL_TP8_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_sm100") {
+    int variant_id = task_register->register_mla_mtp_decode_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs (Q TMA, KV TMA), 2 outputs (Oa, La)
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_SM100, variant_id);
+  } else if (name == "mla_mtp_reduce_sm100") {
+    int variant_id = task_register->register_mla_mtp_reduce_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs (Oa, La), 1 output (O)
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_MTP_REDUCE_SM100, variant_id);
+  }
+  // MLA-MTP TP variants (ferret-derived, no-PDL)
+  else if (name == "mla_mtp_decode_tp2_sm100") {
+    int variant_id = task_register->register_mla_mtp_decode_tp2_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP2_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp2_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_mtp_decode_tp2_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp4_sm100") {
+    int variant_id = task_register->register_mla_mtp_decode_tp4_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP4_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp4_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_mtp_decode_tp4_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp8_sm100") {
+    int variant_id = task_register->register_mla_mtp_decode_tp8_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP8_SM100, variant_id);
+  } else if (name == "mla_mtp_decode_tp8_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_mtp_decode_tp8_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100, variant_id);
+  }
+  // FP8 tasks
+  else if (name == "quantize_fp8_sm100") {
+    int variant_id = task_register->register_quantize_fp8_sm100_task(
+        customized->bgraph, params, true /*scale_ue8m0*/);
+    task_config[op] =
+        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+  } else if (name == "quantize_fp8_f32scale_sm100") {
+    int variant_id = task_register->register_quantize_fp8_sm100_task(
+        customized->bgraph, params, false /*scale_ue8m0*/);
+    task_config[op] =
+        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+  } else if (name == "linear_fp8_sm100") {
+    int variant_id = task_register->register_linear_fp8_sm100_task(
+        customized->bgraph, params, false);
+    task_config[op] = std::make_tuple(4, 1, TASK_LINEAR_FP8_SM100, variant_id);
+  } else if (name == "linear_fp8_with_residual_sm100") {
+    int variant_id = task_register->register_linear_fp8_sm100_task(
+        customized->bgraph, params, true);
+    task_config[op] =
+        std::make_tuple(5, 1, TASK_LINEAR_FP8_WITH_RESIDUAL_SM100, variant_id);
+  }
+  // MLA KV gather
+  else if (name == "mla_kv_gather_sm100") {
+    int variant_id = task_register->register_mla_kv_gather_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 0, TASK_MLA_KV_GATHER_SM100, variant_id);
+  } else if (name == "mla_kv_gather_split_sm100") {
+    int variant_id = task_register->register_mla_kv_gather_split_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
+  }
+  // MTP tasks
+  else if (name == "mtp_verify_strict") {
+    int variant_id = task_register->register_mtp_verify_strict_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 2, TASK_MTP_VERIFY_STRICT, variant_id);
+  } else if (name == "mtp_accept_commit") {
+    int variant_id = task_register->register_mtp_accept_commit_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 3, TASK_MTP_ACCEPT_COMMIT, variant_id);
+  } else if (name == "mtp_token_scatter") {
+    int variant_id = task_register->register_mtp_token_scatter_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_MTP_TOKEN_SCATTER, variant_id);
+  } else if (name == "mtp_prepare_verify") {
+    int variant_id = task_register->register_mtp_prepare_verify_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MTP_PREPARE_VERIFY, variant_id);
+  } else if (name == "mtp_build_embed_input") {
+    // Inputs: output_tokens (main argmax). Output: mtp_input_tokens.
+    // (tokens buffer + step are read via runtime_config, not as task inputs.)
+    int variant_id = task_register->register_mtp_build_embed_input_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_MTP_BUILD_EMBED_INPUT, variant_id);
   }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {
