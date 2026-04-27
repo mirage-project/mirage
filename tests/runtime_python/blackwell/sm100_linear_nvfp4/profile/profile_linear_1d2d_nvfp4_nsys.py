@@ -3,7 +3,7 @@ Profile true GPU kernel time for linear_nvfp4_sm100_no_quantization vs torch._sc
 using nsys to strip host-side overhead (cudaMalloc, memcpy, synchronize, chunking loop).
 
 Usage:
-    python profile_linear_1d2d_nvfp4_nsys.py [--m-values 1,8,32,128] [--n-values 1024] [--k-values 1024,4096]
+    python profile/profile_linear_1d2d_nvfp4_nsys.py [--m-values 1,8,32,128] [--n-values 1024] [--k-values 1024,4096]
 """
 
 import argparse
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 
+import _runtime_path  # noqa: F401
 import torch
 
 DEVICE = "cuda"
@@ -54,6 +55,7 @@ def write_worker(warmup: int, reps: int) -> None:
     src = f"""\
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
+import _runtime_path  # noqa: F401
 import torch
 import runtime_kernel_blackwell_linear_nvfp4 as rt
 from nvfp4_util import (

@@ -1,6 +1,7 @@
 import argparse
 import warnings
 
+import _runtime_path  # noqa: F401
 import torch
 
 import runtime_kernel_blackwell_linear_nvfp4 as runtime_kernel_blackwell
