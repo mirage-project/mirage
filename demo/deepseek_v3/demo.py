@@ -90,6 +90,8 @@ if __name__ == "__main__":
                         help="Rejection sampling method for speculative decoding")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
+    parser.add_argument("--dump-task-graph", action="store_true",
+                        help="Dump Mirage task graph JSON and generated CUDA code")
     parser.add_argument("--ignore-eos", action="store_true",
                         help="Ignore eos token during generation")
     parser.add_argument("--max-new-tokens", type=int, default=None,
@@ -172,6 +174,20 @@ if __name__ == "__main__":
     qk_rope_head_dim = getattr(config, "qk_rope_head_dim", DEEPSEEK_V3_QK_ROPE_HEAD_DIM)
     ckv_kpe_dim = kv_lora_rank + qk_rope_head_dim  # 576 for DeepSeek V3
     num_attention_heads = config.num_attention_heads
+    expected_config = {
+        "hidden_size": 7168,
+        "num_hidden_layers": 61,
+        "num_attention_heads": DEEPSEEK_V3_NUM_HEADS,
+        "kv_lora_rank": DEEPSEEK_V3_KV_LORA_RANK,
+        "qk_rope_head_dim": DEEPSEEK_V3_QK_ROPE_HEAD_DIM,
+    }
+    for field_name, expected_value in expected_config.items():
+        actual_value = getattr(config, field_name, None)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"DeepSeek V3 builder constant mismatch: config.{field_name}="
+                f"{actual_value}, expected {expected_value}."
+            )
 
     print(f"Model config: hidden_size={hidden_size}, num_layers={num_layers}, "
           f"vocab_size={vocab_size}, num_heads={num_attention_heads}, "
@@ -407,8 +423,10 @@ if __name__ == "__main__":
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
-                    # FIXME: Seems to be loading the whole tensor?
-                    # FIXME: We need a more efficient method
+                    # safetensors loads only the requested keys from each shard.
+                    # The granularity is still whole tensor per key; TP/EP
+                    # sharding happens after absorption because q_b/o_proj
+                    # fusion needs full per-layer matrices.
                     with safe_open(shard_path, framework="pt", device=_load_device) as f:
                         for key in keys:
                             state_dict[key] = f.get_tensor(key)
@@ -421,9 +439,8 @@ if __name__ == "__main__":
         # (`model{rank}-mp{world_size}.safetensors`) is already absorbed/fused.
         if args.layers:
             # Absorb kv_b_proj into q_b_proj and fuse V un-absorption into
-            # o_proj (matches vLLM/SGLang runtime). FP8 weights stay FP8;
-            # absorbed q_b becomes BF16 (FP8 requantization compounds error
-            # across residual layers).
+            # o_proj (matches vLLM/SGLang runtime). The attached weights stay
+            # in the same FP8+scale format that the multi-GPU graph expects.
             print("\nConverting weights for MPK builder (FP8 preserved)...")
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
             from convert import (
@@ -469,11 +486,10 @@ if __name__ == "__main__":
                     else:
                         kv_f32 = kv_w.cuda().float()
                     kv_bf16 = kv_f32.to(torch.bfloat16)
-                    absorbed = absorb_kv_into_q(q_f32, kv_f32, mp).to(torch.bfloat16)
-                    state_dict[q_key] = absorbed
-                    # * scale factor is no longer needed after absorption
-                    if q_s_key in state_dict:
-                        del state_dict[q_s_key]
+                    absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)
+                    q_fp8, q_scale = _quantize_f32_to_checkpoint_fp8(absorbed_f32)
+                    state_dict[q_key] = q_fp8
+                    state_dict[q_s_key] = q_scale
                     # Fuse V un-absorption into o_proj
                     num_heads_loc = mp["num_heads"]
                     qk_nope = mp["qk_nope_head_dim"]
@@ -486,7 +502,8 @@ if __name__ == "__main__":
                     # forms lets the builder dispatch based on
                     # max_num_batched_tokens. Per-head layout: [nope(512) | pe(64)].
                     H_ = num_heads_loc
-                    absorbed_r = absorbed.reshape(H_, 576, -1)
+                    absorbed_bf16 = absorbed_f32.to(torch.bfloat16)
+                    absorbed_r = absorbed_bf16.reshape(H_, 576, -1)
                     q_b_nope = absorbed_r[:, :kv_lora_rank, :].contiguous().reshape(H_ * kv_lora_rank, -1)
                     q_b_pe = absorbed_r[:, kv_lora_rank:, :].contiguous().reshape(H_ * (576 - kv_lora_rank), -1)
                     state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
@@ -510,7 +527,7 @@ if __name__ == "__main__":
                         o_fp8, o_scale = _quantize_f32_to_checkpoint_fp8(o_flat)
                         state_dict[o_key] = o_fp8
                         state_dict[o_s_key] = o_scale
-                        print(f"  L{li}: BF16 absorbed q_b {absorbed.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
+                        print(f"  L{li}: FP8 absorbed q_b {q_fp8.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
@@ -593,9 +610,11 @@ if __name__ == "__main__":
 
             print(f"  Converted: {len(state_dict)} keys (FP8 weights preserved)")
 
-            # TP weight sharding: shard weights for multi-GPU inference
-            # FIXME: If we do sharding here, every rank will have to load the full weights first, which may OOM.
-            # FIXME: We need a more efficient method, like spliting the absorption/fusion work across ranks.
+            # TP/EP weight sharding happens after conversion. For TP>1, tensors
+            # stay on CPU until this step to avoid GPU OOM from full
+            # unsharded weights. A future shard-aware converter could reduce
+            # CPU peak memory further, but the current path is deterministic
+            # and keeps absorption/fusion math identical across ranks.
             if world_size > 1:
                 from convert import shard_tensor
                 import re
@@ -744,7 +763,8 @@ if __name__ == "__main__":
             num_layers=num_layers,
             k_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
             v_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
-            # FIXME: Why position embedding is None?
+            # DeepSeek builder precomputes RoPE cos/sin internally because MLA
+            # uses the compressed KV cache and separate c_latent/k_pe paths.
             position_embeddings=None,
             state_dict=state_dict,
             with_lm_head=True,
@@ -754,14 +774,14 @@ if __name__ == "__main__":
         builder = DeepSeekV3Builder(mpk)
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
 
-        # TODO(Zep): Remove this, duplicate graph gen
-        results = mpk.kn_graph.generate_task_graph(
-            num_gpus=world_size, my_gpu_id=rank
-        )
-        with open(f"task_graph_{rank}.json", "w") as f:
-            f.write(results["json_file"])
-        with open(f"kernel_{rank}.cu", "w") as f:
-            f.write(results["cuda_code"])
+        if args.dump_task_graph:
+            results = mpk.kn_graph.generate_task_graph(
+                num_gpus=world_size, my_gpu_id=rank
+            )
+            with open(f"task_graph_{rank}.json", "w") as f:
+                f.write(results["json_file"])
+            with open(f"kernel_{rank}.cu", "w") as f:
+                f.write(results["cuda_code"])
 
         mpk.compile(output_dir=args.output_dir)
 
@@ -901,5 +921,9 @@ if __name__ == "__main__":
                 json.dump(out, f, indent=2)
             print(f"Saved tokens to {save_path}")
 
-    if world_size > 1:
+    if "mpk" in locals() and hasattr(mpk, "finalize") and not getattr(
+        mpk, "__finalized__", True
+    ):
+        mpk.finalize()
+    if world_size > 1 and dist.is_initialized():
         dist.destroy_process_group()

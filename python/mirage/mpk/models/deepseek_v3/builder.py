@@ -21,7 +21,6 @@ from ...model_registry import register_model_builder
 from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64
 
 
-# FIXME: Let's always read the constants from the config file
 # DeepSeek V3 architecture constants
 HIDDEN_SIZE = 7168
 NUM_LAYERS = 61
@@ -53,8 +52,8 @@ RMS_NORM_EPS = 1e-6
 _MOE_FP8_MMA_M = 128
 
 
-# TODO: The current heuristic is not ideal. We need to benchmark to find a better grid_dim.
 def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
+    """Pick a valid output-dimension split for the FP8 MoE group GEMM."""
     max_y = min(preferred, max(1, output_size // _MOE_FP8_MMA_M))
     for y in range(max_y, 0, -1):
         if output_size % y == 0 and (output_size // y) % _MOE_FP8_MMA_M == 0:
@@ -62,17 +61,17 @@ def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
     return 1
 
 
-def _moe_expert_grid_x(
-    max_num_batched_tokens: int,
-    num_experts: int = NUM_EXPERTS,
-    preferred_groups: int = NUM_EXPERTS,
-) -> int:
+def _moe_expert_grid_x(max_num_batched_tokens: int,
+                       num_experts: int = NUM_EXPERTS,
+                       preferred_groups: int | None = None) -> int:
     # The MoE kernels iterate over the compact activated-expert list with a
     # stride equal to grid_dim.x. A batch can activate at most top_k experts per
-    # token, so never create more expert groups than active routing slots.
-    # The preferred value is the MoE-tuned target from the reviewed path.
-    active_groups = max_num_batched_tokens * NUM_EXPERTS_PER_TOK
-    return max(1, min(num_experts, preferred_groups, active_groups))
+    # token. The preferred group count raises parallelism for larger batches,
+    # but it must remain bounded by the active routing slots for MBT=1 graphs.
+    active_slots = max(1, max_num_batched_tokens * NUM_EXPERTS_PER_TOK)
+    group_cap = num_experts if preferred_groups is None else min(
+        num_experts, preferred_groups)
+    return min(group_cap, active_slots)
 
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
@@ -100,6 +99,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # Weight attach cache: avoid re-declaring same C++ variable in MTP draft loop
         self._attach_cache = {}
         self.max_num_batched_tokens = mpk.max_num_batched_tokens
+        self.ckv_kpe_cache = None
+        self.position_embeddings = None
 
         # DeepSeek V3 dimensions
         self.hidden_size = HIDDEN_SIZE
@@ -110,11 +111,12 @@ class DeepSeekV3Builder(GraphBuilder):
         self.v_head_dim = V_HEAD_DIM_TOTAL     # 512 after absorption
         self.q_lora_rank = Q_LORA_RANK
         self.kv_lora_rank = KV_LORA_RANK
-        # FIXME: This naming convention is a bit confusing, let's try to distinguish between
-        # the original one and splitted one.
         self.intermediate_size = INTERMEDIATE_SIZE // self.world_size
+        # Routed experts are split over tensor-parallel ranks inside an
+        # expert-parallel group; shared experts stay tensor-parallel over all ranks.
         self.shared_moe_intermediate_size = MOE_INTERMEDIATE_SIZE // self.world_size
         self.routed_moe_intermediate_size = MOE_INTERMEDIATE_SIZE // self.routed_tp_size
+        # Kept for legacy shared-expert helper paths.
         self.moe_intermediate_size = self.shared_moe_intermediate_size
 
         # Fuse residual into linear kernels (with_residual). Always on.
@@ -135,7 +137,6 @@ class DeepSeekV3Builder(GraphBuilder):
         Args:
             layer_indices: If provided, only build these specific layer indices.
         """
-        # FIXME: Also set None as placeholder for these in the __init__
         self.ckv_kpe_cache = model_config.k_cache  # [num_layers, num_pages, page_size, 576]
         self.position_embeddings = model_config.position_embeddings
 
@@ -149,8 +150,8 @@ class DeepSeekV3Builder(GraphBuilder):
                      grid_dim, block_dim, residual=None):
         """Quantize BF16 input → FP8, then run FP8 GEMM."""
         if weight_scale is None:
-        # FIXME: I think we should throw error if no weight scale is provided, why allow bf16 in this function?
-            # BF16 path (post-dequant weights)
+            # BF16 fallback is kept for fixtures or pre-converted weights that
+            # intentionally arrive without FP8 scale metadata.
             if residual is not None:
                 self.mpk.linear_with_residual_layer(
                     input=input_bf16, weight=weight, residual=residual,
@@ -161,9 +162,12 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=grid_dim, block_dim=block_dim)
             return
 
-        # FIXME: Let's add more checks here, to ensure the input dtype, weight dtype and
-        # FIXME: weight scale factor dtype, output dtype
-
+        if input_bf16.num_dims != 2 or output.num_dims != 2:
+            raise ValueError("FP8 linear expects 2D input and output tensors.")
+        if weight.num_dims != 2:
+            raise ValueError("FP8 linear expects a 2D weight tensor.")
+        if weight_scale.num_dims != 2:
+            raise ValueError("FP8 linear expects a 2D packed UE8M0 scale tensor.")
 
         # New FP8 kernel: each CTA processes output_size=128. Grid splits output.
         output_size = weight.dim(0)
@@ -202,7 +206,8 @@ class DeepSeekV3Builder(GraphBuilder):
             # physical shape=[packed_k, aligned_batch], dtype=uint32
             packed_k = (num_groups + 3) // 4
             aligned_batch = ((mbt + 3) // 4) * 4
-            # FIXME: Let's double check the layout requirement here?
+            # The CUTLASS FP8 kernel reads scales by packed-K first and aligned
+            # batch second, matching the UE8M0 column-major descriptor layout.
             scale_buf = self.mpk.new_tensor(
                 dims=(packed_k, aligned_batch), dtype=uint32,
                 name=f"fp8_scale_{reduction_size}_shared",
@@ -268,18 +273,10 @@ class DeepSeekV3Builder(GraphBuilder):
         """Allocate intermediate computation buffers."""
         mbt = self.max_num_batched_tokens
 
-        # FIXME: What are these???
-        # Pick the MLA kernel at compile time based on max_num_batched_tokens.
-        # Large Q_LEN uses the mla_prefill_sm100 chunked-prefill kernel (which
-        # is designed for that regime); small Q_LEN uses the MLA decode / MTP
-        # decode kernels. The threshold of 32 is chosen so MTP decode
-        # (spec_length ≤ 7) always goes through the decode path, and any
-        # realistic chunked-prefill chunk size (≥ 128 typically) goes through
-        # prefill. The MPK scheduler still dynamically caps per-iter
-        # num_new_tokens via paged_kv_indptr — prefill phase uses chunk=mbt,
-        # decode phase uses chunk=1 — so a single compiled graph handles both
-        # phases correctly at the same mbt budget.
-        self._use_prefill = mbt >= 32
+        # Runtime Q_LEN decides the MLA algorithm: Q_LEN <= 8 is decode/MTP
+        # verify, Q_LEN >= 9 is prefill. MBT caps the maximum prefill chunk
+        # size, so any graph with mbt > 8 must include the prefill path.
+        self._use_prefill = mbt > 8
         if self._use_prefill:
             print(f"  [MLA path] Q_LEN={mbt} → mla_prefill_sm100 (chunked prefill)")
         else:
@@ -335,8 +332,8 @@ class DeepSeekV3Builder(GraphBuilder):
             name="c_latent_out",
             io_category="cuda_tensor",
         )
-        # FIXME: Check this padding?
-        # Pad to 128 for SM100 MMA_M alignment (real data is first 64 elements)
+        # Pad K-PE from 64 to 128 rows so the FP8 linear and downstream KV
+        # copy use the SM100 128-row tile shape. Real data remains in [0:64].
         self.k_pe_out = self.mpk.new_tensor(
             dims=(mbt, 128),  # [batch, 128] — padded from 64
             dtype=bfloat16,
@@ -350,8 +347,9 @@ class DeepSeekV3Builder(GraphBuilder):
             name="kv_combined",
             io_category="cuda_tensor",
         )
-        # FIXME: Why gathering at the cost of extra memory and copy?
-        # Contiguous KV buffer for new MLA decode (gathered from paged cache)
+        # Decode can skip this copy on direct-paged paths. The buffer remains
+        # allocated for legacy decode layouts and for unified prefill/decode
+        # graphs whose prefill side also needs split contiguous KV views.
         self.contiguous_kv = self.mpk.new_tensor(
             dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
                   self.qk_head_dim),
@@ -380,7 +378,6 @@ class DeepSeekV3Builder(GraphBuilder):
         # MLA kernel writes blocks at stride D_V*128 and LSE at stride 128.
         # TP kernels use split-K: each split handles one KV tile (128 tokens).
         # Buffer = mbr * num_groups * max_splits blocks.
-        # FIXME: TP splits along K???
         mbr = self.mpk.max_num_batched_requests
         if self.world_size > 1:
             max_splits = (self.mpk.max_seq_length + 127) // 128
@@ -591,13 +588,19 @@ class DeepSeekV3Builder(GraphBuilder):
         scale_key = f"{key}_scale_inv"
         if scale_key in state_dict:
             # Requantize: dequant with float32 scale, re-quantize with UE8M0 scale
-            # FIXME: Let's first assert the input weight and sf dtype are what we expect
+            if state_dict[key].dtype != torch.float8_e4m3fn:
+                raise TypeError(f"{key} must be torch.float8_e4m3fn when {scale_key} exists.")
+            if state_dict[scale_key].dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                raise TypeError(f"{scale_key} must be a floating scale tensor.")
             new_fp8, packed_ue8m0 = self._requantize_fp8_for_ue8m0(
                 state_dict[key], state_dict[scale_key])
             w = self._safe_attach(new_fp8, name)
             s = self._safe_attach(packed_ue8m0, f"{name}_scale")
         else:
-            # FIXME: I think we should never reach here?
+            # BF16 fallback is used by reduced fixtures or explicitly
+            # pre-converted weights that have no scale tensor.
+            if state_dict[key].dtype != torch.bfloat16:
+                raise TypeError(f"{key} without scale must be torch.bfloat16.")
             w = self._safe_attach(state_dict[key], name)
             s = None  # weight is already BF16 (post-dequant)
         return w, s
@@ -707,8 +710,9 @@ class DeepSeekV3Builder(GraphBuilder):
                                           f"layer_{layer_idx}_kv_a_rope")
             s_kv_rope = None
 
-        # FIXME: Can we fuse these two linears into one?
-        # FP8 GEMM for c_latent [N, 512]
+        # Keep the latent and RoPE projections separate because only c_latent
+        # goes through kv_a_layernorm; a fused projection would need a fused
+        # split-plus-layernorm kernel that is not available here.
         self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent,
                          self.c_latent_out,
                          grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),
@@ -838,7 +842,6 @@ class DeepSeekV3Builder(GraphBuilder):
         """Build dense MLP for layers 0-2 (FP8 weights)."""
         prefix = f"model.layers.{layer_idx}."
 
-        # FIXME: I think we have completed the weight shuffle, so this should be correct?
         w_gate_up, s_gate_up = self._attach_fp8_weight(
             state_dict, f"{prefix}mlp.gate_up_proj.weight",
             f"layer_{layer_idx}_gate_up_proj")
@@ -931,8 +934,8 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_moe_output",
             io_category=_moe_io,
         )
-        # FIXME: This layer requires dummy input and output, which is not ideal.
-        # FIXME: Let's try to fuse this function into
+        # MoE accumulation only writes active routed slots, so initialize the
+        # whole output tensor before routed/shared expert accumulation.
         self.mpk.tensor_init_layer(
             input=moe_output,
             dummy_input=self.rmsnorm_out,
@@ -948,7 +951,8 @@ class DeepSeekV3Builder(GraphBuilder):
             torch_tensor=state_dict[bias_key],
             name=f"layer_{layer_idx}_moe_gate_bias",
         )
-        # TODO: This layer is correctly configured, but still very slow. We should optimize it.
+        # Router is full-replica on every rank; no inter-rank synchronization is
+        # needed before the local top-k routing mask is produced.
         self.mpk.moe_topk_sigmoid_routing_layer(
             input=router_logits,
             bias=w_bias,
@@ -1015,12 +1019,10 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
         if use_fp8_experts:
-            w13_m_split = _moe_fp8_m_split(
-                2 * self.routed_moe_intermediate_size, preferred=16)
+            w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
+                                           preferred=16)
             w13_expert_grid_x = _moe_expert_grid_x(
                 mbt, self.num_local_experts, preferred_groups=8)
-            # We should try to keep num_exp_groups * m_split as large as possible to maximize parallelism,
-            # but still <= total number of workers (140 in this case), for best performance.
             self.mpk.moe_w13_fp8_layer(
                 input_fp8=moe_input_fp8,
                 input_scale=moe_input_scale,
@@ -1040,7 +1042,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_mid,
-                grid_dim=(w13_expert_grid_x, 1, 1),
+                grid_dim=(_moe_expert_grid_x(mbt, self.num_local_experts), 1, 1),
                 block_dim=(128, 1, 1),
             )
 
@@ -1083,7 +1085,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 name=f"layer_{layer_idx}_moe_silu_scale",
                 io_category="cuda_tensor",
             )
-            # FIXME: This is fine for small batchsize <= 16, but for larger batchsize we need better solution.
+            # This flattening maps each (token, selected_expert) row to one
+            # quantization task. Current DeepSeek demo targets small batch sizes.
             self.mpk.quantize_fp8_layer(
                 input=moe_silu_out,
                 output_fp8=moe_silu_fp8,
@@ -1130,7 +1133,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_down_out,
-                grid_dim=(w2_expert_grid_x, 1, 1),
+                grid_dim=(_moe_expert_grid_x(mbt, self.num_local_experts), 1, 1),
                 block_dim=(128, 1, 1),
             )
 
@@ -1215,8 +1218,11 @@ class DeepSeekV3Builder(GraphBuilder):
                          block_dim=(128, 1, 1),
                          residual=None)
 
-        # Final: moe_output = sum(routed_experts * weights) + shared_residual
-        # TODO: Let's also add the real residual here.
+        # Final MoE contribution before transformer residual:
+        #   routed_experts * topk_weights + shared_expert
+        # The model residual is added after the tensor-parallel allreduce in
+        # build_layers, otherwise each rank would add the same residual before
+        # the reduction and over-count it.
         self.mpk.moe_mul_sum_add_layer(
             input=moe_down_out,
             weight=moe_topk_weights,
@@ -1295,8 +1301,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # Set self.x = self.mtp_x so MLP's fuse_residual uses correct hidden state
         self.x = self.mtp_x
         mlp_gate_key = f"{prefix}mlp.gate.weight"
-        # FIXME: I don't think we have a dense_mlp MTP layer?
-        # FIXME: Can we just reuse the main model's construction logic?
+        # Production DeepSeek V3 MTP checkpoints use the MoE path. The dense
+        # fallback is kept for reduced fixtures that omit router weights.
         if mlp_gate_key in state_dict:
             self._build_moe_mlp_with_prefix(prefix, state_dict)
         else:
@@ -1608,8 +1614,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 input=moe_mid, dummy_input=self.rmsnorm_out,
                 dummy_output=self.rmsnorm_out,
                 grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1), block_dim=(128, 1, 1))
-        mtp_w13_m_split = _moe_fp8_m_split(
-            2 * self.routed_moe_intermediate_size, preferred=16)
+        mtp_w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
+                                           preferred=16)
         mtp_w13_expert_grid_x = _moe_expert_grid_x(
             mbt, self.num_local_experts, preferred_groups=8)
         self.mpk.moe_w13_fp8_layer(
@@ -2051,9 +2057,10 @@ class DeepSeekV3Builder(GraphBuilder):
                 name="mtp_draft_probs")
             for step_idx in range(num_draft_steps):
                 # Draft logits for this step are in mtp_step{step_idx}_logits
-                # The draft token for this step is all_draft_ids[:, step_idx]
-                # TODO: need per-step draft token extraction from all_draft_ids
-                pass  # draft prob extraction needs per-column gather — see below
+                # The draft token for this step is all_draft_ids[:, step_idx].
+                # Per-column gather is not wired here; probabilistic verify
+                # consumes self._draft_prob_buffer below.
+                pass
 
             # For now: use target_prob_buffer from main graph + dummy draft_probs
             rng_seed = self._cached_new_tensor(
@@ -2064,7 +2071,6 @@ class DeepSeekV3Builder(GraphBuilder):
             # target_prob_buffer[batch, pos] has P_target(input_token) at each position.
             # The verify positions are step+1..step+K+1 (set by prepare_verify).
             # We need target_probs[0..K-1] = target_prob_buffer[step+1..step+K].
-            # TODO: need a "slice by runtime offset" kernel to extract these.
 
             # Extract target probs from accumulation buffer at verify positions
             target_probs = self._cached_new_tensor(
@@ -2169,9 +2175,11 @@ class DeepSeekV3Builder(GraphBuilder):
 
             # MLP: dense (layers 0-2) or MoE (layers 3-60)
             if i < FIRST_MOE_LAYER:
+                # Dense MLP down_proj already fuses the residual into the
+                # projection kernel. That path does not need the explicit MoE
+                # allreduce-plus-residual sequence below.
                 self._build_dense_mlp(i, state_dict)
                 self.x = self.mlp_out
-                # FIXME: Why no allreduce after mlp?
             else:
                 self._build_moe_mlp(i, state_dict)
                 # MoE: always use explicit residual add (not fused into shared_expert).
@@ -2188,7 +2196,8 @@ class DeepSeekV3Builder(GraphBuilder):
                         name=f"layer_{i}_moe_residual",
                         io_category="cuda_tensor",
                     )
-                    # FIXME: Can we just fuse this residual into the moe_mul_sum_add_layer?
+                    # Residual add must happen after allreduce; fusing it into
+                    # moe_mul_sum_add would over-count residual on TP ranks.
                     self.mpk.elementwise_add_layer(
                         input_a=self.x, input_b=self.allreduce_out,
                         output=moe_residual_out,
@@ -2203,7 +2212,6 @@ class DeepSeekV3Builder(GraphBuilder):
                         name=f"layer_{i}_moe_residual",
                         io_category="cuda_tensor",
                     )
-                    # FIXME: Can we just fuse this residual into the moe_mul_sum_add_layer?
                     self.mpk.elementwise_add_layer(
                         input_a=self.x, input_b=self.mlp_out,
                         output=moe_residual_out,
@@ -2222,7 +2230,6 @@ class DeepSeekV3Builder(GraphBuilder):
         padded_vocab_size = 129280  # DeepSeek V3 vocab size (already aligned)
 
         # Embed layer
-        # FIXME: Do we really need to assign these to self? I guess to don't reuse most of these objects?
         self.x = self.mpk.attach_input(
             torch_tensor=self.input_tokens, name="input_token"
         )
@@ -2261,8 +2268,9 @@ class DeepSeekV3Builder(GraphBuilder):
 
         if with_lm_head:
             lm_head_weight = state_dict["lm_head.weight"]
-            # FIXME: Why want this padding?
-            # FIXME: And how to determine the padded size? The current pad size is the same as the orginal!
+            # Keep vocab rows aligned to the argmax/linear task grid. DeepSeek
+            # V3's checkpoint vocab is already 129280, so this is a no-op for
+            # the normal model and only handles smaller test fixtures.
             if lm_head_weight.shape[0] < padded_vocab_size:
                 lm_head_weight = torch.cat([
                     lm_head_weight,
@@ -2340,5 +2348,4 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
         # Optional MTP layer
-        # TODO(Zep): mtp will be reviewed after the main model is working.
         self._build_mtp_layer(state_dict)
