@@ -172,6 +172,7 @@ class LLMEngine:
         #    ring before launching the kernel. We must guarantee there is at least
         #    one request at GPU side
         t0 = perf_counter()
+        debug_t = perf_counter()
         first_submitted = threading.Event()
         submit_exc: list[BaseException] = []  # captures submit thread exceptions
 
@@ -223,6 +224,12 @@ class LLMEngine:
                     raise TimeoutError(
                         f"generate_incremental() timed out: {num_completed}/{n} completed"
                     )
+                if perf_counter() - debug_t > 5.0:
+                    debug_t = perf_counter()
+                    print(f"step[0:n]={self.model_runner.mpk.step[:n].tolist()}", flush=True)
+                    print(f"req_ready={self.runtime._req_ready.tolist()}", flush=True)
+                    print(f"comp_ready={self.runtime._comp_ready.tolist()}", flush=True)
+
         finally:
             submit_thread.join()
             self.runtime.shutdown()  # signal kernel to exit its spin-wait
