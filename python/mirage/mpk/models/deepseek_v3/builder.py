@@ -747,6 +747,8 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_kv_cache")
         q_len_mla = self.max_num_batched_tokens
         kv_len_max = self.mpk.max_seq_length
+        single_split_mla = kv_len_max <= self.mpk.page_size
+        mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
         if self._use_prefill:
             # 6a. Prefill path: gather into SPLIT CKV/KPE, then mla_prefill.
             self.mpk.mla_kv_gather_split_layer(
@@ -790,35 +792,39 @@ class DeepSeekV3Builder(GraphBuilder):
         if self.world_size == 2:
             self.mpk.mla_mtp_decode_tp2_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp2_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
         elif self.world_size == 4:
             self.mpk.mla_mtp_decode_tp4_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp4_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
         elif self.world_size == 8:
             self.mpk.mla_mtp_decode_tp8_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp8_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
         else:
             self.mpk.mla_mtp_decode_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
 
         # Step 7: O projection (V un-absorption fused into o_proj during conversion)
         # o_proj_fused: [7168, H*kv_lora_rank] — directly takes attn_out [N, H*kv_lora_rank]
@@ -1426,6 +1432,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # details.
         q_len_mla = self.max_num_batched_tokens
         kv_len_max = self.mpk.max_seq_length
+        single_split_mla = kv_len_max <= self.mpk.page_size
+        mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
         if self._use_prefill:
             self.mpk.mla_kv_gather_split_layer(
                 c_latent_new=self.c_latent_out,
@@ -1464,35 +1472,39 @@ class DeepSeekV3Builder(GraphBuilder):
         if self.world_size == 2:
             self.mpk.mla_mtp_decode_tp2_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp2_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
         elif self.world_size == 4:
             self.mpk.mla_mtp_decode_tp4_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp4_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
         elif self.world_size == 8:
             self.mpk.mla_mtp_decode_tp8_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp8_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
         else:
             self.mpk.mla_mtp_decode_layer(
                 self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
+                mla_decode_out, self.mla_partial_lse,
                 q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            if not single_split_mla:
+                self.mpk.mla_mtp_reduce_layer(
+                    self.mla_partial_o, self.mla_partial_lse,
+                    self.attn_out, q_len_mla, kv_len_max)
 
         # o_proj (FP8). Match main layer's pattern: use the with_residual kernel
         # to fuse (matmul + residual) in one pass.
