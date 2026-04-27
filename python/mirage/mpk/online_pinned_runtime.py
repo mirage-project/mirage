@@ -26,6 +26,7 @@ Usage::
 import time
 import threading
 from typing import Dict, List, Optional
+from unittest import result
 
 import torch
 
@@ -190,8 +191,11 @@ class OnlinePinnedRuntime:
         """
         with self._lock:
             final_step = self._completions[request_id]
-        tokens = self._mpk.tokens
-        return tokens[request_id, : final_step + 1].clone()
+        with torch.cuda.stream(self._write_stream):
+            result = self._mpk.tokens[request_id, : final_step + 1].clone()
+        self._write_stream.synchronize()
+        return result
+
 
     def shutdown(self) -> None:
         """Signal the GPU persistent kernel to terminate.
@@ -214,3 +218,5 @@ class OnlinePinnedRuntime:
         self._shutdown[0]   = 0  # clear shutdown flag for next session
         with self._lock:
             self._completions.clear()
+            self._comp_ready.zero_()  # clear completion ring ready flags
+            self._req_ready.zero_()   # clear request ring ready flags
