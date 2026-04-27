@@ -129,17 +129,20 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
 
 // ============ Main MLA Kernel ============
 template <bool SINGLE_TILE>
-__device__ __noinline__ void mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
-                                              CUtensorMap const *KV_tm_ptr,
-                                              nv_bfloat16 *__restrict__ Oa,
-                                              float *__restrict__ La,
-                                              float ss,
-                                              int kv_len,
-                                              int sk,
-                                              int Q_LEN,
-                                              int qpg,
-                                              int block_x,
-                                              int block_y) {
+__device__ __noinline__ void
+    mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
+                     CUtensorMap const *KV_tm_ptr,
+                     nv_bfloat16 *__restrict__ Oa,
+                     float *__restrict__ La,
+                     float ss,
+                     int kv_len,
+                     int sk,
+                     int Q_LEN,
+                     int qpg,
+                     int const *__restrict__ page_indices,
+                     int first_page_pos,
+                     int block_x,
+                     int block_y) {
   if (threadIdx.x >= TB) {
     return;
   }
@@ -233,6 +236,9 @@ __device__ __noinline__ void mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
   for (int tile = t0; tile < t1; tile++) {
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
+    int const kv_row = page_indices == nullptr
+                           ? bi * kv_len + kvs
+                           : page_indices[first_page_pos + tile] * TILE_S;
 
     if (!SINGLE_TILE && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
@@ -290,7 +296,7 @@ __device__ __noinline__ void mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(k_stage),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(ki),
                      "r"(tma_bar + stage * 8)
                      : "memory");
@@ -354,7 +360,7 @@ __device__ __noinline__ void mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc),
                      "r"(tma_bar + vc * 8)
                      : "memory");
@@ -582,7 +588,7 @@ __device__ __noinline__ void mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc),
                      "r"(tma_bar + stage * 8)
                      : "memory");

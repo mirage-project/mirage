@@ -33,6 +33,16 @@ TaskRegister *TaskRegister::get_instance() {
   return singleton;
 }
 
+static bool graph_input_has_num_dims(threadblock::Graph const &bgraph,
+                                     size_t index,
+                                     int num_dims) {
+  assert(bgraph.operators.size() > index);
+  assert(bgraph.operators[index]->op_type == mirage::type::TB_INPUT_OP);
+  tb::TBInputOp const *input_op =
+      static_cast<tb::TBInputOp const *>(bgraph.operators[index]);
+  return input_op->output_tensors[0].num_dims == num_dims;
+}
+
 int TaskRegister::register_task_variant(runtime::TaskType type,
                                         std::string const &code) {
   std::vector<std::string> &variants = all_task_variants[type];
@@ -4441,6 +4451,7 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
   int qpg = (q_len < 2) ? q_len : 2;
+  bool const direct_paged_kv = graph_input_has_num_dims(bgraph, 1, 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4477,6 +4488,10 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   code.e("      $,", num_splits);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
+  code.e("      $,",
+         direct_paged_kv ? "runtime_config.paged_kv_indices_buffer"
+                         : "nullptr");
+  code.e("      fp_,");
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id);");
   code.e("}");
@@ -4529,6 +4544,7 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
   int qpg = (q_len < 4) ? q_len : 4;
+  bool const direct_paged_kv = graph_input_has_num_dims(bgraph, 1, 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4564,6 +4580,10 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   code.e("      $,", num_splits);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
+  code.e("      $,",
+         direct_paged_kv ? "runtime_config.paged_kv_indices_buffer"
+                         : "nullptr");
+  code.e("      fp_,");
   // V-half is folded into block_x's low bit (no z-dim launch in MPK).
   // Python layer doubles the grid; kernel unpacks v_half = block_x & 1.
   code.e(
@@ -4620,6 +4640,7 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
   int qpg = 2;
+  bool const direct_paged_kv = graph_input_has_num_dims(bgraph, 1, 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4657,6 +4678,10 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.e("      $,", num_splits);
   code.e("      q_len_padded_rt_,");
   code.e("      $,", qpg);
+  code.e("      $,",
+         direct_paged_kv ? "runtime_config.paged_kv_indices_buffer"
+                         : "nullptr");
+  code.e("      fp_,");
   code.e("      q_len_real_rt_,");
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id);");

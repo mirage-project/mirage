@@ -1216,9 +1216,14 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                               oob);
         assert(err == CUDA_SUCCESS);
       } else if (param_id == 1) {
-        // KV: global [B*KL, D_K], treat as 3D (BK, B*KL, D_K/BK)
+        // KV: global [B*KL, D_K], or a paged cache flattened from
+        // [num_pages, page_size, D_K].
         int total_rows = tensor_desc.dim[0]; // B*KL
         int d_k = tensor_desc.dim[1];        // D_K
+        if (tensor_desc.num_dims == 3) {
+          total_rows = tensor_desc.dim[0] * tensor_desc.dim[1];
+          d_k = tensor_desc.dim[2];
+        }
         int k_iters = d_k / BK;
         int tile_s = 128; // TILE_S
         uint64_t gd[3] = {
@@ -1328,6 +1333,10 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         // KV: gd = {BK, B*KL, K_ITERS}, bd = {BK, TILE_S, 1}
         int total_rows = tensor_desc.dim[0];
         int d_k = tensor_desc.dim[1];
+        if (tensor_desc.num_dims == 3) {
+          total_rows = tensor_desc.dim[0] * tensor_desc.dim[1];
+          d_k = tensor_desc.dim[2];
+        }
         int k_iters = d_k / BK;
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
@@ -1406,6 +1415,10 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         // KV: same as MLA decode — box = {64, TILE_S=128, 1}
         int total_rows = tensor_desc.dim[0];
         int d_k = tensor_desc.dim[1];
+        if (tensor_desc.num_dims == 3) {
+          total_rows = tensor_desc.dim[0] * tensor_desc.dim[1];
+          d_k = tensor_desc.dim[2];
+        }
         int k_iters = d_k / BK;
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};

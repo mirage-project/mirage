@@ -107,6 +107,10 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   }
   __syncthreads();
 
+  if (contiguous_kv_ptr == paged_cache_ptr) {
+    return;
+  }
+
   // Step 2: Gather all pages into contiguous buffer
   // For each sequence position, copy D_K elements from the paged cache
   // to the contiguous buffer

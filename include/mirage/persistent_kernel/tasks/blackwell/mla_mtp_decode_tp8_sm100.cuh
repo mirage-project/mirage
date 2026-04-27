@@ -125,6 +125,8 @@ __device__ __noinline__ void mla_mtp_tp8_main(
     int sk,
     int Q_LEN,
     int qpg,
+    int const *__restrict__ page_indices,
+    int first_page_pos,
     int Q_LEN_real, // TP=8: Q_LEN is padded to even, this is the real value
     int block_x,
     int block_y) {
@@ -212,6 +214,9 @@ __device__ __noinline__ void mla_mtp_tp8_main(
   for (int tile = t0; tile < t1; tile++) {
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
+    int const kv_row = page_indices == nullptr
+                           ? bi * kv_len + kvs
+                           : page_indices[first_page_pos + tile] * TILE_S;
 
     if (!SINGLE_TILE && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
@@ -269,7 +274,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(k_stage),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(ki),
                      "r"(tma_bar + stage * 8)
                      : "memory");
@@ -333,7 +338,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc),
                      "r"(tma_bar + vc * 8)
                      : "memory");
@@ -561,7 +566,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc),
                      "r"(tma_bar + stage * 8)
                      : "memory");
