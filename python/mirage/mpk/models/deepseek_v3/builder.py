@@ -53,11 +53,25 @@ _MOE_FP8_MMA_M = 128
 
 
 def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
+    """Pick a valid output-dimension split for the FP8 MoE group GEMM."""
     max_y = min(preferred, max(1, output_size // _MOE_FP8_MMA_M))
     for y in range(max_y, 0, -1):
         if output_size % y == 0 and (output_size // y) % _MOE_FP8_MMA_M == 0:
             return y
     return 1
+
+
+def _moe_expert_grid_x(max_num_batched_tokens: int,
+                       num_experts: int = NUM_EXPERTS,
+                       preferred_groups: int | None = None) -> int:
+    # The MoE kernels iterate over the compact activated-expert list with a
+    # stride equal to grid_dim.x. A batch can activate at most top_k experts per
+    # token. The preferred group count raises parallelism for larger batches,
+    # but it must remain bounded by the active routing slots for MBT=1 graphs.
+    active_slots = max(1, max_num_batched_tokens * NUM_EXPERTS_PER_TOK)
+    group_cap = num_experts if preferred_groups is None else min(
+        num_experts, preferred_groups)
+    return min(group_cap, active_slots)
 
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
@@ -68,13 +82,25 @@ class DeepSeekV3Builder(GraphBuilder):
         self.page_size = mpk.page_size
         self.world_size = mpk.world_size
         self.num_workers = mpk.num_workers
+        self.rank = mpk.mpi_rank
+        self.ep_size = getattr(mpk, "ep_size", 1)
+        assert self.ep_size >= 1
+        assert self.world_size % self.ep_size == 0
+        self.routed_tp_size = self.world_size // self.ep_size
+        self.routed_tp_rank = self.rank % self.routed_tp_size
+        self.ep_rank = self.rank // self.routed_tp_size
+        assert NUM_EXPERTS % self.ep_size == 0
+        self.num_local_experts = NUM_EXPERTS // self.ep_size
+        self.local_expert_start = self.ep_rank * self.num_local_experts
+        self.local_expert_end = self.local_expert_start + self.num_local_experts
         self._use_nvshmem = mpk.use_nvshmem  # True only if nvshmem is actually enabled
         self.input_tokens = mpk.meta_tensors["input_tokens"]
         self.output_tokens = mpk.meta_tensors["output_tokens"]
-        self.rank = mpk.mpi_rank
         # Weight attach cache: avoid re-declaring same C++ variable in MTP draft loop
         self._attach_cache = {}
         self.max_num_batched_tokens = mpk.max_num_batched_tokens
+        self.ckv_kpe_cache = None
+        self.position_embeddings = None
 
         # DeepSeek V3 dimensions
         self.hidden_size = HIDDEN_SIZE
@@ -86,7 +112,12 @@ class DeepSeekV3Builder(GraphBuilder):
         self.q_lora_rank = Q_LORA_RANK
         self.kv_lora_rank = KV_LORA_RANK
         self.intermediate_size = INTERMEDIATE_SIZE // self.world_size
-        self.moe_intermediate_size = MOE_INTERMEDIATE_SIZE // self.world_size
+        # Routed experts are split over tensor-parallel ranks inside an
+        # expert-parallel group; shared experts stay tensor-parallel over all ranks.
+        self.shared_moe_intermediate_size = MOE_INTERMEDIATE_SIZE // self.world_size
+        self.routed_moe_intermediate_size = MOE_INTERMEDIATE_SIZE // self.routed_tp_size
+        # Kept for legacy shared-expert helper paths.
+        self.moe_intermediate_size = self.shared_moe_intermediate_size
 
         # Fuse residual into linear kernels (with_residual). Always on.
         self._fuse_residual = True
@@ -119,7 +150,8 @@ class DeepSeekV3Builder(GraphBuilder):
                      grid_dim, block_dim, residual=None):
         """Quantize BF16 input → FP8, then run FP8 GEMM."""
         if weight_scale is None:
-            # BF16 path (post-dequant weights)
+            # BF16 fallback is kept for fixtures or pre-converted weights that
+            # intentionally arrive without FP8 scale metadata.
             if residual is not None:
                 self.mpk.linear_with_residual_layer(
                     input=input_bf16, weight=weight, residual=residual,
@@ -130,20 +162,26 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=grid_dim, block_dim=block_dim)
             return
 
+        if input_bf16.num_dims != 2 or output.num_dims != 2:
+            raise ValueError("FP8 linear expects 2D input and output tensors.")
+        if weight.num_dims != 2:
+            raise ValueError("FP8 linear expects a 2D weight tensor.")
+        if weight_scale.num_dims != 2:
+            raise ValueError("FP8 linear expects a 2D packed UE8M0 scale tensor.")
+
         # New FP8 kernel: each CTA processes output_size=128. Grid splits output.
         output_size = weight.dim(0)
         max_grid = output_size // 128
         if max_grid < 1:
             raise ValueError(
                 f"FP8 linear: output_size={output_size} < 128 (BLOCK_N). "
-                f"Must use BF16 linear for this dimension.")
+                f"Not supported yet.")
         # Each FP8 linear task serializes all of the output tiles in its shard.
         # Large layers were still using the old 64/96-task heuristic, which
-        # leaves many workers idle on B200. Keep the caller's grid for small
-        # layers, but raise the task count for large layers so we at least fill
-        # the available worker pool without oversharding past the kernel's tile
-        # granularity (one 128-row output shard per task).
-        target_grid_x = min(max_grid, self.num_workers)
+        # leaves many workers idle on B200. Use one task per 128-row output
+        # shard whenever possible; this is the kernel's natural tile
+        # granularity and avoids the ~32-SM cap seen in traces.
+        target_grid_x = max_grid
         grid_dim = (min(max_grid, max(grid_dim[0], target_grid_x)),
                     grid_dim[1],
                     grid_dim[2])
@@ -167,6 +205,8 @@ class DeepSeekV3Builder(GraphBuilder):
             # physical shape=[packed_k, aligned_batch], dtype=uint32
             packed_k = (num_groups + 3) // 4
             aligned_batch = ((mbt + 3) // 4) * 4
+            # The CUTLASS FP8 kernel reads scales by packed-K first and aligned
+            # batch second, matching the UE8M0 column-major descriptor layout.
             scale_buf = self.mpk.new_tensor(
                 dims=(packed_k, aligned_batch), dtype=uint32,
                 name=f"fp8_scale_{reduction_size}_shared",
@@ -232,17 +272,27 @@ class DeepSeekV3Builder(GraphBuilder):
         """Allocate intermediate computation buffers."""
         mbt = self.max_num_batched_tokens
 
-        # Pick the MLA kernel at compile time based on max_num_batched_tokens.
-        # Large Q_LEN uses the mla_prefill_sm100 chunked-prefill kernel (which
-        # is designed for that regime); small Q_LEN uses the MLA decode / MTP
-        # decode kernels. The threshold of 32 is chosen so MTP decode
-        # (spec_length ≤ 7) always goes through the decode path, and any
-        # realistic chunked-prefill chunk size (≥ 128 typically) goes through
-        # prefill. The MPK scheduler still dynamically caps per-iter
-        # num_new_tokens via paged_kv_indptr — prefill phase uses chunk=mbt,
-        # decode phase uses chunk=1 — so a single compiled graph handles both
-        # phases correctly at the same mbt budget.
-        self._use_prefill = mbt >= 32
+        # Runtime Q_LEN decides the MLA algorithm: Q_LEN <= 8 is decode/MTP
+        # verify, Q_LEN >= 9 is prefill. MBT caps the maximum prefill chunk
+        # size, so any graph with mbt > 8 must include the prefill path.
+        self._use_prefill = mbt > 8
+        # Direct-paged decode skips the dense KV gather copy. TP decode kernels
+        # consume the runtime page table directly; TP1 still relies on physical
+        # page order, so only enable that legacy shortcut for the single-request
+        # demo path.
+        # TP8 direct-paged decode currently hangs in the end-to-end DeepSeek
+        # demo on V4, so keep TP8 on the dense gather path until that variant
+        # is fixed and validated separately.
+        direct_paged_tp_decode = self.world_size in (2, 4)
+        direct_paged_tp1_decode = (
+            self.world_size == 1
+            and self.mpk.max_num_batched_requests == 1
+            and self.mpk.total_num_requests == 1
+        )
+        self._direct_paged_decode_kv = (
+            self.mpk.page_size == 128
+            and (direct_paged_tp_decode or direct_paged_tp1_decode)
+        )
         if self._use_prefill:
             print(f"  [MLA path] Q_LEN={mbt} → mla_prefill_sm100 (chunked prefill)")
         else:
@@ -298,7 +348,8 @@ class DeepSeekV3Builder(GraphBuilder):
             name="c_latent_out",
             io_category="cuda_tensor",
         )
-        # Pad to 128 for SM100 MMA_M alignment (real data is first 64 elements)
+        # Pad K-PE from 64 to 128 rows so the FP8 linear and downstream KV
+        # copy use the SM100 128-row tile shape. Real data remains in [0:64].
         self.k_pe_out = self.mpk.new_tensor(
             dims=(mbt, 128),  # [batch, 128] — padded from 64
             dtype=bfloat16,
@@ -312,7 +363,9 @@ class DeepSeekV3Builder(GraphBuilder):
             name="kv_combined",
             io_category="cuda_tensor",
         )
-        # Contiguous KV buffer for new MLA decode (gathered from paged cache)
+        # Decode can skip this copy on direct-paged paths. The buffer remains
+        # allocated for legacy decode layouts and for unified prefill/decode
+        # graphs whose prefill side also needs split contiguous KV views.
         self.contiguous_kv = self.mpk.new_tensor(
             dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
                   self.qk_head_dim),
@@ -551,11 +604,19 @@ class DeepSeekV3Builder(GraphBuilder):
         scale_key = f"{key}_scale_inv"
         if scale_key in state_dict:
             # Requantize: dequant with float32 scale, re-quantize with UE8M0 scale
+            if state_dict[key].dtype != torch.float8_e4m3fn:
+                raise TypeError(f"{key} must be torch.float8_e4m3fn when {scale_key} exists.")
+            if state_dict[scale_key].dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                raise TypeError(f"{scale_key} must be a floating scale tensor.")
             new_fp8, packed_ue8m0 = self._requantize_fp8_for_ue8m0(
                 state_dict[key], state_dict[scale_key])
             w = self._safe_attach(new_fp8, name)
             s = self._safe_attach(packed_ue8m0, f"{name}_scale")
         else:
+            # BF16 fallback is used by reduced fixtures or explicitly
+            # pre-converted weights that have no scale tensor.
+            if state_dict[key].dtype != torch.bfloat16:
+                raise TypeError(f"{key} without scale must be torch.bfloat16.")
             w = self._safe_attach(state_dict[key], name)
             s = None  # weight is already BF16 (post-dequant)
         return w, s
@@ -665,7 +726,9 @@ class DeepSeekV3Builder(GraphBuilder):
                                           f"layer_{layer_idx}_kv_a_rope")
             s_kv_rope = None
 
-        # FP8 GEMM for c_latent [N, 512]
+        # Keep the latent and RoPE projections separate because only c_latent
+        # goes through kv_a_layernorm; a fused projection would need a fused
+        # split-plus-layernorm kernel that is not available here.
         self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent,
                          self.c_latent_out,
                          grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),
@@ -683,95 +746,106 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.c_latent_out, weight=w_kv_a_ln, output=self.c_latent_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
-        # Step 6: MLA attention (KV gather + decode + reduce)
-        # Dual-dispatch architecture (opt/mla-dual-dispatch, 2026-04-22):
-        # When `_use_prefill` is True (mbt >= 32), BOTH the prefill kernel and
-        # the decode kernels are registered so that a single compiled task
-        # graph handles both regimes at runtime:
-        #   - Q_LEN large (prefill chunk): prefill kernel runs, decode kernels
-        #     early-exit on Q_LEN>8 gate.
-        #   - Q_LEN small (MTP verify, Q_LEN 1..8): decode kernels run, prefill
-        #     kernel early-exits on Q_LEN<16 gate.
-        # Both write `self.attn_out`. Builder order is prefill -> decode; the
-        # MPK event graph serialises the two writes, so whichever kernel really
-        # runs produces the final value (the other becomes a no-op).
+        # Step 6: MLA attention (KV gather + unified prefill/decode + reduce).
+        # When `_use_prefill` is True, register one MLA main task that chooses
+        # prefill vs decode from runtime Q_LEN. The decode reduce stays
+        # separate and keeps its Q_LEN gate.
         layer_cache = self.mpk.attach_input(
             torch_tensor=self.ckv_kpe_cache[layer_idx],
             name=f"layer_{layer_idx}_kv_cache")
         q_len_mla = self.max_num_batched_tokens
+        decode_q_len_mla = min(q_len_mla, 8)
         kv_len_max = self.mpk.max_seq_length
+        single_split_mla = kv_len_max <= self.mpk.page_size
+        mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
+        mla_decode_kv = (
+            layer_cache if self._direct_paged_decode_kv else self.contiguous_kv
+        )
         if self._use_prefill:
-            # 6a. Prefill path: gather into SPLIT CKV/KPE, then mla_prefill.
-            self.mpk.mla_kv_gather_split_layer(
+            self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
                 paged_cache=layer_cache,
+                contiguous_kv=mla_decode_kv,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            num_q_blocks = (q_len_mla + 64 - 1) // 64  # PF_BM=64 in kernel
-            self.mpk.mla_prefill_layer(
-                q_nope=self.q_nope,
-                q_pe=self.q_pe,
-                ckv=self.ckv_sep,
-                kpe=self.kpe_sep,
-                output=self.attn_out,
-                mla_params=(self.num_local_q_heads, kv_len_max,
-                            self.kv_lora_rank, QK_ROPE_HEAD_DIM,
-                            self.v_head_dim),
-                grid_dim=(self.num_local_q_heads, num_q_blocks,
-                          self.mpk.max_num_batched_requests),
-                block_dim=(256, 1, 1),
-            )
-
-        # 6b. Decode path: always register (both when _use_prefill and when
-        # not). When _use_prefill is True, this runs in addition to prefill;
-        # one of the two early-exits on runtime Q_LEN.
-        self.mpk.mla_kv_gather_layer(
-            c_latent_new=self.c_latent_out,
-            k_pe_new=self.k_pe_out,
-            paged_cache=layer_cache,
-            contiguous_kv=self.contiguous_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-            grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        num_splits = self.mla_max_splits
-        if self.world_size == 2:
-            self.mpk.mla_mtp_decode_tp2_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp2_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 4:
-            self.mpk.mla_mtp_decode_tp4_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp4_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 8:
-            self.mpk.mla_mtp_decode_tp8_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp8_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
         else:
-            self.mpk.mla_mtp_decode_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            self.mpk.mla_kv_gather_layer(
+                c_latent_new=self.c_latent_out,
+                k_pe_new=self.k_pe_out,
+                paged_cache=layer_cache,
+                contiguous_kv=mla_decode_kv,
+                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+        if self._use_prefill:
+            self.mpk.mla_unified_layer(
+                self.q_nope, self.q_pe,
+                self.ckv_sep, self.kpe_sep, self.attn_out,
+                self.q_nope_pe, mla_decode_kv,
+                mla_decode_out, self.mla_partial_lse,
+                q_len_mla, kv_len_max, self.num_local_q_heads,
+                self.world_size, self.kv_lora_rank,
+                QK_ROPE_HEAD_DIM, self.v_head_dim)
+            if not single_split_mla:
+                if self.world_size == 2:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 4:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 8:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                else:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+        else:
+            if self.world_size == 2:
+                self.mpk.mla_mtp_decode_tp2_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 4:
+                self.mpk.mla_mtp_decode_tp4_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 8:
+                self.mpk.mla_mtp_decode_tp8_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            else:
+                self.mpk.mla_mtp_decode_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
 
         # Step 7: O projection (V un-absorption fused into o_proj during conversion)
         # o_proj_fused: [7168, H*kv_lora_rank] — directly takes attn_out [N, H*kv_lora_rank]
@@ -847,13 +921,13 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         moe_routing_indices = self.mpk.new_tensor(
-            dims=(NUM_EXPERTS, self.max_num_batched_tokens),
+            dims=(self.num_local_experts, self.max_num_batched_tokens),
             dtype=int32,
             name=f"layer_{layer_idx}_moe_routing_indices",
             io_category="cuda_tensor",
         )
         moe_mask = self.mpk.new_tensor(
-            dims=(NUM_EXPERTS + 1,),
+            dims=(self.num_local_experts + 1,),
             dtype=int32,
             name=f"layer_{layer_idx}_moe_mask",
             io_category="cuda_tensor",
@@ -887,6 +961,8 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_moe_output",
             io_category=_moe_io,
         )
+        # MoE accumulation only writes active routed slots, so initialize the
+        # whole output tensor before routed/shared expert accumulation.
         self.mpk.tensor_init_layer(
             input=moe_output,
             dummy_input=self.rmsnorm_out,
@@ -902,12 +978,15 @@ class DeepSeekV3Builder(GraphBuilder):
             torch_tensor=state_dict[bias_key],
             name=f"layer_{layer_idx}_moe_gate_bias",
         )
+        # Router is full-replica on every rank; no inter-rank synchronization is
+        # needed before the local top-k routing mask is produced.
         self.mpk.moe_topk_sigmoid_routing_layer(
             input=router_logits,
             bias=w_bias,
             output=(moe_topk_weights, moe_routing_indices, moe_mask),
             grid_dim=(1, 1, 1),
             block_dim=(256, 1, 1),  # 8 warps required by topk kernel
+            local_expert_start=self.local_expert_start,
         )
 
         # Expert W1+W3 (gate + up projection)
@@ -952,15 +1031,25 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
         moe_mid = self.mpk.new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.moe_intermediate_size),
+            dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.routed_moe_intermediate_size),
             dtype=bfloat16,
             name=f"layer_{layer_idx}_moe_mid",
             io_category="cuda_tensor",
         )
+        if self.ep_size > 1:
+            self.mpk.tensor_init_layer(
+                input=moe_mid,
+                dummy_input=self.rmsnorm_out,
+                dummy_output=self.rmsnorm_out,
+                grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1),
+                block_dim=(128, 1, 1),
+            )
 
         if use_fp8_experts:
-            w13_m_split = _moe_fp8_m_split(2 * self.moe_intermediate_size,
-                                           preferred=2)
+            w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
+                                           preferred=16)
+            w13_expert_grid_x = _moe_expert_grid_x(
+                mbt, self.num_local_experts, preferred_groups=8)
             self.mpk.moe_w13_fp8_layer(
                 input_fp8=moe_input_fp8,
                 input_scale=moe_input_scale,
@@ -969,23 +1058,24 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_mid,
-                grid_dim=(NUM_EXPERTS, w13_m_split, 1),
+                grid_dim=(w13_expert_grid_x, w13_m_split, 1),
                 block_dim=(128, 1, 1),
             )
         else:
+            raise RuntimeError("No bf16 moe experts for now.")
             self.mpk.moe_w13_linear_layer(
                 input=self.rmsnorm_out,
                 weight=w_experts_w13,
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_mid,
-                grid_dim=(NUM_EXPERTS, 1, 1),
+                grid_dim=(_moe_expert_grid_x(mbt, self.num_local_experts), 1, 1),
                 block_dim=(128, 1, 1),
             )
 
         # SiLU activation
         moe_silu_out = self.mpk.new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
+            dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size),
             dtype=bfloat16,
             name=f"layer_{layer_idx}_moe_silu",
             io_category="cuda_tensor",
@@ -1011,17 +1101,19 @@ class DeepSeekV3Builder(GraphBuilder):
 
         if use_fp8_experts:
             moe_silu_fp8 = self.mpk.new_tensor(
-                dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size),
                 dtype=float8_e4m3,
                 name=f"layer_{layer_idx}_moe_silu_fp8",
                 io_category="cuda_tensor",
             )
             moe_silu_scale = self.mpk.new_tensor(
-                dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size // 128),
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size // 128),
                 dtype=float32,
                 name=f"layer_{layer_idx}_moe_silu_scale",
                 io_category="cuda_tensor",
             )
+            # This flattening maps each (token, selected_expert) row to one
+            # quantization task. Current DeepSeek demo targets small batch sizes.
             self.mpk.quantize_fp8_layer(
                 input=moe_silu_out,
                 output_fp8=moe_silu_fp8,
@@ -1037,8 +1129,18 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_moe_down",
             io_category="cuda_tensor",
         )
+        if self.ep_size > 1:
+            self.mpk.tensor_init_layer(
+                input=moe_down_out,
+                dummy_input=self.rmsnorm_out,
+                dummy_output=self.rmsnorm_out,
+                grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1),
+                block_dim=(128, 1, 1),
+            )
         if use_fp8_experts:
-            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=2)
+            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
+            w2_expert_grid_x = _moe_expert_grid_x(
+                mbt, self.num_local_experts, preferred_groups=10)
             self.mpk.moe_w2_fp8_layer(
                 input_fp8=moe_silu_fp8,
                 input_scale=moe_silu_scale,
@@ -1047,17 +1149,18 @@ class DeepSeekV3Builder(GraphBuilder):
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_down_out,
-                grid_dim=(NUM_EXPERTS, w2_m_split, 1),
+                grid_dim=(w2_expert_grid_x, w2_m_split, 1),
                 block_dim=(128, 1, 1),
             )
         else:
+            raise RuntimeError("No bf16 moe experts for now.")
             self.mpk.moe_w2_linear_layer(
                 input=moe_silu_out,
                 weight=w_experts_w2,
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=moe_down_out,
-                grid_dim=(NUM_EXPERTS, 1, 1),
+                grid_dim=(_moe_expert_grid_x(mbt, self.num_local_experts), 1, 1),
                 block_dim=(128, 1, 1),
             )
 
@@ -1142,7 +1245,11 @@ class DeepSeekV3Builder(GraphBuilder):
                          block_dim=(128, 1, 1),
                          residual=None)
 
-        # Final: moe_output = sum(routed_experts * weights) + shared_residual
+        # Final MoE contribution before transformer residual:
+        #   routed_experts * topk_weights + shared_expert
+        # The model residual is added after the tensor-parallel allreduce in
+        # build_layers, otherwise each rank would add the same residual before
+        # the reduction and over-count it.
         self.mpk.moe_mul_sum_add_layer(
             input=moe_down_out,
             weight=moe_topk_weights,
@@ -1221,6 +1328,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # Set self.x = self.mtp_x so MLP's fuse_residual uses correct hidden state
         self.x = self.mtp_x
         mlp_gate_key = f"{prefix}mlp.gate.weight"
+        # Production DeepSeek V3 MTP checkpoints use the MoE path. The dense
+        # fallback is kept for reduced fixtures that omit router weights.
         if mlp_gate_key in state_dict:
             self._build_moe_mlp_with_prefix(prefix, state_dict)
         else:
@@ -1230,27 +1339,30 @@ class DeepSeekV3Builder(GraphBuilder):
         # fused-residual linear variant — the shared_expert's down_proj returns
         # partial output and moe_mul_sum_add combines routed+shared but does
         # not add the MLP-input residual. So match main layer's MoE pattern:
-        # always AllReduce + external elementwise_add.
-        if self.world_size > 1:
-            self.mpk.allreduce_layer(
-                input=self.mlp_out, buffer=self.allreduce_buf,
-                output=self.allreduce_out,
-                grid_dim=(self.hidden_size // 128, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            _mtp_mlp_contrib = self.allreduce_out
-        else:
-            _mtp_mlp_contrib = self.mlp_out
+        # allreduce first, then add residual. TP>1 fuses the residual add into
+        # the allreduce task's final local store.
         mtp_mlp_residual = self._cached_new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
             dtype=bfloat16,
             name="mtp_mlp_residual", io_category="cuda_tensor")
-        self.mpk.elementwise_add_layer(
-            input_a=self.mtp_x, input_b=_mtp_mlp_contrib, output=mtp_mlp_residual,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        self.mtp_x = mtp_mlp_residual
+        if self.world_size > 1:
+            self.mpk.allreduce_layer(
+                input=self.mlp_out, buffer=self.allreduce_buf,
+                output=mtp_mlp_residual,
+                residual=self.mtp_x,
+                grid_dim=(self.hidden_size // 128, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            self.mtp_x = mtp_mlp_residual
+        else:
+            _mtp_mlp_contrib = self.mlp_out
+            self.mpk.elementwise_add_layer(
+                input_a=self.mtp_x, input_b=_mtp_mlp_contrib,
+                output=mtp_mlp_residual,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            self.mtp_x = mtp_mlp_residual
         # Restore main model's hidden state
         self.x = _saved_x
 
@@ -1337,80 +1449,103 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.c_latent_out, weight=w_kv_a_ln, output=self.c_latent_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
-        # MTP attention uses its own KV cache (new MLA flow)
-        # Dual-dispatch (opt/mla-dual-dispatch): register BOTH prefill and
-        # decode when _use_prefill, then rely on per-kernel runtime Q_LEN
-        # early-exits to pick the right one. See main MLA builder above for
-        # details.
+        # MTP attention uses its own KV cache. When prefill is enabled, one
+        # unified MLA main task chooses prefill vs decode from runtime Q_LEN.
         q_len_mla = self.max_num_batched_tokens
+        decode_q_len_mla = min(q_len_mla, 8)
         kv_len_max = self.mpk.max_seq_length
+        single_split_mla = kv_len_max <= self.mpk.page_size
+        mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
+        mla_decode_kv = (
+            self.mtp_ckv_kpe_cache_tensor
+            if self._direct_paged_decode_kv
+            else self.contiguous_kv
+        )
         if self._use_prefill:
-            self.mpk.mla_kv_gather_split_layer(
+            self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
                 paged_cache=self.mtp_ckv_kpe_cache_tensor,
+                contiguous_kv=mla_decode_kv,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            num_q_blocks = (q_len_mla + 64 - 1) // 64
-            self.mpk.mla_prefill_layer(
-                q_nope=self.q_nope,
-                q_pe=self.q_pe,
-                ckv=self.ckv_sep,
-                kpe=self.kpe_sep,
-                output=self.attn_out,
-                mla_params=(self.num_local_q_heads, kv_len_max,
-                            self.kv_lora_rank, QK_ROPE_HEAD_DIM,
-                            self.v_head_dim),
-                grid_dim=(self.num_local_q_heads, num_q_blocks, 1),
-                block_dim=(256, 1, 1),
-            )
-            # FALL THROUGH to decode-path registration below.
-        self.mpk.mla_kv_gather_layer(
-            c_latent_new=self.c_latent_out,
-            k_pe_new=self.k_pe_out,
-            paged_cache=self.mtp_ckv_kpe_cache_tensor,
-            contiguous_kv=self.contiguous_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-            grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        num_splits = self.mla_max_splits
-        if self.world_size == 2:
-            self.mpk.mla_mtp_decode_tp2_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp2_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 4:
-            self.mpk.mla_mtp_decode_tp4_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp4_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 8:
-            self.mpk.mla_mtp_decode_tp8_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_decode_tp8_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
         else:
-            self.mpk.mla_mtp_decode_layer(
-                self.q_nope_pe, self.contiguous_kv,
-                self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            self.mpk.mla_mtp_reduce_layer(
-                self.mla_partial_o, self.mla_partial_lse,
-                self.attn_out, q_len_mla, kv_len_max)
+            self.mpk.mla_kv_gather_layer(
+                c_latent_new=self.c_latent_out,
+                k_pe_new=self.k_pe_out,
+                paged_cache=self.mtp_ckv_kpe_cache_tensor,
+                contiguous_kv=mla_decode_kv,
+                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+        if self._use_prefill:
+            self.mpk.mla_unified_layer(
+                self.q_nope, self.q_pe,
+                self.ckv_sep, self.kpe_sep, self.attn_out,
+                self.q_nope_pe, mla_decode_kv,
+                mla_decode_out, self.mla_partial_lse,
+                q_len_mla, kv_len_max, self.num_local_q_heads,
+                self.world_size, self.kv_lora_rank,
+                QK_ROPE_HEAD_DIM, self.v_head_dim)
+            if not single_split_mla:
+                if self.world_size == 2:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 4:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 8:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                else:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+        else:
+            if self.world_size == 2:
+                self.mpk.mla_mtp_decode_tp2_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 4:
+                self.mpk.mla_mtp_decode_tp4_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 8:
+                self.mpk.mla_mtp_decode_tp8_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            else:
+                self.mpk.mla_mtp_decode_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
 
         # o_proj (FP8). Match main layer's pattern: use the with_residual kernel
         # to fuse (matmul + residual) in one pass.
@@ -1463,10 +1598,10 @@ class DeepSeekV3Builder(GraphBuilder):
             dims=(mbt, NUM_EXPERTS_PER_TOK), dtype=float32,
             name="mtp_moe_topk_weights", io_category="cuda_tensor")
         moe_routing_indices = self._cached_new_tensor(
-            dims=(NUM_EXPERTS, mbt), dtype=int32,
+            dims=(self.num_local_experts, mbt), dtype=int32,
             name="mtp_moe_routing_indices", io_category="cuda_tensor")
         moe_mask = self._cached_new_tensor(
-            dims=(NUM_EXPERTS + 1,), dtype=int32,
+            dims=(self.num_local_experts + 1,), dtype=int32,
             name="mtp_moe_mask", io_category="cuda_tensor")
         router_logits = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS), dtype=bfloat16,
@@ -1495,7 +1630,8 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mpk.moe_topk_sigmoid_routing_layer(
             input=router_logits, bias=w_gate_bias,
             output=(moe_topk_weights, moe_routing_indices, moe_mask),
-            grid_dim=(1, 1, 1), block_dim=(256, 1, 1))
+            grid_dim=(1, 1, 1), block_dim=(256, 1, 1),
+            local_expert_start=self.local_expert_start)
 
         # Expert W13 (FP8) — 3D weight (num_experts, 2*intermediate, hidden).
         # Use _safe_attach + manual scale expansion (same as main MoE path); the
@@ -1524,20 +1660,27 @@ class DeepSeekV3Builder(GraphBuilder):
             scale_ue8m0=False)
 
         moe_mid = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.moe_intermediate_size),
+            dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.routed_moe_intermediate_size),
             dtype=bfloat16, name="mtp_moe_mid", io_category="cuda_tensor")
-        mtp_w13_m_split = _moe_fp8_m_split(2 * self.moe_intermediate_size,
-                                           preferred=2)
+        if self.ep_size > 1:
+            self.mpk.tensor_init_layer(
+                input=moe_mid, dummy_input=self.rmsnorm_out,
+                dummy_output=self.rmsnorm_out,
+                grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1), block_dim=(128, 1, 1))
+        mtp_w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
+                                           preferred=16)
+        mtp_w13_expert_grid_x = _moe_expert_grid_x(
+            mbt, self.num_local_experts, preferred_groups=8)
         self.mpk.moe_w13_fp8_layer(
             input_fp8=moe_input_fp8, input_scale=moe_input_scale,
             weight_fp8=w_w13, weight_scale=s_w13,
             moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
             output=moe_mid,
-            grid_dim=(NUM_EXPERTS, mtp_w13_m_split, 1),
+            grid_dim=(mtp_w13_expert_grid_x, mtp_w13_m_split, 1),
             block_dim=(128, 1, 1))
 
         moe_silu_out = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
+            dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size),
             dtype=bfloat16, name="mtp_moe_silu", io_category="cuda_tensor")
         self.mpk.moe_silu_mul_layer(
             input=moe_mid, output=moe_silu_out,
@@ -1555,10 +1698,10 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             s_w2 = None
         mtp_silu_fp8 = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size),
+            dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size),
             dtype=float8_e4m3, name="mtp_moe_silu_fp8", io_category="cuda_tensor")
         mtp_silu_scale = self._cached_new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.moe_intermediate_size // 128),
+            dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size // 128),
             dtype=float32, name="mtp_moe_silu_scale", io_category="cuda_tensor")
         self.mpk.quantize_fp8_layer(
             input=moe_silu_out, output_fp8=mtp_silu_fp8,
@@ -1568,13 +1711,20 @@ class DeepSeekV3Builder(GraphBuilder):
         moe_down_out = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
             dtype=bfloat16, name="mtp_moe_down", io_category="cuda_tensor")
-        mtp_w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=2)
+        if self.ep_size > 1:
+            self.mpk.tensor_init_layer(
+                input=moe_down_out, dummy_input=self.rmsnorm_out,
+                dummy_output=self.rmsnorm_out,
+                grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1), block_dim=(128, 1, 1))
+        mtp_w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
+        mtp_w2_expert_grid_x = _moe_expert_grid_x(
+            mbt, self.num_local_experts, preferred_groups=10)
         self.mpk.moe_w2_fp8_layer(
             input_fp8=mtp_silu_fp8, input_scale=mtp_silu_scale,
             weight_fp8=w_w2, weight_scale=s_w2,
             moe_routing_indices=moe_routing_indices, moe_mask=moe_mask,
             output=moe_down_out,
-            grid_dim=(NUM_EXPERTS, mtp_w2_m_split, 1),
+            grid_dim=(mtp_w2_expert_grid_x, mtp_w2_m_split, 1),
             block_dim=(128, 1, 1))
 
         # Shared expert (FP8) — same pattern as main MoE shared expert:
@@ -1960,9 +2110,10 @@ class DeepSeekV3Builder(GraphBuilder):
                 name="mtp_draft_probs")
             for step_idx in range(num_draft_steps):
                 # Draft logits for this step are in mtp_step{step_idx}_logits
-                # The draft token for this step is all_draft_ids[:, step_idx]
-                # TODO: need per-step draft token extraction from all_draft_ids
-                pass  # draft prob extraction needs per-column gather — see below
+                # The draft token for this step is all_draft_ids[:, step_idx].
+                # Per-column gather is not wired here; probabilistic verify
+                # consumes self._draft_prob_buffer below.
+                pass
 
             # For now: use target_prob_buffer from main graph + dummy draft_probs
             rng_seed = self._cached_new_tensor(
@@ -1973,7 +2124,6 @@ class DeepSeekV3Builder(GraphBuilder):
             # target_prob_buffer[batch, pos] has P_target(input_token) at each position.
             # The verify positions are step+1..step+K+1 (set by prepare_verify).
             # We need target_probs[0..K-1] = target_prob_buffer[step+1..step+K].
-            # TODO: need a "slice by runtime offset" kernel to extract these.
 
             # Extract target probs from accumulation buffer at verify positions
             target_probs = self._cached_new_tensor(
@@ -2078,28 +2228,30 @@ class DeepSeekV3Builder(GraphBuilder):
 
             # MLP: dense (layers 0-2) or MoE (layers 3-60)
             if i < FIRST_MOE_LAYER:
+                # Dense MLP down_proj already fuses the residual into the
+                # projection kernel. That path does not need the explicit MoE
+                # allreduce-plus-residual sequence below.
                 self._build_dense_mlp(i, state_dict)
                 self.x = self.mlp_out
             else:
                 self._build_moe_mlp(i, state_dict)
                 # MoE: always use explicit residual add (not fused into shared_expert).
                 if self.world_size > 1:
-                    self.mpk.allreduce_layer(
-                        input=self.mlp_out, buffer=self.allreduce_buf,
-                        output=self.allreduce_out,
-                        grid_dim=(self.hidden_size // 128, 1, 1),
-                        block_dim=(128, 1, 1),
-                    )
                     moe_residual_out = self.mpk.new_tensor(
                         dims=(self.max_num_batched_tokens, self.hidden_size),
                         dtype=bfloat16,
                         name=f"layer_{i}_moe_residual",
                         io_category="cuda_tensor",
                     )
-                    self.mpk.elementwise_add_layer(
-                        input_a=self.x, input_b=self.allreduce_out,
+                    # Residual add must happen after allreduce; fusing it into
+                    # moe_mul_sum_add would over-count residual on TP ranks.
+                    # The NVSHMEM allreduce task fuses the post-reduce add at
+                    # its final local store.
+                    self.mpk.allreduce_layer(
+                        input=self.mlp_out, buffer=self.allreduce_buf,
                         output=moe_residual_out,
-                        grid_dim=(self.max_num_batched_tokens, 1, 1),
+                        residual=self.x,
+                        grid_dim=(self.hidden_size // 128, 1, 1),
                         block_dim=(128, 1, 1),
                     )
                     self.x = moe_residual_out
@@ -2166,6 +2318,9 @@ class DeepSeekV3Builder(GraphBuilder):
 
         if with_lm_head:
             lm_head_weight = state_dict["lm_head.weight"]
+            # Keep vocab rows aligned to the argmax/linear task grid. DeepSeek
+            # V3's checkpoint vocab is already 129280, so this is a no-op for
+            # the normal model and only handles smaller test fixtures.
             if lm_head_weight.shape[0] < padded_vocab_size:
                 lm_head_weight = torch.cat([
                     lm_head_weight,

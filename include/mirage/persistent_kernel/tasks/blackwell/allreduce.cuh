@@ -449,23 +449,100 @@ static __device__ __forceinline__ void mpkar_nvls_reduce_v4_block(
   }
 }
 
+static __device__ __forceinline__ uint32_t
+    mpkar_add_bf16x2(uint32_t reduced_bits, uint32_t residual_bits) {
+  union PackedBf16x2 {
+    uint32_t bits;
+    __nv_bfloat162 value;
+  };
+
+  PackedBf16x2 reduced{.bits = reduced_bits};
+  PackedBf16x2 residual{.bits = residual_bits};
+  float2 const reduced_vals = __bfloat1622float2(reduced.value);
+  float2 const residual_vals = __bfloat1622float2(residual.value);
+  PackedBf16x2 out;
+  out.value = __float22bfloat162_rn(make_float2(
+      reduced_vals.x + residual_vals.x, reduced_vals.y + residual_vals.y));
+  return out.bits;
+}
+
+// Same NVLS reduce as above, but adds a local residual before the final store.
+// This is the safe fusion point for tensor-parallel MoE residuals: every rank
+// contributes only its partial MLP output to NVLS, and residual is added once
+// after the cross-rank reduction has completed.
+template <typename T>
+static __device__ __forceinline__ void mpkar_nvls_reduce_add_residual_v4_block(
+    int4 *__restrict__ dst,
+    int4 const *__restrict__ mc_src,
+    int4 const *__restrict__ residual,
+    int nelems_v4) {
+  for (int j = threadIdx.x; j < nelems_v4; j += blockDim.x) {
+    if constexpr (sizeof(T) == 2) {
+      if constexpr (cuda::std::is_same<T, __nv_bfloat16>::value) {
+        uint32_t u4[4];
+        mpkar_nvls_ld_reduce_bf16_v4(u4[0], u4[1], u4[2], u4[3], mc_src + j);
+        int4 const r4 = residual[j];
+        u4[0] = mpkar_add_bf16x2(u4[0], static_cast<uint32_t>(r4.x));
+        u4[1] = mpkar_add_bf16x2(u4[1], static_cast<uint32_t>(r4.y));
+        u4[2] = mpkar_add_bf16x2(u4[2], static_cast<uint32_t>(r4.z));
+        u4[3] = mpkar_add_bf16x2(u4[3], static_cast<uint32_t>(r4.w));
+        asm("st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(dst + j),
+            "r"(u4[0]),
+            "r"(u4[1]),
+            "r"(u4[2]),
+            "r"(u4[3]));
+      } else {
+        // The persistent DeepSeek path instantiates bf16 only. Keep the
+        // non-bf16 path unfused instead of silently doing the wrong conversion.
+        uint32_t u4[4];
+        mpkar_nvls_ld_reduce_f16_v4(u4[0], u4[1], u4[2], u4[3], mc_src + j);
+        asm("st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(dst + j),
+            "r"(u4[0]),
+            "r"(u4[1]),
+            "r"(u4[2]),
+            "r"(u4[3]));
+      }
+    } else {
+      float f4[4];
+      mpkar_nvls_ld_reduce_f32_v4(f4[0], f4[1], f4[2], f4[3], mc_src + j);
+      int4 const r4 = residual[j];
+      f4[0] += __uint_as_float(static_cast<uint32_t>(r4.x));
+      f4[1] += __uint_as_float(static_cast<uint32_t>(r4.y));
+      f4[2] += __uint_as_float(static_cast<uint32_t>(r4.z));
+      f4[3] += __uint_as_float(static_cast<uint32_t>(r4.w));
+      asm("st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(dst + j),
+          "r"(__float_as_uint(f4[0])),
+          "r"(__float_as_uint(f4[1])),
+          "r"(__float_as_uint(f4[2])),
+          "r"(__float_as_uint(f4[3])));
+    }
+  }
+}
+
 // ========================= public API =======================================
-// Drop-in replacement for the old nvshmem_tile_allreduce.
-// Same template interface so callers do not need to change.
+// Drop-in replacement for the old nvshmem_tile_allreduce, plus a residual
+// variant used to fuse MoE allreduce + residual add.
 //
 // Template params:
 //   T            - element type (__nv_bfloat16, half, float)
 //   BATCH_SIZE   - unused (kept for API compat)
 //   OUTPUT_SIZE  - contiguous dimension in elements
 //   OUTPUT_STRIDE - stride of minor dimension in elements
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
-__device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
-                                                       void *output_ptr,
-                                                       void *_teams,
-                                                       int task_offset,
-                                                       int active_tokens) {
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int OUTPUT_STRIDE,
+          bool ADD_RESIDUAL>
+__device__ __forceinline__ void
+    nvshmem_tile_allreduce_impl(void *input_ptr,
+                                void *residual_ptr,
+                                void *output_ptr,
+                                void *_teams,
+                                int task_offset,
+                                int active_tokens) {
   nvshmem_team_t *teams = reinterpret_cast<nvshmem_team_t *>(_teams);
   nvshmem_team_t team = teams[task_offset];
+  int const num_active_rows = max(0, min(active_tokens, BATCH_SIZE));
 
   // --- Phase 1: ensure local data is visible, then cross-GPU barrier ---
   __threadfence();
@@ -493,16 +570,30 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
 
   int4 *dst_v4 = reinterpret_cast<int4 *>(output_ptr);
   int4 const *src_mc_v4 = reinterpret_cast<int4 const *>(mc_src);
+  int4 const *residual_v4 = reinterpret_cast<int4 const *>(residual_ptr);
 
   if constexpr (OUTPUT_SIZE == OUTPUT_STRIDE) {
     // Contiguous: one pass over all rows
-    int total_v4 = V4_PER_ROW * active_tokens;
-    mpkar_nvls_reduce_v4_block<T>(dst_v4, src_mc_v4, total_v4);
+    int total_v4 = V4_PER_ROW * num_active_rows;
+    if constexpr (ADD_RESIDUAL) {
+      mpkar_nvls_reduce_add_residual_v4_block<T>(
+          dst_v4, src_mc_v4, residual_v4, total_v4);
+    } else {
+      mpkar_nvls_reduce_v4_block<T>(dst_v4, src_mc_v4, total_v4);
+    }
   } else {
     // Strided: per-row
-    for (int row = 0; row < active_tokens; row++) {
-      mpkar_nvls_reduce_v4_block<T>(
-          dst_v4 + row * STRIDE_V4, src_mc_v4 + row * STRIDE_V4, V4_PER_ROW);
+    for (int row = 0; row < num_active_rows; row++) {
+      if constexpr (ADD_RESIDUAL) {
+        mpkar_nvls_reduce_add_residual_v4_block<T>(
+            dst_v4 + row * STRIDE_V4,
+            src_mc_v4 + row * STRIDE_V4,
+            residual_v4 + row * STRIDE_V4,
+            V4_PER_ROW);
+      } else {
+        mpkar_nvls_reduce_v4_block<T>(
+            dst_v4 + row * STRIDE_V4, src_mc_v4 + row * STRIDE_V4, V4_PER_ROW);
+      }
     }
   }
 
@@ -511,6 +602,28 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
   // __threadfence_system()) is sufficient.
   __threadfence();
   __syncthreads();
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
+__device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
+                                                       void *output_ptr,
+                                                       void *_teams,
+                                                       int task_offset,
+                                                       int active_tokens) {
+  nvshmem_tile_allreduce_impl<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, false>(
+      input_ptr, nullptr, output_ptr, _teams, task_offset, active_tokens);
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
+__device__ __forceinline__ void
+    nvshmem_tile_allreduce_with_residual(void *input_ptr,
+                                         void *residual_ptr,
+                                         void *output_ptr,
+                                         void *_teams,
+                                         int task_offset,
+                                         int active_tokens) {
+  nvshmem_tile_allreduce_impl<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, true>(
+      input_ptr, residual_ptr, output_ptr, _teams, task_offset, active_tokens);
 }
 
 } // namespace kernel

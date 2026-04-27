@@ -33,6 +33,16 @@ TaskRegister *TaskRegister::get_instance() {
   return singleton;
 }
 
+static bool graph_input_has_num_dims(threadblock::Graph const &bgraph,
+                                     size_t index,
+                                     int num_dims) {
+  assert(bgraph.operators.size() > index);
+  assert(bgraph.operators[index]->op_type == mirage::type::TB_INPUT_OP);
+  tb::TBInputOp const *input_op =
+      static_cast<tb::TBInputOp const *>(bgraph.operators[index]);
+  return input_op->output_tensors[0].num_dims == num_dims;
+}
+
 int TaskRegister::register_task_variant(runtime::TaskType type,
                                         std::string const &code) {
   std::vector<std::string> &variants = all_task_variants[type];
@@ -392,6 +402,11 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("int num_active_tokens_ = $;", batch_size);
+  code.e("#ifndef MPK_TEST_MODE");
+  code.e("num_active_tokens_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("#endif");
   code.e("kernel::silu_mul_task_impl<bfloat16, $, $, $, $>(",
          batch_size,
          output_size,
@@ -399,7 +414,7 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
          output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  code.e("    num_active_tokens_);");
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
@@ -2086,7 +2101,7 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   int batch_size = 0, output_size, output_stride;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 2;
+  int num_inputs = 1;
   int num_outputs = 1;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -2097,18 +2112,26 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
-  assert(input_ops[0]->dtensor.num_dims == 2);
-  batch_size = input_ops[0]->output_tensors[0].dim[0];
-  output_size = input_ops[0]->output_tensors[0].dim[1];
+  int ndims = output_ops[0]->dtensor.num_dims;
+  assert(ndims == 2 || ndims == 3);
+  if (ndims == 3) {
+    batch_size = output_ops[0]->output_tensors[0].dim[0] *
+                 output_ops[0]->output_tensors[0].dim[1];
+    output_size = output_ops[0]->output_tensors[0].dim[2];
+  } else {
+    batch_size = output_ops[0]->output_tensors[0].dim[0];
+    output_size = output_ops[0]->output_tensors[0].dim[1];
+  }
   // get input stride
-  output_stride = input_ops[0]->dtensor.dim[1];
+  output_stride = ndims == 3 ? output_ops[0]->dtensor.dim[2]
+                             : output_ops[0]->dtensor.dim[1];
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::tensor_init_sm100_task_impl<cute::bfloat16_t, $, $, $>(",
          /*BATCH_SIZE=*/batch_size,
          /*OUTPUT_SIZE=*/output_size,
          /*OUTPUT_STRIDE=*/output_stride);
-  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
   code.e("    0);");
   return register_task_variant(TASK_TENSOR_INIT, code.to_string());
 }
@@ -2341,13 +2364,16 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
 
 int TaskRegister::register_moe_topk_sigmoid_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 3);
+  assert(params.size() == 3 || params.size() == 5);
   int num_groups = params[0];
   int topk_group = params[1];
   float scaling_factor;
   memcpy(&scaling_factor, &params[2], sizeof(float));
+  int local_expert_start = params.size() == 5 ? params[3] : 0;
+  int local_expert_end = params.size() == 5 ? params[4] : -1;
 
-  int batch_size = 0, num_experts = 0, num_experts_per_tok = 0;
+  int batch_size = 0, num_experts = 0, num_local_experts = 0,
+      num_experts_per_tok = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -2365,18 +2391,24 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   assert(output_ops[1]->output_tensors[0].num_dims == 2);
   assert(output_ops[2]->output_tensors[0].num_dims == 1);
-  num_experts = output_ops[1]->output_tensors[0].dim[0];
+  num_local_experts = output_ops[1]->output_tensors[0].dim[0];
   batch_size = output_ops[1]->output_tensors[0].dim[1];
   num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
   assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
-  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts + 1);
+  assert(output_ops[2]->output_tensors[0].dim[0] == num_local_experts + 1);
   // Validate input shapes
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
-  assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
+  num_experts = input_ops[0]->output_tensors[0].dim[1];
   // Validate bias shape
   assert(input_ops[1]->output_tensors[0].num_dims == 1);
   assert(input_ops[1]->output_tensors[0].dim[0] == num_experts);
+  if (local_expert_end < 0) {
+    local_expert_end = local_expert_start + num_local_experts;
+  }
+  assert(local_expert_start >= 0);
+  assert(local_expert_end == local_expert_start + num_local_experts);
+  assert(local_expert_end <= num_experts);
 
   assert(num_experts % num_groups == 0 &&
          "Number of experts must be divisible by number of groups");
@@ -2385,9 +2417,10 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
-         "$, $>(",
+         "$, $, $>(",
          /*VPT=*/8,
          /*EXPERTS=*/num_experts,
+         /*LOCAL_EXPERTS=*/num_local_experts,
          /*WARPS_PER_TB=*/8,
          /*BYTES_PER_LDG=*/16,
          /*NUM_GROUPS=*/num_groups,
@@ -2401,8 +2434,8 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   code.e("    $,", batch_size);
   code.e("    task_desc->output_ptrs[1],");
   code.e("    task_desc->output_ptrs[2],");
-  code.e("    0,");
-  code.e("    $,", num_experts);
+  code.e("    $,", local_expert_start);
+  code.e("    $,", local_expert_end);
   code.e("    $f);", scaling_factor);
   return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
 }
@@ -3725,6 +3758,175 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   return register_task_variant(TASK_MLA_PREFILL_TP8_SM100, code.to_string());
 }
 
+int TaskRegister::register_mla_unified_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_heads local to this TP rank
+  // params[1]: max decode q_len for this compiled graph
+  // params[2]: max kv_len
+  // params[3]: num_splits
+  // params[4]: tp_size (1, 2, 4, or 8)
+  // params[5]: d_ckv
+  // params[6]: d_kpe
+  // params[7]: d_v
+  assert(params.size() == 8);
+  bool const direct_paged_decode_kv = graph_input_has_num_dims(bgraph, 6, 3);
+  int num_heads = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int num_splits = params[3];
+  int tp_size = params[4];
+  int d_ckv = params[5];
+  int d_kpe = params[6];
+  int d_v = params[7];
+  assert(tp_size == 1 || tp_size == 2 || tp_size == 4 || tp_size == 8);
+
+  int kvt = (kv_len + 128 - 1) / 128;
+  int tps = (kvt + num_splits - 1) / num_splits;
+  int single_tile = (tps == 1) ? 1 : 0;
+
+  int q_len_padded = (tp_size == 8) ? ((q_len + 1) & ~1) : q_len;
+  int qpg = 1;
+  int num_decode_groups = 1;
+  if (tp_size == 1) {
+    int hpb = num_heads / q_len;
+    if (hpb < 1) {
+      hpb = 1;
+    }
+    while (num_heads % hpb != 0) {
+      hpb -= 1;
+    }
+    num_decode_groups = num_heads / hpb;
+  } else if (tp_size == 2) {
+    qpg = (q_len < 2) ? q_len : 2;
+    num_decode_groups = (q_len + qpg - 1) / qpg;
+  } else if (tp_size == 4) {
+    qpg = (q_len < 4) ? q_len : 4;
+    num_decode_groups = (q_len + qpg - 1) / qpg;
+  } else {
+    qpg = 2;
+    num_decode_groups = (q_len_padded + qpg - 1) / qpg;
+  }
+
+  float const _mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float const sm_scale = (1.0f / sqrtf(192.0f)) * _mscale * _mscale;
+  float const sm_scale_log2 = sm_scale * 1.44269504089f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int meta_x_ = task_desc->task_metadata.kv_idx;");
+  code.e("  int meta_y_ = task_desc->task_metadata.request_id;");
+  code.e("  int meta_z_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int qo_fp_prefill_ = 0;");
+  code.e("  int prefill_s_ = 0;");
+  code.e("  int prefill_q_len_ = 0;");
+  code.e("  int prefill_bi_ptr_ = 0;");
+  code.e("  if (meta_z_ >= 0 && meta_z_ < MPK_MAX_NUM_BATCHED_REQUESTS) {");
+  code.e("    prefill_bi_ptr_ = meta_z_;");
+  code.e("    qo_fp_prefill_ = runtime_config.qo_indptr_buffer[meta_z_];");
+  code.e("    int fp_ = runtime_config.paged_kv_indptr_buffer[meta_z_];");
+  code.e("    int lp_ = runtime_config.paged_kv_indptr_buffer[meta_z_ + 1];");
+  code.e("    prefill_s_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[meta_z_];");
+  code.e("    prefill_q_len_ = runtime_config.qo_indptr_buffer[meta_z_ + 1] - "
+         "runtime_config.qo_indptr_buffer[meta_z_];");
+  code.e("  }");
+  code.e("  int decode_kv_len_ = 0;");
+  code.e("  int decode_q_len_ = 0;");
+  code.e("  int decode_first_page_pos_ = 0;");
+  code.e("  if (meta_y_ >= 0 && meta_y_ < MPK_MAX_NUM_BATCHED_REQUESTS) {");
+  code.e("    int fp_ = runtime_config.paged_kv_indptr_buffer[meta_y_];");
+  code.e("    int lp_ = runtime_config.paged_kv_indptr_buffer[meta_y_ + 1];");
+  code.e("    decode_first_page_pos_ = fp_;");
+  code.e("    decode_kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[meta_y_];");
+  code.e("    decode_q_len_ = runtime_config.qo_indptr_buffer[meta_y_ + 1] - "
+         "runtime_config.qo_indptr_buffer[meta_y_];");
+  code.e("    if (decode_q_len_ < 1) decode_q_len_ = 1;");
+  code.e("    if (decode_q_len_ > $) decode_q_len_ = $;", q_len, q_len);
+  code.e("  }");
+  code.e("  int decode_q_len_padded_ = decode_q_len_ + "
+         "((decode_q_len_ & 1) * $);",
+         (tp_size == 8) ? 1 : 0);
+  code.e("  auto *q_nope_ptr_ = static_cast<const nv_bfloat16 *>("
+         "task_desc->input_ptrs[0]) + qo_fp_prefill_ * $;",
+         num_heads * d_ckv);
+  code.e("  auto *q_pe_ptr_ = static_cast<const nv_bfloat16 *>("
+         "task_desc->input_ptrs[1]) + qo_fp_prefill_ * $;",
+         num_heads * d_kpe);
+  code.e("  auto *ckv_ptr_ = static_cast<const nv_bfloat16 *>("
+         "task_desc->input_ptrs[2]) + prefill_bi_ptr_ * "
+         "MPK_MAX_SEQ_LENGTH * $;",
+         d_ckv);
+  code.e("  auto *kpe_ptr_ = static_cast<const nv_bfloat16 *>("
+         "task_desc->input_ptrs[3]) + prefill_bi_ptr_ * "
+         "MPK_MAX_SEQ_LENGTH * $;",
+         d_kpe);
+  code.e("  auto *out_ptr_ = static_cast<nv_bfloat16 *>("
+         "task_desc->input_ptrs[4]) + qo_fp_prefill_ * $;",
+         num_heads * d_v);
+  if (single_tile) {
+    if (tp_size == 1) {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<true, 1>(");
+    } else if (tp_size == 2) {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<true, 2>(");
+    } else if (tp_size == 4) {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<true, 4>(");
+    } else {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<true, 8>(");
+    }
+  } else {
+    if (tp_size == 1) {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<false, 1>(");
+    } else if (tp_size == 2) {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<false, 2>(");
+    } else if (tp_size == 4) {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<false, 4>(");
+    } else {
+      code.e("  kernel::mla_unified_sm100::"
+             "mla_unified_sm100_task_impl<false, 8>(");
+    }
+  }
+  code.e("      q_nope_ptr_,");
+  code.e("      q_pe_ptr_,");
+  code.e("      ckv_ptr_,");
+  code.e("      kpe_ptr_,");
+  code.e("      out_ptr_,");
+  code.e("      static_cast<const CUtensorMap *>("
+         "task_desc->input_tma_desc_ptrs[5][0]),");
+  code.e("      static_cast<const CUtensorMap *>("
+         "task_desc->input_tma_desc_ptrs[6][0]),");
+  code.e("      static_cast<nv_bfloat16 *>(task_desc->output_ptrs[0]),");
+  code.e("      static_cast<float *>(task_desc->output_ptrs[1]),");
+  code.e("      prefill_s_,");
+  code.e("      decode_kv_len_,");
+  code.e("      prefill_q_len_,");
+  code.e("      decode_q_len_,");
+  code.e("      decode_q_len_padded_,");
+  code.e("      $,", num_heads);
+  code.e("      $f,", sm_scale_log2);
+  code.e("      $f,", sm_scale);
+  code.e("      $,", num_splits);
+  code.e("      $,", num_decode_groups);
+  code.e("      $,", qpg);
+  code.e("      $,",
+         direct_paged_decode_kv ? "runtime_config.paged_kv_indices_buffer"
+                                : "nullptr");
+  code.e("      decode_first_page_pos_,");
+  code.e("      meta_x_,");
+  code.e("      meta_y_,");
+  code.e("      meta_z_);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_UNIFIED_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_mtp_decode_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_head_groups
@@ -3753,6 +3955,7 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   // Template dispatch on SINGLE_TILE
   if (single_tile) {
@@ -3806,6 +4009,7 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   // 256 threads for MPK workers (default template is 512 for standalone)
   code.e("  kernel::mla_mtp_reduce_sm100_task_impl<256>(");
@@ -3977,8 +4181,10 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   assert(params.size() == 2);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 1;
   int num_outputs = 1;
+  int num_inputs = static_cast<int>(bgraph.operators.size()) - num_outputs;
+  assert(num_inputs == 1 || num_inputs == 2);
+  bool const with_residual = num_inputs == 2;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -3991,6 +4197,10 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   }
   assert(input_ops[0]->input_map.x == 1 && input_ops[0]->input_map.y == -1 &&
          input_ops[0]->input_map.z == -1);
+  if (with_residual) {
+    assert(input_ops[1]->input_map.x == 1 && input_ops[1]->input_map.y == -1 &&
+           input_ops[1]->input_map.z == -1);
+  }
   // Currently support 2D reduction, buffer has an extra world_size dim
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
@@ -4005,11 +4215,20 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   // Register tile allreduce task
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
-  c.e("kernel::nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
-      batch_size,
-      output_size,
-      output_stride);
-  c.e("  task_desc->input_ptrs[0],");
+  if (with_residual) {
+    c.e("kernel::nvshmem_tile_allreduce_with_residual<__nv_bfloat16, $, $, $>(",
+        batch_size,
+        output_size,
+        output_stride);
+    c.e("  task_desc->input_ptrs[0],");
+    c.e("  task_desc->input_ptrs[1],");
+  } else {
+    c.e("kernel::nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
+        batch_size,
+        output_size,
+        output_stride);
+    c.e("  task_desc->input_ptrs[0],");
+  }
   c.e("  task_desc->output_ptrs[0],");
   c.e("  runtime_config.nvshmem_teams,");
   c.e("  task_desc->task_metadata.task_offset,");
@@ -4054,6 +4273,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   int input_stride = (ndims == 3) ? input_ops[0]->dtensor.dim[2]
                                   : input_ops[0]->dtensor.dim[1];
   constexpr int GROUP_SIZE = 128;
+  int group_tiles = bgraph.grid_dim.x;
 
   // For UE8M0 path: scale_outer_stride is the stride between packed scale
   // columns in the column-major output layout (= aligned_batch for UE8M0)
@@ -4061,11 +4281,12 @@ int TaskRegister::register_quantize_fp8_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $,",
+  code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $, $,",
          batch_size,
          hidden_size,
          GROUP_SIZE,
-         input_stride);
+         input_stride,
+         group_tiles);
   code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $>(",
          scale_ue8m0 ? "true" : "false");
   code.e("    task_desc->input_ptrs[0],");  // input bf16
@@ -4076,7 +4297,9 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // aligned_batch. For float32 scale (MoE), scale_outer_stride is unused
   // (float32 writes directly).
   code.e("    1e-10f, -448.0f, 448.0f,");
-  code.e("    $);", aligned_batch);
+  code.e("    $,", aligned_batch);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx);");
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
 
@@ -4217,9 +4440,13 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
          "qo_fp_ * $;",
          k_pe_row_stride);
+  code.e("  auto *paged_cache_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[2]);");
+  code.e("  auto *contiguous_kv_base_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]);");
   code.e("  auto *contiguous_kv_ptr_ = "
-         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]) + "
-         "bi_ * S_ * $;",
+         "(contiguous_kv_base_ == paged_cache_ptr_) ? contiguous_kv_base_ : "
+         "contiguous_kv_base_ + bi_ * S_ * $;",
          d_k);
   code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $, $>(",
          d_k,
@@ -4228,7 +4455,7 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          k_pe_row_stride);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
-  code.e("    task_desc->input_ptrs[2],"); // paged_cache
+  code.e("    paged_cache_ptr_,"); // paged_cache
   code.e("    contiguous_kv_ptr_,");
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indptr_buffer,");
@@ -4297,6 +4524,73 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
   code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_SPLIT_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_kv_gather_unified_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Unified variant for the chunked-prefill flow. It appends new KV to the
+  // paged cache once, then writes either the decode layout (contiguous_kv) or
+  // the prefill layout (ckv_sep/kpe_sep) based on runtime Q_LEN.
+  (void)bgraph;
+  assert(params.size() == 3);
+
+  int d_k = params[0];
+  int d_v = params[1];
+  int page_size = params[2];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  constexpr int k_pe_row_stride = 128;
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  auto *c_latent_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         d_v);
+  code.e("  auto *k_pe_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         k_pe_row_stride);
+  code.e("  auto *paged_cache_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[2]);");
+  code.e("  auto *contiguous_kv_base_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]);");
+  code.e("  auto *contiguous_kv_ptr_ = "
+         "(contiguous_kv_base_ == paged_cache_ptr_) ? contiguous_kv_base_ : "
+         "contiguous_kv_base_ + bi_ * S_ * $;",
+         d_k);
+  code.e("  auto *ckv_sep_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_v);
+  code.e("  auto *kpe_sep_ptr_ = "
+         "static_cast<nv_bfloat16*>(task_desc->input_ptrs[5]) + "
+         "bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_k - d_v);
+  code.e("kernel::mla_kv_cache_gather_unified_sm100_task_impl<$, $, $, $>(",
+         d_k,
+         d_v,
+         page_size,
+         k_pe_row_stride);
+  code.e("    c_latent_new_ptr_,");
+  code.e("    k_pe_new_ptr_,");
+  code.e("    paged_cache_ptr_,"); // paged_cache
+  code.e("    contiguous_kv_ptr_,");
+  code.e("    ckv_sep_ptr_,");
+  code.e("    kpe_sep_ptr_,");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_KV_GATHER_UNIFIED_SM100,
                                code.to_string());
 }
 
@@ -4417,6 +4711,7 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
   int qpg = (q_len < 2) ? q_len : 2;
+  bool const direct_paged_kv = graph_input_has_num_dims(bgraph, 1, 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4432,6 +4727,7 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   if (single_tile) {
     code.e("  kernel::mla_mtp_tp2::mla_mtp_tp2_main<true>(");
@@ -4453,6 +4749,10 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   code.e("      $,", num_splits);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
+  code.e("      $,",
+         direct_paged_kv ? "runtime_config.paged_kv_indices_buffer"
+                         : "nullptr");
+  code.e("      fp_,");
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id);");
   code.e("}");
@@ -4477,6 +4777,7 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   code.e("  kernel::mla_mtp_tp2::mla_mtp_tp2_reduce(");
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
@@ -4505,6 +4806,7 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
   int qpg = (q_len < 4) ? q_len : 4;
+  bool const direct_paged_kv = graph_input_has_num_dims(bgraph, 1, 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4519,6 +4821,7 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   if (single_tile) {
     code.e("  kernel::mla_mtp_tp4::mla_mtp_tp4_main<true>(");
@@ -4540,6 +4843,10 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   code.e("      $,", num_splits);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
+  code.e("      $,",
+         direct_paged_kv ? "runtime_config.paged_kv_indices_buffer"
+                         : "nullptr");
+  code.e("      fp_,");
   // V-half is folded into block_x's low bit (no z-dim launch in MPK).
   // Python layer doubles the grid; kernel unpacks v_half = block_x & 1.
   code.e(
@@ -4567,6 +4874,7 @@ int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
+  code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
   code.e("  kernel::mla_mtp_tp4::mla_mtp_tp4_reduce(");
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
@@ -4596,6 +4904,7 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
   int qpg = 2;
+  bool const direct_paged_kv = graph_input_has_num_dims(bgraph, 1, 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4610,6 +4919,7 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_real_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_real_rt_ < 1) q_len_real_rt_ = 1;");
+  code.e("  if (q_len_real_rt_ > 8) return;");
   code.e(
       "  if (q_len_real_rt_ > $) q_len_real_rt_ = $;", q_len_real, q_len_real);
   code.e("  int q_len_padded_rt_ = q_len_real_rt_ + (q_len_real_rt_ & 1);");
@@ -4633,6 +4943,10 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.e("      $,", num_splits);
   code.e("      q_len_padded_rt_,");
   code.e("      $,", qpg);
+  code.e("      $,",
+         direct_paged_kv ? "runtime_config.paged_kv_indices_buffer"
+                         : "nullptr");
+  code.e("      fp_,");
   code.e("      q_len_real_rt_,");
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id);");
@@ -4658,6 +4972,7 @@ int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_real_rt_ = qo_lp_ - qo_fp_;");
   code.e("  if (q_len_real_rt_ < 1) q_len_real_rt_ = 1;");
+  code.e("  if (q_len_real_rt_ > 8) return;");
   code.e("  if (q_len_real_rt_ > $) q_len_real_rt_ = $;",
          q_len_padded,
          q_len_padded);

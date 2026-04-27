@@ -623,7 +623,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "tensor_init") {
     int variant_id =
         task_register->register_tensor_init_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_TENSOR_INIT, variant_id);
+    task_config[op] = std::make_tuple(1, 1, TASK_TENSOR_INIT, variant_id);
   } else if (name == "moe_topk_softmax_sm100") {
     int variant_id = task_register->register_moe_topk_softmax_sm100_task(
         customized->bgraph, params);
@@ -722,9 +722,18 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "mla_prefill_tp8_sm100") {
     int variant_id = task_register->register_mla_prefill_tp8_sm100_task(
         customized->bgraph, params);
-    // 4 inputs (Q_nope, Q_pe, K, V), 1 output (O). K and V carry TMA descriptors.
+    // 4 inputs (Q_nope, Q_pe, K, V), 1 output (O). K and V carry TMA
+    // descriptors.
     task_config[op] =
         std::make_tuple(4, 1, TASK_MLA_PREFILL_TP8_SM100, variant_id);
+  } else if (name == "mla_unified_sm100") {
+    int variant_id =
+        task_register->register_mla_unified_sm100_task(customized->bgraph,
+                                                       params);
+    // Inputs: Q_nope, Q_pe, CKV, KPE, O, Q_fused TMA, KV TMA.
+    // Outputs: decode partial O and LSE. O is an input by MPK convention so
+    // the prefill branch can write it directly.
+    task_config[op] = std::make_tuple(7, 2, TASK_MLA_UNIFIED_SM100, variant_id);
   } else if (name == "mla_mtp_decode_sm100") {
     int variant_id = task_register->register_mla_mtp_decode_sm100_task(
         customized->bgraph, params);
@@ -805,6 +814,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
+  } else if (name == "mla_kv_gather_unified_sm100") {
+    int variant_id =
+        task_register->register_mla_kv_gather_unified_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(6, 0, TASK_MLA_KV_GATHER_UNIFIED_SM100, variant_id);
   }
   // MTP tasks
   else if (name == "mtp_verify_strict") {
@@ -843,6 +858,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "nvshmem_tile_allreduce_with_residual") {
+    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
   }
 
   else {
