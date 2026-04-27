@@ -47,8 +47,9 @@ static constexpr int TILE_BYTES = 128 * BK * 2;
 static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES;
 
 // Reduce kernel
-static constexpr int RD_DV = 2;
+static constexpr int RD_DV = 4;
 static constexpr int RD_TB = 256;
+static constexpr int RD_LANES = RD_TB / 128;
 
 // ============ PTX Helpers ============
 namespace ptx {
@@ -765,40 +766,44 @@ __device__ __noinline__ void
 
   int const row = tid & 127;
   int const lane = tid >> 7;
-  int const d = dv_base + lane;
+  int const q_in_group = row / NUM_HEADS;
+  int const h = row % NUM_HEADS;
+  int const actual_q = gi * qpg + q_in_group;
 
-  int q_in_group = row / NUM_HEADS;
-  int h = row % NUM_HEADS;
-  int actual_q = gi * qpg + q_in_group;
-
-  if (actual_q >= Q_LEN || d >= D_V) {
+  if (actual_q >= Q_LEN) {
     return;
   }
 
   float const *la_ptr = La + (bi * num_groups * sk + gi * sk) * 128 + row;
-  nv_bfloat16 const *oa_ptr =
-      Oa + (bi * num_groups * sk + gi * sk) * D_V * 128 + d * 128 + row;
+  for (int lane_iter = lane; lane_iter < RD_DV; lane_iter += RD_LANES) {
+    int const d = dv_base + lane_iter;
+    if (d >= D_V) {
+      continue;
+    }
+    nv_bfloat16 const *oa_ptr =
+        Oa + (bi * num_groups * sk + gi * sk) * D_V * 128 + d * 128 + row;
 
-  float maxVal = -1e30f, oldMaxVal = -1e30f;
-  float sumVal = 0.0f;
-  float acc = 0.0f;
+    float maxVal = -1e30f, oldMaxVal = -1e30f;
+    float sumVal = 0.0f;
+    float acc = 0.0f;
 
-  for (int s = 0; s < sk; s++) {
-    float localMax = la_ptr[s * 128];
-    float oa_val = __bfloat162float(oa_ptr[(size_t)s * D_V * 128]);
+    for (int s = 0; s < sk; s++) {
+      float localMax = la_ptr[s * 128];
+      float oa_val = __bfloat162float(oa_ptr[(size_t)s * D_V * 128]);
 
-    maxVal = fmaxf(maxVal, localMax);
-    float corr0 = exp2f(oldMaxVal - maxVal);
-    float corr1 = exp2f(localMax - maxVal);
-    oldMaxVal = maxVal;
+      maxVal = fmaxf(maxVal, localMax);
+      float corr0 = exp2f(oldMaxVal - maxVal);
+      float corr1 = exp2f(localMax - maxVal);
+      oldMaxVal = maxVal;
 
-    sumVal = sumVal * corr0 + corr1;
-    acc = acc * corr0 + oa_val * corr1;
+      sumVal = sumVal * corr0 + corr1;
+      acc = acc * corr0 + oa_val * corr1;
+    }
+
+    float inv_sum = (sumVal > 0.0f) ? __frcp_rn(sumVal) : 0.0f;
+    int const o_base = (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
+    O[o_base + d] = __float2bfloat16(acc * inv_sum);
   }
-
-  float inv_sum = (sumVal > 0.0f) ? __frcp_rn(sumVal) : 0.0f;
-  int o_base = (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
-  O[o_base + d] = __float2bfloat16(acc * inv_sum);
 }
 
 } // namespace mla_mtp_tp4

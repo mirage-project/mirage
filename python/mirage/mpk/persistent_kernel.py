@@ -1465,7 +1465,7 @@ class PersistentKernel:
         num_groups = (q_len + qpg - 1) // qpg
         num_splits = (kv_len + 128 - 1) // 128
         d_v = 512
-        rd_dv = 2
+        rd_dv = 4 if num_heads == 32 else 2
 
         params = [num_groups, q_len, num_splits, rd_dv]
         grid_dim = ((d_v + rd_dv - 1) // rd_dv,
