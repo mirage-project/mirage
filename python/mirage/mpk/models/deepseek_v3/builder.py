@@ -65,15 +65,14 @@ def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
 def _moe_expert_grid_x(
     max_num_batched_tokens: int,
     num_experts: int = NUM_EXPERTS,
-    min_groups: int = 1,
+    preferred_groups: int = NUM_EXPERTS,
 ) -> int:
     # The MoE kernels iterate over the compact activated-expert list with a
     # stride equal to grid_dim.x. A batch can activate at most top_k experts per
-    # token, so smaller MBT graphs do not need one CTA per model expert. Keep a
-    # small lower bound from the MoE-tuned path so BS=1 still exposes enough
-    # parallelism when combined with the output-dimension split.
+    # token, so never create more expert groups than active routing slots.
+    # The preferred value is the MoE-tuned target from the reviewed path.
     active_groups = max_num_batched_tokens * NUM_EXPERTS_PER_TOK
-    return min(num_experts, max(min_groups, active_groups))
+    return max(1, min(num_experts, preferred_groups, active_groups))
 
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
@@ -1019,7 +1018,7 @@ class DeepSeekV3Builder(GraphBuilder):
             w13_m_split = _moe_fp8_m_split(
                 2 * self.routed_moe_intermediate_size, preferred=16)
             w13_expert_grid_x = _moe_expert_grid_x(
-                mbt, self.num_local_experts, min_groups=8)
+                mbt, self.num_local_experts, preferred_groups=8)
             # We should try to keep num_exp_groups * m_split as large as possible to maximize parallelism,
             # but still <= total number of workers (140 in this case), for best performance.
             self.mpk.moe_w13_fp8_layer(
@@ -1111,7 +1110,7 @@ class DeepSeekV3Builder(GraphBuilder):
         if use_fp8_experts:
             w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
             w2_expert_grid_x = _moe_expert_grid_x(
-                mbt, self.num_local_experts, min_groups=10)
+                mbt, self.num_local_experts, preferred_groups=10)
             self.mpk.moe_w2_fp8_layer(
                 input_fp8=moe_silu_fp8,
                 input_scale=moe_silu_scale,
@@ -1612,7 +1611,7 @@ class DeepSeekV3Builder(GraphBuilder):
         mtp_w13_m_split = _moe_fp8_m_split(
             2 * self.routed_moe_intermediate_size, preferred=16)
         mtp_w13_expert_grid_x = _moe_expert_grid_x(
-            mbt, self.num_local_experts, min_groups=8)
+            mbt, self.num_local_experts, preferred_groups=8)
         self.mpk.moe_w13_fp8_layer(
             input_fp8=moe_input_fp8, input_scale=moe_input_scale,
             weight_fp8=w_w13, weight_scale=s_w13,
@@ -1660,7 +1659,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1), block_dim=(128, 1, 1))
         mtp_w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
         mtp_w2_expert_grid_x = _moe_expert_grid_x(
-            mbt, self.num_local_experts, min_groups=10)
+            mbt, self.num_local_experts, preferred_groups=10)
         self.mpk.moe_w2_fp8_layer(
             input_fp8=mtp_silu_fp8, input_scale=mtp_silu_scale,
             weight_fp8=w_w2, weight_scale=s_w2,
