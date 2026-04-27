@@ -952,6 +952,41 @@ class PersistentKernel:
             [c_latent_new, k_pe_new, paged_cache, ckv_sep, kpe_sep], tb_graph)
         self.kn_graph.register_task(tb_graph, "mla_kv_gather_split_sm100", params)
 
+    def mla_kv_gather_unified_layer(
+        self,
+        c_latent_new: DTensor,
+        k_pe_new: DTensor,
+        paged_cache: DTensor,
+        contiguous_kv: DTensor,
+        ckv_sep: DTensor,
+        kpe_sep: DTensor,
+        mla_params: tuple,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Append paged KV once, then gather the layout needed by runtime Q_LEN."""
+        d_k, d_v, page_size = mla_params
+        params = [d_k, d_v, page_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
+        tb_graph.new_input(paged_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(contiguous_kv, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ckv_sep, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kpe_sep, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                c_latent_new,
+                k_pe_new,
+                paged_cache,
+                contiguous_kv,
+                ckv_sep,
+                kpe_sep,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "mla_kv_gather_unified_sm100", params)
+
     def mla_decode_layer(
         self,
         q_input: DTensor,         # Q tensor (attached with TMA desc)
@@ -1071,6 +1106,99 @@ class PersistentKernel:
             [q_nope, q_pe, k, v, output], tb_graph
         )
         self.kn_graph.register_task(tb_graph, "mla_prefill_tp8_sm100", params)
+
+    def mla_unified_layer(
+        self,
+        q_nope: DTensor,          # [S, H, D_CKV] flattened
+        q_pe: DTensor,            # [S, H, D_KPE] flattened
+        ckv: DTensor,             # [B*S, D_CKV]
+        kpe: DTensor,             # [B*S, D_KPE]
+        output: DTensor,          # final O [S, H, D_V], prefill branch writes
+        q_input: DTensor,         # fused Q [S, H*(D_CKV+D_KPE)] with TMA desc
+        kv_input: DTensor,        # contiguous KV [B*S, D_K] with TMA desc
+        output_partial: DTensor,  # decode partial O
+        output_lse: DTensor,      # decode partial LSE
+        q_len: int,
+        kv_len: int,
+        num_heads: int,
+        tp_size: int,
+        d_ckv: int = 512,
+        d_kpe: int = 64,
+        d_v: int = 512,
+    ):
+        num_splits = (kv_len + 128 - 1) // 128
+        # The graph may be compiled for a large chunk-prefill Q length, but the
+        # decode branch only handles Q_LEN <= 8. Size the decode half of the
+        # unified grid for that domain instead of the prefill chunk size.
+        decode_q_len = min(q_len, 8)
+        if tp_size == 1:
+            hpb = num_heads // decode_q_len
+            if hpb < 1:
+                hpb = 1
+            while num_heads % hpb != 0:
+                hpb -= 1
+            num_groups = num_heads // hpb
+            x_mul = 1
+        elif tp_size == 2:
+            qpg = min(2, decode_q_len)
+            num_groups = (decode_q_len + qpg - 1) // qpg
+            x_mul = 1
+        elif tp_size == 4:
+            qpg = min(4, decode_q_len)
+            num_groups = (decode_q_len + qpg - 1) // qpg
+            x_mul = 2
+        elif tp_size == 8:
+            q_len_padded = (decode_q_len + 1) & ~1
+            qpg = 2
+            num_groups = (q_len_padded + qpg - 1) // qpg
+            x_mul = 1
+        else:
+            raise ValueError(f"Unsupported MLA unified tp_size={tp_size}")
+
+        num_q_blocks = (q_len + 64 - 1) // 64
+        decode_blocks_x = num_groups * num_splits * x_mul
+        grid_dim = (
+            max(num_heads, decode_blocks_x),
+            max(num_q_blocks, self.max_num_batched_requests),
+            self.max_num_batched_requests,
+        )
+        block_dim = (256, 1, 1)
+        params = [
+            num_heads,
+            decode_q_len,
+            kv_len,
+            num_splits,
+            tp_size,
+            d_ckv,
+            d_kpe,
+            d_v,
+        ]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ckv, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kpe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                q_nope,
+                q_pe,
+                ckv,
+                kpe,
+                output,
+                q_input,
+                kv_input,
+                output_partial,
+                output_lse,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "mla_unified_sm100", params)
 
     def mla_mtp_decode_layer(
         self,

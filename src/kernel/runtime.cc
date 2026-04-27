@@ -399,6 +399,14 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y;        // gi (head_group)
               task.task_metadata.merge_task_offset = bid.z; // batch
             }
+            // Unified MLA grid:
+            //   prefill interprets (x,y,z) as (head, q_block, batch)
+            //   decode interprets (x,y,z) as (packed_decode_block, batch, 0)
+            if (task_type == TASK_MLA_UNIFIED_SM100) {
+              task.task_metadata.kv_idx = bid.x;
+              task.task_metadata.request_id = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
             // MLA-MTP TP variants: decode grid=(num_groups*sk[*2 if TP=4], B,
             // 1) Python layer encodes block_x = gi*sk+si (or
             // (block_x<<1)|v_half for TP=4) into kv_idx, batch into request_id.
@@ -424,6 +432,11 @@ void register_mugraph(
             // MLA KV gather: request_id = bid.x (builder uses
             // grid=(max_num_batched_requests, 1, 1))
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
+            // Unified MLA KV gather: same grid/request mapping as both
+            // split and non-split variants.
+            if (task_type == TASK_MLA_KV_GATHER_UNIFIED_SM100) {
               task.task_metadata.request_id = bid.x;
             }
             // Set request_id for FP8 quantize (row index for column-major scale
@@ -1154,7 +1167,8 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP2_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP4_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP8_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100) {");
+           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_UNIFIED_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     // FP8 linear tasks need TMA (outside SM100_TMA range)
@@ -1749,6 +1763,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
   task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
   task_type_to_name[TASK_MLA_PREFILL_TP8_SM100] = "TASK_MLA_PREFILL_TP8_SM100";
+  task_type_to_name[TASK_MLA_UNIFIED_SM100] = "TASK_MLA_UNIFIED_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
@@ -1766,6 +1781,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SPLIT_SM100] =
       "TASK_MLA_KV_GATHER_SPLIT_SM100";
+  task_type_to_name[TASK_MLA_KV_GATHER_UNIFIED_SM100] =
+      "TASK_MLA_KV_GATHER_UNIFIED_SM100";
   task_type_to_name[TASK_MTP_VERIFY_STRICT] = "TASK_MTP_VERIFY_STRICT";
   task_type_to_name[TASK_MTP_ACCEPT_COMMIT] = "TASK_MTP_ACCEPT_COMMIT";
   task_type_to_name[TASK_MTP_TOKEN_SCATTER] = "TASK_MTP_TOKEN_SCATTER";

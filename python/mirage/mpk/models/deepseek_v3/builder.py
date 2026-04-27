@@ -747,22 +747,15 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.c_latent_out, weight=w_kv_a_ln, output=self.c_latent_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
-        # Step 6: MLA attention (KV gather + decode + reduce)
-        # Dual-dispatch architecture (opt/mla-dual-dispatch, 2026-04-22):
-        # When `_use_prefill` is True (mbt >= 32), BOTH the prefill kernel and
-        # the decode kernels are registered so that a single compiled task
-        # graph handles both regimes at runtime:
-        #   - Q_LEN large (prefill chunk): prefill kernel runs, decode kernels
-        #     early-exit on Q_LEN>8 gate.
-        #   - Q_LEN small (MTP verify, Q_LEN 1..8): decode kernels run, prefill
-        #     kernel early-exits on Q_LEN<16 gate.
-        # Both write `self.attn_out`. Builder order is prefill -> decode; the
-        # MPK event graph serialises the two writes, so whichever kernel really
-        # runs produces the final value (the other becomes a no-op).
+        # Step 6: MLA attention (KV gather + unified prefill/decode + reduce).
+        # When `_use_prefill` is True, register one MLA main task that chooses
+        # prefill vs decode from runtime Q_LEN. The decode reduce stays
+        # separate and keeps its Q_LEN gate.
         layer_cache = self.mpk.attach_input(
             torch_tensor=self.ckv_kpe_cache[layer_idx],
             name=f"layer_{layer_idx}_kv_cache")
         q_len_mla = self.max_num_batched_tokens
+        decode_q_len_mla = min(q_len_mla, 8)
         kv_len_max = self.mpk.max_seq_length
         single_split_mla = kv_len_max <= self.mpk.page_size
         mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
@@ -770,81 +763,90 @@ class DeepSeekV3Builder(GraphBuilder):
             layer_cache if self._direct_paged_decode_kv else self.contiguous_kv
         )
         if self._use_prefill:
-            # 6a. Prefill path: gather into SPLIT CKV/KPE, then mla_prefill.
-            self.mpk.mla_kv_gather_split_layer(
+            self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
                 paged_cache=layer_cache,
+                contiguous_kv=mla_decode_kv,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            num_q_blocks = (q_len_mla + 64 - 1) // 64  # PF_BM=64 in kernel
-            self.mpk.mla_prefill_layer(
-                q_nope=self.q_nope,
-                q_pe=self.q_pe,
-                ckv=self.ckv_sep,
-                kpe=self.kpe_sep,
-                output=self.attn_out,
-                mla_params=(self.num_local_q_heads, kv_len_max,
-                            self.kv_lora_rank, QK_ROPE_HEAD_DIM,
-                            self.v_head_dim),
-                grid_dim=(self.num_local_q_heads, num_q_blocks,
-                          self.mpk.max_num_batched_requests),
-                block_dim=(256, 1, 1),
-            )
-
-        # 6b. Decode path: always register (both when _use_prefill and when
-        # not). When _use_prefill is True, this runs in addition to prefill;
-        # one of the two early-exits on runtime Q_LEN.
-        self.mpk.mla_kv_gather_layer(
-            c_latent_new=self.c_latent_out,
-            k_pe_new=self.k_pe_out,
-            paged_cache=layer_cache,
-            contiguous_kv=mla_decode_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-            grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        num_splits = self.mla_max_splits
-        if self.world_size == 2:
-            self.mpk.mla_mtp_decode_tp2_layer(
-                self.q_nope_pe, mla_decode_kv,
-                mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            if not single_split_mla:
-                self.mpk.mla_mtp_decode_tp2_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 4:
-            self.mpk.mla_mtp_decode_tp4_layer(
-                self.q_nope_pe, mla_decode_kv,
-                mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            if not single_split_mla:
-                self.mpk.mla_mtp_decode_tp4_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 8:
-            self.mpk.mla_mtp_decode_tp8_layer(
-                self.q_nope_pe, mla_decode_kv,
-                mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            if not single_split_mla:
-                self.mpk.mla_mtp_decode_tp8_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
         else:
-            self.mpk.mla_mtp_decode_layer(
+            self.mpk.mla_kv_gather_layer(
+                c_latent_new=self.c_latent_out,
+                k_pe_new=self.k_pe_out,
+                paged_cache=layer_cache,
+                contiguous_kv=mla_decode_kv,
+                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+        if self._use_prefill:
+            self.mpk.mla_unified_layer(
+                self.q_nope, self.q_pe,
+                self.ckv_sep, self.kpe_sep, self.attn_out,
                 self.q_nope_pe, mla_decode_kv,
                 mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, self.num_local_q_heads,
+                self.world_size, self.kv_lora_rank,
+                QK_ROPE_HEAD_DIM, self.v_head_dim)
             if not single_split_mla:
-                self.mpk.mla_mtp_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
+                if self.world_size == 2:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 4:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 8:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                else:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+        else:
+            if self.world_size == 2:
+                self.mpk.mla_mtp_decode_tp2_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 4:
+                self.mpk.mla_mtp_decode_tp4_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 8:
+                self.mpk.mla_mtp_decode_tp8_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            else:
+                self.mpk.mla_mtp_decode_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
 
         # Step 7: O projection (V un-absorption fused into o_proj during conversion)
         # o_proj_fused: [7168, H*kv_lora_rank] — directly takes attn_out [N, H*kv_lora_rank]
@@ -1445,12 +1447,10 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.c_latent_out, weight=w_kv_a_ln, output=self.c_latent_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
-        # MTP attention uses its own KV cache (new MLA flow)
-        # Dual-dispatch (opt/mla-dual-dispatch): register BOTH prefill and
-        # decode when _use_prefill, then rely on per-kernel runtime Q_LEN
-        # early-exits to pick the right one. See main MLA builder above for
-        # details.
+        # MTP attention uses its own KV cache. When prefill is enabled, one
+        # unified MLA main task chooses prefill vs decode from runtime Q_LEN.
         q_len_mla = self.max_num_batched_tokens
+        decode_q_len_mla = min(q_len_mla, 8)
         kv_len_max = self.mpk.max_seq_length
         single_split_mla = kv_len_max <= self.mpk.page_size
         mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
@@ -1460,76 +1460,90 @@ class DeepSeekV3Builder(GraphBuilder):
             else self.contiguous_kv
         )
         if self._use_prefill:
-            self.mpk.mla_kv_gather_split_layer(
+            self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
                 paged_cache=self.mtp_ckv_kpe_cache_tensor,
+                contiguous_kv=mla_decode_kv,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            num_q_blocks = (q_len_mla + 64 - 1) // 64
-            self.mpk.mla_prefill_layer(
-                q_nope=self.q_nope,
-                q_pe=self.q_pe,
-                ckv=self.ckv_sep,
-                kpe=self.kpe_sep,
-                output=self.attn_out,
-                mla_params=(self.num_local_q_heads, kv_len_max,
-                            self.kv_lora_rank, QK_ROPE_HEAD_DIM,
-                            self.v_head_dim),
-                grid_dim=(self.num_local_q_heads, num_q_blocks, 1),
-                block_dim=(256, 1, 1),
-            )
-            # FALL THROUGH to decode-path registration below.
-        self.mpk.mla_kv_gather_layer(
-            c_latent_new=self.c_latent_out,
-            k_pe_new=self.k_pe_out,
-            paged_cache=self.mtp_ckv_kpe_cache_tensor,
-            contiguous_kv=mla_decode_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-            grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        num_splits = self.mla_max_splits
-        if self.world_size == 2:
-            self.mpk.mla_mtp_decode_tp2_layer(
-                self.q_nope_pe, mla_decode_kv,
-                mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            if not single_split_mla:
-                self.mpk.mla_mtp_decode_tp2_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 4:
-            self.mpk.mla_mtp_decode_tp4_layer(
-                self.q_nope_pe, mla_decode_kv,
-                mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            if not single_split_mla:
-                self.mpk.mla_mtp_decode_tp4_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
-        elif self.world_size == 8:
-            self.mpk.mla_mtp_decode_tp8_layer(
-                self.q_nope_pe, mla_decode_kv,
-                mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
-            if not single_split_mla:
-                self.mpk.mla_mtp_decode_tp8_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
         else:
-            self.mpk.mla_mtp_decode_layer(
+            self.mpk.mla_kv_gather_layer(
+                c_latent_new=self.c_latent_out,
+                k_pe_new=self.k_pe_out,
+                paged_cache=self.mtp_ckv_kpe_cache_tensor,
+                contiguous_kv=mla_decode_kv,
+                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+        if self._use_prefill:
+            self.mpk.mla_unified_layer(
+                self.q_nope, self.q_pe,
+                self.ckv_sep, self.kpe_sep, self.attn_out,
                 self.q_nope_pe, mla_decode_kv,
                 mla_decode_out, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, self.num_local_q_heads,
+                self.world_size, self.kv_lora_rank,
+                QK_ROPE_HEAD_DIM, self.v_head_dim)
             if not single_split_mla:
-                self.mpk.mla_mtp_reduce_layer(
-                    self.mla_partial_o, self.mla_partial_lse,
-                    self.attn_out, q_len_mla, kv_len_max)
+                if self.world_size == 2:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 4:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                elif self.world_size == 8:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+                else:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, decode_q_len_mla, kv_len_max)
+        else:
+            if self.world_size == 2:
+                self.mpk.mla_mtp_decode_tp2_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp2_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 4:
+                self.mpk.mla_mtp_decode_tp4_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp4_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            elif self.world_size == 8:
+                self.mpk.mla_mtp_decode_tp8_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_decode_tp8_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
+            else:
+                self.mpk.mla_mtp_decode_layer(
+                    self.q_nope_pe, mla_decode_kv,
+                    mla_decode_out, self.mla_partial_lse,
+                    q_len_mla, kv_len_max)
+                if not single_split_mla:
+                    self.mpk.mla_mtp_reduce_layer(
+                        self.mla_partial_o, self.mla_partial_lse,
+                        self.attn_out, q_len_mla, kv_len_max)
 
         # o_proj (FP8). Match main layer's pattern: use the with_residual kernel
         # to fuse (matmul + residual) in one pass.

@@ -43,6 +43,7 @@
 #include "mla_prefill_tp8_sm100.cuh"
 #include "mla_reduce_sm100.cuh"
 #include "mla_sm100_2sm.cuh"
+#include "mla_unified_sm100.cuh"
 #include "moe_linear_sm100.cuh"
 #include "mul_sum_add_sm100.cuh"
 #include "per_token_group_quantize_fp8.cuh"
