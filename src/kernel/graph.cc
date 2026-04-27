@@ -858,6 +858,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "nvshmem_tile_allreduce_with_residual") {
+    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
   }
 
   else {

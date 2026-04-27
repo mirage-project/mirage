@@ -4181,8 +4181,10 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   assert(params.size() == 2);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 1;
   int num_outputs = 1;
+  int num_inputs = static_cast<int>(bgraph.operators.size()) - num_outputs;
+  assert(num_inputs == 1 || num_inputs == 2);
+  bool const with_residual = num_inputs == 2;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -4195,6 +4197,10 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   }
   assert(input_ops[0]->input_map.x == 1 && input_ops[0]->input_map.y == -1 &&
          input_ops[0]->input_map.z == -1);
+  if (with_residual) {
+    assert(input_ops[1]->input_map.x == 1 && input_ops[1]->input_map.y == -1 &&
+           input_ops[1]->input_map.z == -1);
+  }
   // Currently support 2D reduction, buffer has an extra world_size dim
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
@@ -4209,11 +4215,20 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   // Register tile allreduce task
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
-  c.e("kernel::nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
-      batch_size,
-      output_size,
-      output_stride);
-  c.e("  task_desc->input_ptrs[0],");
+  if (with_residual) {
+    c.e("kernel::nvshmem_tile_allreduce_with_residual<__nv_bfloat16, $, $, $>(",
+        batch_size,
+        output_size,
+        output_stride);
+    c.e("  task_desc->input_ptrs[0],");
+    c.e("  task_desc->input_ptrs[1],");
+  } else {
+    c.e("kernel::nvshmem_tile_allreduce<__nv_bfloat16, $, $, $>(",
+        batch_size,
+        output_size,
+        output_stride);
+    c.e("  task_desc->input_ptrs[0],");
+  }
   c.e("  task_desc->output_ptrs[0],");
   c.e("  runtime_config.nvshmem_teams,");
   c.e("  task_desc->task_metadata.task_offset,");
@@ -4258,6 +4273,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   int input_stride = (ndims == 3) ? input_ops[0]->dtensor.dim[2]
                                   : input_ops[0]->dtensor.dim[1];
   constexpr int GROUP_SIZE = 128;
+  int group_tiles = bgraph.grid_dim.x;
 
   // For UE8M0 path: scale_outer_stride is the stride between packed scale
   // columns in the column-major output layout (= aligned_batch for UE8M0)
@@ -4265,11 +4281,12 @@ int TaskRegister::register_quantize_fp8_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $,",
+  code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $, $,",
          batch_size,
          hidden_size,
          GROUP_SIZE,
-         input_stride);
+         input_stride,
+         group_tiles);
   code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $>(",
          scale_ue8m0 ? "true" : "false");
   code.e("    task_desc->input_ptrs[0],");  // input bf16
@@ -4281,7 +4298,8 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // (float32 writes directly).
   code.e("    1e-10f, -448.0f, 448.0f,");
   code.e("    $,", aligned_batch);
-  code.e("    task_desc->task_metadata.request_id);");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx);");
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
 

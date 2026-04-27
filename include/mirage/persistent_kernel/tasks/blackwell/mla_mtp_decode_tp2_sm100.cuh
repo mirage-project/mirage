@@ -38,6 +38,8 @@ namespace mla_mtp_tp2 {
 #define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 12, 128;" ::: "memory")
 
 static constexpr int NUM_HEADS = 64;
+static constexpr int HEAD_GROUPS = 2;
+static constexpr int HEADS_PER_GROUP = NUM_HEADS / HEAD_GROUPS;
 static constexpr int D_K = 576;
 static constexpr int D_V = 512;
 static constexpr int TILE_S = 128; // KV tokens per tile
@@ -156,14 +158,19 @@ __device__ __noinline__ void
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
-  int const gi = block_x / sk;
-  int const si = block_x % sk;
+  int const packed = block_x / HEAD_GROUPS;
+  int const head_group = block_x % HEAD_GROUPS;
+  int const gi = packed / sk;
+  int const si = packed % sk;
   int const bi = block_y;
 
   int const num_groups = (Q_LEN + qpg - 1) / qpg;
   if (gi >= num_groups) {
     return;
   }
+  int const hpb = HEADS_PER_GROUP;
+  int const head_start = head_group * hpb;
+  int const actual_qpg = min(qpg, Q_LEN - gi * qpg);
 
   int const kvt = (kv_len + TILE_S - 1) / TILE_S;
   int const tps = (kvt + sk - 1) / sk;
@@ -171,14 +178,14 @@ __device__ __noinline__ void
   int const t1 = min(t0 + tps, kvt);
   if (t0 >= t1) {
     int block_linear = bi * num_groups * sk + gi * sk + si;
-    if (tid < 128) {
-      La[block_linear * 128 + tid] = -1e30f;
+    int const valid_rows = actual_qpg * hpb;
+    if (tid < valid_rows) {
+      int const h_final = head_start + tid % hpb;
+      int const partial_row = (tid / hpb) * NUM_HEADS + h_final;
+      La[block_linear * 128 + partial_row] = -1e30f;
     }
     return;
   }
-
-  int const hpb = NUM_HEADS;
-  int const actual_qpg = min(qpg, Q_LEN - gi * qpg);
 
   extern __shared__ __align__(1024) char smem_buf[];
   int const smem_base = __cvta_generic_to_shared(smem_buf);
@@ -302,7 +309,8 @@ __device__ __noinline__ void
                      : "memory");
         for (int q = 0; q < actual_qpg; q++) {
           int actual_q_idx = gi * qpg + q;
-          int global_row = bi * Q_LEN * NUM_HEADS + actual_q_idx * NUM_HEADS;
+          int global_row =
+              bi * Q_LEN * NUM_HEADS + actual_q_idx * NUM_HEADS + head_start;
           asm volatile(
               "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_"
               "tx::bytes "
@@ -688,7 +696,8 @@ __device__ __noinline__ void
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
     constexpr bool write_final = SINGLE_TILE;
     int const q_final = gi * qpg + tid / hpb;
-    int const h_final = tid % hpb;
+    int const h_final = head_start + tid % hpb;
+    int const partial_row = (tid / hpb) * NUM_HEADS + h_final;
     for (int vc = 0; vc < V_CHUNKS; vc++) {
       int out_taddr_vc = taddr + vc * BK;
       for (int c = 0; c < BK; c += 16) {
@@ -715,7 +724,7 @@ __device__ __noinline__ void
               "=f"(t16[15])
             : "r"(addr));
         asm volatile("tcgen05.wait::ld.sync.aligned;");
-        int base_d = (vc * BK + c) * 128 + tid;
+        int base_d = (vc * BK + c) * 128 + partial_row;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
           nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
@@ -736,7 +745,8 @@ __device__ __noinline__ void
       }
     }
     if (!write_final) {
-      La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
+      La[block_linear * 128 + partial_row] =
+          log2f(fmaxf(row_sum, 1e-30f)) + row_max;
     }
   }
 

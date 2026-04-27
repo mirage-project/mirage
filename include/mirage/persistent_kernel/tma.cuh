@@ -1290,7 +1290,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_MLA_MTP_DECODE_TP2_SM100:
     case TASK_MLA_MTP_DECODE_TP4_SM100:
     case TASK_MLA_MTP_DECODE_TP8_SM100: {
-      // TP variants: Q box height = NUM_HEADS-per-TP (64/32/16),
+      // TP variants: Q box height = rows consumed by one CTA. TP2 splits
+      // its 64 local heads into 2 head groups, so each CTA loads 32 rows.
       // KV box = TILE_S=128. Same encoding as v037/v007/v001 host code.
       constexpr int BK = 64;
       constexpr int TILE_S = 128;
@@ -1302,7 +1303,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
       int num_heads =
-          (task_desc.task_type == TASK_MLA_MTP_DECODE_TP2_SM100)   ? 64
+          (task_desc.task_type == TASK_MLA_MTP_DECODE_TP2_SM100)   ? 32
           : (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) ? 32
                                                                    : 16;
       if (param_id == 0) {

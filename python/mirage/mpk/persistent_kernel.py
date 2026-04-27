@@ -1272,13 +1272,14 @@ class PersistentKernel:
         self,
         q_input, kv_input, output_partial, output_lse,
         q_len, kv_len, num_heads,
-        task_name, has_v_split=False, q_len_real=None,
+        task_name, has_v_split=False, q_len_real=None, head_groups=1,
     ):
         """Internal helper for TP=2/4/8 decode dispatch.
           q_len: padded Q_LEN passed to the kernel
           q_len_real: TP=8 only — actual unpadded Q_LEN
           num_heads: 64/32/16 per TP variant
           has_v_split: TP=4 only — block_x doubled to encode v_half in low bit
+          head_groups: TP=2 only — additional head split packed into block_x
         """
         if num_heads == 64:
             qpg = min(2, q_len)
@@ -1290,7 +1291,7 @@ class PersistentKernel:
         num_splits = (kv_len + 128 - 1) // 128  # TILE_S=128
         # TP=4 packs v_half into block_x low bit → 2× tasks. Kernel unpacks.
         x_mul = 2 if has_v_split else 1
-        grid_dim = (num_groups * num_splits * x_mul,
+        grid_dim = (num_groups * num_splits * x_mul * head_groups,
                     self.max_num_batched_requests,
                     1)
         block_dim = (128, 1, 1)
@@ -1349,6 +1350,7 @@ class PersistentKernel:
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=64,
             task_name="mla_mtp_decode_tp2_sm100",
+            head_groups=2,
         )
 
     def mla_mtp_decode_tp2_reduce_layer(
@@ -1624,6 +1626,20 @@ class PersistentKernel:
         scale_ue8m0=True: output scale is packed UE8M0 uint32 (for FP8 linear GEMM)
         scale_ue8m0=False: output scale is float32 (for MoE group GEMM)
         """
+        hidden_size = input.dim(input.num_dims - 1)
+        row_count = 1
+        for axis in range(input.num_dims - 1):
+            row_count *= input.dim(axis)
+        num_groups = max(1, hidden_size // 128)
+        if scale_ue8m0:
+            # Packed UE8M0 stores four group scales per uint32. Split only when
+            # tile boundaries stay aligned to that packing, so each CTA owns
+            # whole packed scale words.
+            group_tiles = 2 if num_groups >= 16 and num_groups % 8 == 0 else 1
+        else:
+            # Float-scale MoE quantization has no packing hazard.
+            group_tiles = min(4, max(1, num_groups // 8))
+        grid_dim = (group_tiles, row_count, 1)
         params = []
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, -1, -1), -1, True)
@@ -1857,11 +1873,16 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        residual: DTensor = None,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size)
         assert buffer.num_dims == 3  # (world_size, batch_size, hidden_size)
         assert output.num_dims == 2  # (batch_size, hidden_size)
+        if residual is not None:
+            assert residual.num_dims == 2  # (batch_size, hidden_size)
+            assert residual.dim(0) == output.dim(0)
+            assert residual.dim(1) == output.dim(1)
         # params[0]: num_gpus
         # params[1]: my_gpu_id
         best_implementation = auto_select_allreduce_implementation(self.world_size, self.mpi_rank)
@@ -1870,6 +1891,8 @@ class PersistentKernel:
             "buffer": buffer,
             "output": output,
         }
+        if residual is not None:
+            tensors["residual"] = residual
         params = [self.world_size, self.mpi_rank]
         best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim,
                                            block_dim=block_dim, params=params)

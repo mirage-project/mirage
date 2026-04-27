@@ -178,11 +178,10 @@ class DeepSeekV3Builder(GraphBuilder):
                 f"Not supported yet.")
         # Each FP8 linear task serializes all of the output tiles in its shard.
         # Large layers were still using the old 64/96-task heuristic, which
-        # leaves many workers idle on B200. Keep the caller's grid for small
-        # layers, but raise the task count for large layers so we at least fill
-        # the available worker pool without oversharding past the kernel's tile
-        # granularity (one 128-row output shard per task).
-        target_grid_x = min(max_grid, self.num_workers)
+        # leaves many workers idle on B200. Use one task per 128-row output
+        # shard whenever possible; this is the kernel's natural tile
+        # granularity and avoids the ~32-SM cap seen in traces.
+        target_grid_x = max_grid
         grid_dim = (min(max_grid, max(grid_dim[0], target_grid_x)),
                     grid_dim[1],
                     grid_dim[2])
@@ -1340,27 +1339,30 @@ class DeepSeekV3Builder(GraphBuilder):
         # fused-residual linear variant — the shared_expert's down_proj returns
         # partial output and moe_mul_sum_add combines routed+shared but does
         # not add the MLP-input residual. So match main layer's MoE pattern:
-        # always AllReduce + external elementwise_add.
-        if self.world_size > 1:
-            self.mpk.allreduce_layer(
-                input=self.mlp_out, buffer=self.allreduce_buf,
-                output=self.allreduce_out,
-                grid_dim=(self.hidden_size // 128, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            _mtp_mlp_contrib = self.allreduce_out
-        else:
-            _mtp_mlp_contrib = self.mlp_out
+        # allreduce first, then add residual. TP>1 fuses the residual add into
+        # the allreduce task's final local store.
         mtp_mlp_residual = self._cached_new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
             dtype=bfloat16,
             name="mtp_mlp_residual", io_category="cuda_tensor")
-        self.mpk.elementwise_add_layer(
-            input_a=self.mtp_x, input_b=_mtp_mlp_contrib, output=mtp_mlp_residual,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        self.mtp_x = mtp_mlp_residual
+        if self.world_size > 1:
+            self.mpk.allreduce_layer(
+                input=self.mlp_out, buffer=self.allreduce_buf,
+                output=mtp_mlp_residual,
+                residual=self.mtp_x,
+                grid_dim=(self.hidden_size // 128, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            self.mtp_x = mtp_mlp_residual
+        else:
+            _mtp_mlp_contrib = self.mlp_out
+            self.mpk.elementwise_add_layer(
+                input_a=self.mtp_x, input_b=_mtp_mlp_contrib,
+                output=mtp_mlp_residual,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            self.mtp_x = mtp_mlp_residual
         # Restore main model's hidden state
         self.x = _saved_x
 
@@ -2235,12 +2237,6 @@ class DeepSeekV3Builder(GraphBuilder):
                 self._build_moe_mlp(i, state_dict)
                 # MoE: always use explicit residual add (not fused into shared_expert).
                 if self.world_size > 1:
-                    self.mpk.allreduce_layer(
-                        input=self.mlp_out, buffer=self.allreduce_buf,
-                        output=self.allreduce_out,
-                        grid_dim=(self.hidden_size // 128, 1, 1),
-                        block_dim=(128, 1, 1),
-                    )
                     moe_residual_out = self.mpk.new_tensor(
                         dims=(self.max_num_batched_tokens, self.hidden_size),
                         dtype=bfloat16,
@@ -2249,10 +2245,13 @@ class DeepSeekV3Builder(GraphBuilder):
                     )
                     # Residual add must happen after allreduce; fusing it into
                     # moe_mul_sum_add would over-count residual on TP ranks.
-                    self.mpk.elementwise_add_layer(
-                        input_a=self.x, input_b=self.allreduce_out,
+                    # The NVSHMEM allreduce task fuses the post-reduce add at
+                    # its final local store.
+                    self.mpk.allreduce_layer(
+                        input=self.mlp_out, buffer=self.allreduce_buf,
                         output=moe_residual_out,
-                        grid_dim=(self.max_num_batched_tokens, 1, 1),
+                        residual=self.x,
+                        grid_dim=(self.hidden_size // 128, 1, 1),
                         block_dim=(128, 1, 1),
                     )
                     self.x = moe_residual_out

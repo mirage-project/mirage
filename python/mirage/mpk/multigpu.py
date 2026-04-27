@@ -195,14 +195,23 @@ class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
         assert len(params) == 2, "params should contain [world_size, rank]"
         input_tensor = tensors.pop("input")
         output_tensor = tensors.pop("output")
+        residual_tensor = tensors.pop("residual", None)
         # if len(tensors) > 0:
         #     print(f"{self} Unused tensors: {tensors.keys()}")
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_tensor, (1, -1, -1), -1, True)
+        if residual_tensor is not None:
+            tb_graph.new_input(residual_tensor, (1, -1, -1), -1, True)
         tb_graph.new_input(output_tensor, (1, -1, -1), -1, True)
-        mpk.kn_graph.customized([input_tensor, output_tensor], tb_graph)
-        mpk.kn_graph.register_task(tb_graph, "nvshmem_tile_allreduce", params)
+        if residual_tensor is None:
+            mpk.kn_graph.customized([input_tensor, output_tensor], tb_graph)
+            task_name = "nvshmem_tile_allreduce"
+        else:
+            mpk.kn_graph.customized(
+                [input_tensor, residual_tensor, output_tensor], tb_graph)
+            task_name = "nvshmem_tile_allreduce_with_residual"
+        mpk.kn_graph.register_task(tb_graph, task_name, params)
 
         # We should set NVSHMEM_MAX_TEAMS environment variable
         allocate_nvshmem_teams(mpk, grid_dim[0] * grid_dim[1] * grid_dim[2])

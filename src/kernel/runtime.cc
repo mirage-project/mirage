@@ -407,10 +407,9 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y;
               task.task_metadata.merge_task_offset = bid.z;
             }
-            // MLA-MTP TP variants: decode grid=(num_groups*sk[*2 if TP=4], B,
-            // 1) Python layer encodes block_x = gi*sk+si (or
-            // (block_x<<1)|v_half for TP=4) into kv_idx, batch into request_id.
-            // Kernel unpacks v_half from low bit of block_x for TP=4.
+            // MLA-MTP TP variants: Python layer packs decode metadata into
+            // block_x. TP2 additionally packs a head-group id, TP4 packs
+            // v_half in the low bit, and batch is stored in request_id.
             if (task_type == TASK_MLA_MTP_DECODE_TP2_SM100 ||
                 task_type == TASK_MLA_MTP_DECODE_TP4_SM100 ||
                 task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
@@ -439,10 +438,11 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_UNIFIED_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            // Set request_id for FP8 quantize (row index for column-major scale
-            // output)
+            // FP8 quantize uses grid=(group_tile, row, 1). request_id is the
+            // logical row; kv_idx is the hidden-group tile.
             if (task_type == TASK_QUANTIZE_FP8_SM100) {
-              task.task_metadata.request_id = bid.x;
+              task.task_metadata.request_id = bid.y;
+              task.task_metadata.kv_idx = bid.x;
             }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
