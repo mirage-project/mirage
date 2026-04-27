@@ -2086,7 +2086,7 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   int batch_size = 0, output_size, output_stride;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 2;
+  int num_inputs = 1;
   int num_outputs = 1;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -2097,18 +2097,26 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
-  assert(input_ops[0]->dtensor.num_dims == 2);
-  batch_size = input_ops[0]->output_tensors[0].dim[0];
-  output_size = input_ops[0]->output_tensors[0].dim[1];
+  int ndims = output_ops[0]->dtensor.num_dims;
+  assert(ndims == 2 || ndims == 3);
+  if (ndims == 3) {
+    batch_size = output_ops[0]->output_tensors[0].dim[0] *
+                 output_ops[0]->output_tensors[0].dim[1];
+    output_size = output_ops[0]->output_tensors[0].dim[2];
+  } else {
+    batch_size = output_ops[0]->output_tensors[0].dim[0];
+    output_size = output_ops[0]->output_tensors[0].dim[1];
+  }
   // get input stride
-  output_stride = input_ops[0]->dtensor.dim[1];
+  output_stride = ndims == 3 ? output_ops[0]->dtensor.dim[2]
+                             : output_ops[0]->dtensor.dim[1];
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::tensor_init_sm100_task_impl<cute::bfloat16_t, $, $, $>(",
          /*BATCH_SIZE=*/batch_size,
          /*OUTPUT_SIZE=*/output_size,
          /*OUTPUT_STRIDE=*/output_stride);
-  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
   code.e("    0);");
   return register_task_variant(TASK_TENSOR_INIT, code.to_string());
 }
@@ -2341,13 +2349,16 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
 
 int TaskRegister::register_moe_topk_sigmoid_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 3);
+  assert(params.size() == 3 || params.size() == 5);
   int num_groups = params[0];
   int topk_group = params[1];
   float scaling_factor;
   memcpy(&scaling_factor, &params[2], sizeof(float));
+  int local_expert_start = params.size() == 5 ? params[3] : 0;
+  int local_expert_end = params.size() == 5 ? params[4] : -1;
 
-  int batch_size = 0, num_experts = 0, num_experts_per_tok = 0;
+  int batch_size = 0, num_experts = 0, num_local_experts = 0,
+      num_experts_per_tok = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -2365,18 +2376,24 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   assert(output_ops[1]->output_tensors[0].num_dims == 2);
   assert(output_ops[2]->output_tensors[0].num_dims == 1);
-  num_experts = output_ops[1]->output_tensors[0].dim[0];
+  num_local_experts = output_ops[1]->output_tensors[0].dim[0];
   batch_size = output_ops[1]->output_tensors[0].dim[1];
   num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
   assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
-  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts + 1);
+  assert(output_ops[2]->output_tensors[0].dim[0] == num_local_experts + 1);
   // Validate input shapes
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
-  assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
+  num_experts = input_ops[0]->output_tensors[0].dim[1];
   // Validate bias shape
   assert(input_ops[1]->output_tensors[0].num_dims == 1);
   assert(input_ops[1]->output_tensors[0].dim[0] == num_experts);
+  if (local_expert_end < 0) {
+    local_expert_end = local_expert_start + num_local_experts;
+  }
+  assert(local_expert_start >= 0);
+  assert(local_expert_end == local_expert_start + num_local_experts);
+  assert(local_expert_end <= num_experts);
 
   assert(num_experts % num_groups == 0 &&
          "Number of experts must be divisible by number of groups");
@@ -2385,9 +2402,10 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
-         "$, $>(",
+         "$, $, $>(",
          /*VPT=*/8,
          /*EXPERTS=*/num_experts,
+         /*LOCAL_EXPERTS=*/num_local_experts,
          /*WARPS_PER_TB=*/8,
          /*BYTES_PER_LDG=*/16,
          /*NUM_GROUPS=*/num_groups,
@@ -2401,8 +2419,8 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   code.e("    $,", batch_size);
   code.e("    task_desc->output_ptrs[1],");
   code.e("    task_desc->output_ptrs[2],");
-  code.e("    0,");
-  code.e("    $,", num_experts);
+  code.e("    $,", local_expert_start);
+  code.e("    $,", local_expert_end);
   code.e("    $f);", scaling_factor);
   return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
 }

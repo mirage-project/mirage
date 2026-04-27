@@ -466,6 +466,7 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
                                                        int active_tokens) {
   nvshmem_team_t *teams = reinterpret_cast<nvshmem_team_t *>(_teams);
   nvshmem_team_t team = teams[task_offset];
+  int const num_active_rows = max(0, min(active_tokens, BATCH_SIZE));
 
   // --- Phase 1: ensure local data is visible, then cross-GPU barrier ---
   __threadfence();
@@ -496,11 +497,11 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
 
   if constexpr (OUTPUT_SIZE == OUTPUT_STRIDE) {
     // Contiguous: one pass over all rows
-    int total_v4 = V4_PER_ROW * active_tokens;
+    int total_v4 = V4_PER_ROW * num_active_rows;
     mpkar_nvls_reduce_v4_block<T>(dst_v4, src_mc_v4, total_v4);
   } else {
     // Strided: per-row
-    for (int row = 0; row < active_tokens; row++) {
+    for (int row = 0; row < num_active_rows; row++) {
       mpkar_nvls_reduce_v4_block<T>(
           dst_v4 + row * STRIDE_V4, src_mc_v4 + row * STRIDE_V4, V4_PER_ROW);
     }

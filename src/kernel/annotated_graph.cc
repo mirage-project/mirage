@@ -115,6 +115,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // wrote g MOST RECENTLY before L. After L is processed, L's outputs update
   // last_writer. Subsequent reads see L as the new writer. This is exactly
   // SSA-style def-use: we're implicitly renaming the reused buffer.
+  //
+  // Tensor-init writes need a program-order WAW edge to the next writer of the
+  // same guid. MPK uses this for MoE zero-fill followed by expert accumulation;
+  // without the edge, parallel-path scheduling can run the two writers
+  // concurrently even though the old linear schedule made zero-fill visible
+  // first. We intentionally do not add WAW edges for arbitrary scratch reuse:
+  // RAW edges already protect live ranges, and global WAW edges over-constrain
+  // common recycled scratch buffers.
   // ---------------------------------------------------------------------
   std::unordered_map<size_t, std::pair<int, int>> last_writer;
 
@@ -200,6 +208,52 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     // Write outputs: update last_writer after inputs are bound.
     for (int out_slot = 0; out_slot < num_outputs; out_slot++) {
       size_t guid = output_ops[out_slot]->dtensor.guid;
+      auto wit = last_writer.find(guid);
+      if (wit != last_writer.end() &&
+          ag.layers[wit->second.first].task_type ==
+              mirage::runtime::TASK_TENSOR_INIT) {
+        int prod_layer = wit->second.first;
+        int prod_out_slot = wit->second.second;
+        bool duplicate_edge = false;
+        for (int eidx : ag.layers[layer_idx].in_edges) {
+          EdgeInfo const &existing = ag.edges[eidx];
+          if (existing.prod_layer == prod_layer &&
+              existing.out_slot == prod_out_slot &&
+              existing.tensor_guid == guid) {
+            duplicate_edge = true;
+            break;
+          }
+        }
+        if (!duplicate_edge) {
+          EdgeInfo e;
+          e.prod_layer = prod_layer;
+          e.cons_layer = layer_idx;
+          e.out_slot = prod_out_slot;
+          e.in_slot = -1;
+          e.tensor_guid = guid;
+          // A WAW edge has no consumer input slot; use the consumer's output
+          // partition so event generation tracks the written buffer layout.
+          e.input_map = output_ops[out_slot]->input_map;
+
+          auto const *prod_op = ag.layers[prod_layer].op;
+          std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
+          split_bgraph_ops(prod_op->bgraph,
+                           ag.layers[prod_layer].num_inputs,
+                           prod_inputs,
+                           prod_outputs);
+          if (prod_out_slot < 0 ||
+              prod_out_slot >= (int)prod_outputs.size()) {
+            throw std::runtime_error(
+                "build_annotated_graph: invalid out_slot for WAW producer");
+          }
+          e.output_map = prod_outputs[prod_out_slot]->input_map;
+
+          int edge_idx = (int)ag.edges.size();
+          ag.edges.push_back(e);
+          ag.layers[layer_idx].in_edges.push_back(edge_idx);
+          ag.layers[prod_layer].out_edges.push_back(edge_idx);
+        }
+      }
       last_writer[guid] = {layer_idx, out_slot};
     }
   }
@@ -397,6 +451,21 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       msg << "build_annotated_graph: layer " << i
           << " is both a join-consumer and a fork-consumer (case 2); "
              "a task cannot have two trigger_events.";
+      msg << " task_type=" << static_cast<int>(ag.layers[i].task_type)
+          << " in_edges=";
+      for (int eidx : ag.layers[i].in_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
+            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
+            << "]";
+      }
+      msg << " out_edges=";
+      for (int eidx : ag.layers[i].out_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
+            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
+            << "]";
+      }
       throw std::runtime_error(msg.str());
     }
     if (is_join_producer[i] && ag.layers[i].is_fork_producer) {
@@ -404,6 +473,21 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       msg << "build_annotated_graph: layer " << i
           << " is both a join-producer and a fork-producer (case 3); "
              "a task cannot have two dependent_events.";
+      msg << " task_type=" << static_cast<int>(ag.layers[i].task_type)
+          << " in_edges=";
+      for (int eidx : ag.layers[i].in_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
+            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
+            << "]";
+      }
+      msg << " out_edges=";
+      for (int eidx : ag.layers[i].out_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
+            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
+            << "]";
+      }
       throw std::runtime_error(msg.str());
     }
   }
@@ -544,7 +628,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     ForkGroupInfo fg;
     fg.producer_layer = i;
-    fg.outgoing_edges = ag.layers[i].out_edges;
+    std::unordered_set<int> seen_consumers;
+    for (int eidx : ag.layers[i].out_edges) {
+      int cons_layer = ag.edges[eidx].cons_layer;
+      if (seen_consumers.insert(cons_layer).second) {
+        fg.outgoing_edges.push_back(eidx);
+      }
+    }
 
     // N-way LCM per grid axis.
     std::array<int, 3> lcm_last3{};
@@ -623,7 +713,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     JoinGroupInfo jg;
     jg.consumer_layer = i;
-    jg.incoming_edges = ag.layers[i].in_edges;
+    std::unordered_set<int> seen_producers;
+    for (int eidx : ag.layers[i].in_edges) {
+      int prod_layer = ag.edges[eidx].prod_layer;
+      if (seen_producers.insert(prod_layer).second) {
+        jg.incoming_edges.push_back(eidx);
+      }
+    }
 
     std::array<int, 3> lcm_last3{};
     for (int g = 0; g < 3; g++) {

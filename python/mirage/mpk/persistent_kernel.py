@@ -1280,15 +1280,16 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # Currently assume that output
-        assert input.num_dims == 2  # (batch_size, output_size)
+        # In-place zero fill modeled as a real graph output. dummy_input only
+        # carries the request-row partition/dependency.
+        assert input.num_dims in (2, 3)  # (batch_size, output_size) or flattened 3D rows
         assert dummy_input.num_dims == 2 # (batch_size, hidden_size)
         assert dummy_output.num_dims == 2 # (batch_size, output_size)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        input_partition = (0, -1, -1) if input.num_dims == 2 else (0, 1, -1)
         tb_graph.new_input(dummy_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(dummy_output, (0, -1, -1), -1, True)
-        self.kn_graph.customized([input, dummy_input, dummy_output], tb_graph)
+        tb_graph.new_input(input, input_partition, -1, True)
+        self.kn_graph.customized([dummy_input, input], tb_graph)
 
         self.kn_graph.register_task(tb_graph, "tensor_init")
     
@@ -1325,19 +1326,32 @@ class PersistentKernel:
         num_groups: int = 8,
         topk_group: int = 4,
         routed_scaling_factor: float = 2.5,
+        local_expert_start: int = 0,
     ):
         import struct
 
         assert input.num_dims == 2  # (batch_size, num_experts)
+        total_num_experts = input.dim(1)
         assert bias.num_dims == 1  # (num_experts,)
+        assert bias.dim(0) == total_num_experts
         assert len(output) == 3
         moe_topk_weight, moe_routing_indices, moe_masks = output
         assert moe_topk_weight.num_dims == 2  # (batch_size, num_experts_per_tok)
-        assert moe_routing_indices.num_dims == 2  # (num_experts, batch_size)
-        assert moe_masks.num_dims == 1  # (num_experts + 1)
+        assert moe_routing_indices.num_dims == 2  # (local_num_experts, batch_size)
+        assert moe_masks.num_dims == 1  # (local_num_experts + 1)
+        local_num_experts = moe_routing_indices.dim(0)
+        assert moe_masks.dim(0) == local_num_experts + 1
+        assert 0 <= local_expert_start
+        assert local_expert_start + local_num_experts <= total_num_experts
 
         scaling_bits = struct.unpack("i", struct.pack("f", routed_scaling_factor))[0]
-        params = [num_groups, topk_group, scaling_bits]
+        params = [
+            num_groups,
+            topk_group,
+            scaling_bits,
+            local_expert_start,
+            local_expert_start + local_num_experts,
+        ]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (0, -1, -1), -1, True)

@@ -46,6 +46,7 @@ __global__ __launch_bounds__(256) void topk_sigmoid_kernel(
   kernel::topk_sigmoid_task_impl<T,
                                  VPT,
                                  EXPERTS,
+                                 EXPERTS,
                                  WARPS_PER_TB,
                                  BYTES_PER_LDG,
                                  NUM_GROUPS,

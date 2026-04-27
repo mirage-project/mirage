@@ -81,6 +81,10 @@ if __name__ == "__main__":
     parser.add_argument("--mtp", type=int, default=0, choices=[0, 1, 2, 3],
                         help="MTP speculative decoding. 0=disabled, 1-3=number of "
                              "speculative tokens drafted per step.")
+    parser.add_argument("--ep-size", type=int, default=1,
+                        help="Expert-parallel group count for routed MoE experts. "
+                             "Non-MoE layers and shared experts keep TP=world_size; "
+                             "routed experts use TP=world_size/ep_size.")
     parser.add_argument("--rejection-sample-method", default="strict", type=str,
                         choices=["strict", "probabilistic", "synthetic"],
                         help="Rejection sampling method for speculative decoding")
@@ -144,6 +148,13 @@ if __name__ == "__main__":
 
     print("Input arguments:", args)
     print(f"world_size({world_size}) rank({rank})")
+    if args.ep_size < 1 or world_size % args.ep_size != 0:
+        raise ValueError(
+            f"--ep-size must divide world_size: ep_size={args.ep_size}, "
+            f"world_size={world_size}"
+        )
+    if 256 % args.ep_size != 0:
+        raise ValueError(f"--ep-size must divide 256 routed experts: {args.ep_size}")
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(rank)
 
@@ -340,6 +351,7 @@ if __name__ == "__main__":
             spec_decode_config=spec_decode_config,
             use_cutlass_kernel=True,
         )
+        mpk.ep_size = args.ep_size
 
         # Load state dict from converted weights
         print(f"Loading model weights from: {args.model_path}")
@@ -587,6 +599,18 @@ if __name__ == "__main__":
             if world_size > 1:
                 from convert import shard_tensor
                 import re
+                num_routed_experts = getattr(
+                    config,
+                    "n_routed_experts",
+                    getattr(config, "num_experts", 256),
+                )
+                assert num_routed_experts % args.ep_size == 0
+                routed_tp_size = world_size // args.ep_size
+                routed_tp_rank = rank % routed_tp_size
+                ep_rank = rank // routed_tp_size
+                local_num_experts = num_routed_experts // args.ep_size
+                local_expert_start = ep_rank * local_num_experts
+                local_expert_end = local_expert_start + local_num_experts
                 # Sharding rules for POST-CONVERSION keys (absorbed, fused).
                 # dim=0: row-parallel (shard output), dim=1: col-parallel (shard input),
                 # None: replicate. For 3D expert tensors, None (replicated).
@@ -612,12 +636,12 @@ if __name__ == "__main__":
                     (r"mlp\.down_proj\.weight",                              1),
                     (r"mlp\.gate\.weight$",                                  None),
                     (r"mlp\.gate\.e_score_correction_bias$",                 None),
-                    # MoE experts w13/w2: TP-sharded per vLLM pattern (no EP).
-                    # Every rank has all experts, each with TP-sharded weights.
+                    # MoE experts w13/w2: routed experts can be EP-sharded.
+                    # Each EP group keeps a disjoint expert range and shards the
+                    # intermediate dimension across routed_tp_size=world_size/EP.
                     # w13 [E, 2*inter, hidden]: column-parallel on intermediate (dim=1)
                     # w2  [E, hidden, inter]:   row-parallel on intermediate    (dim=2)
                     # AllReduce after moe_mul_sum_add sums partial contributions.
-                    # Builder uses moe_intermediate_size = FULL//world_size, matching this.
                     (r"mlp\.experts\.w13\.weight",                           1),
                     (r"mlp\.experts\.w2\.weight",                            2),
                     # Shared expert: gate_proj/up_proj are separate keys (not fused
@@ -640,10 +664,30 @@ if __name__ == "__main__":
                             return dim
                     return None  # default: replicate
 
-                print(f"\n  TP sharding (world_size={world_size}, rank={rank})...")
+                print(
+                    f"\n  TP/EP sharding (world_size={world_size}, rank={rank}, "
+                    f"ep_size={args.ep_size}, routed_tp_size={routed_tp_size}, "
+                    f"local_experts=[{local_expert_start},{local_expert_end}))..."
+                )
                 for k in list(state_dict.keys()):
                     base_key = k.replace("_scale_inv", "")
                     shard_dim = _get_tp_shard_dim(base_key)
+                    is_routed_expert = (
+                        "mlp.experts.w13.weight" in base_key
+                        or "mlp.experts.w2.weight" in base_key
+                    )
+                    tp_rank_for_key = routed_tp_rank if is_routed_expert else rank
+                    tp_size_for_key = routed_tp_size if is_routed_expert else world_size
+                    if is_routed_expert and args.ep_size > 1:
+                        old_shape = tuple(state_dict[k].shape)
+                        state_dict[k] = state_dict[k].narrow(
+                            0, local_expert_start, local_num_experts
+                        ).contiguous()
+                        if rank == 0:
+                            print(
+                                f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
+                                f"(EP experts {local_expert_start}:{local_expert_end})"
+                            )
                     if shard_dim is not None and state_dict[k].dim() >= 2:
                         # Special handling for experts.w13: it's cat([gate, up], dim=1)
                         # so naive dim=1 shard takes all-gate or all-up per rank.
@@ -653,17 +697,26 @@ if __name__ == "__main__":
                             half = w.shape[shard_dim] // 2
                             gate_half = w.narrow(shard_dim, 0, half)
                             up_half = w.narrow(shard_dim, half, half)
-                            gate_shard = shard_tensor(gate_half, shard_dim, rank, world_size)
-                            up_shard = shard_tensor(up_half, shard_dim, rank, world_size)
+                            gate_shard = shard_tensor(
+                                gate_half, shard_dim, tp_rank_for_key, tp_size_for_key)
+                            up_shard = shard_tensor(
+                                up_half, shard_dim, tp_rank_for_key, tp_size_for_key)
                             old_shape = tuple(w.shape)
                             state_dict[k] = torch.cat([gate_shard, up_shard], dim=shard_dim).contiguous()
                             if rank == 0:
-                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (w13 split-shard dim={shard_dim})")
+                                print(
+                                    f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
+                                    f"(w13 split-shard dim={shard_dim}, tp={tp_size_for_key})"
+                                )
                         else:
                             old_shape = tuple(state_dict[k].shape)
-                            state_dict[k] = shard_tensor(state_dict[k], shard_dim, rank, world_size)
+                            state_dict[k] = shard_tensor(
+                                state_dict[k], shard_dim, tp_rank_for_key, tp_size_for_key)
                             if rank == 0 and old_shape != tuple(state_dict[k].shape):
-                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (dim={shard_dim})")
+                                print(
+                                    f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
+                                    f"(dim={shard_dim}, tp={tp_size_for_key})"
+                                )
                     elif shard_dim is not None and state_dict[k].dim() < 2:
                         if rank == 0 and "shared_experts" in k:
                             print(f"    [WARN] {k}: dim={state_dict[k].dim()} < 2, shard_dim={shard_dim} → SKIPPED (1D tensor)")
