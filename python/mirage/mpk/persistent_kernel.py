@@ -1771,10 +1771,15 @@ class PersistentKernel:
             row_count *= input.dim(axis)
         num_groups = max(1, hidden_size // 128)
         if scale_ue8m0:
-            # Packed UE8M0 stores four group scales per uint32. Split only when
-            # tile boundaries stay aligned to that packing, so each CTA owns
-            # whole packed scale words.
-            group_tiles = 2 if num_groups >= 16 and num_groups % 8 == 0 else 1
+            # Packed UE8M0 stores four group scales per uint32. Split only at
+            # four-group boundaries so each CTA owns whole packed scale words.
+            group_tiles = 1
+            for candidate in range(min(8, num_groups), 1, -1):
+                if num_groups % candidate == 0:
+                    groups_per_tile = num_groups // candidate
+                    if groups_per_tile % 4 == 0:
+                        group_tiles = candidate
+                        break
         else:
             # Float-scale MoE quantization has no packing hazard.
             group_tiles = min(4, max(1, num_groups // 8))

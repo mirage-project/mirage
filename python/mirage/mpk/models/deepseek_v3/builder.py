@@ -169,22 +169,25 @@ class DeepSeekV3Builder(GraphBuilder):
         if weight_scale.num_dims != 2:
             raise ValueError("FP8 linear expects a 2D packed UE8M0 scale tensor.")
 
-        # New FP8 kernel: each CTA processes output_size=128. Grid splits output.
+        # New FP8 kernel: grid.x splits the output dimension. The SM100 kernel
+        # internally uses BLOCK_N=16, so a task shard can be as small as 16
+        # output columns. Keep enough shards to fill B200 on small projections
+        # instead of forcing every layer back to a 128-column shard.
         output_size = weight.dim(0)
-        max_grid = output_size // 128
+        max_grid = output_size // 16
         if max_grid < 1:
             raise ValueError(
-                f"FP8 linear: output_size={output_size} < 128 (BLOCK_N). "
+                f"FP8 linear: output_size={output_size} < 16 (BLOCK_N). "
                 f"Not supported yet.")
-        # Each FP8 linear task serializes all of the output tiles in its shard.
-        # Large layers were still using the old 64/96-task heuristic, which
-        # leaves many workers idle on B200. Use one task per 128-row output
-        # shard whenever possible; this is the kernel's natural tile
-        # granularity and avoids the ~32-SM cap seen in traces.
-        target_grid_x = max_grid
-        grid_dim = (min(max_grid, max(grid_dim[0], target_grid_x)),
-                    grid_dim[1],
-                    grid_dim[2])
+        target_tile = 64 if output_size <= self.hidden_size and output_size % 64 == 0 else 128
+        target_grid_x = max(1, output_size // target_tile)
+        grid_x = min(max_grid, max(grid_dim[0], target_grid_x))
+        while grid_x > 1:
+            shard = output_size // grid_x
+            if output_size % grid_x == 0 and shard >= 16 and shard % 16 == 0:
+                break
+            grid_x -= 1
+        grid_dim = (grid_x, grid_dim[1], grid_dim[2])
 
         mbt = self.max_num_batched_tokens
         reduction_size = weight.dim(1) if weight.num_dims == 2 else weight.dim(-1)
@@ -2294,7 +2297,8 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         self.mpk.embed_layer(
             input=self.x, weight=w_embed, output=self.y,
-            grid_dim=(1, 1, 1), block_dim=(128, 1, 1), input_source=1,
+            grid_dim=(self.hidden_size // 128, 1, 1),
+            block_dim=(128, 1, 1), input_source=1,
         )
         self.x = self.y
 
