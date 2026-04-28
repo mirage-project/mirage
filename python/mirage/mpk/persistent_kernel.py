@@ -1682,6 +1682,57 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_with_residual_sm100", params)
 
+    def linear_fp8_mpk_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # MPK-native FP8 linear (swapAB inside the kernel). Same Python-layer
+        # API as linear_fp8_layer; the kernel maps weight->A and input->B.
+        # Constraints (asserted at registration time):
+        #   per-task output size (output.dim[1] / grid_dim.x) must be a
+        #   multiple of 128, and batch_size must be <= 16 (decode-only).
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_fp8_mpk_sm100", params)
+
+    def linear_fp8_mpk_with_residual_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        params = [1]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (0, -1, -1), -1, True)
+        tb_graph.new_input(residual, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, residual, output],
+            tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "linear_fp8_mpk_with_residual_sm100", params)
+
     def moe_silu_mul_layer(
         self,
         input: DTensor,

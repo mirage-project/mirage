@@ -4186,6 +4186,208 @@ int TaskRegister::register_linear_fp8_sm100_task(
   }
 }
 
+int TaskRegister::register_linear_fp8_mpk_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool with_residual) {
+  // Inputs (Python-layer order): input_fp8, input_scale, weight_fp8,
+  // weight_scale, [residual]
+  // Output: output_bf16
+  //
+  // The kernel internally swaps A<->B (linear_fp8_mpk_sm100_task_impl): A=weight
+  // (M-axis = per-task output_size), B=activation (N-axis = batch). So the
+  // codegen routes weight_fp8 -> tma_a, input_fp8 -> tma_b, weight_scale ->
+  // tma_sfa, input_scale -> tma_sfb. This is the only place that reorder
+  // happens; the runtime task_desc->input_tma_desc_ptrs[] keeps Python-layer
+  // order.
+  bool rank_with_residual = with_residual;
+  if (with_residual) {
+    assert(params.size() == 1);
+    rank_with_residual = (params[0] == 1);
+  } else {
+    assert(params.size() == 0);
+  }
+  int batch_size = 0, output_size_per_task = 0, reduction_size = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = with_residual ? 5 : 4;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // STensor (per-task tile) holds the post-grid-split shape.
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size_per_task = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  reduction_size = input_ops[0]->dtensor.dim[1];
+
+  // Hard constraints from the kernel design (see plan):
+  //   - per-task output size must be a multiple of MMA_M=128 (the swapped
+  //     A-side tile height; one CTA covers an integer number of these).
+  //   - decode-only: batch_size must fit in MMA_N=16 (one shot, no inner
+  //     N-walk). Larger M would re-introduce the same serialization the new
+  //     kernel was built to avoid.
+  assert(output_size_per_task % 128 == 0 &&
+         "linear_fp8_mpk_sm100 requires per-task output size divisible by 128");
+  assert(batch_size <= 16 &&
+         "linear_fp8_mpk_sm100 is decode-only: BATCH_SIZE must be <= 16");
+  assert(reduction_size % 128 == 0 &&
+         "linear_fp8_mpk_sm100 requires K divisible by BLOCK_K=128");
+
+  // Output stride (column dim) in global memory. For the MPK FP8 swapAB
+  // kernel we always treat the output as row-major BF16 [BATCH, OUTPUT].
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+
+  // Codegen mirrors register_linear_sm100_task (BF16 MPK) with the only
+  // additions being: (a) FP8 element type for A/B, (b) two raw uint32_t*
+  // scale pointers passed through after BiasTensor, (c) FP8-tuned
+  // BLOCK_K=128 (UMMA_K=32) instead of BLOCK_K=64 (UMMA_K=16).
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  constexpr int MMA_M = 128;
+  constexpr int MMA_N = 16;
+  constexpr int num_ab_stages = 8;
+  constexpr int num_acc_stages = 2;
+  constexpr int num_c_stages = 4;
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+  // FP8 path: TMA copies whole BLOCK_K=128 K-tile per shot (one byte per
+  // element, so 128 bytes/row fits in the 128B swizzle).
+  constexpr int TMA_CP_ASYNC_SIZE = 128;
+  constexpr int TILE_SIZE = 128;
+  int const output_tma_cp_size = 128;
+  int const output_atom_size = 128;
+
+  // tma_a = WEIGHT (after swap A-side). FP8 element, [OUTPUT_SIZE,
+  // REDUCTION_SIZE], row-major, K-major TMA.
+  code.e("using TMA_A = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         output_size_per_task, /*GMEM_ROW_*/
+         reduction_size,       /*GMEM_COL_*/
+         MMA_M,                /*SMEM_ROW_*/
+         TMA_CP_ASYNC_SIZE,    /*SMEM_COL_*/
+         reduction_size,       /*GMEM_STRIDE_ROW_*/
+         1,                    /*GMEM_STRIDE_COL_*/
+         1,                    /*SMEM_REPEAT_ROW_*/
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
+             TMA_CP_ASYNC_SIZE,    /*SMEM_REPEAT_COL_*/
+         MMA_M * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+  );
+  // tma_b = INPUT (after swap B-side). FP8 element, [BATCH_SIZE,
+  // REDUCTION_SIZE], row-major, K-major TMA.
+  code.e("using TMA_B = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         batch_size,        /*GMEM_ROW_*/
+         reduction_size,    /*GMEM_COL_*/
+         MMA_N,             /*SMEM_ROW_*/
+         TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
+         reduction_size,    /*GMEM_STRIDE_ROW_*/
+         1,                 /*GMEM_STRIDE_COL_*/
+         1,                 /*SMEM_REPEAT_ROW_*/
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
+             TMA_CP_ASYNC_SIZE,    /*SMEM_REPEAT_COL_*/
+         MMA_N * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+  );
+  // tma_out = OUTPUT BF16 [BATCH_SIZE, OUTPUT_SIZE], row-major.
+  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, "
+         "$, $, $, $, $, $, $, $, true>;",
+         0,
+         M,
+         S,
+         batch_size,           /*GMEM_ROW_*/
+         output_size_per_task, /*GMEM_COL_*/
+         MMA_N,                /*SMEM_ROW_*/
+         MMA_M,                /*SMEM_COL_*/
+         output_stride,        /*GMEM_STRIDE_ROW_*/
+         1,                    /*GMEM_STRIDE_COL_*/
+         1,                    /*SMEM_REPEAT_ROW_*/
+         (output_atom_size + output_tma_cp_size - 1) /
+             output_tma_cp_size, /*SMEM_REPEAT_COL_*/
+         MMA_N * MMA_M           /*SMEM_STRIDE_*/
+  );
+  code.inc_indent();
+  // Construct typed wrappers from CUtensorMap pointers stashed on TaskDesc.
+  // SwapAB wiring: the weight tensor (Python slot 2) becomes the kernel's
+  // A; the input tensor (Python slot 0) becomes the kernel's B.
+  code.e("TMA_A "
+         "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0])"
+         ");");
+  code.e("TMA_B "
+         "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0])"
+         ");");
+  code.e("TMA_OUT "
+         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
+         "0]));");
+
+  // Raw uint32_t* scale pointers. The Python layer's quantize step writes
+  // UE8M0-packed scales (4 bytes per K=128 row of A or B). We trust the
+  // runtime to point input_ptrs[1] / [3] at those packed buffers.
+  // SwapAB wiring: weight_scale (slot 3) is the kernel's A-side scale,
+  // input_scale (slot 1) is the kernel's B-side scale.
+  code.e("uint32_t const *weight_scale_ptr = "
+         "static_cast<uint32_t const*>(task_desc->input_ptrs[3]);");
+  code.e("uint32_t const *input_scale_ptr  = "
+         "static_cast<uint32_t const*>(task_desc->input_ptrs[1]);");
+
+  // BiasTensor: a CuTe gmem tensor over the residual when present, or a
+  // nullptr-backed placeholder when absent. The kernel branches on NOBIAS
+  // (compile-time) and never dereferences mBias when NOBIAS=true.
+  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
+         "cute::make_stride($, cute::Int<1>{}));",
+         batch_size,
+         output_size_per_task,
+         output_stride);
+  code.e("cute::Tensor mBias = "
+         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+         "$)), layout_Bias);",
+         (with_residual && rank_with_residual) ? "task_desc->input_ptrs[4]"
+                                               : "nullptr");
+
+  code.e("kernel::linear_fp8_mpk_sm100_task_impl<cutlass::float_e4m3_t, "
+         "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
+         "$, $, $, $, $, $, $, $, $>(",
+         MMA_M,
+         MMA_N,
+         batch_size,
+         output_size_per_task,
+         reduction_size,
+         (with_residual && rank_with_residual) ? "false" : "true", // NOBIAS
+         num_ab_stages,
+         num_acc_stages,
+         num_c_stages);
+  code.e("    tma_a,");
+  code.e("    tma_b,");
+  code.e("    weight_scale_ptr,");
+  code.e("    input_scale_ptr,");
+  code.e("    mBias,");
+  code.e("    tma_out);");
+
+  if (with_residual) {
+    return register_task_variant(TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100,
+                                 code.to_string());
+  } else {
+    return register_task_variant(TASK_LINEAR_FP8_MPK_SM100, code.to_string());
+  }
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)

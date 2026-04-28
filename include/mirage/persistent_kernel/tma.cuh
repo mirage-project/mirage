@@ -965,6 +965,142 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_LINEAR_FP8_MPK_SM100:
+    case TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100: {
+      // MPK-native FP8 swapAB kernel. Tile shapes match the kernel template:
+      // MMA_M=128 along the OUTPUT axis (kernel's A = weight after swap),
+      // MMA_N=16 along the BATCH axis (kernel's B = input after swap),
+      // BLOCK_K=128. Scales are NOT TMA'd here (raw pointers handle them in
+      // the producer warp).
+      constexpr int MMA_M_MPK = 128;
+      constexpr int MMA_N_MPK = 16;
+      constexpr int BLOCK_K_MPK = 128;
+      bool with_res =
+          (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100);
+      bool is_output_mpk = (param_id == (size_t)(task_desc.num_inputs));
+
+      // The kernel uses kernel::tma::tma_2d typed wrappers, which issue
+      // cp.async.bulk.tensor.5d.* PTX. That requires a *5D-encoded* descriptor
+      // (rank=5 with trailing dims = 1) — encoding as rank=2 produces an
+      // illegal instruction at runtime. We mirror Mirage's `fill_tma_desc`
+      // (tma.cuh:30+) which always emits rank=5 descriptors.
+      if (param_id == 0) {
+        // input_fp8 (slot 0) -> kernel's TMA_B (B-side). dim=[batch, K].
+        int batch = tensor_desc.dim[0];
+        int K = tensor_desc.dim[1];
+        uint64_t gd[5] = {(uint64_t)K, (uint64_t)batch, 1, 1, 1};
+        uint64_t gs[4] = {(uint64_t)K * 1, 0, 0, 0};
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_MPK,
+                          (uint32_t)min(MMA_N_MPK, batch),
+                          1, 1, 1};
+        uint32_t es[5] = {1, 1, 1, 1, 1};
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                   5,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(result, &err);
+          std::cerr << "TMA MPK FP8 input failed: " << err << std::endl;
+        }
+      } else if (param_id == 2) {
+        // weight_fp8 (slot 2) -> kernel's TMA_A (A-side). dim=[output_per_task, K].
+        int output_pt = tensor_desc.dim[0];
+        int K = tensor_desc.dim[1];
+        uint64_t gd[5] = {(uint64_t)K, (uint64_t)output_pt, 1, 1, 1};
+        uint64_t gs[4] = {(uint64_t)K * 1, 0, 0, 0};
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_MPK,
+                          (uint32_t)MMA_M_MPK,
+                          1, 1, 1};
+        uint32_t es[5] = {1, 1, 1, 1, 1};
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                   5,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(result, &err);
+          std::cerr << "TMA MPK FP8 weight failed: " << err << std::endl;
+        }
+      } else if (with_res && param_id == 4) {
+        // residual (BF16): dim=[batch, output_per_task], stride=[stride0, 1].
+        int batch = tensor_desc.dim[0];
+        int output_pt = tensor_desc.dim[1];
+        int stride = tensor_desc.stride[0];
+        uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
+        uint64_t gs[4] = {(uint64_t)stride * 2, 0, 0, 0};
+        uint32_t bd[5] = {(uint32_t)MMA_M_MPK,
+                          (uint32_t)min(MMA_N_MPK, batch),
+                          1, 1, 1};
+        uint32_t es[5] = {1, 1, 1, 1, 1};
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                   5,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_NONE,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(result, &err);
+          std::cerr << "TMA MPK FP8 residual failed: " << err << std::endl;
+        }
+      } else if (is_output_mpk) {
+        // output (BF16): dim=[batch, output_per_task], stride=[stride0, 1].
+        int batch = tensor_desc.dim[0];
+        int output_pt = tensor_desc.dim[1];
+        int stride = tensor_desc.stride[0];
+        uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
+        uint64_t gs[4] = {(uint64_t)stride * 2, 0, 0, 0};
+        uint32_t bd[5] = {(uint32_t)MMA_M_MPK,
+                          (uint32_t)min(MMA_N_MPK, batch),
+                          1, 1, 1};
+        uint32_t es[5] = {1, 1, 1, 1, 1};
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                   5,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_NONE,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(result, &err);
+          std::cerr << "TMA MPK FP8 output failed: " << err << std::endl;
+        }
+      }
+      break;
+    }
     case TASK_SPLITK_LINEAR_SM100: {
       int const cp_async_size = 64;
       const size_t smem_repeat_row = 1;
@@ -1503,6 +1639,26 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       create_tma_desc_for_tensor(
           task_desc, task_desc.outputs[0], task_desc.num_inputs, 0); // CD
+      break;
+    }
+    case TASK_LINEAR_FP8_MPK_SM100:
+    case TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100: {
+      // MPK-native FP8 swapAB kernel: TMA only for the data tensors and
+      // (optionally) residual. Scales (UE8M0 packed uint32) are passed as
+      // raw global pointers from task_desc->input_ptrs[]; the kernel
+      // dereferences them directly inside the producer warp and feeds them
+      // to UTCCP.
+      // Tensor order (Python-layer): 0=input_fp8, 1=input_scale,
+      // 2=weight_fp8, 3=weight_scale, 4=residual?, output[0]=out.
+      bool with_res =
+          (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100);
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);
+      if (with_res) {
+        create_tma_desc_for_tensor(task_desc, task_desc.inputs[4], 4, 0);
+      }
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.outputs[0], task_desc.num_inputs, 0);
       break;
     }
     case TASK_PAGED_ATTENTION_HOPPER: {
