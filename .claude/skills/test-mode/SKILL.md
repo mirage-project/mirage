@@ -283,6 +283,4 @@ The `LD_PRELOAD` is required so `dlopen()`-loaded launcher modules resolve `nvsh
 | File | What it tests |
 |---|---|
 | `tests/runtime_python/test_mode/test_rmsnorm_testmode.py` | Single layer (RMSNorm), default meta tensors |
-| `tests/runtime_python/test_mode/test_prepare_next_batch_testmode.py` | Verifies `prepare_next_batch` runs and populates metadata (asserts `step` advanced) |
 | `tests/runtime_python/test_mode/test_diamond_fork_join_testmode.py` | Multi-task graph (synthetic fork+join) |
-| `tests/runtime_python/test_mode/test_multigpu_rmsnorm_testmode.py` | Multi-GPU smoke test under `mpirun -n 2` |
