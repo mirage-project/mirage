@@ -879,6 +879,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "nvshmem_global_argmax") {
+    int variant_id = task_register->register_nvshmem_global_argmax_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 3, TASK_NVSHMEM_GLOBAL_ARGMAX, variant_id);
   }
 
   else {

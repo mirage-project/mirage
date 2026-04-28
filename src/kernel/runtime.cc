@@ -444,7 +444,8 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y;
               task.task_metadata.kv_idx = bid.x;
             }
-            if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
+            if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE ||
+                task_type == TASK_NVSHMEM_GLOBAL_ARGMAX) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
                   bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
@@ -1860,6 +1861,8 @@ TaskGraphResult print_task_graph(
       "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
   task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
+  task_type_to_name[TASK_NVSHMEM_GLOBAL_ARGMAX] =
+      "TASK_NVSHMEM_GLOBAL_ARGMAX";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

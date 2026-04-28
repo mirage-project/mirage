@@ -85,6 +85,9 @@ if __name__ == "__main__":
                         help="Expert-parallel group count for routed MoE experts. "
                              "Non-MoE layers and shared experts keep TP=world_size; "
                              "routed experts use TP=world_size/ep_size.")
+    parser.add_argument("--disable-vocab-parallel-lm-head", action="store_true",
+                        help="Disable the TP vocab-parallel LM head fast path. "
+                             "By default it is enabled for TP>1 when MTP is disabled.")
     parser.add_argument("--rejection-sample-method", default="strict", type=str,
                         choices=["strict", "probabilistic", "synthetic"],
                         help="Rejection sampling method for speculative decoding")
@@ -287,6 +290,23 @@ if __name__ == "__main__":
 
         # Pad vocab_size for task graph creation
         padded_vocab_size = ((vocab_size + 255) // 256) * 256
+        vocab_parallel_lm_head = (
+            world_size > 1
+            and args.mtp == 0
+            and not args.disable_vocab_parallel_lm_head
+        )
+        lm_head_local_vocab_padded = None
+        lm_head_vocab_offset = 0
+        lm_head_valid_vocab_size = padded_vocab_size
+        if vocab_parallel_lm_head:
+            local_nominal = (padded_vocab_size + world_size - 1) // world_size
+            lm_head_local_vocab_padded = ((local_nominal + 255) // 256) * 256
+            lm_head_vocab_offset = rank * lm_head_local_vocab_padded
+            lm_head_valid_vocab_size = max(
+                0,
+                min(lm_head_local_vocab_padded,
+                    padded_vocab_size - lm_head_vocab_offset),
+            )
 
         if args.profiling:
             profiler_tensor = torch.zeros(
@@ -368,6 +388,12 @@ if __name__ == "__main__":
             use_cutlass_kernel=True,
         )
         mpk.ep_size = args.ep_size
+        mpk.deepseek_vocab_parallel_lm_head = vocab_parallel_lm_head
+        mpk.deepseek_lm_head_vocab_offset = lm_head_vocab_offset
+        mpk.deepseek_lm_head_valid_vocab_size = lm_head_valid_vocab_size
+        mpk.deepseek_lm_head_local_vocab_padded = (
+            lm_head_local_vocab_padded or padded_vocab_size
+        )
 
         # Load state dict from converted weights
         print(f"Loading model weights from: {args.model_path}")
@@ -691,6 +717,32 @@ if __name__ == "__main__":
                 for k in list(state_dict.keys()):
                     base_key = k.replace("_scale_inv", "")
                     shard_dim = _get_tp_shard_dim(base_key)
+                    if base_key == "lm_head.weight" and vocab_parallel_lm_head:
+                        old_shape = tuple(state_dict[k].shape)
+                        start = lm_head_vocab_offset
+                        valid = lm_head_valid_vocab_size
+                        if valid > 0:
+                            shard = state_dict[k].narrow(0, start, valid).contiguous()
+                        else:
+                            shard = state_dict[k].new_empty(
+                                (0, state_dict[k].shape[1])
+                            )
+                        if valid < lm_head_local_vocab_padded:
+                            pad = torch.zeros(
+                                lm_head_local_vocab_padded - valid,
+                                state_dict[k].shape[1],
+                                dtype=state_dict[k].dtype,
+                                device=state_dict[k].device,
+                            )
+                            shard = torch.cat([shard, pad], dim=0).contiguous()
+                        state_dict[k] = shard
+                        if rank == 0:
+                            print(
+                                f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
+                                f"(vocab-parallel lm_head, local padded rows="
+                                f"{lm_head_local_vocab_padded})"
+                            )
+                        continue
                     is_routed_expert = (
                         "mlp.experts.w13.weight" in base_key
                         or "mlp.experts.w2.weight" in base_key

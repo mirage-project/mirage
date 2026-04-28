@@ -14,7 +14,8 @@ from .speculative import (
     PromptLookupConfig,
 )
 from .multigpu import (
-  auto_select_allreduce_implementation
+  allocate_nvshmem_teams,
+  auto_select_allreduce_implementation,
 )
 from typing import Optional
 
@@ -2275,6 +2276,58 @@ class PersistentKernel:
             self.kn_graph.register_task(
                 tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
             )
+
+    def nvshmem_global_argmax_layer(
+        self,
+        partial_value: DTensor,
+        partial_index: DTensor,
+        scratch_value: DTensor,
+        scratch_index: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        vocab_offset: int,
+        valid_vocab_size: int,
+        partial_chunk_size: int,
+    ):
+        assert self.world_size > 1
+        assert self.use_nvshmem
+        assert partial_value.num_dims == 2  # (batch_size, num_partial_tasks)
+        assert partial_index.num_dims == 2  # (batch_size, num_partial_tasks)
+        assert scratch_value.num_dims == 2  # (world_size, batch_size)
+        assert scratch_index.num_dims == 2  # (world_size, batch_size)
+        assert output.num_dims == 2  # (batch_size, 1)
+        assert partial_value.dim(0) == partial_index.dim(0)
+        assert partial_value.dim(1) == partial_index.dim(1)
+        assert scratch_value.dim(0) == self.world_size
+        assert scratch_index.dim(0) == self.world_size
+        assert scratch_value.dim(1) == partial_value.dim(0)
+        assert scratch_index.dim(1) == partial_value.dim(0)
+        assert partial_chunk_size > 0
+        assert 0 <= valid_vocab_size <= partial_value.dim(1) * partial_chunk_size
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(partial_value, (1, 0, -1), -1, True)
+        tb_graph.new_input(partial_index, (1, 0, -1), -1, True)
+        tb_graph.new_input(scratch_value, (-1, -1, -1), -1, True)
+        tb_graph.new_input(scratch_index, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [partial_value, partial_index, scratch_value, scratch_index, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph,
+            "nvshmem_global_argmax",
+            [
+                self.world_size,
+                self.mpi_rank,
+                vocab_offset,
+                valid_vocab_size,
+                partial_chunk_size,
+            ],
+        )
+        allocate_nvshmem_teams(self, grid_dim[0] * grid_dim[1] * grid_dim[2])
 
     def sampling_sm100_layer(
         self,

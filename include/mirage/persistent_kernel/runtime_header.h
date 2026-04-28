@@ -211,6 +211,7 @@ enum TaskType {
   TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
   TASK_NVSHMEM_TILE_ALLREDUCE = 302,
+  TASK_NVSHMEM_GLOBAL_ARGMAX = 303,
   TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
 };
 

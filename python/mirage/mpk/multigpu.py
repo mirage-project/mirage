@@ -83,7 +83,10 @@ def allocate_nvshmem_teams(mpk, num: int):
         existing_max_teams = int(nvshmem_max_teams)
         if existing_max_teams < max_num_teams:
             os.environ["NVSHMEM_MAX_TEAMS"] = str(max_num_teams)
-    mpk.allocate_nvshmem_teams = num
+    mpk.allocate_nvshmem_teams = max(
+        getattr(mpk, "allocate_nvshmem_teams", 0),
+        num,
+    )
     # print(f"Set NVSHMEM_MAX_TEAMS={os.environ['NVSHMEM_MAX_TEAMS']}")
 
     # We should also set NVSHMEM_MAX_CTAS environment variable to avoid creating

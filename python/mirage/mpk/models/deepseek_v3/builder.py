@@ -158,13 +158,44 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                      grid_dim, block_dim, residual=None):
         """Quantize BF16 input → FP8, then run FP8 GEMM."""
+        def _new_tp_partial(name):
+            if output.dim(1) % 128 != 0:
+                raise ValueError(
+                    "TP residual allreduce expects the output dimension to be "
+                    f"128-aligned, got {output.dim(1)}")
+            return self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, output.dim(1)),
+                dtype=bfloat16,
+                name=name,
+                io_category="nvshmem_tensor" if self._use_nvshmem else "cuda_tensor",
+            )
+
+        def _allreduce_residual(partial):
+            self.mpk.allreduce_layer(
+                input=partial,
+                buffer=self.allreduce_buf,
+                output=output,
+                residual=residual,
+                grid_dim=(output.dim(1) // 128, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+
         if weight_scale is None:
             # BF16 fallback is kept for fixtures or pre-converted weights that
             # intentionally arrive without FP8 scale metadata.
             if residual is not None:
-                self.mpk.linear_with_residual_layer(
-                    input=input_bf16, weight=weight, residual=residual,
-                    output=output, grid_dim=grid_dim, block_dim=block_dim)
+                if self.world_size > 1:
+                    idx = getattr(self, "_tp_residual_linear_idx", 0)
+                    self._tp_residual_linear_idx = idx + 1
+                    partial = _new_tp_partial(f"tp_bf16_residual_partial_{idx}")
+                    self.mpk.linear_layer(
+                        input=input_bf16, weight=weight, output=partial,
+                        grid_dim=grid_dim, block_dim=block_dim)
+                    _allreduce_residual(partial)
+                else:
+                    self.mpk.linear_with_residual_layer(
+                        input=input_bf16, weight=weight, residual=residual,
+                        output=output, grid_dim=grid_dim, block_dim=block_dim)
             else:
                 self.mpk.linear_layer(
                     input=input_bf16, weight=weight, output=output,
@@ -236,16 +267,31 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         if residual is not None:
-            self.mpk.linear_fp8_with_residual_layer(
-                input_fp8=self._fp8_input_buf,
-                input_scale=self._fp8_scale_buf,
-                weight_fp8=weight,
-                weight_scale=weight_scale,
-                residual=residual,
-                output=output,
-                grid_dim=grid_dim,
-                block_dim=block_dim,
-            )
+            if self.world_size > 1:
+                idx = getattr(self, "_tp_residual_linear_idx", 0)
+                self._tp_residual_linear_idx = idx + 1
+                partial = _new_tp_partial(f"tp_fp8_residual_partial_{idx}")
+                self.mpk.linear_fp8_layer(
+                    input_fp8=self._fp8_input_buf,
+                    input_scale=self._fp8_scale_buf,
+                    weight_fp8=weight,
+                    weight_scale=weight_scale,
+                    output=partial,
+                    grid_dim=grid_dim,
+                    block_dim=block_dim,
+                )
+                _allreduce_residual(partial)
+            else:
+                self.mpk.linear_fp8_with_residual_layer(
+                    input_fp8=self._fp8_input_buf,
+                    input_scale=self._fp8_scale_buf,
+                    weight_fp8=weight,
+                    weight_scale=weight_scale,
+                    residual=residual,
+                    output=output,
+                    grid_dim=grid_dim,
+                    block_dim=block_dim,
+                )
         else:
             self.mpk.linear_fp8_layer(
                 input_fp8=self._fp8_input_buf,
@@ -2332,10 +2378,45 @@ class DeepSeekV3Builder(GraphBuilder):
 
         if with_lm_head:
             lm_head_weight = state_dict["lm_head.weight"]
+            vocab_parallel_lm_head = bool(
+                getattr(self.mpk, "deepseek_vocab_parallel_lm_head", False)
+            )
+            if vocab_parallel_lm_head and self.mtp_config is not None:
+                vocab_parallel_lm_head = False
+
+            if vocab_parallel_lm_head:
+                lm_head_vocab_size = lm_head_weight.shape[0]
+                lm_head_grid = lm_head_vocab_size // 256
+                if lm_head_vocab_size % 256 != 0:
+                    raise ValueError(
+                        "vocab-parallel lm_head expects a 256-aligned local vocab, "
+                        f"got {lm_head_vocab_size}"
+                    )
+                vocab_offset = int(
+                    getattr(self.mpk, "deepseek_lm_head_vocab_offset", 0)
+                )
+                valid_vocab_size = int(
+                    getattr(
+                        self.mpk,
+                        "deepseek_lm_head_valid_vocab_size",
+                        lm_head_vocab_size,
+                    )
+                )
+                if not (0 < valid_vocab_size <= lm_head_vocab_size):
+                    raise ValueError(
+                        "vocab-parallel lm_head requires at least one valid "
+                        f"local vocab row, got {valid_vocab_size}"
+                    )
+            else:
+                lm_head_vocab_size = padded_vocab_size
+                lm_head_grid = grid_for_rmsnorm_linear_layer(lm_head_vocab_size)
+                vocab_offset = 0
+                valid_vocab_size = lm_head_vocab_size
+
             # Keep vocab rows aligned to the argmax/linear task grid. DeepSeek
             # V3's checkpoint vocab is already 129280, so this is a no-op for
             # the normal model and only handles smaller test fixtures.
-            if lm_head_weight.shape[0] < padded_vocab_size:
+            if not vocab_parallel_lm_head and lm_head_weight.shape[0] < padded_vocab_size:
                 lm_head_weight = torch.cat([
                     lm_head_weight,
                     torch.zeros(padded_vocab_size - lm_head_weight.shape[0],
@@ -2352,12 +2433,12 @@ class DeepSeekV3Builder(GraphBuilder):
             w_lm_head = self.w_lm_head
             self.lm_head_out_buf = None
             lm_head_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, padded_vocab_size),
+                dims=(self.max_num_batched_tokens, lm_head_vocab_size),
                 dtype=bfloat16, name="lm_head_out", io_category="cuda_tensor",
             )
             self.mpk.linear_layer(
                 input=self.rmsnorm_out, weight=w_lm_head, output=lm_head_out,
-                grid_dim=(grid_for_rmsnorm_linear_layer(padded_vocab_size), 1, 1),
+                grid_dim=(lm_head_grid, 1, 1),
                 block_dim=(128, 1, 1),
             )
 
@@ -2399,17 +2480,93 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=self.output_tokens, name="output_token",
             )
             argmax_out = self.argmax_out_dtensor
-            self.mpk.argmax_partial_layer(
-                input=lm_head_out, output=(self.argmax_part_value, self.argmax_part_index),
-                grid_dim=(self.mpk.num_workers, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            self.mpk.argmax_reduce_layer(
-                input=(self.argmax_part_value, self.argmax_part_index),
-                output=argmax_out,
-                grid_dim=(1, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if vocab_parallel_lm_head:
+                local_argmax_part_value = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, lm_head_grid),
+                    dtype=bfloat16,
+                    name="lm_head_local_argmax_part_value",
+                    io_category="cuda_tensor",
+                )
+                local_argmax_part_index = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, lm_head_grid),
+                    dtype=int64,
+                    name="lm_head_local_argmax_part_index",
+                    io_category="cuda_tensor",
+                )
+                partial_chunk_size = lm_head_vocab_size // lm_head_grid
+                self.mpk.argmax_partial_layer(
+                    input=lm_head_out,
+                    output=(local_argmax_part_value, local_argmax_part_index),
+                    grid_dim=(lm_head_grid, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                global_argmax_value = self.mpk.new_tensor(
+                    dims=(self.world_size, self.max_num_batched_tokens),
+                    dtype=float32,
+                    name="lm_head_global_argmax_value",
+                    io_category="nvshmem_tensor",
+                )
+                global_argmax_index = self.mpk.new_tensor(
+                    dims=(self.world_size, self.max_num_batched_tokens),
+                    dtype=int64,
+                    name="lm_head_global_argmax_index",
+                    io_category="nvshmem_tensor",
+                )
+                self.mpk.nvshmem_global_argmax_layer(
+                    partial_value=local_argmax_part_value,
+                    partial_index=local_argmax_part_index,
+                    scratch_value=global_argmax_value,
+                    scratch_index=global_argmax_index,
+                    output=argmax_out,
+                    grid_dim=(1, 1, 1),
+                    block_dim=(128, 1, 1),
+                    vocab_offset=vocab_offset,
+                    valid_vocab_size=valid_vocab_size,
+                    partial_chunk_size=partial_chunk_size,
+                )
+            else:
+                self.mpk.argmax_partial_layer(
+                    input=lm_head_out,
+                    output=(self.argmax_part_value, self.argmax_part_index),
+                    grid_dim=(self.mpk.num_workers, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                if self.world_size > 1:
+                    partial_chunk_size = self.mpk.argmax_partial_output_size
+                    valid_for_partial_grid = (
+                        partial_chunk_size * self.mpk.num_workers
+                    )
+                    global_argmax_value = self.mpk.new_tensor(
+                        dims=(self.world_size, self.max_num_batched_tokens),
+                        dtype=float32,
+                        name="lm_head_full_global_argmax_value",
+                        io_category="nvshmem_tensor",
+                    )
+                    global_argmax_index = self.mpk.new_tensor(
+                        dims=(self.world_size, self.max_num_batched_tokens),
+                        dtype=int64,
+                        name="lm_head_full_global_argmax_index",
+                        io_category="nvshmem_tensor",
+                    )
+                    self.mpk.nvshmem_global_argmax_layer(
+                        partial_value=self.argmax_part_value,
+                        partial_index=self.argmax_part_index,
+                        scratch_value=global_argmax_value,
+                        scratch_index=global_argmax_index,
+                        output=argmax_out,
+                        grid_dim=(1, 1, 1),
+                        block_dim=(128, 1, 1),
+                        vocab_offset=0,
+                        valid_vocab_size=valid_for_partial_grid,
+                        partial_chunk_size=partial_chunk_size,
+                    )
+                else:
+                    self.mpk.argmax_reduce_layer(
+                        input=(self.argmax_part_value, self.argmax_part_index),
+                        output=argmax_out,
+                        grid_dim=(1, 1, 1),
+                        block_dim=(128, 1, 1),
+                    )
 
         # Optional MTP layer
         self._build_mtp_layer(state_dict)

@@ -4236,6 +4236,59 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   return register_task_variant(TASK_NVSHMEM_TILE_ALLREDUCE, c.to_string());
 }
 
+int TaskRegister::register_nvshmem_global_argmax_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_gpus
+  // params[1]: my_gpu_id
+  // params[2]: vocab_offset
+  // params[3]: valid_vocab_size
+  // params[4]: partial_chunk_size
+  assert(params.size() == 5);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 3;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int num_partial_tasks = input_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[1]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[1]->output_tensors[0].dim[1] == num_partial_tasks);
+  int valid_vocab_size = params[3];
+  int partial_chunk_size = params[4];
+  assert(partial_chunk_size > 0);
+  assert(valid_vocab_size > 0 &&
+         valid_vocab_size <= num_partial_tasks * partial_chunk_size);
+
+  mirage::transpiler::CodeKeeper c;
+  c.inc_indent();
+  c.e("kernel::nvshmem_global_argmax_from_partials_bf16<$, $, $, $, $>(",
+      batch_size,
+      num_partial_tasks,
+      partial_chunk_size,
+      valid_vocab_size,
+      params[2]);
+  c.e("  task_desc->input_ptrs[0],");
+  c.e("  task_desc->input_ptrs[1],");
+  c.e("  task_desc->output_ptrs[0],");
+  c.e("  task_desc->output_ptrs[1],");
+  c.e("  task_desc->output_ptrs[2],");
+  c.e("  runtime_config.nvshmem_teams,");
+  c.e("  task_desc->task_metadata.task_offset,");
+  c.e("  runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  return register_task_variant(TASK_NVSHMEM_GLOBAL_ARGMAX, c.to_string());
+}
+
 int TaskRegister::register_quantize_fp8_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,

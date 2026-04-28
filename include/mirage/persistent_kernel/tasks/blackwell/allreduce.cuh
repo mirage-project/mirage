@@ -374,6 +374,17 @@ static __device__ __forceinline__ void *mpkar_mc_ptr(nvshmemi_team_t *team,
   return nullptr;
 }
 
+static __device__ __forceinline__ void *mpkar_peer_ptr(void const *ptr,
+                                                       int pe) {
+  char const *base = static_cast<char const *>(nvshmemi_device_state_d.heap_base);
+  char const *addr = static_cast<char const *>(ptr);
+  ptrdiff_t offset = addr - base;
+  void const *peer_base_addr = (void *)__ldg(
+      (long long unsigned const *)nvshmemi_device_state_d.peer_heap_base_p2p +
+      pe);
+  return (void *)(static_cast<char const *>(peer_base_addr) + offset);
+}
+
 // ========================= NVLS ld_reduce PTX ===============================
 // bf16: multimem.ld_reduce.global.add.acc::f32.v4.bf16x2
 // Loads 16 bytes (8 bf16 values) from multicast address, reduces across GPUs.

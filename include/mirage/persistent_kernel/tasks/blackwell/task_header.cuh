@@ -24,6 +24,9 @@
 #include "tasks/blackwell/allreduce.cuh"
 #endif
 #include "argmax_sm100.cuh"
+#if defined(USE_NVSHMEM) && defined(MIRAGE_GRACE_BLACKWELL)
+#include "nvshmem_argmax_sm100.cuh"
+#endif
 #include "attention_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
 #include "linear_fp8_swapAB_sm100.cuh"

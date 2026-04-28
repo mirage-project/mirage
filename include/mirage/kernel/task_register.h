@@ -199,6 +199,8 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_nvshmem_tile_allreduce_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  int register_nvshmem_global_argmax_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
   // Multi-GPU tasks end
   int register_task_variant(TaskType type, std::string const &code);
 
