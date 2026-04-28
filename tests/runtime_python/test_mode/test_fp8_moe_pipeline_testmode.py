@@ -165,7 +165,7 @@ def test_moe_w13_fp8():
     print("Compiling...")
     pk.compile(output_dir=os.path.dirname(__file__))
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     print(f"\nOutput[0, 0, :8]:    {output[0, 0, :8]}")
@@ -232,7 +232,7 @@ def test_moe_w2_fp8():
     print("Compiling...")
     pk.compile(output_dir=os.path.dirname(__file__))
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     print(f"\nOutput[0, 0, :8]:    {output[0, 0, :8]}")
@@ -310,7 +310,7 @@ def test_moe_w13_silu_mul():
     print("Compiling...")
     pk.compile(output_dir=os.path.dirname(__file__))
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     print(f"\nSiLU-Mul[0, 0, :8]:  {silu_out[0, 0, :8]}")
@@ -406,7 +406,7 @@ def test_moe_w13_silu_mul_w2():
     print("Compiling...")
     pk.compile(output_dir=os.path.dirname(__file__))
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     print(f"\nW2 output[0, 0, :8]:  {w2_out[0, 0, :8]}")
