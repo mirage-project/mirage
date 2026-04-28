@@ -5,7 +5,12 @@ description: Guide for using MPK test mode to unit-test individual layers or mul
 
 # MPK Test Mode
 
-Test mode compiles and runs an MPK task graph **exactly once**, without meta-tensors, batching, or persistent-loop iteration. It exercises the full pipeline — Python layer API, task registration, C++ code generation, nvcc compilation, and runtime dispatch — making it the primary tool for validating that a new layer or task works correctly end-to-end.
+Test mode compiles and runs an MPK task graph **exactly once** and exits. It exercises the full pipeline — Python layer API, task registration, C++ code generation, nvcc compilation, runtime dispatch, and the persistent runtime's metadata setup (`init_kernel` + `prepare_next_batch`) — making it the primary tool for validating that a new layer or task works end-to-end.
+
+Test mode is selected by setting `params["test_mode"] = True` at construction time. Internally this defines `-DMPK_TEST_MODE` for the launcher build, which:
+1. Auto-allocates any meta tensors the test author didn't pass (so paged-attention / embedding / sampling layers see valid `qo_indptr_buffer`, `paged_kv_*`, `input_tokens`, etc.).
+2. Lets `init_request_resources()` and `prepare_next_batch` run normally — the same code paths production uses.
+3. Forces `prepare_next_batch`'s always-finalize shortcut on iter 1, which returns false and terminates the scheduler after exactly one task-graph pass.
 
 ## Quick Start
 
@@ -36,9 +41,9 @@ block_dim = (256, 1, 1) if pk.target_cc >= 90 else (128, 1, 1)
 pk.rmsnorm_layer(input=x_dt, weight=w_dt, output=out_dt,
                  grid_dim=(16, 1, 1), block_dim=block_dim)
 
-# 4. Compile and run
+# 4. Compile and run — same call as production; MPK_TEST_MODE is baked into the .so
 pk.compile(output_dir="./test_output")   # saves .cu and .json for debugging
-pk.run_test_mode()
+pk()
 torch.cuda.synchronize()
 
 # 5. Compare — `out` tensor is now modified in-place
@@ -48,6 +53,21 @@ print("Max diff:", (out - ref).abs().max().item())
 # 6. Cleanup
 pk.finalize()
 ```
+
+## What Test Mode Actually Does
+
+The launcher's first scheduler event is always `EVENT_END_OF_TASK_GRAPH`, so `prepare_next_batch` fires *before* iter 0. Concretely:
+
+```
+init_kernel:           zero step / request_ids / qo_indptr / paged_kv_indptr; seed page_queue
+1st END_OF_TASK_GRAPH (iter_num=0): prepare_next_batch fills meta tensors for iter 0 → returns true
+iter 0:                the test — layer-under-test runs with valid meta tensors
+2nd END_OF_TASK_GRAPH (iter_num=1): prepare_next_batch finalizes (MPK_TEST_MODE always-finalize)
+                                    → no new prefills (next_request_id == total_num_requests)
+                                    → returns false → terminate
+```
+
+So tests of meta-tensor-dependent layers (paged attention, MoE routing, embedding, sampling) work — they read the values that `prepare_next_batch` wrote.
 
 ## API Reference
 
@@ -64,8 +84,10 @@ Commonly overridden keys:
 | `num_local_schedulers` | 4 | Set from `mirage.get_configurations_from_gpu(0)` |
 | `max_num_batched_tokens` | 1 | Set to your test's batch size if the task kernel uses this compile-time constant |
 | `max_num_batched_requests` | 1 | Same as above |
+| `max_num_pages` / `page_size` / `max_seq_length` | 1 | Bump these so `prepare_next_batch` can fit your prefill (`max_num_pages * page_size >= prompt_length`) |
+| `world_size` / `mpi_rank` | 1 / 0 | For multi-GPU tests; set from `mpi4py.MPI.COMM_WORLD` |
 | `use_cutlass_kernel` | False | Set `True` if your layer uses CUTLASS-based kernels |
-| `meta_tensors` | `{}` | Some layers need stubs (e.g., `qo_indptr_buffer`) — see multi-layer example |
+| `meta_tensors` | `{}` | Auto-defaulted; **override only the entries that drive your test scenario** (typically `prompt_lengths` and/or `tokens`) — see "Meta-Tensor Defaults" below |
 
 ### `mirage.get_configurations_from_gpu(rank)`
 
@@ -87,24 +109,67 @@ Generates CUDA code, compiles with nvcc, loads the resulting `.so` module.
 - **Set `output_dir`** to save `test_rank0.cu` and `task_graph_rank0.json` — essential for debugging compilation errors or incorrect results.
 - Compilation can be slow (1–10+ minutes) depending on which task kernels are instantiated.
 
-### `pk.run_test_mode()`
+### `pk()` — Launch the kernel
 
-Launches the compiled task graph **once** on the current CUDA stream.
+Same call as production. In test mode the launcher was compiled with `-DMPK_TEST_MODE` so it terminates after one task-graph pass. The previous `pk.run_test_mode()` method has been removed; use `pk()` directly.
 
-- Only available when `test_mode=True`.
 - Must be called **after** `compile()`.
-- **Does not synchronize** — call `torch.cuda.synchronize()` afterward before reading output tensors.
+- **Does not synchronize** — call `torch.cuda.synchronize()` before reading output tensors.
+- Optional `default_stream=stream` kwarg if you don't want the current stream.
+- Profiler trace export: pass `params["profiler_tensor"] = torch.zeros(N, dtype=torch.uint64, device="cuda")` and optional `params["trace_name"]` before `compile()`. After `pk()` returns, a `<trace_name>.perfetto-trace` file is written.
 
 ### `pk.finalize()`
 
 Frees GPU resources (queues, events, task/event storage). Call when done.
 
-## Multi-Layer Pipeline Example
+## Meta-Tensor Defaults
 
-`tests/runtime_python/test_mode/test_qwen3_mlp_testmode.py` demonstrates chaining multiple layers:
+Test mode auto-allocates any of the 10 meta tensors that you don't pass:
+
+| Key | Default shape | Default dtype | Default content |
+|---|---|---|---|
+| `tokens` | `(1, max_seq_length)` | `int64` | zeros |
+| `step` | `(total_num_requests,)` | `int32` | zeros |
+| `prompt_lengths` | `(total_num_requests,)` | `int32` | filled with `max_num_batched_tokens` |
+| `input_tokens` | `(max_num_batched_tokens,)` | `int64` | zeros (filled by `prepare_next_batch`) |
+| `output_tokens` | `(max_num_batched_tokens,)` | `int64` | zeros |
+| `num_new_tokens` | `(1,)` | `int32` | zeros |
+| `qo_indptr_buffer` | `(max_num_batched_requests + 1,)` | `int32` | zeros (filled by `prepare_next_batch`) |
+| `paged_kv_indptr_buffer` | `(max_num_batched_requests + 1,)` | `int32` | zeros (filled by `prepare_next_batch`) |
+| `paged_kv_indices_buffer` | `(max_num_pages,)` | `int32` | zeros (filled by `prepare_next_batch`) |
+| `paged_kv_last_page_len_buffer` | `(max_num_batched_requests,)` | `int32` | zeros (filled by `prepare_next_batch`) |
+
+`total_num_requests` is derived from `tokens.shape[0]` (defaults to 1).
+
+**Override only what your test scenario requires.** Typical patterns:
 
 ```python
-# Gate+Up linear → SiLU-Mul → Down+Residual  (Qwen3 dense MLP)
+# Single prefill of length N (controls qo_indptr_buffer / paged_kv_* via prepare_next_batch)
+params["meta_tensors"] = {
+    "prompt_lengths": torch.tensor([N], dtype=torch.int32, device="cuda"),
+}
+
+# Specific prompt content (e.g. for embedding-layer tests that read input_tokens)
+params["meta_tensors"] = {
+    "prompt_lengths": torch.tensor([N], dtype=torch.int32, device="cuda"),
+    "tokens": torch.tensor([[101, 7592, 2088, ...]], dtype=torch.int64, device="cuda"),
+}
+
+# Multi-request batch — total_num_requests inferred from tokens.shape[0]
+params["meta_tensors"] = {
+    "tokens": torch.zeros((4, max_seq_length), dtype=torch.int64, device="cuda"),
+    "prompt_lengths": torch.tensor([16, 8, 32, 4], dtype=torch.int32, device="cuda"),
+}
+```
+
+The shape/dtype assertions that production runs through (e.g. `tokens.shape[1] == max_seq_length`, `prompt_lengths.dtype == int32`) all run in test mode too — defaults satisfy them by construction; user overrides will fail loudly if they don't match.
+
+## Multi-Layer Pipeline Example
+
+Multiple layers can be chained with intermediate tensors. From the Qwen3 dense MLP pattern:
+
+```python
+# Gate+Up linear → SiLU-Mul → Down+Residual
 
 # Attach weights separately, then shuffle for interleaved gate/up layout
 w_gate_dt = pk.attach_input(w_gate, name="w_gate")
@@ -130,35 +195,71 @@ pk.linear_with_residual_layer(input=silu_out_dt, weight=w_down_dt,
                               grid_dim=(hidden_size // 64, 1, 1), block_dim=block_dim)
 ```
 
-**Key pattern:** intermediate tensors (`mlp_mid`, `silu_out`) are pre-allocated and attached via `attach_input` so they can be inspected after execution if needed.
+**Key pattern:** intermediate tensors (`mlp_mid`, `silu_out`) are pre-allocated and attached via `attach_input` so they can be inspected after execution if needed. For a runnable multi-task test see `tests/runtime_python/test_mode/test_diamond_fork_join_testmode.py`.
 
-**Meta-tensor stubs:** some layers (e.g., `linear_with_residual_layer`) may reference `qo_indptr_buffer` at compile time. Pass a minimal stub:
+## Multi-GPU Tests
+
+Test mode supports `world_size > 1`. Each rank is independent — auto-defaults are deterministic functions of kernel params, so they produce identical values on every rank.
+
 ```python
-params["meta_tensors"] = {
-    "qo_indptr_buffer": torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
-}
+from mpi4py import MPI
+comm = MPI.COMM_WORLD
+world_size = comm.Get_size()
+rank = comm.Get_rank()
+torch.cuda.set_device(rank)
+
+params = PersistentKernel.get_default_init_parameters()
+params["test_mode"] = True
+params["world_size"] = world_size
+params["mpi_rank"] = rank
+# ... rest of setup is the same as single-GPU
+pk = PersistentKernel(**params)
+# ... attach + register layers (incl. NVSHMEM ops like pk.allreduce_layer)
+pk.compile(output_dir=...)
+pk()
+torch.cuda.synchronize()
 ```
+
+**Launch convention:**
+
+```bash
+LD_PRELOAD=$NVSHMEM_HOME/lib/libnvshmem_host.so \
+mpirun --np 2 -x LD_PRELOAD -x LD_LIBRARY_PATH -x NVSHMEM_HOME \
+    python tests/runtime_python/test_mode/test_multigpu_rmsnorm_testmode.py
+```
+
+The `LD_PRELOAD` is required so `dlopen()`-loaded launcher modules resolve `nvshmem_selected_device_transport` and other NVSHMEM-versioned symbols. This is an existing NVSHMEM 3.x quirk, unrelated to test mode.
 
 ## Constraints
 
-- **One execution pass** — the task graph runs once and terminates. No iteration, no `prepare_next_batch`.
-- **Meta-tensors optional** — pass `{}` or minimal stubs. Missing pointers become null; the kernel must not dereference them.
+- **One execution pass** — the task graph runs once and `prepare_next_batch` returns false on its second call. No multi-iteration scheduling.
+- **Meta tensors auto-allocated** — pass overrides only for entries your test scenario depends on. Defaults are sized from kernel-level params (`max_num_batched_tokens`, `max_num_batched_requests`, `max_num_pages`, `max_seq_length`, etc.), so bump those if your test needs larger buffers.
+- **`MPK_TEST_MODE` is a compile-time flag** — switching `test_mode` between True and False requires re-running `pk.compile()`; the same launcher .so isn't reusable across modes.
 
 ## Debugging Tips
 
 **Compilation fails:**
 - Check `<output_dir>/test_rank0.cu` for the generated code. Search for your task name in the `_execute_task()` function.
-- Check `<output_dir>/task_graph_rank0.json` for the task graph. This file might be extremely long, dont read it in a raw fashion. Use `scripts/parse_task_graph.py` to read the task graph.
+- Check `<output_dir>/task_graph_rank0.json` for the task graph. This file might be extremely long; don't read it raw — use `scripts/parse_task_graph.py`.
 
 **Incorrect dimension splitting:**
-- The MPK layers require `input_map` for each associated tensor to specify how dimensions are split across the grid. If the grid or block dimensions don't divide the tensor dimensions correctly, the kernel may read/write out of bounds, causing NaNs or incorrect results.
+- The MPK layers require `input_map` for each associated tensor to specify how dimensions are split across the grid. If grid/block dimensions don't divide tensor dimensions correctly, the kernel may read/write out of bounds, producing NaNs or wrong results.
 
 **Incomplete task attributes:**
-- Ensure all required attributes for each task are correctly specified in the compilation logic, in `runtime.cc`. Missing or incorrect attributes can lead to undefined behavior or compilation errors.
+- Ensure all required attributes for each task are correctly specified in the compilation logic in `runtime.cc`. Missing/incorrect attributes cause undefined behavior or compilation errors.
+
+**Kernel hangs / never terminates:**
+- Verify `total_num_requests` is set to match the number of in-flight test requests (typically 1, derived from `tokens.shape[0]`). If `next_request_id` never reaches `total_num_requests`, `prepare_next_batch` will keep returning true and iterations will not stop.
+- Verify the active `mode` is `"offline"` (the default). `MPK_TEST_MODE` is designed to layer on top of MODE_OFFLINE's `prepare_next_batch`; other modes are not supported.
+
+**Verifying that `prepare_next_batch` actually ran:**
+- After `pk()` returns, read back `pk.meta_tensors["step"][0]`. It should equal `prompt_lengths[0]` — `prepare_next_batch`'s Step 1.1 advances `step` by `num_tokens` on the second call. See `test_prepare_next_batch_testmode.py` for the canonical assertion.
 
 ## Example Test Files
 
 | File | What it tests |
 |---|---|
-| `tests/runtime_python/test_mode/test_rmsnorm_testmode.py` | Single layer (RMSNorm) |
-| `tests/runtime_python/test_mode/test_qwen3_mlp_testmode.py` | Multi-layer pipeline (Qwen3 MLP) |
+| `tests/runtime_python/test_mode/test_rmsnorm_testmode.py` | Single layer (RMSNorm), default meta tensors |
+| `tests/runtime_python/test_mode/test_prepare_next_batch_testmode.py` | Verifies `prepare_next_batch` runs and populates metadata (asserts `step` advanced) |
+| `tests/runtime_python/test_mode/test_diamond_fork_join_testmode.py` | Multi-task graph (synthetic fork+join) |
+| `tests/runtime_python/test_mode/test_multigpu_rmsnorm_testmode.py` | Multi-GPU smoke test under `mpirun -n 2` |
