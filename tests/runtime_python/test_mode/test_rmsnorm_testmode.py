@@ -65,7 +65,7 @@ def test_rmsnorm_testmode():
 
     # Run
     print("Running test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # Compare against reference
