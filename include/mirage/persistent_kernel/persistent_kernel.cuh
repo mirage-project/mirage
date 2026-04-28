@@ -1184,7 +1184,7 @@ extern "C" void
                            int is_test_mode,
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs) {
-  assert(meta_tensors.size() == 10);
+  assert(meta_tensors.size() == 11);
 
   // Build global model tensors map from parallel vectors
   assert(model_tensor_names.size() == model_tensor_ptrs.size());
