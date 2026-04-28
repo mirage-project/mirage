@@ -34,6 +34,7 @@ static constexpr int BK = 64;      // 128B swizzle tile width
 static constexpr int MMA_K = 16;
 static constexpr int K_ITERS = D_K / BK;  // 9 for QK
 static constexpr int V_CHUNKS = D_V / BK; // 8
+static constexpr int V_SPLITS = 8;
 static constexpr int TB = 128;
 
 // Pipeline stages
@@ -143,14 +144,15 @@ __device__ __noinline__ void
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
-  // V-split is folded into block_x: low bit = v_half, rest = original block_x.
+  // V-split is folded into block_x: low bits select the V part, the remaining
+  // bits are the original (Q group, KV split) index.
   // Mirage MPK has only a flat task index, no z-dim launch.
-  int const block_x = block_x_packed >> 1;
-  int const v_half = block_x_packed & 1;
+  int const block_x = block_x_packed / V_SPLITS;
+  int const v_part = block_x_packed % V_SPLITS;
   int const gi = block_x / sk;
   int const si = block_x % sk;
   int const bi = block_y;
-  constexpr int PV_CHUNKS = V_CHUNKS / 2; // 4 chunks per half
+  constexpr int PV_CHUNKS = V_CHUNKS / V_SPLITS;
 
   int const num_groups = (Q_LEN + qpg - 1) / qpg;
   if (gi >= num_groups) {
@@ -339,7 +341,7 @@ __device__ __noinline__ void
       ptx::mbar_init(mainloop_bar, 1);
       asm volatile("fence.mbarrier_init.release.cluster;");
       int V_buf_base_pre = work_smem + 2 * TILE_BYTES;
-      int vc_base = v_half * PV_CHUNKS;
+      int vc_base = v_part * PV_CHUNKS;
       for (int vi = 0; vi < min(NUM_PV_STAGES, PV_CHUNKS); vi++) {
         int v_smem = V_buf_base_pre + vi * TILE_BYTES;
         ptx::mbar_tx(tma_bar + vi * 8, TILE_BYTES);
@@ -551,7 +553,7 @@ __device__ __noinline__ void
 
     int V_buf_base = work_smem + 2 * TILE_BYTES;
     int pv_acc_base = (!SINGLE_TILE && tile > t0) ? 1 : 0;
-    int vc_base = v_half * PV_CHUNKS;
+    int vc_base = v_part * PV_CHUNKS;
 
     MLA_TP_SYNC_ACTIVE();
 
@@ -672,7 +674,7 @@ __device__ __noinline__ void
   }
 
   asm volatile("tcgen05.fence::after_thread_sync;");
-  int const vc_base_epi = v_half * PV_CHUNKS;
+  int const vc_base_epi = v_part * PV_CHUNKS;
   int const valid_rows = actual_qpg * hpb;
   if (tid < valid_rows) {
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
@@ -726,8 +728,8 @@ __device__ __noinline__ void
         }
       }
     }
-    // Only v_half==0 writes La (shared across V halves)
-    if (!write_final && v_half == 0) {
+    // Only one V split writes La; it is shared by all V splits.
+    if (!write_final && v_part == 0) {
       La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
     }
   }

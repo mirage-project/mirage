@@ -33,8 +33,8 @@ __global__ __launch_bounds__(TB) void shim_main(
     int sk,
     int Q_LEN,
     int qpg) {
-  // Pack v_half (blockIdx.z) into low bit of block_x — Mirage MPK has no z-dim
-  int block_x_packed = (blockIdx.x << 1) | blockIdx.z;
+  // Pack the V split (blockIdx.z) into block_x — Mirage MPK has no z-dim.
+  int block_x_packed = blockIdx.x * V_SPLITS + blockIdx.z;
   mla_mtp_tp4_main<SINGLE_TILE>(&Q_tm,
                                 &KV_tm,
                                 Oa,
@@ -44,6 +44,8 @@ __global__ __launch_bounds__(TB) void shim_main(
                                 sk,
                                 Q_LEN,
                                 qpg,
+                                nullptr,
+                                0,
                                 block_x_packed,
                                 blockIdx.y);
 }
@@ -266,7 +268,7 @@ int main(int argc, char **argv) {
                          SMEM_SIZE);
 
     auto run_main = [&]() {
-      dim3 g(num_groups * sk, B, 2); // z=2 for V-half split
+      dim3 g(num_groups * sk, B, V_SPLITS);
       if (single_tile) {
         shim_main<true>
             <<<g, TB, SMEM_SIZE>>>(Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg);

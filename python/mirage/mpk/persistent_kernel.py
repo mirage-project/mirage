@@ -1412,12 +1412,13 @@ class PersistentKernel:
         q_input, kv_input, output_partial, output_lse,
         q_len, kv_len, num_heads,
         task_name, has_v_split=False, q_len_real=None, head_groups=1,
+        v_splits=2,
     ):
         """Internal helper for TP=2/4/8 decode dispatch.
           q_len: padded Q_LEN passed to the kernel
           q_len_real: TP=8 only — actual unpadded Q_LEN
           num_heads: 64/32/16 per TP variant
-          has_v_split: TP=4 only — block_x doubled to encode v_half in low bit
+          has_v_split: TP=4 only — block_x multiplied to encode V split id
           head_groups: TP=2 only — additional head split packed into block_x
         """
         if num_heads == 64:
@@ -1428,8 +1429,8 @@ class PersistentKernel:
             qpg = 2
         num_groups = (q_len + qpg - 1) // qpg
         num_splits = (kv_len + 128 - 1) // 128  # TILE_S=128
-        # TP=4 packs v_half into block_x low bit → 2× tasks. Kernel unpacks.
-        x_mul = 2 if has_v_split else 1
+        # TP=4 packs the V split id into block_x → multiple tasks per split.
+        x_mul = v_splits if has_v_split else 1
         grid_dim = (num_groups * num_splits * x_mul * head_groups,
                     self.max_num_batched_requests,
                     1)
@@ -1509,6 +1510,7 @@ class PersistentKernel:
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=32,
             task_name="mla_mtp_decode_tp4_sm100", has_v_split=True,
+            v_splits=8,
         )
 
     def mla_mtp_decode_tp4_reduce_layer(

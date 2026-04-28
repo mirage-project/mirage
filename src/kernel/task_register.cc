@@ -4348,15 +4348,9 @@ int TaskRegister::register_linear_fp8_sm100_task(
   code.inc_indent();
   code.inc_indent();
 
-  // New FP8 GEMM kernel call
-  // HACK: The new kernel uses blockIdx.x for internal tile scheduling.
-  // In persistent kernel, blockIdx.x is the worker index (0..num_workers-1),
-  // not the task's grid block index. We can't override blockIdx.x, so we
-  // set kNumSMs to a value large enough that blockIdx.x always maps to a
-  // valid initial tile. With kNumSMs >= num_workers, first block_idx =
-  // blockIdx.x which is always < kNumSMs, and the kernel handles all tiles
-  // for that CTA in one pass.
-  // We use MPK_MAX_NUM_WORKERS (defined at compile time) as kNumSMs.
+  // Persistent-kernel FP8 GEMM task. Each MPK task is one CTA, so kNumSMs is
+  // fixed to 1 and the task walks all internal BLOCK_N tiles in its output
+  // shard sequentially.
   code.e("kernel::linear_fp8_sm100_task_impl<");
   code.e("    cute::UMMA::Major::K, cute::UMMA::Major::K,");
   code.e("    128, 128,"); // kGranKA, kGranKB
@@ -5230,10 +5224,10 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
          direct_paged_kv ? "runtime_config.paged_kv_indices_buffer"
                          : "nullptr");
   code.e("      fp_,");
-  // V-half is folded into block_x's low bit (no z-dim launch in MPK).
-  // Python layer doubles the grid; kernel unpacks v_half = block_x & 1.
+  // V split is folded into block_x (no z-dim launch in MPK).
+  // Python layer multiplies the grid; kernel unpacks the V part.
   code.e(
-      "      task_desc->task_metadata.kv_idx,"); // packed (block_x<<1 | v_half)
+      "      task_desc->task_metadata.kv_idx,"); // packed block/V-split id
   code.e("      task_desc->task_metadata.request_id);"); // batch
   code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_TP4_SM100, code.to_string());
