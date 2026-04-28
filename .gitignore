@@ -68,6 +68,7 @@ output/
 task_graph*.json
 test.cu
 kernel*.cu
+test_rank*.cu
 
 #runtime
 *.perfetto-trace
