@@ -225,7 +225,7 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
-#ifdef MPK_ENABLE_PROFILING
+#if defined(MPK_ENABLE_PROFILING) || defined(MPK_TEST_MODE)
       if (true)
 #else
       if ((step + num_tokens + 1 >= config.max_seq_length) ||
@@ -923,29 +923,11 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
-#ifdef MPK_TEST_MODE
-        // Test mode: run task graph exactly once, then terminate.
-        // iteration_num stays at 1 throughout the single pass so that
-        // event counter thresholds (num_triggers * iteration_num) are
-        // consistent: each event fires exactly num_triggers times.
-        if (iteration_num > 0) {
-          printf("[SCHD] Single pass finished, terminating schedulers.\n");
-          terminate_schedulers(config);
-        } else {
-          size_t last_task_id =
-              worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
-          st_relaxed_gpu_u64(
-              &config.worker_queues[next_worker]
-                                   [last_task_id % config.per_worker_queue_len],
-              compute_task_id(iteration_num + 1, 1 /*begin_task_graph*/));
-          atom_add_release_gpu_u64(
-              &config.worker_queue_last_ready_task_id[next_worker], 1);
-          next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
-                                                            : next_worker + 1;
-        }
-#else // MPK_TEST_MODE
-
-        // Check if we want to continue
+        // Check if we want to continue. Test mode runs through the active
+        // mode's prepare_next_batch (typically MODE_OFFLINE) and terminates
+        // naturally on the second call: the always-finalize shortcut clears
+        // the in-flight request in Step 1, and Step 4 finds next_request_id
+        // already at total_num_requests, so num_tokens == 0 → returns false.
 #ifdef MODE_ONLINE_NOTOKEN
         if (!prepare_next_batch(config, iteration_num))
 #else
@@ -979,7 +961,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
-#endif // MPK_TEST_MODE
       } else if (e.event_type == EVENT_LAUNCH_DEPENDENT_TASKS) {
         iteration_num = iteration_num + 1;
         // assign event in a round-robin fashion
@@ -1181,7 +1162,6 @@ extern "C" void
                            int total_num_requests,
                            long long eos_token_id,
                            int allocate_nvshmem_teams,
-                           int is_test_mode,
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs) {
   assert(meta_tensors.size() == 11);
@@ -1455,14 +1435,7 @@ extern "C" void
   cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
                            cudaEventDisableTiming);
 
-  if (is_test_mode) {
-    printf(
-        "MPK is running in test mode. The persistent kernel will run exactly "
-        "one pass of the task graph, then terminate.\n");
-    printf("Skipping request resource initialization.\n");
-  } else {
-    init_request_resources();
-  }
+  init_request_resources();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();

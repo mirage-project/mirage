@@ -49,10 +49,10 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   std::vector<void*> model_tensor_ptrs;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
-  int allocate_nvshmem_teams, is_test_mode;
+  int allocate_nvshmem_teams;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLiiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &is_test_mode, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -74,7 +74,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor && !is_test_mode) {
+    if(!tensor) {
       PyErr_Format(PyExc_TypeError, "Failed to convert item %d (meta) to void pointer", i);
       return NULL;
     }
@@ -105,7 +105,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
   }
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, is_test_mode, model_tensor_names, model_tensor_ptrs);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs);
 
   Py_RETURN_NONE;
 }
@@ -412,14 +412,18 @@ class PersistentKernel:
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
 
         if test_mode:
-            # Skip all following checks
-            self.total_num_requests = 1
-            return
+            # Auto-allocate any meta tensors the test author didn't provide so
+            # the kernel sees valid GPU pointers. Shapes are derived from the
+            # kernel-level params already on `self`. Defaults model "single
+            # prefill of max_num_batched_tokens tokens, content all zero" — the
+            # test author overrides any subset by setting them in
+            # `params["meta_tensors"]` before constructing PersistentKernel.
+            self._apply_test_mode_meta_defaults()
 
-        self.total_num_requests = meta_tensors["tokens"].shape[0]
+        self.total_num_requests = self.meta_tensors["tokens"].shape[0]
 
         # Checks
-        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
+        assert self.max_seq_length == self.meta_tensors["tokens"].shape[1]
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
@@ -442,7 +446,52 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
-    
+
+    def _apply_test_mode_meta_defaults(self):
+        # Allocate any missing meta tensors with shapes derived from the
+        # kernel-level params. Mirrors the production wiring in
+        # demo/qwen3/demo.py (qo/paged_kv buffers sized to max_num_*).
+        # `total_num_requests` is taken from `tokens.shape[0]` after this
+        # function runs, so default `tokens` to a single-request buffer.
+        device = "cuda"
+        if "tokens" not in self.meta_tensors:
+            self.meta_tensors["tokens"] = torch.zeros(
+                1, self.max_seq_length, dtype=torch.int64, device=device)
+        n_req = self.meta_tensors["tokens"].shape[0]
+        if "step" not in self.meta_tensors:
+            self.meta_tensors["step"] = torch.zeros(
+                n_req, dtype=torch.int32, device=device)
+        if "prompt_lengths" not in self.meta_tensors:
+            # Default to a single prefill that fills one iter's batched-token
+            # budget. Test authors override for decode/multi-request scenarios.
+            self.meta_tensors["prompt_lengths"] = torch.full(
+                (n_req,), self.max_num_batched_tokens,
+                dtype=torch.int32, device=device)
+        if "input_tokens" not in self.meta_tensors:
+            self.meta_tensors["input_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "output_tokens" not in self.meta_tensors:
+            self.meta_tensors["output_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "num_new_tokens" not in self.meta_tensors:
+            self.meta_tensors["num_new_tokens"] = torch.zeros(
+                1, dtype=torch.int32, device=device)
+        if "qo_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["qo_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indices_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indices_buffer"] = torch.zeros(
+                self.max_num_pages, dtype=torch.int32, device=device)
+        if "paged_kv_last_page_len_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_last_page_len_buffer"] = torch.zeros(
+                self.max_num_batched_requests,
+                dtype=torch.int32, device=device)
+
     @classmethod
     def get_default_init_parameters(cls):
         return {
@@ -2534,7 +2583,6 @@ class PersistentKernel:
             self.total_num_requests,
             self.eos_token_id,
             self.allocate_nvshmem_teams,
-            self.test_mode,
             model_tensor_names,
             model_tensor_ptrs,
             "",  # Empty JSON path = use __FILE__ based path during initial compile
@@ -2633,12 +2681,11 @@ class PersistentKernel:
             self.total_num_requests,
             self.eos_token_id,
             self.allocate_nvshmem_teams,
-            self.test_mode,
             model_tensor_names,
             model_tensor_ptrs,
             json_path,  # Pass the JSON path for kernel reuse
         )
-        
+
         self._is_compiled = True
 
     def __call__(self, **kwargs):
@@ -2671,32 +2718,6 @@ class PersistentKernel:
             export_to_perfetto_trace(
                 self.profiler_tensor, trace_name
             )
-
-    def run_test_mode(self):
-        """Test-mode execution: launch the task graph once.
-
-        Input/output tensors must be pre-attached via attach_input() before
-        compile(). After run_test_mode() returns, the output tensors contain the results.
-        """
-        assert self.test_mode, "run_test_mode() is only available in test mode"
-        assert self._is_compiled, "Must call compile() before run_test_mode()"
-
-        stream = torch.cuda.current_stream()
-        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
-        stream_ptr = 0
-        if hasattr(stream, "cuda_stream"):
-            try:
-                stream_ptr = int(stream.cuda_stream)
-            except Exception:
-                try:
-                    stream_ptr = int(stream.cuda_stream.value)
-                except Exception as e:
-                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
-        elif isinstance(stream, int):
-            stream_ptr = stream
-        else:
-            raise ValueError("Invalid stream object")
-        self.launch_func(stream_ptr)
 
     def __del__(self):
         if not self.__finalized__:
