@@ -10,7 +10,7 @@ With a single rank, the all-reduce reduces to identity:
 
 Multi-rank (world_size > 1) cannot run inside the in-process test_mode harness
 because it requires MPI bootstrap + NVSHMEM symmetric heap initialization,
-neither of which is set up by `PersistentKernel.run_test_mode()`.
+neither of which is set up by `pk()` in single-rank test mode.
 """
 
 import torch

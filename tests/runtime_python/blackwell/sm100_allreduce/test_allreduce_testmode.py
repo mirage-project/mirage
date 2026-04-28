@@ -6,7 +6,7 @@ NVLS multicast load-reduce ops against an NVSHMEM team.  That requires:
   - MPI bootstrap
   - NVSHMEM host init (nvshmem_init / symmetric heap)
   - NVSHMEM team allocation
-none of which are performed by `PersistentKernel.run_test_mode()`.
+none of which are performed by `pk()` in single-rank test mode.
 
 Inside `PersistentKernel`, `use_nvshmem` is gated on `world_size > 1`.
 With `world_size=1` the megakernel is compiled WITHOUT `-DUSE_NVSHMEM`,
@@ -117,7 +117,7 @@ def test_allreduce_world_size_1():
 
     print("Running...")
     try:
-        pk.run_test_mode()
+        pk()
         torch.cuda.synchronize()
     except Exception as exc:
         print(

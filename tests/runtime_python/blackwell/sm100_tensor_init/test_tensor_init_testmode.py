@@ -59,7 +59,7 @@ def test_tensor_init_testmode():
     )
 
     pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref = tensor_init_ref(pre_kernel_snapshot, init_val=0.0)

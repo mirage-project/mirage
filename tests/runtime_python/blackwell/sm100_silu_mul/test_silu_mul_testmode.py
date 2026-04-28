@@ -85,7 +85,7 @@ def test_silu_mul_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref = silu_mul_ref(x, num_tasks=num_tasks_silu)

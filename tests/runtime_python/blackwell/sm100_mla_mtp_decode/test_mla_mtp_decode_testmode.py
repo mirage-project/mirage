@@ -120,7 +120,7 @@ def test_mla_mtp_decode_testmode():
     folder_path = os.path.dirname(os.path.abspath(__file__))
     pk.compile(output_dir=folder_path)
     print("Running test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # Reference.

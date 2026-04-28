@@ -117,7 +117,7 @@ def test_linear_fp8_with_residual_testmode():
     print("Compiling test kernel...")
     pk.compile(output_dir=THIS_DIR)
     print("Running test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     print(f"\noutput[0, :8]:    {output[0, :8]}")

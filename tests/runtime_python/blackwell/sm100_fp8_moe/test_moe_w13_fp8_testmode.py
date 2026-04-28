@@ -127,7 +127,7 @@ def test_moe_w13_fp8_testmode():
     print("Compiling...")
     pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # Reference

@@ -133,7 +133,7 @@ def test_mla_kv_gather_split_testmode():
     folder = os.path.dirname(os.path.abspath(__file__))
     pk.compile(output_dir=folder)
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # ----- PyTorch reference -----

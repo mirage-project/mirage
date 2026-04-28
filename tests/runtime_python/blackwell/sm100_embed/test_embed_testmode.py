@@ -77,7 +77,7 @@ def test_embed_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref = embed_ref(input_ids, weight)

@@ -85,7 +85,7 @@ def test_moe_mul_sum_add_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     print(f"\nOutput[0, :8]:    {output[0, :8]}")

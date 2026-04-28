@@ -77,7 +77,7 @@ def test_argmax_reduce_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running argmax_reduce test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref = argmax_reduce_ref_with_chunk_size(part_value, part_index, chunk_size)

@@ -86,7 +86,7 @@ def test_quantize_fp8_testmode():
     pk.compile(output_dir=THIS_DIR)
 
     print("Running test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # Reference uses the same column-major UE8M0 packed scale layout the

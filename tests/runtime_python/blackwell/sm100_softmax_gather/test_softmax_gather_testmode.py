@@ -52,7 +52,7 @@ def test_softmax_gather_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref = softmax_gather_ref(logits, token_ids)

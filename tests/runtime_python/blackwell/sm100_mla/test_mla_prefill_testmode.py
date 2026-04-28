@@ -129,7 +129,7 @@ def test_mla_prefill_testmode():
     folder = os.path.dirname(os.path.abspath(__file__))
     pk.compile(output_dir=folder)
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # PyTorch reference expects [B, S, H, D] / [B, S, D] layouts.

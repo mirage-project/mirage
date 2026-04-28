@@ -86,7 +86,7 @@ def test_linear_with_residual_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref = linear_with_residual_ref(x, w, residual)

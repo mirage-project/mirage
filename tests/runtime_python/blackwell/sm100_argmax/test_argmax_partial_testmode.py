@@ -69,7 +69,7 @@ def test_argmax_partial_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running argmax_partial test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref_v, ref_i = argmax_partial_ref(x, num_tasks)

@@ -45,7 +45,7 @@ def test_elementwise_add_testmode():
     )
 
     pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref = elementwise_add_ref(a, b)
