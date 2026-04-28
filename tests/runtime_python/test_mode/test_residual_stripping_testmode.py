@@ -88,7 +88,7 @@ def test_residual_stripping_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running residual-stripping test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref_a = torch_rmsnorm(x_input, w_a)

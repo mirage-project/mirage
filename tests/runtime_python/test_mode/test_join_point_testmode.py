@@ -90,7 +90,7 @@ def test_join_point_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running join-point test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref_a = torch_rmsnorm(x1_input, w_a)

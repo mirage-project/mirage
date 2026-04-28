@@ -155,7 +155,7 @@ def test_topk_sigmoid_testmode():
 
     # Run
     print("Running test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # Compute reference
