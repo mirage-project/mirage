@@ -991,7 +991,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gd[5] = {(uint64_t)K, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)K * 1, 0, 0, 0};
         uint32_t bd[5] = {(uint32_t)BLOCK_K_MPK,
-                          (uint32_t)min(MMA_N_MPK, batch),
+                          (uint32_t)MMA_N_MPK,
                           1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
@@ -1048,7 +1048,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)stride * 2, 0, 0, 0};
         uint32_t bd[5] = {(uint32_t)MMA_M_MPK,
-                          (uint32_t)min(MMA_N_MPK, batch),
+                          (uint32_t)MMA_N_MPK,
                           1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
@@ -1077,7 +1077,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)stride * 2, 0, 0, 0};
         uint32_t bd[5] = {(uint32_t)MMA_M_MPK,
-                          (uint32_t)min(MMA_N_MPK, batch),
+                          (uint32_t)MMA_N_MPK,
                           1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
