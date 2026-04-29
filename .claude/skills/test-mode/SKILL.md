@@ -274,6 +274,7 @@ The `LD_PRELOAD` is required so `dlopen()`-loaded launcher modules resolve `nvsh
 **Kernel hangs / never terminates:**
 - Verify `total_num_requests` is set to match the number of in-flight test requests (typically 1, derived from `tokens.shape[0]`). If `next_request_id` never reaches `total_num_requests`, `prepare_next_batch` will keep returning true and iterations will not stop.
 - Verify the active `mode` is `"offline"` (the default). `MPK_TEST_MODE` is designed to layer on top of MODE_OFFLINE's `prepare_next_batch`; other modes are not supported.
+- The MPK runtime assumes occupying the entire GPU. If other processes are running, they can interfere with scheduling and cause hangs. Always check GPU availability before running. And if it hangs, kill and rerun on other idle GPUs.
 
 **Verifying that `prepare_next_batch` actually ran:**
 - After `pk()` returns, read back `pk.meta_tensors["step"][0]`. It should equal `prompt_lengths[0]` — `prepare_next_batch`'s Step 1.1 advances `step` by `num_tokens` on the second call. See `test_prepare_next_batch_testmode.py` for the canonical assertion.
