@@ -4584,9 +4584,15 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
          (with_residual && rank_with_residual) ? "task_desc->input_ptrs[4]"
                                                : "nullptr");
 
+  // Non-split: row stride of the packed scale buffer equals the per-row
+  // uint32 count, which equals the kernel's compile-time PACKED_SCALE_K.
+  // (full_K and per-task K coincide here.) Split-K registration below
+  // overrides this.
+  int const packed_scale_k = (reduction_size + 511) / 512;
+
   code.e("kernel::linear_fp8_swapAB_sm100_task_impl<cutlass::float_e4m3_t, "
          "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
-         "$, $, $, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, /*SplitK=*/false, $, $, $>(",
          MMA_M,
          MMA_N,
          batch_size,
@@ -4600,6 +4606,8 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
   code.e("    tma_b,");
   code.e("    weight_scale_ptr,");
   code.e("    input_scale_ptr,");
+  code.e("    /*weight_scale_row_stride=*/$,", packed_scale_k);
+  code.e("    /*input_scale_row_stride=*/$,", packed_scale_k);
   code.e("    mBias,");
   code.e("    tma_out);");
 
@@ -4609,6 +4617,179 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
   } else {
     return register_task_variant(TASK_LINEAR_FP8_SWAPAB_SM100, code.to_string());
   }
+}
+
+int TaskRegister::register_splitk_linear_fp8_swapAB_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params) {
+  // Inputs (Python-layer order): input_fp8, input_scale, weight_fp8,
+  // weight_scale. No residual variant for split-K (matches BF16 split-K).
+  // Output: output_bf16, pre-zeroed by the caller — kernel uses TMA reduce-add.
+  //
+  // Grid layout from `linear_splitk_swapAB_fp8_layer`:
+  //   grid.x splits OUTPUT (M) → per-task output_size = full_OUT / grid.x
+  //   grid.y splits K          → per-task K          = full_K   / grid.y
+  // Each CTA at (gx, gy) computes its own (M_shard, K_shard) and reduce-adds
+  // into the (gx)-th output slice.
+  assert(params.size() == 0);
+  int batch_size = 0, output_size_per_task = 0, reduction_size_per_task = 0;
+  int reduction_size_full = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 4;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // STensor (per-task tile) reflects the partitioned shape after grid-split.
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size_per_task = output_ops[0]->output_tensors[0].dim[1];
+  // Per-task K = the partitioned input's reduction extent.
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  reduction_size_per_task = input_ops[0]->output_tensors[0].dim[1];
+  // Full K = the un-partitioned DTensor's reduction extent. Used for the
+  // gmem row stride of the packed-scale buffers (one uint32 per 128-K row,
+  // packed 4 to a uint32).
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  reduction_size_full = input_ops[0]->dtensor.dim[1];
+
+  assert(output_size_per_task % 128 == 0 &&
+         "splitk_linear_fp8_swapAB_sm100 requires per-task output divisible by 128");
+  assert(batch_size <= 16 &&
+         "splitk_linear_fp8_swapAB_sm100 is decode-only: BATCH_SIZE must be <= 16");
+  assert(reduction_size_per_task % 128 == 0 &&
+         "splitk_linear_fp8_swapAB_sm100 requires per-task K divisible by BLOCK_K=128");
+  // Stronger constraint: K_per_task must be a multiple of 512 (= BLOCK_K * 4)
+  // because UE8M0 scales are packed 4 logical-K per uint32. Picking a
+  // split_k_factor that violates this would land slice boundaries inside a
+  // packed uint32 and the per-CTA scale-pointer base offset would misalign.
+  assert(reduction_size_per_task % 512 == 0 &&
+         "splitk_linear_fp8_swapAB_sm100 requires K_per_task divisible by 512 "
+         "(split_k_factor must divide full_K / 512 evenly)");
+  assert(reduction_size_full % reduction_size_per_task == 0 &&
+         "full K must be a multiple of per-task K (uniform split)");
+
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  constexpr int MMA_M = 128;
+  constexpr int MMA_N = 16;
+  constexpr int num_ab_stages = 8;
+  constexpr int num_acc_stages = 2;
+  constexpr int num_c_stages = 4;
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+  constexpr int TMA_CP_ASYNC_SIZE = 128;
+  constexpr int TILE_SIZE = 128;
+  int const output_tma_cp_size = 128;
+  int const output_atom_size = 128;
+
+  // tma_a = WEIGHT (after swap A-side). Per-task K extent (TBGraph already
+  // sliced base_ptr for this CTA's K-shard).
+  code.e("using TMA_A = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, true>;",
+         B, M, S,
+         output_size_per_task,    /*GMEM_ROW_*/
+         reduction_size_per_task, /*GMEM_COL_*/
+         MMA_M,                   /*SMEM_ROW_*/
+         TMA_CP_ASYNC_SIZE,       /*SMEM_COL_*/
+         reduction_size_full,     /*GMEM_STRIDE_ROW_ — full K row stride */
+         1,                       /*GMEM_STRIDE_COL_*/
+         1,                       /*SMEM_REPEAT_ROW_*/
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
+         MMA_M * TMA_CP_ASYNC_SIZE);
+  // tma_b = INPUT (after swap B-side). Per-task K extent.
+  code.e("using TMA_B = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, true>;",
+         B, M, S,
+         batch_size,
+         reduction_size_per_task,
+         MMA_N,
+         TMA_CP_ASYNC_SIZE,
+         reduction_size_full, /*GMEM_STRIDE_ROW_*/
+         1,
+         1,
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
+         MMA_N * TMA_CP_ASYNC_SIZE);
+  // tma_out = OUTPUT BF16 [BATCH, OUTPUT_per_task]. Same as non-split — all
+  // grid.y CTAs target the same M-shard for reduce-add.
+  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, "
+         "$, $, $, $, $, $, $, $, true>;",
+         0, M, S,
+         batch_size,
+         output_size_per_task,
+         MMA_N,
+         MMA_M,
+         output_stride,
+         1,
+         1,
+         (output_atom_size + output_tma_cp_size - 1) / output_tma_cp_size,
+         MMA_N * MMA_M);
+
+  code.inc_indent();
+  code.e("TMA_A "
+         "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0])"
+         ");");
+  code.e("TMA_B "
+         "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0])"
+         ");");
+  code.e("TMA_OUT "
+         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
+         "0]));");
+
+  code.e("uint32_t const *weight_scale_ptr = "
+         "static_cast<uint32_t const*>(task_desc->input_ptrs[3]);");
+  code.e("uint32_t const *input_scale_ptr  = "
+         "static_cast<uint32_t const*>(task_desc->input_ptrs[1]);");
+
+  // NOBIAS path only — no residual variant for split-K.
+  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
+         "cute::make_stride($, cute::Int<1>{}));",
+         batch_size, output_size_per_task, output_stride);
+  code.e("cute::Tensor mBias = "
+         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+         "nullptr)), layout_Bias);");
+
+  // Scale row stride: gmem buffer's row stride = full_packed_K.
+  // Per-task PACKED_SCALE_K (kernel template) covers only the K-slice this
+  // CTA will read; the runtime row_stride arg lets the kernel index into
+  // the K-shard at the right base.
+  int const packed_scale_k_full = (reduction_size_full + 511) / 512;
+
+  code.e("kernel::linear_fp8_swapAB_sm100_task_impl<cutlass::float_e4m3_t, "
+         "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
+         "$, $, $, $, $, /*NOBIAS=*/true, /*SplitK=*/true, $, $, $>(",
+         MMA_M,
+         MMA_N,
+         batch_size,
+         output_size_per_task,
+         reduction_size_per_task,
+         num_ab_stages,
+         num_acc_stages,
+         num_c_stages);
+  code.e("    tma_a,");
+  code.e("    tma_b,");
+  code.e("    weight_scale_ptr,");
+  code.e("    input_scale_ptr,");
+  code.e("    /*weight_scale_row_stride=*/$,", packed_scale_k_full);
+  code.e("    /*input_scale_row_stride=*/$,", packed_scale_k_full);
+  code.e("    mBias,");
+  code.e("    tma_out);");
+
+  return register_task_variant(TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100,
+                               code.to_string());
 }
 
 int TaskRegister::register_mla_kv_gather_sm100_task(

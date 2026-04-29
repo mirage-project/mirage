@@ -91,6 +91,7 @@ template <typename T_,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           bool NOBIAS,
+          bool SplitK = false,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
@@ -99,6 +100,8 @@ __device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
     const TMA_B &tma_b,
     uint32_t const *weight_scale_ptr,
     uint32_t const *input_scale_ptr,
+    int weight_scale_row_stride,
+    int input_scale_row_stride,
     BiasTensor mBias,
     const TMA_OUT &tma_out) {
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
@@ -262,18 +265,24 @@ __device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
   // packed 4 per uint32 (byte 0 = scale for k_tile 0, byte 1 = k_tile 1, ...).
   // For per-128-K quantization, the same uint32 is reused across 4 consecutive
   // k_tiles; we always load it in full and let the UMMA's sf_id field pick the
-  // correct byte. row stride in uint32 elements = ceil(SCALE_K / 4).
+  // correct byte.
+  //
+  // `row_stride` is the gmem row stride in uint32 elements — passed at runtime
+  // because for split-K the per-task PACKED_SCALE_K differs from the buffer's
+  // actual row stride (which spans the FULL K). Non-split call sites pass
+  // PACKED_SCALE_K (compile-time per-task value) and behavior is unchanged.
   auto load_packed_scale_tile = [&](TypeScale *dst,
                                     TypeScale const *src,
                                     int row_base,
                                     int total_rows,
                                     int block_rows,
-                                    int packed_k_idx) {
+                                    int packed_k_idx,
+                                    int row_stride) {
 #pragma unroll
     for (int i = lane_idx; i < block_rows; i += 32) {
       int global_row = row_base + i;
       dst[i] = global_row < total_rows
-                   ? src[global_row * PACKED_SCALE_K + packed_k_idx]
+                   ? src[global_row * row_stride + packed_k_idx]
                    : TypeScale(0);
     }
   };
@@ -412,13 +421,15 @@ __device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
                                  m_base,
                                  OUTPUT_SIZE,
                                  SF_BLOCK_M,
-                                 packed_k_idx);
+                                 packed_k_idx,
+                                 weight_scale_row_stride);
           load_packed_scale_tile(smem_sfb(smem_wr_buffer),
                                  input_scale_ptr,
                                  n_base,
                                  BATCH_SIZE,
                                  SF_BLOCK_N,
-                                 packed_k_idx);
+                                 packed_k_idx,
+                                 input_scale_row_stride);
           __syncwarp();
 
 #pragma unroll
@@ -729,9 +740,19 @@ __device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
         epilogue_wg_barrier.arrive_and_wait();
 
         if (warp_idx == 0 && cute::elect_one_sync()) {
-          tma_out.tma_store_async(
-              output_smem.base_ptr,
-              {m_tile * OUTPUT_ATOM_SIZE, n_tile * MMA_N});
+          if constexpr (SplitK) {
+            // Split-K: each grid.y CTA holds a partial along its K-slice. Use
+            // TMA reduce-add to atomically accumulate into the shared output
+            // region. Caller MUST zero-initialize the output tensor before
+            // launch — there is no kernel-side guard.
+            tma_out.tma_reduce_add_async(
+                output_smem.base_ptr,
+                {m_tile * OUTPUT_ATOM_SIZE, n_tile * MMA_N});
+          } else {
+            tma_out.tma_store_async(
+                output_smem.base_ptr,
+                {m_tile * OUTPUT_ATOM_SIZE, n_tile * MMA_N});
+          }
 
           cute::tma_store_arrive();
           cute::tma_store_wait<NUM_C_STAGE - 1>();
