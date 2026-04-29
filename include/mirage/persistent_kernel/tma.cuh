@@ -965,6 +965,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100:
     case TASK_LINEAR_FP8_SWAPAB_SM100:
     case TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100: {
       // MPK-native FP8 swapAB kernel. Tile shapes match the kernel template:
@@ -986,10 +987,14 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // (tma.cuh:30+) which always emits rank=5 descriptors.
       if (param_id == 0) {
         // input_fp8 (slot 0) -> kernel's TMA_B (B-side). dim=[batch, K].
+        // For split-K, dim[1] is the per-task K-slice but the gmem row
+        // stride stays at the full K — read it from stride[0]. (For the
+        // non-split case stride[0] == K so behavior is unchanged.)
         int batch = tensor_desc.dim[0];
         int K = tensor_desc.dim[1];
+        int row_stride = tensor_desc.stride[0];
         uint64_t gd[5] = {(uint64_t)K, (uint64_t)batch, 1, 1, 1};
-        uint64_t gs[4] = {(uint64_t)K * 1, 0, 0, 0};
+        uint64_t gs[4] = {(uint64_t)row_stride * 1, 0, 0, 0};
         uint32_t bd[5] = {(uint32_t)BLOCK_K_SWAPAB,
                           (uint32_t)MMA_N_SWAPAB,
                           1, 1, 1};
@@ -1014,10 +1019,12 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         }
       } else if (param_id == 2) {
         // weight_fp8 (slot 2) -> kernel's TMA_A (A-side). dim=[output_per_task, K].
+        // Same row-stride consideration as input above.
         int output_pt = tensor_desc.dim[0];
         int K = tensor_desc.dim[1];
+        int row_stride = tensor_desc.stride[0];
         uint64_t gd[5] = {(uint64_t)K, (uint64_t)output_pt, 1, 1, 1};
-        uint64_t gs[4] = {(uint64_t)K * 1, 0, 0, 0};
+        uint64_t gs[4] = {(uint64_t)row_stride * 1, 0, 0, 0};
         uint32_t bd[5] = {(uint32_t)BLOCK_K_SWAPAB,
                           (uint32_t)MMA_M_SWAPAB,
                           1, 1, 1};
@@ -1641,13 +1648,15 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
           task_desc, task_desc.outputs[0], task_desc.num_inputs, 0); // CD
       break;
     }
+    case TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100:
     case TASK_LINEAR_FP8_SWAPAB_SM100:
     case TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100: {
       // MPK-native FP8 swapAB kernel: TMA only for the data tensors and
       // (optionally) residual. Scales (UE8M0 packed uint32) are passed as
       // raw global pointers from task_desc->input_ptrs[]; the kernel
       // dereferences them directly inside the producer warp and feeds them
-      // to UTCCP.
+      // to UTCCP. Split-K reuses the same descriptor layout — the per-CTA
+      // K-slice is encoded by TBGraph partitioning advancing base_ptr.
       // Tensor order (Python-layer): 0=input_fp8, 1=input_scale,
       // 2=weight_fp8, 3=weight_scale, 4=residual?, output[0]=out.
       bool with_res =

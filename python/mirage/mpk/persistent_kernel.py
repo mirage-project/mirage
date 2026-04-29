@@ -1733,6 +1733,45 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_swapAB_with_residual_sm100", params)
 
+    def linear_splitk_swapAB_fp8_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,    # (num_M_shards, split_k_factor, 1)
+        block_dim: tuple,   # (256, 1, 1) on SM100
+    ):
+        # Split-K variant of linear_fp8_swapAB_layer. grid.y CTAs each compute
+        # a K-slice partial and TMA reduce-add into the shared output tile.
+        #
+        # *** Caller MUST zero-initialize `output` before launch ***
+        # The kernel uses tma_reduce_add_async; if the buffer has stale data
+        # the partials will compound on top of it. No kernel-side guard.
+        #
+        # Constraints (asserted at registration time):
+        #   - output.dim[1] / grid.x must be a multiple of 128 (per-task N)
+        #   - input.dim[1]  / grid.y must be a multiple of 128 (per-task K)
+        #   - batch_size <= 16 (decode-only)
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # input_fp8 [batch, K]: grid.y splits K (dim 1).
+        tb_graph.new_input(input_fp8, (-1, 1, -1), 1, True)
+        # input_scale [batch, packed_K]: same K-split.
+        tb_graph.new_input(input_scale, (-1, 1, -1), 1, True)
+        # weight_fp8 [output, K]: grid.x splits output (dim 0), grid.y splits K (dim 1).
+        tb_graph.new_input(weight_fp8, (0, 1, -1), 1, True)
+        # weight_scale [output, packed_K]: same partition as weight.
+        tb_graph.new_input(weight_scale, (0, 1, -1), 1, True)
+        # output [batch, output]: grid.x splits dim 1; grid.y does NOT
+        # partition (all grid.y CTAs reduce-add into the same M-shard).
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "splitk_linear_fp8_swapAB_sm100", params)
+
     def moe_silu_mul_layer(
         self,
         input: DTensor,

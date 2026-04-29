@@ -803,6 +803,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true);
     task_config[op] = std::make_tuple(
         5, 1, TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100, variant_id);
+  } else if (name == "splitk_linear_fp8_swapAB_sm100") {
+    int variant_id =
+        task_register->register_splitk_linear_fp8_swapAB_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 1, TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {
