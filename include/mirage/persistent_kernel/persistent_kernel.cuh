@@ -273,8 +273,20 @@ __device__ __forceinline__ bool
         num_new_tokens =
             min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       } else {
-        // Decode requests
-        num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        // Decode / speculative-verify requests. MBT is only the batch token
+        // capacity here; the decode width itself is provided by runtime
+        // metadata (1 for normal decode, NUM_DRAFT+1 for MTP verify).
+        num_new_tokens = config.new_token_nums[request_id];
+        if (num_new_tokens < 1) {
+          num_new_tokens = 1;
+        }
+        int remaining_seq = config.max_seq_length - step;
+        if (remaining_seq < 0) {
+          remaining_seq = 0;
+        }
+        num_new_tokens =
+            min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        num_new_tokens = min(num_new_tokens, remaining_seq);
       }
       // Move tokens to input_tokens
       for (int j = 0; j < num_new_tokens; j++) {

@@ -93,7 +93,7 @@ def test_gateup_only():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run()
+    pk.run_test_mode()
     torch.cuda.synchronize()
 
     print(f"\nmlp_mid[0, :8]:   {mlp_mid[0, :8]}")
@@ -211,7 +211,7 @@ def test_gateup_silu_down():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run()
+    pk.run_test_mode()
     torch.cuda.synchronize()
 
     print(f"\nmlp_out[0, :8]:   {mlp_out[0, :8]}")
@@ -321,7 +321,7 @@ def test_gateup_silu():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run()
+    pk.run_test_mode()
     torch.cuda.synchronize()
 
     print(f"\nsilu_mul_out[0, :8]:   {silu_mul_out[0, :8]}")

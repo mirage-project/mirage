@@ -118,17 +118,20 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
 
 // ============ Main MLA Kernel ============
 template <bool SINGLE_TILE>
-__device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
-                                              CUtensorMap const *KV_tm_ptr,
-                                              nv_bfloat16 *__restrict__ Oa,
-                                              float *__restrict__ La,
-                                              float ss,
-                                              int kv_len,
-                                              int sk,
-                                              int Q_LEN,
-                                              int qpg,
-                                              int block_x_packed,
-                                              int block_y) {
+__device__ __noinline__ void
+    mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
+                     CUtensorMap const *KV_tm_ptr,
+                     nv_bfloat16 *__restrict__ Oa,
+                     float *__restrict__ La,
+                     float ss,
+                     int kv_len,
+                     int sk,
+                     int Q_LEN,
+                     int qpg,
+                     int const *__restrict__ page_indices,
+                     int first_page_pos,
+                     int block_x_packed,
+                     int block_y) {
   if (threadIdx.x >= TB) {
     return;
   }
@@ -219,6 +222,9 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
   for (int tile = t0; tile < t1; tile++) {
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
+    int const kv_row = page_indices == nullptr
+                           ? bi * kv_len + kvs
+                           : page_indices[first_page_pos + tile] * TILE_S;
 
     if (!SINGLE_TILE && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
@@ -276,7 +282,7 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(k_stage),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(ki),
                      "r"(tma_bar + stage * 8)
                      : "memory");
@@ -341,7 +347,7 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc_base + vi),
                      "r"(tma_bar + vi * 8)
                      : "memory");
@@ -570,7 +576,7 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc_base + vi),
                      "r"(tma_bar + stage * 8)
                      : "memory");
@@ -669,6 +675,9 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
   int const valid_rows = actual_qpg * hpb;
   if (tid < valid_rows) {
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
+    constexpr bool write_final = SINGLE_TILE;
+    int const q_final = gi * qpg + tid / hpb;
+    int const h_final = tid % hpb;
     for (int vi = 0; vi < PV_CHUNKS; vi++) {
       int vc = vc_base_epi + vi;
       int out_taddr_vc = taddr + vc * BK;
@@ -700,15 +709,24 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
 #pragma unroll
         for (int i = 0; i < 16; i++) {
           nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
-          asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
-                           (nv_bfloat16 *)(Oout + base_d + i * 128)),
-                       "h"(*(uint16_t *)&val)
-                       : "memory");
+          if (write_final) {
+            int const o_base =
+                (bi * Q_LEN + q_final) * NUM_HEADS * D_V + h_final * D_V;
+            asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                             (nv_bfloat16 *)(Oa + o_base + vc * BK + c + i)),
+                         "h"(*(uint16_t *)&val)
+                         : "memory");
+          } else {
+            asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                             (nv_bfloat16 *)(Oout + base_d + i * 128)),
+                         "h"(*(uint16_t *)&val)
+                         : "memory");
+          }
         }
       }
     }
     // Only v_half==0 writes La (shared across V halves)
-    if (v_half == 0) {
+    if (!write_final && v_half == 0) {
       La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
     }
   }

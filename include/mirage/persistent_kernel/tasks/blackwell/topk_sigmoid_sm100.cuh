@@ -75,6 +75,7 @@ __device__ __forceinline__ void
 template <typename T,
           int VPT,
           int NUM_EXPERTS,
+          int LOCAL_EXPERTS,
           int WARPS_PER_CTA,
           int BYTES_PER_LDG,
           int NUM_GROUPS,
@@ -87,8 +88,8 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
     bool const *__restrict__ finished,
     void *__restrict__ output_ptr, // [num_rows, TOPK_EXPERTS]
     int const num_rows,
-    void *__restrict__ mpk_routing_indices_ptr,   // [NUM_EXPERTS, num_rows]
-    void *__restrict__ mpk_active_expert_ids_ptr, // [NUM_EXPERTS + 1]
+    void *__restrict__ mpk_routing_indices_ptr,   // [LOCAL_EXPERTS, num_rows]
+    void *__restrict__ mpk_active_expert_ids_ptr, // [LOCAL_EXPERTS + 1]
     int const start_expert,
     int const end_expert,
     float const routed_scaling_factor) {
@@ -103,17 +104,18 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // ---- Phase 0: Initialize routing structures ----
   for (int expert = start_expert + threadIdx.x; expert < end_expert;
        expert += blockDim.x) {
+    int const local_expert = expert - start_expert;
     if (mpk_routing_indices != nullptr) {
       for (int row = 0; row < num_rows; ++row) {
-        mpk_routing_indices[expert * num_rows + row] = 0;
+        mpk_routing_indices[local_expert * num_rows + row] = 0;
       }
     }
     if (mpk_active_expert_ids != nullptr) {
-      mpk_active_expert_ids[expert - start_expert] = -1;
+      mpk_active_expert_ids[local_expert] = -1;
     }
   }
   if (threadIdx.x == 0 && mpk_active_expert_ids != nullptr) {
-    mpk_active_expert_ids[NUM_EXPERTS] = 0;
+    mpk_active_expert_ids[LOCAL_EXPERTS] = 0;
   }
   __syncthreads();
 
@@ -354,8 +356,8 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
       int const local_expert = expert - start_expert;
       int const mark = mpk_active_expert_ids[local_expert];
       if (mark >= 0) {
-        int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
-        mpk_active_expert_ids[pos] = expert;
+        int const pos = atomicAdd(mpk_active_expert_ids + LOCAL_EXPERTS, 1);
+        mpk_active_expert_ids[pos] = local_expert;
       }
     }
   }

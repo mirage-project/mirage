@@ -265,7 +265,8 @@ __device__ __noinline__ void
       residual_empty_barrier->init(1);
     }
     cutlass::arch::fence_barrier_init();
-  } else if (warp_idx == 2) {
+  }
+  if (warp_idx == 0) {
     Allocator().allocate(kNumTmemCols, tmem_ptr_in_smem);
   }
   kNumMulticast > 1 ? cute::cluster_sync() : __syncthreads();

@@ -262,10 +262,6 @@ __device__ __noinline__ void
                        /* arrival count */ 4);
   }
 
-  // Sync tmem allocation status between MMA and epilogue warps within CTA
-  // 32 threads (mma) + 128 threads (epilog) to sync
-  cutlass::arch::NamedBarrier tmem_allocation_result_barrier(
-      32 + 128, cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
   cutlass::arch::NamedBarrier epilogue_wg_barrier(
       128, /*bar-id*/ cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
@@ -409,6 +405,9 @@ __device__ __noinline__ void
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
 
+  if (warp_idx == 0) {
+    tmem_allocator.allocate(num_tmem_columns, &shared_storage.tmem_base_ptr);
+  }
   __syncthreads(); // Wait for all threads until warp0 allocates TMEM
 
   if (warp_idx == 5) {
@@ -483,8 +482,6 @@ __device__ __noinline__ void
   } else if (warp_idx == 4) {
     // MMA warp (1)
 
-    // Wait for TMEM allocation to complete
-    tmem_allocation_result_barrier.arrive_and_wait();
     tCtAcc.data() = shared_storage.tmem_base_ptr;
 
     int total_k_tile_count = 0;
@@ -565,11 +562,6 @@ __device__ __noinline__ void
   } else if (warp_idx < 4) {
     // Epilogue warps (4)
 
-    // Allocate TMEM for accumulators
-    if (warp_idx == 0) {
-      tmem_allocator.allocate(num_tmem_columns, &shared_storage.tmem_base_ptr);
-    }
-    tmem_allocation_result_barrier.arrive_and_wait();
     tCtAcc.data() = shared_storage.tmem_base_ptr;
 
     using AccType = typename decltype(tCtAcc)::value_type;

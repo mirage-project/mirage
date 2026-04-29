@@ -135,15 +135,16 @@ __device__ __noinline__ void
   int const mainloop_bar = __cvta_generic_to_shared(&mbar_buf[2 * MAX_STAGES]);
   int const q_bar = __cvta_generic_to_shared(&mbar_buf[2 * MAX_STAGES + 1]);
 
-  if (wid == 0 && elect_sync()) {
-    for (int i = 0; i < MAX_STAGES; i++) {
-      mbar_init(tma_bar + i * 8, 1);
-      mbar_init(mma_bar + i * 8, 1);
+  if (wid == 0) {
+    if (elect_sync()) {
+      for (int i = 0; i < MAX_STAGES; i++) {
+        mbar_init(tma_bar + i * 8, 1);
+        mbar_init(mma_bar + i * 8, 1);
+      }
+      mbar_init(mainloop_bar, 1);
+      mbar_init(q_bar, 1);
+      asm volatile("fence.mbarrier_init.release.cluster;");
     }
-    mbar_init(mainloop_bar, 1);
-    mbar_init(q_bar, 1);
-    asm volatile("fence.mbarrier_init.release.cluster;");
-  } else if (wid == 1) {
     int addr_smem = __cvta_generic_to_shared(tmem_addr_buf);
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
@@ -622,6 +623,11 @@ __device__ __noinline__ void
   if (active) {
     asm volatile("tcgen05.fence::after_thread_sync;");
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
+    constexpr bool write_final = SINGLE_TILE;
+    int const q_final = tid / hpb;
+    int const h_final = gi * hpb + (tid % hpb);
+    bool const final_row_valid =
+        (q_final < Q_LEN) && (h_final < local_num_heads);
     for (int vc = 0; vc < V_CHUNKS; vc++) {
       int out_taddr = taddr + vc * BK;
       for (int c = 0; c < BK; c += 16) {
@@ -652,12 +658,20 @@ __device__ __noinline__ void
 #pragma unroll
         for (int i = 0; i < 16; i++) {
           nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
-          Oout[base_d + i * 128] = val;
+          if (write_final) {
+            if (final_row_valid) {
+              int const o_base = (bi * Q_LEN + q_final) * local_num_heads * D_V +
+                                 h_final * D_V;
+              Oa[o_base + vc * BK + c + i] = val;
+            }
+          } else {
+            Oout[base_d + i * 128] = val;
+          }
         }
       }
     }
 
-    if (active) {
+    if (!write_final) {
       La[block_linear * 128 + tid] = logf(fmaxf(row_sum, 1e-30f)) + row_max;
     }
   } // end if (active) for epilogue

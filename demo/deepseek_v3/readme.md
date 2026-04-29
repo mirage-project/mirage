@@ -72,7 +72,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
     -x CUDA_VISIBLE_DEVICES -x LD_LIBRARY_PATH -x LD_PRELOAD -x PATH \
     -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
     python demo/deepseek_v3/demo.py \
-    --model-path /raid/catalyst/models/DeepSeek-V3 \
+    --model-path /path/to/DeepSeek-V3 \
     --use-mirage --layers 0-39 \
     --max-num-batched-tokens 1 --max-seq-length 4096
 ```
@@ -97,11 +97,86 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 mpirun --allow-run-as-root -np 8 \
 ```
 
 Notes:
-- `--max-num-batched-tokens 128` enables the chunked-prefill MLA kernel
-  (auto-selected when `max_num_batched_tokens >= 32`). Drop to `1` for the
-  pure decode path.
+- `--max-num-batched-tokens 128` sets the model token budget for one MPK
+  scheduling step. In prefill, this is the chunk size; values `>=32` select
+  the chunked-prefill MLA kernel. Drop to `1` for the pure single-token decode
+  path. In decode, the actual number of decoded tokens per step is controlled
+  by request count and MTP length, not by this prefill budget.
 - `--max-num-pages 160` ≈ `(16384 / 128) + 32` page headroom at `--page-size 128`.
 - `--mtp 3` draft 3 speculative tokens per step. Set `0` to disable MTP.
+
+## Profiling
+
+Use `--profiling` and `--trace-name` to emit one Perfetto trace per rank. Keep
+the trace name outside the repo if you do not want profiling artifacts in the
+working tree.
+
+Example: TP=4, batch size 1, 20 decoder layers, one-token prompt plus 128 decode
+tokens:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
+    -x CUDA_VISIBLE_DEVICES -x LD_LIBRARY_PATH -x LD_PRELOAD -x PATH \
+    -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
+    python demo/deepseek_v3/demo.py \
+    --model-path /path/to/DeepSeek-V3 \
+    --use-mirage --profiling \
+    --trace-name /tmp/deepseek_v3_tp4_bs1_layers20_decode128 \
+    --layers 0-19 --mtp 0 \
+    --prompt-length 1 --ignore-eos \
+    --max-num-batched-tokens 1 \
+    --max-num-batched-requests 1 \
+    --max-seq-length 129 \
+    --save-tokens /tmp/deepseek_v3_tp4_bs1_layers20_decode128_tokens.json
+```
+
+This writes files such as
+`/tmp/deepseek_v3_tp4_bs1_layers20_decode128_rank0.perfetto-trace`.
+
+## Stress Checks
+
+For quick regression coverage, run a small set of short DeepSeek workloads that
+exercise the main scheduling paths before collecting performance numbers:
+
+```bash
+# TP=1 decode smoke test
+python demo/deepseek_v3/demo.py \
+    --model-path /path/to/DeepSeek-V3 \
+    --use-mirage --layers 0-8 --mtp 0 \
+    --max-num-batched-tokens 1 --max-seq-length 16
+
+# TP=4 decode smoke test
+CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
+    -x CUDA_VISIBLE_DEVICES -x LD_LIBRARY_PATH -x LD_PRELOAD -x PATH \
+    -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
+    python demo/deepseek_v3/demo.py \
+    --model-path /path/to/DeepSeek-V3 \
+    --use-mirage --layers 0-8 --mtp 0 \
+    --max-num-batched-tokens 1 --max-num-batched-requests 1 \
+    --max-seq-length 16
+
+# TP=4 MTP smoke test
+CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
+    -x CUDA_VISIBLE_DEVICES -x LD_LIBRARY_PATH -x LD_PRELOAD -x PATH \
+    -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
+    python demo/deepseek_v3/demo.py \
+    --model-path /path/to/DeepSeek-V3 \
+    --use-mirage --layers 0-8 --mtp 2 \
+    --max-num-batched-tokens 1 --max-num-batched-requests 1 \
+    --max-seq-length 16
+
+# TP=4 chunk-prefill smoke test
+CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
+    -x CUDA_VISIBLE_DEVICES -x LD_LIBRARY_PATH -x LD_PRELOAD -x PATH \
+    -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
+    python demo/deepseek_v3/demo.py \
+    --model-path /path/to/DeepSeek-V3 \
+    --use-mirage --layers 0-8 --mtp 0 \
+    --prompt-length 140 \
+    --max-num-batched-tokens 128 \
+    --max-num-batched-requests 1 \
+    --max-seq-length 160
+```
 
 ## CLI Flags
 
@@ -111,15 +186,17 @@ Notes:
 | `--use-mirage` | off | Use Mirage persistent kernel (vs native PyTorch) |
 | `--layers` | all 61 | Comma-separated layer indices (e.g. `0,3,60`) or range `0-39` |
 | `--mtp` | 0 | MTP speculative decoding draft length (0=disabled, 1-3) |
+| `--ep-size` | 1 | Expert-parallel group count for routed experts. Non-MoE layers, shared experts, and routers keep TP=world_size; routed experts use TP=world_size/ep_size. |
 | `--rejection-sample-method` | strict | MTP rejection sampling mode (strict / probabilistic / synthetic) |
-| `--max-num-batched-tokens` | 8 | Batch size (tokens per decode step). `>=32` selects the chunked-prefill MLA kernel. |
-| `--max-num-batched-requests` | 1 | Max concurrent requests |
+| `--max-num-batched-tokens` | 8 | Model token budget for one scheduling step. In prefill this is the chunk size; `>=32` selects the chunked-prefill MLA kernel. Decode width is controlled by active requests and MTP length. |
+| `--max-num-batched-requests` | 1 | Max concurrent requests. This is the request batch-size limit. |
 | `--max-seq-length` | 4096 | Max sequence length (affects KV cache allocation). **Use `max_seq_length ≈ prompt_len + max_new_tokens`** — MPK's offline driver generates to `max_seq_length`, so over-allocating costs O(max_seq²) decode time. |
 | `--max-num-pages` | 64 | Max KV cache pages |
 | `--page-size` | 128 | Tokens per KV cache page |
 | `--profiling` | off | Attach profiler tensor for Perfetto trace |
 | `--trace-name` | "" | Output name for Perfetto trace file |
 | `--prompt` | (default) | Input prompt text |
+| `--prompts-json` | None | JSON array of prompts for batched-request testing |
 | `--prompt-length` | 0 | If >0, synthesize a prompt of exactly N tokens (stress test) |
 | `--temperature` | 0.0 | Sampling temperature (0 = greedy) |
 | `--top_p` | 1.0 | Top-p sampling |
@@ -128,3 +205,4 @@ Notes:
 | `--max-new-tokens` | None | Cap on generated tokens |
 | `--save-tokens` | off | Dump generated tokens to JSON |
 | `--output-dir` | None | Output directory for compiled kernel |
+| `--dump-task-graph` | off | Dump Mirage task graph JSON and generated CUDA code |

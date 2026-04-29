@@ -125,6 +125,8 @@ __device__ __noinline__ void mla_mtp_tp8_main(
     int sk,
     int Q_LEN,
     int qpg,
+    int const *__restrict__ page_indices,
+    int first_page_pos,
     int Q_LEN_real, // TP=8: Q_LEN is padded to even, this is the real value
     int block_x,
     int block_y) {
@@ -212,6 +214,9 @@ __device__ __noinline__ void mla_mtp_tp8_main(
   for (int tile = t0; tile < t1; tile++) {
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
+    int const kv_row = page_indices == nullptr
+                           ? bi * kv_len + kvs
+                           : page_indices[first_page_pos + tile] * TILE_S;
 
     if (!SINGLE_TILE && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
@@ -269,7 +274,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(k_stage),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(ki),
                      "r"(tma_bar + stage * 8)
                      : "memory");
@@ -333,7 +338,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc),
                      "r"(tma_bar + vc * 8)
                      : "memory");
@@ -561,7 +566,7 @@ __device__ __noinline__ void mla_mtp_tp8_main(
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc),
                      "r"(tma_bar + stage * 8)
                      : "memory");
@@ -659,6 +664,9 @@ __device__ __noinline__ void mla_mtp_tp8_main(
   int const valid_rows = actual_qpg * hpb;
   if (tid < valid_rows) {
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
+    constexpr bool write_final = SINGLE_TILE;
+    int const q_final = gi * qpg + tid / hpb;
+    int const h_final = tid % hpb;
     for (int vc = 0; vc < V_CHUNKS; vc++) {
       int out_taddr_vc = taddr + vc * BK;
       for (int c = 0; c < BK; c += 16) {
@@ -689,14 +697,25 @@ __device__ __noinline__ void mla_mtp_tp8_main(
 #pragma unroll
         for (int i = 0; i < 16; i++) {
           nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
-          asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
-                           (nv_bfloat16 *)(Oout + base_d + i * 128)),
-                       "h"(*(uint16_t *)&val)
-                       : "memory");
+          if (write_final) {
+            int const o_base =
+                (bi * Q_LEN + q_final) * NUM_HEADS * D_V + h_final * D_V;
+            asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                             (nv_bfloat16 *)(Oa + o_base + vc * BK + c + i)),
+                         "h"(*(uint16_t *)&val)
+                         : "memory");
+          } else {
+            asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                             (nv_bfloat16 *)(Oout + base_d + i * 128)),
+                         "h"(*(uint16_t *)&val)
+                         : "memory");
+          }
         }
       }
     }
-    La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
+    if (!write_final) {
+      La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
+    }
   }
 
   MLA_TP_SYNC_ACTIVE();

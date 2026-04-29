@@ -41,6 +41,7 @@ template <
     int HIDDEN_SIZE,
     int GROUP_SIZE,
     int GLOBAL_STRIDE,
+    int GROUP_TILES,
     typename T,
     typename DST_T,
     bool SCALE_UE8M0,
@@ -52,7 +53,9 @@ __device__ __forceinline__ void
                                            float const eps,
                                            float const min_8bit,
                                            float const max_8bit,
-                                           int const scale_outer_stride) {
+                                           int const scale_outer_stride,
+                                           int const row_idx,
+                                           int const group_tile_idx) {
   // Pointers
   T const *input = static_cast<T const *>(input_ptr);
   DST_T *output_q = static_cast<DST_T *>(output_q_ptr);
@@ -66,8 +69,6 @@ __device__ __forceinline__ void
   constexpr int ELEMENTS_PER_THREAD = GROUP_SIZE / WARP_SIZE;
   constexpr int NUM_GROUPS_PER_ROW = HIDDEN_SIZE / GROUP_SIZE;
   constexpr int SCALE_ALIGNMENT = SCALE_UE8M0 ? 4 : 1;
-  constexpr int PACKED_SCALE_K =
-      ((NUM_GROUPS_PER_ROW + SCALE_ALIGNMENT - 1) / SCALE_ALIGNMENT);
   __shared__ uint8_t packed_scale_bytes[NUM_GROUPS_PER_ROW];
 
   // Assertions
@@ -84,15 +85,22 @@ __device__ __forceinline__ void
   int const warp_idx = thread_idx / WARP_SIZE;
   int const num_groups_per_block = blockDim.x / WARP_SIZE;
 
-  // Each CTA quantizes exactly ONE batch row, selected by blockIdx.x.
-  // Callers must launch grid_dim=(BATCH_SIZE, 1, 1) — one block per row.
-  // BATCH_SIZE is retained as a template parameter for callers to assert
-  // intent, but only blockIdx.x controls which row this CTA processes.
-  int const batch_idx = static_cast<int>(blockIdx.x);
+  // Each MPK task quantizes exactly one logical row. In a persistent kernel
+  // blockIdx.x is the worker CTA id, not the task-grid x coordinate, so the row
+  // index must come from task metadata.
+  int const batch_idx = row_idx;
+  if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
+    return;
+  }
   int const row_base = batch_idx * GLOBAL_STRIDE;
+  int const group_tile = min(max(group_tile_idx, 0), GROUP_TILES - 1);
+  int const groups_per_tile =
+      (NUM_GROUPS_PER_ROW + GROUP_TILES - 1) / GROUP_TILES;
+  int const group_begin = group_tile * groups_per_tile;
+  int const group_end = min(group_begin + groups_per_tile, NUM_GROUPS_PER_ROW);
 
 #pragma unroll
-  for (int group_idx = warp_idx; group_idx < NUM_GROUPS_PER_ROW;
+  for (int group_idx = group_begin + warp_idx; group_idx < group_end;
        group_idx += num_groups_per_block) {
     int const group_base_idx = row_base + GROUP_SIZE * group_idx;
 
@@ -143,7 +151,8 @@ __device__ __forceinline__ void
     // UE8M0 scale layout: column-major [packed_k, aligned_batch].
     // This row's packed scales go in column `batch_idx`.
 #pragma unroll
-    for (int packed_idx = thread_idx; packed_idx < PACKED_SCALE_K;
+    for (int packed_idx = group_begin / SCALE_ALIGNMENT + thread_idx;
+         packed_idx < (group_end + SCALE_ALIGNMENT - 1) / SCALE_ALIGNMENT;
          packed_idx += blockDim.x) {
       uint32_t packed_scale = 0;
 #pragma unroll
