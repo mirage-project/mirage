@@ -1,10 +1,10 @@
 """Direct kernel-wrapper smoke test for the MPK FP8 swap-AB Linear kernel.
 
 Run:
-  CUDA_VISIBLE_DEVICES=0 python tests/runtime_python/blackwell/sm100_linear_fp8_mpk/test_linear_fp8_mpk.py
+  CUDA_VISIBLE_DEVICES=0 python tests/runtime_python/blackwell/sm100_linear_fp8_swapAB/test_linear_fp8_swapAB.py
 
 Build first:
-  cd tests/runtime_python/blackwell/sm100_linear_fp8_mpk
+  cd tests/runtime_python/blackwell/sm100_linear_fp8_swapAB
   python setup.py build_ext --inplace
 """
 import os
@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "common"))
 
-import runtime_kernel_blackwell_linear_fp8_mpk as mod  # noqa: E402
+import runtime_kernel_blackwell_linear_fp8_swapAB as mod  # noqa: E402
 from sm100_fp8_scale_layout import quantize_to_fp8_packed_ue8m0  # noqa: E402
 
 
@@ -45,7 +45,7 @@ def main():
     ref = (input_bf16.float() @ weight_bf16.float().T).to(torch.bfloat16)
 
     print("Launching kernel...")
-    mod.linear_fp8_mpk_sm100(input_fp8, input_scale, weight_fp8, weight_scale, output)
+    mod.linear_fp8_swapAB_sm100(input_fp8, input_scale, weight_fp8, weight_scale, output)
     torch.cuda.synchronize()
 
     print(f"output[0, :8]:    {output[0, :8]}")

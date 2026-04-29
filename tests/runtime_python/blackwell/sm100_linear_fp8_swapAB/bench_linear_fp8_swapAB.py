@@ -5,9 +5,9 @@ The kernel is a single CTA on one SM. Each (BATCH, OUTPUT, K) entry below
 maps to a layer the DeepSeek V3 demo (TP4 + Blackwell) fires per token.
 Run after building the wrapper:
 
-    cd tests/runtime_python/blackwell/sm100_linear_fp8_mpk
+    cd tests/runtime_python/blackwell/sm100_linear_fp8_swapAB
     python setup.py build_ext --inplace
-    python bench_linear_fp8_mpk.py
+    python bench_linear_fp8_swapAB.py
 
 DeepSeek V3 K dimensions used here (decode regime, per the public config):
     K = 1536   q_b family input (q_lora_rank)
@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "common"))
 
-import runtime_kernel_blackwell_linear_fp8_mpk as mod  # noqa: E402
+import runtime_kernel_blackwell_linear_fp8_swapAB as mod  # noqa: E402
 from sm100_fp8_scale_layout import quantize_to_fp8_packed_ue8m0  # noqa: E402
 
 
@@ -79,7 +79,7 @@ def bench_one(label, batch, output_size, k, device):
                          device=device)
 
     # Quick correctness probe (optional; skip if you only want timing).
-    mod.linear_fp8_mpk_sm100(input_fp8, input_scale, weight_fp8, weight_scale,
+    mod.linear_fp8_swapAB_sm100(input_fp8, input_scale, weight_fp8, weight_scale,
                              output)
     torch.cuda.synchronize()
     if not torch.isfinite(output).all().item():
@@ -87,7 +87,7 @@ def bench_one(label, batch, output_size, k, device):
                            f"B={batch} N={output_size} K={k}")
 
     # Warmup with repeat=WARMUP_REPS (single host call, descriptors built once).
-    mod.linear_fp8_mpk_sm100(input_fp8, input_scale, weight_fp8, weight_scale,
+    mod.linear_fp8_swapAB_sm100(input_fp8, input_scale, weight_fp8, weight_scale,
                              output, repeat=WARMUP_REPS)
     torch.cuda.synchronize()
 
@@ -96,7 +96,7 @@ def bench_one(label, batch, output_size, k, device):
     start.record()
     # Single host call running TIMED_REPS kernel launches back-to-back —
     # avoids cudaMalloc/cudaMemcpy/launch-overhead bias dominating timing.
-    mod.linear_fp8_mpk_sm100(input_fp8, input_scale, weight_fp8, weight_scale,
+    mod.linear_fp8_swapAB_sm100(input_fp8, input_scale, weight_fp8, weight_scale,
                              output, repeat=TIMED_REPS)
     end.record()
     torch.cuda.synchronize()

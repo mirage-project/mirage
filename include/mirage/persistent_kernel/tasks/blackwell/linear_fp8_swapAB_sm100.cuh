@@ -13,7 +13,8 @@
  * limitations under the License.
  */
 
-// MPK-native FP8 swap-AB linear kernel for Blackwell SM100.
+// FP8 swap-AB Linear kernel for Blackwell SM100. Designed for MPK
+// (one CTA per task) — MMA_M=128 aligns to the per-task output dim.
 //
 // One CTA = one (per-task output_size x batch) output tile. Pipeline:
 //   warp 5      : producer (TMA-loads weight + activation, packs SF in SMEM)
@@ -93,7 +94,7 @@ template <typename T_,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__device__ __noinline__ void linear_fp8_mpk_sm100_task_impl(
+__device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
     const TMA_A &tma_a,
     const TMA_B &tma_b,
     uint32_t const *weight_scale_ptr,

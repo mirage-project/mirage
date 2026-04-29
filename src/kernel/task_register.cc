@@ -4186,7 +4186,7 @@ int TaskRegister::register_linear_fp8_sm100_task(
   }
 }
 
-int TaskRegister::register_linear_fp8_mpk_sm100_task(
+int TaskRegister::register_linear_fp8_swapAB_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool with_residual) {
@@ -4194,7 +4194,7 @@ int TaskRegister::register_linear_fp8_mpk_sm100_task(
   // weight_scale, [residual]
   // Output: output_bf16
   //
-  // The kernel internally swaps A<->B (linear_fp8_mpk_sm100_task_impl): A=weight
+  // The kernel internally swaps A<->B (linear_fp8_swapAB_sm100_task_impl): A=weight
   // (M-axis = per-task output_size), B=activation (N-axis = batch). So the
   // codegen routes weight_fp8 -> tma_a, input_fp8 -> tma_b, weight_scale ->
   // tma_sfa, input_scale -> tma_sfb. This is the only place that reorder
@@ -4236,11 +4236,11 @@ int TaskRegister::register_linear_fp8_mpk_sm100_task(
   //     N-walk). Larger M would re-introduce the same serialization the new
   //     kernel was built to avoid.
   assert(output_size_per_task % 128 == 0 &&
-         "linear_fp8_mpk_sm100 requires per-task output size divisible by 128");
+         "linear_fp8_swapAB_sm100 requires per-task output size divisible by 128");
   assert(batch_size <= 16 &&
-         "linear_fp8_mpk_sm100 is decode-only: BATCH_SIZE must be <= 16");
+         "linear_fp8_swapAB_sm100 is decode-only: BATCH_SIZE must be <= 16");
   assert(reduction_size % 128 == 0 &&
-         "linear_fp8_mpk_sm100 requires K divisible by BLOCK_K=128");
+         "linear_fp8_swapAB_sm100 requires K divisible by BLOCK_K=128");
 
   // Output stride (column dim) in global memory. For the MPK FP8 swapAB
   // kernel we always treat the output as row-major BF16 [BATCH, OUTPUT].
@@ -4361,7 +4361,7 @@ int TaskRegister::register_linear_fp8_mpk_sm100_task(
          (with_residual && rank_with_residual) ? "task_desc->input_ptrs[4]"
                                                : "nullptr");
 
-  code.e("kernel::linear_fp8_mpk_sm100_task_impl<cutlass::float_e4m3_t, "
+  code.e("kernel::linear_fp8_swapAB_sm100_task_impl<cutlass::float_e4m3_t, "
          "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, $, $, $, $>(",
          MMA_M,
@@ -4381,10 +4381,10 @@ int TaskRegister::register_linear_fp8_mpk_sm100_task(
   code.e("    tma_out);");
 
   if (with_residual) {
-    return register_task_variant(TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100,
+    return register_task_variant(TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100,
                                  code.to_string());
   } else {
-    return register_task_variant(TASK_LINEAR_FP8_MPK_SM100, code.to_string());
+    return register_task_variant(TASK_LINEAR_FP8_SWAPAB_SM100, code.to_string());
   }
 }
 

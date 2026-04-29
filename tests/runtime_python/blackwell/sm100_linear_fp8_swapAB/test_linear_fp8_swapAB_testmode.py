@@ -7,10 +7,10 @@ configurations representative of DeepSeek V3 dense FP8 linear layers.
 Per-task output (= full N / grid_dim.x) must be a multiple of 128, and
 batch ≤ 16. Each test below picks a `grid_x` so the per-task tile lands at
 128, 256, or 512 — the kernel template instantiations covered by
-register_linear_fp8_mpk_sm100_task.
+register_linear_fp8_swapAB_sm100_task.
 
 Run:
-  CUDA_VISIBLE_DEVICES=<free-gpu> python tests/runtime_python/blackwell/sm100_linear_fp8_mpk/test_linear_fp8_mpk_testmode.py
+  CUDA_VISIBLE_DEVICES=<free-gpu> python tests/runtime_python/blackwell/sm100_linear_fp8_swapAB/test_linear_fp8_swapAB_testmode.py
 """
 
 import os
@@ -18,7 +18,7 @@ import sys
 import torch
 
 # Make the common scale-layout helpers importable. We're at
-# tests/runtime_python/blackwell/sm100_linear_fp8_mpk/, common is sibling.
+# tests/runtime_python/blackwell/sm100_linear_fp8_swapAB/, common is sibling.
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "common"))
 
@@ -30,7 +30,11 @@ from sm100_fp8_scale_layout import (  # noqa: E402
 )
 
 
-FOLDER = os.path.dirname(os.path.abspath(__file__))
+# Per-compile artifacts (mpk_launcher_*.so, task_graph_*.json, test_rank0.cu)
+# go to /tmp so they don't pile up in the source tree and don't hit ENOSPC on
+# shared mounts. Override with MPK_TEST_OUTPUT_DIR if you need to inspect.
+FOLDER = os.environ.get("MPK_TEST_OUTPUT_DIR", "/tmp/mpk_test_swapAB")
+os.makedirs(FOLDER, exist_ok=True)
 
 
 def _make_pk(batch_size: int) -> PersistentKernel:
@@ -56,7 +60,7 @@ def _quantize(x_bf16: torch.Tensor):
 
 def _run_case(label: str, batch: int, full_n: int, k: int, grid_x: int,
               tol: float = 0.05):
-    """Compile and run linear_fp8_mpk_layer end-to-end for one shape.
+    """Compile and run linear_fp8_swapAB_layer end-to-end for one shape.
 
     Compares against a dequantized FP8 reference (the kernel computes on
     the FP8-quantized inputs, so the BF16-input matmul is not the right
@@ -97,7 +101,7 @@ def _run_case(label: str, batch: int, full_n: int, k: int, grid_x: int,
     w_sc = pk.attach_input(weight_scale, name="weight_scale")
     o = pk.attach_input(output, name="output")
 
-    pk.linear_fp8_mpk_layer(
+    pk.linear_fp8_swapAB_layer(
         input_fp8=i_fp8, input_scale=i_sc,
         weight_fp8=w_fp8, weight_scale=w_sc,
         output=o,

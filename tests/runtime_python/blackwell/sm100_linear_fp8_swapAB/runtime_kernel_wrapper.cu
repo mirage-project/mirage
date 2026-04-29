@@ -4,7 +4,7 @@
 // CTA via __global__ wrapper. Used to debug the kernel body in isolation
 // with compute-sanitizer / cuda-gdb (build with SM100_LINEAR_FP8_MPK_DEBUG=1
 // to enable -G device debug info), and to benchmark the kernel directly
-// across DeepSeek V3 representative shapes via bench_linear_fp8_mpk.py.
+// across DeepSeek V3 representative shapes via bench_linear_fp8_swapAB.py.
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -15,7 +15,7 @@
 #include <vector>
 #include <tuple>
 
-#include "tasks/blackwell/linear_fp8_mpk_sm100.cuh"
+#include "tasks/blackwell/linear_fp8_swapAB_sm100.cuh"
 #include "tasks/hopper/tma_2d.cuh"
 #include <cute/tensor.hpp>
 
@@ -143,7 +143,7 @@ CUtensorMap make_output_desc(void *gmem_ptr) {
 // Templated __global__ kernel wrapper. One CTA, 256 threads.
 // =========================================================================
 template <int BATCH, int OUTPUT_SIZE, int K_>
-__global__ void linear_fp8_mpk_kernel_wrapper(
+__global__ void linear_fp8_swapAB_kernel_wrapper(
     CUtensorMap *input_desc,
     CUtensorMap *weight_desc,
     CUtensorMap *output_desc,
@@ -165,7 +165,7 @@ __global__ void linear_fp8_mpk_kernel_wrapper(
       cute::make_gmem_ptr(static_cast<cute::bfloat16_t *>(nullptr)),
       layout_bias);
 
-  kernel::linear_fp8_mpk_sm100_task_impl<cutlass::float_e4m3_t,
+  kernel::linear_fp8_swapAB_sm100_task_impl<cutlass::float_e4m3_t,
                                          TMA_A, TMA_B, decltype(mBias), TMA_OUT,
                                          MMA_M, MMA_N, BATCH, OUTPUT_SIZE, K_,
                                          /*NOBIAS=*/true,
@@ -199,12 +199,12 @@ size_t compute_smem_bytes() {
 // Per-shape launcher. Runs the kernel `repeat` times back-to-back on the
 // current CUDA stream, sharing one allocation of the device descriptor
 // memory across iterations. For repeat=1 this matches the original
-// per-call cost; bench_linear_fp8_mpk.py uses repeat>1 to amortize the
+// per-call cost; bench_linear_fp8_swapAB.py uses repeat>1 to amortize the
 // cudaMalloc/cudaMemcpy/cudaLaunchKernelEx per-call overhead (~150-200µs)
 // so the timed signal is closer to actual kernel execution.
 // =========================================================================
 template <int BATCH, int OUTPUT_SIZE, int K_>
-void launch_linear_fp8_mpk(torch::Tensor &input_q,
+void launch_linear_fp8_swapAB(torch::Tensor &input_q,
                            torch::Tensor &input_scale,
                            torch::Tensor &weight_q,
                            torch::Tensor &weight_scale,
@@ -230,14 +230,14 @@ void launch_linear_fp8_mpk(torch::Tensor &input_q,
 
   size_t smem_bytes = compute_smem_bytes<BATCH, OUTPUT_SIZE, K_>();
   TORCH_CHECK(
-      cudaFuncSetAttribute(linear_fp8_mpk_kernel_wrapper<BATCH, OUTPUT_SIZE, K_>,
+      cudaFuncSetAttribute(linear_fp8_swapAB_kernel_wrapper<BATCH, OUTPUT_SIZE, K_>,
                            cudaFuncAttributeMaxDynamicSharedMemorySize,
                            static_cast<int>(smem_bytes)) == cudaSuccess,
       "cudaFuncSetAttribute(MaxDynamicSharedMemorySize) failed");
 
   // Bump per-thread stack — CuTe + tcgen05 in debug builds (and even some
   // release builds) overflows the default 1024-byte stack. compute-sanitizer
-  // synccheck reported "Stack overflow" inside linear_fp8_mpk_sm100_task_impl.
+  // synccheck reported "Stack overflow" inside linear_fp8_swapAB_sm100_task_impl.
   TORCH_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 128 * 1024) == cudaSuccess,
               "cudaDeviceSetLimit(StackSize) failed");
 
@@ -264,7 +264,7 @@ void launch_linear_fp8_mpk(torch::Tensor &input_q,
       static_cast<uint32_t const *>(input_scale.data_ptr());
   for (int i = 0; i < repeat; ++i) {
     cudaError_t le = cudaLaunchKernelEx(&cfg,
-                                        linear_fp8_mpk_kernel_wrapper<BATCH, OUTPUT_SIZE, K_>,
+                                        linear_fp8_swapAB_kernel_wrapper<BATCH, OUTPUT_SIZE, K_>,
                                         d_in_desc,
                                         d_w_desc,
                                         d_out_desc,
@@ -292,7 +292,7 @@ void launch_linear_fp8_mpk(torch::Tensor &input_q,
 // =========================================================================
 #define DISPATCH_SHAPE(b, n, k)                                              \
   if (BATCH == (b) && OUTPUT_SIZE == (n) && K == (k)) {                      \
-    launch_linear_fp8_mpk<(b), (n), (k)>(                                    \
+    launch_linear_fp8_swapAB<(b), (n), (k)>(                                    \
         input_q, input_scale, weight_q, weight_scale, output, repeat);       \
     return;                                                                  \
   }
@@ -314,7 +314,7 @@ void launch_linear_fp8_mpk(torch::Tensor &input_q,
 // =========================================================================
 // Python-facing entry point. Dispatches on (BATCH, OUTPUT, K) at runtime.
 // =========================================================================
-void linear_fp8_mpk_sm100(torch::Tensor input_q,      // [BATCH, K]    fp8_e4m3
+void linear_fp8_swapAB_sm100(torch::Tensor input_q,      // [BATCH, K]    fp8_e4m3
                           torch::Tensor input_scale,  // [BATCH, ceil(K/512)] uint32 packed
                           torch::Tensor weight_q,     // [OUTPUT, K]   fp8_e4m3
                           torch::Tensor weight_scale, // [OUTPUT, ceil(K/512)] uint32 packed
@@ -364,7 +364,7 @@ std::vector<std::tuple<int, int, int>> supported_shapes() {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("linear_fp8_mpk_sm100", &linear_fp8_mpk_sm100,
+  m.def("linear_fp8_swapAB_sm100", &linear_fp8_swapAB_sm100,
         "MPK FP8 swapAB Linear (multi-shape dispatch). Optional `repeat` "
         "argument runs the kernel that many times back-to-back on the "
         "current stream, sharing one descriptor allocation — used by the "

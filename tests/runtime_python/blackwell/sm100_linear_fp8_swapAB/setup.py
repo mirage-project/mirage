@@ -81,10 +81,10 @@ else:
     nvcc_opt = "-O3"
 
 setup(
-    name='runtime_kernel_blackwell_linear_fp8_mpk',
+    name='runtime_kernel_blackwell_linear_fp8_swapAB',
     ext_modules=[
         CUDAExtension(
-            name='runtime_kernel_blackwell_linear_fp8_mpk',
+            name='runtime_kernel_blackwell_linear_fp8_swapAB',
             sources=[os.path.join(this_dir, 'runtime_kernel_wrapper.cu')],
             depends=blackwell_depends,
             define_macros=[

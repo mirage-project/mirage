@@ -1682,7 +1682,7 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_with_residual_sm100", params)
 
-    def linear_fp8_mpk_layer(
+    def linear_fp8_swapAB_layer(
         self,
         input_fp8: DTensor,
         input_scale: DTensor,
@@ -1706,9 +1706,9 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_fp8_mpk_sm100", params)
+        self.kn_graph.register_task(tb_graph, "linear_fp8_swapAB_sm100", params)
 
-    def linear_fp8_mpk_with_residual_layer(
+    def linear_fp8_swapAB_with_residual_layer(
         self,
         input_fp8: DTensor,
         input_scale: DTensor,
@@ -1731,7 +1731,7 @@ class PersistentKernel:
             [input_fp8, input_scale, weight_fp8, weight_scale, residual, output],
             tb_graph)
         self.kn_graph.register_task(
-            tb_graph, "linear_fp8_mpk_with_residual_sm100", params)
+            tb_graph, "linear_fp8_swapAB_with_residual_sm100", params)
 
     def moe_silu_mul_layer(
         self,

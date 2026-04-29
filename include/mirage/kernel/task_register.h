@@ -168,7 +168,7 @@ public:
   int register_linear_fp8_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params,
                                      bool with_residual);
-  int register_linear_fp8_mpk_sm100_task(threadblock::Graph const &bgraph,
+  int register_linear_fp8_swapAB_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params,
                                          bool with_residual);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,

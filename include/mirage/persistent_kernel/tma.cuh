@@ -965,18 +965,18 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
-    case TASK_LINEAR_FP8_MPK_SM100:
-    case TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100: {
+    case TASK_LINEAR_FP8_SWAPAB_SM100:
+    case TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100: {
       // MPK-native FP8 swapAB kernel. Tile shapes match the kernel template:
       // MMA_M=128 along the OUTPUT axis (kernel's A = weight after swap),
       // MMA_N=16 along the BATCH axis (kernel's B = input after swap),
       // BLOCK_K=128. Scales are NOT TMA'd here (raw pointers handle them in
       // the producer warp).
-      constexpr int MMA_M_MPK = 128;
-      constexpr int MMA_N_MPK = 16;
-      constexpr int BLOCK_K_MPK = 128;
+      constexpr int MMA_M_SWAPAB = 128;
+      constexpr int MMA_N_SWAPAB = 16;
+      constexpr int BLOCK_K_SWAPAB = 128;
       bool with_res =
-          (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100);
+          (task_desc.task_type == TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100);
       bool is_output_mpk = (param_id == (size_t)(task_desc.num_inputs));
 
       // The kernel uses kernel::tma::tma_2d typed wrappers, which issue
@@ -990,8 +990,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int K = tensor_desc.dim[1];
         uint64_t gd[5] = {(uint64_t)K, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)K * 1, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)BLOCK_K_MPK,
-                          (uint32_t)MMA_N_MPK,
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_SWAPAB,
+                          (uint32_t)MMA_N_SWAPAB,
                           1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
@@ -1018,8 +1018,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int K = tensor_desc.dim[1];
         uint64_t gd[5] = {(uint64_t)K, (uint64_t)output_pt, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)K * 1, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)BLOCK_K_MPK,
-                          (uint32_t)MMA_M_MPK,
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_SWAPAB,
+                          (uint32_t)MMA_M_SWAPAB,
                           1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
@@ -1047,8 +1047,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int stride = tensor_desc.stride[0];
         uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)stride * 2, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)MMA_M_MPK,
-                          (uint32_t)MMA_N_MPK,
+        uint32_t bd[5] = {(uint32_t)MMA_M_SWAPAB,
+                          (uint32_t)MMA_N_SWAPAB,
                           1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
@@ -1076,8 +1076,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int stride = tensor_desc.stride[0];
         uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)stride * 2, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)MMA_M_MPK,
-                          (uint32_t)MMA_N_MPK,
+        uint32_t bd[5] = {(uint32_t)MMA_M_SWAPAB,
+                          (uint32_t)MMA_N_SWAPAB,
                           1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
@@ -1641,8 +1641,8 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
           task_desc, task_desc.outputs[0], task_desc.num_inputs, 0); // CD
       break;
     }
-    case TASK_LINEAR_FP8_MPK_SM100:
-    case TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100: {
+    case TASK_LINEAR_FP8_SWAPAB_SM100:
+    case TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100: {
       // MPK-native FP8 swapAB kernel: TMA only for the data tensors and
       // (optionally) residual. Scales (UE8M0 packed uint32) are passed as
       // raw global pointers from task_desc->input_ptrs[]; the kernel
@@ -1651,7 +1651,7 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // Tensor order (Python-layer): 0=input_fp8, 1=input_scale,
       // 2=weight_fp8, 3=weight_scale, 4=residual?, output[0]=out.
       bool with_res =
-          (task_desc.task_type == TASK_LINEAR_FP8_WITH_RESIDUAL_MPK_SM100);
+          (task_desc.task_type == TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100);
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0);
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0);
       if (with_res) {
