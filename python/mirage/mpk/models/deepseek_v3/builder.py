@@ -231,6 +231,15 @@ class DeepSeekV3Builder(GraphBuilder):
         grid_x = output_size // 128
         return (grid_x, grid_dim[1], grid_dim[2])
 
+    def _can_use_decode_fp8_linear(self, input_fp8, weight, output, grid_dim):
+        if input_fp8.dim(0) > 16 or output.dim(0) > 16:
+            return False
+        if weight.dim(1) % 128 != 0:
+            return False
+        if output.dim(1) % grid_dim[0] != 0:
+            return False
+        return (output.dim(1) // grid_dim[0]) % 128 == 0
+
     def _fp8_buffers_for_reduction(self, reduction_size: int):
         mbt = self.max_num_batched_tokens
         group_size = 128
@@ -269,13 +278,25 @@ class DeepSeekV3Builder(GraphBuilder):
             raise ValueError("FP8 linear expects a 2D packed UE8M0 scale tensor.")
 
         grid_dim = self._fp8_linear_grid_dim(weight, grid_dim)
+        use_decode_kernel = self._can_use_decode_fp8_linear(
+            input_fp8, weight, output, grid_dim)
+        linear_layer = (
+            self.mpk.linear_fp8_swapAB_layer
+            if use_decode_kernel
+            else self.mpk.linear_fp8_layer
+        )
+        linear_with_residual_layer = (
+            self.mpk.linear_fp8_swapAB_with_residual_layer
+            if use_decode_kernel
+            else self.mpk.linear_fp8_with_residual_layer
+        )
 
         if residual is not None:
             if self.world_size > 1:
                 idx = getattr(self, "_tp_residual_linear_idx", 0)
                 self._tp_residual_linear_idx = idx + 1
                 partial = self._new_tp_partial(output, f"tp_fp8_residual_partial_{idx}")
-                self.mpk.linear_fp8_layer(
+                linear_layer(
                     input_fp8=input_fp8,
                     input_scale=input_scale,
                     weight_fp8=weight,
@@ -286,7 +307,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 )
                 self._allreduce_residual(partial, output, residual)
             else:
-                self.mpk.linear_fp8_with_residual_layer(
+                linear_with_residual_layer(
                     input_fp8=input_fp8,
                     input_scale=input_scale,
                     weight_fp8=weight,
@@ -297,7 +318,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     block_dim=block_dim,
                 )
         else:
-            self.mpk.linear_fp8_layer(
+            linear_layer(
                 input_fp8=input_fp8,
                 input_scale=input_scale,
                 weight_fp8=weight,

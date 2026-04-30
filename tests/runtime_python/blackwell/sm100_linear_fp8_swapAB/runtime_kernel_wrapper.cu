@@ -165,12 +165,19 @@ __global__ void linear_fp8_swapAB_kernel_wrapper(
       cute::make_gmem_ptr(static_cast<cute::bfloat16_t *>(nullptr)),
       layout_bias);
 
+  constexpr int packed_scale_k = (K_ + 511) / 512;
+
   kernel::linear_fp8_swapAB_sm100_task_impl<cutlass::float_e4m3_t,
                                          TMA_A, TMA_B, decltype(mBias), TMA_OUT,
                                          MMA_M, MMA_N, BATCH, OUTPUT_SIZE, K_,
                                          /*NOBIAS=*/true,
+                                         /*SplitK=*/false,
                                          NUM_AB_STAGE, NUM_ACC_STAGE, NUM_C_STAGE>(
-      tma_a, tma_b, weight_scale_ptr, input_scale_ptr, mBias, tma_out);
+      tma_a, tma_b,
+      weight_scale_ptr, input_scale_ptr,
+      /*weight_scale_row_stride=*/packed_scale_k,
+      /*input_scale_row_stride=*/packed_scale_k,
+      mBias, tma_out);
 }
 
 // =========================================================================
