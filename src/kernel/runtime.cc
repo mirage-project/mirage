@@ -333,7 +333,7 @@ void register_mugraph(
                 (task_type == TASK_PAGED_ATTENTION_2) ||
                 (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
-                (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
+                (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) ||
                 (task_type == TASK_ATTN_SM100)) {
               // Note that we assume grid_dim.x corresponds to
@@ -391,7 +391,16 @@ void register_mugraph(
             if (task_type == TASK_MLA_MTP_DECODE_SM100) {
               task.task_metadata.kv_idx = bid.x;            // si (split_idx)
               task.task_metadata.request_id = bid.y;        // gi (head_group)
-              task.task_metadata.merge_task_offset = bid.z; // batch
+              int num_head_groups = static_cast<int>(bgraph.grid_dim.y);
+              if (num_head_groups < 1) {
+                num_head_groups = 1;
+              }
+              int hpb = 128 / num_head_groups;
+              // Pack hpb for TMA descriptor creation. The low 16 bits remain
+              // the batch id consumed by the generated kernel wrapper.
+              task.task_metadata.merge_task_offset =
+                  ((hpb & 0xffff) << 16) |
+                  (static_cast<int>(bid.z) & 0xffff);
             }
             // MTP reduce: grid=(D_V/RD_DV, num_head_groups, B)
             if (task_type == TASK_MLA_MTP_REDUCE_SM100) {
@@ -436,6 +445,12 @@ void register_mugraph(
             // Unified MLA KV gather: same grid/request mapping as both
             // split and non-split variants.
             if (task_type == TASK_MLA_KV_GATHER_UNIFIED_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
+            // MTP token-management helpers use grid.x as the active request
+            // slot so they can map slot -> global request id at runtime.
+            if (task_type == TASK_MTP_PREPARE_VERIFY ||
+                task_type == TASK_MTP_BUILD_EMBED_INPUT) {
               task.task_metadata.request_id = bid.x;
             }
             // FP8 quantize uses grid=(group_tile, row, 1). request_id is the
@@ -952,7 +967,13 @@ void register_mugraph(
   all_events.push_back(
       EventDesc(EVENT_END_OF_TASK_GRAPH, end_num_triggers, 0, 0));
 
-  // Prelaunch all tasks at the begining of an iteration
+  // Prelaunch all tasks at the beginning of an iteration. Downstream tasks use
+  // dependent_event to wait for their producer event before executing.
+  //
+  // The scheduler has a partially implemented event-driven path, but switching
+  // DeepSeek graphs to root-only launch currently hangs even on a single
+  // selected layer. Keep the established MPK execution contract here and fix
+  // selective-layer issues without changing that contract.
   all_events[1].first_task_id = 2;
   all_events[1].last_task_id = all_tasks.size();
   for (size_t e = 2; e < all_events.size(); e++) {

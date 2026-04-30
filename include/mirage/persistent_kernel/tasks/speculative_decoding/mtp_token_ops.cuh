@@ -88,7 +88,9 @@ __device__ __forceinline__ void
                                     void *__restrict__ tokens_buffer_ptr,
                                     void const *__restrict__ step_ptr,
                                     void *__restrict__ num_new_tokens_ptr,
-                                    int request_id) {
+                                    int const *__restrict__ qo_indptr_ptr,
+                                    int const *__restrict__ request_ids_ptr,
+                                    int request_slot) {
 
   long long const *__restrict__ main_token =
       static_cast<long long const *>(main_token_ptr);
@@ -101,14 +103,39 @@ __device__ __forceinline__ void
   int t_id = threadIdx.x;
   // Use task metadata request_id (not blockIdx.x which is worker block ID
   // in persistent kernel)
-  int req = request_id;
+  int req = request_slot;
+  if (request_ids_ptr != nullptr) {
+    if (request_slot < 0) {
+      return;
+    }
+    req = static_cast<int>(request_ids_ptr[request_slot]);
+  }
+  if (req < 0) {
+    return;
+  }
+
+  int qo_start = 0;
+  int qo_len = 1;
+  if (qo_indptr_ptr != nullptr) {
+    qo_start = qo_indptr_ptr[request_slot];
+    qo_len = qo_indptr_ptr[request_slot + 1] - qo_start;
+  }
+  // MTP draft scheduling is only valid for decode/verify widths. During
+  // chunk prefill (Q_LEN >= 9), the main model should keep consuming prompt
+  // chunks and the predictor must not overwrite runtime decode metadata.
+  if (qo_len < 1 || qo_len > 8) {
+    return;
+  }
 
   int cur_step = step[req];
+  int main_token_offset = qo_start;
+  int draft_token_offset = qo_start * NUM_DRAFT;
 
   // Thread 0: write main token at step+1, set num_new_tokens
   if (t_id == 0) {
     if (cur_step + 1 < MAX_SEQ_LEN) {
-      tokens[req * MAX_SEQ_LEN + cur_step + 1] = main_token[req];
+      tokens[req * MAX_SEQ_LEN + cur_step + 1] =
+          main_token[main_token_offset];
     }
     // Clamp num_new_tokens so we don't exceed MAX_SEQ_LEN
     int max_new = MAX_SEQ_LEN - cur_step - 1;
@@ -123,7 +150,7 @@ __device__ __forceinline__ void
     int write_pos = cur_step + 2 + t_id;
     if (write_pos < MAX_SEQ_LEN) {
       tokens[req * MAX_SEQ_LEN + write_pos] =
-          draft_tokens[req * NUM_DRAFT + t_id];
+          draft_tokens[draft_token_offset + t_id];
     }
   }
 }
@@ -163,7 +190,9 @@ __device__ __forceinline__ void
                                  void const *__restrict__ tokens_buffer_ptr,
                                  void const *__restrict__ output_tokens_ptr,
                                  void const *__restrict__ step_ptr,
-                                 int request_id) {
+                                 int const *__restrict__ qo_indptr_ptr,
+                                 int const *__restrict__ request_ids_ptr,
+                                 int request_slot) {
   long long *__restrict__ mtp_input =
       static_cast<long long *>(mtp_input_tokens_ptr);
   long long const *__restrict__ tokens =
@@ -172,19 +201,37 @@ __device__ __forceinline__ void
       static_cast<long long const *>(output_tokens_ptr);
   int const *__restrict__ step = static_cast<int const *>(step_ptr);
 
-  int req = request_id;
+  int req = request_slot;
+  if (request_ids_ptr != nullptr) {
+    if (request_slot < 0) {
+      return;
+    }
+    req = static_cast<int>(request_ids_ptr[request_slot]);
+  }
+  if (req < 0) {
+    return;
+  }
+  int qo_start = 0;
+  int qo_len = BATCH_SIZE;
+  if (qo_indptr_ptr != nullptr) {
+    qo_start = qo_indptr_ptr[request_slot];
+    qo_len = qo_indptr_ptr[request_slot + 1] - qo_start;
+  }
+  if (qo_len < 1 || qo_len > 8) {
+    return;
+  }
   int cur_step = step[req];
 
   // Each thread handles multiple positions if BATCH_SIZE > blockDim.x.
-  for (int i = threadIdx.x; i < BATCH_SIZE; i += blockDim.x) {
+  for (int i = threadIdx.x; i < qo_len; i += blockDim.x) {
     long long val;
-    if (i < BATCH_SIZE - 1) {
+    if (i < qo_len - 1) {
       int pos = cur_step + i + 1;
       val = (pos < MAX_SEQ_LEN) ? tokens[req * MAX_SEQ_LEN + pos] : 0LL;
     } else {
-      val = output_tokens[i];
+      val = output_tokens[qo_start + i];
     }
-    mtp_input[i] = val;
+    mtp_input[qo_start + i] = val;
   }
 }
 

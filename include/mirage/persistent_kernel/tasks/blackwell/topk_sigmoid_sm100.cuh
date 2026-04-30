@@ -313,8 +313,10 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
             expert >= start_expert && expert < end_expert;
         bool const should_process_row = row_is_active && node_uses_expert;
         int const out_idx = TOPK_EXPERTS * thread_row + k_idx;
-        output[out_idx] = orig_score;
-        weight_sum += orig_score;
+        output[out_idx] = should_process_row ? orig_score : 0.0f;
+        if (row_is_active) {
+          weight_sum += orig_score;
+        }
 
         if (should_process_row && mpk_routing_indices != nullptr) {
           int const local_expert = expert - start_expert;

@@ -145,6 +145,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
+    bool prompt_prefill,
     int request_id) {
   using T = __nv_bfloat16;
   int const tid = threadIdx.x;
@@ -200,10 +201,10 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
   }
   __syncthreads();
 
-  // Match mla_unified_sm100's phase split: Q_LEN 1..8 is decode, Q_LEN >= 9 is
-  // prefill. Only materialize the layout the selected attention branch will
-  // consume.
-  bool const use_prefill_layout = num_new_tokens >= 9;
+  // MBT is only a chunk/token budget. Runtime step/prompt_length decides the
+  // phase: a short prompt tail (for example 1..8 tokens after a 128-token
+  // chunk) is still prefill and must materialize the prefill layout.
+  bool const use_prefill_layout = prompt_prefill;
   if (!use_prefill_layout && contiguous_kv_ptr == paged_cache_ptr) {
     return;
   }

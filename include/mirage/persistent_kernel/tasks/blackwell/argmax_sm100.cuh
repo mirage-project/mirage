@@ -73,6 +73,11 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
       idx = block_max_idx;
     }
   }
+
+  // The caller may invoke this reduction repeatedly in a row loop.  Keep all
+  // warps from starting the next reduction and overwriting smem before warp 0
+  // has finished consuming the current reduction's warp-level results.
+  wg_barrier.arrive_and_wait();
 }
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>

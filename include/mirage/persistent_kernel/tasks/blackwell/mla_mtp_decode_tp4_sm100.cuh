@@ -119,7 +119,7 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
 } // namespace ptx
 
 // ============ Main MLA Kernel ============
-template <bool SINGLE_TILE>
+template <bool SINGLE_TILE, bool WRITE_FINAL>
 __device__ __noinline__ void
     mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
                      CUtensorMap const *KV_tm_ptr,
@@ -678,7 +678,7 @@ __device__ __noinline__ void
   int const valid_rows = actual_qpg * hpb;
   if (tid < valid_rows) {
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
-    constexpr bool write_final = SINGLE_TILE;
+    constexpr bool write_final = WRITE_FINAL;
     int const q_final = gi * qpg + tid / hpb;
     int const h_final = tid % hpb;
     for (int vi = 0; vi < PV_CHUNKS; vi++) {
@@ -784,6 +784,13 @@ __device__ __noinline__ void
     }
     nv_bfloat16 const *oa_ptr =
         Oa + (bi * num_groups * sk + gi * sk) * D_V * 128 + d * 128 + row;
+
+    if (sk == 1) {
+      int const o_base_single =
+          (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
+      O[o_base_single + d] = oa_ptr[0];
+      continue;
+    }
 
     float maxVal = -1e30f, oldMaxVal = -1e30f;
     float sumVal = 0.0f;

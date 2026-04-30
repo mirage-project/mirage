@@ -6,6 +6,9 @@ import os
 import sys
 import json
 import socket
+import re
+import time
+import hashlib
 
 from mirage.mpk.models.deepseek_v3.builder import DeepSeekV3Builder
 from mirage.mpk.models.graph_builder import MirageModelConfig
@@ -107,6 +110,14 @@ if __name__ == "__main__":
                         help=(
                             "Optionally dump first N generated token_ids, text, and latency to JSON. "
                             "If path omitted, saves to outputs/deepseek_v3/{torch_output.json|mpk_output.json}."
+                        ))
+    parser.add_argument("--weight-cache-dir", type=str,
+                        default=os.environ.get("MPK_DEEPSEEK_WEIGHT_CACHE_DIR"),
+                        help=(
+                            "Optional directory for MPK-ready per-rank weight cache. "
+                            "When set, converted/fused/sharded tensors are saved after "
+                            "the first run and loaded directly by later runs with the "
+                            "same model/layers/TP/EP/vocab-parallel settings."
                         ))
     parser.add_argument("--layers", type=str, default=None,
                         help="Comma-separated list of layer indices to load (e.g. '0,3,60') "
@@ -397,7 +408,8 @@ if __name__ == "__main__":
 
         # Load state dict from converted weights
         print(f"Loading model weights from: {args.model_path}")
-        from safetensors.torch import load_file
+        load_start_time = time.perf_counter()
+        from safetensors.torch import load_file, save_file
         from safetensors import safe_open
 
         def _parse_layers(spec):
@@ -417,10 +429,69 @@ if __name__ == "__main__":
         if layer_indices_for_load is not None and args.mtp > 0:
             layer_indices_for_load.append(num_layers)
 
+        num_routed_experts_for_load = getattr(
+            config,
+            "n_routed_experts",
+            getattr(config, "num_experts", 256),
+        )
+        assert world_size % args.ep_size == 0
+        assert num_routed_experts_for_load % args.ep_size == 0
+        routed_tp_size_for_load = world_size // args.ep_size
+        ep_rank_for_load = rank // routed_tp_size_for_load
+        local_num_experts_for_load = num_routed_experts_for_load // args.ep_size
+        local_expert_start_for_load = ep_rank_for_load * local_num_experts_for_load
+        local_expert_end_for_load = (
+            local_expert_start_for_load + local_num_experts_for_load
+        )
+        local_expert_ids_for_load = (
+            set(range(local_expert_start_for_load, local_expert_end_for_load))
+            if args.ep_size > 1
+            else None
+        )
+        expert_key_re = re.compile(r"^model\.layers\.\d+\.mlp\.experts\.(\d+)\.")
+
+        cache_file = None
+        state_dict_from_cache = False
+        if args.weight_cache_dir:
+            cache_payload = {
+                "format": "deepseek_v3_mpk_fp8_runtime_cache_v1",
+                "model_path": os.path.realpath(args.model_path),
+                "layers": layer_indices_arg,
+                "layers_for_load": layer_indices_for_load,
+                "world_size": world_size,
+                "rank": rank,
+                "mtp": args.mtp,
+                "ep_size": args.ep_size,
+                "vocab_parallel_lm_head": vocab_parallel_lm_head,
+                "lm_head_local_vocab_padded": lm_head_local_vocab_padded,
+                "lm_head_vocab_offset": lm_head_vocab_offset,
+                "lm_head_valid_vocab_size": lm_head_valid_vocab_size,
+                "hidden_size": hidden_size,
+                "vocab_size": vocab_size,
+                "num_layers": num_layers,
+            }
+            cache_key = hashlib.sha256(
+                json.dumps(cache_payload, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:24]
+            cache_dir = os.path.join(args.weight_cache_dir, cache_key)
+            cache_file = os.path.join(cache_dir, f"rank{rank}.safetensors")
+            if os.path.exists(cache_file):
+                cache_load_device = f"cuda:{rank}"
+                print(f"  Loading MPK weight cache: {cache_file}")
+                cache_load_start = time.perf_counter()
+                state_dict = load_file(cache_file, device=cache_load_device)
+                state_dict_from_cache = True
+                print(
+                    f"  Weight cache load time: "
+                    f"{time.perf_counter() - cache_load_start:.3f}s"
+                )
+
         weight_file = os.path.join(
             args.model_path, f"model{rank}-mp{world_size}.safetensors"
         )
-        if os.path.exists(weight_file):
+        if state_dict_from_cache:
+            pass
+        elif os.path.exists(weight_file):
             state_dict = load_file(weight_file, device=f"cuda:{rank}")
         else:
             # Selective loading: only load needed layers from sharded files
@@ -440,12 +511,20 @@ if __name__ == "__main__":
                 shard_to_keys = {}
                 for key, shard in index["weight_map"].items():
                     if any(key.startswith(p) for p in needed_prefixes):
+                        expert_match = expert_key_re.match(key)
+                        if (
+                            local_expert_ids_for_load is not None
+                            and expert_match is not None
+                            and int(expert_match.group(1)) not in local_expert_ids_for_load
+                        ):
+                            continue
                         shard_to_keys.setdefault(shard, []).append(key)
                 # Load only needed shards and keys
                 # Load to CPU first, then move to GPU. This avoids GPU OOM when
                 # multiple TP ranks each load full (un-sharded) weights — the
                 # builder will shard them later during weight conversion.
                 _load_device = "cpu" if world_size > 1 else f"cuda:{rank}"
+                sliced_lm_head = False
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
@@ -455,19 +534,48 @@ if __name__ == "__main__":
                     # fusion needs full per-layer matrices.
                     with safe_open(shard_path, framework="pt", device=_load_device) as f:
                         for key in keys:
-                            state_dict[key] = f.get_tensor(key)
+                            if key == "lm_head.weight" and vocab_parallel_lm_head:
+                                lm_head_slice = f.get_slice(key)
+                                full_shape = lm_head_slice.get_shape()
+                                tensor = lm_head_slice[
+                                    lm_head_vocab_offset:
+                                    lm_head_vocab_offset + lm_head_valid_vocab_size,
+                                    :,
+                                ]
+                                if lm_head_valid_vocab_size < lm_head_local_vocab_padded:
+                                    pad = torch.zeros(
+                                        lm_head_local_vocab_padded
+                                        - lm_head_valid_vocab_size,
+                                        full_shape[1],
+                                        dtype=tensor.dtype,
+                                        device=tensor.device,
+                                    )
+                                    tensor = torch.cat([tensor, pad], dim=0)
+                                state_dict[key] = tensor.contiguous()
+                                sliced_lm_head = True
+                            else:
+                                state_dict[key] = f.get_tensor(key)
                 print(f"  Loaded {len(state_dict)} keys total (device={_load_device})")
+                if sliced_lm_head:
+                    print(
+                        "  Sliced lm_head.weight during load: "
+                        f"rows {lm_head_vocab_offset}:"
+                        f"{lm_head_vocab_offset + lm_head_valid_vocab_size} "
+                        f"-> local padded {lm_head_local_vocab_padded}"
+                    )
             else:
                 raise RuntimeError("No valid weight files found for selective loading.")
+        print(f"  Weight read time: {time.perf_counter() - load_start_time:.3f}s")
 
         # Weight conversion (absorption + gate/up + expert fusion) runs only
         # for selective loading. The pre-converted single-file path
         # (`model{rank}-mp{world_size}.safetensors`) is already absorbed/fused.
-        if args.layers:
+        if args.layers and not state_dict_from_cache:
             # Absorb kv_b_proj into q_b_proj and fuse V un-absorption into
             # o_proj (matches vLLM/SGLang runtime). The attached weights stay
             # in the same FP8+scale format that the multi-GPU graph expects.
             print("\nConverting weights for MPK builder (FP8 preserved)...")
+            convert_start_time = time.perf_counter()
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
             from convert import (
                 dequantize_fp8, absorb_kv_into_q, get_model_params, is_fp8,
@@ -590,16 +698,24 @@ if __name__ == "__main__":
             # Fuse per-expert weights into experts.w13/w2 tensors (keep FP8)
             for li in absorb_layers:
                 ep = f"model.layers.{li}.mlp.experts."
-                expert_keys = [k for k in list(state_dict.keys())
-                               if k.startswith(ep) and ".gate_proj.weight" in k
-                               and not k.endswith("_scale_inv")]
-                if expert_keys:
-                    n_exp = len(expert_keys)
-                    print(f"  Fusing {n_exp} experts for layer {li}")
+                expert_id_re = re.compile(
+                    rf"^{re.escape(ep)}(\d+)\.gate_proj\.weight$"
+                )
+                expert_ids = []
+                for k in list(state_dict.keys()):
+                    m = expert_id_re.match(k)
+                    if m is not None:
+                        expert_ids.append(int(m.group(1)))
+                expert_ids.sort()
+                if expert_ids:
+                    print(f"  Fusing {len(expert_ids)} experts for layer {li}")
                     w13_list, w2_list = [], []
                     s13_list, s2_list = [], []
-                    has_scale = f"{ep}0.gate_proj.weight_scale_inv" in state_dict
-                    for e in range(n_exp):
+                    has_scale = (
+                        f"{ep}{expert_ids[0]}.gate_proj.weight_scale_inv"
+                        in state_dict
+                    )
+                    for e in expert_ids:
                         g = state_dict.pop(f"{ep}{e}.gate_proj.weight")
                         u = state_dict.pop(f"{ep}{e}.up_proj.weight")
                         d = state_dict.pop(f"{ep}{e}.down_proj.weight")
@@ -635,6 +751,10 @@ if __name__ == "__main__":
                 state_dict[k] = t
 
             print(f"  Converted: {len(state_dict)} keys (FP8 weights preserved)")
+            print(
+                f"  Weight conversion time: "
+                f"{time.perf_counter() - convert_start_time:.3f}s"
+            )
 
             # TP/EP weight sharding happens after conversion. For TP>1, tensors
             # stay on CPU until this step to avoid GPU OOM from full
@@ -719,22 +839,25 @@ if __name__ == "__main__":
                     shard_dim = _get_tp_shard_dim(base_key)
                     if base_key == "lm_head.weight" and vocab_parallel_lm_head:
                         old_shape = tuple(state_dict[k].shape)
-                        start = lm_head_vocab_offset
-                        valid = lm_head_valid_vocab_size
-                        if valid > 0:
-                            shard = state_dict[k].narrow(0, start, valid).contiguous()
+                        if state_dict[k].shape[0] == lm_head_local_vocab_padded:
+                            shard = state_dict[k].contiguous()
                         else:
-                            shard = state_dict[k].new_empty(
-                                (0, state_dict[k].shape[1])
-                            )
-                        if valid < lm_head_local_vocab_padded:
-                            pad = torch.zeros(
-                                lm_head_local_vocab_padded - valid,
-                                state_dict[k].shape[1],
-                                dtype=state_dict[k].dtype,
-                                device=state_dict[k].device,
-                            )
-                            shard = torch.cat([shard, pad], dim=0).contiguous()
+                            start = lm_head_vocab_offset
+                            valid = lm_head_valid_vocab_size
+                            if valid > 0:
+                                shard = state_dict[k].narrow(0, start, valid).contiguous()
+                            else:
+                                shard = state_dict[k].new_empty(
+                                    (0, state_dict[k].shape[1])
+                                )
+                            if valid < lm_head_local_vocab_padded:
+                                pad = torch.zeros(
+                                    lm_head_local_vocab_padded - valid,
+                                    state_dict[k].shape[1],
+                                    dtype=state_dict[k].dtype,
+                                    device=state_dict[k].device,
+                                )
+                                shard = torch.cat([shard, pad], dim=0).contiguous()
                         state_dict[k] = shard
                         if rank == 0:
                             print(
@@ -751,13 +874,27 @@ if __name__ == "__main__":
                     tp_size_for_key = routed_tp_size if is_routed_expert else world_size
                     if is_routed_expert and args.ep_size > 1:
                         old_shape = tuple(state_dict[k].shape)
-                        state_dict[k] = state_dict[k].narrow(
-                            0, local_expert_start, local_num_experts
-                        ).contiguous()
-                        if rank == 0:
-                            print(
-                                f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
-                                f"(EP experts {local_expert_start}:{local_expert_end})"
+                        if state_dict[k].shape[0] == num_routed_experts:
+                            state_dict[k] = state_dict[k].narrow(
+                                0, local_expert_start, local_num_experts
+                            ).contiguous()
+                            if rank == 0:
+                                print(
+                                    f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
+                                    f"(EP experts {local_expert_start}:{local_expert_end})"
+                                )
+                        elif state_dict[k].shape[0] == local_num_experts:
+                            if rank == 0:
+                                print(
+                                    f"    {k}: {old_shape} "
+                                    f"(already EP-filtered experts "
+                                    f"{local_expert_start}:{local_expert_end})"
+                                )
+                        else:
+                            raise ValueError(
+                                f"{k}: unexpected expert dimension "
+                                f"{state_dict[k].shape[0]}, expected "
+                                f"{num_routed_experts} or {local_num_experts}"
                             )
                     if shard_dim is not None and state_dict[k].dim() >= 2:
                         # Special handling for experts.w13: it's cat([gate, up], dim=1)
@@ -795,10 +932,28 @@ if __name__ == "__main__":
                         if rank == 0 and "shared_experts" in k:
                             print(f"    [INFO] {k}: shard_dim={shard_dim}, shape={tuple(state_dict[k].shape)} → {'REPLICATED' if shard_dim is None else 'BUG'}")
 
+            if cache_file is not None:
+                os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+                cache_save_start = time.perf_counter()
+                cache_state_dict = {}
+                for k, t in state_dict.items():
+                    cache_state_dict[k] = t.detach().cpu().contiguous()
+                tmp_cache_file = f"{cache_file}.tmp.{os.getpid()}"
+                save_file(
+                    cache_state_dict,
+                    tmp_cache_file,
+                    metadata={"cache_payload": json.dumps(cache_payload, sort_keys=True)},
+                )
+                os.replace(tmp_cache_file, cache_file)
+                print(
+                    f"  Saved MPK weight cache: {cache_file} "
+                    f"({time.perf_counter() - cache_save_start:.3f}s)"
+                )
+
         # Move state_dict to GPU after conversion + TP sharding.
         # Loading to CPU first (when TP>1) avoids single-GPU OOM from
         # holding full un-sharded weights before the sharding step above.
-        if world_size > 1:
+        if world_size > 1 and not state_dict_from_cache:
             print(f"  Moving {len(state_dict)} tensors to cuda:{rank}...")
             for k in state_dict:
                 if state_dict[k].device.type == "cpu":

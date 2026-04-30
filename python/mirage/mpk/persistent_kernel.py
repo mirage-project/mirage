@@ -261,11 +261,12 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # Uncomment to enable verbose scheduler/worker/event debug prints from
-    # persistent_kernel.cuh (all gated on MPK_ENABLE_VERBOSE). Noisy; meant for
-    # local debugging only.
-    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-
+    # Enable verbose scheduler/worker/event debug prints from
+    # persistent_kernel.cuh for local debugging only.
+    if os.environ.get("MPK_ENABLE_VERBOSE", "0") == "1":
+        flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
+    if os.environ.get("MPK_DEBUG_BATCH", "0") == "1":
+        flags = flags + [f"-DMPK_DEBUG_BATCH"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -1265,12 +1266,12 @@ class PersistentKernel:
         d_ckv: int = 512,
         d_kpe: int = 64,
         d_v: int = 512,
+        decode_q_len: int | None = None,
     ):
         num_splits = (kv_len + 128 - 1) // 128
-        # The graph may be compiled for a large chunk-prefill Q length, but the
-        # decode branch only handles Q_LEN <= 8. Size the decode half of the
-        # unified grid for that domain instead of the prefill chunk size.
-        decode_q_len = min(q_len, 8)
+        # q_len is the prompt-prefill chunk budget. Decode width is controlled
+        # by generation semantics (one token, or MTP verify width), not MBT.
+        decode_q_len = min(decode_q_len if decode_q_len is not None else q_len, 8)
         if tp_size == 1:
             hpb = num_heads // decode_q_len
             if hpb < 1:
@@ -1413,7 +1414,7 @@ class PersistentKernel:
         q_input, kv_input, output_partial, output_lse,
         q_len, kv_len, num_heads,
         task_name, has_v_split=False, q_len_real=None, head_groups=1,
-        v_splits=2,
+        v_splits=2, num_splits_override=None,
     ):
         """Internal helper for TP=2/4/8 decode dispatch.
           q_len: padded Q_LEN passed to the kernel
@@ -1429,7 +1430,11 @@ class PersistentKernel:
         else:  # TP=8
             qpg = 2
         num_groups = (q_len + qpg - 1) // qpg
-        num_splits = (kv_len + 128 - 1) // 128  # TILE_S=128
+        num_splits = (
+            num_splits_override
+            if num_splits_override is not None
+            else (kv_len + 128 - 1) // 128
+        )  # TILE_S=128
         # TP=4 packs the V split id into block_x → multiple tasks per split.
         x_mul = v_splits if has_v_split else 1
         grid_dim = (num_groups * num_splits * x_mul * head_groups,
@@ -1486,12 +1491,14 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp2_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+        num_splits_override=None,
     ):
         self._mla_mtp_decode_tp_layer(
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=64,
             task_name="mla_mtp_decode_tp2_sm100",
             head_groups=2,
+            num_splits_override=num_splits_override,
         )
 
     def mla_mtp_decode_tp2_reduce_layer(
@@ -1504,6 +1511,7 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp4_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+        num_splits_override=None,
     ):
         # TP=4 V-split: 2× tasks (v_half=0,1). Each writes to a disjoint TMEM
         # column range; output_partial is a single buffer covering both.
@@ -1512,6 +1520,7 @@ class PersistentKernel:
             q_len, kv_len, num_heads=32,
             task_name="mla_mtp_decode_tp4_sm100", has_v_split=True,
             v_splits=8,
+            num_splits_override=num_splits_override,
         )
 
     def mla_mtp_decode_tp4_reduce_layer(
@@ -1524,7 +1533,7 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp8_layer(
         self, q_input, kv_input, output_partial, output_lse,
-        q_len_real, kv_len,
+        q_len_real, kv_len, num_splits_override=None,
     ):
         # TP=8 pads Q_LEN to even
         q_len = (q_len_real + 1) & ~1
@@ -1532,6 +1541,7 @@ class PersistentKernel:
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=16,
             task_name="mla_mtp_decode_tp8_sm100", q_len_real=q_len_real,
+            num_splits_override=num_splits_override,
         )
 
     def mla_mtp_decode_tp8_reduce_layer(
@@ -1754,6 +1764,22 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
 
     # === FP8 Dense Layers ===
+    def _fp8_quantize_group_tiles(self, hidden_size: int, scale_ue8m0: bool) -> int:
+        num_groups = max(1, hidden_size // 128)
+        if scale_ue8m0:
+            # Packed UE8M0 stores four group scales per uint32. Split only at
+            # four-group boundaries so each CTA owns whole packed scale words.
+            group_tiles = 1
+            for candidate in range(min(16, num_groups), 1, -1):
+                if num_groups % candidate == 0:
+                    groups_per_tile = num_groups // candidate
+                    if groups_per_tile % 4 == 0:
+                        group_tiles = candidate
+                        break
+            return group_tiles
+        # Float-scale MoE quantization has no packing hazard.
+        return min(4, max(1, num_groups // 8))
+
     def quantize_fp8_layer(
         self,
         input: DTensor,
@@ -1772,20 +1798,7 @@ class PersistentKernel:
         row_count = 1
         for axis in range(input.num_dims - 1):
             row_count *= input.dim(axis)
-        num_groups = max(1, hidden_size // 128)
-        if scale_ue8m0:
-            # Packed UE8M0 stores four group scales per uint32. Split only at
-            # four-group boundaries so each CTA owns whole packed scale words.
-            group_tiles = 1
-            for candidate in range(min(8, num_groups), 1, -1):
-                if num_groups % candidate == 0:
-                    groups_per_tile = num_groups // candidate
-                    if groups_per_tile % 4 == 0:
-                        group_tiles = candidate
-                        break
-        else:
-            # Float-scale MoE quantization has no packing hazard.
-            group_tiles = min(4, max(1, num_groups // 8))
+        group_tiles = self._fp8_quantize_group_tiles(hidden_size, scale_ue8m0)
         grid_dim = (group_tiles, row_count, 1)
         params = []
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))

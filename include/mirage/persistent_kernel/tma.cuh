@@ -1525,17 +1525,22 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int total_rows = total_elements / D_K; // B * Q_LEN * NUM_HEADS
         int d_k = D_K;
         int k_iters = d_k / BK;
-        int num_heads = (total_rows <= NUM_H) ? total_rows : NUM_H;
-        int q_len = total_rows / num_heads;
-        if (q_len < 1) {
-          q_len = 1;
-        }
-        int hpb = num_heads / q_len;
-        while (hpb > 0 && num_heads % hpb != 0) {
-          hpb--;
-        }
-        if (hpb <= 0) {
-          hpb = num_heads;
+        uint32_t const packed_mtp =
+            static_cast<uint32_t>(task_desc.task_metadata.merge_task_offset);
+        int hpb = static_cast<int>((packed_mtp >> 16) & 0xffff);
+        if (hpb <= 0 || hpb > NUM_H) {
+          int num_heads = (total_rows <= NUM_H) ? total_rows : NUM_H;
+          int q_len = total_rows / num_heads;
+          if (q_len < 1) {
+            q_len = 1;
+          }
+          hpb = num_heads / q_len;
+          while (hpb > 0 && num_heads % hpb != 0) {
+            hpb--;
+          }
+          if (hpb <= 0) {
+            hpb = num_heads;
+          }
         }
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};

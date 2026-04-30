@@ -43,6 +43,14 @@ __device__ __noinline__ void mla_reduce_sm100_task_impl(
 
   int const h = tid; // head index
 
+  if (num_splits == 1) {
+    for (int di = d_start; di < d_start + d_count; di++) {
+      float oval = Oa[batch_idx * D_V * NUM_HEADS + di * NUM_HEADS + h];
+      O[(batch_idx * NUM_HEADS + h) * D_V + di] = __float2bfloat16(oval);
+    }
+    return;
+  }
+
   // Pass 1: find lse_max across all splits
   float lse_max = -1e30f;
   for (int s = 0; s < num_splits; s++) {

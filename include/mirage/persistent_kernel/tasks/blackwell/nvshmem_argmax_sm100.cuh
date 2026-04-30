@@ -51,33 +51,36 @@ __device__ __forceinline__ void
   int const num_active_rows = max(0, min(active_tokens, BATCH_SIZE));
   int const tidx = threadIdx.x;
 
+  if (tidx < NUM_THREADS) {
 #pragma unroll
-  for (int batch_idx = 0; batch_idx < num_active_rows; batch_idx++) {
-    float local_max = -inf;
-    long long local_idx = -1;
-    bfloat16 const *value_row =
-        partial_value + batch_idx * NUM_PARTIAL_TASKS;
-    long long const *index_row =
-        partial_index + batch_idx * NUM_PARTIAL_TASKS;
-    for (int i = tidx; i < NUM_PARTIAL_TASKS; i += NUM_THREADS) {
-      long long relative_idx = index_row[i];
-      long long candidate_idx =
-          static_cast<long long>(i) * PARTIAL_CHUNK_SIZE + relative_idx;
-      if (relative_idx >= 0 && candidate_idx < VALID_VOCAB_SIZE) {
-        float val = static_cast<float>(value_row[i]);
-        if (val > local_max) {
-          local_max = val;
-          local_idx = candidate_idx;
+    for (int batch_idx = 0; batch_idx < num_active_rows; batch_idx++) {
+      float local_max = -inf;
+      long long local_idx = -1;
+      bfloat16 const *value_row =
+          partial_value + batch_idx * NUM_PARTIAL_TASKS;
+      long long const *index_row =
+          partial_index + batch_idx * NUM_PARTIAL_TASKS;
+      for (int i = tidx; i < NUM_PARTIAL_TASKS; i += NUM_THREADS) {
+        long long relative_idx = index_row[i];
+        long long candidate_idx =
+            static_cast<long long>(i) * PARTIAL_CHUNK_SIZE + relative_idx;
+        if (relative_idx >= 0 && candidate_idx < VALID_VOCAB_SIZE) {
+          float val = static_cast<float>(value_row[i]);
+          if (val > local_max) {
+            local_max = val;
+            local_idx = candidate_idx;
+          }
         }
       }
-    }
 
-    block_reduce_max_idx_sm100<float>(local_max, local_idx);
+      block_reduce_max_idx_sm100<float>(local_max, local_idx);
 
-    if (tidx == 0) {
-      scratch_value[team_rank * BATCH_SIZE + batch_idx] = local_max;
-      scratch_index[team_rank * BATCH_SIZE + batch_idx] =
-          local_idx >= 0 ? static_cast<long long>(VOCAB_OFFSET) + local_idx : -1;
+      if (tidx == 0) {
+        scratch_value[team_rank * BATCH_SIZE + batch_idx] = local_max;
+        scratch_index[team_rank * BATCH_SIZE + batch_idx] =
+            local_idx >= 0 ? static_cast<long long>(VOCAB_OFFSET) + local_idx
+                           : -1;
+      }
     }
   }
 
