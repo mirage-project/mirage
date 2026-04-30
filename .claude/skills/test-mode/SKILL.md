@@ -139,7 +139,7 @@ Same call as production. In test mode the launcher was compiled with `-DMPK_TEST
 - Must be called **after** `compile()`.
 - **Does not synchronize** — call `torch.cuda.synchronize()` before reading output tensors.
 - Optional `default_stream=stream` kwarg if you don't want the current stream.
-- Profiler trace export: pass `params["profiler_tensor"] = torch.zeros(N, dtype=torch.uint64, device="cuda")` and optional `params["trace_name"]` before `compile()`. After `pk()` returns, a `<trace_name>.perfetto-trace` file is written.
+- Profiler export: pass `params["profiler_tensor"]` and optional `params["trace_name"]` before `compile()`. After `pk()` returns, both `<trace_name>.perfetto-trace` and `<trace_name>.csv` are written. See "Profiling" below.
 
 ### `pk.finalize()`
 
@@ -252,6 +252,67 @@ mpirun --np 2 -x LD_PRELOAD -x LD_LIBRARY_PATH -x NVSHMEM_HOME \
 ```
 
 The `LD_PRELOAD` is required so `dlopen()`-loaded launcher modules resolve `nvshmem_selected_device_transport` and other NVSHMEM-versioned symbols. This is an existing NVSHMEM 3.x quirk, unrelated to test mode.
+
+## Profiling
+
+Test mode supports profiling because `pk()` runs the standard `__call__` path. Profiling is opt-in: pass a `profiler_tensor` and the post-run hook writes both a Perfetto trace (for human inspection) and a CSV (for programmatic queries).
+
+```python
+params = PersistentKernel.get_default_init_parameters()
+params["test_mode"] = True
+params["trace_name"] = "rmsnorm_smoke"           # optional; defaults to f"mirage_{mpi_rank}"
+params["profiler_tensor"] = torch.zeros(
+    3000 * 128, dtype=torch.uint64, device="cuda"
+)
+pk = PersistentKernel(**params)
+
+# ... attach tensors, register layers, pk.compile(...) as usual ...
+pk()
+torch.cuda.synchronize()
+# Two files now exist alongside the script:
+#   rmsnorm_smoke.perfetto-trace   ← drag into ui.perfetto.dev
+#   rmsnorm_smoke.csv              ← query with scripts/parse_profile.py
+```
+
+The profiler buffer must be `uint64` on CUDA. `3000 * 128` entries is the conventional size used by the demos and is plenty for short test-mode runs. Each task event consumes 2 entries (BEGIN + END); buffer overflow would surface later as a `RuntimeError("dangling BEGIN ...")` from the CSV writer.
+
+### CSV schema
+
+One row per fully-paired task event (and one row per `kInstant` event with `duration_ns=0`):
+
+| Column | Meaning |
+|---|---|
+| `task_type_id` | `TaskType` enum value (e.g. `253`) |
+| `task_type_name` | Symbolic name (e.g. `TASK_LINEAR_SM100`) |
+| `block_idx`, `group_idx` | Worker that executed the event |
+| `event_no` | Per-worker execution counter |
+| `begin_ts`, `end_ts` | Raw 32-bit `%globaltimer_lo` values (ns, wraps every ~4.3 s) |
+| `duration_ns` | `(end_ts - begin_ts) mod 2^32` |
+
+### Querying the CSV — `scripts/parse_profile.py`
+
+All output is JSON; errors print `{"error": "..."}` and exit 2.
+
+```bash
+# What task types ran, with event counts
+python scripts/parse_profile.py rmsnorm_smoke.csv --list
+
+# Average runtime of one task type
+python scripts/parse_profile.py rmsnorm_smoke.csv TASK_RMS_NORM_HOPPER --stat avg
+
+# Min / max / avg / median in one shot
+python scripts/parse_profile.py rmsnorm_smoke.csv TASK_LINEAR_SM100 --stat all
+
+# Numeric task-type id is also accepted
+python scripts/parse_profile.py rmsnorm_smoke.csv 253 --stat min
+```
+
+Sample output:
+```json
+{"task_type": "TASK_LINEAR_SM100", "count": 7040, "min_ns": 11776, "max_ns": 193856, "avg_ns": 26731.58, "median_ns": 31184.0}
+```
+
+For finer-grained analysis (per-worker breakdown, percentiles, outliers), `pandas.read_csv(...)` the file directly — the schema is stable and column names speak for themselves.
 
 ## Constraints
 
