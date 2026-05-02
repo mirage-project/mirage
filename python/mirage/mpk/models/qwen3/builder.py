@@ -384,6 +384,7 @@ class Qwen3Builder(GraphBuilder):
                     output=self.attn_proj_out,
                     grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 self.mpk.linear_with_residual_layer(
@@ -499,6 +500,7 @@ class Qwen3Builder(GraphBuilder):
                     output=self.mlp_out,
                     grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 self.mpk.linear_with_residual_layer(

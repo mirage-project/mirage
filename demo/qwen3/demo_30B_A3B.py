@@ -599,6 +599,7 @@ if __name__ == "__main__":
                     output=moe_gate_out,
                     grid_dim=(1, hidden_size // 64, 1),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 # moe gate without split-k

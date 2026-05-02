@@ -99,6 +99,7 @@ def _run_case(label, batch, full_n, full_k, grid_x, grid_y, tol=0.05):
         output=o,
         grid_dim=(grid_x, grid_y, 1),
         block_dim=(256, 1, 1),
+        accumulate=False,
     )
 
     print("Compiling...")
