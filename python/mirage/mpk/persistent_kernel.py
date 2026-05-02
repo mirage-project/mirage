@@ -1556,22 +1556,29 @@ class PersistentKernel:
     # MoE Layers
     def tensor_init_layer(
         self,
-        input: DTensor,
-        dummy_input: DTensor,
-        dummy_output: DTensor,
+        target: DTensor,
+        dummy: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        dummy_input_map: tuple,
+        target_input_map: tuple,
     ):
-        # In-place zero fill modeled as a real graph output. dummy_input only
-        # carries the request-row partition/dependency.
-        assert input.num_dims in (2, 3)  # (batch_size, output_size) or flattened 3D rows
-        assert dummy_input.num_dims == 2 # (batch_size, hidden_size)
-        assert dummy_output.num_dims == 2 # (batch_size, output_size)
+        """Zero-fill `target` using a custom kernel.
+
+        `dummy` only carries a dependency edge: it appears as both an input and
+        an output of the task so the MPK dep-tracker chains tensor_init between
+        the producer of `dummy` and any downstream consumer of `dummy`. The
+        kernel never reads or writes `dummy`'s data.
+        """
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        input_partition = (0, -1, -1) if input.num_dims == 2 else (0, 1, -1)
-        tb_graph.new_input(dummy_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(input, input_partition, -1, True)
-        self.kn_graph.customized([dummy_input, input], tb_graph)
+        # bgraph order = [dummy, target, dummy] -> arity (1, 2):
+        #   input_ops[0]  = dummy   (read dep)
+        #   output_ops[0] = target  (the buffer the kernel zeroes)
+        #   output_ops[1] = dummy   (dep-only write)
+        tb_graph.new_input(dummy, dummy_input_map, -1, False)
+        tb_graph.new_input(target, target_input_map, -1, True)
+        tb_graph.new_input(dummy, dummy_input_map, -1, True)
+        self.kn_graph.customized([dummy, target, dummy], tb_graph)
 
         self.kn_graph.register_task(tb_graph, "tensor_init")
     
@@ -1921,18 +1928,35 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,    # (num_M_shards, split_k_factor, 1)
         block_dim: tuple,   # (256, 1, 1) on SM100
+        *,
+        accumulate: bool,
     ):
         # Split-K variant of linear_fp8_swapAB_layer. grid.y CTAs each compute
         # a K-slice partial and TMA reduce-add into the shared output tile.
         #
-        # *** Caller MUST zero-initialize `output` before launch ***
-        # The kernel uses tma_reduce_add_async; if the buffer has stale data
-        # the partials will compound on top of it. No kernel-side guard.
+        # The kernel uses tma_reduce_add_async and unconditionally adds onto
+        # whatever `output` already contains. The `accumulate` flag selects:
+        #   accumulate=True  -> caller owns `output` (e.g. residual). The
+        #                       matmul is added on top; no tensor_init.
+        #   accumulate=False -> layer prepends a tensor_init that zeroes
+        #                       `output` first, so the result is a pure sum.
+        # tensor_init shares the linear's grid_dim and per-tensor input_maps,
+        # so grid.y CTAs zero the same tile redundantly (kept for dep-edge
+        # alignment with the linear).
         #
         # Constraints (asserted at registration time):
         #   - output.dim[1] / grid.x must be a multiple of 128 (per-task N)
         #   - input.dim[1]  / grid.y must be a multiple of 128 (per-task K)
         #   - batch_size <= 16 (decode-only)
+        if not accumulate:
+            self.tensor_init_layer(
+                target=output,
+                dummy=input_fp8,
+                grid_dim=grid_dim,
+                block_dim=block_dim,
+                dummy_input_map=(-1, 1, -1),
+                target_input_map=(1, -1, -1),
+            )
         params = []
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # input_fp8 [batch, K]: grid.y splits K (dim 1).
@@ -2028,11 +2052,29 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        *,
+        accumulate: bool,
     ):
+        # The BF16 splitk kernel uses tma_reduce_add_async and unconditionally
+        # adds onto whatever `output` already contains. The `accumulate` flag
+        # selects:
+        #   accumulate=True  -> caller owns `output` (e.g. residual). The
+        #                       matmul is added on top; no tensor_init.
+        #   accumulate=False -> layer prepends a tensor_init that zeroes
+        #                       `output` first, so the result is a pure sum.
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
         assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
         assert output.num_dims == 2  # (batch_size, hidden_size)
+        if not accumulate:
+            self.tensor_init_layer(
+                target=output,
+                dummy=input,
+                grid_dim=grid_dim,
+                block_dim=block_dim,
+                dummy_input_map=(-1, 1, -1),
+                target_input_map=(1, -1, -1),
+            )
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, 1, -1), 1, True)
         tb_graph.new_input(weight, (0, 1, -1), 1, True)

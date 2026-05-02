@@ -2097,12 +2097,15 @@ int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
                                             std::vector<int> const &params) {
+  // Arity: (1 input, 2 outputs).
+  //   input_ops[0]  = linear_input  (dummy dep, not read)
+  //   output_ops[0] = linear_output (the tile zeroed by the kernel)
+  //   output_ops[1] = linear_input  (dummy dep edge, not written)
   assert(params.size() == 0);
-  int batch_size = 0, output_size, output_stride;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
-  int num_outputs = 1;
+  int num_outputs = 2;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -2112,27 +2115,19 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
-  int ndims = output_ops[0]->dtensor.num_dims;
-  assert(ndims == 2 || ndims == 3);
-  if (ndims == 3) {
-    batch_size = output_ops[0]->output_tensors[0].dim[0] *
-                 output_ops[0]->output_tensors[0].dim[1];
-    output_size = output_ops[0]->output_tensors[0].dim[2];
-  } else {
-    batch_size = output_ops[0]->output_tensors[0].dim[0];
-    output_size = output_ops[0]->output_tensors[0].dim[1];
-  }
-  // get input stride
-  output_stride = ndims == 3 ? output_ops[0]->dtensor.dim[2]
-                             : output_ops[0]->dtensor.dim[1];
+  // The buffer to zero is output_ops[0] (the linear's output).
+  assert(output_ops[0]->dtensor.num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  int output_stride = output_ops[0]->dtensor.dim[1];
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::tensor_init_sm100_task_impl<cute::bfloat16_t, $, $, $>(",
+  code.e("kernel::tensor_init_zero_sm100_task_impl<$, $, $>(",
          /*BATCH_SIZE=*/batch_size,
          /*OUTPUT_SIZE=*/output_size,
          /*OUTPUT_STRIDE=*/output_stride);
-  code.e("    task_desc->output_ptrs[0],");
-  code.e("    0);");
+  code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_TENSOR_INIT, code.to_string());
 }
 
