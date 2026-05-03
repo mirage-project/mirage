@@ -842,6 +842,45 @@ class PersistentKernel:
 
         self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100")
         
+    def moe_hash_routing_layer(
+        self,
+        input: DTensor,        # BF16 [batch_size, num_experts]  (router logits)
+        tid2eid: DTensor,      # INT32[vocab_size, num_experts_per_tok]
+        input_ids: DTensor,    # INT64[batch_size]  (current token ids)
+        output: tuple[DTensor, DTensor, DTensor],
+        grid_dim: tuple,
+        block_dim: tuple,
+        routed_scaling_factor: float = 1.5,
+    ):
+        assert input.num_dims == 2       # (batch_size, num_experts)
+        assert tid2eid.num_dims == 2     # (vocab_size, num_experts_per_tok)
+        assert input_ids.num_dims == 1   # (batch_size,)
+        assert len(output) == 3
+        moe_topk_weight, moe_routing_indices, moe_masks = output
+        assert moe_topk_weight.num_dims == 2   # (batch_size, num_experts_per_tok)
+        assert moe_routing_indices.num_dims == 2  # (num_experts, batch_size)
+        assert moe_masks.num_dims == 1            # (num_experts + 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # inputs: logits (batch-indexed), tid2eid (global table), input_ids (batch-indexed)
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(tid2eid, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_ids, (0, -1, -1), -1, True)
+        # outputs match moe_topk_softmax_routing_layer conventions
+        tb_graph.new_input(moe_topk_weight, (0, -1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, tid2eid, input_ids,
+             moe_topk_weight, moe_routing_indices, moe_masks],
+            tb_graph,
+        )
+        route_scale_x1000 = int(routed_scaling_factor * 1000)
+        self.kn_graph.register_task(
+            tb_graph,
+            "moe_sqrtsoftplus_hash_routing_sm100",
+            [route_scale_x1000],
+        )
+
     def moe_w13_linear_layer(
         self,
         input: DTensor,

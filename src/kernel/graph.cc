@@ -629,6 +629,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 3, TASK_MOE_TOPK_SOFTMAX_SM100, variant_id);
+  } else if (name == "moe_sqrtsoftplus_hash_routing_sm100") {
+    int variant_id =
+        task_register->register_moe_sqrtsoftplus_hash_routing_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        3, 3, TASK_MOE_SQRTSOFTPLUS_HASH_ROUTING_SM100, variant_id);
   } else if (name == "moe_w13_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, true /*w13_linear*/);

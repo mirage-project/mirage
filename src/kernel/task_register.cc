@@ -2172,6 +2172,65 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }
 
+int TaskRegister::register_moe_sqrtsoftplus_hash_routing_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: route_scale * 1000 as int (e.g. 1500 for 1.5)
+  assert(params.size() == 1);
+  int route_scale_x1000 = params[0];
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 3;  // logits, tid2eid, input_ids
+  int num_outputs = 3; // weights, routing_indices, masks
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // input_ops[0]: logits [batch_size, num_experts]
+  // input_ops[1]: tid2eid [vocab_size, K]
+  // input_ops[2]: input_ids [batch_size]
+  // output_ops[0]: weights [batch_size, K]
+  // output_ops[1]: routing_indices [num_experts, batch_size]
+  // output_ops[2]: masks [num_experts + 1]
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  assert(output_ops[1]->output_tensors[0].num_dims == 2);
+  assert(output_ops[2]->output_tensors[0].num_dims == 1);
+
+  int num_experts = input_ops[0]->output_tensors[0].dim[1];
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int K = input_ops[1]->output_tensors[0].dim[1];
+
+  assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(output_ops[0]->output_tensors[0].dim[1] == K);
+  assert(output_ops[1]->output_tensors[0].dim[0] == num_experts);
+  assert(output_ops[1]->output_tensors[0].dim[1] == batch_size);
+  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts + 1);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e(
+      "kernel::sqrtsoftplus_hash_routing_task_impl<cute::bfloat16_t, $, $, $>(",
+      num_experts,
+      K,
+      route_scale_x1000);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    task_desc->output_ptrs[2],");
+  code.e("    $);", batch_size);
+  return register_task_variant(TASK_MOE_SQRTSOFTPLUS_HASH_ROUTING_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_moe_linear_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
