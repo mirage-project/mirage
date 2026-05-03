@@ -4019,7 +4019,11 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
     code.e("    $f,", _sm); // ss
   }
   code.e("    kv_len_,");
-  code.e("    sk_rt_,");
+  // The task grid is generated with the static num_splits. Keep that same
+  // split count in the kernel so block_x metadata decodes to the intended
+  // (group, split). Runtime kv_len_ still makes inactive splits take the
+  // t0>=t1 path.
+  code.e("    $,", num_splits);
   code.e("    $,", num_head_groups);
   code.e("    q_len_rt_,");
   // gi, si, bi from task metadata
@@ -4068,7 +4072,9 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
       "    static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Oa
   code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");    // La
   code.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");   // O
-  code.e("    sk_rt_,");
+  // Match the static split count used to size the partial buffers and task
+  // grid. Inactive runtime splits contain -inf LSE and reduce away.
+  code.e("    $,", num_splits);
   code.e("    $,", num_head_groups);
   code.e("    q_len_rt_,");
   // dv_base, gi, bi from task metadata
@@ -5277,7 +5283,8 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
     code.e("      $f,", _sm);
   }
   code.e("      kv_len_,");
-  code.e("      sk_rt_,");
+  // See generic MTP decode: task metadata is laid out for static num_splits.
+  code.e("      $,", num_splits);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
   code.e("      $,",
@@ -5324,7 +5331,8 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  code.e("      sk_rt_,");
+  // See generic MTP reduce: partial layout is static-num_splits based.
+  code.e("      $,", num_splits);
   code.e("      $,", num_groups);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
@@ -5390,7 +5398,8 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
     code.e("      $f,", _sm);
   }
   code.e("      kv_len_,");
-  code.e("      sk_rt_,");
+  // See TP2 MTP decode: task metadata is laid out for static num_splits.
+  code.e("      $,", num_splits);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
   code.e("      $,",
@@ -5440,7 +5449,8 @@ int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  code.e("      sk_rt_,");
+  // See TP2 MTP reduce: partial layout is static-num_splits based.
+  code.e("      $,", num_splits);
   code.e("      $,", num_groups);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
@@ -5509,7 +5519,8 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
     code.e("      $f,", _sm);
   }
   code.e("      kv_len_,");
-  code.e("      sk_rt_,");
+  // See TP2 MTP decode: task metadata is laid out for static num_splits.
+  code.e("      $,", num_splits);
   code.e("      q_len_padded_rt_,");
   code.e("      $,", qpg);
   code.e("      $,",
@@ -5560,7 +5571,8 @@ int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  code.e("      sk_rt_,");
+  // See TP2 MTP reduce: partial layout is static-num_splits based.
+  code.e("      $,", num_splits);
   code.e("      $,", num_groups);
   code.e("      q_len_padded_rt_,");
   code.e("      $,", qpg);

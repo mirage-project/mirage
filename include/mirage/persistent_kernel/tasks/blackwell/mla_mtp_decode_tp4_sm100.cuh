@@ -34,7 +34,25 @@ static constexpr int BK = 64;      // 128B swizzle tile width
 static constexpr int MMA_K = 16;
 static constexpr int K_ITERS = D_K / BK;  // 9 for QK
 static constexpr int V_CHUNKS = D_V / BK; // 8
-static constexpr int V_SPLITS = 8;
+#ifndef MIRAGE_MLA_TP4_V_SPLITS
+#define MIRAGE_MLA_TP4_V_SPLITS 8
+#endif
+static constexpr int V_SPLITS = MIRAGE_MLA_TP4_V_SPLITS;
+static_assert(V_SPLITS == 1 || V_SPLITS == 2 || V_SPLITS == 4 ||
+                  V_SPLITS == 8,
+              "MIRAGE_MLA_TP4_V_SPLITS must be one of 1, 2, 4, 8");
+static_assert(V_CHUNKS % V_SPLITS == 0,
+              "TP4 MLA V splits must divide D_V / BK");
+#ifndef MIRAGE_MLA_TP4_HEAD_GROUPS
+#define MIRAGE_MLA_TP4_HEAD_GROUPS 1
+#endif
+static constexpr int HEAD_GROUPS = MIRAGE_MLA_TP4_HEAD_GROUPS;
+static_assert(HEAD_GROUPS == 1 || HEAD_GROUPS == 2 || HEAD_GROUPS == 4 ||
+                  HEAD_GROUPS == 8,
+              "MIRAGE_MLA_TP4_HEAD_GROUPS must be one of 1, 2, 4, 8");
+static_assert(NUM_HEADS % HEAD_GROUPS == 0,
+              "TP4 MLA head groups must divide NUM_HEADS");
+static constexpr int HEADS_PER_GROUP = NUM_HEADS / HEAD_GROUPS;
 static constexpr int TB = 128;
 
 // Pipeline stages
@@ -144,11 +162,13 @@ __device__ __noinline__ void
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
-  // V-split is folded into block_x: low bits select the V part, the remaining
-  // bits are the original (Q group, KV split) index.
+  // V-split and optional head split are folded into block_x. V remains the
+  // lowest-order field so existing default metadata layout is unchanged.
   // Mirage MPK has only a flat task index, no z-dim launch.
-  int const block_x = block_x_packed / V_SPLITS;
   int const v_part = block_x_packed % V_SPLITS;
+  int const block_x_no_v = block_x_packed / V_SPLITS;
+  int const head_group = block_x_no_v % HEAD_GROUPS;
+  int const block_x = block_x_no_v / HEAD_GROUPS;
   int const gi = block_x / sk;
   int const si = block_x % sk;
   int const bi = block_y;
@@ -171,7 +191,8 @@ __device__ __noinline__ void
     return;
   }
 
-  int const hpb = NUM_HEADS;
+  int const hpb = HEADS_PER_GROUP;
+  int const head_start = head_group * hpb;
   int const actual_qpg = min(qpg, Q_LEN - gi * qpg);
 
   extern __shared__ __align__(1024) char smem_buf[];
@@ -291,7 +312,8 @@ __device__ __noinline__ void
                      : "memory");
         for (int q = 0; q < actual_qpg; q++) {
           int actual_q_idx = gi * qpg + q;
-          int global_row = bi * Q_LEN * NUM_HEADS + actual_q_idx * NUM_HEADS;
+          int global_row =
+              bi * Q_LEN * NUM_HEADS + actual_q_idx * NUM_HEADS + head_start;
           asm volatile(
               "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_"
               "tx::bytes "
@@ -680,7 +702,8 @@ __device__ __noinline__ void
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
     constexpr bool write_final = WRITE_FINAL;
     int const q_final = gi * qpg + tid / hpb;
-    int const h_final = tid % hpb;
+    int const h_final = head_start + tid % hpb;
+    int const partial_row = (tid / hpb) * NUM_HEADS + h_final;
     for (int vi = 0; vi < PV_CHUNKS; vi++) {
       int vc = vc_base_epi + vi;
       int out_taddr_vc = taddr + vc * BK;
@@ -708,7 +731,7 @@ __device__ __noinline__ void
               "=f"(t16[15])
             : "r"(addr));
         asm volatile("tcgen05.wait::ld.sync.aligned;");
-        int base_d = (vc * BK + c) * 128 + tid;
+        int base_d = (vc * BK + c) * 128 + partial_row;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
           nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
@@ -730,7 +753,8 @@ __device__ __noinline__ void
     }
     // Only one V split writes La; it is shared by all V splits.
     if (!write_final && v_part == 0) {
-      La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
+      La[block_linear * 128 + partial_row] =
+          log2f(fmaxf(row_sum, 1e-30f)) + row_max;
     }
   }
 

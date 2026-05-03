@@ -163,7 +163,7 @@ class DeepSeekV3Builder(GraphBuilder):
         self._reuse_attn_input_fp8 = (
             os.environ.get("MPK_REUSE_ATTN_INPUT_FP8", "1") != "0")
         self._mla_single_split_max_kv_tiles = int(
-            os.environ.get("MPK_MLA_SINGLE_SPLIT_MAX_KV_TILES", "1"))
+            os.environ.get("MPK_MLA_SINGLE_SPLIT_MAX_KV_TILES", "2"))
 
         # MTP config
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)
@@ -1663,7 +1663,9 @@ class DeepSeekV3Builder(GraphBuilder):
         q_len_mla = self.max_num_batched_tokens
         decode_q_len_mla = self._decode_q_len()
         kv_len_max = self.mpk.max_seq_length
-        single_split_mla = kv_len_max <= self.mpk.page_size
+        kv_tiles_max = (kv_len_max + self.mpk.page_size - 1) // self.mpk.page_size
+        single_split_mla = kv_tiles_max <= self._mla_single_split_max_kv_tiles
+        mla_num_splits_override = 1 if single_split_mla else None
         mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
         mla_decode_kv = (
             self.mtp_ckv_kpe_cache_tensor
@@ -1715,17 +1717,20 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.mpk.mla_mtp_decode_tp2_layer(
                     self.q_nope_pe, mla_decode_kv,
                     mla_decode_out, self.mla_partial_lse,
-                    decode_q_len_mla, kv_len_max)
+                    decode_q_len_mla, kv_len_max,
+                    num_splits_override=mla_num_splits_override)
             elif self.world_size == 4:
                 self.mpk.mla_mtp_decode_tp4_layer(
                     self.q_nope_pe, mla_decode_kv,
                     mla_decode_out, self.mla_partial_lse,
-                    decode_q_len_mla, kv_len_max)
+                    decode_q_len_mla, kv_len_max,
+                    num_splits_override=mla_num_splits_override)
             elif self.world_size == 8:
                 self.mpk.mla_mtp_decode_tp8_layer(
                     self.q_nope_pe, mla_decode_kv,
                     mla_decode_out, self.mla_partial_lse,
-                    decode_q_len_mla, kv_len_max)
+                    decode_q_len_mla, kv_len_max,
+                    num_splits_override=mla_num_splits_override)
             else:
                 self.mpk.mla_mtp_decode_layer(
                     self.q_nope_pe, mla_decode_kv,
@@ -1753,7 +1758,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.mpk.mla_mtp_decode_tp2_layer(
                     self.q_nope_pe, mla_decode_kv,
                     mla_decode_out, self.mla_partial_lse,
-                    decode_q_len_mla, kv_len_max)
+                    decode_q_len_mla, kv_len_max,
+                    num_splits_override=mla_num_splits_override)
                 if not single_split_mla:
                     self.mpk.mla_mtp_decode_tp2_reduce_layer(
                         self.mla_partial_o, self.mla_partial_lse,
@@ -1762,7 +1768,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.mpk.mla_mtp_decode_tp4_layer(
                     self.q_nope_pe, mla_decode_kv,
                     mla_decode_out, self.mla_partial_lse,
-                    decode_q_len_mla, kv_len_max)
+                    decode_q_len_mla, kv_len_max,
+                    num_splits_override=mla_num_splits_override)
                 if not single_split_mla:
                     self.mpk.mla_mtp_decode_tp4_reduce_layer(
                         self.mla_partial_o, self.mla_partial_lse,
@@ -1771,7 +1778,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.mpk.mla_mtp_decode_tp8_layer(
                     self.q_nope_pe, mla_decode_kv,
                     mla_decode_out, self.mla_partial_lse,
-                    decode_q_len_mla, kv_len_max)
+                    decode_q_len_mla, kv_len_max,
+                    num_splits_override=mla_num_splits_override)
                 if not single_split_mla:
                     self.mpk.mla_mtp_decode_tp8_reduce_layer(
                         self.mla_partial_o, self.mla_partial_lse,
