@@ -1242,11 +1242,14 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100:
     case TASK_MLA_PREFILL_TP8_SM100: {
       // Unabsorbed MLA prefill (TP=8): K is [S, D_QK=192], V is [S, D_V=128].
       // Both encoded as 3D with 128B swizzle, box = (64, BN=128, 1). Matches
       // src/kernel/mla_prefill_tp8.cu's cuTensorMapEncodeTiled arguments
-      // exactly, so device-side kernel code can be reused verbatim.
+      // exactly, so device-side kernel code can be reused verbatim. The
+      // chunked variant uses the same encoding (S = kv_len for K/V tensors).
       constexpr int BK = 64;
       constexpr int BN_BOX = 128;
       constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
@@ -1262,8 +1265,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       int total_rows = tensor_desc.dim[0]; // S
       int d_last = tensor_desc.dim[1];     // 192 for K, 128 for V
       int k_iters = d_last / BK;
-      uint64_t gd[3] = {
-          (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+      uint64_t gd[3] = {(uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
       uint64_t gs[2] = {(uint64_t)d_last * 2, (uint64_t)BK * 2};
       uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BN_BOX, 1};
       uint32_t es[3] = {1, 1, 1};
@@ -1612,8 +1614,11 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // no TMA needed
       break;
     }
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100:
     case TASK_MLA_PREFILL_TP8_SM100: {
       // Inputs: [0] Qn, [1] Qp, [2] K, [3] V. Only K and V use TMA.
+      // Splitk has an extra input [4] partial (no TMA needed for it).
       for (size_t param_id = 2; param_id < 4; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);

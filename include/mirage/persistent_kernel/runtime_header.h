@@ -194,7 +194,17 @@ enum TaskType {
   TASK_MTP_BUILD_EMBED_INPUT = 294,
   // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
-  TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
+  // MLA chunked prefill TP=8: Q covers a chunk [q_start, q_start+q_len) of a
+  // longer sequence with KV in [0, kv_len). K/V have separate mbarriers so
+  // K-prefetch overlaps with PV compute. Causal: kvp <= q_start + qp.
+  TASK_MLA_PREFILL_TP8_CHUNKED_SM100 = 296,
+  // Split-K variant: each block does only 1/num_splits of the KV range and
+  // writes a per-row partial (D_V floats + m + d) to a global float buffer.
+  // Used when chunk * H * B < SM count (occupancy too low for main kernel).
+  TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 297,
+  // Reduce kernel: combines num_splits partial outputs into final bf16 O.
+  TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 298,
+  TASK_SM100_TASK_END = 299, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

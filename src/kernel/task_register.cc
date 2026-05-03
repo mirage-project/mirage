@@ -3696,7 +3696,8 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   // Inputs: [0] Q_nope [B,S,H,128], [1] Q_pe [B,S,H,64],
   //         [2] K [B,S,192] (nope+rope concat), [3] V [B,S,128]
   // Output: [0] O [B,S,H,128]
-  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V (input_tma_desc_ptrs[3][0]).
+  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V
+  // (input_tma_desc_ptrs[3][0]).
   assert(params.size() == 2);
   int num_heads = params[0];
   int seq_len = params[1];
@@ -3711,18 +3712,138 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
   code.e("    static_cast<const "
-         "__nv_bfloat16*>(task_desc->input_ptrs[0]),");           // Qn
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
   code.e("    static_cast<const "
-         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");           // Qp
-  code.e(
-      "    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
-  code.e("    $,", seq_len);                                          // S
-  code.e("    $,", num_heads);                                        // H
-  code.e("    $f,", sm_scale_log2);                                   // sml2
-  code.e("    task_desc->task_metadata.request_id,"); // head (bid.x)
-  code.e("    task_desc->task_metadata.kv_idx,");     // q_block (bid.y)
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");                  // Qp
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
+  code.e("    $,", seq_len);                                             // S
+  code.e("    $,", num_heads);                                           // H
+  code.e("    $f,", sm_scale_log2);                                      // sml2
+  code.e("    task_desc->task_metadata.request_id,");         // head (bid.x)
+  code.e("    task_desc->task_metadata.kv_idx,");             // q_block (bid.y)
   code.e("    task_desc->task_metadata.merge_task_offset);"); // batch (bid.z)
   return register_task_variant(TASK_MLA_PREFILL_TP8_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_heads per TP rank (e.g. 16 for TP=8)
+  // params[1]: q_len   (chunk size)
+  // params[2]: kv_len  (full KV span)
+  // params[3]: q_start (chunk's offset into the full sequence)
+  // Inputs: [0] Q_nope [B,q_len,H,128], [1] Q_pe [B,q_len,H,64],
+  //         [2] K [B,kv_len,192], [3] V [B,kv_len,128]
+  // Output: [0] O [B,q_len,H,128]
+  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V
+  // (input_tma_desc_ptrs[3][0]).
+  assert(params.size() == 4);
+  int num_heads = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int q_start = params[3];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+  float sm_scale_log2 = sm_scale * 1.44269504089f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_prefill_tp8_chunked::"
+         "mla_prefill_tp8_chunked_sm100_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K TMA
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");                  // Qp
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
+  code.e("    $,", q_len);
+  code.e("    $,", kv_len);
+  code.e("    $,", q_start);
+  code.e("    $,", num_heads);
+  code.e("    $f,", sm_scale_log2);
+  code.e("    task_desc->task_metadata.request_id,");         // head (bid.x)
+  code.e("    task_desc->task_metadata.kv_idx,");             // q_block (bid.y)
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch (bid.z)
+  return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_prefill_tp8_chunked_splitk_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0..3]: num_heads, q_len, kv_len, q_start
+  // params[4]:    num_splits
+  // params[5]:    nqb (== ceil(q_len / 64))
+  // Inputs: [0] Qn, [1] Qp, [2] K, [3] V, [4] partial (float)
+  // Outputs: none (partial is written through input[4])
+  assert(params.size() == 6);
+  int num_heads = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int q_start = params[3];
+  int num_splits = params[4];
+  int nqb = params[5];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+  float sm_scale_log2 = sm_scale * 1.44269504089f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_prefill_tp8_chunked_splitk::"
+         "mla_prefill_tp8_chunked_splitk_sm100_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K TMA
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");          // Qp
+  code.e("    static_cast<float*>(task_desc->output_ptrs[0]),"); // partial
+  code.e("    $,", q_len);
+  code.e("    $,", kv_len);
+  code.e("    $,", q_start);
+  code.e("    $,", num_heads);
+  code.e("    $,", num_splits);
+  code.e("    $,", nqb);
+  code.e("    $f,", sm_scale_log2);
+  code.e("    task_desc->task_metadata.request_id,");         // head (bid.x)
+  code.e("    task_desc->task_metadata.kv_idx,");             // yidx (bid.y)
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch
+  return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_prefill_tp8_chunked_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_heads
+  // params[1]: q_len
+  // params[2]: num_splits
+  // params[3]: nqb
+  // Inputs: [0] partial (float)
+  // Outputs: [0] O (bf16)
+  assert(params.size() == 4);
+  int num_heads = params[0];
+  int q_len = params[1];
+  int num_splits = params[2];
+  int nqb = params[3];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_prefill_tp8_chunked_splitk::"
+         "mla_prefill_tp8_chunked_reduce_sm100_task_impl(");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[0]),"); // partial
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
+  code.e("    $,", q_len);
+  code.e("    $,", num_heads);
+  code.e("    $,", num_splits);
+  code.e("    $,", nqb);
+  code.e("    $f,", sm_scale);
+  code.e("    task_desc->task_metadata.request_id,");         // head (bid.x)
+  code.e("    task_desc->task_metadata.kv_idx,");             // qb (bid.y)
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch
+  return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100,
+                               code.to_string());
 }
 
 int TaskRegister::register_mla_mtp_decode_sm100_task(

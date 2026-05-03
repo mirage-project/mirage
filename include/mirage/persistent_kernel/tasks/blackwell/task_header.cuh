@@ -40,6 +40,8 @@
 #include "mla_mtp_decode_tp4_sm100.cuh"
 #include "mla_mtp_decode_tp8_sm100.cuh"
 #include "mla_prefill_sm100.cuh"
+#include "mla_prefill_tp8_chunked_sm100.cuh"
+#include "mla_prefill_tp8_chunked_splitk_sm100.cuh"
 #include "mla_prefill_tp8_sm100.cuh"
 #include "mla_reduce_sm100.cuh"
 #include "mla_sm100_2sm.cuh"

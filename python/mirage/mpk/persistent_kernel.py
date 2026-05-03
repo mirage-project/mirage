@@ -1162,6 +1162,86 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "mla_prefill_tp8_sm100", params)
 
+    def mla_prefill_tp8_chunked_layer(
+        self,
+        q_nope: DTensor,    # [B, q_len, H, 128]
+        q_pe: DTensor,      # [B, q_len, H, 64]
+        k: DTensor,         # [B, kv_len, 192]
+        v: DTensor,         # [B, kv_len, 128]
+        output: DTensor,    # [B, q_len, H, 128]
+        mla_params: tuple,  # (num_heads, q_len, kv_len, q_start)
+        grid_dim: tuple,    # (H, ceil(q_len/64), B)
+        block_dim: tuple,   # (128, 1, 1)
+    ):
+        # MLA Chunked Prefill TP=8. Q covers a chunk [q_start, q_start+q_len)
+        # of a longer sequence with KV in [0, kv_len). Causal mask uses
+        # q_start so each chunk attends only to KV positions <= its global qp.
+        num_heads, q_len, kv_len, q_start = mla_params
+        params = [num_heads, q_len, kv_len, q_start]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Kernel slices per-block from full tensors using task metadata.
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope, q_pe, k, v, output], tb_graph
+        )
+        self.kn_graph.register_task(
+            tb_graph, "mla_prefill_tp8_chunked_sm100", params)
+
+    def mla_prefill_tp8_chunked_splitk_layer(
+        self,
+        q_nope: DTensor,    # [B, q_len, H, 128]
+        q_pe: DTensor,      # [B, q_len, H, 64]
+        k: DTensor,         # [B, kv_len, 192]
+        v: DTensor,         # [B, kv_len, 128]
+        partial: DTensor,   # float [num_splits, B, nqb, H, BM, D_V+4]
+        mla_params: tuple,  # (num_heads, q_len, kv_len, q_start, num_splits)
+        grid_dim: tuple,    # (H, nqb*num_splits, B)
+        block_dim: tuple,   # (128, 1, 1)
+    ):
+        # Split-K variant of chunked prefill. Use when chunk * H * B is too
+        # small to fill the GPU (heuristic: total64 < SM count). Each block
+        # processes 1/num_splits of the KV range and writes per-row partial
+        # output (D_V floats + m + d) to `partial`. Pair with reduce layer.
+        num_heads, q_len, kv_len, q_start, num_splits = mla_params
+        nqb = (q_len + 63) // 64
+        params = [num_heads, q_len, kv_len, q_start, num_splits, nqb]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(partial, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([q_nope, q_pe, k, v, partial], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "mla_prefill_tp8_chunked_splitk_sm100", params)
+
+    def mla_prefill_tp8_chunked_reduce_layer(
+        self,
+        partial: DTensor,   # float [num_splits, B, nqb, H, BM, D_V+4]
+        output: DTensor,    # bf16 [B, q_len, H, D_V=128]
+        mla_params: tuple,  # (num_heads, q_len, num_splits)
+        grid_dim: tuple,    # (H, nqb, B)
+        block_dim: tuple,   # (256, 1, 1)
+    ):
+        # Combines num_splits per-row partial outputs from splitk into final
+        # bf16 O via online-softmax merge.
+        num_heads, q_len, num_splits = mla_params
+        nqb = (q_len + 63) // 64
+        params = [num_heads, q_len, num_splits, nqb]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([partial, output], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "mla_prefill_tp8_chunked_reduce_sm100", params)
+
     def mla_mtp_decode_layer(
         self,
         q_input: DTensor,          # Q tensor [B*Q_LEN*H, D_K] (with TMA desc)
