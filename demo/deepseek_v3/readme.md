@@ -111,8 +111,8 @@ Use `--profiling` and `--trace-name` to emit one Perfetto trace per rank. Keep
 the trace name outside the repo if you do not want profiling artifacts in the
 working tree.
 
-Example: TP=4, batch size 1, 20 decoder layers, one-token prompt plus 128 decode
-tokens:
+Example: TP=4, batch size 1, 20 decoder layers, a 1024-token synthetic
+context plus 128 decode tokens:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
@@ -121,17 +121,19 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
     python demo/deepseek_v3/demo.py \
     --model-path /path/to/DeepSeek-V3 \
     --use-mirage --profiling \
-    --trace-name /tmp/deepseek_v3_tp4_bs1_layers20_decode128 \
+    --trace-name /tmp/deepseek_v3_tp4_bs1_layers20_ctx1024_decode128 \
     --layers 0-19 --mtp 0 \
-    --prompt-length 1 --ignore-eos \
-    --max-num-batched-tokens 1 \
+    --prompt-length 1024 --ignore-eos \
+    --max-num-batched-tokens 128 \
     --max-num-batched-requests 1 \
-    --max-seq-length 129 \
-    --save-tokens /tmp/deepseek_v3_tp4_bs1_layers20_decode128_tokens.json
+    --max-seq-length 1152 \
+    --max-num-pages 9 --page-size 128 \
+    --max-new-tokens 128 \
+    --save-tokens /tmp/deepseek_v3_tp4_bs1_layers20_ctx1024_decode128_tokens.json
 ```
 
 This writes files such as
-`/tmp/deepseek_v3_tp4_bs1_layers20_decode128_rank0.perfetto-trace`.
+`/tmp/deepseek_v3_tp4_bs1_layers20_ctx1024_decode128_rank0.perfetto-trace`.
 
 ## Stress Checks
 
@@ -176,6 +178,21 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
     --max-num-batched-tokens 128 \
     --max-num-batched-requests 1 \
     --max-seq-length 160
+
+# TP=2 MTP page-boundary smoke test: max_seq_length=129 allocates two
+# 128-token KV pages and catches the one-page/two-page transition.
+CUDA_VISIBLE_DEVICES=0,1 mpirun --allow-run-as-root -np 2 \
+    -x CUDA_VISIBLE_DEVICES -x LD_LIBRARY_PATH -x LD_PRELOAD -x PATH \
+    -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
+    python demo/deepseek_v3/demo.py \
+    --model-path /path/to/DeepSeek-V3 \
+    --use-mirage --layers 0-2 --mtp 2 \
+    --prompt-length 1 --ignore-eos \
+    --max-num-batched-tokens 1 \
+    --max-num-batched-requests 1 \
+    --max-seq-length 129 \
+    --max-num-pages 2 --page-size 128 \
+    --max-new-tokens 128
 ```
 
 ## CLI Flags

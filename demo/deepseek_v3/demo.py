@@ -16,6 +16,7 @@ from mirage.mpk.models.graph_builder import MirageModelConfig
 
 DEFAULT_SAVE_DIR = os.path.join("outputs", "deepseek_v3")
 MAX_SAVE_TOKENS = 100
+DEFAULT_PROFILER_BUFFER_ENTRIES = 6000 * 128
 
 # DeepSeek V3 architecture constants
 # MLA: 128 heads, compressed KV dim 512, rope dim 64, total head dim 576
@@ -23,6 +24,16 @@ DEEPSEEK_V3_NUM_HEADS = 128
 DEEPSEEK_V3_KV_LORA_RANK = 512
 DEEPSEEK_V3_QK_ROPE_HEAD_DIM = 64
 DEEPSEEK_V3_HEAD_DIM_TOTAL = DEEPSEEK_V3_KV_LORA_RANK + DEEPSEEK_V3_QK_ROPE_HEAD_DIM  # 576
+
+
+def get_profiler_buffer_entries() -> int:
+    raw_value = os.environ.get("MPK_PROFILER_BUFFER_ENTRIES")
+    if raw_value is None:
+        return DEFAULT_PROFILER_BUFFER_ENTRIES
+    entries = int(raw_value)
+    if entries <= 0:
+        raise ValueError("MPK_PROFILER_BUFFER_ENTRIES must be positive")
+    return entries
 
 
 def grid_for_rmsnorm_linear_layer(size: int):
@@ -161,6 +172,22 @@ if __name__ == "__main__":
     global print
     if rank != 0:
         print = lambda *_, **__: None
+
+    if args.use_mirage and args.mtp > 0:
+        min_decode_tokens = args.mtp + 1
+        supported_decode_token_caps = (1, 2, 4, 8, 16)
+        required_decode_tokens = next(
+            cap for cap in supported_decode_token_caps
+            if cap >= min_decode_tokens
+        )
+        if args.max_num_batched_tokens < required_decode_tokens:
+            print(
+                "[mtp] Raising max_num_batched_tokens from "
+                f"{args.max_num_batched_tokens} to {required_decode_tokens} "
+                "so one decode/verify iteration can hold the main token plus "
+                "MTP draft tokens on a supported FP8 runtime batch shape."
+            )
+            args.max_num_batched_tokens = required_decode_tokens
 
     print("Input arguments:", args)
     print(f"world_size({world_size}) rank({rank})")
@@ -321,7 +348,7 @@ if __name__ == "__main__":
 
         if args.profiling:
             profiler_tensor = torch.zeros(
-                3000 * 128, dtype=torch.uint64, device="cuda"
+                get_profiler_buffer_entries(), dtype=torch.uint64, device="cuda"
             ).contiguous()
         else:
             profiler_tensor = None

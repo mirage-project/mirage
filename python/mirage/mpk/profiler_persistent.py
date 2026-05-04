@@ -51,6 +51,7 @@ event_name_list = {
     202: "TASK_GET_EVENT",
     203: "TASK_GET_NEXT_TASK",
     230: "TASK_SM100_TASK_BEGIN",
+    231: "TASK_SM100_TMA_START_TASK",
     246: "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100",
     247: "TASK_LINEAR_FP8_SWAPAB_SM100",
     248: "TASK_MOE_W13_FP8_SM100",
@@ -61,6 +62,7 @@ event_name_list = {
     253: "TASK_LINEAR_SM100",
     254: "TASK_MOE_W13_LINEAR_SM100",
     255: "TASK_MOE_W2_LINEAR_SM100",
+    256: "TASK_SM100_TMA_END_TASK",
     257: "TASK_ATTN_SM100",
     258: "TASK_ARGMAX_REDUCE_SM100",
     259: "TASK_ARGMAX_PARTIAL_SM100",
@@ -173,7 +175,7 @@ def export_to_perfetto_trace(
             tid_map[(block_idx, group_idx)] = tid
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
-        event = event_name_list[event_idx] + f"_{event_no}"
+        event = event_name_list.get(event_idx, f"UNKNOWN_{event_idx}") + f"_{event_no}"
         tid = tid_map[(block_idx, group_idx)]
 
         if (block_idx, group_idx, event_idx) in track_map:
