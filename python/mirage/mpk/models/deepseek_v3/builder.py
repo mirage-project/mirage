@@ -74,8 +74,14 @@ def _moe_expert_grid_x(max_num_batched_tokens: int,
     return min(group_cap, active_slots)
 
 
-def _moe_hidden_split(hidden_size: int, preferred: int = 14) -> int:
-    """Pick a valid hidden-dimension split for lightweight MoE epilogues."""
+def _moe_hidden_split(hidden_size: int, preferred: int = 56) -> int:
+    """Pick a valid hidden-dimension split for lightweight MoE epilogues.
+
+    Used by `moe_mul_sum_add_layer` whose grid is (mbt, y, 1). For batch=1
+    the per-token work splits across `y` workers, so we want `y` as close to
+    num_workers as the alignment allows. The 128-multiple constraint comes
+    from the underlying kernel's epilogue tile.
+    """
     max_y = min(preferred, max(1, hidden_size // 128))
     for y in range(max_y, 0, -1):
         if hidden_size % y == 0 and (hidden_size // y) % 128 == 0:
@@ -219,16 +225,54 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
     def _fp8_linear_grid_dim(self, weight, grid_dim):
-        # The current SM100 FP8 runtime path is validated for N=128 task
-        # shards.  Smaller N shards can compile but have shown hangs in the
-        # persistent-kernel schedule, so keep this builder on the supported
-        # contract until the kernel implementation is updated.
+        """Pick grid_x for the FP8 swapAB non-splitk kernel.
+
+        The kernel asserts `output_size_per_task % MMA_M=128 == 0` and
+        iterates m_tile internally, so a single task can cover *any positive
+        multiple* of 128 output cols — 128 is the minimum, not the only
+        allowed shard width. (The earlier comment "validated for N=128 task
+        shards" was conservative; the cause of hangs at small shards was
+        smaller-than-128, not larger-than-128.)
+
+        With that, pick grid_x as the largest divisor of `output_size // 128`
+        that is <= num_workers, so the layer fits in a single worker wave
+        with the most parallelism the kernel allows. For shapes where
+        `output_size // 128 <= num_workers`, this is the original behavior
+        (one MMA_M tile per task).
+
+        Concrete impact at TP=2 batch=1 (B200 num_workers=128):
+          - q_b_proj absorbed: output=36864 → was 288 tasks (2.25 waves),
+            now 96 tasks (single wave, per-task=384=3 tiles).
+          - dense gate_up fallback: output=18432 → was 144 (1.13 waves),
+            now 72 (single wave, per-task=256=2 tiles).
+        """
         output_size = weight.dim(0)
         if output_size % 128 != 0:
             raise ValueError(
                 "FP8 linear runtime currently requires a 128-aligned output "
                 f"dimension, got {output_size}")
-        grid_x = output_size // 128
+        max_n_tiles = output_size // 128
+        if max_n_tiles <= self.num_workers:
+            grid_x = max_n_tiles
+        else:
+            # Largest divisor of max_n_tiles that fits in one wave.
+            best = 1
+            i = 1
+            while i * i <= max_n_tiles:
+                if max_n_tiles % i == 0:
+                    if i <= self.num_workers:
+                        best = max(best, i)
+                    other = max_n_tiles // i
+                    if other <= self.num_workers:
+                        best = max(best, other)
+                i += 1
+            # If max_n_tiles has no decent divisor ≤ num_workers (e.g. prime),
+            # 1-task-per-layer is far worse than letting a small overflow
+            # wave run. Fall back to max_n_tiles in that pathological case.
+            if best * 4 < self.num_workers:
+                grid_x = max_n_tiles
+            else:
+                grid_x = best
         return (grid_x, grid_dim[1], grid_dim[2])
 
     def _can_use_decode_fp8_linear(self, input_fp8, weight, output, grid_dim):
@@ -398,21 +442,76 @@ class DeepSeekV3Builder(GraphBuilder):
     # original linear_layer kernel.
     _BF16_GATE_SPLITK_ENABLED = True
 
-    @classmethod
-    def _pick_fp8_splitk_factor(cls, K, candidates=(8, 4, 2)):
-        """Largest split_k in `candidates` such that K % (512 * split_k) == 0.
+    @staticmethod
+    def _pick_splitk_factor(n_tiles, K, num_workers, k_align):
+        """Pick the split_k that maximizes total tasks (= n_tiles * split_k)
+        subject to a single-wave-on-the-persistent-runtime cap.
 
-        FP8 splitk requires per-task K to be a multiple of 512 (UE8M0 scales
-        pack 4 logical-K per uint32; splitting inside a packed group would
-        misalign the scale-pointer offset). Returns None if no candidate
-        works — caller should fall back to the non-splitk path.
+        The splitk linear kernel produces `grid = (n_tiles, split_k, 1)` tasks
+        where `n_tiles = output_size // MMA_M=128`. We want as many of those
+        tasks as possible without spilling past `num_workers` (otherwise the
+        layer pays for a partial second wave, which on B200's 128-worker
+        config is up to 2x slower than the single-wave optimum).
+
+        Constraints:
+          - K must be divisible by `k_align` (kernel prereq; FP8 needs 512 for
+            UE8M0 packing, BF16 only needs the 64-byte TILE_SIZE).
+          - K // split_k must remain a multiple of `k_align` (per-task K
+            still satisfies the kernel prereq).
+          - n_tiles * split_k <= num_workers (single wave).
+
+        Returns the best split_k, or None if K is not k_align-aligned.
         """
-        if not cls._FP8_SPLITK_ENABLED:
+        if K % k_align != 0:
             return None
-        for s in candidates:
-            if K % (512 * s) == 0:
-                return s
-        return None
+        if n_tiles > num_workers:
+            # Even split_k=1 already overflows a single wave; splitk only adds
+            # tasks (more grid.y), never removes them. Signal "splitk can't
+            # help" so the caller can fall back to a non-splitk path that may
+            # use a coarser N-tile (e.g. grid_for_rmsnorm_linear_layer).
+            return None
+        # split_k must divide quotient = K // k_align so that K/s is still a
+        # multiple of k_align. Iterate divisors in ascending s; tasks = n*s
+        # is monotonically increasing, so we can stop once it exceeds the cap.
+        quotient = K // k_align
+        best_s = None
+        for s in range(1, quotient + 1):
+            if quotient % s != 0:
+                continue
+            if n_tiles * s > num_workers:
+                break
+            best_s = s
+        return best_s
+
+    def _pick_fp8_splitk_factor(self, weight):
+        """FP8 splitk picker for a `weight` tensor of shape [output, K].
+
+        Returns None when splitk is disabled or K isn't 512-aligned, so the
+        caller can fall back to the non-splitk path.
+        """
+        if not self._FP8_SPLITK_ENABLED:
+            return None
+        return self._pick_splitk_factor(
+            n_tiles=weight.dim(0) // 128,
+            K=weight.dim(1),
+            num_workers=self.num_workers,
+            k_align=512,
+        )
+
+    def _pick_bf16_splitk_factor(self, weight):
+        """BF16 splitk picker for a `weight` tensor of shape [output, K].
+
+        BF16 has a looser alignment (TILE_SIZE=64) so almost any K works.
+        Always returns at least 1 — the BF16 gate call sites in this builder
+        don't have a non-splitk fallback wired up, so a None return would
+        wedge the graph build.
+        """
+        return self._pick_splitk_factor(
+            n_tiles=weight.dim(0) // 128,
+            K=weight.dim(1),
+            num_workers=self.num_workers,
+            k_align=64,
+        ) or 1
 
     def _fp8_linear_splitk(self, input_bf16, weight, weight_scale, output,
                            split_k, residual=None,
@@ -507,7 +606,7 @@ class DeepSeekV3Builder(GraphBuilder):
         if use_splitk:
             split_k = (splitk_split_k
                        if splitk_split_k is not None
-                       else self._pick_fp8_splitk_factor(weight.dim(1)))
+                       else self._pick_fp8_splitk_factor(weight))
             if split_k is not None:
                 self._fp8_linear_splitk(
                     silu_bf16_output, weight, weight_scale, output,
@@ -923,7 +1022,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=(self.max_num_batched_tokens, 1, 1),
                     block_dim=(128, 1, 1),
                 )
-            q_a_split_k = self._pick_fp8_splitk_factor(w_q_a.dim(1))
+            q_a_split_k = self._pick_fp8_splitk_factor(w_q_a)
             if q_a_split_k is not None:
                 self._fp8_linear_splitk(
                     None, w_q_a, s_q_a, self.q_a_out,
@@ -936,7 +1035,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=(grid_for_rmsnorm_linear_layer(self.q_lora_rank), 1, 1),
                     block_dim=(128, 1, 1))
         else:
-            q_a_split_k = self._pick_fp8_splitk_factor(w_q_a.dim(1))
+            q_a_split_k = self._pick_fp8_splitk_factor(w_q_a)
             if q_a_split_k is not None:
                 self._fp8_linear_splitk(
                     self.rmsnorm_out, w_q_a, s_q_a, self.q_a_out,
@@ -1215,7 +1314,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # Fuses the residual add into o_proj via the with_residual FP8 kernel.
         w_o, s_o = self._attach_fp8_weight(
             state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
-        o_split_k = self._pick_fp8_splitk_factor(w_o.dim(1))
+        o_split_k = self._pick_fp8_splitk_factor(w_o)
         if o_split_k is not None and self.world_size == 1:
             # TP=1 splitk path: alias attn_proj_out to self.x so the kernel
             # reduce-adds the matmul on top of the residual in place.
@@ -1255,7 +1354,7 @@ class DeepSeekV3Builder(GraphBuilder):
         w_gate_up, s_gate_up = self._attach_fp8_weight(
             state_dict, f"{prefix}mlp.gate_up_proj.weight",
             f"layer_{layer_idx}_gate_up_proj")
-        gate_up_split_k = self._pick_fp8_splitk_factor(w_gate_up.dim(1))
+        gate_up_split_k = self._pick_fp8_splitk_factor(w_gate_up)
         if gate_up_split_k is not None:
             self._fp8_linear_splitk(
                 self.rmsnorm_out, w_gate_up, s_gate_up, self.mlp_mid,
@@ -1277,7 +1376,7 @@ class DeepSeekV3Builder(GraphBuilder):
         w_down, s_down = self._attach_fp8_weight(
             state_dict, f"{prefix}mlp.down_proj.weight",
             f"layer_{layer_idx}_down_proj")
-        down_split_k = self._pick_fp8_splitk_factor(w_down.dim(1))
+        down_split_k = self._pick_fp8_splitk_factor(w_down)
         if down_split_k is not None and self.world_size == 1:
             # TP=1 splitk path: alias mlp_out to self.x for in-place residual
             # accumulation via tma_reduce_add.
@@ -1342,14 +1441,17 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         if self._BF16_GATE_SPLITK_ENABLED:
-            # Router gate via BF16 splitk swapAB: output=NUM_EXPERTS=256, K=hidden.
-            # grid.x splits N into 128-wide tiles; grid.y splits K. accumulate=False
-            # so the prepended tensor_init zeroes router_logits before reduce-add.
+            # Router gate via BF16 splitk swapAB: output=NUM_EXPERTS, K=hidden.
+            # grid.x splits N into 128-wide tiles; grid.y is split_k chosen to
+            # pack as many tasks as possible into a single worker wave (~128
+            # SMs on B200). accumulate=False so the prepended tensor_init
+            # zeroes router_logits before reduce-add.
+            gate_split_k = self._pick_bf16_splitk_factor(w_gate)
             self.mpk.splitk_linear_layer(
                 input=self.rmsnorm_out,
                 weight=w_gate,
                 output=router_logits,
-                grid_dim=(w_gate.dim(0) // 128, 2, 1),
+                grid_dim=(w_gate.dim(0) // 128, gate_split_k, 1),
                 block_dim=(256, 1, 1),
                 accumulate=False,
             )
@@ -1590,7 +1692,7 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_shared_mid",
             io_category="cuda_tensor",
         )
-        shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up.dim(1))
+        shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
         if shared_gu_split_k is not None:
             self._fp8_linear_splitk(
                 self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
@@ -1763,7 +1865,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # q_a_proj (FP8)
         w_q_a, s_q_a = self._attach_fp8_weight(
             state_dict, f"{attn}q_a_proj.weight", f"mtp_{attn}q_a_proj")
-        q_a_split_k = self._pick_fp8_splitk_factor(w_q_a.dim(1))
+        q_a_split_k = self._pick_fp8_splitk_factor(w_q_a)
         if q_a_split_k is not None:
             self._fp8_linear_splitk(
                 self.rmsnorm_out, w_q_a, s_q_a, self.q_a_out,
@@ -1984,7 +2086,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # via the with_residual kernel, or via splitk + alias on TP=1.
         w_o, s_o = self._attach_fp8_weight(
             state_dict, f"{attn}o_proj.weight", f"mtp_{attn}o_proj")
-        o_split_k = self._pick_fp8_splitk_factor(w_o.dim(1))
+        o_split_k = self._pick_fp8_splitk_factor(w_o)
         if o_split_k is not None and self.world_size == 1:
             self.attn_proj_out = self.x
             self._fp8_linear_splitk(
@@ -2021,7 +2123,7 @@ class DeepSeekV3Builder(GraphBuilder):
         w_gate_up, s_gate_up = self._attach_fp8_weight(
             state_dict, f"{mlp_prefix}gate_up_proj.weight",
             f"mtp_{mlp_prefix}gate_up_proj")
-        gate_up_split_k = self._pick_fp8_splitk_factor(w_gate_up.dim(1))
+        gate_up_split_k = self._pick_fp8_splitk_factor(w_gate_up)
         if gate_up_split_k is not None:
             self._fp8_linear_splitk(
                 self.rmsnorm_out, w_gate_up, s_gate_up, self.mlp_mid,
@@ -2033,7 +2135,7 @@ class DeepSeekV3Builder(GraphBuilder):
         w_down, s_down = self._attach_fp8_weight(
             state_dict, f"{mlp_prefix}down_proj.weight",
             f"mtp_{mlp_prefix}down_proj")
-        down_split_k = self._pick_fp8_splitk_factor(w_down.dim(1))
+        down_split_k = self._pick_fp8_splitk_factor(w_down)
         self._silu_mul_fp8_linear(
             self.mlp_mid,
             self.silu_mul_out,
@@ -2071,9 +2173,10 @@ class DeepSeekV3Builder(GraphBuilder):
             name="mtp_router_logits", io_category="cuda_tensor")
         if self._BF16_GATE_SPLITK_ENABLED:
             # MTP router gate: BF16 splitk swapAB, same shape as the main router.
+            mtp_gate_split_k = self._pick_bf16_splitk_factor(w_gate)
             self.mpk.splitk_linear_layer(
                 input=self.rmsnorm_out, weight=w_gate, output=router_logits,
-                grid_dim=(w_gate.dim(0) // 128, 2, 1),
+                grid_dim=(w_gate.dim(0) // 128, mtp_gate_split_k, 1),
                 block_dim=(256, 1, 1),
                 accumulate=False,
             )
@@ -2215,7 +2318,7 @@ class DeepSeekV3Builder(GraphBuilder):
         shared_mid = self._cached_new_tensor(
             dims=(mbt, 2 * self.moe_intermediate_size), dtype=bfloat16,
             name="mtp_shared_mid", io_category="cuda_tensor")
-        mtp_shared_gu_split_k = self._pick_fp8_splitk_factor(w_s_gu.dim(1))
+        mtp_shared_gu_split_k = self._pick_fp8_splitk_factor(w_s_gu)
         if mtp_shared_gu_split_k is not None:
             self._fp8_linear_splitk(
                 self.rmsnorm_out, w_s_gu, s_s_gu, shared_mid,
