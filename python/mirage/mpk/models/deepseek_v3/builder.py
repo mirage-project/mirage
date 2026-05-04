@@ -89,9 +89,24 @@ def _moe_hidden_split(hidden_size: int, preferred: int = 56) -> int:
     return 1
 
 
-def _tensor_parallel_allreduce_grid(output_size: int,
-                                    ep_size: int = 1) -> tuple[int, int, int]:
-    """Use larger feature tiles so NVSHMEM all-reduce work is not sync-bound."""
+def _tensor_parallel_allreduce_grid(output_size: int) -> tuple[int, int, int]:
+    """Pick a grid for the NVSHMEM tile allreduce that mirrors the producer's
+    column-tile granularity.
+
+    All current producers of an allreduce input — FP8 swapAB linear, BF16
+    splitk linear, and `moe_mul_sum_add_layer` — partition the hidden dim
+    into 128-wide column tiles (linear.grid.x = output_size // 128, or
+    moe_mul_sum_add.grid.y = _moe_hidden_split(...) which lands on the same
+    128-wide split). The legacy default of 1024-wide allreduce tiles
+    therefore generated ~8x fewer tasks than the producing layer (7 vs 56
+    for DSv3 hidden=7168), starving the persistent runtime of dispatchable
+    work right after the matmul finished.
+
+    Defaulting the allreduce tile to 128 keeps the partition aligned with
+    the producer so each upstream task has a one-to-one downstream
+    consumer. `MPK_ALLREDUCE_TILE_SIZE` overrides for ablation (e.g. coarse
+    1024-wide tiles for small TP-only configs that prefer fewer collectives).
+    """
     if output_size % 128 != 0:
         raise ValueError(
             "Tensor-parallel all-reduce expects a 128-aligned output "
@@ -108,14 +123,6 @@ def _tensor_parallel_allreduce_grid(output_size: int,
                 "MPK_ALLREDUCE_TILE_SIZE must be 128-aligned, "
                 f"got {tile_size}")
         return (output_size // tile_size, 1, 1)
-    # DeepSeek hidden_size=7168 is small for a collective payload. In TP4/EP2
-    # batch-size-1 profiling, 1792-wide tiles were faster than the legacy 1024
-    # split. TP-only still uses 1024 because 1792 currently hangs there.
-    preferred_tiles = (1792, 1024, 512, 256, 128) if ep_size > 1 else (
-        1024, 512, 256, 128)
-    for tile_size in preferred_tiles:
-        if output_size % tile_size == 0:
-            return (output_size // tile_size, 1, 1)
     return (output_size // 128, 1, 1)
 
 
@@ -219,8 +226,7 @@ class DeepSeekV3Builder(GraphBuilder):
             buffer=self.allreduce_buf,
             output=output,
             residual=residual,
-            grid_dim=_tensor_parallel_allreduce_grid(
-                output.dim(1), ep_size=self.ep_size),
+            grid_dim=_tensor_parallel_allreduce_grid(output.dim(1)),
             block_dim=(128, 1, 1),
         )
 
@@ -1841,8 +1847,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 input=self.mlp_out, buffer=self.allreduce_buf,
                 output=mtp_mlp_residual,
                 residual=self.mtp_x,
-                grid_dim=_tensor_parallel_allreduce_grid(
-                    self.hidden_size, ep_size=self.ep_size),
+                grid_dim=_tensor_parallel_allreduce_grid(self.hidden_size),
                 block_dim=(128, 1, 1),
             )
             self.mtp_x = mtp_mlp_residual
@@ -2829,8 +2834,7 @@ class DeepSeekV3Builder(GraphBuilder):
                         input=self.mlp_out, buffer=self.allreduce_buf,
                         output=moe_residual_out,
                         residual=self.x,
-                        grid_dim=_tensor_parallel_allreduce_grid(
-                            self.hidden_size, ep_size=self.ep_size),
+                        grid_dim=_tensor_parallel_allreduce_grid(self.hidden_size),
                         block_dim=(128, 1, 1),
                     )
                     self.x = moe_residual_out
