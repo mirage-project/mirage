@@ -296,11 +296,10 @@ __device__ __noinline__ void
   //   cute::print("sC_epi:\t"); cute::print(sC_epi); cute::print("\n");
   // } __syncthreads();
 
-  // TMA bytes must match actual clamped box dims.
-  // When BATCH_SIZE < MMA_N, TMA input box is clamped to min(MMA_N,
-  // BATCH_SIZE). size<1>(mma_tiler)=bN corresponds to the input (B) TMA
-  // dimension. size<0>(mma_tiler)=bM corresponds to the weight (A) TMA
-  // dimension.
+  // TMA bytes must match the host-side TMA descriptor's box height for B,
+  // which `fill_tma_desc_by_task` clamps to min(MMA_N, batch_size) for both
+  // splitk and non-splitk paths. Use the same clamp here so the producer's
+  // expect_tx matches the bytes the TMA engine actually delivers.
   constexpr int kClampedBN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
   int tma_transaction_bytes =
       sizeof(T_) * kClampedBN * cute::size<2>(mma_tiler) +
