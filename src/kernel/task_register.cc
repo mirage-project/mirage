@@ -2175,6 +2175,56 @@ int TaskRegister::register_softmax_gather_sm100_task(
   return register_task_variant(TASK_SOFTMAX_GATHER_SM100, code.to_string());
 }
 
+int TaskRegister::register_sinkhorn_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 2);
+  int repeat = params[0];
+  float eps;
+  memcpy(&eps, &params[1], sizeof(float));
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  int token_block_size = output_ops[0]->output_tensors[0].dim[0];
+  int hidden_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(output_ops[0]->output_tensors[0].dim[2] == hidden_size);
+  assert(input_ops[0]->output_tensors[0].dim[0] == token_block_size);
+  assert(input_ops[0]->output_tensors[0].dim[1] == hidden_size);
+  assert(input_ops[0]->output_tensors[0].dim[2] == hidden_size);
+
+  int input_token_stride =
+      input_ops[0]->dtensor.dim[1] * input_ops[0]->dtensor.dim[2];
+  int output_token_stride =
+      output_ops[0]->dtensor.dim[1] * output_ops[0]->dtensor.dim[2];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::sinkhorn_task_impl<$, $, $, $>(",
+         token_block_size,
+         hidden_size,
+         input_token_stride,
+         output_token_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    $,", token_block_size);
+  code.e("    $,", repeat);
+  code.e("    $f);", eps);
+  return register_task_variant(TASK_SINKHORN_SM100, code.to_string());
+}
+
 int TaskRegister::register_mtp_verify_probabilistic_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 1);

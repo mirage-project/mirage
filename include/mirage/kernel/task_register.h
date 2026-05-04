@@ -109,6 +109,8 @@ public:
                                           std::vector<int> const &params);
   int register_softmax_gather_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
+  int register_sinkhorn_sm100_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
   int register_mtp_verify_probabilistic_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
   int register_mtp_float_scatter_task(threadblock::Graph const &bgraph,
