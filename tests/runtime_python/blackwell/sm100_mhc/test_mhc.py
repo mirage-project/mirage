@@ -29,6 +29,28 @@ pytestmark = pytest.mark.skipif(
 
 
 # -----------------------------------------------------------------------------
+# K1 (rmsnorm half): per-token RMSNorm with implicit unit weight
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("num_tokens,hidden", [
+    (1, 256), (16, 1024), (1024, 4096), (32, 16384),
+])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_k1_rmsnorm(num_tokens, hidden, dtype):
+    gen = torch.Generator(device="cuda").manual_seed(50 + num_tokens + hidden)
+    x = torch.randn(num_tokens, hidden, device="cuda", dtype=dtype, generator=gen)
+    y = torch.empty_like(x)
+    eps = 1e-6
+    rt.mHC_rmsnorm(x, y, eps=eps)
+
+    rsqrt = torch.rsqrt(x.float().square().mean(-1, keepdim=True) + eps)
+    ref = (x.float() * rsqrt).to(dtype)
+    rtol = 1e-2 if dtype == torch.bfloat16 else 1e-5
+    atol = 1e-2 if dtype == torch.bfloat16 else 1e-6
+    torch.testing.assert_close(y, ref, rtol=rtol, atol=atol)
+
+
+# -----------------------------------------------------------------------------
 # K2: affine + split + activation
 # -----------------------------------------------------------------------------
 
@@ -45,7 +67,7 @@ def test_k2_affine_split_activation(num_tokens, n, dtype):
     h_post = torch.empty(num_tokens, n, device="cuda", dtype=torch.float32)
     h_res_logits = torch.empty(num_tokens, n * n, device="cuda", dtype=torch.float32)
 
-    rt.affine_split_activation_sm100(mixes, scale, base, h_pre, h_post, h_res_logits, n)
+    rt.mHC_affine_split_activation(mixes, scale, base, h_pre, h_post, h_res_logits, n)
 
     ref_pre, ref_post, ref_res = k2_reference(mixes, scale, base, n)
     rtol = 1e-2 if dtype == torch.bfloat16 else 1e-5
@@ -113,7 +135,7 @@ def test_k5_mul_sum_add_with_outer(num_tokens, n, c):
     post = torch.rand(num_tokens, n, device="cuda", dtype=torch.float32, generator=gen)
     out = torch.empty(num_tokens, n, c, device="cuda", dtype=torch.bfloat16)
 
-    rt.mul_sum_add_with_outer_sm100(residual, x, comb, post, out, n)
+    rt.mHC_mul_sum_add_with_outer(residual, x, comb, post, out, n)
 
     ref = k5_reference(residual, x, comb, post)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
@@ -132,10 +154,10 @@ def _run_hc_pre_with_kernels(x, hc_fn, hc_scale, hc_base, n,
     bs = b * s
     nC = n * C
 
-    # K1: x_normalized * hc_fn^T  (== F.linear(x) * rsqrt by linearity)
-    x_flat_fp32 = x.reshape(bs, nC).float()
-    rsqrt = torch.rsqrt(x_flat_fp32.square().mean(-1, keepdim=True) + norm_eps)
-    x_norm_bf16 = (x_flat_fp32 * rsqrt).to(torch.bfloat16)
+    # K1 rmsnorm half (mHC kernel) + matmul (torch bf16 for now).
+    x_flat_fp32 = x.reshape(bs, nC).float().contiguous()
+    x_norm_bf16 = torch.empty(bs, nC, device=x.device, dtype=torch.bfloat16)
+    rt.mHC_rmsnorm(x_flat_fp32, x_norm_bf16, eps=norm_eps)
     hc_fn_bf16 = hc_fn.to(torch.bfloat16)
     mixes = (x_norm_bf16.float() @ hc_fn_bf16.float().T).to(torch.bfloat16)
 
@@ -144,7 +166,7 @@ def _run_hc_pre_with_kernels(x, hc_fn, hc_scale, hc_base, n,
     h_pre = torch.empty(bs, n, device=x.device, dtype=torch.float32)
     h_post = torch.empty(bs, n, device=x.device, dtype=torch.float32)
     h_res_logits = torch.empty(bs, n * n, device=x.device, dtype=torch.float32)
-    rt.affine_split_activation_sm100(mixes, hc_scale, hc_base, h_pre, h_post,
+    rt.mHC_affine_split_activation(mixes, hc_scale, hc_base, h_pre, h_post,
                                      h_res_logits, n)
 
     # K3
@@ -170,7 +192,7 @@ def _run_hc_post_with_kernel(x, residual, post, comb, n):
     b, s, C = x.shape
     bs = b * s
     out = torch.empty(bs, n, C, device=x.device, dtype=torch.bfloat16)
-    rt.mul_sum_add_with_outer_sm100(
+    rt.mHC_mul_sum_add_with_outer(
         residual.reshape(bs, n, C).contiguous(),
         x.reshape(bs, C).contiguous(),
         comb.reshape(bs, n, n).contiguous(),

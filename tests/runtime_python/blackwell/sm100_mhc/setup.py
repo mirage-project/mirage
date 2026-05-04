@@ -25,15 +25,23 @@ setup(
             depends=[
                 os.path.join(
                     this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/affine_split_activation_sm100.cuh",
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_affine_split_activation.cuh",
+                ),
+                os.path.join(
+                    this_dir,
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_mul_sum_add_with_outer.cuh",
+                ),
+                os.path.join(
+                    this_dir,
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_rmsnorm.cuh",
+                ),
+                os.path.join(
+                    this_dir,
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_mpk.cuh",
                 ),
                 os.path.join(
                     this_dir,
                     "../../../../include/mirage/persistent_kernel/tasks/blackwell/mul_sum_add_sm100.cuh",
-                ),
-                os.path.join(
-                    this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mul_sum_add_with_outer_sm100.cuh",
                 ),
                 os.path.join(
                     this_dir,
@@ -57,6 +65,7 @@ setup(
                     "--use_fast_math",
                     "-gencode=arch=compute_100a,code=sm_100a",
                     "-DMIRAGE_GRACE_BLACKWELL",
+                    "-DMPK_ENABLE_TMA",
                 ],
             },
         )

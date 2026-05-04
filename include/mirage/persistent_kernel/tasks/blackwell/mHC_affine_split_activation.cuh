@@ -31,7 +31,7 @@ namespace kernel {
 
 template <typename T_in, int BATCH_SIZE, int N>
 __device__ __forceinline__ void
-    affine_split_activation_sm100_task_impl(void const *mixes_ptr,
+    mHC_affine_split_activation_task_impl(void const *mixes_ptr,
                                             void const *scale_ptr,
                                             void const *base_ptr,
                                             void *h_pre_ptr,

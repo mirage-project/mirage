@@ -35,7 +35,7 @@ template <typename T,
           int NUM_TOPK,
           int OUTPUT_STRIDE>
 __device__ __forceinline__ void
-    mul_sum_add_with_outer_sm100_task_impl(void const *residual_ptr,
+    mHC_mul_sum_add_with_outer_task_impl(void const *residual_ptr,
                                            void const *x_ptr,
                                            void const *comb_ptr,
                                            void const *post_ptr,
