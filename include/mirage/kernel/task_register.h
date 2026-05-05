@@ -176,6 +176,8 @@ public:
   int register_splitk_linear_fp8_swapAB_sm100_task(
       threadblock::Graph const &bgraph,
       std::vector<int> const &params);
+  int register_linear_fp8_bmm_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,

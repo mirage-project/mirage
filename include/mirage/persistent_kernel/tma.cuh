@@ -965,6 +965,110 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_LINEAR_FP8_BMM_SM100: {
+      // FP8 BMM reuses the swapAB GEMM body but its tensor_desc is 3D:
+      //   inputs[0]  input_fp8   [N, H_per_task, D_in]
+      //   inputs[2]  weight_fp8  [H_per_task, D_out_per_task, D_in]
+      //   outputs[0] output_bf16 [N, H_per_task, D_out_per_task]
+      // The kernel sees a 2D per-head slice, so we encode rank=5 TMA
+      // descriptors with the same logical (rows, K) extents as swapAB,
+      // but pull the dims out of the 3D layout. Row strides come from
+      // the gmem tensor's stride[] array — for input/output that's the
+      // H-spanning stride[0], for weight it's the within-head stride[1].
+      constexpr int MMA_M_BMM = 128;
+      constexpr int MMA_N_BMM = 16;
+      constexpr int BLOCK_K_BMM = 128;
+      bool is_output_mpk = (param_id == (size_t)(task_desc.num_inputs));
+      if (param_id == 0) {
+        // input_fp8 -> kernel's TMA_B (B-side after swapAB).
+        int batch = tensor_desc.dim[0];
+        int K = tensor_desc.dim[2];
+        int row_stride = tensor_desc.stride[0]; // H * D_in
+        uint64_t gd[5] = {(uint64_t)K, (uint64_t)batch, 1, 1, 1};
+        uint64_t gs[4] = {(uint64_t)row_stride * 1, 0, 0, 0};
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_BMM,
+                          (uint32_t)MMA_N_BMM,
+                          1, 1, 1};
+        uint32_t es[5] = {1, 1, 1, 1, 1};
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                   5,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(result, &err);
+          std::cerr << "TMA BMM FP8 input failed: " << err << std::endl;
+        }
+      } else if (param_id == 2) {
+        // weight_fp8 -> kernel's TMA_A (A-side). dim=[H_per_task, D_out_per_task, D_in].
+        int output_pt = tensor_desc.dim[1];
+        int K = tensor_desc.dim[2];
+        int row_stride = tensor_desc.stride[1]; // = D_in within a head
+        uint64_t gd[5] = {(uint64_t)K, (uint64_t)output_pt, 1, 1, 1};
+        uint64_t gs[4] = {(uint64_t)row_stride * 1, 0, 0, 0};
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_BMM,
+                          (uint32_t)MMA_M_BMM,
+                          1, 1, 1};
+        uint32_t es[5] = {1, 1, 1, 1, 1};
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                   5,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(result, &err);
+          std::cerr << "TMA BMM FP8 weight failed: " << err << std::endl;
+        }
+      } else if (is_output_mpk) {
+        // output (BF16): dim=[N, H_per_task, D_out_per_task].
+        int batch = tensor_desc.dim[0];
+        int output_pt = tensor_desc.dim[2];
+        int row_stride = tensor_desc.stride[0]; // H * D_out
+        uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
+        uint64_t gs[4] = {(uint64_t)row_stride * 2, 0, 0, 0};
+        uint32_t bd[5] = {(uint32_t)MMA_M_BMM,
+                          (uint32_t)MMA_N_BMM,
+                          1, 1, 1};
+        uint32_t es[5] = {1, 1, 1, 1, 1};
+        CUresult result =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                   5,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_NONE,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (result != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(result, &err);
+          std::cerr << "TMA BMM FP8 output failed: " << err << std::endl;
+        }
+      }
+      break;
+    }
     case TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100:
     case TASK_LINEAR_FP8_SWAPAB_SM100:
     case TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100: {
@@ -1759,13 +1863,17 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100:
     case TASK_LINEAR_FP8_SWAPAB_SM100:
-    case TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100: {
+    case TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100:
+    case TASK_LINEAR_FP8_BMM_SM100: {
       // MPK-native FP8 swapAB kernel: TMA only for the data tensors and
       // (optionally) residual. Scales (UE8M0 packed uint32) are passed as
       // raw global pointers from task_desc->input_ptrs[]; the kernel
       // dereferences them directly inside the producer warp and feeds them
       // to UTCCP. Split-K reuses the same descriptor layout — the per-CTA
       // K-slice is encoded by TBGraph partitioning advancing base_ptr.
+      // BMM reuses it too — the per-head slice is also encoded by TBGraph
+      // partitioning, with H-strided GMEM strides baked into the codegen
+      // TMA descriptor type (no kernel-side change).
       // Tensor order (Python-layer): 0=input_fp8, 1=input_scale,
       // 2=weight_fp8, 3=weight_scale, 4=residual?, output[0]=out.
       bool with_res =

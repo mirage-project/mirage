@@ -4920,6 +4920,243 @@ int TaskRegister::register_splitk_linear_fp8_swapAB_sm100_task(
                                code.to_string());
 }
 
+int TaskRegister::register_linear_fp8_bmm_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params) {
+  // Per-head FP8 batched matmul. Each CTA handles one head's slice of
+  //     output[n, h, m_lo:m_hi] = input[n, h, :] @ weight[h, m_lo:m_hi, :]^T
+  // chosen by (grid.x = M-shard within a head, grid.y = head index).
+  //
+  // Inputs (Python-layer order, all 3D):
+  //   [0] input_fp8     [N, H, D_in]
+  //   [1] input_scale   [N, H, packed_K]   (UE8M0 packed, 4 logical scales / uint32)
+  //   [2] weight_fp8    [H, D_out, D_in]
+  //   [3] weight_scale  [H, D_out, packed_K]
+  // Output:
+  //   [0] output_bf16   [N, H, D_out]
+  //
+  // SwapAB wiring is the same as the non-BMM swapAB kernel: weight (slot 2)
+  // -> tma_a, input (slot 0) -> tma_b. The only BMM-specific differences are
+  // the per-head row strides on the input/output TMAs and on the input_scale
+  // row stride — both spanning the H dimension.
+  assert(params.size() == 0);
+
+  int num_inputs = 4;
+  int num_outputs = 1;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  // Pull the global tensor shapes from the dtensors (these are always 3D
+  // for BMM regardless of how the per-task STensor is squeezed).
+  assert(input_ops[0]->dtensor.num_dims == 3);
+  assert(input_ops[2]->dtensor.num_dims == 3);
+  assert(output_ops[0]->dtensor.num_dims == 3);
+  int batch_size = input_ops[0]->dtensor.dim[0];
+  int num_heads = input_ops[0]->dtensor.dim[1];
+  int reduction_size = input_ops[0]->dtensor.dim[2];
+  int D_out_full = output_ops[0]->dtensor.dim[2];
+
+  // Cross-check input vs output vs weight shapes line up.
+  assert(output_ops[0]->dtensor.dim[0] == batch_size);
+  assert(output_ops[0]->dtensor.dim[1] == num_heads);
+  assert(input_ops[2]->dtensor.dim[0] == num_heads);
+  assert(input_ops[2]->dtensor.dim[1] == D_out_full);
+  assert(input_ops[2]->dtensor.dim[2] == reduction_size);
+
+  // Per-task M-tile (per-head output shard) and per-CTA head count.
+  int grid_x = bgraph.grid_dim.x;
+  int grid_y = bgraph.grid_dim.y;
+  assert(grid_x >= 1 && grid_y >= 1);
+  assert(D_out_full % grid_x == 0 &&
+         "linear_fp8_bmm_sm100: D_out must be divisible by grid_dim.x");
+  assert(num_heads % grid_y == 0 &&
+         "linear_fp8_bmm_sm100: H must be divisible by grid_dim.y");
+  int output_size_per_task = D_out_full / grid_x;
+  int heads_per_task = num_heads / grid_y;
+
+  // First cut: one head per CTA. The kernel forwards to the existing swapAB
+  // GEMM body, which only knows about a single (M, N, K) tile — so multi-head
+  // fusion would need an outer loop in linear_fp8_bmm_sm100_task_impl.
+  assert(heads_per_task == 1 &&
+         "linear_fp8_bmm_sm100 currently supports only H_PER_TASK=1; "
+         "set grid_dim.y == H to give each CTA exactly one head.");
+
+  // Constraints inherited from swapAB:
+  //   - per-task M (= D_out_per_task) must be a multiple of MMA_M=128.
+  //   - decode-only: batch <= MMA_N=16.
+  //   - K must be a multiple of BLOCK_K=128.
+  assert(output_size_per_task % 128 == 0 &&
+         "linear_fp8_bmm_sm100 requires per-task D_out divisible by 128");
+  assert(batch_size <= 16 &&
+         "linear_fp8_bmm_sm100 is decode-only: BATCH_SIZE must be <= 16");
+  assert(reduction_size % 128 == 0 &&
+         "linear_fp8_bmm_sm100 requires D_in divisible by 128");
+
+  // Row strides (in elements) for the global gmem tensors. With 3D inputs:
+  //   input  [N, H, D_in] -> input_strides[0] = H * D_in
+  //   weight [H, D_out, D_in] -> stride between rows within a head is D_in
+  //   output [N, H, D_out] -> output_strides[0] = H * D_out
+  // Use the dtensor owner's input_strides[0] for the leading-row strides;
+  // those are recorded from the source tensor at attach time and survive
+  // grid partitioning. Within-head weight row stride = D_in (contiguous).
+  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *input_kn =
+      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
+  kn::KNInputOp *output_kn =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  int input_row_stride = static_cast<int>(input_kn->input_strides[0]);
+  int output_row_stride = static_cast<int>(output_kn->input_strides[0]);
+  // Fallback if the recorded leading stride happens to be 0 (no source
+  // tensor metadata): default to the contiguous packed strides.
+  if (input_row_stride == 0) {
+    input_row_stride = num_heads * reduction_size;
+  }
+  if (output_row_stride == 0) {
+    output_row_stride = num_heads * D_out_full;
+  }
+
+  // Codegen: same MMA shape as the parent swapAB. Only the input/output TMA
+  // strides differ (they now span the head dim).
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  constexpr int MMA_M = 128;
+  constexpr int MMA_N = 16;
+  constexpr int num_ab_stages = 8;
+  constexpr int num_acc_stages = 2;
+  constexpr int num_c_stages = 4;
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+  constexpr int TMA_CP_ASYNC_SIZE = 128;
+  constexpr int TILE_SIZE = 128;
+  int const output_tma_cp_size = 128;
+  int const output_atom_size = 128;
+
+  // tma_a = WEIGHT slice [D_out_per_task, D_in], row-major, row stride D_in.
+  code.e("using TMA_A = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         output_size_per_task, /*GMEM_ROW_*/
+         reduction_size,       /*GMEM_COL_*/
+         MMA_M,                /*SMEM_ROW_*/
+         TMA_CP_ASYNC_SIZE,    /*SMEM_COL_*/
+         reduction_size,       /*GMEM_STRIDE_ROW_*/
+         1,                    /*GMEM_STRIDE_COL_*/
+         1,                    /*SMEM_REPEAT_ROW_*/
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
+             TMA_CP_ASYNC_SIZE,    /*SMEM_REPEAT_COL_*/
+         MMA_M * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+  );
+  // tma_b = INPUT slice [N, D_in] for one head, row stride H*D_in (skips
+  // past the other heads' per-token slices in the [N, H, D_in] layout).
+  code.e("using TMA_B = kernel::tma::tma_2d<cutlass::float_e4m3_t, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         batch_size,         /*GMEM_ROW_*/
+         reduction_size,     /*GMEM_COL_*/
+         MMA_N,              /*SMEM_ROW_*/
+         TMA_CP_ASYNC_SIZE,  /*SMEM_COL_*/
+         input_row_stride,   /*GMEM_STRIDE_ROW_ = H * D_in */
+         1,                  /*GMEM_STRIDE_COL_*/
+         1,                  /*SMEM_REPEAT_ROW_*/
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
+             TMA_CP_ASYNC_SIZE,    /*SMEM_REPEAT_COL_*/
+         MMA_N * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+  );
+  // tma_out = OUTPUT slice [N, D_out_per_task], row stride H*D_out.
+  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, "
+         "$, $, $, $, $, $, $, $, true>;",
+         0,
+         M,
+         S,
+         batch_size,           /*GMEM_ROW_*/
+         output_size_per_task, /*GMEM_COL_*/
+         MMA_N,                /*SMEM_ROW_*/
+         MMA_M,                /*SMEM_COL_*/
+         output_row_stride,    /*GMEM_STRIDE_ROW_ = H * D_out */
+         1,                    /*GMEM_STRIDE_COL_*/
+         1,                    /*SMEM_REPEAT_ROW_*/
+         (output_atom_size + output_tma_cp_size - 1) /
+             output_tma_cp_size, /*SMEM_REPEAT_COL_*/
+         MMA_N * MMA_M           /*SMEM_STRIDE_*/
+  );
+  code.inc_indent();
+
+  // The runtime per-task base pointers in input_tma_desc_ptrs[i][0] already
+  // include the head-and-M-tile offset derived from grid coords + the
+  // TBGraph partition map, so the kernel just dereferences them as usual.
+  code.e("TMA_A "
+         "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0])"
+         ");");
+  code.e("TMA_B "
+         "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0])"
+         ");");
+  code.e("TMA_OUT "
+         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
+         "0]));");
+
+  // Raw uint32* scale base pointers (per-task base, head-offset already
+  // applied by the runtime). swapAB convention: weight_scale -> A-side.
+  code.e("uint32_t const *weight_scale_ptr = "
+         "static_cast<uint32_t const*>(task_desc->input_ptrs[3]);");
+  code.e("uint32_t const *input_scale_ptr  = "
+         "static_cast<uint32_t const*>(task_desc->input_ptrs[1]);");
+
+  // No-bias placeholder: kernel branches on NOBIAS=true at compile time and
+  // never dereferences mBias.
+  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
+         "cute::make_stride($, cute::Int<1>{}));",
+         batch_size,
+         output_size_per_task,
+         output_row_stride);
+  code.e("cute::Tensor mBias = "
+         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+         "nullptr)), layout_Bias);");
+
+  // UE8M0 packed scale row strides. Weight: per-head, contiguous within the
+  // head, so packed_K. Input: per-head view of [N, H, packed_K], so the
+  // row stride in uint32 elements is H * packed_K.
+  int const packed_scale_k = (reduction_size + 511) / 512;
+  int const input_scale_row_stride = num_heads * packed_scale_k;
+
+  code.e("kernel::linear_fp8_bmm_sm100_task_impl<cutlass::float_e4m3_t, "
+         "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
+         "$, $, $, $, $, /*NOBIAS=*/true, $, $, $>(",
+         MMA_M,
+         MMA_N,
+         batch_size,
+         output_size_per_task,
+         reduction_size,
+         num_ab_stages,
+         num_acc_stages,
+         num_c_stages);
+  code.e("    tma_a,");
+  code.e("    tma_b,");
+  code.e("    weight_scale_ptr,");
+  code.e("    input_scale_ptr,");
+  code.e("    /*weight_scale_row_stride=*/$,", packed_scale_k);
+  code.e("    /*input_scale_row_stride=*/$,", input_scale_row_stride);
+  code.e("    mBias,");
+  code.e("    tma_out);");
+
+  return register_task_variant(TASK_LINEAR_FP8_BMM_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)

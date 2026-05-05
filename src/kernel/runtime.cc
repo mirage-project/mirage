@@ -1214,7 +1214,8 @@ TaskGraphResult print_task_graph(
     code.e("}");
     // FP8 linear tasks need TMA (outside SM100_TMA range)
     code.e("if (task.at(\"task_type\") == TASK_LINEAR_FP8_SM100 || "
-           "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {");
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 || "
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1848,6 +1849,7 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
       "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

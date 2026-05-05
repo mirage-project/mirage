@@ -1934,6 +1934,55 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_swapAB_with_residual_sm100", params)
 
+    def linear_fp8_bmm_sm100_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,    # (m_shards_per_head, h_shards, 1)
+        block_dim: tuple,   # (256, 1, 1) on SM100
+    ):
+        # Per-head FP8 batched matmul on SM100. Computes
+        #     output[n, h, :] = input[n, h, :] @ weight[h, :, :]^T  (per head)
+        # decode-only, batch_size <= 16. The H dimension is exposed as an
+        # explicit workload split (grid.y) on top of the existing swapAB
+        # M-tile split (grid.x). First cut requires grid.y == H — one head
+        # per CTA — so the kernel stays a thin forward to the swapAB GEMM.
+        #
+        # Tensor layouts (all 3D; dim 1 is the head axis):
+        #   input_fp8     [N, H, D_in]
+        #   input_scale   [N, H, packed_K]   uint32 UE8M0 (4 logical scales / uint32)
+        #   weight_fp8    [H, D_out, D_in]
+        #   weight_scale  [H, D_out, packed_K]
+        #   output        [N, H, D_out]
+        #
+        # Constraints (asserted at registration time):
+        #   - D_out / grid.x must be a multiple of MMA_M=128
+        #   - D_in must be a multiple of BLOCK_K=128
+        #   - batch_size N <= MMA_N=16 (decode-only)
+        #   - H % grid.y == 0; first cut requires H_PER_TASK == 1
+        assert input_fp8.num_dims == 3
+        assert input_scale.num_dims == 3
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert output.num_dims == 3
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # input_fp8 / input_scale [N, H, D_in or packed_K]: grid.y splits dim 1 (H).
+        tb_graph.new_input(input_fp8,    (-1, 1, -1), -1, True)
+        tb_graph.new_input(input_scale,  (-1, 1, -1), -1, True)
+        # weight_fp8 / weight_scale [H, D_out, D_in or packed_K]:
+        # grid.x splits dim 1 (D_out), grid.y splits dim 0 (H).
+        tb_graph.new_input(weight_fp8,   (1, 0, -1), -1, True)
+        tb_graph.new_input(weight_scale, (1, 0, -1), -1, True)
+        # output [N, H, D_out]: grid.x splits dim 2 (D_out), grid.y splits dim 1 (H).
+        tb_graph.new_input(output,       (2, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_fp8_bmm_sm100", params)
+
     def linear_splitk_swapAB_fp8_layer(
         self,
         input_fp8: DTensor,
