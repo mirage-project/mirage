@@ -1590,7 +1590,7 @@ class PersistentKernel:
         #   input_ops[0]  = dummy   (read dep)
         #   output_ops[0] = target  (the buffer the kernel zeroes)
         #   output_ops[1] = dummy   (dep-only write)
-        tb_graph.new_input(dummy, dummy_input_map, -1, False)
+        tb_graph.new_input(dummy, dummy_input_map, -1, True)
         tb_graph.new_input(target, target_input_map, -1, True)
         tb_graph.new_input(dummy, dummy_input_map, -1, True)
         self.kn_graph.customized([dummy, target, dummy], tb_graph)

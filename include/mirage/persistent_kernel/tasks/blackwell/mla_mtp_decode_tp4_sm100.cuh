@@ -66,7 +66,7 @@ static constexpr int TILE_BYTES = 128 * BK * 2;
 static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES;
 
 // Reduce kernel
-static constexpr int RD_DV = 4;
+static constexpr int RD_DV = 2;
 static constexpr int RD_TB = 256;
 static constexpr int RD_LANES = RD_TB / 128;
 
