@@ -175,8 +175,10 @@ class DeepSeekV3Builder(GraphBuilder):
         self._fuse_residual = True
         self._reuse_attn_input_fp8 = (
             os.environ.get("MPK_REUSE_ATTN_INPUT_FP8", "1") != "0")
+        # TP decode's direct-write path is only validated for one 128-token
+        # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
-            os.environ.get("MPK_MLA_SINGLE_SPLIT_MAX_KV_TILES", "2"))
+            os.environ.get("MPK_MLA_SINGLE_SPLIT_MAX_KV_TILES", "1"))
 
         # MTP config
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)

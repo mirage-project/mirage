@@ -182,8 +182,16 @@ def _detect_cxx_standard():
         pass
     return "-std=c++17"
 
-def _mla_tp4_v_splits():
-    value = int(os.environ.get("MPK_MLA_TP4_V_SPLITS", "8"))
+def _mla_tp4_v_splits(max_seq_length=None):
+    env_value = os.environ.get("MPK_MLA_TP4_V_SPLITS")
+    if env_value is not None:
+        value = int(env_value)
+    else:
+        # Standalone ablation on B200:
+        #   KV <= 2048: 8 V splits is fastest.
+        #   KV >= 3072: 2 V splits matches the original TP4 MLA PR and avoids
+        #   redoing the QK/softmax work eight times.
+        value = 2 if max_seq_length is not None and max_seq_length >= 3072 else 8
     if value not in (1, 2, 4, 8):
         raise ValueError("MPK_MLA_TP4_V_SPLITS must be one of 1, 2, 4, 8")
     return value
@@ -249,7 +257,7 @@ def get_compile_command(
         f"-I{os.path.join(mirage_deps_path, 'json/include')}",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
-        f"-DMIRAGE_MLA_TP4_V_SPLITS={_mla_tp4_v_splits()}",
+        f"-DMIRAGE_MLA_TP4_V_SPLITS={_mla_tp4_v_splits(mpk.max_seq_length)}",
         f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_mla_tp4_head_groups()}",
     ]
 
@@ -1534,7 +1542,7 @@ class PersistentKernel:
             q_len, kv_len, num_heads=32,
             task_name="mla_mtp_decode_tp4_sm100", has_v_split=True,
             head_groups=_mla_tp4_head_groups(),
-            v_splits=_mla_tp4_v_splits(),
+            v_splits=_mla_tp4_v_splits(self.max_seq_length),
             num_splits_override=num_splits_override,
         )
 
