@@ -60,6 +60,32 @@ def max_factor_leq_n(m: int, n: int) -> int:
     return max_factor
 
 
+def safe_tokenizer_decode(tokenizer, token_ids, *, context: str) -> str:
+    if torch.is_tensor(token_ids):
+        ids = [int(x) for x in token_ids.detach().cpu().reshape(-1).tolist()]
+    else:
+        ids = [int(x) for x in token_ids]
+
+    try:
+        vocab_size = len(tokenizer)
+    except TypeError:
+        vocab_size = getattr(tokenizer, "vocab_size", None)
+
+    if vocab_size is not None:
+        bad_ids = [tok for tok in ids if tok < 0 or tok >= vocab_size]
+        if bad_ids:
+            first = bad_ids[0]
+            return (
+                f"[decode skipped for {context}: {len(bad_ids)} token id(s) "
+                f"outside tokenizer range [0, {vocab_size}); first={first}]"
+            )
+
+    try:
+        return tokenizer.decode(ids, skip_special_tokens=True)
+    except (OverflowError, ValueError) as exc:
+        return f"[decode skipped for {context}: {type(exc).__name__}: {exc}]"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DeepSeek V3 demo with Mirage megakernel")
     parser.add_argument("--model-path", type=str, required=True,
@@ -68,6 +94,10 @@ if __name__ == "__main__":
                         help="Use Mirage megakernel")
     parser.add_argument("--profiling", action="store_true",
                         help="Enable profiling to generate trace")
+    parser.add_argument("--profile-start-step", type=int, default=None,
+                        help="Profiling-only: initialize the runtime step "
+                             "after MPK compile so a single profiled graph "
+                             "starts from an existing context position.")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int,
                         help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int,
@@ -1018,6 +1048,22 @@ if __name__ == "__main__":
                 f.write(results["cuda_code"])
 
         mpk.compile(output_dir=args.output_dir)
+        if args.profile_start_step is not None:
+            if not args.profiling:
+                raise ValueError("--profile-start-step requires --profiling")
+            if args.profile_start_step < 0 or args.profile_start_step >= args.max_seq_length:
+                raise ValueError(
+                    f"--profile-start-step must be in [0, {args.max_seq_length}); "
+                    f"got {args.profile_start_step}"
+                )
+            step.fill_(args.profile_start_step)
+            torch.cuda.synchronize()
+            if rank == 0:
+                print(
+                    f"[profiling] Starting first task graph at "
+                    f"step={args.profile_start_step}; prompt_lengths="
+                    f"{prompt_lengths.detach().cpu().tolist()}"
+                )
 
         # Run inference
         print("Starting inference with Mirage megakernel...")
@@ -1030,7 +1076,9 @@ if __name__ == "__main__":
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
-            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            response = safe_tokenizer_decode(
+                tokenizer, generated_ids, context=f"request {r}"
+            )
             if total_num_requests > 1:
                 print(f"[request {r}]")
             print(response)
@@ -1053,8 +1101,8 @@ if __name__ == "__main__":
                 per_tok_ms = run_time / max(tokens_generated, 1)
                 slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
                 token_ids = tokens[r, prompt_len:slice_end].tolist()
-                response_text = tokenizer.decode(
-                    tokens[r, :end_idx], skip_special_tokens=True
+                response_text = safe_tokenizer_decode(
+                    tokenizer, tokens[r, :end_idx], context=f"request {r}"
                 )
                 out.append({
                     "request_id": r,
@@ -1126,7 +1174,9 @@ if __name__ == "__main__":
 
         end_idx = prev_pos + 1
         generated_ids = tokens[:1, :end_idx]
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        response = safe_tokenizer_decode(
+            tokenizer, generated_ids, context="torch request 0"
+        )
         print(response)
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
@@ -1143,8 +1193,8 @@ if __name__ == "__main__":
             token_ids = tokens[0, prompt_len:slice_end].tolist()
             out = {
                 "token_ids": token_ids,
-                "text": tokenizer.decode(
-                    tokens[0, :end_idx], skip_special_tokens=True
+                "text": safe_tokenizer_decode(
+                    tokenizer, tokens[0, :end_idx], context="torch request 0"
                 ),
                 "latency_ms_per_token": per_tok_ms,
                 "prompt_length": prompt_len,

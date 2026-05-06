@@ -19,6 +19,7 @@
 #include "mirage/transpiler/utils.h"
 #include "mirage/utils/json_utils.h"
 #include <queue>
+#include <set>
 
 namespace mirage {
 namespace kernel {
@@ -381,6 +382,24 @@ void register_mugraph(
             //   merge_task_offset = batch   (bid.z) — lives at union offset 4
             //   so it doesn't alias request_id/kv_idx (unlike expert_offset).
             if (task_type == TASK_MLA_PREFILL_TP8_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
+            // Chunked TP8 prefill: grid=(H, num_q_blocks, B).
+            if (task_type == TASK_MLA_PREFILL_TP8_CHUNKED_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
+            // Split-K chunked TP8 prefill: grid=(H, nqb*num_splits, B).
+            if (task_type == TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
+            // Split-K reduce: grid=(H, nqb, B).
+            if (task_type == TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100) {
               task.task_metadata.request_id = bid.x;
               task.task_metadata.kv_idx = bid.y;
               task.task_metadata.merge_task_offset = bid.z;
@@ -1209,6 +1228,9 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP4_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP8_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_CHUNKED_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_UNIFIED_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
@@ -1815,6 +1837,12 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
   task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
   task_type_to_name[TASK_MLA_PREFILL_TP8_SM100] = "TASK_MLA_PREFILL_TP8_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_TP8_CHUNKED_SM100] =
+      "TASK_MLA_PREFILL_TP8_CHUNKED_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100] =
+      "TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100] =
+      "TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100";
   task_type_to_name[TASK_MLA_UNIFIED_SM100] = "TASK_MLA_UNIFIED_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
@@ -1889,16 +1917,26 @@ TaskGraphResult print_task_graph(
   code.e("void _execute_task(TaskDesc const* task_desc,");
   code.e("                   RuntimeConfig const &runtime_config) {");
   TaskRegister *task_register = TaskRegister::get_instance();
+  std::map<TaskType, std::set<int>> used_task_variants;
+  for (FullTaskDesc const &task_desc : all_tasks) {
+    used_task_variants[task_desc.task_type].insert(task_desc.variant_id);
+  }
   bool first_task = true;
   for (auto const &task : task_register->all_task_variants) {
-    for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
+    auto used_it = used_task_variants.find(task.first);
+    if (used_it == used_task_variants.end()) {
+      continue;
+    }
+    for (int variant_id : used_it->second) {
+      assert(variant_id >= 0);
+      assert(static_cast<size_t>(variant_id) < task.second.size());
       std::string cond = first_task ? "if" : "else if";
       assert(task_type_to_name.find(task.first) != task_type_to_name.end());
       code.e("$ (task_desc->task_type == $ && task_desc->variant_id == $) {",
              cond,
              task_type_to_name[task.first],
              variant_id);
-      code.e("$", task.second[variant_id]);
+      code.e("$", task.second[static_cast<size_t>(variant_id)]);
       code.e("}");
       first_task = false;
     }

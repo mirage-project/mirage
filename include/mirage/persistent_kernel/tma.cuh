@@ -19,6 +19,7 @@
 #include <cuda.h>
 #include <cutlass/float8.h>
 #include <cutlass/numeric_types.h>
+#include <cstdlib>
 #include <type_traits>
 
 namespace mirage {
@@ -1538,6 +1539,72 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       assert(err == CUDA_SUCCESS);
       break;
     }
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100: {
+      // Per-head unabsorbed MLA chunked prefill (TP=8), 3 TMA inputs:
+      //   param_id=2: K_nope [S,H,128] viewed as [S,H*2,64], 3D
+      //   param_id=3: K_rope [S,64] or [S,1,64], 2D
+      //   param_id=4: V      [S,H,128] viewed as [S,H*2,64], 3D
+      constexpr int BK = 64;
+      constexpr int BN_BOX = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob =
+          CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA;
+
+      if (param_id == 3) {
+        int d_last = tensor_desc.dim[tensor_desc.num_dims - 1];
+        int total_rows = 1;
+        for (int i = 0; i < tensor_desc.num_dims - 1; i++) {
+          total_rows *= tensor_desc.dim[i];
+        }
+        uint64_t gd[2] = {(uint64_t)d_last, (uint64_t)total_rows};
+        uint64_t gs[1] = {(uint64_t)d_last * 2};
+        uint32_t bd[2] = {(uint32_t)BK, (uint32_t)BN_BOX};
+        uint32_t es[2] = {1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              2,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      } else {
+        int total_rows = tensor_desc.dim[0];
+        int H_local = tensor_desc.dim[1];
+        int d_last = tensor_desc.dim[2];
+        int num_blocks = H_local * (d_last / BK);
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)num_blocks};
+        uint64_t gs[2] = {(uint64_t)H_local * d_last * 2,
+                          (uint64_t)BK * 2};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BN_BOX, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      }
+      break;
+    }
     case TASK_MLA_MTP_DECODE_TP2_SM100:
     case TASK_MLA_MTP_DECODE_TP4_SM100:
     case TASK_MLA_MTP_DECODE_TP8_SM100: {
@@ -1557,6 +1624,16 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           (task_desc.task_type == TASK_MLA_MTP_DECODE_TP2_SM100)   ? 32
           : (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) ? 32
                                                                    : 16;
+      if (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) {
+        int head_groups = 1;
+        if (char const *env = std::getenv("MPK_MLA_TP4_HEAD_GROUPS")) {
+          head_groups = std::atoi(env);
+        }
+        if (head_groups == 1 || head_groups == 2 || head_groups == 4 ||
+            head_groups == 8) {
+          num_heads = 32 / head_groups;
+        }
+      }
       if (param_id == 0) {
         // Q: may be flat [mbt, num_heads*D_K]; reinterpret as [B*Q*heads, D_K]
         constexpr int D_K = 576;
@@ -1738,6 +1815,17 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           }
           if (q_box_rows <= 0) {
             q_box_rows = num_heads;
+          }
+        } else if (num_heads == 64) {
+          q_box_rows = 32;
+        } else if (num_heads == 32) {
+          int head_groups = 1;
+          if (char const *env = std::getenv("MPK_MLA_TP4_HEAD_GROUPS")) {
+            head_groups = std::atoi(env);
+          }
+          if (head_groups == 1 || head_groups == 2 || head_groups == 4 ||
+              head_groups == 8) {
+            q_box_rows = 32 / head_groups;
           }
         }
         uint64_t gd[3] = {
@@ -1997,6 +2085,15 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_MLA_PREFILL_TP8_SM100: {
       // Inputs: [0] Qn, [1] Qp, [2] K, [3] V. Only K and V use TMA.
       for (size_t param_id = 2; param_id < 4; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100: {
+      // Per-head unabsorbed: [0]Qn, [1]Qp, [2]K_nope, [3]K_rope, [4]V.
+      for (size_t param_id = 2; param_id < 5; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }

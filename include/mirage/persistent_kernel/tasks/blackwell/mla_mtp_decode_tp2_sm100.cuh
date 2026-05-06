@@ -57,7 +57,9 @@ static constexpr int MAX_STAGES = 5;
 // SMEM tile: 128 rows × BK cols × 2 bytes = 16384
 static constexpr int TILE_BYTES = 128 * BK * 2;
 
-static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES;
+// +1024 because the runtime rounds the extern shared-memory base up to a
+// 1024-byte boundary before issuing 128B-swizzle TMA copies.
+static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES + 1024;
 
 // Reduce kernel
 static constexpr int RD_DV = 2;
@@ -188,8 +190,8 @@ __device__ __noinline__ void
   }
 
   extern __shared__ __align__(1024) char smem_buf[];
-  int const smem_base = __cvta_generic_to_shared(smem_buf);
-  int const work_smem = smem_base;
+  int const smem_base_raw = __cvta_generic_to_shared(smem_buf);
+  int const work_smem = (smem_base_raw + 1023) & ~1023;
 
   __shared__ uint64_t mbar_buf[12];
   __shared__ int tmem_addr_buf[1];

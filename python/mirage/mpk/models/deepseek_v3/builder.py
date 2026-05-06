@@ -179,6 +179,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
             os.environ.get("MPK_MLA_SINGLE_SPLIT_MAX_KV_TILES", "1"))
+        self._mla_num_splits_override = os.environ.get(
+            "MPK_MLA_NUM_SPLITS_OVERRIDE")
 
         # MTP config
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)
@@ -677,9 +679,13 @@ class DeepSeekV3Builder(GraphBuilder):
             and self.mpk.max_num_batched_requests == 1
             and self.mpk.total_num_requests == 1
         )
+        disable_direct_paged_decode_kv = (
+            os.environ.get("MPK_DISABLE_DIRECT_PAGED_DECODE_KV", "0") == "1"
+        )
         self._direct_paged_decode_kv = (
             self.mpk.page_size == 128
             and (direct_paged_tp_decode or direct_paged_tp1_decode)
+            and not disable_direct_paged_decode_kv
         )
         if self._use_prefill:
             print(f"  [MLA path] MBT={mbt} → MLA prefill + runtime-gated decode")
@@ -1190,7 +1196,11 @@ class DeepSeekV3Builder(GraphBuilder):
         kv_len_max = self.mpk.max_seq_length
         kv_tiles_max = (kv_len_max + self.mpk.page_size - 1) // self.mpk.page_size
         single_split_mla = kv_tiles_max <= self._mla_single_split_max_kv_tiles
-        mla_num_splits_override = 1 if single_split_mla else None
+        mla_num_splits_override = (
+            int(self._mla_num_splits_override)
+            if self._mla_num_splits_override
+            else (1 if single_split_mla else None)
+        )
         mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
         mla_decode_kv = (
             layer_cache if self._direct_paged_decode_kv else self.contiguous_kv
@@ -1968,7 +1978,11 @@ class DeepSeekV3Builder(GraphBuilder):
         kv_len_max = self.mpk.max_seq_length
         kv_tiles_max = (kv_len_max + self.mpk.page_size - 1) // self.mpk.page_size
         single_split_mla = kv_tiles_max <= self._mla_single_split_max_kv_tiles
-        mla_num_splits_override = 1 if single_split_mla else None
+        mla_num_splits_override = (
+            int(self._mla_num_splits_override)
+            if self._mla_num_splits_override
+            else (1 if single_split_mla else None)
+        )
         mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
         mla_decode_kv = (
             self.mtp_ckv_kpe_cache_tensor

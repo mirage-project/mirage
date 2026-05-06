@@ -63,10 +63,19 @@ static constexpr int MAX_STAGES = 5;
 // SMEM tile: 128 rows × BK cols × 2 bytes = 16384
 static constexpr int TILE_BYTES = 128 * BK * 2;
 
-static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES;
+// +1024 because the runtime rounds the extern shared-memory base up to a
+// 1024-byte boundary before issuing 128B-swizzle TMA copies.
+static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES + 1024;
 
-// Reduce kernel
-static constexpr int RD_DV = 2;
+// Reduce kernel. Each reduce CTA covers RD_DV value columns. Keeping this as a
+// compile-time knob lets us ablate the tradeoff between many tiny CTAs
+// (RD_DV=2) and more serial work inside each CTA (RD_DV>2).
+#ifndef MIRAGE_MLA_TP4_RD_DV
+#define MIRAGE_MLA_TP4_RD_DV 2
+#endif
+static constexpr int RD_DV = MIRAGE_MLA_TP4_RD_DV;
+static_assert(RD_DV == 2 || RD_DV == 4 || RD_DV == 8,
+              "MIRAGE_MLA_TP4_RD_DV must be one of 2, 4, 8");
 static constexpr int RD_TB = 256;
 static constexpr int RD_LANES = RD_TB / 128;
 
@@ -196,8 +205,8 @@ __device__ __noinline__ void
   int const actual_qpg = min(qpg, Q_LEN - gi * qpg);
 
   extern __shared__ __align__(1024) char smem_buf[];
-  int const smem_base = __cvta_generic_to_shared(smem_buf);
-  int const work_smem = smem_base;
+  int const smem_base_raw = __cvta_generic_to_shared(smem_buf);
+  int const work_smem = (smem_base_raw + 1023) & ~1023;
 
   __shared__ uint64_t mbar_buf[12];
   __shared__ int tmem_addr_buf[1];
@@ -698,8 +707,15 @@ __device__ __noinline__ void
   asm volatile("tcgen05.fence::after_thread_sync;");
   int const vc_base_epi = v_part * PV_CHUNKS;
   int const valid_rows = actual_qpg * hpb;
-  if (tid < valid_rows) {
-    float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
+  // tcgen05.ld.sync.aligned must be issued by complete warps. With TP4 head
+  // split enabled, Q1 can have only 16 valid rows per CTA, so guarding the
+  // TMEM load with tid < valid_rows would leave half a warp stuck. Let full
+  // warps perform the aligned TMEM loads and only commit valid rows to global.
+  int const epilogue_rows = ((valid_rows + 31) / 32) * 32;
+  bool const valid_epilogue_row = tid < valid_rows;
+  if (tid < epilogue_rows) {
+    float inv =
+        (valid_epilogue_row && row_sum > 0) ? 1.0f / row_sum : 0.0f;
     constexpr bool write_final = WRITE_FINAL;
     int const q_final = gi * qpg + tid / hpb;
     int const h_final = head_start + tid % hpb;
@@ -734,25 +750,27 @@ __device__ __noinline__ void
         int base_d = (vc * BK + c) * 128 + partial_row;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
-          nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
-          if (write_final) {
-            int const o_base =
-                (bi * Q_LEN + q_final) * NUM_HEADS * D_V + h_final * D_V;
-            asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
-                             (nv_bfloat16 *)(Oa + o_base + vc * BK + c + i)),
-                         "h"(*(uint16_t *)&val)
-                         : "memory");
-          } else {
-            asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
-                             (nv_bfloat16 *)(Oout + base_d + i * 128)),
-                         "h"(*(uint16_t *)&val)
-                         : "memory");
+          if (valid_epilogue_row) {
+            nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
+            if (write_final) {
+              int const o_base =
+                  (bi * Q_LEN + q_final) * NUM_HEADS * D_V + h_final * D_V;
+              asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                               (nv_bfloat16 *)(Oa + o_base + vc * BK + c + i)),
+                           "h"(*(uint16_t *)&val)
+                           : "memory");
+            } else {
+              asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                               (nv_bfloat16 *)(Oout + base_d + i * 128)),
+                           "h"(*(uint16_t *)&val)
+                           : "memory");
+            }
           }
         }
       }
     }
     // Only one V split writes La; it is shared by all V splits.
-    if (!write_final && v_part == 0) {
+    if (valid_epilogue_row && !write_final && v_part == 0) {
       La[block_linear * 128 + partial_row] =
           log2f(fmaxf(row_sum, 1e-30f)) + row_max;
     }

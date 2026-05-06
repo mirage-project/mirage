@@ -188,7 +188,8 @@ def _mla_tp4_v_splits(max_seq_length=None):
         value = int(env_value)
     else:
         # Standalone ablation on B200:
-        #   KV <= 2048: 8 V splits is fastest.
+        #   KV <= 2048: 8 V splits is fastest for the current MPK single-split
+        #   write-final path.
         #   KV >= 3072: 2 V splits matches the original TP4 MLA PR and avoids
         #   redoing the QK/softmax work eight times.
         value = 2 if max_seq_length is not None and max_seq_length >= 3072 else 8
@@ -200,6 +201,12 @@ def _mla_tp4_head_groups():
     value = int(os.environ.get("MPK_MLA_TP4_HEAD_GROUPS", "1"))
     if value not in (1, 2, 4, 8):
         raise ValueError("MPK_MLA_TP4_HEAD_GROUPS must be one of 1, 2, 4, 8")
+    return value
+
+def _mla_tp4_rd_dv():
+    value = int(os.environ.get("MPK_MLA_TP4_RD_DV", "2"))
+    if value not in (2, 4, 8):
+        raise ValueError("MPK_MLA_TP4_RD_DV must be one of 2, 4, 8")
     return value
 
 def get_compile_command(
@@ -259,8 +266,8 @@ def get_compile_command(
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
         f"-DMIRAGE_MLA_TP4_V_SPLITS={_mla_tp4_v_splits(mpk.max_seq_length)}",
         f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_mla_tp4_head_groups()}",
+        f"-DMIRAGE_MLA_TP4_RD_DV={_mla_tp4_rd_dv()}",
     ]
-
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
@@ -1270,6 +1277,85 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "mla_prefill_tp8_sm100", params)
 
+    def mla_prefill_tp8_chunked_layer(
+        self,
+        q_nope: DTensor,    # [B, q_len, H, 128]
+        q_pe: DTensor,      # [B, q_len, H, 64]
+        k_nope: DTensor,    # [B, kv_len, H, 128]
+        k_rope: DTensor,    # [B, kv_len, 1, 64]
+        v: DTensor,         # [B, kv_len, H, 128]
+        output: DTensor,    # [B, q_len, H, 128]
+        mla_params: tuple,  # (num_heads, q_len, kv_len, q_start)
+        grid_dim: tuple,    # (H, ceil(q_len/64), B)
+        block_dim: tuple,   # (128, 1, 1)
+    ):
+        num_heads, q_len, kv_len, q_start = mla_params
+        params = [num_heads, q_len, kv_len, q_start]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_rope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope, q_pe, k_nope, k_rope, v, output], tb_graph
+        )
+        self.kn_graph.register_task(
+            tb_graph, "mla_prefill_tp8_chunked_sm100", params
+        )
+
+    def mla_prefill_tp8_chunked_splitk_layer(
+        self,
+        q_nope: DTensor,    # [B, q_len, H, 128]
+        q_pe: DTensor,      # [B, q_len, H, 64]
+        k_nope: DTensor,    # [B, kv_len, H, 128]
+        k_rope: DTensor,    # [B, kv_len, 1, 64]
+        v: DTensor,         # [B, kv_len, H, 128]
+        partial: DTensor,   # float, num_splits*B*nqb*H*BM*(D_V+4)
+        mla_params: tuple,  # (num_heads, q_len, kv_len, q_start, num_splits)
+        grid_dim: tuple,    # (H, nqb*num_splits, B)
+        block_dim: tuple,   # (128, 1, 1)
+    ):
+        num_heads, q_len, kv_len, q_start, num_splits = mla_params
+        nqb = (q_len + 63) // 64
+        params = [num_heads, q_len, kv_len, q_start, num_splits, nqb]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_rope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(partial, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope, q_pe, k_nope, k_rope, v, partial], tb_graph
+        )
+        self.kn_graph.register_task(
+            tb_graph, "mla_prefill_tp8_chunked_splitk_sm100", params
+        )
+
+    def mla_prefill_tp8_chunked_reduce_layer(
+        self,
+        partial: DTensor,
+        output: DTensor,    # [B, q_len, H, 128]
+        mla_params: tuple,  # (num_heads, q_len, num_splits)
+        grid_dim: tuple,    # (H, nqb, B)
+        block_dim: tuple,   # (256, 1, 1)
+    ):
+        num_heads, q_len, num_splits = mla_params
+        nqb = (q_len + 63) // 64
+        params = [num_heads, q_len, num_splits, nqb]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([partial, output], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "mla_prefill_tp8_chunked_reduce_sm100", params
+        )
+
     def mla_unified_layer(
         self,
         q_nope: DTensor,          # [S, H, D_CKV] flattened
@@ -1443,7 +1529,7 @@ class PersistentKernel:
           q_len_real: TP=8 only — actual unpadded Q_LEN
           num_heads: 64/32/16 per TP variant
           has_v_split: TP=4 only — block_x multiplied to encode V split id
-          head_groups: TP=2 only — additional head split packed into block_x
+          head_groups: additional head split packed into block_x
         """
         if num_heads == 64:
             qpg = min(2, q_len)
@@ -1494,7 +1580,10 @@ class PersistentKernel:
         num_groups = (q_len + qpg - 1) // qpg
         num_splits = (kv_len + 128 - 1) // 128
         d_v = 512
-        rd_dv = 4 if num_heads == 32 else 2
+        # TP4 can be compiled with a different RD_DV for ablation. Keep the
+        # grid matched to the compiled coverage; standalone tests currently
+        # show RD_DV=2 is fastest for KV=4096.
+        rd_dv = _mla_tp4_rd_dv() if task_name == "mla_mtp_decode_tp4_reduce_sm100" else 2
 
         params = [num_groups, q_len, num_splits, rd_dv]
         grid_dim = ((d_v + rd_dv - 1) // rd_dv,
@@ -2956,7 +3045,18 @@ class PersistentKernel:
         )
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)
-        subprocess.check_call(cc_cmd)
+        if os.environ.get("MPK_SERIALIZE_NVCC", "0") == "1":
+            import fcntl
+
+            lock_path = os.environ.get(
+                "MPK_NVCC_LOCK_PATH",
+                os.path.join(tempfile.gettempdir(), "mirage_mpk_nvcc.lock"),
+            )
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                subprocess.check_call(cc_cmd)
+        else:
+            subprocess.check_call(cc_cmd)
         
         # Copy .so to output_dir if specified
         if output_dir is not None:

@@ -3761,6 +3761,114 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   return register_task_variant(TASK_MLA_PREFILL_TP8_SM100, code.to_string());
 }
 
+int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: num_heads, q_len, kv_len, q_start
+  assert(params.size() == 4);
+  int num_heads = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int q_start = params[3];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+  float sm_scale_log2 = sm_scale * 1.44269504089f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_prefill_tp8_chunked::"
+         "mla_prefill_tp8_chunked_sm100_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K_nope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // K_rope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[4][0]),"); // V
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");                  // Qp
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
+  code.e("    $,", q_len);
+  code.e("    $,", kv_len);
+  code.e("    $,", q_start);
+  code.e("    $,", num_heads);
+  code.e("    $f,", sm_scale_log2);
+  code.e("    task_desc->task_metadata.request_id,");         // head
+  code.e("    task_desc->task_metadata.kv_idx,");             // q_block
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch
+  return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_prefill_tp8_chunked_splitk_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: num_heads, q_len, kv_len, q_start, num_splits, nqb
+  assert(params.size() == 6);
+  int num_heads = params[0];
+  int q_len = params[1];
+  int kv_len = params[2];
+  int q_start = params[3];
+  int num_splits = params[4];
+  int nqb = params[5];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+  float sm_scale_log2 = sm_scale * 1.44269504089f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_prefill_tp8_chunked_splitk::"
+         "mla_prefill_tp8_chunked_splitk_sm100_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K_nope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // K_rope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[4][0]),"); // V
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");          // Qp
+  code.e("    static_cast<float*>(task_desc->output_ptrs[0]),"); // partial
+  code.e("    $,", q_len);
+  code.e("    $,", kv_len);
+  code.e("    $,", q_start);
+  code.e("    $,", num_heads);
+  code.e("    $,", num_splits);
+  code.e("    $,", nqb);
+  code.e("    $f,", sm_scale_log2);
+  code.e("    task_desc->task_metadata.request_id,");         // head
+  code.e("    task_desc->task_metadata.kv_idx,");             // packed yidx
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch
+  return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_mla_prefill_tp8_chunked_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: num_heads, q_len, num_splits, nqb
+  assert(params.size() == 4);
+  int num_heads = params[0];
+  int q_len = params[1];
+  int num_splits = params[2];
+  int nqb = params[3];
+  float sm_scale = 1.0f / sqrtf(192.0f);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mla_prefill_tp8_chunked_splitk::"
+         "mla_prefill_tp8_chunked_reduce_sm100_task_impl(");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    $,", q_len);
+  code.e("    $,", num_heads);
+  code.e("    $,", num_splits);
+  code.e("    $,", nqb);
+  code.e("    $f,", sm_scale);
+  code.e("    task_desc->task_metadata.request_id,");         // head
+  code.e("    task_desc->task_metadata.kv_idx,");             // q_block
+  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch
+  return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_mla_unified_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_heads local to this TP rank
@@ -3786,6 +3894,9 @@ int TaskRegister::register_mla_unified_sm100_task(
   int kvt = (kv_len + 128 - 1) / 128;
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
+  if (std::getenv("MPK_MLA_DISABLE_SINGLE_TILE")) {
+    single_tile = 0;
+  }
   bool const write_final = (num_splits == 1);
 
   int q_len_padded = (tp_size == 8) ? ((q_len + 1) & ~1) : q_len;
@@ -5630,8 +5741,11 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
     code.e("      $f,", _sm);
   }
   code.e("      kv_len_,");
-  // See TP2 MTP decode: task metadata is laid out for static num_splits.
-  code.e("      $,", num_splits);
+  // Use the runtime number of active KV tiles. The graph still contains the
+  // static worst-case task count, but tasks beyond sk_rt_ remap to gi >=
+  // num_groups and return before touching partial buffers; reduce reads only
+  // the compact active split range.
+  code.e("      sk_rt_,");
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
   code.e("      $,",
@@ -5681,8 +5795,8 @@ int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  // See TP2 MTP reduce: partial layout is static-num_splits based.
-  code.e("      $,", num_splits);
+  // Match the main task's runtime compact split layout.
+  code.e("      sk_rt_,");
   code.e("      $,", num_groups);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);

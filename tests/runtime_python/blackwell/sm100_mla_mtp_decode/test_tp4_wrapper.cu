@@ -21,9 +21,14 @@
 
 using namespace kernel::mla_mtp_tp4;
 
+#ifndef MIRAGE_MLA_TP4_WRAPPER_THREADS
+#define MIRAGE_MLA_TP4_WRAPPER_THREADS TB
+#endif
+static constexpr int WRAPPER_THREADS = MIRAGE_MLA_TP4_WRAPPER_THREADS;
+
 // ===== Thin __global__ shims forwarding blockIdx to __device__ functions =====
 template <bool SINGLE_TILE>
-__global__ __launch_bounds__(TB) void shim_main(
+__global__ __launch_bounds__(WRAPPER_THREADS) void shim_main(
     const __grid_constant__ CUtensorMap Q_tm,
     const __grid_constant__ CUtensorMap KV_tm,
     nv_bfloat16 *Oa,
@@ -32,8 +37,11 @@ __global__ __launch_bounds__(TB) void shim_main(
     int kv_len,
     int sk,
     int Q_LEN,
-    int qpg) {
+    int qpg,
+    int const *page_indices) {
   // Pack the V split (blockIdx.z) into block_x — Mirage MPK has no z-dim.
+  // The x dimension may also include a head-group field when
+  // MIRAGE_MLA_TP4_HEAD_GROUPS > 1.
   int block_x_packed = blockIdx.x * V_SPLITS + blockIdx.z;
   mla_mtp_tp4_main<SINGLE_TILE, false>(&Q_tm,
                                        &KV_tm,
@@ -44,7 +52,7 @@ __global__ __launch_bounds__(TB) void shim_main(
                                        sk,
                                        Q_LEN,
                                        qpg,
-                                       nullptr,
+                                       page_indices,
                                        0,
                                        block_x_packed,
                                        blockIdx.y);
@@ -149,12 +157,16 @@ static void ck(CUresult e) {
 int main(int argc, char **argv) {
   cuInit(0);
   int B = 1, KL = 4096;
+  bool use_paged = false;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--b=", 4)) {
       B = atoi(argv[i] + 4);
     }
     if (!strncmp(argv[i], "--k=", 4)) {
       KL = atoi(argv[i] + 4);
+    }
+    if (!strcmp(argv[i], "--paged")) {
+      use_paged = true;
     }
   }
   float ss = 1.0f / sqrtf((float)D_K);
@@ -176,6 +188,20 @@ int main(int argc, char **argv) {
   nv_bfloat16 *dKV;
   cudaMalloc(&dKV, KVs * 2);
   cudaMemcpy(dKV, hKV, KVs * 2, cudaMemcpyHostToDevice);
+  int const kvt_all = (KL + TILE_S - 1) / TILE_S;
+  int *dPage = nullptr;
+  if (use_paged) {
+    int *hPage = new int[(size_t)B * kvt_all];
+    for (int b = 0; b < B; b++) {
+      for (int p = 0; p < kvt_all; p++) {
+        hPage[b * kvt_all + p] = b * kvt_all + p;
+      }
+    }
+    cudaMalloc(&dPage, (size_t)B * kvt_all * sizeof(int));
+    cudaMemcpy(
+        dPage, hPage, (size_t)B * kvt_all * sizeof(int), cudaMemcpyHostToDevice);
+    delete[] hPage;
+  }
 
   CUtensorMap KVtm;
   {
@@ -200,7 +226,7 @@ int main(int argc, char **argv) {
   for (int Q_LEN = 1; Q_LEN <= 4; Q_LEN++) {
     int qpg = std::min(4, Q_LEN);
     int num_groups = (Q_LEN + qpg - 1) / qpg;
-    int hpb = NUM_HEADS;
+    int hpb = HEADS_PER_GROUP;
 
     int max_sk = (KL + TILE_S - 1) / TILE_S;
     int sk = max_sk;
@@ -268,13 +294,15 @@ int main(int argc, char **argv) {
                          SMEM_SIZE);
 
     auto run_main = [&]() {
-      dim3 g(num_groups * sk, B, V_SPLITS);
+      dim3 g(num_groups * sk * HEAD_GROUPS, B, V_SPLITS);
       if (single_tile) {
         shim_main<true>
-            <<<g, TB, SMEM_SIZE>>>(Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg);
+            <<<g, WRAPPER_THREADS, SMEM_SIZE>>>(
+                Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg, dPage);
       } else {
         shim_main<false>
-            <<<g, TB, SMEM_SIZE>>>(Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg);
+            <<<g, WRAPPER_THREADS, SMEM_SIZE>>>(
+                Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg, dPage);
       }
     };
     auto run_reduce = [&]() {
@@ -359,6 +387,9 @@ int main(int argc, char **argv) {
     delete[] hQ;
     delete[] hO;
     delete[] hOr;
+  }
+  if (dPage != nullptr) {
+    cudaFree(dPage);
   }
   return 0;
 }

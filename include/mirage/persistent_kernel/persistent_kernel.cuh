@@ -360,26 +360,49 @@ __device__ __forceinline__ bool
     config.request_ids[num_reqs] = next_request_id;
     config.qo_indptr_buffer[num_reqs] = num_tokens;
     config.paged_kv_indptr_buffer[num_reqs] = num_pages;
-    // Prefill request
-    int num_new_tokens = min(config.prompt_length[next_request_id],
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    int step = config.step[next_request_id];
+    int prompt_len = config.prompt_length[next_request_id];
+    int num_new_tokens = prompt_len - step;
+    if (num_new_tokens > 0) {
+      // Prefill request, including profiling runs that start from a prompt
+      // tail instead of token zero.
+      num_new_tokens =
+          min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    } else {
+      // Decode / speculative-verify request. Normal new requests have
+      // step == 0, so this branch is only reachable after explicit profiling
+      // step injection or if a caller intentionally seeds request state.
+      num_new_tokens = config.new_token_nums[next_request_id];
+      if (num_new_tokens < 1) {
+        num_new_tokens = 1;
+      }
+      int remaining_seq = config.max_seq_length - step;
+      if (remaining_seq < 0) {
+        remaining_seq = 0;
+      }
+      num_new_tokens =
+          min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+      num_new_tokens = min(num_new_tokens, remaining_seq);
+    }
 #ifdef MPK_DEBUG_BATCH
-    printf("[BATCH new] slot=%d req=%d prompt_len=%d schedule_tokens=%d "
-           "token_budget=%d\n",
+    printf("[BATCH new] slot=%d req=%d step=%d prompt_len=%d "
+           "schedule_tokens=%d token_budget=%d\n",
            num_reqs,
            next_request_id,
-           config.prompt_length[next_request_id],
+           step,
+           prompt_len,
            num_new_tokens,
            MPK_MAX_NUM_BATCHED_TOKENS);
 #endif
     // Move tokens to input tokens
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
-          config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
+          config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + step + j];
     }
-    int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
+    int num_new_pages =
+        (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
     {
-      int _lpl = num_new_tokens % MPK_PAGE_SIZE;
+      int _lpl = (step + num_new_tokens) % MPK_PAGE_SIZE;
       config.paged_kv_last_page_len_buffer[num_reqs] =
           (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
     }
