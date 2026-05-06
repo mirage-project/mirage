@@ -3732,10 +3732,12 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   // params[2]: kv_len  (full KV span)
   // params[3]: q_start (chunk's offset into the full sequence)
   // Inputs: [0] Q_nope [B,q_len,H,128], [1] Q_pe [B,q_len,H,64],
-  //         [2] K [B,kv_len,192], [3] V [B,kv_len,128]
+  //         [2] K_nope [B,kv_len,H,128] per-head (kv_b_proj output),
+  //         [3] K_rope [B,kv_len,1,64]  shared,
+  //         [4] V      [B,kv_len,H,128] per-head (kv_b_proj output)
   // Output: [0] O [B,q_len,H,128]
-  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V
-  // (input_tma_desc_ptrs[3][0]).
+  // TMA: K_nope (input_tma_desc_ptrs[2]), K_rope (input_tma_desc_ptrs[3]),
+  //      V (input_tma_desc_ptrs[4]).
   assert(params.size() == 4);
   int num_heads = params[0];
   int q_len = params[1];
@@ -3749,9 +3751,11 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("kernel::mla_prefill_tp8_chunked::"
          "mla_prefill_tp8_chunked_sm100_task_impl(");
   code.e("    static_cast<const "
-         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K TMA
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K_nope
   code.e("    static_cast<const "
-         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // K_rope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[4][0]),"); // V
   code.e("    static_cast<const "
          "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
   code.e("    static_cast<const "
@@ -3774,8 +3778,8 @@ int TaskRegister::register_mla_prefill_tp8_chunked_splitk_sm100_task(
   // params[0..3]: num_heads, q_len, kv_len, q_start
   // params[4]:    num_splits
   // params[5]:    nqb (== ceil(q_len / 64))
-  // Inputs: [0] Qn, [1] Qp, [2] K, [3] V, [4] partial (float)
-  // Outputs: none (partial is written through input[4])
+  // Inputs: [0] Qn, [1] Qp, [2] K_nope, [3] K_rope, [4] V
+  // Output: [0] partial (float)
   assert(params.size() == 6);
   int num_heads = params[0];
   int q_len = params[1];
@@ -3791,9 +3795,11 @@ int TaskRegister::register_mla_prefill_tp8_chunked_splitk_sm100_task(
   code.e("kernel::mla_prefill_tp8_chunked_splitk::"
          "mla_prefill_tp8_chunked_splitk_sm100_task_impl(");
   code.e("    static_cast<const "
-         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K TMA
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K_nope
   code.e("    static_cast<const "
-         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // K_rope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[4][0]),"); // V
   code.e("    static_cast<const "
          "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
   code.e("    static_cast<const "

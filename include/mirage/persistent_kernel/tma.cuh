@@ -1242,14 +1242,9 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
-    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
-    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100:
     case TASK_MLA_PREFILL_TP8_SM100: {
-      // Unabsorbed MLA prefill (TP=8): K is [S, D_QK=192], V is [S, D_V=128].
-      // Both encoded as 3D with 128B swizzle, box = (64, BN=128, 1). Matches
-      // src/kernel/mla_prefill_tp8.cu's cuTensorMapEncodeTiled arguments
-      // exactly, so device-side kernel code can be reused verbatim. The
-      // chunked variant uses the same encoding (S = kv_len for K/V tensors).
+      // Old 1-shared-KV variant (kept for back-compat with the basic
+      // mla_prefill_tp8 kernel). K [S, 192] + V [S, 128], 3D TMA.
       constexpr int BK = 64;
       constexpr int BN_BOX = 128;
       constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
@@ -1259,9 +1254,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
       constexpr CUtensorMapFloatOOBfill oob =
           CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA;
-
-      // param 2 = K [S, 192]; param 3 = V [S, 128]. Both share identical
-      // TMA descriptor shape except for d_last (K_ITERS).
       int total_rows = tensor_desc.dim[0]; // S
       int d_last = tensor_desc.dim[1];     // 192 for K, 128 for V
       int k_iters = d_last / BK;
@@ -1282,6 +1274,77 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             l2,
                                             oob);
       assert(err == CUDA_SUCCESS);
+      break;
+    }
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100: {
+      // Per-head unabsorbed MLA chunked prefill (TP=8), 3 TMA inputs:
+      //   param_id=2: K_nope, per-head [S, H, 128] viewed as [S, H*2, 64], 3D
+      //   param_id=3: K_rope, shared  [S, 64], 2D
+      //   param_id=4: V,      per-head [S, H, 128] viewed as [S, H*2, 64], 3D
+      constexpr int BK = 64;
+      constexpr int BN_BOX = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob =
+          CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA;
+
+      if (param_id == 3) {
+        // K_rope: shared, last dim = 64. Tensor may be 2D [S, 64] or
+        // 3D [S, 1, 64] (singleton head dim). Collapse leading dims as rows.
+        int d_last = tensor_desc.dim[tensor_desc.num_dims - 1]; // 64
+        int total_rows = 1;
+        for (int i = 0; i < tensor_desc.num_dims - 1; i++) {
+          total_rows *= tensor_desc.dim[i];
+        }
+        uint64_t gd[2] = {(uint64_t)d_last, (uint64_t)total_rows};
+        uint64_t gs[1] = {(uint64_t)d_last * 2};
+        uint32_t bd[2] = {(uint32_t)BK, (uint32_t)BN_BOX};
+        uint32_t es[2] = {1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              2,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      } else {
+        // K_nope (param 2) or V (param 4): per-head, 3D.
+        // Tensor layout: [S, H, d_last] where d_last = 128.
+        // Viewed for TMA as [S, H*2, 64]: dim2 = head*2 + half.
+        int total_rows = tensor_desc.dim[0]; // S
+        int H_local = tensor_desc.dim[1];    // num_heads per rank
+        int d_last = tensor_desc.dim[2];     // 128
+        int num_blocks = H_local * (d_last / BK); // H * 2
+        uint64_t gd[3] = {
+            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)num_blocks};
+        uint64_t gs[2] = {(uint64_t)H_local * d_last * 2,
+                          (uint64_t)BK * 2};
+        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BN_BOX, 1};
+        uint32_t es[3] = {1, 1, 1};
+        CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                              fmt,
+                                              3,
+                                              tensor_desc.base_ptr,
+                                              gd,
+                                              gs,
+                                              bd,
+                                              es,
+                                              interleave,
+                                              swizzle,
+                                              l2,
+                                              oob);
+        assert(err == CUDA_SUCCESS);
+      }
       break;
     }
     case TASK_MLA_MTP_DECODE_TP2_SM100:
@@ -1614,12 +1677,19 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // no TMA needed
       break;
     }
-    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
-    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100:
     case TASK_MLA_PREFILL_TP8_SM100: {
-      // Inputs: [0] Qn, [1] Qp, [2] K, [3] V. Only K and V use TMA.
-      // Splitk has an extra input [4] partial (no TMA needed for it).
+      // Old 1-shared-KV variant: [0]Qn, [1]Qp, [2]K, [3]V. K and V use TMA.
       for (size_t param_id = 2; param_id < 4; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
+    case TASK_MLA_PREFILL_TP8_CHUNKED_SM100: {
+      // Per-head unabsorbed: [0]Qn, [1]Qp, [2]K_nope, [3]K_rope, [4]V.
+      // K_nope/K_rope/V all use TMA (with different layouts).
+      for (size_t param_id = 2; param_id < 5; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }

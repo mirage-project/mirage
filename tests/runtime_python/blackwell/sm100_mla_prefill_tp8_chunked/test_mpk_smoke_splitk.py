@@ -1,7 +1,8 @@
-"""MPK end-to-end smoke for chunked prefill via SPLITK + REDUCE pair.
+"""MPK end-to-end smoke for chunked prefill via SPLITK + REDUCE pair (per-head MLA).
 
-Allocates Qn/Qp/K/V/O + a partial buffer, registers two MPK tasks (splitk
-writes partial, reduce combines into O), runs once, compares to ref.
+Allocates Qn/Qp/K_nope/K_rope/V/O + a partial buffer, registers two MPK
+tasks (splitk writes partial, reduce combines into O), runs once,
+compares to the per-head reference.
 """
 import math
 import os
@@ -18,13 +19,14 @@ D_QK = 192
 D_V = 128
 
 
-def torch_reference(qn, qp, k, v, q_start, sm_scale):
+def torch_reference(qn, qp, k_nope, k_rope, v, q_start, sm_scale):
     B, q_len, H, _ = qn.shape
-    kv_len = k.shape[1]
+    kv_len = k_nope.shape[1]
     q = torch.cat([qn, qp], dim=-1).float()
-    kf = k.float().unsqueeze(2).expand(B, kv_len, H, D_QK)
-    vf = v.float().unsqueeze(2).expand(B, kv_len, H, D_V)
-    scores = torch.einsum("bihd,bjhd->bhij", q, kf) * sm_scale
+    kr = k_rope.float().expand(B, kv_len, H, D_QK_ROPE)
+    k = torch.cat([k_nope.float(), kr], dim=-1)
+    vf = v.float()
+    scores = torch.einsum("bihd,bjhd->bhij", q, k) * sm_scale
     j = torch.arange(kv_len, device=q.device)
     i = torch.arange(q_len, device=q.device)
     mask = j[None, :] > (q_start + i[:, None])
@@ -48,15 +50,10 @@ def main():
     torch.manual_seed(0)
     q_nope = torch.randn(B * q_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
     q_pe = torch.randn(B * q_len, H, D_QK_ROPE, dtype=dt, device=device) * 0.2
-    k = torch.randn(B * kv_len, D_QK, dtype=dt, device=device) * 0.2
-    v = torch.randn(B * kv_len, D_V, dtype=dt, device=device) * 0.2
+    k_nope = torch.randn(B * kv_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
+    k_rope = torch.randn(B * kv_len, 1, D_QK_ROPE, dtype=dt, device=device) * 0.2
+    v = torch.randn(B * kv_len, H, D_V, dtype=dt, device=device) * 0.2
     o = torch.zeros(B * q_len, H, D_V, dtype=dt, device=device)
-    # Partial buffer is intermediate (splitk writes, reduce reads). Use
-    # mpk.new_tensor (MPK-managed cuda alloc) like DeepSeek builder does
-    # for mla_partial_o, NOT attach_input. Kernel computes its own offsets,
-    # so shape just needs to match total size. 2D layout matches existing
-    # mla decode/reduce convention.
-    partial_size = num_splits * B * nqb * H * 64 * (D_V + 4)
 
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
@@ -72,7 +69,8 @@ def main():
 
     q_nope_dt = pk.attach_input(q_nope, name="q_nope")
     q_pe_dt = pk.attach_input(q_pe, name="q_pe")
-    k_dt = pk.attach_input(k, name="k")
+    k_nope_dt = pk.attach_input(k_nope, name="k_nope")
+    k_rope_dt = pk.attach_input(k_rope, name="k_rope")
     v_dt = pk.attach_input(v, name="v")
     o_dt = pk.attach_input(o, name="o")
     # MPK-managed intermediate buffer (cuda_tensor). 2D shape: total floats
@@ -86,7 +84,8 @@ def main():
 
     # SPLITK task: produces partial.
     pk.mla_prefill_tp8_chunked_splitk_layer(
-        q_nope=q_nope_dt, q_pe=q_pe_dt, k=k_dt, v=v_dt,
+        q_nope=q_nope_dt, q_pe=q_pe_dt,
+        k_nope=k_nope_dt, k_rope=k_rope_dt, v=v_dt,
         partial=partial_dt,
         mla_params=(H, q_len, kv_len, q_start, num_splits),
         grid_dim=(H, nqb * num_splits, B),
@@ -125,8 +124,9 @@ def main():
     o_ref = torch_reference(
         q_nope.view(B, q_len, H, D_QK_NOPE),
         q_pe.view(B, q_len, H, D_QK_ROPE),
-        k.view(B, kv_len, D_QK),
-        v.view(B, kv_len, D_V),
+        k_nope.view(B, kv_len, H, D_QK_NOPE),
+        k_rope.view(B, kv_len, 1, D_QK_ROPE),
+        v.view(B, kv_len, H, D_V),
         q_start, sm_scale,
     ).view(B * q_len, H, D_V)
     err = (o.float() - o_ref.float()).abs()

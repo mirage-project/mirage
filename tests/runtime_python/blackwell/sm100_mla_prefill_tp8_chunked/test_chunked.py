@@ -1,8 +1,15 @@
 """Correctness + perf for mla_prefill_tp8_chunked device function.
 
-The kernel implements MLA chunked prefill: Q covers chunk
+Per-head DeepSeek MLA chunked prefill: Q covers chunk
 [q_start, q_start+q_len) of a longer sequence, KV covers [0, kv_len).
-Compares against PyTorch reference and FlashInfer single_prefill_with_kv_cache.
+
+Layout (post kv_b_proj decompression, per TP=8 rank):
+  Q_nope: [B, q_len, H=16, 128]    per-head
+  Q_rope: [B, q_len, H=16,  64]    per-head
+  K_nope: [B, kv_len, H=16, 128]   per-head
+  K_rope: [B, kv_len, 1,    64]    shared across heads
+  V:      [B, kv_len, H=16, 128]   per-head
+  O:      [B, q_len,  H=16, 128]   per-head
 """
 import math
 import os
@@ -21,15 +28,26 @@ D_QK = 192
 D_V = 128
 
 
-def torch_reference(qn, qp, k, v, q_start, sm_scale):
-    """Causal MLA chunked prefill reference (fp32). q_len queries at offset
-    q_start, kv_len keys; q[i] attends to k[0..q_start+i]."""
+def make_inputs(B, q_len, kv_len, H, device="cuda", dtype=torch.bfloat16, seed=0):
+    g = torch.Generator(device=device).manual_seed(seed)
+    qn = torch.randn(B, q_len, H, D_QK_NOPE, dtype=dtype, device=device, generator=g) * 0.2
+    qp = torch.randn(B, q_len, H, D_QK_ROPE, dtype=dtype, device=device, generator=g) * 0.2
+    k_nope = torch.randn(B, kv_len, H, D_QK_NOPE, dtype=dtype, device=device, generator=g) * 0.2
+    k_rope = torch.randn(B, kv_len, 1, D_QK_ROPE, dtype=dtype, device=device, generator=g) * 0.2
+    v = torch.randn(B, kv_len, H, D_V, dtype=dtype, device=device, generator=g) * 0.2
+    return qn, qp, k_nope, k_rope, v
+
+
+def torch_reference(qn, qp, k_nope, k_rope, v, q_start, sm_scale):
+    """Per-head causal MLA chunked prefill reference (fp32)."""
     B, q_len, H, _ = qn.shape
-    kv_len = k.shape[1]
+    kv_len = k_nope.shape[1]
     q = torch.cat([qn, qp], dim=-1).float()
-    kf = k.float().unsqueeze(2).expand(B, kv_len, H, D_QK)
-    vf = v.float().unsqueeze(2).expand(B, kv_len, H, D_V)
-    scores = torch.einsum("bihd,bjhd->bhij", q, kf) * sm_scale
+    # K_rope is shared across heads — broadcast.
+    kr = k_rope.float().expand(B, kv_len, H, D_QK_ROPE)
+    k = torch.cat([k_nope.float(), kr], dim=-1)
+    vf = v.float()
+    scores = torch.einsum("bihd,bjhd->bhij", q, k) * sm_scale
     j = torch.arange(kv_len, device=q.device)
     i = torch.arange(q_len, device=q.device)
     mask = j[None, :] > (q_start + i[:, None])
@@ -41,17 +59,11 @@ def torch_reference(qn, qp, k, v, q_start, sm_scale):
 
 def run_case(B, q_len, kv_len, q_start, H, atol=3e-2):
     sm_scale = 1.0 / math.sqrt(D_QK)
-    torch.manual_seed(0)
-    device = "cuda"
-    dt = torch.bfloat16
-    qn = torch.randn(B, q_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
-    qp = torch.randn(B, q_len, H, D_QK_ROPE, dtype=dt, device=device) * 0.2
-    k = torch.randn(B, kv_len, D_QK, dtype=dt, device=device) * 0.2
-    v = torch.randn(B, kv_len, D_V, dtype=dt, device=device) * 0.2
-    o = torch.zeros(B, q_len, H, D_V, dtype=dt, device=device)
+    qn, qp, kn, kr, v = make_inputs(B, q_len, kv_len, H)
+    o = torch.zeros(B, q_len, H, D_V, dtype=qn.dtype, device=qn.device)
 
-    ext.mla_prefill_tp8_chunked_test(qn, qp, k, v, o, q_start, sm_scale)
-    o_ref = torch_reference(qn, qp, k, v, q_start, sm_scale)
+    ext.mla_prefill_tp8_chunked_test(qn, qp, kn, kr, v, o, q_start, sm_scale)
+    o_ref = torch_reference(qn, qp, kn, kr, v, q_start, sm_scale)
 
     err = (o.float() - o_ref.float()).abs()
     max_err, mean_err = err.max().item(), err.mean().item()
@@ -63,18 +75,13 @@ def run_case(B, q_len, kv_len, q_start, H, atol=3e-2):
 
 def bench(B, q_len, kv_len, q_start, H, n_iters=100, warmup=20):
     sm_scale = 1.0 / math.sqrt(D_QK)
-    device = "cuda"
-    dt = torch.bfloat16
-    qn = torch.randn(B, q_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
-    qp = torch.randn(B, q_len, H, D_QK_ROPE, dtype=dt, device=device) * 0.2
-    k = torch.randn(B, kv_len, D_QK, dtype=dt, device=device) * 0.2
-    v = torch.randn(B, kv_len, D_V, dtype=dt, device=device) * 0.2
-    o = torch.zeros(B, q_len, H, D_V, dtype=dt, device=device)
+    qn, qp, kn, kr, v = make_inputs(B, q_len, kv_len, H)
+    o = torch.zeros(B, q_len, H, D_V, dtype=qn.dtype, device=qn.device)
 
-    flush = torch.zeros(128 * 1024 * 1024 // 4, dtype=torch.int32, device=device)
+    flush = torch.zeros(128 * 1024 * 1024 // 4, dtype=torch.int32, device=qn.device)
 
     for _ in range(warmup):
-        ext.mla_prefill_tp8_chunked_test(qn, qp, k, v, o, q_start, sm_scale)
+        ext.mla_prefill_tp8_chunked_test(qn, qp, kn, kr, v, o, q_start, sm_scale)
     torch.cuda.synchronize()
     times = []
     for _ in range(5):
@@ -83,7 +90,7 @@ def bench(B, q_len, kv_len, q_start, H, n_iters=100, warmup=20):
         e = torch.cuda.Event(enable_timing=True)
         s.record()
         for _ in range(n_iters):
-            ext.mla_prefill_tp8_chunked_test(qn, qp, k, v, o, q_start, sm_scale)
+            ext.mla_prefill_tp8_chunked_test(qn, qp, kn, kr, v, o, q_start, sm_scale)
         e.record()
         torch.cuda.synchronize()
         times.append(s.elapsed_time(e) / n_iters)
@@ -96,20 +103,14 @@ def bench(B, q_len, kv_len, q_start, H, n_iters=100, warmup=20):
 
 def run_splitk_case(B, q_len, kv_len, q_start, H, num_splits, atol=3e-2):
     sm_scale = 1.0 / math.sqrt(D_QK)
-    torch.manual_seed(0)
-    device = "cuda"
-    dt = torch.bfloat16
-    qn = torch.randn(B, q_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
-    qp = torch.randn(B, q_len, H, D_QK_ROPE, dtype=dt, device=device) * 0.2
-    k = torch.randn(B, kv_len, D_QK, dtype=dt, device=device) * 0.2
-    v = torch.randn(B, kv_len, D_V, dtype=dt, device=device) * 0.2
-    o = torch.zeros(B, q_len, H, D_V, dtype=dt, device=device)
+    qn, qp, kn, kr, v = make_inputs(B, q_len, kv_len, H)
+    o = torch.zeros(B, q_len, H, D_V, dtype=qn.dtype, device=qn.device)
     nqb = (q_len + 63) // 64
     partial = torch.zeros(num_splits, B, nqb, H, 64, D_V + 4,
-                          dtype=torch.float32, device=device)
+                          dtype=torch.float32, device=qn.device)
     ext.mla_prefill_tp8_chunked_splitk_test(
-        qn, qp, k, v, o, partial, q_start, num_splits, sm_scale)
-    o_ref = torch_reference(qn, qp, k, v, q_start, sm_scale)
+        qn, qp, kn, kr, v, o, partial, q_start, num_splits, sm_scale)
+    o_ref = torch_reference(qn, qp, kn, kr, v, q_start, sm_scale)
     err = (o.float() - o_ref.float()).abs()
     max_err, mean_err = err.max().item(), err.mean().item()
     status = "OK" if max_err < atol else "FAIL"
@@ -121,19 +122,14 @@ def run_splitk_case(B, q_len, kv_len, q_start, H, num_splits, atol=3e-2):
 def bench_splitk(B, q_len, kv_len, q_start, H, num_splits,
                  n_iters=100, warmup=20):
     sm_scale = 1.0 / math.sqrt(D_QK)
-    device = "cuda"
-    dt = torch.bfloat16
-    qn = torch.randn(B, q_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
-    qp = torch.randn(B, q_len, H, D_QK_ROPE, dtype=dt, device=device) * 0.2
-    k = torch.randn(B, kv_len, D_QK, dtype=dt, device=device) * 0.2
-    v = torch.randn(B, kv_len, D_V, dtype=dt, device=device) * 0.2
-    o = torch.zeros(B, q_len, H, D_V, dtype=dt, device=device)
+    qn, qp, kn, kr, v = make_inputs(B, q_len, kv_len, H)
+    o = torch.zeros(B, q_len, H, D_V, dtype=qn.dtype, device=qn.device)
     nqb = (q_len + 63) // 64
     partial = torch.zeros(num_splits, B, nqb, H, 64, D_V + 4,
-                          dtype=torch.float32, device=device)
-    flush = torch.zeros(128 * 1024 * 1024 // 4, dtype=torch.int32, device=device)
+                          dtype=torch.float32, device=qn.device)
+    flush = torch.zeros(128 * 1024 * 1024 // 4, dtype=torch.int32, device=qn.device)
     fn = lambda: ext.mla_prefill_tp8_chunked_splitk_test(
-        qn, qp, k, v, o, partial, q_start, num_splits, sm_scale)
+        qn, qp, kn, kr, v, o, partial, q_start, num_splits, sm_scale)
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()

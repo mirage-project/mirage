@@ -13,17 +13,20 @@
  * limitations under the License.
  */
 
-// MLA Chunked Prefill (TP=8) for DeepSeek V3 on B200 — UNABSORBED, TMA KV.
-// BM=64 main variant of MLA chunked prefill (chunked-aware causal mask +
-// K/V split mbarriers). Splitk variant is in mla_prefill_tp8_chunked_splitk;
-// bm32 / bm32_db variants from the standalone heuristic are not ported.
+// MLA Chunked Prefill (TP=8) — true unabsorbed, per-head K/V.
+// Source: mla_chunked_prefill_tp8_unabsorbed_perhead.cu (BM=64 main variant).
 //
-// Differs from mla_prefill_tp8_sm100 in two ways:
-//   1. Q covers a chunk [q_start, q_start+q_len); KV covers [0, kv_len).
-//      Causal mask is kvp <= q_start + qp  (vs kvp <= qp in plain tp8).
-//   2. K and V use SEPARATE mbarriers (mbk, mbv) so the next K-tile load
-//      can fly during compute on the current V-tile, increasing TMA/MMA
-//      overlap. Same arithmetic as plain tp8 otherwise.
+// DeepSeek V3 MLA dimensions (post kv_b_proj decompression, per TP=8 rank):
+//   Q_nope: [B, q_len, H=16, 128]   per-head
+//   Q_rope: [B, q_len, H=16,  64]   per-head
+//   K_nope: [B, kv_len, H=16, 128]  per-head (from kv_b_proj)
+//   K_rope: [B, kv_len, 1,    64]   shared across heads
+//   V:      [B, kv_len, H=16, 128]  per-head (from kv_b_proj)
+//   O:      [B, q_len,  H=16, 128]  per-head
+//
+// QK = Q_nope @ K_nope^T + Q_rope @ K_rope^T (separate MMA passes for nope+rope).
+// kv_b_proj decompression is done OUTSIDE this kernel; caller provides
+// already-decompressed per-head K_nope and V.
 //
 // MPK adaptation pattern (per kernel_adaptation_guide):
 //   __global__         → __device__ __noinline__
@@ -179,6 +182,16 @@ __device__ __forceinline__ void
                "r"(mb)
                : "memory");
 }
+__device__ __forceinline__ void
+    tma2d(CUtensorMap const *d, int sa, int mb, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_"
+               "tx::bytes [%0],[%1,{%2,%3}],[%4];" ::"r"(sa),
+               "l"((uint64_t)d),
+               "r"(c0),
+               "r"(c1),
+               "r"(mb)
+               : "memory");
+}
 __device__ __forceinline__ void mbar_init_1(int a, int c) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0],%1;" ::"r"(a), "r"(c));
 }
@@ -193,14 +206,11 @@ __device__ __forceinline__ void mbar_wait_1(int a, int p) {
                "r"(p));
 }
 
-// Named barrier 4 (128 threads). Plain tp8 uses 3, this task uses 4 so the
-// two MLA prefill flavors can coexist in one megakernel without ID collision.
+// Named barrier 4 (128 threads).
 __device__ __forceinline__ void task_sync() {
   asm volatile("bar.sync 4, %0;" ::"n"(NT));
 }
 
-// QK MMA for one half-tile (HALF_N=4 of [16x16] tiles). Reads K SMEM, writes
-// sf.
 __device__ __forceinline__ void do_qk_half(float sf[][8],
                                            int noff,
                                            int qpl,
@@ -255,8 +265,6 @@ __device__ __forceinline__ void do_qk_half(float sf[][8],
   }
 }
 
-// Causal mask (uses q_start) + online softmax + scale of accumulators.
-// Does not touch V SMEM, so K-loader can prefetch next tile in parallel.
 __device__ __forceinline__ void do_mask_softmax(float sf[][8],
                                                 int noff,
                                                 int kvb,
@@ -298,12 +306,14 @@ __device__ __forceinline__ void do_mask_softmax(float sf[][8],
     float nms = -(ms[j] * sml2);
     float sc = ex2(__fmaf_rn(mp[j], sml2, nms));
     ds[j] *= sc;
+    if (mp[j] != ms[j]) {
 #pragma unroll
-    for (int md = 0; md < NMDV; md++) {
-      of[md][j * 2 + 0] *= sc;
-      of[md][j * 2 + 1] *= sc;
-      of[md][j * 2 + 4] *= sc;
-      of[md][j * 2 + 5] *= sc;
+      for (int md = 0; md < NMDV; md++) {
+        of[md][j * 2 + 0] *= sc;
+        of[md][j * 2 + 1] *= sc;
+        of[md][j * 2 + 4] *= sc;
+        of[md][j * 2 + 5] *= sc;
+      }
     }
 #pragma unroll
     for (int nl = 0; nl < HALF_N; nl++) {
@@ -315,7 +325,6 @@ __device__ __forceinline__ void do_mask_softmax(float sf[][8],
   }
 }
 
-// PV MMA for one half-tile. Reads V SMEM (so V must already be in via mbv).
 __device__ __forceinline__ void do_pv_half(float sf[][8],
                                            int noff,
                                            int v0s,
@@ -400,31 +409,32 @@ __device__ __forceinline__ void write_o(float of[][8],
 }
 
 __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
-    CUtensorMap const *K_tm_ptr,
-    CUtensorMap const *V_tm_ptr,
-    bf16 const *__restrict__ Qn, // [B, q_len, H, D_QK_NOPE]
-    bf16 const *__restrict__ Qp, // [B, q_len, H, D_QK_ROPE]
-    bf16 *__restrict__ O,        // [B, q_len, H, D_V]
+    CUtensorMap const *KN_tm_ptr, // K_nope, per-head [B, kv_len, H, 128]
+    CUtensorMap const *KR_tm_ptr, // K_rope, shared  [B, kv_len, 1,  64]
+    CUtensorMap const *V_tm_ptr,  // V,      per-head [B, kv_len, H, 128]
+    bf16 const *__restrict__ Qn,  // [B, q_len, H, 128]
+    bf16 const *__restrict__ Qp,  // [B, q_len, H,  64]
+    bf16 *__restrict__ O,         // [B, q_len, H, 128]
     int const q_len,
     int const kv_len,
     int const q_start,
     int const H,
-    float const sml2, // sm_scale * log2(e)
-    int const head,   // was blockIdx.x
-    int const qb_in,  // was blockIdx.y; mapped to qb = cdiv(q_len,BM)-1-qb_in
-    int const bat     // was blockIdx.z
+    float const sml2,
+    int const head,  // bid.x
+    int const qb_in, // bid.y
+    int const bat    // bid.z
 ) {
   if (threadIdx.x >= NT) {
     return;
   }
-  int const qb = cdiv(q_len, BM) - 1 - qb_in;
-  int const qs = qb * BM;
-  int const tid = threadIdx.x;
-  int const wid = tid / 32;
-  int const lid = tid % 32;
-  long long const bqn = (long long)bat * q_len * H * D_QK_NOPE;
-  long long const bqp = (long long)bat * q_len * H * D_QK_ROPE;
-  long long const bo = (long long)bat * q_len * H * D_V;
+  const int qb = cdiv(q_len, BM) - 1 - qb_in;
+  const int qs = qb * BM;
+  const int tid = threadIdx.x;
+  const int wid = tid / 32;
+  const int lid = tid % 32;
+  const long long bqn = (long long)bat * q_len * H * D_QK_NOPE;
+  const long long bqp = (long long)bat * q_len * H * D_QK_ROPE;
+  const long long bo = (long long)bat * q_len * H * D_V;
 
   extern __shared__ __align__(1024) uint8_t sm_raw_chunk[];
   int sb = __cvta_generic_to_shared(sm_raw_chunk);
@@ -443,7 +453,7 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
     asm volatile("fence.mbarrier_init.release.cluster;");
   }
   task_sync();
-  // Load Q via cp.async (Qn and Qp), then sync.
+  // Load Q via cp.async.
   {
     constexpr int SN = D_QK_NOPE * 2, SP = D_QK_ROPE * 2;
     for (int i = tid; i < BM * (D_QK_NOPE / 8); i += NT) {
@@ -474,8 +484,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
   }
   int qnl = qn_s + swz<(D_QK_NOPE * 2)>(wid * 16 + (lid % 16), lid / 16);
   int qpl = qp_s + swz<(D_QK_ROPE * 2)>(wid * 16 + (lid % 16), lid / 16);
-  int const kr = (lid % 8) + (lid / 16) * 8;
-  int const kc = (lid % 16) / 8;
+  const int kr_swz = (lid % 8) + (lid / 16) * 8;
+  const int kc_swz = (lid % 16) / 8;
 
   float of[NMDV][8];
 #pragma unroll
@@ -491,19 +501,22 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
   int nt = cdiv(kvend, BN);
   int mphk = 0, mphv = 0;
 
+  // Per-head K_nope is loaded with TMA dim2 = head*2 + half (kv_b_proj output
+  // stored as [kv_len, H, 128] viewed as [kv_len, H*2, 64]). K_rope uses 2D
+  // TMA (shared across heads). V follows the same per-head layout as K_nope.
   auto tld_k = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbk, 3 * TMA_BLK);
-      tma3d(K_tm_ptr, kn0, mbk, 0, kvb, 0);
-      tma3d(K_tm_ptr, kn1, mbk, 0, kvb, 1);
-      tma3d(K_tm_ptr, kps, mbk, 0, kvb, 2);
+      tma3d(KN_tm_ptr, kn0, mbk, 0, kvb, head * 2 + 0);
+      tma3d(KN_tm_ptr, kn1, mbk, 0, kvb, head * 2 + 1);
+      tma2d(KR_tm_ptr, kps, mbk, 0, kvb);
     }
   };
   auto tld_v = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbv, 2 * TMA_BLK);
-      tma3d(V_tm_ptr, v0s, mbv, 0, kvb, 0);
-      tma3d(V_tm_ptr, v1s, mbv, 0, kvb, 1);
+      tma3d(V_tm_ptr, v0s, mbv, 0, kvb, head * 2 + 0);
+      tma3d(V_tm_ptr, v1s, mbv, 0, kvb, head * 2 + 1);
     }
   };
   if (nt > 0) {
@@ -514,28 +527,22 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
 #pragma unroll 1
   for (int t = 0; t < nt; t++) {
     int kvb = t * BN;
-    // Wait K, do QK both halves
     mbar_wait_1(mbk, mphk);
     mphk ^= 1;
-    do_qk_half(sf0, 0, qpl, qnl, kps, kn0, kn1, kr, kc, lid);
-    do_qk_half(sf1, HALF_N, qpl, qnl, kps, kn0, kn1, kr, kc, lid);
-    // K SMEM is free; issue next K (overlaps with softmax + PV below)
+    do_qk_half(sf0, 0, qpl, qnl, kps, kn0, kn1, kr_swz, kc_swz, lid);
+    do_qk_half(sf1, HALF_N, qpl, qnl, kps, kn0, kn1, kr_swz, kc_swz, lid);
     task_sync();
     if (t + 1 < nt) {
       tld_k((t + 1) * BN);
     }
-    // Mask + softmax for half0
     do_mask_softmax(
         sf0, 0, kvb, q_start, qs, kv_len, wid, lid, sml2, ms, ds, of);
-    // Wait V, PV for half0
     mbar_wait_1(mbv, mphv);
     mphv ^= 1;
     do_pv_half(sf0, 0, v0s, v1s, lid, ds, of);
-    // Mask + softmax + PV for half1 (V already in SMEM)
     do_mask_softmax(
         sf1, HALF_N, kvb, q_start, qs, kv_len, wid, lid, sml2, ms, ds, of);
     do_pv_half(sf1, HALF_N, v0s, v1s, lid, ds, of);
-    // V SMEM is free; issue next V
     task_sync();
     if (t + 1 < nt) {
       tld_v((t + 1) * BN);

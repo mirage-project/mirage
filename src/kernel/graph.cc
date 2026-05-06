@@ -729,17 +729,17 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "mla_prefill_tp8_chunked_sm100") {
     int variant_id = task_register->register_mla_prefill_tp8_chunked_sm100_task(
         customized->bgraph, params);
-    // Same shape as plain tp8: 4 inputs (Qn, Qp, K, V) + 1 output (O).
+    // Per-head unabsorbed: 5 inputs (Qn, Qp, K_nope, K_rope, V) + 1 output (O).
     task_config[op] =
-        std::make_tuple(4, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SM100, variant_id);
+        std::make_tuple(5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SM100, variant_id);
   } else if (name == "mla_prefill_tp8_chunked_splitk_sm100") {
     int variant_id =
         task_register->register_mla_prefill_tp8_chunked_splitk_sm100_task(
             customized->bgraph, params);
-    // 4 inputs (Qn, Qp, K, V), 1 output (partial). Partial as output so MPK
-    // dep tracker links SPLITK → REDUCE through it (REDUCE's input).
+    // 5 inputs (Qn, Qp, K_nope, K_rope, V), 1 output (partial). Partial as
+    // output so MPK dep tracker links SPLITK → REDUCE through it.
     task_config[op] = std::make_tuple(
-        4, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100, variant_id);
+        5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100, variant_id);
   } else if (name == "mla_prefill_tp8_chunked_reduce_sm100") {
     int variant_id =
         task_register->register_mla_prefill_tp8_chunked_reduce_sm100_task(

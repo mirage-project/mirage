@@ -13,17 +13,15 @@
  * limitations under the License.
  */
 
-// MLA Chunked Prefill (TP=8) — Split-K variant + Reduce kernel.
-// Split-K + Reduce companion to mla_prefill_tp8_chunked_sm100.cuh. Used when
-// chunk * H * B is too small to fill the GPU with the BM=64 main path.
+// Split-K + Reduce companion to mla_prefill_tp8_chunked_sm100.cuh.
+// Used when chunk * H * B is too small to fill the GPU with the BM=64 main
+// path: each block does only 1/num_splits of the KV range, writing per-row
+// partial output (D_V floats + m + d) to a global float buffer; the reduce
+// kernel then combines the partials into the final bf16 O.
 //
-// SPLITK: each block does the same BM=64 prefill but only a 1/num_splits
-// slice of the KV range. Writes per-row partial output (D_V floats + m + d)
-// to a float buffer in global memory. Grid: (H, nqb*num_splits, B).
-//
-// REDUCE: combines partial outputs from all splits using online-softmax
-// merge (rescale by exp(m_global - m_s)), writes final bf16 O.
-// Grid: (H, nqb, B), 256 threads, 64 rows × 4 threads/row.
+// Same DeepSeek V3 unabsorbed dimensions as the main kernel:
+//   K_nope per-head (3D TMA, head*2+half), K_rope shared (2D TMA),
+//   V per-head (3D TMA, head*2+half).
 
 #pragma once
 
@@ -35,7 +33,6 @@ namespace mla_prefill_tp8_chunked_splitk {
 using bf16 = __nv_bfloat16;
 using bf16_2 = __nv_bfloat162;
 
-// Reuse all constants and PTX helpers from the chunked main kernel namespace.
 using kernel::mla_prefill_tp8_chunked::BM;
 using kernel::mla_prefill_tp8_chunked::BN;
 using kernel::mla_prefill_tp8_chunked::cdiv;
@@ -63,32 +60,35 @@ using kernel::mla_prefill_tp8_chunked::NT;
 using kernel::mla_prefill_tp8_chunked::Q_NOPE_SZ;
 using kernel::mla_prefill_tp8_chunked::SMEM_SZ;
 using kernel::mla_prefill_tp8_chunked::swz;
+using kernel::mla_prefill_tp8_chunked::tma2d;
 using kernel::mla_prefill_tp8_chunked::tma3d;
 using kernel::mla_prefill_tp8_chunked::TMA_BLK;
 using kernel::mla_prefill_tp8_chunked::V0_OFF;
 using kernel::mla_prefill_tp8_chunked::V1_OFF;
 
-// Splitk uses named barrier 5 (chunked main uses 4).
+// Named barrier 5 (chunked main uses 4).
 __device__ __forceinline__ void splitk_sync() {
   asm volatile("bar.sync 5, %0;" ::"n"(NT));
 }
 
-__device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
-    CUtensorMap const *K_tm_ptr,
-    CUtensorMap const *V_tm_ptr,
-    bf16 const *__restrict__ Qn,
-    bf16 const *__restrict__ Qp,
-    float *__restrict__ partial, // [nsplits, B, nqb, H, BM, D_V+4] float
-    int const q_len,
-    int const kv_len,
-    int const q_start,
-    int const H,
-    int const num_splits,
-    int const nqb,
-    float const sml2,
-    int const head, // bid.x
-    int const yidx, // bid.y; encodes (qb_rev, split_id)
-    int const bat   // bid.z
+__device__ __noinline__ void
+    mla_prefill_tp8_chunked_splitk_sm100_task_impl(
+        CUtensorMap const *KN_tm_ptr,
+        CUtensorMap const *KR_tm_ptr,
+        CUtensorMap const *V_tm_ptr,
+        bf16 const *__restrict__ Qn,
+        bf16 const *__restrict__ Qp,
+        float *__restrict__ partial,
+        int const q_len,
+        int const kv_len,
+        int const q_start,
+        int const H,
+        int const num_splits,
+        int const nqb,
+        float const sml2,
+        int const head,    // bid.x
+        int const yidx,    // bid.y; encodes (qb_rev, split_id)
+        int const bat      // bid.z
 ) {
   if (threadIdx.x >= NT) {
     return;
@@ -121,7 +121,7 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
   }
   splitk_sync();
 
-  // Load Q
+  // Load Q.
   {
     constexpr int SN = D_QK_NOPE * 2, SP = D_QK_ROPE * 2;
     for (int i = tid; i < BM * (D_QK_NOPE / 8); i += NT) {
@@ -152,8 +152,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
   }
   int qnl = qn_s + swz<(D_QK_NOPE * 2)>(wid * 16 + (lid % 16), lid / 16);
   int qpl = qp_s + swz<(D_QK_ROPE * 2)>(wid * 16 + (lid % 16), lid / 16);
-  int const kr = (lid % 8) + (lid / 16) * 8;
-  int const kc = (lid % 16) / 8;
+  int const kr_swz = (lid % 8) + (lid / 16) * 8;
+  int const kc_swz = (lid % 16) / 8;
 
   float of[NMDV][8];
 #pragma unroll
@@ -166,7 +166,6 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
   float ds[2] = {1.f, 1.f};
   float sf0[HALF_N][8], sf1[HALF_N][8];
 
-  // Slice the KV range for this split.
   int const kvend = min(kv_len, q_start + qs + BM);
   int const total_tiles = cdiv(kvend, BN);
   int const tiles_per_split = cdiv(total_tiles, num_splits);
@@ -178,16 +177,16 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
   auto tld_k = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbk, 3 * TMA_BLK);
-      tma3d(K_tm_ptr, kn0, mbk, 0, kvb, 0);
-      tma3d(K_tm_ptr, kn1, mbk, 0, kvb, 1);
-      tma3d(K_tm_ptr, kps, mbk, 0, kvb, 2);
+      tma3d(KN_tm_ptr, kn0, mbk, 0, kvb, head * 2 + 0);
+      tma3d(KN_tm_ptr, kn1, mbk, 0, kvb, head * 2 + 1);
+      tma2d(KR_tm_ptr, kps, mbk, 0, kvb);
     }
   };
   auto tld_v = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbv, 2 * TMA_BLK);
-      tma3d(V_tm_ptr, v0s, mbv, 0, kvb, 0);
-      tma3d(V_tm_ptr, v1s, mbv, 0, kvb, 1);
+      tma3d(V_tm_ptr, v0s, mbv, 0, kvb, head * 2 + 0);
+      tma3d(V_tm_ptr, v1s, mbv, 0, kvb, head * 2 + 1);
     }
   };
   if (nt > 0) {
@@ -200,8 +199,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
     int kvb = t * BN;
     mbar_wait_1(mbk, mphk);
     mphk ^= 1;
-    do_qk_half(sf0, 0, qpl, qnl, kps, kn0, kn1, kr, kc, lid);
-    do_qk_half(sf1, HALF_N, qpl, qnl, kps, kn0, kn1, kr, kc, lid);
+    do_qk_half(sf0, 0, qpl, qnl, kps, kn0, kn1, kr_swz, kc_swz, lid);
+    do_qk_half(sf1, HALF_N, qpl, qnl, kps, kn0, kn1, kr_swz, kc_swz, lid);
     splitk_sync();
     if (t + 1 < t_end) {
       tld_k((t + 1) * BN);
@@ -228,9 +227,10 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
   long long const stride_head = (long long)BM * stride_row;
   long long const stride_qb = (long long)H * stride_head;
   long long const stride_bat = (long long)nqb * stride_qb;
-  long long const pbase =
-      (long long)split_id * stride_bat + (long long)bat * stride_bat +
-      (long long)qb * stride_qb + (long long)head * stride_head;
+  long long const pbase = (long long)split_id * stride_bat +
+                          (long long)bat * stride_bat +
+                          (long long)qb * stride_qb +
+                          (long long)head * stride_head;
   int g = lid / 4, t2 = lid % 4;
   {
     int row = wid * 16 + g;
@@ -284,13 +284,12 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
     int const qb,   // bid.y
     int const bat   // bid.z
 ) {
-  // 256 threads = 64 rows × 4 threads/row, each thread does 32 D_V values.
   if (threadIdx.x >= 256) {
     return;
   }
   int const qs = qb * BM;
   int const row = threadIdx.x / 4;
-  int const col_group = threadIdx.x % 4; // 0..3 → starts at d=0,32,64,96
+  int const col_group = threadIdx.x % 4;
   long long const stride_row = D_V + 4;
   long long const stride_head = (long long)BM * stride_row;
   long long const stride_qb = (long long)H * stride_head;
@@ -298,6 +297,7 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   if (qs + row >= q_len) {
     return;
   }
+
   float m_global = -INFINITY, d_global = 0.f;
   float o_local[32];
 #pragma unroll
@@ -307,8 +307,10 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   int const d_start = col_group * 32;
 
   for (int s = 0; s < num_splits; s++) {
-    long long roff = (long long)s * stride_bat + (long long)bat * stride_bat +
-                     (long long)qb * stride_qb + (long long)head * stride_head +
+    long long roff = (long long)s * stride_bat +
+                     (long long)bat * stride_bat +
+                     (long long)qb * stride_qb +
+                     (long long)head * stride_head +
                      (long long)row * stride_row;
     float m_s = -INFINITY, d_s = 0.f;
     if (col_group == 0) {
@@ -348,11 +350,12 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   }
   float dr = (m_global != -INFINITY) ? (1.0f / d_global) : 0.f;
   long long ooff = (long long)bat * q_len * H * D_V +
-                   (long long)(qs + row) * H * D_V + (long long)head * D_V;
+                   (long long)(qs + row) * H * D_V +
+                   (long long)head * D_V;
 #pragma unroll
   for (int d = 0; d < 32; d += 4) {
-    bf16_2 lo = __float22bfloat162_rn(
-        make_float2(o_local[d] * dr, o_local[d + 1] * dr));
+    bf16_2 lo =
+        __float22bfloat162_rn(make_float2(o_local[d] * dr, o_local[d + 1] * dr));
     bf16_2 hi = __float22bfloat162_rn(
         make_float2(o_local[d + 2] * dr, o_local[d + 3] * dr));
     int2 packed;

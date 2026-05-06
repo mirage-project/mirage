@@ -1166,28 +1166,29 @@ class PersistentKernel:
         self,
         q_nope: DTensor,    # [B, q_len, H, 128]
         q_pe: DTensor,      # [B, q_len, H, 64]
-        k: DTensor,         # [B, kv_len, 192]
-        v: DTensor,         # [B, kv_len, 128]
-        output: DTensor,    # [B, q_len, H, 128]
+        k_nope: DTensor,    # [B, kv_len, H, 128]   per-head (kv_b_proj output)
+        k_rope: DTensor,    # [B, kv_len, 1, 64]    shared (rope)
+        v: DTensor,         # [B, kv_len, H, 128]   per-head (kv_b_proj output)
+        output: DTensor,    # [B, q_len,  H, 128]
         mla_params: tuple,  # (num_heads, q_len, kv_len, q_start)
         grid_dim: tuple,    # (H, ceil(q_len/64), B)
         block_dim: tuple,   # (128, 1, 1)
     ):
-        # MLA Chunked Prefill TP=8. Q covers a chunk [q_start, q_start+q_len)
-        # of a longer sequence with KV in [0, kv_len). Causal mask uses
-        # q_start so each chunk attends only to KV positions <= its global qp.
+        # MLA Chunked Prefill TP=8 (true unabsorbed, per-head K/V).
+        # Q covers a chunk [q_start, q_start+q_len), KV covers [0, kv_len).
+        # Causal mask uses q_start so each chunk attends to KV pos <= global qp.
         num_heads, q_len, kv_len, q_start = mla_params
         params = [num_heads, q_len, kv_len, q_start]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        # Kernel slices per-block from full tensors using task metadata.
         tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
         tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
-        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_rope, (-1, -1, -1), -1, True)
         tb_graph.new_input(v, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
-            [q_nope, q_pe, k, v, output], tb_graph
+            [q_nope, q_pe, k_nope, k_rope, v, output], tb_graph
         )
         self.kn_graph.register_task(
             tb_graph, "mla_prefill_tp8_chunked_sm100", params)
@@ -1196,17 +1197,18 @@ class PersistentKernel:
         self,
         q_nope: DTensor,    # [B, q_len, H, 128]
         q_pe: DTensor,      # [B, q_len, H, 64]
-        k: DTensor,         # [B, kv_len, 192]
-        v: DTensor,         # [B, kv_len, 128]
-        partial: DTensor,   # float [num_splits, B, nqb, H, BM, D_V+4]
+        k_nope: DTensor,    # [B, kv_len, H, 128]
+        k_rope: DTensor,    # [B, kv_len, 1, 64]
+        v: DTensor,         # [B, kv_len, H, 128]
+        partial: DTensor,   # float, flat 1D, size num_splits*B*nqb*H*BM*(D_V+4)
         mla_params: tuple,  # (num_heads, q_len, kv_len, q_start, num_splits)
         grid_dim: tuple,    # (H, nqb*num_splits, B)
         block_dim: tuple,   # (128, 1, 1)
     ):
-        # Split-K variant of chunked prefill. Use when chunk * H * B is too
-        # small to fill the GPU (heuristic: total64 < SM count). Each block
-        # processes 1/num_splits of the KV range and writes per-row partial
-        # output (D_V floats + m + d) to `partial`. Pair with reduce layer.
+        # Split-K variant of chunked prefill (per-head K/V). Use when
+        # chunk * H * B is too small to fill the GPU. Each block processes
+        # 1/num_splits of the KV range and writes per-row partial output
+        # (D_V floats + m + d) to `partial`. Pair with reduce layer.
         num_heads, q_len, kv_len, q_start, num_splits = mla_params
         nqb = (q_len + 63) // 64
         params = [num_heads, q_len, kv_len, q_start, num_splits, nqb]
@@ -1214,10 +1216,13 @@ class PersistentKernel:
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
         tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
-        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_rope, (-1, -1, -1), -1, True)
         tb_graph.new_input(v, (-1, -1, -1), -1, True)
         tb_graph.new_input(partial, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([q_nope, q_pe, k, v, partial], tb_graph)
+        self.kn_graph.customized(
+            [q_nope, q_pe, k_nope, k_rope, v, partial], tb_graph
+        )
         self.kn_graph.register_task(
             tb_graph, "mla_prefill_tp8_chunked_splitk_sm100", params)
 

@@ -3,6 +3,11 @@
 // to the MPK __device__ task body. Used to validate the device function in
 // isolation (correctness vs reference + microbench), independent of MPK
 // runtime/scheduling.
+//
+// Per-head DeepSeek MLA layout:
+//   K_nope: [B, kv_len, H, 128]   per-head, 3D TMA
+//   K_rope: [B, kv_len, 1,  64]   shared,   2D TMA
+//   V:      [B, kv_len, H, 128]   per-head, 3D TMA
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
@@ -16,7 +21,8 @@ using bf16 = __nv_bfloat16;
 using namespace kernel::mla_prefill_tp8_chunked;
 
 __global__ __launch_bounds__(NT, 2) void mla_prefill_tp8_chunked_wrapper(
-    const __grid_constant__ CUtensorMap K_tm,
+    const __grid_constant__ CUtensorMap KN_tm,
+    const __grid_constant__ CUtensorMap KR_tm,
     const __grid_constant__ CUtensorMap V_tm,
     bf16 const *__restrict__ Qn,
     bf16 const *__restrict__ Qp,
@@ -26,7 +32,8 @@ __global__ __launch_bounds__(NT, 2) void mla_prefill_tp8_chunked_wrapper(
     int const q_start,
     int const H,
     float const sml2) {
-  mla_prefill_tp8_chunked_sm100_task_impl(&K_tm,
+  mla_prefill_tp8_chunked_sm100_task_impl(&KN_tm,
+                                          &KR_tm,
                                           &V_tm,
                                           Qn,
                                           Qp,
@@ -50,13 +57,14 @@ static void check_cu(CUresult err) {
   }
 }
 
-static CUtensorMap make_kv_tma(void *ptr, int rows, int d_last) {
-  // Same encoding as runtime tma.cuh's TASK_MLA_PREFILL_TP8_CHUNKED case:
-  // gd = (64, rows, d_last/64), 128B swizzle, box = (64, 128, 1).
+// K_nope: 3D, view [kv_len, H, 128] as [kv_len, H*2, 64].
+// V:      3D, same shape as K_nope.
+static CUtensorMap make_per_head_tma(void *ptr, int kv_len, int H, int d_last) {
   CUtensorMap desc;
-  uint64_t gd[3] = {64, (uint64_t)rows, (uint64_t)(d_last / 64)};
-  uint64_t gs[2] = {(uint64_t)d_last * sizeof(bf16), 64 * sizeof(bf16)};
-  uint32_t bd[3] = {64, 128, 1};
+  uint64_t gd[3] = {64, (uint64_t)kv_len, (uint64_t)(H * 2)};
+  uint64_t gs[2] = {(uint64_t)H * (uint64_t)d_last * sizeof(bf16),
+                    64 * sizeof(bf16)};
+  uint32_t bd[3] = {64, (uint32_t)BN, 1};
   uint32_t es[3] = {1, 1, 1};
   CUresult err =
       cuTensorMapEncodeTiled(&desc,
@@ -75,21 +83,47 @@ static CUtensorMap make_kv_tma(void *ptr, int rows, int d_last) {
   return desc;
 }
 
-void mla_prefill_tp8_chunked_test(torch::Tensor Qn, // [B, q_len, H, 128]
-                                  torch::Tensor Qp, // [B, q_len, H, 64]
-                                  torch::Tensor K,  // [B, kv_len, 192]
-                                  torch::Tensor V,  // [B, kv_len, 128]
-                                  torch::Tensor O,  // [B, q_len, H, 128]
+// K_rope: 2D, view [kv_len, 1, 64] as [kv_len, 64].
+static CUtensorMap make_kr_tma(void *ptr, int kv_len) {
+  CUtensorMap desc;
+  uint64_t gd[2] = {64, (uint64_t)kv_len};
+  uint64_t gs[1] = {64 * sizeof(bf16)};
+  uint32_t bd[2] = {64, (uint32_t)BN};
+  uint32_t es[2] = {1, 1};
+  CUresult err =
+      cuTensorMapEncodeTiled(&desc,
+                             CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                             2,
+                             ptr,
+                             gd,
+                             gs,
+                             bd,
+                             es,
+                             CU_TENSOR_MAP_INTERLEAVE_NONE,
+                             CU_TENSOR_MAP_SWIZZLE_128B,
+                             CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                             CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA);
+  check_cu(err);
+  return desc;
+}
+
+void mla_prefill_tp8_chunked_test(torch::Tensor Qn,     // [B, q_len, H, 128]
+                                  torch::Tensor Qp,     // [B, q_len, H, 64]
+                                  torch::Tensor K_nope, // [B, kv_len, H, 128]
+                                  torch::Tensor K_rope, // [B, kv_len, 1, 64]
+                                  torch::Tensor V,      // [B, kv_len, H, 128]
+                                  torch::Tensor O,      // [B, q_len, H, 128]
                                   int64_t q_start,
                                   double sm_scale) {
   int B = Qn.size(0);
   int q_len = Qn.size(1);
   int H = Qn.size(2);
-  int kv_len = K.size(1);
+  int kv_len = K_nope.size(1);
   float sml2 = (float)sm_scale * 1.44269504089f;
 
-  CUtensorMap K_tm = make_kv_tma(K.data_ptr(), kv_len, D_QK);
-  CUtensorMap V_tm = make_kv_tma(V.data_ptr(), kv_len, D_V);
+  CUtensorMap KN_tm = make_per_head_tma(K_nope.data_ptr(), kv_len, H, D_QK_NOPE);
+  CUtensorMap KR_tm = make_kr_tma(K_rope.data_ptr(), kv_len);
+  CUtensorMap V_tm = make_per_head_tma(V.data_ptr(), kv_len, H, D_V);
 
   cudaFuncSetAttribute(mla_prefill_tp8_chunked_wrapper,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -100,7 +134,8 @@ void mla_prefill_tp8_chunked_test(torch::Tensor Qn, // [B, q_len, H, 128]
   dim3 block(NT, 1, 1);
 
   mla_prefill_tp8_chunked_wrapper<<<grid, block, SMEM_SZ>>>(
-      K_tm,
+      KN_tm,
+      KR_tm,
       V_tm,
       (bf16 const *)Qn.data_ptr(),
       (bf16 const *)Qp.data_ptr(),
@@ -120,7 +155,8 @@ void mla_prefill_tp8_chunked_test(torch::Tensor Qn, // [B, q_len, H, 128]
 namespace splitk_ns = ::kernel::mla_prefill_tp8_chunked_splitk;
 
 __global__ __launch_bounds__(NT, 2) void mla_prefill_tp8_chunked_splitk_wrapper(
-    const __grid_constant__ CUtensorMap K_tm,
+    const __grid_constant__ CUtensorMap KN_tm,
+    const __grid_constant__ CUtensorMap KR_tm,
     const __grid_constant__ CUtensorMap V_tm,
     bf16 const *__restrict__ Qn,
     bf16 const *__restrict__ Qp,
@@ -132,7 +168,8 @@ __global__ __launch_bounds__(NT, 2) void mla_prefill_tp8_chunked_splitk_wrapper(
     int const num_splits,
     int const nqb,
     float const sml2) {
-  splitk_ns::mla_prefill_tp8_chunked_splitk_sm100_task_impl(&K_tm,
+  splitk_ns::mla_prefill_tp8_chunked_splitk_sm100_task_impl(&KN_tm,
+                                                            &KR_tm,
                                                             &V_tm,
                                                             Qn,
                                                             Qp,
@@ -171,7 +208,8 @@ __global__ __launch_bounds__(256) void mla_prefill_tp8_chunked_reduce_wrapper(
 
 void mla_prefill_tp8_chunked_splitk_test(torch::Tensor Qn,
                                          torch::Tensor Qp,
-                                         torch::Tensor K,
+                                         torch::Tensor K_nope,
+                                         torch::Tensor K_rope,
                                          torch::Tensor V,
                                          torch::Tensor O,
                                          torch::Tensor partial,
@@ -181,12 +219,13 @@ void mla_prefill_tp8_chunked_splitk_test(torch::Tensor Qn,
   int B = Qn.size(0);
   int q_len = Qn.size(1);
   int H = Qn.size(2);
-  int kv_len = K.size(1);
+  int kv_len = K_nope.size(1);
   int nqb = (q_len + BM - 1) / BM;
   float sml2 = (float)sm_scale * 1.44269504089f;
 
-  CUtensorMap K_tm = make_kv_tma(K.data_ptr(), kv_len, D_QK);
-  CUtensorMap V_tm = make_kv_tma(V.data_ptr(), kv_len, D_V);
+  CUtensorMap KN_tm = make_per_head_tma(K_nope.data_ptr(), kv_len, H, D_QK_NOPE);
+  CUtensorMap KR_tm = make_kr_tma(K_rope.data_ptr(), kv_len);
+  CUtensorMap V_tm = make_per_head_tma(V.data_ptr(), kv_len, H, D_V);
 
   cudaFuncSetAttribute(mla_prefill_tp8_chunked_splitk_wrapper,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -196,7 +235,8 @@ void mla_prefill_tp8_chunked_splitk_test(torch::Tensor Qn,
   dim3 grid_sk(H, nqb * (int)num_splits, B);
   dim3 block_sk(NT, 1, 1);
   mla_prefill_tp8_chunked_splitk_wrapper<<<grid_sk, block_sk, SMEM_SZ>>>(
-      K_tm,
+      KN_tm,
+      KR_tm,
       V_tm,
       (bf16 const *)Qn.data_ptr(),
       (bf16 const *)Qp.data_ptr(),
