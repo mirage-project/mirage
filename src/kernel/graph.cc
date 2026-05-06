@@ -806,6 +806,14 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
+  } else if (name == "dsv4_c4_compress_sm100") {
+    int variant_id = task_register->register_dsv4_c4_compress_sm100_task(
+        customized->bgraph, params);
+    // Seven mutable/input tensors. The first implementation writes state/cache
+    // through input_ptrs to stay within MAX_OUTPUTS_PER_TASK and follow the
+    // existing MPK KV-cache mutation convention.
+    task_config[op] =
+        std::make_tuple(7, 0, TASK_DSV4_C4_COMPRESS_SM100, variant_id);
   }
   // MTP tasks
   else if (name == "mtp_verify_strict") {

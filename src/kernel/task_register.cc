@@ -4300,6 +4300,43 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
                                code.to_string());
 }
 
+int TaskRegister::register_dsv4_c4_compress_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // DeepSeek V4 Flash Base C4 compressor skeleton.
+  //
+  // params[0]: head_dim (512)
+  // params[1]: rope_head_dim (64)
+  // params[2]: kv_score_dim (2048 = 4 * head_dim)
+  // params[3]: c4_page_size (implementation decision; default test uses 128)
+  assert(params.size() == 4);
+
+  int head_dim = params[0];
+  int rope_head_dim = params[1];
+  int kv_score_dim = params[2];
+  int c4_page_size = params[3];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  kernel::dsv4_c4_compress_sm100_task_impl<$, $, $, $>(",
+         head_dim,
+         rope_head_dim,
+         kv_score_dim,
+         c4_page_size);
+  code.e("      task_desc->input_ptrs[0],"); // kv_score
+  code.e("      task_desc->input_ptrs[1],"); // token_meta
+  code.e("      task_desc->input_ptrs[2],"); // state_cache
+  code.e("      task_desc->input_ptrs[3],"); // c4_cache
+  code.e("      task_desc->input_ptrs[4],"); // ape
+  code.e("      task_desc->input_ptrs[5],"); // norm_weight
+  code.e("      task_desc->input_ptrs[6],"); // rope_cos_sin
+  code.e("      runtime_config.qo_indptr_buffer,");
+  code.e("      bi_);");
+  code.e("}");
+  return register_task_variant(TASK_DSV4_C4_COMPRESS_SM100, code.to_string());
+}
+
 int TaskRegister::register_mtp_verify_strict_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_draft_tokens (1-7)

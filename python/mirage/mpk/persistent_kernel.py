@@ -1048,6 +1048,70 @@ class PersistentKernel:
             [c_latent_new, k_pe_new, paged_cache, ckv_sep, kpe_sep], tb_graph)
         self.kn_graph.register_task(tb_graph, "mla_kv_gather_split_sm100", params)
 
+    # DeepSeek V4 C4 KV compression/cache-insert skeleton.
+    def dsv4_c4_compress_layer(
+        self,
+        kv_score: DTensor,
+        token_meta: DTensor,
+        state_cache: DTensor,
+        c4_cache: DTensor,
+        ape: DTensor,
+        norm_weight: DTensor,
+        rope_cos_sin: DTensor,
+        dsv4_params: tuple = (512, 64, 2048, 128),
+        grid_dim: tuple = None,
+        block_dim: tuple = (128, 1, 1),
+    ):
+        """Register the DeepSeek V4 Flash Base C4 compressor task.
+
+        This is a draft-PR wrapper for the SM100 C4 compressor/cache-insert
+        task. The CUDA body is currently a no-op stub with detailed TODOs.
+
+        Args:
+            kv_score: [max_num_batched_tokens, 2048], produced by fused
+                wkv/wgate in the eventual V4 builder.
+            token_meta: int32 [max_num_batched_tokens, 2], layout
+                {absolute_position, physical_c4_slot_or_minus_one}.
+            state_cache: float32 [max_requests, 8, 2048], mutable C4 state.
+            c4_cache: bf16 [num_c4_pages, c4_page_size, 512], mutable output
+                cache for the correctness-first implementation.
+            ape: float32 [8, 512], prepacked from official HF ape [4, 1024].
+            norm_weight: [512], RMSNorm weight.
+            rope_cos_sin: float32 [max_seq_len, 64], GPT-J style cos/sin.
+            dsv4_params: (head_dim, rope_head_dim, kv_score_dim, c4_page_size).
+        """
+        if self.target_cc < 100:
+            raise ValueError(
+                f"dsv4_c4_compress_sm100 requires SM100+, got CC {self.target_cc}"
+            )
+
+        head_dim, rope_head_dim, kv_score_dim, c4_page_size = dsv4_params
+        params = [head_dim, rope_head_dim, kv_score_dim, c4_page_size]
+        if grid_dim is None:
+            grid_dim = (self.max_num_batched_requests, 1, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(kv_score, (-1, 1, -1), -1, True)
+        tb_graph.new_input(token_meta, (-1, 1, -1), -1, True)
+        tb_graph.new_input(state_cache, (-1, -1, -1), -1, True)
+        tb_graph.new_input(c4_cache, (-1, 2, -1), -1, True)
+        tb_graph.new_input(ape, (-1, 1, -1), -1, True)
+        tb_graph.new_input(norm_weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(rope_cos_sin, (-1, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                kv_score,
+                token_meta,
+                state_cache,
+                c4_cache,
+                ape,
+                norm_weight,
+                rope_cos_sin,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "dsv4_c4_compress_sm100", params)
+
     def mla_decode_layer(
         self,
         q_input: DTensor,         # Q tensor (attached with TMA desc)

@@ -205,6 +205,10 @@ enum TaskType {
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
   TASK_NVSHMEM_TILE_ALLREDUCE = 302,
   TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
+  // DeepSeek V4 tasks
+  TASK_DSV4_TASK_BEGIN = 350, // begin placeholder, not a real task
+  TASK_DSV4_C4_COMPRESS_SM100 = 351,
+  TASK_DSV4_TASK_END = 399, // end placeholder, not a real task
 };
 
 enum EventType {

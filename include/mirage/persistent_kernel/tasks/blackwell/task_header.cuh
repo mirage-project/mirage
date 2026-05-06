@@ -30,6 +30,7 @@
 #include "linear_fp8_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
 #include "mla_dispatch_sm100.cuh"
+#include "deepseek_v4/dsv4_c4_compress_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"
 #include "mla_kv_cache_gather_split_sm100.cuh"
 // sm100_ptx.cuh must be included BEFORE mla_mtp_decode_sm100.cuh at top level
