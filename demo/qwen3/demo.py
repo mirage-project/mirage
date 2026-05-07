@@ -1,5 +1,6 @@
+from models.configuration_qwen3 import Qwen3Config
 from models.modeling_qwen3 import Qwen3ForCausalLM
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer
 from safetensors.torch import load_model
 import torch
 import torch.distributed as dist
@@ -33,6 +34,13 @@ MAX_SAVE_TOKENS = 100
 
 # print limitation
 # torch.set_printoptions(threshold=2000)
+
+
+def load_qwen3_config(model_name_or_path: str) -> Qwen3Config:
+    config = Qwen3Config.from_pretrained(model_name_or_path)
+    if not hasattr(config, "pad_token_id") or config.pad_token_id is None:
+        config.pad_token_id = config.eos_token_id
+    return config
 
 def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
@@ -180,7 +188,7 @@ if __name__ == "__main__":
           if args.model_path is not None:
               # load model locally (necessary for multi-GPU case)
               print(f"Load model from model path: {args.model_path}")
-              config = AutoConfig.from_pretrained(args.model_path)
+              config = load_qwen3_config(args.model_path)
               model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
               load_model(
                   model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
@@ -193,7 +201,7 @@ if __name__ == "__main__":
     else: # Use dynamic shard loader to load directly from HF and shard.
         print("Detected multi-GPU run without a local path specified. Will use the DynamicShardLoader class.")
         with torch.device("meta"):
-            config = AutoConfig.from_pretrained(model_name)
+            config = load_qwen3_config(model_name)
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
 
         device = torch.device(f"cuda:{rank}")
