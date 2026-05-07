@@ -130,8 +130,11 @@ export NVSHMEM_LIB_PATH="$NVSHMEM_HOME/lib/x86_64-linux-gnu/nvshmem/13"
 export LD_LIBRARY_PATH="$NVSHMEM_LIB_PATH:$MPI_HOME/lib:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="$NVSHMEM_PRELOAD"
 export NVSHMEM_SYMMETRIC_SIZE=4294967296
-# CUDA toolchain for any nvcc the runtime may invoke
-export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.8}"
+# CUDA toolchain for the runtime nvcc compile of the megakernel.
+# Default to 13.2 — CUDA 12.8 nvcc segfaults on the post-PR674 megakernel
+# (verified 2026-05-07 with workload A_mtp0). 13.2 + NVSHMEM 3.6.5 is the
+# user-validated combination per `project_tp_rdc_hang.md`.
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.2}"
 export PATH="$CUDA_HOME/bin:$PATH"
 
 MPI_ENV_ARGS=(
@@ -189,11 +192,13 @@ run_workload() {
     local log="$OUT_DIR/${tag}.log"
     local mtp_args=""
     if (( mtp > 0 )); then
-        mtp_args="--mtp $mtp --num-speculative-tokens 3"
+        # demo's --mtp N: N is both the speculative-decoding mode and the
+        # spec_length (number of draft steps). Older demos used a separate
+        # --num-speculative-tokens flag; this revision folds it in.
+        mtp_args="--mtp $mtp"
     fi
-    if [[ -f "$log" ]] && grep -qE "REGRESSION_RESULT=(PASS|FAIL|HANG)" "$log"; then
-        local prev=$(grep -oE "REGRESSION_RESULT=[A-Z]+" "$log" | tail -1)
-        echo "[$tag] CACHED $prev (log $log)" | tee -a "$SUMMARY"
+    if [[ -f "$log" ]] && grep -qE "REGRESSION_RESULT=PASS" "$log"; then
+        echo "[$tag] CACHED PASS (log $log)" | tee -a "$SUMMARY"
         return 0
     fi
     if ! acquire_gpus "$tp"; then
@@ -245,9 +250,8 @@ run_workload() {
 run_qwen3() {
     local tag=$1
     local log="$OUT_DIR/${tag}.log"
-    if [[ -f "$log" ]] && grep -qE "REGRESSION_RESULT=(PASS|FAIL|HANG)" "$log"; then
-        local prev=$(grep -oE "REGRESSION_RESULT=[A-Z]+" "$log" | tail -1)
-        echo "[$tag] CACHED $prev (log $log)" | tee -a "$SUMMARY"
+    if [[ -f "$log" ]] && grep -qE "REGRESSION_RESULT=PASS" "$log"; then
+        echo "[$tag] CACHED PASS (log $log)" | tee -a "$SUMMARY"
         return 0
     fi
     if ! acquire_gpus 1; then
