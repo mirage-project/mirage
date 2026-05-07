@@ -404,6 +404,12 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.y;
               task.task_metadata.merge_task_offset = bid.z;
             }
+            // FP8 dense GEMM: grid=(num_workers, 1, 1). request_id = worker
+            // index; kernel uses it as the persistent loop's stride offset.
+            if (task_type == TASK_FP8_GEMM_DENSE_SMALLM_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // MTP decode: grid=(sk, num_head_groups, B)
             // request_id=gi (head_group from bid.y), kv_idx=si (split from
             // bid.x) expert_offset stores hpb for TMA box dimension
@@ -1205,6 +1211,11 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
+    // Dense FP8 GEMM (smallm + mediumm both need TMA, outside SM100_TMA range)
+    code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
     code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
@@ -1834,6 +1845,10 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_SM100] = "TASK_LINEAR_FP8_SM100";
   task_type_to_name[TASK_LINEAR_FP8_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_SMALLM_SM100] =
+      "TASK_FP8_GEMM_DENSE_SMALLM_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_SM100] =
+      "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

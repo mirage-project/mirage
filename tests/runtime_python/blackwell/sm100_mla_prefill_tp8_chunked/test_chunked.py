@@ -32,9 +32,13 @@ def make_inputs(B, q_len, kv_len, H, device="cuda", dtype=torch.bfloat16, seed=0
     g = torch.Generator(device=device).manual_seed(seed)
     qn = torch.randn(B, q_len, H, D_QK_NOPE, dtype=dtype, device=device, generator=g) * 0.2
     qp = torch.randn(B, q_len, H, D_QK_ROPE, dtype=dtype, device=device, generator=g) * 0.2
-    k_nope = torch.randn(B, kv_len, H, D_QK_NOPE, dtype=dtype, device=device, generator=g) * 0.2
+    # vLLM-style fused kv_combined layout: K_nope and V interleaved per head.
+    # kv_combined[..., :128] is K_nope, kv_combined[..., 128:] is V.
+    kv_combined = torch.randn(B, kv_len, H, D_QK_NOPE + D_V, dtype=dtype,
+                              device=device, generator=g) * 0.2
+    k_nope = kv_combined[..., :D_QK_NOPE]            # strided view, head stride=256
+    v = kv_combined[..., D_QK_NOPE:]                 # strided view, head stride=256
     k_rope = torch.randn(B, kv_len, 1, D_QK_ROPE, dtype=dtype, device=device, generator=g) * 0.2
-    v = torch.randn(B, kv_len, H, D_V, dtype=dtype, device=device, generator=g) * 0.2
     return qn, qp, k_nope, k_rope, v
 
 

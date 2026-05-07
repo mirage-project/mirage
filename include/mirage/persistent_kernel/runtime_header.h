@@ -204,7 +204,16 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 297,
   // Reduce kernel: combines num_splits partial outputs into final bf16 O.
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 298,
-  TASK_SM100_TASK_END = 299, // SM100 end placeholder, not a real task
+  // Dense FP8 block-scaled GEMM, small-M variant (M ≤ 512 sweet spot).
+  // 1×128 act scale, 128×128 wt scale, fp32. Persistent kernel: registered
+  // with grid_dim=(num_workers, 1, 1); each task instance walks output
+  // tiles striding by num_workers.
+  TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 299,
+  // Medium-M variant of dense FP8 GEMM (M=512..2048 sweet spot). Same
+  // scale layout as smallm; NE=4 TMEM stages instead of 2.
+  // (300-349 overlaps with multigpu placeholder range; use 310 to dodge.)
+  TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 310,
+  TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

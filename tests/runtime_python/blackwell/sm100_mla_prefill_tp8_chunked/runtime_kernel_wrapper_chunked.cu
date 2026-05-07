@@ -57,19 +57,23 @@ static void check_cu(CUresult err) {
   }
 }
 
-// K_nope: 3D, view [kv_len, H, 128] as [kv_len, H*2, 64].
-// V:      3D, same shape as K_nope.
-static CUtensorMap make_per_head_tma(void *ptr, int kv_len, int H, int d_last) {
+// 4D TMA into the fused kv_b_proj output `kv_combined [S, H, qk_nope+v_head=256]`.
+// K_nope view starts at base offset 0; V view starts at base offset
+// qk_nope_head_dim (128 elements). Both share the same H*256 row stride.
+// `ptr` is the view base (already shifted by 128 elements for V).
+static CUtensorMap make_per_head_tma(void *ptr, int kv_len, int H, int /*d_last*/) {
   CUtensorMap desc;
-  uint64_t gd[3] = {64, (uint64_t)kv_len, (uint64_t)(H * 2)};
-  uint64_t gs[2] = {(uint64_t)H * (uint64_t)d_last * sizeof(bf16),
-                    64 * sizeof(bf16)};
-  uint32_t bd[3] = {64, (uint32_t)BN, 1};
-  uint32_t es[3] = {1, 1, 1};
+  constexpr int FUSED_DIM = 256;
+  uint64_t gd[4] = {64, (uint64_t)kv_len, 2, (uint64_t)H};
+  uint64_t gs[3] = {(uint64_t)H * FUSED_DIM * sizeof(bf16),
+                    64 * sizeof(bf16),
+                    (uint64_t)FUSED_DIM * sizeof(bf16)};
+  uint32_t bd[4] = {64, (uint32_t)BN, 1, 1};
+  uint32_t es[4] = {1, 1, 1, 1};
   CUresult err =
       cuTensorMapEncodeTiled(&desc,
                              CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-                             3,
+                             4,
                              ptr,
                              gd,
                              gs,

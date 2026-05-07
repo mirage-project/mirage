@@ -61,7 +61,7 @@ using kernel::mla_prefill_tp8_chunked::Q_NOPE_SZ;
 using kernel::mla_prefill_tp8_chunked::SMEM_SZ;
 using kernel::mla_prefill_tp8_chunked::swz;
 using kernel::mla_prefill_tp8_chunked::tma2d;
-using kernel::mla_prefill_tp8_chunked::tma3d;
+using kernel::mla_prefill_tp8_chunked::tma4d;
 using kernel::mla_prefill_tp8_chunked::TMA_BLK;
 using kernel::mla_prefill_tp8_chunked::V0_OFF;
 using kernel::mla_prefill_tp8_chunked::V1_OFF;
@@ -177,16 +177,16 @@ __device__ __noinline__ void
   auto tld_k = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbk, 3 * TMA_BLK);
-      tma3d(KN_tm_ptr, kn0, mbk, 0, kvb, head * 2 + 0);
-      tma3d(KN_tm_ptr, kn1, mbk, 0, kvb, head * 2 + 1);
+      tma4d(KN_tm_ptr, kn0, mbk, 0, kvb, 0, head);
+      tma4d(KN_tm_ptr, kn1, mbk, 0, kvb, 1, head);
       tma2d(KR_tm_ptr, kps, mbk, 0, kvb);
     }
   };
   auto tld_v = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbv, 2 * TMA_BLK);
-      tma3d(V_tm_ptr, v0s, mbv, 0, kvb, head * 2 + 0);
-      tma3d(V_tm_ptr, v1s, mbv, 0, kvb, head * 2 + 1);
+      tma4d(V_tm_ptr, v0s, mbv, 0, kvb, 0, head);
+      tma4d(V_tm_ptr, v1s, mbv, 0, kvb, 1, head);
     }
   };
   if (nt > 0) {

@@ -522,11 +522,17 @@ class PersistentKernel:
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
         strides = tuple([s for s in torch_tensor.stride()])
-        # Check layout: row-major or column-major (for FP8 scale tensors)
-        is_row_major = all(strides[d] == strides[d + 1] * dims[d + 1] for d in range(len(dims) - 1))
+        # Accept row-major (incl. padded/strided views like kv_combined[..., :128]
+        # where head stride > head dim) or column-major (FP8 scale tensors).
+        is_row_major_or_view = (
+            strides[-1] == 1
+            and all(strides[d] >= strides[d + 1] * dims[d + 1]
+                    for d in range(len(dims) - 1))
+        )
         is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
-        assert is_row_major or is_col_major, \
-            f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
+        assert is_row_major_or_view or is_col_major, \
+            f"Tensor must be row-major (or strided view) or column-major, " \
+            f"got dims={dims} strides={strides}"
         dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
@@ -1692,6 +1698,55 @@ class PersistentKernel:
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_sm100", params)
+
+    def _fp8_gemm_dense_layer_impl(
+        self,
+        task_name: str,
+        input_fp8: DTensor,    # [M, K] fp8 e4m3
+        weight_fp8: DTensor,   # [N, K] fp8 e4m3
+        input_scale: DTensor,  # [M, K/128] float32 (1×128 group act scale)
+        weight_scale: DTensor, # [N/128, K/128] float32 (128×128 block wt scale)
+        output: DTensor,       # [M, N] bf16
+        num_workers: int,      # persistent stride
+    ):
+        # Persistent kernel: each task instance walks output tiles striding by
+        # num_workers. Register grid_dim=(num_workers, 1, 1) so each MPK
+        # worker block becomes one task instance with a unique request_id.
+        assert input_fp8.num_dims == 2
+        assert weight_fp8.num_dims == 2
+        assert output.num_dims == 2
+        M = input_fp8.dim(0)
+        K = input_fp8.dim(1)
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        block_dim = (256, 1, 1)  # fixed by kernel role layout (8 warps)
+        params = [M, N, K, num_workers]
+        grid_dim = (num_workers, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def fp8_gemm_dense_smallm_layer(self, input_fp8, weight_fp8, input_scale,
+                                    weight_scale, output, num_workers):
+        # Small-M variant (M ≤ 512 sweet spot). NE=2 TMEM stages.
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_smallm_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers)
+
+    def fp8_gemm_dense_mediumm_layer(self, input_fp8, weight_fp8, input_scale,
+                                     weight_scale, output, num_workers):
+        # Medium-M variant (M=512..2048 sweet spot). NE=4 TMEM stages.
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_mediumm_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers)
 
     def linear_fp8_with_residual_layer(
         self,

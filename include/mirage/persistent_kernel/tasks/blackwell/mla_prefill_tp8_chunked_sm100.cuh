@@ -172,13 +172,15 @@ __host__ __device__ __forceinline__ int cdiv(int a, int b) {
 }
 
 __device__ __forceinline__ void
-    tma3d(CUtensorMap const *d, int sa, int mb, int c0, int c1, int c2) {
-  asm volatile("cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_"
-               "tx::bytes [%0],[%1,{%2,%3,%4}],[%5];" ::"r"(sa),
+    tma4d(CUtensorMap const *d, int sa, int mb,
+          int c0, int c1, int c2, int c3) {
+  asm volatile("cp.async.bulk.tensor.4d.shared::cta.global.mbarrier::complete_"
+               "tx::bytes [%0],[%1,{%2,%3,%4,%5}],[%6];" ::"r"(sa),
                "l"((uint64_t)d),
                "r"(c0),
                "r"(c1),
                "r"(c2),
+               "r"(c3),
                "r"(mb)
                : "memory");
 }
@@ -501,22 +503,24 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
   int nt = cdiv(kvend, BN);
   int mphk = 0, mphv = 0;
 
-  // Per-head K_nope is loaded with TMA dim2 = head*2 + half (kv_b_proj output
-  // stored as [kv_len, H, 128] viewed as [kv_len, H*2, 64]). K_rope uses 2D
-  // TMA (shared across heads). V follows the same per-head layout as K_nope.
+  // K_nope and V are loaded with 4D TMA (dim layout [BK=64, kv_len, 2 halves,
+  // H heads]) so the kernel can read interleaved kv_b_proj output [kv_len, H,
+  // qk_nope+v_head] as a strided view: K_nope at offset 0 with head stride
+  // 256 elements, V at offset +qk_nope_head_dim (=128) with same head stride.
+  // K_rope is shared across heads and stays 2D.
   auto tld_k = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbk, 3 * TMA_BLK);
-      tma3d(KN_tm_ptr, kn0, mbk, 0, kvb, head * 2 + 0);
-      tma3d(KN_tm_ptr, kn1, mbk, 0, kvb, head * 2 + 1);
+      tma4d(KN_tm_ptr, kn0, mbk, 0, kvb, 0, head);
+      tma4d(KN_tm_ptr, kn1, mbk, 0, kvb, 1, head);
       tma2d(KR_tm_ptr, kps, mbk, 0, kvb);
     }
   };
   auto tld_v = [&](int kvb) {
     if (tid == 0) {
       mbar_tx(mbv, 2 * TMA_BLK);
-      tma3d(V_tm_ptr, v0s, mbv, 0, kvb, head * 2 + 0);
-      tma3d(V_tm_ptr, v1s, mbv, 0, kvb, head * 2 + 1);
+      tma4d(V_tm_ptr, v0s, mbv, 0, kvb, 0, head);
+      tma4d(V_tm_ptr, v1s, mbv, 0, kvb, 1, head);
     }
   };
   if (nt > 0) {

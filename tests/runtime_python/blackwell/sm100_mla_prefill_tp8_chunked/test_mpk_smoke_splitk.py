@@ -50,9 +50,12 @@ def main():
     torch.manual_seed(0)
     q_nope = torch.randn(B * q_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
     q_pe = torch.randn(B * q_len, H, D_QK_ROPE, dtype=dt, device=device) * 0.2
-    k_nope = torch.randn(B * kv_len, H, D_QK_NOPE, dtype=dt, device=device) * 0.2
+    # vLLM-style fused kv_combined: K_nope and V interleaved per head.
+    kv_combined = torch.randn(B * kv_len, H, D_QK_NOPE + D_V,
+                              dtype=dt, device=device) * 0.2
+    k_nope = kv_combined[..., :D_QK_NOPE]   # strided view
+    v = kv_combined[..., D_QK_NOPE:]        # strided view
     k_rope = torch.randn(B * kv_len, 1, D_QK_ROPE, dtype=dt, device=device) * 0.2
-    v = torch.randn(B * kv_len, H, D_V, dtype=dt, device=device) * 0.2
     o = torch.zeros(B * q_len, H, D_V, dtype=dt, device=device)
 
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)

@@ -1318,22 +1318,35 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                               oob);
         assert(err == CUDA_SUCCESS);
       } else {
-        // K_nope (param 2) or V (param 4): per-head, 3D.
-        // Tensor layout: [S, H, d_last] where d_last = 128.
-        // Viewed for TMA as [S, H*2, 64]: dim2 = head*2 + half.
+        // K_nope (param 2) or V (param 4): strided view into the fused
+        // kv_b_proj output `kv_combined [S, H, qk_nope+v_head=256]` (vLLM
+        // layout). DTensor shape is [S, H, qk_nope=128] for K_nope and
+        // [S, H, v_head=128] for V; underlying row stride is H*256, NOT
+        // H*128, because K_nope and V are interleaved per head.
+        // V's base_ptr is already shifted by qk_nope (128 elements / 256
+        // bytes) on the caller side, so the encoder treats both uniformly.
+        //
+        // TMA layout: 4D [BK=64, S, 2 halves, H heads]
+        //   gs[0] = H * 256 * sizeof(bf16)  // row stride (interleaved buffer)
+        //   gs[1] = BK * sizeof(bf16) = 128 // half stride
+        //   gs[2] = 256 * sizeof(bf16) = 512 // head stride (over both K_nope+V)
         int total_rows = tensor_desc.dim[0]; // S
         int H_local = tensor_desc.dim[1];    // num_heads per rank
-        int d_last = tensor_desc.dim[2];     // 128
-        int num_blocks = H_local * (d_last / BK); // H * 2
-        uint64_t gd[3] = {
-            (uint64_t)BK, (uint64_t)total_rows, (uint64_t)num_blocks};
-        uint64_t gs[2] = {(uint64_t)H_local * d_last * 2,
-                          (uint64_t)BK * 2};
-        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BN_BOX, 1};
-        uint32_t es[3] = {1, 1, 1};
+        int d_last = tensor_desc.dim[2];     // 128 (qk_nope or v_head)
+        int n_halves = d_last / BK;          // 2
+        constexpr int FUSED_DIM = 256;       // qk_nope + v_head
+        uint64_t gd[4] = {(uint64_t)BK,
+                          (uint64_t)total_rows,
+                          (uint64_t)n_halves,
+                          (uint64_t)H_local};
+        uint64_t gs[3] = {(uint64_t)H_local * FUSED_DIM * 2,
+                          (uint64_t)BK * 2,
+                          (uint64_t)FUSED_DIM * 2};
+        uint32_t bd[4] = {(uint32_t)BK, (uint32_t)BN_BOX, 1, 1};
+        uint32_t es[4] = {1, 1, 1, 1};
         CUresult err = cuTensorMapEncodeTiled(tma_desc,
                                               fmt,
-                                              3,
+                                              4,
                                               tensor_desc.base_ptr,
                                               gd,
                                               gs,
@@ -1345,6 +1358,40 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                               oob);
         assert(err == CUDA_SUCCESS);
       }
+      break;
+    }
+    case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100: {
+      // Dense FP8 GEMM: 2D uint8 (e4m3 raw bytes) with 128B swizzle, box
+      // (128, 128). Same encoding for A [M, K] and B [N, K]; param_id 0=A, 1=B.
+      constexpr int BK_BOX = 128;
+      constexpr int OUTER_BOX = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob =
+          CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+      int outer = tensor_desc.dim[0]; // M (param 0=A) or N (param 1=B)
+      int K_local = tensor_desc.dim[1];
+      uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
+      uint64_t gs[1] = {(uint64_t)K_local}; // bytes per row (1 byte/element)
+      uint32_t bd[2] = {BK_BOX, OUTER_BOX};
+      uint32_t es[2] = {1, 1};
+      CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                            fmt,
+                                            2,
+                                            tensor_desc.base_ptr,
+                                            gd,
+                                            gs,
+                                            bd,
+                                            es,
+                                            interleave,
+                                            swizzle,
+                                            l2,
+                                            oob);
+      assert(err == CUDA_SUCCESS);
       break;
     }
     case TASK_MLA_MTP_DECODE_TP2_SM100:
@@ -1690,6 +1737,17 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // Per-head unabsorbed: [0]Qn, [1]Qp, [2]K_nope, [3]K_rope, [4]V.
       // K_nope/K_rope/V all use TMA (with different layouts).
       for (size_t param_id = 2; param_id < 5; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100: {
+      // [0] A_fp8 [M, K] uint8 (e4m3 raw), [1] B_fp8 [N, K] uint8.
+      // Both use 2D TMA with 128B-swizzle, box=(128, 128).
+      // sa (param 2) and sb (param 3) are direct LDG, no TMA.
+      for (size_t param_id = 0; param_id < 2; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }

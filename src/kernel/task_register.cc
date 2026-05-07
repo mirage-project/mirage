@@ -4313,6 +4313,54 @@ int TaskRegister::register_linear_fp8_sm100_task(
   }
 }
 
+// Shared codegen for both dense FP8 GEMM variants. params: [M, N, K,
+// num_workers]. Inputs: [0] A_fp8 [M,K] TMA, [1] B_fp8 [N,K] TMA,
+// [2] sa [M,K/128] fp32 LDG, [3] sb [N/128,K/128] fp32 LDG.
+// Output: [0] C_bf16 [M,N].
+static int register_fp8_gemm_dense_variant(TaskRegister *self,
+                                           std::vector<int> const &params,
+                                           char const *namespace_name,
+                                           char const *fn_name,
+                                           TaskType task_type) {
+  assert(params.size() == 4);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::$::$<128, 4>(", namespace_name, fn_name);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),"); // B
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),"); // sa
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),"); // sb
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // C
+  code.e("    $,", M);
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,"); // worker_idx
+  code.e("    $);", num_workers);
+  return self->register_task_variant(task_type, code.to_string());
+}
+
+int TaskRegister::register_fp8_gemm_dense_smallm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_variant(
+      this, params, "fp8_gemm_dense_smallm",
+      "fp8_gemm_dense_smallm_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_SMALLM_SM100);
+}
+
+int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_variant(
+      this, params, "fp8_gemm_dense_mediumm",
+      "fp8_gemm_dense_mediumm_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)
