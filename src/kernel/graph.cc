@@ -670,6 +670,23 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_sinkhorn_sm100_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SINKHORN_SM100, variant_id);
+  } else if (name == "mhc_post_sm100") {
+    int variant_id =
+        task_register->register_mhc_post_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 1, TASK_MHC_POST_SM100, variant_id);
+  } else if (name == "mhc_rmsnorm_sm100") {
+    int variant_id = task_register->register_mhc_rmsnorm_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_MHC_RMSNORM_SM100, variant_id);
+  } else if (name == "mhc_tail_sm100") {
+    int variant_id =
+        task_register->register_mhc_tail_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 3, TASK_MHC_TAIL_SM100, variant_id);
+  } else if (name == "mhc_linear_sm100") {
+    int variant_id = task_register->register_mhc_linear_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_MHC_LINEAR_SM100, variant_id);
   } else if (name == "mtp_verify_probabilistic") {
     int variant_id = task_register->register_mtp_verify_probabilistic_task(
         customized->bgraph, params);

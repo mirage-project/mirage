@@ -2225,6 +2225,286 @@ int TaskRegister::register_sinkhorn_sm100_task(
   return register_task_variant(TASK_SINKHORN_SM100, code.to_string());
 }
 
+int TaskRegister::register_mhc_rmsnorm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // mHC RMSNorm (K1 norm half): per-token y = x * rsqrt(mean(x**2) + eps).
+  //   x: [bs_tile, hidden] bf16
+  //   y: [bs_tile, hidden] bf16
+  // params: [eps_bits]  (float bit-cast to int)
+  // Reduction is done in fp32 inside the kernel (T_in is the load type).
+  assert(params.size() == 1);
+  float eps;
+  memcpy(&eps, &params[0], sizeof(float));
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int bs_tile = input_ops[0]->output_tensors[0].dim[0];
+  int hidden = input_ops[0]->output_tensors[0].dim[1];
+  assert(output_ops[0]->output_tensors[0].dim[0] == bs_tile);
+  assert(output_ops[0]->output_tensors[0].dim[1] == hidden);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // Loop over tokens in this CTA's tile (the device impl handles one token
+  // per call; the surrounding scheduler partitions tokens via grid_dim).
+  code.e("for (int t = 0; t < $; ++t) {", bs_tile);
+  code.e("  kernel::mHC_rmsnorm_task_impl<bfloat16, bfloat16, $, 256>(",
+         hidden);
+  code.e("      static_cast<char const *>(task_desc->input_ptrs[0]) +");
+  code.e("          t * $ * sizeof(bfloat16),", hidden);
+  code.e("      static_cast<char *>(task_desc->output_ptrs[0]) +");
+  code.e("          t * $ * sizeof(bfloat16),", hidden);
+  code.e("      $f);", eps);
+  code.e("}");
+  return register_task_variant(TASK_MHC_RMSNORM_SM100, code.to_string());
+}
+
+int TaskRegister::register_mhc_linear_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // mHC linear (K1 linear half): tcgen05+TMA+TMEM bf16 GEMM.
+  //   x_norm:    [bs_full, K]  bf16  (input 0)  — TMA-loaded
+  //   weight:    [128, K]      bf16  (input 1)  — TMA-loaded (broadcast)
+  //   mixes_pad: [bs_full, 128] bf16 (output 0) — TMA-stored
+  // Per task: handles one MMA_N=16 tile of bs (16 rows). Caller sets
+  // grid_dim.x = bs_full / 16. The tile this CTA handles is encoded as
+  // n_tile_override; we pass blockIdx.x there but partitioning means MPK
+  // sets the per-task input/output pointers to the right slice already.
+  // The simpler alternative is to pass n_tile_override = 0 and rely on
+  // pointer slicing to give us exactly one tile of work.
+  assert(params.size() == 0);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // The STensor (per-task) view: bs_per_task = MMA_N = 16.
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int reduction_size = input_ops[0]->output_tensors[0].dim[1];
+  // weight is broadcast: [128, K]
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].dim[0] == 128);
+  assert(input_ops[1]->output_tensors[0].dim[1] == reduction_size);
+  // output mixes_pad: [bs_per_task, 128]
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(output_ops[0]->output_tensors[0].dim[1] == 128);
+
+  constexpr int MMA_M = 128;
+  constexpr int MMA_N = 16;
+  constexpr int OUTPUT_SIZE = 128;  // OUT_PAD: weight padded rows / mixes col
+  // The TMA and matmul use BATCH_SIZE = the per-task bs slice. Since MPK
+  // partitions tokens to CTAs, batch_size here is what one CTA processes.
+  // For a single n_tile per task, BATCH_SIZE must equal MMA_N=16.
+  assert(batch_size == MMA_N);
+
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+  constexpr int TMA_CP_ASYNC_SIZE = 64;
+  constexpr int TILE_SIZE = 64;
+  int const tma_cp_repeat_col =
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // TMA_B (x_norm operand): [BATCH_SIZE, K] bf16
+  code.e("using TMA_B = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
+         "$, $, $, $, $, $, $, true>;",
+         B, M, S,
+         batch_size, reduction_size,
+         MMA_N, TMA_CP_ASYNC_SIZE,
+         reduction_size, 1, 1,
+         tma_cp_repeat_col,
+         MMA_N * TMA_CP_ASYNC_SIZE);
+  // TMA_A (weight operand): [OUTPUT_SIZE=128, K] bf16
+  code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
+         "$, $, $, $, $, $, $, true>;",
+         B, M, S,
+         OUTPUT_SIZE, reduction_size,
+         MMA_M, TMA_CP_ASYNC_SIZE,
+         reduction_size, 1, 1,
+         tma_cp_repeat_col,
+         MMA_M * TMA_CP_ASYNC_SIZE);
+  // TMA_OUT: [BATCH_SIZE, OUTPUT_SIZE=128] bf16
+  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
+         "$, $, $, $, $, $, $, true>;",
+         0, M, S,
+         batch_size, OUTPUT_SIZE,
+         MMA_N, MMA_M,
+         OUTPUT_SIZE, 1, 1,
+         /*output_atom_repeat_col=*/1,
+         MMA_N * MMA_M);
+  code.e("TMA_A tma_a(static_cast<CUtensorMap*>("
+         "task_desc->input_tma_desc_ptrs[1][0]));");
+  code.e("TMA_B tma_b(static_cast<CUtensorMap*>("
+         "task_desc->input_tma_desc_ptrs[0][0]));");
+  code.e("TMA_OUT tma_out(static_cast<CUtensorMap*>("
+         "task_desc->output_tma_desc_ptrs[0][0]));");
+  code.e("kernel::mHC_linear_task_impl<cute::bfloat16_t, TMA_A, TMA_B, TMA_OUT,");
+  code.e("    /*MMA_M=*/$, /*MMA_N=*/$, /*BATCH_SIZE=*/$,",
+         MMA_M, MMA_N, batch_size);
+  code.e("    /*OUTPUT_SIZE=*/$, /*REDUCTION_SIZE=*/$>(",
+         OUTPUT_SIZE, reduction_size);
+  code.e("    tma_a, tma_b, tma_out, /*n_tile_override=*/0);");
+  return register_task_variant(TASK_MHC_LINEAR_SM100, code.to_string());
+}
+
+int TaskRegister::register_mhc_tail_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // mHC tail (K2 + K3 + K4 fused): runs per-CTA on TOKENS_PER_CTA tokens.
+  //   mixes:    [TPC, MIX_STRIDE] bf16  (input 0; MIX_STRIDE = 128 padded)
+  //   scale:    [3]               fp32  (input 1; broadcast)
+  //   base:     [mix_hc]          fp32  (input 2; broadcast)
+  //   x_orig:   [TPC, n, C]       bf16  (input 3)
+  //   f_pre:    [TPC, C]          bf16  (output 0)
+  //   h_post:   [TPC, n]          fp32  (output 1)
+  //   comb:     [TPC, n, n]       fp32  (output 2)
+  // params: [tokens_per_cta, sinkhorn_repeat, sinkhorn_eps_bits]
+  assert(params.size() == 3);
+  int tokens_per_cta = params[0];
+  int sinkhorn_repeat = params[1];
+  float sinkhorn_eps;
+  memcpy(&sinkhorn_eps, &params[2], sizeof(float));
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 4;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  constexpr int N = 4;  // tail kernel hardcoded to n=4
+  // mixes [TPC, MIX_STRIDE]
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(input_ops[0]->output_tensors[0].dim[0] == tokens_per_cta);
+  int mix_stride = input_ops[0]->output_tensors[0].dim[1];
+  // x_orig [TPC, n, C]
+  assert(input_ops[3]->output_tensors[0].num_dims == 3);
+  assert(input_ops[3]->output_tensors[0].dim[0] == tokens_per_cta);
+  assert(input_ops[3]->output_tensors[0].dim[1] == N);
+  int output_size = input_ops[3]->output_tensors[0].dim[2];
+  // f_pre [TPC, C]
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  assert(output_ops[0]->output_tensors[0].dim[0] == tokens_per_cta);
+  assert(output_ops[0]->output_tensors[0].dim[1] == output_size);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("extern __shared__ char mhc_tail_smem[];");
+  code.e("kernel::mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl<");
+  code.e("    bfloat16, /*N=*/$, /*C=*/$, /*TOKENS_PER_CTA=*/$,",
+         N, output_size, tokens_per_cta);
+  code.e("    /*BLOCK_THREADS=*/256, /*MIX_STRIDE=*/$>(",
+         mix_stride);
+  code.e("    task_desc->input_ptrs[0],");   // mixes
+  code.e("    task_desc->input_ptrs[1],");   // scale
+  code.e("    task_desc->input_ptrs[2],");   // base
+  code.e("    task_desc->input_ptrs[3],");   // x_orig
+  code.e("    task_desc->output_ptrs[0],");  // f_pre
+  code.e("    task_desc->output_ptrs[1],");  // h_post
+  code.e("    task_desc->output_ptrs[2],");  // comb
+  code.e("    /*sinkhorn_repeat=*/$,", sinkhorn_repeat);
+  code.e("    /*sinkhorn_eps=*/$f,", sinkhorn_eps);
+  code.e("    /*num_tokens=*/$,", tokens_per_cta);
+  code.e("    mhc_tail_smem,");
+  code.e("    /*token_base_override=*/0);");
+  return register_task_variant(TASK_MHC_TAIL_SM100, code.to_string());
+}
+
+int TaskRegister::register_mhc_post_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // mHC_post: y = post*x + sum_t comb[k,t] * residual[t]
+  //   residual: [bs, n, C] bf16
+  //   x:        [bs, C]    bf16
+  //   comb:     [bs, n, n] fp32
+  //   post:     [bs, n]    fp32
+  //   y:        [bs, n, C] bf16
+  assert(params.size() == 0);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 4;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  // residual: [bs_tile, n, C]
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  int bs_tile = input_ops[0]->output_tensors[0].dim[0];
+  int num_topk = input_ops[0]->output_tensors[0].dim[1];
+  int output_size = input_ops[0]->output_tensors[0].dim[2];
+  // x: [bs_tile, C]
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].dim[0] == bs_tile);
+  assert(input_ops[1]->output_tensors[0].dim[1] == output_size);
+  // comb: [bs_tile, n, n]
+  assert(input_ops[2]->output_tensors[0].num_dims == 3);
+  assert(input_ops[2]->output_tensors[0].dim[0] == bs_tile);
+  assert(input_ops[2]->output_tensors[0].dim[1] == num_topk);
+  assert(input_ops[2]->output_tensors[0].dim[2] == num_topk);
+  // post: [bs_tile, n]
+  assert(input_ops[3]->output_tensors[0].num_dims == 2);
+  assert(input_ops[3]->output_tensors[0].dim[0] == bs_tile);
+  assert(input_ops[3]->output_tensors[0].dim[1] == num_topk);
+  // output: [bs_tile, n, C]
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  assert(output_ops[0]->output_tensors[0].dim[0] == bs_tile);
+  assert(output_ops[0]->output_tensors[0].dim[1] == num_topk);
+  assert(output_ops[0]->output_tensors[0].dim[2] == output_size);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::mHC_mul_sum_add_with_outer_task_impl<bfloat16, $, $, $, $>(",
+         bs_tile,
+         output_size,
+         num_topk,
+         output_size);
+  code.e("    task_desc->input_ptrs[0],");  // residual
+  code.e("    task_desc->input_ptrs[1],");  // x
+  code.e("    task_desc->input_ptrs[2],");  // comb
+  code.e("    task_desc->input_ptrs[3],");  // post
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_MHC_POST_SM100, code.to_string());
+}
+
 int TaskRegister::register_mtp_verify_probabilistic_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 1);

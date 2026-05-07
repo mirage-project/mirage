@@ -33,11 +33,19 @@ setup(
                 ),
                 os.path.join(
                     this_dir,
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_linear.cuh",
+                ),
+                os.path.join(
+                    this_dir,
                     "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_rmsnorm.cuh",
                 ),
                 os.path.join(
                     this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_mpk.cuh",
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_hc_pre_post_fused.cuh",
+                ),
+                os.path.join(
+                    this_dir,
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_hc_pre_megakernel.cuh",
                 ),
                 os.path.join(
                     this_dir,

@@ -2215,6 +2215,232 @@ class PersistentKernel:
         self.kn_graph.customized([comb_res_mix, comb_res_mix_out], tb_graph)
         self.kn_graph.register_task(tb_graph, "sinkhorn_sm100", params)
 
+    def hc_pre_block(
+        self,
+        x_flat: DTensor,        # [bs, n*C]     bf16  (caller flattens [bs,n,C])
+        x_orig: DTensor,        # [bs, n, C]    bf16  (the same data, 3D view)
+        hc_fn_padded: DTensor,  # [128, n*C]    bf16  (weight, padded rows)
+        hc_scale: DTensor,      # [3]           fp32
+        hc_base: DTensor,       # [mix_hc]      fp32
+        f_pre: DTensor,         # [bs, C]       bf16  (output: K1+K2+K3+K4)
+        h_post: DTensor,        # [bs, n]       fp32  (output: post-gate)
+        comb: DTensor,          # [bs, n, n]    fp32  (output: sinkhorn comb)
+        norm_eps: float = 1e-6,
+        sinkhorn_iters: int = 20,
+        sinkhorn_eps: float = 1e-9,
+        tokens_per_cta: int = 32,
+        scratch_name_prefix: str = "hc_pre",
+    ):
+        """High-level mHC hc_pre block: rmsnorm -> linear -> tail (K2+K3+K4).
+
+        Allocates one scratch DTensor (mixes_pad) and wires the three
+        underlying MPK tasks. Equivalent to the eager:
+
+            x_flat = x.flatten(2)
+            rsqrt  = torch.rsqrt(x_flat.float().square().mean(-1, keepdim=True) + eps)
+            mixes  = F.linear(x_flat, hc_fn) * rsqrt
+            pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, ...)
+            f_pre  = torch.sum(pre.unsqueeze(-1) * x_orig, dim=2)
+
+        Caller responsibility: pass `x_flat` as the [bs, n*C] view of the
+        same buffer as `x_orig`. The caller's model layer can construct
+        these via DTensor reshape facilities.
+        """
+        assert x_flat.num_dims == 2
+        assert x_orig.num_dims == 3
+        bs, n, C = x_orig.dim[0], x_orig.dim[1], x_orig.dim[2]
+        assert n == 4, "mHC tail kernel hardcoded to n=4"
+        K = n * C
+        assert x_flat.dim[0] == bs and x_flat.dim[1] == K
+
+        # Allocate scratch for the linear's bf16 output (rmsnorm output is
+        # the linear's TMA-B operand and lives in its own scratch).
+        x_norm_bf16 = self.new_tensor(
+            dims=(bs, K), dtype=bfloat16,
+            name=f"{scratch_name_prefix}_x_norm")
+        mixes_pad = self.new_tensor(
+            dims=(bs, 128), dtype=bfloat16,
+            name=f"{scratch_name_prefix}_mixes_pad")
+
+        block_dim = (256, 1, 1)
+        # Stage 1: rmsnorm — one CTA per token, bf16 in/out.
+        self.mhc_rmsnorm_layer(
+            x_flat, x_norm_bf16,
+            grid_dim=(bs, 1, 1), block_dim=block_dim, eps=norm_eps)
+
+        # Stage 2: linear — one CTA per MMA_N=16 batch tile.
+        assert bs % 16 == 0, "bs must be a multiple of 16 for mhc_linear"
+        self.mhc_linear_layer(
+            x_norm_bf16, hc_fn_padded, mixes_pad,
+            grid_dim=(bs // 16, 1, 1), block_dim=block_dim)
+
+        # Stage 3: tail (K2+K3+K4) — one CTA per tokens_per_cta tokens.
+        assert bs % tokens_per_cta == 0, \
+            f"bs={bs} must be a multiple of tokens_per_cta={tokens_per_cta}"
+        self.mhc_tail_layer(
+            mixes_pad, hc_scale, hc_base, x_orig,
+            f_pre, h_post, comb,
+            grid_dim=(bs // tokens_per_cta, 1, 1), block_dim=block_dim,
+            tokens_per_cta=tokens_per_cta,
+            sinkhorn_repeat=sinkhorn_iters, sinkhorn_eps=sinkhorn_eps)
+
+    def hc_post_block(
+        self,
+        x: DTensor,         # [bs, C]      bf16  (post-attn/ffn output)
+        residual: DTensor,  # [bs, n, C]   bf16  (per-head residual stream)
+        post: DTensor,      # [bs, n]      fp32  (per-head gate from hc_pre)
+        comb: DTensor,      # [bs, n, n]   fp32  (sinkhorn comb from hc_pre)
+        y: DTensor,         # [bs, n, C]   bf16  (output)
+        tokens_per_cta_grid: int = None,
+    ):
+        """High-level mHC hc_post block: thin wrapper around mhc_post_layer.
+
+        Equivalent to:
+            y = post.unsqueeze(-1) * x.unsqueeze(-2)
+              + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)
+        """
+        bs = residual.dim[0]
+        # post task partitions over bs; one CTA per token by default.
+        grid_x = bs if tokens_per_cta_grid is None else (
+            bs // tokens_per_cta_grid)
+        self.mhc_post_layer(
+            residual, x, comb, post, y,
+            grid_dim=(grid_x, 1, 1), block_dim=(256, 1, 1))
+
+    def mhc_rmsnorm_layer(
+        self,
+        x: DTensor,        # [bs, hidden] bf16  (or [bs, n, C] flattened)
+        y: DTensor,        # [bs, hidden] bf16
+        grid_dim: tuple,
+        block_dim: tuple,
+        eps: float = 1e-6,
+    ):
+        """mHC K1 rmsnorm half: y = x * rsqrt(mean(x**2) + eps).
+
+        Implicit unit weight (no learned gain). bf16 in/out (reduction
+        is done in fp32 inside the kernel). Partition over bs via
+        grid_dim.x.
+        """
+        import struct
+
+        assert self.target_cc == 100
+        assert x.num_dims == 2
+        assert y.num_dims == 2
+        eps_bits = struct.unpack("i", struct.pack("f", eps))[0]
+        params = [eps_bits]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (0, -1, -1), -1, True)
+        tb_graph.new_input(y, (0, -1, -1), -1, True)
+        self.kn_graph.customized([x, y], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mhc_rmsnorm_sm100", params)
+
+    def mhc_linear_layer(
+        self,
+        x_norm: DTensor,    # [bs, K]   bf16  (TMA-loaded)
+        weight: DTensor,    # [128, K]  bf16  (TMA-loaded, broadcast)
+        mixes_pad: DTensor, # [bs, 128] bf16  (TMA-stored)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """mHC K1 linear half: tcgen05+TMA+TMEM bf16 GEMM, weight padded to 128.
+
+        Per-task processes 16 rows of bs (one MMA_N tile). Caller sets
+        grid_dim.x = bs / 16. The kernel uses TMA descriptors; the MPK
+        runtime materializes those at task-graph init.
+        """
+        assert self.target_cc == 100
+        assert x_norm.num_dims == 2
+        assert weight.num_dims == 2
+        assert mixes_pad.num_dims == 2
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # x_norm partitioned over bs (each task sees 16 rows).
+        tb_graph.new_input(x_norm, (0, -1, -1), -1, True)
+        # weight is broadcast (full [128,K] visible to every task).
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        # mixes_pad partitioned over bs.
+        tb_graph.new_input(mixes_pad, (0, -1, -1), -1, True)
+        self.kn_graph.customized([x_norm, weight, mixes_pad], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mhc_linear_sm100", [])
+
+    def mhc_tail_layer(
+        self,
+        mixes: DTensor,    # [bs, mix_stride] bf16 (mix_stride usually 128)
+        scale: DTensor,    # [3]              fp32
+        base: DTensor,     # [mix_hc]         fp32
+        x_orig: DTensor,   # [bs, n, C]       bf16
+        f_pre: DTensor,    # [bs, C]          bf16
+        h_post: DTensor,   # [bs, n]          fp32
+        comb: DTensor,     # [bs, n, n]       fp32
+        grid_dim: tuple,
+        block_dim: tuple,
+        tokens_per_cta: int = 32,
+        sinkhorn_repeat: int = 20,
+        sinkhorn_eps: float = 1e-9,
+    ):
+        """mHC K2+K3+K4 fused tail.
+
+        Each CTA processes `tokens_per_cta` tokens. Set
+        grid_dim.x = bs / tokens_per_cta.
+        """
+        import struct
+
+        assert self.target_cc == 100
+        assert mixes.num_dims == 2
+        assert scale.num_dims == 1
+        assert base.num_dims == 1
+        assert x_orig.num_dims == 3
+        assert f_pre.num_dims == 2
+        assert h_post.num_dims == 2
+        assert comb.num_dims == 3
+        eps_bits = struct.unpack("i", struct.pack("f", sinkhorn_eps))[0]
+        params = [tokens_per_cta, sinkhorn_repeat, eps_bits]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(mixes,  (0, -1, -1), -1, True)
+        tb_graph.new_input(scale,  (-1, -1, -1), -1, True)  # broadcast
+        tb_graph.new_input(base,   (-1, -1, -1), -1, True)  # broadcast
+        tb_graph.new_input(x_orig, (0, -1, -1), -1, True)
+        tb_graph.new_input(f_pre,  (0, -1, -1), -1, True)
+        tb_graph.new_input(h_post, (0, -1, -1), -1, True)
+        tb_graph.new_input(comb,   (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [mixes, scale, base, x_orig, f_pre, h_post, comb], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mhc_tail_sm100", params)
+
+    def mhc_post_layer(
+        self,
+        residual: DTensor,  # [bs, n, C] bf16 (the per-head residual stream)
+        x: DTensor,         # [bs, C]    bf16 (the post-attention/ffn output)
+        comb: DTensor,      # [bs, n, n] fp32 (sinkhorn-projected mixing)
+        post: DTensor,      # [bs, n]    fp32 (per-head gate)
+        output: DTensor,    # [bs, n, C] bf16
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """mHC_post: y[k] = post[k] * x + sum_t comb[k,t] * residual[t].
+
+        Combines the post-mixing step that follows attention/ffn in the
+        head-and-context (HC) block. Single fused task; partition over the
+        bs dimension via grid_dim.x.
+        """
+        assert self.target_cc == 100
+        assert residual.num_dims == 3
+        assert x.num_dims == 2
+        assert comb.num_dims == 3
+        assert post.num_dims == 2
+        assert output.num_dims == 3
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(residual, (0, -1, -1), -1, True)
+        tb_graph.new_input(x, (0, -1, -1), -1, True)
+        tb_graph.new_input(comb, (0, -1, -1), -1, True)
+        tb_graph.new_input(post, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([residual, x, comb, post, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mhc_post_sm100", [])
+
     def mtp_float_scatter_layer(
         self,
         src: DTensor,       # [batch, 1] float32

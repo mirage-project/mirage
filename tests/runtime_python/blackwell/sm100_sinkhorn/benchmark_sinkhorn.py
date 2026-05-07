@@ -27,21 +27,15 @@ def time_ms(fn, warmup=20, iters=100):
     return start.elapsed_time(end) / iters
 
 
-def bench_case(num_tokens, hidden_size, repeat=20, token_block_size=4):
+def bench_case(num_tokens, repeat=20):
     comb_res_mix = torch.randn(
-        (num_tokens, hidden_size, hidden_size),
-        device="cuda",
-        dtype=torch.float32,
+        (num_tokens, 4, 4), device="cuda", dtype=torch.float32,
     )
     comb_res_mix_out = torch.empty_like(comb_res_mix)
 
     kernel_ms = time_ms(
         lambda: runtime_kernel_blackwell.sinkhorn_sm100(
-            comb_res_mix,
-            comb_res_mix_out,
-            repeat=repeat,
-            eps=1e-9,
-            token_block_size=token_block_size,
+            comb_res_mix, comb_res_mix_out, repeat=repeat, eps=1e-9,
         )
     )
     torch_ms = time_ms(
@@ -51,7 +45,7 @@ def bench_case(num_tokens, hidden_size, repeat=20, token_block_size=4):
     )
     matrices_per_ms = num_tokens / kernel_ms
     print(
-        f"tokens={num_tokens:5d} hidden={hidden_size:2d} repeat={repeat:2d} "
+        f"tokens={num_tokens:5d} repeat={repeat:2d} "
         f"kernel={kernel_ms:.4f} ms torch={torch_ms:.4f} ms "
         f"matrices/ms={matrices_per_ms:.1f}"
     )
@@ -59,5 +53,5 @@ def bench_case(num_tokens, hidden_size, repeat=20, token_block_size=4):
 
 if __name__ == "__main__":
     torch.cuda.init()
-    for shape in [(1024, 4), (4096, 4), (4096, 8), (4096, 16)]:
-        bench_case(*shape)
+    for tokens in [1024, 4096, 16384, 65536]:
+        bench_case(tokens)

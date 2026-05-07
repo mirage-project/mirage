@@ -47,15 +47,12 @@ def _print_row(label, num_tokens, kernel_ms, torch_ms, extra=""):
 
 
 def bench_k1(num_tokens, n, c, dtype=torch.bfloat16):
-    """K1 = mHC_rmsnorm + mHC_linear (linear_sm100_mpk_task_impl with output
-    padded to 128 cols and batch tiled at MMA_N=16)."""
-    assert num_tokens % 16 == 0, "mHC_linear requires bs % 16 == 0"
+    """K1 = mHC_rmsnorm + mHC_linear (tcgen05+TMA+TMEM, weight padded to 128)."""
     nC = n * c
     mix_hc = n * n + 2 * n
     x = torch.randn(num_tokens, nC, device="cuda", dtype=torch.float32)
     hc_fn_bf16 = (torch.randn(mix_hc, nC, device="cuda", dtype=torch.float32)
                   * 0.02).to(torch.bfloat16)
-    # Pad the weight to [128, nC] so output cols = MMA_M = 128.
     w_pad = torch.zeros(128, nC, device="cuda", dtype=torch.bfloat16)
     w_pad[:mix_hc] = hc_fn_bf16
 
@@ -73,12 +70,11 @@ def bench_k1(num_tokens, n, c, dtype=torch.bfloat16):
     torch_ms = time_ms(lambda: k1_reference(x, hc_fn_bf16, 1e-6),
                        warmup=5, iters=20)
     _print_row("K1", num_tokens, kernel_ms, torch_ms,
-               extra=f"n={n} c={c} mix_hc={mix_hc} (rms+linear kernels)")
+               extra=f"n={n} c={c} mix_hc={mix_hc} (rms+tcgen05 GEMM)")
 
 
 def bench_k1_linear_only(num_tokens, n, c):
     """Isolated linear-half timing: mHC_linear vs torch bf16 matmul."""
-    assert num_tokens % 16 == 0, "mHC_linear requires bs % 16 == 0"
     nC = n * c
     mix_hc = n * n + 2 * n
     x = torch.randn(num_tokens, nC, device="cuda", dtype=torch.bfloat16)
@@ -126,15 +122,15 @@ def bench_k2(num_tokens, n, dtype=torch.bfloat16):
     _print_row("K2", num_tokens, kernel_ms, torch_ms, extra=f"n={n} {dtype}")
 
 
-def bench_k3(num_tokens, n, repeat=20, token_block_size=1):
-    res = torch.randn(num_tokens, n, n, device="cuda", dtype=torch.float32)
+def bench_k3(num_tokens, repeat=20):
+    res = torch.randn(num_tokens, 4, 4, device="cuda", dtype=torch.float32)
     out = torch.empty_like(res)
     kernel_ms = time_ms(lambda: rt.sinkhorn_sm100(
-        res, out, repeat=repeat, eps=1e-9, token_block_size=token_block_size))
+        res, out, repeat=repeat, eps=1e-9))
     torch_ms = time_ms(lambda: sinkhorn_knopp_torch(res, repeat=repeat, eps=1e-9),
                        warmup=5, iters=20)
     _print_row("K3", num_tokens, kernel_ms, torch_ms,
-               extra=f"n={n} iters={repeat}")
+               extra=f"n=4 iters={repeat}")
 
 
 def bench_k4(num_tokens, n, c):
@@ -166,9 +162,8 @@ def bench_k5(num_tokens, n, c):
 def _hc_pre_kernel_call(x, hc_fn_padded_bf16, hc_scale, hc_base, n,
                         sinkhorn_iters, hc_eps, norm_eps,
                         scratch):
-    """Run hc_pre using the kernels for K1/K2/K3/K4. `scratch` holds
-    preallocated buffers including the padded weight + output for K1's linear
-    half."""
+    """Run hc_pre using kernels for K1/K2/K3/K4. `scratch` holds preallocated
+    buffers including the padded weight + output for K1's tcgen05 GEMM."""
     b, s, n_chk, C = x.shape
     bs = b * s
     nC = n * C
@@ -186,7 +181,7 @@ def _hc_pre_kernel_call(x, hc_fn_padded_bf16, hc_scale, hc_base, n,
 
     res_mat = scratch["h_res"].reshape(bs, n, n)
     rt.sinkhorn_sm100(res_mat.contiguous(), scratch["comb"],
-                      repeat=sinkhorn_iters, eps=hc_eps, token_block_size=1)
+                      repeat=sinkhorn_iters, eps=hc_eps)
 
     rt.mul_sum_add_sm100(scratch["x_bs"], scratch["h_pre"],
                          scratch["zero_res"], scratch["f_pre"], n)
@@ -196,7 +191,6 @@ def bench_hc_pre(b, s, n, C, sinkhorn_iters=20):
     nC = n * C
     mix_hc = n * n + 2 * n
     bs = b * s
-    assert bs % 16 == 0, "mHC_linear requires bs % 16 == 0"
 
     x = torch.randn(b, s, n, C, device="cuda", dtype=torch.bfloat16)
     hc_fn = torch.randn(mix_hc, nC, device="cuda", dtype=torch.float32) * 0.02
@@ -259,7 +253,7 @@ if __name__ == "__main__":
                            (4096, 16384)]:
         bench_k1_rmsnorm_only(tokens, hidden)
 
-    print("--- K1 linear half (mHC_linear, padded mix_hc->128) ---")
+    print("--- K1 linear half (mHC_linear, tcgen05+TMA+TMEM) ---")
     for tokens, n, c in [(1024, 4, 256), (1024, 4, 1024), (4096, 4, 1024),
                          (4096, 4, 4096)]:
         bench_k1_linear_only(tokens, n, c)
@@ -272,9 +266,9 @@ if __name__ == "__main__":
     for tokens, n in [(1024, 4), (4096, 4), (4096, 8), (16384, 4)]:
         bench_k2(tokens, n)
 
-    print("--- K3: sinkhorn ---")
-    for tokens, n in [(1024, 4), (4096, 4), (4096, 8)]:
-        bench_k3(tokens, n)
+    print("--- K3: sinkhorn (4x4) ---")
+    for tokens in [1024, 4096, 16384]:
+        bench_k3(tokens)
 
     print("--- K4: weighted sum across n streams ---")
     for tokens, n, c in [(1024, 4, 1024), (4096, 4, 1024), (4096, 4, 4096),

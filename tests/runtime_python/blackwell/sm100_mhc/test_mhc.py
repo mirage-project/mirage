@@ -81,12 +81,12 @@ def test_k2_affine_split_activation(num_tokens, n, dtype):
 # K3: sinkhorn (existing kernel; smoke test in this wrapper)
 # -----------------------------------------------------------------------------
 
-@pytest.mark.parametrize("num_tokens,n", [(1, 4), (16, 4), (32, 8)])
-def test_k3_sinkhorn(num_tokens, n):
-    gen = torch.Generator(device="cuda").manual_seed(200 + num_tokens + n)
-    res_logits = torch.randn(num_tokens, n, n, device="cuda", dtype=torch.float32, generator=gen)
+@pytest.mark.parametrize("num_tokens", [1, 16, 1024])
+def test_k3_sinkhorn(num_tokens):
+    gen = torch.Generator(device="cuda").manual_seed(200 + num_tokens)
+    res_logits = torch.randn(num_tokens, 4, 4, device="cuda", dtype=torch.float32, generator=gen)
     out = torch.empty_like(res_logits)
-    rt.sinkhorn_sm100(res_logits, out, repeat=20, eps=1e-9, token_block_size=1)
+    rt.sinkhorn_sm100(res_logits, out, repeat=20, eps=1e-9)
     ref = sinkhorn_knopp_torch(res_logits, repeat=20, eps=1e-9)
     torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-5)
 
@@ -172,8 +172,7 @@ def _run_hc_pre_with_kernels(x, hc_fn, hc_scale, hc_base, n,
     # K3
     res_mat = h_res_logits.reshape(bs, n, n).contiguous()
     comb = torch.empty_like(res_mat)
-    rt.sinkhorn_sm100(res_mat, comb, repeat=sinkhorn_iters, eps=hc_eps,
-                      token_block_size=1)
+    rt.sinkhorn_sm100(res_mat, comb, repeat=sinkhorn_iters, eps=hc_eps)
 
     # K4: F_pre = sum_i h_pre[i] * x[i,:]
     x_bs = x.reshape(bs, n, C).to(torch.bfloat16).contiguous()
