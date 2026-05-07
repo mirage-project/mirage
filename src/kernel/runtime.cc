@@ -466,6 +466,18 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_UNIFIED_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // DeepSeek MLA RoPE: grid=(request_slot, local_head, q_tile).
+            if (task_type == TASK_DEEPSEEK_MLA_ROPE_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
+            // FP8 dense GEMM: grid=(num_workers, 1, 1). request_id is the
+            // worker index used by the persistent tiling loop.
+            if (task_type == TASK_FP8_GEMM_DENSE_SMALLM_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // MTP token-management helpers use grid.x as the active request
             // slot so they can map slot -> global request id at runtime.
             if (task_type == TASK_MTP_PREPARE_VERIFY ||
@@ -1240,6 +1252,10 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
+    code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
     code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
@@ -1863,6 +1879,8 @@ TaskGraphResult print_task_graph(
       "TASK_MLA_KV_GATHER_SPLIT_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_UNIFIED_SM100] =
       "TASK_MLA_KV_GATHER_UNIFIED_SM100";
+  task_type_to_name[TASK_DEEPSEEK_MLA_ROPE_SM100] =
+      "TASK_DEEPSEEK_MLA_ROPE_SM100";
   task_type_to_name[TASK_MTP_VERIFY_STRICT] = "TASK_MTP_VERIFY_STRICT";
   task_type_to_name[TASK_MTP_ACCEPT_COMMIT] = "TASK_MTP_ACCEPT_COMMIT";
   task_type_to_name[TASK_MTP_TOKEN_SCATTER] = "TASK_MTP_TOKEN_SCATTER";
@@ -1875,6 +1893,10 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_SWAPAB_SM100] = "TASK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_SMALLM_SM100] =
+      "TASK_FP8_GEMM_DENSE_SMALLM_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_SM100] =
+      "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
       "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";

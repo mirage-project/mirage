@@ -676,36 +676,62 @@ if __name__ == "__main__":
                         kv_f32 = dequantize_fp8(kv_w.cuda(), state_dict[kv_s_key].cuda())
                     else:
                         kv_f32 = kv_w.cuda().float()
-                    kv_bf16 = kv_f32.to(torch.bfloat16)
                     absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)
                     q_fp8, q_scale = _quantize_f32_to_checkpoint_fp8(absorbed_f32)
                     state_dict[q_key] = q_fp8
                     state_dict[q_s_key] = q_scale
-                    # Fuse V un-absorption into o_proj
                     num_heads_loc = mp["num_heads"]
                     qk_nope = mp["qk_nope_head_dim"]
+                    qk_rope = mp["qk_rope_head_dim"]
                     v_dim = mp["v_head_dim"]
                     kv_lora_rank = mp["kv_lora_rank"]
-                    # Split absorbed q_b into q_b_nope (H*D_CKV=512) and
-                    # q_b_pe (H*D_KPE=64) for the chunked-prefill MLA kernel,
-                    # which takes Q_nope / Q_pe as separate tensors. Decode
-                    # still uses the fused [H*576] q_b_proj — keeping both
-                    # forms lets the builder dispatch based on
-                    # max_num_batched_tokens. Per-head layout: [nope(512) | pe(64)].
                     H_ = num_heads_loc
-                    absorbed_bf16 = absorbed_f32.to(torch.bfloat16)
-                    absorbed_r = absorbed_bf16.reshape(H_, 576, -1)
-                    q_b_nope = absorbed_r[:, :kv_lora_rank, :].contiguous().reshape(H_ * kv_lora_rank, -1)
-                    q_b_pe = absorbed_r[:, kv_lora_rank:, :].contiguous().reshape(H_ * (576 - kv_lora_rank), -1)
-                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
-                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
+
+                    # Prefill follows vLLM's compute-friendly MLA path:
+                    # original q_b_proj produces per-head q_nope/q_pe, while
+                    # kv_b_proj decompresses cached c_latent into per-head
+                    # K_nope/V. Decode keeps the absorbed q_b/o_proj path.
+                    q_orig = q_f32.reshape(H_, qk_nope + qk_rope, -1)
+                    q_b_nope_f32 = q_orig[:, :qk_nope, :].contiguous().reshape(
+                        H_ * qk_nope, -1)
+                    q_b_pe_f32 = q_orig[:, qk_nope:, :].contiguous().reshape(
+                        H_ * qk_rope, -1)
+                    q_b_nope_fp8, q_b_nope_scale = _quantize_f32_to_checkpoint_fp8(
+                        q_b_nope_f32)
+                    q_b_pe_fp8, q_b_pe_scale = _quantize_f32_to_checkpoint_fp8(
+                        q_b_pe_f32)
+                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope_fp8
+                    state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
+                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
+                    state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
+
                     kv_head_dim = qk_nope + v_dim
-                    kv_b_reshaped = kv_bf16.reshape(num_heads_loc, kv_head_dim, kv_lora_rank)
-                    W_UV = kv_b_reshaped[:, :v_dim, :]
+                    kv_b_reshaped = kv_f32.reshape(
+                        num_heads_loc, kv_head_dim, kv_lora_rank)
+                    W_UK = kv_b_reshaped[:, :qk_nope, :]
+                    W_UV = kv_b_reshaped[:, qk_nope:, :]
+                    kv_b_k_f32 = W_UK.contiguous().reshape(H_ * qk_nope, kv_lora_rank)
+                    kv_b_v_f32 = W_UV.contiguous().reshape(H_ * v_dim, kv_lora_rank)
+                    kv_b_k_fp8, kv_b_k_scale = _quantize_f32_to_checkpoint_fp8(
+                        kv_b_k_f32)
+                    kv_b_v_fp8, kv_b_v_scale = _quantize_f32_to_checkpoint_fp8(
+                        kv_b_v_f32)
+                    state_dict[f"{attn}kv_b_k.weight"] = kv_b_k_fp8
+                    state_dict[f"{attn}kv_b_k.weight_scale_inv"] = kv_b_k_scale
+                    state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
+                    state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
+
+                    # Preserve original W_O for PR674 prefill output. The
+                    # existing o_proj key is replaced by the decode-only fused
+                    # W_UV→W_O path below.
                     o_key = f"{attn}o_proj.weight"
                     if o_key in state_dict:
                         o_w = state_dict[o_key]
                         o_s_key = f"{o_key}_scale_inv"
+                        state_dict[f"{attn}o_proj_original.weight"] = o_w
+                        if o_s_key in state_dict:
+                            state_dict[f"{attn}o_proj_original.weight_scale_inv"] = (
+                                state_dict[o_s_key])
                         if is_fp8(o_w) and o_s_key in state_dict:
                             o_bf16 = dequantize_fp8(o_w.cuda(), state_dict[o_s_key].cuda()).to(torch.bfloat16)
                             del state_dict[o_s_key]
@@ -718,7 +744,13 @@ if __name__ == "__main__":
                         o_fp8, o_scale = _quantize_f32_to_checkpoint_fp8(o_flat)
                         state_dict[o_key] = o_fp8
                         state_dict[o_s_key] = o_scale
-                        print(f"  L{li}: FP8 absorbed q_b {q_fp8.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
+                        print(
+                            f"  L{li}: absorbed q_b {q_fp8.shape}, "
+                            f"prefill q/nope {q_b_nope_fp8.shape}/"
+                            f"{q_b_pe_fp8.shape}, kv_b K/V "
+                            f"{kv_b_k_fp8.shape}/{kv_b_v_fp8.shape}, "
+                            f"fused decode o_proj [{hidden_dim}, "
+                            f"{num_heads_loc * kv_lora_rank}]")
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
@@ -843,14 +875,15 @@ if __name__ == "__main__":
                     (r"self_attn\.q_a_proj\.weight",                         None),  # ReplicatedLinear (vLLM): hidden→q_lora_rank, output feeds full-width q_b_proj
                     (r"self_attn\.q_a_layernorm\.weight",                    None),
                     (r"self_attn\.q_b_proj\.weight",                         0),     # ColumnParallelLinear: shard output heads
-                    # Split q_b_proj (absorbed) for the chunked-prefill MLA
-                    # kernel, which expects Q_nope and Q_pe as separate dense
-                    # tensors. Both are column-parallel on the head dim (same
-                    # sharding as q_b_proj).
+                    # Prefill path uses original q_b split and kv_b
+                    # decompression, both column-parallel on local heads.
                     (r"self_attn\.q_b_nope\.weight",                         0),
                     (r"self_attn\.q_b_pe\.weight",                           0),
+                    (r"self_attn\.kv_b_k\.weight",                           0),
+                    (r"self_attn\.kv_b_v\.weight",                           0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
+                    (r"self_attn\.o_proj_original\.weight",                  1),
                     (r"self_attn\.o_proj\.weight",                           1),
                     (r"input_layernorm\.weight$",                            None),
                     (r"post_attention_layernorm\.weight$",                   None),
@@ -1030,6 +1063,10 @@ if __name__ == "__main__":
             # DeepSeek builder precomputes RoPE cos/sin internally because MLA
             # uses the compressed KV cache and separate c_latent/k_pe paths.
             position_embeddings=None,
+            rope_theta=getattr(config, "rope_theta", 10000.0),
+            rope_parameters=getattr(config, "rope_parameters", None)
+            or getattr(config, "rope_scaling", None),
+            max_position_embeddings=getattr(config, "max_position_embeddings", None),
             state_dict=state_dict,
             with_lm_head=True,
         )

@@ -1580,8 +1580,16 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         assert(err == CUDA_SUCCESS);
       } else {
         int total_rows = tensor_desc.dim[0];
-        int H_local = tensor_desc.dim[1];
-        int d_last = tensor_desc.dim[2];
+        int H_local = 0;
+        int d_last = 0;
+        if (tensor_desc.num_dims == 2) {
+          // Builder stores decompressed K_nope/V as flat [S, H*128].
+          H_local = tensor_desc.dim[1] / 128;
+          d_last = 128;
+        } else {
+          H_local = tensor_desc.dim[1];
+          d_last = tensor_desc.dim[2];
+        }
         int num_blocks = H_local * (d_last / BK);
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)num_blocks};
@@ -1603,6 +1611,40 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                               oob);
         assert(err == CUDA_SUCCESS);
       }
+      break;
+    }
+    case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100: {
+      // Dense FP8 GEMM TMA for A [M,K] and B [N,K], both row-major raw
+      // e4m3 bytes. Scales are loaded directly, not through TMA.
+      constexpr int BK_BOX = 128;
+      constexpr int OUTER_BOX = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob =
+          CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+      int outer = tensor_desc.dim[0];
+      int K_local = tensor_desc.dim[1];
+      uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
+      uint64_t gs[1] = {(uint64_t)K_local};
+      uint32_t bd[2] = {BK_BOX, OUTER_BOX};
+      uint32_t es[2] = {1, 1};
+      CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                            fmt,
+                                            2,
+                                            tensor_desc.base_ptr,
+                                            gd,
+                                            gs,
+                                            bd,
+                                            es,
+                                            interleave,
+                                            swizzle,
+                                            l2,
+                                            oob);
+      assert(err == CUDA_SUCCESS);
       break;
     }
     case TASK_MLA_MTP_DECODE_TP2_SM100:
@@ -2094,6 +2136,15 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_MLA_PREFILL_TP8_CHUNKED_SM100: {
       // Per-head unabsorbed: [0]Qn, [1]Qp, [2]K_nope, [3]K_rope, [4]V.
       for (size_t param_id = 2; param_id < 5; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100: {
+      // A_fp8 and B_fp8 use TMA; scale tensors are plain LDG inputs.
+      for (size_t param_id = 0; param_id < 2; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }

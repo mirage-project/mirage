@@ -43,6 +43,38 @@ static bool graph_input_has_num_dims(threadblock::Graph const &bgraph,
   return input_op->output_tensors[0].num_dims == num_dims;
 }
 
+static void emit_deepseek_prefill_flag(mirage::transpiler::CodeKeeper &code) {
+  code.e("bool prompt_prefill_ = false;");
+  code.e("for (int bi_pf_ = 0; bi_pf_ < MPK_MAX_NUM_BATCHED_REQUESTS; "
+         "++bi_pf_) {");
+  code.e("  int req_pf_ = runtime_config.request_ids[bi_pf_];");
+  code.e("  if (req_pf_ < 0) continue;");
+  code.e("  int q_len_pf_ = runtime_config.qo_indptr_buffer[bi_pf_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_pf_];");
+  code.e("  if (runtime_config.step[req_pf_] < "
+         "runtime_config.prompt_length[req_pf_] && q_len_pf_ > 8) {");
+  code.e("    prompt_prefill_ = true;");
+  code.e("    break;");
+  code.e("  }");
+  code.e("}");
+}
+
+static void emit_deepseek_phase_gate(mirage::transpiler::CodeKeeper &code,
+                                     int gate_mode) {
+  if (gate_mode == 0) {
+    return;
+  }
+  assert(gate_mode == 1 || gate_mode == 2);
+  code.e("{");
+  emit_deepseek_prefill_flag(code);
+  if (gate_mode == 1) {
+    code.e("if (!prompt_prefill_) return;");
+  } else {
+    code.e("if (prompt_prefill_) return;");
+  }
+  code.e("}");
+}
+
 int TaskRegister::register_task_variant(runtime::TaskType type,
                                         std::string const &code) {
   std::vector<std::string> &variants = all_task_variants[type];
@@ -3725,6 +3757,70 @@ int TaskRegister::register_mla_prefill_sm100_task(
   return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
 }
 
+int TaskRegister::register_mla_prefill_absorbed_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 5);
+  int num_heads = params[0];
+  int seq_len = params[1];
+  int d_ckv = params[2];
+  int d_kpe = params[3];
+  int d_v = params[4];
+  assert(d_ckv == 512);
+  assert(d_kpe == 64);
+  assert(d_v == 512);
+  (void)seq_len;
+  float const _mscale_pf = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_pf * _mscale_pf;
+  float sm_scale_log2 = sm_scale * 1.44269504089f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int head_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("  int req_id_ = runtime_config.request_ids[bi_];");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int Q_LEN_ = runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  if (req_id_ < 0 || runtime_config.step[req_id_] >= "
+         "runtime_config.prompt_length[req_id_] || Q_LEN_ <= 8) return;");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  auto *q_ptr_ = static_cast<const nv_bfloat16 *>("
+         "task_desc->input_ptrs[0]) + qo_fp_ * $;",
+         num_heads * (d_ckv + d_kpe));
+  code.e("  auto *kv_ptr_ = static_cast<const nv_bfloat16 *>("
+         "task_desc->input_ptrs[1]) + bi_ * MPK_MAX_SEQ_LENGTH * $;",
+         d_ckv + d_kpe);
+  code.e("  auto *out_ptr_ = static_cast<nv_bfloat16 *>("
+         "task_desc->output_ptrs[0]) + qo_fp_ * $;",
+         num_heads * d_v);
+  code.e("  kernel::mla_prefill_sm100_task_impl(");
+  code.e("      q_ptr_,");
+  code.e("      q_ptr_,");
+  code.e("      kv_ptr_,");
+  code.e("      kv_ptr_,");
+  code.e("      out_ptr_,");
+  code.e("      S_,");
+  code.e("      Q_LEN_,");
+  code.e("      $,", num_heads);
+  code.e("      $f,", sm_scale_log2);
+  code.e("      head_,");
+  code.e("      task_desc->task_metadata.kv_idx,");
+  code.e("      $,", num_heads * (d_ckv + d_kpe));
+  code.e("      $,", d_ckv + d_kpe);
+  code.e("      $,", num_heads * (d_ckv + d_kpe));
+  code.e("      $,", d_ckv + d_kpe);
+  code.e("      $,", d_ckv + d_kpe);
+  code.e("      $,", d_ckv + d_kpe);
+  code.e("      $);", d_ckv);
+  code.e("}");
+  return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_prefill_tp8_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_heads per TP rank (e.g. 16 for TP=8)
@@ -3766,14 +3862,15 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   // params: num_heads, q_len, kv_len, q_start
   assert(params.size() == 4);
   int num_heads = params[0];
-  int q_len = params[1];
-  int kv_len = params[2];
+  int q_len_max = params[1];
+  int kv_len_max = params[2];
   int q_start = params[3];
   float sm_scale = 1.0f / sqrtf(192.0f);
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("#ifdef MPK_TEST_MODE");
   code.e("kernel::mla_prefill_tp8_chunked::"
          "mla_prefill_tp8_chunked_sm100_task_impl(");
   code.e("    static_cast<const "
@@ -3785,16 +3882,64 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("    static_cast<const "
          "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
   code.e("    static_cast<const "
-         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");                  // Qp
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),"); // Qp
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
-  code.e("    $,", q_len);
-  code.e("    $,", kv_len);
+  code.e("    $,", q_len_max);
+  code.e("    $,", kv_len_max);
   code.e("    $,", q_start);
   code.e("    $,", num_heads);
   code.e("    $f,", sm_scale_log2);
   code.e("    task_desc->task_metadata.request_id,");         // head
   code.e("    task_desc->task_metadata.kv_idx,");             // q_block
   code.e("    task_desc->task_metadata.merge_task_offset);"); // batch
+  code.e("#else");
+  code.e("{");
+  code.e("int bi_ = task_desc->task_metadata.merge_task_offset;");
+  code.e("int req_id_ = runtime_config.request_ids[bi_];");
+  code.e("if (req_id_ < 0) return;");
+  code.e("int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("int Q_LEN_ = runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_];");
+  code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
+         "runtime_config.prompt_length[req_id_] && Q_LEN_ > 8;");
+  code.e("if (!prompt_prefill_) return;");
+  code.e("int q_blocks_ = (Q_LEN_ + 63) / 64;");
+  code.e("if (task_desc->task_metadata.kv_idx >= q_blocks_) return;");
+  code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+  code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+  code.e("int KV_LEN_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("int Q_START_ = KV_LEN_ - Q_LEN_;");
+  code.e("auto *Qn_ = static_cast<const __nv_bfloat16*>("
+         "task_desc->input_ptrs[0]) + qo_fp_ * $;",
+         num_heads * 128);
+  code.e("auto *Qp_ = static_cast<const __nv_bfloat16*>("
+         "task_desc->input_ptrs[1]) + qo_fp_ * $;",
+         num_heads * 64);
+  code.e("auto *O_ = static_cast<__nv_bfloat16*>("
+         "task_desc->output_ptrs[0]) + qo_fp_ * $;",
+         num_heads * 128);
+  code.e("kernel::mla_prefill_tp8_chunked::"
+         "mla_prefill_tp8_chunked_sm100_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // K_nope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // K_rope
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[4][0]),"); // V
+  code.e("    Qn_,"); // Qn
+  code.e("    Qp_,"); // Qp
+  code.e("    O_,");  // O
+  code.e("    Q_LEN_,");
+  code.e("    KV_LEN_,");
+  code.e("    Q_START_,");
+  code.e("    $,", num_heads);
+  code.e("    $f,", sm_scale_log2);
+  code.e("    task_desc->task_metadata.request_id,");         // head
+  code.e("    task_desc->task_metadata.kv_idx,");             // q_block
+  code.e("    0);"); // local batch offset already applied to raw pointers
+  code.e("}");
+  code.e("#endif");
   return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SM100,
                                code.to_string());
 }
@@ -4341,7 +4486,9 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_gpus
   // params[1]: my_gpu_id
-  assert(params.size() == 2);
+  // params[2] optional: phase gate, 1=prefill, 2=decode.
+  assert(params.size() == 2 || params.size() == 3);
+  int gate_mode = (params.size() == 3) ? params[2] : 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_outputs = 1;
@@ -4378,6 +4525,7 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   // Register tile allreduce task
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
+  emit_deepseek_phase_gate(c, gate_mode);
   if (with_residual) {
     c.e("kernel::nvshmem_tile_allreduce_with_residual<__nv_bfloat16, $, $, $>(",
         batch_size,
@@ -4481,7 +4629,15 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // Output: fp8 same shape, scale [..., hidden/group_size]
   // scale_ue8m0=true: packed UE8M0 uint32 scale (for FP8 linear GEMM)
   // scale_ue8m0=false: float32 scale (for MoE group GEMM)
-  assert(params.size() == 0);
+  // active_mode:
+  //   0: rows are current qo tokens (default)
+  //   1: rows are the current request's full KV length, for prefill cache
+  //      decompression over [0, kv_len)
+  //   2: qo-token rows, prefill phase only
+  //   3: qo-token rows, decode phase only
+  assert(params.size() == 0 || params.size() == 1);
+  int active_mode = params.empty() ? 0 : params[0];
+  assert(active_mode >= 0 && active_mode <= 3);
   int batch_size = 0, hidden_size = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -4521,10 +4677,37 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("{");
-  code.e("int active_rows_ = "
-         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS] * $;",
-         active_row_multiplier);
-  code.e("if (task_desc->task_metadata.request_id >= active_rows_) return;");
+  if (active_mode == 1) {
+    code.e("int row_idx_ = task_desc->task_metadata.request_id;");
+    code.e("int bi_ = row_idx_ / MPK_MAX_SEQ_LENGTH;");
+    code.e("int row_local_ = row_idx_ - bi_ * MPK_MAX_SEQ_LENGTH;");
+    code.e("if (bi_ < 0 || bi_ >= MPK_MAX_NUM_BATCHED_REQUESTS) return;");
+    code.e("int req_id_ = runtime_config.request_ids[bi_];");
+    code.e("if (req_id_ < 0) return;");
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[bi_ + 1] - "
+           "runtime_config.qo_indptr_buffer[bi_];");
+    code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
+           "runtime_config.prompt_length[req_id_] && q_len_ > 8;");
+    code.e("if (!prompt_prefill_) return;");
+    code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
+    code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
+    code.e("int seq_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+           "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+    code.e("if (row_local_ < 0 || row_local_ >= seq_len_) return;");
+  } else {
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS] * $;",
+           active_row_multiplier);
+    if (active_mode == 2 || active_mode == 3) {
+      emit_deepseek_prefill_flag(code);
+      if (active_mode == 2) {
+        code.e("if (!prompt_prefill_) return;");
+      } else {
+        code.e("if (prompt_prefill_) return;");
+      }
+    }
+    code.e("if (task_desc->task_metadata.request_id >= active_rows_) return;");
+  }
   code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $, $,",
          batch_size,
          hidden_size,
@@ -4557,11 +4740,18 @@ int TaskRegister::register_linear_fp8_sm100_task(
   //         reduction/128], (optional) residual [batch, output]
   // Output: output_bf16 [batch, output]
   bool rank_with_residual = with_residual;
+  int gate_mode = 0;
   if (with_residual) {
-    assert(params.size() == 1);
+    assert(params.size() == 1 || params.size() == 2);
     rank_with_residual = (params[0] == 1);
+    if (params.size() == 2) {
+      gate_mode = params[1];
+    }
   } else {
-    assert(params.size() == 0);
+    assert(params.size() == 0 || params.size() == 1);
+    if (params.size() == 1) {
+      gate_mode = params[0];
+    }
   }
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -4592,6 +4782,7 @@ int TaskRegister::register_linear_fp8_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.inc_indent();
+  emit_deepseek_phase_gate(code, gate_mode);
 
   // Persistent-kernel FP8 GEMM task. Each MPK task is one CTA, so kNumSMs is
   // fixed to 1 and the task walks all internal BLOCK_N tiles in its output
@@ -4663,11 +4854,18 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
   // happens; the runtime task_desc->input_tma_desc_ptrs[] keeps Python-layer
   // order.
   bool rank_with_residual = with_residual;
+  int gate_mode = 0;
   if (with_residual) {
-    assert(params.size() == 1);
+    assert(params.size() == 1 || params.size() == 2);
     rank_with_residual = (params[0] == 1);
+    if (params.size() == 2) {
+      gate_mode = params[1];
+    }
   } else {
-    assert(params.size() == 0);
+    assert(params.size() == 0 || params.size() == 1);
+    if (params.size() == 1) {
+      gate_mode = params[0];
+    }
   }
   int batch_size = 0, output_size_per_task = 0, reduction_size = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -4717,6 +4915,7 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
   // BLOCK_K=128 (UMMA_K=32) instead of BLOCK_K=64 (UMMA_K=16).
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  emit_deepseek_phase_gate(code, gate_mode);
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
   constexpr int num_ab_stages = 8;
@@ -5268,6 +5467,82 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   return register_task_variant(TASK_LINEAR_FP8_BMM_SM100, code.to_string());
 }
 
+static int register_fp8_gemm_dense_variant(TaskRegister *self,
+                                           std::vector<int> const &params,
+                                           char const *namespace_name,
+                                           char const *fn_name,
+                                           TaskType task_type) {
+  // params: [M, N, K, num_workers, optional runtime_m_mode]
+  // runtime_m_mode=1 gates to prompt-prefill and uses request 0's current
+  // kv_len as runtime M. This is used for ckv -> kv_b_proj decompression.
+  assert(params.size() == 4 || params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
+  assert(runtime_m_mode == 0 || runtime_m_mode == 1);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (runtime_m_mode == 1) {
+    code.e("{");
+    code.e("int req_id_ = runtime_config.request_ids[0];");
+    code.e("if (req_id_ < 0) return;");
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
+           "runtime_config.prompt_length[req_id_] && q_len_ > 8;");
+    code.e("if (!prompt_prefill_) return;");
+    code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[0];");
+    code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
+    code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+           "runtime_config.paged_kv_last_page_len_buffer[0];");
+    code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  } else {
+    code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  }
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  if (runtime_m_mode == 1) {
+    code.e("    runtime_m_,");
+  } else {
+    code.e("    $,", M);
+  }
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", num_workers);
+  if (runtime_m_mode == 1) {
+    code.e("}");
+  }
+  return self->register_task_variant(task_type, code.to_string());
+}
+
+int TaskRegister::register_fp8_gemm_dense_smallm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_variant(
+      this,
+      params,
+      "fp8_gemm_dense_smallm",
+      "fp8_gemm_dense_smallm_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_SMALLM_SM100);
+}
+
+int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_variant(
+      this,
+      params,
+      "fp8_gemm_dense_mediumm",
+      "fp8_gemm_dense_mediumm_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)
@@ -5389,8 +5664,8 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
 int TaskRegister::register_mla_kv_gather_unified_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // Unified variant for the chunked-prefill flow. It appends new KV to the
-  // paged cache once, then writes either the decode layout (contiguous_kv) or
-  // the prefill layout (ckv_sep/kpe_sep) based on runtime Q_LEN.
+  // paged cache once. Decode gets a dense concatenated [CKV,KPE] view when
+  // needed; prompt prefill gets split CKV/KPE views for kv_b_proj + PR674 MLA.
   (void)bgraph;
   assert(params.size() == 3);
 
@@ -5429,7 +5704,7 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]);");
   code.e("  auto *contiguous_kv_ptr_ = "
          "(contiguous_kv_base_ == paged_cache_ptr_) ? contiguous_kv_base_ : "
-         "contiguous_kv_base_ + bi_ * S_ * $;",
+         "contiguous_kv_base_ + bi_ * MPK_MAX_SEQ_LENGTH * $;",
          d_k);
   code.e("  auto *ckv_sep_ptr_ = "
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]) + "
@@ -5458,6 +5733,123 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_UNIFIED_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_deepseek_mla_rope_q_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 3);
+  int num_heads = params[0];
+  int tile_q = params[1];
+  int has_split_q = params[2];
+  assert(num_heads > 0);
+  assert(tile_q > 0);
+  assert(has_split_q == 0 || has_split_q == 1);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::deepseek_mla_rope_sm100_task_impl<$, $, $, true, false>(",
+         num_heads,
+         tile_q,
+         has_split_q ? "true" : "false");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[1]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[1]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[3]),");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.step,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.merge_task_offset);");
+  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 2);
+  int num_heads = params[0];
+  int tile_q = params[1];
+  assert(num_heads > 0);
+  assert(tile_q > 0);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::deepseek_mla_rope_sm100_task_impl<$, $, false, true, false>(",
+         num_heads,
+         tile_q);
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[2]),");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.step,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.merge_task_offset);");
+  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 2);
+  int num_heads = params[0];
+  int tile_q = params[1];
+  assert(num_heads > 0);
+  assert(tile_q > 0);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::deepseek_mla_rope_sm100_task_impl<"
+         "$, $, false, true, false, 64, 64, 64>(",
+         num_heads,
+         tile_q);
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[2]),");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.step,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.merge_task_offset);");
+  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_deepseek_mla_rope_k_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 1);
+  int tile_q = params[0];
+  assert(tile_q > 0);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::deepseek_mla_rope_sm100_task_impl<1, $, false, false, true>(",
+         tile_q);
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[2]),");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.step,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    task_desc->task_metadata.merge_task_offset);");
+  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100,
                                code.to_string());
 }
 

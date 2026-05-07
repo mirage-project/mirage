@@ -1134,7 +1134,7 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        """Append paged KV once, then gather the layout needed by runtime Q_LEN."""
+        """Append paged KV once, then materialize decode or prefill views."""
         d_k, d_v, page_size = mla_params
         params = [d_k, d_v, page_size]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -1156,6 +1156,114 @@ class PersistentKernel:
             tb_graph,
         )
         self.kn_graph.register_task(tb_graph, "mla_kv_gather_unified_sm100", params)
+
+    def deepseek_mla_rope_q_layer(
+        self,
+        q_nope_pe: DTensor,
+        q_pe: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        num_heads: int,
+        has_split_q: bool,
+        grid_dim: tuple,
+        block_dim: tuple = (128, 1, 1),
+        q_tile_size: int = 16,
+    ):
+        params = [num_heads, q_tile_size, 1 if has_split_q else 0]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Duplicate Q tensors are used as task outputs. This gives downstream
+        # MLA tasks a real dependency on the in-place RoPE write without
+        # joining the independent K-RoPE dependency chain.
+        tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                q_nope_pe,
+                q_pe,
+                cos_pos_embed,
+                sin_pos_embed,
+                q_nope_pe,
+                q_pe,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "deepseek_mla_rope_q_sm100", params)
+
+    def deepseek_mla_rope_q_fused_layer(
+        self,
+        q_nope_pe: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        num_heads: int,
+        grid_dim: tuple,
+        block_dim: tuple = (128, 1, 1),
+        q_tile_size: int = 16,
+    ):
+        params = [num_heads, q_tile_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_nope_pe, cos_pos_embed, sin_pos_embed, q_nope_pe],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "deepseek_mla_rope_q_fused_sm100", params)
+
+    def deepseek_mla_rope_q_split_layer(
+        self,
+        q_pe: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        num_heads: int,
+        grid_dim: tuple,
+        block_dim: tuple = (128, 1, 1),
+        q_tile_size: int = 16,
+    ):
+        params = [num_heads, q_tile_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [q_pe, cos_pos_embed, sin_pos_embed, q_pe],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "deepseek_mla_rope_q_split_sm100", params)
+
+    def deepseek_mla_rope_k_layer(
+        self,
+        k_pe: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple = (128, 1, 1),
+        q_tile_size: int = 16,
+    ):
+        params = [q_tile_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(k_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_pe, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                k_pe,
+                cos_pos_embed,
+                sin_pos_embed,
+                k_pe,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "deepseek_mla_rope_k_sm100", params)
 
     def mla_decode_layer(
         self,
@@ -1247,6 +1355,25 @@ class PersistentKernel:
             [q_nope, q_pe, ckv, kpe, output], tb_graph
         )
         self.kn_graph.register_task(tb_graph, "mla_prefill_sm100", params)
+
+    def mla_prefill_absorbed_layer(
+        self,
+        q_nope_pe: DTensor,  # [S, H, D_CKV + D_KPE] flattened
+        kv: DTensor,         # [B * max_seq_len, D_CKV + D_KPE]
+        output: DTensor,     # [S, H, D_V]
+        mla_params: tuple,   # (num_heads, seq_len, d_ckv, d_kpe, d_v)
+        grid_dim: tuple,     # (H, num_q_blocks, B)
+        block_dim: tuple,    # (256, 1, 1)
+    ):
+        num_heads, seq_len, d_ckv, d_kpe, d_v = mla_params
+        params = [num_heads, seq_len, d_ckv, d_kpe, d_v]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kv, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([q_nope_pe, kv, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mla_prefill_absorbed_sm100", params)
 
     def mla_prefill_tp8_layer(
         self,
@@ -1907,6 +2034,7 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         scale_ue8m0: bool = True,
+        active_mode: int = 0,
     ):
         """Quantize BF16 input to FP8 with block-wise scale.
 
@@ -1919,7 +2047,7 @@ class PersistentKernel:
             row_count *= input.dim(axis)
         group_tiles = self._fp8_quantize_group_tiles(hidden_size, scale_ue8m0)
         grid_dim = (group_tiles, row_count, 1)
-        params = []
+        params = [] if active_mode == 0 else [active_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, -1, -1), -1, True)
         tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
@@ -1937,8 +2065,9 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        gate_mode: int = 0,
     ):
-        params = []
+        params = [] if gate_mode == 0 else [gate_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # Grid partitions output along dim0 (output_size): each block handles 128 rows
         # input_fp8 and input_scale: not partitioned (all blocks read same input)
@@ -1965,8 +2094,9 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        gate_mode: int = 0,
     ):
-        params = [1]
+        params = [1] if gate_mode == 0 else [1, gate_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
@@ -1989,13 +2119,14 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        gate_mode: int = 0,
     ):
         # MPK-native FP8 linear (swapAB inside the kernel). Same Python-layer
         # API as linear_fp8_layer; the kernel maps weight->A and input->B.
         # Constraints (asserted at registration time):
         #   per-task output size (output.dim[1] / grid_dim.x) must be a
         #   multiple of 128, and batch_size must be <= 16 (decode-only).
-        params = []
+        params = [] if gate_mode == 0 else [gate_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
@@ -2016,8 +2147,9 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        gate_mode: int = 0,
     ):
-        params = [1]
+        params = [1] if gate_mode == 0 else [1, gate_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
@@ -2079,6 +2211,60 @@ class PersistentKernel:
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_bmm_sm100", params)
+
+    def _fp8_gemm_dense_layer_impl(
+        self,
+        task_name: str,
+        input_fp8: DTensor,
+        weight_fp8: DTensor,
+        input_scale: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        num_workers: int,
+        runtime_m_mode: int = 0,
+    ):
+        # A: [M,K], B: [N,K], C: [M,N]. The kernel distributes output tiles
+        # across `num_workers` persistent tasks.
+        assert input_fp8.num_dims == 2
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims == 2
+        M = input_fp8.dim(0)
+        K = input_fp8.dim(1)
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M and output.dim(1) == N
+        params = [M, N, K, num_workers]
+        if runtime_m_mode:
+            params.append(runtime_m_mode)
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def fp8_gemm_dense_smallm_layer(self, input_fp8, weight_fp8, input_scale,
+                                    weight_scale, output, num_workers,
+                                    runtime_m_mode: int = 0):
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_smallm_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers, runtime_m_mode=runtime_m_mode)
+
+    def fp8_gemm_dense_mediumm_layer(self, input_fp8, weight_fp8, input_scale,
+                                     weight_scale, output, num_workers,
+                                     runtime_m_mode: int = 0):
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_mediumm_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers, runtime_m_mode=runtime_m_mode)
 
     def linear_splitk_swapAB_fp8_layer(
         self,
@@ -2327,6 +2513,7 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         residual: DTensor = None,
+        gate_mode: int = 0,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size)
@@ -2347,6 +2534,12 @@ class PersistentKernel:
         if residual is not None:
             tensors["residual"] = residual
         params = [self.world_size, self.mpi_rank]
+        if gate_mode:
+            if getattr(best_implementation, "name", "") != "nvshmem_tile_allreduce":
+                raise RuntimeError(
+                    "Gated allreduce is currently implemented only for "
+                    "nvshmem_tile_allreduce.")
+            params.append(gate_mode)
         best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim,
                                            block_dim=block_dim, params=params)
 

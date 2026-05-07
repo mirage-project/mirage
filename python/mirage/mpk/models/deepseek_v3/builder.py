@@ -10,6 +10,7 @@ Weight absorption: at load time, kv_b_proj is absorbed into q_b_proj so that
 runtime only needs compressed KV cache [c_latent(512), k_pe(64)] = 576 dims.
 """
 
+import math
 import os
 import torch
 from typing import Optional
@@ -89,6 +90,37 @@ def _moe_hidden_split(hidden_size: int, preferred: int = 56) -> int:
     return 1
 
 
+def _yarn_get_mscale(scale: float = 1.0, mscale: float = 1.0) -> float:
+    if scale <= 1.0:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
+def _yarn_find_correction_dim(num_rotations: int,
+                              dim: int,
+                              base: float,
+                              max_position_embeddings: int) -> float:
+    return (
+        dim
+        * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))
+        / (2 * math.log(base))
+    )
+
+
+def _yarn_find_correction_range(low_rot: int,
+                                high_rot: int,
+                                dim: int,
+                                base: float,
+                                max_position_embeddings: int) -> tuple[int, int]:
+    low = math.floor(
+        _yarn_find_correction_dim(
+            low_rot, dim, base, max_position_embeddings))
+    high = math.ceil(
+        _yarn_find_correction_dim(
+            high_rot, dim, base, max_position_embeddings))
+    return max(low, 0), min(high, dim - 1)
+
+
 def _tensor_parallel_allreduce_grid(output_size: int) -> tuple[int, int, int]:
     """Pick a grid for the NVSHMEM tile allreduce that mirrors the producer's
     column-tile granularity.
@@ -153,6 +185,9 @@ class DeepSeekV3Builder(GraphBuilder):
         self.max_num_batched_tokens = mpk.max_num_batched_tokens
         self.ckv_kpe_cache = None
         self.position_embeddings = None
+        self.rope_theta = 10000.0
+        self.rope_parameters = None
+        self.original_max_position_embeddings = 4096
 
         # DeepSeek V3 dimensions
         self.hidden_size = HIDDEN_SIZE
@@ -205,6 +240,13 @@ class DeepSeekV3Builder(GraphBuilder):
         """
         self.ckv_kpe_cache = model_config.k_cache  # [num_layers, num_pages, page_size, 576]
         self.position_embeddings = model_config.position_embeddings
+        self.rope_theta = model_config.rope_theta or 10000.0
+        self.rope_parameters = model_config.rope_parameters
+        max_pos = model_config.max_position_embeddings
+        if self.rope_parameters is not None:
+            max_pos = self.rope_parameters.get(
+                "original_max_position_embeddings", max_pos)
+        self.original_max_position_embeddings = max_pos or 4096
 
         self.build_from_dict(
             model_config.state_dict,
@@ -224,7 +266,7 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="nvshmem_tensor" if self._use_nvshmem else "cuda_tensor",
         )
 
-    def _allreduce_residual(self, partial, output, residual):
+    def _allreduce_residual(self, partial, output, residual, gate_mode: int = 0):
         self.mpk.allreduce_layer(
             input=partial,
             buffer=self.allreduce_buf,
@@ -232,6 +274,7 @@ class DeepSeekV3Builder(GraphBuilder):
             residual=residual,
             grid_dim=_tensor_parallel_allreduce_grid(output.dim(1)),
             block_dim=(128, 1, 1),
+            gate_mode=gate_mode,
         )
 
     def _fp8_linear_grid_dim(self, weight, grid_dim):
@@ -319,9 +362,32 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_bufs[cache_key]
 
+    def _fp8_sequence_buffers_for_reduction(
+        self, reduction_size: int, tag: str = "shared"
+    ):
+        rows = self.mpk.max_num_batched_requests * self.mpk.max_seq_length
+        group_size = 128
+        num_groups = (reduction_size + group_size - 1) // group_size
+        if not hasattr(self, '_fp8_seq_bufs'):
+            self._fp8_seq_bufs = {}
+        cache_key = (rows, reduction_size, tag)
+        if cache_key not in self._fp8_seq_bufs:
+            fp8_buf = self.mpk.new_tensor(
+                dims=(rows, reduction_size), dtype=float8_e4m3,
+                name=f"fp8_seq_input_{reduction_size}_{tag}",
+                io_category="cuda_tensor",
+            )
+            scale_buf = self.mpk.new_tensor(
+                dims=(rows, num_groups), dtype=float32,
+                name=f"fp8_seq_scale_{reduction_size}_{tag}",
+                io_category="cuda_tensor",
+            )
+            self._fp8_seq_bufs[cache_key] = (fp8_buf, scale_buf)
+        return self._fp8_seq_bufs[cache_key]
+
     def _fp8_linear_prequantized(self, input_fp8, input_scale, weight,
                                  weight_scale, output, grid_dim, block_dim,
-                                 residual=None):
+                                 residual=None, gate_mode: int = 0):
         if weight_scale is None:
             raise ValueError("Prequantized FP8 linear requires FP8 weight scale.")
         if input_fp8.num_dims != 2 or output.num_dims != 2:
@@ -358,8 +424,10 @@ class DeepSeekV3Builder(GraphBuilder):
                     output=partial,
                     grid_dim=grid_dim,
                     block_dim=block_dim,
+                    gate_mode=gate_mode,
                 )
-                self._allreduce_residual(partial, output, residual)
+                self._allreduce_residual(partial, output, residual,
+                                         gate_mode=gate_mode)
             else:
                 linear_with_residual_layer(
                     input_fp8=input_fp8,
@@ -370,6 +438,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     output=output,
                     grid_dim=grid_dim,
                     block_dim=block_dim,
+                    gate_mode=gate_mode,
                 )
         else:
             linear_layer(
@@ -380,10 +449,11 @@ class DeepSeekV3Builder(GraphBuilder):
                 output=output,
                 grid_dim=grid_dim,
                 block_dim=block_dim,
+                gate_mode=gate_mode,
             )
 
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
-                     grid_dim, block_dim, residual=None):
+                     grid_dim, block_dim, residual=None, gate_mode: int = 0):
         """Quantize BF16 input → FP8, then run FP8 GEMM."""
 
         if weight_scale is None:
@@ -397,7 +467,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     self.mpk.linear_layer(
                         input=input_bf16, weight=weight, output=partial,
                         grid_dim=grid_dim, block_dim=block_dim)
-                    self._allreduce_residual(partial, output, residual)
+                    self._allreduce_residual(partial, output, residual,
+                                             gate_mode=gate_mode)
                 else:
                     self.mpk.linear_with_residual_layer(
                         input=input_bf16, weight=weight, residual=residual,
@@ -424,6 +495,8 @@ class DeepSeekV3Builder(GraphBuilder):
             output_scale=self._fp8_scale_buf,
             grid_dim=(self.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
+            active_mode=(
+                2 if gate_mode == 1 else 3 if gate_mode == 2 else 0),
         )
 
         self._fp8_linear_prequantized(
@@ -435,6 +508,38 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim,
             block_dim,
             residual=residual,
+            gate_mode=gate_mode,
+        )
+
+    def _fp8_dense_kv_b_proj(
+        self, ckv, weight, weight_scale, output, tag: str
+    ):
+        if weight_scale is None:
+            raise ValueError("kv_b prefill projection requires FP8 weight scale.")
+        input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
+            self.kv_lora_rank, tag=tag)
+        self.mpk.quantize_fp8_layer(
+            input=ckv,
+            output_fp8=input_fp8,
+            output_scale=input_scale,
+            grid_dim=(input_fp8.dim(0), 1, 1),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=False,
+            active_mode=1,
+        )
+        gemm_layer = (
+            self.mpk.fp8_gemm_dense_smallm_layer
+            if self.mpk.max_seq_length <= 512
+            else self.mpk.fp8_gemm_dense_mediumm_layer
+        )
+        gemm_layer(
+            input_fp8=input_fp8,
+            weight_fp8=weight,
+            input_scale=input_scale,
+            weight_scale=weight_scale,
+            output=output,
+            num_workers=self.num_workers,
+            runtime_m_mode=1,
         )
 
     # FP8 splitk replacements verified end-to-end on TP=1 layers 0-8.
@@ -635,22 +740,68 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
     def _precompute_rope_embeddings(self):
-        """Precompute cos/sin RoPE embeddings for DeepSeek V3."""
+        """Precompute vLLM/SGLang-aligned DeepSeek-V3 RoPE tables."""
         rope_dim = QK_ROPE_HEAD_DIM  # 64
         max_seq = self.mpk.max_seq_length
-        # DeepSeek V3 uses standard RoPE with theta=10000
-        theta = 10000.0
         half = rope_dim // 2
-        freqs = 1.0 / (theta ** (torch.arange(0, half, dtype=torch.float32) / half))
+        rope_params = self.rope_parameters or {}
+        rope_type = rope_params.get("rope_type", rope_params.get("type", "default"))
+        factor = float(rope_params.get("factor", 1.0))
+        base = float(self.rope_theta)
+
+        pos_freqs = base ** (
+            torch.arange(0, rope_dim, 2, dtype=torch.float32) / rope_dim)
+        if rope_type in ("yarn", "deepseek_yarn", "deepseek_llama_scaling"):
+            inv_freq_extrapolation = 1.0 / pos_freqs
+            inv_freq_interpolation = 1.0 / (factor * pos_freqs)
+            beta_fast = int(rope_params.get("beta_fast", 32))
+            beta_slow = int(rope_params.get("beta_slow", 1))
+            low, high = _yarn_find_correction_range(
+                beta_fast,
+                beta_slow,
+                rope_dim,
+                base,
+                int(self.original_max_position_embeddings),
+            )
+            if low == high:
+                high += 0.001
+            ramp = torch.clamp(
+                (torch.arange(half, dtype=torch.float32) - low) / (high - low),
+                0,
+                1,
+            )
+            extrapolation_factor = float(
+                rope_params.get("extrapolation_factor", 1.0))
+            inv_freq_mask = (1 - ramp) * extrapolation_factor
+            freqs = (
+                inv_freq_interpolation * (1 - inv_freq_mask)
+                + inv_freq_extrapolation * inv_freq_mask
+            )
+            attn_factor = float(rope_params.get("attn_factor", 1.0))
+            mscale = (
+                _yarn_get_mscale(factor, float(rope_params.get("mscale", 1.0)))
+                / _yarn_get_mscale(
+                    factor, float(rope_params.get("mscale_all_dim", 0.0)))
+                * attn_factor
+            )
+        else:
+            freqs = 1.0 / pos_freqs
+            mscale = 1.0
+
         positions = torch.arange(max_seq, dtype=torch.float32)
         angles = torch.outer(positions, freqs)  # [max_seq, half]
-        # Expand to full rope_dim: [max_seq, rope_dim] = [cos_half, cos_half]
+        # vLLM/SGLang run DeepSeek MLA RoPE with interleaved/GPT-J semantics
+        # (is_neox_style=False): pair dims (0,1), (2,3), ... and use
+        # repeat_interleave cos/sin. The local HF checkpoint first permutes the
+        # interleaved tensor to half layout and then applies rotate_half; that
+        # is mathematically equivalent for QK dot products, but the physical
+        # tensor layout differs. Keep MPK aligned with vLLM/SGLang.
         # Keep PyTorch tensors alive on self — the persistent kernel stores
         # raw GPU pointers, so the tensors must not be garbage-collected.
-        self._rope_cos_buf = torch.cat([angles.cos(), angles.cos()], dim=-1).to(
-            dtype=torch.bfloat16, device="cuda")
-        self._rope_sin_buf = torch.cat([-angles.sin(), angles.sin()], dim=-1).to(
-            dtype=torch.bfloat16, device="cuda")
+        self._rope_cos_buf = (angles.cos() * mscale).repeat_interleave(
+            2, dim=-1).to(dtype=torch.bfloat16, device="cuda")
+        self._rope_sin_buf = (angles.sin() * mscale).repeat_interleave(
+            2, dim=-1).to(dtype=torch.bfloat16, device="cuda")
         # Attach as DTensors
         self.cos_pos_embed = self.mpk.attach_input(
             torch_tensor=self._rope_cos_buf, name="rope_cos")
@@ -717,21 +868,16 @@ class DeepSeekV3Builder(GraphBuilder):
             name="q_nope_pe",
             io_category="cuda_tensor",
         )
-        # Prefill-path Q tensors: split per-head [nope(512) | pe(64)]. For the
-        # mla_prefill_sm100 kernel which expects them as two separate dense
-        # tensors (shape [S, H, D_CKV] and [S, H, D_KPE]).
-        if self._use_prefill:
-            self.q_nope = self.mpk.new_tensor(
-                dims=(mbt, self.num_local_q_heads * self.kv_lora_rank),
-                dtype=bfloat16, name="q_nope", io_category="cuda_tensor",
-            )
-            self.q_pe = self.mpk.new_tensor(
-                dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
-                dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
-            )
-        else:
-            self.q_nope = None
-            self.q_pe = None
+        # Decode consumes absorbed [CKV, KPE] Q. Prefill consumes vLLM's
+        # original per-head split Q: [nope(128), rope(64)].
+        self.q_nope = self.mpk.new_tensor(
+            dims=(mbt, self.num_local_q_heads * QK_NOPE_HEAD_DIM),
+            dtype=bfloat16, name="q_nope", io_category="cuda_tensor",
+        )
+        self.q_pe = self.mpk.new_tensor(
+            dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
+            dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
+        )
         # kv_a output split: c_latent [batch, 512] and k_pe [batch, 64]
         # We use two separate linear layers instead of one 576-dim output,
         # so we can apply kv_a_layernorm to c_latent only.
@@ -767,9 +913,6 @@ class DeepSeekV3Builder(GraphBuilder):
             name="contiguous_kv",
             io_category="cuda_tensor",
         )
-        # Prefill-path KV: split into CKV [B, S, 512] and KPE [B, S, 64]. The
-        # prefill kernel itself is single-request; task registration offsets
-        # each request to its own [S, *] window inside this flattened buffer.
         if self._use_prefill:
             self.ckv_sep = self.mpk.new_tensor(
                 dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
@@ -781,9 +924,21 @@ class DeepSeekV3Builder(GraphBuilder):
                       QK_ROPE_HEAD_DIM),
                 dtype=bfloat16, name="kpe_sep", io_category="cuda_tensor",
             )
+            self.prefill_k_nope = self.mpk.new_tensor(
+                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
+                      self.num_local_q_heads * QK_NOPE_HEAD_DIM),
+                dtype=bfloat16, name="prefill_k_nope", io_category="cuda_tensor",
+            )
+            self.prefill_v = self.mpk.new_tensor(
+                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
+                      self.num_local_q_heads * V_HEAD_DIM),
+                dtype=bfloat16, name="prefill_v", io_category="cuda_tensor",
+            )
         else:
             self.ckv_sep = None
             self.kpe_sep = None
+            self.prefill_k_nope = None
+            self.prefill_v = None
         # MLA decode partial outputs (PR 651: bf16 for partials)
         # MLA kernel writes blocks at stride D_V*128 and LSE at stride 128.
         # TP kernels use split-K: each split handles one KV tile (128 tokens).
@@ -1015,6 +1170,23 @@ class DeepSeekV3Builder(GraphBuilder):
             s = None  # weight is already BF16 (post-dequant)
         return w, s
 
+    def _attach_raw_fp8_weight(self, state_dict, key, name):
+        """Attach checkpoint-style FP8 weight + float32 block scale.
+
+        PR674's dense FP8 GEMM uses the original block scale layout
+        [output/128, K/128], not the packed UE8M0 scale used by the small-B
+        linear runtime.
+        """
+        scale_key = f"{key}_scale_inv"
+        if scale_key not in state_dict:
+            raise ValueError(f"{key} requires {scale_key} for FP8 dense GEMM.")
+        if state_dict[key].dtype != torch.float8_e4m3fn:
+            raise TypeError(f"{key} must be torch.float8_e4m3fn.")
+        w = self._safe_attach(state_dict[key], name)
+        s = self._safe_attach(
+            state_dict[scale_key].float().contiguous(), f"{name}_scale")
+        return w, s
+
     def _build_mla_attention_layer(self, layer_idx: int, state_dict: dict):
         """Build MLA attention for one decoder layer (FP8 weights)."""
         prefix = f"model.layers.{layer_idx}."
@@ -1067,24 +1239,16 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
-        # Step 3: q_b_proj absorbed (BF16 — scale deleted after absorption)
-        # Dual-dispatch (opt/mla-dual-dispatch):
-        #  - _use_prefill = False (decode/MTP): one linear, fused [H*576]
-        #    output -> self.q_nope_pe, consumed by the MLA decode kernel.
-        #  - _use_prefill = True: BOTH forms produced — the decode kernel
-        #    consumes q_nope_pe [H*576] and the prefill kernel consumes
-        #    q_nope [H*512] + q_pe [H*64]. The builder's dual-dispatch
-        #    registers both attention kernels; at runtime one of them
-        #    early-exits based on Q_LEN, but both Q forms must be present.
-        #    Split weights (q_b_nope, q_b_pe) are produced at load time in
-        #    demo.py's Phase 2 absorption; the fused q_b_proj weight is
-        #    retained alongside.
+        # Step 3: q_b projections.
+        # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
+        # Prefill uses vLLM's original split q_b [H*128] + [H*64].
         w_q_b, s_q_b = self._attach_fp8_weight(
             state_dict, f"{attn}q_b_proj.weight",
             f"layer_{layer_idx}_q_b_proj")
         self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
                          grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
-                         block_dim=(128, 1, 1))
+                         block_dim=(128, 1, 1),
+                         gate_mode=2 if self._use_prefill else 0)
         if self._use_prefill:
             w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
                 state_dict, f"{attn}q_b_nope.weight",
@@ -1092,14 +1256,16 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_linear(
                 self.q_a_out, w_q_b_nope, s_q_b_nope, self.q_nope,
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
-                block_dim=(128, 1, 1))
+                block_dim=(128, 1, 1),
+                gate_mode=1)
             w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
                 state_dict, f"{attn}q_b_pe.weight",
                 f"layer_{layer_idx}_q_b_pe")
             self._fp8_linear(
                 self.q_a_out, w_q_b_pe, s_q_b_pe, self.q_pe,
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
-                block_dim=(128, 1, 1))
+                block_dim=(128, 1, 1),
+                gate_mode=1)
         # Step 4: kv_a_proj split — c_latent (FP8) + k_pe (BF16 padded)
         # k_pe output=64 < MMA_M=128, so dequant to BF16 and pad weight to [128, H]
         kv_a_w = state_dict[f"{attn}kv_a_proj_with_mqa.weight"]
@@ -1176,6 +1342,37 @@ class DeepSeekV3Builder(GraphBuilder):
                              self.k_pe_out,
                              grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
 
+        rope_q_grid = (
+            self.mpk.max_num_batched_requests,
+            self.num_local_q_heads,
+            (self.max_num_batched_tokens + 15) // 16,
+        )
+        self.mpk.deepseek_mla_rope_q_fused_layer(
+            q_nope_pe=self.q_nope_pe,
+            cos_pos_embed=self.cos_pos_embed,
+            sin_pos_embed=self.sin_pos_embed,
+            num_heads=self.num_local_q_heads,
+            grid_dim=rope_q_grid,
+        )
+        if self._use_prefill:
+            self.mpk.deepseek_mla_rope_q_split_layer(
+                q_pe=self.q_pe,
+                cos_pos_embed=self.cos_pos_embed,
+                sin_pos_embed=self.sin_pos_embed,
+                num_heads=self.num_local_q_heads,
+                grid_dim=rope_q_grid,
+            )
+        self.mpk.deepseek_mla_rope_k_layer(
+            k_pe=self.k_pe_out,
+            cos_pos_embed=self.cos_pos_embed,
+            sin_pos_embed=self.sin_pos_embed,
+            grid_dim=(
+                self.mpk.max_num_batched_requests,
+                1,
+                (self.max_num_batched_tokens + 15) // 16,
+            ),
+        )
+
         # Step 5: kv_a_layernorm on c_latent ONLY
         w_kv_a_ln = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}kv_a_layernorm.weight"],
@@ -1228,23 +1425,37 @@ class DeepSeekV3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
             )
         if self._use_prefill:
-            self.mpk.mla_prefill_layer(
-                self.q_nope, self.q_pe,
-                self.ckv_sep, self.kpe_sep,
-                self.attn_out,
+            w_kv_b_k, s_kv_b_k = self._attach_raw_fp8_weight(
+                state_dict, f"{attn}kv_b_k.weight",
+                f"layer_{layer_idx}_kv_b_k")
+            w_kv_b_v, s_kv_b_v = self._attach_raw_fp8_weight(
+                state_dict, f"{attn}kv_b_v.weight",
+                f"layer_{layer_idx}_kv_b_v")
+            self._fp8_dense_kv_b_proj(
+                self.ckv_sep, w_kv_b_k, s_kv_b_k, self.prefill_k_nope,
+                tag=f"layer_{layer_idx}_kv_b_k")
+            self._fp8_dense_kv_b_proj(
+                self.ckv_sep, w_kv_b_v, s_kv_b_v, self.prefill_v,
+                tag=f"layer_{layer_idx}_kv_b_v")
+            self.mpk.mla_prefill_tp8_chunked_layer(
+                q_nope=self.q_nope,
+                q_pe=self.q_pe,
+                k_nope=self.prefill_k_nope,
+                k_rope=self.kpe_sep,
+                v=self.prefill_v,
+                output=self.attn_unabsorbed,
                 mla_params=(
                     self.num_local_q_heads,
+                    q_len_mla,
                     kv_len_max,
-                    self.kv_lora_rank,
-                    QK_ROPE_HEAD_DIM,
-                    self.v_head_dim,
+                    0,
                 ),
                 grid_dim=(
                     self.num_local_q_heads,
                     (q_len_mla + 63) // 64,
                     self.mpk.max_num_batched_requests,
                 ),
-                block_dim=(256, 1, 1),
+                block_dim=(128, 1, 1),
             )
             if self.world_size == 2:
                 self.mpk.mla_mtp_decode_tp2_layer(
@@ -1327,43 +1538,68 @@ class DeepSeekV3Builder(GraphBuilder):
                         self.mla_partial_o, self.mla_partial_lse,
                         self.attn_out, decode_q_len_mla, kv_len_max)
 
-        # Step 7: O projection (V un-absorption fused into o_proj during conversion)
-        # o_proj_fused: [7168, H*kv_lora_rank] — directly takes attn_out [N, H*kv_lora_rank]
-        # Fuses the residual add into o_proj via the with_residual FP8 kernel.
-        w_o, s_o = self._attach_fp8_weight(
-            state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
-        o_split_k = self._pick_fp8_splitk_factor(w_o)
-        if o_split_k is not None and self.world_size == 1:
-            # TP=1 splitk path: alias attn_proj_out to self.x so the kernel
-            # reduce-adds the matmul on top of the residual in place.
-            self.attn_proj_out = self.x
-            self._fp8_linear_splitk(
-                self.attn_out, w_o, s_o, self.attn_proj_out,
-                split_k=o_split_k, residual=self.x)
-        elif o_split_k is not None:
-            # TP>1 splitk path: produce partial, then allreduce + add residual.
-            self.attn_proj_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_attn_proj_fused",
-                io_category="cuda_tensor",
+        # Step 7: O projection.
+        # Decode uses the absorbed output projection produced during weight
+        # conversion: [hidden, H*512]. Prefill uses PR674's unabsorbed attention
+        # output and therefore must use the original projection:
+        # [hidden, H*128]. Both are registered in the same graph and runtime
+        # phase gates make exactly one branch write the residual output.
+        self.attn_proj_out = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_attn_proj_fused",
+            io_category="cuda_tensor",
+        )
+        if self._use_prefill:
+            w_o_prefill, s_o_prefill = self._attach_fp8_weight(
+                state_dict, f"{attn}o_proj_original.weight",
+                f"layer_{layer_idx}_o_proj_original")
+            self._fp8_linear(
+                self.attn_unabsorbed,
+                w_o_prefill,
+                s_o_prefill,
+                self.attn_proj_out,
+                grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+                block_dim=(128, 1, 1),
+                residual=self.x,
+                gate_mode=1,
             )
-            self._fp8_linear_splitk(
-                self.attn_out, w_o, s_o, self.attn_proj_out,
-                split_k=o_split_k, residual=self.x)
+            w_o_decode, s_o_decode = self._attach_fp8_weight(
+                state_dict, f"{attn}o_proj.weight",
+                f"layer_{layer_idx}_o_proj")
+            self._fp8_linear(
+                self.attn_out,
+                w_o_decode,
+                s_o_decode,
+                self.attn_proj_out,
+                grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+                block_dim=(128, 1, 1),
+                residual=self.x,
+                gate_mode=2,
+            )
         else:
-            # Allocate per-layer output tensor to avoid aliasing self.x ↔
-            # self.attn_proj_out in the next layer's with_residual call.
-            self.attn_proj_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_attn_proj_fused",
-                io_category="cuda_tensor",
-            )
-            self._fp8_linear(self.attn_out, w_o, s_o, self.attn_proj_out,
-                             grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
-                             block_dim=(128, 1, 1),
-                             residual=self.x)
+            w_o, s_o = self._attach_fp8_weight(
+                state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
+            o_split_k = self._pick_fp8_splitk_factor(w_o)
+            if o_split_k is not None and self.world_size == 1:
+                self.attn_proj_out = self.x
+                self._fp8_linear_splitk(
+                    self.attn_out, w_o, s_o, self.attn_proj_out,
+                    split_k=o_split_k, residual=self.x)
+            elif o_split_k is not None:
+                self._fp8_linear_splitk(
+                    self.attn_out, w_o, s_o, self.attn_proj_out,
+                    split_k=o_split_k, residual=self.x)
+            else:
+                self._fp8_linear(
+                    self.attn_out,
+                    w_o,
+                    s_o,
+                    self.attn_proj_out,
+                    grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+                    block_dim=(128, 1, 1),
+                    residual=self.x,
+                )
 
     def _build_dense_mlp(self, layer_idx: int, state_dict: dict):
         """Build dense MLP for layers 0-2 (FP8 weights)."""
@@ -1965,6 +2201,37 @@ class DeepSeekV3Builder(GraphBuilder):
                          grid_dim=(1, 1, 1),
                          block_dim=(128, 1, 1))
 
+        rope_q_grid = (
+            self.mpk.max_num_batched_requests,
+            self.num_local_q_heads,
+            (self.max_num_batched_tokens + 15) // 16,
+        )
+        self.mpk.deepseek_mla_rope_q_fused_layer(
+            q_nope_pe=self.q_nope_pe,
+            cos_pos_embed=self.cos_pos_embed,
+            sin_pos_embed=self.sin_pos_embed,
+            num_heads=self.num_local_q_heads,
+            grid_dim=rope_q_grid,
+        )
+        if use_mtp_prefill_attention:
+            self.mpk.deepseek_mla_rope_q_split_layer(
+                q_pe=self.q_pe,
+                cos_pos_embed=self.cos_pos_embed,
+                sin_pos_embed=self.sin_pos_embed,
+                num_heads=self.num_local_q_heads,
+                grid_dim=rope_q_grid,
+            )
+        self.mpk.deepseek_mla_rope_k_layer(
+            k_pe=self.k_pe_out,
+            cos_pos_embed=self.cos_pos_embed,
+            sin_pos_embed=self.sin_pos_embed,
+            grid_dim=(
+                self.mpk.max_num_batched_requests,
+                1,
+                (self.max_num_batched_tokens + 15) // 16,
+            ),
+        )
+
         w_kv_a_ln = self._cached_attach(
             state_dict[f"{attn}kv_a_layernorm.weight"],
             f"mtp_{attn}kv_a_layernorm")
@@ -2012,10 +2279,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
             )
         if use_mtp_prefill_attention:
-            self.mpk.mla_prefill_layer(
-                self.q_nope, self.q_pe,
-                self.ckv_sep, self.kpe_sep,
-                self.attn_out,
+            self.mpk.mla_prefill_absorbed_layer(
+                self.q_nope_pe, self.contiguous_kv, self.attn_out,
                 mla_params=(
                     self.num_local_q_heads,
                     kv_len_max,

@@ -22,6 +22,9 @@ class MirageModelConfig:
     v_cache: list[torch.Tensor] = None
     # position embeddings (cos, sin)
     position_embeddings: tuple[torch.Tensor, torch.Tensor] = None
+    rope_theta: float | None = None
+    rope_parameters: dict | None = None
+    max_position_embeddings: int | None = None
     # model weights
     state_dict: dict | None = None
     

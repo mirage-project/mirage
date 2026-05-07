@@ -28,6 +28,9 @@
 #include "nvshmem_argmax_sm100.cuh"
 #endif
 #include "attention_sm100.cuh"
+#include "deepseek_mla_rope_sm100.cuh"
+#include "fp8_gemm_dense_mediumm_sm100.cuh"
+#include "fp8_gemm_dense_smallm_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
 #include "linear_fp8_swapAB_sm100.cuh"
 #include "linear_fp8_bmm_sm100.cuh"
