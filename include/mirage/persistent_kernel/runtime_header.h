@@ -203,7 +203,13 @@ enum TaskType {
   // Unified KV gather: appends once, then writes the prefill or decode layout
   // selected by runtime Q_LEN.
   TASK_MLA_KV_GATHER_UNIFIED_SM100 = 297,
-  TASK_SM100_TASK_END = 299, // SM100 end placeholder, not a real task
+  TASK_MLA_PREFILL_TP8_CHUNKED_SM100 = 298,
+  TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 299,
+  TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
+  TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
+  TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 306,
+  TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 307,
+  TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

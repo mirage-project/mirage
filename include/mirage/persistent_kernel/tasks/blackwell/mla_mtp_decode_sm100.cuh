@@ -57,7 +57,9 @@ static constexpr int RD_TB = 512;
 static constexpr int MAX_SK = 32;
 
 // SMEM for main kernel
-static constexpr int MTP_SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES; // 160KB
+// +1024 because the runtime rounds the extern shared-memory base up to a
+// 1024-byte boundary before issuing 128B-swizzle TMA copies.
+static constexpr int MTP_SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES + 1024;
 
 } // namespace mla_mtp
 
@@ -134,9 +136,9 @@ __device__ __noinline__ void
   int const hpb = local_num_heads / num_head_groups;
 
   extern __shared__ __align__(1024) char smem_buf[];
-  int const smem_base = __cvta_generic_to_shared(smem_buf);
+  int const smem_base_raw = __cvta_generic_to_shared(smem_buf);
 
-  int const work_smem = smem_base;
+  int const work_smem = (smem_base_raw + 1023) & ~1023;
 
   __shared__ uint64_t mbar_buf[12];
   __shared__ int tmem_addr_buf[1];

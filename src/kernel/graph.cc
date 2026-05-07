@@ -719,6 +719,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // attached with store_in_dmem=True, MPK convention (same as mla_decode).
     // Task register dispatches input_ptrs[4] as the O pointer.
     task_config[op] = std::make_tuple(5, 0, TASK_MLA_PREFILL_SM100, variant_id);
+  } else if (name == "mla_prefill_absorbed_sm100") {
+    int variant_id = task_register->register_mla_prefill_absorbed_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_MLA_PREFILL_SM100, variant_id);
   } else if (name == "mla_prefill_tp8_sm100") {
     int variant_id = task_register->register_mla_prefill_tp8_sm100_task(
         customized->bgraph, params);
@@ -726,6 +730,24 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // descriptors.
     task_config[op] =
         std::make_tuple(4, 1, TASK_MLA_PREFILL_TP8_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_chunked_sm100") {
+    int variant_id = task_register->register_mla_prefill_tp8_chunked_sm100_task(
+        customized->bgraph, params);
+    // Per-head unabsorbed: 5 inputs (Qn, Qp, K_nope, K_rope, V) + 1 output.
+    task_config[op] =
+        std::make_tuple(5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_chunked_splitk_sm100") {
+    int variant_id =
+        task_register->register_mla_prefill_tp8_chunked_splitk_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_chunked_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_prefill_tp8_chunked_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        1, 1, TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100, variant_id);
   } else if (name == "mla_unified_sm100") {
     int variant_id =
         task_register->register_mla_unified_sm100_task(customized->bgraph,
@@ -823,6 +845,18 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_LINEAR_FP8_BMM_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_smallm_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_smallm_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SMALLM_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_mediumm_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_mediumm_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_MEDIUMM_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {
@@ -841,6 +875,28 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] =
         std::make_tuple(6, 0, TASK_MLA_KV_GATHER_UNIFIED_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_q_sm100") {
+    int variant_id = task_register->register_deepseek_mla_rope_q_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 2, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_q_fused_sm100") {
+    int variant_id =
+        task_register->register_deepseek_mla_rope_q_fused_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_q_split_sm100") {
+    int variant_id =
+        task_register->register_deepseek_mla_rope_q_split_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_k_sm100") {
+    int variant_id = task_register->register_deepseek_mla_rope_k_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
   }
   // MTP tasks
   else if (name == "mtp_verify_strict") {

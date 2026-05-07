@@ -64,6 +64,7 @@ benchmark/*generated*
 
 # Output files of runtime
 output/
+outputs/
 # Temp file
 task_graph*.json
 test.cu
@@ -86,3 +87,4 @@ ncu_tmp
 # Local-only Claude docs / scratch PR description — never push
 /CLAUDE.md
 /pr.md
+/codex-sub-agent.md

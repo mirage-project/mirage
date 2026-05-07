@@ -195,7 +195,8 @@ class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
     
     def register_tasks(self, mpk, tensors: Dict, grid_dim: Tuple,
                       block_dim: Tuple, params: List[int]) -> None:
-        assert len(params) == 2, "params should contain [world_size, rank]"
+        assert len(params) in (2, 3), (
+            "params should contain [world_size, rank] plus optional gate mode")
         input_tensor = tensors.pop("input")
         output_tensor = tensors.pop("output")
         residual_tensor = tensors.pop("residual", None)

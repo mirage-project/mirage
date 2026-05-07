@@ -201,11 +201,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
   }
   __syncthreads();
 
-  // MBT is only a chunk/token budget. Runtime step/prompt_length decides the
-  // phase: a short prompt tail (for example 1..8 tokens after a 128-token
-  // chunk) is still prefill and must materialize the prefill layout.
-  bool const use_prefill_layout = prompt_prefill;
-  if (!use_prefill_layout && contiguous_kv_ptr == paged_cache_ptr) {
+  if (!prompt_prefill && contiguous_kv_ptr == paged_cache_ptr) {
     return;
   }
   for (int seq_pos = 0; seq_pos < seq_len; seq_pos++) {
@@ -213,7 +209,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
     int const pos_in_page = seq_pos % PAGE_SIZE;
     T const *src = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
 
-    if (use_prefill_layout) {
+    if (prompt_prefill) {
       T *ckv_dst = ckv_sep + seq_pos * D_V;
       T *kpe_dst = kpe_sep + seq_pos * ROPE_DIM;
       for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {

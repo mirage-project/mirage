@@ -60,6 +60,32 @@ def max_factor_leq_n(m: int, n: int) -> int:
     return max_factor
 
 
+def safe_tokenizer_decode(tokenizer, token_ids, *, context: str) -> str:
+    if torch.is_tensor(token_ids):
+        ids = [int(x) for x in token_ids.detach().cpu().reshape(-1).tolist()]
+    else:
+        ids = [int(x) for x in token_ids]
+
+    try:
+        vocab_size = len(tokenizer)
+    except TypeError:
+        vocab_size = getattr(tokenizer, "vocab_size", None)
+
+    if vocab_size is not None:
+        bad_ids = [tok for tok in ids if tok < 0 or tok >= vocab_size]
+        if bad_ids:
+            first = bad_ids[0]
+            return (
+                f"[decode skipped for {context}: {len(bad_ids)} token id(s) "
+                f"outside tokenizer range [0, {vocab_size}); first={first}]"
+            )
+
+    try:
+        return tokenizer.decode(ids, skip_special_tokens=True)
+    except (OverflowError, ValueError) as exc:
+        return f"[decode skipped for {context}: {type(exc).__name__}: {exc}]"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DeepSeek V3 demo with Mirage megakernel")
     parser.add_argument("--model-path", type=str, required=True,
@@ -68,6 +94,10 @@ if __name__ == "__main__":
                         help="Use Mirage megakernel")
     parser.add_argument("--profiling", action="store_true",
                         help="Enable profiling to generate trace")
+    parser.add_argument("--profile-start-step", type=int, default=None,
+                        help="Profiling-only: initialize the runtime step "
+                             "after MPK compile so a single profiled graph "
+                             "starts from an existing context position.")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int,
                         help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int,
@@ -646,36 +676,62 @@ if __name__ == "__main__":
                         kv_f32 = dequantize_fp8(kv_w.cuda(), state_dict[kv_s_key].cuda())
                     else:
                         kv_f32 = kv_w.cuda().float()
-                    kv_bf16 = kv_f32.to(torch.bfloat16)
                     absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)
                     q_fp8, q_scale = _quantize_f32_to_checkpoint_fp8(absorbed_f32)
                     state_dict[q_key] = q_fp8
                     state_dict[q_s_key] = q_scale
-                    # Fuse V un-absorption into o_proj
                     num_heads_loc = mp["num_heads"]
                     qk_nope = mp["qk_nope_head_dim"]
+                    qk_rope = mp["qk_rope_head_dim"]
                     v_dim = mp["v_head_dim"]
                     kv_lora_rank = mp["kv_lora_rank"]
-                    # Split absorbed q_b into q_b_nope (H*D_CKV=512) and
-                    # q_b_pe (H*D_KPE=64) for the chunked-prefill MLA kernel,
-                    # which takes Q_nope / Q_pe as separate tensors. Decode
-                    # still uses the fused [H*576] q_b_proj — keeping both
-                    # forms lets the builder dispatch based on
-                    # max_num_batched_tokens. Per-head layout: [nope(512) | pe(64)].
                     H_ = num_heads_loc
-                    absorbed_bf16 = absorbed_f32.to(torch.bfloat16)
-                    absorbed_r = absorbed_bf16.reshape(H_, 576, -1)
-                    q_b_nope = absorbed_r[:, :kv_lora_rank, :].contiguous().reshape(H_ * kv_lora_rank, -1)
-                    q_b_pe = absorbed_r[:, kv_lora_rank:, :].contiguous().reshape(H_ * (576 - kv_lora_rank), -1)
-                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
-                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
+
+                    # Prefill follows vLLM's compute-friendly MLA path:
+                    # original q_b_proj produces per-head q_nope/q_pe, while
+                    # kv_b_proj decompresses cached c_latent into per-head
+                    # K_nope/V. Decode keeps the absorbed q_b/o_proj path.
+                    q_orig = q_f32.reshape(H_, qk_nope + qk_rope, -1)
+                    q_b_nope_f32 = q_orig[:, :qk_nope, :].contiguous().reshape(
+                        H_ * qk_nope, -1)
+                    q_b_pe_f32 = q_orig[:, qk_nope:, :].contiguous().reshape(
+                        H_ * qk_rope, -1)
+                    q_b_nope_fp8, q_b_nope_scale = _quantize_f32_to_checkpoint_fp8(
+                        q_b_nope_f32)
+                    q_b_pe_fp8, q_b_pe_scale = _quantize_f32_to_checkpoint_fp8(
+                        q_b_pe_f32)
+                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope_fp8
+                    state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
+                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
+                    state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
+
                     kv_head_dim = qk_nope + v_dim
-                    kv_b_reshaped = kv_bf16.reshape(num_heads_loc, kv_head_dim, kv_lora_rank)
-                    W_UV = kv_b_reshaped[:, :v_dim, :]
+                    kv_b_reshaped = kv_f32.reshape(
+                        num_heads_loc, kv_head_dim, kv_lora_rank)
+                    W_UK = kv_b_reshaped[:, :qk_nope, :]
+                    W_UV = kv_b_reshaped[:, qk_nope:, :]
+                    kv_b_k_f32 = W_UK.contiguous().reshape(H_ * qk_nope, kv_lora_rank)
+                    kv_b_v_f32 = W_UV.contiguous().reshape(H_ * v_dim, kv_lora_rank)
+                    kv_b_k_fp8, kv_b_k_scale = _quantize_f32_to_checkpoint_fp8(
+                        kv_b_k_f32)
+                    kv_b_v_fp8, kv_b_v_scale = _quantize_f32_to_checkpoint_fp8(
+                        kv_b_v_f32)
+                    state_dict[f"{attn}kv_b_k.weight"] = kv_b_k_fp8
+                    state_dict[f"{attn}kv_b_k.weight_scale_inv"] = kv_b_k_scale
+                    state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
+                    state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
+
+                    # Preserve original W_O for PR674 prefill output. The
+                    # existing o_proj key is replaced by the decode-only fused
+                    # W_UV→W_O path below.
                     o_key = f"{attn}o_proj.weight"
                     if o_key in state_dict:
                         o_w = state_dict[o_key]
                         o_s_key = f"{o_key}_scale_inv"
+                        state_dict[f"{attn}o_proj_original.weight"] = o_w
+                        if o_s_key in state_dict:
+                            state_dict[f"{attn}o_proj_original.weight_scale_inv"] = (
+                                state_dict[o_s_key])
                         if is_fp8(o_w) and o_s_key in state_dict:
                             o_bf16 = dequantize_fp8(o_w.cuda(), state_dict[o_s_key].cuda()).to(torch.bfloat16)
                             del state_dict[o_s_key]
@@ -688,7 +744,13 @@ if __name__ == "__main__":
                         o_fp8, o_scale = _quantize_f32_to_checkpoint_fp8(o_flat)
                         state_dict[o_key] = o_fp8
                         state_dict[o_s_key] = o_scale
-                        print(f"  L{li}: FP8 absorbed q_b {q_fp8.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
+                        print(
+                            f"  L{li}: absorbed q_b {q_fp8.shape}, "
+                            f"prefill q/nope {q_b_nope_fp8.shape}/"
+                            f"{q_b_pe_fp8.shape}, kv_b K/V "
+                            f"{kv_b_k_fp8.shape}/{kv_b_v_fp8.shape}, "
+                            f"fused decode o_proj [{hidden_dim}, "
+                            f"{num_heads_loc * kv_lora_rank}]")
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
@@ -813,14 +875,15 @@ if __name__ == "__main__":
                     (r"self_attn\.q_a_proj\.weight",                         None),  # ReplicatedLinear (vLLM): hidden→q_lora_rank, output feeds full-width q_b_proj
                     (r"self_attn\.q_a_layernorm\.weight",                    None),
                     (r"self_attn\.q_b_proj\.weight",                         0),     # ColumnParallelLinear: shard output heads
-                    # Split q_b_proj (absorbed) for the chunked-prefill MLA
-                    # kernel, which expects Q_nope and Q_pe as separate dense
-                    # tensors. Both are column-parallel on the head dim (same
-                    # sharding as q_b_proj).
+                    # Prefill path uses original q_b split and kv_b
+                    # decompression, both column-parallel on local heads.
                     (r"self_attn\.q_b_nope\.weight",                         0),
                     (r"self_attn\.q_b_pe\.weight",                           0),
+                    (r"self_attn\.kv_b_k\.weight",                           0),
+                    (r"self_attn\.kv_b_v\.weight",                           0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
+                    (r"self_attn\.o_proj_original\.weight",                  1),
                     (r"self_attn\.o_proj\.weight",                           1),
                     (r"input_layernorm\.weight$",                            None),
                     (r"post_attention_layernorm\.weight$",                   None),
@@ -1000,6 +1063,10 @@ if __name__ == "__main__":
             # DeepSeek builder precomputes RoPE cos/sin internally because MLA
             # uses the compressed KV cache and separate c_latent/k_pe paths.
             position_embeddings=None,
+            rope_theta=getattr(config, "rope_theta", 10000.0),
+            rope_parameters=getattr(config, "rope_parameters", None)
+            or getattr(config, "rope_scaling", None),
+            max_position_embeddings=getattr(config, "max_position_embeddings", None),
             state_dict=state_dict,
             with_lm_head=True,
         )
@@ -1018,6 +1085,22 @@ if __name__ == "__main__":
                 f.write(results["cuda_code"])
 
         mpk.compile(output_dir=args.output_dir)
+        if args.profile_start_step is not None:
+            if not args.profiling:
+                raise ValueError("--profile-start-step requires --profiling")
+            if args.profile_start_step < 0 or args.profile_start_step >= args.max_seq_length:
+                raise ValueError(
+                    f"--profile-start-step must be in [0, {args.max_seq_length}); "
+                    f"got {args.profile_start_step}"
+                )
+            step.fill_(args.profile_start_step)
+            torch.cuda.synchronize()
+            if rank == 0:
+                print(
+                    f"[profiling] Starting first task graph at "
+                    f"step={args.profile_start_step}; prompt_lengths="
+                    f"{prompt_lengths.detach().cpu().tolist()}"
+                )
 
         # Run inference
         print("Starting inference with Mirage megakernel...")
@@ -1030,7 +1113,9 @@ if __name__ == "__main__":
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
-            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            response = safe_tokenizer_decode(
+                tokenizer, generated_ids, context=f"request {r}"
+            )
             if total_num_requests > 1:
                 print(f"[request {r}]")
             print(response)
@@ -1053,8 +1138,8 @@ if __name__ == "__main__":
                 per_tok_ms = run_time / max(tokens_generated, 1)
                 slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
                 token_ids = tokens[r, prompt_len:slice_end].tolist()
-                response_text = tokenizer.decode(
-                    tokens[r, :end_idx], skip_special_tokens=True
+                response_text = safe_tokenizer_decode(
+                    tokenizer, tokens[r, :end_idx], context=f"request {r}"
                 )
                 out.append({
                     "request_id": r,
@@ -1126,7 +1211,9 @@ if __name__ == "__main__":
 
         end_idx = prev_pos + 1
         generated_ids = tokens[:1, :end_idx]
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        response = safe_tokenizer_decode(
+            tokenizer, generated_ids, context="torch request 0"
+        )
         print(response)
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
@@ -1143,8 +1230,8 @@ if __name__ == "__main__":
             token_ids = tokens[0, prompt_len:slice_end].tolist()
             out = {
                 "token_ids": token_ids,
-                "text": tokenizer.decode(
-                    tokens[0, :end_idx], skip_special_tokens=True
+                "text": safe_tokenizer_decode(
+                    tokenizer, tokens[0, :end_idx], context="torch request 0"
                 ),
                 "latency_ms_per_token": per_tok_ms,
                 "prompt_length": prompt_len,
