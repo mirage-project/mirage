@@ -666,10 +666,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_SOFTMAX_GATHER_SM100, variant_id);
-  } else if (name == "sinkhorn_sm100") {
-    int variant_id =
-        task_register->register_sinkhorn_sm100_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(1, 1, TASK_SINKHORN_SM100, variant_id);
   } else if (name == "mhc_post_sm100") {
     int variant_id =
         task_register->register_mhc_post_sm100_task(customized->bgraph, params);

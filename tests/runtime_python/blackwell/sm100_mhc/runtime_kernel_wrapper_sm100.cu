@@ -43,6 +43,7 @@
 #include "blackwell/mHC_linear.cuh"
 #include "blackwell/mHC_mul_sum_add_with_outer.cuh"
 #include "blackwell/mHC_rmsnorm.cuh"
+#include "blackwell/sinkhorn.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <cutlass/bfloat16.h>
 
@@ -855,10 +856,9 @@ void mHC_mul_sum_add_with_outer(torch::Tensor residual,
 }
 
 // ============================================================================
-// K3 reuse: sinkhorn (already in sinkhorn.cuh)
+// K3 standalone: sinkhorn (4x4)
 // ============================================================================
 
-// One thread = one 4x4 matrix. Grid strides over all tokens.
 __global__ __launch_bounds__(256) void sinkhorn_sm100_kernel(
     float const *__restrict__ comb_res_mix,
     float *__restrict__ comb_res_mix_out,
@@ -897,8 +897,6 @@ void sinkhorn_sm100(torch::Tensor comb_res_mix,
   cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(comb_res_mix.get_device());
 
-  // Cap grid at num_tokens / kBlock so we don't launch idle CTAs for tiny
-  // workloads; cap at num_ctas for large workloads.
   int const tokens_per_cta_floor = ceil_div(num_tokens, kBlockThreads);
   int const grid =
       tokens_per_cta_floor < num_ctas ? tokens_per_cta_floor : num_ctas;
@@ -910,227 +908,6 @@ void sinkhorn_sm100(torch::Tensor comb_res_mix,
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
               "Sinkhorn launch error: ",
-              cudaGetErrorString(err));
-}
-
-// ============================================================================
-// Fused hc_pre tail v1 (serial inlining): K2 + K3 + K4 in one kernel,
-// processing 1 token at a time. K3's sinkhorn runs on a single thread per
-// token (lane 0 only) — bottleneck for large bs. Kept for comparison.
-// ============================================================================
-
-template <typename T, int N, int C>
-__global__ __launch_bounds__(256)
-    void mHC_hc_pre_tail_fused_v1_kernel(void const *mixes,
-                                          void const *scale,
-                                          void const *base,
-                                          void const *x,
-                                          void *f_pre,
-                                          void *h_post_out,
-                                          void *comb_out,
-                                          int num_tokens,
-                                          int sinkhorn_repeat,
-                                          float sinkhorn_eps) {
-  constexpr int MIX_HC = N * N + 2 * N;
-  for (int64_t token = blockIdx.x; token < num_tokens; token += gridDim.x) {
-    T const *mixes_t = static_cast<T const *>(mixes) + token * MIX_HC;
-    T const *x_t = static_cast<T const *>(x) + token * N * C;
-    T *f_pre_t = static_cast<T *>(f_pre) + token * C;
-    float *h_post_t = static_cast<float *>(h_post_out) + token * N;
-    float *comb_t = static_cast<float *>(comb_out) + token * N * N;
-
-    kernel::mHC_hc_pre_tail_fused_task_impl<T, N, C, /*BLOCK_THREADS=*/256>(
-        mixes_t, scale, base, x_t,
-        f_pre_t, h_post_t, comb_t,
-        sinkhorn_repeat, sinkhorn_eps);
-  }
-}
-
-// ============================================================================
-// Fused hc_pre tail v2 (fusion-native): K2 + K3 + K4 batched at
-// TOKENS_PER_CTA=32 tokens per CTA per outer iteration. Sinkhorn runs across
-// 32 lanes of warp 0 in parallel (one lane per token) — no per-token
-// serialization. 256 threads cooperate on K2 and K4.
-// ============================================================================
-
-template <typename T, int N, int C, int TOKENS_PER_CTA>
-__global__ __launch_bounds__(256)
-    void mHC_hc_pre_tail_fused_v2_kernel(void const *mixes,
-                                          void const *scale,
-                                          void const *base,
-                                          void const *x,
-                                          void *f_pre,
-                                          void *h_post_out,
-                                          void *comb_out,
-                                          int num_tokens,
-                                          int sinkhorn_repeat,
-                                          float sinkhorn_eps) {
-  kernel::mHC_hc_pre_tail_fused_v2_task_impl<T, N, C,
-                                              TOKENS_PER_CTA,
-                                              /*BLOCK_THREADS=*/256>(
-      mixes, scale, base, x,
-      f_pre, h_post_out, comb_out,
-      sinkhorn_repeat, sinkhorn_eps, num_tokens);
-}
-
-// Shared validation logic for both v1 and v2 entrypoints. Returns the
-// resolved (bs, c, num_ctas, eps_f) tuple.
-namespace fused_tail_check {
-struct Resolved {
-  int bs, c, num_ctas;
-  float eps_f;
-  cudaStream_t stream;
-};
-inline Resolved validate(torch::Tensor const &mixes,
-                         torch::Tensor const &scale,
-                         torch::Tensor const &base,
-                         torch::Tensor const &x,
-                         torch::Tensor const &f_pre,
-                         torch::Tensor const &h_post_out,
-                         torch::Tensor const &comb_out,
-                         int n,
-                         int sinkhorn_repeat,
-                         double sinkhorn_eps,
-                         int num_ctas_arg) {
-  TORCH_CHECK(n == 4, "fused hc_pre tail is hardcoded to n=4");
-  TORCH_CHECK(mixes.is_cuda() && mixes.is_contiguous() &&
-                  mixes.scalar_type() == at::kBFloat16 && mixes.dim() == 2,
-              "mixes must be bf16 [bs, mix_hc] CUDA contiguous");
-  TORCH_CHECK(x.is_cuda() && x.is_contiguous() &&
-                  x.scalar_type() == at::kBFloat16 && x.dim() == 3,
-              "x must be bf16 [bs, n, c] CUDA contiguous");
-  TORCH_CHECK(scale.is_cuda() && scale.numel() == 3 &&
-                  scale.scalar_type() == at::kFloat,
-              "scale must be float32 [3]");
-  TORCH_CHECK(base.is_cuda() && base.scalar_type() == at::kFloat &&
-                  base.numel() == n * n + 2 * n,
-              "base must be float32 [mix_hc]");
-  TORCH_CHECK(f_pre.is_cuda() && f_pre.scalar_type() == at::kBFloat16 &&
-                  f_pre.is_contiguous(),
-              "f_pre must be bf16 contiguous");
-  TORCH_CHECK(h_post_out.is_cuda() &&
-                  h_post_out.scalar_type() == at::kFloat &&
-                  h_post_out.is_contiguous(),
-              "h_post_out must be float32 contiguous");
-  TORCH_CHECK(comb_out.is_cuda() && comb_out.scalar_type() == at::kFloat &&
-                  comb_out.is_contiguous(),
-              "comb_out must be float32 contiguous");
-  int const bs = static_cast<int>(mixes.size(0));
-  int const c = static_cast<int>(x.size(2));
-  TORCH_CHECK(mixes.size(1) == n * n + 2 * n, "mix_hc mismatch");
-  TORCH_CHECK(x.size(0) == bs && x.size(1) == n, "x shape mismatch");
-  TORCH_CHECK(f_pre.sizes() == torch::IntArrayRef({bs, c}),
-              "f_pre shape mismatch");
-  TORCH_CHECK(h_post_out.sizes() == torch::IntArrayRef({bs, n}),
-              "h_post_out shape mismatch");
-  TORCH_CHECK(comb_out.sizes() == torch::IntArrayRef({bs, n, n}),
-              "comb_out shape mismatch");
-  return {bs, c,
-          resolve_num_ctas(num_ctas_arg, mixes.get_device()),
-          static_cast<float>(sinkhorn_eps),
-          at::cuda::getCurrentCUDAStream(mixes.get_device())};
-}
-} // namespace fused_tail_check
-
-void mHC_hc_pre_tail_fused_v1(torch::Tensor mixes,
-                              torch::Tensor scale,
-                              torch::Tensor base,
-                              torch::Tensor x,
-                              torch::Tensor f_pre,
-                              torch::Tensor h_post_out,
-                              torch::Tensor comb_out,
-                              int n,
-                              int sinkhorn_repeat,
-                              double sinkhorn_eps,
-                              int num_ctas_arg) {
-  auto r = fused_tail_check::validate(mixes, scale, base, x, f_pre,
-                                      h_post_out, comb_out, n,
-                                      sinkhorn_repeat, sinkhorn_eps,
-                                      num_ctas_arg);
-  int const grid = r.num_ctas < r.bs ? r.num_ctas : r.bs;
-  dim3 grid_dim(grid, 1, 1);
-  dim3 block_dim(kBlockThreads, 1, 1);
-
-#define DISPATCH_FUSED_V1_C(C_VAL)                                             \
-  mHC_hc_pre_tail_fused_v1_kernel<bf16_t, 4, C_VAL>                            \
-      <<<grid_dim, block_dim, 0, r.stream>>>(                                  \
-          mixes.data_ptr(), scale.data_ptr<float>(), base.data_ptr<float>(),   \
-          x.data_ptr(), f_pre.data_ptr(),                                      \
-          h_post_out.data_ptr<float>(), comb_out.data_ptr<float>(),            \
-          r.bs, sinkhorn_repeat, r.eps_f)
-
-  switch (r.c) {
-    case 128:  DISPATCH_FUSED_V1_C(128);  break;
-    case 1024: DISPATCH_FUSED_V1_C(1024); break;
-    case 4096: DISPATCH_FUSED_V1_C(4096); break;
-    default:
-      TORCH_CHECK(false, "Unsupported c=", r.c,
-                  " (must be 128, 1024, or 4096)");
-  }
-#undef DISPATCH_FUSED_V1_C
-
-  cudaError_t err = cudaGetLastError();
-  TORCH_CHECK(err == cudaSuccess,
-              "fused hc_pre tail v1 launch error: ",
-              cudaGetErrorString(err));
-}
-
-void mHC_hc_pre_tail_fused_v2(torch::Tensor mixes,
-                              torch::Tensor scale,
-                              torch::Tensor base,
-                              torch::Tensor x,
-                              torch::Tensor f_pre,
-                              torch::Tensor h_post_out,
-                              torch::Tensor comb_out,
-                              int n,
-                              int sinkhorn_repeat,
-                              double sinkhorn_eps,
-                              int num_ctas_arg,
-                              int tokens_per_cta) {
-  auto r = fused_tail_check::validate(mixes, scale, base, x, f_pre,
-                                      h_post_out, comb_out, n,
-                                      sinkhorn_repeat, sinkhorn_eps,
-                                      num_ctas_arg);
-  TORCH_CHECK(tokens_per_cta == 32 || tokens_per_cta == 64 ||
-                  tokens_per_cta == 128,
-              "tokens_per_cta must be 32, 64, or 128");
-  // Each CTA processes tokens_per_cta tokens per outer iteration; grid is
-  // capped at the natural number of token-batches.
-  int const num_token_batches =
-      (r.bs + tokens_per_cta - 1) / tokens_per_cta;
-  int const grid = r.num_ctas < num_token_batches ? r.num_ctas
-                                                  : num_token_batches;
-  dim3 grid_dim(grid, 1, 1);
-  dim3 block_dim(kBlockThreads, 1, 1);
-
-#define LAUNCH_V2(C_VAL, TPC)                                                  \
-  mHC_hc_pre_tail_fused_v2_kernel<bf16_t, 4, C_VAL, TPC>                       \
-      <<<grid_dim, block_dim, 0, r.stream>>>(                                  \
-          mixes.data_ptr(), scale.data_ptr<float>(), base.data_ptr<float>(),   \
-          x.data_ptr(), f_pre.data_ptr(),                                      \
-          h_post_out.data_ptr<float>(), comb_out.data_ptr<float>(),            \
-          r.bs, sinkhorn_repeat, r.eps_f)
-#define DISPATCH_FUSED_V2_C(C_VAL)                                             \
-  switch (tokens_per_cta) {                                                    \
-    case 32:  LAUNCH_V2(C_VAL, 32);  break;                                    \
-    case 64:  LAUNCH_V2(C_VAL, 64);  break;                                    \
-    case 128: LAUNCH_V2(C_VAL, 128); break;                                    \
-  }
-
-  switch (r.c) {
-    case 128:  DISPATCH_FUSED_V2_C(128);  break;
-    case 1024: DISPATCH_FUSED_V2_C(1024); break;
-    case 4096: DISPATCH_FUSED_V2_C(4096); break;
-    default:
-      TORCH_CHECK(false, "Unsupported c=", r.c,
-                  " (must be 128, 1024, or 4096)");
-  }
-#undef DISPATCH_FUSED_V2_C
-#undef LAUNCH_V2
-
-  cudaError_t err = cudaGetLastError();
-  TORCH_CHECK(err == cudaSuccess,
-              "fused hc_pre tail v2 launch error: ",
               cudaGetErrorString(err));
 }
 
@@ -1496,53 +1273,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("eps") = 1e-9,
         py::arg("num_ctas") = 0,
         "mHC K3: Sinkhorn-Knopp normalization (4x4)");
-
-  m.def("mHC_hc_pre_tail_fused",
-        &mHC_hc_pre_tail_fused_v1,
-        py::arg("mixes"),
-        py::arg("scale"),
-        py::arg("base"),
-        py::arg("x"),
-        py::arg("f_pre"),
-        py::arg("h_post_out"),
-        py::arg("comb_out"),
-        py::arg("n"),
-        py::arg("sinkhorn_repeat") = 20,
-        py::arg("sinkhorn_eps") = 1e-9,
-        py::arg("num_ctas") = 0,
-        "Fused K2 + K3 + K4 v1 (serial inlining; sinkhorn is 1 thread).");
-
-  m.def("mHC_hc_pre_tail_fused_v1",
-        &mHC_hc_pre_tail_fused_v1,
-        py::arg("mixes"),
-        py::arg("scale"),
-        py::arg("base"),
-        py::arg("x"),
-        py::arg("f_pre"),
-        py::arg("h_post_out"),
-        py::arg("comb_out"),
-        py::arg("n"),
-        py::arg("sinkhorn_repeat") = 20,
-        py::arg("sinkhorn_eps") = 1e-9,
-        py::arg("num_ctas") = 0,
-        "Fused K2 + K3 + K4 v1 (serial inlining).");
-
-  m.def("mHC_hc_pre_tail_fused_v2",
-        &mHC_hc_pre_tail_fused_v2,
-        py::arg("mixes"),
-        py::arg("scale"),
-        py::arg("base"),
-        py::arg("x"),
-        py::arg("f_pre"),
-        py::arg("h_post_out"),
-        py::arg("comb_out"),
-        py::arg("n"),
-        py::arg("sinkhorn_repeat") = 20,
-        py::arg("sinkhorn_eps") = 1e-9,
-        py::arg("num_ctas") = 0,
-        py::arg("tokens_per_cta") = 32,
-        "Fused K2 + K3 + K4 v2 (TOKENS_PER_CTA-batched, warp-parallel "
-        "sinkhorn, 8-wide bf16 vectorized K4).");
 
   m.def("mHC_hc_pre_v3",
         &mHC_hc_pre_v3,

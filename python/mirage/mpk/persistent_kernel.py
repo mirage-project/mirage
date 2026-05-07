@@ -2190,31 +2190,6 @@ class PersistentKernel:
         self.kn_graph.customized([logits, token_ids, output_probs], tb_graph)
         self.kn_graph.register_task(tb_graph, "softmax_gather_sm100")
 
-    def sinkhorn_layer(
-        self,
-        comb_res_mix: DTensor,      # [num_tokens, hidden_size, hidden_size] FP32
-        comb_res_mix_out: DTensor,  # [num_tokens, hidden_size, hidden_size] FP32
-        grid_dim: tuple,
-        block_dim: tuple,
-        repeat: int = 20,
-        eps: float = 1e-9,
-    ):
-        """mHC Sinkhorn-Knopp projection for Hres."""
-        import struct
-
-        assert self.target_cc == 100
-        assert comb_res_mix.num_dims == 3
-        assert comb_res_mix_out.num_dims == 3
-        assert repeat >= 1
-        eps_bits = struct.unpack("i", struct.pack("f", eps))[0]
-        params = [repeat, eps_bits]
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(comb_res_mix, (0, -1, -1), -1, True)
-        tb_graph.new_input(comb_res_mix_out, (0, -1, -1), -1, True)
-        self.kn_graph.customized([comb_res_mix, comb_res_mix_out], tb_graph)
-        self.kn_graph.register_task(tb_graph, "sinkhorn_sm100", params)
-
     def hc_pre_block(
         self,
         x_flat: DTensor,        # [bs, n*C]     bf16  (caller flattens [bs,n,C])

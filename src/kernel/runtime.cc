@@ -1818,7 +1818,6 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
   task_type_to_name[TASK_ELEMENTWISE_ADD_SM100] = "TASK_ELEMENTWISE_ADD_SM100";
   task_type_to_name[TASK_SOFTMAX_GATHER_SM100] = "TASK_SOFTMAX_GATHER_SM100";
-  task_type_to_name[TASK_SINKHORN_SM100] = "TASK_SINKHORN_SM100";
   task_type_to_name[TASK_MHC_POST_SM100] = "TASK_MHC_POST_SM100";
   task_type_to_name[TASK_MHC_RMSNORM_SM100] = "TASK_MHC_RMSNORM_SM100";
   task_type_to_name[TASK_MHC_LINEAR_SM100] = "TASK_MHC_LINEAR_SM100";
