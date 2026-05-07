@@ -2135,13 +2135,30 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
 
-        # The MTP predictor is only needed for decode/verify iterations. During
-        # chunk prefill the main model still uses prefill MLA, but MTP work is
-        # ignored until decode starts; compiling a second prefill MLA inside
-        # the predictor can deadlock the persistent-kernel schedule for
-        # Q_LEN >= 9. Keep this path decode-only and let the runtime Q_LEN gate
-        # in the decode kernel skip predictor attention during prefill.
-        use_mtp_prefill_attention = False
+        # MTP runs both prefill and decode attention so its KV cache and
+        # per-position hidden states are populated correctly. Mirrors vLLM's
+        # `DeepseekV2DecoderLayer` flow inside the EagleSpeculator's first
+        # post-target call (see `vllm/v1/worker/gpu/spec_decode/eagle/
+        # speculator.py:374`): MTP's MLA attention runs over every prefill
+        # position, producing the contextualised hidden state that the
+        # subsequent draft loop reads.
+        #
+        # Without prefill attention here, MTP's `mla_kv_gather` writes
+        # k/v from `kv_a_proj(rmsnorm(eh_proj(target_h, embed(t))))` for
+        # every prefill position, but `attn_out` is left undefined because
+        # the decode kernel returns early on `Q_LEN > 8`. The resulting
+        # MTP layer output (and downstream o_proj/MLP/residual) is garbage
+        # during prefill iterations.
+        #
+        # An older comment claimed Q_LEN>=9 deadlocks the persistent-kernel
+        # schedule when both main and MTP register prefill MLA tasks.
+        # That came from commit 54de0a31 (2026-04-30) which predates PR 674
+        # chunked prefill. Re-tested 2026-05-07 on `dev-v8-rope-prefill-main`:
+        # no deadlock observed (see `scripts/test_mtp_deadlock.sh` and the
+        # `regression_test.sh` post-fix run). If the deadlock returns,
+        # bisect by flipping this flag back to False and capture a perfetto
+        # trace; the dual-prefill schedule is the suspect.
+        use_mtp_prefill_attention = True
 
         # q_b_proj (FP8) — produce the fused q_nope_pe for the decode kernel.
         # Split q_nope/q_pe are only needed by prefill MLA, which the predictor
