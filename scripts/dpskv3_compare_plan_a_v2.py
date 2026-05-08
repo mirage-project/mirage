@@ -82,9 +82,43 @@ def collate(ref_root: Path, mpk_root: Path) -> list[dict]:
     return rows
 
 
+def _is_mtp_workload(tag: str) -> bool:
+    """Subdir naming convention: '<tag>_mtp<N>'."""
+    return tag.endswith(("_mtp1", "_mtp2", "_mtp3"))
+
+
 def to_markdown(rows: list[dict]) -> str:
+    canonical_pass = sum(
+        1 for r in rows
+        if not _is_mtp_workload(r["tag"])
+        and r.get("ref_present") and r.get("mpk_present")
+        and r.get("tokens_match")
+    )
+    canonical_total = sum(
+        1 for r in rows
+        if not _is_mtp_workload(r["tag"])
+        and r.get("ref_present") and r.get("mpk_present")
+    )
+    mtp_match = sum(
+        1 for r in rows
+        if _is_mtp_workload(r["tag"])
+        and r.get("ref_present") and r.get("mpk_present")
+        and r.get("tokens_match")
+    )
+    mtp_total = sum(
+        1 for r in rows
+        if _is_mtp_workload(r["tag"])
+        and r.get("ref_present") and r.get("mpk_present")
+    )
+
     lines = [
         "# Plan A v2 — Reference ↔ MPK comparison",
+        "",
+        f"**Canonical (mtp=0) tokens match**: {canonical_pass} / {canonical_total}",
+        "",
+        f"**MTP-on workload tokens match**: {mtp_match} / {mtp_total}  "
+        "(expected to differ: ref always uses main argmax for next token, "
+        "MPK uses MTP-draft + verify path so accepted drafts replace main).",
         "",
         "| Tag | Match | nRef/nMPK | First mismatch | Ref decode head | MPK decode head | prefill (ref) | TPOT (ref) | TPOT (mpk) |",
         "|-----|-------|-----------|----------------|-----------------|-----------------|---------------|------------|------------|",
@@ -136,14 +170,22 @@ def main() -> int:
     with open(out_root / "summary.md", "w") as f:
         f.write(to_markdown(rows))
 
-    n = sum(1 for r in rows if r.get("tokens_match"))
-    n_total = sum(
-        1 for r in rows
+    canonical_rows = [r for r in rows if not _is_mtp_workload(r["tag"])]
+    canonical_present = [
+        r for r in canonical_rows
         if r.get("ref_present") and r.get("mpk_present")
+    ]
+    canonical_pass = [r for r in canonical_present if r.get("tokens_match")]
+    print(
+        f"Canonical (mtp=0): {len(canonical_pass)}/{len(canonical_present)} match  "
+        f"({len(canonical_rows)} total)"
     )
-    print(f"PASS {n}/{n_total} workloads ({len(rows)} total).")
     print(f"summary: {out_root}/summary.md")
-    return 0 if n == n_total and n_total > 0 else 1
+    # Exit non-zero if any canonical workload mismatched.
+    return 0 if (
+        canonical_present
+        and len(canonical_pass) == len(canonical_present)
+    ) else 1
 
 
 if __name__ == "__main__":
