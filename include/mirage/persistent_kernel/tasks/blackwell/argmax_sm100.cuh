@@ -98,7 +98,12 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
-      long long local_idx = -1;
+      // Default to chunk-internal index 0 instead of -1 so a degenerate
+      // input (all -inf or all NaN, where every `val > local_max` check
+      // returns false) produces a valid index rather than a sentinel
+      // that gets sign-extended into 0xFFFFFFFFFFFFFFFF when packed
+      // with the chunk index in argmax_reduce_sm100_kernel below.
+      long long local_idx = 0;
 #pragma unroll
       for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
         T val = input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS];
@@ -138,8 +143,15 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
-      // Pack (chunk_index, relative_index) into a single 64-bit integer
-      long long local_packed_idx = -1;
+      // Pack (chunk_index, relative_index) into a single 64-bit integer.
+      // Default to (chunk 0, idx 0) — a valid token id — so a degenerate
+      // input where every `current_val > local_max` is false (all -inf
+      // or NaN partial maxima) still produces a real token index. The
+      // previous -1 sentinel was sign-extended into 0xFFFFFFFFFFFFFFFF
+      // and collided with `eos_token_id = -1` in --ignore-eos mode,
+      // causing the megakernel to terminate decoding after the first
+      // step.
+      long long local_packed_idx = 0;
 
 #pragma unroll
       for (int i = tidx; i < NUM_PARTIAL_TASKS; i += NUM_THREADS) {
@@ -155,17 +167,10 @@ __device__ __forceinline__ void
       block_reduce_max_idx_sm100(local_max, local_packed_idx);
 
       if (tidx == 0) {
-        if (local_packed_idx != -1) {
-          long long winning_chunk_idx = local_packed_idx >> 32;
-          long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
-          final_output[batch_idx] =
-              winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
-          // tokens[step + 1] = winning_chunk_idx * CHUNK_SIZE +
-          // winning_relative_idx;
-        } else {
-          final_output[batch_idx] = -1;
-          // tokens[step + 1] = -1;
-        }
+        long long winning_chunk_idx = local_packed_idx >> 32;
+        long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
+        final_output[batch_idx] =
+            winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
       }
     }
   }
