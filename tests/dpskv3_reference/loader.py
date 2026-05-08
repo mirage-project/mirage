@@ -1,47 +1,41 @@
-"""Selective weight loader for the DeepSeek V3 reference.
+"""Rank-aware selective weight loader for the DeepSeek V3 reference.
 
-Loads only the layers specified in `layer_indices` (and optionally the
-MTP layer at index `num_hidden_layers`) from a HuggingFace DeepSeek V3
-checkpoint, dequantizes FP8 → BF16 on the fly, and copies into the
-`DeepseekV3Model` parameter tree.
+For each rank, loads only the slice of each weight that this rank
+holds. Works for any (tp_size, ep_size) topology supported by
+`ParallelConfig`.
 
-Why selective:
-    The published DeepSeek V3 checkpoint is ~671B parameters. We can't
-    load the full thing on a single test GPU. MPK already runs partial
-    layers (`--layers 0-3`) for correctness comparison; this loader
-    mirrors that.
+Sharding rules (must match `modeling.py`'s parallel layers):
 
-FP8 dequantization:
-    DeepSeek V3 weights are FP8 (E4M3) with a separate per-block scale
-    tensor (scale_inv) at `<weight_name>.weight_scale_inv`. The dequant
-    formula is:
-        block_scale = scale_inv[block_i, block_j]                # float32
-        weight_bf16[i, j] = float8_to_float32(weight_fp8[i, j])  \
-                           * block_scale[i // BS, j // BS]
-        with BS = 128 (DeepSeek V3 specific).
+    Replicated (full tensor on every rank):
+        - embed_tokens.weight, lm_head.weight
+        - input_layernorm / post_attention_layernorm / final norm
+        - q_a_proj.weight, q_a_layernorm.weight
+        - kv_a_proj_with_mqa.weight, kv_a_layernorm.weight
+        - MoE gate.weight + e_score_correction_bias
+        - MTP enorm/hnorm/eh_proj/shared_head.norm
 
-    See `demo/deepseek_v3/models/convert.py:dequantize_fp8` for the
-    canonical implementation. The loader reuses it via import.
+    ColumnParallel (split output dim by tp_size, take rank's slice):
+        - q_b_proj.weight: split out dim by tp_size
+        - kv_b_proj.weight: split out dim by tp_size
+        - dense MLP gate_up_proj.weight: split out dim by tp_size
+        - shared_experts gate_up_proj.weight: split out dim by tp_size
 
-Weight name mapping:
-    HF key (in checkpoint)                     → Reference attribute
-    -----------------------------------------------------------------
-    model.embed_tokens.weight                  → embed_tokens.weight
-    model.layers.<L>.input_layernorm.weight    → layers.<L>.input_layernorm.weight
-    model.layers.<L>.self_attn.q_a_proj.weight → layers.<L>.self_attn.q_a_proj.weight
-    ... (etc; see dictionaries below)
-    model.norm.weight                          → norm.weight
-    lm_head.weight                             → lm_head.weight  (tied to embed by default)
+    RowParallel (split input dim by tp_size, take rank's slice):
+        - o_proj.weight: split in dim by tp_size
+        - dense MLP down_proj.weight: split in dim by tp_size
+        - shared_experts down_proj.weight: split in dim by tp_size
 
-    MTP (layer index = num_hidden_layers, e.g., 61):
-    model.layers.61.embed_tokens.weight        → embed_tokens.weight (shared with main)
-    model.layers.61.enorm.weight               → mtp_layer.enorm.weight
-    model.layers.61.hnorm.weight               → mtp_layer.hnorm.weight
-    model.layers.61.eh_proj.weight             → mtp_layer.eh_proj.weight
-    model.layers.61.input_layernorm.weight     → mtp_layer.mtp_block.input_layernorm.weight
-    ... (rest of mtp_block follows main-layer key shape)
-    model.layers.61.shared_head.norm.weight    → mtp_layer.shared_head_norm.weight
-    model.layers.61.shared_head.head.weight    → tied to lm_head.weight
+    Routed experts (EP × within-EP TP):
+        - This rank's local experts: indices
+          [ep_rank * num_local : (ep_rank + 1) * num_local]
+        - For each local expert:
+            gate_up_proj.weight: split out dim by routed_tp_size, take routed_tp_rank's slice
+            down_proj.weight: split in dim by routed_tp_size, take routed_tp_rank's slice
+        - Other experts (not in this rank's slice) are not loaded.
+
+The loader handles the HF checkpoint's separate `gate_proj.weight` +
+`up_proj.weight` storage (combined to `gate_up_proj` at load time via
+`cat([gate, up], dim=0)`) and FP8 → BF16 dequantization.
 """
 
 from __future__ import annotations
@@ -55,21 +49,20 @@ from safetensors import safe_open
 
 from .config import Config
 from .modeling import DeepseekV3Model
+from .parallel import ParallelConfig
 
 
-# Add demo path so we can reuse `dequantize_fp8` and `is_fp8`.
-_DEMO_MODELS = Path(__file__).resolve().parents[2] / "demo" / "deepseek_v3" / "models"
+_DEMO_MODELS = (
+    Path(__file__).resolve().parents[2] / "demo" / "deepseek_v3" / "models"
+)
 if str(_DEMO_MODELS) not in sys.path:
     sys.path.insert(0, str(_DEMO_MODELS))
 
 
 def _index_safetensors(model_dir: Path) -> dict[str, str]:
-    """Return key → file mapping by reading model.safetensors.index.json."""
     import json
     idx_path = model_dir / "model.safetensors.index.json"
     if not idx_path.exists():
-        # Single-file checkpoint (rare for DeepSeek V3). Fall back to
-        # listing all safetensors files and probing.
         out: dict[str, str] = {}
         for st in model_dir.glob("*.safetensors"):
             with safe_open(st, framework="pt") as f:
@@ -82,18 +75,43 @@ def _index_safetensors(model_dir: Path) -> dict[str, str]:
 
 
 def _needed_prefixes(
-    layer_indices: Iterable[int], num_hidden_layers: int, with_mtp: bool
-) -> list[str]:
+    layer_indices: Iterable[int], num_hidden_layers: int, with_mtp: bool,
+    pcfg: ParallelConfig, n_routed_experts: int,
+) -> tuple[list[str], set[int]]:
+    """Compute which prefixes to load + which routed experts to load.
+
+    Returns (prefixes, local_expert_global_indices_set).
+    """
     pfxs = ["model.embed_tokens.", "model.norm.", "lm_head."]
     for li in layer_indices:
         pfxs.append(f"model.layers.{li}.")
     if with_mtp:
         pfxs.append(f"model.layers.{num_hidden_layers}.")
-    return pfxs
+
+    # Local routed-expert global indices for this rank.
+    num_local = pcfg.num_local_routed_experts(n_routed_experts)
+    first = pcfg.first_local_routed_expert(n_routed_experts)
+    local_experts = set(range(first, first + num_local))
+    return pfxs, local_experts
 
 
-def _matches(key: str, prefixes: list[str]) -> bool:
-    return any(key.startswith(p) for p in prefixes)
+def _key_is_local_expert(key: str, local_experts: set[int]) -> bool:
+    """True iff `key` is a routed-expert weight that this rank holds."""
+    # Pattern: model.layers.<L>.mlp.experts.<E>.<...>
+    parts = key.split(".")
+    if len(parts) < 5 or parts[3] != "mlp":
+        return False
+    if len(parts) < 7 or parts[4] != "experts":
+        return False
+    try:
+        e_idx = int(parts[5])
+    except ValueError:
+        return False
+    return e_idx in local_experts
+
+
+def _key_has_experts(key: str) -> bool:
+    return ".mlp.experts." in key
 
 
 def _load_state_dict(
@@ -103,29 +121,32 @@ def _load_state_dict(
     with_mtp: bool,
     target_dtype: torch.dtype,
     device: str,
+    pcfg: ParallelConfig,
+    n_routed_experts: int,
 ) -> dict[str, torch.Tensor]:
-    """Load + dequantize the needed slice of the HF checkpoint."""
-    from convert import dequantize_fp8, is_fp8  # demo/deepseek_v3/models/convert.py
+    from convert import dequantize_fp8, is_fp8
 
     weight_map = _index_safetensors(model_dir)
-    needed_pfx = _needed_prefixes(layer_indices, num_hidden_layers, with_mtp)
+    needed_pfx, local_experts = _needed_prefixes(
+        layer_indices, num_hidden_layers, with_mtp, pcfg, n_routed_experts,
+    )
+
     by_file: dict[str, list[str]] = {}
     for k, fname in weight_map.items():
-        if _matches(k, needed_pfx):
-            by_file.setdefault(fname, []).append(k)
+        if not any(k.startswith(p) for p in needed_pfx):
+            continue
+        # Skip experts not on this rank to save memory + load time.
+        if _key_has_experts(k) and not _key_is_local_expert(k, local_experts):
+            continue
+        by_file.setdefault(fname, []).append(k)
 
     state_dict: dict[str, torch.Tensor] = {}
     for fname, keys in by_file.items():
         with safe_open(fname, framework="pt", device="cpu") as f:
             for k in keys:
-                t = f.get_tensor(k)
-                if k.endswith(".weight_scale_inv"):
-                    # Don't store separately; consumed by dequant pairing.
-                    state_dict[k] = t
-                else:
-                    state_dict[k] = t
+                state_dict[k] = f.get_tensor(k)
 
-    # Pair (weight, weight_scale_inv) and dequantize where both exist.
+    # Pair (weight, weight_scale_inv) → dequantize FP8 → BF16.
     paired: list[str] = []
     for k in list(state_dict.keys()):
         if k.endswith(".weight"):
@@ -134,14 +155,32 @@ def _load_state_dict(
                 w = state_dict[k]
                 s = state_dict[scale_k]
                 if is_fp8(w):
-                    w_bf16 = dequantize_fp8(w.to(device), s.to(device)).to(
-                        target_dtype
-                    )
+                    w_bf16 = dequantize_fp8(
+                        w.to(device), s.to(device)
+                    ).to(target_dtype)
                     state_dict[k] = w_bf16
                 paired.append(scale_k)
     for k in paired:
         del state_dict[k]
     return state_dict
+
+
+def _shard_col(t: torch.Tensor, tp_size: int, rank: int) -> torch.Tensor:
+    """Split tensor's dim 0 into `tp_size` slices and take `rank`-th."""
+    assert t.shape[0] % tp_size == 0, (
+        f"col-shard: shape[0]={t.shape[0]} not divisible by tp_size={tp_size}"
+    )
+    chunk = t.shape[0] // tp_size
+    return t[rank * chunk:(rank + 1) * chunk].contiguous()
+
+
+def _shard_row(t: torch.Tensor, tp_size: int, rank: int) -> torch.Tensor:
+    """Split tensor's dim 1 into `tp_size` slices and take `rank`-th."""
+    assert t.shape[1] % tp_size == 0, (
+        f"row-shard: shape[1]={t.shape[1]} not divisible by tp_size={tp_size}"
+    )
+    chunk = t.shape[1] // tp_size
+    return t[:, rank * chunk:(rank + 1) * chunk].contiguous()
 
 
 def load_into(
@@ -151,22 +190,11 @@ def load_into(
     device: str = "cuda",
 ) -> None:
     """Load weights from a HuggingFace DeepSeek V3 checkpoint into the
-    reference model in place. Only the layer indices the model was
-    constructed with are loaded.
-
-    HF DeepSeek V3 stores MLP weights as separate `gate_proj.weight`
-    and `up_proj.weight`. Our reference uses a fused `gate_up_proj`
-    matching vLLM's `MergedColumnParallelLinear`, so we combine at
-    load time via `cat([gate, up], dim=0)`.
-
-    HF also stores MTP-specific `model.layers.<N>.embed_tokens.weight`
-    and `model.layers.<N>.shared_head.head.weight`. vLLM treats these
-    as redundant copies of the main model's tied embeddings — we do
-    the same and ignore them. (If they ever differ from main's, the
-    audit comparator will flag the resulting argmax mismatch.)
+    reference model in place. TP/EP-aware: each rank only loads its slice.
     """
     model_dir = Path(model_dir)
     cfg = model.cfg
+    pcfg = model.pcfg
     sd = _load_state_dict(
         model_dir,
         layer_indices=model.layer_indices,
@@ -174,157 +202,173 @@ def load_into(
         with_mtp=model.enable_mtp,
         target_dtype=target_dtype,
         device=device,
+        pcfg=pcfg,
+        n_routed_experts=cfg.n_routed_experts,
     )
 
     def _get(src_key: str) -> torch.Tensor:
         if src_key not in sd:
             raise KeyError(
-                f"Missing weight {src_key} in checkpoint (have "
-                f"{len(sd)} keys)."
+                f"Missing weight {src_key} in checkpoint (rank {pcfg.rank} "
+                f"has {len(sd)} keys)."
             )
         return sd[src_key]
 
-    def _copy(dst: torch.nn.Parameter, src_key: str) -> None:
+    def _copy_replicated(dst: torch.nn.Parameter, src_key: str) -> None:
         src = _get(src_key).to(dtype=dst.dtype, device=dst.device)
         if src.shape != dst.shape:
             raise ValueError(
-                f"Shape mismatch for {src_key}: src={tuple(src.shape)} "
-                f"dst={tuple(dst.shape)}"
+                f"Replicated copy shape mismatch for {src_key}: "
+                f"src={tuple(src.shape)} dst={tuple(dst.shape)}"
             )
         with torch.no_grad():
             dst.copy_(src)
 
-    def _copy_gate_up(dst: torch.nn.Parameter, gate_key: str, up_key: str) -> None:
-        gate = _get(gate_key).to(dtype=dst.dtype, device=dst.device)
-        up = _get(up_key).to(dtype=dst.dtype, device=dst.device)
-        # Reference layout: gate_up_proj weight is [2*intermediate, hidden].
-        # cat order = [gate; up] (so chunk(2, dim=-1) of the OUTPUT yields
-        # (gate_out, up_out) — see DeepseekV2DenseMLP.forward).
-        merged = torch.cat([gate, up], dim=0)
-        if merged.shape != dst.shape:
+    def _copy_col_tp(
+        dst: torch.nn.Parameter, src_key: str,
+        tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
+    ) -> None:
+        src_full = _get(src_key).to(dtype=dst.dtype, device=dst.device)
+        src = _shard_col(src_full, tp_size, rank)
+        if src.shape != dst.shape:
             raise ValueError(
-                f"Shape mismatch for [gate;up] {gate_key}+{up_key}: "
-                f"src={tuple(merged.shape)} dst={tuple(dst.shape)}"
+                f"Col-TP shape mismatch for {src_key}: "
+                f"src={tuple(src.shape)} dst={tuple(dst.shape)}"
             )
         with torch.no_grad():
-            dst.copy_(merged)
+            dst.copy_(src)
 
-    # Embedding (also tied to lm_head).
-    _copy(model.embed_tokens.weight, "model.embed_tokens.weight")
-    # Final norm.
-    _copy(model.norm.weight, "model.norm.weight")
-    # lm_head — separate copy in case the checkpoint untied it.
+    def _copy_row_tp(
+        dst: torch.nn.Parameter, src_key: str,
+        tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
+    ) -> None:
+        src_full = _get(src_key).to(dtype=dst.dtype, device=dst.device)
+        src = _shard_row(src_full, tp_size, rank)
+        if src.shape != dst.shape:
+            raise ValueError(
+                f"Row-TP shape mismatch for {src_key}: "
+                f"src={tuple(src.shape)} dst={tuple(dst.shape)}"
+            )
+        with torch.no_grad():
+            dst.copy_(src)
+
+    def _copy_col_tp_gate_up(
+        dst: torch.nn.Parameter, gate_key: str, up_key: str,
+        tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
+    ) -> None:
+        gate = _get(gate_key).to(dtype=dst.dtype, device=dst.device)
+        up = _get(up_key).to(dtype=dst.dtype, device=dst.device)
+        merged = torch.cat([gate, up], dim=0)
+        sharded = _shard_col(merged, tp_size, rank)
+        if sharded.shape != dst.shape:
+            raise ValueError(
+                f"Col-TP gate_up shape mismatch for [{gate_key}; {up_key}]: "
+                f"src={tuple(sharded.shape)} dst={tuple(dst.shape)}"
+            )
+        with torch.no_grad():
+            dst.copy_(sharded)
+
+    # =================== Embedding + Final Norm + LM head ===================
+    _copy_replicated(model.embed_tokens.weight, "model.embed_tokens.weight")
+    _copy_replicated(model.norm.weight, "model.norm.weight")
     if "lm_head.weight" in sd:
-        _copy(model.lm_head.weight, "lm_head.weight")
+        # lm_head is tied to embed_tokens by default; copy if separate
+        # tensor exists in the checkpoint (overrides the tied weight).
+        _copy_replicated(model.lm_head.weight, "lm_head.weight")
 
-    # Decoder layers.
-    for li in model.layer_indices:
-        layer = model.layers[str(li)]
-        pfx = f"model.layers.{li}."
-        # Layernorms
-        _copy(layer.input_layernorm.weight, f"{pfx}input_layernorm.weight")
-        _copy(layer.post_attention_layernorm.weight, f"{pfx}post_attention_layernorm.weight")
-        # MLA
+    def _load_decoder_layer(
+        layer: torch.nn.Module, pfx: str, *, is_mtp_block: bool = False,
+    ) -> None:
+        """Load weights for one DeepseekV2DecoderLayer at prefix `pfx`."""
+        # Layernorms (replicated).
+        _copy_replicated(layer.input_layernorm.weight, f"{pfx}input_layernorm.weight")
+        _copy_replicated(
+            layer.post_attention_layernorm.weight,
+            f"{pfx}post_attention_layernorm.weight",
+        )
+        # MLA.
         attn = layer.self_attn
         ap = f"{pfx}self_attn."
-        _copy(attn.q_a_proj.weight, f"{ap}q_a_proj.weight")
-        _copy(attn.q_a_layernorm.weight, f"{ap}q_a_layernorm.weight")
-        _copy(attn.q_b_proj.weight, f"{ap}q_b_proj.weight")
-        _copy(attn.kv_a_proj_with_mqa.weight, f"{ap}kv_a_proj_with_mqa.weight")
-        _copy(attn.kv_a_layernorm.weight, f"{ap}kv_a_layernorm.weight")
-        _copy(attn.kv_b_proj.weight, f"{ap}kv_b_proj.weight")
-        _copy(attn.o_proj.weight, f"{ap}o_proj.weight")
-        # MLP
+        # Replicated Q/KV LoRA-down + layernorms.
+        _copy_replicated(attn.q_a_proj.weight, f"{ap}q_a_proj.weight")
+        _copy_replicated(attn.q_a_layernorm.weight, f"{ap}q_a_layernorm.weight")
+        _copy_replicated(
+            attn.kv_a_proj_with_mqa.weight, f"{ap}kv_a_proj_with_mqa.weight"
+        )
+        _copy_replicated(attn.kv_a_layernorm.weight, f"{ap}kv_a_layernorm.weight")
+        # ColumnParallel q_b_proj / kv_b_proj.
+        _copy_col_tp(attn.q_b_proj.weight, f"{ap}q_b_proj.weight")
+        _copy_col_tp(attn.kv_b_proj.weight, f"{ap}kv_b_proj.weight")
+        # RowParallel o_proj.
+        _copy_row_tp(attn.o_proj.weight, f"{ap}o_proj.weight")
+
+        # MLP.
         mlp_pfx = f"{pfx}mlp."
-        if li < cfg.first_k_dense_replace:
+        is_dense = layer.layer_idx < cfg.first_k_dense_replace and not is_mtp_block
+        if is_dense:
             mlp = layer.mlp
-            _copy_gate_up(
+            _copy_col_tp_gate_up(
                 mlp.gate_up_proj.weight,
                 f"{mlp_pfx}gate_proj.weight",
                 f"{mlp_pfx}up_proj.weight",
             )
-            _copy(mlp.down_proj.weight, f"{mlp_pfx}down_proj.weight")
+            _copy_row_tp(mlp.down_proj.weight, f"{mlp_pfx}down_proj.weight")
         else:
             moe = layer.mlp
-            _copy(moe.gate.weight, f"{mlp_pfx}gate.weight")
-            # The correction-bias ships under `gate.e_score_correction_bias`.
+            # Replicated gate + correction bias.
+            _copy_replicated(moe.gate.weight, f"{mlp_pfx}gate.weight")
             if f"{mlp_pfx}gate.e_score_correction_bias" in sd:
-                _copy(
+                _copy_replicated(
                     moe.gate_e_score_correction_bias,
                     f"{mlp_pfx}gate.e_score_correction_bias",
                 )
-            for e in range(cfg.n_routed_experts):
-                exp = moe.experts[e]
-                exp_pfx = f"{mlp_pfx}experts.{e}."
-                _copy_gate_up(
+            # Local routed experts.
+            for local_idx, global_e in enumerate(
+                range(moe.first_local_expert,
+                      moe.first_local_expert + moe.num_local_experts)
+            ):
+                exp = moe.local_experts[local_idx]
+                exp_pfx = f"{mlp_pfx}experts.{global_e}."
+                _copy_col_tp_gate_up(
                     exp.gate_up_proj.weight,
                     f"{exp_pfx}gate_proj.weight",
                     f"{exp_pfx}up_proj.weight",
+                    tp_size=pcfg.routed_tp_size,
+                    rank=pcfg.routed_tp_rank,
                 )
-                _copy(exp.down_proj.weight, f"{exp_pfx}down_proj.weight")
+                _copy_row_tp(
+                    exp.down_proj.weight,
+                    f"{exp_pfx}down_proj.weight",
+                    tp_size=pcfg.routed_tp_size,
+                    rank=pcfg.routed_tp_rank,
+                )
+            # Shared experts (TP across full tp_size).
             shared_pfx = f"{mlp_pfx}shared_experts."
-            _copy_gate_up(
-                moe.shared_experts.gate_up_proj.weight,
+            _copy_col_tp_gate_up(
+                moe.shared_gate_up.weight,
                 f"{shared_pfx}gate_proj.weight",
                 f"{shared_pfx}up_proj.weight",
             )
-            _copy(moe.shared_experts.down_proj.weight,
-                  f"{shared_pfx}down_proj.weight")
+            _copy_row_tp(
+                moe.shared_down.weight,
+                f"{shared_pfx}down_proj.weight",
+            )
 
-    # MTP layer (if enabled).
+    # =================== Decoder layers ===================
+    for li in model.layer_indices:
+        _load_decoder_layer(model.layers[str(li)], f"model.layers.{li}.")
+
+    # =================== MTP ===================
     if model.enable_mtp:
         mtp = model.mtp_layer
         mtp_li = cfg.num_hidden_layers
         mtp_pfx = f"model.layers.{mtp_li}."
-        _copy(mtp.enorm.weight, f"{mtp_pfx}enorm.weight")
-        _copy(mtp.hnorm.weight, f"{mtp_pfx}hnorm.weight")
-        _copy(mtp.eh_proj.weight, f"{mtp_pfx}eh_proj.weight")
-        # mtp_block (a full DecoderLayer with same key layout)
-        layer = mtp.mtp_block
-        _copy(layer.input_layernorm.weight, f"{mtp_pfx}input_layernorm.weight")
-        _copy(layer.post_attention_layernorm.weight,
-              f"{mtp_pfx}post_attention_layernorm.weight")
-        attn = layer.self_attn
-        ap = f"{mtp_pfx}self_attn."
-        _copy(attn.q_a_proj.weight, f"{ap}q_a_proj.weight")
-        _copy(attn.q_a_layernorm.weight, f"{ap}q_a_layernorm.weight")
-        _copy(attn.q_b_proj.weight, f"{ap}q_b_proj.weight")
-        _copy(attn.kv_a_proj_with_mqa.weight, f"{ap}kv_a_proj_with_mqa.weight")
-        _copy(attn.kv_a_layernorm.weight, f"{ap}kv_a_layernorm.weight")
-        _copy(attn.kv_b_proj.weight, f"{ap}kv_b_proj.weight")
-        _copy(attn.o_proj.weight, f"{ap}o_proj.weight")
-        # MTP block always uses MoE MLP for DeepSeek V3 (per the published
-        # checkpoint), so layer_idx >= first_k_dense_replace by construction.
-        moe = layer.mlp
-        moe_pfx = f"{mtp_pfx}mlp."
-        _copy(moe.gate.weight, f"{moe_pfx}gate.weight")
-        if f"{moe_pfx}gate.e_score_correction_bias" in sd:
-            _copy(moe.gate_e_score_correction_bias,
-                  f"{moe_pfx}gate.e_score_correction_bias")
-        for e in range(cfg.n_routed_experts):
-            exp = moe.experts[e]
-            exp_pfx = f"{moe_pfx}experts.{e}."
-            _copy_gate_up(
-                exp.gate_up_proj.weight,
-                f"{exp_pfx}gate_proj.weight",
-                f"{exp_pfx}up_proj.weight",
-            )
-            _copy(exp.down_proj.weight, f"{exp_pfx}down_proj.weight")
-        shared_pfx = f"{moe_pfx}shared_experts."
-        _copy_gate_up(
-            moe.shared_experts.gate_up_proj.weight,
-            f"{shared_pfx}gate_proj.weight",
-            f"{shared_pfx}up_proj.weight",
+        # Replicated MTP-specific.
+        _copy_replicated(mtp.enorm.weight, f"{mtp_pfx}enorm.weight")
+        _copy_replicated(mtp.hnorm.weight, f"{mtp_pfx}hnorm.weight")
+        _copy_replicated(mtp.eh_proj.weight, f"{mtp_pfx}eh_proj.weight")
+        _copy_replicated(
+            mtp.shared_head_norm.weight, f"{mtp_pfx}shared_head.norm.weight"
         )
-        _copy(moe.shared_experts.down_proj.weight,
-              f"{shared_pfx}down_proj.weight")
-        # Shared head norm.
-        _copy(mtp.shared_head_norm.weight,
-              f"{mtp_pfx}shared_head.norm.weight")
-        # Note: model.layers.<mtp_li>.embed_tokens.weight and
-        # model.layers.<mtp_li>.shared_head.head.weight exist in the
-        # checkpoint as redundant copies of the main embed / lm_head
-        # (vLLM treats them as tied). We don't load them explicitly —
-        # the main model's tied embed is reused. If they ever differ
-        # in a future checkpoint, the comparator will catch it via an
-        # mtp_argmax mismatch.
+        # MTP block (full DecoderLayer at the same prefix).
+        _load_decoder_layer(mtp.mtp_block, mtp_pfx, is_mtp_block=True)

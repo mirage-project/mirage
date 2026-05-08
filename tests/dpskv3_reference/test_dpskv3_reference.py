@@ -166,9 +166,10 @@ def test_softmax_scale_uses_mscale_squared() -> None:
     See `vllm/model_executor/models/deepseek_v2.py:889,966`.
     """
     from .modeling import DeepseekYarnRotaryEmbedding, DeepseekV2MLAAttention
+    from .parallel import ParallelConfig
     cfg = Config(**TINY)
     rope = DeepseekYarnRotaryEmbedding(cfg)
-    attn = DeepseekV2MLAAttention(cfg, rope)
+    attn = DeepseekV2MLAAttention(cfg, rope, ParallelConfig())
     expected = (1.0 / (cfg.qk_head_dim ** 0.5)) * (rope.attn_mscale ** 2)
     assert abs(attn.softmax_scale - expected) < 1e-9
 
@@ -176,12 +177,54 @@ def test_softmax_scale_uses_mscale_squared() -> None:
 def test_eh_proj_concat_form() -> None:
     """MTP eh_proj must be `Linear(concat([enorm,hnorm]))`, not two
     parallel matmuls. See vllm/model_executor/models/deepseek_mtp.py:110.
-
-    Verified by checking the eh_proj layer takes 2*H input.
     """
     from .modeling import DeepseekV3MTPLayer, DeepseekYarnRotaryEmbedding
+    from .parallel import ParallelConfig
     cfg = Config(**TINY)
     rope = DeepseekYarnRotaryEmbedding(cfg)
-    mtp = DeepseekV3MTPLayer(cfg, rope)
+    mtp = DeepseekV3MTPLayer(cfg, rope, ParallelConfig())
     assert mtp.eh_proj.in_features == 2 * cfg.hidden_size
     assert mtp.eh_proj.out_features == cfg.hidden_size
+
+
+def test_parallel_config_topology() -> None:
+    """ParallelConfig topology calculations for TP=4 EP=2."""
+    from .parallel import ParallelConfig
+    # TP=4 EP=2: 4 ranks, 2 EP groups, routed_tp_size=2
+    p0 = ParallelConfig(tp_size=4, ep_size=2, rank=0)
+    p1 = ParallelConfig(tp_size=4, ep_size=2, rank=1)
+    p2 = ParallelConfig(tp_size=4, ep_size=2, rank=2)
+    p3 = ParallelConfig(tp_size=4, ep_size=2, rank=3)
+    assert p0.routed_tp_size == 2
+    assert p0.ep_rank == 0 and p0.routed_tp_rank == 0
+    assert p1.ep_rank == 0 and p1.routed_tp_rank == 1
+    assert p2.ep_rank == 1 and p2.routed_tp_rank == 0
+    assert p3.ep_rank == 1 and p3.routed_tp_rank == 1
+    # 256 experts / ep_size=2 = 128 each
+    assert p0.num_local_routed_experts(256) == 128
+    assert p0.first_local_routed_expert(256) == 0
+    assert p2.first_local_routed_expert(256) == 128
+
+
+def test_column_parallel_shape() -> None:
+    """ColumnParallelLinear weight shape and forward output shape."""
+    from .parallel import ColumnParallelLinear, ParallelConfig
+    pcfg = ParallelConfig(tp_size=4, ep_size=2, rank=0)
+    layer = ColumnParallelLinear(in_features=128, out_features=256, pcfg=pcfg)
+    # Weight is [out_per_partition=64, in_features=128]
+    assert tuple(layer.weight.shape) == (64, 128)
+    x = torch.randn(8, 128)
+    y = layer(x)
+    assert tuple(y.shape) == (8, 64)
+
+
+def test_row_parallel_shape() -> None:
+    """RowParallelLinear weight shape (no all-reduce in tp_size=1)."""
+    from .parallel import RowParallelLinear, ParallelConfig
+    # TP=1: no actual sharding
+    pcfg = ParallelConfig()
+    layer = RowParallelLinear(in_features=128, out_features=256, pcfg=pcfg)
+    assert tuple(layer.weight.shape) == (256, 128)
+    x = torch.randn(8, 128)
+    y = layer(x)
+    assert tuple(y.shape) == (8, 256)
