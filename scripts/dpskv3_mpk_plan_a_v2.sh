@@ -53,6 +53,12 @@ SUMMARY="$OUT_ROOT/summary.txt"
 REPO=/home/muhengl/mirage
 VENV=/raid/user_data/muhengl/.venv
 
+# Reuse FP8-dequantized weights across runs (avoids ~3-5 min/per-rank
+# dequant overhead). Two cache keys are produced — one for mtp=0 and
+# one for mtp=1 — because demo.py keys the cache on `--mtp` value.
+WEIGHT_CACHE_DIR="${WEIGHT_CACHE_DIR:-/raid/user_data/muhengl/mpk_dpskv3_weight_cache}"
+mkdir -p "$WEIGHT_CACHE_DIR"
+
 # Parse plan_a_v2.json into bash-friendly tab-separated rows.
 TMP_PLAN=$(mktemp)
 python3 - "$WL_JSON" "$WL_FILTER" > "$TMP_PLAN" <<'PYEOF'
@@ -124,6 +130,7 @@ while IFS=$'\t' read -r TAG PROMPT_LEN DECODE MTP MBT; do
             --ep-size "$EP" \
             --ignore-eos \
             --save-tokens "$TOKENS" \
+            --weight-cache-dir "$WEIGHT_CACHE_DIR" \
             $MTP_ARG \
             > "$LOG" 2>&1
     RC=$?
