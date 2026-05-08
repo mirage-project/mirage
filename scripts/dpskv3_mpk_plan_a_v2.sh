@@ -56,7 +56,10 @@ VENV=/raid/user_data/muhengl/.venv
 # Reuse FP8-dequantized weights across runs (avoids ~3-5 min/per-rank
 # dequant overhead). Two cache keys are produced — one for mtp=0 and
 # one for mtp=1 — because demo.py keys the cache on `--mtp` value.
-WEIGHT_CACHE_DIR="${WEIGHT_CACHE_DIR:-/raid/user_data/muhengl/mpk_dpskv3_weight_cache}"
+# The cache is written to /tmp (md0, ~1.3T free on this box) because
+# /raid (md1) is frequently full and 5GB/per-rank cache writes will
+# trip "no space left on device" otherwise.
+WEIGHT_CACHE_DIR="${WEIGHT_CACHE_DIR:-/tmp/dpskv3_v8_weight_cache}"
 mkdir -p "$WEIGHT_CACHE_DIR"
 
 # Parse plan_a_v2.json into bash-friendly tab-separated rows.
@@ -103,7 +106,12 @@ while IFS=$'\t' read -r TAG PROMPT_LEN DECODE MTP MBT; do
     fi
 
     START=$(date +%s)
-    set +e
+    # The script runs under `set -uo pipefail` (no -e). Each per-workload
+    # mpirun is captured into RC; we deliberately do NOT toggle set -e
+    # — a previous version did `set +e` then `set -e`, which incorrectly
+    # ENABLED -e (it was off before) and made subsequent grep/tee
+    # failures (e.g., grep finding no match) crash the whole sweep. Now
+    # we just check $? directly.
     CUDA_VISIBLE_DEVICES="$GPUS" \
     LD_LIBRARY_PATH=/home/muhengl/local/nvshmem-3.6.5-dev/usr/lib/x86_64-linux-gnu/nvshmem/13:/usr/mpi/gcc/openmpi-4.1.9a1/lib \
     LD_PRELOAD=/home/muhengl/local/nvshmem-3.6.5-extract/usr/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.so.3.6.5 \
@@ -128,20 +136,18 @@ while IFS=$'\t' read -r TAG PROMPT_LEN DECODE MTP MBT; do
             --max-num-pages "$PAGES" \
             --page-size 128 \
             --ep-size "$EP" \
-            --ignore-eos \
             --save-tokens "$TOKENS" \
             --weight-cache-dir "$WEIGHT_CACHE_DIR" \
             $MTP_ARG \
-            > "$LOG" 2>&1
+            > "$LOG" 2>&1 || true
     RC=$?
-    set -e
     EL=$(( $(date +%s) - START ))
     if (( RC == 0 )) && [[ -f "$TOKENS" ]]; then
-        echo "[mpk-sweep] $TAG mtp=$MTP DONE in ${EL}s" | tee -a "$SUMMARY"
-        grep -E "per-token latency" "$LOG" | tail -1 | tee -a "$SUMMARY"
+        echo "[mpk-sweep] $TAG mtp=$MTP DONE in ${EL}s" | tee -a "$SUMMARY" || true
+        (grep -E "per-token latency" "$LOG" | tail -1 | tee -a "$SUMMARY") || true
     else
-        echo "[mpk-sweep] $TAG mtp=$MTP FAIL rc=$RC after ${EL}s" | tee -a "$SUMMARY"
-        tail -15 "$LOG" | tee -a "$SUMMARY"
+        echo "[mpk-sweep] $TAG mtp=$MTP FAIL rc=$RC after ${EL}s" | tee -a "$SUMMARY" || true
+        (tail -15 "$LOG" | tee -a "$SUMMARY") || true
     fi
 done < "$TMP_PLAN"
 
