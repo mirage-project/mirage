@@ -2273,12 +2273,21 @@ class DeepSeekV3Builder(GraphBuilder):
             if self._direct_paged_decode_kv
             else self.contiguous_kv
         )
+        # MTP's `mla_prefill_absorbed_layer` (below) reads `self.contiguous_kv`
+        # via a dense `bi * MPK_MAX_SEQ_LENGTH * D` offset — it has no paged
+        # variant. So we always pass `self.contiguous_kv` as the gather's
+        # `contiguous_kv` target (rather than `mla_decode_kv`), even when
+        # direct-paged is enabled. Otherwise, with direct-paged on,
+        # `mla_decode_kv == mtp_ckv_kpe_cache_tensor` and the dense buffer
+        # never gets written, making the absorbed-prefill kernel read stale
+        # data. Decode kernels still read from `mla_decode_kv` (paged when
+        # direct-paged is on, fast path).
         if use_mtp_prefill_attention:
             self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
                 paged_cache=self.mtp_ckv_kpe_cache_tensor,
-                contiguous_kv=mla_decode_kv,
+                contiguous_kv=self.contiguous_kv,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
