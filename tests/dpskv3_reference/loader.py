@@ -222,43 +222,47 @@ def load_into(
             )
         return sd[src_key]
 
+    # The state_dict holds CPU tensors (kept on CPU after FP8 dequant
+    # to avoid GPU pressure). For each parameter copy we do the SHARD
+    # on CPU first, then move just the rank's slice to GPU. This keeps
+    # transient GPU usage bounded — moving full-size weights to GPU
+    # before sharding caused OOM on rank-2 (the highest-numbered EP
+    # rank's GPU) with layers 0-19.
     def _copy_replicated(dst: torch.nn.Parameter, src_key: str) -> None:
-        src = _get(src_key).to(dtype=dst.dtype, device=dst.device)
-        if src.shape != dst.shape:
+        src_cpu = _get(src_key)
+        if src_cpu.shape != dst.shape:
             raise ValueError(
                 f"Replicated copy shape mismatch for {src_key}: "
-                f"src={tuple(src.shape)} dst={tuple(dst.shape)}"
+                f"src={tuple(src_cpu.shape)} dst={tuple(dst.shape)}"
             )
         with torch.no_grad():
-            dst.copy_(src)
+            dst.copy_(src_cpu.to(dtype=dst.dtype, device=dst.device))
 
     def _copy_col_tp(
         dst: torch.nn.Parameter, src_key: str,
         tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
     ) -> None:
-        src_full = _get(src_key).to(dtype=dst.dtype, device=dst.device)
-        src = _shard_col(src_full, tp_size, rank)
-        if src.shape != dst.shape:
+        src_cpu = _shard_col(_get(src_key), tp_size, rank)
+        if src_cpu.shape != dst.shape:
             raise ValueError(
                 f"Col-TP shape mismatch for {src_key}: "
-                f"src={tuple(src.shape)} dst={tuple(dst.shape)}"
+                f"src={tuple(src_cpu.shape)} dst={tuple(dst.shape)}"
             )
         with torch.no_grad():
-            dst.copy_(src)
+            dst.copy_(src_cpu.to(dtype=dst.dtype, device=dst.device))
 
     def _copy_row_tp(
         dst: torch.nn.Parameter, src_key: str,
         tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
     ) -> None:
-        src_full = _get(src_key).to(dtype=dst.dtype, device=dst.device)
-        src = _shard_row(src_full, tp_size, rank)
-        if src.shape != dst.shape:
+        src_cpu = _shard_row(_get(src_key), tp_size, rank)
+        if src_cpu.shape != dst.shape:
             raise ValueError(
                 f"Row-TP shape mismatch for {src_key}: "
-                f"src={tuple(src.shape)} dst={tuple(dst.shape)}"
+                f"src={tuple(src_cpu.shape)} dst={tuple(dst.shape)}"
             )
         with torch.no_grad():
-            dst.copy_(src)
+            dst.copy_(src_cpu.to(dtype=dst.dtype, device=dst.device))
 
     def _copy_col_tp_gate_up(
         dst: torch.nn.Parameter, gate_key: str, up_key: str,
@@ -268,24 +272,20 @@ def load_into(
         its slice of GATE concatenated with its slice of UP, NOT a
         contiguous chunk of `cat([gate; up])`.
 
-        This mirrors vLLM's `MergedColumnParallelLinear`: each output
-        partition is sharded independently, then stacked. Otherwise
-        `gate_up.chunk(2, -1)` in the forward would split a single
-        TP partition into halves of the SAME tensor (e.g., both halves
-        are gate's rows), which is mathematically wrong.
+        Mirrors vLLM's `MergedColumnParallelLinear`: each output
+        partition is sharded independently, then stacked. Sharding
+        happens on CPU; only the merged-and-sharded slice moves to GPU.
         """
-        gate = _get(gate_key).to(dtype=dst.dtype, device=dst.device)
-        up = _get(up_key).to(dtype=dst.dtype, device=dst.device)
-        gate_local = _shard_col(gate, tp_size, rank)
-        up_local = _shard_col(up, tp_size, rank)
-        merged = torch.cat([gate_local, up_local], dim=0)
-        if merged.shape != dst.shape:
+        gate_cpu = _shard_col(_get(gate_key), tp_size, rank)
+        up_cpu = _shard_col(_get(up_key), tp_size, rank)
+        merged_cpu = torch.cat([gate_cpu, up_cpu], dim=0)
+        if merged_cpu.shape != dst.shape:
             raise ValueError(
                 f"Col-TP gate_up shape mismatch for [{gate_key}; {up_key}]: "
-                f"src={tuple(merged.shape)} dst={tuple(dst.shape)}"
+                f"src={tuple(merged_cpu.shape)} dst={tuple(dst.shape)}"
             )
         with torch.no_grad():
-            dst.copy_(merged)
+            dst.copy_(merged_cpu.to(dtype=dst.dtype, device=dst.device))
 
     # =================== Embedding + Final Norm + LM head ===================
     _copy_replicated(model.embed_tokens.weight, "model.embed_tokens.weight")
