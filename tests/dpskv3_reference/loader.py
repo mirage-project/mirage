@@ -153,6 +153,17 @@ def load_into(
     """Load weights from a HuggingFace DeepSeek V3 checkpoint into the
     reference model in place. Only the layer indices the model was
     constructed with are loaded.
+
+    HF DeepSeek V3 stores MLP weights as separate `gate_proj.weight`
+    and `up_proj.weight`. Our reference uses a fused `gate_up_proj`
+    matching vLLM's `MergedColumnParallelLinear`, so we combine at
+    load time via `cat([gate, up], dim=0)`.
+
+    HF also stores MTP-specific `model.layers.<N>.embed_tokens.weight`
+    and `model.layers.<N>.shared_head.head.weight`. vLLM treats these
+    as redundant copies of the main model's tied embeddings — we do
+    the same and ignore them. (If they ever differ from main's, the
+    audit comparator will flag the resulting argmax mismatch.)
     """
     model_dir = Path(model_dir)
     cfg = model.cfg
@@ -165,13 +176,16 @@ def load_into(
         device=device,
     )
 
-    def _copy(dst: torch.nn.Parameter, src_key: str) -> None:
+    def _get(src_key: str) -> torch.Tensor:
         if src_key not in sd:
             raise KeyError(
                 f"Missing weight {src_key} in checkpoint (have "
                 f"{len(sd)} keys)."
             )
-        src = sd[src_key].to(dtype=dst.dtype, device=dst.device)
+        return sd[src_key]
+
+    def _copy(dst: torch.nn.Parameter, src_key: str) -> None:
+        src = _get(src_key).to(dtype=dst.dtype, device=dst.device)
         if src.shape != dst.shape:
             raise ValueError(
                 f"Shape mismatch for {src_key}: src={tuple(src.shape)} "
@@ -179,6 +193,21 @@ def load_into(
             )
         with torch.no_grad():
             dst.copy_(src)
+
+    def _copy_gate_up(dst: torch.nn.Parameter, gate_key: str, up_key: str) -> None:
+        gate = _get(gate_key).to(dtype=dst.dtype, device=dst.device)
+        up = _get(up_key).to(dtype=dst.dtype, device=dst.device)
+        # Reference layout: gate_up_proj weight is [2*intermediate, hidden].
+        # cat order = [gate; up] (so chunk(2, dim=-1) of the OUTPUT yields
+        # (gate_out, up_out) — see DeepseekV2DenseMLP.forward).
+        merged = torch.cat([gate, up], dim=0)
+        if merged.shape != dst.shape:
+            raise ValueError(
+                f"Shape mismatch for [gate;up] {gate_key}+{up_key}: "
+                f"src={tuple(merged.shape)} dst={tuple(dst.shape)}"
+            )
+        with torch.no_grad():
+            dst.copy_(merged)
 
     # Embedding (also tied to lm_head).
     _copy(model.embed_tokens.weight, "model.embed_tokens.weight")
@@ -209,7 +238,11 @@ def load_into(
         mlp_pfx = f"{pfx}mlp."
         if li < cfg.first_k_dense_replace:
             mlp = layer.mlp
-            _copy(mlp.gate_up_proj.weight, f"{mlp_pfx}gate_up_proj.weight")
+            _copy_gate_up(
+                mlp.gate_up_proj.weight,
+                f"{mlp_pfx}gate_proj.weight",
+                f"{mlp_pfx}up_proj.weight",
+            )
             _copy(mlp.down_proj.weight, f"{mlp_pfx}down_proj.weight")
         else:
             moe = layer.mlp
@@ -223,11 +256,18 @@ def load_into(
             for e in range(cfg.n_routed_experts):
                 exp = moe.experts[e]
                 exp_pfx = f"{mlp_pfx}experts.{e}."
-                _copy(exp.gate_up_proj.weight, f"{exp_pfx}gate_up_proj.weight")
+                _copy_gate_up(
+                    exp.gate_up_proj.weight,
+                    f"{exp_pfx}gate_proj.weight",
+                    f"{exp_pfx}up_proj.weight",
+                )
                 _copy(exp.down_proj.weight, f"{exp_pfx}down_proj.weight")
             shared_pfx = f"{mlp_pfx}shared_experts."
-            _copy(moe.shared_experts.gate_up_proj.weight,
-                  f"{shared_pfx}gate_up_proj.weight")
+            _copy_gate_up(
+                moe.shared_experts.gate_up_proj.weight,
+                f"{shared_pfx}gate_proj.weight",
+                f"{shared_pfx}up_proj.weight",
+            )
             _copy(moe.shared_experts.down_proj.weight,
                   f"{shared_pfx}down_proj.weight")
 
@@ -264,13 +304,27 @@ def load_into(
         for e in range(cfg.n_routed_experts):
             exp = moe.experts[e]
             exp_pfx = f"{moe_pfx}experts.{e}."
-            _copy(exp.gate_up_proj.weight, f"{exp_pfx}gate_up_proj.weight")
+            _copy_gate_up(
+                exp.gate_up_proj.weight,
+                f"{exp_pfx}gate_proj.weight",
+                f"{exp_pfx}up_proj.weight",
+            )
             _copy(exp.down_proj.weight, f"{exp_pfx}down_proj.weight")
         shared_pfx = f"{moe_pfx}shared_experts."
-        _copy(moe.shared_experts.gate_up_proj.weight,
-              f"{shared_pfx}gate_up_proj.weight")
+        _copy_gate_up(
+            moe.shared_experts.gate_up_proj.weight,
+            f"{shared_pfx}gate_proj.weight",
+            f"{shared_pfx}up_proj.weight",
+        )
         _copy(moe.shared_experts.down_proj.weight,
               f"{shared_pfx}down_proj.weight")
         # Shared head norm.
         _copy(mtp.shared_head_norm.weight,
               f"{mtp_pfx}shared_head.norm.weight")
+        # Note: model.layers.<mtp_li>.embed_tokens.weight and
+        # model.layers.<mtp_li>.shared_head.head.weight exist in the
+        # checkpoint as redundant copies of the main embed / lm_head
+        # (vLLM treats them as tied). We don't load them explicitly —
+        # the main model's tied embed is reused. If they ever differ
+        # in a future checkpoint, the comparator will catch it via an
+        # mtp_argmax mismatch.
