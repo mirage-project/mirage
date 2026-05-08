@@ -264,17 +264,28 @@ def load_into(
         dst: torch.nn.Parameter, gate_key: str, up_key: str,
         tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
     ) -> None:
+        """ColumnParallel for the FUSED gate_up_proj. Each rank holds
+        its slice of GATE concatenated with its slice of UP, NOT a
+        contiguous chunk of `cat([gate; up])`.
+
+        This mirrors vLLM's `MergedColumnParallelLinear`: each output
+        partition is sharded independently, then stacked. Otherwise
+        `gate_up.chunk(2, -1)` in the forward would split a single
+        TP partition into halves of the SAME tensor (e.g., both halves
+        are gate's rows), which is mathematically wrong.
+        """
         gate = _get(gate_key).to(dtype=dst.dtype, device=dst.device)
         up = _get(up_key).to(dtype=dst.dtype, device=dst.device)
-        merged = torch.cat([gate, up], dim=0)
-        sharded = _shard_col(merged, tp_size, rank)
-        if sharded.shape != dst.shape:
+        gate_local = _shard_col(gate, tp_size, rank)
+        up_local = _shard_col(up, tp_size, rank)
+        merged = torch.cat([gate_local, up_local], dim=0)
+        if merged.shape != dst.shape:
             raise ValueError(
                 f"Col-TP gate_up shape mismatch for [{gate_key}; {up_key}]: "
-                f"src={tuple(sharded.shape)} dst={tuple(dst.shape)}"
+                f"src={tuple(merged.shape)} dst={tuple(dst.shape)}"
             )
         with torch.no_grad():
-            dst.copy_(sharded)
+            dst.copy_(merged)
 
     # =================== Embedding + Final Norm + LM head ===================
     _copy_replicated(model.embed_tokens.weight, "model.embed_tokens.weight")
