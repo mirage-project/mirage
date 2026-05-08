@@ -87,7 +87,12 @@ echo "" | tee -a "$SUMMARY"
 
 START_ALL=$(date +%s)
 
-while IFS=$'\t' read -r TAG PROMPT_LEN DECODE MTP MBT; do
+# Use FD 3 for the loop's input so commands inside the loop body
+# (notably mpirun) cannot accidentally consume the rest of the
+# iterator by reading from stdin. Without this the sweep silently
+# stops after one workload because mpirun drains the remaining
+# entries from stdin during its first run.
+while IFS=$'\t' read -r TAG PROMPT_LEN DECODE MTP MBT <&3; do
     SUB="$OUT_ROOT/${TAG}_mtp${MTP}"
     mkdir -p "$SUB"
     LOG="$SUB/run.log"
@@ -149,7 +154,7 @@ while IFS=$'\t' read -r TAG PROMPT_LEN DECODE MTP MBT; do
         echo "[mpk-sweep] $TAG mtp=$MTP FAIL rc=$RC after ${EL}s" | tee -a "$SUMMARY" || true
         (tail -15 "$LOG" | tee -a "$SUMMARY") || true
     fi
-done < "$TMP_PLAN"
+done 3< "$TMP_PLAN"
 
 ELAPSED=$(( $(date +%s) - START_ALL ))
 echo "" | tee -a "$SUMMARY"
