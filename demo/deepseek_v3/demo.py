@@ -1110,6 +1110,16 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
+        # Optional debug dump: per-row argmax outputs from the lm_head.
+        # During prefill, output_tokens[i] is the argmax of position i's logits.
+        # Comparing across rows tells us whether degenerate logits are
+        # specific to the last prefill position (off-by-one on hidden state)
+        # or affect every prefill row (lm_head/final-norm bug).
+        if os.environ.get("MPK_DEBUG_OUTPUT_TOKENS") == "1" and rank == 0:
+            ot = output_tokens.flatten().cpu().tolist()
+            ot_str = ", ".join(str(v) for v in ot[:min(110, len(ot))])
+            print(f"[debug] output_tokens[0:{min(110, len(ot))}] = [{ot_str}]")
+
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
