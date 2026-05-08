@@ -79,12 +79,12 @@ def run_workload(
     """Run one workload through the already-loaded model. Returns
     a JSON-serialisable result summary."""
     enable_mtp = (mtp > 0)
-    if enable_mtp != model.enable_mtp:
-        # Cannot run MTP workload on a non-MTP model and vice versa.
-        # Skip or error.
+    # MTP-enabled model can run mtp=0 workloads (just skip the MTP
+    # forward path); a non-MTP model cannot run mtp>0 workloads.
+    if enable_mtp and not model.enable_mtp:
         return {
             "tag": tag, "skipped": True,
-            "reason": f"model.enable_mtp={model.enable_mtp} but mtp={mtp}",
+            "reason": f"model.enable_mtp=False but mtp={mtp} (>0)",
         }
 
     if _is_rank0(pcfg):
