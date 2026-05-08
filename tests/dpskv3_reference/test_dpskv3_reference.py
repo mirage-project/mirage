@@ -79,14 +79,14 @@ def _build_model(cfg: Config, *, enable_mtp: bool, device: str) -> DeepseekV3Mod
 
 
 def test_forward_no_mtp_shapes(cfg: Config, device: str) -> None:
-    """Case #3: no MTP. Verify shapes + no-NaN."""
+    """Case #3: no MTP. Verify shapes + no-NaN. Use record_hidden=True
+    so we can check per-layer intermediates."""
     model = _build_model(cfg, enable_mtp=False, device=device)
     T = 8
     input_ids = torch.randint(0, cfg.vocab_size, (T,), device=device)
     positions = torch.arange(T, device=device)
     with torch.no_grad():
-        out = model(input_ids=input_ids, positions=positions)
-    # Required keys.
+        out = model(input_ids=input_ids, positions=positions, record_hidden=True)
     assert "embed" in out
     assert out["embed"].shape == (T, cfg.hidden_size)
     for li in range(cfg.num_hidden_layers):
@@ -95,24 +95,21 @@ def test_forward_no_mtp_shapes(cfg: Config, device: str) -> None:
     assert out["final_norm"].shape == (T, cfg.hidden_size)
     assert out["logits"].shape == (T, cfg.vocab_size)
     assert out["argmax"].shape == (T,)
-    # No NaNs.
     for k, v in out.items():
         assert torch.isfinite(v).all(), f"NaN/Inf in {k}"
 
 
 def test_forward_with_mtp_shapes(cfg: Config, device: str) -> None:
-    """Cases #1 / #2: MTP forward attached."""
+    """Cases #1 / #2: MTP forward attached, record_hidden=True."""
     model = _build_model(cfg, enable_mtp=True, device=device)
     T = 8
     input_ids = torch.randint(0, cfg.vocab_size, (T,), device=device)
     positions = torch.arange(T, device=device)
-    # vLLM-style shifted ground-truth: prev_mtp_input_ids[i] = next_target_token.
-    # For a synthetic test, just shift by 1.
     prev_mtp = torch.cat([input_ids[1:], input_ids[-1:]])
     with torch.no_grad():
         out = model(
             input_ids=input_ids, positions=positions,
-            prev_mtp_input_ids=prev_mtp,
+            prev_mtp_input_ids=prev_mtp, record_hidden=True,
         )
     assert out["mtp_output"].shape == (T, cfg.hidden_size)
     assert out["mtp_logits"].shape == (T, cfg.vocab_size)
@@ -122,20 +119,23 @@ def test_forward_with_mtp_shapes(cfg: Config, device: str) -> None:
 
 
 def test_decode_step_shapes(cfg: Config, device: str) -> None:
-    """Case decode-step (T=1). Should still work — just one position."""
+    """Case decode-step (T=1). record_hidden=False (the production path)."""
     model = _build_model(cfg, enable_mtp=True, device=device)
     input_ids = torch.tensor([5], device=device, dtype=torch.long)
     positions = torch.tensor([10], device=device)
     prev_mtp = torch.tensor([6], device=device, dtype=torch.long)
     with torch.no_grad():
         out = model(input_ids=input_ids, positions=positions,
-                    prev_mtp_input_ids=prev_mtp)
+                    prev_mtp_input_ids=prev_mtp, record_hidden=False)
+    # record_hidden=False: only argmax + mtp_argmax populated.
     assert out["argmax"].shape == (1,)
     assert out["mtp_argmax"].shape == (1,)
+    assert "embed" not in out
+    assert "logits" not in out
 
 
 def test_partial_layers(cfg: Config, device: str) -> None:
-    """Build with only layers [0, 3]; should run those two and skip 1, 2."""
+    """Build with only layers [0, 3]; record_hidden=True for verification."""
     model = DeepseekV3Model(
         cfg, layer_indices=[0, 3], enable_mtp=False,
     ).to(device=device, dtype=torch.float32).eval()
@@ -143,11 +143,11 @@ def test_partial_layers(cfg: Config, device: str) -> None:
     input_ids = torch.randint(0, cfg.vocab_size, (T,), device=device)
     positions = torch.arange(T, device=device)
     with torch.no_grad():
-        out = model(input_ids=input_ids, positions=positions)
+        out = model(input_ids=input_ids, positions=positions, record_hidden=True)
     assert "layer_0_output" in out
     assert "layer_3_output" in out
-    assert "layer_1_output" not in out  # skipped
-    assert "layer_2_output" not in out  # skipped
+    assert "layer_1_output" not in out
+    assert "layer_2_output" not in out
     assert out["argmax"].shape == (T,)
 
 

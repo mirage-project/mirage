@@ -474,9 +474,19 @@ class DeepseekV3MoE(nn.Module):
         topk_weights = topk_weights.to(x.dtype)
 
         # 5. Apply only this rank's local experts.
+        # Optimization: iterate only the UNIQUE experts that appear in
+        # topk_idx (at most num_experts_per_tok * T distinct experts),
+        # filtered to those owned by this rank. Avoids the O(n_routed_experts)
+        # Python loop that dominates forward time at long context.
         routed_out = torch.zeros_like(x)
-        for local_e_idx in range(self.num_local_experts):
-            global_e = self.first_local_expert + local_e_idx
+        # `topk_idx` shape: [T, topk]. Get the unique expert indices used.
+        unique_experts = torch.unique(topk_idx).tolist()
+        first = self.first_local_expert
+        last = first + self.num_local_experts
+        for global_e in unique_experts:
+            if global_e < first or global_e >= last:
+                continue
+            local_e_idx = global_e - first
             mask = (topk_idx == global_e)
             if not mask.any():
                 continue
@@ -637,31 +647,73 @@ class DeepseekV3Model(nn.Module):
         input_ids: Tensor,
         positions: Tensor,
         prev_mtp_input_ids: Optional[Tensor] = None,
+        record_hidden: bool = False,
     ) -> dict[str, Tensor]:
+        """Forward pass.
+
+        `record_hidden=False` (default) returns only the final tokens
+        (`argmax` + `mtp_argmax` if MTP). This is the fast path used
+        for end-to-end token-level alignment with MPK; per-layer
+        intermediates would consume significant GPU memory at long
+        context.
+
+        `record_hidden=True` additionally clones every intermediate
+        (embed, per-layer output+residual, final_norm, logits, MTP
+        equivalents) into the returned dict. Use for fine-grained
+        debugging — but watch the memory.
+        """
         out: dict[str, Tensor] = {}
         x = self.embed_tokens(input_ids)
-        out["embed"] = x.detach().clone()
+        if record_hidden:
+            out["embed"] = x.detach().clone()
         residual: Optional[Tensor] = None
         for li in self.layer_indices:
             layer = self.layers[str(li)]
             x, residual = layer(positions, x, residual)
-            out[f"layer_{li}_output"] = x.detach().clone()
-            out[f"layer_{li}_residual"] = residual.detach().clone()
+            if record_hidden:
+                out[f"layer_{li}_output"] = x.detach().clone()
+                out[f"layer_{li}_residual"] = residual.detach().clone()
         x_main, _ = self.norm(x, residual=residual)
-        out["final_norm"] = x_main.detach().clone()
-        logits = self.lm_head(x_main)
-        out["logits"] = logits.detach().clone()
-        out["argmax"] = logits.argmax(dim=-1).detach().clone()
-        if self.enable_mtp:
-            assert prev_mtp_input_ids is not None
+        if record_hidden:
+            out["final_norm"] = x_main.detach().clone()
+            logits = self.lm_head(x_main)
+            out["logits"] = logits.detach().clone()
+            out["argmax"] = logits.argmax(dim=-1).detach().clone()
+        else:
+            # Compute logits only on the last position when record_hidden
+            # is off — for autoregressive decode we only need the next
+            # token's prediction. Saves a [T, vocab=129280] tensor on GPU.
+            logits_last = self.lm_head(x_main[-1:])
+            out["argmax"] = torch.cat([
+                # Pad earlier positions with zeros for shape compatibility
+                # with the runner's `argmax[-1]` access.
+                torch.zeros(x_main.shape[0] - 1,
+                            dtype=torch.long, device=x_main.device),
+                logits_last.argmax(dim=-1).detach().clone(),
+            ])
+        # Run MTP only when caller provided prev_mtp_input_ids. The model
+        # being built with enable_mtp=True doesn't FORCE running it on
+        # every forward — the runner does a "main-only" pass first to
+        # get target argmax, then a "main+MTP" pass with the shifted
+        # ground-truth input IDs.
+        if self.enable_mtp and prev_mtp_input_ids is not None:
             mtp_embed = self.embed_tokens(prev_mtp_input_ids)
             mtp_out = self.mtp_layer(
                 positions=positions,
                 input_ids_embed=mtp_embed,
                 previous_hidden_states=x_main,
             )
-            out["mtp_output"] = mtp_out.detach().clone()
-            mtp_logits = self.lm_head(mtp_out)
-            out["mtp_logits"] = mtp_logits.detach().clone()
-            out["mtp_argmax"] = mtp_logits.argmax(dim=-1).detach().clone()
+            if record_hidden:
+                out["mtp_output"] = mtp_out.detach().clone()
+                mtp_logits = self.lm_head(mtp_out)
+                out["mtp_logits"] = mtp_logits.detach().clone()
+                out["mtp_argmax"] = mtp_logits.argmax(dim=-1).detach().clone()
+            else:
+                # Same compute-on-last-only optimization for MTP.
+                mtp_logits_last = self.lm_head(mtp_out[-1:])
+                out["mtp_argmax"] = torch.cat([
+                    torch.zeros(mtp_out.shape[0] - 1,
+                                dtype=torch.long, device=mtp_out.device),
+                    mtp_logits_last.argmax(dim=-1).detach().clone(),
+                ])
         return out

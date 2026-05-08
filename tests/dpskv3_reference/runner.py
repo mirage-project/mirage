@@ -91,6 +91,7 @@ def _is_rank0(pcfg: ParallelConfig) -> bool:
 def run_reference(
     model_path: str,
     prompt: str = "Give me a short introduction to large language model.",
+    prompt_length: int = 0,
     layers: Optional[list[int]] = None,
     enable_mtp: bool = False,
     spec_length: int = 1,
@@ -106,6 +107,13 @@ def run_reference(
 ) -> RunResult:
     """Run the PyTorch reference, dump everything (rank 0 only),
     return final tokens.
+
+    Prompt selection (mirrors MPK demo's behavior):
+        - If `prompt_length > 0`: use a deterministic synthetic prompt
+          `arange(prompt_length) % 4096 + 1024`. Same as MPK demo's
+          `--prompt-length N` mode (demo.py:280-294). This gives bit-
+          identical prompt token IDs on both sides.
+        - Else: tokenize `prompt` via AutoTokenizer (no chat template).
 
     `rank` defaults to env `LOCAL_RANK` (torchrun) or 0.
     """
@@ -143,8 +151,18 @@ def run_reference(
     if not skip_weight_load:
         load_into(model, model_path, target_dtype=dtype, device=device)
 
-    # Tokenise (rank 0 then broadcast to other ranks).
-    if not skip_weight_load:
+    # Tokenise. Two modes (mirrors MPK demo.py:280-294):
+    #   prompt_length > 0  →  synthetic deterministic prompt
+    #   prompt_length == 0 →  tokenize the text via AutoTokenizer
+    if prompt_length > 0:
+        # Synthetic, deterministic. No tokenizer needed; identical on
+        # every rank without broadcast.
+        full_prompt_ids = (
+            (torch.arange(prompt_length, dtype=torch.long, device=device) % 4096)
+            + 1024
+        )
+        tokenizer = None
+    elif not skip_weight_load:
         if _is_rank0(pcfg):
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(

@@ -47,6 +47,10 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--model-path", required=True)
     p.add_argument("--prompt", default="Give me a short introduction to large language model.")
+    p.add_argument("--prompt-length", type=int, default=0,
+                   help="If > 0, use synthetic deterministic prompt "
+                        "(arange(N) % 4096 + 1024) — matches MPK demo's "
+                        "--prompt-length mode. Else tokenize --prompt.")
     p.add_argument("--layers", default="0", help='comma list or "a-b" range')
     p.add_argument("--enable-mtp", action="store_true")
     p.add_argument("--spec-length", type=int, default=1)
@@ -65,6 +69,7 @@ def main() -> int:
     result = run_reference(
         model_path=args.model_path,
         prompt=args.prompt,
+        prompt_length=args.prompt_length,
         layers=layers,
         enable_mtp=args.enable_mtp,
         spec_length=args.spec_length,
