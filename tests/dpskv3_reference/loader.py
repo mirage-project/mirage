@@ -147,6 +147,11 @@ def _load_state_dict(
                 state_dict[k] = f.get_tensor(k)
 
     # Pair (weight, weight_scale_inv) → dequantize FP8 → BF16.
+    # CRITICAL: keep dequantized tensors on CPU, not GPU. With layers 0-19
+    # the cumulative dequant'd MoE weights would exceed B200's 180 GB GPU
+    # capacity. We move FP8 + scale to GPU only for the dequant kernel,
+    # then immediately move the BF16 result back to CPU. Per-param GPU
+    # transfer happens during the copy phase via `.to(device=dst.device)`.
     paired: list[str] = []
     for k in list(state_dict.keys()):
         if k.endswith(".weight"):
@@ -157,8 +162,11 @@ def _load_state_dict(
                 if is_fp8(w):
                     w_bf16 = dequantize_fp8(
                         w.to(device), s.to(device)
-                    ).to(target_dtype)
+                    ).to(target_dtype).cpu()
                     state_dict[k] = w_bf16
+                    # Free the GPU memory used during dequant.
+                    if device.startswith("cuda"):
+                        torch.cuda.empty_cache()
                 paired.append(scale_k)
     for k in paired:
         del state_dict[k]
