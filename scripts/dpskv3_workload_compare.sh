@@ -163,7 +163,7 @@ if [[ -z "${SKIP_REF:-}" ]]; then
             --model-path "$MODEL_PATH" \
             --layers "$LAYERS_MAIN" \
             --tp-size "$TP" --ep-size "$EP" \
-            --prompt "$PROMPT_TEXT" \
+            --prompt-length "$PROMPT_LEN" \
             --max-new-tokens "$DECODE" \
             --max-num-batched-tokens "$MBT" \
             --dump-dir "$OUT_BASE/ref" \
