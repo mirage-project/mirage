@@ -152,6 +152,14 @@ if __name__ == "__main__":
                             "Optionally dump first N generated token_ids, text, and latency to JSON. "
                             "If path omitted, saves to outputs/deepseek_v3/{torch_output.json|mpk_output.json}."
                         ))
+    parser.add_argument("--dump-hidden-dir", type=str, default=None,
+                        help=(
+                            "Diagnostic: dump per-layer residual stream after each "
+                            "decoder layer's MLP/MoE residual fusion to "
+                            "<dir>/layer_NN_residual.pt. Saved on rank 0 only. "
+                            "Used to localize the layer where MPK first diverges "
+                            "from the PyTorch reference."
+                        ))
     parser.add_argument("--weight-cache-dir", type=str,
                         default=os.environ.get("MPK_DEEPSEEK_WEIGHT_CACHE_DIR"),
                         help=(
@@ -1071,6 +1079,58 @@ if __name__ == "__main__":
             with_lm_head=True,
         )
 
+        # Optional per-layer residual dump (diagnostic). Allocate one
+        # PyTorch tensor per built layer so the builder can wire a copy
+        # task at the end of each layer iteration. Saved on rank 0
+        # after mpk() returns.
+        if args.dump_hidden_dir is not None:
+            num_dump_layers = (
+                len(layer_indices_arg) if layer_indices_arg
+                else model_config.num_layers
+            )
+            mpk.dump_hidden_tensors = [
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                )
+                for _ in range(num_dump_layers)
+            ]
+            # Also dump self.y (embed_layer output) so we can isolate
+            # whether MPK's hidden-state divergence from reference starts
+            # at the embedding step or later in attn/MLP.
+            mpk.dump_embed_tensor = torch.zeros(
+                (args.max_num_batched_tokens, model_config.hidden_size),
+                dtype=torch.bfloat16, device="cuda",
+            )
+            # Layer-0 intra-layer dumps: 4 slots, all bf16
+            # 0=input_norm    (mbt, hidden)
+            # 1=q_a_out       (mbt, q_lora_rank=1536) — first FP8 GEMM in attn
+            # 2=attn_out      (mbt, hidden) — o_proj+residual
+            # 3=dense_mlp_out (mbt, hidden) — full layer 0 residual
+            q_lora_rank = 1536
+            mpk.dump_layer0_intra_tensors = [
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+                torch.zeros(
+                    (args.max_num_batched_tokens, q_lora_rank),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+            ]
+        else:
+            mpk.dump_hidden_tensors = None
+            mpk.dump_embed_tensor = None
+            mpk.dump_layer0_intra_tensors = None
+
         # Build the computation graph using the DeepSeek V3 builder
         builder = DeepSeekV3Builder(mpk)
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
@@ -1119,6 +1179,28 @@ if __name__ == "__main__":
             ot = output_tokens.flatten().cpu().tolist()
             ot_str = ", ".join(str(v) for v in ot[:min(110, len(ot))])
             print(f"[debug] output_tokens[0:{min(110, len(ot))}] = [{ot_str}]")
+
+        if args.dump_hidden_dir is not None and rank == 0 and getattr(mpk, "dump_hidden_tensors", None) is not None:
+            os.makedirs(args.dump_hidden_dir, exist_ok=True)
+            ordered_layer_idx = layer_indices_arg or list(range(model_config.num_layers))
+            for slot, t in enumerate(mpk.dump_hidden_tensors):
+                idx = ordered_layer_idx[slot] if slot < len(ordered_layer_idx) else slot
+                path = os.path.join(args.dump_hidden_dir, f"layer_{idx:02d}_residual.pt")
+                torch.save(t.detach().cpu(), path)
+            if getattr(mpk, "dump_embed_tensor", None) is not None:
+                torch.save(mpk.dump_embed_tensor.detach().cpu(),
+                           os.path.join(args.dump_hidden_dir, "embed.pt"))
+                print(f"Saved embed.pt to {args.dump_hidden_dir}")
+            if getattr(mpk, "dump_layer0_intra_tensors", None) is not None:
+                names = ["layer0_input_norm.pt",
+                         "layer0_q_a_out.pt",
+                         "layer0_attn_out.pt",
+                         "layer0_dense_mlp_out.pt"]
+                for k, t in enumerate(mpk.dump_layer0_intra_tensors):
+                    torch.save(t.detach().cpu(),
+                               os.path.join(args.dump_hidden_dir, names[k]))
+                print(f"Saved layer-0 intra-layer dumps to {args.dump_hidden_dir}")
+            print(f"Saved {len(mpk.dump_hidden_tensors)} per-layer residual dumps to {args.dump_hidden_dir}")
 
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
