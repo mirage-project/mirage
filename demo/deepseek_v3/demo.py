@@ -288,7 +288,10 @@ if __name__ == "__main__":
 
     # Tokenize prompt (or synthesize a fixed-length prompt for stress tests)
     if args.prompt_length > 0:
-        pl = min(args.prompt_length, args.max_seq_length - 16)
+        # Reserve at least 1 slot for the next decoded token. For prefill-only
+        # diagnostics (max_seq_length == prompt_length), this collapses to a
+        # one-iter run that terminates right after the prefill iter.
+        pl = min(args.prompt_length, args.max_seq_length - 1)
         # Deterministic synthetic prompt: cycle over a small subset of the
         # vocab. Excludes special IDs (pad, bos, eos, etc.) by staying in
         # [1024, 1024 + 4096) which is safely inside any tokenizer's main
