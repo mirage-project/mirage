@@ -208,8 +208,15 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # Fuse residual into linear kernels (with_residual). Always on.
         self._fuse_residual = True
+        # Disabled by default after the FP8 GEMM kernel migration: the old
+        # UE8M0 packed-scale buffer used by `_fp8_buffers_for_reduction`
+        # is incompatible with the new `fp8_gemm_dense_smallm/mediumm_sm100`
+        # kernels (which take row-major float32 scales). Set
+        # `MPK_REUSE_ATTN_INPUT_FP8=1` to force the old UE8M0 reuse path
+        # for regression isolation against the older `linear_fp8_sm100`
+        # kernel — note that path also re-introduces the row-coverage bug.
         self._reuse_attn_input_fp8 = (
-            os.environ.get("MPK_REUSE_ATTN_INPUT_FP8", "1") != "0")
+            os.environ.get("MPK_REUSE_ATTN_INPUT_FP8", "0") == "1")
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
@@ -356,6 +363,142 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_bufs[cache_key]
 
+    def _fp8_mbt_buffers_for_reduction_f32scale(self, reduction_size: int):
+        """Per-token-batch FP8 buffer + float32 scale (NEW kernel format).
+
+        Used by `fp8_gemm_dense_smallm_sm100` / `fp8_gemm_dense_mediumm_sm100`,
+        which take row-major float32 scales `[M, K/128]` instead of the
+        packed UE8M0 column-major scales used by the older
+        `linear_fp8_sm100` kernel. Cache shared across all FP8 GEMMs of the
+        same reduction_size, like `_fp8_buffers_for_reduction`.
+        """
+        mbt = self.max_num_batched_tokens
+        group_size = 128
+        num_groups = (reduction_size + group_size - 1) // group_size
+        if not hasattr(self, "_fp8_mbt_f32_bufs"):
+            self._fp8_mbt_f32_bufs = {}
+        cache_key = reduction_size
+        if cache_key not in self._fp8_mbt_f32_bufs:
+            fp8_buf = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=float8_e4m3,
+                name=f"fp8_input_v2_{reduction_size}_shared",
+                io_category="cuda_tensor",
+            )
+            scale_buf = self.mpk.new_tensor(
+                dims=(mbt, num_groups), dtype=float32,
+                name=f"fp8_scale_v2_{reduction_size}_shared",
+                io_category="cuda_tensor",
+            )
+            self._fp8_mbt_f32_bufs[cache_key] = (fp8_buf, scale_buf)
+        return self._fp8_mbt_f32_bufs[cache_key]
+
+    def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
+                       output, residual=None, gate_mode: int = 0):
+        """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
+
+        Replaces the old `linear_fp8_sm100` path which has a row-coverage
+        bug for batch>16 prefill (rows 1-15 of every output stay zero,
+        propagating through attention and MLP). The new kernel was
+        introduced for `_fp8_dense_kv_b_proj` and supports any M including
+        mbt=128.
+
+        Args
+        ----
+        input_bf16: (mbt, K) bf16 tensor — pre-quantize input.
+        weight_fp8_raw: (N, K) fp8_e4m3 tensor — raw checkpoint weight.
+        weight_scale_raw: (N/128, K/128) float32 tensor — checkpoint scale.
+            Use `_attach_raw_fp8_weight` (NOT `_attach_fp8_weight`) for the
+            weight side so the scale stays in raw float32 layout.
+        output: (mbt, N) bf16 tensor.
+        residual: optional (mbt, N) bf16. When provided AND world_size>1,
+            we GEMM into a partial buffer then AllReduce + add residual.
+            Without TP (world_size=1), we GEMM into a partial then add
+            residual via elementwise_add (the new kernel has no fused
+            residual epilogue).
+        gate_mode: 0=always run, 1=prefill phase only, 2=decode phase only
+            (mirrors the dense-GEMM `runtime_m_mode`).
+        """
+        if weight_scale_raw is None:
+            raise ValueError("FP8 linear v2 requires FP8 weight scale.")
+        if input_bf16.num_dims != 2 or output.num_dims != 2:
+            raise ValueError("FP8 linear v2 expects 2D input/output.")
+        if weight_fp8_raw.num_dims != 2 or weight_scale_raw.num_dims != 2:
+            raise ValueError("FP8 linear v2 expects 2D weight + scale.")
+
+        reduction_size = weight_fp8_raw.dim(1)
+        input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
+            reduction_size)
+        # Quantize bf16 input → FP8 + float32 scale. active_mode mirrors the
+        # gate_mode so the quantize fires only in the matching phase.
+        active_mode = 2 if gate_mode == 1 else 3 if gate_mode == 2 else 0
+        self.mpk.quantize_fp8_layer(
+            input=input_bf16,
+            output_fp8=input_fp8,
+            output_scale=input_scale,
+            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=False,
+            active_mode=active_mode,
+        )
+
+        gemm_layer = (
+            self.mpk.fp8_gemm_dense_smallm_layer
+            if self.mpk.max_seq_length <= 512
+            else self.mpk.fp8_gemm_dense_mediumm_layer
+        )
+
+        if residual is None:
+            gemm_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=output,
+                num_workers=self.num_workers,
+                runtime_m_mode=0,
+            )
+            return
+
+        if self.world_size > 1:
+            idx = getattr(self, "_tp_residual_linear_idx", 0)
+            self._tp_residual_linear_idx = idx + 1
+            partial = self._new_tp_partial(output, f"tp_v2_residual_partial_{idx}")
+            gemm_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=partial,
+                num_workers=self.num_workers,
+                runtime_m_mode=0,
+            )
+            self._allreduce_residual(partial, output, residual,
+                                     gate_mode=gate_mode)
+            return
+
+        # TP=1 path: dense GEMM into a partial buffer, then add residual.
+        partial = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, weight_fp8_raw.dim(0)),
+            dtype=bfloat16, name=f"fp8_v2_partial_{id(weight_fp8_raw)}",
+            io_category="cuda_tensor",
+        )
+        gemm_layer(
+            input_fp8=input_fp8,
+            weight_fp8=weight_fp8_raw,
+            input_scale=input_scale,
+            weight_scale=weight_scale_raw,
+            output=partial,
+            num_workers=self.num_workers,
+            runtime_m_mode=0,
+        )
+        self.mpk.elementwise_add_layer(
+            input_a=partial,
+            input_b=residual,
+            output=output,
+            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            block_dim=(128, 1, 1),
+        )
+
     def _fp8_sequence_buffers_for_reduction(
         self, reduction_size: int, tag: str = "shared"
     ):
@@ -448,7 +591,15 @@ class DeepSeekV3Builder(GraphBuilder):
 
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                      grid_dim, block_dim, residual=None, gate_mode: int = 0):
-        """Quantize BF16 input → FP8, then run FP8 GEMM."""
+        """Quantize BF16 input → FP8, then run FP8 GEMM.
+
+        Now routes through the new `fp8_gemm_dense_smallm/mediumm_sm100`
+        kernels (`_fp8_linear_v2`) instead of the older `linear_fp8_sm100`,
+        which has a row-coverage bug for batch>16 prefill (rows 1-15 of
+        every output stay zero). The `grid_dim`/`block_dim` arguments are
+        accepted for API compatibility but ignored — the new kernel uses
+        a persistent `(num_workers, 1, 1)` grid internally.
+        """
 
         if weight_scale is None:
             # BF16 fallback is kept for fixtures or pre-converted weights that
@@ -473,34 +624,12 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=grid_dim, block_dim=block_dim)
             return
 
-        if input_bf16.num_dims != 2 or output.num_dims != 2:
-            raise ValueError("FP8 linear expects 2D input and output tensors.")
-        if weight.num_dims != 2:
-            raise ValueError("FP8 linear expects a 2D weight tensor.")
-        if weight_scale.num_dims != 2:
-            raise ValueError("FP8 linear expects a 2D packed UE8M0 scale tensor.")
-
-        reduction_size = weight.dim(1) if weight.num_dims == 2 else weight.dim(-1)
-        self._fp8_input_buf, self._fp8_scale_buf = self._fp8_buffers_for_reduction(reduction_size)
-
-        self.mpk.quantize_fp8_layer(
-            input=input_bf16,
-            output_fp8=self._fp8_input_buf,
-            output_scale=self._fp8_scale_buf,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
-            block_dim=(128, 1, 1),
-            active_mode=(
-                2 if gate_mode == 1 else 3 if gate_mode == 2 else 0),
-        )
-
-        self._fp8_linear_prequantized(
-            self._fp8_input_buf,
-            self._fp8_scale_buf,
-            weight,
-            weight_scale,
-            output,
-            grid_dim,
-            block_dim,
+        # Route to the new dense FP8 GEMM kernel (smallm/mediumm).
+        self._fp8_linear_v2(
+            input_bf16=input_bf16,
+            weight_fp8_raw=weight,
+            weight_scale_raw=weight_scale,
+            output=output,
             residual=residual,
             gate_mode=gate_mode,
         )
@@ -1160,18 +1289,26 @@ class DeepSeekV3Builder(GraphBuilder):
         return hasattr(self, '_is_fp8_mode') and self._is_fp8_mode
 
     def _attach_fp8_weight(self, state_dict, key, name):
-        """Attach FP8 weight + scale_inv (converted to UE8M0), or BF16 weight."""
+        """Attach FP8 weight + raw float32 scale_inv (NEW kernel format),
+        or BF16 weight as fallback.
+
+        Previously this requantized the weight to UE8M0 scale for the old
+        `linear_fp8_sm100` kernel. We now use the new dense GEMM kernels
+        (`fp8_gemm_dense_smallm_sm100` / `_mediumm_sm100`) which take raw
+        float32 block scales instead — same layout as
+        `_attach_raw_fp8_weight`. Keeping the same function name avoids
+        churn at the many existing call sites; the weight tuple `(w, s)`
+        now matches `_attach_raw_fp8_weight`'s contract.
+        """
         scale_key = f"{key}_scale_inv"
         if scale_key in state_dict:
-            # Requantize: dequant with float32 scale, re-quantize with UE8M0 scale
             if state_dict[key].dtype != torch.float8_e4m3fn:
                 raise TypeError(f"{key} must be torch.float8_e4m3fn when {scale_key} exists.")
             if state_dict[scale_key].dtype not in (torch.float16, torch.bfloat16, torch.float32):
                 raise TypeError(f"{scale_key} must be a floating scale tensor.")
-            new_fp8, packed_ue8m0 = self._requantize_fp8_for_ue8m0(
-                state_dict[key], state_dict[scale_key])
-            w = self._safe_attach(new_fp8, name)
-            s = self._safe_attach(packed_ue8m0, f"{name}_scale")
+            w = self._safe_attach(state_dict[key], name)
+            scale = state_dict[scale_key].to(torch.float32).contiguous()
+            s = self._safe_attach(scale, f"{name}_scale")
         else:
             # BF16 fallback is used by reduced fixtures or explicitly
             # pre-converted weights that have no scale tensor.
@@ -1304,31 +1441,26 @@ class DeepSeekV3Builder(GraphBuilder):
             scale_rows_total = kv_a_s.shape[0]
             latent_ratio = self.kv_lora_rank / (self.kv_lora_rank + QK_ROPE_HEAD_DIM)
             scale_rows_latent = round(scale_rows_total * latent_ratio)
-            # c_latent: requantize [512, hidden] FP8
-            latent_fp8, latent_ue8m0 = self._requantize_fp8_for_ue8m0(
-                kv_a_w[:self.kv_lora_rank].contiguous(),
-                kv_a_s[:scale_rows_latent].contiguous())
+            # c_latent: raw FP8 + float32 block scale (new kernel format).
+            latent_fp8 = kv_a_w[:self.kv_lora_rank].contiguous()
+            latent_scale = kv_a_s[:scale_rows_latent].to(torch.float32).contiguous()
             w_kv_latent = self._safe_attach(latent_fp8,
                 f"layer_{layer_idx}_kv_a_latent")
-            s_kv_latent = self._safe_attach(latent_ue8m0,
+            s_kv_latent = self._safe_attach(latent_scale,
                 f"layer_{layer_idx}_kv_a_latent_scale")
-            # k_pe: requantize [64, hidden] → pad to [128, hidden]
+            # k_pe: pad raw FP8 [64, H] → [128, H], pad float32 scale [1, K/128].
             rope_fp8_raw = kv_a_w[self.kv_lora_rank:].contiguous()
-            rope_scale_raw = kv_a_s[scale_rows_latent:].contiguous()
-            # Pad FP8 weight from [64, H] to [128, H] BEFORE requantize
+            rope_scale_raw = kv_a_s[scale_rows_latent:].to(torch.float32).contiguous()
             rope_fp8_padded = torch.zeros(128, rope_fp8_raw.shape[1],
                                           dtype=rope_fp8_raw.dtype, device=rope_fp8_raw.device)
             rope_fp8_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_raw
-            # Pad scale_inv from [64/128_rows, K/128_cols] to [128/128_rows, K/128_cols]
             rope_scale_padded = torch.zeros(
                 (128 + 127) // 128, rope_scale_raw.shape[1],
                 dtype=rope_scale_raw.dtype, device=rope_scale_raw.device)
             rope_scale_padded[:rope_scale_raw.shape[0]] = rope_scale_raw
-            rope_fp8_req, rope_ue8m0_req = self._requantize_fp8_for_ue8m0(
-                rope_fp8_padded, rope_scale_padded)
-            w_kv_rope = self._safe_attach(rope_fp8_req,
+            w_kv_rope = self._safe_attach(rope_fp8_padded,
                                           f"layer_{layer_idx}_kv_a_rope")
-            s_kv_rope = self._safe_attach(rope_ue8m0_req,
+            s_kv_rope = self._safe_attach(rope_scale_padded,
                                           f"layer_{layer_idx}_kv_a_rope_scale")
         else:
             w_kv_latent = self._safe_attach(
@@ -2216,16 +2348,14 @@ class DeepSeekV3Builder(GraphBuilder):
         latent_ratio = self.kv_lora_rank / (self.kv_lora_rank + QK_ROPE_HEAD_DIM)
         scale_rows_latent = round(scale_rows_total * latent_ratio)
 
-        # c_latent: requantize
-        latent_fp8, latent_ue8m0 = self._requantize_fp8_for_ue8m0(
-            kv_a_w[:self.kv_lora_rank].contiguous(),
-            kv_a_s[:scale_rows_latent].contiguous())
+        # c_latent: raw FP8 + float32 scale (new dense GEMM kernel format)
+        latent_fp8 = kv_a_w[:self.kv_lora_rank].contiguous()
+        latent_scale = kv_a_s[:scale_rows_latent].to(torch.float32).contiguous()
         w_kv_latent = self._safe_attach(latent_fp8, f"mtp_{attn}kv_a_latent")
-        s_kv_latent = self._safe_attach(latent_ue8m0, f"mtp_{attn}kv_a_latent_scale")
-        # kv_a_rope: requantize + pad to [128, H]
-        # Pad FP8 weight + scale before requantize (128 rows for SM100 MMA_M)
+        s_kv_latent = self._safe_attach(latent_scale, f"mtp_{attn}kv_a_latent_scale")
+        # kv_a_rope: pad raw FP8 [64, H] → [128, H], pad float32 scale.
         rope_fp8_raw = kv_a_w[self.kv_lora_rank:].contiguous()
-        rope_scale_raw = kv_a_s[scale_rows_latent:].contiguous()
+        rope_scale_raw = kv_a_s[scale_rows_latent:].to(torch.float32).contiguous()
         rope_fp8_padded = torch.zeros(128, rope_fp8_raw.shape[1],
                                       dtype=rope_fp8_raw.dtype, device=rope_fp8_raw.device)
         rope_fp8_padded[:QK_ROPE_HEAD_DIM] = rope_fp8_raw
@@ -2233,10 +2363,8 @@ class DeepSeekV3Builder(GraphBuilder):
             (128 + 127) // 128, rope_scale_raw.shape[1],
             dtype=rope_scale_raw.dtype, device=rope_scale_raw.device)
         rope_scale_padded[:rope_scale_raw.shape[0]] = rope_scale_raw
-        rope_fp8_req, rope_ue8m0_req = self._requantize_fp8_for_ue8m0(
-            rope_fp8_padded, rope_scale_padded)
-        w_kv_rope = self._safe_attach(rope_fp8_req, f"mtp_{attn}kv_a_rope")
-        s_kv_rope = self._safe_attach(rope_ue8m0_req, f"mtp_{attn}kv_a_rope_scale")
+        w_kv_rope = self._safe_attach(rope_fp8_padded, f"mtp_{attn}kv_a_rope")
+        s_kv_rope = self._safe_attach(rope_scale_padded, f"mtp_{attn}kv_a_rope_scale")
 
         self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent, self.c_latent_out,
                          grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),

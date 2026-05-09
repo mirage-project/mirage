@@ -1200,6 +1200,12 @@ if __name__ == "__main__":
                     torch.save(t.detach().cpu(),
                                os.path.join(args.dump_hidden_dir, names[k]))
                 print(f"Saved layer-0 intra-layer dumps to {args.dump_hidden_dir}")
+            if getattr(mpk, "dump_attn_unabsorbed_tensor", None) is not None:
+                torch.save(
+                    mpk.dump_attn_unabsorbed_tensor.detach().cpu(),
+                    os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
+                )
+                print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
             print(f"Saved {len(mpk.dump_hidden_tensors)} per-layer residual dumps to {args.dump_hidden_dir}")
 
         print("tokens.shape = ", tokens.shape)
