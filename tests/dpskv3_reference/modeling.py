@@ -637,7 +637,13 @@ class DeepseekV3Model(nn.Module):
         )
         self.norm = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
-        self.lm_head.weight = self.embed_tokens.weight
+        # NOTE: DeepSeek V3 checkpoint has SEPARATE `lm_head.weight` and
+        # `model.embed_tokens.weight` (different magnitudes — embed L2 ≈ 3.8,
+        # lm_head L2 ≈ 8.1). Tying them and then copying both from the
+        # checkpoint causes the second copy to silently overwrite the first
+        # (since the tied tensor is a single Parameter), leaving the model
+        # using lm_head values for embeddings. Keep the two as separate
+        # Parameters so loader._copy_replicated can populate each correctly.
 
         if enable_mtp:
             self.mtp_layer = DeepseekV3MTPLayer(cfg, self.rope, self.pcfg)
