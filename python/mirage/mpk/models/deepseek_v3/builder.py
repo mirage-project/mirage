@@ -292,12 +292,6 @@ class DeepSeekV3Builder(GraphBuilder):
         with the most parallelism the kernel allows. For shapes where
         `output_size // 128 <= num_workers`, this is the original behavior
         (one MMA_M tile per task).
-
-        Concrete impact at TP=2 batch=1 (B200 num_workers=128):
-          - q_b_proj absorbed: output=36864 → was 288 tasks (2.25 waves),
-            now 96 tasks (single wave, per-task=384=3 tiles).
-          - dense gate_up fallback: output=18432 → was 144 (1.13 waves),
-            now 72 (single wave, per-task=256=2 tiles).
         """
         output_size = weight.dim(0)
         if output_size % 128 != 0:
@@ -603,8 +597,18 @@ class DeepSeekV3Builder(GraphBuilder):
 
         Returns None when splitk is disabled or K isn't 512-aligned, so the
         caller can fall back to the non-splitk path.
+
+        IMPORTANT: `splitk_linear_fp8_swapAB_sm100` is decode-only — the
+        kernel asserts `BATCH_SIZE <= 16` at registration. When the builder
+        is configured for prefill (`_use_prefill = mbt > 8`, i.e.
+        max_num_batched_tokens >= 9), the per-task batch shape can exceed
+        16 and the kernel produces wrong (mostly-zero) output. Force the
+        non-splitk path in that case so prefill correctness is preserved.
+        Decoding-only deployments (mbt <= 8) keep the splitk fast-path.
         """
         if not self._FP8_SPLITK_ENABLED:
+            return None
+        if self._use_prefill:
             return None
         return self._pick_splitk_factor(
             n_tiles=weight.dim(0) // 128,
@@ -620,7 +624,14 @@ class DeepSeekV3Builder(GraphBuilder):
         Always returns at least 1 — the BF16 gate call sites in this builder
         don't have a non-splitk fallback wired up, so a None return would
         wedge the graph build.
+
+        Note: like FP8 splitk, the BF16 splitk_linear_layer is decode-only
+        (BATCH_SIZE clamp issue, see `_BF16_GATE_SPLITK_ENABLED` comment).
+        When `_use_prefill` is on, return 1 so the kernel still registers
+        but with split_k=1 (effectively a non-splitk single-K-tile path).
         """
+        if self._use_prefill:
+            return 1
         return self._pick_splitk_factor(
             n_tiles=weight.dim(0) // 128,
             K=weight.dim(1),
@@ -1238,6 +1249,22 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mpk.rmsnorm_layer(
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
             grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
+
+        # Diagnostic: dump self.q_a_out for layer 0 if dump_layer0_intra_tensors
+        # is set. Saves the post-layernormed q_a_proj output as slot 1.
+        if (layer_idx == 0 and getattr(self.mpk, "dump_layer0_intra_tensors", None)
+                is not None and getattr(self, "_layer0_q_a_zero_pt", None) is not None):
+            q_a_zero_dt = self.mpk.attach_input(
+                torch_tensor=self._layer0_q_a_zero_pt, name="q_a_zero_local")
+            q_a_dump_dt = self.mpk.attach_input(
+                torch_tensor=self.mpk.dump_layer0_intra_tensors[1],
+                name="q_a_dump_local")
+            self.mpk.elementwise_add_layer(
+                input_a=self.q_a_out, input_b=q_a_zero_dt,
+                output=q_a_dump_dt,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
 
         # Step 3: q_b projections.
         # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
@@ -3086,7 +3113,72 @@ class DeepSeekV3Builder(GraphBuilder):
         """
         if layer_indices is None:
             layer_indices = list(range(self.num_layers))
-        for i in layer_indices:
+
+        # Optional per-layer residual dump infrastructure. Demo allocates
+        # `mpk.dump_hidden_tensors` as a list of bf16 (mbt, hidden) tensors,
+        # one per built layer. We attach them as IO buffers and append a
+        # zero-add copy task after each layer's residual update so the
+        # snapshot is captured into the torch tensor that the demo can read
+        # back after mpk() returns. Activated only when --dump-hidden-dir
+        # is set; zero overhead otherwise.
+        dump_layer_dts = None
+        dump_zero_dt = None
+        if getattr(self.mpk, "dump_hidden_tensors", None) is not None:
+            assert len(self.mpk.dump_hidden_tensors) == len(layer_indices), (
+                f"dump_hidden_tensors length {len(self.mpk.dump_hidden_tensors)} "
+                f"!= built layer count {len(layer_indices)}"
+            )
+            self._dump_zero_pt = torch.zeros(
+                (self.max_num_batched_tokens, self.hidden_size),
+                dtype=torch.bfloat16, device="cuda",
+            )
+            dump_zero_dt = self.mpk.attach_input(
+                torch_tensor=self._dump_zero_pt,
+                name="hidden_dump_zero",
+            )
+            dump_layer_dts = []
+            for slot, t in enumerate(self.mpk.dump_hidden_tensors):
+                dump_layer_dts.append(self.mpk.attach_input(
+                    torch_tensor=t,
+                    name=f"hidden_dump_layer_{slot}",
+                ))
+
+        # Optional: dump several layer-0 intra-layer states to localize
+        # where MPK first diverges from reference. Slots: 0=input_norm,
+        # 1=attn_unabsorbed (raw chunked-prefill output, before o_proj),
+        # 2=attn_out (= o_proj+residual), 3=dense_mlp_out.
+        layer0_intra = getattr(self.mpk, "dump_layer0_intra_tensors", None)
+        layer0_intra_dts = None
+        layer0_attn_zero_dt = None
+        if layer0_intra is not None:
+            assert len(layer0_intra) == 4, "expected 4 intra-layer dump slots"
+            self._layer0_intra_zero_pt = torch.zeros(
+                (self.max_num_batched_tokens, self.hidden_size),
+                dtype=torch.bfloat16, device="cuda",
+            )
+            layer0_intra_zero_dt = self.mpk.attach_input(
+                torch_tensor=self._layer0_intra_zero_pt,
+                name="layer0_intra_zero",
+            )
+            # Slot 1 has different shape (mbt, q_lora_rank=1536); use a
+            # matching zero buffer so elementwise_add input_b matches.
+            self._layer0_q_a_zero_pt = torch.zeros(
+                (self.max_num_batched_tokens, self.q_lora_rank),
+                dtype=torch.bfloat16, device="cuda",
+            )
+            layer0_attn_zero_dt = self.mpk.attach_input(
+                torch_tensor=self._layer0_q_a_zero_pt,
+                name="layer0_q_a_out_zero",
+            )
+            layer0_intra_dts = [
+                self.mpk.attach_input(
+                    torch_tensor=layer0_intra[k],
+                    name=f"layer0_intra_dump_{k}",
+                )
+                for k in range(4)
+            ]
+
+        for slot, i in enumerate(layer_indices):
             prefix = f"model.layers.{i}."
 
             # Input layernorm
@@ -3100,10 +3192,36 @@ class DeepSeekV3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
             )
 
+            if i == 0 and layer0_intra_dts is not None:
+                # Dump self.rmsnorm_out (= input-layernormed embed) into slot 0
+                self.mpk.elementwise_add_layer(
+                    input_a=self.rmsnorm_out, input_b=layer0_intra_zero_dt,
+                    output=layer0_intra_dts[0],
+                    grid_dim=(self.max_num_batched_tokens, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+
             # MLA attention. The residual is fused into o_proj's with_residual
             # kernel, so attn_proj_out already contains (matmul + residual).
             self._build_mla_attention_layer(i, state_dict)
+
+            # Slot 1 (attn_unabsorbed) intentionally not dumped via
+            # elementwise_add — that triggered a long hang at runtime when
+            # the dump tensor shape (mbt, num_q_heads*128 = 4096) didn't
+            # match the standard (mbt, hidden=7168) elementwise path.
+            # We can infer attn_unabsorbed validity from attn_proj_out
+            # via the o_proj+residual relation (slot 2 - embed).
+
             self.x = self.attn_proj_out
+
+            if i == 0 and layer0_intra_dts is not None:
+                # Dump self.attn_proj_out (= attn matmul + residual) into slot 2
+                self.mpk.elementwise_add_layer(
+                    input_a=self.x, input_b=layer0_intra_zero_dt,
+                    output=layer0_intra_dts[2],
+                    grid_dim=(self.max_num_batched_tokens, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
 
             # Post-attention layernorm
             w_post_norm = self.mpk.attach_input(
@@ -3160,6 +3278,29 @@ class DeepSeekV3Builder(GraphBuilder):
                     )
                     self.x = moe_residual_out
 
+            # Per-layer residual dump (diagnostic): copy self.x into a
+            # torch-backed tensor so the demo can read it back. The copy is
+            # `dump = self.x + 0` via elementwise_add. Only fires when
+            # dump_hidden_tensors was provided by the demo.
+            if dump_layer_dts is not None:
+                self.mpk.elementwise_add_layer(
+                    input_a=self.x,
+                    input_b=dump_zero_dt,
+                    output=dump_layer_dts[slot],
+                    grid_dim=(self.max_num_batched_tokens, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+
+            if i == 0 and layer0_intra_dts is not None:
+                # Slot 3 = self.x at end of layer 0 (= dense MLP + residual).
+                # Duplicates dump_hidden_tensors[0] but kept for symmetry.
+                self.mpk.elementwise_add_layer(
+                    input_a=self.x, input_b=layer0_intra_zero_dt,
+                    output=layer0_intra_dts[3],
+                    grid_dim=(self.max_num_batched_tokens, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+
     def build_from_dict(self, state_dict: dict, with_lm_head: bool,
                         layer_indices: list = None):
         """Build the DeepSeek V3 computation graph.
@@ -3188,6 +3329,21 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1), input_source=1,
         )
         self.x = self.y
+
+        if getattr(self.mpk, "dump_embed_tensor", None) is not None:
+            self._dump_embed_zero_pt = torch.zeros(
+                (self.max_num_batched_tokens, self.hidden_size),
+                dtype=torch.bfloat16, device="cuda",
+            )
+            embed_zero_dt = self.mpk.attach_input(
+                torch_tensor=self._dump_embed_zero_pt, name="embed_dump_zero")
+            embed_dump_dt = self.mpk.attach_input(
+                torch_tensor=self.mpk.dump_embed_tensor, name="embed_dump")
+            self.mpk.elementwise_add_layer(
+                input_a=self.x, input_b=embed_zero_dt, output=embed_dump_dt,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
 
         # Intermediate tensors
         self._new_intermediate_tensors()
