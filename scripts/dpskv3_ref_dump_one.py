@@ -91,6 +91,7 @@ def main() -> int:
         out = model(
             input_ids=full_prompt_ids, positions=positions,
             record_hidden=True,
+            record_layer0_intra=True,
         )
 
     if pcfg.tp_size > 1:
@@ -134,6 +135,18 @@ def main() -> int:
         # the checkpoint rather than leaving it at random init.
         torch.save(model.embed_tokens.weight.detach().cpu(),
                    out_dir / "embed_weight.pt")
+        # Save layer-0 intra-layer attention substep dumps.
+        if "layer0_intra" in out:
+            intra = out["layer0_intra"]
+            for key, tensor in intra.items():
+                torch.save(tensor.detach().cpu(),
+                           out_dir / f"ref_layer0_intra_{key}.pt")
+            print(f"[ref_dump] Saved {len(intra)} layer0_intra dumps: "
+                  f"{sorted(intra.keys())}", flush=True)
+            for key, tensor in sorted(intra.items()):
+                print(f"[ref_dump]   ref_layer0_intra_{key}: "
+                      f"shape={tuple(tensor.shape)} dtype={tensor.dtype}",
+                      flush=True)
         print(f"[ref_dump] Saved {len(layers)} layer residual dumps to "
               f"{out_dir}", flush=True)
         last_argmax = out["argmax"][-1].item()

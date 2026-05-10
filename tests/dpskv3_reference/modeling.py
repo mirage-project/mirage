@@ -266,6 +266,7 @@ class DeepseekV2MLAAttention(nn.Module):
     def forward(
         self, positions: Tensor, hidden_states: Tensor,
         attention_mask: Optional[Tensor] = None,
+        intra_dumps: Optional[dict] = None,
     ) -> Tensor:
         cfg = self.cfg
         T = hidden_states.shape[0]
@@ -274,15 +275,25 @@ class DeepseekV2MLAAttention(nn.Module):
         # Q path (replicated up to q_a_layernorm; ColumnParallel q_b_proj).
         q_c = self.q_a_proj(hidden_states)
         q_c = self.q_a_layernorm(q_c)
+        if intra_dumps is not None:
+            intra_dumps["q_a_out"] = q_c.detach().clone()
         q = self.q_b_proj(q_c).view(T, H_local, cfg.qk_head_dim)
+        if intra_dumps is not None:
+            intra_dumps["q_b_full"] = q.detach().clone()
         q_nope = q[..., : cfg.qk_nope_head_dim]
         q_pe = q[..., cfg.qk_nope_head_dim :]
 
         # KV path.
         kv_a = self.kv_a_proj_with_mqa(hidden_states)
+        if intra_dumps is not None:
+            intra_dumps["kv_a_out"] = kv_a.detach().clone()
         kv_c = kv_a[..., : cfg.kv_lora_rank]
         k_pe = kv_a[..., cfg.kv_lora_rank :].unsqueeze(1)
+        if intra_dumps is not None:
+            intra_dumps["k_pe_pre_rope"] = k_pe.detach().clone()
         kv_c = self.kv_a_layernorm(kv_c)
+        if intra_dumps is not None:
+            intra_dumps["kv_c"] = kv_c.detach().clone()
         kv = self.kv_b_proj(kv_c).view(
             T, H_local, cfg.qk_nope_head_dim + cfg.v_head_dim
         )
@@ -296,6 +307,8 @@ class DeepseekV2MLAAttention(nn.Module):
         k_pe = k_pe.expand(-1, H_local, -1)
         k = torch.cat([k_nope, k_pe], dim=-1)
         q_full = torch.cat([q_nope, q_pe], dim=-1)
+        if intra_dumps is not None:
+            intra_dumps["q_full_post_rope"] = q_full.detach().clone()
         v_padded = F.pad(v, (0, cfg.qk_head_dim - cfg.v_head_dim))
 
         # Attention with YaRN-mscale^2 softmax scale.
@@ -311,9 +324,14 @@ class DeepseekV2MLAAttention(nn.Module):
         attn = attn.permute(1, 0, 2)
         attn = attn[..., : cfg.v_head_dim]
         attn = attn.reshape(T, H_local * cfg.v_head_dim)
+        if intra_dumps is not None:
+            intra_dumps["attn_unabsorbed"] = attn.detach().clone()
 
         # RowParallel: each rank's partial output is all-reduced.
-        return self.o_proj(attn)
+        out = self.o_proj(attn)
+        if intra_dumps is not None:
+            intra_dumps["attn_proj_out"] = out.detach().clone()
+        return out
 
 
 # =============================================================================
@@ -535,17 +553,27 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def forward(
         self, positions: Tensor, hidden_states: Tensor, residual: Optional[Tensor],
+        intra_dumps: Optional[dict] = None,
     ) -> Tuple[Tensor, Tensor]:
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions, hidden_states)
+        if intra_dumps is not None and self.layer_idx == 0:
+            intra_dumps["input_norm"] = hidden_states.detach().clone()
+        hidden_states = self.self_attn(
+            positions, hidden_states,
+            intra_dumps=intra_dumps if (intra_dumps is not None and self.layer_idx == 0) else None,
+        )
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual
         )
+        if intra_dumps is not None and self.layer_idx == 0:
+            intra_dumps["attn_residual"] = residual.detach().clone()
         hidden_states = self.mlp(hidden_states)
+        if intra_dumps is not None and self.layer_idx == 0:
+            intra_dumps["mlp_delta"] = hidden_states.detach().clone()
         return hidden_states, residual
 
 
@@ -654,6 +682,7 @@ class DeepseekV3Model(nn.Module):
         positions: Tensor,
         prev_mtp_input_ids: Optional[Tensor] = None,
         record_hidden: bool = False,
+        record_layer0_intra: bool = False,
     ) -> dict[str, Tensor]:
         """Forward pass.
 
@@ -667,18 +696,29 @@ class DeepseekV3Model(nn.Module):
         (embed, per-layer output+residual, final_norm, logits, MTP
         equivalents) into the returned dict. Use for fine-grained
         debugging — but watch the memory.
+
+        `record_layer0_intra=True` additionally saves per-substep
+        attention intermediates for layer 0 into out['layer0_intra'].
+        Independent of record_hidden; defaults to False so existing
+        callers are unaffected.
         """
         out: dict[str, Tensor] = {}
         x = self.embed_tokens(input_ids)
         if record_hidden:
             out["embed"] = x.detach().clone()
         residual: Optional[Tensor] = None
+        layer0_intra: Optional[dict] = {} if record_layer0_intra else None
         for li in self.layer_indices:
             layer = self.layers[str(li)]
-            x, residual = layer(positions, x, residual)
+            x, residual = layer(
+                positions, x, residual,
+                intra_dumps=layer0_intra if li == 0 else None,
+            )
             if record_hidden:
                 out[f"layer_{li}_output"] = x.detach().clone()
                 out[f"layer_{li}_residual"] = residual.detach().clone()
+        if layer0_intra is not None:
+            out["layer0_intra"] = layer0_intra
         x_main, _ = self.norm(x, residual=residual)
         if record_hidden:
             out["final_norm"] = x_main.detach().clone()
