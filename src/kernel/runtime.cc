@@ -472,10 +472,14 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.y;
               task.task_metadata.merge_task_offset = bid.z;
             }
-            // FP8 dense GEMM: grid=(num_workers, 1, 1). request_id is the
-            // worker index used by the persistent tiling loop.
+            // FP8 dense + grouped GEMM: grid=(num_workers, 1, 1).
+            // request_id is the worker index used by the persistent
+            // tiling loop. Grouped variants share the same metadata
+            // shape; m_indices selects the active expert per output tile.
             if (task_type == TASK_FP8_GEMM_DENSE_SMALLM_SM100 ||
-                task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100) {
+                task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 ||
+                task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
+                task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {
               task.task_metadata.request_id = bid.x;
             }
             // MTP token-management helpers use grid.x as the active request
@@ -1253,7 +1257,9 @@ TaskGraphResult print_task_graph(
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
-           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100) {");
+           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1900,6 +1906,10 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
       "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";
+  task_type_to_name[TASK_FP8_GROUP_GEMM_SMALLM_SM100] =
+      "TASK_FP8_GROUP_GEMM_SMALLM_SM100";
+  task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_SM100] =
+      "TASK_FP8_GROUP_GEMM_LARGEM_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";
