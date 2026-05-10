@@ -4361,6 +4361,59 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
       TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
 }
 
+// Shared codegen for both group GEMM variants (smallm/largem). Variant
+// only changes the namespace + function name + TaskType.
+static int register_fp8_group_gemm_variant(TaskRegister *self,
+                                           std::vector<int> const &params,
+                                           char const *namespace_name,
+                                           char const *fn_name,
+                                           TaskType task_type) {
+  // params: [M_total, N, K, E, num_workers]
+  assert(params.size() == 5);
+  int M_total = params[0], N = params[1], K = params[2], E = params[3];
+  int num_workers = params[4];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::$::$(", namespace_name, fn_name);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),"); // B
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // SFA
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // SFB
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]),"); // D
+  code.e("    static_cast<const int*>(task_desc->input_ptrs[4]),"); // m_indices
+  code.e("    $,", M_total);
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    $,", E);
+  code.e("    task_desc->task_metadata.request_id,"); // worker_idx
+  code.e("    $);", num_workers);
+  return self->register_task_variant(task_type, code.to_string());
+}
+
+int TaskRegister::register_fp8_group_gemm_smallm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_group_gemm_variant(
+      this, params, "fp8_group_gemm_smallm",
+      "fp8_group_gemm_smallm_sm100_task_impl",
+      TASK_FP8_GROUP_GEMM_SMALLM_SM100);
+}
+
+int TaskRegister::register_fp8_group_gemm_largem_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_group_gemm_variant(
+      this, params, "fp8_group_gemm_largem",
+      "fp8_group_gemm_largem_sm100_task_impl",
+      TASK_FP8_GROUP_GEMM_LARGEM_SM100);
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)

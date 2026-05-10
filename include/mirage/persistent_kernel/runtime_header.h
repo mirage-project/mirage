@@ -67,9 +67,11 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #else
 #if MPK_TARGET_CC >= 90
 // B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
-// (la_smem[MAX_SK*128]). Reduce dynamic budget to stay under total limit.
+// (la_smem[MAX_SK*128]). FP8 group GEMM (NS=6, BN=128) needs ~216KB
+// dynamic SMEM, so we bump from 207 -> 222 to fit it. Stays under total
+// 228KB hardware limit when combined with the 6KB worker reserved static.
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    207 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+    222 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -213,6 +215,11 @@ enum TaskType {
   // scale layout as smallm; NE=4 TMEM stages instead of 2.
   // (300-349 overlaps with multigpu placeholder range; use 310 to dodge.)
   TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 310,
+  // Grouped FP8 GEMM for MoE (DSv3). Fused block_scale MMA with UE8M0
+  // scales. 5 TMA descriptors (A, B, SFA, SFB, D output). Two variants
+  // share kernel body; differ in (BN, NS) and corresponding TMA box dim.
+  TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8 (K>4096, MPE<=8)
+  TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6 (everything else)
   TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

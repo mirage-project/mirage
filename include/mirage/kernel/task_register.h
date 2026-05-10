@@ -178,6 +178,10 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_mediumm_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_group_gemm_smallm_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_group_gemm_largem_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,

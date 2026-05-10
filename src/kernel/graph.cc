@@ -829,6 +829,20 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         4, 1, TASK_FP8_GEMM_DENSE_MEDIUMM_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_smallm_sm100") {
+    // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + 1 output (D_bf16). All
+    // 4 first inputs + the output carry TMA descriptors; m_indices direct LDG.
+    int variant_id =
+        task_register->register_fp8_group_gemm_smallm_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        5, 1, TASK_FP8_GROUP_GEMM_SMALLM_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_largem_sm100") {
+    int variant_id =
+        task_register->register_fp8_group_gemm_largem_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        5, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {

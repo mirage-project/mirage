@@ -1748,6 +1748,82 @@ class PersistentKernel:
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers)
 
+    def _fp8_group_gemm_layer_impl(
+        self,
+        task_name: str,
+        a_fp8: DTensor,
+        b_fp8: DTensor,
+        sfa_packed: DTensor,
+        sfb_packed: DTensor,
+        m_indices: DTensor,
+        output: DTensor,
+        num_workers: int,
+    ):
+        assert a_fp8.num_dims == 2
+        assert b_fp8.num_dims == 3
+        assert output.num_dims == 2
+        M_total = a_fp8.dim(0)
+        K = a_fp8.dim(1)
+        E = b_fp8.dim(0)
+        N = b_fp8.dim(1)
+        assert b_fp8.dim(2) == K
+        assert m_indices.dim(0) == M_total
+        params = [M_total, N, K, E, num_workers]
+        grid_dim = (num_workers, 1, 1)
+        block_dim = (256, 1, 1)  # 8 warps fixed by kernel role layout
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(a_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(b_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sfa_packed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output],
+            tb_graph)
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def fp8_group_gemm_smallm_layer(
+        self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+        num_workers,
+    ):
+        # Smallm variant: BN=64, NS=8. Best for K>4096 && MPE<=8 (gate_up
+        # M{1,4,8} on DSv3). MoE decode niche.
+        self._fp8_group_gemm_layer_impl(
+            "fp8_group_gemm_smallm_sm100",
+            a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+            num_workers)
+
+    def fp8_group_gemm_largem_layer(
+        self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+        num_workers,
+    ):
+        # Largem variant: BN=128, NS=6. Default for everything outside the
+        # smallm niche (most MoE configs incl. all prefill MPE >= 16 and any
+        # K <= 4096 layer like down_proj).
+        self._fp8_group_gemm_layer_impl(
+            "fp8_group_gemm_largem_sm100",
+            a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+            num_workers)
+
+    def fp8_group_gemm_layer(
+        self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+        num_workers,
+    ):
+        # Auto-dispatcher: pick smallm/largem by (K, M_per_expert).
+        K = a_fp8.dim(1)
+        M_total = a_fp8.dim(0)
+        E = b_fp8.dim(0)
+        MPE = M_total // E
+        if K > 4096 and MPE <= 8:
+            self.fp8_group_gemm_smallm_layer(
+                a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+                num_workers)
+        else:
+            self.fp8_group_gemm_largem_layer(
+                a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+                num_workers)
+
     def linear_fp8_with_residual_layer(
         self,
         input_fp8: DTensor,
