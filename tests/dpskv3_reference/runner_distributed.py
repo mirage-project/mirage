@@ -72,6 +72,15 @@ def main() -> int:
                    help="dump per-layer residual + output tensors per "
                         "iteration into <dump-dir>/iter_*/layer_*_*.pt; "
                         "off by default (extra disk I/O).")
+    p.add_argument("--force-accept-n", type=int, default=None,
+                   help="Spec-decode debug flag: bypass natural draft-vs-"
+                        "target verify and force `accepted = N` (final "
+                        "accepted_count = N+1 including bonus). N in "
+                        "[0, spec_length]. Only meaningful with "
+                        "--enable-mtp. Mirrors MPK's "
+                        "MPK_MTP_DEBUG_FORCE_ACCEPT_N=N for end-to-end "
+                        "correctness comparison. Default: unset (= natural "
+                        "greedy decode, 1 token per iter, no spec).")
     args = p.parse_args()
 
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -95,6 +104,7 @@ def main() -> int:
         rank=rank,
         fp8_faithful=args.fp8_faithful,
         record_hidden=args.record_hidden,
+        force_accept_n=args.force_accept_n,
     )
     if rank == 0:
         print(f"DUMP_DIR={result.dump_dir}")

@@ -106,6 +106,7 @@ def run_reference(
     rank: Optional[int] = None,
     fp8_faithful: bool = False,
     record_hidden: bool = False,
+    force_accept_n: Optional[int] = None,
 ) -> RunResult:
     """Run the PyTorch reference, dump everything (rank 0 only),
     return final tokens.
@@ -238,13 +239,23 @@ def run_reference(
     elapsed_start = time.time()
     prefill_end_time: Optional[float] = None
 
+    # Decode "width" tracking for force-accept spec decode. Mirrors MPK's
+    # `meta_tensors["num_new_tokens"]`: initially 1 (single-token decode);
+    # after a verify+accept_commit iter it becomes accepted_count.
+    # Only meaningful when `force_accept_n is not None` and `enable_mtp`.
+    # `K` is the spec_length (number of draft slots per iter).
+    K = spec_length if enable_mtp else 0
+    decode_num_new = 1  # width for the first decode iter
+
     while step < total_tokens:
         if step < prompt_length:
             chunk_len = min(max_num_batched_tokens, prompt_length - step)
         else:
-            chunk_len = 1
+            chunk_len = decode_num_new
         if chunk_len == 0:
             break
+        # Cap so we don't run past max_new_tokens budget.
+        chunk_len = min(chunk_len, total_tokens - step)
         cur_input_ids = tokens[step : step + chunk_len].clone()
         cur_positions = torch.arange(step, step + chunk_len, device=device)
 
@@ -286,12 +297,72 @@ def run_reference(
             save_dict.update(out)
             _save_iter(iter_dir, save_dict)
 
-        if step + chunk_len >= prompt_length:
-            next_tok = out["argmax"][-1].item()
-            if step + chunk_len < total_tokens:
-                tokens[step + chunk_len] = next_tok
-        step += chunk_len
+        # Decide what gets committed to the sequence this iter.
+        # Prefill: iters with step < prompt_length and chunk_len == prompt_length-step.
+        # Decode: iters AFTER the prefill iter (step >= prompt_length).
+        # The "prefill-completing iter" (step < prompt_length but
+        # step+chunk_len == prompt_length) is treated as PREFILL — it just
+        # commits the first generated token via greedy and advances step
+        # by chunk_len (matching MPK's prepare_next_batch prefill path
+        # which uses `num_new_tokens = prompt_length - step` not
+        # `new_token_nums`).
+        in_prefill_iter = step < prompt_length
+        if in_prefill_iter or force_accept_n is None or not enable_mtp:
+            # Greedy commit: one new token at position step+chunk_len
+            # (= the predicted token after the last input position).
+            # For prefill-completing iter, this places the first
+            # generated token at position prompt_length.
+            if step + chunk_len >= prompt_length:
+                next_tok = out["argmax"][-1].item()
+                if step + chunk_len < total_tokens:
+                    tokens[step + chunk_len] = next_tok
+            step += chunk_len
+            iter_idx += 1
+            continue
+
+        # ---- Force-accept spec-decode commit path ----
+        # Mirrors MPK's mtp_prepare_verify + accept_commit semantics:
+        #   tokens[step+1]                    = main_argmax at input pos 0
+        #   tokens[step+2..step+K+1]          = MTP drafts D_1..D_K
+        #   accepted_count = N+1 (= force_accept_n + bonus)
+        #   step += accepted_count
+        #   next iter decode_num_new = accepted_count
+        # Even rejected slots are *written* by prepare_verify in MPK; the
+        # next iter then overwrites them at its own positions. We do the
+        # same here so the sequence-buffer state matches MPK byte-for-byte.
+        main_argmax = out["argmax"]  # [chunk_len]
+        # MTP drafts: K predicted tokens for positions step+2..step+K+1.
+        # When `prev_mtp_input_ids` is set (which we did above), `out`
+        # includes "mtp_argmax" — the MTP head's predicted next token at
+        # each input position. For spec_length=K we treat the LAST K of
+        # those as drafts (since input length matches K+1 in steady state).
+        mtp_argmax = out.get("mtp_argmax", None)
+        if mtp_argmax is not None and mtp_argmax.numel() >= K:
+            drafts = mtp_argmax[-K:] if K > 0 else mtp_argmax[:0]
+        else:
+            drafts = torch.zeros(K, dtype=torch.long, device=device)
+        # accepted = min(force_accept_n, K)
+        accepted = max(0, min(int(force_accept_n), K))
+        # Commit tokens at positions step+1..step+K+1 (K+1 writes).
+        # Position step+1: the natural greedy next token = argmax at
+        #   last input position (which predicts the NEXT sequence pos).
+        if step + 1 < total_tokens:
+            tokens[step + 1] = main_argmax[-1]
+        # Positions step+2..step+K+1: draft tokens.
+        for i in range(K):
+            wp = step + 2 + i
+            if wp >= total_tokens:
+                break
+            tokens[wp] = drafts[i]
+        # Advance by accepted+1 (matches MPK's accept_commit.num_new).
+        step_advance = accepted + 1
+        step += step_advance
+        # Next iter's width.
+        decode_num_new = step_advance
         iter_idx += 1
+        # End-of-budget bail.
+        if step >= total_tokens:
+            break
 
     elapsed = time.time() - elapsed_start
 
