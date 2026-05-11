@@ -45,6 +45,14 @@ export LD_LIBRARY_PATH=$NVSHMEM_LIB_PATH:$MPI_HOME/lib:$LD_LIBRARY_PATH
 # libnvshmem_host is needed at load time — adjust if your package puts it
 # under a different prefix (some distros split headers and host lib).
 export LD_PRELOAD=$NVSHMEM_HOME/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.so.3.6.5
+
+# Bump NVSHMEM team budget. The default (32) is exceeded once we register
+# MLA-TP, AllReduce-residual, MoE, and MTP teams together (typically 56
+# teams for layers 0-4 + MTP at TP=4 EP=2). Without this the megakernel
+# launch fails with "NCCL error … team_internal.cpp:690 'unhandled cuda
+# error'" partway through `MPK: Creating nvshmem team N/56`. 128 is
+# comfortable for all current configs.
+export NVSHMEM_MAX_TEAMS=128
 ```
 
 ## Quickstart

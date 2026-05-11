@@ -3207,12 +3207,20 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
         # ---- Verification + Accept/Commit ----
-        # After target model re-runs on draft tokens (managed by scheduler),
-        # the target token IDs are available. Wire up verification here.
-        target_token_ids = self.mpk.new_tensor(
-            dims=(mbt, num_draft_steps + 1), dtype=int64,
-            name="mtp_target_token_ids", io_category="cuda_tensor",
-        )
+        # The "target token IDs" for verifying drafts D_1..D_K placed at
+        # positions [step+2..step+K+1] are the main model's argmax at
+        # input positions [step+1..step+K+1] (i.e., predicted tokens at
+        # positions [step+2..step+K+2]). The main model already computed
+        # those argmax values into `self.argmax_out_dtensor`, which is
+        # bound to `self.output_tokens` of shape (mbt, 1) int64. The
+        # verify kernel reads `target_ids[i]` linearly for i in 0..K, so
+        # the first K+1 int64 entries of `output_tokens` are exactly what
+        # we need. Aliasing avoids a redundant copy task and the previous
+        # dead-buffer bug where `mtp_target_token_ids` was allocated
+        # fresh and never written, making the strict-verify kernel
+        # compare drafts against zeros (always reject for any non-zero
+        # draft). [2026-05-11 fix]
+        target_token_ids = self.argmax_out_dtensor
         accepted_count = self.mpk.new_tensor(
             dims=(mbt, 1), dtype=int64,
             name="mtp_accepted_count", io_category="cuda_tensor",
@@ -3311,17 +3319,27 @@ class DeepSeekV3Builder(GraphBuilder):
                 dims=(mbt, num_draft_steps + 1), dtype=int64,
                 name="mtp_final_output", io_category="cuda_tensor",
             )
-            num_new = self.mpk.new_tensor(
-                dims=(mbt, 1), dtype=int64,
-                name="mtp_accept_num_new", io_category="cuda_tensor",
-            )
+            # accept_commit writes `accepted_count` (which already
+            # includes the bonus) into the runtime-visible meta tensor
+            # `meta_tensors["num_new_tokens"]` (attached above as
+            # `d_num_new`). This overwrites the optimistic K+1 that
+            # prepare_verify wrote earlier in the iteration, so the
+            # scheduler's prepare_next_batch advances `step` by only
+            # the accepted positions. Previously this wrote to a fresh
+            # `mpk.new_tensor` builder-local buffer that nothing
+            # downstream reads, making the scheduler always advance
+            # K+1 regardless of accept/reject. Implicitly fixes
+            # KV-cache rollback: the next iteration's main forward
+            # then starts at `step+accepted_count+1` and writes K+1
+            # fresh K/V entries, overwriting any stale K/V at rejected
+            # positions. [2026-05-11 fix]
             self.mpk.mtp_accept_commit_layer(
                 accepted_count=accepted_count,
                 output_tokens=verified_output_tokens,
                 current_position=current_position,
                 new_position=new_position,
                 final_output=final_output,
-                num_new_tokens=num_new,
+                num_new_tokens=d_num_new,
                 grid_dim=(mbt, 1, 1),
                 block_dim=(128, 1, 1),
                 num_draft_tokens=num_draft_steps,
