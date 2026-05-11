@@ -68,6 +68,10 @@ def main() -> int:
                         "dequantized to BF16 once at load and the matmul "
                         "is run in BF16, which diverges from MPK by FP8 "
                         "activation-quantization noise).")
+    p.add_argument("--record-hidden", action="store_true",
+                   help="dump per-layer residual + output tensors per "
+                        "iteration into <dump-dir>/iter_*/layer_*_*.pt; "
+                        "off by default (extra disk I/O).")
     args = p.parse_args()
 
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -90,6 +94,7 @@ def main() -> int:
         ep_size=args.ep_size,
         rank=rank,
         fp8_faithful=args.fp8_faithful,
+        record_hidden=args.record_hidden,
     )
     if rank == 0:
         print(f"DUMP_DIR={result.dump_dir}")

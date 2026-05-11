@@ -105,6 +105,7 @@ def run_reference(
     ep_size: int = 1,
     rank: Optional[int] = None,
     fp8_faithful: bool = False,
+    record_hidden: bool = False,
 ) -> RunResult:
     """Run the PyTorch reference, dump everything (rank 0 only),
     return final tokens.
@@ -156,7 +157,9 @@ def run_reference(
         )
         if fp8_faithful and fp8_state:
             from .fp8_runtime import attach_fp8_faithful
-            report = attach_fp8_faithful(model, fp8_state, device=device)
+            report = attach_fp8_faithful(
+                model, fp8_state, device=device, pcfg_rank=pcfg.rank,
+            )
             if _is_rank0(pcfg):
                 print(
                     f"[fp8-faithful] linears patched={report['linears_patched']} "
@@ -264,6 +267,7 @@ def run_reference(
                 input_ids=cur_input_ids,
                 positions=cur_positions,
                 prev_mtp_input_ids=prev_mtp_input_ids,
+                record_hidden=record_hidden,
             )
 
         if pcfg.tp_size > 1:

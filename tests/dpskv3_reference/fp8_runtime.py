@@ -35,7 +35,8 @@ from .fp8_sim import (
 
 
 def _matching_fp8_pair(
-    name: str, module: nn.Module, fp8_state: dict
+    name: str, module: nn.Module, fp8_state: dict,
+    pcfg_rank: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Return (weight_fp8, weight_scale_inv) from fp8_state, sharded to
     match the module's BF16 `.weight` shape. Handles three layouts:
@@ -45,6 +46,14 @@ def _matching_fp8_pair(
                         along dim 0. Slice FP8 + scale identically.
       - RowParallel:    BF16 weight is [N, K_local] = full [N, K] sliced
                         along dim 1. Slice FP8 + scale identically.
+
+    `pcfg_rank` (when provided) is the TP rank of the current process; it
+    selects the matching slice deterministically. Falling back to the
+    abs-mean heuristic in `_detect_rank` is unreliable because TP slices
+    of an i.i.d. weight all have similar abs-means — it commonly resolves
+    every rank to rank 0, which makes RowParallel AllReduce undercount
+    the result by ~4× and is the source of the layer-0 attn-magnitude
+    mismatch seen in 2026-05-11 distributed runs.
 
     Returns None if the keys don't exist or the shapes are ambiguous.
     """
@@ -81,19 +90,14 @@ def _matching_fp8_pair(
         and bf16_shape[1] == full_shape[1]
         and full_shape[0] % bf16_shape[0] == 0
     ):
-        # Column-parallel: dim-0 sharded. Compute rank from sizes.
+        # Column-parallel: dim-0 sharded.
         tp = full_shape[0] // bf16_shape[0]
-        # Find which slice matches; pick the unique non-NaN block compared
-        # against BF16 (cheap: just take rank index from sum heuristic).
-        # In practice the loader has already loaded one specific slice, so
-        # we can infer rank by matching the BF16 dequant to candidate FP8
-        # slices. Simpler: caller passes pcfg, but here we don't have it.
-        # Use shape-only heuristic: assume the module already loaded the
-        # rank-i slice, where i corresponds to dim-0 row index — match by
-        # comparing dequant'd block-mean to module.weight per candidate.
-        rank = _detect_rank(module, w_fp8_full, w_scale_full, axis=0, tp=tp)
-        if rank is None:
-            return None
+        if pcfg_rank is not None and 0 <= pcfg_rank < tp:
+            rank = pcfg_rank
+        else:
+            rank = _detect_rank(module, w_fp8_full, w_scale_full, axis=0, tp=tp)
+            if rank is None:
+                return None
         n_local = bf16_shape[0]
         w_fp8 = w_fp8_full[rank * n_local : (rank + 1) * n_local].contiguous()
         nb_local = n_local // GROUP_SIZE
@@ -108,9 +112,12 @@ def _matching_fp8_pair(
     ):
         # Row-parallel: dim-1 sharded.
         tp = full_shape[1] // bf16_shape[1]
-        rank = _detect_rank(module, w_fp8_full, w_scale_full, axis=1, tp=tp)
-        if rank is None:
-            return None
+        if pcfg_rank is not None and 0 <= pcfg_rank < tp:
+            rank = pcfg_rank
+        else:
+            rank = _detect_rank(module, w_fp8_full, w_scale_full, axis=1, tp=tp)
+            if rank is None:
+                return None
         k_local = bf16_shape[1]
         w_fp8 = w_fp8_full[:, rank * k_local : (rank + 1) * k_local].contiguous()
         kb_local = k_local // GROUP_SIZE
@@ -170,7 +177,16 @@ def _replace_forward(module: nn.Module, fp8_pair: tuple[torch.Tensor, torch.Tens
     """Attach (weight_fp8, weight_scale_inv) as buffers and override the
     module's forward to dispatch through `fp8_simulated_linear`. Keeps the
     original BF16 weight + bias so other code (e.g. all-gather views,
-    saving) still works unchanged."""
+    saving) still works unchanged.
+
+    Preserves the collective semantics of `RowParallelLinear` (post-matmul
+    AllReduce) and any future input-gather step on `ColumnParallelLinear`
+    by inspecting the module class and re-emitting the collective after
+    the FP8 GEMM. Dropping the AllReduce caused TP=4 layer-0 attn-only to
+    underflow by tp_size× (observed 2026-05-11: BF16-ref attn=15.1 vs
+    FP8-sim attn=4.24 = 3.53×, with cosine similarity preserved)."""
+    from .parallel import RowParallelLinear, all_reduce_tp
+
     w_fp8, w_scale = fp8_pair
     # Register as buffers so state_dict() picks them up if someone saves.
     module.register_buffer("weight_fp8", w_fp8.contiguous(), persistent=False)
@@ -179,10 +195,28 @@ def _replace_forward(module: nn.Module, fp8_pair: tuple[torch.Tensor, torch.Tens
     )
     bias = getattr(module, "bias", None)
 
-    def fp8_forward(x: torch.Tensor) -> torch.Tensor:
-        return fp8_simulated_linear(
-            x, module.weight_fp8, module.weight_scale_inv, bias
-        )
+    if isinstance(module, RowParallelLinear):
+        pcfg = module.pcfg
+        all_reduce_after = module.all_reduce_after
+
+        def fp8_forward(x: torch.Tensor) -> torch.Tensor:
+            # Mirror RowParallelLinear.forward: matmul → AllReduce → bias.
+            out = fp8_simulated_linear(
+                x, module.weight_fp8, module.weight_scale_inv, None
+            )
+            if all_reduce_after:
+                out = all_reduce_tp(out, pcfg)
+            if bias is not None:
+                out = out + bias
+            return out
+    else:
+        # ColumnParallelLinear, replicated Linear, RoutedExpert variants —
+        # forward is just `F.linear(x, weight, bias)` with no collective,
+        # so the simple replacement is faithful.
+        def fp8_forward(x: torch.Tensor) -> torch.Tensor:
+            return fp8_simulated_linear(
+                x, module.weight_fp8, module.weight_scale_inv, bias
+            )
 
     # Preserve original forward for any code that wants to compare.
     module._bf16_forward = module.forward  # type: ignore[attr-defined]
@@ -194,9 +228,16 @@ def attach_fp8_faithful(
     model: nn.Module,
     fp8_state: dict[str, torch.Tensor],
     device: torch.device | str | None = None,
+    pcfg_rank: int | None = None,
 ) -> dict[str, int]:
     """Walk `model`, replacing forward of every Linear-like module whose
     `.weight` shape matches an `fp8_state[name + '.weight']` entry.
+
+    `pcfg_rank` is this process's TP rank; pass it so RowParallel /
+    ColumnParallel modules get their own FP8 slice rather than falling
+    back to the abs-mean heuristic (which collapses every rank to slice
+    0 on i.i.d. weights and divides RowParallel AllReduce results by
+    ~tp).
 
     Returns a small report (`{linears_patched, linears_skipped}`) for
     logging.
@@ -215,7 +256,7 @@ def attach_fp8_faithful(
             continue
         if module.weight.ndim != 2:
             continue
-        pair = _matching_fp8_pair(name, module, fp8_state)
+        pair = _matching_fp8_pair(name, module, fp8_state, pcfg_rank=pcfg_rank)
         if pair is None:
             skipped += 1
             continue

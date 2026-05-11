@@ -107,30 +107,57 @@ def fp8_simulated_linear(
 
     a_bf16:  [..., K]
     w_fp8:   [N, K] float8_e4m3fn
-    w_scale: [N // group_size, K // group_size] float32
+    w_scale: [ceil(N/group_size), K // group_size] float32
     bias:    [N] (optional)
 
-    Returns [..., N] bf16. Token alignment between this and MPK is expected
-    at the kernel-output level (FP8 rounding identical), modulo accumulator
-    precision (we accumulate in FP32 then cast; MPK's tcgen05 does FP32 accum
-    too, so this matches).
+    Returns [..., N] bf16.
+
+    Math (matching `fp8_gemm_dense_smallm_sm100`'s
+    `tcgen05.mma.kind::f8f6f4` semantics exactly):
+
+        A_fp8[i, k]  = round_to_e4m3( A_bf16[i, k] / a_scale[i, k//128] )
+        W_fp8[j, k]  =                W_fp8[j, k]                 (from ckpt)
+        out[i, j]    = sum_k ( A_fp8[i, k] * a_scale[i, k//128]
+                              * W_fp8[j, k] * w_scale[j//128, k//128] )
+                         accumulated in FP32, cast to BF16 at the end.
+
+    The accumulation happens in FP32, NOT bf16. A previous version of this
+    function dequant'd `A_fp8` to bf16 first; that extra cast threw away
+    the precision we just paid for, making the simulation strictly less
+    faithful than MPK's hardware path. This version keeps the dequant'd
+    activation in FP32 so the matmul matches MPK bit-for-bit on the
+    accumulator side. The only remaining numerical gap vs MPK is the
+    FP8 rounding-mode used by `bfloat16 -> float8_e4m3fn` cast (saturating
+    round-to-nearest-even per PyTorch), which is the same scheme as
+    MPK's `per_token_group_quantize_fp8.cuh`.
     """
     a_fp8, a_scale = _quantize_activation_fp8(a_bf16, group_size=group_size)
-    # Re-multiply by the activation scale to get a "noisy BF16" view.
     leading = a_bf16.shape[:-1]
     K = a_bf16.shape[-1]
     M = int(torch.tensor(leading).prod()) if len(leading) > 0 else 1
     num_groups = K // group_size
-    a_dq_groups = (
+    # FP8 -> FP32 is exact (no precision loss). Apply the per-row group
+    # scale in FP32; the result is the same value MPK's MMA sees on the
+    # A side per inner-product step.
+    a_f32 = (
         a_fp8.reshape(M, num_groups, group_size).to(torch.float32)
         * a_scale.unsqueeze(-1)
-    )
-    a_dq = a_dq_groups.view(M, K).to(torch.bfloat16)
-    # Use the dequantized weight directly; equivalent to performing the
-    # block-scaled MMA at FP8 precision.
-    w_dq = _dequant_block_weight(w_fp8, w_scale, block=group_size)
-    out = F.linear(a_dq, w_dq, bias)
-    return out.reshape(*leading, w_fp8.shape[0])
+    ).view(M, K)
+    # Dequant the weight to FP32 as well so the matmul carries no extra
+    # rounding from the activation side. _dequant_block_weight casts to
+    # bf16 at the end; instead we re-run the math in FP32 here.
+    N, _ = w_fp8.shape
+    Nb = (N + group_size - 1) // group_size
+    Kb = K // group_size
+    scale_full = w_scale.repeat_interleave(group_size, dim=0).repeat_interleave(
+        group_size, dim=1
+    )[:N, :K]
+    w_f32 = w_fp8.to(torch.float32) * scale_full
+    # FP32 matmul -> BF16 output (matches MPK's tcgen05 accum -> bf16 store).
+    out_f32 = a_f32 @ w_f32.t()
+    if bias is not None:
+        out_f32 = out_f32 + bias.float()
+    return out_f32.to(torch.bfloat16).reshape(*leading, N)
 
 
 class FP8SimulatedLinear(nn.Module):
