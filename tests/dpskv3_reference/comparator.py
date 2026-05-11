@@ -58,8 +58,15 @@ def compare_dumps(
             r = json.load(f)
         with open(mpk_tokens) as f:
             m = json.load(f)
-        ref_ids = r.get("decoded_suffix_ids", r.get("token_ids", []))
-        mpk_ids = m.get("decoded_suffix_ids", m.get("token_ids", []))
+        # MPK saves a dict for mbr=1, a list of dicts (one per request) for
+        # mbr>1. Reference always saves a dict. For mbr>1 we compare request 0
+        # only (reference processes one prompt at a time).
+        def _pick_ids(obj):
+            if isinstance(obj, list):
+                obj = obj[0] if obj else {}
+            return obj.get("decoded_suffix_ids", obj.get("token_ids", []))
+        ref_ids = _pick_ids(r)
+        mpk_ids = _pick_ids(m)
         n = min(len(ref_ids), len(mpk_ids))
         report["tokens_match"] = ref_ids[:n] == mpk_ids[:n]
         report["tokens_n_compared"] = n

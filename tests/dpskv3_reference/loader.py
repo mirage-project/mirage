@@ -123,7 +123,20 @@ def _load_state_dict(
     device: str,
     pcfg: ParallelConfig,
     n_routed_experts: int,
-) -> dict[str, torch.Tensor]:
+    return_fp8_companion: bool = False,
+):
+    """Load + (optionally) dequantize the DSv3 weights.
+
+    Returns:
+        state_dict:    BF16-dequantized weights (the long-standing default).
+        fp8_state:     ONLY if `return_fp8_companion=True`. Holds the
+                       original `(weight_fp8, weight_scale_inv)` pairs for
+                       every FP8 weight, keyed by the same param names.
+                       Consumers can pass it to
+                       `fp8_runtime.attach_fp8_faithful(model, fp8_state)`
+                       to flip selected linears into the FP8 simulation
+                       path post-load.
+    """
     from convert import dequantize_fp8, is_fp8
 
     weight_map = _index_safetensors(model_dir)
@@ -152,6 +165,7 @@ def _load_state_dict(
     # capacity. We move FP8 + scale to GPU only for the dequant kernel,
     # then immediately move the BF16 result back to CPU. Per-param GPU
     # transfer happens during the copy phase via `.to(device=dst.device)`.
+    fp8_state: dict[str, torch.Tensor] = {}
     paired: list[str] = []
     for k in list(state_dict.keys()):
         if k.endswith(".weight"):
@@ -160,6 +174,13 @@ def _load_state_dict(
                 w = state_dict[k]
                 s = state_dict[scale_k]
                 if is_fp8(w):
+                    if return_fp8_companion:
+                        # Preserve the FP8 weight + scale on CPU for the
+                        # FP8-faithful reference path. They're small (FP8
+                        # = 1 byte/elem, scale is tiny), so keeping
+                        # alongside the BF16 dequant doesn't blow memory.
+                        fp8_state[k] = w.clone()
+                        fp8_state[scale_k] = s.clone()
                     w_bf16 = dequantize_fp8(
                         w.to(device), s.to(device)
                     ).to(target_dtype).cpu()
@@ -170,6 +191,8 @@ def _load_state_dict(
                 paired.append(scale_k)
     for k in paired:
         del state_dict[k]
+    if return_fp8_companion:
+        return state_dict, fp8_state
     return state_dict
 
 
@@ -196,23 +219,44 @@ def load_into(
     model_dir: str | Path,
     target_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
-) -> None:
+    fp8_faithful: bool = False,
+) -> dict[str, torch.Tensor]:
     """Load weights from a HuggingFace DeepSeek V3 checkpoint into the
     reference model in place. TP/EP-aware: each rank only loads its slice.
+
+    If `fp8_faithful=True`, also returns the *unmodified* FP8 weight +
+    scale pairs alongside; the caller can pass this into
+    `fp8_runtime.attach_fp8_faithful(model, fp8_state)` to switch matching
+    linears into the FP8-simulated forward. Returns an empty dict
+    otherwise.
     """
     model_dir = Path(model_dir)
     cfg = model.cfg
     pcfg = model.pcfg
-    sd = _load_state_dict(
-        model_dir,
-        layer_indices=model.layer_indices,
-        num_hidden_layers=cfg.num_hidden_layers,
-        with_mtp=model.enable_mtp,
-        target_dtype=target_dtype,
-        device=device,
-        pcfg=pcfg,
-        n_routed_experts=cfg.n_routed_experts,
-    )
+    if fp8_faithful:
+        sd, fp8_state = _load_state_dict(
+            model_dir,
+            layer_indices=model.layer_indices,
+            num_hidden_layers=cfg.num_hidden_layers,
+            with_mtp=model.enable_mtp,
+            target_dtype=target_dtype,
+            device=device,
+            pcfg=pcfg,
+            n_routed_experts=cfg.n_routed_experts,
+            return_fp8_companion=True,
+        )
+    else:
+        sd = _load_state_dict(
+            model_dir,
+            layer_indices=model.layer_indices,
+            num_hidden_layers=cfg.num_hidden_layers,
+            with_mtp=model.enable_mtp,
+            target_dtype=target_dtype,
+            device=device,
+            pcfg=pcfg,
+            n_routed_experts=cfg.n_routed_experts,
+        )
+        fp8_state = {}
 
     def _get(src_key: str) -> torch.Tensor:
         if src_key not in sd:
@@ -391,3 +435,5 @@ def load_into(
         )
         # MTP block (full DecoderLayer at the same prefix).
         _load_decoder_layer(mtp.mtp_block, mtp_pfx, is_mtp_block=True)
+
+    return fp8_state

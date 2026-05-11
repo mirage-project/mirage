@@ -25,30 +25,41 @@ while [[ $# -gt 0 ]]; do
         --workloads) WL_FILTER="$2"; shift 2;;
         --no-mpk) EXTRA+=" --skip-mpk"; shift;;
         --no-ref) EXTRA+=" --skip-ref"; shift;;
+        --fp8-faithful) EXTRA+=" --fp8-faithful"; shift;;
         *) echo "Unknown arg: $1" >&2; exit 1;;
     esac
 done
 
-# Workload table:    tag prompt decode mtp_setting (used regardless if MTP loop runs)
-declare -A WL_PROMPT WL_DECODE
-WLS=(A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14)
-WL_PROMPT[A1]=100;  WL_DECODE[A1]=32     # single page baseline
-WL_PROMPT[A2]=200;  WL_DECODE[A2]=32     # crosses 1 page boundary
-WL_PROMPT[A3]=256;  WL_DECODE[A3]=32     # exactly 2 pages
-WL_PROMPT[A4]=384;  WL_DECODE[A4]=32     # 3 page boundaries
-WL_PROMPT[A5]=500;  WL_DECODE[A5]=32     # 4 pages
-WL_PROMPT[A6]=768;  WL_DECODE[A6]=32     # 6 pages
-WL_PROMPT[A7]=1024; WL_DECODE[A7]=32     # 8 pages, long prefill
-WL_PROMPT[A8]=2048; WL_DECODE[A8]=32     # 16 pages
-WL_PROMPT[A9]=64;   WL_DECODE[A9]=128    # decode crosses page (prefill < 1 page)
-WL_PROMPT[A10]=100; WL_DECODE[A10]=200   # decode spans many pages
-WL_PROMPT[A11]=127; WL_DECODE[A11]=32    # prefill fills page 0, decode goes into page 1
-WL_PROMPT[A12]=129; WL_DECODE[A12]=32    # prefill just past page boundary
-WL_PROMPT[A13]=256; WL_DECODE[A13]=256   # long prefill + long decode
-WL_PROMPT[A14]=16384; WL_DECODE[A14]=256 # super-long (the user's perf-check target)
+# Workload table:    tag prompt decode mbr  (mbr=1 unless specified, single-request)
+# A-series: mbr=1, varies prompt/decode lengths to cover page boundaries.
+# B-series: mbr>1, exercises the gather + chunked-prefill across distinct
+#           request slots in one MPK iteration. Token alignment vs ref is
+#           only meaningful for request 0 (ref always processes 1 prompt),
+#           but each MPK run still validates that the kernel survives
+#           mbr>1 setups end-to-end.
+declare -A WL_PROMPT WL_DECODE WL_MBR
+WLS=(A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 B1 B2 B3)
+WL_PROMPT[A1]=100;  WL_DECODE[A1]=32;  WL_MBR[A1]=1     # single page baseline
+WL_PROMPT[A2]=200;  WL_DECODE[A2]=32;  WL_MBR[A2]=1     # crosses 1 page boundary
+WL_PROMPT[A3]=256;  WL_DECODE[A3]=32;  WL_MBR[A3]=1     # exactly 2 pages
+WL_PROMPT[A4]=384;  WL_DECODE[A4]=32;  WL_MBR[A4]=1     # 3 page boundaries
+WL_PROMPT[A5]=500;  WL_DECODE[A5]=32;  WL_MBR[A5]=1     # 4 pages
+WL_PROMPT[A6]=768;  WL_DECODE[A6]=32;  WL_MBR[A6]=1     # 6 pages
+WL_PROMPT[A7]=1024; WL_DECODE[A7]=32;  WL_MBR[A7]=1     # 8 pages, long prefill
+WL_PROMPT[A8]=2048; WL_DECODE[A8]=32;  WL_MBR[A8]=1     # 16 pages
+WL_PROMPT[A9]=64;   WL_DECODE[A9]=128; WL_MBR[A9]=1     # decode crosses page
+WL_PROMPT[A10]=100; WL_DECODE[A10]=200; WL_MBR[A10]=1   # decode spans many pages
+WL_PROMPT[A11]=127; WL_DECODE[A11]=32; WL_MBR[A11]=1    # prefill fills page 0
+WL_PROMPT[A12]=129; WL_DECODE[A12]=32; WL_MBR[A12]=1    # prefill past page boundary
+WL_PROMPT[A13]=256; WL_DECODE[A13]=256; WL_MBR[A13]=1   # long prefill + long decode
+WL_PROMPT[A14]=16384; WL_DECODE[A14]=256; WL_MBR[A14]=1 # super-long perf-check
+# B-series: chunked-prefill smoke under multi-request concurrency.
+WL_PROMPT[B1]=100;  WL_DECODE[B1]=32;  WL_MBR[B1]=2     # 2-way concurrent baseline
+WL_PROMPT[B2]=200;  WL_DECODE[B2]=32;  WL_MBR[B2]=2     # 2-way + page-crossing prefill
+WL_PROMPT[B3]=100;  WL_DECODE[B3]=32;  WL_MBR[B3]=4     # 4-way concurrent baseline
 
 if [[ "$QUICK" == 1 ]]; then
-    WLS=(A1 A4 A11 A14)
+    WLS=(A1 A4 A11 A14 B1)
 fi
 if [[ -n "$WL_FILTER" ]]; then
     IFS=',' read -ra WLS <<< "$WL_FILTER"
@@ -75,12 +86,13 @@ START_ALL=$(date +%s)
 for tag in "${WLS[@]}"; do
     P=${WL_PROMPT[$tag]}
     D=${WL_DECODE[$tag]}
+    M=${WL_MBR[$tag]:-1}
     for mtp in "${MTPS[@]}"; do
         echo "" | tee -a "$SUMMARY"
-        echo "============== $tag mtp=$mtp prompt=$P decode=$D ==============" | tee -a "$SUMMARY"
+        echo "============== $tag mtp=$mtp prompt=$P decode=$D mbr=$M ==============" | tee -a "$SUMMARY"
         out_sub="$OUT_ROOT/${tag}_mtp${mtp}"
         OUT_BASE="$out_sub" bash /home/muhengl/mirage/scripts/dpskv3_workload_compare.sh \
-            --tag "$tag" --prompt-len "$P" --decode "$D" --mtp "$mtp" \
+            --tag "$tag" --prompt-len "$P" --decode "$D" --mtp "$mtp" --mbr "$M" \
             $EXTRA \
             2>&1 | tee -a "$SUMMARY"
     done

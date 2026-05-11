@@ -104,6 +104,7 @@ def run_reference(
     tp_size: int = 1,
     ep_size: int = 1,
     rank: Optional[int] = None,
+    fp8_faithful: bool = False,
 ) -> RunResult:
     """Run the PyTorch reference, dump everything (rank 0 only),
     return final tokens.
@@ -149,7 +150,18 @@ def run_reference(
     model.eval()
 
     if not skip_weight_load:
-        load_into(model, model_path, target_dtype=dtype, device=device)
+        fp8_state = load_into(
+            model, model_path, target_dtype=dtype, device=device,
+            fp8_faithful=fp8_faithful,
+        )
+        if fp8_faithful and fp8_state:
+            from .fp8_runtime import attach_fp8_faithful
+            report = attach_fp8_faithful(model, fp8_state, device=device)
+            if _is_rank0(pcfg):
+                print(
+                    f"[fp8-faithful] linears patched={report['linears_patched']} "
+                    f"skipped={report['linears_skipped']}"
+                )
 
     # Tokenise. Two modes (mirrors MPK demo.py:280-294):
     #   prompt_length > 0  →  synthetic deterministic prompt

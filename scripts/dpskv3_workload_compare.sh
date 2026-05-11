@@ -30,6 +30,14 @@ LAYERS_MAIN="0-19"
 TP=4
 EP=2
 MBT=128
+# Max concurrent requests in a single MPK iteration. Default 1; >1 stresses
+# the gather/chunked-prefill path across distinct request slots.
+MBR=1
+# FP8-faithful reference: route the PyTorch reference's FP8-eligible
+# linears through a quantize-then-matmul simulation so numerics match
+# MPK's hardware FP8 GEMM. Otherwise reference uses BF16-dequant weights
+# and diverges by FP8 activation-quantization noise.
+FP8_FAITHFUL=0
 MODEL_PATH="${MODEL_PATH:-/raid/catalyst/models/DeepSeek-V3}"
 PROMPT_TEXT="${PROMPT_TEXT:-Give me a short introduction to large language model.}"
 GPUS="${GPUS:-0,1,3,5}"
@@ -45,7 +53,9 @@ while [[ $# -gt 0 ]]; do
         --tp) TP="$2"; shift 2;;
         --ep) EP="$2"; shift 2;;
         --mbt) MBT="$2"; shift 2;;
+        --mbr) MBR="$2"; shift 2;;
         --gpus) GPUS="$2"; shift 2;;
+        --fp8-faithful) FP8_FAITHFUL=1; shift;;
         --skip-mpk) SKIP_MPK=1; shift;;
         --skip-ref) SKIP_REF=1; shift;;
         *) echo "Unknown arg: $1" >&2; exit 1;;
@@ -71,7 +81,7 @@ PAGES=$(( ((SEQ + 127) / 128) + 4 ))
 
 echo "============================================================" | tee -a "$SUMMARY"
 echo "[$TAG] prompt=$PROMPT_LEN decode=$DECODE mtp=$MTP tp=$TP ep=$EP layers=$LAYERS_MAIN" | tee -a "$SUMMARY"
-echo "  seq=$SEQ pages=$PAGES mbt=$MBT" | tee -a "$SUMMARY"
+echo "  seq=$SEQ pages=$PAGES mbt=$MBT mbr=$MBR" | tee -a "$SUMMARY"
 echo "  gpus=$GPUS  out=$OUT_BASE" | tee -a "$SUMMARY"
 echo "============================================================" | tee -a "$SUMMARY"
 
@@ -105,7 +115,7 @@ if [[ -z "${SKIP_MPK:-}" ]]; then
             --model-path "$MODEL_PATH" --use-mirage \
             --layers "$LAYERS_MAIN" \
             --max-num-batched-tokens "$MBT" \
-            --max-num-batched-requests 1 \
+            --max-num-batched-requests "$MBR" \
             --prompt-length "$PROMPT_LEN" \
             --max-new-tokens "$DECODE" \
             --max-seq-length "$SEQ" \
@@ -152,6 +162,10 @@ if [[ -z "${SKIP_REF:-}" ]]; then
     # token IDs match for short prompts; for long prompts this assumption
     # may break.
 
+    FP8_ARG=""
+    if (( FP8_FAITHFUL == 1 )); then
+        FP8_ARG="--fp8-faithful"
+    fi
     set +e
     CUDA_VISIBLE_DEVICES="$GPUS" \
     PATH="$VENV/bin:/usr/local/cuda-13.2/bin:/usr/mpi/gcc/openmpi-4.1.9a1/bin:$PATH" \
@@ -167,7 +181,7 @@ if [[ -z "${SKIP_REF:-}" ]]; then
             --max-new-tokens "$DECODE" \
             --max-num-batched-tokens "$MBT" \
             --dump-dir "$OUT_BASE/ref" \
-            $MTP_ARG \
+            $MTP_ARG $FP8_ARG \
             > "$REF_LOG" 2>&1
     REF_RC=$?
     set -e
@@ -193,7 +207,8 @@ if [[ -f "$OUT_BASE/mpk/tokens.json" ]] && [[ -f "$OUT_BASE/ref/tokens.json" ]];
         --mpk "$OUT_BASE/mpk" \
         --out "$COMPARE" 2>&1 | tee -a "$SUMMARY"
 
-    # Quick pass/fail summary line.
+    # Quick pass/fail summary line. Use Python interpolation {status}, not
+    # ${} bash expansion, so `set -u` doesn't trip on the local Python var.
     "$VENV/bin/python" -c "
 import json, sys
 with open('$COMPARE') as f: r = json.load(f)
@@ -203,7 +218,7 @@ fm = r.get('tokens_first_mismatch')
 ref_h = r.get('tokens_ref_head', [])
 mpk_h = r.get('tokens_mpk_head', [])
 status = 'PASS' if match else 'FAIL'
-print(f'[$TAG] TOKENS_$status  n={nc}  first_mismatch={fm}')
+print(f'[$TAG] TOKENS_{status}  n={nc}  first_mismatch={fm}')
 if not match:
     print(f'  ref head: {ref_h}')
     print(f'  mpk head: {mpk_h}')

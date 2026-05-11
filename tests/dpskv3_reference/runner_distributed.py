@@ -61,6 +61,13 @@ def main() -> int:
     p.add_argument("--dump-dir", default=None)
     p.add_argument("--skip-weight-load", action="store_true",
                    help="random init for unit testing")
+    p.add_argument("--fp8-faithful", action="store_true",
+                   help="route FP8 linears through a quantize-then-matmul "
+                        "PyTorch simulation so numerics match MPK's FP8 "
+                        "dense/group GEMM (otherwise weights are "
+                        "dequantized to BF16 once at load and the matmul "
+                        "is run in BF16, which diverges from MPK by FP8 "
+                        "activation-quantization noise).")
     args = p.parse_args()
 
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -82,6 +89,7 @@ def main() -> int:
         tp_size=args.tp_size,
         ep_size=args.ep_size,
         rank=rank,
+        fp8_faithful=args.fp8_faithful,
     )
     if rank == 0:
         print(f"DUMP_DIR={result.dump_dir}")
