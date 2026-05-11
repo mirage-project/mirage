@@ -1,5 +1,6 @@
 // Ampere task impls
 #include "tasks/ampere/embedding.cuh"
+#include "tasks/ampere/identity.cuh"
 #include "tasks/ampere/merge_splitkv.cuh"
 #include "tasks/ampere/multitoken_paged_attention_split_kv.cuh"
 #include "tasks/ampere/silu_mul.cuh"
@@ -32,9 +33,9 @@
 #include "fp8_gemm_dense_mediumm_sm100.cuh"
 #include "fp8_gemm_dense_smallm_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
-#include "linear_fp8_swapAB_sm100.cuh"
 #include "linear_fp8_bmm_sm100.cuh"
 #include "linear_fp8_sm100.cuh"
+#include "linear_fp8_swapAB_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
 #include "mla_dispatch_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"

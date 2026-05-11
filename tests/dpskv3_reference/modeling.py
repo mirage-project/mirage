@@ -303,6 +303,13 @@ class DeepseekV2MLAAttention(nn.Module):
         # RoPE.
         q_pe, k_pe = self.rope(positions, q_pe, k_pe)
 
+        # DEBUG 2026-05-10: dump K_nope, K_pe post-RoPE, V for chunked prefill
+        # PyTorch reference validation.
+        if intra_dumps is not None:
+            intra_dumps["k_nope"] = k_nope.detach().clone()
+            intra_dumps["k_pe_post_rope"] = k_pe.detach().clone()
+            intra_dumps["v"] = v.detach().clone()
+
         # Recompose K and pad V.
         k_pe = k_pe.expand(-1, H_local, -1)
         k = torch.cat([k_nope, k_pe], dim=-1)

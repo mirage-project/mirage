@@ -749,9 +749,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] = std::make_tuple(
         1, 1, TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100, variant_id);
   } else if (name == "mla_unified_sm100") {
-    int variant_id =
-        task_register->register_mla_unified_sm100_task(customized->bgraph,
-                                                       params);
+    int variant_id = task_register->register_mla_unified_sm100_task(
+        customized->bgraph, params);
     // Inputs: Q_nope, Q_pe, CKV, KPE, O, Q_fused TMA, KV TMA.
     // Outputs: decode partial O and LSE. O is an input by MPK convention so
     // the prefill branch can write it directly.
@@ -838,23 +837,21 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_splitk_linear_fp8_swapAB_sm100_task(
             customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        4, 1, TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100, variant_id);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100, variant_id);
   } else if (name == "linear_fp8_bmm_sm100") {
     int variant_id = task_register->register_linear_fp8_bmm_sm100_task(
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_LINEAR_FP8_BMM_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_smallm_sm100") {
-    int variant_id =
-        task_register->register_fp8_gemm_dense_smallm_sm100_task(
-            customized->bgraph, params);
+    int variant_id = task_register->register_fp8_gemm_dense_smallm_sm100_task(
+        customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SMALLM_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_mediumm_sm100") {
-    int variant_id =
-        task_register->register_fp8_gemm_dense_mediumm_sm100_task(
-            customized->bgraph, params);
+    int variant_id = task_register->register_fp8_gemm_dense_mediumm_sm100_task(
+        customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_MEDIUMM_SM100, variant_id);
   }
@@ -870,11 +867,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
   } else if (name == "mla_kv_gather_unified_sm100") {
-    int variant_id =
-        task_register->register_mla_kv_gather_unified_sm100_task(
-            customized->bgraph, params);
+    int variant_id = task_register->register_mla_kv_gather_unified_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs (c_latent_new, k_pe_new) + 4 store_in_dmem slots; we track
+    // ckv_sep and kpe_sep as outputs so downstream consumers
+    // (quantize_kv_b_k / quantize_kv_b_v / identity copies) get dependency
+    // edges. paged_cache and contiguous_kv stay in input slots because
+    // they're attach_input torch tensors written in-place across iters
+    // (their consumers are naturally serialized by EVENT_END_OF_TASK_GRAPH).
     task_config[op] =
-        std::make_tuple(6, 0, TASK_MLA_KV_GATHER_UNIFIED_SM100, variant_id);
+        std::make_tuple(4, 2, TASK_MLA_KV_GATHER_UNIFIED_SM100, variant_id);
   } else if (name == "deepseek_mla_rope_q_sm100") {
     int variant_id = task_register->register_deepseek_mla_rope_q_sm100_task(
         customized->bgraph, params);

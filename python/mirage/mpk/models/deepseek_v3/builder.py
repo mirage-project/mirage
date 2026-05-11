@@ -502,7 +502,11 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_sequence_buffers_for_reduction(
         self, reduction_size: int, tag: str = "shared"
     ):
-        rows = self.mpk.max_num_batched_requests * self.mpk.max_seq_length
+        # DEBUG 2026-05-10: pad row dim to multiple of 128 (chunked prefill
+        # TMA box BN_BOX=128) to avoid OOB NaN-fill propagation in PV MMA.
+        _raw_rows = (self.mpk.max_num_batched_requests
+                     * self.mpk.max_seq_length)
+        rows = ((_raw_rows + 127) // 128) * 128
         group_size = 128
         num_groups = (reduction_size + group_size - 1) // group_size
         if not hasattr(self, '_fp8_seq_bufs'):
@@ -1054,29 +1058,64 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         if self._use_prefill:
+            # DEBUG 2026-05-10: pad row dim up to multiple of 128 (chunked
+            # prefill TMA box BN_BOX=128) to avoid OOB NaN-fill in V/K SMEM
+            # which propagates through hmma16 (0 * NaN = NaN in IEEE math).
+            _raw_rows = (self.mpk.max_num_batched_requests
+                         * self.mpk.max_seq_length)
+            _kv_rows = ((_raw_rows + 127) // 128) * 128
             self.ckv_sep = self.mpk.new_tensor(
-                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
-                      self.kv_lora_rank),
+                dims=(_kv_rows, self.kv_lora_rank),
                 dtype=bfloat16, name="ckv_sep", io_category="cuda_tensor",
             )
             self.kpe_sep = self.mpk.new_tensor(
-                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
-                      QK_ROPE_HEAD_DIM),
+                dims=(_kv_rows, QK_ROPE_HEAD_DIM),
                 dtype=bfloat16, name="kpe_sep", io_category="cuda_tensor",
             )
+            # `kpe_sep_v2` is the receiving tensor for an identity-copy
+            # "phantom bridge" task inserted between the unified KV gather
+            # and the chunked-prefill kernel. The bridge is NOT a real
+            # compute step; it exists purely to legalize the MPK task
+            # graph. See the identity_layer call after the gather for the
+            # full rationale; the short version:
+            #
+            # Without the bridge, `mla_kv_gather_unified` simultaneously
+            # plays two roles the runtime can't represent in one task:
+            #
+            #   * fork-producer: gather has multiple distinct downstream
+            #     consumer layers (quantize_kv_b_k, quantize_kv_b_v,
+            #     chunked_prefill).
+            #   * join-producer: one of those consumers
+            #     (`chunked_prefill`) is itself a join-consumer with 4
+            #     distinct producers, so gather feeds a join event.
+            #
+            # A single MPK task has exactly one `trigger_event` slot, so a
+            # layer that is both fork-producer and join-producer would
+            # need to fire two distinct events. `annotated_graph.cc`
+            # rejects that as case-3. Inserting the identity copy
+            # (`kpe_sep → kpe_sep_v2`) turns the gather→chunked_prefill
+            # edge into gather→identity→chunked_prefill, breaking the
+            # fork+join overlap: the identity has a single producer (no
+            # join) and a single consumer (no fork), and gather no longer
+            # directly feeds the join-consumer.
+            self.kpe_sep_v2 = self.mpk.new_tensor(
+                dims=(_kv_rows, QK_ROPE_HEAD_DIM),
+                dtype=bfloat16, name="kpe_sep_v2",
+                io_category="cuda_tensor",
+            )
             self.prefill_k_nope = self.mpk.new_tensor(
-                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
+                dims=(_kv_rows,
                       self.num_local_q_heads * QK_NOPE_HEAD_DIM),
                 dtype=bfloat16, name="prefill_k_nope", io_category="cuda_tensor",
             )
             self.prefill_v = self.mpk.new_tensor(
-                dims=(self.mpk.max_num_batched_requests * self.mpk.max_seq_length,
-                      self.num_local_q_heads * V_HEAD_DIM),
+                dims=(_kv_rows, self.num_local_q_heads * V_HEAD_DIM),
                 dtype=bfloat16, name="prefill_v", io_category="cuda_tensor",
             )
         else:
             self.ckv_sep = None
             self.kpe_sep = None
+            self.kpe_sep_v2 = None
             self.prefill_k_nope = None
             self.prefill_v = None
         # MLA decode partial outputs (PR 651: bf16 for partials)
@@ -1573,6 +1612,58 @@ class DeepSeekV3Builder(GraphBuilder):
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
+            # =================================================================
+            # PHANTOM BRIDGE for chunked-prefill kpe_sep dependency tracking.
+            #
+            # Problem this fixes:
+            #   `mla_kv_gather_unified` is registered as (4 inputs, 2 outputs)
+            #   in graph.cc so its ckv_sep / kpe_sep writes get proper output
+            #   edges in the annotated task graph. Without that, downstream
+            #   consumers (kv_b_k / kv_b_v GEMMs, chunked_prefill) have no
+            #   dependency edge from the gather and the megakernel scheduler
+            #   is free to race them — in practice kv_b_k/v read zero ckv_sep
+            #   and chunked_prefill emits all-zero attn_unabsorbed.
+            #
+            # Why the bridge is needed once the gather IS tracked:
+            #   `chunked_prefill` is a join-consumer (4 distinct producers:
+            #   RoPE_q, kv_b_k FP8 GEMM, gather, kv_b_v FP8 GEMM). Gather
+            #   feeds it via kpe_sep AND is also a fork-producer to other
+            #   consumers (the two quantize tasks). That makes gather both a
+            #   `fork-producer` AND `is_join_producer` (one of its consumers
+            #   is a join-consumer). MPK's `FullTaskDesc` has exactly one
+            #   `trigger_event` slot, so a task literally cannot fire two
+            #   distinct events (the fork event AND the downstream join
+            #   event). `annotated_graph.cc` rejects this as case-3.
+            #
+            # The fix:
+            #   Insert an identity copy `kpe_sep → kpe_sep_v2`, and have
+            #   chunked_prefill read kpe_sep_v2 instead of kpe_sep. The
+            #   gather now only directly feeds 1-producer-only tasks
+            #   (the two quantize tasks plus this identity), so it stays
+            #   fork-producer but is no longer is_join_producer. The
+            #   identity itself is is_join_producer (its consumer
+            #   chunked_prefill is a join-consumer) but is NOT a
+            #   fork-producer (single consumer), so it's also case-3-safe.
+            #
+            #   In event terms: gather fires E1 (its fork event). E1
+            #   launches quantize_kv_b_k, quantize_kv_b_v, AND the
+            #   identity. The identity, when done, fires E2 (the join
+            #   event for chunked_prefill). E2 also collects triggers from
+            #   the other join-producers (kv_b_k/v GEMMs, RoPE_q). When
+            #   E2's counter reaches num_triggers, chunked_prefill fires.
+            #
+            # NB on grid_dim: identity_layer's dim_maps partition the LAST
+            # tensor dim across grid.x, and grid.x must DIVIDE the inner
+            # dim. kpe_sep's inner dim is 64 (rope dim). grid.x=1 = no
+            # partition; a single block does the full copy. The copy is
+            # tiny (kv_rows * 64 bf16 < 64 KB).
+            # =================================================================
+            self.mpk.identity_layer(
+                input=self.kpe_sep,
+                output=self.kpe_sep_v2,
+                grid_dim=(1, 1, 1),
+                block_dim=(128, 1, 1),
+            )
         else:
             self.mpk.mla_kv_gather_layer(
                 c_latent_new=self.c_latent_out,
@@ -1600,7 +1691,11 @@ class DeepSeekV3Builder(GraphBuilder):
                 q_nope=self.q_nope,
                 q_pe=self.q_pe,
                 k_nope=self.prefill_k_nope,
-                k_rope=self.kpe_sep,
+                # k_rope comes from `kpe_sep_v2`, the phantom-bridged copy
+                # of kpe_sep produced by the identity_layer above. This
+                # breaks the gather→chunked_prefill direct edge that
+                # would otherwise make gather a fork+join layer (case 3).
+                k_rope=self.kpe_sep_v2,
                 v=self.prefill_v,
                 output=self.attn_unabsorbed,
                 mla_params=(
@@ -3279,7 +3374,7 @@ class DeepSeekV3Builder(GraphBuilder):
         layer0_intra_dts = None
         layer0_attn_zero_dt = None
         if layer0_intra is not None:
-            assert len(layer0_intra) == 4, "expected 4 intra-layer dump slots"
+            assert len(layer0_intra) >= 4, "expected at least 4 intra-layer dump slots"
             self._layer0_intra_zero_pt = torch.zeros(
                 (self.max_num_batched_tokens, self.hidden_size),
                 dtype=torch.bfloat16, device="cuda",
