@@ -484,7 +484,21 @@ class DeepseekV3MoE(nn.Module):
         )
 
         # 1. Score router logits (sigmoid scoring per DeepSeek V3 config).
-        router_logits = self.gate(x.to(self.gate.weight.dtype)).to(torch.float32)
+        # MPK's MoE keeps router_logits in BF16 and the topk_sigmoid kernel
+        # reads bf16 logits (converting to fp32 internally for sigmoid).
+        # vLLM's GateLinear similarly outputs bf16 when not in the
+        # "monolithic + DeepSeekV3 routing" path (`deepseek_v2.py:341-346`).
+        # Our previous `.to(torch.float32)` cast on the gate output broke
+        # bit-for-bit alignment with MPK at the routing decision — for
+        # row 0 (BOS, position-0 self-attention only → "concentrated"
+        # hidden state) the extra fp32 precision pushed some close-call
+        # comparisons over the threshold so we routed to a different
+        # expert (e.g. expert 121 at L6) than MPK does, which then fires
+        # hard for that input and the row-0 residual blows up over
+        # subsequent layers. Keeping router_logits in bf16 makes the
+        # routing decision agree with MPK and avoids the bug.
+        # [2026-05-11]
+        router_logits = self.gate(x.to(self.gate.weight.dtype))
         if cfg.scoring_func == "sigmoid":
             scores = router_logits.sigmoid()
         elif cfg.scoring_func == "softmax":
