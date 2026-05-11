@@ -296,6 +296,21 @@ def get_compile_command(
         flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
     if os.environ.get("MPK_DEBUG_BATCH", "0") == "1":
         flags = flags + [f"-DMPK_DEBUG_BATCH"]
+    # MTP verify debug overrides — for testing partial-accept and full-accept
+    # KV-cache paths that the natural drafts-vs-target comparison rarely hits
+    # in shallow-layer correctness runs (drafts almost always mismatch with
+    # only 5 layers loaded → accepted=0 every iter, only the bonus advances).
+    #
+    # MPK_MTP_DEBUG_FORCE_ACCEPT_N: integer N in [0, NUM_DRAFT]. Bypasses the
+    #   real verify comparison and pins `accepted = N` (i.e. final
+    #   accepted_count = N + 1 including the bonus token). N=0 means
+    #   "reject all" (matches the rare natural-reject case); N=NUM_DRAFT
+    #   means "accept all" (every draft pretended-correct, K+1 step advance);
+    #   any value in between exercises the partial-accept K/V management
+    #   path. Default (unset) preserves real verify semantics.
+    mtp_force_accept = os.environ.get("MPK_MTP_DEBUG_FORCE_ACCEPT_N", None)
+    if mtp_force_accept is not None:
+        flags = flags + [f"-DMPK_MTP_DEBUG_FORCE_ACCEPT_N={int(mtp_force_accept)}"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
