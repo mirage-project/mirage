@@ -2192,8 +2192,7 @@ class PersistentKernel:
 
     def hc_pre_block(
         self,
-        x_flat: DTensor,        # [bs, n*C]     bf16  (caller flattens [bs,n,C])
-        x_orig: DTensor,        # [bs, n, C]    bf16  (the same data, 3D view)
+        x: DTensor,             # [bs, n, C]    bf16
         hc_fn_padded: DTensor,  # [128, n*C]    bf16  (weight, padded rows)
         hc_scale: DTensor,      # [3]           fp32
         hc_base: DTensor,       # [mix_hc]      fp32
@@ -2208,25 +2207,19 @@ class PersistentKernel:
     ):
         """High-level mHC hc_pre block: rmsnorm -> linear -> tail (K2+K3+K4).
 
-        Allocates one scratch DTensor (mixes_pad) and wires the three
+        Allocates scratch DTensors and wires the three
         underlying MPK tasks. Equivalent to the eager:
 
-            x_flat = x.flatten(2)
+            x_flat = x.flatten(1)
             rsqrt  = torch.rsqrt(x_flat.float().square().mean(-1, keepdim=True) + eps)
             mixes  = F.linear(x_flat, hc_fn) * rsqrt
             pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, ...)
-            f_pre  = torch.sum(pre.unsqueeze(-1) * x_orig, dim=2)
-
-        Caller responsibility: pass `x_flat` as the [bs, n*C] view of the
-        same buffer as `x_orig`. The caller's model layer can construct
-        these via DTensor reshape facilities.
+            f_pre  = torch.sum(pre.unsqueeze(-1) * x, dim=2)
         """
-        assert x_flat.num_dims == 2
-        assert x_orig.num_dims == 3
-        bs, n, C = x_orig.dim[0], x_orig.dim[1], x_orig.dim[2]
+        assert x.num_dims == 3
+        bs, n, C = x.dim(0), x.dim(1), x.dim(2)
         assert n == 4, "mHC tail kernel hardcoded to n=4"
         K = n * C
-        assert x_flat.dim[0] == bs and x_flat.dim[1] == K
 
         # Allocate scratch for the linear's bf16 output (rmsnorm output is
         # the linear's TMA-B operand and lives in its own scratch).
@@ -2240,7 +2233,7 @@ class PersistentKernel:
         block_dim = (256, 1, 1)
         # Stage 1: rmsnorm — one CTA per token, bf16 in/out.
         self.mhc_rmsnorm_layer(
-            x_flat, x_norm_bf16,
+            x, x_norm_bf16,
             grid_dim=(bs, 1, 1), block_dim=block_dim, eps=norm_eps)
 
         # Stage 2: linear — one CTA per MMA_N=16 batch tile.
@@ -2253,7 +2246,7 @@ class PersistentKernel:
         assert bs % tokens_per_cta == 0, \
             f"bs={bs} must be a multiple of tokens_per_cta={tokens_per_cta}"
         self.mhc_tail_layer(
-            mixes_pad, hc_scale, hc_base, x_orig,
+            mixes_pad, hc_scale, hc_base, x,
             f_pre, h_post, comb,
             grid_dim=(bs // tokens_per_cta, 1, 1), block_dim=block_dim,
             tokens_per_cta=tokens_per_cta,
@@ -2284,7 +2277,7 @@ class PersistentKernel:
 
     def mhc_rmsnorm_layer(
         self,
-        x: DTensor,        # [bs, hidden] bf16  (or [bs, n, C] flattened)
+        x: DTensor,        # [bs, hidden] or [bs, n, C] bf16
         y: DTensor,        # [bs, hidden] bf16
         grid_dim: tuple,
         block_dim: tuple,
@@ -2299,7 +2292,7 @@ class PersistentKernel:
         import struct
 
         assert self.target_cc == 100
-        assert x.num_dims == 2
+        assert x.num_dims in (2, 3)
         assert y.num_dims == 2
         eps_bits = struct.unpack("i", struct.pack("f", eps))[0]
         params = [eps_bits]

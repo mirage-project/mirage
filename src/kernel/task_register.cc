@@ -2178,7 +2178,7 @@ int TaskRegister::register_softmax_gather_sm100_task(
 int TaskRegister::register_mhc_rmsnorm_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // mHC RMSNorm (K1 norm half): per-token y = x * rsqrt(mean(x**2) + eps).
-  //   x: [bs_tile, hidden] bf16
+  //   x: [bs_tile, hidden] or [bs_tile, n, C] bf16
   //   y: [bs_tile, hidden] bf16
   // params: [eps_bits]  (float bit-cast to int)
   // Reduction is done in fp32 inside the kernel (T_in is the load type).
@@ -2200,10 +2200,14 @@ int TaskRegister::register_mhc_rmsnorm_sm100_task(
     }
   }
 
-  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int x_num_dims = input_ops[0]->output_tensors[0].num_dims;
+  assert(x_num_dims == 2 || x_num_dims == 3);
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int bs_tile = input_ops[0]->output_tensors[0].dim[0];
-  int hidden = input_ops[0]->output_tensors[0].dim[1];
+  int hidden = 1;
+  for (int i = 1; i < x_num_dims; ++i) {
+    hidden *= input_ops[0]->output_tensors[0].dim[i];
+  }
   assert(output_ops[0]->output_tensors[0].dim[0] == bs_tile);
   assert(output_ops[0]->output_tensors[0].dim[1] == hidden);
 
