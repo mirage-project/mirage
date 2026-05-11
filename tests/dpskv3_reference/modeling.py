@@ -441,6 +441,9 @@ class DeepseekV3MoE(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.pcfg = pcfg
+        # Layer index is set by the parent DecoderLayer for debug printing
+        # of MoE routing decisions. Defaults to -1 ("unknown").
+        self.layer_idx = -1
 
         # Gate (replicated).
         self.gate = nn.Linear(cfg.hidden_size, cfg.n_routed_experts, bias=False)
@@ -473,6 +476,12 @@ class DeepseekV3MoE(nn.Module):
         cfg = self.cfg
         pcfg = self.pcfg
         T = x.shape[0]
+        import os
+        _moe_dbg = os.environ.get("DSV3_REF_MOE_DEBUG", "")
+        _dbg_this_layer = (
+            _moe_dbg and str(self.layer_idx) in _moe_dbg.split(",")
+            and (not hasattr(self, "_dbg_done") or not self._dbg_done)
+        )
 
         # 1. Score router logits (sigmoid scoring per DeepSeek V3 config).
         router_logits = self.gate(x.to(self.gate.weight.dtype)).to(torch.float32)
@@ -502,21 +511,52 @@ class DeepseekV3MoE(nn.Module):
         masked_scores = scores_for_topk.masked_fill(~expert_mask, float("-inf"))
 
         # 4. topk over remaining experts (un-biased weights).
+        #
+        # vLLM keeps the routing weights in float32 and applies the
+        # `routed_scaling_factor` AFTER the per-expert sum + global
+        # AllReduce (`vllm/model_executor/models/deepseek_v2.py:325,379`).
+        # Our earlier code (a) pre-multiplied by routed_scaling_factor=2.5
+        # and (b) demoted to bf16 before the per-expert mul. For "diffuse"
+        # rows that's fine — accumulation noise cancels across channels.
+        # But for row 0 (causal mask → attends only to self → "spiky"
+        # hidden state) the bf16 (large_w × large_y) addend can saturate
+        # mantissa precision, especially when one expert (e.g. expert 121
+        # at L6) fires hard. The error compounds layer-on-layer and
+        # blows up the row-0 residual stream.
+        # Fix: keep topk_weights in float32 through the per-expert mul,
+        # don't pre-multiply by routed_scaling_factor here, apply the
+        # factor once after the global AllReduce. Matches vLLM's order
+        # exactly. [2026-05-11]
         topk_vals, topk_idx = masked_scores.topk(
             cfg.num_experts_per_tok, dim=-1
         )
         topk_weights = scores.gather(-1, topk_idx)
         if cfg.norm_topk_prob:
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-        topk_weights = topk_weights * cfg.routed_scaling_factor
-        topk_weights = topk_weights.to(x.dtype)
+        topk_weights = topk_weights.to(torch.float32)
+        if _dbg_this_layer and pcfg.rank == 0:
+            # Print row 0 vs row 1 routing decisions for comparison.
+            import sys
+            for r in (0, 1):
+                print(f"[moe-dbg L{self.layer_idx} rank0] row {r}: "
+                      f"x_norm={x[r].float().norm().item():.4f}  "
+                      f"topk_idx={topk_idx[r].tolist()}  "
+                      f"topk_w={[f'{v:.4f}' for v in topk_weights[r].tolist()]}",
+                      file=sys.stderr, flush=True)
 
         # 5. Apply only this rank's local experts.
         # Optimization: iterate only the UNIQUE experts that appear in
         # topk_idx (at most num_experts_per_tok * T distinct experts),
         # filtered to those owned by this rank. Avoids the O(n_routed_experts)
         # Python loop that dominates forward time at long context.
-        routed_out = torch.zeros_like(x)
+        #
+        # Accumulate in FP32 to match vLLM's FusedMoE kernel which uses
+        # FP32 register accumulation across experts. BF16 accumulation
+        # loses mantissa precision when one expert fires hard for a
+        # "spiky" hidden state (e.g. row 0 with causal-mask single-position
+        # attention), compounding into a row-specific magnitude blow-up
+        # over many layers.
+        routed_out = torch.zeros_like(x, dtype=torch.float32)
         # `topk_idx` shape: [T, topk]. Get the unique expert indices used.
         unique_experts = torch.unique(topk_idx).tolist()
         first = self.first_local_expert
@@ -533,11 +573,42 @@ class DeepseekV3MoE(nn.Module):
             if not sel.any():
                 continue
             x_sel = x[sel]
-            y = self.local_experts[local_e_idx](x_sel) * w[sel]
-            routed_out[sel] = routed_out[sel] + y.to(routed_out.dtype)
+            y_raw = self.local_experts[local_e_idx](x_sel)
+            # Apply routing weight in FP32 (matches vLLM's FusedMoE
+            # which keeps weights in FP32 register through the mul).
+            y = y_raw.float() * w[sel]  # FP32 (routed_out is FP32)
+            if _dbg_this_layer and pcfg.rank == 0 and sel[0]:
+                # Row 0 routes to this expert. Print expert output magnitude.
+                # Index of row 0 in sel-selected rows:
+                row0_in_sel = sel[:1].sum().item() - 1 + 1 - 1  # = 0 if sel[0]
+                row0_in_sel = 0
+                import sys
+                print(f"[moe-dbg L{self.layer_idx} rank0] row0 expert {global_e} "
+                      f"(local {local_e_idx}): "
+                      f"raw_y_norm={y_raw[row0_in_sel].float().norm().item():.4f}  "
+                      f"w={w[0,0].item():.4f}  "
+                      f"y_norm={y[row0_in_sel].float().norm().item():.4f}",
+                      file=sys.stderr, flush=True)
+            routed_out[sel] = routed_out[sel] + y  # FP32 accumulation
 
         # 6. ONE global AllReduce across full TP world.
+        if _dbg_this_layer and pcfg.rank == 0:
+            import sys
+            print(f"[moe-dbg L{self.layer_idx} rank0] pre-allreduce "
+                  f"routed_out row0 norm={routed_out[0].float().norm().item():.4f}",
+                  file=sys.stderr, flush=True)
         routed_out = all_reduce_tp(routed_out, pcfg)
+        # Apply routed_scaling_factor ONCE after the per-expert sum and the
+        # global AllReduce (vLLM: `deepseek_v2.py:379`). Pre-multiplying
+        # into topk_weights inflated bf16 addends for "spiky" hidden
+        # states (row 0) and lost mantissa precision.
+        routed_out = (routed_out * cfg.routed_scaling_factor).to(x.dtype)
+        if _dbg_this_layer and pcfg.rank == 0:
+            import sys
+            print(f"[moe-dbg L{self.layer_idx} rank0] post-allreduce*scale "
+                  f"routed_out row0 norm={routed_out[0].float().norm().item():.4f}",
+                  file=sys.stderr, flush=True)
+            self._dbg_done = True
 
         # 7. Shared expert (TP across full tp_size; the RowParallel
         #    `shared_down` already does its own all-reduce).
@@ -570,6 +641,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             self.mlp = DeepseekV2DenseMLP(cfg, pcfg)
         else:
             self.mlp = DeepseekV3MoE(cfg, pcfg)
+            self.mlp.layer_idx = layer_idx
 
     def forward(
         self, positions: Tensor, hidden_states: Tensor, residual: Optional[Tensor],
