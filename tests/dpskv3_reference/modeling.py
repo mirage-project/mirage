@@ -258,9 +258,22 @@ class DeepseekV2MLAAttention(nn.Module):
             H * cfg.v_head_dim, cfg.hidden_size, pcfg,
         )
 
-        # softmax scale incorporates YaRN's mscale^2.
+        # softmax scale incorporates YaRN's full mscale^2, NOT the
+        # cos/sin pre-mul ratio `rope.attn_mscale` (which is 1.0 for DSv3
+        # since `mscale_base == mscale_all_dim` and the ratio cancels).
+        # vLLM uses `yarn_get_mscale(scaling_factor, mscale_all_dim)`
+        # directly here (see vllm/.../deepseek_v2.py:963-966). Using the
+        # ratio instead made the softmax 1.87× too flat for DSv3, which
+        # systematically inflated row-0 attention magnitude (causal mask
+        # restricts row 0 to single-token attention, so it never benefits
+        # from softmax-peaking the way later rows do). The bias compounds
+        # through the residual stream and triggers a row-0 MoE blow-up
+        # ~6-11 layers in (2026-05-11).
+        attn_factor_mscale = yarn_get_mscale(
+            rope.scaling_factor, rope.mscale_all_dim
+        )
         self.softmax_scale = (1.0 / math.sqrt(cfg.qk_head_dim)) * (
-            rope.attn_mscale * rope.attn_mscale
+            attn_factor_mscale * attn_factor_mscale
         )
 
     def forward(

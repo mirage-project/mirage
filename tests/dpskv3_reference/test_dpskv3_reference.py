@@ -161,16 +161,22 @@ def test_yarn_rope_finite() -> None:
 
 
 def test_softmax_scale_uses_mscale_squared() -> None:
-    """Critical: scale must include mscale^2, not mscale.
+    """Critical: softmax_scale must include the YaRN attention mscale^2
+    (= `yarn_get_mscale(scaling_factor, mscale_all_dim)`), NOT the cos/sin
+    pre-mul ratio `rope.attn_mscale` (which is 1.0 for DSv3 because
+    mscale_base == mscale_all_dim and the ratio cancels).
 
-    See `vllm/model_executor/models/deepseek_v2.py:889,966`.
+    See `vllm/model_executor/models/deepseek_v2.py:963-966`:
+        mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+        self.scaling = self.scaling * mscale * mscale
     """
-    from .modeling import DeepseekYarnRotaryEmbedding, DeepseekV2MLAAttention
+    from .modeling import DeepseekYarnRotaryEmbedding, DeepseekV2MLAAttention, yarn_get_mscale
     from .parallel import ParallelConfig
     cfg = Config(**TINY)
     rope = DeepseekYarnRotaryEmbedding(cfg)
     attn = DeepseekV2MLAAttention(cfg, rope, ParallelConfig())
-    expected = (1.0 / (cfg.qk_head_dim ** 0.5)) * (rope.attn_mscale ** 2)
+    expected_mscale = yarn_get_mscale(rope.scaling_factor, rope.mscale_all_dim)
+    expected = (1.0 / (cfg.qk_head_dim ** 0.5)) * (expected_mscale ** 2)
     assert abs(attn.softmax_scale - expected) < 1e-9
 
 
