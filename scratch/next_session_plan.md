@@ -8,7 +8,8 @@ Earlier session morning notes at `scratch/next_session_plan_morning.md`
 - `18dc6a4b` — Revert `3a9588cf` AR per-task barrier. Premise was wrong; defaults already had per-team private psync. Saved only 2.1 ms (1.25%), below the 3 ms keep threshold. See `project_ar_per_task_barrier` memory.
 - `0246a671` — **topk_sigmoid CORRECTNESS FIX**. Kernel was processing only 8/128 rows for prefill mbt=128; routing_indices stayed 0 for rows 8..127, group GEMM silently skipped them. Wrapped Phase 1-6 in a `for (row_base ...)` outer loop over `ROWS_PER_CTA=8` chunks. DSv3 prefill MoE now processes all 128 tokens correctly. See `project_topk_sigmoid_prefill_bug` memory.
 - `41d8e042` — `MPK_MOE_W13_M_SPLIT` / `MPK_MOE_W2_M_SPLIT` env knobs (defaults unchanged at 16 / 14).
-- Journal entries: `669e7b40` (A3 revert), `8f0e80d2` (Y-sweep), `1ed325bb` (A2 bisect).
+- `979bb411` (doc-only) — Path 3 from morning notes (fp8_dense output partition declaration) was tried and REJECTED. Changing `tb_graph.new_input(output, (-1,-1,-1), ...)` → `(1,-1,-1)` in `_fp8_gemm_dense_layer_impl` caused CUDA misaligned-address: runtime offsets per-task output ptr, kernel writes unoffset. Reverted; documented in journal.
+- Journal entries: `669e7b40` (A3 revert), `8f0e80d2` (Y-sweep), `1ed325bb` (A2 bisect), `979bb411` (Path 3 reject).
 
 ## Outstanding pending tasks
 
