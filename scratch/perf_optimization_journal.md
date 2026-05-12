@@ -150,6 +150,12 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 - **Lesson learned**: re-verify the contention premise from first principles before designing fixes. `scratch/ar_rewrite_design.md` Option A's underlying analysis missed that each `task_offset` uses a different `nvshmem_team_t`. Option B (single barrier task per AR phase) and Option C (system fence) are still on the table but address a different angle.
 - Phase-isolation gates (`MPK_AR_SKIP_BARRIER/REDUCE` from `d6d1730a`) remain in tree as measurement infra — those reveal the 91 μs barrier cost is **NVLink dissemination latency**, not contention.
 
+### Path 3 (morning notes) — fp8_dense output partition declaration: REJECTED
+- Tried `MPK_FP8_DENSE_OUTPUT_PARTITION=1` to change `tb_graph.new_input(output, (-1,-1,-1), ...)` → `(1,-1,-1)` in `_fp8_gemm_dense_layer_impl`. Idea: declare grid.x partitions output dim 1, allowing finer event GCD on downstream consumers.
+- **Crashed with "CUDA error: misaligned address"**. The runtime offsets the per-task output pointer based on the partition declaration, but `fp8_gemm_dense_smallm_sm100`'s kernel internally writes to the unoffset full output buffer (`bidx = iter*num_workers + worker_idx` selects the N-tile and the kernel computes the absolute offset itself). Mismatch → misalignment.
+- For (1,-1,-1) to be valid, the kernel would need to either: (a) accept a pre-offset output_ptr that already points to its assigned N-slice (simpler), OR (b) the runtime needs to NOT offset the pointer when output_map says "partition dim N" (semantically wrong). Either way, kernel-side cooperation needed.
+- **Reverted** the experiment.
+
 ### MoE Y-sweep (2026-05-12) — defaults already optimal
 - Added env overrides `MPK_MOE_W13_M_SPLIT` / `MPK_MOE_W2_M_SPLIT` in builder (commit `41d8e042`) for the `_moe_fp8_m_split(preferred=...)` knob. Defaults stay at W13=16, W2=14.
 - W13 sweep (DSv3 layers 0-19, --profile-start-step 0, 1-token e2e):
