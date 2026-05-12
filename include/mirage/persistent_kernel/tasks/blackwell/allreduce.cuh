@@ -354,6 +354,108 @@ static __device__ __forceinline__ void mpkar_sync_block(nvshmem_team_t team) {
   }
 }
 
+// ============= Per-task contention-free dissemination barrier ===============
+//
+// Variant of `mpkar_sync_block` that uses a PRIVATE counter and slot pair
+// per task_offset, eliminating the contention measured in the 2026-05-12
+// phase-isolation experiment (56 concurrent AR tasks contending on the
+// shared `sync_counter[0]` + `pSync[mype]` cost 91 μs/task barrier vs an
+// expected ~6 μs for an uncontended dissemination).
+//
+// Layout in the team's psync_pool region (≥4*SYNC_SIZE longs reserved, of
+// which the legacy SYNC op uses only slots 0..2*SYNC_SIZE-1):
+//   per_task_region = psync_base + 2 * MPKAR_NVSHMEMI_SYNC_SIZE
+//   task_counter[task_offset] = per_task_region + task_offset
+//   task_pSync[task_offset, phase&1, pe] = per_task_region + MAX_AR_TASKS
+//       + task_offset*size*2 + (phase&1)*size + pe
+// Budget: MAX_AR_TASKS=128 → 128 (counters) + 128*8*2=2048 (slots) = 17 KB
+// out of ~440 KB unused in the team's reduce/bcast region of psync_pool.
+//
+// Stationarity precondition (audited 2026-05-12 in
+// scratch/ar_rewrite_design.md): each AR call fires the same (team,
+// task_offset) on every PE exactly once. DSv3's `_use_prefill` gate,
+// `gate_mode` runtime check, and MTP draft loops are all symmetric across
+// PEs. Future call sites that asymmetrically skip a single rank MUST fall
+// back to the legacy `mpkar_sync_block` path.
+//
+// Only enabled when compiled with `-DMPK_AR_PER_TASK_BARRIER` (propagated by
+// `MPK_AR_PER_TASK_BARRIER=1` in persistent_kernel.py).
+static constexpr int MPKAR_PER_TASK_MAX_TASKS = 128;
+
+static __device__ __forceinline__ void
+    mpkar_sync_block_per_task(nvshmem_team_t team, int task_offset) {
+  nvshmemi_team_t *teami = nvshmemi_device_state_d.team_pool[team];
+  int size = teami->size;
+
+  if (!teami->are_gpus_p2p_connected ||
+      task_offset < 0 ||
+      task_offset >= MPKAR_PER_TASK_MAX_TASKS) {
+    // Conservative fallback for cases this routine isn't designed for
+    // (non-P2P team or task_offset out of bounds). DSv3 TP=4 / TP=2 / TP=8
+    // teams are always P2P-connected so this branch is dead in practice.
+    mpkar_sync_block(team);
+    return;
+  }
+
+  long volatile *psync_base = (long volatile *)mpkar_team_get_psync_sync(teami);
+  long volatile *per_task_region =
+      psync_base + 2 * MPKAR_NVSHMEMI_SYNC_SIZE;
+  long volatile *task_counter = per_task_region + task_offset;
+  long volatile *task_pSync_base =
+      per_task_region + MPKAR_PER_TASK_MAX_TASKS + task_offset * size * 2;
+
+  // Atomic increment to claim a unique phase number for THIS task on THIS PE.
+  // First call sees counter=0 (psync_pool zero-init by NVSHMEM bootstrap)
+  // and signals phase=1. The +1 is critical: pSync slots are also zero-init,
+  // so a phase=0 signal would trivially satisfy any peer's wait_until_ge.
+  long my_phase = 0;
+  if (threadIdx.x == 0) {
+    my_phase = (long)atomicAdd(
+                   reinterpret_cast<unsigned long long *>(
+                       const_cast<long *>(task_counter)),
+                   (unsigned long long)1) +
+               1;
+  }
+  __shared__ long s_my_phase;
+  if (threadIdx.x == 0) {
+    s_my_phase = my_phase;
+  }
+  __syncthreads();
+  my_phase = s_my_phase;
+
+  // 2-buffered slot pair selected by phase parity; slot within pair indexed
+  // by source PE (this PE's world mype).
+  long volatile *pSync = task_pSync_base + (my_phase & 1) * size;
+
+  // P2P-connected teams use k = size (full-radix dissemination). For TP=4
+  // that's 3 signals + 3 waits per phase, 1 phase total. Private slots per
+  // task eliminate contention across the 56 callers. Run on lane 0 only —
+  // work is latency-bound by NVLink P2P round-trip (~1 μs each).
+  int const my_pe = teami->my_pe;
+  int const world_my_pe = nvshmemi_device_state_d.mype;
+  if (threadIdx.x == 0) {
+    int k = size;
+    for (int j = 1; j < k; j++) {
+      int to_nbr_idx = my_pe + j;
+      if (to_nbr_idx >= size) {
+        to_nbr_idx -= size;
+      }
+      int to_nbr = mpkar_team_translate_pe(teami, to_nbr_idx);
+      mpkar_signal_for_barrier(
+          (long *)(pSync + world_my_pe), my_phase, to_nbr);
+    }
+    for (int j = 1; j < k; j++) {
+      int from_nbr_idx = my_pe - j;
+      if (from_nbr_idx < 0) {
+        from_nbr_idx += size;
+      }
+      int from_nbr = mpkar_team_translate_pe(teami, from_nbr_idx);
+      mpkar_wait_until_ge(pSync + from_nbr, my_phase);
+    }
+  }
+  __syncthreads();
+}
+
 // ========================= NVLS multicast pointer ===========================
 static __device__ __forceinline__ void *mpkar_mc_ptr(nvshmemi_team_t *team,
                                                      void const *ptr) {
@@ -558,7 +660,13 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
   // --- Phase 1: ensure local data is visible, then cross-GPU barrier ---
   __threadfence();
 #ifndef MPK_AR_SKIP_BARRIER
+#if defined(MPK_AR_PER_TASK_BARRIER)
+  // Contention-free per-task slot version (2026-05-12). See
+  // `mpkar_sync_block_per_task` comment for stationarity precondition.
+  mpkar_sync_block_per_task(team, task_offset);
+#else
   mpkar_sync_block(team);
+#endif
 #endif
 
   // --- Phase 2: NVLS multicast ld_reduce -> local store ---
