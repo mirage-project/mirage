@@ -106,6 +106,27 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 - Reverted runtime.cc, build clean
 - Indicates a deeper scheduler/worker event-handshake race bug; needs cuda-gdb debugging
 
+### `0246a671` (2026-05-12) — topk_sigmoid: loop over row chunks (CORRECTNESS FIX)
+- Kernel processed only 8 rows/CTA (`ROWS_PER_WARP=1`, `WARPS_PER_CTA=8`), but builder calls with `grid_dim=(1,1,1)` and `num_rows=mbt`. For prefill mbt=128 this silently dropped MoE for rows 8..127 (group GEMM `if (topk_idx_n > 0)` skip on the 0-init routing index).
+- Fix: wrap Phase 1-6 in `for (row_base = 0; row_base < num_rows; row_base += ROWS_PER_CTA)`.
+- Validation: Qwen3 TP=4 bit-equal post-fix (no MoE, expected). DSv3 layers 0-3: layer 0-2 (no MoE) bit-equal; layer 3 (first MoE) rows 8..127 now get MoE contribution.
+- Perf side-effect: trace numbers shifted dramatically. PRE-fix MoE was silently doing only ~25% of real work, so per-task wallclock looked smaller (W13 949 → 4076 μs/call, W2 242 → 1007 μs/call). AR mean dropped 4× (workers better balanced post-fix). E2E ~unchanged (169.812 → 168.053 ms/token).
+- The correct interpretation: MPK was previously silently incorrect for DSv3 prefill MoE; the new per-call numbers reflect the actual work needed.
+
+### Post-fix perfetto trace (2026-05-12, `outputs/dpskv3_perf_post_fixes_140550/`) — dispatch analyzer
+- E2E: 168.053 ms/token (DSv3 TP=4 EP=2 prompt=128 layers 0-19 prefill+1-decode).
+- Top kernels by total worker-wallclock (rank0):
+  - TASK_MOE_W13_FP8_SM100: 8870 ms total, 4076 μs/call mean (×2176 calls — **88% of MoE layer wallclock**)
+  - TASK_MOE_W2_FP8_SM100: 2395 ms total, 1007 μs/call mean (×2380)
+  - TASK_NVSHMEM_TILE_ALLREDUCE: 1039 ms total, 309 μs/call mean (×3360)
+  - TASK_FP8_GEMM_DENSE_SMALLM_SM100: 257 ms (×30720)
+  - TASK_MOE_MUL_SUM_ADD_SM100: 161 ms (×121856)
+  - TASK_LINEAR_SM100 (LM head): 67 ms (×127)
+- `mpk-perf-analyzer` agent verdict (2026-05-12 14:09):
+  - **Critical path per MoE layer is 89.6% MoE_W13 + W2 + AR2-straggler.** Almost no overlap between phases.
+  - **AR2 straggler**: 6 of 20 layers (L7, L9, L12, L13, L18, L19) have AR2 ≥ 1100 μs vs typical 290 μs → ~5.3 ms/token wasted. Root cause is rank-asymmetric MoE finish time (EP=2 expert-load skew).
+  - **Top 3 next moves**: (1) sweep MoE Y; (2) AR2 straggler / MoE imbalance; (3) file topk + router GEMV perf followups.
+
 ### A3 Option A (AR per-task barrier `mpkar_sync_block_per_task`) — REVERTED
 - Commit `3a9588cf` (2026-05-12 staged), reverted `18dc6a4b` (2026-05-12). Gated `-DMPK_AR_PER_TASK_BARRIER`.
 - **Premise was wrong**: original journal claimed 56-way contention on a shared psync slot. But `nvshmem_tile_allreduce_impl` already uses `teams[task_offset]` (line 657) — each AR task gets its own NVSHMEM team and thus its own psync region. So the OLD `mpkar_sync_block(team)` already has private psync per task. The new per-task code indexes by `task_offset` within each (already-private) team's psync — semantically equivalent.
@@ -123,3 +144,23 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 - **Decision per start.md tree**: 2.1 ms (1.25%) is below the 3-5 ms revert threshold. Revert to remove dead code.
 - **Lesson learned**: re-verify the contention premise from first principles before designing fixes. `scratch/ar_rewrite_design.md` Option A's underlying analysis missed that each `task_offset` uses a different `nvshmem_team_t`. Option B (single barrier task per AR phase) and Option C (system fence) are still on the table but address a different angle.
 - Phase-isolation gates (`MPK_AR_SKIP_BARRIER/REDUCE` from `d6d1730a`) remain in tree as measurement infra — those reveal the 91 μs barrier cost is **NVLink dissemination latency**, not contention.
+
+### MoE Y-sweep (2026-05-12) — defaults already optimal
+- Added env overrides `MPK_MOE_W13_M_SPLIT` / `MPK_MOE_W2_M_SPLIT` in builder (commit `41d8e042`) for the `_moe_fp8_m_split(preferred=...)` knob. Defaults stay at W13=16, W2=14.
+- W13 sweep (DSv3 layers 0-19, --profile-start-step 0, 1-token e2e):
+  - Y=4: 168.768 ms / W13 mean 14722 μs (×544 calls)
+  - Y=8: 166.814 ms / W13 mean 7358 μs (×1088)
+  - Y=16 (default): 165.882 ms / W13 mean 4076 μs (×2176)
+  - Y=32: 166.645 ms / W13 mean 4076 μs (×2176) — same as Y=16 because `max_y = min(preferred, output_size//MMA_M)` caps below 32 for output=4096
+  - **Verdict**: Y=16 already best. Variance ~3 ms across Y.
+- W2 sweep (same 1-token profiling config):
+  - Y=2:  165.04 ms (340 calls, 6982 μs/call)
+  - Y=14 (default): 173.81 ms (2380 calls, 1006 μs/call) ← noise/local minimum
+  - Y=28: 166.72 ms
+  - Y=56: 166.43 ms
+- W2 confirm sweep — 3×Y=14 vs 3×Y=2 ALTERNATING, **WITHOUT --profiling** (real demo workload, 128 generate tokens per run):
+  - Y=14: 67.184 / 67.257 / 67.143 ms (mean 67.20, std 0.06)
+  - Y=2:  118.075 / 117.767 / 120.493 ms (mean 118.78, std 1.4)
+  - **Y=14 wins by 51.6 ms (-43% absolute) — decisive.** The earlier 1-token profiling sweep was prefill-only and not representative of the decode-heavy steady state.
+- **Decision**: keep both defaults (W13=16, W2=14). Env knobs stay for future investigation.
+- **Lesson**: 1-token `--profile-start-step 0 --max-new-tokens 1` measures prefill cost; "natural" run (no profiling, --ignore-eos to max-seq-length) measures per-token amortized cost which is dominated by decode. They give different optima.
