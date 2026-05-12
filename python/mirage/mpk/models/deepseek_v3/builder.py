@@ -1046,14 +1046,37 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         # Decode consumes absorbed [CKV, KPE] Q. Prefill consumes vLLM's
         # original per-head split Q: [nope(128), rope(64)].
-        self.q_nope = self.mpk.new_tensor(
-            dims=(mbt, self.num_local_q_heads * QK_NOPE_HEAD_DIM),
-            dtype=bfloat16, name="q_nope", io_category="cuda_tensor",
-        )
-        self.q_pe = self.mpk.new_tensor(
-            dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
-            dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
-        )
+        # 2026-05-12 (user #2 FuseTensor): when MPK_DSV3_QB_FUSED=1,
+        # prefill uses a single q_b_proj_unabsorbed Linear emitting one
+        # (mbt, H*192) fused tensor. q_nope and q_pe both alias into this
+        # fused tensor (same DTensor handle); the chunked_prefill kernel
+        # reads Qn at the base and Qp at base + 128 via qfused_mode=1.
+        # Default OFF for incremental validation; flip to "1" once validated
+        # against reference across prefill workloads.
+        self._qb_fused = os.environ.get("MPK_DSV3_QB_FUSED", "0") == "1"
+        if self._qb_fused:
+            # Fused Q for prefill: per-head 192 = 128 (nope) + 64 (pe).
+            self.q_b_prefill_fused = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads *
+                      (QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM)),
+                dtype=bfloat16, name="q_b_prefill_fused",
+                io_category="cuda_tensor",
+            )
+            # Aliases used by the prefill kernel call sites — both point at
+            # the same fused tensor; chunked_prefill's qfused_mode=1 path
+            # uses input_ptrs[0] for both and computes the 128-offset
+            # internally.
+            self.q_nope = self.q_b_prefill_fused
+            self.q_pe = self.q_b_prefill_fused
+        else:
+            self.q_nope = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * QK_NOPE_HEAD_DIM),
+                dtype=bfloat16, name="q_nope", io_category="cuda_tensor",
+            )
+            self.q_pe = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
+                dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
+            )
         # kv_a output split: c_latent [batch, 512] and k_pe [batch, 64]
         # We use two separate linear layers instead of one 576-dim output,
         # so we can apply kv_a_layernorm to c_latent only.
@@ -1485,22 +1508,39 @@ class DeepSeekV3Builder(GraphBuilder):
                          block_dim=(128, 1, 1),
                          gate_mode=2 if self._use_prefill else 0)
         if self._use_prefill:
-            w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
-                state_dict, f"{attn}q_b_nope.weight",
-                f"layer_{layer_idx}_q_b_nope")
-            self._fp8_linear(
-                self.q_a_out, w_q_b_nope, s_q_b_nope, self.q_nope,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
-                gate_mode=1)
-            w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
-                state_dict, f"{attn}q_b_pe.weight",
-                f"layer_{layer_idx}_q_b_pe")
-            self._fp8_linear(
-                self.q_a_out, w_q_b_pe, s_q_b_pe, self.q_pe,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
-                gate_mode=1)
+            if self._qb_fused:
+                # FuseTensor path (2026-05-12 user #2): single FP8 GEMM
+                # emitting q_b_prefill_fused (mbt, H*192). chunked_prefill
+                # reads with qfused_mode=1 (kernel splits via offset 128).
+                w_q_b_unabs, s_q_b_unabs = self._attach_fp8_weight(
+                    state_dict, f"{attn}q_b_proj_unabsorbed.weight",
+                    f"layer_{layer_idx}_q_b_proj_unabsorbed")
+                self._fp8_linear(
+                    self.q_a_out, w_q_b_unabs, s_q_b_unabs,
+                    self.q_b_prefill_fused,
+                    grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_unabs.dim(0)),
+                              1, 1),
+                    block_dim=(128, 1, 1),
+                    gate_mode=1)
+            else:
+                w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
+                    state_dict, f"{attn}q_b_nope.weight",
+                    f"layer_{layer_idx}_q_b_nope")
+                self._fp8_linear(
+                    self.q_a_out, w_q_b_nope, s_q_b_nope, self.q_nope,
+                    grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)),
+                              1, 1),
+                    block_dim=(128, 1, 1),
+                    gate_mode=1)
+                w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
+                    state_dict, f"{attn}q_b_pe.weight",
+                    f"layer_{layer_idx}_q_b_pe")
+                self._fp8_linear(
+                    self.q_a_out, w_q_b_pe, s_q_b_pe, self.q_pe,
+                    grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)),
+                              1, 1),
+                    block_dim=(128, 1, 1),
+                    gate_mode=1)
         # Step 4: kv_a_proj split — c_latent (FP8) + k_pe (BF16 padded)
         # k_pe output=64 < MMA_M=128, so dequant to BF16 and pad weight to [128, H]
         kv_a_w = state_dict[f"{attn}kv_a_proj_with_mqa.weight"]
@@ -1742,6 +1782,9 @@ class DeepSeekV3Builder(GraphBuilder):
                     self.mpk.max_num_batched_requests,
                 ),
                 block_dim=(128, 1, 1),
+                # FuseTensor (2026-05-12 user #2): q_nope and q_pe are the
+                # same fused [mbt, H*192] tensor when MPK_DSV3_QB_FUSED=1.
+                qfused_mode=1 if self._qb_fused else 0,
             )
             if self.world_size == 2:
                 self.mpk.mla_mtp_decode_tp2_layer(

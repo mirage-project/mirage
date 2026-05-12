@@ -24,9 +24,9 @@
 //   V:      [B, kv_len, H=16, 128]  per-head (from kv_b_proj)
 //   O:      [B, q_len,  H=16, 128]  per-head
 //
-// QK = Q_nope @ K_nope^T + Q_rope @ K_rope^T (separate MMA passes for nope+rope).
-// kv_b_proj decompression is done OUTSIDE this kernel; caller provides
-// already-decompressed per-head K_nope and V.
+// QK = Q_nope @ K_nope^T + Q_rope @ K_rope^T (separate MMA passes for
+// nope+rope). kv_b_proj decompression is done OUTSIDE this kernel; caller
+// provides already-decompressed per-head K_nope and V.
 //
 // MPK adaptation pattern (per kernel_adaptation_guide):
 //   __global__         → __device__ __noinline__
@@ -412,8 +412,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
     CUtensorMap const *KN_tm_ptr, // K_nope, per-head [B, kv_len, H, 128]
     CUtensorMap const *KR_tm_ptr, // K_rope, shared  [B, kv_len, 1,  64]
     CUtensorMap const *V_tm_ptr,  // V,      per-head [B, kv_len, H, 128]
-    bf16 const *__restrict__ Qn,  // [B, q_len, H, 128]
-    bf16 const *__restrict__ Qp,  // [B, q_len, H,  64]
+    bf16 const *__restrict__ Qn,  // [B, q_len, H, qn_head_stride] starting at nope
+    bf16 const *__restrict__ Qp,  // [B, q_len, H, qp_head_stride] starting at pe
     bf16 *__restrict__ O,         // [B, q_len, H, 128]
     int const q_len,
     int const kv_len,
@@ -422,19 +422,25 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
     float const sml2,
     int const head,  // bid.x
     int const qb_in, // bid.y
-    int const bat    // bid.z
+    int const bat,   // bid.z
+    // FuseTensor support (2026-05-12 user #2): when Qn and Qp share a
+    // fused [B, q_len, H, qn_size+qp_size] buffer, callers pass
+    // Qp = Qn + D_QK_NOPE (offset 128) and BOTH strides = D_QK_NOPE+D_QK_ROPE.
+    // Default values preserve the legacy split-buffer layout.
+    int const qn_head_stride = D_QK_NOPE,
+    int const qp_head_stride = D_QK_ROPE
 ) {
   if (threadIdx.x >= NT) {
     return;
   }
-  const int qb = cdiv(q_len, BM) - 1 - qb_in;
-  const int qs = qb * BM;
-  const int tid = threadIdx.x;
-  const int wid = tid / 32;
-  const int lid = tid % 32;
-  const long long bqn = (long long)bat * q_len * H * D_QK_NOPE;
-  const long long bqp = (long long)bat * q_len * H * D_QK_ROPE;
-  const long long bo = (long long)bat * q_len * H * D_V;
+  int const qb = cdiv(q_len, BM) - 1 - qb_in;
+  int const qs = qb * BM;
+  int const tid = threadIdx.x;
+  int const wid = tid / 32;
+  int const lid = tid % 32;
+  long long const bqn = (long long)bat * q_len * H * qn_head_stride;
+  long long const bqp = (long long)bat * q_len * H * qp_head_stride;
+  long long const bo = (long long)bat * q_len * H * D_V;
 
   extern __shared__ __align__(1024) uint8_t sm_raw_chunk[];
   int sb = __cvta_generic_to_shared(sm_raw_chunk);
@@ -461,8 +467,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
       int a = qn_s + swz<SN>(r, c);
       if (qi < q_len) {
         cpa(a,
-            Qn + bqn + (long long)qi * H * D_QK_NOPE +
-                (long long)head * D_QK_NOPE + c * 8);
+            Qn + bqn + (long long)qi * H * qn_head_stride +
+                (long long)head * qn_head_stride + c * 8);
       } else {
         asm volatile("st.shared.v4.u32 [%0],{0,0,0,0};\n" ::"r"(a));
       }
@@ -472,8 +478,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
       int a = qp_s + swz<SP>(r, c);
       if (qi < q_len) {
         cpa(a,
-            Qp + bqp + (long long)qi * H * D_QK_ROPE +
-                (long long)head * D_QK_ROPE + c * 8);
+            Qp + bqp + (long long)qi * H * qp_head_stride +
+                (long long)head * qp_head_stride + c * 8);
       } else {
         asm volatile("st.shared.v4.u32 [%0],{0,0,0,0};\n" ::"r"(a));
       }
@@ -484,8 +490,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
   }
   int qnl = qn_s + swz<(D_QK_NOPE * 2)>(wid * 16 + (lid % 16), lid / 16);
   int qpl = qp_s + swz<(D_QK_ROPE * 2)>(wid * 16 + (lid % 16), lid / 16);
-  const int kr_swz = (lid % 8) + (lid / 16) * 8;
-  const int kc_swz = (lid % 16) / 8;
+  int const kr_swz = (lid % 8) + (lid / 16) * 8;
+  int const kc_swz = (lid % 16) / 8;
 
   float of[NMDV][8];
 #pragma unroll

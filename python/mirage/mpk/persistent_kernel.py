@@ -1427,8 +1427,8 @@ class PersistentKernel:
 
     def mla_prefill_tp8_chunked_layer(
         self,
-        q_nope: DTensor,    # [B, q_len, H, 128]
-        q_pe: DTensor,      # [B, q_len, H, 64]
+        q_nope: DTensor,    # [B, q_len, H, 128] OR fused-Q [B, q_len, H, 192]
+        q_pe: DTensor,      # [B, q_len, H, 64]  OR same as q_nope if fused
         k_nope: DTensor,    # [B, kv_len, H, 128]
         k_rope: DTensor,    # [B, kv_len, 1, 64]
         v: DTensor,         # [B, kv_len, H, 128]
@@ -1436,9 +1436,10 @@ class PersistentKernel:
         mla_params: tuple,  # (num_heads, q_len, kv_len, q_start)
         grid_dim: tuple,    # (H, ceil(q_len/64), B)
         block_dim: tuple,   # (128, 1, 1)
+        qfused_mode: int = 0,  # 0 = legacy split q_nope/q_pe; 1 = fused
     ):
         num_heads, q_len, kv_len, q_start = mla_params
-        params = [num_heads, q_len, kv_len, q_start]
+        params = [num_heads, q_len, kv_len, q_start, qfused_mode]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)

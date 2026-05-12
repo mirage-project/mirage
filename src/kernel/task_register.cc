@@ -3857,14 +3857,27 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
 
 int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: num_heads, q_len, kv_len, q_start
-  assert(params.size() == 4);
+  // params: num_heads, q_len, kv_len, q_start [, qfused_mode]
+  //   qfused_mode (optional, default 0):
+  //     0 = legacy split-buffer layout: input_ptrs[0] = Qn [B, q_len, H, 128],
+  //         input_ptrs[1] = Qp [B, q_len, H, 64]. Per-head strides 128 / 64.
+  //     1 = fused-Q layout: input_ptrs[0] = Q_fused [B, q_len, H, 192] starting
+  //         at nope, input_ptrs[1] = same fused tensor pointer (the kernel
+  //         reads Qp from input_ptrs[0] + D_QK_NOPE per-element offset). Per-head
+  //         strides 192 / 192. Builder must concatenate q_b_nope+q_b_pe weights
+  //         and emit a single FP8 GEMM into a (mbt, H*192) buffer.
+  assert(params.size() == 4 || params.size() == 5);
   int num_heads = params[0];
   int q_len_max = params[1];
   int kv_len_max = params[2];
   int q_start = params[3];
+  int qfused_mode = (params.size() == 5) ? params[4] : 0;
   float sm_scale = 1.0f / sqrtf(192.0f);
   float sm_scale_log2 = sm_scale * 1.44269504089f;
+  // FuseTensor: when qfused_mode=1, Qn and Qp share a single buffer with
+  // per-head stride D_QK_NOPE+D_QK_ROPE=192. Otherwise legacy split layout.
+  int qn_head_stride = qfused_mode == 1 ? 192 : 128;
+  int qp_head_stride = qfused_mode == 1 ? 192 : 64;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -3877,10 +3890,18 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // K_rope
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[4][0]),"); // V
-  code.e("    static_cast<const "
-         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
-  code.e("    static_cast<const "
-         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");                  // Qp
+  if (qfused_mode == 1) {
+    // Qn = fused base; Qp = fused base + D_QK_NOPE (128 elements offset)
+    code.e("    static_cast<const "
+           "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn = fused
+    code.e("    static_cast<const "
+           "__nv_bfloat16*>(task_desc->input_ptrs[0]) + 128,"); // Qp = Qn+128
+  } else {
+    code.e("    static_cast<const "
+           "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
+    code.e("    static_cast<const "
+           "__nv_bfloat16*>(task_desc->input_ptrs[1]),"); // Qp
+  }
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
   code.e("    $,", q_len_max);
   code.e("    $,", kv_len_max);
@@ -3889,7 +3910,9 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("    $f,", sm_scale_log2);
   code.e("    task_desc->task_metadata.request_id,");         // head
   code.e("    task_desc->task_metadata.kv_idx,");             // q_block
-  code.e("    task_desc->task_metadata.merge_task_offset);"); // batch
+  code.e("    task_desc->task_metadata.merge_task_offset,");  // batch
+  code.e("    $,", qn_head_stride);
+  code.e("    $);", qp_head_stride);
   code.e("#else");
   code.e("{");
   code.e("int bi_ = task_desc->task_metadata.merge_task_offset;");
@@ -3908,12 +3931,20 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("int KV_LEN_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
          "runtime_config.paged_kv_last_page_len_buffer[bi_];");
   code.e("int Q_START_ = KV_LEN_ - Q_LEN_;");
-  code.e("auto *Qn_ = static_cast<const __nv_bfloat16*>("
-         "task_desc->input_ptrs[0]) + qo_fp_ * $;",
-         num_heads * 128);
-  code.e("auto *Qp_ = static_cast<const __nv_bfloat16*>("
-         "task_desc->input_ptrs[1]) + qo_fp_ * $;",
-         num_heads * 64);
+  if (qfused_mode == 1) {
+    // Fused tensor: row stride = num_heads * 192; Qp = Qn + 128
+    code.e("auto *Qn_ = static_cast<const __nv_bfloat16*>("
+           "task_desc->input_ptrs[0]) + qo_fp_ * $;",
+           num_heads * 192);
+    code.e("auto *Qp_ = Qn_ + 128;");
+  } else {
+    code.e("auto *Qn_ = static_cast<const __nv_bfloat16*>("
+           "task_desc->input_ptrs[0]) + qo_fp_ * $;",
+           num_heads * 128);
+    code.e("auto *Qp_ = static_cast<const __nv_bfloat16*>("
+           "task_desc->input_ptrs[1]) + qo_fp_ * $;",
+           num_heads * 64);
+  }
   code.e("auto *O_ = static_cast<__nv_bfloat16*>("
          "task_desc->output_ptrs[0]) + qo_fp_ * $;",
          num_heads * 128);
@@ -3935,7 +3966,9 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("    $f,", sm_scale_log2);
   code.e("    task_desc->task_metadata.request_id,"); // head
   code.e("    task_desc->task_metadata.kv_idx,");     // q_block
-  code.e("    0);"); // local batch offset already applied to raw pointers
+  code.e("    0,");  // batch offset already applied via Qn_/Qp_/O_
+  code.e("    $,", qn_head_stride);
+  code.e("    $);", qp_head_stride);
   code.e("}");
   code.e("#endif");
   return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SM100,
@@ -5570,7 +5603,7 @@ static int register_fp8_group_gemm_variant(TaskRegister *self,
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // SFB
   code.e("    static_cast<const "
-         "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]),"); // D
+         "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]),");  // D
   code.e("    static_cast<const int*>(task_desc->input_ptrs[4]),"); // m_indices
   code.e("    $,", M_total);
   code.e("    $,", N);
@@ -5585,7 +5618,9 @@ int TaskRegister::register_fp8_group_gemm_smallm_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   return register_fp8_group_gemm_variant(
-      this, params, "fp8_group_gemm_smallm",
+      this,
+      params,
+      "fp8_group_gemm_smallm",
       "fp8_group_gemm_smallm_sm100_task_impl",
       TASK_FP8_GROUP_GEMM_SMALLM_SM100);
 }
@@ -5594,7 +5629,9 @@ int TaskRegister::register_fp8_group_gemm_largem_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   return register_fp8_group_gemm_variant(
-      this, params, "fp8_group_gemm_largem",
+      this,
+      params,
+      "fp8_group_gemm_largem",
       "fp8_group_gemm_largem_sm100_task_impl",
       TASK_FP8_GROUP_GEMM_LARGEM_SM100);
 }

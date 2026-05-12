@@ -715,6 +715,18 @@ if __name__ == "__main__":
                     state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
                     state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
                     state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
+                    # 2026-05-12 (user #2 FuseTensor): also keep the
+                    # UNABSORBED q_b_proj weight as a single fused tensor
+                    # so the prefill path can do ONE FP8 GEMM emitting a
+                    # (mbt, H*192) buffer instead of two separate Linears
+                    # (q_b_nope + q_b_pe). chunked_prefill reads with
+                    # stride 192 per head; Qn ptr = base, Qp ptr = base+128.
+                    q_b_unabs_f32 = q_orig.reshape(
+                        H_ * (qk_nope + qk_rope), -1).contiguous()
+                    q_b_unabs_fp8, q_b_unabs_scale = (
+                        _quantize_f32_to_checkpoint_fp8(q_b_unabs_f32))
+                    state_dict[f"{attn}q_b_proj_unabsorbed.weight"] = q_b_unabs_fp8
+                    state_dict[f"{attn}q_b_proj_unabsorbed.weight_scale_inv"] = q_b_unabs_scale
 
                     kv_head_dim = qk_nope + v_dim
                     kv_b_reshaped = kv_f32.reshape(
@@ -731,6 +743,15 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_k.weight_scale_inv"] = kv_b_k_scale
                     state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
                     state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
+                    # DEBUG 2026-05-10: also store bf16 versions of the
+                    # split kv_b weights for the BF16 ablation in
+                    # _fp8_dense_kv_b_proj. Used to verify whether the FP8
+                    # GEMM path is the source of the layer-0 attn_proj
+                    # orthogonality. Toggle via builder._kv_b_use_bf16.
+                    state_dict[f"{attn}kv_b_k_bf16.weight"] = (
+                        kv_b_k_f32.bfloat16().contiguous())
+                    state_dict[f"{attn}kv_b_v_bf16.weight"] = (
+                        kv_b_v_f32.bfloat16().contiguous())
 
                     # Preserve original W_O for PR674 prefill output. The
                     # existing o_proj key is replaced by the decode-only fused
@@ -892,6 +913,8 @@ if __name__ == "__main__":
                     (r"self_attn\.q_b_pe\.weight",                           0),
                     (r"self_attn\.kv_b_k\.weight",                           0),
                     (r"self_attn\.kv_b_v\.weight",                           0),
+                    (r"self_attn\.kv_b_k_bf16\.weight",                      0),
+                    (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
                     (r"self_attn\.o_proj_original\.weight",                  1),
@@ -1209,6 +1232,17 @@ if __name__ == "__main__":
                     os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
                 )
                 print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
+            for _attr, _fname in [
+                ("dump_ckv_sep_tensor", "ckv_sep.pt"),
+                ("dump_kpe_sep_tensor", "kpe_sep.pt"),
+                ("dump_prefill_k_nope_tensor", "prefill_k_nope.pt"),
+                ("dump_prefill_v_tensor", "prefill_v.pt"),
+            ]:
+                _t = getattr(mpk, _attr, None)
+                if _t is not None:
+                    torch.save(_t.detach().cpu(),
+                               os.path.join(args.dump_hidden_dir, _fname))
+                    print(f"Saved {_fname} to {args.dump_hidden_dir}")
             print(f"Saved {len(mpk.dump_hidden_tensors)} per-layer residual dumps to {args.dump_hidden_dir}")
 
         print("tokens.shape = ", tokens.shape)
