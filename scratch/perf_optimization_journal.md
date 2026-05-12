@@ -150,6 +150,21 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 - **Lesson learned**: re-verify the contention premise from first principles before designing fixes. `scratch/ar_rewrite_design.md` Option A's underlying analysis missed that each `task_offset` uses a different `nvshmem_team_t`. Option B (single barrier task per AR phase) and Option C (system fence) are still on the table but address a different angle.
 - Phase-isolation gates (`MPK_AR_SKIP_BARRIER/REDUCE` from `d6d1730a`) remain in tree as measurement infra — those reveal the 91 μs barrier cost is **NVLink dissemination latency**, not contention.
 
+### User-#2 Fuse-Q (q_b_nope + q_b_pe → q_b_proj_unabsorbed) — INFRA LANDED, FP8 NOISE TBD
+- Commits (2026-05-12 evening session):
+  - Kernel: added `qn_head_stride` / `qp_head_stride` default args to `mla_prefill_tp8_chunked_sm100_task_impl`.
+  - `task_register.cc`: added optional 5th param `qfused_mode` (default 0). When 1: Qp_ptr = Qn_ptr + 128, strides = 192/192, per-batch offset uses num_heads * 192.
+  - `persistent_kernel.py::mla_prefill_tp8_chunked_layer`: new kwarg `qfused_mode: int = 0`.
+  - `builder.py`: `_qb_fused = MPK_DSV3_QB_FUSED == "1"` (default OFF). When ON, allocates `q_b_prefill_fused` (mbt, H*192) and runs a single FP8 GEMM with `q_b_proj_unabsorbed` weight.
+  - `demo.py`: emits `q_b_proj_unabsorbed.weight` + scale_inv in state_dict (column-parallel TP-sharded at dim=0).
+- **Validation (DSv3 TP=4 EP=2 prompt=128 layers 0-3, MPK_DSV3_QB_FUSED=1)**:
+  - Legacy MPK vs official ref (rows 1..127): layer 0-2 cos ≥ 0.9998 (bit-equal), layer 3 cos = 0.9957.
+  - Fused MPK vs official ref: layer 0 cos = 0.9911 (drop), layer 1 = 0.9811, layer 2 = 0.9752, layer 3 = 0.9376. **All layers degraded.**
+  - First decoded token differs from reference (token 9774): fused produces garbage Chinese/etc text.
+- **Root cause: FP8 quantization block-alignment mismatch.** Block size = 128 rows. Each head's data is 192 rows (128 nope + 64 pe). Legacy q_b_nope is (H*128) — block boundaries land per-head (clean). q_b_pe is (H*64) — block boundaries land per-2-heads (consistent). Unified q_b_proj_unabsorbed is (H*192) — block 0 = head 0 nope (clean), block 1 = head 0 pe (64) + head 1 nope first 64 (MIXED), block 2 = head 1 nope last 64 + head 1 pe (MIXED), etc. 1/3 of blocks clean, 2/3 mixed across head/dim boundaries → larger per-block FP8 scale → higher quantization noise.
+- **Decision**: Keep infra (env-gated default OFF). Don't flip default until FP8 noise is addressed.
+- **Future fix options**: (a) custom non-128-aligned block layout that respects 192 head stride; (b) use BF16 weight for q_b_proj_unabsorbed (loses FP8 storage savings but matches quantization noise); (c) abandon this fusion in FP8 mode and seek a different fusion that's block-friendly (e.g., kv_a + kv_rope into 576-wide).
+
 ### Path 3 (morning notes) — fp8_dense output partition declaration: REJECTED
 - Tried `MPK_FP8_DENSE_OUTPUT_PARTITION=1` to change `tb_graph.new_input(output, (-1,-1,-1), ...)` → `(1,-1,-1)` in `_fp8_gemm_dense_layer_impl`. Idea: declare grid.x partitions output dim 1, allowing finer event GCD on downstream consumers.
 - **Crashed with "CUDA error: misaligned address"**. The runtime offsets the per-task output pointer based on the partition declaration, but `fp8_gemm_dense_smallm_sm100`'s kernel internally writes to the unoffset full output buffer (`bidx = iter*num_workers + worker_idx` selects the N-tile and the kernel computes the absolute offset itself). Mismatch → misalignment.
