@@ -4,18 +4,18 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 
 ## 进行中
 
-### AllReduce kernel rewrite (A3)
-- **Status**: Phase-isolation measured, designing fix
+### AllReduce kernel rewrite (A3) — Option A reverted, Options B/C still open
+- **Status**: A3 Option A (per-task barrier) reverted 2026-05-12. See 「已完成」 entry. Options B/C still TBD.
 - **Goal**: vLLM/SGLang style — 1 global barrier instead of 56 per-task barriers; finer-grained MLA→AR task event chains
-- **Baseline**: decode AR per-call 14.7μs (vLLM 6-8μs), prefill 380μs/task barrier-bound
-- **Reference**: `include/mirage/persistent_kernel/tasks/blackwell/allreduce.cuh` (current), vLLM `vllm/distributed/device_communicators/all_reduce_utils.py` style
-- **Phase-isolation results** (DSv3 prefill-128 TP=4 EP=2 layers 0-19, 2026-05-12):
+- **Baseline measurements** (DSv3 prefill-128 TP=4 EP=2 layers 0-19, 2026-05-12 d6d1730a):
   - baseline (full AR):  370.4 μs/task, e2e 182.72 ms
   - skip_barrier:        279.0 μs/task, e2e 164.25 ms (-18.5 ms vs baseline, -10.1%)
   - skip_reduce:         149.5 μs/task, e2e 168.97 ms (-13.75 ms)
-  - Decomposition: barrier=91μs/task (24%), reduce=221μs/task (60%), other=58μs (16%)
-  - **Key insight**: barrier (56 concurrent callers contend on team psync_pool) is the biggest single contributor to total AR cost. NVLS reduce hardware itself takes 221μs/task which is also high for the small tile (~33KB/worker on bf16 hidden=7168 prefill-128).
-  - Path: ONE cross-PE barrier task per AR phase + 56 reduce tasks with no internal barrier. Expected recovery: ~17ms of the 18.5ms (1 barrier task adds ~6-12μs back per phase × 40 phases ≈ 0.5ms).
+  - Decomposition: barrier=91μs/task, reduce=221μs/task, other=58μs
+  - **Updated understanding (post-A3)**: barrier cost is NVLink dissemination latency (P2P signal+wait, ~91 μs for TP=4 full-radix). NOT contention as originally hypothesized — each AR task already uses its own `nvshmem_team_t` with private psync.
+- **Open ideas:**
+  - Option B (`scratch/ar_rewrite_design.md`): SINGLE barrier task per AR phase + 56 reduce-only tasks. Recovers 56× barrier latency but needs builder-side event-chain restructure.
+  - Option C: drop explicit cross-PE barrier in favor of NVLink fence + signal-only on a small number of slots. Higher correctness risk.
 - **AR_SKIP debug gates committed (opt-in)** to allreduce.cuh + persistent_kernel.py:
   - `MPK_AR_SKIP_BARRIER=1` and `MPK_AR_SKIP_REDUCE=1` env vars propagate as -D macros for measurement only.
 
@@ -105,3 +105,21 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 - Added `MPK_TRY_FINEGRAINED_LAUNCH=1` env gate. Qwen3 hangs after [MPK INIT] (not just DSv3 selective-layer as comment claimed)
 - Reverted runtime.cc, build clean
 - Indicates a deeper scheduler/worker event-handshake race bug; needs cuda-gdb debugging
+
+### A3 Option A (AR per-task barrier `mpkar_sync_block_per_task`) — REVERTED
+- Commit `3a9588cf` (2026-05-12 staged), reverted `18dc6a4b` (2026-05-12). Gated `-DMPK_AR_PER_TASK_BARRIER`.
+- **Premise was wrong**: original journal claimed 56-way contention on a shared psync slot. But `nvshmem_tile_allreduce_impl` already uses `teams[task_offset]` (line 657) — each AR task gets its own NVSHMEM team and thus its own psync region. So the OLD `mpkar_sync_block(team)` already has private psync per task. The new per-task code indexes by `task_offset` within each (already-private) team's psync — semantically equivalent.
+- **Correctness validation (DSv3 TP=4 EP=2 prompt=128 layers 0-3)**:
+  - Baseline (env=0) run1 vs run2: bit-equal (cos=1.0000, mad=0)
+  - Env=1 run1 vs run2: bit-equal (cos=1.0000, mad=0) — fully deterministic
+  - Baseline vs env=1, rows 1..127: bit-equal at layer 0-1; layer 2-3 still match. **Row 0 is decode-overwrite dump artifact** (see [[feedback-row0-dump-artifact]] memory); ignoring row 0, output is bit-identical.
+  - Qwen3 TP=4 layers 0-3 8 new tokens: 473 generated token IDs MATCH between baseline and env=1.
+- **Perf validation (DSv3 layers 0-19)**:
+  - Baseline e2e: 169.812 ms/token, slow AR task mean = 1987.1 μs
+  - Env=1 e2e:   167.694 ms/token, slow AR task mean = 1846.6 μs
+  - Δ e2e = -2.118 ms (-1.25%)
+  - Δ slow AR task = -140.5 μs (-7.1%) — real but small
+  - Predicted savings was 12-17 ms (7-10%) based on the wrong contention premise; actual is far below.
+- **Decision per start.md tree**: 2.1 ms (1.25%) is below the 3-5 ms revert threshold. Revert to remove dead code.
+- **Lesson learned**: re-verify the contention premise from first principles before designing fixes. `scratch/ar_rewrite_design.md` Option A's underlying analysis missed that each `task_offset` uses a different `nvshmem_team_t`. Option B (single barrier task per AR phase) and Option C (system fence) are still on the table but address a different angle.
+- Phase-isolation gates (`MPK_AR_SKIP_BARRIER/REDUCE` from `d6d1730a`) remain in tree as measurement infra — those reveal the 91 μs barrier cost is **NVLink dissemination latency**, not contention.
