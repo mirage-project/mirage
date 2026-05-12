@@ -274,13 +274,6 @@ def get_compile_command(
         common_cmd.append("-DMPK_AR_SKIP_BARRIER")
     if os.environ.get("MPK_AR_SKIP_REDUCE") == "1":
         common_cmd.append("-DMPK_AR_SKIP_REDUCE")
-    # AllReduce contention-free per-task barrier (2026-05-12, Option A from
-    # scratch/ar_rewrite_design.md). Drop-in replacement for mpkar_sync_block
-    # that uses private psync slots per task_offset, eliminating 56-way
-    # contention measured in the phase-isolation experiment. Off by default
-    # while the cross-PE stationarity audit is being validated end-to-end.
-    if os.environ.get("MPK_AR_PER_TASK_BARRIER") == "1":
-        common_cmd.append("-DMPK_AR_PER_TASK_BARRIER")
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
