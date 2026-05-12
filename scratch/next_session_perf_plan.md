@@ -12,36 +12,45 @@
 | `1ed0ea6a`   | perf: AR rewrite design doc with three options + recommendation             | `scratch/ar_rewrite_design.md`                                                  |
 | `543bdc21`   | perf: draft Option A per-task barrier (out-of-build, for review)            | `scratch/ar_option_a_per_task_barrier.cuh` (180 lines, ready to wire in)        |
 
-## Highest-value next step (recommended)
+## Highest-value next step (staged, awaiting live validation)
 
-**Implement and live-test Option A** (per-task barrier slots).
+**Option A (per-task barrier slots)** is committed at `3a9588cf` —
+`allreduce: gated opt-in per-task barrier (MPK_AR_PER_TASK_BARRIER=1)`.
+Default OFF; enable via `MPK_AR_PER_TASK_BARRIER=1` to pass
+`-DMPK_AR_PER_TASK_BARRIER` to runtime nvcc.
 
-Why this is high-value:
-- Phase-isolation says barrier accounts for 18.5 ms / 10% of e2e on prefill-128 TP=4.
-- Contention on shared psync slot is the proven cause; per-task slots eliminate it.
-- Single-file change (`include/.../allreduce.cuh`), single-line plumbing in
-  `persistent_kernel.py`, env-gated. Easy to revert.
-- Risk is bounded: stationarity audit complete (4 call sites + MTP MoE + decode
-  AR all symmetric across PEs); first-call psync-zero issue resolved (atomicAdd+1).
+The code is **unverified on a live GPU** — review and run validation when
+GPU time is available:
 
-Mechanical steps to land it (estimated 1.5 hours):
-1. Patch `include/mirage/persistent_kernel/tasks/blackwell/allreduce.cuh`:
-   - Inline `mpkar_sync_block_per_task` from `scratch/ar_option_a_per_task_barrier.cuh`
-   - Add the gated dispatch in `nvshmem_tile_allreduce_impl` (~line 558)
-2. Patch `python/mirage/mpk/persistent_kernel.py` (next to existing
-   `MPK_AR_SKIP_BARRIER` block, ~line 273) to propagate `MPK_AR_PER_TASK_BARRIER=1`
-   as `-DMPK_AR_PER_TASK_BARRIER`
-3. Force the Cython relink path: `rm python/mirage/core.*.so && touch python/mirage/_cython/*.pyx`
-4. Smoke Qwen3 (TP=4, layers 0-3, mbt=1) with and without the env — same output tokens.
-5. DSv3 prefill-128 layers 0-19: e2e + AR per-task wallclock; expect e2e
-   165-170 ms (vs 182.72 ms baseline).
-6. Commit; update `scratch/perf_optimization_journal.md`.
+1. Force the Cython relink path (only needed if you also touched .cc/.h):
+   `rm python/mirage/core.*.so && touch python/mirage/_cython/*.pyx`
+2. Smoke Qwen3 (TP=4, layers 0-3, mbt=1) with `MPK_AR_PER_TASK_BARRIER=1`
+   → must produce same output token IDs as without the env.
+3. DSv3 prefill-128 layers 0-3 with the env → per-layer cosine vs FP8 ref ≥ 0.99.
+4. DSv3 prefill-128 layers 0-19 prefill+1-decode, with and without env →
+   record per-token latency and AR per-task wallclock.
+   - Expected with env: e2e drops toward 165-170 ms (vs 182.72 ms baseline,
+     vs 164.25 ms theoretical lower-bound from `MPK_AR_SKIP_BARRIER`).
+   - Expected per-task AR wallclock: 280-310 μs (down from 370 μs).
 
-Decision tree after Step 5:
-- If e2e drops to ~165 ms → Option A succeeded; close A3 task.
-- If e2e drops by only 3-5 ms → contention isn't the dominant cost; revisit
-  reduce path (and skip Option B).
-- If correctness fails on Qwen3 → revert; reconsider counter-stationarity edge case.
+Decision tree after step 4:
+- If e2e drops by ≥ 12 ms with the env: Option A succeeded; consider making
+  it the default and close A3. Update `scratch/perf_optimization_journal.md`.
+- If e2e drops by 3-5 ms: contention is only part of the cost; revisit
+  reduce path (and skip Option B from `scratch/ar_rewrite_design.md`).
+- If correctness fails on Qwen3 or DSv3: REVERT commit `3a9588cf`.
+  The fault is most likely (i) the assumption that NVSHMEM zero-initializes
+  the per-team psync region beyond 2*SYNC_SIZE, (ii) a P2P-write ordering
+  edge case in the phase-parity slot reuse, or (iii) a stationarity
+  exception I missed in the audit.
+
+Implementation review notes:
+- `mpkar_sync_block_per_task` sits at `allreduce.cuh:357-455`; layout
+  documented in the header comment + `scratch/ar_option_a_per_task_barrier.cuh`.
+- `MPK_AR_PER_TASK_BARRIER` env→-D propagation at `persistent_kernel.py:280-286`.
+- AR kernel dispatch at `allreduce.cuh:660-672`: nested `#ifndef
+  MPK_AR_SKIP_BARRIER` / `#if defined(MPK_AR_PER_TASK_BARRIER)`. If both env
+  vars are set, `MPK_AR_SKIP_BARRIER` wins (no barrier at all).
 
 ## Other open work (in roughly decreasing impact order)
 
