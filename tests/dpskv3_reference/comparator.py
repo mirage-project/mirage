@@ -1,27 +1,50 @@
-"""Compare a reference dump to an MPK dump.
+"""Compare a reference dump against an MPK dump.
 
-Usage:
-    python -m tests.dpskv3_reference.comparator \
-        --reference outputs/dpskv3_reference_dump_<ts> \
-        --mpk       outputs/<mpk_run>/<workload>_dump
+Reference dumps (from `runner.run_reference`) live under
+    <ref_dump_dir>/
+        config.json
+        tokens.json
+        iter_<N>/
+            input_ids.pt, positions.pt, embed.pt,
+            layer_<L>_residual.pt for each L in `layer_indices`,
+            final_norm.pt, logits.pt, argmax.pt
 
-Reports per-tensor cosine similarity + max-abs-diff for every tensor
-that exists in both dumps. Tensors only in one side get flagged.
+MPK dumps (from `demo/deepseek_v3/demo.py --dump-hidden-dir <out>`)
+live under
+    <mpk_dump_dir>/
+        embed.pt
+        layer_<L>_residual.pt for each L in `--layers`
 
-The MPK side currently does not produce a per-layer hidden state dump
-— that's task #19 in the plan and lives in `python/mirage/mpk/...`
-on the MPK side. Until that lands, this comparator is a no-op for
-hidden states (it can still compare token IDs from `tokens.json`).
+The shape conventions differ slightly:
+  - reference: [T, H]  where T = chunk len for iter
+  - MPK: [mbt, H] where mbt = max_num_batched_tokens (rows beyond
+    the real prompt are zero-padded; row 0 is overwritten by the
+    decode iteration — see `feedback_row0_dump_artifact` memory).
+
+So we compare rows [1 : prompt_len) by default, skipping row 0
+(decode overwrite) and zero-padded rows beyond prompt_len.
 """
 
 from __future__ import annotations
 import argparse
 import json
+import re
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
+
+
+_LAYER_RE = re.compile(r"layer_0*(\d+)_residual\.pt$")
+
+
+def _list_layers(d: Path) -> dict[int, Path]:
+    out: dict[int, Path] = {}
+    for p in d.glob("layer_*_residual.pt"):
+        m = _LAYER_RE.search(p.name)
+        if m:
+            out[int(m.group(1))] = p
+    return out
 
 
 def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -32,110 +55,99 @@ def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     return F.cosine_similarity(af, bf, dim=0).item()
 
 
-def _max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
-    return (a.float() - b.float()).abs().max().item()
-
-
 def compare_dumps(
-    reference_dir: Path,
-    mpk_dir: Path,
-    cosine_threshold: float = 0.999,
-    abs_threshold: Optional[float] = None,
-) -> dict:
-    """Diff two dump directories, return a structured report."""
-    report = {
-        "reference_dir": str(reference_dir),
-        "mpk_dir": str(mpk_dir),
-        "iterations": [],
-        "tokens_match": None,
-        "errors": [],
-    }
-    # Compare token sequences if both exist.
-    ref_tokens = reference_dir / "tokens.json"
-    mpk_tokens = mpk_dir / "tokens.json"
-    if ref_tokens.exists() and mpk_tokens.exists():
-        with open(ref_tokens) as f:
-            r = json.load(f)
-        with open(mpk_tokens) as f:
-            m = json.load(f)
-        # MPK saves a dict for mbr=1, a list of dicts (one per request) for
-        # mbr>1. Reference always saves a dict. For mbr>1 we compare request 0
-        # only (reference processes one prompt at a time).
-        def _pick_ids(obj):
-            if isinstance(obj, list):
-                obj = obj[0] if obj else {}
-            return obj.get("decoded_suffix_ids", obj.get("token_ids", []))
-        ref_ids = _pick_ids(r)
-        mpk_ids = _pick_ids(m)
-        n = min(len(ref_ids), len(mpk_ids))
-        report["tokens_match"] = ref_ids[:n] == mpk_ids[:n]
-        report["tokens_n_compared"] = n
-        report["tokens_first_mismatch"] = next(
-            (i for i in range(n) if ref_ids[i] != mpk_ids[i]), None
-        )
-        if n > 0:
-            report["tokens_ref_head"] = ref_ids[:8]
-            report["tokens_mpk_head"] = mpk_ids[:8]
+    ref_iter_dir: Path | str,
+    mpk_dump_dir: Path | str,
+    layer_indices: list[int] | None = None,
+    skip_row_0: bool = True,
+    max_rows: int | None = None,
+) -> list[dict]:
+    """Compare per-layer residual dumps.
 
-    # Compare iter dumps tensor-by-tensor.
-    ref_iter_dirs = sorted(reference_dir.glob("iter_*"))
-    mpk_iter_dirs = sorted(mpk_dir.glob("iter_*"))
-    for ref_d, mpk_d in zip(ref_iter_dirs, mpk_iter_dirs):
-        per_iter = {"name": ref_d.name, "tensors": {}}
-        ref_tensors = {p.stem: p for p in ref_d.glob("*.pt")}
-        mpk_tensors = {p.stem: p for p in mpk_d.glob("*.pt")}
-        common = sorted(set(ref_tensors) & set(mpk_tensors))
-        only_ref = sorted(set(ref_tensors) - set(mpk_tensors))
-        only_mpk = sorted(set(mpk_tensors) - set(ref_tensors))
-        per_iter["only_in_reference"] = only_ref
-        per_iter["only_in_mpk"] = only_mpk
-        for name in common:
-            try:
-                a = torch.load(ref_tensors[name], map_location="cpu")
-                b = torch.load(mpk_tensors[name], map_location="cpu")
-            except Exception as e:
-                per_iter["tensors"][name] = {"error": str(e)}
-                continue
-            if a.shape != b.shape:
-                per_iter["tensors"][name] = {
-                    "error": "shape mismatch",
-                    "ref_shape": list(a.shape),
-                    "mpk_shape": list(b.shape),
-                }
-                continue
-            cos = _cosine(a, b)
-            mad = _max_abs_diff(a, b)
-            ok = cos >= cosine_threshold
-            if abs_threshold is not None and mad > abs_threshold:
-                ok = False
-            per_iter["tensors"][name] = {
-                "cosine": cos, "max_abs_diff": mad, "pass": ok,
-            }
-        report["iterations"].append(per_iter)
-    return report
+    Args:
+        ref_iter_dir: Path to a `iter_<N>` subdir of a reference dump
+            (where layer_<L>_residual.pt files live).
+        mpk_dump_dir: MPK's `--dump-hidden-dir` output.
+        layer_indices: Layers to compare. None = intersection of dumps.
+        skip_row_0: Skip row 0 (MPK's decode-overwrite artifact).
+        max_rows: Truncate to first N rows after the optional row-0 skip.
+
+    Returns:
+        list of {layer, cos_full, mad, n_rows_compared, per_row_min_cos}.
+    """
+    ref_iter_dir = Path(ref_iter_dir)
+    mpk_dump_dir = Path(mpk_dump_dir)
+    ref_layers = _list_layers(ref_iter_dir)
+    mpk_layers = _list_layers(mpk_dump_dir)
+    common = sorted(set(ref_layers) & set(mpk_layers))
+    if layer_indices is not None:
+        common = [i for i in common if i in layer_indices]
+
+    results = []
+    for li in common:
+        ref = torch.load(ref_layers[li], map_location="cpu", weights_only=True).float()
+        mpk = torch.load(mpk_layers[li], map_location="cpu", weights_only=True).float()
+        # Reference is [T, H], MPK is [mbt, H]. Use first min(T_ref, T_mpk) rows.
+        T = min(ref.shape[0], mpk.shape[0])
+        ref_t = ref[:T]
+        mpk_t = mpk[:T]
+        if skip_row_0 and T > 1:
+            ref_t = ref_t[1:]
+            mpk_t = mpk_t[1:]
+        if max_rows:
+            ref_t = ref_t[:max_rows]
+            mpk_t = mpk_t[:max_rows]
+        full_cos = _cosine(ref_t, mpk_t)
+        per_row_cos = F.cosine_similarity(ref_t, mpk_t, dim=1)
+        n_bad = int((per_row_cos < 0.99).sum().item())
+        mad = float((ref_t - mpk_t).abs().max().item())
+        results.append({
+            "layer": li,
+            "n_rows": ref_t.shape[0],
+            "cos_full": full_cos,
+            "per_row_min_cos": float(per_row_cos.min().item()),
+            "n_rows_below_0.99": n_bad,
+            "max_abs_diff": mad,
+        })
+    return results
 
 
-def main() -> None:
+def _parse_layer_arg(s: str | None) -> list[int] | None:
+    if not s:
+        return None
+    if "-" in s:
+        a, b = s.split("-", 1)
+        return list(range(int(a), int(b) + 1))
+    return [int(x) for x in s.split(",")]
+
+
+def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--reference", required=True)
-    p.add_argument("--mpk", required=True)
-    p.add_argument("--cosine-threshold", type=float, default=0.999)
-    p.add_argument("--abs-threshold", type=float, default=None)
-    p.add_argument("--out", default=None,
-                   help="Write report JSON to this path (else print).")
+    p.add_argument("--ref", required=True, help="reference iter_<N> dir")
+    p.add_argument("--mpk", required=True, help="MPK --dump-hidden-dir dir")
+    p.add_argument("--layers", default=None)
+    p.add_argument("--max-rows", type=int, default=None)
+    p.add_argument("--keep-row-0", action="store_true",
+                   help="include row 0 in the comparison (default skip)")
     args = p.parse_args()
-    rep = compare_dumps(
-        Path(args.reference), Path(args.mpk),
-        cosine_threshold=args.cosine_threshold,
-        abs_threshold=args.abs_threshold,
+    rows = compare_dumps(
+        ref_iter_dir=args.ref,
+        mpk_dump_dir=args.mpk,
+        layer_indices=_parse_layer_arg(args.layers),
+        skip_row_0=not args.keep_row_0,
+        max_rows=args.max_rows,
     )
-    if args.out:
-        with open(args.out, "w") as f:
-            json.dump(rep, f, indent=2)
-        print(f"wrote {args.out}")
-    else:
-        print(json.dumps(rep, indent=2))
+    if not rows:
+        print("no layers in common.")
+        return 1
+    print(f"{'layer':>5} {'n_rows':>7} {'cos_full':>10} {'min_row_cos':>12} "
+          f"{'bad<0.99':>9} {'max_abs_diff':>12}")
+    for r in rows:
+        print(f"{r['layer']:>5} {r['n_rows']:>7} "
+              f"{r['cos_full']:>10.4f} {r['per_row_min_cos']:>12.4f} "
+              f"{r['n_rows_below_0.99']:>9} {r['max_abs_diff']:>12.4f}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

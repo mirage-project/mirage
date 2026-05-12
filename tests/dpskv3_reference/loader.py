@@ -1,45 +1,26 @@
-"""Rank-aware selective weight loader for the DeepSeek V3 reference.
+"""Load HF DeepSeek V3 safetensors checkpoint into our subset model
+that wraps the official inference Transformer modules.
 
-For each rank, loads only the slice of each weight that this rank
-holds. Works for any (tp_size, ep_size) topology supported by
-`ParallelConfig`.
+Two responsibilities:
 
-Sharding rules (must match `modeling.py`'s parallel layers):
+1. Translate HF parameter names → official-model parameter names.
+2. Dequantize FP8 → BF16 at load time (we run the reference in BF16
+   for simplicity; the checkpoint stores FP8 + per-128x128-block
+   scale_inv).
 
-    Replicated (full tensor on every rank):
-        - embed_tokens.weight, lm_head.weight
-        - input_layernorm / post_attention_layernorm / final norm
-        - q_a_proj.weight, q_a_layernorm.weight
-        - kv_a_proj_with_mqa.weight, kv_a_layernorm.weight
-        - MoE gate.weight + e_score_correction_bias
-        - MTP enorm/hnorm/eh_proj/shared_head.norm
+The official model lives at `/home/muhengl/DeepSeek-V3/inference/model.py`
+and its parameter layout matches the DeepSeek paper's notation
+(`wq_a`/`wq_b`, `wkv_a`/`wkv_b`, `w1`/`w2`/`w3`, etc.) — different
+from HF (`q_a_proj`/`q_b_proj`, `kv_a_proj_with_mqa`/`kv_b_proj`,
+`gate_proj`/`down_proj`/`up_proj`). The map is in `_HF_TO_OFFICIAL`.
 
-    ColumnParallel (split output dim by tp_size, take rank's slice):
-        - q_b_proj.weight: split out dim by tp_size
-        - kv_b_proj.weight: split out dim by tp_size
-        - dense MLP gate_up_proj.weight: split out dim by tp_size
-        - shared_experts gate_up_proj.weight: split out dim by tp_size
-
-    RowParallel (split input dim by tp_size, take rank's slice):
-        - o_proj.weight: split in dim by tp_size
-        - dense MLP down_proj.weight: split in dim by tp_size
-        - shared_experts down_proj.weight: split in dim by tp_size
-
-    Routed experts (EP × within-EP TP):
-        - This rank's local experts: indices
-          [ep_rank * num_local : (ep_rank + 1) * num_local]
-        - For each local expert:
-            gate_up_proj.weight: split out dim by routed_tp_size, take routed_tp_rank's slice
-            down_proj.weight: split in dim by routed_tp_size, take routed_tp_rank's slice
-        - Other experts (not in this rank's slice) are not loaded.
-
-The loader handles the HF checkpoint's separate `gate_proj.weight` +
-`up_proj.weight` storage (combined to `gate_up_proj` at load time via
-`cat([gate, up], dim=0)`) and FP8 → BF16 dequantization.
+Only weights for the layer indices passed in `layer_indices` are
+loaded; other layers' Modules don't exist in the subset model.
 """
 
 from __future__ import annotations
-import os
+import json
+import re
 import sys
 from pathlib import Path
 from typing import Iterable, Optional
@@ -47,393 +28,324 @@ from typing import Iterable, Optional
 import torch
 from safetensors import safe_open
 
-from .config import Config
-from .modeling import DeepseekV3Model
-from .parallel import ParallelConfig
+
+# ===== HF name → official name mapping ========================================
+#
+# Each entry's pattern is matched against the HF key. The capture groups in
+# the pattern are substituted into the corresponding "official" template.
+#
+# Order matters: more specific patterns first.
+_HF_TO_OFFICIAL: list[tuple[re.Pattern, str]] = [
+    # Top-level
+    (re.compile(r"^model\.embed_tokens\.weight$"), "embed.weight"),
+    (re.compile(r"^model\.norm\.weight$"), "norm.weight"),
+    (re.compile(r"^lm_head\.weight$"), "head.weight"),
+    # Per-layer
+    (re.compile(r"^model\.layers\.(\d+)\.input_layernorm\.weight$"),
+     "layers.{0}.attn_norm.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.post_attention_layernorm\.weight$"),
+     "layers.{0}.ffn_norm.weight"),
+    # Attention (MLA) — both .weight and .weight_scale_inv
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.q_a_proj\.weight$"),
+     "layers.{0}.attn.wq_a.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.q_a_proj\.weight_scale_inv$"),
+     "layers.{0}.attn.wq_a.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.q_a_layernorm\.weight$"),
+     "layers.{0}.attn.q_norm.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.q_b_proj\.weight$"),
+     "layers.{0}.attn.wq_b.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.q_b_proj\.weight_scale_inv$"),
+     "layers.{0}.attn.wq_b.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.weight$"),
+     "layers.{0}.attn.wkv_a.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.weight_scale_inv$"),
+     "layers.{0}.attn.wkv_a.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.kv_a_layernorm\.weight$"),
+     "layers.{0}.attn.kv_norm.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.kv_b_proj\.weight$"),
+     "layers.{0}.attn.wkv_b.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.kv_b_proj\.weight_scale_inv$"),
+     "layers.{0}.attn.wkv_b.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight$"),
+     "layers.{0}.attn.wo.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight_scale_inv$"),
+     "layers.{0}.attn.wo.scale"),
+    # Dense MLP (HF: mlp.{gate,up,down}_proj → official: ffn.{w1,w3,w2}).
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.gate_proj\.weight$"),
+     "layers.{0}.ffn.w1.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.gate_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.w1.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.up_proj\.weight$"),
+     "layers.{0}.ffn.w3.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.up_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.w3.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.down_proj\.weight$"),
+     "layers.{0}.ffn.w2.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.down_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.w2.scale"),
+    # MoE router gate (HF: mlp.gate.weight / .e_score_correction_bias)
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.gate\.weight$"),
+     "layers.{0}.ffn.gate.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.gate\.e_score_correction_bias$"),
+     "layers.{0}.ffn.gate.bias"),
+    # MoE routed experts (HF: mlp.experts.{j}.{gate,up,down}_proj)
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.weight$"),
+     "layers.{0}.ffn.experts.{1}.w1.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.experts.{1}.w1.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.weight$"),
+     "layers.{0}.ffn.experts.{1}.w3.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.experts.{1}.w3.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.weight$"),
+     "layers.{0}.ffn.experts.{1}.w2.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.experts.{1}.w2.scale"),
+    # MoE shared expert (HF: mlp.shared_experts.{gate,up,down}_proj)
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.shared_experts\.gate_proj\.weight$"),
+     "layers.{0}.ffn.shared_experts.w1.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.shared_experts\.gate_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.shared_experts.w1.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.shared_experts\.up_proj\.weight$"),
+     "layers.{0}.ffn.shared_experts.w3.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.shared_experts\.up_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.shared_experts.w3.scale"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.shared_experts\.down_proj\.weight$"),
+     "layers.{0}.ffn.shared_experts.w2.weight"),
+    (re.compile(r"^model\.layers\.(\d+)\.mlp\.shared_experts\.down_proj\.weight_scale_inv$"),
+     "layers.{0}.ffn.shared_experts.w2.scale"),
+]
+
+# Ignore-list: MTP layer (model.layers.61 in DSv3) and tokenizer
+# artifacts. We don't model MTP in the reference (yet).
+_IGNORE_PATTERNS = [
+    re.compile(r"^model\.layers\.61\."),
+    re.compile(r"^model\.embed_tokens_v2\."),
+]
 
 
-_DEMO_MODELS = (
-    Path(__file__).resolve().parents[2] / "demo" / "deepseek_v3" / "models"
-)
-if str(_DEMO_MODELS) not in sys.path:
-    sys.path.insert(0, str(_DEMO_MODELS))
+def _hf_to_official_name(hf_key: str) -> Optional[str]:
+    """Return the official-model parameter name for an HF key, or None
+    if the key should be ignored."""
+    for ignore in _IGNORE_PATTERNS:
+        if ignore.match(hf_key):
+            return None
+    for pat, tmpl in _HF_TO_OFFICIAL:
+        m = pat.match(hf_key)
+        if m:
+            return tmpl.format(*m.groups())
+    return None
 
 
 def _index_safetensors(model_dir: Path) -> dict[str, str]:
-    import json
+    """Map HF parameter key → safetensors shard path."""
     idx_path = model_dir / "model.safetensors.index.json"
-    if not idx_path.exists():
-        out: dict[str, str] = {}
-        for st in model_dir.glob("*.safetensors"):
-            with safe_open(st, framework="pt") as f:
-                for k in f.keys():
-                    out[k] = str(st)
-        return out
-    with open(idx_path) as f:
-        idx = json.load(f)["weight_map"]
-    return {k: str(model_dir / fname) for k, fname in idx.items()}
+    if idx_path.exists():
+        with open(idx_path) as f:
+            idx = json.load(f)["weight_map"]
+        return {k: str(model_dir / fname) for k, fname in idx.items()}
+    out: dict[str, str] = {}
+    for st in model_dir.glob("*.safetensors"):
+        with safe_open(st, framework="pt") as f:
+            for k in f.keys():
+                out[k] = str(st)
+    return out
 
 
-def _needed_prefixes(
-    layer_indices: Iterable[int], num_hidden_layers: int, with_mtp: bool,
-    pcfg: ParallelConfig, n_routed_experts: int,
-) -> tuple[list[str], set[int]]:
-    """Compute which prefixes to load + which routed experts to load.
+def _dequantize_fp8(weight_fp8: torch.Tensor, scale_inv: torch.Tensor,
+                   block_size: int = 128) -> torch.Tensor:
+    """Convert an FP8 weight + per-(block_size x block_size) BF16-scale
+    tensor into a full BF16 weight.
 
-    Returns (prefixes, local_expert_global_indices_set).
+        weight_bf16[m, n] = weight_fp8[m, n].float()
+                          * scale_inv[m // block_size, n // block_size]
+
+    Padding: HF stores `scale_inv` with shape (ceil(M/bs), ceil(N/bs))
+    so we can fall short on the last row/col. We use repeat_interleave
+    then crop to (M, N).
     """
-    pfxs = ["model.embed_tokens.", "model.norm.", "lm_head."]
+    assert weight_fp8.dtype == torch.float8_e4m3fn, (
+        f"expected float8_e4m3fn, got {weight_fp8.dtype}"
+    )
+    M, N = weight_fp8.shape
+    # Upcast scale to float32 for the per-block expand+multiply.
+    scale = scale_inv.float()
+    # Expand block scale to per-element scale via repeat_interleave.
+    expanded = (
+        scale.repeat_interleave(block_size, dim=0)
+        .repeat_interleave(block_size, dim=1)
+    )[:M, :N]
+    w_f32 = weight_fp8.float() * expanded
+    return w_f32.to(torch.bfloat16)
+
+
+def _wanted_keys(
+    layer_indices: Iterable[int], num_routed_experts: int = 256,
+) -> set[str]:
+    """Set of HF parameter keys we want for the requested subset of layers.
+
+    Includes top-level (embed, norm, lm_head) + per-layer attn + per-layer
+    MLP (dense or MoE). For MoE we include ALL experts; the loader skips
+    routed expert weights that don't exist in the official module for
+    layers that aren't MoE.
+    """
+    wanted = {
+        "model.embed_tokens.weight",
+        "model.norm.weight",
+        "lm_head.weight",
+    }
     for li in layer_indices:
-        pfxs.append(f"model.layers.{li}.")
-    if with_mtp:
-        pfxs.append(f"model.layers.{num_hidden_layers}.")
-
-    # Local routed-expert global indices for this rank.
-    num_local = pcfg.num_local_routed_experts(n_routed_experts)
-    first = pcfg.first_local_routed_expert(n_routed_experts)
-    local_experts = set(range(first, first + num_local))
-    return pfxs, local_experts
-
-
-def _key_is_local_expert(key: str, local_experts: set[int]) -> bool:
-    """True iff `key` is a routed-expert weight that this rank holds."""
-    # Pattern: model.layers.<L>.mlp.experts.<E>.<...>
-    parts = key.split(".")
-    if len(parts) < 5 or parts[3] != "mlp":
-        return False
-    if len(parts) < 7 or parts[4] != "experts":
-        return False
-    try:
-        e_idx = int(parts[5])
-    except ValueError:
-        return False
-    return e_idx in local_experts
-
-
-def _key_has_experts(key: str) -> bool:
-    return ".mlp.experts." in key
+        prefix = f"model.layers.{li}."
+        wanted.add(prefix + "input_layernorm.weight")
+        wanted.add(prefix + "post_attention_layernorm.weight")
+        attn = prefix + "self_attn."
+        for n in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj"):
+            wanted.add(attn + n + ".weight")
+            wanted.add(attn + n + ".weight_scale_inv")
+        wanted.add(attn + "q_a_layernorm.weight")
+        wanted.add(attn + "kv_a_layernorm.weight")
+        # MLP — request both dense and MoE keys; the loader silently
+        # skips ones that don't exist in the checkpoint.
+        for n in ("gate_proj", "up_proj", "down_proj"):
+            wanted.add(prefix + "mlp." + n + ".weight")
+            wanted.add(prefix + "mlp." + n + ".weight_scale_inv")
+        wanted.add(prefix + "mlp.gate.weight")
+        wanted.add(prefix + "mlp.gate.e_score_correction_bias")
+        for j in range(num_routed_experts):
+            ep = prefix + f"mlp.experts.{j}."
+            for n in ("gate_proj", "up_proj", "down_proj"):
+                wanted.add(ep + n + ".weight")
+                wanted.add(ep + n + ".weight_scale_inv")
+        sh = prefix + "mlp.shared_experts."
+        for n in ("gate_proj", "up_proj", "down_proj"):
+            wanted.add(sh + n + ".weight")
+            wanted.add(sh + n + ".weight_scale_inv")
+    return wanted
 
 
-def _load_state_dict(
-    model_dir: Path,
-    layer_indices: list[int],
-    num_hidden_layers: int,
-    with_mtp: bool,
-    target_dtype: torch.dtype,
-    device: str,
-    pcfg: ParallelConfig,
-    n_routed_experts: int,
-    return_fp8_companion: bool = False,
-):
-    """Load + (optionally) dequantize the DSv3 weights.
+def load_official_subset(
+    model: torch.nn.Module,
+    model_path: str | Path,
+    layer_indices: Iterable[int],
+    device: torch.device | str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+    verbose: bool = False,
+) -> dict[str, int]:
+    """Load HF safetensors weights into a subset model built from the
+    official DeepSeek inference code.
+
+    Args:
+        model: Subset model (e.g., `DeepseekV3SubsetModel`) whose
+            parameters use the official naming scheme.
+        model_path: Path to HF checkpoint directory.
+        layer_indices: Layer indices to load (matches the model's
+            constructed Blocks).
+        device: Target device for loaded weights.
+        dtype: Target dtype (BF16 is what the official model uses by
+            default when not configured for FP8).
 
     Returns:
-        state_dict:    BF16-dequantized weights (the long-standing default).
-        fp8_state:     ONLY if `return_fp8_companion=True`. Holds the
-                       original `(weight_fp8, weight_scale_inv)` pairs for
-                       every FP8 weight, keyed by the same param names.
-                       Consumers can pass it to
-                       `fp8_runtime.attach_fp8_faithful(model, fp8_state)`
-                       to flip selected linears into the FP8 simulation
-                       path post-load.
+        Stats dict: {'loaded': int, 'dequantized': int, 'missing': int}.
+
+    Raises:
+        FileNotFoundError if no checkpoint or shard file found.
+        RuntimeError if a required HF key is missing from the
+        checkpoint (e.g., an MoE layer is in `layer_indices` but the
+        checkpoint is dense-only).
     """
-    from convert import dequantize_fp8, is_fp8
+    model_path = Path(model_path)
+    idx = _index_safetensors(model_path)
 
-    weight_map = _index_safetensors(model_dir)
-    needed_pfx, local_experts = _needed_prefixes(
-        layer_indices, num_hidden_layers, with_mtp, pcfg, n_routed_experts,
-    )
+    # Build the wanted-set for the requested layer subset.
+    wanted = _wanted_keys(layer_indices)
+    # The HF index may not have every "wanted" key — e.g., dense
+    # layers don't have `gate.weight`, MoE layers don't have
+    # `gate_proj.weight`. We tolerate "key in wanted but not in idx".
 
-    by_file: dict[str, list[str]] = {}
-    for k, fname in weight_map.items():
-        if not any(k.startswith(p) for p in needed_pfx):
-            continue
-        # Skip experts not on this rank to save memory + load time.
-        if _key_has_experts(k) and not _key_is_local_expert(k, local_experts):
-            continue
-        by_file.setdefault(fname, []).append(k)
+    # Group keys by shard for efficient single-pass open.
+    by_shard: dict[str, list[str]] = {}
+    for k, shard in idx.items():
+        if k in wanted:
+            by_shard.setdefault(shard, []).append(k)
 
-    state_dict: dict[str, torch.Tensor] = {}
-    for fname, keys in by_file.items():
-        with safe_open(fname, framework="pt", device="cpu") as f:
+    state_dict = dict(model.state_dict())  # name → tensor
+
+    stats = {"loaded": 0, "dequantized": 0, "skipped": 0, "missing_official": 0}
+
+    # First pass: load all `*.weight` and `*.weight_scale_inv` into a
+    # staging dict so we can dequantize after both halves are loaded.
+    staging: dict[str, torch.Tensor] = {}
+    for shard, keys in by_shard.items():
+        with safe_open(shard, framework="pt", device="cpu") as f:
             for k in keys:
-                state_dict[k] = f.get_tensor(k)
+                t = f.get_tensor(k)
+                staging[k] = t
 
-    # Pair (weight, weight_scale_inv) → dequantize FP8 → BF16.
-    # CRITICAL: keep dequantized tensors on CPU, not GPU. With layers 0-19
-    # the cumulative dequant'd MoE weights would exceed B200's 180 GB GPU
-    # capacity. We move FP8 + scale to GPU only for the dequant kernel,
-    # then immediately move the BF16 result back to CPU. Per-param GPU
-    # transfer happens during the copy phase via `.to(device=dst.device)`.
-    fp8_state: dict[str, torch.Tensor] = {}
-    paired: list[str] = []
-    for k in list(state_dict.keys()):
-        if k.endswith(".weight"):
-            scale_k = f"{k}_scale_inv"
-            if scale_k in state_dict:
-                w = state_dict[k]
-                s = state_dict[scale_k]
-                if is_fp8(w):
-                    if return_fp8_companion:
-                        # Preserve the FP8 weight + scale on CPU for the
-                        # FP8-faithful reference path. They're small (FP8
-                        # = 1 byte/elem, scale is tiny), so keeping
-                        # alongside the BF16 dequant doesn't blow memory.
-                        fp8_state[k] = w.clone()
-                        fp8_state[scale_k] = s.clone()
-                    w_bf16 = dequantize_fp8(
-                        w.to(device), s.to(device)
-                    ).to(target_dtype).cpu()
-                    state_dict[k] = w_bf16
-                    # Free the GPU memory used during dequant.
-                    if device.startswith("cuda"):
-                        torch.cuda.empty_cache()
-                paired.append(scale_k)
-    for k in paired:
-        del state_dict[k]
-    if return_fp8_companion:
-        return state_dict, fp8_state
-    return state_dict
+    # Second pass: convert HF names to official names, dequantize FP8,
+    # copy into model.
+    by_official: dict[str, torch.Tensor] = {}
+    for hf_key, hf_tensor in staging.items():
+        official = _hf_to_official_name(hf_key)
+        if official is None:
+            stats["skipped"] += 1
+            continue
+        # `*.scale` and `*.weight` come separately; pair them.
+        by_official[official] = hf_tensor
 
-
-def _shard_col(t: torch.Tensor, tp_size: int, rank: int) -> torch.Tensor:
-    """Split tensor's dim 0 into `tp_size` slices and take `rank`-th."""
-    assert t.shape[0] % tp_size == 0, (
-        f"col-shard: shape[0]={t.shape[0]} not divisible by tp_size={tp_size}"
-    )
-    chunk = t.shape[0] // tp_size
-    return t[rank * chunk:(rank + 1) * chunk].contiguous()
-
-
-def _shard_row(t: torch.Tensor, tp_size: int, rank: int) -> torch.Tensor:
-    """Split tensor's dim 1 into `tp_size` slices and take `rank`-th."""
-    assert t.shape[1] % tp_size == 0, (
-        f"row-shard: shape[1]={t.shape[1]} not divisible by tp_size={tp_size}"
-    )
-    chunk = t.shape[1] // tp_size
-    return t[:, rank * chunk:(rank + 1) * chunk].contiguous()
-
-
-def load_into(
-    model: DeepseekV3Model,
-    model_dir: str | Path,
-    target_dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
-    fp8_faithful: bool = False,
-) -> dict[str, torch.Tensor]:
-    """Load weights from a HuggingFace DeepSeek V3 checkpoint into the
-    reference model in place. TP/EP-aware: each rank only loads its slice.
-
-    If `fp8_faithful=True`, also returns the *unmodified* FP8 weight +
-    scale pairs alongside; the caller can pass this into
-    `fp8_runtime.attach_fp8_faithful(model, fp8_state)` to switch matching
-    linears into the FP8-simulated forward. Returns an empty dict
-    otherwise.
-    """
-    model_dir = Path(model_dir)
-    cfg = model.cfg
-    pcfg = model.pcfg
-    if fp8_faithful:
-        sd, fp8_state = _load_state_dict(
-            model_dir,
-            layer_indices=model.layer_indices,
-            num_hidden_layers=cfg.num_hidden_layers,
-            with_mtp=model.enable_mtp,
-            target_dtype=target_dtype,
-            device=device,
-            pcfg=pcfg,
-            n_routed_experts=cfg.n_routed_experts,
-            return_fp8_companion=True,
-        )
-    else:
-        sd = _load_state_dict(
-            model_dir,
-            layer_indices=model.layer_indices,
-            num_hidden_layers=cfg.num_hidden_layers,
-            with_mtp=model.enable_mtp,
-            target_dtype=target_dtype,
-            device=device,
-            pcfg=pcfg,
-            n_routed_experts=cfg.n_routed_experts,
-        )
-        fp8_state = {}
-
-    def _get(src_key: str) -> torch.Tensor:
-        if src_key not in sd:
-            raise KeyError(
-                f"Missing weight {src_key} in checkpoint (rank {pcfg.rank} "
-                f"has {len(sd)} keys)."
+    # For each FP8 weight that has a matching scale, dequantize.
+    handled: set[str] = set()
+    for off_name, t in list(by_official.items()):
+        if off_name.endswith(".scale"):
+            continue
+        if t.dtype == torch.float8_e4m3fn:
+            scale_name = off_name[: -len(".weight")] + ".scale"
+            if scale_name in by_official:
+                t = _dequantize_fp8(t, by_official[scale_name])
+                stats["dequantized"] += 1
+                handled.add(scale_name)
+            else:
+                if verbose:
+                    print(f"  [load] missing scale for {off_name} — using raw FP8")
+        # Copy into model.
+        if off_name not in state_dict:
+            stats["missing_official"] += 1
+            if verbose:
+                print(f"  [load] {off_name} not in model (probably layer not in subset)")
+            continue
+        target = state_dict[off_name]
+        if target.shape != t.shape:
+            raise RuntimeError(
+                f"shape mismatch for {off_name}: model={tuple(target.shape)}, "
+                f"checkpoint={tuple(t.shape)}"
             )
-        return sd[src_key]
+        target.copy_(t.to(dtype=target.dtype, device=device))
+        stats["loaded"] += 1
+        handled.add(off_name)
 
-    # The state_dict holds CPU tensors (kept on CPU after FP8 dequant
-    # to avoid GPU pressure). For each parameter copy we do the SHARD
-    # on CPU first, then move just the rank's slice to GPU. This keeps
-    # transient GPU usage bounded — moving full-size weights to GPU
-    # before sharding caused OOM on rank-2 (the highest-numbered EP
-    # rank's GPU) with layers 0-19.
-    def _copy_replicated(dst: torch.nn.Parameter, src_key: str) -> None:
-        src_cpu = _get(src_key)
-        if src_cpu.shape != dst.shape:
-            raise ValueError(
-                f"Replicated copy shape mismatch for {src_key}: "
-                f"src={tuple(src_cpu.shape)} dst={tuple(dst.shape)}"
-            )
-        with torch.no_grad():
-            dst.copy_(src_cpu.to(dtype=dst.dtype, device=dst.device))
+    # gate.bias (the float32 e_score_correction_bias) gets through the
+    # same path; the loader stored it as torch.float32 in HF, copy as-is.
+    return stats
 
-    def _copy_col_tp(
-        dst: torch.nn.Parameter, src_key: str,
-        tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
-    ) -> None:
-        src_cpu = _shard_col(_get(src_key), tp_size, rank)
-        if src_cpu.shape != dst.shape:
-            raise ValueError(
-                f"Col-TP shape mismatch for {src_key}: "
-                f"src={tuple(src_cpu.shape)} dst={tuple(dst.shape)}"
-            )
-        with torch.no_grad():
-            dst.copy_(src_cpu.to(dtype=dst.dtype, device=dst.device))
 
-    def _copy_row_tp(
-        dst: torch.nn.Parameter, src_key: str,
-        tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
-    ) -> None:
-        src_cpu = _shard_row(_get(src_key), tp_size, rank)
-        if src_cpu.shape != dst.shape:
-            raise ValueError(
-                f"Row-TP shape mismatch for {src_key}: "
-                f"src={tuple(src_cpu.shape)} dst={tuple(dst.shape)}"
-            )
-        with torch.no_grad():
-            dst.copy_(src_cpu.to(dtype=dst.dtype, device=dst.device))
-
-    def _copy_col_tp_gate_up(
-        dst: torch.nn.Parameter, gate_key: str, up_key: str,
-        tp_size: int = pcfg.tp_size, rank: int = pcfg.rank,
-    ) -> None:
-        """ColumnParallel for the FUSED gate_up_proj. Each rank holds
-        its slice of GATE concatenated with its slice of UP, NOT a
-        contiguous chunk of `cat([gate; up])`.
-
-        Mirrors vLLM's `MergedColumnParallelLinear`: each output
-        partition is sharded independently, then stacked. Sharding
-        happens on CPU; only the merged-and-sharded slice moves to GPU.
-        """
-        gate_cpu = _shard_col(_get(gate_key), tp_size, rank)
-        up_cpu = _shard_col(_get(up_key), tp_size, rank)
-        merged_cpu = torch.cat([gate_cpu, up_cpu], dim=0)
-        if merged_cpu.shape != dst.shape:
-            raise ValueError(
-                f"Col-TP gate_up shape mismatch for [{gate_key}; {up_key}]: "
-                f"src={tuple(merged_cpu.shape)} dst={tuple(dst.shape)}"
-            )
-        with torch.no_grad():
-            dst.copy_(merged_cpu.to(dtype=dst.dtype, device=dst.device))
-
-    # =================== Embedding + Final Norm + LM head ===================
-    _copy_replicated(model.embed_tokens.weight, "model.embed_tokens.weight")
-    _copy_replicated(model.norm.weight, "model.norm.weight")
-    if "lm_head.weight" in sd:
-        # lm_head is tied to embed_tokens by default; copy if separate
-        # tensor exists in the checkpoint (overrides the tied weight).
-        _copy_replicated(model.lm_head.weight, "lm_head.weight")
-
-    def _load_decoder_layer(
-        layer: torch.nn.Module, pfx: str, *, is_mtp_block: bool = False,
-    ) -> None:
-        """Load weights for one DeepseekV2DecoderLayer at prefix `pfx`."""
-        # Layernorms (replicated).
-        _copy_replicated(layer.input_layernorm.weight, f"{pfx}input_layernorm.weight")
-        _copy_replicated(
-            layer.post_attention_layernorm.weight,
-            f"{pfx}post_attention_layernorm.weight",
-        )
-        # MLA.
-        attn = layer.self_attn
-        ap = f"{pfx}self_attn."
-        # Replicated Q/KV LoRA-down + layernorms.
-        _copy_replicated(attn.q_a_proj.weight, f"{ap}q_a_proj.weight")
-        _copy_replicated(attn.q_a_layernorm.weight, f"{ap}q_a_layernorm.weight")
-        _copy_replicated(
-            attn.kv_a_proj_with_mqa.weight, f"{ap}kv_a_proj_with_mqa.weight"
-        )
-        _copy_replicated(attn.kv_a_layernorm.weight, f"{ap}kv_a_layernorm.weight")
-        # ColumnParallel q_b_proj / kv_b_proj.
-        _copy_col_tp(attn.q_b_proj.weight, f"{ap}q_b_proj.weight")
-        _copy_col_tp(attn.kv_b_proj.weight, f"{ap}kv_b_proj.weight")
-        # RowParallel o_proj.
-        _copy_row_tp(attn.o_proj.weight, f"{ap}o_proj.weight")
-
-        # MLP.
-        mlp_pfx = f"{pfx}mlp."
-        is_dense = layer.layer_idx < cfg.first_k_dense_replace and not is_mtp_block
-        if is_dense:
-            mlp = layer.mlp
-            _copy_col_tp_gate_up(
-                mlp.gate_up_proj.weight,
-                f"{mlp_pfx}gate_proj.weight",
-                f"{mlp_pfx}up_proj.weight",
-            )
-            _copy_row_tp(mlp.down_proj.weight, f"{mlp_pfx}down_proj.weight")
-        else:
-            moe = layer.mlp
-            # Replicated gate + correction bias.
-            _copy_replicated(moe.gate.weight, f"{mlp_pfx}gate.weight")
-            if f"{mlp_pfx}gate.e_score_correction_bias" in sd:
-                _copy_replicated(
-                    moe.gate_e_score_correction_bias,
-                    f"{mlp_pfx}gate.e_score_correction_bias",
-                )
-            # Local routed experts.
-            for local_idx, global_e in enumerate(
-                range(moe.first_local_expert,
-                      moe.first_local_expert + moe.num_local_experts)
+if __name__ == "__main__":
+    # Smoke: just verify the mapping table covers all keys for layer 0
+    # + layer 3 (one dense, one MoE).
+    idx_path = "/raid/catalyst/models/DeepSeek-V3/model.safetensors.index.json"
+    with open(idx_path) as f:
+        idx = json.load(f)["weight_map"]
+    unknown = []
+    layer0_or_3 = 0
+    for k in idx:
+        if "model.layers.0." in k or "model.layers.3." in k or k in (
+            "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"
+        ):
+            layer0_or_3 += 1
+            if _hf_to_official_name(k) is None and not any(
+                p.match(k) for p in _IGNORE_PATTERNS
             ):
-                exp = moe.local_experts[local_idx]
-                exp_pfx = f"{mlp_pfx}experts.{global_e}."
-                _copy_col_tp_gate_up(
-                    exp.gate_up_proj.weight,
-                    f"{exp_pfx}gate_proj.weight",
-                    f"{exp_pfx}up_proj.weight",
-                    tp_size=pcfg.routed_tp_size,
-                    rank=pcfg.routed_tp_rank,
-                )
-                _copy_row_tp(
-                    exp.down_proj.weight,
-                    f"{exp_pfx}down_proj.weight",
-                    tp_size=pcfg.routed_tp_size,
-                    rank=pcfg.routed_tp_rank,
-                )
-            # Shared experts (TP across full tp_size).
-            shared_pfx = f"{mlp_pfx}shared_experts."
-            _copy_col_tp_gate_up(
-                moe.shared_gate_up.weight,
-                f"{shared_pfx}gate_proj.weight",
-                f"{shared_pfx}up_proj.weight",
-            )
-            _copy_row_tp(
-                moe.shared_down.weight,
-                f"{shared_pfx}down_proj.weight",
-            )
-
-    # =================== Decoder layers ===================
-    for li in model.layer_indices:
-        _load_decoder_layer(model.layers[str(li)], f"model.layers.{li}.")
-
-    # =================== MTP ===================
-    if model.enable_mtp:
-        mtp = model.mtp_layer
-        mtp_li = cfg.num_hidden_layers
-        mtp_pfx = f"model.layers.{mtp_li}."
-        # Replicated MTP-specific.
-        _copy_replicated(mtp.enorm.weight, f"{mtp_pfx}enorm.weight")
-        _copy_replicated(mtp.hnorm.weight, f"{mtp_pfx}hnorm.weight")
-        _copy_replicated(mtp.eh_proj.weight, f"{mtp_pfx}eh_proj.weight")
-        _copy_replicated(
-            mtp.shared_head_norm.weight, f"{mtp_pfx}shared_head.norm.weight"
-        )
-        # MTP block (full DecoderLayer at the same prefix).
-        _load_decoder_layer(mtp.mtp_block, mtp_pfx, is_mtp_block=True)
-
-    return fp8_state
+                unknown.append(k)
+    print(f"layer0+layer3 keys scanned: {layer0_or_3}")
+    print(f"unmapped: {len(unknown)}")
+    if unknown:
+        for k in unknown[:30]:
+            print(f"  {k}")
