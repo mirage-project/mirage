@@ -686,13 +686,18 @@ class DeepSeekV3Builder(GraphBuilder):
             if self.mpk.max_seq_length <= 512
             else self.mpk.fp8_gemm_dense_mediumm_layer
         )
+        # Chunked-prefill kv_b_k/v: keep at full self.num_workers (NOT the
+        # env-overridable). The runtime_m_mode=1 + larger M_total path has
+        # tighter constraints and crashes at low num_workers (tested 48/64
+        # both fail). Decode-only env override (`MPK_FP8_DENSE_NUM_WORKERS`)
+        # leaves this call at default 128.
         gemm_layer(
             input_fp8=input_fp8,
             weight_fp8=weight,
             input_scale=input_scale,
             weight_scale=weight_scale,
             output=output,
-            num_workers=self._fp8_dense_num_workers(),
+            num_workers=self.num_workers,
             runtime_m_mode=1,
         )
 
