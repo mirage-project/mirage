@@ -138,6 +138,14 @@ def _tensor_parallel_allreduce_grid(output_size: int) -> tuple[int, int, int]:
     the producer so each upstream task has a one-to-one downstream
     consumer. `MPK_ALLREDUCE_TILE_SIZE` overrides for ablation (e.g. coarse
     1024-wide tiles for small TP-only configs that prefer fewer collectives).
+
+    Empirical note (2026-05-11): a tile-size sweep on prefill-128 TP=4 EP=2
+    showed TILE=128 / 512 / 1024 all within ~1.5ms (= run-to-run noise)
+    end-to-end. Per-task barrier wallclock (~370μs in prefill, ~12μs in
+    decode) is **independent of tile size** — barrier-dominated, not
+    bandwidth-bound. So tile-size tuning here is not a productive lever;
+    closing the AR vs vLLM gap (12μs vs 6μs in decode) requires kernel-
+    level changes (e.g., single global barrier shared across all AR tasks).
     """
     if output_size % 128 != 0:
         raise ValueError(
