@@ -2081,8 +2081,12 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         if use_fp8_experts:
+            # 2026-05-12: MoE W13 dominates prefill (88% of layer wallclock,
+            # 4076 μs/call mean per perf-analyzer). Env override lets a sweep
+            # find a better Y without rebuilding the builder.
+            _w13_pref = int(os.environ.get("MPK_MOE_W13_M_SPLIT", "16"))
             w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
-                                           preferred=16)
+                                           preferred=_w13_pref)
             w13_expert_grid_x = _moe_expert_grid_x(
                 mbt, self.num_local_experts, preferred_groups=8)
             self.mpk.moe_w13_fp8_layer(
@@ -2162,7 +2166,8 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         if use_fp8_experts:
-            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
+            _w2_pref = int(os.environ.get("MPK_MOE_W2_M_SPLIT", "14"))
+            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=_w2_pref)
             w2_expert_grid_x = _moe_expert_grid_x(
                 mbt, self.num_local_experts, preferred_groups=10)
             self.mpk.moe_w2_fp8_layer(
@@ -2833,8 +2838,9 @@ class DeepSeekV3Builder(GraphBuilder):
         moe_mid = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.routed_moe_intermediate_size),
             dtype=bfloat16, name="mtp_moe_mid", io_category="cuda_tensor")
+        _mtp_w13_pref = int(os.environ.get("MPK_MOE_W13_M_SPLIT", "16"))
         mtp_w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
-                                           preferred=16)
+                                           preferred=_mtp_w13_pref)
         mtp_w13_expert_grid_x = _moe_expert_grid_x(
             mbt, self.num_local_experts, preferred_groups=8)
         self.mpk.moe_w13_fp8_layer(
@@ -2876,7 +2882,8 @@ class DeepSeekV3Builder(GraphBuilder):
         moe_down_out = self._cached_new_tensor(
             dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
             dtype=bfloat16, name="mtp_moe_down", io_category="cuda_tensor")
-        mtp_w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=14)
+        _mtp_w2_pref = int(os.environ.get("MPK_MOE_W2_M_SPLIT", "14"))
+        mtp_w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=_mtp_w2_pref)
         mtp_w2_expert_grid_x = _moe_expert_grid_x(
             mbt, self.num_local_experts, preferred_groups=10)
         self.mpk.moe_w2_fp8_layer(
