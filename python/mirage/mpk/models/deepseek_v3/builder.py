@@ -400,6 +400,25 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_mbt_f32_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_mbt_f32_bufs[cache_key]
 
+    def _fp8_dense_num_workers(self):
+        """Number of persistent workers each fp8_gemm_dense_{smallm,mediumm} call
+        is allowed to occupy.
+
+        Default = self.num_workers (typically 128 on B200). Override via env
+        `MPK_FP8_DENSE_NUM_WORKERS` for experiments. Lower values free workers
+        for concurrent GEMMs in the same phase (e.g., Q/KV phase with many
+        small per-shard linears running back-to-back).
+
+        Each task strides through output tiles internally, so lowering num_workers
+        below the actual tile count just means each task does more iterations.
+        For output 1536/128 = 12 tiles, num_workers >= 12 covers all tiles in
+        one wave; <12 means each worker handles multiple tiles.
+        """
+        override = os.environ.get("MPK_FP8_DENSE_NUM_WORKERS")
+        if override:
+            return int(override)
+        return self.num_workers
+
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
                        output, residual=None, gate_mode: int = 0):
         """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
@@ -462,7 +481,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 input_scale=input_scale,
                 weight_scale=weight_scale_raw,
                 output=output,
-                num_workers=self.num_workers,
+                num_workers=self._fp8_dense_num_workers(),
                 runtime_m_mode=0,
             )
             return
@@ -477,7 +496,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 input_scale=input_scale,
                 weight_scale=weight_scale_raw,
                 output=partial,
-                num_workers=self.num_workers,
+                num_workers=self._fp8_dense_num_workers(),
                 runtime_m_mode=0,
             )
             self._allreduce_residual(partial, output, residual,
@@ -496,7 +515,7 @@ class DeepSeekV3Builder(GraphBuilder):
             input_scale=input_scale,
             weight_scale=weight_scale_raw,
             output=partial,
-            num_workers=self.num_workers,
+            num_workers=self._fp8_dense_num_workers(),
             runtime_m_mode=0,
         )
         self.mpk.elementwise_add_layer(
@@ -673,7 +692,7 @@ class DeepSeekV3Builder(GraphBuilder):
             input_scale=input_scale,
             weight_scale=weight_scale,
             output=output,
-            num_workers=self.num_workers,
+            num_workers=self._fp8_dense_num_workers(),
             runtime_m_mode=1,
         )
 
