@@ -19,6 +19,11 @@
 Default OFF; enable via `MPK_AR_PER_TASK_BARRIER=1` to pass
 `-DMPK_AR_PER_TASK_BARRIER` to runtime nvcc.
 
+**Syntax check passed** (2026-05-12): `nvcc -arch=sm_100a -dc -DUSE_NVSHMEM
+-DMIRAGE_BACKEND_USE_CUDA [-DMPK_AR_PER_TASK_BARRIER]` on the .cuh-only file
+produces a 56KB object file with no errors or warnings, with the macro both
+defined and undefined.
+
 The code is **unverified on a live GPU** — review and run validation when
 GPU time is available:
 
