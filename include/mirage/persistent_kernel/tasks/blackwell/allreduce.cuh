@@ -376,7 +376,8 @@ static __device__ __forceinline__ void *mpkar_mc_ptr(nvshmemi_team_t *team,
 
 static __device__ __forceinline__ void *mpkar_peer_ptr(void const *ptr,
                                                        int pe) {
-  char const *base = static_cast<char const *>(nvshmemi_device_state_d.heap_base);
+  char const *base =
+      static_cast<char const *>(nvshmemi_device_state_d.heap_base);
   char const *addr = static_cast<char const *>(ptr);
   ptrdiff_t offset = addr - base;
   void const *peer_base_addr = (void *)__ldg(
@@ -482,11 +483,11 @@ static __device__ __forceinline__ uint32_t
 // contributes only its partial MLP output to NVLS, and residual is added once
 // after the cross-rank reduction has completed.
 template <typename T>
-static __device__ __forceinline__ void mpkar_nvls_reduce_add_residual_v4_block(
-    int4 *__restrict__ dst,
-    int4 const *__restrict__ mc_src,
-    int4 const *__restrict__ residual,
-    int nelems_v4) {
+static __device__ __forceinline__ void
+    mpkar_nvls_reduce_add_residual_v4_block(int4 *__restrict__ dst,
+                                            int4 const *__restrict__ mc_src,
+                                            int4 const *__restrict__ residual,
+                                            int nelems_v4) {
   for (int j = threadIdx.x; j < nelems_v4; j += blockDim.x) {
     if constexpr (sizeof(T) == 2) {
       if constexpr (cuda::std::is_same<T, __nv_bfloat16>::value) {
@@ -544,24 +545,42 @@ template <typename T,
           int OUTPUT_SIZE,
           int OUTPUT_STRIDE,
           bool ADD_RESIDUAL>
-__device__ __forceinline__ void
-    nvshmem_tile_allreduce_impl(void *input_ptr,
-                                void *residual_ptr,
-                                void *output_ptr,
-                                void *_teams,
-                                int task_offset,
-                                int active_tokens) {
+__device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
+                                                            void *residual_ptr,
+                                                            void *output_ptr,
+                                                            void *_teams,
+                                                            int task_offset,
+                                                            int active_tokens) {
   nvshmem_team_t *teams = reinterpret_cast<nvshmem_team_t *>(_teams);
   nvshmem_team_t team = teams[task_offset];
   int const num_active_rows = max(0, min(active_tokens, BATCH_SIZE));
 
   // --- Phase 1: ensure local data is visible, then cross-GPU barrier ---
   __threadfence();
+#ifndef MPK_AR_SKIP_BARRIER
   mpkar_sync_block(team);
+#endif
 
   // --- Phase 2: NVLS multicast ld_reduce -> local store ---
   nvshmemi_team_t *teami = nvshmemi_device_state_d.team_pool[team];
   void *mc_src = mpkar_mc_ptr(teami, input_ptr);
+#ifdef MPK_AR_SKIP_REDUCE
+  // Skip NVLS reduce entirely; just copy input → output (per-PE, no AR).
+  // Used only for measuring barrier-vs-reduce cost; produces wrong output.
+  {
+    int4 *dst_v4_dbg = reinterpret_cast<int4 *>(output_ptr);
+    int4 const *src_v4_dbg = reinterpret_cast<int4 const *>(input_ptr);
+    constexpr int ELEMS_PER_V4_DBG = 16 / sizeof(T);
+    constexpr int V4_PER_ROW_DBG = OUTPUT_SIZE / ELEMS_PER_V4_DBG;
+    int const total_v4_dbg = V4_PER_ROW_DBG * num_active_rows;
+    for (int j = threadIdx.x; j < total_v4_dbg; j += blockDim.x) {
+      dst_v4_dbg[j] = src_v4_dbg[j];
+    }
+    __threadfence();
+    __syncthreads();
+    return;
+  }
+#endif
 
   // Compute number of int4 (16-byte) elements.
   // For 2D tile with shape [OUTPUT_SIZE, active_tokens] and stride
@@ -596,11 +615,11 @@ __device__ __forceinline__ void
     // Strided: per-row
     for (int row = 0; row < num_active_rows; row++) {
       if constexpr (ADD_RESIDUAL) {
-        mpkar_nvls_reduce_add_residual_v4_block<T>(
-            dst_v4 + row * STRIDE_V4,
-            src_mc_v4 + row * STRIDE_V4,
-            residual_v4 + row * STRIDE_V4,
-            V4_PER_ROW);
+        mpkar_nvls_reduce_add_residual_v4_block<T>(dst_v4 + row * STRIDE_V4,
+                                                   src_mc_v4 + row * STRIDE_V4,
+                                                   residual_v4 +
+                                                       row * STRIDE_V4,
+                                                   V4_PER_ROW);
       } else {
         mpkar_nvls_reduce_v4_block<T>(
             dst_v4 + row * STRIDE_V4, src_mc_v4 + row * STRIDE_V4, V4_PER_ROW);

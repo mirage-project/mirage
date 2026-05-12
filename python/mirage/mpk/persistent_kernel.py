@@ -268,6 +268,12 @@ def get_compile_command(
         f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_mla_tp4_head_groups()}",
         f"-DMIRAGE_MLA_TP4_RD_DV={_mla_tp4_rd_dv()}",
     ]
+    # Debug knobs to isolate AllReduce barrier vs NVLS-reduce cost (UNSAFE for
+    # correctness — only for measuring per-phase wallclock).
+    if os.environ.get("MPK_AR_SKIP_BARRIER") == "1":
+        common_cmd.append("-DMPK_AR_SKIP_BARRIER")
+    if os.environ.get("MPK_AR_SKIP_REDUCE") == "1":
+        common_cmd.append("-DMPK_AR_SKIP_REDUCE")
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
