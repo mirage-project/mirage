@@ -20,9 +20,19 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
   - `MPK_AR_SKIP_BARRIER=1` and `MPK_AR_SKIP_REDUCE=1` env vars propagate as -D macros for measurement only.
 
 ### A2 ablation — fp8_dense_smallm low num_workers crash
-- **Status**: Planning
+- **Status**: Static code analysis done, no code-level smoking gun. Live bisect pending GPU time.
 - **Goal**: Find code-level root cause of CUDA "unspecified launch failure" at num_workers<56 (decode) and <64 (prefill)
 - **Method**: Bisect with cuda-gdb / printf instrumentation, vary num_workers in steps
+- **Static-analysis findings (2026-05-12)**:
+  - Kernel `fp8_gemm_dense_sm100_common.cuh::task_impl_tpl` is structurally fine for any `num_workers`: worker_idx + num_workers correctly parametrize tile striding (`int bidx = iter * num_workers + worker_idx; if (bidx >= total) break;`).
+  - Template params `<BN=128, NS=3>` are hardcoded at registration (`task_register.cc:5501-5503`), so num_workers doesn't change generated code.
+  - tcgen05 alloc (warp 2) + dealloc (warp 0) are in different warps — unusual but matches the kernel's documented role assignment (`common.cuh:26-31`); not the same restriction as CUTLASS/CuTe which the CLAUDE.md note covers.
+  - The runtime_m_mode=1 (chunked-prefill kv_b path) has BIGGER `runtime_m_` → more iterations per worker when num_workers is low — but that should slow down, not crash.
+- **Working hypotheses for the live bisect**:
+  1. **Task graph scheduling**: with grid=(num_workers, 1, 1) and num_workers<global_workers (typically 128), some workers run other task types instead. Those tasks might race against in-flight dense-GEMM TMA/tcgen05 state in unintended ways.
+  2. **Resource starvation**: if dense_smallm holds TMA descriptors / TMEM and a co-scheduled task on another worker also needs them, allocation can fail asymmetrically.
+  3. **runtime_m_mode=1 only**: the dynamic M = `(lp_-fp_-1)*MPK_PAGE_SIZE + last_page_len` might compute negative/zero when fp_ or lp_ are uninitialized for the gated decode-step early-exit path — but the comment at task_register.cc:5491 already guards `if (req_id_ < 0) return`. Need to verify all kv_indptr fields are populated before the prefill chunk is dispatched.
+- **Next live experiment**: run mbt=128 prefill with `MPK_FP8_DENSE_NUM_WORKERS_KV_B=N` for N in {32, 40, 48, 56, 64, 72, 96, 128} (need to plumb a separate env override for the kv_b call), capture exact failure threshold.
 
 ### LM head 75μs calling-overhead investigation
 - **Status**: Planning
