@@ -1584,9 +1584,11 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # Diagnostic: dump self.q_a_out for layer 0 if dump_layer0_intra_tensors
         # is set. Saves the post-layernormed q_a_proj output as slot 1.
-        # Skipped in qkv_a fused mode because elementwise_add expects matching
-        # input/output dims and qkv_a_out is wider than the dump buffer.
-        if (not self._qkv_a_fused and layer_idx == 0
+        # In QKV-a fused mode the dump tensor must match input_a's wider
+        # shape, so demo.py allocates the slot-1 buffer as (mbt, 2176) when
+        # MPK_DSV3_QKV_A_FUSED=1. Python downstream just slices [:, :1536]
+        # to compare with the baseline (mbt, 1536) dump.
+        if (layer_idx == 0
                 and getattr(self.mpk, "dump_layer0_intra_tensors", None) is not None
                 and getattr(self, "_layer0_q_a_zero_pt", None) is not None):
             q_a_zero_dt = self.mpk.attach_input(
@@ -3636,10 +3638,12 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=self._layer0_intra_zero_pt,
                 name="layer0_intra_zero",
             )
-            # Slot 1 has different shape (mbt, q_lora_rank=1536); use a
-            # matching zero buffer so elementwise_add input_b matches.
+            # Slot 1 has different shape (mbt, q_lora_rank=1536) by default,
+            # but in QKV-a fused mode the demo allocates it as (mbt, 2176)
+            # so the dump captures the whole qkv_a_out (we slice in Python).
+            slot1_cols = (2176 if self._qkv_a_fused else self.q_lora_rank)
             self._layer0_q_a_zero_pt = torch.zeros(
-                (self.max_num_batched_tokens, self.q_lora_rank),
+                (self.max_num_batched_tokens, slot1_cols),
                 dtype=torch.bfloat16, device="cuda",
             )
             layer0_attn_zero_dt = self.mpk.attach_input(

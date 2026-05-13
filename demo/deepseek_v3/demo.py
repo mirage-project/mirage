@@ -1211,13 +1211,18 @@ if __name__ == "__main__":
             # 2=attn_out      (mbt, hidden) — o_proj+residual
             # 3=dense_mlp_out (mbt, hidden) — full layer 0 residual
             q_lora_rank = 1536
+            # When QKV-a fused is on, the slot-1 dump captures the WHOLE
+            # qkv_a_out (mbt, 2176) so elementwise_add can run with matching
+            # shapes; Python-side comparator slices [:, :q_lora_rank].
+            qkv_a_diag_fused = os.environ.get("MPK_DSV3_QKV_A_FUSED", "0") == "1"
+            slot1_cols = 2176 if qkv_a_diag_fused else q_lora_rank
             mpk.dump_layer0_intra_tensors = [
                 torch.zeros(
                     (args.max_num_batched_tokens, model_config.hidden_size),
                     dtype=torch.bfloat16, device="cuda",
                 ),
                 torch.zeros(
-                    (args.max_num_batched_tokens, q_lora_rank),
+                    (args.max_num_batched_tokens, slot1_cols),
                     dtype=torch.bfloat16, device="cuda",
                 ),
                 torch.zeros(
