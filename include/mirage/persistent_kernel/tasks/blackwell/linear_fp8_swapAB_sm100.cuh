@@ -95,15 +95,15 @@ template <typename T_,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
-    const TMA_A &tma_a,
-    const TMA_B &tma_b,
-    uint32_t const *weight_scale_ptr,
-    uint32_t const *input_scale_ptr,
-    int weight_scale_row_stride,
-    int input_scale_row_stride,
-    BiasTensor mBias,
-    const TMA_OUT &tma_out) {
+__device__ __noinline__ void
+    linear_fp8_swapAB_sm100_task_impl(const TMA_A &tma_a,
+                                      const TMA_B &tma_b,
+                                      uint32_t const *weight_scale_ptr,
+                                      uint32_t const *input_scale_ptr,
+                                      int weight_scale_row_stride,
+                                      int input_scale_row_stride,
+                                      BiasTensor mBias,
+                                      const TMA_OUT &tma_out) {
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
   using TypeScale = uint32_t;
   using TypeC = cute::bfloat16_t;
@@ -137,8 +137,9 @@ __device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
   // {32, 64, 128, 256, 512}. Round up the raw sum.
   constexpr int num_tmem_columns_raw =
       kNumAccumTmemCols + kNumSFATmemCols + kNumSFBTmemCols;
-  constexpr int num_tmem_columns = mirage::blackwell::linear_fp8_sm100::sm100::
-      get_num_aligned_tmem_cols<num_tmem_columns_raw>();
+  constexpr int num_tmem_columns =
+      mirage::blackwell::linear_fp8_sm100::sm100::get_num_aligned_tmem_cols<
+          num_tmem_columns_raw>();
 
   int warp_idx = cutlass::canonical_warp_idx_sync();
   int lane_idx = kernel::lane_id();
@@ -598,8 +599,7 @@ __device__ __noinline__ void linear_fp8_swapAB_sm100_task_impl(
             // uint32. sf_id = k_tile % 4 selects that byte for every k_sub.
             // (See linear_fp8_sm100.cuh:496-499 for the canonical pattern:
             //   sfa_id = (kGranKA == 32 ? k_sub : sfa_stage_in_group_idx).)
-            const uint32_t sfa_id =
-                static_cast<uint32_t>(k_tile & 3);
+            const uint32_t sfa_id = static_cast<uint32_t>(k_tile & 3);
             const uint32_t sfb_id = sfa_id;
             auto const runtime_instr_desc =
                 kernel::sm100::make_runtime_instr_desc_with_sf_id(

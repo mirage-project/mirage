@@ -29,6 +29,10 @@ SHAPES = [
                                                               # supported_shapes; SKIP if so
     ("o_proj split_k=2",                 16, 128, 8192,  2),
     ("o_proj split_k=4",                 16, 128, 4096,  4),
+    # o_proj at K_per_task=2048 split_k=8 (closest to MPK shape, B=128)
+    ("o_proj split_k=8 K/t=2048 B=128", 128, 128, 2048,  8),
+    # o_proj at K_per_task=2048 split_k=8 (B=16 proxy)
+    ("o_proj split_k=8 K/t=2048 B=16",  16, 128, 2048,  8),
     # q_a-like (full_K=7168)
     ("q_a split_k=1 (full K=7168)",      16, 128, 7168,  1),
     ("q_a split_k=2",                    16, 128, 3584,  2),

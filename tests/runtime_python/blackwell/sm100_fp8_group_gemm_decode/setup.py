@@ -4,7 +4,7 @@ import os
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 repo_root = os.path.abspath(os.path.join(this_dir, "../../../.."))
-cuda_home = "/usr/local/cuda-12.8"
+cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda-13.2")
 os.environ["CUDA_HOME"] = cuda_home
 os.environ["PATH"] = os.path.join(cuda_home, "bin") + ":" + os.environ.get("PATH", "")
 
@@ -27,7 +27,12 @@ setup(
             extra_compile_args={
                 'cxx': ['-std=c++17'],
                 'nvcc': [
-                    '-O3', '-arch=sm_100a', '-std=c++17',
+                    '-O3',
+                    # MUST use -gencode (not -arch) for sm_100a — `-arch=sm_100a`
+                    # gets silently downgraded to sm_100 by ptxas on CUDA 13.2,
+                    # which then rejects tcgen05.* instructions.
+                    '-gencode=arch=compute_100a,code=sm_100a',
+                    '-std=c++17',
                     '--expt-relaxed-constexpr', '-lineinfo',
                 ]
             }

@@ -80,8 +80,8 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
     // get the current batch input, weight, and output pointers. When
     // IN_OFFSET/OUT_OFFSET are non-zero, the per-row base is shifted by
     // that many elements (used by the QKV-a fused path on BATCH_SIZE==1).
-    T const *__restrict__ curr_d_input = static_cast<T const *>(input_ptr) +
-                                         IN_OFFSET + batch_idx * HIDDEN_DIM;
+    T const *__restrict__ curr_d_input =
+        static_cast<T const *>(input_ptr) + IN_OFFSET + batch_idx * HIDDEN_DIM;
     T *__restrict__ curr_d_output =
         static_cast<T *>(output_ptr) + OUT_OFFSET + batch_idx * HIDDEN_DIM;
     // Warm up input tiles for the first atoms

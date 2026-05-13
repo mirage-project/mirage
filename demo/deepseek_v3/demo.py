@@ -1324,6 +1324,28 @@ if __name__ == "__main__":
                     os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
                 )
                 print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
+            # 2026-05-13 DEBUG: dump FP8 input/scale + qkv_a_out torch tensors
+            # if attached via MPK_DSV3_FP8_BUF_ATTACH / MPK_DSV3_QKV_A_OUT_ATTACH.
+            if getattr(mpk, "_fp8_input_torch", None) is not None:
+                for rsize, tensor in mpk._fp8_input_torch.items():
+                    name = f"fp8_input_v2_{rsize}.pt"
+                    torch.save(tensor.detach().view(torch.uint8).cpu(),
+                               os.path.join(args.dump_hidden_dir, name))
+                    print(f"Saved {name} to {args.dump_hidden_dir}")
+                for rsize, tensor in mpk._fp8_scale_torch.items():
+                    name = f"fp8_scale_v2_{rsize}.pt"
+                    torch.save(tensor.detach().cpu(),
+                               os.path.join(args.dump_hidden_dir, name))
+                    print(f"Saved {name} to {args.dump_hidden_dir}")
+            if getattr(mpk, "_qkv_a_out_torch", None) is not None:
+                torch.save(mpk._qkv_a_out_torch.detach().cpu(),
+                           os.path.join(args.dump_hidden_dir, "qkv_a_out_attached.pt"))
+                print(f"Saved qkv_a_out_attached.pt to {args.dump_hidden_dir}")
+            if getattr(mpk, "_rmsnorm_out_torch", None) is not None:
+                torch.save(mpk._rmsnorm_out_torch.detach().cpu(),
+                           os.path.join(args.dump_hidden_dir, "rmsnorm_out_attached.pt"))
+                print(f"Saved rmsnorm_out_attached.pt to {args.dump_hidden_dir}")
+
             for _attr, _fname in [
                 ("dump_ckv_sep_tensor", "ckv_sep.pt"),
                 ("dump_kpe_sep_tensor", "kpe_sep.pt"),

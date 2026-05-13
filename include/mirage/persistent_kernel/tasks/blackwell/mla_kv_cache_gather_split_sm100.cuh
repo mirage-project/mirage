@@ -40,12 +40,13 @@ template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
 // specified, default to ROPE_DIM for back-compat with contiguous
 // [N, ROPE_DIM] callers.
 __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
-    void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new c_latent
-    void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] (first
-                                  //  D_K-D_V=64 cols are real rope data)
-    void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged cache
-    void *ckv_sep_ptr,            // [max_seq_len, D_V=512] output
-    void *kpe_sep_ptr,            // [max_seq_len, D_K-D_V=64] output
+    void const
+        *c_latent_new_ptr,    // [num_tokens, C_LATENT_ROW_STRIDE] new c_latent
+    void const *k_pe_new_ptr, // [num_tokens, K_PE_ROW_STRIDE] (first
+                              //  D_K-D_V=64 cols are real rope data)
+    void *paged_cache_ptr,    // [num_pages, PAGE_SIZE, D_K] paged cache
+    void *ckv_sep_ptr,        // [max_seq_len, D_V=512] output
+    void *kpe_sep_ptr,        // [max_seq_len, D_K-D_V=64] output
     int const *qo_indptr_buffer_ptr,
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,

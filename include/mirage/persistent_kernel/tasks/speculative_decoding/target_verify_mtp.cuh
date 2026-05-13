@@ -70,11 +70,10 @@ __device__ __forceinline__ void
     //                   natural drafts rarely hit in shallow-layer tests
     //   K=NUM_DRAFT   — accept all drafts; exercises full K+1 step advance
     // Clamp at compile time so out-of-range envs degrade to a valid mode.
-    constexpr int _force_n =
-        (MPK_MTP_DEBUG_FORCE_ACCEPT_N < 0) ? 0
-        : (MPK_MTP_DEBUG_FORCE_ACCEPT_N > NUM_DRAFT_TOKENS)
-              ? NUM_DRAFT_TOKENS
-              : MPK_MTP_DEBUG_FORCE_ACCEPT_N;
+    constexpr int _force_n = (MPK_MTP_DEBUG_FORCE_ACCEPT_N < 0) ? 0
+                             : (MPK_MTP_DEBUG_FORCE_ACCEPT_N > NUM_DRAFT_TOKENS)
+                                 ? NUM_DRAFT_TOKENS
+                                 : MPK_MTP_DEBUG_FORCE_ACCEPT_N;
     int accepted = _force_n;
 #else
     int accepted = NUM_DRAFT_TOKENS;

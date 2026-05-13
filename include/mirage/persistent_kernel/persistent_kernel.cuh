@@ -234,8 +234,7 @@ __device__ __forceinline__ bool
              num_tokens,
              prompt_len,
              config.step[request_id],
-             config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
-                           num_tokens],
+             config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + num_tokens],
              config.eos_token_id);
 #endif
 #if defined(MPK_ENABLE_PROFILING) || defined(MPK_TEST_MODE)

@@ -209,9 +209,8 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     for (int out_slot = 0; out_slot < num_outputs; out_slot++) {
       size_t guid = output_ops[out_slot]->dtensor.guid;
       auto wit = last_writer.find(guid);
-      if (wit != last_writer.end() &&
-          ag.layers[wit->second.first].task_type ==
-              mirage::runtime::TASK_TENSOR_INIT) {
+      if (wit != last_writer.end() && ag.layers[wit->second.first].task_type ==
+                                          mirage::runtime::TASK_TENSOR_INIT) {
         int prod_layer = wit->second.first;
         int prod_out_slot = wit->second.second;
         bool duplicate_edge = false;
@@ -241,8 +240,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
                            ag.layers[prod_layer].num_inputs,
                            prod_inputs,
                            prod_outputs);
-          if (prod_out_slot < 0 ||
-              prod_out_slot >= (int)prod_outputs.size()) {
+          if (prod_out_slot < 0 || prod_out_slot >= (int)prod_outputs.size()) {
             throw std::runtime_error(
                 "build_annotated_graph: invalid out_slot for WAW producer");
           }
@@ -455,16 +453,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
           << " in_edges=";
       for (int eidx : ag.layers[i].in_edges) {
         auto const &e = ag.edges[eidx];
-        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
-            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
-            << "]";
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
       }
       msg << " out_edges=";
       for (int eidx : ag.layers[i].out_edges) {
         auto const &e = ag.edges[eidx];
-        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
-            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
-            << "]";
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
       }
       throw std::runtime_error(msg.str());
     }
@@ -477,16 +473,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
           << " in_edges=";
       for (int eidx : ag.layers[i].in_edges) {
         auto const &e = ag.edges[eidx];
-        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
-            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
-            << "]";
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
       }
       msg << " out_edges=";
       for (int eidx : ag.layers[i].out_edges) {
         auto const &e = ag.edges[eidx];
-        msg << " [" << e.prod_layer << ":" << e.out_slot << "->"
-            << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
-            << "]";
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
       }
       throw std::runtime_error(msg.str());
     }

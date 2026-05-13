@@ -672,8 +672,9 @@ __device__ __noinline__ void
           nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
           if (write_final) {
             if (final_row_valid) {
-              int const o_base = (bi * Q_LEN + q_final) * local_num_heads * D_V +
-                                 h_final * D_V;
+              int const o_base =
+                  (bi * Q_LEN + q_final) * local_num_heads * D_V +
+                  h_final * D_V;
               Oa[o_base + vc * BK + c + i] = val;
             }
           } else {

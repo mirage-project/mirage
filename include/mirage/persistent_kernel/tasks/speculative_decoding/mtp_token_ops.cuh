@@ -134,8 +134,7 @@ __device__ __forceinline__ void
   // Thread 0: write main token at step+1, set num_new_tokens
   if (t_id == 0) {
     if (cur_step + 1 < MAX_SEQ_LEN) {
-      tokens[req * MAX_SEQ_LEN + cur_step + 1] =
-          main_token[main_token_offset];
+      tokens[req * MAX_SEQ_LEN + cur_step + 1] = main_token[main_token_offset];
     }
     // Clamp num_new_tokens so we don't exceed MAX_SEQ_LEN
     int max_new = MAX_SEQ_LEN - cur_step - 1;

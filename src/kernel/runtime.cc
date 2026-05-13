@@ -408,8 +408,8 @@ void register_mugraph(
             // request_id=gi (head_group from bid.y), kv_idx=si (split from
             // bid.x) expert_offset stores hpb for TMA box dimension
             if (task_type == TASK_MLA_MTP_DECODE_SM100) {
-              task.task_metadata.kv_idx = bid.x;            // si (split_idx)
-              task.task_metadata.request_id = bid.y;        // gi (head_group)
+              task.task_metadata.kv_idx = bid.x;     // si (split_idx)
+              task.task_metadata.request_id = bid.y; // gi (head_group)
               int num_head_groups = static_cast<int>(bgraph.grid_dim.y);
               if (num_head_groups < 1) {
                 num_head_groups = 1;
@@ -418,8 +418,7 @@ void register_mugraph(
               // Pack hpb for TMA descriptor creation. The low 16 bits remain
               // the batch id consumed by the generated kernel wrapper.
               task.task_metadata.merge_task_offset =
-                  ((hpb & 0xffff) << 16) |
-                  (static_cast<int>(bid.z) & 0xffff);
+                  ((hpb & 0xffff) << 16) | (static_cast<int>(bid.z) & 0xffff);
             }
             // MTP reduce: grid=(D_V/RD_DV, num_head_groups, B)
             if (task_type == TASK_MLA_MTP_REDUCE_SM100) {
@@ -1896,7 +1895,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_SM100] = "TASK_LINEAR_FP8_SM100";
   task_type_to_name[TASK_LINEAR_FP8_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100";
-  task_type_to_name[TASK_LINEAR_FP8_SWAPAB_SM100] = "TASK_LINEAR_FP8_SWAPAB_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_SWAPAB_SM100] =
+      "TASK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_SMALLM_SM100] =
@@ -1942,8 +1942,7 @@ TaskGraphResult print_task_graph(
       "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
   task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
-  task_type_to_name[TASK_NVSHMEM_GLOBAL_ARGMAX] =
-      "TASK_NVSHMEM_GLOBAL_ARGMAX";
+  task_type_to_name[TASK_NVSHMEM_GLOBAL_ARGMAX] = "TASK_NVSHMEM_GLOBAL_ARGMAX";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

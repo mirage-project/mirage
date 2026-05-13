@@ -4817,14 +4817,21 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     }
     code.e("if (task_desc->task_metadata.request_id >= active_rows_) return;");
   }
+  // OUTPUT_STRIDE: when slicing (input_stride > hidden_size), the output
+  // buffer is sized for hidden_size per row, so writes must use hidden_size
+  // as the row stride. Default (no slice) keeps OUTPUT_STRIDE == input_stride
+  // for backward compat with legacy callers where the kernel previously
+  // assumed input_stride == output_stride. 2026-05-12 H8 fix.
+  int output_stride = has_slice_override ? hidden_size : input_stride;
   code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $, $,",
          batch_size,
          hidden_size,
          GROUP_SIZE,
          input_stride,
          group_tiles);
-  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $>(",
-         scale_ue8m0 ? "true" : "false");
+  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $, $>(",
+         scale_ue8m0 ? "true" : "false",
+         output_stride);
   if (in_offset_elems != 0) {
     // QKV-a fused slice: pre-offset the input pointer so the kernel reads
     // the right column window from a wider buffer.
@@ -6057,7 +6064,8 @@ int TaskRegister::register_deepseek_mla_rope_k_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   // params: [tile_q [, k_pe_row_stride [, k_pe_offset]]]
-  // - Legacy (1 param): standalone k_pe buffer (mbt, 128) → K_PE_STRIDE=128, K_PE_OFFSET=0.
+  // - Legacy (1 param): standalone k_pe buffer (mbt, 128) → K_PE_STRIDE=128,
+  // K_PE_OFFSET=0.
   // - QKV-a fused (3 params): k_pe lives at offset `k_pe_offset` within a
   //   wider (mbt, k_pe_row_stride) buffer. Builder passes e.g. (16, 2176, 2048)
   //   so the kernel rotates qkv_a_out[:, 2048:2112] in place. Defaults keep

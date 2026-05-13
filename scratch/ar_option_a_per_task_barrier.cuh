@@ -11,15 +11,16 @@
 // (barrier=91 μs/task, removing barrier saves 18.5 ms / 460 μs/phase e2e).
 //
 // Memory layout in team's psync_pool region (per psync_len_per_team formula):
-//   slots 0 .. 2*MPKAR_NVSHMEMI_SYNC_SIZE-1 -> existing legacy barrier (untouched)
-//   slots 2*SYNC_SIZE + 0 .. + MAX_AR_TASKS-1 -> per-task counters
-//   slots 2*SYNC_SIZE + MAX_AR_TASKS + ... -> per-task pSync (2 buffer × npes per task)
+//   slots 0 .. 2*MPKAR_NVSHMEMI_SYNC_SIZE-1 -> existing legacy barrier
+//   (untouched) slots 2*SYNC_SIZE + 0 .. + MAX_AR_TASKS-1 -> per-task counters
+//   slots 2*SYNC_SIZE + MAX_AR_TASKS + ... -> per-task pSync (2 buffer × npes
+//   per task)
 //
 // MAX_AR_TASKS = 128 (covers DSv3 hidden=7168 / tile=128 = 56, with headroom
 // for future tile-size sweeps).
 // Per-team budget = 128 (counters) + 128 * NPES_MAX(8) * 2 = 128 + 2048 = 2176
-// longs = 17 KB. Well within psync_len_per_team's reserved 2*SYNC_SIZE-3*SYNC_SIZE
-// reduce/bcast region (55 KB available there).
+// longs = 17 KB. Well within psync_len_per_team's reserved
+// 2*SYNC_SIZE-3*SYNC_SIZE reduce/bcast region (55 KB available there).
 //
 // IMPORTANT: this REUSES psync_pool slots reserved by NVSHMEM for reduce/bcast
 // ops. MPK does not use those ops, so this is safe — but if anyone adds a
@@ -29,8 +30,8 @@
 
 // ---- assumed defined in allreduce.cuh ----
 // MPKAR_NVSHMEMI_SYNC_SIZE          : 2 * 27648 longs
-// mpkar_team_get_psync_sync(teami)  : returns long* (base of team's psync region)
-// mpkar_team_translate_pe(teami, i) : i -> world-PE
+// mpkar_team_get_psync_sync(teami)  : returns long* (base of team's psync
+// region) mpkar_team_translate_pe(teami, i) : i -> world-PE
 // mpkar_signal_for_barrier(dst, val, peer) : P2P volatile store
 // mpkar_wait_until_ge(addr, val)    : spin
 
@@ -82,10 +83,9 @@ static __device__ __forceinline__ void
   // signaling >=1, the receiver actually waits for the peer's increment.
   long my_phase;
   if (threadIdx.x == 0) {
-    my_phase = (long)atomicAdd(
-                   reinterpret_cast<unsigned long long *>(
-                       const_cast<long *>(task_counter)),
-                   (unsigned long long)1) +
+    my_phase = (long)atomicAdd(reinterpret_cast<unsigned long long *>(
+                                   const_cast<long *>(task_counter)),
+                               (unsigned long long)1) +
                1;
   }
   __shared__ long s_my_phase;
@@ -95,7 +95,8 @@ static __device__ __forceinline__ void
   __syncthreads();
   my_phase = s_my_phase;
 
-  // Slot pair: 2-buffered by phase parity. Slot index = (phase & 1) * size + pe.
+  // Slot pair: 2-buffered by phase parity. Slot index = (phase & 1) * size +
+  // pe.
   long volatile *pSync = task_pSync_base + (my_phase & 1) * size;
 
   // For P2P-connected teams, k = size. TP=4 => 3 signals + 3 waits per phase,
@@ -121,8 +122,7 @@ static __device__ __forceinline__ void
       int to_nbr = mpkar_team_translate_pe(teami, to_nbr_idx);
       // Remote pSync address = same offset relative to peer's heap_base.
       long volatile *remote_dest = pSync + world_my_pe;
-      mpkar_signal_for_barrier(
-          (long *)remote_dest, my_phase, to_nbr);
+      mpkar_signal_for_barrier((long *)remote_dest, my_phase, to_nbr);
     }
 
     // Wait phase: spin until each peer has written >= my_phase to MY slot

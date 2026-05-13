@@ -113,12 +113,31 @@ def make_random_routing(batch_size, padded_batch, device, seed=42):
 # ================================================================
 
 def bench(fn):
-    """Benchmark using FlashInfer's bench_gpu_time. Returns median in microseconds."""
-    measurements = bench_gpu_time(fn, dry_run_time_ms=100, repeat_time_ms=1000)
-    median_ms = np.median(measurements)
-    min_ms = np.min(measurements)
-    p99_ms = np.percentile(measurements, 99)
-    return median_ms * 1000.0, min_ms * 1000.0, p99_ms * 1000.0  # ms -> us
+    """Benchmark using FlashInfer's bench_gpu_time if available, else CUDA events.
+    Returns (median_us, min_us, p99_us)."""
+    if HAS_FLASHINFER:
+        measurements = bench_gpu_time(fn, dry_run_time_ms=200, repeat_time_ms=2000)
+        median_ms = np.median(measurements)
+        min_ms = np.min(measurements)
+        p99_ms = np.percentile(measurements, 99)
+        return median_ms * 1000.0, min_ms * 1000.0, p99_ms * 1000.0  # ms -> us
+    # Fallback: CUDA events — 16 warmup + 200 timed reps
+    WARMUP = 16
+    REPS = 200
+    for _ in range(WARMUP):
+        fn()
+    torch.cuda.synchronize()
+    measurements_us = []
+    for _ in range(REPS):
+        t0 = torch.cuda.Event(enable_timing=True)
+        t1 = torch.cuda.Event(enable_timing=True)
+        t0.record()
+        fn()
+        t1.record()
+        torch.cuda.synchronize()
+        measurements_us.append(t0.elapsed_time(t1) * 1000.0)  # ms -> us
+    arr = np.array(measurements_us)
+    return float(np.median(arr)), float(np.min(arr)), float(np.percentile(arr, 99))
 
 
 # ================================================================

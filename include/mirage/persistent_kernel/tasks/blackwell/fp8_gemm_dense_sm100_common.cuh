@@ -47,27 +47,44 @@ namespace fp8_gemm_dense_common {
 
 __device__ __forceinline__ uint32_t elect_one_sync() {
   uint32_t pred = 0;
-  asm volatile("{\n\t.reg .pred %%px;\n\telect.sync _|%%px, %1;\n\t@%%px mov.s32 %0, 1;\n\t}"
-      : "+r"(pred) : "r"(0xFFFFFFFF));
+  asm volatile("{\n\t.reg .pred %%px;\n\telect.sync _|%%px, %1;\n\t@%%px "
+               "mov.s32 %0, 1;\n\t}"
+               : "+r"(pred)
+               : "r"(0xFFFFFFFF));
   return pred;
 }
 
 __device__ __forceinline__ void mb_init(int a, int c) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(a), "r"(c));
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(a), "r"(c));
 }
 __device__ __forceinline__ void mb_wait(int a, int p) {
-  asm volatile("{\n\t.reg .pred P1;\n\tLW:\n\tmbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, %2;\n\t@P1 bra.uni DN;\n\tbra.uni LW;\n\tDN:\n\t}"
-      :: "r"(a), "r"(p), "r"(0x989680));
+  asm volatile(
+      "{\n\t.reg .pred "
+      "P1;\n\tLW:\n\tmbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, "
+      "[%0], %1, %2;\n\t@P1 bra.uni DN;\n\tbra.uni LW;\n\tDN:\n\t}" ::"r"(a),
+      "r"(p),
+      "r"(0x989680));
 }
 __device__ __forceinline__ void mb_arrive(int a) {
-  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" :: "r"(a) : "memory");
+  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" ::"r"(a)
+               : "memory");
 }
 __device__ __forceinline__ void mb_arrive_tx(int a, int s) {
-  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" :: "r"(a), "r"(s) : "memory");
+  asm volatile(
+      "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" ::
+          "r"(a),
+      "r"(s)
+      : "memory");
 }
-__device__ __forceinline__ void tma_ld(int d, void const *t, int x, int y, int m) {
-  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
-      :: "r"(d), "l"(t), "r"(x), "r"(y), "r"(m) : "memory");
+__device__ __forceinline__ void
+    tma_ld(int d, void const *t, int x, int y, int m) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_"
+               "tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(d),
+               "l"(t),
+               "r"(x),
+               "r"(y),
+               "r"(m)
+               : "memory");
 }
 
 __device__ __forceinline__ constexpr uint64_t denc(uint64_t x) {
@@ -78,17 +95,16 @@ __device__ __forceinline__ uint64_t mkdesc(int a) {
 }
 
 template <int BN, int NS, int NE>
-__device__ __forceinline__ void task_impl_tpl(
-    CUtensorMap const *ta_ptr,
-    CUtensorMap const *tb_ptr,
-    float const *__restrict__ sa,
-    float const *__restrict__ sb,
-    __nv_bfloat16 *__restrict__ C,
-    int const M,
-    int const N,
-    int const K,
-    int const worker_idx,
-    int const num_workers) {
+__device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
+                                              CUtensorMap const *tb_ptr,
+                                              float const *__restrict__ sa,
+                                              float const *__restrict__ sb,
+                                              __nv_bfloat16 *__restrict__ C,
+                                              int const M,
+                                              int const N,
+                                              int const K,
+                                              int const worker_idx,
+                                              int const num_workers) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   constexpr int BM = 128, BK = 128, UK = 32;
   int const tid = threadIdx.x, wid = tid / 32;
@@ -110,7 +126,11 @@ __device__ __forceinline__ void task_impl_tpl(
   int bte = btf + NE * 8;
   int tp_addr = bars_addr + (NS * 2 + NE * 2) * 8;
   constexpr int TC = NE * BN;
-  constexpr int TCA = TC <= 32 ? 32 : TC <= 64 ? 64 : TC <= 128 ? 128 : TC <= 256 ? 256 : 512;
+  constexpr int TCA = TC <= 32    ? 32
+                      : TC <= 64  ? 64
+                      : TC <= 128 ? 128
+                      : TC <= 256 ? 256
+                                  : 512;
 
   if (wid == 0 && elect_one_sync()) {
     asm volatile("prefetch.tensormap [%0];" ::"l"(ta_ptr));
@@ -127,12 +147,16 @@ __device__ __forceinline__ void task_impl_tpl(
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (wid == 2) {
-    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::"r"(tp_addr), "r"(TCA));
+    asm volatile(
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
+            "r"(tp_addr),
+        "r"(TCA));
   }
   __syncthreads();
   uint32_t taddr;
   asm volatile("ld.shared.u32 %0, [%1];" : "=r"(taddr) : "r"(tp_addr));
-  constexpr uint32_t idesc = (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
+  constexpr uint32_t idesc =
+      (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
 
   if (wid == 0 && elect_one_sync()) {
     int ph = 0;
@@ -181,12 +205,25 @@ __device__ __forceinline__ void task_impl_tpl(
         for (int k = 0; k < BK / UK; k++) {
           uint64_t ad = mkdesc(as_ + k * UK), bd = mkdesc(bs_ + k * UK);
           uint32_t en = (k > 0) ? 1u : 0u;
-          asm volatile("{\n\t.reg .pred p;\n\tsetp.ne.b32 p, %4, 0;\n\ttcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, {%5, %6, %7, %8}, p;\n\t}\n"
-              ::"r"(tc), "l"(ad), "l"(bd), "r"(idesc), "r"(en), "r"(0u), "r"(0u), "r"(0u), "r"(0u));
+          asm volatile("{\n\t.reg .pred p;\n\tsetp.ne.b32 p, %4, "
+                       "0;\n\ttcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, "
+                       "%2, %3, {%5, %6, %7, %8}, p;\n\t}\n" ::"r"(tc),
+                       "l"(ad),
+                       "l"(bd),
+                       "r"(idesc),
+                       "r"(en),
+                       "r"(0u),
+                       "r"(0u),
+                       "r"(0u),
+                       "r"(0u));
         }
         asm volatile("tcgen05.fence::before_thread_sync;");
-        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];" ::"r"(be + s * 8) : "memory");
-        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];" ::"r"(btf + ai * 8) : "memory");
+        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared:"
+                     ":cluster.b64 [%0];" ::"r"(be + s * 8)
+                     : "memory");
+        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared:"
+                     ":cluster.b64 [%0];" ::"r"(btf + ai * 8)
+                     : "memory");
       }
     }
   } else if (wid >= 4) {
@@ -225,9 +262,25 @@ __device__ __forceinline__ void task_impl_tpl(
         for (int i = 0; i < BN / 16; i++) {
           uint32_t ta_ = taddr + ((ew * 32) << 16) + ai * BN + i * 16;
           float v[16];
-          asm volatile("tcgen05.ld.sync.aligned.32x32b.x16.b32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
-              : "=f"(v[0]), "=f"(v[1]), "=f"(v[2]), "=f"(v[3]), "=f"(v[4]), "=f"(v[5]), "=f"(v[6]), "=f"(v[7]),
-                "=f"(v[8]), "=f"(v[9]), "=f"(v[10]), "=f"(v[11]), "=f"(v[12]), "=f"(v[13]), "=f"(v[14]), "=f"(v[15])
+          asm volatile(
+              "tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+              "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+              : "=f"(v[0]),
+                "=f"(v[1]),
+                "=f"(v[2]),
+                "=f"(v[3]),
+                "=f"(v[4]),
+                "=f"(v[5]),
+                "=f"(v[6]),
+                "=f"(v[7]),
+                "=f"(v[8]),
+                "=f"(v[9]),
+                "=f"(v[10]),
+                "=f"(v[11]),
+                "=f"(v[12]),
+                "=f"(v[13]),
+                "=f"(v[14]),
+                "=f"(v[15])
               : "r"(ta_));
           asm volatile("tcgen05.wait::ld.sync.aligned;");
           float sf = (BN <= 128 || i * 16 < 128) ? sf0 : sf1;
@@ -261,10 +314,20 @@ __device__ __forceinline__ void task_impl_tpl(
             uint32_t r5 = *reinterpret_cast<uint32_t *>(&b5);
             uint32_t r6 = *reinterpret_cast<uint32_t *>(&b6);
             uint32_t r7 = *reinterpret_cast<uint32_t *>(&b7);
-            asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], {%1,%2,%3,%4};"
-                ::"l"(row + n), "r"(r0), "r"(r1), "r"(r2), "r"(r3) : "memory");
-            asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], {%1,%2,%3,%4};"
-                ::"l"(row + n + 8), "r"(r4), "r"(r5), "r"(r6), "r"(r7) : "memory");
+            asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
+                         "{%1,%2,%3,%4};" ::"l"(row + n),
+                         "r"(r0),
+                         "r"(r1),
+                         "r"(r2),
+                         "r"(r3)
+                         : "memory");
+            asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
+                         "{%1,%2,%3,%4};" ::"l"(row + n + 8),
+                         "r"(r4),
+                         "r"(r5),
+                         "r"(r6),
+                         "r"(r7)
+                         : "memory");
           } else {
             for (int j = 0; j < 16 && on + n + j < N; j++) {
               row[n + j] = __float2bfloat16(acc[n + j]);
@@ -276,8 +339,20 @@ __device__ __forceinline__ void task_impl_tpl(
   }
 
   __syncthreads();
+  // 2026-05-13: the consumer-warp output writes use st.relaxed.cta.global
+  // which has CTA-scope semantics — fine when this kernel is launched
+  // standalone (cudaLaunch acts as implicit fence between successive
+  // launches), but in the MPK persistent megakernel the next task on a
+  // different CTA may see stale L2 lines. Add a global-scope memory
+  // fence so downstream tasks (rmsnorm-q/kv, rope-k, MLA-KV-gather, etc.)
+  // reading qkv_a_out see the GEMM's writes. The fence is cheap (single
+  // membar instruction per CTA exit); standalone tests still pass since
+  // it's a no-op when no other CTAs are reading.
+  asm volatile("membar.gl;" ::: "memory");
   if (wid == 0) {
-    asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr), "r"(TCA));
+    asm volatile(
+        "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
+        "r"(TCA));
   }
 #endif
 }

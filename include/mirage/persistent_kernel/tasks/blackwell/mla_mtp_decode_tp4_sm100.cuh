@@ -38,8 +38,7 @@ static constexpr int V_CHUNKS = D_V / BK; // 8
 #define MIRAGE_MLA_TP4_V_SPLITS 8
 #endif
 static constexpr int V_SPLITS = MIRAGE_MLA_TP4_V_SPLITS;
-static_assert(V_SPLITS == 1 || V_SPLITS == 2 || V_SPLITS == 4 ||
-                  V_SPLITS == 8,
+static_assert(V_SPLITS == 1 || V_SPLITS == 2 || V_SPLITS == 4 || V_SPLITS == 8,
               "MIRAGE_MLA_TP4_V_SPLITS must be one of 1, 2, 4, 8");
 static_assert(V_CHUNKS % V_SPLITS == 0,
               "TP4 MLA V splits must divide D_V / BK");
@@ -714,8 +713,7 @@ __device__ __noinline__ void
   int const epilogue_rows = ((valid_rows + 31) / 32) * 32;
   bool const valid_epilogue_row = tid < valid_rows;
   if (tid < epilogue_rows) {
-    float inv =
-        (valid_epilogue_row && row_sum > 0) ? 1.0f / row_sum : 0.0f;
+    float inv = (valid_epilogue_row && row_sum > 0) ? 1.0f / row_sum : 0.0f;
     constexpr bool write_final = WRITE_FINAL;
     int const q_final = gi * qpg + tid / hpb;
     int const h_final = head_start + tid % hpb;

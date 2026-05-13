@@ -44,15 +44,15 @@ template <typename T_,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__device__ __forceinline__ void linear_fp8_bmm_sm100_task_impl(
-    TMA_A const &tma_a,
-    TMA_B const &tma_b,
-    uint32_t const *weight_scale_ptr,
-    uint32_t const *input_scale_ptr,
-    int weight_scale_row_stride,
-    int input_scale_row_stride,
-    BiasTensor mBias,
-    TMA_OUT const &tma_out) {
+__device__ __forceinline__ void
+    linear_fp8_bmm_sm100_task_impl(TMA_A const &tma_a,
+                                   TMA_B const &tma_b,
+                                   uint32_t const *weight_scale_ptr,
+                                   uint32_t const *input_scale_ptr,
+                                   int weight_scale_row_stride,
+                                   int input_scale_row_stride,
+                                   BiasTensor mBias,
+                                   TMA_OUT const &tma_out) {
   // The swapAB kernel's body is agnostic to whether the per-CTA tile comes
   // from a flat [OUT, K] / [BATCH, K] matrix or from a per-head slice of a
   // larger [H, OUT, K] / [BATCH, H, K] tensor — the TMA descriptors fully

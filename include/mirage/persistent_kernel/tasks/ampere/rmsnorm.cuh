@@ -52,8 +52,7 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
   constexpr int NUM_TILES = HIDDEN_DIM / TILE_SIZE;
   constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * HIDDEN_DIM / CHUNK_SIZE;
 
-  T const *__restrict__ d_input =
-      static_cast<T const *>(input_ptr) + IN_OFFSET;
+  T const *__restrict__ d_input = static_cast<T const *>(input_ptr) + IN_OFFSET;
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr) + OUT_OFFSET;
 

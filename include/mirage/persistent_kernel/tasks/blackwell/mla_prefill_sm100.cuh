@@ -220,8 +220,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     int q_pe_head_stride = mla_prefill::PF_D_KPE,
     int ckv_row_stride = mla_prefill::PF_D_CKV,
     int kpe_row_stride = mla_prefill::PF_D_KPE,
-    int kpe_offset = 0
-) {
+    int kpe_offset = 0) {
   using namespace mla_prefill;
 
   // The caller decides whether the current runtime batch is prompt prefill or
@@ -289,8 +288,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int row = i / (PF_D_CKV / 8);
       int col = i % (PF_D_CKV / 8);
       int q_idx = q_start + row;
-      int smem_addr =
-          q_nope_smem + mla_prefill::swizzle<STRIDE_NOPE>(row, col);
+      int smem_addr = q_nope_smem + mla_prefill::swizzle<STRIDE_NOPE>(row, col);
       bf16 const *gmem_ptr = Q_nope + (long long)q_idx * q_nope_row_stride +
                              (long long)head * q_nope_head_stride + col * 8;
       if (q_idx < Q_LEN) {
@@ -304,8 +302,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int row = i / (PF_D_KPE / 8);
       int col = i % (PF_D_KPE / 8);
       int q_idx = q_start + row;
-      int smem_addr =
-          q_pe_smem + mla_prefill::swizzle<STRIDE_PE>(row, col);
+      int smem_addr = q_pe_smem + mla_prefill::swizzle<STRIDE_PE>(row, col);
       bf16 const *gmem_ptr = Q_pe + (long long)q_idx * q_pe_row_stride +
                              (long long)head * q_pe_head_stride + col * 8;
       if (q_idx < Q_LEN) {
@@ -324,13 +321,11 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
   constexpr int STRIDE_NOPE_B = PF_D_CKV * sizeof(bf16);
   constexpr int STRIDE_PE_B = PF_D_KPE * sizeof(bf16);
   int q_nope_ldm_base =
-      q_nope_smem +
-      mla_prefill::swizzle<STRIDE_NOPE_B>(
-          warp_m * 16 + (lane_id % 16), lane_id / 16);
+      q_nope_smem + mla_prefill::swizzle<STRIDE_NOPE_B>(
+                        warp_m * 16 + (lane_id % 16), lane_id / 16);
   int q_pe_ldm_base =
-      q_pe_smem +
-      mla_prefill::swizzle<STRIDE_PE_B>(
-          warp_m * 16 + (lane_id % 16), lane_id / 16);
+      q_pe_smem + mla_prefill::swizzle<STRIDE_PE_B>(
+                      warp_m * 16 + (lane_id % 16), lane_id / 16);
 
   // Initialize accumulators
   float o_frag[PF_NUM_MMA_D_V_HALF][8];
@@ -370,8 +365,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int row = i / (PF_D_CKV / 8);
         int col = i % (PF_D_CKV / 8);
         int kv_idx = kv_base + row;
-        int addr =
-            ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
+        int addr = ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
         const bf16 *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
         cp_async_128b(addr, ptr);
       }
@@ -390,8 +384,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int row = i / (PF_D_CKV / 8);
         int col = i % (PF_D_CKV / 8);
         int kv_idx = kv_base + row;
-        int addr =
-            ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
+        int addr = ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
         const bf16 *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
         cp_async_128b_pred(addr, ptr, kv_idx < S);
       }
@@ -555,12 +548,12 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         m_state[j] = fmaxf(m_wg[0 * PF_BM + warp_m * 16 + j * 8 + lane_id / 4],
                            m_wg[1 * PF_BM + warp_m * 16 + j * 8 + lane_id / 4]);
         bool const has_valid_score = (m_state[j] > PF_MASK_NEG_INF * 0.5f);
-        float neg_m_scaled = has_valid_score ? -(m_state[j] * sm_scale_log2) : 0.0f;
-        float scale = (has_valid_score && (m_prev[j] > PF_MASK_NEG_INF * 0.5f))
-                          ? fast_exp2f(__fmaf_rn(m_prev[j],
-                                                 sm_scale_log2,
-                                                 neg_m_scaled))
-                          : 0.0f;
+        float neg_m_scaled =
+            has_valid_score ? -(m_state[j] * sm_scale_log2) : 0.0f;
+        float scale =
+            (has_valid_score && (m_prev[j] > PF_MASK_NEG_INF * 0.5f))
+                ? fast_exp2f(__fmaf_rn(m_prev[j], sm_scale_log2, neg_m_scaled))
+                : 0.0f;
         d_state[j] *= scale;
 #pragma unroll
         for (int mma_d = 0; mma_d < PF_NUM_MMA_D_V_HALF; mma_d++) {
@@ -572,14 +565,14 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
 #pragma unroll
         for (int nl = 0; nl < NUM_N_SHARD; nl++) {
           if (has_valid_score) {
-            s_frag[nl][j * 2 + 0] = fast_exp2f(__fmaf_rn(
-                s_frag[nl][j * 2 + 0], sm_scale_log2, neg_m_scaled));
-            s_frag[nl][j * 2 + 1] = fast_exp2f(__fmaf_rn(
-                s_frag[nl][j * 2 + 1], sm_scale_log2, neg_m_scaled));
-            s_frag[nl][j * 2 + 4] = fast_exp2f(__fmaf_rn(
-                s_frag[nl][j * 2 + 4], sm_scale_log2, neg_m_scaled));
-            s_frag[nl][j * 2 + 5] = fast_exp2f(__fmaf_rn(
-                s_frag[nl][j * 2 + 5], sm_scale_log2, neg_m_scaled));
+            s_frag[nl][j * 2 + 0] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 0], sm_scale_log2, neg_m_scaled));
+            s_frag[nl][j * 2 + 1] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 1], sm_scale_log2, neg_m_scaled));
+            s_frag[nl][j * 2 + 4] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 4], sm_scale_log2, neg_m_scaled));
+            s_frag[nl][j * 2 + 5] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 5], sm_scale_log2, neg_m_scaled));
           } else {
             s_frag[nl][j * 2 + 0] = 0.0f;
             s_frag[nl][j * 2 + 1] = 0.0f;
@@ -614,19 +607,19 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int col_unit2 = p_col2 / 8;
       int col_off = (p_col % 8) * (int)sizeof(bf16);
       int col_off2 = (p_col2 % 8) * (int)sizeof(bf16);
-      int a0 = p_smem + mla_prefill::swizzle<P_STRIDE>(p_row, col_unit) + col_off;
+      int a0 =
+          p_smem + mla_prefill::swizzle<P_STRIDE>(p_row, col_unit) + col_off;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a0),
                    "r"(p_f16_local[nl][0]));
-      int a1 = p_smem +
-               mla_prefill::swizzle<P_STRIDE>(p_row + 8, col_unit) + col_off;
+      int a1 = p_smem + mla_prefill::swizzle<P_STRIDE>(p_row + 8, col_unit) +
+               col_off;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a1),
                    "r"(p_f16_local[nl][1]));
-      int a2 = p_smem + mla_prefill::swizzle<P_STRIDE>(p_row, col_unit2) +
-               col_off2;
+      int a2 =
+          p_smem + mla_prefill::swizzle<P_STRIDE>(p_row, col_unit2) + col_off2;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a2),
                    "r"(p_f16_local[nl][2]));
-      int a3 = p_smem +
-               mla_prefill::swizzle<P_STRIDE>(p_row + 8, col_unit2) +
+      int a3 = p_smem + mla_prefill::swizzle<P_STRIDE>(p_row + 8, col_unit2) +
                col_off2;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a3),
                    "r"(p_f16_local[nl][3]));
@@ -643,17 +636,16 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
 #pragma unroll
       for (int mma_kv = 0; mma_kv < PF_NUM_MMA_KV; mma_kv++) {
         uint32_t p_frag[4];
-        int p_addr =
-            p_smem +
-            mla_prefill::swizzle<P_STRIDE>(p_ldm_row, mma_kv * 2 + p_ldm_col);
+        int p_addr = p_smem + mla_prefill::swizzle<P_STRIDE>(
+                                  p_ldm_row, mma_kv * 2 + p_ldm_col);
         ldmatrix_x4(p_frag, p_addr);
 #pragma unroll
         for (int mma_d = 0; mma_d < PF_NUM_MMA_D_V_HALF; mma_d++) {
           uint32_t v_frag[4];
           int v_r = v_row + mma_kv * 16;
           int v_c = v_col_base + mma_d * 2;
-          int v_addr = ckv_smem(stage) +
-                       mla_prefill::swizzle<STRIDE_CKV_B>(v_r, v_c);
+          int v_addr =
+              ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV_B>(v_r, v_c);
           ldmatrix_x4_trans(v_frag, v_addr);
           mma_m16n16k16_bf16(p_frag, v_frag, o_frag[mma_d]);
         }
@@ -696,8 +688,8 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     bool norm_valid[2];
 #pragma unroll
     for (int j = 0; j < 2; j++) {
-      norm_valid[j] = (m_state[j] > PF_MASK_NEG_INF * 0.5f) &&
-                      (d_state[j] > 0.0f);
+      norm_valid[j] =
+          (m_state[j] > PF_MASK_NEG_INF * 0.5f) && (d_state[j] > 0.0f);
       if (norm_valid[j]) {
         asm volatile("rcp.approx.ftz.f32 %0, %1;"
                      : "=f"(d_rcp[j])
@@ -781,16 +773,15 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     int const diag_idx = q_hist + q_start;
     float local_score = 0.0f;
     for (int d = tid; d < PF_D_CKV; d += PF_NUM_THREADS) {
-      float q = __bfloat162float(
-          Q_nope[(long long)q_start * q_nope_row_stride +
-                 (long long)head * q_nope_head_stride + d]);
+      float q =
+          __bfloat162float(Q_nope[(long long)q_start * q_nope_row_stride +
+                                  (long long)head * q_nope_head_stride + d]);
       float k = __bfloat162float(CKV[(long long)diag_idx * ckv_row_stride + d]);
       local_score += q * k;
     }
     for (int d = tid; d < PF_D_KPE; d += PF_NUM_THREADS) {
-      float q = __bfloat162float(
-          Q_pe[(long long)q_start * q_pe_row_stride +
-               (long long)head * q_pe_head_stride + d]);
+      float q = __bfloat162float(Q_pe[(long long)q_start * q_pe_row_stride +
+                                      (long long)head * q_pe_head_stride + d]);
       float k = __bfloat162float(
           KPE[(long long)diag_idx * kpe_row_stride + kpe_offset + d]);
       local_score += q * k;
@@ -806,10 +797,9 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     if (tid == 0) {
       float diag_score = tmp[0];
       float max_new = fmaxf(max_old, diag_score);
-      float old_scale =
-          (denom_old > 0.0f)
-              ? fast_exp2f((max_old - max_new) * sm_scale_log2)
-              : 0.0f;
+      float old_scale = (denom_old > 0.0f)
+                            ? fast_exp2f((max_old - max_new) * sm_scale_log2)
+                            : 0.0f;
       float diag_p = fast_exp2f((diag_score - max_new) * sm_scale_log2);
       tmp[0] = denom_old * old_scale;
       tmp[1] = diag_p;
@@ -820,8 +810,8 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     float diag_weight = tmp[1];
     float denom_new = tmp[2];
     if (denom_new > 0.0f) {
-      long long out_base = (long long)q_start * H * PF_D_V +
-                           (long long)head * PF_D_V;
+      long long out_base =
+          (long long)q_start * H * PF_D_V + (long long)head * PF_D_V;
       long long v_base = (long long)diag_idx * ckv_row_stride;
       for (int d = tid; d < PF_D_V; d += PF_NUM_THREADS) {
         float old_o = __bfloat162float(O[out_base + d]);

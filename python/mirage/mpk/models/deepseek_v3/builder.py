@@ -387,16 +387,30 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_mbt_f32_bufs = {}
         cache_key = reduction_size
         if cache_key not in self._fp8_mbt_f32_bufs:
-            fp8_buf = self.mpk.new_tensor(
-                dims=(mbt, reduction_size), dtype=float8_e4m3,
-                name=f"fp8_input_v2_{reduction_size}_shared",
-                io_category="cuda_tensor",
-            )
-            scale_buf = self.mpk.new_tensor(
-                dims=(mbt, num_groups), dtype=float32,
-                name=f"fp8_scale_v2_{reduction_size}_shared",
-                io_category="cuda_tensor",
-            )
+            # 2026-05-13 DEBUG: optionally attach the FP8 input + scale buffers
+            # as torch tensors so we can inspect them post-megakernel from Python.
+            if os.environ.get("MPK_DSV3_FP8_BUF_ATTACH", "0") == "1":
+                import torch as _torch
+                if not hasattr(self.mpk, "_fp8_input_torch"):
+                    self.mpk._fp8_input_torch = {}
+                    self.mpk._fp8_scale_torch = {}
+                fp8_t = _torch.zeros((mbt, reduction_size), dtype=_torch.float8_e4m3fn, device="cuda")
+                scale_t = _torch.zeros((mbt, num_groups), dtype=_torch.float32, device="cuda")
+                self.mpk._fp8_input_torch[reduction_size] = fp8_t
+                self.mpk._fp8_scale_torch[reduction_size] = scale_t
+                fp8_buf = self.mpk.attach_input(torch_tensor=fp8_t, name=f"fp8_input_v2_{reduction_size}_shared")
+                scale_buf = self.mpk.attach_input(torch_tensor=scale_t, name=f"fp8_scale_v2_{reduction_size}_shared")
+            else:
+                fp8_buf = self.mpk.new_tensor(
+                    dims=(mbt, reduction_size), dtype=float8_e4m3,
+                    name=f"fp8_input_v2_{reduction_size}_shared",
+                    io_category="cuda_tensor",
+                )
+                scale_buf = self.mpk.new_tensor(
+                    dims=(mbt, num_groups), dtype=float32,
+                    name=f"fp8_scale_v2_{reduction_size}_shared",
+                    io_category="cuda_tensor",
+                )
             self._fp8_mbt_f32_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_mbt_f32_bufs[cache_key]
 
@@ -1039,12 +1053,27 @@ class DeepSeekV3Builder(GraphBuilder):
             print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
 
         # RMSNorm output
-        self.rmsnorm_out = self.mpk.new_tensor(
-            dims=(mbt, self.hidden_size),
-            dtype=bfloat16,
-            name="rmsnorm_out",
-            io_category="cuda_tensor",
-        )
+        # 2026-05-13 DEBUG: optionally attach rmsnorm_out as a torch tensor
+        # (bypassing MPK's buffer pool) AND pre-fill with a sentinel value
+        # so we can tell post-megakernel whether rows are
+        #   (a) still at sentinel → rmsnorm task never wrote them (skip bug)
+        #   (b) zero → something else wrote zero over them (overwrite bug)
+        #   (c) normal rmsnorm output → rmsnorm wrote but quantize saw something else
+        if os.environ.get("MPK_DSV3_RMSNORM_OUT_ATTACH", "0") == "1":
+            import torch as _torch
+            sentinel = float(os.environ.get("MPK_DSV3_RMSNORM_SENTINEL", "0.0"))
+            self.mpk._rmsnorm_out_torch = _torch.full(
+                (mbt, self.hidden_size), sentinel,
+                dtype=_torch.bfloat16, device="cuda")
+            self.rmsnorm_out = self.mpk.attach_input(
+                torch_tensor=self.mpk._rmsnorm_out_torch, name="rmsnorm_out")
+        else:
+            self.rmsnorm_out = self.mpk.new_tensor(
+                dims=(mbt, self.hidden_size),
+                dtype=bfloat16,
+                name="rmsnorm_out",
+                io_category="cuda_tensor",
+            )
 
         # MLA projections.
         # 2026-05-12 (user #2 part-a) — QKV-a fusion: when MPK_DSV3_QKV_A_FUSED=1,
@@ -1064,10 +1093,22 @@ class DeepSeekV3Builder(GraphBuilder):
             # Larger values (2304, 2560, ...) zero-pad after k_pe to change
             # the GEMM's N-tile count for kernel diagnostics.
             assert qkv_a_total >= 2176 and qkv_a_total % 128 == 0
-            self.qkv_a_out = self.mpk.new_tensor(
-                dims=(mbt, qkv_a_total),
-                dtype=bfloat16, name="qkv_a_out", io_category="cuda_tensor",
-            )
+            # 2026-05-13 DEBUG: attach via torch tensor (instead of new_tensor)
+            # so we can read qkv_a_out's GPU state from Python after the
+            # megakernel completes. This bypasses the elementwise_add dump task
+            # which might read stale L2 cache.
+            if os.environ.get("MPK_DSV3_QKV_A_OUT_ATTACH", "0") == "1":
+                import torch as _torch
+                if not hasattr(self.mpk, "_qkv_a_out_torch"):
+                    self.mpk._qkv_a_out_torch = _torch.zeros(
+                        (mbt, qkv_a_total), dtype=_torch.bfloat16, device="cuda")
+                self.qkv_a_out = self.mpk.attach_input(
+                    torch_tensor=self.mpk._qkv_a_out_torch, name="qkv_a_out")
+            else:
+                self.qkv_a_out = self.mpk.new_tensor(
+                    dims=(mbt, qkv_a_total),
+                    dtype=bfloat16, name="qkv_a_out", io_category="cuda_tensor",
+                )
             self._qkv_a_row_stride = qkv_a_total
             self._qkv_a_q_offset = 0
             self._qkv_a_c_latent_offset = self.q_lora_rank             # 1536
@@ -1563,6 +1604,25 @@ class DeepSeekV3Builder(GraphBuilder):
                             1, 1),
                         block_dim=(128, 1, 1))
 
+        # Diagnostic (PRE-RMSnorm dump 2026-05-13): captures RAW qkv_a_out
+        # immediately after the fused GEMM, before any consumer touches it.
+        # This discriminates: if rows 1..71 are zero HERE, GEMM is the bug;
+        # if rows 1..71 only become zero post-RMSnorm, RMSnorm is the bug.
+        if (layer_idx == 0
+                and getattr(self.mpk, "dump_layer0_intra_tensors", None) is not None
+                and getattr(self, "_layer0_q_a_zero_pt", None) is not None):
+            q_a_zero_dt = self.mpk.attach_input(
+                torch_tensor=self._layer0_q_a_zero_pt, name="q_a_zero_local")
+            q_a_dump_dt = self.mpk.attach_input(
+                torch_tensor=self.mpk.dump_layer0_intra_tensors[1],
+                name="q_a_dump_local")
+            self.mpk.elementwise_add_layer(
+                input_a=self.q_a_out, input_b=q_a_zero_dt,
+                output=q_a_dump_dt,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+
         # Step 2: q_a_layernorm (BF16 norm weight)
         w_q_a_ln = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}q_a_layernorm.weight"],
@@ -1582,27 +1642,6 @@ class DeepSeekV3Builder(GraphBuilder):
                 input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
                 grid_dim=(self.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1))
-
-        # Diagnostic: dump self.q_a_out for layer 0 if dump_layer0_intra_tensors
-        # is set. Saves the post-layernormed q_a_proj output as slot 1.
-        # In QKV-a fused mode the dump tensor must match input_a's wider
-        # shape, so demo.py allocates the slot-1 buffer as (mbt, 2176) when
-        # MPK_DSV3_QKV_A_FUSED=1. Python downstream just slices [:, :1536]
-        # to compare with the baseline (mbt, 1536) dump.
-        if (layer_idx == 0
-                and getattr(self.mpk, "dump_layer0_intra_tensors", None) is not None
-                and getattr(self, "_layer0_q_a_zero_pt", None) is not None):
-            q_a_zero_dt = self.mpk.attach_input(
-                torch_tensor=self._layer0_q_a_zero_pt, name="q_a_zero_local")
-            q_a_dump_dt = self.mpk.attach_input(
-                torch_tensor=self.mpk.dump_layer0_intra_tensors[1],
-                name="q_a_dump_local")
-            self.mpk.elementwise_add_layer(
-                input_a=self.q_a_out, input_b=q_a_zero_dt,
-                output=q_a_dump_dt,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-            )
 
         # Step 3: q_b projections.
         # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
@@ -1656,7 +1695,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)),
                               1, 1),
                     block_dim=(128, 1, 1),
-                    gate_mode=1)
+                    gate_mode=1,
+                    **qb_slice_kwargs)  # 2026-05-13: was missing — see scratch/fp8_dense_smallm_n2176_bug.md
         # Step 4: kv_a_proj split — c_latent (FP8) + k_pe (BF16 padded)
         # k_pe output=64 < MMA_M=128, so dequant to BF16 and pad weight to [128, H]
         # In QKV-a fused mode, the c_latent + k_pe portions are produced by

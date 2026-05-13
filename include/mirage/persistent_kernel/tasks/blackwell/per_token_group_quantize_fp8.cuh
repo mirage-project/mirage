@@ -36,6 +36,10 @@ __device__ __forceinline__ uint8_t encode_ue8m0(float scale) {
   return static_cast<uint8_t>(ue8m0);
 }
 
+// 2026-05-12 (QKV-a fusion, H8): added OUTPUT_STRIDE to fix overflow when the
+// INPUT is a column slice of a wider buffer (GLOBAL_STRIDE > HIDDEN_SIZE) but
+// the OUTPUT is sized for HIDDEN_SIZE per row. Default keeps legacy callers
+// (input and output share the same stride) unchanged.
 template <
     int BATCH_SIZE,
     int HIDDEN_SIZE,
@@ -45,6 +49,7 @@ template <
     typename T,
     typename DST_T,
     bool SCALE_UE8M0,
+    int OUTPUT_STRIDE = GLOBAL_STRIDE,
     typename SCALE_PACKED_T = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
 __device__ __forceinline__ void
     per_token_group_quantize_fp8_task_impl(void const *__restrict__ input_ptr,
@@ -92,7 +97,11 @@ __device__ __forceinline__ void
   if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
     return;
   }
-  int const row_base = batch_idx * GLOBAL_STRIDE;
+  // Input row may live in a wider parent buffer (GLOBAL_STRIDE) than the
+  // output (OUTPUT_STRIDE). When OUTPUT_STRIDE == GLOBAL_STRIDE (default,
+  // legacy callers) the two row bases are identical.
+  int const input_row_base = batch_idx * GLOBAL_STRIDE;
+  int const output_row_base = batch_idx * OUTPUT_STRIDE;
   int const group_tile = min(max(group_tile_idx, 0), GROUP_TILES - 1);
   int const groups_per_tile =
       (NUM_GROUPS_PER_ROW + GROUP_TILES - 1) / GROUP_TILES;
@@ -102,12 +111,13 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int group_idx = group_begin + warp_idx; group_idx < group_end;
        group_idx += num_groups_per_block) {
-    int const group_base_idx = row_base + GROUP_SIZE * group_idx;
+    int const input_group_base = input_row_base + GROUP_SIZE * group_idx;
+    int const output_group_base = output_row_base + GROUP_SIZE * group_idx;
 
     float local_max = eps;
 #pragma unroll
     for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
-      int const input_idx = group_base_idx + lane_idx + ele_idx * WARP_SIZE;
+      int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
       float const abs_val = fabsf(static_cast<float>(input[input_idx]));
       local_max = fmaxf(abs_val, local_max);
     }
@@ -136,8 +146,9 @@ __device__ __forceinline__ void
 
 #pragma unroll
     for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
-      int const output_idx = group_base_idx + lane_idx + ele_idx * WARP_SIZE;
-      float const orig_val = static_cast<float>(input[output_idx]);
+      int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
+      int const output_idx = output_group_base + lane_idx + ele_idx * WARP_SIZE;
+      float const orig_val = static_cast<float>(input[input_idx]);
       float const quant_val =
           fminf(fmaxf(orig_val / y_scale, min_8bit), max_8bit);
       output_q[output_idx] = __nv_fp8_e4m3(quant_val);

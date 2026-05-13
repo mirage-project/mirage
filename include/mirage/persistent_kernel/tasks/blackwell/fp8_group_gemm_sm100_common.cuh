@@ -14,9 +14,10 @@
  */
 
 // Shared body for grouped FP8 block-scaled GEMM tasks (smallm + largem).
-// Adapted from cpp_examples/blackwell_fp8_gemm/fp8_group_gemm_dsv3_decode_sm100.cu
-// (v007, ferret-generated). Beats current DeepGEMM 1.05-1.29x across MPE
-// 1-1024 on E=32 + gate_up (K=7168 N=4096) / down (K=2048 N=7168).
+// Adapted from
+// cpp_examples/blackwell_fp8_gemm/fp8_group_gemm_dsv3_decode_sm100.cu (v007,
+// ferret-generated). Beats current DeepGEMM 1.05-1.29x across MPE 1-1024 on
+// E=32 + gate_up (K=7168 N=4096) / down (K=2048 N=7168).
 //
 // Two variants share this body, differing only in (BN, NS):
 //   smallm: BN=64,  NS=8  (used when K>4096 && MPE<=8 — gate_up_M{1,4,8})
@@ -30,8 +31,9 @@
 //   A_fp8    [M_total, K]              row-major (K innermost)
 //   B_fp8    [E, N, K]                 per-expert weights (viewed as [K, E*N])
 //   sfa      [M_total, num_sf_k]       packed UE8M0 uint32 (4 UE8M0/uint32)
-//   sfb      [E*N, num_sf_k]           packed UE8M0 uint32, per-element expanded
-//   m_indices[M_total]                 int32, expert id per row (rows in
+//   sfb      [E*N, num_sf_k]           packed UE8M0 uint32, per-element
+//   expanded m_indices[M_total]                 int32, expert id per row (rows
+//   in
 //                                      [bm*BM, (bm+1)*BM) must share expert)
 //   D_bf16   [M_total, N]              bf16 output
 //
@@ -57,26 +59,43 @@ namespace fp8_group_gemm_common {
 
 __device__ __forceinline__ uint32_t elect_one_sync() {
   uint32_t pred = 0;
-  asm volatile("{\n\t.reg .pred %%px;\n\telect.sync _|%%px, %1;\n\t@%%px mov.s32 %0, 1;\n\t}"
-      : "+r"(pred) : "r"(0xFFFFFFFF));
+  asm volatile("{\n\t.reg .pred %%px;\n\telect.sync _|%%px, %1;\n\t@%%px "
+               "mov.s32 %0, 1;\n\t}"
+               : "+r"(pred)
+               : "r"(0xFFFFFFFF));
   return pred;
 }
 __device__ __forceinline__ void mb_init(int a, int c) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(a), "r"(c));
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(a), "r"(c));
 }
 __device__ __forceinline__ void mb_wait(int a, int p) {
-  asm volatile("{\n\t.reg .pred P1;\n\tLW:\n\tmbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, %2;\n\t@P1 bra.uni DN;\n\tbra.uni LW;\n\tDN:\n\t}"
-      :: "r"(a), "r"(p), "r"(0x989680));
+  asm volatile(
+      "{\n\t.reg .pred "
+      "P1;\n\tLW:\n\tmbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, "
+      "[%0], %1, %2;\n\t@P1 bra.uni DN;\n\tbra.uni LW;\n\tDN:\n\t}" ::"r"(a),
+      "r"(p),
+      "r"(0x989680));
 }
 __device__ __forceinline__ void mb_arrive(int a) {
-  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" :: "r"(a) : "memory");
+  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" ::"r"(a)
+               : "memory");
 }
 __device__ __forceinline__ void mb_arrive_tx(int a, int s) {
-  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" :: "r"(a), "r"(s) : "memory");
+  asm volatile(
+      "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" ::
+          "r"(a),
+      "r"(s)
+      : "memory");
 }
-__device__ __forceinline__ void tma_ld(int d, void const *t, int x, int y, int m) {
-  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
-      :: "r"(d), "l"(t), "r"(x), "r"(y), "r"(m) : "memory");
+__device__ __forceinline__ void
+    tma_ld(int d, void const *t, int x, int y, int m) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_"
+               "tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(d),
+               "l"(t),
+               "r"(x),
+               "r"(y),
+               "r"(m)
+               : "memory");
 }
 __device__ __forceinline__ constexpr uint64_t denc(uint64_t x) {
   return (x & 0x3FFFFULL) >> 4ULL;
@@ -93,16 +112,16 @@ __device__ __forceinline__ uint32_t ld_shared_u32_addr(uint32_t addr) {
   return r;
 }
 __device__ __forceinline__ void st_shared_u32_addr(uint32_t addr, uint32_t v) {
-  asm volatile("st.shared.u32 [%0], %1;" :: "r"(addr), "r"(v));
+  asm volatile("st.shared.u32 [%0], %1;" ::"r"(addr), "r"(v));
 }
 
 template <int BN, int NS>
 __device__ __noinline__ void task_impl_tpl(
-    CUtensorMap const *ta_ptr,    // A: [K, M_total] FP8
-    CUtensorMap const *tb_ptr,    // B: [K, E*N] FP8
-    CUtensorMap const *tsfa_ptr,  // SFA: [M_total, num_sf_k] uint32 packed
-    CUtensorMap const *tsfb_ptr,  // SFB: [E*N, num_sf_k] uint32 packed
-    CUtensorMap const *td_ptr,    // D: [N, M_total] BF16 (TMA store)
+    CUtensorMap const *ta_ptr,   // A: [K, M_total] FP8
+    CUtensorMap const *tb_ptr,   // B: [K, E*N] FP8
+    CUtensorMap const *tsfa_ptr, // SFA: [M_total, num_sf_k] uint32 packed
+    CUtensorMap const *tsfb_ptr, // SFB: [E*N, num_sf_k] uint32 packed
+    CUtensorMap const *td_ptr,   // D: [N, M_total] BF16 (TMA store)
     int const *__restrict__ m_indices,
     int const M_total,
     int const N,
@@ -121,7 +140,8 @@ __device__ __noinline__ void task_impl_tpl(
   int const nm = (M_total + BM - 1) / BM;
   int const total = nm * nn;
 
-  // 1024-byte aligned dynamic SMEM (MPK static prefix may leave us 128-aligned).
+  // 1024-byte aligned dynamic SMEM (MPK static prefix may leave us
+  // 128-aligned).
   extern __shared__ __align__(1024) uint8_t sm_raw_fp8group[];
   int sb_base = __cvta_generic_to_shared(sm_raw_fp8group);
   int sb_aligned = (sb_base + 1023) & ~1023;
@@ -160,10 +180,11 @@ __device__ __noinline__ void task_impl_tpl(
   constexpr int TMEM_SFA = NE * BN;
   constexpr int TMEM_SFB = TMEM_SFA + TMEM_SFA_COLS;
   constexpr int TMEM_TOTAL = NE * BN + TMEM_SFA_COLS + TMEM_SFB_COLS;
-  constexpr int TCA = TMEM_TOTAL <= 32 ? 32 :
-                       TMEM_TOTAL <= 64 ? 64 :
-                       TMEM_TOTAL <= 128 ? 128 :
-                       TMEM_TOTAL <= 256 ? 256 : 512;
+  constexpr int TCA = TMEM_TOTAL <= 32    ? 32
+                      : TMEM_TOTAL <= 64  ? 64
+                      : TMEM_TOTAL <= 128 ? 128
+                      : TMEM_TOTAL <= 256 ? 256
+                                          : 512;
 
   if (wid == 0 && elect_one_sync()) {
     asm volatile("prefetch.tensormap [%0];" ::"l"(ta_ptr));
@@ -184,7 +205,10 @@ __device__ __noinline__ void task_impl_tpl(
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (wid == 2) {
-    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::"r"(tp_addr), "r"(TCA));
+    asm volatile(
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
+            "r"(tp_addr),
+        "r"(TCA));
   }
   __syncthreads();
   uint32_t taddr;
@@ -292,11 +316,16 @@ __device__ __noinline__ void task_impl_tpl(
         if (ki % SF_PER_LOAD == 0) {
           int sfas_ = sSFA_addr(s);
           uint64_t sfa_desc = mkdesc_sf(sfas_);
-          asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;" ::"r"(TMEM_SFA), "l"(sfa_desc));
+          asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;" ::"r"(
+                           TMEM_SFA),
+                       "l"(sfa_desc));
           for (int b = 0; b < SF_BLOCK_N / 128; b++) {
             int sfbs_ = sSFB_addr(s) + b * 128 * 4;
             uint64_t sfb_desc = mkdesc_sf(sfbs_);
-            asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;" ::"r"(TMEM_SFB + b * 4), "l"(sfb_desc));
+            asm volatile(
+                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;" ::"r"(
+                    TMEM_SFB + b * 4),
+                "l"(sfb_desc));
           }
         }
 
@@ -310,16 +339,24 @@ __device__ __noinline__ void task_impl_tpl(
           uint64_t ad = mkdesc(as_ + k * UK);
           uint64_t bd = mkdesc(bs_ + k * UK);
           uint32_t en = (ki > 0 || k > 0) ? 1u : 0u;
-          asm volatile(
-              "{\n\t.reg .pred p;\n\tsetp.ne.b32 p, %4, 0;\n\t"
-              "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale [%0], %1, %2, %3, [%5], [%6], p;\n\t}\n"
-              ::"r"(tc), "l"(ad), "l"(bd), "r"(idesc), "r"(en),
-                "r"(TMEM_SFA), "r"(TMEM_SFB));
+          asm volatile("{\n\t.reg .pred p;\n\tsetp.ne.b32 p, %4, 0;\n\t"
+                       "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale "
+                       "[%0], %1, %2, %3, [%5], [%6], p;\n\t}\n" ::"r"(tc),
+                       "l"(ad),
+                       "l"(bd),
+                       "r"(idesc),
+                       "r"(en),
+                       "r"(TMEM_SFA),
+                       "r"(TMEM_SFB));
         }
 
-        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];" ::"r"(be + s * 8) : "memory");
+        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared:"
+                     ":cluster.b64 [%0];" ::"r"(be + s * 8)
+                     : "memory");
         if (ki == nk - 1) {
-          asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];" ::"r"(btf + accum_idx * 8) : "memory");
+          asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one."
+                       "shared::cluster.b64 [%0];" ::"r"(btf + accum_idx * 8)
+                       : "memory");
         }
       }
     }
@@ -345,7 +382,8 @@ __device__ __noinline__ void task_impl_tpl(
 #pragma unroll
       for (int si = 0; si < NUM_N_ST; si++) {
         if (ew == 0) {
-          asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(NUM_TMA_ST - 1) : "memory");
+          asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(NUM_TMA_ST - 1)
+                       : "memory");
         }
         // Named barrier 6 (free in MPK convention; bar.sync 0 is the
         // implicit __syncthreads() with count=256 used elsewhere).
@@ -356,10 +394,17 @@ __device__ __noinline__ void task_impl_tpl(
           uint32_t tc = accum_idx * BN + si * STORE_BN + i * 8;
           uint32_t so = ew * 32 * 128 + row * 128 + col * 16;
           uint32_t v0, v1, v2, v3, v4, v5, v6, v7;
-          asm volatile("tcgen05.ld.sync.aligned.32x32b.x8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
-              : "=r"(v0), "=r"(v1), "=r"(v2), "=r"(v3),
-                "=r"(v4), "=r"(v5), "=r"(v6), "=r"(v7)
-              : "r"(tc));
+          asm volatile("tcgen05.ld.sync.aligned.32x32b.x8.b32 "
+                       "{%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+                       : "=r"(v0),
+                         "=r"(v1),
+                         "=r"(v2),
+                         "=r"(v3),
+                         "=r"(v4),
+                         "=r"(v5),
+                         "=r"(v6),
+                         "=r"(v7)
+                       : "r"(tc));
           asm volatile("tcgen05.wait::ld.sync.aligned;");
           uint32_t b0, b1, b2, b3;
           asm("cvt.rn.bf16x2.f32 %0, %2, %1;" : "=r"(b0) : "r"(v0), "r"(v1));
@@ -367,7 +412,12 @@ __device__ __noinline__ void task_impl_tpl(
           asm("cvt.rn.bf16x2.f32 %0, %2, %1;" : "=r"(b2) : "r"(v4), "r"(v5));
           asm("cvt.rn.bf16x2.f32 %0, %2, %1;" : "=r"(b3) : "r"(v6), "r"(v7));
           uint32_t sa = sCD_addr(tma_st) + so;
-          asm volatile("st.shared.v4.u32 [%0], {%1,%2,%3,%4};" ::"r"(sa), "r"(b0), "r"(b1), "r"(b2), "r"(b3) : "memory");
+          asm volatile("st.shared.v4.u32 [%0], {%1,%2,%3,%4};" ::"r"(sa),
+                       "r"(b0),
+                       "r"(b1),
+                       "r"(b2),
+                       "r"(b3)
+                       : "memory");
         }
         if (si == NUM_N_ST - 1) {
           asm volatile("tcgen05.fence::before_thread_sync;");
@@ -380,8 +430,12 @@ __device__ __noinline__ void task_impl_tpl(
         if (ew == 0 && elect_one_sync()) {
           uint64_t dd = (uint64_t)td_ptr;
           uint32_t sp = sCD_addr(tma_st);
-          asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%2, %3}], [%1];"
-              ::"l"(dd), "r"(sp), "r"(on + si * STORE_BN), "r"(om) : "memory");
+          asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
+                       "[%0, {%2, %3}], [%1];" ::"l"(dd),
+                       "r"(sp),
+                       "r"(on + si * STORE_BN),
+                       "r"(om)
+                       : "memory");
           asm volatile("cp.async.bulk.commit_group;");
         }
         tma_st = (tma_st + 1) % NUM_TMA_ST;
@@ -391,7 +445,9 @@ __device__ __noinline__ void task_impl_tpl(
       asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(0) : "memory");
     }
     if (ew == 1) {
-      asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr), "r"(TCA));
+      asm volatile(
+          "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
+          "r"(TCA));
     }
   }
 #endif

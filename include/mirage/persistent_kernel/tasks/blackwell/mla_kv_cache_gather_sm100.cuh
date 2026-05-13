@@ -45,7 +45,8 @@ template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int K_PE_ROW_STRIDE = D_K - D_V,
           int C_LATENT_ROW_STRIDE = D_V>
 __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
-    void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new c_latent (normed)
+    void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new
+                                  // c_latent (normed)
     void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] new k_pe
     void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged KV cache
     void *contiguous_kv_ptr,      // [max_seq_len, D_K] output: contiguous KV
@@ -143,7 +144,8 @@ template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int K_PE_ROW_STRIDE = D_K - D_V,
           int C_LATENT_ROW_STRIDE = D_V>
 __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
-    void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new c_latent (normed)
+    void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new
+                                  // c_latent (normed)
     void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] new k_pe
     void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged KV cache
     void *contiguous_kv_ptr,      // [max_seq_len, D_K] decode-layout output
