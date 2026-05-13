@@ -714,8 +714,15 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        process_dim: int = None,
+        in_offset_elems: int = 0,
+        out_offset_elems: int = 0,
     ):
-        # Currently assume that the input/output are 2D tensors
+        # process_dim / in_offset_elems / out_offset_elems support
+        # row-slice RMSnorm where input/output are slices of a wider buffer
+        # (e.g., QKV-a fused qkv_a_out where q_a_layernorm reads
+        # cols [0:1536) and kv_a_layernorm reads cols [1536:2048)). Defaults
+        # match legacy contiguous behaviour.
         assert input.num_dims == 2
         assert output.num_dims == 2
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -723,7 +730,18 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm")
+        task_name = "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm"
+        if (process_dim is None and in_offset_elems == 0
+                and out_offset_elems == 0):
+            self.kn_graph.register_task(tb_graph, task_name)
+        else:
+            if process_dim is None:
+                process_dim = output.dim(1)
+            self.kn_graph.register_task(
+                tb_graph,
+                task_name,
+                [process_dim, in_offset_elems, out_offset_elems],
+            )
 
     def rmsnorm_linear_layer(
         self,
@@ -1102,9 +1120,31 @@ class PersistentKernel:
         mla_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
+        c_latent_row_stride: int = None,
+        c_latent_offset_elems: int = 0,
+        k_pe_row_stride: int = None,
+        k_pe_offset_elems: int = 0,
     ):
+        # Stride/offset overrides let the kernel read c_latent / k_pe from
+        # a wider parent buffer (QKV-a fused: qkv_a_out (mbt, 2176) with
+        # c_latent at [1536:2048) and k_pe at [2048:2112)). Defaults
+        # preserve legacy contiguous inputs.
         d_k, d_v, page_size = mla_params
-        params = [d_k, d_v, page_size]
+        slice_override = (
+            c_latent_row_stride is not None or
+            c_latent_offset_elems != 0 or
+            k_pe_row_stride is not None or
+            k_pe_offset_elems != 0)
+        if slice_override:
+            params = [
+                d_k, d_v, page_size,
+                c_latent_row_stride if c_latent_row_stride is not None else d_v,
+                c_latent_offset_elems,
+                k_pe_row_stride if k_pe_row_stride is not None else 128,
+                k_pe_offset_elems,
+            ]
+        else:
+            params = [d_k, d_v, page_size]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
@@ -1154,10 +1194,32 @@ class PersistentKernel:
         mla_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
+        c_latent_row_stride: int = None,
+        c_latent_offset_elems: int = 0,
+        k_pe_row_stride: int = None,
+        k_pe_offset_elems: int = 0,
     ):
-        """Append paged KV once, then materialize decode or prefill views."""
+        """Append paged KV once, then materialize decode or prefill views.
+
+        Stride/offset overrides let the kernel read c_latent / k_pe from a
+        wider parent buffer (QKV-a fused path). Defaults preserve legacy.
+        """
         d_k, d_v, page_size = mla_params
-        params = [d_k, d_v, page_size]
+        slice_override = (
+            c_latent_row_stride is not None or
+            c_latent_offset_elems != 0 or
+            k_pe_row_stride is not None or
+            k_pe_offset_elems != 0)
+        if slice_override:
+            params = [
+                d_k, d_v, page_size,
+                c_latent_row_stride if c_latent_row_stride is not None else d_v,
+                c_latent_offset_elems,
+                k_pe_row_stride if k_pe_row_stride is not None else 128,
+                k_pe_offset_elems,
+            ]
+        else:
+            params = [d_k, d_v, page_size]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
@@ -1275,8 +1337,17 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple = (128, 1, 1),
         q_tile_size: int = 16,
+        k_pe_row_stride: int = None,
+        k_pe_offset: int = 0,
     ):
+        # k_pe_row_stride / k_pe_offset support running the K_PE rotation
+        # in-place on a slice of a wider buffer (e.g., qkv_a_out (mbt, 2176)
+        # where k_pe lives at cols [2048:2112)). Defaults preserve legacy.
         params = [q_tile_size]
+        if k_pe_row_stride is not None or k_pe_offset != 0:
+            if k_pe_row_stride is None:
+                k_pe_row_stride = 128
+            params = [q_tile_size, k_pe_row_stride, k_pe_offset]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(k_pe, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
@@ -2064,19 +2135,37 @@ class PersistentKernel:
         block_dim: tuple,
         scale_ue8m0: bool = True,
         active_mode: int = 0,
+        hidden_size_override: int = None,
+        input_stride_override: int = None,
+        in_offset_elems: int = 0,
     ):
         """Quantize BF16 input to FP8 with block-wise scale.
 
         scale_ue8m0=True: output scale is packed UE8M0 uint32 (for FP8 linear GEMM)
         scale_ue8m0=False: output scale is float32 (for MoE group GEMM)
+
+        hidden_size_override / input_stride_override / in_offset_elems support
+        quantizing a column slice of a wider input buffer (QKV-a fused path).
+        Defaults preserve legacy whole-row quantize. The OUTPUT buffer should
+        be sized for the slice (hidden_size_override columns).
         """
-        hidden_size = input.dim(input.num_dims - 1)
+        legacy_hidden_size = input.dim(input.num_dims - 1)
         row_count = 1
         for axis in range(input.num_dims - 1):
             row_count *= input.dim(axis)
+        slice_override = (hidden_size_override is not None or
+                          input_stride_override is not None or
+                          in_offset_elems != 0)
+        hidden_size = hidden_size_override or legacy_hidden_size
+        if input_stride_override is None:
+            input_stride_override = legacy_hidden_size
         group_tiles = self._fp8_quantize_group_tiles(hidden_size, scale_ue8m0)
         grid_dim = (group_tiles, row_count, 1)
-        params = [] if active_mode == 0 else [active_mode]
+        if slice_override:
+            params = [active_mode, hidden_size,
+                      input_stride_override, in_offset_elems]
+        else:
+            params = [] if active_mode == 0 else [active_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, -1, -1), -1, True)
         tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)

@@ -132,7 +132,16 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params (optional, default = legacy contiguous):
+  //   params[0] = process_dim  (elements per row to normalise; defaults to
+  //               the DTensor's last-dim size = contiguous).
+  //   params[1] = in_offset_elems   (skip elements at the start of each row).
+  //   params[2] = out_offset_elems  (skip elements at the start of each row
+  //               in the output; equal to in_offset for in-place).
+  // Used by the QKV-a fused path (user #2 part-a, 2026-05-12): when q_a_out
+  // and kv_a_out are aliases of a wider qkv_a_out buffer, the per-row offset
+  // selects which slice to normalise.
+  assert(params.size() == 0 || params.size() == 3);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -149,15 +158,24 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
-  int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
+  int hidden_dim_full = output_ops[0]->output_tensors[0].dim[1];
   // Currently assume that each rmsnorm task processes one token
   assert(batch_size == 1);
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.dim[0] == input_ops[0]->dtensor.dim[0]);
   assert(output_ops[0]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
+  int process_dim = params.size() == 3 ? params[0] : hidden_dim_full;
+  int in_offset = params.size() == 3 ? params[1] : 0;
+  int out_offset = params.size() == 3 ? params[2] : 0;
+  assert(in_offset + process_dim <= hidden_dim_full);
+  assert(out_offset + process_dim <= hidden_dim_full);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::rms_norm_impl<bfloat16, $, $>(", batch_size, hidden_dim);
+  code.e("kernel::rms_norm_impl<bfloat16, $, $, $, $>(",
+         batch_size,
+         process_dim,
+         in_offset,
+         out_offset);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
@@ -1185,7 +1203,13 @@ int TaskRegister::register_paged_attention_hopper_task(
 
 int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params (optional, default = legacy contiguous):
+  //   params[0] = process_dim    (HIDDEN_DIM the kernel processes per row).
+  //   params[1] = in_offset_elems  (skip elements at start of each row).
+  //   params[2] = out_offset_elems (same, for output).
+  // QKV-a fused path uses these so q_a_layernorm / kv_a_layernorm can run
+  // in-place on a wider qkv_a_out buffer.
+  assert(params.size() == 0 || params.size() == 3);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -1202,17 +1226,26 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
-  int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
+  int hidden_dim_full = output_ops[0]->output_tensors[0].dim[1];
 
   // Currently assume that each rmsnorm task processes one token
   // assert(batch_size == 1);
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.dim[0] == input_ops[0]->dtensor.dim[0]);
   assert(output_ops[0]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
+  int process_dim = params.size() == 3 ? params[0] : hidden_dim_full;
+  int in_offset = params.size() == 3 ? params[1] : 0;
+  int out_offset = params.size() == 3 ? params[2] : 0;
+  assert(in_offset + process_dim <= hidden_dim_full);
+  assert(out_offset + process_dim <= hidden_dim_full);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e(
-      "kernel::rms_norm_hopper_impl<bfloat16, $, $>(", batch_size, hidden_dim);
+  // NUM_THREADS defaults to 256; explicit so we can append IN/OUT_OFFSET.
+  code.e("kernel::rms_norm_hopper_impl<bfloat16, $, $, 256, $, $>(",
+         batch_size,
+         process_dim,
+         in_offset,
+         out_offset);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
@@ -4688,9 +4721,16 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   //      decompression over [0, kv_len)
   //   2: qo-token rows, prefill phase only
   //   3: qo-token rows, decode phase only
-  assert(params.size() == 0 || params.size() == 1);
+  // params layout:
+  //   size 0: defaults (active_mode=0, no row-slice overrides).
+  //   size 1: [active_mode] (legacy).
+  //   size 4: [active_mode, hidden_size_override, input_stride_override,
+  //            in_offset_elems] — QKV-a fused path uses this to quantize
+  //            a slice of a wider buffer.
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 4);
   int active_mode = params.empty() ? 0 : params[0];
   assert(active_mode >= 0 && active_mode <= 3);
+  bool has_slice_override = (params.size() == 4);
   int batch_size = 0, hidden_size = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -4718,6 +4758,12 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // GLOBAL_STRIDE = hidden_size (stride between rows in linearized layout)
   int input_stride = (ndims == 3) ? input_ops[0]->dtensor.dim[2]
                                   : input_ops[0]->dtensor.dim[1];
+  int in_offset_elems = 0;
+  if (has_slice_override) {
+    hidden_size = params[1];
+    input_stride = params[2];
+    in_offset_elems = params[3];
+  }
   int active_row_multiplier =
       (ndims == 3) ? input_ops[0]->output_tensors[0].dim[1] : 1;
   constexpr int GROUP_SIZE = 128;
@@ -4769,7 +4815,15 @@ int TaskRegister::register_quantize_fp8_sm100_task(
          group_tiles);
   code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $>(",
          scale_ue8m0 ? "true" : "false");
-  code.e("    task_desc->input_ptrs[0],");  // input bf16
+  if (in_offset_elems != 0) {
+    // QKV-a fused slice: pre-offset the input pointer so the kernel reads
+    // the right column window from a wider buffer.
+    code.e("    static_cast<cute::bfloat16_t const*>(task_desc->input_ptrs[0])"
+           " + $,",
+           in_offset_elems);
+  } else {
+    code.e("    task_desc->input_ptrs[0],"); // input bf16
+  }
   code.e("    task_desc->output_ptrs[0],"); // output fp8
   code.e("    task_desc->output_ptrs[1],"); // output scale
   // scale_outer_stride: for UE8M0 column-major layout [packed_k,
@@ -5665,20 +5719,26 @@ int TaskRegister::register_fp8_group_gemm_largem_sm100_task(
 
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params[0]: d_k (576)
-  // params[1]: d_v (512)
-  // params[2]: page_size (128)
-  assert(params.size() == 3);
+  // params:
+  //   size 3 (legacy): [d_k, d_v, page_size]
+  //     c_latent input  is contiguous (mbt, d_v)            -> stride d_v
+  //     k_pe     input  is contiguous (mbt, 128 padded)     -> stride 128
+  //   size 7 (QKV-a fused): adds
+  //     [c_latent_row_stride, c_latent_offset_elems,
+  //      k_pe_row_stride,     k_pe_offset_elems]
+  //   The two inputs may live at different col-offsets inside a wider buffer.
+  assert(params.size() == 3 || params.size() == 7);
 
   int d_k = params[0];
   int d_v = params[1];
   int page_size = params[2];
+  int c_latent_row_stride = (params.size() == 7) ? params[3] : d_v;
+  int c_latent_offset = (params.size() == 7) ? params[4] : 0;
+  int k_pe_row_stride = (params.size() == 7) ? params[5] : 128;
+  int k_pe_offset = (params.size() == 7) ? params[6] : 0;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // k_pe_out is allocated with a padded row stride of 128 (real ROPE dim is
-  // 64). Slice the per-request token window before appending/gathering.
-  constexpr int k_pe_row_stride = 128;
   code.e("{");
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
@@ -5688,12 +5748,14 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          "runtime_config.paged_kv_last_page_len_buffer[bi_];");
   code.e("  auto *c_latent_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
-         "qo_fp_ * $;",
-         d_v);
+         "qo_fp_ * $ + $;",
+         c_latent_row_stride,
+         c_latent_offset);
   code.e("  auto *k_pe_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
-         "qo_fp_ * $;",
-         k_pe_row_stride);
+         "qo_fp_ * $ + $;",
+         k_pe_row_stride,
+         k_pe_offset);
   code.e("  auto *paged_cache_ptr_ = "
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[2]);");
   code.e("  auto *contiguous_kv_base_ = "
@@ -5702,11 +5764,12 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          "(contiguous_kv_base_ == paged_cache_ptr_) ? contiguous_kv_base_ : "
          "contiguous_kv_base_ + bi_ * S_ * $;",
          d_k);
-  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $, $>(",
+  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $, $, $>(",
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride);
+         k_pe_row_stride,
+         c_latent_row_stride);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    paged_cache_ptr_,"); // paged_cache
@@ -5786,16 +5849,24 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   // Unified variant for the chunked-prefill flow. It appends new KV to the
   // paged cache once. Decode gets a dense concatenated [CKV,KPE] view when
   // needed; prompt prefill gets split CKV/KPE views for kv_b_proj + PR674 MLA.
+  //
+  // params (same scheme as register_mla_kv_gather_sm100_task):
+  //   size 3 (legacy): [d_k, d_v, page_size].
+  //   size 7 (QKV-a fused): adds [c_latent_row_stride, c_latent_offset_elems,
+  //                               k_pe_row_stride, k_pe_offset_elems].
   (void)bgraph;
-  assert(params.size() == 3);
+  assert(params.size() == 3 || params.size() == 7);
 
   int d_k = params[0];
   int d_v = params[1];
   int page_size = params[2];
+  int c_latent_row_stride = (params.size() == 7) ? params[3] : d_v;
+  int c_latent_offset = (params.size() == 7) ? params[4] : 0;
+  int k_pe_row_stride = (params.size() == 7) ? params[5] : 128;
+  int k_pe_offset = (params.size() == 7) ? params[6] : 0;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  constexpr int k_pe_row_stride = 128;
   code.e("{");
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
@@ -5812,12 +5883,14 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   code.e("  prompt_prefill_ = prompt_prefill_ && q_len_ > 8;");
   code.e("  auto *c_latent_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
-         "qo_fp_ * $;",
-         d_v);
+         "qo_fp_ * $ + $;",
+         c_latent_row_stride,
+         c_latent_offset);
   code.e("  auto *k_pe_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
-         "qo_fp_ * $;",
-         k_pe_row_stride);
+         "qo_fp_ * $ + $;",
+         k_pe_row_stride,
+         k_pe_offset);
   code.e("  auto *paged_cache_ptr_ = "
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[2]);");
   code.e("  auto *contiguous_kv_base_ = "
@@ -5838,11 +5911,12 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
          "static_cast<nv_bfloat16*>(task_desc->output_ptrs[1]) + "
          "bi_ * MPK_MAX_SEQ_LENGTH * $;",
          d_k - d_v);
-  code.e("kernel::mla_kv_cache_gather_unified_sm100_task_impl<$, $, $, $>(",
+  code.e("kernel::mla_kv_cache_gather_unified_sm100_task_impl<$, $, $, $, $>(",
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride);
+         k_pe_row_stride,
+         c_latent_row_stride);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    paged_cache_ptr_,"); // paged_cache
@@ -5972,14 +6046,30 @@ int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
 int TaskRegister::register_deepseek_mla_rope_k_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  assert(params.size() == 1);
+  // params: [tile_q [, k_pe_row_stride [, k_pe_offset]]]
+  // - Legacy (1 param): standalone k_pe buffer (mbt, 128) → K_PE_STRIDE=128, K_PE_OFFSET=0.
+  // - QKV-a fused (3 params): k_pe lives at offset `k_pe_offset` within a
+  //   wider (mbt, k_pe_row_stride) buffer. Builder passes e.g. (16, 2176, 2048)
+  //   so the kernel rotates qkv_a_out[:, 2048:2112] in place. Defaults keep
+  //   legacy callers unaffected.
+  assert(params.size() == 1 || params.size() == 3);
   int tile_q = params[0];
   assert(tile_q > 0);
+  int k_pe_row_stride = (params.size() == 3) ? params[1] : 128;
+  int k_pe_offset = (params.size() == 3) ? params[2] : 0;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::deepseek_mla_rope_sm100_task_impl<1, $, false, false, true>(",
-         tile_q);
+  // Template params (positionally):
+  //   NUM_HEADS=1, TILE_Q, HAS_SPLIT_Q=false, DO_Q=false, DO_K=true,
+  //   FUSED_HEAD_DIM=576 (unused for K), ROPE_DIM=64, K_PE_STRIDE,
+  //   Q_ROW_STRIDE_OVERRIDE=0, Q_PE_BASE_IN_ROW=0, Q_PE_HEAD_STRIDE=0,
+  //   K_PE_OFFSET
+  code.e("kernel::deepseek_mla_rope_sm100_task_impl<"
+         "1, $, false, false, true, 576, 64, $, 0, 0, 0, $>(",
+         tile_q,
+         k_pe_row_stride,
+         k_pe_offset);
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");

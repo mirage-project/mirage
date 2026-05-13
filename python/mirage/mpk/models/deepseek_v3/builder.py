@@ -420,7 +420,9 @@ class DeepSeekV3Builder(GraphBuilder):
         return self.num_workers
 
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
-                       output, residual=None, gate_mode: int = 0):
+                       output, residual=None, gate_mode: int = 0,
+                       input_row_stride: int = None,
+                       input_col_offset: int = 0):
         """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
 
         Replaces the old `linear_fp8_sm100` path which has a row-coverage
@@ -444,6 +446,11 @@ class DeepSeekV3Builder(GraphBuilder):
             residual epilogue).
         gate_mode: 0=always run, 1=prefill phase only, 2=decode phase only
             (mirrors the dense-GEMM `runtime_m_mode`).
+        input_row_stride / input_col_offset: when reading a column slice of
+            a wider input buffer (QKV-a fused path), specify the parent's
+            row stride and the slice's start column. K (= weight.dim(1))
+            tells the kernel how many cols to actually quantize per row.
+            Defaults preserve legacy contiguous reads.
         """
         if weight_scale_raw is None:
             raise ValueError("FP8 linear v2 requires FP8 weight scale.")
@@ -458,6 +465,13 @@ class DeepSeekV3Builder(GraphBuilder):
         # Quantize bf16 input → FP8 + float32 scale. active_mode mirrors the
         # gate_mode so the quantize fires only in the matching phase.
         active_mode = 2 if gate_mode == 1 else 3 if gate_mode == 2 else 0
+        quantize_kwargs = {}
+        if input_row_stride is not None or input_col_offset != 0:
+            quantize_kwargs["hidden_size_override"] = reduction_size
+            quantize_kwargs["input_stride_override"] = (
+                input_row_stride if input_row_stride is not None
+                else input_bf16.dim(1))
+            quantize_kwargs["in_offset_elems"] = input_col_offset
         self.mpk.quantize_fp8_layer(
             input=input_bf16,
             output_fp8=input_fp8,
@@ -466,6 +480,7 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             scale_ue8m0=False,
             active_mode=active_mode,
+            **quantize_kwargs,
         )
 
         gemm_layer = (
@@ -621,7 +636,9 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
-                     grid_dim, block_dim, residual=None, gate_mode: int = 0):
+                     grid_dim, block_dim, residual=None, gate_mode: int = 0,
+                     input_row_stride: int = None,
+                     input_col_offset: int = 0):
         """Quantize BF16 input → FP8, then run FP8 GEMM.
 
         Now routes through the new `fp8_gemm_dense_smallm/mediumm_sm100`
@@ -663,6 +680,8 @@ class DeepSeekV3Builder(GraphBuilder):
             output=output,
             residual=residual,
             gate_mode=gate_mode,
+            input_row_stride=input_row_stride,
+            input_col_offset=input_col_offset,
         )
 
     def _fp8_dense_kv_b_proj(
@@ -1027,15 +1046,48 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
 
-        # MLA projections
+        # MLA projections.
+        # 2026-05-12 (user #2 part-a) — QKV-a fusion: when MPK_DSV3_QKV_A_FUSED=1,
+        # allocate a single qkv_a_out (mbt, 2176) buffer and alias q_a_out /
+        # c_latent_out / k_pe_out to it. The fused FP8 GEMM writes all three
+        # outputs in one task; downstream consumers read their slice via the
+        # new stride/offset kernel params.
+        # Layout per row:
+        #   cols [0    : 1536) = q_a_out      (q_lora_rank = 1536)
+        #   cols [1536 : 2048) = c_latent_out (kv_lora_rank = 512)
+        #   cols [2048 : 2112) = k_pe_out real (QK_ROPE_HEAD_DIM = 64)
+        #   cols [2112 : 2176) = k_pe_out zero pad (= MMA_M tail)
+        self._qkv_a_fused = os.environ.get("MPK_DSV3_QKV_A_FUSED", "0") == "1"
+        if self._qkv_a_fused:
+            qkv_a_total = self.q_lora_rank + self.kv_lora_rank + 128
+            assert qkv_a_total == 2176, (
+                f"QKV-a fused expects q_lora=1536 + kv_lora=512 + k_pe_pad=128"
+                f" = 2176, got {qkv_a_total}")
+            self.qkv_a_out = self.mpk.new_tensor(
+                dims=(mbt, qkv_a_total),
+                dtype=bfloat16, name="qkv_a_out", io_category="cuda_tensor",
+            )
+            self._qkv_a_row_stride = qkv_a_total
+            self._qkv_a_q_offset = 0
+            self._qkv_a_c_latent_offset = self.q_lora_rank             # 1536
+            self._qkv_a_k_pe_offset = self.q_lora_rank + self.kv_lora_rank  # 2048
+            # All three downstream "slots" share the same backing buffer.
+            self.q_a_out = self.qkv_a_out
+        else:
+            self.qkv_a_out = None
+            self._qkv_a_row_stride = None
+            self._qkv_a_q_offset = 0
+            self._qkv_a_c_latent_offset = 0
+            self._qkv_a_k_pe_offset = 0
         # q_a output: [batch, q_lora_rank]
         self.q_a_out_buf = None
-        self.q_a_out = self.mpk.new_tensor(
-            dims=(mbt, self.q_lora_rank),
-            dtype=bfloat16,
-            name="q_a_out",
-            io_category="cuda_tensor",
-        )
+        if not self._qkv_a_fused:
+            self.q_a_out = self.mpk.new_tensor(
+                dims=(mbt, self.q_lora_rank),
+                dtype=bfloat16,
+                name="q_a_out",
+                io_category="cuda_tensor",
+            )
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
         self.q_nope_pe_buf = None
         self.q_nope_pe = self.mpk.new_tensor(
@@ -1081,20 +1133,29 @@ class DeepSeekV3Builder(GraphBuilder):
         # We use two separate linear layers instead of one 576-dim output,
         # so we can apply kv_a_layernorm to c_latent only.
         self.c_latent_out_buf = None
-        self.c_latent_out = self.mpk.new_tensor(
-            dims=(mbt, self.kv_lora_rank),  # [batch, 512]
-            dtype=bfloat16,
-            name="c_latent_out",
-            io_category="cuda_tensor",
-        )
-        # Pad K-PE from 64 to 128 rows so the FP8 linear and downstream KV
-        # copy use the SM100 128-row tile shape. Real data remains in [0:64].
-        self.k_pe_out = self.mpk.new_tensor(
-            dims=(mbt, 128),  # [batch, 128] — padded from 64
-            dtype=bfloat16,
-            name="k_pe_out",
-            io_category="cuda_tensor",
-        )
+        if self._qkv_a_fused:
+            # Alias c_latent_out / k_pe_out into the fused qkv_a_out buffer.
+            # Downstream consumers receive the FULL qkv_a_out DTensor; the
+            # builder passes the right (row_stride, offset, process_dim) to
+            # each kernel so it reads/writes only its slice.
+            self.c_latent_out = self.qkv_a_out
+            self.k_pe_out = self.qkv_a_out
+        else:
+            self.c_latent_out = self.mpk.new_tensor(
+                dims=(mbt, self.kv_lora_rank),  # [batch, 512]
+                dtype=bfloat16,
+                name="c_latent_out",
+                io_category="cuda_tensor",
+            )
+            # Pad K-PE from 64 to 128 rows so the FP8 linear and downstream KV
+            # copy use the SM100 128-row tile shape. Real data remains in
+            # [0:64].
+            self.k_pe_out = self.mpk.new_tensor(
+                dims=(mbt, 128),  # [batch, 128] — padded from 64
+                dtype=bfloat16,
+                name="k_pe_out",
+                io_category="cuda_tensor",
+            )
         # Combined KV entry after layernorm: [batch, 576]
         self.kv_combined = self.mpk.new_tensor(
             dims=(mbt, self.qk_head_dim),  # [batch, 576]
@@ -1434,57 +1495,100 @@ class DeepSeekV3Builder(GraphBuilder):
         prefix = f"model.layers.{layer_idx}."
         attn = f"{prefix}self_attn."
 
-        # Step 1: q_a_proj (FP8)
-        w_q_a, s_q_a = self._attach_fp8_weight(
-            state_dict, f"{attn}q_a_proj.weight", f"layer_{layer_idx}_q_a_proj")
         attn_input_fp8 = None
         attn_input_scale = None
-        if self._reuse_attn_input_fp8 and s_q_a is not None:
-            if attn_input_fp8 is None or attn_input_scale is None:
-                attn_input_fp8, attn_input_scale = self._fp8_buffers_for_reduction(
-                    self.hidden_size)
-                self.mpk.quantize_fp8_layer(
-                    input=self.rmsnorm_out,
-                    output_fp8=attn_input_fp8,
-                    output_scale=attn_input_scale,
-                    grid_dim=(self.max_num_batched_tokens, 1, 1),
-                    block_dim=(128, 1, 1),
-                )
-            q_a_split_k = self._pick_fp8_splitk_factor(w_q_a)
-            if q_a_split_k is not None:
-                self._fp8_linear_splitk(
-                    None, w_q_a, s_q_a, self.q_a_out,
-                    split_k=q_a_split_k,
-                    input_fp8=attn_input_fp8, input_scale=attn_input_scale,
-                )
-            else:
-                self._fp8_linear_prequantized(
-                    attn_input_fp8, attn_input_scale, w_q_a, s_q_a, self.q_a_out,
-                    grid_dim=(grid_for_rmsnorm_linear_layer(self.q_lora_rank), 1, 1),
-                    block_dim=(128, 1, 1))
+
+        if self._qkv_a_fused:
+            # 2026-05-12 (user #2 part-a) — One fused FP8 GEMM emits the full
+            # qkv_a_out (mbt, 2176). Replaces the three separate FP8 GEMMs
+            # (q_a_proj, kv_a_latent, kv_a_rope_padded). Demo.py builds
+            # qkv_a_proj.weight by FP8-byte-concatenating the three weights
+            # along dim 0 (no requantize — block boundaries align at 128).
+            w_qkv_a, s_qkv_a = self._attach_fp8_weight(
+                state_dict, f"{attn}qkv_a_proj.weight",
+                f"layer_{layer_idx}_qkv_a_proj")
+            if s_qkv_a is None:
+                raise RuntimeError(
+                    "MPK_DSV3_QKV_A_FUSED=1 requires qkv_a_proj.weight + "
+                    "weight_scale_inv to be present in the state_dict. "
+                    "demo.py builds them when the env var is set at load time.")
+            self._fp8_linear(
+                self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
+                block_dim=(128, 1, 1))
         else:
-            q_a_split_k = self._pick_fp8_splitk_factor(w_q_a)
-            if q_a_split_k is not None:
-                self._fp8_linear_splitk(
-                    self.rmsnorm_out, w_q_a, s_q_a, self.q_a_out,
-                    split_k=q_a_split_k)
+            # Step 1: q_a_proj (FP8)
+            w_q_a, s_q_a = self._attach_fp8_weight(
+                state_dict, f"{attn}q_a_proj.weight",
+                f"layer_{layer_idx}_q_a_proj")
+            if self._reuse_attn_input_fp8 and s_q_a is not None:
+                if attn_input_fp8 is None or attn_input_scale is None:
+                    attn_input_fp8, attn_input_scale = (
+                        self._fp8_buffers_for_reduction(self.hidden_size))
+                    self.mpk.quantize_fp8_layer(
+                        input=self.rmsnorm_out,
+                        output_fp8=attn_input_fp8,
+                        output_scale=attn_input_scale,
+                        grid_dim=(self.max_num_batched_tokens, 1, 1),
+                        block_dim=(128, 1, 1),
+                    )
+                q_a_split_k = self._pick_fp8_splitk_factor(w_q_a)
+                if q_a_split_k is not None:
+                    self._fp8_linear_splitk(
+                        None, w_q_a, s_q_a, self.q_a_out,
+                        split_k=q_a_split_k,
+                        input_fp8=attn_input_fp8,
+                        input_scale=attn_input_scale,
+                    )
+                else:
+                    self._fp8_linear_prequantized(
+                        attn_input_fp8, attn_input_scale,
+                        w_q_a, s_q_a, self.q_a_out,
+                        grid_dim=(
+                            grid_for_rmsnorm_linear_layer(self.q_lora_rank),
+                            1, 1),
+                        block_dim=(128, 1, 1))
             else:
-                self._fp8_linear(self.rmsnorm_out, w_q_a, s_q_a, self.q_a_out,
-                                 grid_dim=(grid_for_rmsnorm_linear_layer(self.q_lora_rank), 1, 1),
-                                 block_dim=(128, 1, 1))
+                q_a_split_k = self._pick_fp8_splitk_factor(w_q_a)
+                if q_a_split_k is not None:
+                    self._fp8_linear_splitk(
+                        self.rmsnorm_out, w_q_a, s_q_a, self.q_a_out,
+                        split_k=q_a_split_k)
+                else:
+                    self._fp8_linear(
+                        self.rmsnorm_out, w_q_a, s_q_a, self.q_a_out,
+                        grid_dim=(
+                            grid_for_rmsnorm_linear_layer(self.q_lora_rank),
+                            1, 1),
+                        block_dim=(128, 1, 1))
 
         # Step 2: q_a_layernorm (BF16 norm weight)
         w_q_a_ln = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}q_a_layernorm.weight"],
             name=f"layer_{layer_idx}_q_a_layernorm")
-        self.mpk.rmsnorm_layer(
-            input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
+        if self._qkv_a_fused:
+            # In-place RMSnorm of the q_a slice [0:q_lora_rank) inside the
+            # wider qkv_a_out buffer (row stride 2176).
+            self.mpk.rmsnorm_layer(
+                input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+                process_dim=self.q_lora_rank,
+                in_offset_elems=self._qkv_a_q_offset,
+                out_offset_elems=self._qkv_a_q_offset)
+        else:
+            self.mpk.rmsnorm_layer(
+                input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1))
 
         # Diagnostic: dump self.q_a_out for layer 0 if dump_layer0_intra_tensors
         # is set. Saves the post-layernormed q_a_proj output as slot 1.
-        if (layer_idx == 0 and getattr(self.mpk, "dump_layer0_intra_tensors", None)
-                is not None and getattr(self, "_layer0_q_a_zero_pt", None) is not None):
+        # Skipped in qkv_a fused mode because elementwise_add expects matching
+        # input/output dims and qkv_a_out is wider than the dump buffer.
+        if (not self._qkv_a_fused and layer_idx == 0
+                and getattr(self.mpk, "dump_layer0_intra_tensors", None) is not None
+                and getattr(self, "_layer0_q_a_zero_pt", None) is not None):
             q_a_zero_dt = self.mpk.attach_input(
                 torch_tensor=self._layer0_q_a_zero_pt, name="q_a_zero_local")
             q_a_dump_dt = self.mpk.attach_input(
@@ -1500,13 +1604,20 @@ class DeepSeekV3Builder(GraphBuilder):
         # Step 3: q_b projections.
         # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
         # Prefill uses vLLM's original split q_b [H*128] + [H*64].
+        # QKV-a fused: q_a_out aliases qkv_a_out (mbt, 2176); pass the slice
+        # row stride + offset so the FP8 quantize reads only q_a's 1536 cols.
         w_q_b, s_q_b = self._attach_fp8_weight(
             state_dict, f"{attn}q_b_proj.weight",
             f"layer_{layer_idx}_q_b_proj")
+        qb_slice_kwargs = (
+            dict(input_row_stride=self._qkv_a_row_stride,
+                 input_col_offset=self._qkv_a_q_offset)
+            if self._qkv_a_fused else {})
         self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
                          grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
                          block_dim=(128, 1, 1),
-                         gate_mode=2 if self._use_prefill else 0)
+                         gate_mode=2 if self._use_prefill else 0,
+                         **qb_slice_kwargs)
         if self._use_prefill:
             if self._qb_fused:
                 # FuseTensor path (2026-05-12 user #2): single FP8 GEMM
@@ -1521,7 +1632,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_unabs.dim(0)),
                               1, 1),
                     block_dim=(128, 1, 1),
-                    gate_mode=1)
+                    gate_mode=1,
+                    **qb_slice_kwargs)
             else:
                 w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
                     state_dict, f"{attn}q_b_nope.weight",
@@ -1531,7 +1643,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)),
                               1, 1),
                     block_dim=(128, 1, 1),
-                    gate_mode=1)
+                    gate_mode=1,
+                    **qb_slice_kwargs)
                 w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
                     state_dict, f"{attn}q_b_pe.weight",
                     f"layer_{layer_idx}_q_b_pe")
@@ -1543,11 +1656,17 @@ class DeepSeekV3Builder(GraphBuilder):
                     gate_mode=1)
         # Step 4: kv_a_proj split — c_latent (FP8) + k_pe (BF16 padded)
         # k_pe output=64 < MMA_M=128, so dequant to BF16 and pad weight to [128, H]
-        kv_a_w = state_dict[f"{attn}kv_a_proj_with_mqa.weight"]
+        # In QKV-a fused mode, the c_latent + k_pe portions are produced by
+        # the fused GEMM above; skip the separate kv_a_proj GEMMs entirely.
+        kv_a_w = state_dict[f"{attn}kv_a_proj_with_mqa.weight"] if not self._qkv_a_fused else None
         kv_a_s_key = f"{attn}kv_a_proj_with_mqa.weight_scale_inv"
-        has_kv_scale = kv_a_s_key in state_dict
+        has_kv_scale = (not self._qkv_a_fused) and (kv_a_s_key in state_dict)
 
-        if has_kv_scale:
+        if self._qkv_a_fused:
+            # c_latent + k_pe already written by the fused qkv_a GEMM above.
+            # Skip the separate kv_a_latent / kv_a_rope FP8 GEMMs entirely.
+            pass
+        elif has_kv_scale:
             kv_a_s = state_dict[kv_a_s_key]
             scale_rows_total = kv_a_s.shape[0]
             latent_ratio = self.kv_lora_rank / (self.kv_lora_rank + QK_ROPE_HEAD_DIM)
@@ -1587,30 +1706,31 @@ class DeepSeekV3Builder(GraphBuilder):
                                           f"layer_{layer_idx}_kv_a_rope")
             s_kv_rope = None
 
-        # Keep the latent and RoPE projections separate because only c_latent
-        # goes through kv_a_layernorm; a fused projection would need a fused
-        # split-plus-layernorm kernel that is not available here.
-        if attn_input_fp8 is not None and s_kv_latent is not None:
-            self._fp8_linear_prequantized(
-                attn_input_fp8, attn_input_scale, w_kv_latent, s_kv_latent,
-                self.c_latent_out,
-                grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),
-                block_dim=(128, 1, 1))
-        else:
-            self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent,
-                             self.c_latent_out,
-                             grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),
-                             block_dim=(128, 1, 1))
-        # FP8 GEMM for k_pe [N, 128] (padded from 64)
-        if attn_input_fp8 is not None and s_kv_rope is not None:
-            self._fp8_linear_prequantized(
-                attn_input_fp8, attn_input_scale, w_kv_rope, s_kv_rope,
-                self.k_pe_out,
-                grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
-        else:
-            self._fp8_linear(self.rmsnorm_out, w_kv_rope, s_kv_rope,
-                             self.k_pe_out,
-                             grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
+        if not self._qkv_a_fused:
+            # Keep the latent and RoPE projections separate because only c_latent
+            # goes through kv_a_layernorm; a fused projection would need a fused
+            # split-plus-layernorm kernel that is not available here.
+            if attn_input_fp8 is not None and s_kv_latent is not None:
+                self._fp8_linear_prequantized(
+                    attn_input_fp8, attn_input_scale, w_kv_latent, s_kv_latent,
+                    self.c_latent_out,
+                    grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),
+                    block_dim=(128, 1, 1))
+            else:
+                self._fp8_linear(self.rmsnorm_out, w_kv_latent, s_kv_latent,
+                                 self.c_latent_out,
+                                 grid_dim=(grid_for_rmsnorm_linear_layer(self.kv_lora_rank), 1, 1),
+                                 block_dim=(128, 1, 1))
+            # FP8 GEMM for k_pe [N, 128] (padded from 64)
+            if attn_input_fp8 is not None and s_kv_rope is not None:
+                self._fp8_linear_prequantized(
+                    attn_input_fp8, attn_input_scale, w_kv_rope, s_kv_rope,
+                    self.k_pe_out,
+                    grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
+            else:
+                self._fp8_linear(self.rmsnorm_out, w_kv_rope, s_kv_rope,
+                                 self.k_pe_out,
+                                 grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
 
         rope_q_grid = (
             self.mpk.max_num_batched_requests,
@@ -1637,6 +1757,10 @@ class DeepSeekV3Builder(GraphBuilder):
                 grid_dim=rope_q_grid,
                 qfused_mode=1 if self._qb_fused else 0,
             )
+        k_pe_rope_kwargs = (
+            dict(k_pe_row_stride=self._qkv_a_row_stride,
+                 k_pe_offset=self._qkv_a_k_pe_offset)
+            if self._qkv_a_fused else {})
         self.mpk.deepseek_mla_rope_k_layer(
             k_pe=self.k_pe_out,
             cos_pos_embed=self.cos_pos_embed,
@@ -1646,15 +1770,28 @@ class DeepSeekV3Builder(GraphBuilder):
                 1,
                 (self.max_num_batched_tokens + 15) // 16,
             ),
+            **k_pe_rope_kwargs,
         )
 
         # Step 5: kv_a_layernorm on c_latent ONLY
         w_kv_a_ln = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}kv_a_layernorm.weight"],
             name=f"layer_{layer_idx}_kv_a_layernorm")
-        self.mpk.rmsnorm_layer(
-            input=self.c_latent_out, weight=w_kv_a_ln, output=self.c_latent_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
+        if self._qkv_a_fused:
+            self.mpk.rmsnorm_layer(
+                input=self.c_latent_out, weight=w_kv_a_ln,
+                output=self.c_latent_out,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+                process_dim=self.kv_lora_rank,
+                in_offset_elems=self._qkv_a_c_latent_offset,
+                out_offset_elems=self._qkv_a_c_latent_offset)
+        else:
+            self.mpk.rmsnorm_layer(
+                input=self.c_latent_out, weight=w_kv_a_ln,
+                output=self.c_latent_out,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1))
 
         # Step 6: MLA attention (KV gather + unified prefill/decode + reduce).
         # When `_use_prefill` is True, register one MLA main task that chooses
@@ -1677,6 +1814,15 @@ class DeepSeekV3Builder(GraphBuilder):
         mla_decode_kv = (
             layer_cache if self._direct_paged_decode_kv else self.contiguous_kv
         )
+        # QKV-a fused: c_latent and k_pe live at offsets 1536 / 2048 of a
+        # 2176-wide qkv_a_out row. Pass row strides + offsets so the gather
+        # kernel reads the right slice for each input.
+        kv_gather_slice_kwargs = (
+            dict(c_latent_row_stride=self._qkv_a_row_stride,
+                 c_latent_offset_elems=self._qkv_a_c_latent_offset,
+                 k_pe_row_stride=self._qkv_a_row_stride,
+                 k_pe_offset_elems=self._qkv_a_k_pe_offset)
+            if self._qkv_a_fused else {})
         if self._use_prefill:
             self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
@@ -1688,6 +1834,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
+                **kv_gather_slice_kwargs,
             )
             # =================================================================
             # PHANTOM BRIDGE for chunked-prefill kpe_sep dependency tracking.
@@ -1750,6 +1897,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
+                **kv_gather_slice_kwargs,
             )
         if self._use_prefill:
             w_kv_b_k, s_kv_b_k = self._attach_raw_fp8_weight(

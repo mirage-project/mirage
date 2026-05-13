@@ -166,7 +166,31 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 - **Initial bug (= "shallow attempts" before fix)**: ran a smoke test with stale `core.*.so` (rebuilt before the `task_register.cc` qfused_mode=1 codegen edits landed); generated kernel call used qo_fp_*4096 stride on the 6144-wide buffer. After `rm core.*.so + touch _cython/*.pyx + uv pip install -e .`, the new codegen path activated; then the ROPE-side bug surfaced and required the kernel template extension above.
 - **Lesson**: any time fused tensors **alias** with separate tensors that downstream tasks already work on, audit ALL writers/readers of the aliased tensor — not just the GEMM that produces it. The ROPE split kernel was the silent victim here.
 
-### User-#2 part-a Fuse-QKV-a (q_a_proj + kv_a_latent + kv_a_rope → 2176-wide) — DEFERRED 2026-05-12
+### User-#2 part-a Fuse-QKV-a (q_a_proj + kv_a_latent + kv_a_rope → 2176-wide) — INFRA LANDED, CORRECTNESS REGRESSION (2026-05-12)
+- **Approach**: per user's directive — add stride/offset template params to 5 downstream kernels so q_a_out / c_latent_out / k_pe_out can all alias `qkv_a_out (mbt, 2176)` and each consumer reads its slice via `(row_stride, offset)`. Reference pattern: `multitoken_paged_attention_4_16.cuh#L13`. Defaults preserve legacy contiguous addressing → non-fused callers unaffected.
+- **5 kernels extended**:
+  1. `rms_norm_impl` (ampere) + `rms_norm_hopper_impl` (hopper) — added `IN_OFFSET, OUT_OFFSET` template params, pre-shifts input/output pointers.
+  2. `deepseek_mla_rope_sm100_task_impl` (DO_K branch) — added `K_PE_OFFSET` template param.
+  3. `per_token_group_quantize_fp8_task_impl` (already had `GLOBAL_STRIDE`) — extended task_register to take a 4-param `[active_mode, hidden_size_override, input_stride_override, in_offset_elems]` slice override, codegen pre-offsets input_ptr.
+  4. `mla_kv_cache_gather_sm100_task_impl` — added `C_LATENT_ROW_STRIDE` template param (alongside the pre-existing `K_PE_ROW_STRIDE`).
+  5. `mla_kv_cache_gather_unified_sm100_task_impl` — same as #4. Also touched `mla_kv_cache_gather_split_sm100_task_impl` for symmetry (not on hot path).
+- **Builder + demo wiring** (`MPK_DSV3_QKV_A_FUSED=1`, default OFF):
+  - `demo.py`: byte-concatenates q_a_proj.weight (1536) + kv_a_proj_with_mqa[:512] + kv_a_proj_with_mqa[512:576] + zero-pad to row 2176 → emits `qkv_a_proj.weight (2176, 7168)` + `weight_scale_inv (17, 56)`. FP8 byte-equal to baseline at the corresponding slice ranges (verified by inspection of the on-disk cache).
+  - `builder.py`: when fused, allocates one `qkv_a_out (mbt, 2176)`, aliases `q_a_out = c_latent_out = k_pe_out = qkv_a_out`, runs ONE fused FP8 GEMM, then wires q_a_layernorm/kv_a_layernorm/k_pe_ROPE/q_b-quantize/MLA-KV-gather with the right `(row_stride, offset, process_dim)` triple per consumer.
+  - `_fp8_linear` / `_fp8_linear_v2` extended with `input_row_stride` / `input_col_offset` kwargs that propagate to the quantize task.
+- **Smoke (DSv3 TP=4 EP=2 prompt=128, layers 0-3)** — initial fused vs non-fused baseline:
+  - Non-fused baseline (sanity, unchanged): L0..L2 cos=0.9999, L3 cos=0.9957 (matches reference).
+  - **Fused (with all slicing wired): L0 cos=0.9708, L1 cos=0.9532, L2 cos=0.9381, L3 cos=0.8841 vs reference. Real correctness regression.**
+  - Intra-layer diff vs non-fused MPK baseline: `layer0_input_norm` cos=1.0 (rmsnorm_out matches → fused GEMM input is identical); `layer0_attn_out` cos=0.9899 with mean_diff ~0.003 across rows 1-127. Divergence is small + uniform — looks like a precision-level rather than structural bug.
+- **Diagnostic state**:
+  - Generated test.cu has correct kernel template args (rmsnorm with IN/OUT_OFFSET, ROPE-K with K_PE_OFFSET=2048 K_PE_STRIDE=2176, gather with C_LATENT_ROW_STRIDE=2176 + offsets, quantize with HIDDEN=1536 STRIDE=2176).
+  - Task-graph deps form a serial chain `fused_GEMM → q_a_layernorm → ROPE_K → kv_a_layernorm → MLA_KV_gather` because all four write to the same DTensor (qkv_a_out). Over-serialized but should be correct.
+  - Weight bytes byte-equal to baseline at the corresponding slice ranges (asserted on the cache file).
+- **What I'd try next** (deferred to next session):
+  - Add a temporary copy task that dumps `qkv_a_out[r, :]` right after the fused GEMM (and similarly for post-layernorm states); compare per-slice against baseline `q_a_out / c_latent_out / k_pe_out` to identify whether the GEMM, layernorm, ROPE-K, or quantize introduces the divergence.
+  - If post-GEMM qkv_a_out matches baseline → bug is in one of the 4 slice consumers (most likely the rmsnorm IN_OFFSET shift or the k_pe ROPE K_PE_OFFSET shift). Bisect by selectively reverting each.
+  - If post-GEMM qkv_a_out diverges → bug is in either the demo-time weight construction or the FP8 GEMM kernel's handling of N=2176 (e.g., last-tile padding semantics around the k_pe pad block).
+- **Decision**: keep infra in tree env-gated `MPK_DSV3_QKV_A_FUSED=1` (default OFF). Don't flip default; don't proceed to perfetto/stress on a broken-correctness path.
 - **Goal**: replace 3 separate FP8 GEMMs (q_a, c_latent, k_pe) with a single fused GEMM emitting `qkv_a_out (mbt, 2176)` where cols [0:1536)=q_a, [1536:2048)=c_latent, [2048:2176)=k_pe.
 - **Blocker = same as Path 1**: MPK DTensor has no view/slice API. Downstream consumers (q_a_layernorm, kv_a_layernorm, k_pe ROPE) assume contiguous row layout with `row_stride=dim`. To read from `qkv_a_out` with `row_stride=2176, offset=...`, every downstream consumer kernel needs an explicit stride/offset param (like we did for `mla_prefill_tp8_chunked` and `deepseek_mla_rope_q_split` in row-swap fuse-Q).
 - **Alternatives evaluated**:

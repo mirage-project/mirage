@@ -839,6 +839,52 @@ if __name__ == "__main__":
                         state_dict[f"{prefix}gate_up_proj.weight_scale_inv"] = (
                             _shuffle_tensors([gs, us], split=split, dim=0))
 
+            # 2026-05-12 (user #2 part-a) — Fuse q_a_proj + kv_a_proj_with_mqa
+            # into a single qkv_a_proj.weight of shape (2176, hidden). Layout:
+            #   rows [0     : 1536) = q_a_proj.weight              (12 fp8 blocks)
+            #   rows [1536  : 2048) = kv_a_proj_with_mqa[:512]     (4  blocks, c_latent)
+            #   rows [2048  : 2112) = kv_a_proj_with_mqa[512:576]  (k_pe real, 64 rows)
+            #   rows [2112  : 2176) = zero-padded                  (k_pe pad block tail)
+            # FP8 block boundaries fall cleanly at 128-row borders → no nope/pe
+            # mixing within blocks. Scales just concat.
+            #
+            # Both q_a_proj and kv_a_proj_with_mqa are REPLICATED (no TP shard),
+            # so the fused weight is also replicated. Builder gates the fused
+            # path on `MPK_DSV3_QKV_A_FUSED=1`.
+            QKV_A_FUSED = os.environ.get("MPK_DSV3_QKV_A_FUSED", "0") == "1"
+            if QKV_A_FUSED:
+                for li in absorb_layers:
+                    attn = f"model.layers.{li}.self_attn."
+                    q_a_key = f"{attn}q_a_proj.weight"
+                    kv_a_key = f"{attn}kv_a_proj_with_mqa.weight"
+                    if q_a_key not in state_dict or kv_a_key not in state_dict:
+                        continue
+                    q_a_w = state_dict[q_a_key]
+                    kv_a_w = state_dict[kv_a_key]
+                    q_a_s_key = f"{q_a_key}_scale_inv"
+                    kv_a_s_key = f"{kv_a_key}_scale_inv"
+                    q_a_s = state_dict.get(q_a_s_key)
+                    kv_a_s = state_dict.get(kv_a_s_key)
+                    if q_a_s is None or kv_a_s is None:
+                        # No FP8 scale → skip fusion for this layer (legacy BF16)
+                        continue
+                    if q_a_w.shape[0] != 1536 or kv_a_w.shape[0] != 576:
+                        # Unexpected shape (e.g., different model variant) — skip
+                        continue
+                    K = q_a_w.shape[1]
+                    fused_rows = 2176  # 1536 + 512 + 128 (padded k_pe)
+                    # Build fused FP8 bytes
+                    fused_w = torch.zeros(
+                        (fused_rows, K), dtype=q_a_w.dtype, device=q_a_w.device)
+                    fused_w[0:1536] = q_a_w
+                    fused_w[1536:2048] = kv_a_w[:512]
+                    fused_w[2048:2112] = kv_a_w[512:576]
+                    # rows [2112:2176) stay zero (k_pe block tail pad)
+                    # Build fused float32 block-scale: (17, K/128) concat
+                    fused_s = torch.cat([q_a_s, kv_a_s], dim=0).contiguous()
+                    state_dict[f"{attn}qkv_a_proj.weight"] = fused_w
+                    state_dict[f"{attn}qkv_a_proj.weight_scale_inv"] = fused_s
+
             # Fuse per-expert weights into experts.w13/w2 tensors (keep FP8)
             for li in absorb_layers:
                 ep = f"model.layers.{li}.mlp.experts."
@@ -944,6 +990,10 @@ if __name__ == "__main__":
                     (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
+                    # FuseTensor part-a (user #2 part-a, 2026-05-12): fused
+                    # q_a_proj + kv_a_proj_with_mqa weight, replicated like its
+                    # constituents (used when MPK_DSV3_QKV_A_FUSED=1).
+                    (r"self_attn\.qkv_a_proj\.weight",                       None),
                     (r"self_attn\.o_proj_original\.weight",                  1),
                     (r"self_attn\.o_proj\.weight",                           1),
                     (r"input_layernorm\.weight$",                            None),

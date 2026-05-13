@@ -22,7 +22,13 @@ template <int NUM_HEADS,
           int K_PE_STRIDE = 128,
           int Q_ROW_STRIDE_OVERRIDE = 0,
           int Q_PE_BASE_IN_ROW = 0,
-          int Q_PE_HEAD_STRIDE = 0>
+          int Q_PE_HEAD_STRIDE = 0,
+          // QKV-a fused: shift k_pe base by K_PE_OFFSET elements before
+          // the per-row stride is applied. With K_PE_OFFSET=2048 +
+          // K_PE_STRIDE=2176 the kernel rotates the k_pe slice that lives
+          // at cols [2048:2112) of a fused qkv_a_out (mbt, 2176) buffer.
+          // Default 0 preserves legacy.
+          int K_PE_OFFSET = 0>
 __device__ __forceinline__ void
     deepseek_mla_rope_sm100_task_impl(__nv_bfloat16 *__restrict__ q_fused,
                                       __nv_bfloat16 *__restrict__ q_split_pe,
@@ -98,7 +104,8 @@ __device__ __forceinline__ void
       if (head_idx != 0) {
         continue;
       }
-      __nv_bfloat16 *k_tok = k_pe + static_cast<long long>(row) * K_PE_STRIDE;
+      __nv_bfloat16 *k_tok = k_pe + K_PE_OFFSET +
+                             static_cast<long long>(row) * K_PE_STRIDE;
       float const k0 = __bfloat162float(k_tok[d0]);
       float const k1 = __bfloat162float(k_tok[d1]);
       k_tok[d0] = __float2bfloat16(k0 * c - k1 * s);
