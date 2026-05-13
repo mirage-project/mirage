@@ -482,6 +482,40 @@ void quantize_fp8_slice_launch(torch::Tensor a_bf16_wide,
               cudaGetErrorString(err));
 }
 
+// Quantize-only entry point for the 7168-wide case (the QKV-a fusion bug).
+// Mirrors MPK's quantize_fp8_layer registration for hidden_size=7168.
+//   grid = (group_tiles=4, batch=128, 1), block = (128, 1, 1)
+//   Each (block_x=group_tile, block_y=row) writes 14 groups × 128 cols of FP8
+//   plus 14 scale values into the row's 56-cell scale slot.
+void quantize_fp8_7168_launch(torch::Tensor a_bf16,
+                              torch::Tensor a_fp8_out,
+                              torch::Tensor scale_out) {
+  TORCH_CHECK(a_bf16.dim() == 2 && a_bf16.size(0) == 128 && a_bf16.size(1) == 7168,
+              "a_bf16 must be [128, 7168]");
+  TORCH_CHECK(a_fp8_out.dim() == 2 && a_fp8_out.size(0) == 128 && a_fp8_out.size(1) == 7168,
+              "a_fp8_out must be [128, 7168]");
+  TORCH_CHECK(scale_out.dim() == 2 && scale_out.size(0) == 128 && scale_out.size(1) == 56,
+              "scale_out must be [128, 56]");
+  TORCH_CHECK(a_bf16.scalar_type() == at::kBFloat16, "a_bf16 dtype");
+  TORCH_CHECK(a_fp8_out.scalar_type() == at::kFloat8_e4m3fn, "fp8 dtype");
+  TORCH_CHECK(scale_out.scalar_type() == at::kFloat, "scale dtype");
+  TORCH_CHECK(a_bf16.is_contiguous() && a_fp8_out.is_contiguous() && scale_out.is_contiguous(),
+              "tensors must be contiguous");
+
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  __nv_bfloat16 const *in_ptr = static_cast<__nv_bfloat16 const *>(a_bf16.data_ptr());
+  __nv_fp8_e4m3 *outq = static_cast<__nv_fp8_e4m3 *>(a_fp8_out.data_ptr());
+  float *outs = static_cast<float *>(scale_out.data_ptr());
+  void *args[] = {&in_ptr, &outq, &outs};
+  cudaError_t err = cudaLaunchKernel(
+      reinterpret_cast<void const *>(quantize_fp8_f32_test_kernel),
+      /*grid=*/dim3(4, 128, 1),
+      /*block=*/dim3(128, 1, 1),
+      args, /*sharedMem=*/0, stream);
+  TORCH_CHECK(err == cudaSuccess,
+              "quantize_fp8_7168 launch failed: ", cudaGetErrorString(err));
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_gemm_dense_smallm_launch",
         &fp8_gemm_dense_smallm_launch,
@@ -492,6 +526,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("quantize_then_gemm_launch",
         &quantize_then_gemm_launch,
         "Run MPK's quantize_fp8 kernel + fp8_gemm_dense back-to-back.");
+  m.def("quantize_fp8_7168_launch",
+        &quantize_fp8_7168_launch,
+        "Quantize a [128, 7168] BF16 buffer to FP8 e4m3 + float32 scale. "
+        "Standalone variant matching MPK's qkv_a quantize registration.");
   m.def("quantize_fp8_slice_launch",
         &quantize_fp8_slice_launch,
         "Quantize a [128, 1536] slice of a wider [128, 2176] BF16 buffer "
