@@ -715,14 +715,37 @@ if __name__ == "__main__":
                     state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
                     state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
                     state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
-                    # 2026-05-12 (user #2 FuseTensor): also keep the
-                    # UNABSORBED q_b_proj weight as a single fused tensor
-                    # so the prefill path can do ONE FP8 GEMM emitting a
-                    # (mbt, H*192) buffer instead of two separate Linears
-                    # (q_b_nope + q_b_pe). chunked_prefill reads with
-                    # stride 192 per head; Qn ptr = base, Qp ptr = base+128.
-                    q_b_unabs_f32 = q_orig.reshape(
-                        H_ * (qk_nope + qk_rope), -1).contiguous()
+                    # 2026-05-12 (user #2 FuseTensor v2 — row-swap layout):
+                    # Build a single unabsorbed q_b weight so the prefill
+                    # path can do ONE FP8 GEMM (instead of q_b_nope + q_b_pe).
+                    # The per-rank layout is [rank_heads_nope_concat;
+                    # rank_heads_pe_concat] so the 128-row FP8 quantization
+                    # block boundaries align cleanly with the nope/pe split.
+                    # The FULL weight is constructed as concatenation of
+                    # per-rank slices so that the default dim=0 TP-sharding
+                    # gives each rank its [nope; pe] block.
+                    #
+                    # Layout per rank (TP=4 → H_local=32):
+                    #   rows [0,         H_local*128)  = nope of rank's heads
+                    #   rows [H_local*128, H_local*192) = pe   of rank's heads
+                    # Full weight = concat([rank_0_slice, rank_1_slice, ...]).
+                    # Kernel reads Qn at base, Qp at base + H_local*128.
+                    H_local_w = H_ // world_size
+                    if H_ % world_size != 0:
+                        raise ValueError(
+                            f"num_heads {H_} not divisible by world_size "
+                            f"{world_size} — row-swap fused q_b can't shard")
+                    rank_parts = []
+                    for r in range(world_size):
+                        rank_heads = q_orig[r * H_local_w : (r + 1) * H_local_w]
+                        # (H_local, 192, K)
+                        rank_nope = rank_heads[:, :qk_nope, :].reshape(
+                            H_local_w * qk_nope, -1)        # (H_local*128, K)
+                        rank_pe = rank_heads[:, qk_nope:, :].reshape(
+                            H_local_w * qk_rope, -1)        # (H_local*64, K)
+                        rank_parts.append(rank_nope)
+                        rank_parts.append(rank_pe)
+                    q_b_unabs_f32 = torch.cat(rank_parts, dim=0).contiguous()
                     q_b_unabs_fp8, q_b_unabs_scale = (
                         _quantize_f32_to_checkpoint_fp8(q_b_unabs_f32))
                     state_dict[f"{attn}q_b_proj_unabsorbed.weight"] = q_b_unabs_fp8
@@ -911,6 +934,10 @@ if __name__ == "__main__":
                     # decompression, both column-parallel on local heads.
                     (r"self_attn\.q_b_nope\.weight",                         0),
                     (r"self_attn\.q_b_pe\.weight",                           0),
+                    # FuseTensor (user #2, 2026-05-12): unabsorbed q_b_proj
+                    # used by the fused prefill path (MPK_DSV3_QB_FUSED=1).
+                    # Same column-parallel sharding as q_b_proj.
+                    (r"self_attn\.q_b_proj_unabsorbed\.weight",              0),
                     (r"self_attn\.kv_b_k\.weight",                           0),
                     (r"self_attn\.kv_b_v\.weight",                           0),
                     (r"self_attn\.kv_b_k_bf16\.weight",                      0),

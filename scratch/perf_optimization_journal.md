@@ -150,20 +150,35 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
 - **Lesson learned**: re-verify the contention premise from first principles before designing fixes. `scratch/ar_rewrite_design.md` Option A's underlying analysis missed that each `task_offset` uses a different `nvshmem_team_t`. Option B (single barrier task per AR phase) and Option C (system fence) are still on the table but address a different angle.
 - Phase-isolation gates (`MPK_AR_SKIP_BARRIER/REDUCE` from `d6d1730a`) remain in tree as measurement infra — those reveal the 91 μs barrier cost is **NVLink dissemination latency**, not contention.
 
-### User-#2 Fuse-Q (q_b_nope + q_b_pe → q_b_proj_unabsorbed) — INFRA LANDED, FP8 NOISE TBD
-- Commits (2026-05-12 evening session):
-  - Kernel: added `qn_head_stride` / `qp_head_stride` default args to `mla_prefill_tp8_chunked_sm100_task_impl`.
-  - `task_register.cc`: added optional 5th param `qfused_mode` (default 0). When 1: Qp_ptr = Qn_ptr + 128, strides = 192/192, per-batch offset uses num_heads * 192.
-  - `persistent_kernel.py::mla_prefill_tp8_chunked_layer`: new kwarg `qfused_mode: int = 0`.
-  - `builder.py`: `_qb_fused = MPK_DSV3_QB_FUSED == "1"` (default OFF). When ON, allocates `q_b_prefill_fused` (mbt, H*192) and runs a single FP8 GEMM with `q_b_proj_unabsorbed` weight.
-  - `demo.py`: emits `q_b_proj_unabsorbed.weight` + scale_inv in state_dict (column-parallel TP-sharded at dim=0).
-- **Validation (DSv3 TP=4 EP=2 prompt=128 layers 0-3, MPK_DSV3_QB_FUSED=1)**:
-  - Legacy MPK vs official ref (rows 1..127): layer 0-2 cos ≥ 0.9998 (bit-equal), layer 3 cos = 0.9957.
-  - Fused MPK vs official ref: layer 0 cos = 0.9911 (drop), layer 1 = 0.9811, layer 2 = 0.9752, layer 3 = 0.9376. **All layers degraded.**
-  - First decoded token differs from reference (token 9774): fused produces garbage Chinese/etc text.
-- **Root cause: FP8 quantization block-alignment mismatch.** Block size = 128 rows. Each head's data is 192 rows (128 nope + 64 pe). Legacy q_b_nope is (H*128) — block boundaries land per-head (clean). q_b_pe is (H*64) — block boundaries land per-2-heads (consistent). Unified q_b_proj_unabsorbed is (H*192) — block 0 = head 0 nope (clean), block 1 = head 0 pe (64) + head 1 nope first 64 (MIXED), block 2 = head 1 nope last 64 + head 1 pe (MIXED), etc. 1/3 of blocks clean, 2/3 mixed across head/dim boundaries → larger per-block FP8 scale → higher quantization noise.
-- **Decision**: Keep infra (env-gated default OFF). Don't flip default until FP8 noise is addressed.
-- **Future fix options**: (a) custom non-128-aligned block layout that respects 192 head stride; (b) use BF16 weight for q_b_proj_unabsorbed (loses FP8 storage savings but matches quantization noise); (c) abandon this fusion in FP8 mode and seek a different fusion that's block-friendly (e.g., kv_a + kv_rope into 576-wide).
+### User-#2 Fuse-Q (q_b_nope + q_b_pe → q_b_proj_unabsorbed) — CORRECTNESS FIXED 2026-05-12
+- **Final design — row-swap layout per rank**:
+  - Full weight: `q_b_proj_unabsorbed.weight` shape `(world_size * H_local * 192, q_lora)`.
+  - Per-rank slice (TP-shard dim=0): `[rank_heads_nope_concat (H_local*128 rows); rank_heads_pe_concat (H_local*64 rows)]`. Total `H_local * 192` rows per rank.
+  - This makes FP8 128-row blocks clean: blocks 0..H_local-1 = 1 head's nope each (clean), blocks H_local..H_local+H_local/2-1 = 2-pe-heads-per-block (same magnitude class). No nope/pe mixing.
+- **Chunked-prefill kernel**: added 4 stride params to `mla_prefill_tp8_chunked_sm100_task_impl` (`qn_head_stride`, `qp_head_stride`, `qn_row_stride_in`, `qp_row_stride_in`). In fused mode (`qfused_mode=1`): qn_head_stride=128, qp_head_stride=64, qn_row_stride=qp_row_stride=H*192. Qp pointer = Qn pointer + H*128.
+- **ROPE bug found & fixed (the actual root cause of the apparent "FP8 noise")**: when `self.q_pe = self.q_b_prefill_fused`, the `deepseek_mla_rope_q_split_sm100` task was rotating with stride `H*64` instead of `H*192`, corrupting nope data outside its intended pe region. Fixed by extending the kernel template with `Q_ROW_STRIDE_OVERRIDE` / `Q_PE_BASE_IN_ROW` / `Q_PE_HEAD_STRIDE` and adding `qfused_mode=1` to `register_deepseek_mla_rope_q_split_sm100_task` (passes `H*192 / H*128 / 64`).
+- **Validation (DSv3 TP=4 EP=2 prompt=128 layers 0-3)** — fused row-swap vs non-fused baseline at `outputs/dpskv3_qbfused_rebuild_rope_fixed/` vs `dpskv3_qb_baseline_retry1/`:
+  - L0..L3 per-layer residual: `max_abs_diff = 0.0`, cos = 0.999955 (floating-point jitter; numerically byte-equal).
+  - vs official ref: L0..L2 cos=0.9999, L3 cos=0.9957 — **identical to non-fused baseline**.
+  - Latency at 4-layer mbt=128: 6.21 ms/tok (fused) vs 6.20 ms (baseline). No measurable speedup.
+  - Latency at **19-layer realistic scale** (mbt=128 prompt + 128 new tokens, EP=2): baseline 121.975 ms/tok, fused 121.804 ms/tok. **Diff 0.17 ms = 0.14% — within run-to-run noise.** No perf benefit at scale either.
+  - **Conclusion**: row-swap fuse-Q is correctness-correct but not a perf win. The q_b GEMM is not the prefill bottleneck. Real benefit will need either (a) MPK DTensor view API to enable proper q_a+kv_a fusion (saves shared input quantize + multiple GEMM dispatches), OR (b) tackle the bigger gaps (AR1 42μs/layer, SiLU 72μs/layer, inter-layer 47μs/layer). Infra stays in tree behind `MPK_DSV3_QB_FUSED=1` (default OFF) as foundation for when view API lands.
+- **Initial bug (= "shallow attempts" before fix)**: ran a smoke test with stale `core.*.so` (rebuilt before the `task_register.cc` qfused_mode=1 codegen edits landed); generated kernel call used qo_fp_*4096 stride on the 6144-wide buffer. After `rm core.*.so + touch _cython/*.pyx + uv pip install -e .`, the new codegen path activated; then the ROPE-side bug surfaced and required the kernel template extension above.
+- **Lesson**: any time fused tensors **alias** with separate tensors that downstream tasks already work on, audit ALL writers/readers of the aliased tensor — not just the GEMM that produces it. The ROPE split kernel was the silent victim here.
+
+### User-#2 part-a Fuse-QKV-a (q_a_proj + kv_a_latent + kv_a_rope → 2176-wide) — DEFERRED 2026-05-12
+- **Goal**: replace 3 separate FP8 GEMMs (q_a, c_latent, k_pe) with a single fused GEMM emitting `qkv_a_out (mbt, 2176)` where cols [0:1536)=q_a, [1536:2048)=c_latent, [2048:2176)=k_pe.
+- **Blocker = same as Path 1**: MPK DTensor has no view/slice API. Downstream consumers (q_a_layernorm, kv_a_layernorm, k_pe ROPE) assume contiguous row layout with `row_stride=dim`. To read from `qkv_a_out` with `row_stride=2176, offset=...`, every downstream consumer kernel needs an explicit stride/offset param (like we did for `mla_prefill_tp8_chunked` and `deepseek_mla_rope_q_split` in row-swap fuse-Q).
+- **Alternatives evaluated**:
+  - (A) Fused GEMM + explicit split-copy kernel after: 1 dispatch saved (3 GEMMs → 1) + 1-2 quantize saved, but adds 1 copy task (mbt × 2176 bf16 ≈ 0.55 MB). Net likely positive but small.
+  - (B) Stride-aware RMSnorm + ROPE + KV consumers: many kernel changes (~5 kernels). Heavy refactor.
+  - (C) DTensor view API (task B3): cleanest, unblocks multiple paths (Path 1 too).
+- **Quantitative gap analysis** (from perfetto journal Q/KV utilization 27% finding): the q_a+kv_a phase wait is ~9.4 μs per layer. Even perfect fusion saves ~5-7 μs / layer × 19 layers ≈ 100 μs out of 6200 μs total (~1.6%). Not the biggest fish — AR1 gap (42.5 μs), SiLU gap (72.6 μs), inter-layer gap (47.6 μs) are each 5–8× larger.
+- **Decision**: defer until either task B3 lands OR a clear bottleneck shift makes Q/KV phase the dominant gap. Row-swap fuse-Q infra (env-gated, default OFF) stays in tree as a foundation for when the view API is added.
+- **What's needed to unblock**:
+  - `tensor.view(start_col, end_col)` or `tensor.slice(...)` Python API → returns a DTensor that shares the underlying storage with an offset + stride.
+  - C++ runtime: pre-offset task input/output pointers based on the slice's offset, and use the slice's stride instead of the underlying tensor's stride for per-task addressing.
+  - Persistent kernel scheduler: track per-DTensor lifetime correctly when multiple slices share one allocation (so the original allocation lives as long as the longest-lived slice).
 
 ### Path 3 (morning notes) — fp8_dense output partition declaration: REJECTED
 - Tried `MPK_FP8_DENSE_OUTPUT_PARTITION=1` to change `tb_graph.new_input(output, (-1,-1,-1), ...)` → `(1,-1,-1)` in `_fp8_gemm_dense_layer_impl`. Idea: declare grid.x partitions output dim 1, allowing finer event GCD on downstream consumers.

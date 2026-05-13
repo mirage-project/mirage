@@ -1246,8 +1246,15 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple = (128, 1, 1),
         q_tile_size: int = 16,
+        qfused_mode: int = 0,
     ):
+        # qfused_mode = 0: q_pe is a standalone (mbt, num_heads*64) tensor.
+        # qfused_mode = 1: q_pe is the same DTensor as the fused q_b_prefill
+        # buffer (mbt, num_heads*192) with row-swap layout. Kernel uses
+        # row_stride = num_heads*192 and pe_base_in_row = num_heads*128.
         params = [num_heads, q_tile_size]
+        if qfused_mode != 0:
+            params.append(qfused_mode)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)

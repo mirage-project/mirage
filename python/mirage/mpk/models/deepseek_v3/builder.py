@@ -1625,12 +1625,17 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=rope_q_grid,
         )
         if self._use_prefill:
+            # 2026-05-12 (user #2 FuseTensor row-swap): when q_b_prefill_fused
+            # aliases q_pe, the ROPE kernel must use the row-swap addressing
+            # (row stride = H*192, pe block at H*128 within each row). The
+            # default split variant assumes a standalone (mbt, H*64) buffer.
             self.mpk.deepseek_mla_rope_q_split_layer(
                 q_pe=self.q_pe,
                 cos_pos_embed=self.cos_pos_embed,
                 sin_pos_embed=self.sin_pos_embed,
                 num_heads=self.num_local_q_heads,
                 grid_dim=rope_q_grid,
+                qfused_mode=1 if self._qb_fused else 0,
             )
         self.mpk.deepseek_mla_rope_k_layer(
             k_pe=self.k_pe_out,

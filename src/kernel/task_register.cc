@@ -3863,9 +3863,10 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   //         input_ptrs[1] = Qp [B, q_len, H, 64]. Per-head strides 128 / 64.
   //     1 = fused-Q layout: input_ptrs[0] = Q_fused [B, q_len, H, 192] starting
   //         at nope, input_ptrs[1] = same fused tensor pointer (the kernel
-  //         reads Qp from input_ptrs[0] + D_QK_NOPE per-element offset). Per-head
-  //         strides 192 / 192. Builder must concatenate q_b_nope+q_b_pe weights
-  //         and emit a single FP8 GEMM into a (mbt, H*192) buffer.
+  //         reads Qp from input_ptrs[0] + D_QK_NOPE per-element offset).
+  //         Per-head strides 192 / 192. Builder must concatenate
+  //         q_b_nope+q_b_pe weights and emit a single FP8 GEMM into a (mbt,
+  //         H*192) buffer.
   assert(params.size() == 4 || params.size() == 5);
   int num_heads = params[0];
   int q_len_max = params[1];
@@ -3874,10 +3875,29 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   int qfused_mode = (params.size() == 5) ? params[4] : 0;
   float sm_scale = 1.0f / sqrtf(192.0f);
   float sm_scale_log2 = sm_scale * 1.44269504089f;
-  // FuseTensor: when qfused_mode=1, Qn and Qp share a single buffer with
-  // per-head stride D_QK_NOPE+D_QK_ROPE=192. Otherwise legacy split layout.
-  int qn_head_stride = qfused_mode == 1 ? 192 : 128;
-  int qp_head_stride = qfused_mode == 1 ? 192 : 64;
+  // FuseTensor row-swap layout (2026-05-12 user #2 v2): when qfused_mode=1,
+  // weight is rearranged at load time as [all_heads_nope; all_heads_pe]
+  // per-rank, so the fused output buffer per row has layout
+  //   [head0_nope(128), head1_nope(128), ..., head_{H-1}_nope(128),
+  //    head0_pe(64),    head1_pe(64),    ..., head_{H-1}_pe(64)]
+  // Per-head strides stay 128 / 64 (matching the LEGACY layout for Qn and
+  // Qp slices), but the row stride differs: a row of the fused buffer is
+  // H * 192 elements wide, so per-qi advance is H * 192 for BOTH Qn and Qp.
+  // Qp_ptr starts at offset H * D_QK_NOPE (= H * 128 elements) from Qn_ptr —
+  // the start of the pe region within each row.
+  //
+  // FP8 block alignment: with the row-swap layout, 128-row FP8 blocks fall
+  // cleanly: blocks 0..H-1 are each one head's nope; blocks H..(H+H/2) are
+  // 2-heads-per-block pe (same magnitude class). No more nope/pe mixing.
+  int qn_head_stride = 128; // D_QK_NOPE — same for both modes
+  int qp_head_stride = 64;  // D_QK_ROPE — same for both modes
+  // Row stride: legacy split = H * head_stride (default sentinel 0); fused
+  // row-swap = H * (D_QK_NOPE + D_QK_ROPE) = H * 192 for BOTH Qn and Qp.
+  int qn_row_stride = qfused_mode == 1 ? num_heads * 192 : 0;
+  int qp_row_stride = qfused_mode == 1 ? num_heads * 192 : 0;
+  // Qp offset within the fused buffer (in bf16 elements). For row-swap:
+  // Qp region starts at H * D_QK_NOPE in each row, so Qp_ptr = Qn_ptr + H*128.
+  int qp_offset_elems = qfused_mode == 1 ? num_heads * 128 : 0;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -3891,11 +3911,13 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[4][0]),"); // V
   if (qfused_mode == 1) {
-    // Qn = fused base; Qp = fused base + D_QK_NOPE (128 elements offset)
+    // Qn = fused base (start of nope region);
+    // Qp = fused base + H * D_QK_NOPE (start of pe region within row)
     code.e("    static_cast<const "
            "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn = fused
     code.e("    static_cast<const "
-           "__nv_bfloat16*>(task_desc->input_ptrs[0]) + 128,"); // Qp = Qn+128
+           "__nv_bfloat16*>(task_desc->input_ptrs[0]) + $,",
+           qp_offset_elems); // Qp = Qn + H*128
   } else {
     code.e("    static_cast<const "
            "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
@@ -3908,11 +3930,13 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("    $,", q_start);
   code.e("    $,", num_heads);
   code.e("    $f,", sm_scale_log2);
-  code.e("    task_desc->task_metadata.request_id,");         // head
-  code.e("    task_desc->task_metadata.kv_idx,");             // q_block
-  code.e("    task_desc->task_metadata.merge_task_offset,");  // batch
+  code.e("    task_desc->task_metadata.request_id,");        // head
+  code.e("    task_desc->task_metadata.kv_idx,");            // q_block
+  code.e("    task_desc->task_metadata.merge_task_offset,"); // batch
   code.e("    $,", qn_head_stride);
-  code.e("    $);", qp_head_stride);
+  code.e("    $,", qp_head_stride);
+  code.e("    $,", qn_row_stride);
+  code.e("    $);", qp_row_stride);
   code.e("#else");
   code.e("{");
   code.e("int bi_ = task_desc->task_metadata.merge_task_offset;");
@@ -3932,11 +3956,12 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
          "runtime_config.paged_kv_last_page_len_buffer[bi_];");
   code.e("int Q_START_ = KV_LEN_ - Q_LEN_;");
   if (qfused_mode == 1) {
-    // Fused tensor: row stride = num_heads * 192; Qp = Qn + 128
+    // Row-swap fused buffer: row stride = num_heads * 192;
+    // Qp_ region starts at num_heads * D_QK_NOPE within the row.
     code.e("auto *Qn_ = static_cast<const __nv_bfloat16*>("
            "task_desc->input_ptrs[0]) + qo_fp_ * $;",
            num_heads * 192);
-    code.e("auto *Qp_ = Qn_ + 128;");
+    code.e("auto *Qp_ = Qn_ + $;", qp_offset_elems); // = num_heads * 128
   } else {
     code.e("auto *Qn_ = static_cast<const __nv_bfloat16*>("
            "task_desc->input_ptrs[0]) + qo_fp_ * $;",
@@ -3966,9 +3991,11 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("    $f,", sm_scale_log2);
   code.e("    task_desc->task_metadata.request_id,"); // head
   code.e("    task_desc->task_metadata.kv_idx,");     // q_block
-  code.e("    0,");  // batch offset already applied via Qn_/Qp_/O_
+  code.e("    0,"); // batch offset already applied via Qn_/Qp_/O_
   code.e("    $,", qn_head_stride);
-  code.e("    $);", qp_head_stride);
+  code.e("    $,", qp_head_stride);
+  code.e("    $,", qn_row_stride);
+  code.e("    $);", qp_row_stride);
   code.e("}");
   code.e("#endif");
   return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SM100,
@@ -5895,18 +5922,39 @@ int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
 int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  assert(params.size() == 2);
+  // params: [num_heads, tile_q [, qfused_mode]]
+  //   qfused_mode (optional, default 0):
+  //     0 = legacy separate q_pe buffer, row stride = num_heads * 64,
+  //         per-head stride 64. q_pe is a standalone (mbt, H*64) tensor.
+  //     1 = row-swap fused q_b_prefill_fused (mbt, H*192), pe slice starts
+  //         at H*128 within each row. Per-head pe stride = 64. Used when
+  //         MPK_DSV3_QB_FUSED=1.
+  assert(params.size() == 2 || params.size() == 3);
   int num_heads = params[0];
   int tile_q = params[1];
+  int qfused_mode = (params.size() == 3) ? params[2] : 0;
   assert(num_heads > 0);
   assert(tile_q > 0);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::deepseek_mla_rope_sm100_task_impl<"
-         "$, $, false, true, false, 64, 64, 64>(",
-         num_heads,
-         tile_q);
+  if (qfused_mode == 1) {
+    // Row-swap fused layout: pe of head h at offset
+    //   row * (num_heads * 192) + (num_heads * 128) + h * 64
+    int const row_stride = num_heads * 192;
+    int const pe_base = num_heads * 128;
+    code.e("kernel::deepseek_mla_rope_sm100_task_impl<"
+           "$, $, false, true, false, 64, 64, 64, $, $, 64>(",
+           num_heads,
+           tile_q,
+           row_stride,
+           pe_base);
+  } else {
+    code.e("kernel::deepseek_mla_rope_sm100_task_impl<"
+           "$, $, false, true, false, 64, 64, 64>(",
+           num_heads,
+           tile_q);
+  }
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
