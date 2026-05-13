@@ -1059,10 +1059,11 @@ class DeepSeekV3Builder(GraphBuilder):
         #   cols [2112 : 2176) = k_pe_out zero pad (= MMA_M tail)
         self._qkv_a_fused = os.environ.get("MPK_DSV3_QKV_A_FUSED", "0") == "1"
         if self._qkv_a_fused:
-            qkv_a_total = self.q_lora_rank + self.kv_lora_rank + 128
-            assert qkv_a_total == 2176, (
-                f"QKV-a fused expects q_lora=1536 + kv_lora=512 + k_pe_pad=128"
-                f" = 2176, got {qkv_a_total}")
+            qkv_a_total = int(os.environ.get("MPK_DSV3_QKV_A_FUSED_N", "2176"))
+            # 2176 = natural (1536 q_a + 512 c_latent + 128 padded k_pe).
+            # Larger values (2304, 2560, ...) zero-pad after k_pe to change
+            # the GEMM's N-tile count for kernel diagnostics.
+            assert qkv_a_total >= 2176 and qkv_a_total % 128 == 0
             self.qkv_a_out = self.mpk.new_tensor(
                 dims=(mbt, qkv_a_total),
                 dtype=bfloat16, name="qkv_a_out", io_category="cuda_tensor",
@@ -3639,9 +3640,12 @@ class DeepSeekV3Builder(GraphBuilder):
                 name="layer0_intra_zero",
             )
             # Slot 1 has different shape (mbt, q_lora_rank=1536) by default,
-            # but in QKV-a fused mode the demo allocates it as (mbt, 2176)
+            # but in QKV-a fused mode the demo allocates it as (mbt, fused_N)
             # so the dump captures the whole qkv_a_out (we slice in Python).
-            slot1_cols = (2176 if self._qkv_a_fused else self.q_lora_rank)
+            import os as _os
+            slot1_cols = (
+                int(_os.environ.get("MPK_DSV3_QKV_A_FUSED_N", "2176"))
+                if self._qkv_a_fused else self.q_lora_rank)
             self._layer0_q_a_zero_pt = torch.zeros(
                 (self.max_num_batched_tokens, slot1_cols),
                 dtype=torch.bfloat16, device="cuda",

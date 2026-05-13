@@ -21,7 +21,9 @@ export NVSHMEM_MAX_TEAMS=128
 
 if [ "${mode}" = "fused" ]; then
     export MPK_DSV3_QKV_A_FUSED=1
-    export MPK_DEEPSEEK_WEIGHT_CACHE_DIR=/tmp/dpskv3_v8_weight_cache_qkva_fused
+    FUSED_N="${MPK_DSV3_QKV_A_FUSED_N:-2176}"
+    export MPK_DSV3_QKV_A_FUSED_N
+    export MPK_DEEPSEEK_WEIGHT_CACHE_DIR=/tmp/dpskv3_v8_weight_cache_qkva_fused_${FUSED_N}
 else
     export MPK_DSV3_QKV_A_FUSED=0
     export MPK_DEEPSEEK_WEIGHT_CACHE_DIR=/tmp/dpskv3_v8_weight_cache_qkva_baseline
@@ -34,6 +36,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun --allow-run-as-root -np 4 \
     -x MPI_INC_PATH -x MPI_LIB_PATH -x NVSHMEM_INC_PATH -x NVSHMEM_LIB_PATH \
     -x NVSHMEM_MAX_TEAMS \
     -x MPK_DSV3_QKV_A_FUSED \
+    -x MPK_DSV3_QKV_A_FUSED_N \
+    -x MPK_FP8_DENSE_FORCE_MEDIUMM \
     -x MPK_DEEPSEEK_WEIGHT_CACHE_DIR \
     /home/muhengl/mirage/.venv/bin/python demo/deepseek_v3/demo.py \
     --model-path /raid/catalyst/models/DeepSeek-V3 \

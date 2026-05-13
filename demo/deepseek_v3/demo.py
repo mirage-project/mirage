@@ -872,18 +872,27 @@ if __name__ == "__main__":
                         # Unexpected shape (e.g., different model variant) — skip
                         continue
                     K = q_a_w.shape[1]
-                    fused_rows = 2176  # 1536 + 512 + 128 (padded k_pe)
-                    # Build fused FP8 bytes
+                    # DIAGNOSTIC PAD: env override the fused N so we can A/B
+                    # tile counts (2176 = 17 tiles, 2304 = 18, 2560 = 20).
+                    fused_rows = int(os.environ.get(
+                        "MPK_DSV3_QKV_A_FUSED_N", "2176"))
+                    assert fused_rows >= 2112 and fused_rows % 128 == 0, (
+                        f"MPK_DSV3_QKV_A_FUSED_N={fused_rows} must be a multiple"
+                        f" of 128 and ≥ 2112 to hold q_a+c_latent+k_pe slices.")
                     fused_w = torch.zeros(
                         (fused_rows, K), dtype=q_a_w.dtype, device=q_a_w.device)
                     fused_w[0:1536] = q_a_w
                     fused_w[1536:2048] = kv_a_w[:512]
                     fused_w[2048:2112] = kv_a_w[512:576]
-                    # rows [2112:2176) stay zero (k_pe block tail pad)
-                    # Build fused float32 block-scale: (17, K/128) concat
-                    fused_s = torch.cat([q_a_s, kv_a_s], dim=0).contiguous()
+                    # rows [2112:fused_rows) stay zero (pad)
+                    scale_rows = fused_rows // 128
+                    fused_s = torch.zeros(
+                        (scale_rows, q_a_s.shape[1]),
+                        dtype=q_a_s.dtype, device=q_a_s.device)
+                    fused_s[0:12] = q_a_s
+                    fused_s[12:17] = kv_a_s
                     state_dict[f"{attn}qkv_a_proj.weight"] = fused_w
-                    state_dict[f"{attn}qkv_a_proj.weight_scale_inv"] = fused_s
+                    state_dict[f"{attn}qkv_a_proj.weight_scale_inv"] = fused_s.contiguous()
 
             # Fuse per-expert weights into experts.w13/w2 tensors (keep FP8)
             for li in absorb_layers:
@@ -1212,10 +1221,11 @@ if __name__ == "__main__":
             # 3=dense_mlp_out (mbt, hidden) — full layer 0 residual
             q_lora_rank = 1536
             # When QKV-a fused is on, the slot-1 dump captures the WHOLE
-            # qkv_a_out (mbt, 2176) so elementwise_add can run with matching
-            # shapes; Python-side comparator slices [:, :q_lora_rank].
+            # qkv_a_out (mbt, MPK_DSV3_QKV_A_FUSED_N) so elementwise_add can
+            # run with matching shapes; Python comparator slices [:, :q_lora].
             qkv_a_diag_fused = os.environ.get("MPK_DSV3_QKV_A_FUSED", "0") == "1"
-            slot1_cols = 2176 if qkv_a_diag_fused else q_lora_rank
+            slot1_cols = (int(os.environ.get("MPK_DSV3_QKV_A_FUSED_N", "2176"))
+                          if qkv_a_diag_fused else q_lora_rank)
             mpk.dump_layer0_intra_tensors = [
                 torch.zeros(
                     (args.max_num_batched_tokens, model_config.hidden_size),
