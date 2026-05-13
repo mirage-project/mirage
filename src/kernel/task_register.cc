@@ -4393,6 +4393,75 @@ int TaskRegister::register_mtp_build_embed_input_task(
   return register_task_variant(TASK_MTP_BUILD_EMBED_INPUT, code.to_string());
 }
 
+// ============ Eagle3 tasks ============
+
+int TaskRegister::register_copy_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params) {
+  // params[0]: batch_size, params[1]: hidden_dim
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int hidden_dim = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::copy_layer_kernel<bfloat16, $, $>(", batch_size, hidden_dim);
+  code.e("    task_desc->input_ptrs[0],");   // src
+  code.e("    task_desc->output_ptrs[0]);"); // dst
+  return register_task_variant(TASK_COPY, code.to_string());
+}
+
+int TaskRegister::register_eagle3_aux_concat_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: batch_size, params[1]: hidden_dim
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int hidden_dim = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::eagle3_aux_concat_kernel<bfloat16, $, $>(",
+         batch_size,
+         hidden_dim);
+  code.e("    task_desc->input_ptrs[0],");   // h0
+  code.e("    task_desc->input_ptrs[1],");   // h1
+  code.e("    task_desc->input_ptrs[2],");   // h2
+  code.e("    task_desc->output_ptrs[0]);"); // output (3H)
+  return register_task_variant(TASK_EAGLE3_AUX_CONCAT, code.to_string());
+}
+
+int TaskRegister::register_eagle3_input_concat_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: batch_size, params[1]: hidden_dim
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int hidden_dim = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::eagle3_input_concat_kernel<bfloat16, $, $>(",
+         batch_size,
+         hidden_dim);
+  code.e("    task_desc->input_ptrs[0],");   // embed
+  code.e("    task_desc->input_ptrs[1],");   // hidden
+  code.e("    task_desc->output_ptrs[0]);"); // output (2H)
+  return register_task_variant(TASK_EAGLE3_INPUT_CONCAT, code.to_string());
+}
+
+int TaskRegister::register_eagle3_d2t_remap_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: batch_size
+  assert(params.size() == 1);
+  int batch_size = params[0];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::eagle3_d2t_remap_kernel<$>(", batch_size);
+  code.e("    task_desc->input_ptrs[0],");   // hot_token
+  code.e("    task_desc->input_ptrs[1],");   // d2t table
+  code.e("    task_desc->output_ptrs[0]);"); // target_token
+  return register_task_variant(TASK_EAGLE3_D2T_REMAP, code.to_string());
+}
+
 // ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
 //
 // Three variants (TP=2/4/8) share structure but differ:

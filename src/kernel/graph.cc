@@ -832,6 +832,25 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(1, 1, TASK_MTP_BUILD_EMBED_INPUT, variant_id);
   }
+  // Eagle3 tasks
+  else if (name == "copy") {
+    int variant_id =
+        task_register->register_copy_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_COPY, variant_id);
+  } else if (name == "eagle3_aux_concat") {
+    int variant_id = task_register->register_eagle3_aux_concat_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_EAGLE3_AUX_CONCAT, variant_id);
+  } else if (name == "eagle3_input_concat") {
+    int variant_id = task_register->register_eagle3_input_concat_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_EAGLE3_INPUT_CONCAT, variant_id);
+  } else if (name == "eagle3_d2t_remap") {
+    int variant_id = task_register->register_eagle3_d2t_remap_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_EAGLE3_D2T_REMAP, variant_id);
+  }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {
     int variant_id = task_register->register_nvshmem_allgather_strided_put_task(

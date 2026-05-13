@@ -50,6 +50,7 @@
 #include "sm100_ptx.cuh"
 #include "softmax_gather_sm100.cuh"
 #include "tasks/common/sampling.cuh"
+#include "tasks/speculative_decoding/eagle3_ops.cuh"
 #include "tasks/speculative_decoding/mtp_token_ops.cuh"
 #include "tasks/speculative_decoding/target_verify_mtp.cuh"
 #include "tensor_init.cuh"

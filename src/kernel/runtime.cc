@@ -1802,6 +1802,10 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MTP_TOKEN_SCATTER] = "TASK_MTP_TOKEN_SCATTER";
   task_type_to_name[TASK_MTP_PREPARE_VERIFY] = "TASK_MTP_PREPARE_VERIFY";
   task_type_to_name[TASK_MTP_BUILD_EMBED_INPUT] = "TASK_MTP_BUILD_EMBED_INPUT";
+  task_type_to_name[TASK_COPY] = "TASK_COPY";
+  task_type_to_name[TASK_EAGLE3_AUX_CONCAT] = "TASK_EAGLE3_AUX_CONCAT";
+  task_type_to_name[TASK_EAGLE3_INPUT_CONCAT] = "TASK_EAGLE3_INPUT_CONCAT";
+  task_type_to_name[TASK_EAGLE3_D2T_REMAP] = "TASK_EAGLE3_D2T_REMAP";
   task_type_to_name[TASK_QUANTIZE_FP8_SM100] = "TASK_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_LINEAR_FP8_SM100] = "TASK_LINEAR_FP8_SM100";
   task_type_to_name[TASK_LINEAR_FP8_WITH_RESIDUAL_SM100] =

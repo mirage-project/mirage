@@ -1620,6 +1620,15 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
+    // Eagle3 simple kernels (memcpy/concat/remap) don't need TMA. Their task
+    // IDs fall in the TMA range gating in runtime.cc so we explicitly no-op
+    // them here.
+    case TASK_COPY:
+    case TASK_EAGLE3_AUX_CONCAT:
+    case TASK_EAGLE3_INPUT_CONCAT:
+    case TASK_EAGLE3_D2T_REMAP: {
+      break;
+    }
     default:
       assert(false);
   }

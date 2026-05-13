@@ -794,6 +794,7 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        enable_qk_norm: bool = True,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -814,13 +815,19 @@ class PersistentKernel:
             assert cos_pos_embed.dim(1) == head_dim
             assert sin_pos_embed.dim(1) == head_dim
             rotary_embed = 1
-        qk_norm = 0
-        if q_norm is not None or k_norm is not None:
-            assert q_norm.num_dims == 1  # (head_dim)
-            assert k_norm.num_dims == 1  # (head_dim)
-            qk_norm = 1
-            assert q_norm.dim(0) == head_dim
-            assert k_norm.dim(0) == head_dim
+        # The underlying task's input slots require valid DTensors for
+        # q_norm / k_norm even when norm is disabled (the kernel template's
+        # qk_norm=0 branch ignores the values but the slot must be bound).
+        # Callers that don't have real norm weights can attach a dummy tensor
+        # of shape (head_dim,) and pass enable_qk_norm=False.
+        assert q_norm is not None and k_norm is not None, (
+            "q_norm/k_norm must be valid DTensors; pass a dummy + "
+            "enable_qk_norm=False when norm is disabled")
+        assert q_norm.num_dims == 1  # (head_dim)
+        assert k_norm.num_dims == 1  # (head_dim)
+        assert q_norm.dim(0) == head_dim
+        assert k_norm.dim(0) == head_dim
+        qk_norm = 1 if enable_qk_norm else 0
 
         # params[0]: num_q_heads
         # params[1]: num_kv_heads
@@ -2317,6 +2324,113 @@ class PersistentKernel:
             [accepted_count, output_tokens, current_position,
              new_position, final_output, num_new_tokens], tb_graph)
         self.kn_graph.register_task(tb_graph, "mtp_accept_commit", params)
+
+    # === Eagle3 layers ===
+    def copy_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Generic memcpy: dst[i,j] = src[i,j] for a 2D bf16 tensor.
+
+        Used by Eagle3 to capture target's intermediate hidden states into
+        dedicated aux buffers (since MPK's per-layer intermediates are reused
+        across layers and get overwritten).
+        """
+        assert input.num_dims == 2
+        assert output.num_dims == 2
+        assert input.dim(0) == output.dim(0)
+        assert input.dim(1) == output.dim(1)
+        batch_size = input.dim(0)
+        hidden_dim = input.dim(1)
+        params = [batch_size, hidden_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "copy", params)
+
+    def eagle3_aux_concat_layer(
+        self,
+        h0: DTensor,
+        h1: DTensor,
+        h2: DTensor,
+        output: DTensor,  # (batch, 3 * hidden_dim)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Concatenate 3 (batch, H) aux hidden states into (batch, 3H).
+
+        Used at Eagle3 draft step 0 to feed h_low/h_mid/h_high through eh_proj.
+        """
+        assert h0.num_dims == 2 and h1.num_dims == 2 and h2.num_dims == 2
+        assert output.num_dims == 2
+        assert h0.dim(0) == h1.dim(0) == h2.dim(0) == output.dim(0)
+        assert h0.dim(1) == h1.dim(1) == h2.dim(1)
+        assert output.dim(1) == 3 * h0.dim(1)
+        batch_size = h0.dim(0)
+        hidden_dim = h0.dim(1)
+        params = [batch_size, hidden_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(h0, (-1, -1, -1), -1, True)
+        tb_graph.new_input(h1, (-1, -1, -1), -1, True)
+        tb_graph.new_input(h2, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([h0, h1, h2, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "eagle3_aux_concat", params)
+
+    def eagle3_input_concat_layer(
+        self,
+        embed: DTensor,    # (batch, hidden_dim)
+        hidden: DTensor,   # (batch, hidden_dim)
+        output: DTensor,   # (batch, 2 * hidden_dim)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Concatenate (embed, hidden) → (batch, 2H) for Eagle3 draft attn QKV.
+
+        Matches sglang's `torch.cat([embeds, hidden_states], dim=-1)`.
+        """
+        assert embed.num_dims == 2 and hidden.num_dims == 2
+        assert output.num_dims == 2
+        assert embed.dim(0) == hidden.dim(0) == output.dim(0)
+        assert embed.dim(1) == hidden.dim(1)
+        assert output.dim(1) == 2 * embed.dim(1)
+        batch_size = embed.dim(0)
+        hidden_dim = embed.dim(1)
+        params = [batch_size, hidden_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(hidden, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([embed, hidden, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "eagle3_input_concat", params)
+
+    def eagle3_d2t_remap_layer(
+        self,
+        hot_token: DTensor,      # (batch, 1) int64 — argmax over draft logits
+        d2t_table: DTensor,      # (draft_vocab_size,) int64
+        target_token: DTensor,   # (batch, 1) int64 — output
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Map Eagle3 draft hot-vocab id to target vocab id:
+            target_id = hot_id + d2t[hot_id]
+        """
+        assert hot_token.num_dims == 2
+        assert d2t_table.num_dims == 1
+        assert target_token.num_dims == 2
+        assert hot_token.dim(0) == target_token.dim(0)
+        batch_size = hot_token.dim(0)
+        params = [batch_size]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(hot_token, (-1, -1, -1), -1, True)
+        tb_graph.new_input(d2t_table, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_token, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([hot_token, d2t_table, target_token], tb_graph)
+        self.kn_graph.register_task(tb_graph, "eagle3_d2t_remap", params)
 
     def compile(
         self,
