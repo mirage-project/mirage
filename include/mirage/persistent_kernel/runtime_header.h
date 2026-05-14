@@ -227,6 +227,10 @@ enum TaskType {
   // (K_PACKED, M); needed for the silu→W2 path because quantize_fp8 emits
   // (M, K_PACKED) while the new fp8_group_gemm SFA expects (K_PACKED, M).
   TASK_TRANSPOSE_SCALE_SM100 = 315,
+  // Helper for the MPK_DSV3_BMM decode Q path: interleaves the BMM-absorbed
+  // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
+  // (N, H, 576) that the MLA decode TMA expects.
+  TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
   TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

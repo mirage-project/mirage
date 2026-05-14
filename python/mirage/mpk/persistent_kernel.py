@@ -2508,6 +2508,54 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_swapAB_with_residual_sm100", params)
 
+    def assemble_q_decode_sm100_layer(
+        self,
+        q_nope_abs: DTensor,
+        q_pe: DTensor,
+        q_nope_pe: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple = (128, 1, 1),
+    ):
+        """Interleave the BMM-absorbed q_nope (N, H, 512) with q_pe (N, H, 64)
+        into per-head [nope|pe] layout (N, H, 576) for MLA decode.
+
+        Used by the MPK_DSV3_BMM=1 decode Q path:
+          rmsnorm_linear(q_a, q_b_nope) → q_nope (N, H, 128)
+          quantize_fp8(q_nope)         → q_nope_fp8 (N, H, 128)
+          linear_fp8_bmm_sm100(q_nope_fp8, kv_b_k_bmm) → q_nope_abs (N, H, 512)
+          rmsnorm_linear(q_a, q_b_pe)  → q_pe (N, H, 64)
+          assemble_q_decode_sm100(q_nope_abs, q_pe) → q_nope_pe (N, H, 576)
+
+        Replaces the load-time absorbed q_b_proj GEMM. The BMM is per-head and
+        loads smaller weights ((H, 512, 128) per head) vs the absorbed (H*576, q_lora)
+        monolith, which is the perf win — smaller TMA traffic per task.
+
+        grid_dim = (N, 1, 1); each CTA processes 1 token (all H heads).
+        block_dim = (128, 1, 1) is plenty: at TP=4 (H=32) each CTA writes
+        32*576 = 18432 bf16 elements = 144 elements/thread.
+        """
+        assert q_nope_abs.num_dims == 3
+        assert q_pe.num_dims == 3
+        # q_nope_pe may be 3D (N, H, D_TOTAL) or 2D (N, H*D_TOTAL) — same
+        # byte layout, the register code handles both. 2D is convenient so
+        # the existing q_nope_pe buffer doesn't need to be reshaped.
+        assert q_nope_pe.num_dims in (2, 3)
+        assert q_nope_abs.dim(0) == q_pe.dim(0) == q_nope_pe.dim(0)
+        H = q_nope_abs.dim(1)
+        assert q_pe.dim(1) == H
+        D_TOTAL = q_nope_abs.dim(2) + q_pe.dim(2)
+        if q_nope_pe.num_dims == 3:
+            assert q_nope_pe.dim(1) == H
+            assert q_nope_pe.dim(2) == D_TOTAL
+        else:
+            assert q_nope_pe.dim(1) == H * D_TOTAL
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope_abs, (0, -1, -1), -1, True)
+        tb_graph.new_input(q_pe,       (0, -1, -1), -1, True)
+        tb_graph.new_input(q_nope_pe,  (0, -1, -1), -1, True)
+        self.kn_graph.customized([q_nope_abs, q_pe, q_nope_pe], tb_graph)
+        self.kn_graph.register_task(tb_graph, "assemble_q_decode_sm100")
+
     def linear_fp8_bmm_sm100_layer(
         self,
         input_fp8: DTensor,
@@ -2537,22 +2585,42 @@ class PersistentKernel:
         #   - D_in must be a multiple of BLOCK_K=128
         #   - batch_size N <= MMA_N=16 (decode-only)
         #   - H % grid.y == 0; first cut requires H_PER_TASK == 1
-        assert input_fp8.num_dims == 3
-        assert input_scale.num_dims == 3
+        # Weight stays 3D (H, D_out, D_in) — the per-head TMA stride depends
+        # on the explicit H dim. Input/output may be 2D (N, H*D_*) or 3D
+        # (N, H, D_*); same byte layout, partition map adjusts the dim index.
         assert weight_fp8.num_dims == 3
         assert weight_scale.num_dims == 3
-        assert output.num_dims == 3
+        assert input_fp8.num_dims in (2, 3)
+        assert input_scale.num_dims in (2, 3)
+        assert output.num_dims in (2, 3)
         params = []
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        # input_fp8 / input_scale [N, H, D_in or packed_K]: grid.y splits dim 1 (H).
-        tb_graph.new_input(input_fp8,    (-1, 1, -1), -1, True)
-        tb_graph.new_input(input_scale,  (-1, 1, -1), -1, True)
+        in_h_axis = 1 if input_fp8.num_dims == 3 else 1
+        in_sc_h_axis = 1 if input_scale.num_dims == 3 else 1
+        out_h_axis = 1
+        out_m_axis = 2 if output.num_dims == 3 else 1
+        # input_fp8 / input_scale: grid.y splits the head axis. For 3D
+        # (N, H, D_in), head axis is dim 1; for 2D (N, H*D_in), head
+        # axis is also dim 1 because the partition map's axis index
+        # refers to the DTensor's dim sequence; dim 1 still partitions
+        # into H equal slices of D_in each (per-CTA STensor.dim[1] = D_in).
+        tb_graph.new_input(input_fp8,    (-1, in_h_axis, -1), -1, True)
+        tb_graph.new_input(input_scale,  (-1, in_sc_h_axis, -1), -1, True)
         # weight_fp8 / weight_scale [H, D_out, D_in or packed_K]:
         # grid.x splits dim 1 (D_out), grid.y splits dim 0 (H).
         tb_graph.new_input(weight_fp8,   (1, 0, -1), -1, True)
         tb_graph.new_input(weight_scale, (1, 0, -1), -1, True)
-        # output [N, H, D_out]: grid.x splits dim 2 (D_out), grid.y splits dim 1 (H).
-        tb_graph.new_input(output,       (2, 1, -1), -1, True)
+        # output: dim 1 (H) split by grid.y. For 3D, dim 2 (D_out) split
+        # by grid.x; for 2D, dim 1 (H*D_out) is also split — but the
+        # partition needs the SAME dim for both H and D_out splits, which
+        # only works in 3D form. For 2D output, grid.x must be 1.
+        if output.num_dims == 3:
+            tb_graph.new_input(output, (out_m_axis, out_h_axis, -1), -1, True)
+        else:
+            assert grid_dim[0] == 1, (
+                "linear_fp8_bmm with 2D output requires grid.x=1 "
+                "(D_out cannot be sharded across CTAs when packed flat)")
+            tb_graph.new_input(output, (-1, 1, -1), -1, True)
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_bmm_sm100", params)
@@ -2569,17 +2637,24 @@ class PersistentKernel:
         runtime_m_mode: int = 0,
     ):
         # A: [M,K], B: [N,K], C: [M,N]. The kernel distributes output tiles
-        # across `num_workers` persistent tasks.
-        assert input_fp8.num_dims == 2
+        # across `num_workers` persistent tasks. Inputs/output may also be
+        # 3D (M, H_split, K/H_split or D_out/H_split) when the caller wants
+        # to keep the head dimension explicit downstream (e.g. for BMM); the
+        # GEMM kernel itself sees the buffer as flat M*K / M*N bytes via TMA.
+        assert input_fp8.num_dims in (2, 3)
         assert weight_fp8.num_dims == 2
         assert input_scale.num_dims == 2
         assert weight_scale.num_dims == 2
-        assert output.num_dims == 2
+        assert output.num_dims in (2, 3)
         M = input_fp8.dim(0)
-        K = input_fp8.dim(1)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
         N = weight_fp8.dim(0)
         assert weight_fp8.dim(1) == K
-        assert output.dim(0) == M and output.dim(1) == N
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N
         params = [M, N, K, num_workers]
         if runtime_m_mode:
             params.append(runtime_m_mode)

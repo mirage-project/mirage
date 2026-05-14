@@ -243,6 +243,15 @@ class DeepSeekV3Builder(GraphBuilder):
         # Temporarily raisable for "BM_PADDING saturation" debugging via env.
         self._moe_bm_padding = int(os.environ.get("MPK_DSV3_BM_PADDING", "128"))
         assert self._moe_bm_padding % 128 == 0, "BM_PADDING must be 128-aligned"
+        # MPK_DSV3_BMM=1: switch the decode Q path from the load-time absorbed
+        # q_b_proj (single fused (H*576, q_lora) FP8 GEMM) to a per-head BMM
+        # chain: rmsnorm_linear(q_b_nope, 128) + rmsnorm_linear(q_b_pe, 64)
+        # + quantize_fp8(q_nope) + linear_fp8_bmm(q_nope, kv_b_k_bmm) →
+        # q_nope_abs (mbt, H, 512) + assemble_q_decode → q_nope_pe.
+        # Win: smaller weight loads per task (per-head (512, 128) vs absorbed
+        # (576, q_lora=1536) monolith) → less TMA traffic, room to overlap.
+        # Default OFF; flip after correctness validated end-to-end.
+        self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "0") == "1"
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
@@ -486,8 +495,14 @@ class DeepSeekV3Builder(GraphBuilder):
         """
         if weight_scale_raw is None:
             raise ValueError("FP8 linear v2 requires FP8 weight scale.")
-        if input_bf16.num_dims != 2 or output.num_dims != 2:
-            raise ValueError("FP8 linear v2 expects 2D input/output.")
+        if input_bf16.num_dims != 2:
+            raise ValueError("FP8 linear v2 expects 2D input.")
+        # Output may be 2D (M, N) or 3D (M, H, D_per_head). Storage is
+        # row-major contiguous either way; the kernel writes M*N bf16. The
+        # 3D form is for the MPK_DSV3_BMM=1 path that wants H exposed
+        # downstream without an extra reshape task.
+        if output.num_dims not in (2, 3):
+            raise ValueError("FP8 linear v2 expects 2D or 3D output.")
         if weight_fp8_raw.num_dims != 2 or weight_scale_raw.num_dims != 2:
             raise ValueError("FP8 linear v2 expects 2D weight + scale.")
 
@@ -714,6 +729,110 @@ class DeepSeekV3Builder(GraphBuilder):
             gate_mode=gate_mode,
             input_row_stride=input_row_stride,
             input_col_offset=input_col_offset,
+        )
+
+    def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs):
+        """MPK_DSV3_BMM=1: replaces the absorbed q_b_proj decode GEMM with a
+        per-head BMM chain that loads the unabsorbed weights at runtime:
+
+          rmsnorm_linear(q_a, q_b_nope)   → q_nope (mbt, H, 128)  bf16
+          rmsnorm_linear(q_a, q_b_pe)     → q_pe   (mbt, H, 64)   bf16
+          quantize_fp8(q_nope, UE8M0)     → q_nope_fp8, q_nope_scale
+          linear_fp8_bmm(q_nope_fp8, kv_b_k_bmm) → q_nope_abs (mbt, H, 512)
+          assemble_q_decode(q_nope_abs, q_pe) → q_nope_pe (mbt, H, 576)
+
+        Win over the absorbed monolith (single (H*576, q_lora) FP8 GEMM):
+        per-task weight load drops from (576, q_lora=1536) per head-tile to
+        (128, q_lora) + (64, q_lora) + (512, 128) per head, materially less
+        TMA traffic per CTA. The absorbed weight buffer (~6.8 GB across
+        DSv3 layers) also goes away.
+        """
+        # Per-layer reusable 3D buffers. Sized to mbt × H_local.
+        H_local = self.num_local_q_heads
+        mbt = self.max_num_batched_tokens
+        if not hasattr(self, "_bmm_decode_buffers"):
+            self._bmm_decode_buffers = {}
+            # bf16 outputs of q_b_nope/q_b_pe FP8 dense GEMMs (3D so the
+            # BMM input partition map can see H as an explicit dim).
+            self._bmm_decode_buffers["q_nope_3d"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, 128), dtype=bfloat16,
+                name="q_nope_decode_3d", io_category="cuda_tensor")
+            self._bmm_decode_buffers["q_pe_3d"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, 64), dtype=bfloat16,
+                name="q_pe_decode_3d", io_category="cuda_tensor")
+            # FP8 q_nope + UE8M0 packed scale for BMM input. K=128 ≤ 512
+            # so packed_K = 1 (one uint32 per row).
+            self._bmm_decode_buffers["q_nope_fp8"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, 128), dtype=float8_e4m3,
+                name="q_nope_decode_fp8", io_category="cuda_tensor")
+            self._bmm_decode_buffers["q_nope_scale"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, 1), dtype=uint32,
+                name="q_nope_decode_scale", io_category="cuda_tensor")
+            # BMM output (mbt, H, 512) — q_nope absorbed.
+            self._bmm_decode_buffers["q_nope_abs"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, 512), dtype=bfloat16,
+                name="q_nope_abs_3d", io_category="cuda_tensor")
+        q_nope_3d = self._bmm_decode_buffers["q_nope_3d"]
+        q_pe_3d = self._bmm_decode_buffers["q_pe_3d"]
+        q_nope_fp8 = self._bmm_decode_buffers["q_nope_fp8"]
+        q_nope_scale = self._bmm_decode_buffers["q_nope_scale"]
+        q_nope_abs = self._bmm_decode_buffers["q_nope_abs"]
+
+        # 1) q_b_nope FP8 dense GEMM → q_nope_3d (mbt, H, 128)
+        w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
+            state_dict, f"{attn}q_b_nope.weight",
+            f"layer_{layer_idx}_q_b_nope_decode")
+        self._fp8_linear(
+            self.q_a_out, w_q_b_nope, s_q_b_nope, q_nope_3d,
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
+            block_dim=(128, 1, 1),
+            gate_mode=2 if self._use_prefill else 0,
+            **qb_slice_kwargs)
+        # 2) q_b_pe FP8 dense GEMM → q_pe_3d (mbt, H, 64)
+        w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
+            state_dict, f"{attn}q_b_pe.weight",
+            f"layer_{layer_idx}_q_b_pe_decode")
+        self._fp8_linear(
+            self.q_a_out, w_q_b_pe, s_q_b_pe, q_pe_3d,
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
+            block_dim=(128, 1, 1),
+            gate_mode=2 if self._use_prefill else 0,
+            **qb_slice_kwargs)
+        # 3) Quantize q_nope BF16 → FP8 + UE8M0 packed scale.
+        # Each row's K=128, so packed_K=1. row_count = mbt * H rows.
+        active_mode_bmm = 3 if self._use_prefill else 0  # decode-only when prefill enabled
+        self.mpk.quantize_fp8_layer(
+            input=q_nope_3d,
+            output_fp8=q_nope_fp8,
+            output_scale=q_nope_scale,
+            grid_dim=(1, mbt * H_local, 1),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=True,
+            active_mode=active_mode_bmm,
+        )
+        # 4) BMM(q_nope_fp8, kv_b_k_bmm) → q_nope_abs (mbt, H, 512).
+        w_kvk_bmm = self.mpk.attach_input(
+            torch_tensor=state_dict[f"{attn}kv_b_k_bmm.weight"],
+            name=f"layer_{layer_idx}_kv_b_k_bmm")
+        s_kvk_bmm = self.mpk.attach_input(
+            torch_tensor=state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"],
+            name=f"layer_{layer_idx}_kv_b_k_bmm_scale")
+        self.mpk.linear_fp8_bmm_sm100_layer(
+            input_fp8=q_nope_fp8,
+            input_scale=q_nope_scale,
+            weight_fp8=w_kvk_bmm,
+            weight_scale=s_kvk_bmm,
+            output=q_nope_abs,
+            grid_dim=(512 // 128, H_local, 1),  # (4, H, 1)
+            block_dim=(256, 1, 1),
+        )
+        # 5) Assemble: per-head interleave nope|pe into q_nope_pe (2D buffer).
+        self.mpk.assemble_q_decode_sm100_layer(
+            q_nope_abs=q_nope_abs,
+            q_pe=q_pe_3d,
+            q_nope_pe=self.q_nope_pe,
+            grid_dim=(mbt, 1, 1),
+            block_dim=(128, 1, 1),
         )
 
     def _fp8_dense_kv_b_proj(
@@ -1602,17 +1721,25 @@ class DeepSeekV3Builder(GraphBuilder):
         # Prefill uses vLLM's original split q_b [H*128] + [H*64].
         # QKV-a fused: q_a_out aliases qkv_a_out (mbt, 2176); pass the slice
         # row stride + offset so the FP8 quantize reads only q_a's 1536 cols.
-        w_q_b, s_q_b = self._attach_fp8_weight(
-            state_dict, f"{attn}q_b_proj.weight",
-            f"layer_{layer_idx}_q_b_proj")
         qb_slice_kwargs = dict(
             input_row_stride=self._qkv_a_row_stride,
             input_col_offset=self._qkv_a_q_offset)
-        self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
-                         grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
-                         block_dim=(128, 1, 1),
-                         gate_mode=2 if self._use_prefill else 0,
-                         **qb_slice_kwargs)
+        if self._dsv3_bmm:
+            # MPK_DSV3_BMM=1: replace the load-time absorbed q_b_proj with
+            # runtime BMM-based absorption. Five tasks instead of one
+            # monolithic FP8 GEMM, but each task loads smaller per-head
+            # weights → less TMA traffic, better overlap potential.
+            self._bmm_decode_q_path(state_dict, attn, layer_idx, qb_slice_kwargs)
+        else:
+            # Existing absorbed-Q path (default).
+            w_q_b, s_q_b = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_proj.weight",
+                f"layer_{layer_idx}_q_b_proj")
+            self._fp8_linear(self.q_a_out, w_q_b, s_q_b, self.q_nope_pe,
+                             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
+                             block_dim=(128, 1, 1),
+                             gate_mode=2 if self._use_prefill else 0,
+                             **qb_slice_kwargs)
         if self._use_prefill:
             if self._qb_fused:
                 # FuseTensor path (2026-05-12 user #2): single FP8 GEMM

@@ -766,6 +766,37 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_k.weight_scale_inv"] = kv_b_k_scale
                     state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
                     state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
+
+                    # BMM repack of kv_b_k for MPK_DSV3_BMM=1 decode path:
+                    # transpose W_UK (H, 128, 512) → (H, 512, 128) and
+                    # per-row quantize. BMM kernel expects weight layout
+                    # (H, D_out=512, D_in=128) FP8 + (H, 512, 1) uint32
+                    # UE8M0-packed scale (1 packed scale per row since
+                    # D_in=128 == one BLOCK_K). Row-major contiguous.
+                    W_UK_bmm = W_UK.transpose(-2, -1).contiguous()  # (H, 512, 128)
+                    bmm_amax = W_UK_bmm.abs().amax(dim=-1, keepdim=True).clamp(
+                        min=1e-12)
+                    bmm_scale_inv_f32 = (bmm_amax / 448.0).squeeze(-1)  # (H, 512)
+                    bmm_w_q = (W_UK_bmm / bmm_amax).clamp(-448, 448).to(
+                        torch.float8_e4m3fn).contiguous()  # (H, 512, 128) FP8
+                    # UE8M0 encode (CEIL log2 to match kernel-side encode_ue8m0).
+                    # Direct exponent math (bias = 127) avoids the
+                    # float-as-int-bits trick which silently broke when
+                    # torch.pow returned float64 (last dim halved on view
+                    # to int32).
+                    pos = torch.where(
+                        bmm_scale_inv_f32 > 0, bmm_scale_inv_f32,
+                        torch.full_like(bmm_scale_inv_f32, 1e-30))
+                    log2_val = torch.ceil(torch.log2(pos))
+                    ue = (log2_val + 127.0).clamp(0, 255).to(torch.uint8)
+                    ue = torch.where(bmm_scale_inv_f32 > 0, ue,
+                                     torch.zeros_like(ue))
+                    # Pack into uint32 (1 packed scale per row at K=128 ≤ 512).
+                    bmm_scale_packed = ue.to(torch.uint32).unsqueeze(-1).contiguous()
+                    # ^ shape (H, 512, 1) uint32, low byte holds UE8M0 exponent.
+                    state_dict[f"{attn}kv_b_k_bmm.weight"] = bmm_w_q
+                    state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"] = (
+                        bmm_scale_packed)
                     # DEBUG 2026-05-10: also store bf16 versions of the
                     # split kv_b weights for the BF16 ablation in
                     # _fp8_dense_kv_b_proj. Used to verify whether the FP8
@@ -989,6 +1020,11 @@ if __name__ == "__main__":
                     (r"self_attn\.q_b_proj_unabsorbed\.weight",              0),
                     (r"self_attn\.kv_b_k\.weight",                           0),
                     (r"self_attn\.kv_b_v\.weight",                           0),
+                    # BMM repack of kv_b_k: per-head (H, 512, 128); shard
+                    # head dim (dim=0). The packed UE8M0 scale (H, 512, 1)
+                    # shards the same way.
+                    (r"self_attn\.kv_b_k_bmm\.weight",                       0),
+                    (r"self_attn\.kv_b_k_bmm\.weight_scale_ue8m0",           0),
                     (r"self_attn\.kv_b_k_bf16\.weight",                      0),
                     (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),

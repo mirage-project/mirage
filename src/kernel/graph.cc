@@ -885,6 +885,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_TRANSPOSE_SCALE_SM100, variant_id);
+  } else if (name == "assemble_q_decode_sm100") {
+    // 2 inputs (q_nope_abs, q_pe) + 1 output (q_nope_pe).
+    int variant_id = task_register->register_assemble_q_decode_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_ASSEMBLE_Q_DECODE_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {

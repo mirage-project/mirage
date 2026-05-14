@@ -5420,22 +5420,32 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
     }
   }
 
-  // Pull the global tensor shapes from the dtensors (these are always 3D
-  // for BMM regardless of how the per-task STensor is squeezed).
-  assert(input_ops[0]->dtensor.num_dims == 3);
-  assert(input_ops[2]->dtensor.num_dims == 3);
-  assert(output_ops[0]->dtensor.num_dims == 3);
-  int batch_size = input_ops[0]->dtensor.dim[0];
-  int num_heads = input_ops[0]->dtensor.dim[1];
-  int reduction_size = input_ops[0]->dtensor.dim[2];
-  int D_out_full = output_ops[0]->dtensor.dim[2];
+  // Weight is always 3D [H, D_out, D_in]. Input and output may be 2D
+  // (N, H*D_*) or 3D (N, H, D_*) — same byte layout, identical TMA
+  // strides. Accept either so callers don't need a reshape kernel.
+  assert(input_ops[2]->dtensor.num_dims == 3);  // weight 3D required
+  int num_heads = input_ops[2]->dtensor.dim[0];
+  int D_out_full = input_ops[2]->dtensor.dim[1];
+  int reduction_size = input_ops[2]->dtensor.dim[2];
 
-  // Cross-check input vs output vs weight shapes line up.
+  int const in_dims = input_ops[0]->dtensor.num_dims;
+  int const out_dims = output_ops[0]->dtensor.num_dims;
+  assert(in_dims == 2 || in_dims == 3);
+  assert(out_dims == 2 || out_dims == 3);
+  int batch_size = input_ops[0]->dtensor.dim[0];
+  if (in_dims == 3) {
+    assert(input_ops[0]->dtensor.dim[1] == num_heads);
+    assert(input_ops[0]->dtensor.dim[2] == reduction_size);
+  } else {
+    assert(input_ops[0]->dtensor.dim[1] == num_heads * reduction_size);
+  }
   assert(output_ops[0]->dtensor.dim[0] == batch_size);
-  assert(output_ops[0]->dtensor.dim[1] == num_heads);
-  assert(input_ops[2]->dtensor.dim[0] == num_heads);
-  assert(input_ops[2]->dtensor.dim[1] == D_out_full);
-  assert(input_ops[2]->dtensor.dim[2] == reduction_size);
+  if (out_dims == 3) {
+    assert(output_ops[0]->dtensor.dim[1] == num_heads);
+    assert(output_ops[0]->dtensor.dim[2] == D_out_full);
+  } else {
+    assert(output_ops[0]->dtensor.dim[1] == num_heads * D_out_full);
+  }
 
   // Per-task M-tile (per-head output shard) and per-CTA head count.
   int grid_x = bgraph.grid_dim.x;
@@ -5868,6 +5878,64 @@ int TaskRegister::register_transpose_scale_sm100_task(
   code.e("    task_desc->input_ptrs[0],");   // in (M, K_PACKED)
   code.e("    task_desc->output_ptrs[0]);"); // out (K_PACKED, M)
   return register_task_variant(TASK_TRANSPOSE_SCALE_SM100, code.to_string());
+}
+
+int TaskRegister::register_assemble_q_decode_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Interleaves (N, H, D_NOPE) + (N, H, D_PE) → (N, H, D_NOPE+D_PE) per head.
+  //
+  // Inputs (Python-layer order):
+  //   [0] q_nope_abs  (N, H, D_NOPE=512) bf16   — BMM output
+  //   [1] q_pe        (N, H, D_PE=64)    bf16   — q_b_pe FP8 dense GEMM output
+  // Output:
+  //   [0] q_nope_pe   (N, H, D_NOPE+D_PE=576) bf16
+  //
+  // grid_dim = (N, 1, 1); partition (0, -1, -1) on all 3 tensors so each
+  // CTA processes 1 token. n_active passed to the kernel = STensor.dim[0]
+  // = N / grid.x.
+  assert(params.size() == 0);
+  int num_inputs = 2, num_outputs = 1;
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // Inputs are 3D (N, H, D_NOPE) and (N, H, D_PE). Output may be either
+  // 3D (N, H, D_NOPE+D_PE) or 2D (N, H*(D_NOPE+D_PE)) — same byte layout,
+  // accept either so callers can keep the existing 2D q_nope_pe buffer.
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  assert(input_ops[1]->output_tensors[0].num_dims == 3);
+  int const out_dims = output_ops[0]->output_tensors[0].num_dims;
+  assert(out_dims == 2 || out_dims == 3);
+  int n_per_task = output_ops[0]->output_tensors[0].dim[0];
+  int D_NOPE = input_ops[0]->output_tensors[0].dim[2];
+  int D_PE = input_ops[1]->output_tensors[0].dim[2];
+  int H = input_ops[0]->output_tensors[0].dim[1];
+  int D_TOTAL;
+  if (out_dims == 3) {
+    assert(output_ops[0]->output_tensors[0].dim[1] == H);
+    D_TOTAL = output_ops[0]->output_tensors[0].dim[2];
+  } else {
+    assert(output_ops[0]->output_tensors[0].dim[1] == H * (D_NOPE + D_PE));
+    D_TOTAL = D_NOPE + D_PE;
+  }
+  assert(input_ops[0]->output_tensors[0].dim[0] == n_per_task);
+  assert(input_ops[1]->output_tensors[0].dim[0] == n_per_task);
+  assert(input_ops[1]->output_tensors[0].dim[1] == H);
+  assert(D_NOPE + D_PE == D_TOTAL);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::assemble_q_decode_sm100_task_impl<$, $, $>(", H, D_NOPE, D_PE);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    $);", n_per_task);
+  return register_task_variant(TASK_ASSEMBLE_Q_DECODE_SM100, code.to_string());
 }
 
 int TaskRegister::register_mla_kv_gather_sm100_task(
