@@ -855,17 +855,22 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_MEDIUMM_SM100, variant_id);
   } else if (name == "fp8_group_gemm_smallm_sm100") {
-    // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + 1 output (D_bf16). All
-    // 4 first inputs + the output carry TMA descriptors; m_indices direct LDG.
+    // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + optional 6th (meta for
+    // per-expert active mask) + 1 output (D_bf16). All 4 first inputs +
+    // the output carry TMA descriptors; m_indices + active mask are direct
+    // LDG. The 6th-input case is signaled by params[5] >= 0 (= flat offset
+    // of active_expert_mask inside meta).
     int variant_id = task_register->register_fp8_group_gemm_smallm_sm100_task(
         customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(5, 1, TASK_FP8_GROUP_GEMM_SMALLM_SM100, variant_id);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_SMALLM_SM100, variant_id);
   } else if (name == "fp8_group_gemm_largem_sm100") {
     int variant_id = task_register->register_fp8_group_gemm_largem_sm100_task(
         customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(5, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
   } else if (name == "moe_permute_sm100") {
     // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
     // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).

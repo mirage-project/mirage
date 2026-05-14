@@ -5736,10 +5736,15 @@ static int register_fp8_group_gemm_variant(TaskRegister *self,
                                            char const *namespace_name,
                                            char const *fn_name,
                                            TaskType task_type) {
-  // params: [M_total, N, K, E, num_workers]
-  assert(params.size() == 5);
+  // params: [M_total, N, K, E, num_workers, active_mask_offset]
+  // active_mask_offset == -1 means caller did not supply a meta buffer;
+  // pass nullptr so the kernel processes every tile (legacy behavior).
+  // active_mask_offset >= 0 means input_ptrs[5] is the meta buffer (int32)
+  // and the per-expert active mask lives at meta + active_mask_offset.
+  assert(params.size() == 6);
   int M_total = params[0], N = params[1], K = params[2], E = params[3];
   int num_workers = params[4];
+  int active_mask_offset = params[5];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5755,6 +5760,13 @@ static int register_fp8_group_gemm_variant(TaskRegister *self,
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]),");  // D
   code.e("    static_cast<const int*>(task_desc->input_ptrs[4]),"); // m_indices
+  if (active_mask_offset >= 0) {
+    code.e("    static_cast<const int*>(task_desc->input_ptrs[5]) + "
+           "$,",
+           active_mask_offset); // active_expert_mask
+  } else {
+    code.e("    nullptr,"); // no active mask supplied
+  }
   code.e("    $,", M_total);
   code.e("    $,", N);
   code.e("    $,", K);

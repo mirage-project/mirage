@@ -2352,6 +2352,7 @@ class DeepSeekV3Builder(GraphBuilder):
             m_indices=self.new_moe_m_indices_dt,
             output=new_moe_w13_out,
             num_workers=self.mpk.num_workers,
+            meta=new_moe_meta,
         )
         if upto < 5: return
         # 5) SiLU+MUL.
@@ -2402,6 +2403,7 @@ class DeepSeekV3Builder(GraphBuilder):
             m_indices=self.new_moe_m_indices_dt,
             output=new_moe_w2_out,
             num_workers=self.mpk.num_workers,
+            meta=new_moe_meta,
         )
 
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):

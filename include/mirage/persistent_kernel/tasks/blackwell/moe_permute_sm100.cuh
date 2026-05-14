@@ -83,10 +83,18 @@ __device__ __forceinline__ void
   int32_t *__restrict__ meta = static_cast<int32_t *>(meta_ptr);
 
   // Sub-regions inside the meta buffer.
+  // The meta tensor is shape (2, M_TOTAL + MBT*TOPK) int32 — see the wrapper
+  // docstring. Row 0 holds out_weights (float32 bits) + tok_to_perm; row 1
+  // was unused historically (tensor_init artifact) and now carries the
+  // per-expert active mask consumed by fp8_group_gemm to skip whole-expert
+  // tile blocks where no token routed locally.
   constexpr int M_TOTAL = E_LOCAL * BM_PADDING;
+  constexpr int META_ROW_STRIDE = M_TOTAL + MBT * TOPK;
   float *__restrict__ out_weights =
       reinterpret_cast<float *>(meta);                // [0 : M_TOTAL)
   int32_t *__restrict__ tok_to_perm = meta + M_TOTAL; // [M_TOTAL : ...)
+  int32_t *__restrict__ active_expert_mask =
+      meta + META_ROW_STRIDE; // [META_ROW_STRIDE : META_ROW_STRIDE + E_LOCAL)
 
   int const my_row_base = my_expert * BM_PADDING;
   int const tid = threadIdx.x;
@@ -152,6 +160,16 @@ __device__ __forceinline__ void
       // the GEMM output for these rows will be multiplied by 0.
       out_weights[row] = 0.0f;
     }
+  }
+
+  // Phase 3: publish per-expert active mask so the downstream group GEMM
+  // can short-circuit every (bm=my_expert*BM_PADDING/BM, *) tile when this
+  // expert receives no token this iteration. With BM_PADDING==BM_kernel,
+  // each expert occupies exactly one bm row of tiles; setting mask=0 lets
+  // the GEMM kernel skip nn tiles per inactive expert without touching
+  // mbarriers or TMA.
+  if (tid == 0) {
+    active_expert_mask[my_expert] = (actual_count > 0) ? 1 : 0;
   }
 }
 

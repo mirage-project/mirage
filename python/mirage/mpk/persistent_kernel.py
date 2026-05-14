@@ -2273,6 +2273,7 @@ class PersistentKernel:
         m_indices: DTensor,
         output: DTensor,
         num_workers: int,
+        meta: DTensor = None,
     ):
         """Shared registration helper for the SM100 grouped FP8 block-scaled
         GEMM tasks (`fp8_group_gemm_smallm_sm100` / `fp8_group_gemm_largem_sm100`).
@@ -2353,7 +2354,15 @@ class PersistentKernel:
         N = b_fp8.dim(1)
         assert b_fp8.dim(2) == K
         assert m_indices.dim(0) == M_total
-        params = [M_total, N, K, E, num_workers]
+        if meta is None:
+            active_mask_offset = -1
+        else:
+            assert meta.num_dims == 2
+            # meta layout: row 0 = out_weights+tok_to_perm (length M_total+MBT*TOPK).
+            # Row 1's first E entries hold active_expert_mask (int32).
+            # Flat offset of row 1: meta.dim(1) (since row 0 occupies that).
+            active_mask_offset = meta.dim(1)
+        params = [M_total, N, K, E, num_workers, active_mask_offset]
         grid_dim = (num_workers, 1, 1)
         block_dim = (256, 1, 1)  # 8 warps fixed by kernel role layout
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -2363,25 +2372,27 @@ class PersistentKernel:
         tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output],
-            tb_graph)
+        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output]
+        if meta is not None:
+            tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+            operators.append(meta)
+        self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 
     def fp8_group_gemm_smallm_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-        num_workers,
+        num_workers, meta=None,
     ):
         # Smallm variant: BN=64, NS=8. Best for K>4096 && MPE<=8 (gate_up
         # M{1,4,8} on DSv3). MoE decode niche.
         self._fp8_group_gemm_layer_impl(
             "fp8_group_gemm_smallm_sm100",
             a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-            num_workers)
+            num_workers, meta=meta)
 
     def fp8_group_gemm_largem_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-        num_workers,
+        num_workers, meta=None,
     ):
         # Largem variant: BN=128, NS=6. Default for everything outside the
         # smallm niche (most MoE configs incl. all prefill MPE >= 16 and any
@@ -2389,11 +2400,11 @@ class PersistentKernel:
         self._fp8_group_gemm_layer_impl(
             "fp8_group_gemm_largem_sm100",
             a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-            num_workers)
+            num_workers, meta=meta)
 
     def fp8_group_gemm_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-        num_workers,
+        num_workers, meta=None,
     ):
         # Auto-dispatcher: pick smallm/largem by (K, M_per_expert).
         K = a_fp8.dim(1)
@@ -2403,11 +2414,11 @@ class PersistentKernel:
         if K > 4096 and MPE <= 8:
             self.fp8_group_gemm_smallm_layer(
                 a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-                num_workers)
+                num_workers, meta=meta)
         else:
             self.fp8_group_gemm_largem_layer(
                 a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-                num_workers)
+                num_workers, meta=meta)
 
     def moe_permute_sm100_layer(
         self,
