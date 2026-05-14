@@ -285,6 +285,12 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
+    # Eagle3 v2: gate OFFLINE runtime's spec-decode-aware step advance behind a
+    # compile-time flag. Only enabled when the user configured Eagle3 (others
+    # like promptlookup / DeepSeek MTP keep original semantics).
+    spec_cfg = getattr(mpk, 'spec_decode_config', None)
+    if spec_cfg is not None and getattr(spec_cfg, 'method', None) == 'eagle3':
+        flags = flags + ["-DMPK_SPEC_DECODE"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -2407,6 +2413,44 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([embed, hidden, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "eagle3_input_concat", params)
+
+    def eagle3_commit_layer(
+        self,
+        verified_output: DTensor,   # (batch, K+1) int64 — from verify_strict
+        draft_tokens_new: DTensor,  # (batch, K) int64 — this iter's drafts
+        accepted_count: DTensor,    # (batch, 1) int32 — from verify_strict
+        tokens_buffer: DTensor,     # (max_requests, max_seq_len) int64 — written in-place
+        num_new_tokens: DTensor,    # (max_requests,) int32 — OUTPUT (= accept_count)
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,      # K
+        batch_size: int,            # mbt
+        max_seq_len: int,
+    ):
+        """Eagle3 post-verify commit:
+         - Writes verified prefix (accepted+bonus) at tokens[step+1..step+ac].
+         - Writes new drafts at tokens[step+ac+1..step+ac+K].
+         - Publishes accepted_count to num_new_tokens (aliased to runtime's
+           new_token_nums) for the MPK_SPEC_DECODE OFFLINE prepare_next_batch
+           to advance step.
+         - All writes guarded against overwriting the prompt
+           (pos >= prompt_length[req]).
+
+         Matches mtp_prepare_verify_layer pattern: tokens_buffer is INPUT
+         (kernel writes through it), num_new_tokens is OUTPUT.
+         """
+        params = [num_draft_tokens, batch_size, max_seq_len]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(verified_output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(draft_tokens_new, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
+        tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [verified_output, draft_tokens_new, accepted_count, tokens_buffer,
+             num_new_tokens],
+            tb_graph)
+        self.kn_graph.register_task(tb_graph, "eagle3_commit", params)
 
     def eagle3_d2t_remap_layer(
         self,

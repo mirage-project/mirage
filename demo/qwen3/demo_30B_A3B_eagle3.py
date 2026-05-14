@@ -820,12 +820,15 @@ if __name__ == "__main__":
             # DTensor reference for naming is what matters for the task graph;
             # MPK's persistent tensors retain their content across iterations.
             # We pre-allocate it here so the verify task can reference it.
-            eagle3_all_draft_ids_prealloc = mpk.new_tensor(
-                dims=(mbt_e, K), dtype=mi.int64,
-                name="eagle3_all_draft_ids", io_category="cuda_tensor",
+            # DEBUG: reorder — build draft loop (writer) FIRST, then verify (reader)
+            eagle3.build_draft_loop(
+                aux_h0=eagle3_aux_h0,
+                aux_h1=eagle3_aux_h1,
+                aux_h2=eagle3_aux_h2,
+                target_argmax_token=argmax_out,
             )
             mpk.mtp_verify_strict_layer(
-                draft_token_ids=eagle3_all_draft_ids_prealloc,
+                draft_token_ids=eagle3._attach_cache["eagle3_all_draft_ids"],
                 target_token_ids=argmax_out,
                 accepted_count=accepted_count,
                 output_tokens=verified_output,
@@ -834,29 +837,25 @@ if __name__ == "__main__":
                 num_draft_tokens=K,
             )
 
-            # Build Eagle3 draft loop (writes all_draft_ids for next iter).
-            # NOTE: Eagle3Builder will call mpk.new_tensor(...) for
-            # "eagle3_all_draft_ids" via its _new cache; the prealloc above
-            # uses the same name so the cache will reuse it.
-            eagle3._attach_cache["eagle3_all_draft_ids"] = eagle3_all_draft_ids_prealloc
-            eagle3.build_draft_loop(
-                aux_h0=eagle3_aux_h0,
-                aux_h1=eagle3_aux_h1,
-                aux_h2=eagle3_aux_h2,
-                target_argmax_token=argmax_out,
+            # DBG: real draft + real verified, dummy accepted_count
+            d_tokens = mpk.attach_input(
+                torch_tensor=tokens, name="dbg_t8")
+            d_num_new = mpk.attach_input(
+                torch_tensor=num_new_tokens, name="dbg_n8")
+            dummy_ac_buf = torch.ones((mbt_e, 1), dtype=torch.int32, device="cuda")
+            dummy_ac = mpk.attach_input(torch_tensor=dummy_ac_buf, name="dbg_a8")
+            mpk.eagle3_commit_layer(
+                verified_output=verified_output,
+                draft_tokens_new=eagle3._attach_cache["eagle3_all_draft_ids"],
+                accepted_count=dummy_ac,
+                tokens_buffer=d_tokens,
+                num_new_tokens=d_num_new,
+                grid_dim=(mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+                num_draft_tokens=K,
+                batch_size=mbt_e,
+                max_seq_len=args.max_seq_length,
             )
-
-            # NOTE (v1, K=1): we intentionally do NOT call mtp_prepare_verify_layer
-            # here. That kernel writes main_token + draft tokens into
-            # tokens[step+1..step+K+1], which during prefill (step still inside
-            # prompt range) corrupts the prompt and produces garbage output. The
-            # MTP DeepSeek path likely has a special prefill flow we haven't
-            # replicated yet. For v1 we let the runtime use its default token
-            # bookkeeping (advance by 1 per iter using output_tokens / argmax_out),
-            # which means draft tokens are computed but never actually consumed —
-            # output should be strict-identical to baseline (no spec decode),
-            # validating the Eagle3 plumbing without paying the prefill-corruption
-            # cost. K>1 functional benefit requires fixing prepare_verify (later).
         elif spec_decode_config:
             verify_out = mpk.verify_layer_dispatcher(
                 spec_decode_config = spec_decode_config,

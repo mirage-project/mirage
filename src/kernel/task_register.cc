@@ -4462,6 +4462,34 @@ int TaskRegister::register_eagle3_d2t_remap_task(
   return register_task_variant(TASK_EAGLE3_D2T_REMAP, code.to_string());
 }
 
+int TaskRegister::register_eagle3_commit_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: K (= num_draft_steps), params[1]: batch_size,
+  // params[2]: max_seq_len
+  // Matches mtp_prepare_verify pattern: tokens_buffer / step as INPUT
+  // (kernel writes through them), num_new_tokens as OUTPUT.
+  assert(params.size() == 3);
+  int K = params[0];
+  int batch_size = params[1];
+  int max_seq_len = params[2];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::eagle3_commit_kernel<$, $, $>(",
+         K,
+         batch_size,
+         max_seq_len);
+  code.e("    task_desc->input_ptrs[3],");            // tokens_buffer
+  code.e("    task_desc->input_ptrs[0],");            // verified_output
+  code.e("    task_desc->input_ptrs[1],");            // draft_tokens_new
+  code.e("    task_desc->input_ptrs[2],");            // accepted_count
+  code.e("    runtime_config.step,");                 // step (global)
+  code.e("    runtime_config.prompt_length,");        // prompt_length (global)
+  code.e("    task_desc->output_ptrs[0],");           // new_token_nums
+  code.e("    task_desc->task_metadata.request_id);"); // request_id
+  return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
+}
+
 // ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
 //
 // Three variants (TP=2/4/8) share structure but differ:

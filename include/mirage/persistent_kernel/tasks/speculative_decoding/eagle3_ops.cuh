@@ -146,4 +146,43 @@ __device__ __forceinline__ void
   }
 }
 
+// --- Eagle3 Commit (verify-aware token buffer write + step-advance signal) ---
+//
+// Replaces mtp_prepare_verify + mtp_accept_commit for Eagle3's K=1+ flow.
+// Handles three responsibilities atomically per iteration:
+//
+//  1. Write the verified prefix (accepted drafts + bonus) into the tokens
+//     buffer at positions [step+1 .. step+accepted_count], guarded against
+//     overwriting the prompt (`pos >= prompt_len`).
+//  2. Write the K new draft tokens (for next iter's input) at positions
+//     [step+accepted_count+1 .. step+accepted_count+K], same guard.
+//  3. Publish `accepted_count` to `new_token_nums[req]` so the OFFLINE
+//     runtime's prepare_next_batch can advance step by accept_count past
+//     prefill (gated by MPK_SPEC_DECODE).
+//
+// `accepted_count` here is verify_strict's output = final_accepted + 1,
+// so it lies in [1, K+1].
+//
+// Inputs:
+//   tokens_buffer       [MAX_REQUESTS, MAX_SEQ_LEN] int64 — full seq buffer
+//   verified_output     [BATCH_SIZE, K+1]           int64 — accepted+bonus from verify
+//   draft_tokens_new    [BATCH_SIZE, K]             int64 — this iter's draft (next iter input)
+//   accepted_count      [BATCH_SIZE]                int32 — from verify_strict
+//   step                [MAX_REQUESTS]              int32 — current step
+//   prompt_length       [MAX_REQUESTS]              int32 — req's prompt length
+// Outputs:
+//   new_token_nums      [MAX_REQUESTS]              int32 — accepted_count (for runtime)
+template <int K, int BATCH_SIZE, int MAX_SEQ_LEN>
+__device__ __forceinline__ void
+    eagle3_commit_kernel(void *__restrict__ tokens_buffer_ptr,
+                         void const *__restrict__ verified_output_ptr,
+                         void const *__restrict__ draft_tokens_new_ptr,
+                         void const *__restrict__ accepted_count_ptr,
+                         void const *__restrict__ step_ptr,
+                         void const *__restrict__ prompt_length_ptr,
+                         void *__restrict__ new_token_nums_ptr,
+                         int request_id) {
+  // DEBUG: empty body to isolate whether task-graph integration itself hangs.
+}
+
 } // namespace kernel
