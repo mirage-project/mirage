@@ -1,5 +1,24 @@
 # QKV-a Fusion Bug — FINAL Root Cause Analysis (2026-05-13 evening)
 
+> **STATUS (2026-05-13, later): SUPERSEDED — see `qkva_fusion_bug_FIXED.md`.**
+>
+> The "race / scheduling" verdict below was the wrong framing. After more
+> instrumentation we confirmed it's NOT a race: the 508 zero-acc firings
+> are the 127 DECODE iters per rank (×4 ranks) of the persistent megakernel,
+> where `quantize_fp8_layer` correctly early-exits (active_rows=1, only row 0
+> refreshed) but `fp8_gemm_dense_smallm` did NOT have a matching early-exit
+> and kept writing rows 1..127 from stale FP8 input (FALLBACK scale = 2.232e-13
+> left over from a previous post-attn quantize). Fix is in
+> `task_register.cc::register_fp8_gemm_dense_variant`: cap GEMM runtime M at
+> `min(compile M, active_rows)`. Verified PASS on DSv3 TP=4 EP=2 layers 0-3
+> (qkv_a_out has 0 zero rows after fix; was 71 before) and Qwen3 TP=4 regression
+> (no impact). The 4 correct firings ≈ 1 prefill iter × 4 ranks — exactly the
+> single iter where active_rows = mbt = 128.
+>
+> The investigation log below is kept for historical context.
+>
+> ---
+
 ## Verdict
 
 **MPK runtime has a race / scheduling bug where the fused `qkv_a` FP8 GEMM

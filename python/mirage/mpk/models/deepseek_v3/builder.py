@@ -371,44 +371,22 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_bufs[cache_key]
 
-    def _fp8_mbt_buffers_for_reduction_f32scale(self, reduction_size: int,
-                                                  tag: str = "shared"):
+    def _fp8_mbt_buffers_for_reduction_f32scale(self, reduction_size: int):
         """Per-token-batch FP8 buffer + float32 scale (NEW kernel format).
 
         Used by `fp8_gemm_dense_smallm_sm100` / `fp8_gemm_dense_mediumm_sm100`,
         which take row-major float32 scales `[M, K/128]` instead of the
         packed UE8M0 column-major scales used by the older
-        `linear_fp8_sm100` kernel.
-
-        `tag` selects the cache slot: callers that need a private buffer
-        (e.g., the QKV-a fused quantize, which must NOT be poisoned by the
-        post-attn rmsnorm's gate-up quantize during prefill — see 2026-05-13
-        fix below) should pass a unique tag. Default "shared" keeps the
-        legacy shared-buffer behaviour.
-
-        2026-05-13 ROOT CAUSE: pre-fix, all callers shared the same
-        fp8_input_v2_{rs}_shared buffer. In MPK's multi-iteration persistent
-        kernel, `quantize_fp8_layer` has `active_rows = qo_indptr[max_req]`
-        early-exit that skips rows >= active_rows. In DECODE iters
-        (active_rows=1), only row 0 is refreshed; rows 1..127 retain
-        whatever the LAST writer wrote. For DSv3 layer 0, that last writer
-        was the post-attn dense_gate_up quantize from PREFILL, whose input
-        (post-attn rmsnorm output) is row-dependent and falls below the
-        eps=1e-10 clamp for some rows → scale = fallback 1e-10/448 =
-        2.232e-13 → FP8 saturates → GEMM dequant ≈ 0 for those rows in
-        every decode iter. qkv_a_out gets overwritten to zero each decode
-        iter, and the final dump shows rows 1..71 = 0.
+        `linear_fp8_sm100` kernel. Cache shared across all FP8 GEMMs of the
+        same reduction_size, like `_fp8_buffers_for_reduction`.
         """
         mbt = self.max_num_batched_tokens
         group_size = 128
         num_groups = (reduction_size + group_size - 1) // group_size
         if not hasattr(self, "_fp8_mbt_f32_bufs"):
             self._fp8_mbt_f32_bufs = {}
-        cache_key = (reduction_size, tag)
+        cache_key = reduction_size
         if cache_key not in self._fp8_mbt_f32_bufs:
-            suffix = tag if tag != "shared" else "shared"
-            fp8_name = f"fp8_input_v2_{reduction_size}_{suffix}"
-            scale_name = f"fp8_scale_v2_{reduction_size}_{suffix}"
             # 2026-05-13 DEBUG: optionally attach the FP8 input + scale buffers
             # as torch tensors so we can inspect them post-megakernel from Python.
             if os.environ.get("MPK_DSV3_FP8_BUF_ATTACH", "0") == "1":
@@ -418,19 +396,19 @@ class DeepSeekV3Builder(GraphBuilder):
                     self.mpk._fp8_scale_torch = {}
                 fp8_t = _torch.zeros((mbt, reduction_size), dtype=_torch.float8_e4m3fn, device="cuda")
                 scale_t = _torch.zeros((mbt, num_groups), dtype=_torch.float32, device="cuda")
-                self.mpk._fp8_input_torch[(reduction_size, tag)] = fp8_t
-                self.mpk._fp8_scale_torch[(reduction_size, tag)] = scale_t
-                fp8_buf = self.mpk.attach_input(torch_tensor=fp8_t, name=fp8_name)
-                scale_buf = self.mpk.attach_input(torch_tensor=scale_t, name=scale_name)
+                self.mpk._fp8_input_torch[reduction_size] = fp8_t
+                self.mpk._fp8_scale_torch[reduction_size] = scale_t
+                fp8_buf = self.mpk.attach_input(torch_tensor=fp8_t, name=f"fp8_input_v2_{reduction_size}_shared")
+                scale_buf = self.mpk.attach_input(torch_tensor=scale_t, name=f"fp8_scale_v2_{reduction_size}_shared")
             else:
                 fp8_buf = self.mpk.new_tensor(
                     dims=(mbt, reduction_size), dtype=float8_e4m3,
-                    name=fp8_name,
+                    name=f"fp8_input_v2_{reduction_size}_shared",
                     io_category="cuda_tensor",
                 )
                 scale_buf = self.mpk.new_tensor(
                     dims=(mbt, num_groups), dtype=float32,
-                    name=scale_name,
+                    name=f"fp8_scale_v2_{reduction_size}_shared",
                     io_category="cuda_tensor",
                 )
             self._fp8_mbt_f32_bufs[cache_key] = (fp8_buf, scale_buf)
@@ -458,8 +436,7 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
                        output, residual=None, gate_mode: int = 0,
                        input_row_stride: int = None,
-                       input_col_offset: int = 0,
-                       fp8_buf_tag: str = "shared"):
+                       input_col_offset: int = 0):
         """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
 
         Replaces the old `linear_fp8_sm100` path which has a row-coverage
@@ -498,7 +475,7 @@ class DeepSeekV3Builder(GraphBuilder):
 
         reduction_size = weight_fp8_raw.dim(1)
         input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
-            reduction_size, tag=fp8_buf_tag)
+            reduction_size)
         # Quantize bf16 input → FP8 + float32 scale. active_mode mirrors the
         # gate_mode so the quantize fires only in the matching phase.
         active_mode = 2 if gate_mode == 1 else 3 if gate_mode == 2 else 0
@@ -675,8 +652,7 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                      grid_dim, block_dim, residual=None, gate_mode: int = 0,
                      input_row_stride: int = None,
-                     input_col_offset: int = 0,
-                     fp8_buf_tag: str = "shared"):
+                     input_col_offset: int = 0):
         """Quantize BF16 input → FP8, then run FP8 GEMM.
 
         Now routes through the new `fp8_gemm_dense_smallm/mediumm_sm100`
@@ -720,7 +696,6 @@ class DeepSeekV3Builder(GraphBuilder):
             gate_mode=gate_mode,
             input_row_stride=input_row_stride,
             input_col_offset=input_col_offset,
-            fp8_buf_tag=fp8_buf_tag,
         )
 
     def _fp8_dense_kv_b_proj(
@@ -1579,16 +1554,10 @@ class DeepSeekV3Builder(GraphBuilder):
                     "MPK_DSV3_QKV_A_FUSED=1 requires qkv_a_proj.weight + "
                     "weight_scale_inv to be present in the state_dict. "
                     "demo.py builds them when the env var is set at load time.")
-            # 2026-05-13 ROOT-CAUSE FIX: use a dedicated FP8 buffer for the
-            # QKV-a quantize so it's NOT shared with the post-attn
-            # dense_gate_up quantize. See the long comment in
-            # `_fp8_mbt_buffers_for_reduction_f32scale` for the multi-iter
-            # poisoning mechanism.
             self._fp8_linear(
                 self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
-                fp8_buf_tag="qkv_a")
+                block_dim=(128, 1, 1))
         else:
             # Step 1: q_a_proj (FP8)
             w_q_a, s_q_a = self._attach_fp8_weight(

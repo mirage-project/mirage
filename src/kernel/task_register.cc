@@ -5607,8 +5607,17 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
                                            char const *fn_name,
                                            TaskType task_type) {
   // params: [M, N, K, num_workers, optional runtime_m_mode]
-  // runtime_m_mode=1 gates to prompt-prefill and uses request 0's current
-  // kv_len as runtime M. This is used for ckv -> kv_b_proj decompression.
+  // runtime_m_mode=0 (default): use min(compile-time M, active_rows) as
+  //   runtime M, where active_rows = qo_indptr_buffer[MAX_NUM_BATCHED_REQUESTS]
+  //   = total active tokens in the current iter. This makes the GEMM's
+  //   per-row write check (`if (mi < M)`) respect the active-token count,
+  //   so decode iters don't overwrite output rows 1..MBT-1 with stale-
+  //   FP8-driven garbage when the upstream quantize early-exited for
+  //   non-active rows. See scratch/qkva_fusion_bug_FIXED.md for the
+  //   multi-iter buffer-poisoning chain that motivated this fix
+  //   (2026-05-13).
+  // runtime_m_mode=1: gates to prompt-prefill and uses request 0's current
+  //   kv_len as runtime M. This is used for ckv -> kv_b_proj decompression.
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
@@ -5616,8 +5625,8 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  code.e("{");
   if (runtime_m_mode == 1) {
-    code.e("{");
     code.e("int req_id_ = runtime_config.request_ids[0];");
     code.e("if (req_id_ < 0) return;");
     code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
@@ -5629,10 +5638,19 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
     code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
            "runtime_config.paged_kv_last_page_len_buffer[0];");
-    code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
   } else {
-    code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+    // 2026-05-13 ROOT-CAUSE FIX: cap M at active_rows so decode iters
+    // (active_rows=1) don't overwrite output rows 1..M-1 with garbage.
+    // This makes the GEMM's early-exit semantics symmetric with the
+    // upstream quantize task's `request_id >= active_rows` early-exit:
+    // the buffer's non-active rows retain their PREFILL content
+    // (= correct), and the GEMM doesn't trash them in decode iters.
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
   }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
   code.e("    static_cast<const "
@@ -5640,18 +5658,12 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
   code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  if (runtime_m_mode == 1) {
-    code.e("    runtime_m_,");
-  } else {
-    code.e("    $,", M);
-  }
+  code.e("    runtime_m_,");
   code.e("    $,", N);
   code.e("    $,", K);
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    $);", num_workers);
-  if (runtime_m_mode == 1) {
-    code.e("}");
-  }
+  code.e("}");
   return self->register_task_variant(task_type, code.to_string());
 }
 
