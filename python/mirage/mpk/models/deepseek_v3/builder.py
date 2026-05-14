@@ -225,6 +225,12 @@ class DeepSeekV3Builder(GraphBuilder):
         # OFF; A/B test under MPK_DSV3_NEW_MOE=1 then flip default after
         # correctness + perf are validated. See scratch/pr674_moe_kernel_wiring_plan.md.
         self._new_moe = os.environ.get("MPK_DSV3_NEW_MOE", "0") == "1"
+        # MPK_DSV3_ACTIVE_SKIP=0 disables the per-expert active-mask
+        # short-circuit in fp8_group_gemm (commit ecf1f8e5) — useful for
+        # A/B correctness checks. Default ON when NEW MoE is on.
+        self._new_moe_active_skip = (
+            os.environ.get("MPK_DSV3_ACTIVE_SKIP", "1") == "1"
+        )
         # Per-layer NEW-MoE skip list — env-gated escape hatch while the
         # L8+ correctness bug is unresolved. Comma-separated layer indices
         # (e.g. "8,9,10,11,12,13") fall back to OLD MoE on those layers,
@@ -2352,7 +2358,7 @@ class DeepSeekV3Builder(GraphBuilder):
             m_indices=self.new_moe_m_indices_dt,
             output=new_moe_w13_out,
             num_workers=self.mpk.num_workers,
-            meta=new_moe_meta,
+            meta=new_moe_meta if self._new_moe_active_skip else None,
         )
         if upto < 5: return
         # 5) SiLU+MUL.
@@ -2403,7 +2409,7 @@ class DeepSeekV3Builder(GraphBuilder):
             m_indices=self.new_moe_m_indices_dt,
             output=new_moe_w2_out,
             num_workers=self.mpk.num_workers,
-            meta=new_moe_meta,
+            meta=new_moe_meta if self._new_moe_active_skip else None,
         )
 
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):
