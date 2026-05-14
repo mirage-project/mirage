@@ -31,18 +31,17 @@ namespace kernel {
 // halves the per-CTA memory traffic and avoids the redundant
 // q_nope_abs → q_nope_pe identity-copy.
 template <int H, int D_NOPE, int D_PE, bool PE_ONLY = false>
-__device__ __forceinline__ void assemble_q_decode_sm100_task_impl(
-    void const *q_nope_abs_ptr,
-    void const *q_pe_ptr,
-    void *q_nope_pe_ptr,
-    int n_active) {
+__device__ __forceinline__ void
+    assemble_q_decode_sm100_task_impl(void const *q_nope_abs_ptr,
+                                      void const *q_pe_ptr,
+                                      void *q_nope_pe_ptr,
+                                      int n_active) {
   constexpr int D_TOTAL = D_NOPE + D_PE;
   nv_bfloat16 const *__restrict__ nope_in =
       static_cast<nv_bfloat16 const *>(q_nope_abs_ptr);
   nv_bfloat16 const *__restrict__ pe_in =
       static_cast<nv_bfloat16 const *>(q_pe_ptr);
-  nv_bfloat16 *__restrict__ out =
-      static_cast<nv_bfloat16 *>(q_nope_pe_ptr);
+  nv_bfloat16 *__restrict__ out = static_cast<nv_bfloat16 *>(q_nope_pe_ptr);
 
   int const tid = threadIdx.x;
   int const nthreads = blockDim.x;

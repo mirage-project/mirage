@@ -52,18 +52,13 @@ namespace kernel {
 //   input_fp8           : (MBT, K)         uint8
 //   input_scale         : (MBT, K_PACKED)  uint32           — UE8M0 packed
 //   topk_weights        : (MBT, TOPK)      float32
-//   routing_indices     : (E_LOCAL, MBT)   int32            — topk_sigmoid output
-//   permuted_fp8 (out)  : (M_TOTAL, K)     uint8
-//   permuted_scale (out): (K_PACKED, M_TOTAL) uint32        — TRANSPOSED packed
-//   meta (out)          : (M_TOTAL + MBT*TOPK,) int32       — see layout above
+//   routing_indices     : (E_LOCAL, MBT)   int32            — topk_sigmoid
+//   output permuted_fp8 (out)  : (M_TOTAL, K)     uint8 permuted_scale (out):
+//   (K_PACKED, M_TOTAL) uint32        — TRANSPOSED packed meta (out)          :
+//   (M_TOTAL + MBT*TOPK,) int32       — see layout above
 //
 
-template <int K,
-          int K_PACKED,
-          int MBT,
-          int TOPK,
-          int E_LOCAL,
-          int BM_PADDING>
+template <int K, int K_PACKED, int MBT, int TOPK, int E_LOCAL, int BM_PADDING>
 __device__ __forceinline__ void
     moe_permute_sm100_task_impl(void const *input_fp8_ptr,
                                 void const *input_scale_ptr,
@@ -90,7 +85,7 @@ __device__ __forceinline__ void
   // Sub-regions inside the meta buffer.
   constexpr int M_TOTAL = E_LOCAL * BM_PADDING;
   float *__restrict__ out_weights =
-      reinterpret_cast<float *>(meta);              // [0 : M_TOTAL)
+      reinterpret_cast<float *>(meta);                // [0 : M_TOTAL)
   int32_t *__restrict__ tok_to_perm = meta + M_TOTAL; // [M_TOTAL : ...)
 
   int const my_row_base = my_expert * BM_PADDING;

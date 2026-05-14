@@ -44,6 +44,7 @@
 #include "mla_kv_cache_gather_split_sm100.cuh"
 // sm100_ptx.cuh must be included BEFORE mla_mtp_decode_sm100.cuh at top level
 // so kernel::sm100_ptx is defined in the correct namespace
+#include "assemble_q_decode_sm100.cuh"
 #include "elementwise_add_sm100.cuh"
 #include "mla_mtp_decode_sm100.cuh"
 #include "mla_mtp_decode_tp2_sm100.cuh"
@@ -59,7 +60,6 @@
 #include "moe_linear_sm100.cuh"
 #include "moe_permute_sm100.cuh"
 #include "moe_unpermute_sm100.cuh"
-#include "assemble_q_decode_sm100.cuh"
 #include "mul_sum_add_sm100.cuh"
 #include "per_token_group_quantize_fp8.cuh"
 #include "prob_scatter_sm100.cuh"

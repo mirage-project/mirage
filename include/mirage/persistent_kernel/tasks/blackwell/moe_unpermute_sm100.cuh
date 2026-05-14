@@ -41,11 +41,7 @@ namespace kernel {
 //                                              iter upstream)
 //
 
-template <int MBT,
-          int TOPK,
-          int HIDDEN,
-          int M_TOTAL,
-          int OUTPUT_STRIDE>
+template <int MBT, int TOPK, int HIDDEN, int M_TOTAL, int OUTPUT_STRIDE>
 __device__ __forceinline__ void
     moe_unpermute_sm100_task_impl(void const *permuted_output_ptr,
                                   void const *meta_ptr,
@@ -55,8 +51,7 @@ __device__ __forceinline__ void
   using bf16 = cute::bfloat16_t;
   bf16 const *__restrict__ d_in =
       static_cast<bf16 const *>(permuted_output_ptr);
-  int32_t const *__restrict__ d_meta =
-      static_cast<int32_t const *>(meta_ptr);
+  int32_t const *__restrict__ d_meta = static_cast<int32_t const *>(meta_ptr);
   float const *__restrict__ d_weights =
       reinterpret_cast<float const *>(d_meta); // [0 : M_TOTAL)
   int32_t const *__restrict__ d_t2p =
