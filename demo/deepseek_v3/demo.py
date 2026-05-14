@@ -849,50 +849,44 @@ if __name__ == "__main__":
             # mixing within blocks. Scales just concat.
             #
             # Both q_a_proj and kv_a_proj_with_mqa are REPLICATED (no TP shard),
-            # so the fused weight is also replicated. Builder gates the fused
-            # path on `MPK_DSV3_QKV_A_FUSED=1`.
-            QKV_A_FUSED = os.environ.get("MPK_DSV3_QKV_A_FUSED", "0") == "1"
-            if QKV_A_FUSED:
-                for li in absorb_layers:
-                    attn = f"model.layers.{li}.self_attn."
-                    q_a_key = f"{attn}q_a_proj.weight"
-                    kv_a_key = f"{attn}kv_a_proj_with_mqa.weight"
-                    if q_a_key not in state_dict or kv_a_key not in state_dict:
-                        continue
-                    q_a_w = state_dict[q_a_key]
-                    kv_a_w = state_dict[kv_a_key]
-                    q_a_s_key = f"{q_a_key}_scale_inv"
-                    kv_a_s_key = f"{kv_a_key}_scale_inv"
-                    q_a_s = state_dict.get(q_a_s_key)
-                    kv_a_s = state_dict.get(kv_a_s_key)
-                    if q_a_s is None or kv_a_s is None:
-                        # No FP8 scale → skip fusion for this layer (legacy BF16)
-                        continue
-                    if q_a_w.shape[0] != 1536 or kv_a_w.shape[0] != 576:
-                        # Unexpected shape (e.g., different model variant) — skip
-                        continue
-                    K = q_a_w.shape[1]
-                    # DIAGNOSTIC PAD: env override the fused N so we can A/B
-                    # tile counts (2176 = 17 tiles, 2304 = 18, 2560 = 20).
-                    fused_rows = int(os.environ.get(
-                        "MPK_DSV3_QKV_A_FUSED_N", "2176"))
-                    assert fused_rows >= 2112 and fused_rows % 128 == 0, (
-                        f"MPK_DSV3_QKV_A_FUSED_N={fused_rows} must be a multiple"
-                        f" of 128 and ≥ 2112 to hold q_a+c_latent+k_pe slices.")
-                    fused_w = torch.zeros(
-                        (fused_rows, K), dtype=q_a_w.dtype, device=q_a_w.device)
-                    fused_w[0:1536] = q_a_w
-                    fused_w[1536:2048] = kv_a_w[:512]
-                    fused_w[2048:2112] = kv_a_w[512:576]
-                    # rows [2112:fused_rows) stay zero (pad)
-                    scale_rows = fused_rows // 128
-                    fused_s = torch.zeros(
-                        (scale_rows, q_a_s.shape[1]),
-                        dtype=q_a_s.dtype, device=q_a_s.device)
-                    fused_s[0:12] = q_a_s
-                    fused_s[12:17] = kv_a_s
-                    state_dict[f"{attn}qkv_a_proj.weight"] = fused_w
-                    state_dict[f"{attn}qkv_a_proj.weight_scale_inv"] = fused_s.contiguous()
+            # so the fused weight is also replicated. The fused 2176-wide
+            # qkv_a_proj is the only path the MPK builder supports — the
+            # 3-GEMM unfused path was removed (was +14.9% slower e2e).
+            FUSED_ROWS = 2176  # 1536 q_a + 512 c_latent + 64 k_pe + 64 pad
+            for li in absorb_layers:
+                attn = f"model.layers.{li}.self_attn."
+                q_a_key = f"{attn}q_a_proj.weight"
+                kv_a_key = f"{attn}kv_a_proj_with_mqa.weight"
+                if q_a_key not in state_dict or kv_a_key not in state_dict:
+                    continue
+                q_a_w = state_dict[q_a_key]
+                kv_a_w = state_dict[kv_a_key]
+                q_a_s_key = f"{q_a_key}_scale_inv"
+                kv_a_s_key = f"{kv_a_key}_scale_inv"
+                q_a_s = state_dict.get(q_a_s_key)
+                kv_a_s = state_dict.get(kv_a_s_key)
+                if q_a_s is None or kv_a_s is None:
+                    raise RuntimeError(
+                        f"layer {li}: q_a_proj/kv_a_proj_with_mqa FP8 scales "
+                        f"missing — MPK requires FP8 DeepSeek-V3 weights.")
+                assert q_a_w.shape[0] == 1536 and kv_a_w.shape[0] == 576, (
+                    f"layer {li}: unexpected q_a/kv_a shape "
+                    f"({q_a_w.shape}, {kv_a_w.shape})")
+                K = q_a_w.shape[1]
+                fused_w = torch.zeros(
+                    (FUSED_ROWS, K), dtype=q_a_w.dtype, device=q_a_w.device)
+                fused_w[0:1536] = q_a_w
+                fused_w[1536:2048] = kv_a_w[:512]
+                fused_w[2048:2112] = kv_a_w[512:576]
+                # rows [2112:2176) stay zero (pad to 128-row MMA tile)
+                scale_rows = FUSED_ROWS // 128
+                fused_s = torch.zeros(
+                    (scale_rows, q_a_s.shape[1]),
+                    dtype=q_a_s.dtype, device=q_a_s.device)
+                fused_s[0:12] = q_a_s
+                fused_s[12:17] = kv_a_s
+                state_dict[f"{attn}qkv_a_proj.weight"] = fused_w
+                state_dict[f"{attn}qkv_a_proj.weight_scale_inv"] = fused_s.contiguous()
 
             # Fuse per-expert weights into experts.w13/w2 tensors (keep FP8)
             for li in absorb_layers:
@@ -999,9 +993,9 @@ if __name__ == "__main__":
                     (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
-                    # FuseTensor part-a (user #2 part-a, 2026-05-12): fused
-                    # q_a_proj + kv_a_proj_with_mqa weight, replicated like its
-                    # constituents (used when MPK_DSV3_QKV_A_FUSED=1).
+                    # FuseTensor part-a (user #2 part-a, landed 2026-05-13):
+                    # fused q_a_proj + kv_a_proj_with_mqa weight, replicated
+                    # like its constituents.
                     (r"self_attn\.qkv_a_proj\.weight",                       None),
                     (r"self_attn\.o_proj_original\.weight",                  1),
                     (r"self_attn\.o_proj\.weight",                           1),
@@ -1216,16 +1210,11 @@ if __name__ == "__main__":
             )
             # Layer-0 intra-layer dumps: 4 slots, all bf16
             # 0=input_norm    (mbt, hidden)
-            # 1=q_a_out       (mbt, q_lora_rank=1536) — first FP8 GEMM in attn
+            # 1=qkv_a_out     (mbt, 2176) — full fused QKV-a GEMM output;
+            #                  Python comparator slices to q_a/c_latent/k_pe.
             # 2=attn_out      (mbt, hidden) — o_proj+residual
             # 3=dense_mlp_out (mbt, hidden) — full layer 0 residual
-            q_lora_rank = 1536
-            # When QKV-a fused is on, the slot-1 dump captures the WHOLE
-            # qkv_a_out (mbt, MPK_DSV3_QKV_A_FUSED_N) so elementwise_add can
-            # run with matching shapes; Python comparator slices [:, :q_lora].
-            qkv_a_diag_fused = os.environ.get("MPK_DSV3_QKV_A_FUSED", "0") == "1"
-            slot1_cols = (int(os.environ.get("MPK_DSV3_QKV_A_FUSED_N", "2176"))
-                          if qkv_a_diag_fused else q_lora_rank)
+            slot1_cols = 2176  # = QKV_A_FUSED_N in builder.py
             mpk.dump_layer0_intra_tensors = [
                 torch.zeros(
                     (args.max_num_batched_tokens, model_config.hidden_size),
@@ -1324,8 +1313,9 @@ if __name__ == "__main__":
                     os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
                 )
                 print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
-            # 2026-05-13 DEBUG: dump FP8 input/scale + qkv_a_out torch tensors
-            # if attached via MPK_DSV3_FP8_BUF_ATTACH / MPK_DSV3_QKV_A_OUT_ATTACH.
+            # Debug-only: when MPK_DSV3_FP8_BUF_ATTACH=1, builder attaches the
+            # shared FP8 input/scale buffers as torch tensors so we can inspect
+            # their post-megakernel state here.
             if getattr(mpk, "_fp8_input_torch", None) is not None:
                 for rsize, tensor in mpk._fp8_input_torch.items():
                     name = f"fp8_input_v2_{rsize}.pt"
@@ -1337,10 +1327,6 @@ if __name__ == "__main__":
                     torch.save(tensor.detach().cpu(),
                                os.path.join(args.dump_hidden_dir, name))
                     print(f"Saved {name} to {args.dump_hidden_dir}")
-            if getattr(mpk, "_qkv_a_out_torch", None) is not None:
-                torch.save(mpk._qkv_a_out_torch.detach().cpu(),
-                           os.path.join(args.dump_hidden_dir, "qkv_a_out_attached.pt"))
-                print(f"Saved qkv_a_out_attached.pt to {args.dump_hidden_dir}")
             if getattr(mpk, "_rmsnorm_out_torch", None) is not None:
                 torch.save(mpk._rmsnorm_out_torch.detach().cpu(),
                            os.path.join(args.dump_hidden_dir, "rmsnorm_out_attached.pt"))

@@ -229,3 +229,60 @@ Started 2026-05-12. 每个优化点记录: 做了什么, 测试方法, 结果, �
   - **Y=14 wins by 51.6 ms (-43% absolute) — decisive.** The earlier 1-token profiling sweep was prefill-only and not representative of the decode-heavy steady state.
 - **Decision**: keep both defaults (W13=16, W2=14). Env knobs stay for future investigation.
 - **Lesson**: 1-token `--profile-start-step 0 --max-new-tokens 1` measures prefill cost; "natural" run (no profiling, --ignore-eos to max-seq-length) measures per-token amortized cost which is dominated by decode. They give different optima.
+
+### QKV-a fusion correctness FIXED + perf measurement (2026-05-13, commit `907892c0`)
+- **Two-bug fix landed** for the QKV-a fused 2176-wide GEMM path:
+  - **Bug #1 (commit prior, included in `907892c0`)**: per_token_group_quantize_fp8 used input stride (2176) for output writes, overflowing the narrower per-slice output buffer. Fixed via OUTPUT_STRIDE template param.
+  - **Bug #2 (`907892c0`)**: fp8_gemm_dense_smallm/mediumm had no active_rows early-exit, so decode iters overwrote rows 1..M-1 of qkv_a_out with stale FP8 input. Fixed kernel-side in `register_fp8_gemm_dense_variant` by capping runtime M at `min(compile-time M, qo_indptr_buffer[MAX_NUM_BATCHED_REQUESTS])`. See `scratch/qkva_fusion_bug_FIXED.md`.
+- **19-layer perf measurement (DSv3 TP=4 EP=2 prompt=128 + 1024 decode tokens, --ignore-eos, natural workload)** — 2× alternating fused vs baseline:
+  - Fused: 103.155 / 104.715 ms/token (mean 103.94, std 1.10)
+  - Baseline: 122.076 / 122.153 ms/token (mean 122.11, std 0.05)
+  - **Δ = -18.18 ms (-14.9% absolute)** ← clear, repeatable win
+  - Far above the 3 ms keep-threshold, far above run-to-run noise
+- **Why this win is real, unlike the earlier row-swap fuse-Q (Q_B only) flop**:
+  - Row-swap fuse-Q (q_b_nope+q_b_pe) bundled two small GEMMs that already overlapped; saved 0 dispatches at the bottleneck. Δ ≈ noise.
+  - QKV-a fusion (q_a + kv_a_latent + kv_a_rope) collapses **3 FP8 GEMMs + 3 quantize tasks** to **1 + 1**. Saves 2 quantize tasks (each ~5-7 μs/layer dispatch overhead) + 2 GEMM dispatches per layer × 19 layers + reduces shared-buffer write contention. Effective decode-iter dispatch count drops materially.
+- **Status (2026-05-13 evening)**: env var removed, fusion is the only path.
+  Builder + demo cleanup landed (separate commit) per user's "把它设成 default,
+  之前 unfused 的那一套方案就可以去掉了". Unfused 3-GEMM code path
+  (q_a_proj + kv_a_latent + kv_a_rope_padded) and the `_reuse_attn_input_fp8`
+  / `MPK_DSV3_QKV_A_FUSED` / `MPK_DSV3_QKV_A_OUT_ATTACH` env vars all deleted.
+  Diagnostic dump width hardcoded at 2176. DSv3 TP=4 EP=2 layers 0-3 smoke
+  PASS (rc=0, 5.889 ms/tok). Qwen3 regression PENDING.
+
+### QKV-a fusion perfetto trace analysis (2026-05-13 evening)
+- **Traces compared apples-to-apples (same args: TP=4 EP=2 layers 0-19 decode, mbt=1, profile_start_step=1)**:
+  - BASE (pre-fusion): `outputs/perfetto_decode_fresh_20260511_235240/trace_rank0.csv` — span 7032 μs (8 decode iters in window? actually 1 iter; warmup span larger)
+  - FUSED: `outputs/perfetto_decode_fused_20260513_203108/trace_rank0.csv` — span 6359 μs
+  - Both: 40 AR clusters = 2 × 20 layers; 1 BEGIN_TASK_GRAPH = 1 iter
+- **Per-layer wallclock (MoE layers L3-L19, mean of 17):**
+  - BASE: 352.5 μs/layer
+  - FUSED: 316.2 μs/layer
+  - **Δ = -36.4 μs/layer (-10.3%)** ← matches the 14.9% e2e win once you discount L0-L2 dense and amortize over 8 decode iters
+- **Phase decomposition (per-MoE-layer mean):**
+  | phase | BASE μs | FUSED μs | Δ μs |
+  |-|-|-|-|
+  | Q/KV (RMSNorm→attn→o_proj) | 173.4 | 137.4 | **-36.0** |
+  | AR1 (post-attn) | 12.2 | 11.6 | -0.6 |
+  | MoE phase | 157.9 | 158.4 | +0.4 (noise) |
+  | AR2 (post-MoE) | 9.1 | 8.7 | -0.5 |
+  - **Entire win is in the Q/KV phase; nothing else moved.** Confirms attribution.
+- **Q/KV phase utilization (SM busy / (window × 128 workers)):**
+  - BASE: 37% (L5/L11/L17 averaged)
+  - FUSED: 41% (L5/L11/L17 averaged)
+  - Util improved but still well below 70% target; phase was made shorter, not denser.
+- **Per-task wallclock delta (decode trace, summed worker-time):**
+  | task | n_calls B→F | wc μs B→F | sum worker-ms B→F |
+  |-|-|-|-|
+  | SPLITK_LINEAR_FP8_SWAPAB (qb/kvup/o_proj) | 210→145 | 11.5→12.4 | 130.9→113.9 (**-17.1 ms**) |
+  | FP8_GEMM_DENSE_SMALLM (qkv-a + W13 small) | 125→120 | 16.4→14.8 | 67.4→70.4 (+3.0 ms) |
+  | NVSHMEM_TILE_ALLREDUCE | 42→42 | 13.3→14.4 | 26.3→25.8 (-0.5 ms) |
+  | MOE_W13_FP8 | 18→19 | 75.0→75.0 | 22.9→23.1 (noise) |
+  | MOE_W2_FP8 | 20→20 | 26.6→26.5 | 9.8→9.1 (-0.7 ms) |
+  - SPLITK_FP8_SWAPAB call-count dropped 210→145 (65 fewer logical calls). FP8_GEMM_DENSE_SMALLM call-count 125→120 (5 fewer; was 6 GEMMs/layer for Q/KV path, now 4: qkv_a fused + q_b/q_up/kv_up still split). Net call-graph compression matches the 36 μs/layer phase shrinkage.
+- **Bottleneck shift confirmed**: pre-fusion morning plan flagged "Q/KV phase 27% util" as the dominant Q/KV-side cost; now (a) Q/KV phase still under-utilized (41%) but (b) the *biggest absolute gap left* is now MoE_W13 at 75 μs/call × 19 layers = 1425 μs vs vLLM 24 μs → 3.1× gap. Q/KV is no longer the top fish.
+- **Bottleneck ranking (post-fusion)**: MoE_W13 > MoE_W2 > splitk_swapAB (qb/kvup/o_proj at 12 μs vs vLLM 4.5-15 μs) > MOE_TOPK_SIGMOID (13.7 μs vs 7) > LM head (75 μs/call, single call, but worker-time 9.3 ms).
+- **Next session candidates**:
+  1. MoE_W13 + MoE_W2: already reported upstream. If the kernel owner doesn't have a fix in flight, re-prioritize.
+  2. Inter-task quantize calls: 149 QUANTIZE_FP8 calls/iter × ~1.7 μs avg = 253 μs/iter worker-time. Fuse quantize into upstream RMSNorm or downstream GEMM-prologue.
+  3. SPLITK_LINEAR_FP8_SWAPAB calls (qb 11μs, kvup 11μs, o_proj 11μs): these stayed 12 μs/call post-fusion. Fusing q_b_nope + q_b_pe (the row-swap experiment) might pay off now that Q/KV phase has dropped — re-test at lower-noise floor.
