@@ -88,3 +88,10 @@ ncu_tmp
 /CLAUDE.md
 /pr.md
 /codex-sub-agent.md
+
+# Local working dirs — NEVER push (user rule 2026-05-14)
+# scratch/ holds session notes, perf journals, analysis scripts, log files —
+# all personal/per-session, must not pollute the public PR or remote.
+# scripts/ holds local test helpers — same policy.
+scratch/
+scripts/
