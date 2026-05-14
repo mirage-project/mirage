@@ -4843,15 +4843,25 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // for backward compat with legacy callers where the kernel previously
   // assumed input_stride == output_stride. 2026-05-12 H8 fix.
   int output_stride = has_slice_override ? hidden_size : input_stride;
+  // ROWS_PER_TASK: when caller passes grid.y < batch_size, the kernel
+  // internally loops over multiple rows per CTA so total launched CTAs
+  // stay ≤ num_workers. Default 1 preserves the legacy 1-row-per-CTA
+  // behavior when grid.y == batch_size.
+  int grid_y_safe = bgraph.grid_dim.y > 0 ? (int)bgraph.grid_dim.y : 1;
+  int rows_per_task = (batch_size + grid_y_safe - 1) / grid_y_safe;
+  if (rows_per_task < 1) {
+    rows_per_task = 1;
+  }
   code.e("kernel::per_token_group_quantize_fp8_task_impl<$, $, $, $, $,",
          batch_size,
          hidden_size,
          GROUP_SIZE,
          input_stride,
          group_tiles);
-  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $, $>(",
+  code.e("    cute::bfloat16_t, __nv_fp8_e4m3, $, $, $>(",
          scale_ue8m0 ? "true" : "false",
-         output_stride);
+         output_stride,
+         rows_per_task);
   if (in_offset_elems != 0) {
     // QKV-a fused slice: pre-offset the input pointer so the kernel reads
     // the right column window from a wider buffer.
@@ -5423,7 +5433,7 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   // Weight is always 3D [H, D_out, D_in]. Input and output may be 2D
   // (N, H*D_*) or 3D (N, H, D_*) — same byte layout, identical TMA
   // strides. Accept either so callers don't need a reshape kernel.
-  assert(input_ops[2]->dtensor.num_dims == 3);  // weight 3D required
+  assert(input_ops[2]->dtensor.num_dims == 3); // weight 3D required
   int num_heads = input_ops[2]->dtensor.dim[0];
   int D_out_full = input_ops[2]->dtensor.dim[1];
   int reduction_size = input_ops[2]->dtensor.dim[2];
@@ -5935,7 +5945,10 @@ int TaskRegister::register_assemble_q_decode_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::assemble_q_decode_sm100_task_impl<$, $, $, $>(",
-         H, D_NOPE, D_PE, pe_only ? "true" : "false");
+         H,
+         D_NOPE,
+         D_PE,
+         pe_only ? "true" : "false");
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");

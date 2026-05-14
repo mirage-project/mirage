@@ -31,7 +31,21 @@ __device__ __forceinline__ float group_reduce_max(float val) {
 }
 
 __device__ __forceinline__ uint8_t encode_ue8m0(float scale) {
-  int ue8m0 = static_cast<int>(ceilf(log2f(fmaxf(scale, 1e-30f)))) + 127;
+  // Compute ceil(log2(scale)) via direct IEEE 754 exponent extraction so an
+  // exact power of two doesn't get bumped one bin too high by --use_fast_math
+  // replacing log2f with __log2f (which returns -6.9999995... for 2^-7).
+  // For a normal positive float, scale = 2^(exp-127) * (1 + mantissa/2^23):
+  //   * mantissa == 0  -> scale == 2^(exp-127)         -> ceil(log2(scale)) =
+  //   exp-127
+  //   * mantissa  > 0  -> scale  > 2^(exp-127)         -> ceil(log2(scale)) =
+  //   exp-127+1
+  // fmaxf with 1e-30f keeps scale in the normal range (smallest normal
+  // ~1.18e-38) so the exponent decode below is well-defined.
+  scale = fmaxf(scale, 1e-30f);
+  uint32_t bits = __float_as_uint(scale);
+  int exp_unbiased = static_cast<int>((bits >> 23) & 0xff) - 127;
+  uint32_t mantissa = bits & 0x7fffff;
+  int ue8m0 = (mantissa == 0 ? exp_unbiased : exp_unbiased + 1) + 127;
   ue8m0 = max(0, min(255, ue8m0));
   return static_cast<uint8_t>(ue8m0);
 }
@@ -50,6 +64,7 @@ template <
     typename DST_T,
     bool SCALE_UE8M0,
     int OUTPUT_STRIDE = GLOBAL_STRIDE,
+    int ROWS_PER_TASK = 1,
     typename SCALE_PACKED_T = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
 __device__ __forceinline__ void
     per_token_group_quantize_fp8_task_impl(void const *__restrict__ input_ptr,
@@ -90,93 +105,106 @@ __device__ __forceinline__ void
   int const warp_idx = thread_idx / WARP_SIZE;
   int const num_groups_per_block = blockDim.x / WARP_SIZE;
 
-  // Each MPK task quantizes exactly one logical row. In a persistent kernel
-  // blockIdx.x is the worker CTA id, not the task-grid x coordinate, so the row
-  // index must come from task metadata.
-  int const batch_idx = row_idx;
-  if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
-    return;
-  }
-  // Input row may live in a wider parent buffer (GLOBAL_STRIDE) than the
-  // output (OUTPUT_STRIDE). When OUTPUT_STRIDE == GLOBAL_STRIDE (default,
-  // legacy callers) the two row bases are identical.
-  int const input_row_base = batch_idx * GLOBAL_STRIDE;
-  int const output_row_base = batch_idx * OUTPUT_STRIDE;
-  int const group_tile = min(max(group_tile_idx, 0), GROUP_TILES - 1);
-  int const groups_per_tile =
-      (NUM_GROUPS_PER_ROW + GROUP_TILES - 1) / GROUP_TILES;
-  int const group_begin = group_tile * groups_per_tile;
-  int const group_end = min(group_begin + groups_per_tile, NUM_GROUPS_PER_ROW);
+  // Each task quantizes ROWS_PER_TASK consecutive logical rows. Default 1
+  // preserves the legacy 1-row-per-CTA contract. ROWS_PER_TASK > 1 lets a
+  // single CTA handle multiple rows so the runtime can launch grid.y =
+  // ceil(BATCH_SIZE / ROWS_PER_TASK) ≤ num_workers and keep one task wave
+  // on the persistent runtime instead of overflowing the scheduler queue.
+  int const task_idx = row_idx;
+#pragma unroll 1
+  for (int r = 0; r < ROWS_PER_TASK; ++r) {
+    int const batch_idx = task_idx * ROWS_PER_TASK + r;
+    if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
+      return;
+    }
+    // Input row may live in a wider parent buffer (GLOBAL_STRIDE) than the
+    // output (OUTPUT_STRIDE). When OUTPUT_STRIDE == GLOBAL_STRIDE (default,
+    // legacy callers) the two row bases are identical.
+    int const input_row_base = batch_idx * GLOBAL_STRIDE;
+    int const output_row_base = batch_idx * OUTPUT_STRIDE;
+    int const group_tile = min(max(group_tile_idx, 0), GROUP_TILES - 1);
+    int const groups_per_tile =
+        (NUM_GROUPS_PER_ROW + GROUP_TILES - 1) / GROUP_TILES;
+    int const group_begin = group_tile * groups_per_tile;
+    int const group_end =
+        min(group_begin + groups_per_tile, NUM_GROUPS_PER_ROW);
 
 #pragma unroll
-  for (int group_idx = group_begin + warp_idx; group_idx < group_end;
-       group_idx += num_groups_per_block) {
-    int const input_group_base = input_row_base + GROUP_SIZE * group_idx;
-    int const output_group_base = output_row_base + GROUP_SIZE * group_idx;
+    for (int group_idx = group_begin + warp_idx; group_idx < group_end;
+         group_idx += num_groups_per_block) {
+      int const input_group_base = input_row_base + GROUP_SIZE * group_idx;
+      int const output_group_base = output_row_base + GROUP_SIZE * group_idx;
 
-    float local_max = eps;
+      float local_max = eps;
 #pragma unroll
-    for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
-      int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
-      float const abs_val = fabsf(static_cast<float>(input[input_idx]));
-      local_max = fmaxf(abs_val, local_max);
+      for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
+        int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
+        float const abs_val = fabsf(static_cast<float>(input[input_idx]));
+        local_max = fmaxf(abs_val, local_max);
+      }
+
+      float y_scale = 0.0f;
+      if constexpr (SCALE_UE8M0) {
+        float group_max = group_reduce_max<WARP_SIZE>(local_max);
+        group_max = fmaxf(group_max, 1e-10f);
+        y_scale = group_max / max_8bit;
+        const uint8_t scale_quant =
+            __shfl_sync(0xffffffff, encode_ue8m0(y_scale), 0, WARP_SIZE);
+        y_scale = exp2f(static_cast<float>(scale_quant) - 127.0f);
+        if (lane_idx == 0) {
+          packed_scale_bytes[group_idx] = scale_quant;
+        }
+      } else {
+        float group_max = group_reduce_max<WARP_SIZE>(local_max);
+        group_max = fmaxf(group_max, 1e-10f);
+        y_scale = group_max / max_8bit;
+        if (lane_idx == 0) {
+          // float32 scale is stored as [batch, num_groups] row-major.
+          output_s[batch_idx * NUM_GROUPS_PER_ROW + group_idx] =
+              static_cast<SCALE_PACKED_T>(y_scale);
+        }
+      }
+
+#pragma unroll
+      for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
+        int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
+        int const output_idx =
+            output_group_base + lane_idx + ele_idx * WARP_SIZE;
+        float const orig_val = static_cast<float>(input[input_idx]);
+        float const quant_val =
+            fminf(fmaxf(orig_val / y_scale, min_8bit), max_8bit);
+        output_q[output_idx] = __nv_fp8_e4m3(quant_val);
+      }
     }
 
-    float y_scale = 0.0f;
     if constexpr (SCALE_UE8M0) {
-      float group_max = group_reduce_max<WARP_SIZE>(local_max);
-      group_max = fmaxf(group_max, 1e-10f);
-      y_scale = group_max / max_8bit;
-      const uint8_t scale_quant =
-          __shfl_sync(0xffffffff, encode_ue8m0(y_scale), 0, WARP_SIZE);
-      y_scale = exp2f(static_cast<float>(scale_quant) - 127.0f);
-      if (lane_idx == 0) {
-        packed_scale_bytes[group_idx] = scale_quant;
+      // Ensure every warp finished writing its byte into packed_scale_bytes
+      // before any thread packs four bytes into a uint32 below.
+      __syncthreads();
+      // UE8M0 scale layout: column-major [packed_k, aligned_batch].
+      // This row's packed scales go in column `batch_idx`.
+#pragma unroll
+      for (int packed_idx = group_begin / SCALE_ALIGNMENT + thread_idx;
+           packed_idx < (group_end + SCALE_ALIGNMENT - 1) / SCALE_ALIGNMENT;
+           packed_idx += blockDim.x) {
+        uint32_t packed_scale = 0;
+#pragma unroll
+        for (int pack_idx = 0; pack_idx < SCALE_ALIGNMENT; ++pack_idx) {
+          int const group_idx = packed_idx * SCALE_ALIGNMENT + pack_idx;
+          const uint8_t encoded = group_idx < NUM_GROUPS_PER_ROW
+                                      ? packed_scale_bytes[group_idx]
+                                      : 0;
+          packed_scale |= static_cast<uint32_t>(encoded) << (pack_idx * 8);
+        }
+        output_s[packed_idx * scale_outer_stride + batch_idx] =
+            static_cast<SCALE_PACKED_T>(packed_scale);
       }
-    } else {
-      float group_max = group_reduce_max<WARP_SIZE>(local_max);
-      group_max = fmaxf(group_max, 1e-10f);
-      y_scale = group_max / max_8bit;
-      if (lane_idx == 0) {
-        // float32 scale is stored as [batch, num_groups] row-major.
-        output_s[batch_idx * NUM_GROUPS_PER_ROW + group_idx] =
-            static_cast<SCALE_PACKED_T>(y_scale);
+      // Reset shared mem before next iter (next batch_idx) reuses it.
+      if constexpr (ROWS_PER_TASK > 1) {
+        __syncthreads();
       }
     }
-
-#pragma unroll
-    for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
-      int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
-      int const output_idx = output_group_base + lane_idx + ele_idx * WARP_SIZE;
-      float const orig_val = static_cast<float>(input[input_idx]);
-      float const quant_val =
-          fminf(fmaxf(orig_val / y_scale, min_8bit), max_8bit);
-      output_q[output_idx] = __nv_fp8_e4m3(quant_val);
-    }
-  }
-
-  if constexpr (SCALE_UE8M0) {
-    // Ensure every warp finished writing its byte into packed_scale_bytes
-    // before any thread packs four bytes into a uint32 below.
-    __syncthreads();
-    // UE8M0 scale layout: column-major [packed_k, aligned_batch].
-    // This row's packed scales go in column `batch_idx`.
-#pragma unroll
-    for (int packed_idx = group_begin / SCALE_ALIGNMENT + thread_idx;
-         packed_idx < (group_end + SCALE_ALIGNMENT - 1) / SCALE_ALIGNMENT;
-         packed_idx += blockDim.x) {
-      uint32_t packed_scale = 0;
-#pragma unroll
-      for (int pack_idx = 0; pack_idx < SCALE_ALIGNMENT; ++pack_idx) {
-        int const group_idx = packed_idx * SCALE_ALIGNMENT + pack_idx;
-        const uint8_t encoded =
-            group_idx < NUM_GROUPS_PER_ROW ? packed_scale_bytes[group_idx] : 0;
-        packed_scale |= static_cast<uint32_t>(encoded) << (pack_idx * 8);
-      }
-      output_s[packed_idx * scale_outer_stride + batch_idx] =
-          static_cast<SCALE_PACKED_T>(packed_scale);
-    }
-  }
+  } // end ROWS_PER_TASK loop
 }
 
 } // namespace kernel

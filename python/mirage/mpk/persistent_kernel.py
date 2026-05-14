@@ -2169,7 +2169,14 @@ class PersistentKernel:
         if input_stride_override is None:
             input_stride_override = legacy_hidden_size
         group_tiles = self._fp8_quantize_group_tiles(hidden_size, scale_ue8m0)
-        grid_dim = (group_tiles, row_count, 1)
+        # Cap grid.y at num_workers so total CTAs launched per task instance
+        # stays ≤ num_workers (single wave on persistent runtime). The kernel
+        # gets ROWS_PER_TASK = ceil(row_count / grid.y) template param via the
+        # C++ register and internally loops over multiple rows per CTA. For
+        # the legacy case (row_count ≤ num_workers) grid.y == row_count and
+        # ROWS_PER_TASK = 1, matching the original behavior.
+        grid_y = min(row_count, max(self.num_workers, 1))
+        grid_dim = (group_tiles, grid_y, 1)
         if slice_override:
             params = [active_mode, hidden_size,
                       input_stride_override, in_offset_elems]
