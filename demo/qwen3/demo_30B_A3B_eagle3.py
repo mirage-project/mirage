@@ -775,12 +775,17 @@ if __name__ == "__main__":
         if args.eagle3:
             # === Eagle3 draft + verify wiring ===
             #
-            # Within one mpk() iteration the scheduler orders task execution
-            # by data dependency. Verify reads `all_draft_ids` (written by the
-            # PREVIOUS iter's draft loop) and current iter's argmax_out. Then
-            # the draft loop overwrites `all_draft_ids` for NEXT iter.
+            # Cross-iter draft snapshot design:
+            # - eagle3_drafts_prev is an attach_input tensor (MPK does NOT
+            #   track its writers as task graph edges).
+            # - verify_strict reads drafts_prev. MPK only sees other deps for
+            #   verify (argmax_out from argmax_reduce, accepted_count out).
+            # - eagle3_commit writes drafts_prev at end of iter (its
+            #   draft_tokens_new input is this iter's scatter output).
+            # - Across iters, MPK guarantees iter N tasks complete before
+            #   iter N+1 starts, so iter N+1's verify reads iter N's snapshot.
             #
-            # At iter 0 the all_draft_ids buffer is zero-initialized → verify
+            # At iter 0 the drafts_prev buffer is zero-initialized → verify
             # accepts 0 tokens, commits only the 1 bonus token. Prefill must
             # therefore be handled by pre-seeding `tokens` with the prompt
             # before the first mpk() call (existing demo pattern).
@@ -802,9 +807,6 @@ if __name__ == "__main__":
                 use_aux_norm=False,
             )
 
-            # Verify (strict): compares last iter's draft against current
-            # iter's target argmax. argmax_out (mbt × 1) holds the K+1 target
-            # tokens for the K+1 verify positions (since mbt = K + 1).
             mbt_e = args.max_num_batched_tokens
             K = args.num_draft_steps
             accepted_count = mpk.new_tensor(
@@ -815,12 +817,20 @@ if __name__ == "__main__":
                 dims=(mbt_e, K + 1), dtype=mi.int64,
                 name="eagle3_verified_output", io_category="cuda_tensor",
             )
-            # Note: `all_draft_ids` is built only after build_draft_loop runs
-            # below, but the verify uses the PREVIOUS iter's contents. The
-            # DTensor reference for naming is what matters for the task graph;
-            # MPK's persistent tensors retain their content across iterations.
-            # We pre-allocate it here so the verify task can reference it.
-            # DEBUG: reorder — build draft loop (writer) FIRST, then verify (reader)
+            # Cross-iter snapshot buffer: written by commit at end of iter N,
+            # read by verify_strict at start of iter N+1. Shape (mbt, K) to
+            # match all_draft_ids / verify's read pattern: draft[bid*K + k].
+            eagle3_drafts_prev_buf = torch.zeros(
+                (mbt_e, K), dtype=torch.int64, device="cuda")
+            eagle3_drafts_prev = mpk.attach_input(
+                torch_tensor=eagle3_drafts_prev_buf,
+                name="eagle3_drafts_prev",
+            )
+
+            # Build draft loop first (registers scatter writer of
+            # all_draft_ids); verify still references all_draft_ids via the
+            # attach_input drafts_prev (NOT via the in-graph DTensor) so the
+            # within-iter dep scatter→verify is broken.
             eagle3.build_draft_loop(
                 aux_h0=eagle3_aux_h0,
                 aux_h1=eagle3_aux_h1,
@@ -828,7 +838,7 @@ if __name__ == "__main__":
                 target_argmax_token=argmax_out,
             )
             mpk.mtp_verify_strict_layer(
-                draft_token_ids=eagle3._attach_cache["eagle3_all_draft_ids"],
+                draft_token_ids=eagle3_drafts_prev,  # attach_input (prev iter)
                 target_token_ids=argmax_out,
                 accepted_count=accepted_count,
                 output_tokens=verified_output,
@@ -837,19 +847,21 @@ if __name__ == "__main__":
                 num_draft_tokens=K,
             )
 
-            # DBG: real draft + real verified, dummy accepted_count
+            # Single-edge-per-pair design: pass argmax_out (from argmax_reduce)
+            # instead of verified_output (from verify_strict, which also
+            # produces accepted_count). commit also snapshots drafts_new into
+            # the attach_input drafts_prev buffer (for next iter's verify).
             d_tokens = mpk.attach_input(
-                torch_tensor=tokens, name="dbg_t8")
+                torch_tensor=tokens, name="eagle3_commit_tokens")
             d_num_new = mpk.attach_input(
-                torch_tensor=num_new_tokens, name="dbg_n8")
-            dummy_ac_buf = torch.ones((mbt_e, 1), dtype=torch.int32, device="cuda")
-            dummy_ac = mpk.attach_input(torch_tensor=dummy_ac_buf, name="dbg_a8")
+                torch_tensor=num_new_tokens, name="eagle3_commit_num_new")
             mpk.eagle3_commit_layer(
-                verified_output=verified_output,
+                target_argmax=argmax_out,
                 draft_tokens_new=eagle3._attach_cache["eagle3_all_draft_ids"],
-                accepted_count=dummy_ac,
+                accepted_count=accepted_count,
                 tokens_buffer=d_tokens,
                 num_new_tokens=d_num_new,
+                drafts_prev=eagle3_drafts_prev,
                 grid_dim=(mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
                 num_draft_tokens=K,

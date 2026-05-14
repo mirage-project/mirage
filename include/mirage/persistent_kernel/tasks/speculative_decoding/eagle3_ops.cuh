@@ -146,10 +146,11 @@ __device__ __forceinline__ void
   }
 }
 
-// --- Eagle3 Commit (verify-aware token buffer write + step-advance signal) ---
+// --- Eagle3 Commit (verify-aware token buffer write + step-advance signal +
+//                    cross-iter draft snapshot) ---
 //
 // Replaces mtp_prepare_verify + mtp_accept_commit for Eagle3's K=1+ flow.
-// Handles three responsibilities atomically per iteration:
+// Runs once at end of iter, handling four responsibilities atomically:
 //
 //  1. Write the verified prefix (accepted drafts + bonus) into the tokens
 //     buffer at positions [step+1 .. step+accepted_count], guarded against
@@ -159,30 +160,93 @@ __device__ __forceinline__ void
 //  3. Publish `accepted_count` to `new_token_nums[req]` so the OFFLINE
 //     runtime's prepare_next_batch can advance step by accept_count past
 //     prefill (gated by MPK_SPEC_DECODE).
+//  4. Copy `draft_tokens_new` into `drafts_prev_attached` (an attach_input
+//     tensor not tracked as a graph edge). Next iter's verify_strict reads
+//     `drafts_prev_attached`, which still holds iter N's value when iter N+1
+//     runs — solving the cross-iter "verify needs prev iter's drafts" problem
+//     without violating the unique-edge-per-pair MPK invariant.
 //
 // `accepted_count` here is verify_strict's output = final_accepted + 1,
 // so it lies in [1, K+1].
 //
 // Inputs:
 //   tokens_buffer       [MAX_REQUESTS, MAX_SEQ_LEN] int64 — full seq buffer
-//   verified_output     [BATCH_SIZE, K+1]           int64 — accepted+bonus from verify
+//   argmax_out          [BATCH_SIZE]                int64 — target argmax (K+1)
 //   draft_tokens_new    [BATCH_SIZE, K]             int64 — this iter's draft (next iter input)
 //   accepted_count      [BATCH_SIZE]                int32 — from verify_strict
 //   step                [MAX_REQUESTS]              int32 — current step
 //   prompt_length       [MAX_REQUESTS]              int32 — req's prompt length
 // Outputs:
 //   new_token_nums      [MAX_REQUESTS]              int32 — accepted_count (for runtime)
+//   drafts_prev         [MAX_REQUESTS, K]           int64 — attach_input snapshot
 template <int K, int BATCH_SIZE, int MAX_SEQ_LEN>
 __device__ __forceinline__ void
     eagle3_commit_kernel(void *__restrict__ tokens_buffer_ptr,
-                         void const *__restrict__ verified_output_ptr,
+                         void const *__restrict__ argmax_out_ptr,
                          void const *__restrict__ draft_tokens_new_ptr,
                          void const *__restrict__ accepted_count_ptr,
                          void const *__restrict__ step_ptr,
                          void const *__restrict__ prompt_length_ptr,
                          void *__restrict__ new_token_nums_ptr,
+                         void *__restrict__ drafts_prev_ptr,
                          int request_id) {
-  // DEBUG: empty body to isolate whether task-graph integration itself hangs.
+  // Single-edge per (producer, consumer) pair design:
+  //   argmax_out (from argmax_reduce)             : 1 edge
+  //   draft_tokens_new (from mtp_token_scatter)   : 1 edge
+  //   accepted_count (from mtp_verify_strict)     : 1 edge
+  //   tokens_buffer / new_token_nums / drafts_prev: attach_input (no edges)
+  long long *__restrict__ tokens =
+      static_cast<long long *>(tokens_buffer_ptr);
+  long long const *__restrict__ argmax =
+      static_cast<long long const *>(argmax_out_ptr);
+  long long const *__restrict__ drafts =
+      static_cast<long long const *>(draft_tokens_new_ptr);
+  int const *__restrict__ accepted_count =
+      static_cast<int const *>(accepted_count_ptr);
+  int const *__restrict__ step = static_cast<int const *>(step_ptr);
+  int const *__restrict__ prompt_length =
+      static_cast<int const *>(prompt_length_ptr);
+  int *__restrict__ new_token_nums =
+      static_cast<int *>(new_token_nums_ptr);
+  long long *__restrict__ drafts_prev =
+      static_cast<long long *>(drafts_prev_ptr);
+
+  int t_id = threadIdx.x;
+  int req = request_id;
+
+  int cur_step = step[req];
+  int prompt_len = prompt_length[req];
+  int ac = accepted_count[0];
+
+  // Write verified prefix at step+1 .. step+ac (only past prompt). Values
+  // come directly from argmax_out (target's argmax over K+1 positions).
+  if (t_id < ac) {
+    int pos = cur_step + 1 + t_id;
+    if (pos < MAX_SEQ_LEN && pos >= prompt_len) {
+      tokens[req * MAX_SEQ_LEN + pos] = argmax[t_id];
+    }
+  }
+
+  // Write K new drafts at step+ac+1 .. step+ac+K (only past prompt).
+  if (t_id < K) {
+    int pos = cur_step + ac + 1 + t_id;
+    if (pos < MAX_SEQ_LEN && pos >= prompt_len) {
+      tokens[req * MAX_SEQ_LEN + pos] = drafts[t_id];
+    }
+  }
+
+  // Snapshot current iter's drafts (shape [BATCH_SIZE, K]) into attach_input
+  // slot for next iter's verify_strict to consume. Copy the whole tensor so
+  // verify can index draft_token_ids[bid * K + k] across all q-positions.
+  int const total = BATCH_SIZE * K;
+  for (int i = t_id; i < total; i += blockDim.x) {
+    drafts_prev[i] = drafts[i];
+  }
+
+  // Publish step-advance signal to runtime.
+  if (t_id == 0) {
+    new_token_nums[req] = ac;
+  }
 }
 
 } // namespace kernel

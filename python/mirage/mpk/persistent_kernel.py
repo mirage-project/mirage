@@ -2416,39 +2416,48 @@ class PersistentKernel:
 
     def eagle3_commit_layer(
         self,
-        verified_output: DTensor,   # (batch, K+1) int64 — from verify_strict
-        draft_tokens_new: DTensor,  # (batch, K) int64 — this iter's drafts
-        accepted_count: DTensor,    # (batch, 1) int32 — from verify_strict
+        target_argmax: DTensor,     # (batch, 1) int64 — from argmax_reduce (= output_token DTensor)
+        draft_tokens_new: DTensor,  # (batch, K) int64 — this iter's drafts (scatter output)
+        accepted_count: DTensor,    # (batch, 1) int32 — from verify_strict (1st output)
         tokens_buffer: DTensor,     # (max_requests, max_seq_len) int64 — written in-place
         num_new_tokens: DTensor,    # (max_requests,) int32 — OUTPUT (= accept_count)
+        drafts_prev: DTensor,       # (max_requests, K) int64 — attach_input cross-iter snapshot dst
         grid_dim: tuple,
         block_dim: tuple,
         num_draft_tokens: int,      # K
         batch_size: int,            # mbt
         max_seq_len: int,
     ):
-        """Eagle3 post-verify commit:
-         - Writes verified prefix (accepted+bonus) at tokens[step+1..step+ac].
-         - Writes new drafts at tokens[step+ac+1..step+ac+K].
-         - Publishes accepted_count to num_new_tokens (aliased to runtime's
-           new_token_nums) for the MPK_SPEC_DECODE OFFLINE prepare_next_batch
-           to advance step.
-         - All writes guarded against overwriting the prompt
-           (pos >= prompt_length[req]).
+        """Eagle3 post-verify commit (single-edge-per-pair design).
 
-         Matches mtp_prepare_verify_layer pattern: tokens_buffer is INPUT
-         (kernel writes through it), num_new_tokens is OUTPUT.
+        Each producer→consumer pair has exactly one edge to preserve MPK's
+        graph invariant:
+          argmax_reduce → eagle3_commit (target_argmax)             [1 edge]
+          mtp_token_scatter → eagle3_commit (draft_tokens_new)      [1 edge]
+          mtp_verify_strict → eagle3_commit (accepted_count)        [1 edge]
+          attach_input → tokens_buffer, num_new_tokens, drafts_prev [no edges]
+
+        Writes:
+         - Verified prefix tokens[step+1..step+ac] = target_argmax[0..ac-1]
+           (= same values as verify_strict's output_tokens, but reading
+            target_argmax avoids a 2nd edge from verify_strict)
+         - New drafts tokens[step+ac+1..step+ac+K] = draft_tokens_new
+         - num_new_tokens[req] = ac (= step_advance signal for runtime)
+         - drafts_prev[req, :] = draft_tokens_new (cross-iter snapshot;
+           consumed by NEXT iter's verify_strict via attach_input)
+         - Prompt-guarded (skip writes where pos < prompt_length[req]).
          """
         params = [num_draft_tokens, batch_size, max_seq_len]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(verified_output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_argmax, (-1, -1, -1), -1, True)
         tb_graph.new_input(draft_tokens_new, (-1, -1, -1), -1, True)
         tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
         tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
         tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(drafts_prev, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
-            [verified_output, draft_tokens_new, accepted_count, tokens_buffer,
-             num_new_tokens],
+            [target_argmax, draft_tokens_new, accepted_count, tokens_buffer,
+             num_new_tokens, drafts_prev],
             tb_graph)
         self.kn_graph.register_task(tb_graph, "eagle3_commit", params)
 

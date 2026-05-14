@@ -4480,12 +4480,13 @@ int TaskRegister::register_eagle3_commit_task(
          batch_size,
          max_seq_len);
   code.e("    task_desc->input_ptrs[3],");            // tokens_buffer
-  code.e("    task_desc->input_ptrs[0],");            // verified_output
-  code.e("    task_desc->input_ptrs[1],");            // draft_tokens_new
-  code.e("    task_desc->input_ptrs[2],");            // accepted_count
+  code.e("    task_desc->input_ptrs[0],");            // target_argmax (from argmax_reduce)
+  code.e("    task_desc->input_ptrs[1],");            // draft_tokens_new (from scatter)
+  code.e("    task_desc->input_ptrs[2],");            // accepted_count (from verify_strict)
   code.e("    runtime_config.step,");                 // step (global)
   code.e("    runtime_config.prompt_length,");        // prompt_length (global)
   code.e("    task_desc->output_ptrs[0],");           // new_token_nums
+  code.e("    task_desc->output_ptrs[1],");           // drafts_prev (attach_input snapshot)
   code.e("    task_desc->task_metadata.request_id);"); // request_id
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }
