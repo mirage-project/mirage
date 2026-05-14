@@ -642,7 +642,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "moe_silu_mul") {
     int variant_id =
         task_register->register_moe_silu_mul_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+    // params: [] (legacy 1 input) OR
+    //         [active_mask_offset, rows_per_cta] (2 inputs, meta supplied
+    //                                             for NEW MoE D3 skip).
+    int num_inputs_silu = (params.size() == 2 && params[0] >= 0) ? 2 : 1;
+    task_config[op] =
+        std::make_tuple(num_inputs_silu, 1, TASK_SILU_MUL, variant_id);
   } else if (name == "moe_w2_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, false /*w13_linear*/);

@@ -488,6 +488,15 @@ void register_mugraph(
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // SiLU + Mul (NEW MoE 2D path): grid=(num_workers, 1, 1).
+            // Each CTA owns one BM=BM_PADDING-row slice of the permuted
+            // buffer, so request_id = bid.x identifies the expert this
+            // CTA processes. The codegen uses it to early-return when
+            // active_expert_mask says no token routed to that expert
+            // (D3 follow-up to D1 — same skip pattern, lighter wiring).
+            if (task_type == TASK_SILU_MUL) {
+              task.task_metadata.request_id = bid.x;
+            }
             // MTP token-management helpers use grid.x as the active request
             // slot so they can map slot -> global request id at runtime.
             if (task_type == TASK_MTP_PREPARE_VERIFY ||

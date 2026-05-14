@@ -2376,6 +2376,11 @@ class DeepSeekV3Builder(GraphBuilder):
             output=new_moe_silu_out,
             grid_dim=(_silu_grid, 1, 1),
             block_dim=(128, 1, 1),
+            meta=new_moe_meta if self._new_moe_active_skip else None,
+            # bm_padding = per-expert row count in the permuted buffer.
+            # Wrapper combines with rows_per_cta (= input.dim(0)/grid.x)
+            # to derive my_expert = bid.x / (bm_padding / rows_per_cta).
+            bm_padding=bm_pad,
         )
         if upto < 6: return
         # 6) Quantize SiLU → UE8M0, then transpose to K-outermost.

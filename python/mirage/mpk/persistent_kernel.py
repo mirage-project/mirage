@@ -2892,13 +2892,37 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        meta: DTensor = None,
+        bm_padding: int = 128,
     ):
         # Accepts both:
         #   3D (batch, num_experts_per_tok, intermediate) — OLD MoE path.
         #   2D (M_total, intermediate) — NEW MoE path. Treated as (M_total, 1, N)
         #   inside the task_register codegen (num_experts_per_tok = 1).
+        #
+        # When ``meta`` is supplied (NEW MoE only), the kernel early-returns
+        # if active_expert_mask[my_expert] == 0 so we skip the entire
+        # silu+mul work for inactive-expert blocks. The mask lives at
+        # meta[1, 0:E_LOCAL] (= flat offset meta.dim(1)). The CTA→expert
+        # mapping depends on how grid.x partitions the M dim:
+        #   ctas_per_expert = bm_padding // rows_per_cta
+        #   my_expert       = bid.x / ctas_per_expert
+        # For the standard NEW MoE config (grid.x == num_local_experts,
+        # bm_padding == rows_per_cta == 128), ctas_per_expert == 1 and
+        # my_expert == bid.x.
         assert input.num_dims in (2, 3)
         assert output.num_dims == input.num_dims
+        if meta is None:
+            active_mask_offset = -1
+            ctas_per_expert = 0
+        else:
+            assert meta.num_dims == 2
+            assert grid_dim[1] == 1 and grid_dim[2] == 1, (
+                "active-mask skip requires grid.y == grid.z == 1")
+            rows_per_cta = max(1, input.dim(0) // grid_dim[0])
+            ctas_per_expert = max(1, bm_padding // rows_per_cta)
+            active_mask_offset = meta.dim(1)
+        params = [active_mask_offset, ctas_per_expert]
         if input.num_dims == 3:
             tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
             tb_graph.new_input(input, (0, 1, -1), -1, True)
@@ -2907,8 +2931,12 @@ class PersistentKernel:
             tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
             tb_graph.new_input(input, (0, -1, -1), -1, True)
             tb_graph.new_input(output, (0, -1, -1), -1, True)
-        self.kn_graph.customized([input, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "moe_silu_mul")
+        operators = [input, output]
+        if meta is not None:
+            tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+            operators.append(meta)
+        self.kn_graph.customized(operators, tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_silu_mul", params)
             
     def moe_w2_linear_layer(
         self,
