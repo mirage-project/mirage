@@ -2146,13 +2146,26 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
 
     # === FP8 Dense Layers ===
-    def _fp8_quantize_group_tiles(self, hidden_size: int, scale_ue8m0: bool) -> int:
+    def _fp8_quantize_group_tiles(
+        self, hidden_size: int, scale_ue8m0: bool, max_tiles: int = 16
+    ) -> int:
+        """Pick the per-row group-tile count for quantize_fp8.
+
+        ``max_tiles`` is the caller's upper bound — passed by
+        ``quantize_fp8_layer`` as ``num_workers // grid_y`` so the total
+        launched CTAs (group_tiles * grid_y) stays ≤ num_workers and the
+        task fits in a single dispatch wave. For prefill where row_count
+        >= num_workers this collapses to ``group_tiles = 1`` (each CTA
+        owns all groups for its row(s)); for decode-style row_count=1 it
+        scales up to use idle workers, capped by num_groups and the UE8M0
+        4-group alignment.
+        """
         num_groups = max(1, hidden_size // 128)
         if scale_ue8m0:
             # Packed UE8M0 stores four group scales per uint32. Split only at
             # four-group boundaries so each CTA owns whole packed scale words.
             group_tiles = 1
-            for candidate in range(min(16, num_groups), 1, -1):
+            for candidate in range(min(max_tiles, num_groups), 1, -1):
                 if num_groups % candidate == 0:
                     groups_per_tile = num_groups // candidate
                     if groups_per_tile % 4 == 0:
@@ -2160,7 +2173,7 @@ class PersistentKernel:
                         break
             return group_tiles
         # Float-scale MoE quantization has no packing hazard.
-        return min(4, max(1, num_groups // 8))
+        return min(min(max_tiles, 4), max(1, num_groups // 8))
 
     def quantize_fp8_layer(
         self,
@@ -2195,14 +2208,19 @@ class PersistentKernel:
         hidden_size = hidden_size_override or legacy_hidden_size
         if input_stride_override is None:
             input_stride_override = legacy_hidden_size
-        group_tiles = self._fp8_quantize_group_tiles(hidden_size, scale_ue8m0)
-        # Cap grid.y at num_workers so total CTAs launched per task instance
-        # stays ≤ num_workers (single wave on persistent runtime). The kernel
-        # gets ROWS_PER_TASK = ceil(row_count / grid.y) template param via the
-        # C++ register and internally loops over multiple rows per CTA. For
-        # the legacy case (row_count ≤ num_workers) grid.y == row_count and
-        # ROWS_PER_TASK = 1, matching the original behavior.
-        grid_y = min(row_count, max(self.num_workers, 1))
+        # Pick grid so total CTAs (group_tiles * grid_y) stays ≤ num_workers
+        # and the task fits in one persistent-runtime wave (~1 μs per-task
+        # gap × multi-wave is the main scheduler overhead). For prefill with
+        # row_count >= num_workers the kernel internally loops ROWS_PER_TASK
+        # = ceil(row_count / grid_y) rows per CTA (see register_quantize_fp8);
+        # for row_count < num_workers we let group_tiles soak up the spare
+        # workers (each CTA then owns a smaller per-row group slice).
+        total_workers = max(self.num_workers, 1)
+        grid_y = min(row_count, total_workers)
+        workers_per_row = max(1, total_workers // grid_y)
+        group_tiles = self._fp8_quantize_group_tiles(
+            hidden_size, scale_ue8m0, max_tiles=workers_per_row
+        )
         grid_dim = (group_tiles, grid_y, 1)
         if slice_override:
             params = [active_mode, hidden_size,
