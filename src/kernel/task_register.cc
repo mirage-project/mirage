@@ -5890,10 +5890,14 @@ int TaskRegister::register_assemble_q_decode_sm100_task(
   // Output:
   //   [0] q_nope_pe   (N, H, D_NOPE+D_PE=576) bf16
   //
+  // params: [] (default) or [pe_only:int] (1=skip nope copy, used when BMM
+  // wrote directly into q_nope_pe[:, :, :D_NOPE] via TMA-stride fuse).
+  //
   // grid_dim = (N, 1, 1); partition (0, -1, -1) on all 3 tensors so each
   // CTA processes 1 token. n_active passed to the kernel = STensor.dim[0]
   // = N / grid.x.
-  assert(params.size() == 0);
+  assert(params.size() == 0 || params.size() == 1);
+  bool pe_only = (params.size() == 1) && (params[0] == 1);
   int num_inputs = 2, num_outputs = 1;
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -5930,7 +5934,8 @@ int TaskRegister::register_assemble_q_decode_sm100_task(
   assert(D_NOPE + D_PE == D_TOTAL);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::assemble_q_decode_sm100_task_impl<$, $, $>(", H, D_NOPE, D_PE);
+  code.e("kernel::assemble_q_decode_sm100_task_impl<$, $, $, $>(",
+         H, D_NOPE, D_PE, pe_only ? "true" : "false");
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");

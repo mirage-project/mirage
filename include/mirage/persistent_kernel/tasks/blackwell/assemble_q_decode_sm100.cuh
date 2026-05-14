@@ -25,7 +25,12 @@ namespace kernel {
 // thread = trivial wallclock at TP=4; up to ~576 elements/thread at TP=1.
 //
 
-template <int H, int D_NOPE, int D_PE>
+// PE_ONLY=true skips the nope copy (used when BMM has already written the
+// per-head nope slot directly into q_nope_pe via the TMA-stride fuse, so
+// only q_pe still needs to land in the [D_NOPE:D_NOPE+D_PE] tail). This
+// halves the per-CTA memory traffic and avoids the redundant
+// q_nope_abs → q_nope_pe identity-copy.
+template <int H, int D_NOPE, int D_PE, bool PE_ONLY = false>
 __device__ __forceinline__ void assemble_q_decode_sm100_task_impl(
     void const *q_nope_abs_ptr,
     void const *q_pe_ptr,
@@ -41,6 +46,22 @@ __device__ __forceinline__ void assemble_q_decode_sm100_task_impl(
 
   int const tid = threadIdx.x;
   int const nthreads = blockDim.x;
+
+  if constexpr (PE_ONLY) {
+    // PE-only path: write q_pe to the last D_PE cols of each head's slot.
+    int const total_per_token = H * D_PE;
+#pragma unroll 1
+    for (int t = 0; t < n_active; ++t) {
+      for (int i = tid; i < total_per_token; i += nthreads) {
+        int h = i / D_PE;
+        int d_pe = i % D_PE;
+        nv_bfloat16 v = pe_in[t * H * D_PE + h * D_PE + d_pe];
+        out[t * H * D_TOTAL + h * D_TOTAL + D_NOPE + d_pe] = v;
+      }
+    }
+    return;
+  }
+
   int const total_per_token = H * D_TOTAL;
 #pragma unroll 1
   for (int t = 0; t < n_active; ++t) {

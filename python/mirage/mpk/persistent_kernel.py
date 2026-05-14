@@ -623,8 +623,17 @@ class PersistentKernel:
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
         strides = tuple([s for s in torch_tensor.stride()])
-        # Check layout: row-major or column-major (for FP8 scale tensors)
-        is_row_major = all(strides[d] == strides[d + 1] * dims[d + 1] for d in range(len(dims) - 1))
+        # Check layout: row-major (possibly with padded outer strides — supports
+        # slice views like q_nope_pe[:, :, :512] of a (mbt, H, 576) parent for
+        # the MPK_DSV3_BMM TMA-stride fuse) or column-major (FP8 scale tensors).
+        # Padded row-major: each outer stride covers AT LEAST a contiguous
+        # row at the next level (== for contig, > for slice view of a wider
+        # parent). Innermost stride must still be 1.
+        is_row_major = (
+            all(strides[d] >= strides[d + 1] * dims[d + 1]
+                for d in range(len(dims) - 1))
+            and strides[-1] == 1
+        )
         is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
         assert is_row_major or is_col_major, \
             f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
@@ -2515,6 +2524,7 @@ class PersistentKernel:
         q_nope_pe: DTensor,
         grid_dim: tuple,
         block_dim: tuple = (128, 1, 1),
+        pe_only: bool = False,
     ):
         """Interleave the BMM-absorbed q_nope (N, H, 512) with q_pe (N, H, 64)
         into per-head [nope|pe] layout (N, H, 576) for MLA decode.
@@ -2554,7 +2564,8 @@ class PersistentKernel:
         tb_graph.new_input(q_pe,       (0, -1, -1), -1, True)
         tb_graph.new_input(q_nope_pe,  (0, -1, -1), -1, True)
         self.kn_graph.customized([q_nope_abs, q_pe, q_nope_pe], tb_graph)
-        self.kn_graph.register_task(tb_graph, "assemble_q_decode_sm100")
+        params = [1] if pe_only else []
+        self.kn_graph.register_task(tb_graph, "assemble_q_decode_sm100", params)
 
     def linear_fp8_bmm_sm100_layer(
         self,

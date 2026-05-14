@@ -768,10 +768,17 @@ class DeepSeekV3Builder(GraphBuilder):
             self._bmm_decode_buffers["q_nope_scale"] = self.mpk.new_tensor(
                 dims=(mbt, H_local, 1), dtype=uint32,
                 name="q_nope_decode_scale", io_category="cuda_tensor")
-            # BMM output (mbt, H, 512) — q_nope absorbed.
-            self._bmm_decode_buffers["q_nope_abs"] = self.mpk.new_tensor(
-                dims=(mbt, H_local, 512), dtype=bfloat16,
-                name="q_nope_abs_3d", io_category="cuda_tensor")
+            # BMM output FUSE: instead of a separate (mbt, H, 512) buffer,
+            # attach a slice view of q_nope_pe[:, :, :512] (parent is
+            # (mbt, H, 576) torch tensor). The slice has strides (H*576,
+            # 576, 1) which matches what BMM TMA needs to write each head's
+            # 512 nope cols at the [h*576:h*576+512] slot of the wider
+            # buffer. This eliminates the separate q_nope_abs allocation
+            # and lets BMM output directly land in the per-head
+            # [nope|pe] interleaved layout.
+            q_nope_abs_view = self._q_nope_pe_torch[:, :, :512]
+            self._bmm_decode_buffers["q_nope_abs"] = self.mpk.attach_input(
+                q_nope_abs_view, name="q_nope_abs_view")
         q_nope_3d = self._bmm_decode_buffers["q_nope_3d"]
         q_pe_3d = self._bmm_decode_buffers["q_pe_3d"]
         q_nope_fp8 = self._bmm_decode_buffers["q_nope_fp8"]
@@ -826,13 +833,16 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(512 // 128, H_local, 1),  # (4, H, 1)
             block_dim=(256, 1, 1),
         )
-        # 5) Assemble: per-head interleave nope|pe into q_nope_pe (2D buffer).
+        # 5) Assemble (PE-only): BMM already wrote nope into q_nope_pe[:, :, :512]
+        # via the q_nope_abs slice-view fuse, so the assemble step only needs
+        # to write q_pe into the tail [512:576]. Half the per-CTA traffic.
         self.mpk.assemble_q_decode_sm100_layer(
             q_nope_abs=q_nope_abs,
             q_pe=q_pe_3d,
             q_nope_pe=self.q_nope_pe,
             grid_dim=(mbt, 1, 1),
             block_dim=(128, 1, 1),
+            pe_only=True,
         )
 
     def _fp8_dense_kv_b_proj(
@@ -1236,12 +1246,24 @@ class DeepSeekV3Builder(GraphBuilder):
         self.q_a_out_buf = None
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
         self.q_nope_pe_buf = None
-        self.q_nope_pe = self.mpk.new_tensor(
-            dims=(mbt, self.num_local_q_heads * self.qk_head_dim),
-            dtype=bfloat16,
-            name="q_nope_pe",
-            io_category="cuda_tensor",
-        )
+        if self._dsv3_bmm:
+            # MPK_DSV3_BMM=1: allocate as 3D torch tensor so we can attach
+            # slice views (q_nope_pe[:, :, :512] for BMM output, q_nope_pe[:, :, 512:]
+            # for q_pe) and have BMM write per-head [nope|pe] interleaved
+            # directly without an assemble task.
+            import torch as _torch
+            self._q_nope_pe_torch = _torch.zeros(
+                mbt, self.num_local_q_heads, self.qk_head_dim,
+                dtype=_torch.bfloat16, device="cuda")
+            self.q_nope_pe = self.mpk.attach_input(
+                self._q_nope_pe_torch, name="q_nope_pe")
+        else:
+            self.q_nope_pe = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * self.qk_head_dim),
+                dtype=bfloat16,
+                name="q_nope_pe",
+                io_category="cuda_tensor",
+            )
         # Decode consumes absorbed [CKV, KPE] Q. Prefill consumes vLLM's
         # original per-head split Q: [nope(128), rope(64)].
         # 2026-05-12 (user #2 FuseTensor): when MPK_DSV3_QB_FUSED=1,
