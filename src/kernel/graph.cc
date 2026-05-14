@@ -866,6 +866,25 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(5, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
+  } else if (name == "moe_permute_sm100") {
+    // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
+    // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).
+    // m_indices is a static attach_input buffer set up by the builder; it
+    // is NOT an output of this task.
+    int variant_id = task_register->register_moe_permute_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 3, TASK_MOE_PERMUTE_SM100, variant_id);
+  } else if (name == "moe_unpermute_sm100") {
+    // 3 inputs (permuted_output, meta, residual) + 1 output (output).
+    int variant_id = task_register->register_moe_unpermute_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_MOE_UNPERMUTE_SM100, variant_id);
+  } else if (name == "transpose_scale_sm100") {
+    int variant_id = task_register->register_transpose_scale_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_TRANSPOSE_SCALE_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {

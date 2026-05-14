@@ -2973,22 +2973,42 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
-  assert(output_ops[0]->output_tensors[0].num_dims == 3);
-  batch_size = output_ops[0]->output_tensors[0].dim[0];
-  num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
-  output_size = output_ops[0]->output_tensors[0].dim[2];
-  assert(input_ops[0]->output_tensors[0].num_dims == 3);
-  assert(input_ops[0]->output_tensors[0].dim[2] == output_size * 2);
+  // Accept both 3D (batch, topk, intermediate) — OLD MoE path — and 2D
+  // (M_total, intermediate) — NEW MoE path. For 2D we treat topk == 1.
+  int const out_dims = output_ops[0]->output_tensors[0].num_dims;
+  int const in_dims = input_ops[0]->output_tensors[0].num_dims;
+  assert(out_dims == in_dims);
+  assert(out_dims == 2 || out_dims == 3);
+  if (out_dims == 3) {
+    batch_size = output_ops[0]->output_tensors[0].dim[0];
+    num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+    output_size = output_ops[0]->output_tensors[0].dim[2];
+    assert(input_ops[0]->output_tensors[0].dim[2] == output_size * 2);
+  } else {
+    batch_size = output_ops[0]->output_tensors[0].dim[0];
+    num_experts_per_tok = 1;
+    output_size = output_ops[0]->output_tensors[0].dim[1];
+    assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
+  }
   // get input stride
   assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[2];
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
+  if (out_dims == 3) {
+    input_stride = input_ops[0]->dtensor.dim[2];
+    assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
+  } else {
+    // 2D input: stride along the row dim is just the inner-dim length.
+    input_stride = input_ops[0]->dtensor.dim[1];
+  }
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  if (out_dims == 3) {
+    output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  } else {
+    output_stride = output_ops[0]->dtensor.dim[1];
+  }
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::silu_mul_task_impl<bfloat16, $, $, $, $>(",
@@ -5744,6 +5764,110 @@ int TaskRegister::register_fp8_group_gemm_largem_sm100_task(
       "fp8_group_gemm_largem",
       "fp8_group_gemm_largem_sm100_task_impl",
       TASK_FP8_GROUP_GEMM_LARGEM_SM100);
+}
+
+// moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.
+// Params (compile-time): [K, K_PACKED, MBT, TOPK, E_LOCAL, BM_PADDING]
+// Inputs (4): input_fp8 (mbt, K) u8, input_scale (mbt, K_PACKED) u32 UE8M0,
+//             topk_weights (mbt, TOPK) f32, routing_indices (E_LOCAL, MBT) i32
+// Outputs (3): permuted_fp8 (M_TOTAL, K) u8,
+//              permuted_scale (K_PACKED, M_TOTAL) u32 TRANSPOSED,
+//              meta (M_TOTAL + MBT*TOPK,) i32 packing
+//                 [0       : M_TOTAL]               = permuted_weights (f32
+//                 bits) [M_TOTAL : M_TOTAL + MBT*TOPK]    = token_to_permuted
+//                 (row+1)
+// Static m_indices is set up by the builder via attach_input (constant
+// pattern m_indices[r] = r / BM_PADDING) and consumed directly by the
+// grouped GEMM — NOT emitted by this task.
+// Grid: (E_LOCAL, 1, 1). expert_offset = bid.x (runtime.cc).
+int TaskRegister::register_moe_permute_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 6);
+  int K = params[0], K_PACKED = params[1], MBT = params[2];
+  int TOPK = params[3], E_LOCAL = params[4], BM_PADDING = params[5];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::moe_permute_sm100_task_impl<$, $, $, $, $, $>(",
+         K,
+         K_PACKED,
+         MBT,
+         TOPK,
+         E_LOCAL,
+         BM_PADDING);
+  code.e("    task_desc->input_ptrs[0],");  // input_fp8
+  code.e("    task_desc->input_ptrs[1],");  // input_scale (packed UE8M0)
+  code.e("    task_desc->input_ptrs[2],");  // topk_weights
+  code.e("    task_desc->input_ptrs[3],");  // routing_indices
+  code.e("    task_desc->output_ptrs[0],"); // permuted_fp8
+  code.e("    task_desc->output_ptrs[1],"); // permuted_scale (transposed)
+  code.e("    task_desc->output_ptrs[2],"); // meta (packed weights+tok2perm)
+  code.e("    task_desc->task_metadata.expert_offset);");
+  return register_task_variant(TASK_MOE_PERMUTE_SM100, code.to_string());
+}
+
+// moe_unpermute_sm100 — see moe_unpermute_sm100.cuh for the contract.
+// Params (compile-time): [MBT, TOPK, HIDDEN, M_TOTAL]
+// Inputs (3): permuted_output (M_TOTAL, HIDDEN) bf16,
+//             meta (M_TOTAL + MBT*TOPK,) i32 (= permuted_weights+token2perm),
+//             residual (MBT, HIDDEN) bf16
+// Outputs (1): output (MBT, HIDDEN) bf16
+// Grid: (MBT, 1, 1). request_id = bid.x set by runtime.
+int TaskRegister::register_moe_unpermute_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 4);
+  int MBT = params[0], TOPK = params[1], HIDDEN = params[2],
+      M_TOTAL = params[3];
+
+  // Output stride: pull from the kn-level tensor like moe_mul_sum_add does.
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = 3, num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    auto *iop = static_cast<tb::TBInputOp *>(op);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(iop);
+    } else {
+      output_ops.push_back(iop);
+    }
+  }
+  int output_stride = HIDDEN;
+  if (output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP) {
+    kn::KNInputOp *kn_input_op =
+        static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+    output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  }
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::moe_unpermute_sm100_task_impl<$, $, $, $, $>(",
+         MBT,
+         TOPK,
+         HIDDEN,
+         M_TOTAL,
+         output_stride);
+  code.e("    task_desc->input_ptrs[0],");  // permuted_output
+  code.e("    task_desc->input_ptrs[1],");  // meta
+  code.e("    task_desc->input_ptrs[2],");  // residual
+  code.e("    task_desc->output_ptrs[0],"); // output
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_MOE_UNPERMUTE_SM100, code.to_string());
+}
+
+// transpose_scale_sm100 — (M, K_PACKED) uint32 → (K_PACKED, M) uint32.
+// Params: [M, K_PACKED]. 1 input, 1 output, single CTA (grid=(1,1,1)).
+int TaskRegister::register_transpose_scale_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 2);
+  int M = params[0], K_PACKED = params[1];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::transpose_scale_sm100_task_impl<$, $>(", M, K_PACKED);
+  code.e("    task_desc->input_ptrs[0],");   // in (M, K_PACKED)
+  code.e("    task_desc->output_ptrs[0]);"); // out (K_PACKED, M)
+  return register_task_variant(TASK_TRANSPOSE_SCALE_SM100, code.to_string());
 }
 
 int TaskRegister::register_mla_kv_gather_sm100_task(

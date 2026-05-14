@@ -347,8 +347,13 @@ void register_mugraph(
                 task_type == TASK_MOE_W13_LINEAR_SM90 ||
                 task_type == TASK_MOE_W2_LINEAR_SM90 ||
                 task_type == TASK_MOE_W13_FP8_SM100 ||
-                task_type == TASK_MOE_W2_FP8_SM100) {
+                task_type == TASK_MOE_W2_FP8_SM100 ||
+                task_type == TASK_MOE_PERMUTE_SM100) {
               task.task_metadata.expert_offset = bid.x;
+            }
+            // moe_unpermute uses request_id = bid.x (one CTA per token).
+            if (task_type == TASK_MOE_UNPERMUTE_SM100) {
+              task.task_metadata.request_id = bid.x;
             }
             // Set paged attention split kv task kv_idx
             if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 ||
@@ -1910,6 +1915,9 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GROUP_GEMM_SMALLM_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_SM100] =
       "TASK_FP8_GROUP_GEMM_LARGEM_SM100";
+  task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";
+  task_type_to_name[TASK_MOE_UNPERMUTE_SM100] = "TASK_MOE_UNPERMUTE_SM100";
+  task_type_to_name[TASK_TRANSPOSE_SCALE_SM100] = "TASK_TRANSPOSE_SCALE_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

@@ -2278,6 +2278,157 @@ class PersistentKernel:
                 a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
                 num_workers)
 
+    def moe_permute_sm100_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        topk_weights: DTensor,
+        routing_indices: DTensor,
+        permuted_fp8: DTensor,
+        permuted_scale: DTensor,
+        meta: DTensor,
+        bm_padding: int = 128,
+    ):
+        """MoE expand-permute-sort task — peripheral glue for the PR-674
+        grouped FP8 GEMM. See moe_permute_sm100.cuh for the exact contract.
+
+        One CTA per local expert (grid_dim = (E_local, 1, 1)). Scans
+        routing_indices[my_expert, :], gathers matched tokens, and copies
+        FP8 row + UE8M0-packed scale into the permuted layout. Small
+        per-row metadata (permuted_weights + token_to_permuted) is packed
+        into one int32 `meta` buffer so the task stays within MPK's
+        3-outputs-per-task limit:
+
+          meta[0       : M_TOTAL]            = permuted_weights (f32 bits)
+          meta[M_TOTAL : M_TOTAL + MBT*TOPK] = token_to_permuted (row + 1;
+                                                  0 = not routed locally;
+                                                  caller must tensor_init
+                                                  zero this region each
+                                                  iter).
+
+        `m_indices` is a STATIC constant the builder sets up once via
+        attach_input (pattern: m_indices[r] = r / BM_PADDING). It is fed
+        directly to the grouped FP8 GEMM and is NOT a per-iter output.
+
+        IMPORTANT: input_scale must be UE8M0-PACKED uint32 (produced by
+        quantize_fp8_layer with scale_ue8m0=True).
+        """
+        assert input_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert topk_weights.num_dims == 2
+        assert routing_indices.num_dims == 2
+        assert permuted_fp8.num_dims == 2
+        assert permuted_scale.num_dims == 2
+        # meta is shaped (2, M_TOTAL + MBT*TOPK) int32 — see builder.py for
+        # the BATCH_SIZE=2 rationale (full-byte tensor_init).
+        assert meta.num_dims == 2
+        assert meta.dim(0) == 2
+
+        K = input_fp8.dim(1)
+        K_PACKED = input_scale.dim(1)
+        MBT = input_fp8.dim(0)
+        TOPK = topk_weights.dim(1)
+        E_LOCAL = routing_indices.dim(0)
+        M_TOTAL = E_LOCAL * bm_padding
+        assert routing_indices.dim(1) == MBT
+        assert topk_weights.dim(0) == MBT
+        assert permuted_fp8.dim(0) == M_TOTAL
+        assert permuted_fp8.dim(1) == K
+        assert permuted_scale.dim(0) == K_PACKED
+        assert permuted_scale.dim(1) == M_TOTAL
+        assert meta.dim(1) == M_TOTAL + MBT * TOPK, (
+            f"meta length must be {M_TOTAL + MBT * TOPK}, got {meta.dim(1)}")
+
+        params = [K, K_PACKED, MBT, TOPK, E_LOCAL, bm_padding]
+        grid_dim = (E_LOCAL, 1, 1)
+        block_dim = (128, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(topk_weights, (-1, -1, -1), -1, True)
+        # routing_indices: (-1, -1, -1) so the kernel sees the FULL (E_LOCAL, MBT)
+        # buffer and computes its expert row from task_metadata.expert_offset.
+        tb_graph.new_input(routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(permuted_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(permuted_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, topk_weights, routing_indices,
+             permuted_fp8, permuted_scale, meta], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_permute_sm100", params)
+
+    def moe_unpermute_sm100_layer(
+        self,
+        permuted_output: DTensor,
+        meta: DTensor,
+        residual: DTensor,
+        output: DTensor,
+    ):
+        """MoE combine-unpermute task — inverse of moe_permute_sm100. See
+        moe_unpermute_sm100.cuh for the contract. One CTA per token
+        (grid_dim = (MBT, 1, 1)). Decodes `meta` into permuted_weights +
+        token_to_permuted, then writes
+        `output[t] = residual[t] +
+                     sum_k(permuted_output[token_to_permuted[t,k]-1]
+                            * permuted_weights[same row])`.
+        """
+        assert permuted_output.num_dims == 2
+        # meta is shaped (2, M_TOTAL + MBT*TOPK) int32 — see
+        # moe_permute_sm100_layer for the layout contract.
+        assert meta.num_dims == 2
+        assert meta.dim(0) == 2
+        assert residual.num_dims == 2
+        assert output.num_dims == 2
+
+        MBT = residual.dim(0)
+        HIDDEN = permuted_output.dim(1)
+        M_TOTAL = permuted_output.dim(0)
+        # meta = M_TOTAL (weights) + MBT*TOPK (token_to_permuted) entries.
+        meta_len = meta.dim(1)
+        TOPK = (meta_len - M_TOTAL) // MBT
+        assert M_TOTAL + MBT * TOPK == meta_len
+        assert residual.dim(1) == HIDDEN
+        assert output.dim(0) == MBT
+        assert output.dim(1) == HIDDEN
+
+        params = [MBT, TOPK, HIDDEN, M_TOTAL]
+        grid_dim = (MBT, 1, 1)
+        block_dim = (128, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # All inputs/outputs are (-1, -1, -1) so the kernel sees the FULL
+        # tensors and indexes them with task_metadata.request_id (= my_token).
+        tb_graph.new_input(permuted_output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+        tb_graph.new_input(residual, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [permuted_output, meta, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_unpermute_sm100", params)
+
+    def transpose_scale_sm100_layer(
+        self, scale_in: DTensor, scale_out: DTensor,
+    ):
+        """(M, K_PACKED) uint32 → (K_PACKED, M) uint32 via single-CTA copy.
+
+        Bridges quantize_fp8_layer's M-outermost packed scale output to the
+        K-outermost layout the PR-674 fp8_group_gemm SFA/SFB TMA descriptors
+        require. See transpose_scale_sm100.cuh.
+        """
+        assert scale_in.num_dims == 2
+        assert scale_out.num_dims == 2
+        M = scale_in.dim(0)
+        K_PACKED = scale_in.dim(1)
+        assert scale_out.dim(0) == K_PACKED
+        assert scale_out.dim(1) == M
+        params = [M, K_PACKED]
+        grid_dim = (1, 1, 1)
+        block_dim = (128, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(scale_in, (-1, -1, -1), -1, True)
+        tb_graph.new_input(scale_out, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([scale_in, scale_out], tb_graph)
+        self.kn_graph.register_task(tb_graph, "transpose_scale_sm100", params)
+
     def linear_fp8_with_residual_layer(
         self,
         input_fp8: DTensor,
@@ -2523,12 +2674,20 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # Currently assume that input/output
-        assert input.num_dims == 3 # (batch_size, num_expert_per_tok, 2 * intermediate_size)
-        assert output.num_dims == 3 # (batch_size, num_expert_per_tok, intermediate_size)
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (0, 1, -1), -1, True)
-        tb_graph.new_input(output, (0, 1, -1), -1, True)
+        # Accepts both:
+        #   3D (batch, num_experts_per_tok, intermediate) — OLD MoE path.
+        #   2D (M_total, intermediate) — NEW MoE path. Treated as (M_total, 1, N)
+        #   inside the task_register codegen (num_experts_per_tok = 1).
+        assert input.num_dims in (2, 3)
+        assert output.num_dims == input.num_dims
+        if input.num_dims == 3:
+            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            tb_graph.new_input(input, (0, 1, -1), -1, True)
+            tb_graph.new_input(output, (0, 1, -1), -1, True)
+        else:
+            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            tb_graph.new_input(input, (0, -1, -1), -1, True)
+            tb_graph.new_input(output, (0, -1, -1), -1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "moe_silu_mul")
             

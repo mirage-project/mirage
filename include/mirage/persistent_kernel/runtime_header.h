@@ -217,6 +217,16 @@ enum TaskType {
   // in (BN, NS) and corresponding TMA box dim.
   TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8 (K>4096, MPE<=8)
   TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6 (everything else)
+  // Peripheral tasks that adapt the new grouped GEMM's pre-permuted
+  // input/output contract to the OLD MoE-builder format (routing_indices
+  // + mask + (mbt, K) input + (mbt, hidden) output). One CTA per local
+  // expert (PERMUTE) / per token (UNPERMUTE).
+  TASK_MOE_PERMUTE_SM100 = 313,
+  TASK_MOE_UNPERMUTE_SM100 = 314,
+  // Tiny helper to transpose packed UE8M0 scale (M, K_PACKED) →
+  // (K_PACKED, M); needed for the silu→W2 path because quantize_fp8 emits
+  // (M, K_PACKED) while the new fp8_group_gemm SFA expects (K_PACKED, M).
+  TASK_TRANSPOSE_SCALE_SM100 = 315,
   TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

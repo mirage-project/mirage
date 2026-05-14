@@ -219,6 +219,30 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # Fuse residual into linear kernels (with_residual). Always on.
         self._fuse_residual = True
+        # NEW MoE path: route MoE W13/W2 through the PR-674 fp8_group_gemm
+        # via two peripheral tasks (moe_permute → fp8_group_gemm →
+        # silu_mul → quantize → fp8_group_gemm → moe_unpermute). Default
+        # OFF; A/B test under MPK_DSV3_NEW_MOE=1 then flip default after
+        # correctness + perf are validated. See scratch/pr674_moe_kernel_wiring_plan.md.
+        self._new_moe = os.environ.get("MPK_DSV3_NEW_MOE", "0") == "1"
+        # Per-layer NEW-MoE skip list — env-gated escape hatch while the
+        # L8+ correctness bug is unresolved. Comma-separated layer indices
+        # (e.g. "8,9,10,11,12,13") fall back to OLD MoE on those layers,
+        # preserving the 2.7x perf win on the remaining layers.
+        _skip_str = os.environ.get("MPK_DSV3_NEW_MOE_SKIP_LAYERS", "")
+        self._new_moe_skip_layers = set()
+        if _skip_str:
+            for tok in _skip_str.split(","):
+                tok = tok.strip()
+                if tok:
+                    self._new_moe_skip_layers.add(int(tok))
+        # M_TOTAL for the new GEMM = NUM_LOCAL_EXPERTS * BM_PADDING. Both
+        # are compile-time-ish (NUM_LOCAL_EXPERTS depends on ep_size at
+        # __init__ time; BM_PADDING matches the new GEMM's largest BM tile).
+        # Must be a multiple of fp8_group_gemm's internal BM tile (=128).
+        # Temporarily raisable for "BM_PADDING saturation" debugging via env.
+        self._moe_bm_padding = int(os.environ.get("MPK_DSV3_BM_PADDING", "128"))
+        assert self._moe_bm_padding % 128 == 0, "BM_PADDING must be 128-aligned"
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
@@ -1456,6 +1480,52 @@ class DeepSeekV3Builder(GraphBuilder):
             s = None  # weight is already BF16 (post-dequant)
         return w, s
 
+    @staticmethod
+    def _float_to_ue8m0(t: torch.Tensor) -> torch.Tensor:
+        """fp32 → UE8M0 (8-bit exponent only). Uses CEIL rounding to match
+        the kernel-side `encode_ue8m0` in per_token_group_quantize_fp8.cuh
+        (which uses `ceilf(log2f(scale))`). The standalone test uses
+        torch.round — that's only consistent within the test because the
+        test feeds pre-encoded SFA to the kernel without re-quantizing;
+        production has the kernel re-encoding SFA at runtime so the Python
+        weight-pack MUST use the same rounding convention as the kernel.
+        """
+        pos = torch.where(t > 0, t, torch.full_like(t, 1e-30))
+        p2 = torch.pow(2.0, torch.ceil(torch.log2(pos)))
+        bits = p2.view(torch.int32)
+        ue = ((bits >> 23) & 0xFF).to(torch.uint8)
+        ue = torch.where(t > 0, ue, torch.zeros_like(ue))
+        return ue
+
+    @staticmethod
+    def _pack_moe_scale_ue8m0(scale_per_row: torch.Tensor) -> torch.Tensor:
+        """[dim, nk] fp32 → [num_sf_k, dim] uint32 row-major, UE8M0-packed.
+
+        Identical packing as test_wrapper.py::pack_sf — the new PR-674
+        grouped FP8 GEMM's SFA/SFB TMA descriptors expect this transposed
+        layout (gd=[dim, num_sf_k] with dim as the innermost axis).
+
+        scale_per_row: per-output-row dequant scale (after repeat_interleave
+        along the output dim). For W13 this is reshape from
+        (E, 2*intermediate, K/128); pass it flattened as
+        (E*2*intermediate, K/128).
+        """
+        dim, nk = scale_per_row.shape
+        num_sf_k = (nk + 3) // 4
+        ue = DeepSeekV3Builder._float_to_ue8m0(scale_per_row).to(torch.int64)
+        out = torch.zeros(num_sf_k, dim, dtype=torch.int64,
+                          device=scale_per_row.device)
+        zero = torch.zeros(dim, num_sf_k, dtype=torch.int64,
+                           device=scale_per_row.device)
+        for j in range(4):
+            ki = torch.arange(num_sf_k, device=scale_per_row.device) * 4 + j
+            valid = ki < nk
+            ue_col = torch.where(valid,
+                                 ue[:, ki.clamp(max=nk - 1)],
+                                 zero[:, 0:num_sf_k])
+            out |= (ue_col.t() & 0xFF) << (j * 8)
+        return out.to(torch.uint32).contiguous()
+
     def _attach_raw_fp8_weight(self, state_dict, key, name):
         """Attach checkpoint-style FP8 weight + float32 block scale.
 
@@ -1981,6 +2051,204 @@ class DeepSeekV3Builder(GraphBuilder):
             splitk_split_k=down_split_k,
         )
 
+    def _setup_new_moe_buffers(self):
+        """Lazy-init the SHARED NEW-MoE buffers + static m_indices buffer
+        the first time _build_moe_mlp runs with MPK_DSV3_NEW_MOE=1.
+
+        All buffers are shared across MoE layers (single allocation per
+        rank, reused per layer) to keep peak HBM bounded.
+        """
+        if getattr(self, "_new_moe_alloced", False):
+            return
+        bm = self._moe_bm_padding  # 128
+        E = self.num_local_experts
+        m_total = E * bm
+        K = self.hidden_size
+        N_w13 = 2 * self.routed_moe_intermediate_size
+        N_w2 = K  # W2 maps intermediate → hidden
+        K_intermediate = self.routed_moe_intermediate_size
+        # Packed UE8M0 num_sf_k for K = hidden, K_intermediate = intermediate.
+        nk_K = (K + 127) // 128
+        nk_int = (K_intermediate + 127) // 128
+        K_PACKED_K = (nk_K + 3) // 4
+        K_PACKED_INT = (nk_int + 3) // 4
+        topk = NUM_EXPERTS_PER_TOK
+
+        # Static m_indices = [0,0,..0, 1,1,..1, ..., E-1,...,E-1] each repeated
+        # BM_PADDING times. Lives in GPU memory for the entire megakernel run.
+        # Keep a Python-side reference so the tensor isn't GC'd (MPK stores
+        # raw pointers).
+        self._new_moe_m_indices_tensor = (
+            torch.arange(m_total, dtype=torch.int32, device="cuda") // bm
+        ).contiguous()
+        self.new_moe_m_indices_dt = self.mpk.attach_input(
+            torch_tensor=self._new_moe_m_indices_tensor,
+            name="new_moe_m_indices_static",
+        )
+
+        # Permuted input (W13's A): shared across layers.
+        self.new_moe_permuted_in_fp8 = self.mpk.new_tensor(
+            dims=(m_total, K), dtype=float8_e4m3,
+            name="new_moe_permuted_in_fp8", io_category="cuda_tensor",
+        )
+        self.new_moe_permuted_in_scale = self.mpk.new_tensor(
+            dims=(K_PACKED_K, m_total), dtype=uint32,
+            name="new_moe_permuted_in_scale", io_category="cuda_tensor",
+        )
+        # NOTE: per-iter buffers (meta, permuted_fp8/scale, w13/silu/w2 outs)
+        # are allocated PER LAYER inside `_build_moe_mlp`'s NEW path, not
+        # shared globally. Sharing them across layers makes MPK's task-graph
+        # dep tracker hit "case 3 — fork+join producer" errors because the
+        # same buffer gets two distinct producer→consumer chains in
+        # consecutive layers. Per-layer allocations keep each chain linear.
+        self._new_moe_per_iter_alloced = False  # legacy flag, unused
+        # All per-iter buffers (input quantized, permuted_*, meta) are
+        # allocated PER LAYER inside `_build_moe_mlp`'s NEW path — sharing
+        # them across layers breaks MPK's dep tracker (case-3 fork+join).
+        # The only thing this setup does globally is the static m_indices
+        # attach + the per-layer scale-pack cache (so we don't re-pack the
+        # same weight scale every rebuild).
+        self._new_moe_packed_scale_cache = {}
+        self._new_moe_alloced = True
+
+    def _pack_and_attach_moe_weight_scale(self, state_dict, key, name):
+        """Pack `state_dict[key]` (per-block fp32 scale_inv) into the
+        UE8M0-transposed layout the new fp8_group_gemm expects, and attach.
+
+        Input shape: (E, N/128, K/128) fp32
+        Pack steps:
+          1) repeat-interleave dim=1 → (E, N, K/128)
+          2) flatten → (E*N, K/128)
+          3) pack_sf → (num_sf_k, E*N) uint32 UE8M0
+        """
+        cache = self._new_moe_packed_scale_cache
+        if name in cache:
+            return cache[name]
+        raw = state_dict[key].to(torch.float32).clamp(min=1e-30)
+        # (E, N/128, K/128) → (E, N, K/128)
+        expanded = raw.repeat_interleave(128, dim=1).contiguous()
+        E_, N_, NK_ = expanded.shape
+        flat = expanded.reshape(E_ * N_, NK_).contiguous()
+        packed = self._pack_moe_scale_ue8m0(flat).contiguous()
+        dt = self._safe_attach(packed, name)
+        cache[name] = dt
+        return dt
+
+    def _new_moe_dispatch_inline(self, layer_idx, prefix, state_dict, mbt,
+                                  bm_pad, m_total, K, K_intermediate,
+                                  K_PACKED_K, K_PACKED_INT,
+                                  w13_scale_key, w_experts_w13,
+                                  moe_topk_weights, moe_routing_indices,
+                                  new_moe_input_fp8, new_moe_input_scale,
+                                  new_moe_permuted_in_fp8,
+                                  new_moe_permuted_in_scale,
+                                  new_moe_meta, new_moe_meta_dummy,
+                                  new_moe_w13_out, new_moe_silu_out,
+                                  new_moe_silu_fp8,
+                                  new_moe_silu_scale_Mfirst,
+                                  new_moe_silu_scale, new_moe_w2_out):
+        """Per-layer NEW MoE task dispatch. Extracted so the bisect gate
+        in `_build_moe_mlp` can skip it without indentation gymnastics.
+
+        Set MPK_DSV3_NEW_MOE_TASKS_UPTO=N (default 99) to stop after the
+        N-th task; rest skipped. Tasks numbered 1..8 below.
+        """
+        upto = int(os.environ.get("MPK_DSV3_NEW_MOE_TASKS_UPTO", "99"))
+        if upto < 1: return
+        # Pack W13 weight scale (always — needs to be attached for w13).
+        s_w13_packed = self._pack_and_attach_moe_weight_scale(
+            state_dict, w13_scale_key,
+            f"layer_{layer_idx}_experts_w13_scale_ue8m0")
+        # 1) Quantize MoE input with UE8M0-packed scale.
+        self.mpk.quantize_fp8_layer(
+            input=self.rmsnorm_out,
+            output_fp8=new_moe_input_fp8,
+            output_scale=new_moe_input_scale,
+            grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+            scale_ue8m0=True,
+        )
+        if upto < 2: return
+        # 2) Zero-init meta.
+        self.mpk.tensor_init_layer(
+            target=new_moe_meta,
+            dummy=new_moe_meta_dummy,
+            grid_dim=(1, 1, 1), block_dim=(128, 1, 1),
+            dummy_input_map=(-1, -1, -1),
+            target_input_map=(-1, -1, -1),
+        )
+        if upto < 3: return
+        # 3) Permute + scale-transpose.
+        self.mpk.moe_permute_sm100_layer(
+            input_fp8=new_moe_input_fp8,
+            input_scale=new_moe_input_scale,
+            topk_weights=moe_topk_weights,
+            routing_indices=moe_routing_indices,
+            permuted_fp8=new_moe_permuted_in_fp8,
+            permuted_scale=new_moe_permuted_in_scale,
+            meta=new_moe_meta,
+            bm_padding=bm_pad,
+        )
+        if upto < 4: return
+        # 4) Group GEMM W13.
+        self.mpk.fp8_group_gemm_layer(
+            a_fp8=new_moe_permuted_in_fp8,
+            b_fp8=w_experts_w13,
+            sfa_packed=new_moe_permuted_in_scale,
+            sfb_packed=s_w13_packed,
+            m_indices=self.new_moe_m_indices_dt,
+            output=new_moe_w13_out,
+            num_workers=self.mpk.num_workers,
+        )
+        if upto < 5: return
+        # 5) SiLU+MUL.
+        # 2026-05-14 v2: grid=(num_workers, 1, 1) — was (1,1,1) which was a
+        # 30ms hot spot (single CTA on 1 SM doing m_total*OUTPUT_SIZE ops).
+        # With input_map=(0,-1,-1) the runtime partitions dim 0 across
+        # grid.x CTAs and the C++ register pulls num_active_tokens from
+        # per-CTA STensor shape (= m_total / grid_dim.x rows per CTA). So
+        # each CTA processes m_total/num_workers rows in-bounds. Total
+        # tasks = num_workers (~128) × 17 layers = ~2K (vs ~278K with
+        # grid=m_total).
+        self.mpk.moe_silu_mul_layer(
+            input=new_moe_w13_out,
+            output=new_moe_silu_out,
+            grid_dim=(1, 1, 1),
+            block_dim=(128, 1, 1),
+        )
+        if upto < 6: return
+        # 6) Quantize SiLU → UE8M0, then transpose to K-outermost.
+        self.mpk.quantize_fp8_layer(
+            input=new_moe_silu_out,
+            output_fp8=new_moe_silu_fp8,
+            output_scale=new_moe_silu_scale_Mfirst,
+            grid_dim=(m_total, 1, 1),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=True,
+        )
+        if upto < 7: return
+        self.mpk.transpose_scale_sm100_layer(
+            scale_in=new_moe_silu_scale_Mfirst,
+            scale_out=new_moe_silu_scale,
+        )
+        if upto < 8: return
+        # 7+8) Pack W2 weight scale + attach W2 weight + Group GEMM W2.
+        w2_scale_key_for_pack = f"{prefix}experts.w2.weight_scale_inv"
+        w_experts_w2_new = self._safe_attach(
+            state_dict[f"{prefix}experts.w2.weight"],
+            f"layer_{layer_idx}_experts_w2")
+        s_w2_packed = self._pack_and_attach_moe_weight_scale(
+            state_dict, w2_scale_key_for_pack,
+            f"layer_{layer_idx}_experts_w2_scale_ue8m0")
+        self.mpk.fp8_group_gemm_layer(
+            a_fp8=new_moe_silu_fp8,
+            b_fp8=w_experts_w2_new,
+            sfa_packed=new_moe_silu_scale,
+            sfb_packed=s_w2_packed,
+            m_indices=self.new_moe_m_indices_dt,
+            output=new_moe_w2_out,
+            num_workers=self.mpk.num_workers,
+        )
+
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):
         """Build MoE MLP for layers 3-60."""
         prefix = f"model.layers.{layer_idx}.mlp."
@@ -2077,159 +2345,282 @@ class DeepSeekV3Builder(GraphBuilder):
         w_experts_w13 = self._safe_attach(
             state_dict[f"{prefix}experts.w13.weight"],
             f"layer_{layer_idx}_experts_w13")
-        # Group GEMM expects per-row weight_scale (not per-block scale_inv)
-        # Checkpoint: scale_inv [num_experts, out/128, K/128]
-        # Kernel expects: scale [num_experts*out, K/128] (per-row, float32)
-        if use_fp8_experts:
-            raw_scale_inv = state_dict[w13_scale_key].float().clamp(min=1e-30)
-            # scale_inv IS the dequant scale (weight_float = weight_fp8 * scale_inv)
-            # Group GEMM kernel expects this directly, NOT 1/scale_inv
-            # Expand per-block to per-row: repeat each block row 128 times
-            # Result: [num_experts, out_rows, K/128] — 3D (PR 652 format)
-            w13_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
-            s_experts_w13 = self._safe_attach(
-                w13_scale_expanded, f"layer_{layer_idx}_experts_w13_scale")
-        else:
-            s_experts_w13 = None
         mbt = self.max_num_batched_tokens
-        if use_fp8_experts:
-            # Quantize input for MoE FP8
-            moe_input_fp8 = self.mpk.new_tensor(
-                dims=(mbt, self.hidden_size), dtype=float8_e4m3,
-                name=f"layer_{layer_idx}_moe_input_fp8", io_category="cuda_tensor",
-            )
-            moe_input_scale = self.mpk.new_tensor(
-                dims=(mbt, self.hidden_size // 128), dtype=float32,
-                name=f"layer_{layer_idx}_moe_input_scale", io_category="cuda_tensor",
-            )
-            # MoE group GEMM expects float32 scale (does internal UE8M0 conversion)
-            self.mpk.quantize_fp8_layer(
-                input=self.rmsnorm_out,
-                output_fp8=moe_input_fp8,
-                output_scale=moe_input_scale,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
-                scale_ue8m0=False,
-            )
 
-        moe_mid = self.mpk.new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.routed_moe_intermediate_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_moe_mid",
-            io_category="cuda_tensor",
-        )
+        # ====================================================================
+        # NEW MoE PATH — wires through PR-674 fp8_group_gemm_smallm/largem.
+        # Permute(routing) → group_gemm(W13) → silu → quantize → transpose →
+        # group_gemm(W2) → unpermute(combine + residual). Gated by env var
+        # MPK_DSV3_NEW_MOE=1 so we can A/B against the OLD per-expert kernel.
+        # See scratch/pr674_moe_kernel_wiring_plan.md for the full design.
+        # ====================================================================
+        # DEBUG bisect levels for the NEW MoE correctness bug
+        # (layer_02_residual row 127 anomaly):
+        #   MPK_DSV3_NEW_MOE_DRY_RUN=B  → setup only (just attach static
+        #                                  m_indices); skip per-layer allocs
+        #                                  and tasks; fall through to OLD.
+        #   MPK_DSV3_NEW_MOE_DRY_RUN=C  → setup + per-layer buffer alloc;
+        #                                  skip tasks; fall through to OLD.
+        #   MPK_DSV3_NEW_MOE_DRY_RUN=0  → (default) full NEW path.
+        new_moe_dry_run = os.environ.get("MPK_DSV3_NEW_MOE_DRY_RUN", "0")
+        # NEW MoE branch. The setup runs whenever env is set (so we can
+        # isolate whether merely attaching m_indices_static causes drift).
+        # The per-layer body skips for bisect level "B".
+        if self._new_moe and use_fp8_experts:
+            self._setup_new_moe_buffers()  # idempotent
+        if (self._new_moe and use_fp8_experts
+                and new_moe_dry_run != "B"):
+            bm_pad = self._moe_bm_padding
+            E_local = self.num_local_experts
+            m_total = E_local * bm_pad
+            K = self.hidden_size
+            K_intermediate = self.routed_moe_intermediate_size
+            N_w13 = 2 * K_intermediate
+            N_w2 = K
+            nk_K = (K + 127) // 128
+            nk_int = (K_intermediate + 127) // 128
+            K_PACKED_K = (nk_K + 3) // 4
+            K_PACKED_INT = (nk_int + 3) // 4
 
-        if use_fp8_experts:
-            # 2026-05-12: MoE W13 dominates prefill (88% of layer wallclock,
-            # 4076 μs/call mean per perf-analyzer). Env override lets a sweep
-            # find a better Y without rebuilding the builder.
-            _w13_pref = int(os.environ.get("MPK_MOE_W13_M_SPLIT", "16"))
-            w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
-                                           preferred=_w13_pref)
-            w13_expert_grid_x = _moe_expert_grid_x(
-                mbt, self.num_local_experts, preferred_groups=8)
-            self.mpk.moe_w13_fp8_layer(
-                input_fp8=moe_input_fp8,
-                input_scale=moe_input_scale,
-                weight_fp8=w_experts_w13,
-                weight_scale=s_experts_w13,
-                moe_routing_indices=moe_routing_indices,
-                moe_mask=moe_mask,
-                output=moe_mid,
-                grid_dim=(w13_expert_grid_x, w13_m_split, 1),
-                block_dim=(128, 1, 1),
-            )
+            # Per-layer allocations (NOT shared across MoE layers — sharing
+            # tripped MPK's dep tracker on case-3 fork+join).
+            new_moe_input_fp8 = self.mpk.new_tensor(
+                dims=(mbt, K), dtype=float8_e4m3,
+                name=f"layer_{layer_idx}_new_moe_input_fp8",
+                io_category="cuda_tensor")
+            new_moe_input_scale = self.mpk.new_tensor(
+                dims=(mbt, K_PACKED_K), dtype=uint32,
+                name=f"layer_{layer_idx}_new_moe_input_scale",
+                io_category="cuda_tensor")
+            new_moe_permuted_in_fp8 = self.mpk.new_tensor(
+                dims=(m_total, K), dtype=float8_e4m3,
+                name=f"layer_{layer_idx}_new_moe_permuted_in_fp8",
+                io_category="cuda_tensor")
+            new_moe_permuted_in_scale = self.mpk.new_tensor(
+                dims=(K_PACKED_K, m_total), dtype=uint32,
+                name=f"layer_{layer_idx}_new_moe_permuted_in_scale",
+                io_category="cuda_tensor")
+            # 2D `(2, N)` int32 so the shared `tensor_init` kernel — which
+            # zeros `BATCH_SIZE * OUTPUT_SIZE * sizeof(bf16)` bytes — covers
+            # the FULL int32 byte range (BATCH_SIZE=2, OUTPUT_SIZE=N int32
+            # → 2*N*2 bytes = N*4 bytes = sizeof int32 buffer of length N).
+            # L8 instrumentation: attach the meta buffer for layer_idx=8
+            # to a host-readable torch tensor (set up by demo.py) so we can
+            # dump tok_to_perm / out_weights after the run. Otherwise the
+            # buffer lives in cuda_tensor pool and isn't host-accessible.
+            new_moe_meta = self.mpk.new_tensor(
+                dims=(2, m_total + mbt * NUM_EXPERTS_PER_TOK),
+                dtype=int32,
+                name=f"layer_{layer_idx}_new_moe_meta",
+                io_category="cuda_tensor")
+            new_moe_meta_dummy = self.mpk.new_tensor(
+                dims=(1, 1), dtype=int32,
+                name=f"layer_{layer_idx}_new_moe_meta_dummy",
+                io_category="cuda_tensor")
+            new_moe_w13_out = self.mpk.new_tensor(
+                dims=(m_total, N_w13), dtype=bfloat16,
+                name=f"layer_{layer_idx}_new_moe_w13_out",
+                io_category="cuda_tensor")
+            new_moe_silu_out = self.mpk.new_tensor(
+                dims=(m_total, K_intermediate), dtype=bfloat16,
+                name=f"layer_{layer_idx}_new_moe_silu_out",
+                io_category="cuda_tensor")
+            new_moe_silu_fp8 = self.mpk.new_tensor(
+                dims=(m_total, K_intermediate), dtype=float8_e4m3,
+                name=f"layer_{layer_idx}_new_moe_silu_fp8",
+                io_category="cuda_tensor")
+            new_moe_silu_scale_Mfirst = self.mpk.new_tensor(
+                dims=(m_total, K_PACKED_INT), dtype=uint32,
+                name=f"layer_{layer_idx}_new_moe_silu_scale_Mfirst",
+                io_category="cuda_tensor")
+            new_moe_silu_scale = self.mpk.new_tensor(
+                dims=(K_PACKED_INT, m_total), dtype=uint32,
+                name=f"layer_{layer_idx}_new_moe_silu_scale",
+                io_category="cuda_tensor")
+            new_moe_w2_out = self.mpk.new_tensor(
+                dims=(m_total, N_w2), dtype=bfloat16,
+                name=f"layer_{layer_idx}_new_moe_w2_out",
+                io_category="cuda_tensor")
+
+            if new_moe_dry_run == "C":
+                # Bisect level C: allocations done, skip all NEW task
+                # dispatch + tasks; fall through to OLD path.
+                new_moe_skip_old_routed = False
+            else:
+                self._new_moe_dispatch_inline(
+                    layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
+                    K, K_intermediate, K_PACKED_K, K_PACKED_INT,
+                    w13_scale_key, w_experts_w13,
+                    moe_topk_weights, moe_routing_indices,
+                    new_moe_input_fp8, new_moe_input_scale,
+                    new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
+                    new_moe_meta, new_moe_meta_dummy,
+                    new_moe_w13_out, new_moe_silu_out,
+                    new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
+                    new_moe_silu_scale, new_moe_w2_out)
+                self._new_moe_layer_w2_out = new_moe_w2_out
+                self._new_moe_layer_meta = new_moe_meta
+                # Always skip OLD routed path when NEW path takes over.
+                # If MPK_DSV3_NEW_MOE_TASKS_UPTO < 8 truncates the dispatch
+                # mid-chain, the moe_unpermute downstream will read partly-
+                # uninitialized buffers (layer 3 output will be garbage)
+                # but the dense layers 0..2 residual dumps stay valid for
+                # bisect comparison.
+                new_moe_skip_old_routed = True
+
+        elif self._new_moe and use_fp8_experts and new_moe_dry_run == "B":
+            # Level B: setup-only (handled above), no per-layer body.
+            new_moe_skip_old_routed = False
         else:
-            raise RuntimeError("No bf16 moe experts for now.")
-            self.mpk.moe_w13_linear_layer(
-                input=self.rmsnorm_out,
-                weight=w_experts_w13,
-                moe_routing_indices=moe_routing_indices,
-                moe_mask=moe_mask,
-                output=moe_mid,
-                grid_dim=(_moe_expert_grid_x(mbt, self.num_local_experts), 1, 1),
-                block_dim=(128, 1, 1),
+            new_moe_skip_old_routed = False
+
+        # (NEW MoE dispatch body extracted into `_new_moe_dispatch_inline`.)
+
+        # OLD routed-experts path (W13 → silu → W2). Skipped when NEW MoE
+        # path took over above.
+        if not new_moe_skip_old_routed:
+            # Group GEMM expects per-row weight_scale (not per-block scale_inv)
+            # Checkpoint: scale_inv [num_experts, out/128, K/128]
+            # Kernel expects: scale [num_experts*out, K/128] (per-row, float32)
+            if use_fp8_experts:
+                raw_scale_inv = state_dict[w13_scale_key].float().clamp(min=1e-30)
+                # scale_inv IS the dequant scale (weight_float = weight_fp8 * scale_inv)
+                # Group GEMM kernel expects this directly, NOT 1/scale_inv
+                # Expand per-block to per-row: repeat each block row 128 times
+                # Result: [num_experts, out_rows, K/128] — 3D (PR 652 format)
+                w13_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+                s_experts_w13 = self._safe_attach(
+                    w13_scale_expanded, f"layer_{layer_idx}_experts_w13_scale")
+            else:
+                s_experts_w13 = None
+            if use_fp8_experts:
+                # Quantize input for MoE FP8
+                moe_input_fp8 = self.mpk.new_tensor(
+                    dims=(mbt, self.hidden_size), dtype=float8_e4m3,
+                    name=f"layer_{layer_idx}_moe_input_fp8", io_category="cuda_tensor",
+                )
+                moe_input_scale = self.mpk.new_tensor(
+                    dims=(mbt, self.hidden_size // 128), dtype=float32,
+                    name=f"layer_{layer_idx}_moe_input_scale", io_category="cuda_tensor",
+                )
+                # MoE group GEMM expects float32 scale (does internal UE8M0 conversion)
+                self.mpk.quantize_fp8_layer(
+                    input=self.rmsnorm_out,
+                    output_fp8=moe_input_fp8,
+                    output_scale=moe_input_scale,
+                    grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                    scale_ue8m0=False,
+                )
+
+            moe_mid = self.mpk.new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, 2 * self.routed_moe_intermediate_size),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_moe_mid",
+                io_category="cuda_tensor",
             )
 
-        moe_silu_out = self.mpk.new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_moe_silu",
-            io_category="cuda_tensor",
-        )
-        self.mpk.moe_silu_mul_layer(
-            input=moe_mid, output=moe_silu_out,
-            grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1),
-            block_dim=(128, 1, 1),
-        )
+            if use_fp8_experts:
+                # 2026-05-12: MoE W13 dominates prefill (88% of layer wallclock,
+                # 4076 μs/call mean per perf-analyzer). Env override lets a sweep
+                # find a better Y without rebuilding the builder.
+                _w13_pref = int(os.environ.get("MPK_MOE_W13_M_SPLIT", "16"))
+                w13_m_split = _moe_fp8_m_split(2 * self.routed_moe_intermediate_size,
+                                               preferred=_w13_pref)
+                w13_expert_grid_x = _moe_expert_grid_x(
+                    mbt, self.num_local_experts, preferred_groups=8)
+                self.mpk.moe_w13_fp8_layer(
+                    input_fp8=moe_input_fp8,
+                    input_scale=moe_input_scale,
+                    weight_fp8=w_experts_w13,
+                    weight_scale=s_experts_w13,
+                    moe_routing_indices=moe_routing_indices,
+                    moe_mask=moe_mask,
+                    output=moe_mid,
+                    grid_dim=(w13_expert_grid_x, w13_m_split, 1),
+                    block_dim=(128, 1, 1),
+                )
+            else:
+                raise RuntimeError("No bf16 moe experts for now.")
 
-        # Expert W2 (down projection)
-        w2_scale_key = f"{prefix}experts.w2.weight_scale_inv"
-        w_experts_w2 = self._safe_attach(
-            state_dict[f"{prefix}experts.w2.weight"],
-            f"layer_{layer_idx}_experts_w2")
-        if use_fp8_experts:
-            raw_scale_inv = state_dict[w2_scale_key].float().clamp(min=1e-30)
-            w2_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
-            s_experts_w2 = self._safe_attach(
-                w2_scale_expanded, f"layer_{layer_idx}_experts_w2_scale")
-        else:
-            s_experts_w2 = None
-
-        if use_fp8_experts:
-            moe_silu_fp8 = self.mpk.new_tensor(
+            moe_silu_out = self.mpk.new_tensor(
                 dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size),
-                dtype=float8_e4m3,
-                name=f"layer_{layer_idx}_moe_silu_fp8",
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_moe_silu",
                 io_category="cuda_tensor",
             )
-            moe_silu_scale = self.mpk.new_tensor(
-                dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size // 128),
-                dtype=float32,
-                name=f"layer_{layer_idx}_moe_silu_scale",
-                io_category="cuda_tensor",
-            )
-            self.mpk.quantize_fp8_layer(
-                input=moe_silu_out,
-                output_fp8=moe_silu_fp8,
-                output_scale=moe_silu_scale,
-                grid_dim=(mbt * NUM_EXPERTS_PER_TOK, 1, 1),
-                scale_ue8m0=False,
+            # NOTE: grid=(mbt, topk, 1) kept as-is. silu_mul has a known
+            # OOB-write pattern (CTAs > BM write past buffer end since the
+            # kernel iterates num_active_tokens=mbt*topk rows from each
+            # CTA's offset). For OLD MoE this has been benign in
+            # production (writes apparently land in pool padding); FIXING
+            # OLD to grid=(1,1,1) introduces new divergence at L15+ vs
+            # established baseline. So OLD silu_mul stays as-is. NEW MoE
+            # path uses grid=(1,1,1) — see _new_moe_dispatch_inline.
+            self.mpk.moe_silu_mul_layer(
+                input=moe_mid, output=moe_silu_out,
+                grid_dim=(mbt, NUM_EXPERTS_PER_TOK, 1),
                 block_dim=(128, 1, 1),
             )
 
-        moe_down_out = self.mpk.new_tensor(
-            dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_moe_down",
-            io_category="cuda_tensor",
-        )
-        if use_fp8_experts:
-            _w2_pref = int(os.environ.get("MPK_MOE_W2_M_SPLIT", "14"))
-            w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=_w2_pref)
-            w2_expert_grid_x = _moe_expert_grid_x(
-                mbt, self.num_local_experts, preferred_groups=10)
-            self.mpk.moe_w2_fp8_layer(
-                input_fp8=moe_silu_fp8,
-                input_scale=moe_silu_scale,
-                weight_fp8=w_experts_w2,
-                weight_scale=s_experts_w2,
-                moe_routing_indices=moe_routing_indices,
-                moe_mask=moe_mask,
-                output=moe_down_out,
-                grid_dim=(w2_expert_grid_x, w2_m_split, 1),
-                block_dim=(128, 1, 1),
+            # Expert W2 (down projection)
+            w2_scale_key = f"{prefix}experts.w2.weight_scale_inv"
+            w_experts_w2 = self._safe_attach(
+                state_dict[f"{prefix}experts.w2.weight"],
+                f"layer_{layer_idx}_experts_w2")
+            if use_fp8_experts:
+                raw_scale_inv = state_dict[w2_scale_key].float().clamp(min=1e-30)
+                w2_scale_expanded = raw_scale_inv.repeat_interleave(128, dim=1).contiguous().to(torch.float32)
+                s_experts_w2 = self._safe_attach(
+                    w2_scale_expanded, f"layer_{layer_idx}_experts_w2_scale")
+            else:
+                s_experts_w2 = None
+
+            if use_fp8_experts:
+                moe_silu_fp8 = self.mpk.new_tensor(
+                    dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size),
+                    dtype=float8_e4m3,
+                    name=f"layer_{layer_idx}_moe_silu_fp8",
+                    io_category="cuda_tensor",
+                )
+                moe_silu_scale = self.mpk.new_tensor(
+                    dims=(mbt, NUM_EXPERTS_PER_TOK, self.routed_moe_intermediate_size // 128),
+                    dtype=float32,
+                    name=f"layer_{layer_idx}_moe_silu_scale",
+                    io_category="cuda_tensor",
+                )
+                self.mpk.quantize_fp8_layer(
+                    input=moe_silu_out,
+                    output_fp8=moe_silu_fp8,
+                    output_scale=moe_silu_scale,
+                    grid_dim=(mbt * NUM_EXPERTS_PER_TOK, 1, 1),
+                    scale_ue8m0=False,
+                    block_dim=(128, 1, 1),
+                )
+
+            moe_down_out = self.mpk.new_tensor(
+                dims=(mbt, NUM_EXPERTS_PER_TOK, self.hidden_size),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_moe_down",
+                io_category="cuda_tensor",
             )
-        else:
-            raise RuntimeError("No bf16 moe experts for now.")
-            self.mpk.moe_w2_linear_layer(
-                input=moe_silu_out,
-                weight=w_experts_w2,
-                moe_routing_indices=moe_routing_indices,
-                moe_mask=moe_mask,
-                output=moe_down_out,
-                grid_dim=(_moe_expert_grid_x(mbt, self.num_local_experts), 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if use_fp8_experts:
+                _w2_pref = int(os.environ.get("MPK_MOE_W2_M_SPLIT", "14"))
+                w2_m_split = _moe_fp8_m_split(self.hidden_size, preferred=_w2_pref)
+                w2_expert_grid_x = _moe_expert_grid_x(
+                    mbt, self.num_local_experts, preferred_groups=10)
+                self.mpk.moe_w2_fp8_layer(
+                    input_fp8=moe_silu_fp8,
+                    input_scale=moe_silu_scale,
+                    weight_fp8=w_experts_w2,
+                    weight_scale=s_experts_w2,
+                    moe_routing_indices=moe_routing_indices,
+                    moe_mask=moe_mask,
+                    output=moe_down_out,
+                    grid_dim=(w2_expert_grid_x, w2_m_split, 1),
+                    block_dim=(128, 1, 1),
+                )
+            else:
+                raise RuntimeError("No bf16 moe experts for now.")
 
         # ---- Shared Expert (1 expert, TP parallel, same as dense MLP) ----
         # Shared expert runs on ALL tokens independently of routing.
@@ -2324,14 +2715,28 @@ class DeepSeekV3Builder(GraphBuilder):
         # The model residual is added after the tensor-parallel allreduce in
         # build_layers, otherwise each rank would add the same residual before
         # the reduction and over-count it.
-        self.mpk.moe_mul_sum_add_layer(
-            input=moe_down_out,
-            weight=moe_topk_weights,
-            residual=shared_residual,
-            output=moe_output,
-            grid_dim=(self.max_num_batched_tokens, _moe_hidden_split(self.hidden_size), 1),
-            block_dim=(128, 1, 1),
-        )
+        if new_moe_skip_old_routed:
+            # NEW path: moe_unpermute does
+            #   output[t] = shared_residual[t]
+            #             + sum_k(permuted_w2_out[token_to_perm[t,k]-1]
+            #                      * permuted_weights[same row])
+            # — i.e. the topk-weighted combine AND the shared-residual add
+            # in one task. Skips the OLD moe_mul_sum_add entirely.
+            self.mpk.moe_unpermute_sm100_layer(
+                permuted_output=self._new_moe_layer_w2_out,
+                meta=self._new_moe_layer_meta,
+                residual=shared_residual,
+                output=moe_output,
+            )
+        else:
+            self.mpk.moe_mul_sum_add_layer(
+                input=moe_down_out,
+                weight=moe_topk_weights,
+                residual=shared_residual,
+                output=moe_output,
+                grid_dim=(self.max_num_batched_tokens, _moe_hidden_split(self.hidden_size), 1),
+                block_dim=(128, 1, 1),
+            )
         self.mlp_out = moe_output
 
     def _cached_attach(self, tensor, name, **kwargs):
