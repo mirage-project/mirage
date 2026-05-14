@@ -2328,18 +2328,19 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         if upto < 5: return
         # 5) SiLU+MUL.
-        # 2026-05-14 v2: grid=(num_workers, 1, 1) — was (1,1,1) which was a
-        # 30ms hot spot (single CTA on 1 SM doing m_total*OUTPUT_SIZE ops).
-        # With input_map=(0,-1,-1) the runtime partitions dim 0 across
-        # grid.x CTAs and the C++ register pulls num_active_tokens from
-        # per-CTA STensor shape (= m_total / grid_dim.x rows per CTA). So
-        # each CTA processes m_total/num_workers rows in-bounds. Total
-        # tasks = num_workers (~128) × 17 layers = ~2K (vs ~278K with
-        # grid=m_total).
+        # 2026-05-14 v3: grid=(num_workers, 1, 1) restored after disk-full
+        # turned out to be the earlier crash root cause (not the grid).
+        # The previous (1,1,1) was a 30 ms/call hot spot (single CTA on
+        # 1 SM doing m_total*OUTPUT_SIZE ops). With input_map=(0,-1,-1)
+        # the runtime partitions dim 0 across grid.x CTAs and the C++
+        # register pulls num_active_tokens from per-CTA STensor shape
+        # (= m_total / grid_dim.x rows per CTA). So each CTA processes
+        # m_total/num_workers rows in-bounds, fully parallel across SMs.
+        _silu_grid = min(self.mpk.num_workers, m_total)
         self.mpk.moe_silu_mul_layer(
             input=new_moe_w13_out,
             output=new_moe_silu_out,
-            grid_dim=(1, 1, 1),
+            grid_dim=(_silu_grid, 1, 1),
             block_dim=(128, 1, 1),
         )
         if upto < 6: return
