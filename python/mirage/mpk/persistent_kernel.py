@@ -268,12 +268,6 @@ def get_compile_command(
         f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_mla_tp4_head_groups()}",
         f"-DMIRAGE_MLA_TP4_RD_DV={_mla_tp4_rd_dv()}",
     ]
-    # Debug knobs to isolate AllReduce barrier vs NVLS-reduce cost (UNSAFE for
-    # correctness — only for measuring per-phase wallclock).
-    if os.environ.get("MPK_AR_SKIP_BARRIER") == "1":
-        common_cmd.append("-DMPK_AR_SKIP_BARRIER")
-    if os.environ.get("MPK_AR_SKIP_REDUCE") == "1":
-        common_cmd.append("-DMPK_AR_SKIP_REDUCE")
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
@@ -296,27 +290,6 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # Enable verbose scheduler/worker/event debug prints from
-    # persistent_kernel.cuh for local debugging only.
-    if os.environ.get("MPK_ENABLE_VERBOSE", "0") == "1":
-        flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-    if os.environ.get("MPK_DEBUG_BATCH", "0") == "1":
-        flags = flags + [f"-DMPK_DEBUG_BATCH"]
-    # MTP verify debug overrides — for testing partial-accept and full-accept
-    # KV-cache paths that the natural drafts-vs-target comparison rarely hits
-    # in shallow-layer correctness runs (drafts almost always mismatch with
-    # only 5 layers loaded → accepted=0 every iter, only the bonus advances).
-    #
-    # MPK_MTP_DEBUG_FORCE_ACCEPT_N: integer N in [0, NUM_DRAFT]. Bypasses the
-    #   real verify comparison and pins `accepted = N` (i.e. final
-    #   accepted_count = N + 1 including the bonus token). N=0 means
-    #   "reject all" (matches the rare natural-reject case); N=NUM_DRAFT
-    #   means "accept all" (every draft pretended-correct, K+1 step advance);
-    #   any value in between exercises the partial-accept K/V management
-    #   path. Default (unset) preserves real verify semantics.
-    mtp_force_accept = os.environ.get("MPK_MTP_DEBUG_FORCE_ACCEPT_N", None)
-    if mtp_force_accept is not None:
-        flags = flags + [f"-DMPK_MTP_DEBUG_FORCE_ACCEPT_N={int(mtp_force_accept)}"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
