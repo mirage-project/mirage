@@ -1321,8 +1321,15 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple = (128, 1, 1),
         q_tile_size: int = 16,
+        phase_gate: int = 0,
     ):
+        # phase_gate=2 (decode-only, B25 2026-05-15): codegen emits a
+        # `if (Q_LEN > 8) return;` gate so the kernel skips the rotation
+        # on prefill iters where q_nope_pe is stale (the absorbed q_b
+        # decode GEMM early-exits via gate_mode=2 on prefill iters).
         params = [num_heads, q_tile_size]
+        if phase_gate != 0:
+            params.append(phase_gate)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
@@ -1345,13 +1352,24 @@ class PersistentKernel:
         block_dim: tuple = (128, 1, 1),
         q_tile_size: int = 16,
         qfused_mode: int = 0,
+        phase_gate: int = 0,
     ):
         # qfused_mode = 0: q_pe is a standalone (mbt, num_heads*64) tensor.
         # qfused_mode = 1: q_pe is the same DTensor as the fused q_b_prefill
         # buffer (mbt, num_heads*192) with row-swap layout. Kernel uses
         # row_stride = num_heads*192 and pe_base_in_row = num_heads*128.
+        # phase_gate=1 (prefill-only, B25 2026-05-15): codegen emits a
+        # `if (Q_LEN <= 8) return;` gate so the kernel skips the rotation
+        # on decode iters where the q_b_prefill_fused buffer is stale
+        # (the unabsorbed q_b prefill GEMM early-exits via gate_mode=1
+        # on decode iters; chunked_prefill itself returns early too).
         params = [num_heads, q_tile_size]
-        if qfused_mode != 0:
+        # The codegen reads phase_gate at params[3], so qfused_mode (params[2])
+        # must be present when phase_gate is set, even if 0.
+        if phase_gate != 0:
+            params.append(qfused_mode)
+            params.append(phase_gate)
+        elif qfused_mode != 0:
             params.append(qfused_mode)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)

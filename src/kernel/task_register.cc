@@ -6385,14 +6385,30 @@ int TaskRegister::register_deepseek_mla_rope_q_sm100_task(
 int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  assert(params.size() == 2);
+  // params: [num_heads, tile_q [, phase_gate]]
+  //   phase_gate (optional, default 0):
+  //     0 = no gate (legacy)
+  //     2 = decode-only (skip if Q_LEN > 8) — used for the fused
+  //         absorbed-Q ROPE in dual-dispatch. On prefill iters the q_b
+  //         decode GEMM early-exits via gate_mode=2, leaving q_nope_pe
+  //         with stale data; rotating stale data is wasted work.
+  assert(params.size() == 2 || params.size() == 3);
   int num_heads = params[0];
   int tile_q = params[1];
+  int phase_gate = (params.size() == 3) ? params[2] : 0;
   assert(num_heads > 0);
   assert(tile_q > 0);
+  assert(phase_gate == 0 || phase_gate == 2);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  if (phase_gate == 2) {
+    code.e("{");
+    code.e("int q_len_rope_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    code.e("if (q_len_rope_ > 8) return;");
+    code.e("}");
+  }
   code.e("kernel::deepseek_mla_rope_sm100_task_impl<$, $, false, true, false>(",
          num_heads,
          tile_q);
@@ -6413,22 +6429,38 @@ int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
 int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  // params: [num_heads, tile_q [, qfused_mode]]
+  // params: [num_heads, tile_q [, qfused_mode [, phase_gate]]]
   //   qfused_mode (optional, default 0):
   //     0 = legacy separate q_pe buffer, row stride = num_heads * 64,
   //         per-head stride 64. q_pe is a standalone (mbt, H*64) tensor.
   //     1 = row-swap fused q_b_prefill_fused (mbt, H*192), pe slice starts
   //         at H*128 within each row. Per-head pe stride = 64. Used when
   //         MPK_DSV3_QB_FUSED=1.
-  assert(params.size() == 2 || params.size() == 3);
+  //   phase_gate (optional, default 0):
+  //     0 = no gate (legacy)
+  //     1 = prefill-only (skip if Q_LEN <= 8) — used for the unabsorbed-Q
+  //         ROPE in dual-dispatch. On decode iters the q_b prefill GEMM
+  //         early-exits via gate_mode=1 (and chunked_prefill itself
+  //         returns), so rotating the (stale) q_b_prefill_fused buffer
+  //         on decode iters is wasted work.
+  assert(params.size() == 2 || params.size() == 3 || params.size() == 4);
   int num_heads = params[0];
   int tile_q = params[1];
-  int qfused_mode = (params.size() == 3) ? params[2] : 0;
+  int qfused_mode = (params.size() >= 3) ? params[2] : 0;
+  int phase_gate = (params.size() >= 4) ? params[3] : 0;
   assert(num_heads > 0);
   assert(tile_q > 0);
+  assert(phase_gate == 0 || phase_gate == 1);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  if (phase_gate == 1) {
+    code.e("{");
+    code.e("int q_len_rope_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    code.e("if (q_len_rope_ <= 8) return;");
+    code.e("}");
+  }
   if (qfused_mode == 1) {
     // Row-swap fused layout: pe of head h at offset
     //   row * (num_heads * 192) + (num_heads * 128) + h * 64

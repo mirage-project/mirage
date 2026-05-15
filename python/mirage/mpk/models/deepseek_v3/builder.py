@@ -1890,12 +1890,17 @@ class DeepSeekV3Builder(GraphBuilder):
             self.num_local_q_heads,
             (self.max_num_batched_tokens + 15) // 16,
         )
+        # B25 (2026-05-15): in dual-dispatch the fused (absorbed) ROPE_Q
+        # only matters on decode iters and the split (unabsorbed) ROPE_Q
+        # only matters on prefill iters. Add phase gates so the wrong-
+        # phase ROPE returns immediately instead of rotating stale data.
         self.mpk.deepseek_mla_rope_q_fused_layer(
             q_nope_pe=self.q_nope_pe,
             cos_pos_embed=self.cos_pos_embed,
             sin_pos_embed=self.sin_pos_embed,
             num_heads=self.num_local_q_heads,
             grid_dim=rope_q_grid,
+            phase_gate=2 if self._use_prefill else 0,
         )
         if self._use_prefill:
             # 2026-05-12 (user #2 FuseTensor row-swap): when q_b_prefill_fused
@@ -1909,6 +1914,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 num_heads=self.num_local_q_heads,
                 grid_dim=rope_q_grid,
                 qfused_mode=1 if self._qb_fused else 0,
+                phase_gate=1,
             )
         # k_pe lives at cols [2048:2112) inside the 2176-wide qkv_a_out;
         # pass row stride + offset so the ROPE kernel rotates the right slice.
