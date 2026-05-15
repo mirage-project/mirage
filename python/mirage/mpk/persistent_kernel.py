@@ -2938,18 +2938,31 @@ class PersistentKernel:
             ctas_per_expert = max(1, bm_padding // rows_per_cta)
             active_mask_offset = meta.dim(1)
         params = [active_mask_offset, ctas_per_expert]
+        # CRITICAL ORDERING (2026-05-14):
+        # task_register.cc reads input_ptrs[0] as silu input and
+        # output_ptrs[0] as silu output. graph.cc tuple is
+        # `(num_inputs_silu, 1, TASK_SILU_MUL, ...)` (line 642), so the
+        # last `register_task` operand becomes output_ptrs[0]. The active-
+        # mask skip (D3) reads input_ptrs[1] as the meta pointer. The
+        # required operand order is therefore
+        #     [silu_input, meta, silu_output]   (meta case)
+        #     [silu_input, silu_output]         (legacy)
+        # The earlier `[input, output, meta]` order silently wrote silu
+        # results into the meta buffer and left silu_out uninitialized,
+        # which propagated into a zero W2 GEMM input and effectively
+        # null-out the MoE contribution for every layer.
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         if input.num_dims == 3:
-            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            tb_graph.new_input(input, (0, 1, -1), -1, True)
-            tb_graph.new_input(output, (0, 1, -1), -1, True)
+            input_map = (0, 1, -1)
         else:
-            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            tb_graph.new_input(input, (0, -1, -1), -1, True)
-            tb_graph.new_input(output, (0, -1, -1), -1, True)
-        operators = [input, output]
+            input_map = (0, -1, -1)
+        tb_graph.new_input(input, input_map, -1, True)
+        operators = [input]
         if meta is not None:
             tb_graph.new_input(meta, (-1, -1, -1), -1, True)
             operators.append(meta)
+        tb_graph.new_input(output, input_map, -1, True)
+        operators.append(output)
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, "moe_silu_mul", params)
             
