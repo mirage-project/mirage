@@ -789,6 +789,106 @@ class PersistentKernel:
                 [process_dim, in_offset_elems, out_offset_elems],
             )
 
+    def fused_rmsnorm_quantize_fp8_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output_bf16: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        process_dim: int = None,
+        in_offset_elems: int = 0,
+        out_offset_elems: int = 0,
+        scale_ue8m0: bool = True,
+        emit_bf16: bool = True,
+        eps: float = 1e-6,  # accepted for API parity; kernel hardcodes 1e-6f
+        epsilon: float = None,  # alias for `eps` to match older call sites
+        group_size: int = 128,  # kernel currently asserts GROUP_SIZE == 128
+    ):
+        """B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+
+        Replaces the two-task chain `rmsnorm_layer` + `quantize_fp8_layer`
+        when the BF16 rmsnorm output is consumed (only) by an FP8 dense
+        GEMM. Saves one dispatch wave + one BF16 HBM round-trip per layer
+        (~10 μs/layer expected at TP=4 EP=2 mbt=128 decode).
+
+        Parameters mirror the two underlying calls:
+          * `process_dim` / `in_offset_elems` / `out_offset_elems` select
+            a column slice of a wider parent buffer (QKV-a FuseTensor
+            path). Defaults preserve legacy contiguous behaviour.
+          * `scale_ue8m0=True` writes packed UE8M0 uint32 scales in the
+            column-major `[packed_k, aligned_batch]` layout that the new
+            FP8 dense GEMMs (`fp8_gemm_dense_smallm/mediumm_sm100`) read.
+            `False` writes float32 scales in `[batch, num_groups]`
+            row-major (MoE permute path).
+          * `emit_bf16=False` skips writing the BF16 normalized output to
+            HBM. Use when no downstream consumer needs the BF16 (e.g.,
+            pre-qkv_a where only the FP8 path reads the result). Defaults
+            to True so the wrapper is a strict superset of `rmsnorm_layer`.
+          * `eps` / `epsilon`: RMS epsilon (kernel hard-codes 1e-6f today;
+            accepted only for API parity).
+          * `group_size`: FP8 quantization group size; kernel requires 128.
+        """
+        del eps, epsilon  # API parity only, kernel uses 1e-6f hard-coded.
+        if group_size != 128:
+            raise ValueError(
+                f"fused_rmsnorm_quantize_fp8_layer requires group_size=128, "
+                f"got {group_size}")
+        assert input.num_dims == 2
+        assert weight.num_dims == 1
+        assert output_bf16.num_dims == 2
+        assert output_fp8.num_dims == 2
+        # output_scale shape is layout-dependent: packed UE8M0 is
+        # (packed_k, aligned_batch) column-major; float32 is
+        # (batch, num_groups) row-major. Both are 2D.
+        assert output_scale.num_dims == 2
+        assert input.dim(0) == output_bf16.dim(0)
+        assert input.dim(1) == output_bf16.dim(1)
+        assert output_fp8.dim(0) == input.dim(0)
+        legacy_hidden = input.dim(1)
+        if process_dim is None:
+            process_dim = legacy_hidden
+        assert output_fp8.dim(1) == process_dim, (
+            f"output_fp8 second dim must equal process_dim "
+            f"({output_fp8.dim(1)} vs {process_dim})")
+        assert in_offset_elems + process_dim <= legacy_hidden
+        assert out_offset_elems + process_dim <= output_bf16.dim(1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # IMPORTANT: input order MUST match the C++ task_register reader.
+        # input_ptrs[0]=input, [1]=weight, [2]=output_bf16, [3]=output_fp8,
+        # [4]=output_scale. We pass outputs via `store_in_dmem=True` inputs
+        # so the (num_inputs, num_outputs) tuple in graph.cc is (5, 0).
+        #
+        # Per-CTA pointer offsetting via dim_maps:
+        #   input / output_bf16 / output_fp8: row dim 0 → grid.x, so each
+        #     CTA's base pointer is pre-offset to its row-block. The kernel
+        #     then walks `batch_idx in [0, BATCH_SIZE)` within that block.
+        #   weight: 1D, shared across all CTAs (dim_maps all -1).
+        #   output_scale: 2D but BOTH UE8M0 (col-major) and float32
+        #     (row-major) layouts need the GLOBAL row index, which the
+        #     kernel reconstructs from task_idx = task_metadata.request_id.
+        #     dim_maps stays (-1, -1, -1) so the kernel sees the buffer
+        #     base pointer.
+        tb_graph.new_input(input, (0, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 0, True)
+        tb_graph.new_input(output_bf16, (0, -1, -1), 1, True)
+        tb_graph.new_input(output_fp8, (0, -1, -1), 1, True)
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, weight, output_bf16, output_fp8, output_scale], tb_graph)
+        params = [
+            process_dim,
+            in_offset_elems,
+            out_offset_elems,
+            1 if scale_ue8m0 else 0,
+            1 if emit_bf16 else 0,
+        ]
+        self.kn_graph.register_task(
+            tb_graph, "fused_rmsnorm_quantize_fp8_sm100", params)
+
     def rmsnorm_linear_layer(
         self,
         input: DTensor,

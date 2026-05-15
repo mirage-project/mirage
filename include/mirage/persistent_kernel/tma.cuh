@@ -2203,6 +2203,10 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // no TMA needed
       break;
     }
+    case TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100: {
+      // no TMA needed — uses cp.async for input/weight, plain stores for fp8.
+      break;
+    }
     case TASK_MLA_DECODE_SM100: {
       // Q (input 0) and KV (input 1) each get 1 TMA desc
       for (size_t param_id = 0; param_id < 2; param_id++) {

@@ -869,6 +869,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         4, 1, TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100, variant_id);
+  } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
+    // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+    // 5 inputs (input, weight, output_bf16, output_fp8, output_scale)
+    // 0 outputs — bf16/fp8/scale outputs come in via store_in_dmem inputs.
+    int variant_id =
+        task_register->register_fused_rmsnorm_quantize_fp8_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        5, 0, TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "fp8_group_gemm_smallm_sm100") {
     // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + optional 6th (meta for
     // per-expert active mask) + 1 output (D_bf16). All 4 first inputs +

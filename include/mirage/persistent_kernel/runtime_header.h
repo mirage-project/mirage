@@ -219,6 +219,11 @@ enum TaskType {
   // SPLIT_K=4 we run 224 tiles in 3 better-utilized waves, each tile
   // doing K/4 work. Gated behind MPK_DSV3_DECODE_OPROJ_SPLITK=1.
   TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 = 308,
+  // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize. Replaces
+  // the (RMSNorm bf16 -> Quantize fp8) two-task chain that feeds the qkv_a
+  // FP8 dense GEMM. Saves one dispatch wave and one bf16 HBM round-trip
+  // per layer. Behind `MPK_DSV3_FUSED_RMSNORM_QUANTIZE=1`.
+  TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100 = 309,
   // Grouped FP8 GEMM for MoE (DSv3, cherry-picked from PR674 f24dcd85).
   // Fused block_scale MMA with UE8M0 scales. 5 TMA descriptors
   // (A, B, SFA, SFB, D output). Two variants share kernel body; differ

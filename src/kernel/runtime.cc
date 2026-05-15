@@ -515,6 +515,12 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y;
               task.task_metadata.kv_idx = bid.x;
             }
+            // B37 fused RMSNorm + FP8 quantize: grid=(mbt/ROWS_PER_TASK,1,1).
+            // request_id is the row-block index used by the kernel to skip
+            // CTAs past the active-rows boundary on decode iters.
+            if (task_type == TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE ||
                 task_type == TASK_NVSHMEM_GLOBAL_ARGMAX) {
               task.task_metadata.task_offset =
@@ -1953,6 +1959,8 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100] =
       "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100";
+  task_type_to_name[TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100] =
+      "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
       "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";

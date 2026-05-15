@@ -284,6 +284,14 @@ class DeepSeekV3Builder(GraphBuilder):
         # (576, q_lora=1536) monolith) → less TMA traffic, room to overlap.
         # Default OFF; flip after correctness validated end-to-end.
         self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "0") == "1"
+        # B37 (2026-05-15): replace the (input_layernorm RMSNorm + qkv_a
+        # quantize) two-task chain with one fused kernel that writes BF16
+        # rmsnorm_out and FP8 + scale in one pass. Saves ~10 us/layer on
+        # TP=4 EP=2 mbt=128 decode by eliminating one dispatch wave plus a
+        # bf16 HBM round-trip. Default OFF; A/B under
+        # MPK_DSV3_FUSED_RMSNORM_QUANTIZE=1.
+        self._fused_rmsnorm_quantize = (
+            os.environ.get("MPK_DSV3_FUSED_RMSNORM_QUANTIZE", "0") == "1")
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
@@ -852,6 +860,58 @@ class DeepSeekV3Builder(GraphBuilder):
             input_col_offset=input_col_offset,
             share_quantize_tag=share_quantize_tag,
         )
+
+    def _fused_rmsnorm_quantize_qkv_a_tag(self, layer_idx: int) -> str:
+        """B37: deterministic share_quantize_tag for the fused
+        rmsnorm + qkv_a-quantize path. Pre-populated in
+        `_fp8_quantize_emitted` so the qkv_a `_fp8_linear` call skips its
+        internal quantize (we already wrote the FP8 + scale buffers in
+        the fused task)."""
+        return f"layer_{layer_idx}_qkv_a_fused_rmsnorm_quantize"
+
+    def _emit_fused_rmsnorm_qkv_a_quantize(self,
+                                            input_x: 'DTensor',
+                                            w_norm: 'DTensor',
+                                            layer_idx: int,
+                                            reduction_size: int) -> str:
+        """B37: write self.rmsnorm_out (BF16) AND the qkv_a-side FP8 input
+        + float32 scale buffers in one fused task.
+
+        Returns the share_quantize_tag the caller MUST forward to
+        `_fp8_linear(share_quantize_tag=...)` so the downstream qkv_a
+        GEMM skips its internal quantize (the fused task has already
+        published valid bytes into the cached buffer).
+
+        Buffer ownership: `_fp8_mbt_buffers_for_reduction_f32scale(K)`
+        caches `(fp8_buf, scale_buf)` keyed on K. We must call it BEFORE
+        the fused task so the buffer DTensors exist when we wire the
+        task; the qkv_a `_fp8_linear_v2` call later in the same layer
+        will reuse the same cached buffers.
+        """
+        input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
+            reduction_size)
+        # Pre-populate the emitted-set so _fp8_linear_v2 will skip the
+        # internal quantize call that would otherwise overwrite the
+        # fused-task output bytes with identical-but-redundant work.
+        already = getattr(self, "_fp8_quantize_emitted", set())
+        tag = self._fused_rmsnorm_quantize_qkv_a_tag(layer_idx)
+        already.add(tag)
+        self._fp8_quantize_emitted = already
+
+        # Float32 scale path (matches _fp8_mbt_buffers_for_reduction_f32scale
+        # layout; dense GEMM consumes (M, K/128) f32 row-major scales).
+        self.mpk.fused_rmsnorm_quantize_fp8_layer(
+            input=input_x,
+            weight=w_norm,
+            output_bf16=self.rmsnorm_out,
+            output_fp8=input_fp8,
+            output_scale=input_scale,
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=False,
+            emit_bf16=True,
+        )
+        return tag
 
     def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs):
         """MPK_DSV3_BMM=1: replaces the absorbed q_b_proj decode GEMM with a
@@ -1849,10 +1909,17 @@ class DeepSeekV3Builder(GraphBuilder):
             raise RuntimeError(
                 "qkv_a_proj.weight + weight_scale_inv must be present in "
                 "the state_dict. demo.py builds them at load time.")
+        # B37: when fused rmsnorm+quantize is active, the share_quantize_tag
+        # is pre-populated in _fp8_quantize_emitted by the input_layernorm
+        # call site, so _fp8_linear_v2's internal quantize is skipped.
+        qkv_a_quantize_tag = (
+            self._fused_rmsnorm_quantize_qkv_a_tag(layer_idx)
+            if self._fused_rmsnorm_quantize else None)
         self._fp8_linear(
             self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
-            block_dim=(128, 1, 1))
+            block_dim=(128, 1, 1),
+            share_quantize_tag=qkv_a_quantize_tag)
 
         # Diagnostic (PRE-RMSnorm dump 2026-05-13): captures RAW qkv_a_out
         # immediately after the fused GEMM, before any consumer touches it.
@@ -4288,11 +4355,24 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=state_dict[f"{prefix}input_layernorm.weight"],
                 name=f"layer_{i}_input_layernorm",
             )
-            self.mpk.rmsnorm_layer(
-                input=self.x, weight=w_norm, output=self.rmsnorm_out,
-                grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
-                block_dim=(128, 1, 1),
-            )
+            # B37: when env-gated, fuse the input-layernorm RMSNorm with
+            # the downstream qkv_a FP8 quantize. The fused task writes the
+            # BF16 normalized output AND the FP8 + scale buffers in one
+            # pass, so the qkv_a `_fp8_linear` call can skip its internal
+            # quantize via share_quantize_tag.
+            if self._fused_rmsnorm_quantize:
+                self._emit_fused_rmsnorm_qkv_a_quantize(
+                    input_x=self.x,
+                    w_norm=w_norm,
+                    layer_idx=i,
+                    reduction_size=self.hidden_size,
+                )
+            else:
+                self.mpk.rmsnorm_layer(
+                    input=self.x, weight=w_norm, output=self.rmsnorm_out,
+                    grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+                    block_dim=(128, 1, 1),
+                )
 
             if i == 0 and layer0_intra_dts is not None:
                 # Dump self.rmsnorm_out (= input-layernormed embed) into slot 0

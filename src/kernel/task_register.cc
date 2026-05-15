@@ -5044,6 +5044,123 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
 
+int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+  //
+  // tb_graph inputs (in order):
+  //   [0] input bf16  [M, K_full]              (row-major, possibly wider
+  //                                              than process_dim)
+  //   [1] weight bf16 [process_dim]            (rms weight)
+  //   [2] output_bf16 [M, K_full]              (normalized bf16 output —
+  //                                              optional; the kernel still
+  //                                              computes it in smem)
+  //   [3] output_fp8  [M, process_dim]         (per-row FP8 quantized)
+  //   [4] output_scale uint32                  (packed UE8M0 column-major
+  //                                              [packed_k, aligned_batch])
+  //
+  // params (optional, default = legacy contiguous + UE8M0 scale):
+  //   params[0] = process_dim     (HIDDEN_DIM the kernel processes per row)
+  //   params[1] = in_offset_elems (skip elements at start of each row)
+  //   params[2] = out_offset_elems (same, for bf16 output)
+  //   params[3] = scale_ue8m0 (1=UE8M0 packed uint32, 0=float32 scale)
+  //   params[4] = emit_bf16 (1=write bf16 output, 0=skip the bf16 store)
+  //
+  // The bf16 output is stored as the 3rd input tensor (store_in_dmem),
+  // matching the MPK convention used by mla_decode/mla_prefill — codegen
+  // reads `input_ptrs[2]` for the output pointer.
+  assert(params.size() == 0 || params.size() == 3 || params.size() == 4 ||
+         params.size() == 5);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  int const num_inputs = 5;
+  int const num_outputs = 0; // outputs go via store_in_dmem inputs.
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+  }
+
+  int dtensor_batch = input_ops[0]->dtensor.dim[0];
+  int hidden_dim_full = input_ops[0]->dtensor.dim[1];
+  int output_bf16_full = input_ops[2]->dtensor.dim[1];
+  int output_fp8_full = input_ops[3]->dtensor.dim[1];
+
+  int process_dim = params.size() >= 3 ? params[0] : hidden_dim_full;
+  int in_offset = params.size() >= 3 ? params[1] : 0;
+  int out_offset = params.size() >= 3 ? params[2] : 0;
+  int scale_ue8m0 = params.size() >= 4 ? params[3] : 1;
+  int emit_bf16 = params.size() >= 5 ? params[4] : 1;
+  assert(scale_ue8m0 == 0 || scale_ue8m0 == 1);
+  assert(emit_bf16 == 0 || emit_bf16 == 1);
+  assert(in_offset + process_dim <= hidden_dim_full);
+  assert(out_offset + process_dim <= output_bf16_full);
+
+  // BATCH_SIZE per CTA = ceil(batch / grid_x).
+  int const grid_x = bgraph.grid_dim.x > 0 ? (int)bgraph.grid_dim.x : 1;
+  int batch_size = (dtensor_batch + grid_x - 1) / grid_x;
+  if (batch_size < 1) {
+    batch_size = 1;
+  }
+
+  // UE8M0 column-major scale layout requires the alignment to align with
+  // the batch axis dim (see quantize kernel). For the float32 path,
+  // scale_outer_stride is unused (writes go to [batch, num_groups] row-
+  // major) but we still pass a sane value.
+  constexpr int GROUP_SIZE = 128;
+  int const aligned_batch =
+      scale_ue8m0 ? ((dtensor_batch + 3) / 4) * 4 : dtensor_batch;
+  (void)GROUP_SIZE;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Active-rows gate (B34 convention): skip CTAs whose first row is past
+  // the active token count, and clamp the inner loop to the remaining
+  // active rows so we don't normalize/overwrite stale bf16.
+  code.e("int active_rows_fused_ = $;", dtensor_batch);
+  code.e("#ifndef MPK_TEST_MODE");
+  code.e("active_rows_fused_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("#endif");
+  code.e("int task_first_row_fused_ = "
+         "task_desc->task_metadata.request_id * $;",
+         batch_size);
+  code.e("if (task_first_row_fused_ < 0) task_first_row_fused_ = 0;");
+  code.e("if (task_first_row_fused_ >= active_rows_fused_) return;");
+  code.e("int row_count_cap_fused_ = "
+         "active_rows_fused_ - task_first_row_fused_;");
+
+  // Kernel template params: T, DST_T, BATCH_SIZE, HIDDEN_DIM, GROUP_SIZE,
+  // NUM_THREADS, IN_OFFSET, OUT_OFFSET, IN_ROW_STRIDE, OUT_ROW_STRIDE,
+  // FP8_ROW_STRIDE, SCALE_UE8M0, EMIT_BF16.
+  code.e("kernel::fused_rmsnorm_quantize_fp8_impl<bfloat16, __nv_fp8_e4m3,"
+         " $, $, 128, 256, $, $, $, $, $, $, $>(",
+         batch_size,
+         process_dim,
+         in_offset,
+         out_offset,
+         hidden_dim_full,
+         output_bf16_full,
+         output_fp8_full,
+         scale_ue8m0 ? "true" : "false",
+         emit_bf16 ? "true" : "false");
+  code.e("    task_desc->input_ptrs[0],"); // input bf16
+  code.e("    task_desc->input_ptrs[1],"); // weight bf16
+  code.e("    task_desc->input_ptrs[2],"); // output bf16 (store_in_dmem)
+  code.e("    task_desc->input_ptrs[3],"); // output fp8
+  code.e("    task_desc->input_ptrs[4],"); // output scale
+  code.e("    1e-6f,");                    // rms eps
+  code.e("    1e-10f,"); // quantize scale eps (floor for local_max)
+  code.e("    -448.0f, 448.0f,");
+  code.e("    $,", aligned_batch);
+  code.e("    task_desc->task_metadata.request_id,"); // task_idx
+  code.e("    row_count_cap_fused_);");
+  code.e("}");
+  return register_task_variant(TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_linear_fp8_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
