@@ -1265,18 +1265,42 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   int out_offset = params.size() == 3 ? params[2] : 0;
   assert(in_offset + process_dim <= hidden_dim_full);
   assert(out_offset + process_dim <= hidden_dim_full);
+  int dtensor_batch = output_ops[0]->dtensor.dim[0];
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // B34 (2026-05-15): builder may shrink grid.x below mbt so each CTA
+  // handles BATCH_SIZE > 1 rows. Skip CTAs whose first row is past the
+  // active token count, and clamp the kernel's inner row-loop to the
+  // remaining active rows so we don't normalize/overwrite stale bf16.
+  // In MPK_TEST_MODE qo_indptr_buffer is uninitialised (zeros), so fall
+  // back to the full DTensor batch dim (no skip) to keep unit-tests
+  // working — matches the silu_mul test-mode escape hatch.
+  code.e("int active_rows_rms_ = $;", dtensor_batch);
+  code.e("#ifndef MPK_TEST_MODE");
+  code.e("active_rows_rms_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("#endif");
+  code.e("int task_first_row_ = "
+         "task_desc->task_metadata.request_id * $;",
+         batch_size);
+  code.e("if (task_first_row_ >= active_rows_rms_) return;");
+  code.e("int row_count_cap_ = active_rows_rms_ - task_first_row_;");
   // NUM_THREADS defaults to 256; explicit so we can append IN/OUT_OFFSET.
-  code.e("kernel::rms_norm_hopper_impl<bfloat16, $, $, 256, $, $>(",
+  // IN_ROW_STRIDE / OUT_ROW_STRIDE = hidden_dim_full so multi-row CTAs walk
+  // by the actual physical row width (matters for QKV-a fused slice paths
+  // where process_dim < hidden_dim_full).
+  code.e("kernel::rms_norm_hopper_impl<bfloat16, $, $, 256, $, $, $, $>(",
          batch_size,
          process_dim,
          in_offset,
-         out_offset);
+         out_offset,
+         hidden_dim_full,
+         hidden_dim_full);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    1e-6f);");
+  code.e("    1e-6f,");
+  code.e("    row_count_cap_);");
   return register_task_variant(TASK_RMS_NORM_HOPPER, code.to_string());
 }
 

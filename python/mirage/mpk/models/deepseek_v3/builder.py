@@ -65,6 +65,32 @@ def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
     return 1
 
 
+# B34 (2026-05-15): multi-row-per-CTA grid for RMSNorm. Shrinks grid.x from
+# mbt down to ~mbt//8 so each CTA processes ~8 rows via the kernel's existing
+# batch_idx loop, gated by a runtime row_count_cap (active_rows - first_row)
+# so decode iters don't overwrite inactive rows with stale-bf16 normalized
+# output. Frees up worker slots that previously sat idle when active_rows < mbt.
+# The threadblock partition asserts (mbt % grid.x == 0), so when mbt is not a
+# multiple of the preferred rows-per-task we fall back to the largest divisor
+# of mbt at or below it (typically aligned to powers of two in real configs).
+_RMSNORM_ROWS_PER_TASK = 8
+
+
+def _rmsnorm_grid(mbt: int) -> tuple:
+    if mbt <= _RMSNORM_ROWS_PER_TASK:
+        # Single-CTA covers the whole batch — kernel BATCH_SIZE = mbt.
+        return (1, 1, 1)
+    target = mbt // _RMSNORM_ROWS_PER_TASK
+    # Snap to a divisor of mbt at or above `target` so grid_x divides mbt.
+    # Walk up from target until we find a divisor; bounded by mbt itself.
+    g = target
+    while g <= mbt and mbt % g != 0:
+        g += 1
+    if g > mbt:
+        g = mbt  # legacy 1-row-per-CTA fallback
+    return (g, 1, 1)
+
+
 def _moe_expert_grid_x(max_num_batched_tokens: int,
                        num_experts: int = NUM_EXPERTS,
                        preferred_groups: int | None = None) -> int:
@@ -1815,7 +1841,7 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_q_a_layernorm")
         self.mpk.rmsnorm_layer(
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
             process_dim=self.q_lora_rank,
             in_offset_elems=self._qkv_a_q_offset,
@@ -1950,7 +1976,7 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mpk.rmsnorm_layer(
             input=self.c_latent_out, weight=w_kv_a_ln,
             output=self.c_latent_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
             process_dim=self.kv_lora_rank,
             in_offset_elems=self._qkv_a_c_latent_offset,
@@ -3078,7 +3104,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         self.mpk.rmsnorm_layer(
             input=self.mtp_x, weight=w_norm, output=self.rmsnorm_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
         )
 
@@ -3103,7 +3129,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         self.mpk.rmsnorm_layer(
             input=self.mtp_x, weight=w_post_norm, output=self.rmsnorm_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
         )
 
@@ -3172,7 +3198,8 @@ class DeepSeekV3Builder(GraphBuilder):
             f"mtp_{attn}q_a_layernorm")
         self.mpk.rmsnorm_layer(
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1))
 
         # MTP runs both prefill and decode attention so its KV cache and
         # per-position hidden states are populated correctly. Mirrors vLLM's
@@ -3289,7 +3316,8 @@ class DeepSeekV3Builder(GraphBuilder):
             f"mtp_{attn}kv_a_layernorm")
         self.mpk.rmsnorm_layer(
             input=self.c_latent_out, weight=w_kv_a_ln, output=self.c_latent_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1))
 
         # MTP attention uses its own KV cache and decode-only MLA kernels.
         q_len_mla = self.max_num_batched_tokens
@@ -3864,14 +3892,14 @@ class DeepSeekV3Builder(GraphBuilder):
             # 3. enorm(embed_out)
             self.mpk.rmsnorm_layer(
                 input=mtp_embed_out, weight=w_enorm, output=mtp_enorm_out,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=_rmsnorm_grid(mbt), block_dim=(128, 1, 1),
             )
 
             # 4. hnorm(previous_hidden_states)
             hidden_input = main_hidden_states if step == 0 else self.mtp_x
             self.mpk.rmsnorm_layer(
                 input=hidden_input, weight=w_hnorm, output=mtp_hnorm_out,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=_rmsnorm_grid(mbt), block_dim=(128, 1, 1),
             )
 
             # 5. eh_proj: output = W1 @ enorm_out + W2 @ hnorm_out
@@ -3903,7 +3931,7 @@ class DeepSeekV3Builder(GraphBuilder):
             )
             self.mpk.rmsnorm_layer(
                 input=self.mtp_x, weight=w_mtp_norm, output=self.rmsnorm_out,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=_rmsnorm_grid(mbt), block_dim=(128, 1, 1),
             )
 
             # Shared lm_head (saved during build_from_dict)
@@ -4217,7 +4245,7 @@ class DeepSeekV3Builder(GraphBuilder):
             )
             self.mpk.rmsnorm_layer(
                 input=self.x, weight=w_norm, output=self.rmsnorm_out,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
                 block_dim=(128, 1, 1),
             )
 
@@ -4259,7 +4287,7 @@ class DeepSeekV3Builder(GraphBuilder):
             )
             self.mpk.rmsnorm_layer(
                 input=self.x, weight=w_post_norm, output=self.rmsnorm_out,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
                 block_dim=(128, 1, 1),
             )
 
@@ -4388,7 +4416,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         self.mpk.rmsnorm_layer(
             input=self.x, weight=w_final_norm, output=self.rmsnorm_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
         )
 
