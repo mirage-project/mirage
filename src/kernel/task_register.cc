@@ -5073,18 +5073,23 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
          params.size() == 5);
 
   std::vector<tb::TBInputOp *> input_ops;
-  int const num_inputs = 5;
-  int const num_outputs = 0; // outputs go via store_in_dmem inputs.
+  std::vector<tb::TBInputOp *> output_ops;
+  int const num_inputs = 2;
+  int const num_outputs = 3;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
-    input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
   }
 
   int dtensor_batch = input_ops[0]->dtensor.dim[0];
   int hidden_dim_full = input_ops[0]->dtensor.dim[1];
-  int output_bf16_full = input_ops[2]->dtensor.dim[1];
-  int output_fp8_full = input_ops[3]->dtensor.dim[1];
+  int output_bf16_full = output_ops[0]->dtensor.dim[1];
+  int output_fp8_full = output_ops[1]->dtensor.dim[1];
 
   int process_dim = params.size() >= 3 ? params[0] : hidden_dim_full;
   int in_offset = params.size() >= 3 ? params[1] : 0;
@@ -5145,11 +5150,11 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
          output_fp8_full,
          scale_ue8m0 ? "true" : "false",
          emit_bf16 ? "true" : "false");
-  code.e("    task_desc->input_ptrs[0],"); // input bf16
-  code.e("    task_desc->input_ptrs[1],"); // weight bf16
-  code.e("    task_desc->input_ptrs[2],"); // output bf16 (store_in_dmem)
-  code.e("    task_desc->input_ptrs[3],"); // output fp8
-  code.e("    task_desc->input_ptrs[4],"); // output scale
+  code.e("    task_desc->input_ptrs[0],");  // input bf16
+  code.e("    task_desc->input_ptrs[1],");  // weight bf16
+  code.e("    task_desc->output_ptrs[0],"); // output bf16
+  code.e("    task_desc->output_ptrs[1],"); // output fp8
+  code.e("    task_desc->output_ptrs[2],"); // output scale
   code.e("    1e-6f,");                    // rms eps
   code.e("    1e-10f,"); // quantize scale eps (floor for local_max)
   code.e("    -448.0f, 448.0f,");
