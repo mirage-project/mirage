@@ -24,16 +24,15 @@ template <int BATCH_SIZE,
           int PARTIAL_CHUNK_SIZE,
           int VALID_VOCAB_SIZE,
           int VOCAB_OFFSET>
-__device__ __forceinline__ void
-    nvshmem_global_argmax_from_partials_bf16(
-        void const *__restrict__ partial_value_ptr,
-        void const *__restrict__ partial_index_ptr,
-        void *__restrict__ scratch_value_ptr,
-        void *__restrict__ scratch_index_ptr,
-        void *__restrict__ output_ptr,
-        void *__restrict__ _teams,
-        int task_offset,
-        int active_tokens) {
+__device__ __forceinline__ void nvshmem_global_argmax_from_partials_bf16(
+    void const *__restrict__ partial_value_ptr,
+    void const *__restrict__ partial_index_ptr,
+    void *__restrict__ scratch_value_ptr,
+    void *__restrict__ scratch_index_ptr,
+    void *__restrict__ output_ptr,
+    void *__restrict__ _teams,
+    int task_offset,
+    int active_tokens) {
   bfloat16 const *__restrict__ partial_value =
       static_cast<bfloat16 const *>(partial_value_ptr);
   long long const *__restrict__ partial_index =
@@ -56,8 +55,7 @@ __device__ __forceinline__ void
     for (int batch_idx = 0; batch_idx < num_active_rows; batch_idx++) {
       float local_max = -inf;
       long long local_idx = -1;
-      bfloat16 const *value_row =
-          partial_value + batch_idx * NUM_PARTIAL_TASKS;
+      bfloat16 const *value_row = partial_value + batch_idx * NUM_PARTIAL_TASKS;
       long long const *index_row =
           partial_index + batch_idx * NUM_PARTIAL_TASKS;
       for (int i = tidx; i < NUM_PARTIAL_TASKS; i += NUM_THREADS) {
@@ -94,10 +92,10 @@ __device__ __forceinline__ void
       long long best_idx = -1;
       for (int peer_idx = 0; peer_idx < team_size; peer_idx++) {
         int peer = mpkar_team_translate_pe(teami, peer_idx);
-        float const *peer_values = static_cast<float const *>(
-            mpkar_peer_ptr(scratch_value, peer));
-        long long const *peer_indices = static_cast<long long const *>(
-            mpkar_peer_ptr(scratch_index, peer));
+        float const *peer_values =
+            static_cast<float const *>(mpkar_peer_ptr(scratch_value, peer));
+        long long const *peer_indices =
+            static_cast<long long const *>(mpkar_peer_ptr(scratch_index, peer));
         float val = peer_values[peer_idx * BATCH_SIZE + batch_idx];
         long long idx = peer_indices[peer_idx * BATCH_SIZE + batch_idx];
         if (val > best_val) {

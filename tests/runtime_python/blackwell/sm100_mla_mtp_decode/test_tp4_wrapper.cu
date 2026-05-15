@@ -198,8 +198,10 @@ int main(int argc, char **argv) {
       }
     }
     cudaMalloc(&dPage, (size_t)B * kvt_all * sizeof(int));
-    cudaMemcpy(
-        dPage, hPage, (size_t)B * kvt_all * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(dPage,
+               hPage,
+               (size_t)B * kvt_all * sizeof(int),
+               cudaMemcpyHostToDevice);
     delete[] hPage;
   }
 
@@ -296,13 +298,11 @@ int main(int argc, char **argv) {
     auto run_main = [&]() {
       dim3 g(num_groups * sk * HEAD_GROUPS, B, V_SPLITS);
       if (single_tile) {
-        shim_main<true>
-            <<<g, WRAPPER_THREADS, SMEM_SIZE>>>(
-                Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg, dPage);
+        shim_main<true><<<g, WRAPPER_THREADS, SMEM_SIZE>>>(
+            Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg, dPage);
       } else {
-        shim_main<false>
-            <<<g, WRAPPER_THREADS, SMEM_SIZE>>>(
-                Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg, dPage);
+        shim_main<false><<<g, WRAPPER_THREADS, SMEM_SIZE>>>(
+            Qtm, KVtm, dOa, dLa, ss, KL, sk, Q_LEN, qpg, dPage);
       }
     };
     auto run_reduce = [&]() {

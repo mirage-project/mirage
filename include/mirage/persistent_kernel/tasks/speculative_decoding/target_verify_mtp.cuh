@@ -61,6 +61,21 @@ __device__ __forceinline__ void
   __shared__ int accepted_num_smem;
 
   if (t_id == 0) {
+#ifdef MPK_MTP_DEBUG_FORCE_ACCEPT_N
+    // Debug override: pin the accept count regardless of draft vs target.
+    // Use cases:
+    //   N=0           — reject all (only the bonus token advances)
+    //   1..K-1        — partial accept; exercises KV-cache management for
+    //                   the "some accepted, some rejected" path that
+    //                   natural drafts rarely hit in shallow-layer tests
+    //   K=NUM_DRAFT   — accept all drafts; exercises full K+1 step advance
+    // Clamp at compile time so out-of-range envs degrade to a valid mode.
+    constexpr int _force_n = (MPK_MTP_DEBUG_FORCE_ACCEPT_N < 0) ? 0
+                             : (MPK_MTP_DEBUG_FORCE_ACCEPT_N > NUM_DRAFT_TOKENS)
+                                 ? NUM_DRAFT_TOKENS
+                                 : MPK_MTP_DEBUG_FORCE_ACCEPT_N;
+    int accepted = _force_n;
+#else
     int accepted = NUM_DRAFT_TOKENS;
     for (int i = 0; i < NUM_DRAFT_TOKENS; i++) {
       // draft_ids[i] is the draft token for position i
@@ -70,6 +85,7 @@ __device__ __forceinline__ void
         break;
       }
     }
+#endif
     accepted_num_smem = accepted;
   }
   __syncthreads();

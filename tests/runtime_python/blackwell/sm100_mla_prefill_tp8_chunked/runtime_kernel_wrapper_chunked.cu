@@ -121,7 +121,8 @@ void mla_prefill_tp8_chunked_test(torch::Tensor Qn,     // [B, q_len, H, 128]
   int kv_len = K_nope.size(1);
   float sml2 = (float)sm_scale * 1.44269504089f;
 
-  CUtensorMap KN_tm = make_per_head_tma(K_nope.data_ptr(), kv_len, H, D_QK_NOPE);
+  CUtensorMap KN_tm =
+      make_per_head_tma(K_nope.data_ptr(), kv_len, H, D_QK_NOPE);
   CUtensorMap KR_tm = make_kr_tma(K_rope.data_ptr(), kv_len);
   CUtensorMap V_tm = make_per_head_tma(V.data_ptr(), kv_len, H, D_V);
 
@@ -223,7 +224,8 @@ void mla_prefill_tp8_chunked_splitk_test(torch::Tensor Qn,
   int nqb = (q_len + BM - 1) / BM;
   float sml2 = (float)sm_scale * 1.44269504089f;
 
-  CUtensorMap KN_tm = make_per_head_tma(K_nope.data_ptr(), kv_len, H, D_QK_NOPE);
+  CUtensorMap KN_tm =
+      make_per_head_tma(K_nope.data_ptr(), kv_len, H, D_QK_NOPE);
   CUtensorMap KR_tm = make_kr_tma(K_rope.data_ptr(), kv_len);
   CUtensorMap V_tm = make_per_head_tma(V.data_ptr(), kv_len, H, D_V);
 

@@ -28,17 +28,17 @@ namespace kernel {
 namespace fp8_gemm_dense_mediumm {
 
 template <int BN, int NS>
-__device__ __noinline__ void fp8_gemm_dense_mediumm_sm100_task_impl(
-    CUtensorMap const *ta_ptr,
-    CUtensorMap const *tb_ptr,
-    float const *__restrict__ sa,
-    float const *__restrict__ sb,
-    __nv_bfloat16 *__restrict__ C,
-    int const M,
-    int const N,
-    int const K,
-    int const worker_idx,
-    int const num_workers) {
+__device__ __noinline__ void
+    fp8_gemm_dense_mediumm_sm100_task_impl(CUtensorMap const *ta_ptr,
+                                           CUtensorMap const *tb_ptr,
+                                           float const *__restrict__ sa,
+                                           float const *__restrict__ sb,
+                                           __nv_bfloat16 *__restrict__ C,
+                                           int const M,
+                                           int const N,
+                                           int const K,
+                                           int const worker_idx,
+                                           int const num_workers) {
   fp8_gemm_dense_common::task_impl_tpl<BN, NS, /*NE=*/4>(
       ta_ptr, tb_ptr, sa, sb, C, M, N, K, worker_idx, num_workers);
 }

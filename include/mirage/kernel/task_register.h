@@ -141,8 +141,8 @@ public:
                                      std::vector<int> const &params);
   int register_mla_prefill_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
-  int register_mla_prefill_absorbed_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_mla_prefill_absorbed_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params);
   int register_mla_prefill_tp8_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
   int register_mla_prefill_tp8_chunked_sm100_task(
@@ -179,31 +179,42 @@ public:
                                      std::vector<int> const &params,
                                      bool with_residual);
   int register_linear_fp8_swapAB_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params,
-                                         bool with_residual);
+                                            std::vector<int> const &params,
+                                            bool with_residual);
   int register_splitk_linear_fp8_swapAB_sm100_task(
-      threadblock::Graph const &bgraph,
-      std::vector<int> const &params);
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_linear_fp8_bmm_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_fp8_gemm_dense_smallm_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_mediumm_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_group_gemm_smallm_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_group_gemm_largem_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_moe_permute_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_moe_unpermute_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  int register_transpose_scale_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
+  int register_assemble_q_decode_sm100_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,
                                               std::vector<int> const &params);
   int register_mla_kv_gather_unified_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_deepseek_mla_rope_q_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_deepseek_mla_rope_q_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params);
   int register_deepseek_mla_rope_q_fused_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_deepseek_mla_rope_q_split_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_deepseek_mla_rope_k_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_deepseek_mla_rope_k_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params);
   // MTP tasks
   int register_mtp_verify_strict_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);

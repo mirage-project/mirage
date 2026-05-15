@@ -67,9 +67,11 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #else
 #if MPK_TARGET_CC >= 90
 // B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
-// (la_smem[MAX_SK*128]). Reduce dynamic budget to stay under total limit.
+// (la_smem[MAX_SK*128]). FP8 group GEMM (NS=6, BN=128) needs ~216KB
+// dynamic SMEM, so we bump from 207 -> 222 to fit it. Stays under total
+// 228KB hardware limit when combined with the 6KB worker reserved static.
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    207 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+    222 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -209,6 +211,26 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
   TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 306,
   TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 307,
+  // Grouped FP8 GEMM for MoE (DSv3, cherry-picked from PR674 f24dcd85).
+  // Fused block_scale MMA with UE8M0 scales. 5 TMA descriptors
+  // (A, B, SFA, SFB, D output). Two variants share kernel body; differ
+  // in (BN, NS) and corresponding TMA box dim.
+  TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8 (K>4096, MPE<=8)
+  TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6 (everything else)
+  // Peripheral tasks that adapt the new grouped GEMM's pre-permuted
+  // input/output contract to the OLD MoE-builder format (routing_indices
+  // + mask + (mbt, K) input + (mbt, hidden) output). One CTA per local
+  // expert (PERMUTE) / per token (UNPERMUTE).
+  TASK_MOE_PERMUTE_SM100 = 313,
+  TASK_MOE_UNPERMUTE_SM100 = 314,
+  // Tiny helper to transpose packed UE8M0 scale (M, K_PACKED) →
+  // (K_PACKED, M); needed for the silu→W2 path because quantize_fp8 emits
+  // (M, K_PACKED) while the new fp8_group_gemm SFA expects (K_PACKED, M).
+  TASK_TRANSPOSE_SCALE_SM100 = 315,
+  // Helper for the MPK_DSV3_BMM decode Q path: interleaves the BMM-absorbed
+  // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
+  // (N, H, 576) that the MLA decode TMA expects.
+  TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
   TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

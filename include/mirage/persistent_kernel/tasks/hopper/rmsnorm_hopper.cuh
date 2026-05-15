@@ -16,7 +16,17 @@
 #include "../common/utils.cuh"
 namespace kernel {
 
-template <typename T, int BATCH_SIZE, int HIDDEN_DIM, int NUM_THREADS = 256>
+// 2026-05-12 (user #2 part-a) FuseTensor support: IN_OFFSET / OUT_OFFSET shift
+// the per-row read/write start, letting the kernel operate on a slice of a
+// wider buffer (e.g., qkv_a_out (mbt, 2176) where q_a_layernorm covers
+// cols [0:1536) and kv_a_layernorm covers cols [1536:2048)). Defaults
+// preserve legacy contiguous behaviour.
+template <typename T,
+          int BATCH_SIZE,
+          int HIDDEN_DIM,
+          int NUM_THREADS = 256,
+          int IN_OFFSET = 0,
+          int OUT_OFFSET = 0>
 __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
                                                      void const *weight_ptr,
                                                      void *output_ptr,
@@ -67,11 +77,13 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
   float *reduce_smem = reinterpret_cast<float *>(smem + REDUCE_BUFFER_OFFSET);
 
   for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
-    // get the current batch input, weight, and output pointers
+    // get the current batch input, weight, and output pointers. When
+    // IN_OFFSET/OUT_OFFSET are non-zero, the per-row base is shifted by
+    // that many elements (used by the QKV-a fused path on BATCH_SIZE==1).
     T const *__restrict__ curr_d_input =
-        static_cast<T const *>(input_ptr) + batch_idx * HIDDEN_DIM;
+        static_cast<T const *>(input_ptr) + IN_OFFSET + batch_idx * HIDDEN_DIM;
     T *__restrict__ curr_d_output =
-        static_cast<T *>(output_ptr) + batch_idx * HIDDEN_DIM;
+        static_cast<T *>(output_ptr) + OUT_OFFSET + batch_idx * HIDDEN_DIM;
     // Warm up input tiles for the first atoms
     {
       load_smem<T, BYTES_PER_CP>(shared_input_buffer + threadIdx.x * CHUNK_SIZE,

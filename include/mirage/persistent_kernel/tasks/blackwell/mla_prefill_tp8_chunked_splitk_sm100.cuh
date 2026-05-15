@@ -71,24 +71,23 @@ __device__ __forceinline__ void splitk_sync() {
   asm volatile("bar.sync 5, %0;" ::"n"(NT));
 }
 
-__device__ __noinline__ void
-    mla_prefill_tp8_chunked_splitk_sm100_task_impl(
-        CUtensorMap const *KN_tm_ptr,
-        CUtensorMap const *KR_tm_ptr,
-        CUtensorMap const *V_tm_ptr,
-        bf16 const *__restrict__ Qn,
-        bf16 const *__restrict__ Qp,
-        float *__restrict__ partial,
-        int const q_len,
-        int const kv_len,
-        int const q_start,
-        int const H,
-        int const num_splits,
-        int const nqb,
-        float const sml2,
-        int const head,    // bid.x
-        int const yidx,    // bid.y; encodes (qb_rev, split_id)
-        int const bat      // bid.z
+__device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
+    CUtensorMap const *KN_tm_ptr,
+    CUtensorMap const *KR_tm_ptr,
+    CUtensorMap const *V_tm_ptr,
+    bf16 const *__restrict__ Qn,
+    bf16 const *__restrict__ Qp,
+    float *__restrict__ partial,
+    int const q_len,
+    int const kv_len,
+    int const q_start,
+    int const H,
+    int const num_splits,
+    int const nqb,
+    float const sml2,
+    int const head, // bid.x
+    int const yidx, // bid.y; encodes (qb_rev, split_id)
+    int const bat   // bid.z
 ) {
   if (threadIdx.x >= NT) {
     return;
@@ -227,10 +226,9 @@ __device__ __noinline__ void
   long long const stride_head = (long long)BM * stride_row;
   long long const stride_qb = (long long)H * stride_head;
   long long const stride_bat = (long long)nqb * stride_qb;
-  long long const pbase = (long long)split_id * stride_bat +
-                          (long long)bat * stride_bat +
-                          (long long)qb * stride_qb +
-                          (long long)head * stride_head;
+  long long const pbase =
+      (long long)split_id * stride_bat + (long long)bat * stride_bat +
+      (long long)qb * stride_qb + (long long)head * stride_head;
   int g = lid / 4, t2 = lid % 4;
   {
     int row = wid * 16 + g;
@@ -307,10 +305,8 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   int const d_start = col_group * 32;
 
   for (int s = 0; s < num_splits; s++) {
-    long long roff = (long long)s * stride_bat +
-                     (long long)bat * stride_bat +
-                     (long long)qb * stride_qb +
-                     (long long)head * stride_head +
+    long long roff = (long long)s * stride_bat + (long long)bat * stride_bat +
+                     (long long)qb * stride_qb + (long long)head * stride_head +
                      (long long)row * stride_row;
     float m_s = -INFINITY, d_s = 0.f;
     if (col_group == 0) {
@@ -350,12 +346,11 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   }
   float dr = (m_global != -INFINITY) ? (1.0f / d_global) : 0.f;
   long long ooff = (long long)bat * q_len * H * D_V +
-                   (long long)(qs + row) * H * D_V +
-                   (long long)head * D_V;
+                   (long long)(qs + row) * H * D_V + (long long)head * D_V;
 #pragma unroll
   for (int d = 0; d < 32; d += 4) {
-    bf16_2 lo =
-        __float22bfloat162_rn(make_float2(o_local[d] * dr, o_local[d + 1] * dr));
+    bf16_2 lo = __float22bfloat162_rn(
+        make_float2(o_local[d] * dr, o_local[d + 1] * dr));
     bf16_2 hi = __float22bfloat162_rn(
         make_float2(o_local[d + 2] * dr, o_local[d + 3] * dr));
     int2 packed;

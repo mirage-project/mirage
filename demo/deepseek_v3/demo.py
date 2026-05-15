@@ -152,6 +152,14 @@ if __name__ == "__main__":
                             "Optionally dump first N generated token_ids, text, and latency to JSON. "
                             "If path omitted, saves to outputs/deepseek_v3/{torch_output.json|mpk_output.json}."
                         ))
+    parser.add_argument("--dump-hidden-dir", type=str, default=None,
+                        help=(
+                            "Diagnostic: dump per-layer residual stream after each "
+                            "decoder layer's MLP/MoE residual fusion to "
+                            "<dir>/layer_NN_residual.pt. Saved on rank 0 only. "
+                            "Used to localize the layer where MPK first diverges "
+                            "from the PyTorch reference."
+                        ))
     parser.add_argument("--weight-cache-dir", type=str,
                         default=os.environ.get("MPK_DEEPSEEK_WEIGHT_CACHE_DIR"),
                         help=(
@@ -280,7 +288,10 @@ if __name__ == "__main__":
 
     # Tokenize prompt (or synthesize a fixed-length prompt for stress tests)
     if args.prompt_length > 0:
-        pl = min(args.prompt_length, args.max_seq_length - 16)
+        # Reserve at least 1 slot for the next decoded token. For prefill-only
+        # diagnostics (max_seq_length == prompt_length), this collapses to a
+        # one-iter run that terminates right after the prefill iter.
+        pl = min(args.prompt_length, args.max_seq_length - 1)
         # Deterministic synthetic prompt: cycle over a small subset of the
         # vocab. Excludes special IDs (pad, bos, eos, etc.) by staying in
         # [1024, 1024 + 4096) which is safely inside any tokenizer's main
@@ -704,6 +715,41 @@ if __name__ == "__main__":
                     state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
                     state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
                     state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
+                    # 2026-05-12 (user #2 FuseTensor v2 — row-swap layout):
+                    # Build a single unabsorbed q_b weight so the prefill
+                    # path can do ONE FP8 GEMM (instead of q_b_nope + q_b_pe).
+                    # The per-rank layout is [rank_heads_nope_concat;
+                    # rank_heads_pe_concat] so the 128-row FP8 quantization
+                    # block boundaries align cleanly with the nope/pe split.
+                    # The FULL weight is constructed as concatenation of
+                    # per-rank slices so that the default dim=0 TP-sharding
+                    # gives each rank its [nope; pe] block.
+                    #
+                    # Layout per rank (TP=4 → H_local=32):
+                    #   rows [0,         H_local*128)  = nope of rank's heads
+                    #   rows [H_local*128, H_local*192) = pe   of rank's heads
+                    # Full weight = concat([rank_0_slice, rank_1_slice, ...]).
+                    # Kernel reads Qn at base, Qp at base + H_local*128.
+                    H_local_w = H_ // world_size
+                    if H_ % world_size != 0:
+                        raise ValueError(
+                            f"num_heads {H_} not divisible by world_size "
+                            f"{world_size} — row-swap fused q_b can't shard")
+                    rank_parts = []
+                    for r in range(world_size):
+                        rank_heads = q_orig[r * H_local_w : (r + 1) * H_local_w]
+                        # (H_local, 192, K)
+                        rank_nope = rank_heads[:, :qk_nope, :].reshape(
+                            H_local_w * qk_nope, -1)        # (H_local*128, K)
+                        rank_pe = rank_heads[:, qk_nope:, :].reshape(
+                            H_local_w * qk_rope, -1)        # (H_local*64, K)
+                        rank_parts.append(rank_nope)
+                        rank_parts.append(rank_pe)
+                    q_b_unabs_f32 = torch.cat(rank_parts, dim=0).contiguous()
+                    q_b_unabs_fp8, q_b_unabs_scale = (
+                        _quantize_f32_to_checkpoint_fp8(q_b_unabs_f32))
+                    state_dict[f"{attn}q_b_proj_unabsorbed.weight"] = q_b_unabs_fp8
+                    state_dict[f"{attn}q_b_proj_unabsorbed.weight_scale_inv"] = q_b_unabs_scale
 
                     kv_head_dim = qk_nope + v_dim
                     kv_b_reshaped = kv_f32.reshape(
@@ -720,6 +766,46 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_k.weight_scale_inv"] = kv_b_k_scale
                     state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
                     state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
+
+                    # BMM repack of kv_b_k for MPK_DSV3_BMM=1 decode path:
+                    # transpose W_UK (H, 128, 512) → (H, 512, 128) and
+                    # per-row quantize. BMM kernel expects weight layout
+                    # (H, D_out=512, D_in=128) FP8 + (H, 512, 1) uint32
+                    # UE8M0-packed scale (1 packed scale per row since
+                    # D_in=128 == one BLOCK_K). Row-major contiguous.
+                    W_UK_bmm = W_UK.transpose(-2, -1).contiguous()  # (H, 512, 128)
+                    bmm_amax = W_UK_bmm.abs().amax(dim=-1, keepdim=True).clamp(
+                        min=1e-12)
+                    bmm_scale_inv_f32 = (bmm_amax / 448.0).squeeze(-1)  # (H, 512)
+                    bmm_w_q = (W_UK_bmm / bmm_amax).clamp(-448, 448).to(
+                        torch.float8_e4m3fn).contiguous()  # (H, 512, 128) FP8
+                    # UE8M0 encode (CEIL log2 to match kernel-side encode_ue8m0).
+                    # Direct exponent math (bias = 127) avoids the
+                    # float-as-int-bits trick which silently broke when
+                    # torch.pow returned float64 (last dim halved on view
+                    # to int32).
+                    pos = torch.where(
+                        bmm_scale_inv_f32 > 0, bmm_scale_inv_f32,
+                        torch.full_like(bmm_scale_inv_f32, 1e-30))
+                    log2_val = torch.ceil(torch.log2(pos))
+                    ue = (log2_val + 127.0).clamp(0, 255).to(torch.uint8)
+                    ue = torch.where(bmm_scale_inv_f32 > 0, ue,
+                                     torch.zeros_like(ue))
+                    # Pack into uint32 (1 packed scale per row at K=128 ≤ 512).
+                    bmm_scale_packed = ue.to(torch.uint32).unsqueeze(-1).contiguous()
+                    # ^ shape (H, 512, 1) uint32, low byte holds UE8M0 exponent.
+                    state_dict[f"{attn}kv_b_k_bmm.weight"] = bmm_w_q
+                    state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"] = (
+                        bmm_scale_packed)
+                    # DEBUG 2026-05-10: also store bf16 versions of the
+                    # split kv_b weights for the BF16 ablation in
+                    # _fp8_dense_kv_b_proj. Used to verify whether the FP8
+                    # GEMM path is the source of the layer-0 attn_proj
+                    # orthogonality. Toggle via builder._kv_b_use_bf16.
+                    state_dict[f"{attn}kv_b_k_bf16.weight"] = (
+                        kv_b_k_f32.bfloat16().contiguous())
+                    state_dict[f"{attn}kv_b_v_bf16.weight"] = (
+                        kv_b_v_f32.bfloat16().contiguous())
 
                     # Preserve original W_O for PR674 prefill output. The
                     # existing o_proj key is replaced by the decode-only fused
@@ -783,6 +869,55 @@ if __name__ == "__main__":
                         us = state_dict.pop(us_key)
                         state_dict[f"{prefix}gate_up_proj.weight_scale_inv"] = (
                             _shuffle_tensors([gs, us], split=split, dim=0))
+
+            # 2026-05-12 (user #2 part-a) — Fuse q_a_proj + kv_a_proj_with_mqa
+            # into a single qkv_a_proj.weight of shape (2176, hidden). Layout:
+            #   rows [0     : 1536) = q_a_proj.weight              (12 fp8 blocks)
+            #   rows [1536  : 2048) = kv_a_proj_with_mqa[:512]     (4  blocks, c_latent)
+            #   rows [2048  : 2112) = kv_a_proj_with_mqa[512:576]  (k_pe real, 64 rows)
+            #   rows [2112  : 2176) = zero-padded                  (k_pe pad block tail)
+            # FP8 block boundaries fall cleanly at 128-row borders → no nope/pe
+            # mixing within blocks. Scales just concat.
+            #
+            # Both q_a_proj and kv_a_proj_with_mqa are REPLICATED (no TP shard),
+            # so the fused weight is also replicated. The fused 2176-wide
+            # qkv_a_proj is the only path the MPK builder supports — the
+            # 3-GEMM unfused path was removed (was +14.9% slower e2e).
+            FUSED_ROWS = 2176  # 1536 q_a + 512 c_latent + 64 k_pe + 64 pad
+            for li in absorb_layers:
+                attn = f"model.layers.{li}.self_attn."
+                q_a_key = f"{attn}q_a_proj.weight"
+                kv_a_key = f"{attn}kv_a_proj_with_mqa.weight"
+                if q_a_key not in state_dict or kv_a_key not in state_dict:
+                    continue
+                q_a_w = state_dict[q_a_key]
+                kv_a_w = state_dict[kv_a_key]
+                q_a_s_key = f"{q_a_key}_scale_inv"
+                kv_a_s_key = f"{kv_a_key}_scale_inv"
+                q_a_s = state_dict.get(q_a_s_key)
+                kv_a_s = state_dict.get(kv_a_s_key)
+                if q_a_s is None or kv_a_s is None:
+                    raise RuntimeError(
+                        f"layer {li}: q_a_proj/kv_a_proj_with_mqa FP8 scales "
+                        f"missing — MPK requires FP8 DeepSeek-V3 weights.")
+                assert q_a_w.shape[0] == 1536 and kv_a_w.shape[0] == 576, (
+                    f"layer {li}: unexpected q_a/kv_a shape "
+                    f"({q_a_w.shape}, {kv_a_w.shape})")
+                K = q_a_w.shape[1]
+                fused_w = torch.zeros(
+                    (FUSED_ROWS, K), dtype=q_a_w.dtype, device=q_a_w.device)
+                fused_w[0:1536] = q_a_w
+                fused_w[1536:2048] = kv_a_w[:512]
+                fused_w[2048:2112] = kv_a_w[512:576]
+                # rows [2112:2176) stay zero (pad to 128-row MMA tile)
+                scale_rows = FUSED_ROWS // 128
+                fused_s = torch.zeros(
+                    (scale_rows, q_a_s.shape[1]),
+                    dtype=q_a_s.dtype, device=q_a_s.device)
+                fused_s[0:12] = q_a_s
+                fused_s[12:17] = kv_a_s
+                state_dict[f"{attn}qkv_a_proj.weight"] = fused_w
+                state_dict[f"{attn}qkv_a_proj.weight_scale_inv"] = fused_s.contiguous()
 
             # Fuse per-expert weights into experts.w13/w2 tensors (keep FP8)
             for li in absorb_layers:
@@ -879,10 +1014,25 @@ if __name__ == "__main__":
                     # decompression, both column-parallel on local heads.
                     (r"self_attn\.q_b_nope\.weight",                         0),
                     (r"self_attn\.q_b_pe\.weight",                           0),
+                    # FuseTensor (user #2, 2026-05-12): unabsorbed q_b_proj
+                    # used by the fused prefill path (MPK_DSV3_QB_FUSED=1).
+                    # Same column-parallel sharding as q_b_proj.
+                    (r"self_attn\.q_b_proj_unabsorbed\.weight",              0),
                     (r"self_attn\.kv_b_k\.weight",                           0),
                     (r"self_attn\.kv_b_v\.weight",                           0),
+                    # BMM repack of kv_b_k: per-head (H, 512, 128); shard
+                    # head dim (dim=0). The packed UE8M0 scale (H, 512, 1)
+                    # shards the same way.
+                    (r"self_attn\.kv_b_k_bmm\.weight",                       0),
+                    (r"self_attn\.kv_b_k_bmm\.weight_scale_ue8m0",           0),
+                    (r"self_attn\.kv_b_k_bf16\.weight",                      0),
+                    (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
+                    # FuseTensor part-a (user #2 part-a, landed 2026-05-13):
+                    # fused q_a_proj + kv_a_proj_with_mqa weight, replicated
+                    # like its constituents.
+                    (r"self_attn\.qkv_a_proj\.weight",                       None),
                     (r"self_attn\.o_proj_original\.weight",                  1),
                     (r"self_attn\.o_proj\.weight",                           1),
                     (r"input_layernorm\.weight$",                            None),
@@ -1071,6 +1221,60 @@ if __name__ == "__main__":
             with_lm_head=True,
         )
 
+        # Optional per-layer residual dump (diagnostic). Allocate one
+        # PyTorch tensor per built layer so the builder can wire a copy
+        # task at the end of each layer iteration. Saved on rank 0
+        # after mpk() returns.
+        if args.dump_hidden_dir is not None:
+            num_dump_layers = (
+                len(layer_indices_arg) if layer_indices_arg
+                else model_config.num_layers
+            )
+            mpk.dump_hidden_tensors = [
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                )
+                for _ in range(num_dump_layers)
+            ]
+            # Also dump self.y (embed_layer output) so we can isolate
+            # whether MPK's hidden-state divergence from reference starts
+            # at the embedding step or later in attn/MLP.
+            mpk.dump_embed_tensor = torch.zeros(
+                (args.max_num_batched_tokens, model_config.hidden_size),
+                dtype=torch.bfloat16, device="cuda",
+            )
+            # Layer-0 intra-layer dumps: 4 slots, all bf16
+            # 0=input_norm    (mbt, hidden)
+            # 1=qkv_a_out     (mbt, 2176) — full fused QKV-a GEMM output;
+            #                  Python comparator slices to q_a/c_latent/k_pe.
+            # 2=attn_out      (mbt, hidden) — o_proj+residual
+            # 3=dense_mlp_out (mbt, hidden) — full layer 0 residual
+            slot1_cols = 2176  # = QKV_A_FUSED_N in builder.py
+            mpk.dump_layer0_intra_tensors = [
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+                torch.zeros(
+                    (args.max_num_batched_tokens, slot1_cols),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+                torch.zeros(
+                    (args.max_num_batched_tokens, model_config.hidden_size),
+                    dtype=torch.bfloat16, device="cuda",
+                ),
+            ]
+        else:
+            mpk.dump_hidden_tensors = None
+            mpk.dump_embed_tensor = None
+            mpk.dump_layer0_intra_tensors = None
+
+
         # Build the computation graph using the DeepSeek V3 builder
         builder = DeepSeekV3Builder(mpk)
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
@@ -1109,6 +1313,64 @@ if __name__ == "__main__":
         ender.record()
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
+
+        if args.dump_hidden_dir is not None and rank == 0 and getattr(mpk, "dump_hidden_tensors", None) is not None:
+            os.makedirs(args.dump_hidden_dir, exist_ok=True)
+            ordered_layer_idx = layer_indices_arg or list(range(model_config.num_layers))
+            for slot, t in enumerate(mpk.dump_hidden_tensors):
+                idx = ordered_layer_idx[slot] if slot < len(ordered_layer_idx) else slot
+                path = os.path.join(args.dump_hidden_dir, f"layer_{idx:02d}_residual.pt")
+                torch.save(t.detach().cpu(), path)
+            if getattr(mpk, "dump_embed_tensor", None) is not None:
+                torch.save(mpk.dump_embed_tensor.detach().cpu(),
+                           os.path.join(args.dump_hidden_dir, "embed.pt"))
+                print(f"Saved embed.pt to {args.dump_hidden_dir}")
+            if getattr(mpk, "dump_layer0_intra_tensors", None) is not None:
+                names = ["layer0_input_norm.pt",
+                         "layer0_q_a_out.pt",
+                         "layer0_attn_out.pt",
+                         "layer0_dense_mlp_out.pt"]
+                for k, t in enumerate(mpk.dump_layer0_intra_tensors):
+                    torch.save(t.detach().cpu(),
+                               os.path.join(args.dump_hidden_dir, names[k]))
+                print(f"Saved layer-0 intra-layer dumps to {args.dump_hidden_dir}")
+            if getattr(mpk, "dump_attn_unabsorbed_tensor", None) is not None:
+                torch.save(
+                    mpk.dump_attn_unabsorbed_tensor.detach().cpu(),
+                    os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
+                )
+                print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
+            # Debug-only: when MPK_DSV3_FP8_BUF_ATTACH=1, builder attaches the
+            # shared FP8 input/scale buffers as torch tensors so we can inspect
+            # their post-megakernel state here.
+            if getattr(mpk, "_fp8_input_torch", None) is not None:
+                for rsize, tensor in mpk._fp8_input_torch.items():
+                    name = f"fp8_input_v2_{rsize}.pt"
+                    torch.save(tensor.detach().view(torch.uint8).cpu(),
+                               os.path.join(args.dump_hidden_dir, name))
+                    print(f"Saved {name} to {args.dump_hidden_dir}")
+                for rsize, tensor in mpk._fp8_scale_torch.items():
+                    name = f"fp8_scale_v2_{rsize}.pt"
+                    torch.save(tensor.detach().cpu(),
+                               os.path.join(args.dump_hidden_dir, name))
+                    print(f"Saved {name} to {args.dump_hidden_dir}")
+            if getattr(mpk, "_rmsnorm_out_torch", None) is not None:
+                torch.save(mpk._rmsnorm_out_torch.detach().cpu(),
+                           os.path.join(args.dump_hidden_dir, "rmsnorm_out_attached.pt"))
+                print(f"Saved rmsnorm_out_attached.pt to {args.dump_hidden_dir}")
+
+            for _attr, _fname in [
+                ("dump_ckv_sep_tensor", "ckv_sep.pt"),
+                ("dump_kpe_sep_tensor", "kpe_sep.pt"),
+                ("dump_prefill_k_nope_tensor", "prefill_k_nope.pt"),
+                ("dump_prefill_v_tensor", "prefill_v.pt"),
+            ]:
+                _t = getattr(mpk, _attr, None)
+                if _t is not None:
+                    torch.save(_t.detach().cpu(),
+                               os.path.join(args.dump_hidden_dir, _fname))
+                    print(f"Saved {_fname} to {args.dump_hidden_dir}")
+            print(f"Saved {len(mpk.dump_hidden_tensors)} per-layer residual dumps to {args.dump_hidden_dir}")
 
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):

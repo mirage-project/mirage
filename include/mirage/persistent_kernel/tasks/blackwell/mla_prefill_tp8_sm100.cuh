@@ -25,9 +25,9 @@
 //   Thread guard at entry    → if (threadIdx.x >= 128) return;
 //   Removed __launch_bounds__, launcher function, main().
 //
-// Each task handles one (head, q_block, batch) tuple. Grid = (H, num_q_blocks, B).
-// TP=8 means NUM_HEADS per rank is 128/8 = 16; the kernel doesn't encode that —
-// it just iterates over H passed as a parameter (H = 16 for TP=8).
+// Each task handles one (head, q_block, batch) tuple. Grid = (H, num_q_blocks,
+// B). TP=8 means NUM_HEADS per rank is 128/8 = 16; the kernel doesn't encode
+// that — it just iterates over H passed as a parameter (H = 16 for TP=8).
 
 #pragma once
 
@@ -53,10 +53,10 @@ static constexpr int BM = 64;
 static constexpr int BN = 128;
 static constexpr int NT = 128;
 static constexpr int MK = 16;
-static constexpr int HALF_N = BN / 16 / 2;    // 4
-static constexpr int NMDK = D_QK_NOPE / MK;   // 8
-static constexpr int NMRK = D_QK_ROPE / MK;   // 4
-static constexpr int NMDV = D_V / 16;         // 8
+static constexpr int HALF_N = BN / 16 / 2;  // 4
+static constexpr int NMDK = D_QK_NOPE / MK; // 8
+static constexpr int NMRK = D_QK_ROPE / MK; // 4
+static constexpr int NMDV = D_V / 16;       // 8
 
 // SMEM: Q_nope + Q_pe + 5 TMA blocks of [BN,64] with 128B swizzle + mbar
 static constexpr int Q_NOPE_SZ = BM * D_QK_NOPE * 2; // 16 KB
@@ -94,15 +94,11 @@ __device__ __forceinline__ void ldm4t(uint32_t r[4], int a) {
 }
 __device__ __forceinline__ void
     hmma(const uint32_t A[4], const uint32_t B[2], float C[4]) {
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-               "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};\n"
-               : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
-               : "r"(A[0]),
-                 "r"(A[1]),
-                 "r"(A[2]),
-                 "r"(A[3]),
-                 "r"(B[0]),
-                 "r"(B[1]));
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+      "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};\n"
+      : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
+      : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]));
 }
 __device__ __forceinline__ void
     hmma0(const uint32_t A[4], const uint32_t B[2], float C[4]) {
@@ -141,7 +137,7 @@ __device__ __forceinline__ void rowsum(float *d, uint32_t *s) {
                  "r"(1065369472u),
                  "r"(1065369472u));
 }
-__device__ __forceinline__ void cpa(int d, const void *s) {
+__device__ __forceinline__ void cpa(int d, void const *s) {
   asm volatile("cp.async.cg.shared.global [%0],[%1],16;\n" ::"r"(d), "l"(s));
 }
 __device__ __forceinline__ void cpa_commit() {
@@ -182,8 +178,8 @@ __device__ __forceinline__ void mbar_init_1(int a, int c) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0],%1;" ::"r"(a), "r"(c));
 }
 __device__ __forceinline__ void mbar_tx(int a, int b) {
-  asm volatile(
-      "mbarrier.arrive.expect_tx.shared::cta.b64 _,[%0],%1;" ::"r"(a), "r"(b));
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _,[%0],%1;" ::"r"(a),
+               "r"(b));
 }
 __device__ __forceinline__ void mbar_wait_1(int a, int p) {
   asm volatile("{.reg .pred P;\nW: "
@@ -207,23 +203,23 @@ __device__ __noinline__ void mla_prefill_tp8_sm100_task_impl(
     int const S,
     int const H,
     float const sml2, // sm_scale * log2(e)
-    int const head,    // was blockIdx.x
-    int const qb_in,   // was blockIdx.y input (mapped to qb = cdiv(S,BM)-1-qb_in)
-    int const bat      // was blockIdx.z
+    int const head,   // was blockIdx.x
+    int const qb_in, // was blockIdx.y input (mapped to qb = cdiv(S,BM)-1-qb_in)
+    int const bat    // was blockIdx.z
 ) {
   // MPK worker may launch with more threads; only NT participate.
   if (threadIdx.x >= NT) {
     return;
   }
 
-  const int qb = cdiv(S, BM) - 1 - qb_in;
-  const int qs = qb * BM;
-  const int tid = threadIdx.x;
-  const int wid = tid / 32;
-  const int lid = tid % 32;
-  const long long bqn = (long long)bat * S * H * D_QK_NOPE;
-  const long long bqp = (long long)bat * S * H * D_QK_ROPE;
-  const long long bo = (long long)bat * S * H * D_V;
+  int const qb = cdiv(S, BM) - 1 - qb_in;
+  int const qs = qb * BM;
+  int const tid = threadIdx.x;
+  int const wid = tid / 32;
+  int const lid = tid % 32;
+  long long const bqn = (long long)bat * S * H * D_QK_NOPE;
+  long long const bqp = (long long)bat * S * H * D_QK_ROPE;
+  long long const bo = (long long)bat * S * H * D_V;
   // 128B swizzle TMA requires SMEM destination aligned to the 1024-byte
   // swizzle tile. In MPK the dynamic SMEM starts after ~7 KB of static
   // shared (TaskDesc buffers), leaving the extern __shared__ base only
@@ -276,7 +272,7 @@ __device__ __noinline__ void mla_prefill_tp8_sm100_task_impl(
   constexpr int SNB = D_QK_NOPE * 2, SPB = D_QK_ROPE * 2, S128 = 128;
   int qnl = qn_s + swz<SNB>(wid * 16 + (lid % 16), lid / 16);
   int qpl = qp_s + swz<(D_QK_ROPE * 2)>(wid * 16 + (lid % 16), lid / 16);
-  const int kr = (lid % 8) + (lid / 16) * 8, kc = (lid % 16) / 8;
+  int const kr = (lid % 8) + (lid / 16) * 8, kc = (lid % 16) / 8;
 
   float of[NMDV][8];
 #pragma unroll
@@ -427,7 +423,9 @@ __device__ __noinline__ void mla_prefill_tp8_sm100_task_impl(
             uint32_t vf[4];
             int vs_base = (md < 4) ? v0s : v1s;
             int md_local = (md < 4) ? md : (md - 4);
-            ldm4t(vf, vs_base + swz<S128>(vr0 + (noff + mkv) * 16, vcb + md_local * 2));
+            ldm4t(vf,
+                  vs_base +
+                      swz<S128>(vr0 + (noff + mkv) * 16, vcb + md_local * 2));
             hmma16(pf[mkv], vf, of[md]);
           }
         }
@@ -464,7 +462,8 @@ __device__ __noinline__ void mla_prefill_tp8_sm100_task_impl(
     for (int md = 0; md < NMDV; md++) {
       int db = md * 16, qp = qs + wid * 16 + g;
       if (qp < S) {
-        long long off = bo + (long long)qp * H * D_V + (long long)head * D_V + db;
+        long long off =
+            bo + (long long)qp * H * D_V + (long long)head * D_V + db;
         *(bf16_2 *)&O[off + 2 * t2] =
             __float22bfloat162_rn(make_float2(of[md][0], of[md][1]));
         *(bf16_2 *)&O[off + 2 * t2 + 8] =
@@ -472,7 +471,8 @@ __device__ __noinline__ void mla_prefill_tp8_sm100_task_impl(
       }
       qp = qs + wid * 16 + g + 8;
       if (qp < S) {
-        long long off = bo + (long long)qp * H * D_V + (long long)head * D_V + db;
+        long long off =
+            bo + (long long)qp * H * D_V + (long long)head * D_V + db;
         *(bf16_2 *)&O[off + 2 * t2] =
             __float22bfloat162_rn(make_float2(of[md][2], of[md][3]));
         *(bf16_2 *)&O[off + 2 * t2 + 8] =

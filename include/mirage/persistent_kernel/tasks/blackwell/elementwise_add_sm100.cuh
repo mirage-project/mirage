@@ -25,7 +25,16 @@
 
 namespace kernel {
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int STRIDE>
+// IN_A_STRIDE / IN_A_OFFSET let input_a read a column slice of a wider
+// buffer (e.g. when input_a is qkv_a_out and we want only its q_a slice).
+// Defaults keep the legacy contiguous (STRIDE-wide) behaviour for input_b
+// and the output.
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int STRIDE,
+          int IN_A_STRIDE = STRIDE,
+          int IN_A_OFFSET = 0>
 __device__ __forceinline__ void elementwise_add_task_impl(
     void const *input_a_ptr, void const *input_b_ptr, void *output_ptr) {
   T const *__restrict__ a = static_cast<T const *>(input_a_ptr);
@@ -36,8 +45,9 @@ __device__ __forceinline__ void elementwise_add_task_impl(
   for (int i = threadIdx.x; i < BATCH_SIZE * OUTPUT_SIZE; i += blockDim.x) {
     int row = i / OUTPUT_SIZE;
     int col = i % OUTPUT_SIZE;
+    int idx_a = row * IN_A_STRIDE + IN_A_OFFSET + col;
     int idx = row * STRIDE + col;
-    out[idx] = T(float(a[idx]) + float(b[idx]));
+    out[idx] = T(float(a[idx_a]) + float(b[idx]));
   }
 }
 
