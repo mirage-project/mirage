@@ -208,10 +208,7 @@ class OnlinePinnedRuntime:
 
     def reset(self) -> None:
         """Clear completion bookkeeping for a new inference session.
-
-        Does *not* reset the ring cursor state — call only between full
-        inference sessions (i.e. after the persistent kernel has been
-        relaunched via ``mpk.init_per_request()``).
+        It is not used anywhere right now, because mpk start only once in the whole inference lifecycle
         """
         self._cpu_req_tail  = 0
         self._cpu_comp_head = 0

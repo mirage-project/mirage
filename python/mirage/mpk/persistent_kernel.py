@@ -396,7 +396,7 @@ class PersistentKernel:
         self._torch_tensor_refs = []
         self.meta_tensors = meta_tensors
         # Auto-allocate scheduler snapshot buffer for in-place compaction
-        if "paged_kv_indices_snapshot" not in self.meta_tensors:
+        if "paged_kv_indices_snapshot" not in self.meta_tensors and self.mode != "online_pinned":
             self.meta_tensors["paged_kv_indices_snapshot"] = torch.empty(
                 max_num_pages, dtype=torch.int32, device="cuda")
         self.profiler_tensor = profiler_tensor

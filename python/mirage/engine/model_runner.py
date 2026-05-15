@@ -110,6 +110,8 @@ class ModelRunner:
         prevents the kernel from trying to process uninitialized empty slots.
         """
         pk = self.mpk.persistent_kernel
+        model_tensor_names = list(pk._model_tensors.keys())
+        model_tensor_ptrs = [t.data_ptr() for t in pk._model_tensors.values()]
         pk.init_func(
             self.mpk.meta_tensors_ptr,
             self.mpk.profiler_buffer_ptr,
@@ -122,6 +124,9 @@ class ModelRunner:
             pk.eos_token_id,
             pk.allocate_nvshmem_teams,
             pk.test_mode,
+            model_tensor_names,
+            model_tensor_ptrs,
+            "",  # Empty JSON path = use __FILE__ based path
         )
 
     def __call__(self) -> None:

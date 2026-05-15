@@ -1398,24 +1398,33 @@ extern "C" void init_request_resources() {
   cudaStreamSynchronize(NULL);
 }
 
-extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
-                                       void *profiler_buffer,
-                                       int my_rank,
-                                       int num_workers,
-                                       int num_local_schedulers,
-                                       int num_remote_schedulers,
-                                       int max_seq_length,
-                                       int total_num_requests,
-                                       long long eos_token_id,
-                                       int allocate_nvshmem_teams,
-                                       int is_test_mode) {
-  // meta_tensors[0..9] are always required.
-  // meta_tensors[10..16]: pinned ring pointers (MODE_ONLINE_PINNED only,
+extern "C" void
+    init_persistent_kernel(std::vector<void *> meta_tensors,
+                           void *profiler_buffer,
+                           int my_rank,
+                           int num_workers,
+                           int num_local_schedulers,
+                           int num_remote_schedulers,
+                           int max_seq_length,
+                           int total_num_requests,
+                           long long eos_token_id,
+                           int allocate_nvshmem_teams,
+                           int is_test_mode,
+                           std::vector<std::string> model_tensor_names,
+                           std::vector<void *> model_tensor_ptrs) {
+  // Build global model tensors map from parallel vectors
+  assert(model_tensor_names.size() == model_tensor_ptrs.size());
+  global_model_tensors.clear();
+  for (size_t i = 0; i < model_tensor_names.size(); i++) {
+    global_model_tensors[model_tensor_names[i]] = model_tensor_ptrs[i];
+  }
+  // meta_tensors[0..10] are always required.
+  // meta_tensors[11..18]: pinned ring pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 18);
+  assert(meta_tensors.size() == 19);
 #else
-  assert(meta_tensors.size() == 10);
+  assert(meta_tensors.size() == 11);
 #endif
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
@@ -1434,21 +1443,21 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       static_cast<int *>(meta_tensors[9]);
 #if defined(MODE_ONLINE_PINNED)
   global_runtime_config.pinned_req_ready =
-      static_cast<volatile int32_t *>(meta_tensors[10]);
+      static_cast<volatile int32_t *>(meta_tensors[11]);
   global_runtime_config.pinned_req_request_id =
-      static_cast<int32_t *>(meta_tensors[11]);
-  global_runtime_config.pinned_req_prompt_len =
       static_cast<int32_t *>(meta_tensors[12]);
-  global_runtime_config.pinned_req_initial_step =
+  global_runtime_config.pinned_req_prompt_len =
       static_cast<int32_t *>(meta_tensors[13]);
+  global_runtime_config.pinned_req_initial_step =
+      static_cast<int32_t *>(meta_tensors[14]);
   global_runtime_config.pinned_comp_ready =
-      static_cast<volatile int32_t *>(meta_tensors[14]);
+      static_cast<volatile int32_t *>(meta_tensors[15]);
   global_runtime_config.pinned_comp_request_id =
-      static_cast<int32_t *>(meta_tensors[15]);
-  global_runtime_config.pinned_comp_final_step =
       static_cast<int32_t *>(meta_tensors[16]);
+  global_runtime_config.pinned_comp_final_step =
+      static_cast<int32_t *>(meta_tensors[17]);
   global_runtime_config.pinned_shutdown =
-      static_cast<volatile int32_t *>(meta_tensors[17]);
+      static_cast<volatile int32_t *>(meta_tensors[18]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;

@@ -125,7 +125,7 @@ class MPK:
         self.max_sm_num = args.max_sm_num
         self.num_workers = args.num_workers
         self.num_schedulers = args.num_schedulers
-        
+        self.max_num_pages = args.max_num_pages
         torch.set_default_dtype(torch.bfloat16)
         torch.cuda.set_device(self.rank)
         
@@ -208,7 +208,8 @@ class MPK:
             "qo_indptr_buffer": self.qo_indptr_buffer,
             "paged_kv_indptr_buffer": self.paged_kv_indptr_buffer,
             "paged_kv_indices_buffer": self.paged_kv_indices_buffer,
-            "paged_kv_last_page_len_buffer": self.paged_kv_last_page_len_buffer
+            "paged_kv_last_page_len_buffer": self.paged_kv_last_page_len_buffer,
+            "paged_kv_indices_snapshot": self.paged_kv_indices_snapshot
         }
         # Pinned ring buffers for online_pinned mode.
         # Both CPU and GPU access these arrays; pin_memory() gives a stable
