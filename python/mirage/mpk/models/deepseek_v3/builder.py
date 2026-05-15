@@ -1891,6 +1891,18 @@ class DeepSeekV3Builder(GraphBuilder):
             k_pe_row_stride=self._qkv_a_row_stride,
             k_pe_offset_elems=self._qkv_a_k_pe_offset)
         if self._use_prefill:
+            # B14 (2026-05-15): grid.y = 4 CTAs stripe Phase 2 over
+            # seq_pos. Bisect: chunks=1/2/4/8 all pass; chunks=16 hits
+            # an async cudaErrorMisalignedAddress sometime later (not
+            # in the gather kernel itself — kernel does early-return
+            # path for decode iter — so the cause is unclear, possibly
+            # the extra event-chain overhead disturbs another kernel's
+            # alignment assumption). Chunks=4 cuts gather wallclock
+            # 117 → 30 μs/CTA (4×) and per-MoE-layer 888 → 800 μs
+            # (-10%). Chunks=8 also passes but in some runs per-layer
+            # variance exploded (likely cross-rank sglang contention,
+            # not B14 fault). Keep conservative chunks=4.
+            mla_kv_gather_seq_chunks = 4
             self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
@@ -1899,7 +1911,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                grid_dim=(self.mpk.max_num_batched_requests,
+                          mla_kv_gather_seq_chunks, 1),
                 block_dim=(128, 1, 1),
                 **kv_gather_slice_kwargs,
             )
