@@ -387,6 +387,9 @@ struct RuntimeConfig {
   // CPU→GPU shutdown signal: CPU writes 1 to request kernel termination.
   // GPU polls with ld.acquire.sys when the batch is empty.
   int32_t volatile *pinned_shutdown; // 0=running, 1=shutdown requested
+  // Per-request step progress: GPU writes after each decode step so CPU can
+  // poll for streaming output without touching GPU memory.
+  int32_t *pinned_step; // [max_num_batched_requests], pinned, GPU writes
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;

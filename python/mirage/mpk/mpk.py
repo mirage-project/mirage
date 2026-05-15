@@ -238,6 +238,9 @@ class MPK:
             # CPU→GPU shutdown signal (scalar): CPU writes 1 to request termination.
             self.pinned_shutdown         = torch.zeros(1, dtype=torch.int32).pin_memory()
             meta_tensors["pinned_shutdown"] = self.pinned_shutdown
+            # Per-request step progress: GPU writes after each decode step.
+            self.pinned_step = torch.zeros(args.max_num_batched_requests, dtype=torch.int32).pin_memory()
+            meta_tensors["pinned_step"] = self.pinned_step
         else:
             self.pinned_ring_capacity = 0
         self.persistent_kernel = PersistentKernel(

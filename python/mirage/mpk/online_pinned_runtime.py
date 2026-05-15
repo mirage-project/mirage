@@ -57,6 +57,7 @@ class OnlinePinnedRuntime:
         self._comp_request_id  = mpk.pinned_comp_request_id  # int32, pinned
         self._comp_final_step  = mpk.pinned_comp_final_step  # int32, pinned
         self._shutdown         = mpk.pinned_shutdown         # int32[1], pinned
+        self._pinned_step      = mpk.pinned_step             # int32[max_requests], pinned
 
         # CPU-private ring cursors (int, not tensors)
         self._cpu_req_tail  = 0  # next slot to write into the request ring
@@ -146,6 +147,38 @@ class OnlinePinnedRuntime:
                 self._completions[request_id] = final_step
             finished.append(request_id)
         return finished
+
+    def get_current_step(self, request_id: int) -> int:
+        """Return the latest decode step written by the GPU for *request_id*.
+
+        The step is the index of the last generated+prompt token, so the
+        number of tokens available in the token buffer is step + 1.
+        Returns 0 if no decode progress has been recorded yet (the request
+        may still be in prefill or not yet admitted by the GPU).
+        """
+        return int(self._pinned_step[request_id].item())
+
+    def drain_step_progress(self) -> Dict[int, int]:
+        """Non-blocking poll: return {request_id: current_step} for all active
+        requests that have made progress since last call.
+
+        Only returns requests whose step has advanced; stalled/idle requests
+        are not included.
+        """
+        # pinned_step is shared memory; safe to read without locking.
+        # We track previous step per request to detect changes.
+        if not hasattr(self, '_prev_steps'):
+            self._prev_steps: Dict[int, int] = {}
+        progress = {}
+        for rid in range(self._mpk.metadata.max_num_batched_requests):
+            s = int(self._pinned_step[rid].item())
+            if s <= 0:
+                continue
+            prev = self._prev_steps.get(rid, 0)
+            if s > prev:
+                self._prev_steps[rid] = s
+                progress[rid] = s
+        return progress
 
     def wait_all(
         self,

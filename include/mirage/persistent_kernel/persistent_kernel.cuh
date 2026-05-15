@@ -449,6 +449,10 @@ __device__ __forceinline__ bool
     }
     config.step[request_id] = step + num_tokens;
 
+    // Per-step notification: write step to pinned memory so CPU can
+    // poll progress for streaming output.
+    config.pinned_step[request_id] = (int32_t)(step + num_tokens);
+
 #ifdef MPK_ENABLE_PROFILING
     bool done = true;
 #else
@@ -1423,7 +1427,7 @@ extern "C" void
   // meta_tensors[11..18]: pinned ring pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 19);
+  assert(meta_tensors.size() == 20);
 #else
   assert(meta_tensors.size() == 11);
 #endif
@@ -1459,6 +1463,8 @@ extern "C" void
       static_cast<int32_t *>(meta_tensors[17]);
   global_runtime_config.pinned_shutdown =
       static_cast<volatile int32_t *>(meta_tensors[18]);
+  global_runtime_config.pinned_step =
+      static_cast<int32_t *>(meta_tensors[19]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
