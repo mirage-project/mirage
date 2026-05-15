@@ -2391,6 +2391,11 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         if upto < 6: return
         # 6) Quantize SiLU → UE8M0, then transpose to K-outermost.
+        # B12 (2026-05-15): process_all_rows=True because new_moe_silu_out
+        # has M_TOTAL = E_LOCAL × BM_PADDING rows (permuted-expert layout),
+        # not token-indexed. The default token-based active_rows skip was
+        # leaving rows 128..16383 uninitialized in decode and feeding
+        # stale silu_fp8 to the W2 group GEMM for every routed expert > 0.
         self.mpk.quantize_fp8_layer(
             input=new_moe_silu_out,
             output_fp8=new_moe_silu_fp8,
@@ -2398,6 +2403,7 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(m_total, 1, 1),
             block_dim=(128, 1, 1),
             scale_ue8m0=True,
+            process_all_rows=True,
         )
         if upto < 7: return
         self.mpk.transpose_scale_sm100_layer(
