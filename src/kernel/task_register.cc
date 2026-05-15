@@ -472,9 +472,16 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params) {
   // params: [] (legacy copy) OR [noop_flag] (when 1, emit empty body — the
   //   task graph node still exists for case-3 fork+join shaping but the
-  //   kernel does nothing, just `return;`).
-  assert(params.size() == 0 || params.size() == 1);
-  bool is_noop = (params.size() == 1 && params[0] == 1);
+  //   kernel does nothing, just `return;`)
+  //   OR [noop_flag, gate_decode_q_len_flag] (when gate_decode_q_len_flag==1,
+  //   emit a runtime Q_LEN gate at the top of the kernel that returns
+  //   immediately if request 0's Q_LEN <= 8. This makes the kpe_sep_v2
+  //   phantom-bridge identity a noop on decode iters while still doing the
+  //   real BF16 copy on chunked-prefill iters — saving ~16 μs per decode
+  //   layer).
+  assert(params.size() <= 2);
+  bool is_noop = (params.size() >= 1 && params[0] == 1);
+  bool gate_decode_q_len = (params.size() >= 2 && params[1] == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -515,6 +522,16 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
     // shaping node. No data motion, just return.
     code.e("// identity_task no-op variant (graph-shaping only)");
   } else {
+    if (gate_decode_q_len) {
+      // Runtime Q_LEN gate: skip the BF16 copy entirely on decode iters
+      // (Q_LEN <= 8). Used by the kpe_sep_v2 phantom-bridge identity in the
+      // chunked-prefill task graph: chunked_prefill itself has a Q_LEN > 8
+      // gate, so its kpe_sep_v2 input is never read on decode iters, and
+      // letting the buffer keep stale data is harmless.
+      code.e("int q_len_id_ = runtime_config.qo_indptr_buffer[1] - "
+             "runtime_config.qo_indptr_buffer[0];");
+      code.e("if (q_len_id_ <= 8) return;");
+    }
     code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
            outer_dim_size,
            inner_dim_size,
@@ -5776,10 +5793,19 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   (2026-05-13).
   // runtime_m_mode=1: gates to prompt-prefill and uses request 0's current
   //   kv_len as runtime M. This is used for ckv -> kv_b_proj decompression.
+  // runtime_m_mode=2 (B20, 2026-05-15): prefill-phase gate (Q_LEN > 8) but
+  //   keep active_rows as runtime M. Used for the prefill-only branch of
+  //   the dual-dispatch O_proj (prefill O_proj reads attn_unabsorbed which
+  //   is only valid on prefill iters; decode iters early-exit so the GEMM
+  //   doesn't burn ~30 μs on a wasted wave).
+  // runtime_m_mode=3 (B20, 2026-05-15): decode-phase gate (Q_LEN <= 8) with
+  //   active_rows as runtime M. Used for the decode-only branch of the
+  //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
+  //   valid on decode iters; prefill iters early-exit).
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
-  assert(runtime_m_mode == 0 || runtime_m_mode == 1);
+  assert(runtime_m_mode >= 0 && runtime_m_mode <= 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5796,6 +5822,19 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
     code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
            "runtime_config.paged_kv_last_page_len_buffer[0];");
+  } else if (runtime_m_mode == 2 || runtime_m_mode == 3) {
+    // Phase gate + active_rows cap. Mode 2 = prefill-only, 3 = decode-only.
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    if (runtime_m_mode == 2) {
+      code.e("if (q_len_ <= 8) return;");
+    } else {
+      code.e("if (q_len_ > 8) return;");
+    }
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
   } else {
     // 2026-05-13 ROOT-CAUSE FIX: cap M at active_rows so decode iters
     // (active_rows=1) don't overwrite output rows 1..M-1 with garbage.

@@ -541,6 +541,15 @@ class DeepSeekV3Builder(GraphBuilder):
             if self.mpk.max_seq_length <= 512
             else self.mpk.fp8_gemm_dense_mediumm_layer
         )
+        # B20 (2026-05-15): mirror gate_mode into the GEMM kernel itself so
+        # the dual-dispatch O_proj branches early-exit the wave for the
+        # wrong phase. Otherwise both prefill and decode O_proj GEMMs run
+        # every iter (~30-50 μs each of wasted MMA wave on the unused
+        # branch) — visible in perfetto as a 90 μs bubble after the
+        # MLA attention path.
+        gemm_runtime_m_mode = (2 if gate_mode == 1
+                               else 3 if gate_mode == 2
+                               else 0)
 
         if residual is None:
             gemm_layer(
@@ -550,7 +559,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 weight_scale=weight_scale_raw,
                 output=output,
                 num_workers=self._fp8_dense_num_workers(),
-                runtime_m_mode=0,
+                runtime_m_mode=gemm_runtime_m_mode,
             )
             return
 
@@ -565,7 +574,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 weight_scale=weight_scale_raw,
                 output=partial,
                 num_workers=self._fp8_dense_num_workers(),
-                runtime_m_mode=0,
+                runtime_m_mode=gemm_runtime_m_mode,
             )
             self._allreduce_residual(partial, output, residual,
                                      gate_mode=gate_mode)
@@ -584,7 +593,7 @@ class DeepSeekV3Builder(GraphBuilder):
             weight_scale=weight_scale_raw,
             output=partial,
             num_workers=self._fp8_dense_num_workers(),
-            runtime_m_mode=0,
+            runtime_m_mode=gemm_runtime_m_mode,
         )
         self.mpk.elementwise_add_layer(
             input_a=partial,
@@ -1961,6 +1970,13 @@ class DeepSeekV3Builder(GraphBuilder):
                 output=self.kpe_sep_v2,
                 grid_dim=(8, 1, 1),
                 block_dim=(128, 1, 1),
+                # B19 (2026-05-15): decode iter has Q_LEN=1 and chunked_prefill
+                # early-returns via its own Q_LEN > 8 gate. The copy here is
+                # wasted ~16 μs/layer in decode. Gate the body on Q_LEN > 8
+                # so decode iters skip the copy entirely (kpe_sep_v2 keeps
+                # stale data, harmless because chunked_prefill doesn't read
+                # it on decode).
+                gate_decode_q_len=True,
             )
         else:
             self.mpk.mla_kv_gather_layer(

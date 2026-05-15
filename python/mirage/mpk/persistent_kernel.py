@@ -3258,12 +3258,19 @@ class PersistentKernel:
         block_dim: tuple,
         dependent_tensor: DTensor = None,
         noop: bool = False,
+        gate_decode_q_len: bool = False,
     ):
         # When ``noop`` is True we still register the task graph node (so
         # downstream task-graph constraints — case-3 fork+join — are
         # preserved) but the codegen emits an empty kernel body. Use for
         # phantom-bridge identities where the output buffer is only
         # plumbed for the dependency edge, not actually consumed.
+        # When ``gate_decode_q_len`` is True the codegen emits a runtime
+        # Q_LEN check (request 0): if Q_LEN <= 8 (decode iter) the kernel
+        # returns before doing the BF16 copy. Use for kpe_sep_v2 in the
+        # chunked-prefill phantom bridge — chunked_prefill itself has a
+        # Q_LEN > 8 gate, so the output buffer is never read on decode
+        # iters and the copy is wasted ~16 μs.
         # TODO: Add support from kn_graph
         last_dim = 0
         assert input.num_dims == output.num_dims
@@ -3275,7 +3282,7 @@ class PersistentKernel:
         tb_graph.new_input(input, (last_dim, -1, -1), 1, True)
         tb_graph.new_input(output, (last_dim, -1, -1), 1, True)
         self.kn_graph.customized([input, output], tb_graph)
-        params = [1 if noop else 0]
+        params = [1 if noop else 0, 1 if gate_decode_q_len else 0]
         self.kn_graph.register_task(tb_graph, "identity", params)
 
     def elementwise_add_layer(
