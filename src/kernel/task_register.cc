@@ -2976,26 +2976,17 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params) {
-  // params: [] (legacy) OR [active_mask_offset, ctas_per_expert, e_local]
-  //                       (NEW MoE D3+B11).
+  // params: [] (legacy) OR [active_mask_offset, ctas_per_expert] (NEW MoE D3).
   //   active_mask_offset == -1 -> meta input not supplied, no skip.
   //   active_mask_offset >= 0  -> meta is input_ptrs[1], active mask lives
   //                               at meta + active_mask_offset (int32),
   //                               my_expert = bid.x / ctas_per_expert.
-  //                               B11: meta + active_mask_offset + e_local
-  //                               holds per-expert actual_count (real row
-  //                               count, ≤ BM_PADDING) — used to bound the
-  //                               silu*mul loop.
-  assert(params.size() == 0 || params.size() == 2 || params.size() == 3);
+  assert(params.size() == 0 || params.size() == 2);
   int active_mask_offset = -1;
   int ctas_per_expert = 0;
-  int e_local = 0;
-  if (params.size() >= 2) {
+  if (params.size() == 2) {
     active_mask_offset = params[0];
     ctas_per_expert = params[1];
-  }
-  if (params.size() >= 3) {
-    e_local = params[2];
   }
   int batch_size = 0, num_experts_per_tok = 0, output_size = 0, input_stride,
       output_stride;
@@ -3050,34 +3041,22 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
   }
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // For NEW MoE with active-mask: read mask + actual_count from meta. The
-  // mask lives at meta[1, 0:E_LOCAL] (flat offset M_TOTAL+MBT*TOPK), the
-  // per-expert actual_count lives immediately after at [E_LOCAL:2*E_LOCAL].
-  // Both are written by moe_permute Phase 3.
-  // For non-active-mask path (legacy), we still pass the compile-time
-  // (num_experts_per_tok * batch_size) as the row bound.
-  bool has_active = (active_mask_offset >= 0 && ctas_per_expert > 0);
-  if (has_active) {
-    // D3 + B11 (2026-05-15): per-CTA short-circuit when this CTA's
-    // expert is inactive; otherwise read actual_count to cap the row
-    // loop. For decode (active_token=1) each routed expert sees only
-    // 1 real row, vs the BM_PADDING (=128) padded layout, so the
-    // ROWS_PER_CTA work drops 128× on the active CTA.
+  if (active_mask_offset >= 0 && ctas_per_expert > 0) {
+    // D3 (2026-05-14): early-return when this CTA's expert received no
+    // routing locally. With grid=(num_workers, 1, 1) for NEW MoE silu the
+    // runtime sets task_metadata.request_id = bid.x. The CTA→expert
+    // mapping is `my_expert = bid.x / ctas_per_expert` (=1 for the
+    // standard num_local_experts == num_workers, BM_PADDING == rows_per_cta
+    // setup, so my_expert == bid.x). The mask is meta[1, 0:E_LOCAL] at
+    // flat offset M_TOTAL + MBT*TOPK in the int32 meta buffer.
+    code.e("{");
     code.e("int const *active_mask_silu_ = "
            "static_cast<int const *>(task_desc->input_ptrs[1]) + $;",
            active_mask_offset);
-    // active_mask_silu_[0..E_LOCAL-1]      = active flag
-    // active_mask_silu_[E_LOCAL..2E_LOCAL] = actual_count
     code.e("int my_expert_silu_ = task_desc->task_metadata.request_id / $;",
            ctas_per_expert);
     code.e("if (!active_mask_silu_[my_expert_silu_]) return;");
-    // actual_count_per_expert lives at meta + active_mask_offset + e_local.
-    // For B11 we cap silu*mul's row count to actual_count instead of
-    // BM_PADDING (=128). Decode iter: actual_count ~= 1 (8 active
-    // experts/iter, 1 routed row each), vs 128 padded rows.
-    code.e("int silu_rows_ = active_mask_silu_[$ + my_expert_silu_];", e_local);
-    code.e("if (silu_rows_ <= 0) return;");
-    code.e("if (silu_rows_ > $) silu_rows_ = $;", batch_size, batch_size);
+    code.e("}");
   }
   code.e("kernel::silu_mul_task_impl<bfloat16, $, $, $, $>(",
          batch_size,
@@ -3086,11 +3065,7 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
          output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
-  if (has_active) {
-    code.e("    silu_rows_);");
-  } else {
-    code.e("    $);", num_experts_per_tok * batch_size);
-  }
+  code.e("    $);", num_experts_per_tok * batch_size);
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
@@ -4831,10 +4806,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   //            a slice of a wider buffer.
   assert(params.size() == 0 || params.size() == 1 || params.size() == 4);
   int active_mode = params.empty() ? 0 : params[0];
-  // active_mode 4 (B12): no token-indexed skip — process every CTA's
-  // ROWS_PER_TASK chunk unconditionally. Used by NEW MoE silu_out
-  // quantize where rows are permuted-expert layout, not token index.
-  assert(active_mode >= 0 && active_mode <= 4);
+  assert(active_mode >= 0 && active_mode <= 3);
   bool has_slice_override = (params.size() == 4);
   int batch_size = 0, hidden_size = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -4898,12 +4870,6 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     code.e("int seq_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
            "runtime_config.paged_kv_last_page_len_buffer[bi_];");
     code.e("if (row_local_ < 0 || row_local_ >= seq_len_) return;");
-  } else if (active_mode == 4) {
-    // process_all_rows: no skip — every CTA quantizes its
-    // ROWS_PER_TASK chunk. For NEW MoE silu_out where rows index a
-    // permuted-expert layout (M_TOTAL = E_LOCAL × BM_PADDING) and the
-    // token-indexed active_rows_ would silently leave most rows
-    // uninitialized, feeding stale silu_fp8 to the W2 group GEMM.
   } else {
     code.e("int active_rows_ = "
            "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS] * $;",

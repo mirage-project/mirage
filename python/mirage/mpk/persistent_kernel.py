@@ -2202,7 +2202,6 @@ class PersistentKernel:
         hidden_size_override: int = None,
         input_stride_override: int = None,
         in_offset_elems: int = 0,
-        process_all_rows: bool = False,
     ):
         """Quantize BF16 input to FP8 with block-wise scale.
 
@@ -2213,14 +2212,6 @@ class PersistentKernel:
         quantizing a column slice of a wider input buffer (QKV-a fused path).
         Defaults preserve legacy whole-row quantize. The OUTPUT buffer should
         be sized for the slice (hidden_size_override columns).
-
-        process_all_rows=True: disable the token-indexed `active_rows`
-        skip and process EVERY logical row (batch_size). Use for
-        permuted-layout buffers (e.g. NEW MoE silu_out at M_TOTAL =
-        E_LOCAL × BM_PADDING rows) where the row index is NOT the token
-        index — the default skip path was silently leaving rows
-        128..M_TOTAL-1 uninitialized in decode, feeding stale silu_fp8
-        into the W2 group GEMM for every routed expert > 0.
         """
         legacy_hidden_size = input.dim(input.num_dims - 1)
         row_count = 1
@@ -2246,14 +2237,6 @@ class PersistentKernel:
             hidden_size, scale_ue8m0, max_tiles=workers_per_row
         )
         grid_dim = (group_tiles, grid_y, 1)
-        if process_all_rows:
-            # active_mode=4 (sentinel) -> task_register emits no skip check
-            # and quantizes ROWS_PER_TASK rows for every CTA. The token-
-            # indexed `active_rows_` short-circuit makes no sense when the
-            # row axis is permuted-expert layout (NEW MoE silu_out).
-            assert active_mode == 0, (
-                "process_all_rows is incompatible with explicit active_mode")
-            active_mode = 4
         if slice_override:
             params = [active_mode, hidden_size,
                       input_stride_override, in_offset_elems]
@@ -2947,7 +2930,6 @@ class PersistentKernel:
         if meta is None:
             active_mask_offset = -1
             ctas_per_expert = 0
-            e_local = 0
         else:
             assert meta.num_dims == 2
             assert grid_dim[1] == 1 and grid_dim[2] == 1, (
@@ -2955,12 +2937,7 @@ class PersistentKernel:
             rows_per_cta = max(1, input.dim(0) // grid_dim[0])
             ctas_per_expert = max(1, bm_padding // rows_per_cta)
             active_mask_offset = meta.dim(1)
-            # E_LOCAL inferred from the permuted-layout input row count:
-            # M_TOTAL = E_LOCAL * BM_PADDING. moe_permute writes
-            # active_expert_mask[0..E_LOCAL-1] followed by
-            # actual_count_per_expert[0..E_LOCAL-1] starting at meta row 1.
-            e_local = max(1, input.dim(0) // bm_padding)
-        params = [active_mask_offset, ctas_per_expert, e_local]
+        params = [active_mask_offset, ctas_per_expert]
         # CRITICAL ORDERING (2026-05-14):
         # task_register.cc reads input_ptrs[0] as silu input and
         # output_ptrs[0] as silu output. graph.cc tuple is

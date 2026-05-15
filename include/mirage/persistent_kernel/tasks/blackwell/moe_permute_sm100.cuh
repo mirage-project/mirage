@@ -169,22 +169,14 @@ __device__ __forceinline__ void
     }
   }
 
-  // Phase 3: publish per-expert active mask + actual row count.
-  //
-  // active_expert_mask[expert]: 0/1 — used by fp8_group_gemm + silu_mul
-  // D1/D3 short-circuits.
-  //
-  // actual_count_per_expert[expert]: number of real (non-padding) routed
-  // rows this iter. Decode (active_token=1) routes at most 1 row per
-  // selected expert; the silu_mul kernel can use this to bound its
-  // ROWS_PER_CTA loop instead of always processing all BM_PADDING (=128)
-  // rows. Layout in row 1 of meta (after active_expert_mask):
-  //
-  //   meta[META_ROW_STRIDE       : META_ROW_STRIDE +   E_LOCAL] = mask
-  //   meta[META_ROW_STRIDE+E_LOC : META_ROW_STRIDE + 2*E_LOCAL] = count
+  // Phase 3: publish per-expert active mask so the downstream group GEMM
+  // can short-circuit every (bm=my_expert*BM_PADDING/BM, *) tile when this
+  // expert receives no token this iteration. With BM_PADDING==BM_kernel,
+  // each expert occupies exactly one bm row of tiles; setting mask=0 lets
+  // the GEMM kernel skip nn tiles per inactive expert without touching
+  // mbarriers or TMA.
   if (tid == 0) {
     active_expert_mask[my_expert] = (actual_count > 0) ? 1 : 0;
-    active_expert_mask[E_LOCAL + my_expert] = actual_count;
   }
 }
 
