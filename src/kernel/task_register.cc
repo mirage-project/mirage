@@ -6232,10 +6232,7 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   //   size 3 (legacy): [d_k, d_v, page_size].
   //   size 7 (QKV-a fused): adds [c_latent_row_stride, c_latent_offset_elems,
   //                               k_pe_row_stride, k_pe_offset_elems].
-  // B14 (2026-05-15): grid.y CTAs stripe Phase 2 over seq_pos. Picked
-  // up from `bgraph.grid_dim.y`; runtime sets task_metadata.kv_idx =
-  // bid.y for this task type (mla_kv_gather_unified handler in
-  // runtime.cc).
+  (void)bgraph;
   assert(params.size() == 3 || params.size() == 7);
 
   int d_k = params[0];
@@ -6245,10 +6242,6 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   int c_latent_offset = (params.size() == 7) ? params[4] : 0;
   int k_pe_row_stride = (params.size() == 7) ? params[5] : 128;
   int k_pe_offset = (params.size() == 7) ? params[6] : 0;
-  int num_seq_chunks = (int)bgraph.grid_dim.y;
-  if (num_seq_chunks < 1) {
-    num_seq_chunks = 1;
-  }
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6313,9 +6306,7 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    prompt_prefill_,");
-  code.e("    task_desc->task_metadata.request_id,");
-  code.e("    task_desc->task_metadata.kv_idx,");
-  code.e("    $);", num_seq_chunks);
+  code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_UNIFIED_SM100,
                                code.to_string());
