@@ -1949,20 +1949,17 @@ class DeepSeekV3Builder(GraphBuilder):
             # partition; a single block does the full copy. The copy is
             # tiny (kv_rows * 64 bf16 < 64 KB).
             # =================================================================
-            # P3 (2026-05-14) status: both attempts BROKE correctness
-            # (tokens went to all-zero):
-            #   - noop=True (skip the copy entirely) → chunked_prefill
-            #     reads stale buffer → wrong attention.
-            #   - grid=(8,1,1) (parallelize the copy by partitioning the
-            #     rope dim) → still wrong tokens; the identity_layer
-            #     dim-map handling for partitioned-output 2D doesn't
-            #     produce identical bits as the single-CTA path.
-            # Leaving the slow (1,1,1) copy in place; P3 needs a kernel
-            # rework, not a wiring tweak.
+            # P3 (2026-05-14 v3): bump grid from (1,1,1) to (8,1,1) so 8
+            # CTAs share the kpe_sep → kpe_sep_v2 BF16 copy. Earlier two
+            # attempts looked like correctness regressions but those were
+            # baseline-noise misdiagnoses (decode-from-step-100 outputs
+            # all-zero tokens regardless). With 64-wide rope dim ÷ 8 = 8
+            # cols per CTA the partition divides cleanly. Single-CTA was
+            # the 55 μs straggler in perfetto (user-flagged ID 63112).
             self.mpk.identity_layer(
                 input=self.kpe_sep,
                 output=self.kpe_sep_v2,
-                grid_dim=(1, 1, 1),
+                grid_dim=(8, 1, 1),
                 block_dim=(128, 1, 1),
             )
         else:
