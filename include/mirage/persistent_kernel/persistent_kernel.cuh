@@ -449,9 +449,11 @@ __device__ __forceinline__ bool
     }
     config.step[request_id] = step + num_tokens;
 
-    // Per-step notification: write step to pinned memory so CPU can
-    // poll progress for streaming output.
-    config.pinned_step[request_id] = (int32_t)(step + num_tokens);
+    // Per-step notification: release store so that all token buffer
+    // writes happen-before, guaranteeing CPU sees complete token data
+    // when it observes the updated step.
+    st_release_sys_i32(&config.pinned_step[request_id],
+                       (int32_t)(step + num_tokens));
 
 #ifdef MPK_ENABLE_PROFILING
     bool done = true;
