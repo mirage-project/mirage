@@ -1944,7 +1944,22 @@ class PersistentKernel:
         an output of the task so the MPK dep-tracker chains tensor_init between
         the producer of `dummy` and any downstream consumer of `dummy`. The
         kernel never reads or writes `dummy`'s data.
+
+        Optimization: when `target_input_map[i]` == -1 for grid axis `i`, that
+        grid axis does NOT partition `target`, so all CTAs on that axis would
+        zero the same target tile redundantly (1 logical wave with K-fold
+        replication). Collapse such redundant axes to 1 — the dep edge stays
+        task-level (no CTA-level partner-tracking in the runtime), so reducing
+        the CTA count does not affect downstream consumers. Saves the splitk
+        prepend-tensor_init from launching grid_y replicates of the same zero
+        tile.
         """
+        gx, gy, gz = grid_dim
+        if target_input_map[1] == -1 and gy > 1:
+            gy = 1
+        if target_input_map[2] == -1 and gz > 1:
+            gz = 1
+        grid_dim = (gx, gy, gz)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # bgraph order = [dummy, target, dummy] -> arity (1, 2):
         #   input_ops[0]  = dummy   (read dep)

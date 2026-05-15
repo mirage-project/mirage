@@ -112,11 +112,19 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   int *mpk_active_expert_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
 
   // ---- Phase 0: Initialize routing structures ----
+  // Init only [0, num_active_rows) of the routing buffer: moe_permute
+  // (D5) only scans up to num_active_rows, so rows >= num_active_rows
+  // are never read. Skipping their init drops decode's 128*128=16384
+  // zero-stores to 128*1=128. The mpk_active_expert_ids vector still
+  // gets the full LOCAL_EXPERTS reset because Phase 7's compaction
+  // reads `mark[local_expert]` for every local expert.
+  int const init_rows =
+      (num_active_rows < num_rows) ? num_active_rows : num_rows;
   for (int expert = start_expert + threadIdx.x; expert < end_expert;
        expert += blockDim.x) {
     int const local_expert = expert - start_expert;
     if (mpk_routing_indices != nullptr) {
-      for (int row = 0; row < num_rows; ++row) {
+      for (int row = 0; row < init_rows; ++row) {
         mpk_routing_indices[local_expert * num_rows + row] = 0;
       }
     }
