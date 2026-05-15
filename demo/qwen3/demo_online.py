@@ -63,6 +63,7 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--stream", action="store_true", help="Enable streaming output (shows tokens as generated)")
     args = parser.parse_args()
 
     runnerConfig = RunnerConfig(
@@ -86,17 +87,22 @@ if __name__ == "__main__":
         ("Lebron James and Steven Curry, who is the goat?",    75),
         ("Do you think Attack on Titan really have a good end?", 5)
     ]
-    if args.use_nsys:
+    if args.stream:
+        print("=== Streaming mode ===\n")
+        for rid, text, is_final in llm.stream_incremental(arrivals, timeout=60):
+            prompt_text, _ = arrivals[rid]
+            if is_final:
+                print(f"\n--- [{rid}] FINAL: {prompt_text!r} ---")
+                print(f"{text}")
+            else:
+                print(f"[{rid}] {text}", end="", flush=True)
+    elif args.use_nsys:
         import ctypes
         _cudart = ctypes.CDLL("libcudart.so")
 
         _cudart.cudaProfilerStart()
         outputs = llm.generate_incremental(arrivals)
         _cudart.cudaProfilerStop()
-    else:    
+    else:
         outputs = llm.generate_incremental(arrivals,timeout=60)
-
-    # for (prompt, _), output in zip(arrivals, outputs):
-    #     print(f"\nPrompt: {prompt!r}")
-    #     print(f"Completion: {output['text']!r}")
 

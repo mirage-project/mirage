@@ -212,6 +212,18 @@ class OnlinePinnedRuntime:
                 )
             time.sleep(poll_interval)
 
+    def read_tokens(self, request_id: int, up_to_step: int) -> torch.Tensor:
+        """Read tokens [0..up_to_step] for *request_id* from the GPU buffer.
+
+        Unlike :meth:`get_output_tokens`, this does not require the request to
+        have completed.  The caller must ensure *up_to_step* corresponds to a
+        step that the GPU has already written (e.g. via :meth:`get_current_step`).
+        """
+        with torch.cuda.stream(self._write_stream):
+            result = self._mpk.tokens[request_id, : up_to_step + 1].clone()
+        self._write_stream.synchronize()
+        return result
+
     def get_output_tokens(self, request_id: int) -> torch.Tensor:
         """Return the generated token sequence for a completed request.
 
