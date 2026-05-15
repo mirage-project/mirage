@@ -27,24 +27,30 @@ namespace kernel {
 // format the PR-674 fp8_group_gemm_smallm/largem_sm100 SFA/SFB TMA
 // descriptors expect).
 //
-// One CTA only (grid_dim = (1, 1, 1)). Cooperative thread copy. Buffer is
-// small (~32-100 KB for DSv3 MoE shapes) so single-CTA bandwidth is fine
-// here; if perf becomes an issue, fan out to grid_dim=(K_PACKED, 1, 1) and
-// have each CTA handle one column.
+// Multi-CTA fan-out (B13 2026-05-15): the single-CTA version was 53 μs
+// for the DSv3 NEW MoE silu_scale shape (M=16384, K_PACKED=2 → 32K
+// uint32 = 128 KB transfer). Split the M dimension across grid.x CTAs
+// — each CTA owns a contiguous chunk of M rows and does its own
+// transpose. No cross-CTA sync required (disjoint writes).
+//
+// Wrapper now picks grid_dim=(min(num_workers, M/16), 1, 1) so a
+// single wave handles the full transpose.
 //
 
 template <int M, int K_PACKED>
-__device__ __forceinline__ void
-    transpose_scale_sm100_task_impl(void const *in_ptr, void *out_ptr) {
+__device__ __forceinline__ void transpose_scale_sm100_task_impl(
+    void const *in_ptr, void *out_ptr, int cta_idx, int num_ctas) {
   uint32_t const *__restrict__ in = static_cast<uint32_t const *>(in_ptr);
   uint32_t *__restrict__ out = static_cast<uint32_t *>(out_ptr);
   int const tid = threadIdx.x;
   int const nthreads = blockDim.x;
-  int const total = M * K_PACKED;
-  for (int i = tid; i < total; i += nthreads) {
-    int m = i / K_PACKED;
-    int k = i % K_PACKED;
-    out[(size_t)k * M + m] = in[(size_t)m * K_PACKED + k];
+  // Stripe M across grid.x CTAs. Each CTA processes M_per_cta rows.
+  int const m_lo = (M * cta_idx) / num_ctas;
+  int const m_hi = (M * (cta_idx + 1)) / num_ctas;
+  for (int m = m_lo; m < m_hi; ++m) {
+    for (int k = tid; k < K_PACKED; k += nthreads) {
+      out[(size_t)k * M + m] = in[(size_t)m * K_PACKED + k];
+    }
   }
 }
 

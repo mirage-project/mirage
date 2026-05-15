@@ -2582,11 +2582,17 @@ class PersistentKernel:
     def transpose_scale_sm100_layer(
         self, scale_in: DTensor, scale_out: DTensor,
     ):
-        """(M, K_PACKED) uint32 → (K_PACKED, M) uint32 via single-CTA copy.
+        """(M, K_PACKED) uint32 → (K_PACKED, M) uint32 via multi-CTA copy.
 
         Bridges quantize_fp8_layer's M-outermost packed scale output to the
         K-outermost layout the PR-674 fp8_group_gemm SFA/SFB TMA descriptors
         require. See transpose_scale_sm100.cuh.
+
+        B13 (2026-05-15): stripe M across `min(num_workers, M//16)` CTAs.
+        Disjoint write ranges (M dimension), no cross-CTA sync needed.
+        For DSv3 NEW MoE silu_scale (M=16384, K_PACKED=2 → 128 KB),
+        single-CTA was 53 μs; multi-CTA expected to drop to a single
+        wave ~3-5 μs.
         """
         assert scale_in.num_dims == 2
         assert scale_out.num_dims == 2
@@ -2595,7 +2601,11 @@ class PersistentKernel:
         assert scale_out.dim(0) == K_PACKED
         assert scale_out.dim(1) == M
         params = [M, K_PACKED]
-        grid_dim = (1, 1, 1)
+        # Pick grid_x = min(num_workers, M / 16) so each CTA handles
+        # >=16 rows. Avoids degenerate per-CTA work for tiny M.
+        rows_per_cta_min = 16
+        num_ctas = max(1, min(self.num_workers, M // rows_per_cta_min))
+        grid_dim = (num_ctas, 1, 1)
         block_dim = (128, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(scale_in, (-1, -1, -1), -1, True)

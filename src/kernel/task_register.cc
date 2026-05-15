@@ -5971,17 +5971,24 @@ int TaskRegister::register_moe_unpermute_sm100_task(
 }
 
 // transpose_scale_sm100 — (M, K_PACKED) uint32 → (K_PACKED, M) uint32.
-// Params: [M, K_PACKED]. 1 input, 1 output, single CTA (grid=(1,1,1)).
+// Params: [M, K_PACKED]. 1 input, 1 output.
+// B13 (2026-05-15): grid_dim.x CTAs stripe M; each CTA handles a
+// disjoint chunk of rows. cta_idx / num_ctas passed via task metadata.
 int TaskRegister::register_transpose_scale_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  (void)bgraph;
   assert(params.size() == 2);
   int M = params[0], K_PACKED = params[1];
+  int num_ctas = (int)bgraph.grid_dim.x;
+  if (num_ctas < 1) {
+    num_ctas = 1;
+  }
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::transpose_scale_sm100_task_impl<$, $>(", M, K_PACKED);
-  code.e("    task_desc->input_ptrs[0],");   // in (M, K_PACKED)
-  code.e("    task_desc->output_ptrs[0]);"); // out (K_PACKED, M)
+  code.e("    task_desc->input_ptrs[0],");            // in (M, K_PACKED)
+  code.e("    task_desc->output_ptrs[0],");           // out (K_PACKED, M)
+  code.e("    task_desc->task_metadata.request_id,"); // cta_idx = bid.x
+  code.e("    $);", num_ctas);
   return register_task_variant(TASK_TRANSPOSE_SCALE_SM100, code.to_string());
 }
 

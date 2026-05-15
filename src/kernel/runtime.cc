@@ -357,6 +357,11 @@ void register_mugraph(
             if (task_type == TASK_MOE_UNPERMUTE_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // transpose_scale_sm100 (B13): grid_x CTAs stripe M.
+            // request_id = bid.x = the CTA's chunk index.
+            if (task_type == TASK_TRANSPOSE_SCALE_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // Set paged attention split kv task kv_idx
             if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 ||
                 task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 ||
