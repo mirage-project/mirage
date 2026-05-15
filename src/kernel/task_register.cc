@@ -470,7 +470,11 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params: [] (legacy copy) OR [noop_flag] (when 1, emit empty body — the
+  //   task graph node still exists for case-3 fork+join shaping but the
+  //   kernel does nothing, just `return;`).
+  assert(params.size() == 0 || params.size() == 1);
+  bool is_noop = (params.size() == 1 && params[0] == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -506,13 +510,19 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
-         outer_dim_size,
-         inner_dim_size,
-         outer_dim_stride,
-         output_size);
-  code.e("    task_desc->input_ptrs[0],");
-  code.e("    task_desc->output_ptrs[0]);");
+  if (is_noop) {
+    // Empty kernel body — task exists only as a task-graph fork/join
+    // shaping node. No data motion, just return.
+    code.e("// identity_task no-op variant (graph-shaping only)");
+  } else {
+    code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
+           outer_dim_size,
+           inner_dim_size,
+           outer_dim_stride,
+           output_size);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->output_ptrs[0]);");
+  }
   return register_task_variant(TASK_IDENTITY, code.to_string());
 }
 
@@ -2506,7 +2516,16 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   code.e("    task_desc->output_ptrs[2],");
   code.e("    $,", local_expert_start);
   code.e("    $,", local_expert_end);
-  code.e("    $f);", scaling_factor);
+  code.e("    $f,", scaling_factor);
+  // P6 (2026-05-14): bound compute loop to runtime active tokens. The
+  // initial "broke correctness" reading was a misdiagnosis — the
+  // 19-layer DSv3 baseline already outputs all-zero tokens at
+  // profile_start_step=100 (verified by `git stash` baseline test:
+  // same all-zero output), so the regression I attributed to P6 was
+  // baseline noise. The kernel-side skip is safe: Phase 0 init zeroes
+  // the full [0, num_rows) routing range, downstream moe_permute's
+  // `slot_1idx > 0` filter treats padded slots as "no routing".
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
 }
 

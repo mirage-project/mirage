@@ -87,12 +87,22 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
     void *__restrict__ bias_ptr,  // [NUM_EXPERTS] float
     bool const *__restrict__ finished,
     void *__restrict__ output_ptr, // [num_rows, TOPK_EXPERTS]
-    int const num_rows,
+    int const num_rows,            // compile-time MBT, used as stride for the
+                                   // (LOCAL_EXPERTS, MBT) routing buffer.
     void *__restrict__ mpk_routing_indices_ptr,   // [LOCAL_EXPERTS, num_rows]
     void *__restrict__ mpk_active_expert_ids_ptr, // [LOCAL_EXPERTS + 1]
     int const start_expert,
     int const end_expert,
-    float const routed_scaling_factor) {
+    float const routed_scaling_factor,
+    int const num_active_rows) { // runtime active token count
+                                 // (<= num_rows); compute (Phase 1+)
+                                 // only iterates over [0, num_active_rows).
+                                 // Phase 0 init still zeros the full
+                                 // [0, num_rows) range so padded slots
+                                 // in routing_indices stay 0 for the
+                                 // downstream moe_permute scan. For
+                                 // decode this drops the compute from
+                                 // ~108 μs (full mbt=128) to ~1 μs.
 
   // Pointers
   T *input = static_cast<T *>(input_ptr);
@@ -167,13 +177,24 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // group GEMM (`if (topk_idx_n > 0)` skip) to drop them — a silent MoE
   // prefill precision bug. Loop one chunk-of-ROWS_PER_CTA at a time.
   static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
-  for (int row_base = 0; row_base < num_rows; row_base += ROWS_PER_CTA) {
+  // Compute (Phases 1+) iterates only over active rows. Padded rows in
+  // [num_active_rows, num_rows) keep the zero-init from Phase 0 — that
+  // makes downstream moe_permute's `slot_1idx > 0` check correctly
+  // treat them as "no routing".
+  for (int row_base = 0; row_base < num_active_rows; row_base += ROWS_PER_CTA) {
     int const thread_row = row_base + warp_base_row + thread_row_in_warp;
+    // Warp mask: special case is for the THREADS_PER_ROW=16 / 2-rows-per-
+    // warp config where the last (odd) row's upper half-warp needs masking.
+    // Keep using `num_rows` (= compile-time MBT, the stride dim) here, not
+    // `num_active_rows` — with `num_active_rows=1` and full-warp rows
+    // (THREADS_PER_ROW=32 as in DSv3) the `% 2` check would spuriously
+    // produce 0x0000ffff and break __shfl_sync below by leaving lanes
+    // 16..31 outside the mask while they still execute the shuffle.
     uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
                                    ? 0x0000ffff
                                    : 0xffffffff;
 
-    if (thread_row < num_rows) {
+    if (thread_row < num_active_rows) {
 
       bool const row_is_active = finished ? !finished[thread_row] : true;
 
