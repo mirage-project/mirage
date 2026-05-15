@@ -370,6 +370,16 @@ def get_compile_command(
     return common_cmd + specific_cmd + flags
 
 
+# B32 (2026-05-15): default grid_y cap for quantize_fp8_layer. The kernel
+# loops ROWS_PER_TASK = ceil(row_count / grid_y) rows per CTA (see
+# per_token_group_quantize_fp8.cuh:113-130). Capping grid_y at 16 means
+# each CTA covers ~8 rows when row_count == 128, cutting per-task
+# dispatch overhead without violating the persistent-runtime hard rule
+# (grid_y * group_tiles ≤ num_workers). active_mode=5 overrides this
+# with E_local (B15 invariant: ctas_per_expert == 1).
+_QUANTIZE_GRID_Y_CAP = 16
+
+
 class PersistentKernel:
     def __init__(
         self,
@@ -2253,20 +2263,24 @@ class PersistentKernel:
         hidden_size = hidden_size_override or legacy_hidden_size
         if input_stride_override is None:
             input_stride_override = legacy_hidden_size
-        # Pick grid so total CTAs (group_tiles * grid_y) stays ≤ num_workers
-        # and the task fits in one persistent-runtime wave (~1 μs per-task
-        # gap × multi-wave is the main scheduler overhead). For prefill with
-        # row_count >= num_workers the kernel internally loops ROWS_PER_TASK
-        # = ceil(row_count / grid_y) rows per CTA (see register_quantize_fp8);
-        # for row_count < num_workers we let group_tiles soak up the spare
-        # workers (each CTA then owns a smaller per-row group slice).
-        total_workers = max(self.num_workers, 1)
-        grid_y = min(row_count, total_workers)
-        workers_per_row = max(1, total_workers // grid_y)
-        group_tiles = self._fp8_quantize_group_tiles(
-            hidden_size, scale_ue8m0, max_tiles=workers_per_row
-        )
-        grid_dim = (group_tiles, grid_y, 1)
+        # B32 (2026-05-15): collapse grid_y so the kernel's ROWS_PER_TASK
+        # multi-row inner loop kicks in instead of dispatching one CTA per
+        # row. Old code overwrote grid_y = min(row_count, num_workers),
+        # which silently defeated the kernel's ROWS_PER_TASK contract (see
+        # per_token_group_quantize_fp8.cuh:113-130). The user-supplied
+        # `grid_dim` arg is intentionally ignored — every existing caller
+        # passes a legacy "one CTA per row" shape that the wrapper has
+        # always overwritten anyway. The new policy:
+        #   * active_mode=5 (B15 per-expert skip): grid_y = E_local so
+        #     rows_per_cta == bm_padding (ctas_per_expert == 1). Required
+        #     because the kernel's row_count_cap clips the per-CTA inner
+        #     loop only, not multi-CTA-per-expert.
+        #   * otherwise: grid_y = min(row_count, _QUANTIZE_GRID_Y_CAP) so
+        #     each CTA covers ~ROWS_PER_TASK = row_count / grid_y rows.
+        #     Downstream consumers (FP8 GEMM, permute) are insensitive
+        #     to stale rows past active_rows, so over-quantizing in
+        #     decode is benign — same as today.
+        del grid_dim  # see comment above; legacy callers expect override.
         if process_all_rows:
             assert active_mode == 0
             active_mode = 4
@@ -2278,14 +2292,28 @@ class PersistentKernel:
             assert expert_active_e_local > 0
             assert expert_active_bm_padding > 0
             active_mode = 5
+        total_workers = max(self.num_workers, 1)
+        if active_mode == 5:
+            # B15 invariant: ctas_per_expert == 1 → grid_y = E_local.
+            # Otherwise the cap (kernel row_count_cap, applied per-CTA)
+            # would let CTAs past CTA-0 of each expert mis-quantize rows
+            # past actual_count. With grid_y = E_local, each CTA covers
+            # exactly one expert's bm_padding rows, and the cap correctly
+            # clips the inner loop at actual_count.
+            grid_y = max(1, expert_active_e_local)
+        else:
+            grid_y = min(row_count, _QUANTIZE_GRID_Y_CAP)
+        grid_y = max(1, min(grid_y, total_workers))
+        workers_per_row = max(1, total_workers // grid_y)
+        group_tiles = self._fp8_quantize_group_tiles(
+            hidden_size, scale_ue8m0, max_tiles=workers_per_row
+        )
+        grid_dim = (group_tiles, grid_y, 1)
         if active_mode == 5:
             # params: [active_mode, expert_meta_offset, e_local,
             #          bm_padding, ctas_per_expert]
             assert expert_active_meta is not None
             expert_meta_offset = expert_active_meta.dim(1)
-            row_count = 1
-            for axis in range(input.num_dims - 1):
-                row_count *= input.dim(axis)
             rows_per_cta = max(1, row_count // max(grid_dim[1] or 1, 1))
             ctas_per_expert = max(1,
                                   expert_active_bm_padding // rows_per_cta)
