@@ -861,21 +861,47 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
     def _fp8_dense_kv_b_proj(
-        self, ckv, weight, weight_scale, output, tag: str
+        self, ckv, weight, weight_scale, output, tag: str,
+        shared_quantize_tag: str = None,
     ):
         if weight_scale is None:
             raise ValueError("kv_b prefill projection requires FP8 weight scale.")
-        input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
-            self.kv_lora_rank, tag=tag)
-        self.mpk.quantize_fp8_layer(
-            input=ckv,
-            output_fp8=input_fp8,
-            output_scale=input_scale,
-            grid_dim=(input_fp8.dim(0), 1, 1),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=False,
-            active_mode=1,
-        )
+        # B23 (2026-05-15): kv_b_k and kv_b_v both quantize the SAME ckv_sep
+        # to FP8 with the SAME group_size — emitting two quantize tasks
+        # writes the same bytes twice. When `shared_quantize_tag` is given
+        # we reuse the buffer that the previous call already wrote, and
+        # skip the quantize task entirely (only emit the GEMM). Caller
+        # must pass the same `shared_quantize_tag` to both kv_b_k and
+        # kv_b_v calls in the same layer; the FIRST call emits quantize,
+        # the SECOND reuses.
+        if shared_quantize_tag is not None:
+            input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
+                self.kv_lora_rank, tag=shared_quantize_tag)
+            already_quantized = getattr(self, "_kv_b_quantized_tags", set())
+            if shared_quantize_tag not in already_quantized:
+                self.mpk.quantize_fp8_layer(
+                    input=ckv,
+                    output_fp8=input_fp8,
+                    output_scale=input_scale,
+                    grid_dim=(input_fp8.dim(0), 1, 1),
+                    block_dim=(128, 1, 1),
+                    scale_ue8m0=False,
+                    active_mode=1,
+                )
+                already_quantized.add(shared_quantize_tag)
+                self._kv_b_quantized_tags = already_quantized
+        else:
+            input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
+                self.kv_lora_rank, tag=tag)
+            self.mpk.quantize_fp8_layer(
+                input=ckv,
+                output_fp8=input_fp8,
+                output_scale=input_scale,
+                grid_dim=(input_fp8.dim(0), 1, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=False,
+                active_mode=1,
+            )
         gemm_layer = (
             self.mpk.fp8_gemm_dense_smallm_layer
             if self.mpk.max_seq_length <= 512
@@ -1996,12 +2022,20 @@ class DeepSeekV3Builder(GraphBuilder):
             w_kv_b_v, s_kv_b_v = self._attach_raw_fp8_weight(
                 state_dict, f"{attn}kv_b_v.weight",
                 f"layer_{layer_idx}_kv_b_v")
+            # B23 (2026-05-15): share the FP8 quantize of ckv_sep between
+            # kv_b_k and kv_b_v — both operate on the same input with the
+            # same group_size, so emitting two quantize tasks duplicates
+            # the bytes (and one extra ~5 μs dispatch wave on decode iters
+            # where both early-exit). One quantize, two GEMM consumers.
+            kv_b_shared_tag = f"layer_{layer_idx}_kv_b_shared"
             self._fp8_dense_kv_b_proj(
                 self.ckv_sep, w_kv_b_k, s_kv_b_k, self.prefill_k_nope,
-                tag=f"layer_{layer_idx}_kv_b_k")
+                tag=f"layer_{layer_idx}_kv_b_k",
+                shared_quantize_tag=kv_b_shared_tag)
             self._fp8_dense_kv_b_proj(
                 self.ckv_sep, w_kv_b_v, s_kv_b_v, self.prefill_v,
-                tag=f"layer_{layer_idx}_kv_b_v")
+                tag=f"layer_{layer_idx}_kv_b_v",
+                shared_quantize_tag=kv_b_shared_tag)
             self.mpk.mla_prefill_tp8_chunked_layer(
                 q_nope=self.q_nope,
                 q_pe=self.q_pe,
