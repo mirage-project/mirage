@@ -138,21 +138,6 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   }
 }
 
-// B14 (2026-05-15): multi-CTA stripe across seq_pos in Phase 2.
-//
-// Pre-B14: single CTA per request did Phase 1 (append num_new_tokens
-// to paged_cache) + Phase 2 (read paged_cache, write ckv_sep/kpe_sep
-// for prefill OR contiguous_kv for decode). seq_pos loop was serial
-// → 117 μs per call for ~128 prefill rows / decode iter.
-//
-// Post-B14: grid_dim now (num_requests, NUM_SEQ_CHUNKS, 1). Phase 1
-// only runs on chunk 0 (q_len writes, tiny). Phase 2 strides seq_pos
-// across NUM_SEQ_CHUNKS CTAs. To avoid cross-CTA race with Phase 1's
-// paged_cache writes, Phase 2 reads c_latent_new/k_pe_new DIRECTLY
-// for seq_pos >= kv_start_pos (the just-appended rows), and only
-// reads paged_cache for seq_pos < kv_start_pos (genuine cache hits).
-// This makes Phase 2 independent of Phase 1's writes — no fence
-// required.
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
           int PAGE_SIZE, // Page size (e.g., 128)
@@ -171,9 +156,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
     bool prompt_prefill,
-    int request_id,
-    int seq_chunk_idx, // bid.y; chunk 0 also runs Phase 1
-    int num_seq_chunks) {
+    int request_id) {
   using T = __nv_bfloat16;
   int const tid = threadIdx.x;
   int const NUM_THREADS = 128;
@@ -205,90 +188,58 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
   }
 
   int const kv_start_pos = seq_len - num_new_tokens;
+  for (int tok = 0; tok < num_new_tokens; tok++) {
+    int const seq_pos = kv_start_pos + tok;
+    int const page_idx = page_indices[seq_pos / PAGE_SIZE];
+    int const pos_in_page = seq_pos % PAGE_SIZE;
+    T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
+    T const *src_lat = c_latent_new + tok * C_LATENT_ROW_STRIDE;
+    T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
 
-  // Phase 1: only chunk 0 appends new tokens to paged_cache. Other
-  // chunks skip and proceed straight to Phase 2 (using c_latent_new/
-  // k_pe_new directly for new positions, avoiding cross-CTA race).
-  if (seq_chunk_idx == 0) {
-    for (int tok = 0; tok < num_new_tokens; tok++) {
-      int const seq_pos = kv_start_pos + tok;
-      int const page_idx = page_indices[seq_pos / PAGE_SIZE];
-      int const pos_in_page = seq_pos % PAGE_SIZE;
-      T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
-      T const *src_lat = c_latent_new + tok * C_LATENT_ROW_STRIDE;
-      T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
-
-      for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
-        if (d + 8 <= D_V) {
-          *reinterpret_cast<uint4 *>(dst + d) =
-              *reinterpret_cast<uint4 const *>(src_lat + d);
-        }
+    for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
+      if (d + 8 <= D_V) {
+        *reinterpret_cast<uint4 *>(dst + d) =
+            *reinterpret_cast<uint4 const *>(src_lat + d);
       }
-      for (int d = tid * 8; d < ROPE_DIM; d += NUM_THREADS * 8) {
-        if (d + 8 <= ROPE_DIM) {
-          *reinterpret_cast<uint4 *>(dst + D_V + d) =
-              *reinterpret_cast<uint4 const *>(src_pe + d);
-        }
+    }
+    for (int d = tid * 8; d < ROPE_DIM; d += NUM_THREADS * 8) {
+      if (d + 8 <= ROPE_DIM) {
+        *reinterpret_cast<uint4 *>(dst + D_V + d) =
+            *reinterpret_cast<uint4 const *>(src_pe + d);
       }
     }
   }
+  __syncthreads();
 
   if (!prompt_prefill && contiguous_kv_ptr == paged_cache_ptr) {
     return;
   }
-
-  // Phase 2: stride seq_pos across NUM_SEQ_CHUNKS. For seq_pos >=
-  // kv_start_pos (just-appended rows) read directly from
-  // c_latent_new/k_pe_new — bypasses cross-CTA paged_cache race.
-  for (int seq_pos = seq_chunk_idx; seq_pos < seq_len;
-       seq_pos += num_seq_chunks) {
-    T const *src_lat; // source for the D_V latent half
-    T const *src_pe;  // source for the ROPE_DIM rope half
-    bool combined = false;
-    T const *src_combined = nullptr;
-    if (seq_pos >= kv_start_pos) {
-      int const tok = seq_pos - kv_start_pos;
-      src_lat = c_latent_new + tok * C_LATENT_ROW_STRIDE;
-      src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
-    } else {
-      int const page_idx = page_indices[seq_pos / PAGE_SIZE];
-      int const pos_in_page = seq_pos % PAGE_SIZE;
-      src_combined = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
-      combined = true;
-    }
+  for (int seq_pos = 0; seq_pos < seq_len; seq_pos++) {
+    int const page_idx = page_indices[seq_pos / PAGE_SIZE];
+    int const pos_in_page = seq_pos % PAGE_SIZE;
+    T const *src = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
 
     if (prompt_prefill) {
       T *ckv_dst = ckv_sep + seq_pos * D_V;
       T *kpe_dst = kpe_sep + seq_pos * ROPE_DIM;
       for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
         if (d + 8 <= D_V) {
-          T const *s = combined ? (src_combined + d) : (src_lat + d);
           *reinterpret_cast<uint4 *>(ckv_dst + d) =
-              *reinterpret_cast<uint4 const *>(s);
+              *reinterpret_cast<uint4 const *>(src + d);
         }
       }
       for (int d = tid * 8; d < ROPE_DIM; d += NUM_THREADS * 8) {
         if (d + 8 <= ROPE_DIM) {
-          T const *s = combined ? (src_combined + D_V + d) : (src_pe + d);
           *reinterpret_cast<uint4 *>(kpe_dst + d) =
-              *reinterpret_cast<uint4 const *>(s);
+              *reinterpret_cast<uint4 const *>(src + D_V + d);
         }
       }
     } else {
       T *dst = contiguous_kv + seq_pos * D_K;
-      // decode layout = [D_V latent | ROPE_DIM rope] packed into D_K.
-      for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
-        if (d + 8 <= D_V) {
-          T const *s = combined ? (src_combined + d) : (src_lat + d);
+      for (int d = tid * 8; d < D_K; d += NUM_THREADS * 8) {
+        if (d + 8 <= D_K) {
           *reinterpret_cast<uint4 *>(dst + d) =
-              *reinterpret_cast<uint4 const *>(s);
-        }
-      }
-      for (int d = tid * 8; d < ROPE_DIM; d += NUM_THREADS * 8) {
-        if (d + 8 <= ROPE_DIM) {
-          T const *s = combined ? (src_combined + D_V + d) : (src_pe + d);
-          *reinterpret_cast<uint4 *>(dst + D_V + d) =
-              *reinterpret_cast<uint4 const *>(s);
+              *reinterpret_cast<uint4 const *>(src + d);
         }
       }
     }
