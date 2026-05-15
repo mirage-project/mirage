@@ -2422,6 +2422,7 @@ class PersistentKernel:
         tokens_buffer: DTensor,     # (max_requests, max_seq_len) int64 — written in-place
         num_new_tokens: DTensor,    # (max_requests,) int32 — OUTPUT (= accept_count)
         drafts_prev: DTensor,       # (max_requests, K) int64 — attach_input cross-iter snapshot dst
+        debug_stats: DTensor,       # (2,) int32 — [iter_count, sum_accepted_drafts]
         grid_dim: tuple,
         block_dim: tuple,
         num_draft_tokens: int,      # K
@@ -2455,29 +2456,33 @@ class PersistentKernel:
         tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
         tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
         tb_graph.new_input(drafts_prev, (-1, -1, -1), -1, True)
+        tb_graph.new_input(debug_stats, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [target_argmax, draft_tokens_new, accepted_count, tokens_buffer,
-             num_new_tokens, drafts_prev],
+             num_new_tokens, drafts_prev, debug_stats],
             tb_graph)
         self.kn_graph.register_task(tb_graph, "eagle3_commit", params)
 
     def eagle3_d2t_remap_layer(
         self,
         hot_token: DTensor,      # (batch, 1) int64 — argmax over draft logits
-        d2t_table: DTensor,      # (draft_vocab_size,) int64
+        d2t_table: DTensor,      # (draft_vocab_real,) int64
         target_token: DTensor,   # (batch, 1) int64 — output
         grid_dim: tuple,
         block_dim: tuple,
+        draft_vocab_real: int,   # = d2t_table.dim(0); argmax indices ≥ this come from
+                                 # lm_head's padded rows and must be sentinel-mapped to 0
     ):
         """Map Eagle3 draft hot-vocab id to target vocab id:
-            target_id = hot_id + d2t[hot_id]
+            target_id = hot_id + d2t[hot_id]  (if hot_id < draft_vocab_real)
+            target_id = 0                      (otherwise — padded-row argmax)
         """
         assert hot_token.num_dims == 2
         assert d2t_table.num_dims == 1
         assert target_token.num_dims == 2
         assert hot_token.dim(0) == target_token.dim(0)
         batch_size = hot_token.dim(0)
-        params = [batch_size]
+        params = [batch_size, draft_vocab_real]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(hot_token, (-1, -1, -1), -1, True)
         tb_graph.new_input(d2t_table, (-1, -1, -1), -1, True)

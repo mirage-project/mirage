@@ -224,9 +224,16 @@ class Eagle3Builder:
 
     def _attach_weights(self):
         """Attach the prepared weights to the mpk graph."""
+        # Eagle3 draft uses TWO RMSNorms before QKV:
+        #   input_layernorm over the H-dim EMBED only
+        #   hidden_norm     over the H-dim HIDDEN only
+        # then concat → 2H → QKV. (sglang llama_eagle3.LlamaDecoderLayer.forward)
         self.w_input_ln = self._attach(
             self.sd["midlayer.input_layernorm.weight"].contiguous(),
             "eagle3_input_layernorm")
+        self.w_hidden_norm = self._attach(
+            self.sd["midlayer.hidden_norm.weight"].contiguous(),
+            "eagle3_hidden_norm")
         self.w_post_ln = self._attach(
             self.sd["midlayer.post_attention_layernorm.weight"].contiguous(),
             "eagle3_post_attention_layernorm")
@@ -256,6 +263,10 @@ class Eagle3Builder:
 
         self.embed_out = self._new(
             (mbt, H), bfloat16, "eagle3_embed_out")
+        self.embed_normed = self._new(
+            (mbt, H), bfloat16, "eagle3_embed_normed")  # after input_layernorm
+        self.hidden_normed = self._new(
+            (mbt, H), bfloat16, "eagle3_hidden_normed")  # after hidden_norm
         self.aux_concat_out = self._new(
             (mbt, 3 * H), bfloat16, "eagle3_aux_concat_out")
         self.hidden_in = self._new(
@@ -364,23 +375,29 @@ class Eagle3Builder:
                 # step>0: reuse the draft block's output hidden from previous iter.
                 step_hidden = self.draft_hidden
 
-            # 4. Concat(embed, hidden) → 2H input for QKV
+            # 4. Per-branch RMSNorm BEFORE concat (sglang Eagle3 convention):
+            #   embed   → input_layernorm → embed_normed   (H)
+            #   hidden  → hidden_norm     → hidden_normed  (H)
+            # Then concat the two normed tensors into the 2H QKV input.
+            self.mpk.rmsnorm_layer(
+                input=self.embed_out, weight=self.w_input_ln,
+                output=self.embed_normed,
+                grid_dim=(mbt, 1, 1), block_dim=bd_small,
+            )
+            self.mpk.rmsnorm_layer(
+                input=step_hidden, weight=self.w_hidden_norm,
+                output=self.hidden_normed,
+                grid_dim=(mbt, 1, 1), block_dim=bd_small,
+            )
             self.mpk.eagle3_input_concat_layer(
-                embed=self.embed_out, hidden=step_hidden,
+                embed=self.embed_normed, hidden=self.hidden_normed,
                 output=self.qkv_in_2H,
                 grid_dim=(1, 1, 1), block_dim=bd_compute,
             )
 
-            # 5. input_layernorm over 2H
-            self.mpk.rmsnorm_layer(
-                input=self.qkv_in_2H, weight=self.w_input_ln,
-                output=self.ln_out,
-                grid_dim=(mbt, 1, 1), block_dim=bd_small,
-            )
-
-            # 6. fused QKV projection: (fused_outdim_qkv, 2H)
+            # 5. fused QKV projection: (fused_outdim_qkv, 2H)
             self.mpk.linear_layer(
-                input=self.ln_out, weight=self.w_qkv, output=self.attn_in,
+                input=self.qkv_in_2H, weight=self.w_qkv, output=self.attn_in,
                 grid_dim=(grid_for_rmsnorm_linear_layer(self.w_qkv.dim(0)), 1, 1),
                 block_dim=bd_small,
             )
@@ -456,11 +473,13 @@ class Eagle3Builder:
                 grid_dim=(1, 1, 1), block_dim=bd_small,
             )
 
-            # 13. d2t remap: hot_id → target vocab id
+            # 13. d2t remap: hot_id → target vocab id (guarded against padded
+            # argmax: hot_id ≥ draft_vocab_size → sentinel 0)
             self.mpk.eagle3_d2t_remap_layer(
                 hot_token=self.hot_token, d2t_table=self.d2t,
                 target_token=self.target_token,
                 grid_dim=(1, 1, 1), block_dim=bd_small,
+                draft_vocab_real=self.draft_vocab_size,
             )
 
             # 14. scatter target_token into all_draft_ids[:, step]

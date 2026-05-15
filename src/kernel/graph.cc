@@ -854,9 +854,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id = task_register->register_eagle3_commit_task(
         customized->bgraph, params);
     // Inputs:  argmax_out, draft_tokens_new, accepted_count, tokens_buffer
-    // Outputs: new_token_nums, drafts_prev (attach_input cross-iter snapshot)
+    // Outputs: new_token_nums, drafts_prev (cross-iter snapshot), debug_stats
     // (step / prompt_length read from runtime_config)
-    task_config[op] = std::make_tuple(4, 2, TASK_EAGLE3_COMMIT, variant_id);
+    task_config[op] = std::make_tuple(4, 3, TASK_EAGLE3_COMMIT, variant_id);
   }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {

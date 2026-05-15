@@ -516,12 +516,15 @@ if __name__ == "__main__":
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )
-        
+        # Stable handle to the embed table for Eagle3 (the local `w` variable
+        # gets clobbered by per-layer projection weights inside the loop below).
+        w_embed_table = w
+
         mpk.embed_layer(
-            input=x, 
-            weight=w, 
-            output=y, 
-            grid_dim=(1, 1, 1), 
+            input=x,
+            weight=w,
+            output=y,
+            grid_dim=(1, 1, 1),
             block_dim=(256, 1, 1),
             input_source=1,
         )
@@ -800,7 +803,7 @@ if __name__ == "__main__":
                 draft_state_dict=draft_sd,
                 draft_config=draft_cfg,
                 target_hidden_size=hidden_size,
-                target_w_embed=w,  # shared target embed_tokens DTensor
+                target_w_embed=w_embed_table,  # shared target embed_tokens DTensor
                 cos_pos_embed=cos_pos_embed,
                 sin_pos_embed=sin_pos_embed,
                 num_draft_steps=args.num_draft_steps,
@@ -825,6 +828,13 @@ if __name__ == "__main__":
             eagle3_drafts_prev = mpk.attach_input(
                 torch_tensor=eagle3_drafts_prev_buf,
                 name="eagle3_drafts_prev",
+            )
+            # Debug stats: [iter_count, sum_accepted_drafts]
+            eagle3_debug_stats_buf = torch.zeros(
+                (2,), dtype=torch.int32, device="cuda")
+            eagle3_debug_stats = mpk.attach_input(
+                torch_tensor=eagle3_debug_stats_buf,
+                name="eagle3_debug_stats",
             )
 
             # Build draft loop first (registers scatter writer of
@@ -862,6 +872,7 @@ if __name__ == "__main__":
                 tokens_buffer=d_tokens,
                 num_new_tokens=d_num_new,
                 drafts_prev=eagle3_drafts_prev,
+                debug_stats=eagle3_debug_stats,
                 grid_dim=(mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
                 num_draft_tokens=K,
@@ -966,6 +977,19 @@ if __name__ == "__main__":
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
+        if args.eagle3:
+            stats = eagle3_debug_stats_buf.cpu().tolist()
+            iter_count, sum_accepted = stats[0], stats[1]
+            avg_ac = (iter_count + sum_accepted) / max(iter_count, 1)
+            print(
+                f"[Eagle3 stats] iter_count={iter_count}, "
+                f"sum_accepted_drafts={sum_accepted}, "
+                f"avg ac per iter={avg_ac:.3f} "
+                f"(= 1.0 means all drafts rejected; max possible = {args.num_draft_steps + 1})"
+            )
+            last_drafts = eagle3_drafts_prev_buf.cpu().tolist()
+            print(f"[Eagle3 stats] last iter drafts_prev (mbt x K)={last_drafts}; "
+                  f"(0 means hot_id was in lm_head padded range → d2t sentinel)")
         pass
     if world_size > 1:
         dist.destroy_process_group()

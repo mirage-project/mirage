@@ -4449,13 +4449,15 @@ int TaskRegister::register_eagle3_input_concat_task(
 
 int TaskRegister::register_eagle3_d2t_remap_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params[0]: batch_size
-  assert(params.size() == 1);
+  // params[0]: batch_size, params[1]: draft_vocab_real (unpadded)
+  assert(params.size() == 2);
   int batch_size = params[0];
+  int draft_vocab_real = params[1];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::eagle3_d2t_remap_kernel<$>(", batch_size);
+  code.e(
+      "kernel::eagle3_d2t_remap_kernel<$, $>(", batch_size, draft_vocab_real);
   code.e("    task_desc->input_ptrs[0],");   // hot_token
   code.e("    task_desc->input_ptrs[1],");   // d2t table
   code.e("    task_desc->output_ptrs[0]);"); // target_token
@@ -4487,6 +4489,7 @@ int TaskRegister::register_eagle3_commit_task(
   code.e("    runtime_config.prompt_length,");        // prompt_length (global)
   code.e("    task_desc->output_ptrs[0],");           // new_token_nums
   code.e("    task_desc->output_ptrs[1],");           // drafts_prev (attach_input snapshot)
+  code.e("    task_desc->output_ptrs[2],");           // debug_stats (attach_input)
   code.e("    task_desc->task_metadata.request_id);"); // request_id
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }

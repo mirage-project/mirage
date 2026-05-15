@@ -122,12 +122,18 @@ __device__ __forceinline__ void
 //
 // (sglang convention; d2t is signed int64). One thread per batch element.
 //
+// Padding guard: when lm_head is row-padded (to satisfy TMA 16B alignment),
+// argmax can land in the padded range [DRAFT_VOCAB_REAL, padded). d2t only
+// has DRAFT_VOCAB_REAL entries, so an OOB read would write garbage. When
+// hot_id is out of range, emit 0 — verify will reject (won't match target
+// argmax) and the bonus token is committed normally.
+//
 // Inputs:
 //   hot_token: [BATCH_SIZE] int64    — argmax over draft logits
-//   d2t:      [DRAFT_VOCAB_SIZE] int64
+//   d2t:      [DRAFT_VOCAB_REAL] int64
 // Outputs:
 //   target_token: [BATCH_SIZE] int64 — target vocab id for downstream tasks
-template <int BATCH_SIZE>
+template <int BATCH_SIZE, int DRAFT_VOCAB_REAL>
 __device__ __forceinline__ void
     eagle3_d2t_remap_kernel(void const *__restrict__ hot_token_ptr,
                             void const *__restrict__ d2t_table_ptr,
@@ -142,7 +148,11 @@ __device__ __forceinline__ void
   int b = threadIdx.x;
   if (b < BATCH_SIZE) {
     long long hot_id = hot[b];
-    target[b] = hot_id + d2t[hot_id];
+    if (hot_id >= 0 && hot_id < (long long)DRAFT_VOCAB_REAL) {
+      target[b] = hot_id + d2t[hot_id];
+    } else {
+      target[b] = 0; // padded-row argmax → sentinel; verify will reject
+    }
   }
 }
 
@@ -189,6 +199,7 @@ __device__ __forceinline__ void
                          void const *__restrict__ prompt_length_ptr,
                          void *__restrict__ new_token_nums_ptr,
                          void *__restrict__ drafts_prev_ptr,
+                         void *__restrict__ debug_stats_ptr,
                          int request_id) {
   // Single-edge per (producer, consumer) pair design:
   //   argmax_out (from argmax_reduce)             : 1 edge
@@ -246,6 +257,14 @@ __device__ __forceinline__ void
   // Publish step-advance signal to runtime.
   if (t_id == 0) {
     new_token_nums[req] = ac;
+  }
+
+  // Debug stats: int32 buffer of size 2 = [iter_count, sum_accepted_drafts].
+  // sum_accepted_drafts = sum of (ac - 1) across iters (excludes bonus token).
+  if (t_id == 0) {
+    int *stats = static_cast<int *>(debug_stats_ptr);
+    atomicAdd(&stats[0], 1);
+    atomicAdd(&stats[1], ac - 1);
   }
 }
 
