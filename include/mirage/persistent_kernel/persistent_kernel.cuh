@@ -39,6 +39,7 @@
 #include <nvshmemx.h>
 #endif
 #endif
+#include <map>
 #include <thread>
 #include <unistd.h>
 #include <vector>
