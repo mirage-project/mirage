@@ -1603,9 +1603,12 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       break;
     }
     case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
-    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100: {
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
+    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100: {
       // Dense FP8 GEMM TMA for A [M,K] and B [N,K], both row-major raw
-      // e4m3 bytes. Scales are loaded directly, not through TMA.
+      // e4m3 bytes. Scales are loaded directly, not through TMA. SplitK
+      // variant uses the same descriptor — per-CTA K offset is encoded in
+      // the runtime tile-index decomposition.
       constexpr int BK_BOX = 128;
       constexpr int OUTER_BOX = 128;
       constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_UINT8;
@@ -2259,8 +2262,11 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       break;
     }
     case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
-    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100: {
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
+    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100: {
       // A_fp8 and B_fp8 use TMA; scale tensors are plain LDG inputs.
+      // SplitK uses the same TMA layout (full K extent in descriptor;
+      // per-CTA K offset baked into runtime tile indexing).
       for (size_t param_id = 0; param_id < 2; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);

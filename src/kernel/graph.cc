@@ -863,6 +863,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_MEDIUMM_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_decode_splitk_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_decode_splitk_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 1, TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100, variant_id);
   } else if (name == "fp8_group_gemm_smallm_sm100") {
     // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + optional 6th (meta for
     // per-expert active mask) + 1 output (D_bf16). All 4 first inputs +

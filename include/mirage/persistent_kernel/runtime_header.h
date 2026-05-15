@@ -211,6 +211,14 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
   TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 306,
   TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 307,
+  // SplitK decode variant of the dense FP8 GEMM. K is partitioned across
+  // SPLIT_K CTAs (per output tile) which atomically reduce-add their
+  // partial sums into a pre-zeroed BF16 output. Targets DSv3 decode
+  // O_proj (M=128 mbt, K=16384 = 32*512 absorbed, N=7168 hidden shard),
+  // where the stock kernel runs 56 tiles in 1 underutilized wave; with
+  // SPLIT_K=4 we run 224 tiles in 3 better-utilized waves, each tile
+  // doing K/4 work. Gated behind MPK_DSV3_DECODE_OPROJ_SPLITK=1.
+  TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 = 308,
   // Grouped FP8 GEMM for MoE (DSv3, cherry-picked from PR674 f24dcd85).
   // Fused block_scale MMA with UE8M0 scales. 5 TMA descriptors
   // (A, B, SFA, SFB, D output). Two variants share kernel body; differ

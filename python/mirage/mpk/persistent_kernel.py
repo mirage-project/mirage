@@ -2962,6 +2962,81 @@ class PersistentKernel:
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
+    def fp8_gemm_dense_decode_splitk_layer(self, input_fp8, weight_fp8,
+                                            input_scale, weight_scale, output,
+                                            num_workers, split_k: int = 4):
+        """Decode-only SplitK FP8 dense GEMM.
+
+        Decomposes the K axis across `split_k` CTAs per (m_tile, n_tile)
+        and atomically accumulates BF16 partials into `output` via
+        red.global.add.bf16x2. Kernel bakes in runtime_m_mode=3
+        (decode-phase gate Q_LEN<=8 + active_rows cap), so prefill iters
+        early-exit before the wave starts.
+
+        IMPORTANT: the kernel relies on `output` being pre-zeroed each
+        iteration — this wrapper prepends a `tensor_init_layer` that
+        zeroes `output` before the GEMM. The dep-tracker chains them.
+
+        Args
+        ----
+        input_fp8:    (M, K) FP8 e4m3, row-major.
+        weight_fp8:   (N, K) FP8 e4m3, row-major.
+        input_scale:  (M, K/128) float32 per-128-K group scale for A.
+        weight_scale: (N/128, K/128) float32 per-128x128-block scale for B.
+        output:       (M, N) BF16. Pre-zeroed by the prepended tensor_init.
+        num_workers:  persistent worker count (= grid_dim.x for this task).
+        split_k:      K-split factor. K / (128 * split_k) must be integer.
+                      split_k=4 is the DSv3 decode O_proj sweet spot.
+        """
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims in (2, 3)
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N
+        assert split_k >= 1 and split_k <= 8
+        # Kernel-side BK=128; K must split evenly across split_k slices at
+        # the 128-K boundary so scale-tile boundaries align with K slices.
+        assert K % (128 * split_k) == 0, (
+            f"fp8_gemm_dense_decode_splitk: K={K} must be divisible by "
+            f"128 * split_k={128 * split_k}")
+        params = [M, N, K, num_workers, split_k]
+        # Prepend tensor_init to zero `output` before each GEMM iter. Use
+        # `input_fp8` as the "dummy" input — its dep edge gates the
+        # tensor_init on the upstream quantize task; the wider task DAG
+        # then gates the GEMM on the tensor_init via the `output` write.
+        # grid_dim mirrors the GEMM so the dep-tracker sees a tight chain;
+        # tensor_init_layer auto-collapses redundant grid.y/z dims when
+        # target_input_map[i] == -1.
+        self.tensor_init_layer(
+            target=output,
+            dummy=input_fp8,
+            grid_dim=(num_workers, 1, 1),
+            block_dim=(128, 1, 1),
+            dummy_input_map=(-1, -1, -1),
+            target_input_map=(-1, -1, -1),
+        )
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_decode_splitk_sm100", params)
+
     def linear_splitk_swapAB_fp8_layer(
         self,
         input_fp8: DTensor,

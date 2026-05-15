@@ -489,6 +489,7 @@ void register_mugraph(
             // shape; m_indices selects the active expert per output tile.
             if (task_type == TASK_FP8_GEMM_DENSE_SMALLM_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {
               task.task_metadata.request_id = bid.x;
@@ -1278,6 +1279,8 @@ TaskGraphResult print_task_graph(
     code.e("}");
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
@@ -1948,6 +1951,8 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GEMM_DENSE_SMALLM_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_SM100] =
       "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100] =
+      "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
       "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";

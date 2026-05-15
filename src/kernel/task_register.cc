@@ -5910,6 +5910,63 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
       TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
 }
 
+// SplitK decode variant. params: [M, N, K, num_workers, SPLIT_K]. Always
+// runs with runtime_m_mode=3 (decode-only Q_LEN<=8 + active_rows cap)
+// inline; that gate is baked in (no override). Kernel template:
+// <BN=128, NS=3, NE=2, SPLIT_K>. NE=2 matches the smallm sweet spot
+// (decode active_rows is tiny so wide TMEM staging wastes registers).
+//
+// Caller MUST pre-zero the output tensor (the Python wrapper prepends a
+// tensor_init); the kernel uses red.global.add.bf16x2 PTX atomics to
+// accumulate SPLIT_K partials per (m_tile, n_tile).
+int TaskRegister::register_fp8_gemm_dense_decode_splitk_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int split_k = params[4];
+  // BK=128 in the kernel; nk = K / 128 must be divisible by split_k so
+  // the K slice boundaries align with the per-128 scale rows.
+  assert(K % (128 * split_k) == 0 &&
+         "fp8_gemm_dense_decode_splitk requires K divisible by 128 * SPLIT_K");
+  assert(split_k >= 1 && split_k <= 8 &&
+         "fp8_gemm_dense_decode_splitk: SPLIT_K in [1, 8]");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // runtime_m_mode=3 (decode-phase gate + active_rows cap) inline.
+  code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+         "runtime_config.qo_indptr_buffer[0];");
+  code.e("if (q_len_ > 8) return;");
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+  code.e("if (runtime_m_ <= 0) return;");
+  // <BN, NS, NE, SPLIT_K> = <128, 3, 2, split_k>.
+  code.e("kernel::fp8_gemm_dense_decode_splitk::fp8_gemm_dense_decode_splitk_"
+         "sm100_task_impl<$, $, $, $>(",
+         128,
+         3,
+         2,
+         split_k);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", num_workers);
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100,
+                               code.to_string());
+}
+
 // Shared codegen for both group GEMM variants (smallm/largem). Variant
 // only changes the namespace + function name + TaskType.
 static int register_fp8_group_gemm_variant(TaskRegister *self,

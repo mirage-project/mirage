@@ -617,31 +617,67 @@ class DeepSeekV3Builder(GraphBuilder):
                                else 3 if gate_mode == 2
                                else 0)
 
-        if residual is None:
-            gemm_layer(
+        # B36 (2026-05-15): env-gated decode-only SplitK kernel for the
+        # decode O_proj. Stock mediumm runs 56 tiles in 1 underutilized
+        # 80-worker wave for the M=128, N=7168, K=16384 (TP=4) shape;
+        # splitk=4 gives 224 tiles in 3 better-utilized waves with K/4
+        # work per tile. Gate it strictly on gate_mode=2 (decode-only
+        # branch) so prefill iters keep the proven mediumm path.
+        use_decode_splitk = (
+            gate_mode == 2
+            and os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK") == "1"
+        )
+        decode_split_k = int(
+            os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK_FACTOR", "4"))
+        # Hard-stop if the shape's K can't be split evenly: a static
+        # split_k that doesn't divide K/128 corrupts scale indexing.
+        if use_decode_splitk:
+            K_ = weight_fp8_raw.dim(1)
+            if K_ % (128 * decode_split_k) != 0:
+                use_decode_splitk = False
+
+        def _emit_decode_splitk(out_tensor):
+            self.mpk.fp8_gemm_dense_decode_splitk_layer(
                 input_fp8=input_fp8,
                 weight_fp8=weight_fp8_raw,
                 input_scale=input_scale,
                 weight_scale=weight_scale_raw,
-                output=output,
+                output=out_tensor,
                 num_workers=self._fp8_dense_num_workers(),
-                runtime_m_mode=gemm_runtime_m_mode,
+                split_k=decode_split_k,
             )
+
+        if residual is None:
+            if use_decode_splitk:
+                _emit_decode_splitk(output)
+            else:
+                gemm_layer(
+                    input_fp8=input_fp8,
+                    weight_fp8=weight_fp8_raw,
+                    input_scale=input_scale,
+                    weight_scale=weight_scale_raw,
+                    output=output,
+                    num_workers=self._fp8_dense_num_workers(),
+                    runtime_m_mode=gemm_runtime_m_mode,
+                )
             return
 
         if self.world_size > 1:
             idx = getattr(self, "_tp_residual_linear_idx", 0)
             self._tp_residual_linear_idx = idx + 1
             partial = self._new_tp_partial(output, f"tp_v2_residual_partial_{idx}")
-            gemm_layer(
-                input_fp8=input_fp8,
-                weight_fp8=weight_fp8_raw,
-                input_scale=input_scale,
-                weight_scale=weight_scale_raw,
-                output=partial,
-                num_workers=self._fp8_dense_num_workers(),
-                runtime_m_mode=gemm_runtime_m_mode,
-            )
+            if use_decode_splitk:
+                _emit_decode_splitk(partial)
+            else:
+                gemm_layer(
+                    input_fp8=input_fp8,
+                    weight_fp8=weight_fp8_raw,
+                    input_scale=input_scale,
+                    weight_scale=weight_scale_raw,
+                    output=partial,
+                    num_workers=self._fp8_dense_num_workers(),
+                    runtime_m_mode=gemm_runtime_m_mode,
+                )
             self._allreduce_residual(partial, output, residual,
                                      gate_mode=gate_mode)
             return
@@ -652,15 +688,18 @@ class DeepSeekV3Builder(GraphBuilder):
             dtype=bfloat16, name=f"fp8_v2_partial_{id(weight_fp8_raw)}",
             io_category="cuda_tensor",
         )
-        gemm_layer(
-            input_fp8=input_fp8,
-            weight_fp8=weight_fp8_raw,
-            input_scale=input_scale,
-            weight_scale=weight_scale_raw,
-            output=partial,
-            num_workers=self._fp8_dense_num_workers(),
-            runtime_m_mode=gemm_runtime_m_mode,
-        )
+        if use_decode_splitk:
+            _emit_decode_splitk(partial)
+        else:
+            gemm_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=partial,
+                num_workers=self._fp8_dense_num_workers(),
+                runtime_m_mode=gemm_runtime_m_mode,
+            )
         self.mpk.elementwise_add_layer(
             input_a=partial,
             input_b=residual,
