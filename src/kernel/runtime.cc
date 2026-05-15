@@ -472,10 +472,12 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            // Unified MLA KV gather: same grid/request mapping as both
-            // split and non-split variants.
+            // Unified MLA KV gather: B14 (2026-05-15) added grid.y
+            // CTAs for Phase 2 seq_pos stripe. request_id = bid.x
+            // (request index), kv_idx = bid.y (seq_chunk_idx).
             if (task_type == TASK_MLA_KV_GATHER_UNIFIED_SM100) {
               task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
             }
             // DeepSeek MLA RoPE: grid=(request_slot, local_head, q_tile).
             if (task_type == TASK_DEEPSEEK_MLA_ROPE_SM100) {
