@@ -67,7 +67,8 @@ __device__ __forceinline__ void
                                 void *permuted_fp8_ptr,
                                 void *permuted_scale_ptr,
                                 void *meta_ptr,
-                                int my_expert) {
+                                int my_expert,
+                                int num_active_rows) {
   uint8_t const *__restrict__ in_fp8 =
       static_cast<uint8_t const *>(input_fp8_ptr);
   uint32_t const *__restrict__ in_scale =
@@ -110,8 +111,14 @@ __device__ __forceinline__ void
   if (tid == 0) {
     int count = 0;
     int const my_routing_base = my_expert * MBT;
+    // Bound the scan by num_active_rows: topk_sigmoid zero-inits routing
+    // for the full [0, MBT) range but only writes [0, num_active_rows),
+    // so rows >= num_active_rows always carry slot_1idx==0 and would be
+    // skipped anyway. For decode (num_active_rows=1) this drops the
+    // per-CTA scan from 128 iters to 1.
+    int const scan_end = (num_active_rows < MBT) ? num_active_rows : MBT;
 #pragma unroll 1
-    for (int t = 0; t < MBT; ++t) {
+    for (int t = 0; t < scan_end; ++t) {
       int32_t slot_1idx = routing[my_routing_base + t];
       if (slot_1idx > 0 && count < BM_PADDING) {
         s_matched_token[count] = t;

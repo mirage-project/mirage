@@ -5882,7 +5882,8 @@ int TaskRegister::register_moe_permute_sm100_task(
   code.e("    task_desc->output_ptrs[0],"); // permuted_fp8
   code.e("    task_desc->output_ptrs[1],"); // permuted_scale (transposed)
   code.e("    task_desc->output_ptrs[2],"); // meta (packed weights+tok2perm)
-  code.e("    task_desc->task_metadata.expert_offset);");
+  code.e("    task_desc->task_metadata.expert_offset,");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_PERMUTE_SM100, code.to_string());
 }
 
@@ -5930,7 +5931,8 @@ int TaskRegister::register_moe_unpermute_sm100_task(
   code.e("    task_desc->input_ptrs[1],");  // meta
   code.e("    task_desc->input_ptrs[2],");  // residual
   code.e("    task_desc->output_ptrs[0],"); // output
-  code.e("    task_desc->task_metadata.request_id);");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_UNPERMUTE_SM100, code.to_string());
 }
 

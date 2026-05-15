@@ -47,7 +47,19 @@ __device__ __forceinline__ void
                                   void const *meta_ptr,
                                   void const *residual_ptr,
                                   void *output_ptr,
-                                  int my_token) {
+                                  int my_token,
+                                  int num_active_rows) {
+  // Active-row skip: 1 CTA per token (grid = MBT). For inactive tokens
+  // (>= num_active_rows) the routing buffer is zero-init (topk_sigmoid
+  // only computed for active rows), so the accumulation would just be
+  // `output = residual + 0`. Early-exit instead — downstream consumers
+  // (AR, next-layer rmsnorm) only read row 0 in the decode iter, and the
+  // pre-MoE residual is re-added on the post-AR path for all rows
+  // independently, so leaving inactive rows untouched here cannot affect
+  // the active row's logits.
+  if (my_token >= num_active_rows) {
+    return;
+  }
   using bf16 = cute::bfloat16_t;
   bf16 const *__restrict__ d_in =
       static_cast<bf16 const *>(permuted_output_ptr);
