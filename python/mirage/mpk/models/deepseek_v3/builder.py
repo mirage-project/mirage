@@ -469,7 +469,8 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
                        output, residual=None, gate_mode: int = 0,
                        input_row_stride: int = None,
-                       input_col_offset: int = 0):
+                       input_col_offset: int = 0,
+                       share_quantize_tag: str = None):
         """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
 
         Replaces the old `linear_fp8_sm100` path which has a row-coverage
@@ -498,6 +499,14 @@ class DeepSeekV3Builder(GraphBuilder):
             row stride and the slice's start column. K (= weight.dim(1))
             tells the kernel how many cols to actually quantize per row.
             Defaults preserve legacy contiguous reads.
+        share_quantize_tag: B24 (2026-05-15). Dual-dispatch GEMMs reading the
+            same input slice (e.g., decode q_b + prefill q_b both reading
+            q_a_out[..., :q_lora]) emit two quantize tasks that write
+            identical bytes to the shared cached buffer. When both callers
+            pass the same `share_quantize_tag`, the first call emits a
+            single quantize with active_mode=0 (always run) and subsequent
+            calls skip the quantize. Saves one ~5 us wave dispatch per
+            shared input per layer.
         """
         if weight_scale_raw is None:
             raise ValueError("FP8 linear v2 requires FP8 weight scale.")
@@ -515,26 +524,45 @@ class DeepSeekV3Builder(GraphBuilder):
         reduction_size = weight_fp8_raw.dim(1)
         input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
             reduction_size)
-        # Quantize bf16 input → FP8 + float32 scale. active_mode mirrors the
-        # gate_mode so the quantize fires only in the matching phase.
-        active_mode = 2 if gate_mode == 1 else 3 if gate_mode == 2 else 0
-        quantize_kwargs = {}
-        if input_row_stride is not None or input_col_offset != 0:
-            quantize_kwargs["hidden_size_override"] = reduction_size
-            quantize_kwargs["input_stride_override"] = (
-                input_row_stride if input_row_stride is not None
-                else input_bf16.dim(1))
-            quantize_kwargs["in_offset_elems"] = input_col_offset
-        self.mpk.quantize_fp8_layer(
-            input=input_bf16,
-            output_fp8=input_fp8,
-            output_scale=input_scale,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=False,
-            active_mode=active_mode,
-            **quantize_kwargs,
-        )
+        # B24: emit quantize only on the FIRST call that supplies a given
+        # share_quantize_tag this layer; subsequent calls reuse the buffer.
+        # The shared-quantize variant uses active_mode=0 (always run) so
+        # both decode and prefill iters see fresh data. The non-shared path
+        # mirrors gate_mode into the quantize active_mode (existing
+        # behavior).
+        emit_quantize = True
+        if share_quantize_tag is not None:
+            already = getattr(self, "_fp8_quantize_emitted", set())
+            if share_quantize_tag in already:
+                emit_quantize = False
+            else:
+                already.add(share_quantize_tag)
+                self._fp8_quantize_emitted = already
+
+        if emit_quantize:
+            active_mode = (
+                0 if share_quantize_tag is not None
+                else (2 if gate_mode == 1
+                      else 3 if gate_mode == 2
+                      else 0)
+            )
+            quantize_kwargs = {}
+            if input_row_stride is not None or input_col_offset != 0:
+                quantize_kwargs["hidden_size_override"] = reduction_size
+                quantize_kwargs["input_stride_override"] = (
+                    input_row_stride if input_row_stride is not None
+                    else input_bf16.dim(1))
+                quantize_kwargs["in_offset_elems"] = input_col_offset
+            self.mpk.quantize_fp8_layer(
+                input=input_bf16,
+                output_fp8=input_fp8,
+                output_scale=input_scale,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=False,
+                active_mode=active_mode,
+                **quantize_kwargs,
+            )
 
         gemm_layer = (
             self.mpk.fp8_gemm_dense_smallm_layer
@@ -700,7 +728,8 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                      grid_dim, block_dim, residual=None, gate_mode: int = 0,
                      input_row_stride: int = None,
-                     input_col_offset: int = 0):
+                     input_col_offset: int = 0,
+                     share_quantize_tag: str = None):
         """Quantize BF16 input → FP8, then run FP8 GEMM.
 
         Now routes through the new `fp8_gemm_dense_smallm/mediumm_sm100`
@@ -744,6 +773,7 @@ class DeepSeekV3Builder(GraphBuilder):
             gate_mode=gate_mode,
             input_row_stride=input_row_stride,
             input_col_offset=input_col_offset,
+            share_quantize_tag=share_quantize_tag,
         )
 
     def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs):
@@ -1795,6 +1825,14 @@ class DeepSeekV3Builder(GraphBuilder):
             self._bmm_decode_q_path(state_dict, attn, layer_idx, qb_slice_kwargs)
         else:
             # Existing absorbed-Q path (default).
+            # B24 (2026-05-15): when dual-dispatch is active, decode q_b
+            # and prefill q_b both quantize self.q_a_out with K=q_lora=1536.
+            # Share the quantize task between them — saves one ~5 us wave
+            # dispatch per layer on decode iters (the prefill quantize was
+            # early-exiting on decode but still paying the dispatch cost).
+            qb_share_tag = (
+                f"layer_{layer_idx}_qb_q_a_shared"
+                if self._use_prefill else None)
             w_q_b, s_q_b = self._attach_fp8_weight(
                 state_dict, f"{attn}q_b_proj.weight",
                 f"layer_{layer_idx}_q_b_proj")
@@ -1802,6 +1840,7 @@ class DeepSeekV3Builder(GraphBuilder):
                              grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
                              block_dim=(128, 1, 1),
                              gate_mode=2 if self._use_prefill else 0,
+                             share_quantize_tag=qb_share_tag,
                              **qb_slice_kwargs)
         if self._use_prefill:
             if self._qb_fused:
@@ -1818,6 +1857,7 @@ class DeepSeekV3Builder(GraphBuilder):
                               1, 1),
                     block_dim=(128, 1, 1),
                     gate_mode=1,
+                    share_quantize_tag=qb_share_tag,
                     **qb_slice_kwargs)
             else:
                 w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
@@ -1829,6 +1869,7 @@ class DeepSeekV3Builder(GraphBuilder):
                               1, 1),
                     block_dim=(128, 1, 1),
                     gate_mode=1,
+                    share_quantize_tag=qb_share_tag,
                     **qb_slice_kwargs)
                 w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
                     state_dict, f"{attn}q_b_pe.weight",
@@ -1839,6 +1880,7 @@ class DeepSeekV3Builder(GraphBuilder):
                               1, 1),
                     block_dim=(128, 1, 1),
                     gate_mode=1,
+                    share_quantize_tag=qb_share_tag,
                     **qb_slice_kwargs)  # 2026-05-13: was missing — see scratch/fp8_dense_smallm_n2176_bug.md
         # Step 4: kv_a (c_latent + k_pe) is produced by the fused qkv_a GEMM
         # above; no separate kv_a_proj_with_mqa GEMMs are emitted.
