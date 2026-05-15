@@ -238,20 +238,37 @@ __device__ __forceinline__ void
     }
   }
 
-  // Write K new drafts at step+ac+1 .. step+ac+K (only past prompt).
+  // Select the correct slot for the new K-token chain that aligns with the
+  // next iter's prefix.
+  //
+  // Each iter-N slot b's K-step chain predicts positions
+  //   step_N + b + 2, step_N + b + 3, ..., step_N + b + K + 1
+  // Next iter's verify reads drafts_prev[k] expecting a prediction at position
+  // step_{N+1} + 1 + k = step_N + ac + 1 + k. The matching slot is b = ac - 1.
+  // The tokens-buffer write at step+ac+1+k must use the SAME slot, otherwise
+  // the next iter's target gets a wrong-position token in its mbt-window and
+  // every subsequent verify gets a corrupted KV state.
+  // Clamp src_slot to [0, BATCH_SIZE-1] for safety (ac ∈ [1, K+1]; the
+  // BATCH_SIZE=K+1 → ac=K+1 maps to slot K which is out of bounds and means
+  // "all drafts accepted — no valid continuation slot", clamp to last).
+  int src_slot = ac - 1;
+  if (src_slot < 0) src_slot = 0;
+  if (src_slot >= BATCH_SIZE) src_slot = BATCH_SIZE - 1;
+
+  // Write K new drafts at step+ac+1 .. step+ac+K (only past prompt), drawn
+  // from the slot ac-1 chain.
   if (t_id < K) {
     int pos = cur_step + ac + 1 + t_id;
     if (pos < MAX_SEQ_LEN && pos >= prompt_len) {
-      tokens[req * MAX_SEQ_LEN + pos] = drafts[t_id];
+      tokens[req * MAX_SEQ_LEN + pos] = drafts[src_slot * K + t_id];
     }
   }
 
-  // Snapshot current iter's drafts (shape [BATCH_SIZE, K]) into attach_input
-  // slot for next iter's verify_strict to consume. Copy the whole tensor so
-  // verify can index draft_token_ids[bid * K + k] across all q-positions.
-  int const total = BATCH_SIZE * K;
-  for (int i = t_id; i < total; i += blockDim.x) {
-    drafts_prev[i] = drafts[i];
+  // Snapshot current iter's drafts (shape [BATCH_SIZE=K+1, K]) into the
+  // attach_input slot for next iter's verify_strict to consume. The next iter's
+  // verify reads drafts_prev[0..K-1] (the first K entries).
+  if (t_id < K) {
+    drafts_prev[t_id] = drafts[src_slot * K + t_id];
   }
 
   // Publish step-advance signal to runtime.
