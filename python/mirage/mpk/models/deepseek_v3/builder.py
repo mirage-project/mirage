@@ -646,10 +646,18 @@ class DeepSeekV3Builder(GraphBuilder):
         # decode O_proj. Stock mediumm runs 56 tiles in 1 underutilized
         # 80-worker wave for the M=128, N=7168, K=16384 (TP=4) shape;
         # splitk=4 gives 224 tiles in 3 better-utilized waves with K/4
-        # work per tile. Gate it strictly on gate_mode=2 (decode-only
-        # branch) so prefill iters keep the proven mediumm path.
+        # work per tile.
+        #
+        # Gating: gate_mode=2 (decode-only) AND residual is not None.
+        # The residual-not-None check restricts to the O_proj path —
+        # otherwise q_b decode (also gate_mode=2 but residual=None,
+        # K=1536 N=18432) hits the kernel with a shape the SplitK
+        # kernel was never tested against and crashes with "illegal
+        # memory access". The kernel is tuned for the M=128 N=7168
+        # K=16384 O_proj shape (and similar TP=1/TP=2 variants).
         use_decode_splitk = (
             gate_mode == 2
+            and residual is not None
             and os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK") == "1"
         )
         decode_split_k = int(
