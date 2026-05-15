@@ -2612,14 +2612,26 @@ class PersistentKernel:
         meta: DTensor,
         residual: DTensor,
         output: DTensor,
+        rows_per_cta: int = 8,
     ):
         """MoE combine-unpermute task — inverse of moe_permute_sm100. See
-        moe_unpermute_sm100.cuh for the contract. One CTA per token
-        (grid_dim = (MBT, 1, 1)). Decodes `meta` into permuted_weights +
-        token_to_permuted, then writes
+        moe_unpermute_sm100.cuh for the contract. Decodes `meta` into
+        permuted_weights + token_to_permuted, then writes
         `output[t] = residual[t] +
                      sum_k(permuted_output[token_to_permuted[t,k]-1]
                             * permuted_weights[same row])`.
+
+        B33 (2026-05-15): grid_dim = (ceil(MBT / rows_per_cta), 1, 1). The
+        kernel's ROWS_PER_TASK template (moe_unpermute_sm100.cuh) loops
+        `ceil(MBT / grid.x)` tokens per CTA, so each CTA handles
+        rows_per_cta consecutive tokens. Default rows_per_cta=8 gives 16
+        CTAs for MBT=128 (vs 128 CTAs at rows_per_cta=1), freeing 112
+        worker slots per unpermute wave for concurrent tasks. For
+        decode (active_rows=1) only CTA 0 does work; the rest pass the
+        my_token >= num_active_rows check and exit immediately, same as
+        before. Setting rows_per_cta=1 preserves the legacy 1-CTA-per-
+        token shape. The codegen recomputes ROWS_PER_TASK from grid.x so
+        this kwarg only affects launch fan-out, not correctness.
         """
         assert permuted_output.num_dims == 2
         # meta is shaped (2, M_TOTAL + MBT*TOPK) int32 — see
@@ -2641,11 +2653,14 @@ class PersistentKernel:
         assert output.dim(1) == HIDDEN
 
         params = [MBT, TOPK, HIDDEN, M_TOTAL]
-        grid_dim = (MBT, 1, 1)
+        rows_per_cta_safe = max(1, int(rows_per_cta))
+        grid_x = max(1, (MBT + rows_per_cta_safe - 1) // rows_per_cta_safe)
+        grid_dim = (grid_x, 1, 1)
         block_dim = (128, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # All inputs/outputs are (-1, -1, -1) so the kernel sees the FULL
-        # tensors and indexes them with task_metadata.request_id (= my_token).
+        # tensors and indexes them with task_metadata.request_id (= task_idx).
+        # task_idx * ROWS_PER_TASK + r is the per-CTA token id (kernel-side).
         tb_graph.new_input(permuted_output, (-1, -1, -1), -1, True)
         tb_graph.new_input(meta, (-1, -1, -1), -1, True)
         tb_graph.new_input(residual, (-1, -1, -1), -1, True)

@@ -28,9 +28,14 @@ namespace kernel {
 //                  sum_k(permuted_output[token_to_permuted[t,k]-1]
 //                         * permuted_weights[same row])`.
 //
-// One CTA per token (grid_dim = (MBT, 1, 1)). The token id comes from
-// `task_desc->task_metadata.request_id = bid.x` (set by the runtime —
-// see runtime.cc near TASK_MOE_UNPERMUTE_SM100).
+// One CTA per `ROWS_PER_TASK` tokens (grid_dim = (ceil(MBT / ROWS_PER_TASK),
+// 1, 1)). The CTA's task index comes from `task_desc->task_metadata.request_id
+// = bid.x` (set by the runtime — see runtime.cc near
+// TASK_MOE_UNPERMUTE_SM100). With ROWS_PER_TASK > 1, each CTA loops over a
+// contiguous range of tokens `task_idx * ROWS_PER_TASK + r`
+// (r = 0..ROWS_PER_TASK-1) and exits the moment a row crosses MBT or
+// num_active_rows. Default ROWS_PER_TASK == 1 preserves the legacy
+// 1-CTA-per-token contract.
 //
 // meta layout (must match moe_permute_sm100):
 //   meta[0       : M_TOTAL]                 = permuted_weights (float32
@@ -41,25 +46,19 @@ namespace kernel {
 //                                              iter upstream)
 //
 
-template <int MBT, int TOPK, int HIDDEN, int M_TOTAL, int OUTPUT_STRIDE>
+template <int MBT,
+          int TOPK,
+          int HIDDEN,
+          int M_TOTAL,
+          int OUTPUT_STRIDE,
+          int ROWS_PER_TASK = 1>
 __device__ __forceinline__ void
     moe_unpermute_sm100_task_impl(void const *permuted_output_ptr,
                                   void const *meta_ptr,
                                   void const *residual_ptr,
                                   void *output_ptr,
-                                  int my_token,
+                                  int task_idx,
                                   int num_active_rows) {
-  // Active-row skip: 1 CTA per token (grid = MBT). For inactive tokens
-  // (>= num_active_rows) the routing buffer is zero-init (topk_sigmoid
-  // only computed for active rows), so the accumulation would just be
-  // `output = residual + 0`. Early-exit instead — downstream consumers
-  // (AR, next-layer rmsnorm) only read row 0 in the decode iter, and the
-  // pre-MoE residual is re-added on the post-AR path for all rows
-  // independently, so leaving inactive rows untouched here cannot affect
-  // the active row's logits.
-  if (my_token >= num_active_rows) {
-    return;
-  }
   using bf16 = cute::bfloat16_t;
   bf16 const *__restrict__ d_in =
       static_cast<bf16 const *>(permuted_output_ptr);
@@ -71,29 +70,59 @@ __device__ __forceinline__ void
   bf16 const *__restrict__ d_res = static_cast<bf16 const *>(residual_ptr);
   bf16 *__restrict__ d_out = static_cast<bf16 *>(output_ptr);
 
-  // Load this token's topk → permuted_row mapping (small, registers OK).
-  int rows[TOPK];
-  float weights[TOPK];
-#pragma unroll
-  for (int k = 0; k < TOPK; ++k) {
-    int row_1idx = d_t2p[(size_t)my_token * TOPK + k];
-    rows[k] = row_1idx - 1; // -1 if not routed locally (was 0)
-    weights[k] = (row_1idx > 0) ? d_weights[row_1idx - 1] : 0.0f;
-  }
+  // B33 (2026-05-15): outer loop over ROWS_PER_TASK contiguous tokens so a
+  // single CTA can cover multiple rows when the wrapper shrinks grid_dim
+  // (e.g., 16 CTAs × 8 rows = 128 tokens with MBT=128). Default
+  // ROWS_PER_TASK=1 is the legacy 1-CTA-per-token shape.
+  //
+  // Two early-exit cases inside the loop:
+  //   * my_token >= MBT — past the static batch bound; subsequent rows
+  //     are also past it, so return.
+  //   * my_token >= num_active_rows — inactive token; the routing buffer
+  //     was zero-init (topk_sigmoid skipped inactive rows), so the
+  //     accumulation would just be `output = residual + 0`. Active rows
+  //     in MPK are contiguous from 0 (qo_indptr is prefix-summed by the
+  //     scheduler), so once we cross num_active_rows all later rows in
+  //     this CTA are also inactive. Return rather than continue — exits
+  //     match the per_token_group_quantize_fp8 row_count_cap pattern and
+  //     downstream consumers (AR, next-layer rmsnorm) only read row 0 in
+  //     the decode iter, and the pre-MoE residual is re-added on the
+  //     post-AR path for all rows independently, so leaving inactive
+  //     rows untouched here cannot affect the active row's logits.
+#pragma unroll 1
+  for (int r = 0; r < ROWS_PER_TASK; ++r) {
+    int const my_token = task_idx * ROWS_PER_TASK + r;
+    if (my_token >= MBT) {
+      return;
+    }
+    if (my_token >= num_active_rows) {
+      return;
+    }
 
-  // Accumulate per-element: out[i] = residual[i]
-  //                                + sum_k(d_in[rows[k]][i] * weights[k]).
-  for (int i = threadIdx.x; i < HIDDEN; i += blockDim.x) {
-    float acc = float(d_res[(size_t)my_token * OUTPUT_STRIDE + i]);
+    // Load this token's topk → permuted_row mapping (small, registers OK).
+    int rows[TOPK];
+    float weights[TOPK];
 #pragma unroll
     for (int k = 0; k < TOPK; ++k) {
-      if (rows[k] >= 0 && weights[k] != 0.0f) {
-        float v = float(d_in[(size_t)rows[k] * HIDDEN + i]);
-        acc += v * weights[k];
-      }
+      int row_1idx = d_t2p[(size_t)my_token * TOPK + k];
+      rows[k] = row_1idx - 1; // -1 if not routed locally (was 0)
+      weights[k] = (row_1idx > 0) ? d_weights[row_1idx - 1] : 0.0f;
     }
-    d_out[(size_t)my_token * OUTPUT_STRIDE + i] = bf16(acc);
-  }
+
+    // Accumulate per-element: out[i] = residual[i]
+    //                                + sum_k(d_in[rows[k]][i] * weights[k]).
+    for (int i = threadIdx.x; i < HIDDEN; i += blockDim.x) {
+      float acc = float(d_res[(size_t)my_token * OUTPUT_STRIDE + i]);
+#pragma unroll
+      for (int k = 0; k < TOPK; ++k) {
+        if (rows[k] >= 0 && weights[k] != 0.0f) {
+          float v = float(d_in[(size_t)rows[k] * HIDDEN + i]);
+          acc += v * weights[k];
+        }
+      }
+      d_out[(size_t)my_token * OUTPUT_STRIDE + i] = bf16(acc);
+    }
+  } // end ROWS_PER_TASK loop
 }
 
 } // namespace kernel

@@ -6003,7 +6003,11 @@ int TaskRegister::register_moe_permute_sm100_task(
 //             meta (M_TOTAL + MBT*TOPK,) i32 (= permuted_weights+token2perm),
 //             residual (MBT, HIDDEN) bf16
 // Outputs (1): output (MBT, HIDDEN) bf16
-// Grid: (MBT, 1, 1). request_id = bid.x set by runtime.
+// Grid: (ceil(MBT / ROWS_PER_TASK), 1, 1). request_id = bid.x set by runtime.
+// B33 (2026-05-15): added ROWS_PER_TASK template — when the wrapper shrinks
+// grid_dim.x below MBT, the kernel loops ROWS_PER_TASK = ceil(MBT / grid.x)
+// tokens per CTA. Default grid.x == MBT keeps ROWS_PER_TASK == 1 and the
+// legacy 1-CTA-per-token shape unchanged.
 int TaskRegister::register_moe_unpermute_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
@@ -6029,14 +6033,25 @@ int TaskRegister::register_moe_unpermute_sm100_task(
     output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   }
 
+  // B33: rows_per_task = ceil(MBT / grid.x). When the wrapper passes
+  // grid.x < MBT the kernel internally loops over multiple tokens per CTA
+  // so the total launched CTAs stay ≤ num_workers. Default grid.x == MBT
+  // gives rows_per_task == 1 (legacy 1-CTA-per-token contract).
+  int grid_x_safe = bgraph.grid_dim.x > 0 ? (int)bgraph.grid_dim.x : 1;
+  int rows_per_task = (MBT + grid_x_safe - 1) / grid_x_safe;
+  if (rows_per_task < 1) {
+    rows_per_task = 1;
+  }
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::moe_unpermute_sm100_task_impl<$, $, $, $, $>(",
+  code.e("kernel::moe_unpermute_sm100_task_impl<$, $, $, $, $, $>(",
          MBT,
          TOPK,
          HIDDEN,
          M_TOTAL,
-         output_stride);
+         output_stride,
+         rows_per_task);
   code.e("    task_desc->input_ptrs[0],");  // permuted_output
   code.e("    task_desc->input_ptrs[1],");  // meta
   code.e("    task_desc->input_ptrs[2],");  // residual
