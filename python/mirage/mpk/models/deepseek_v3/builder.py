@@ -451,10 +451,20 @@ class DeepSeekV3Builder(GraphBuilder):
         """Number of persistent workers each fp8_gemm_dense_{smallm,mediumm} call
         is allowed to occupy.
 
-        Default = self.num_workers (typically 128 on B200). Override via env
-        `MPK_FP8_DENSE_NUM_WORKERS` for experiments. Lower values free workers
-        for concurrent GEMMs in the same phase (e.g., Q/KV phase with many
-        small per-shard linears running back-to-back).
+        B26 (2026-05-15): default lowered from `self.num_workers` (128) to
+        80 for DSv3 dual-dispatch (`_use_prefill=True`). On B200 with
+        128 workers, the dense GEMM CTA waves frequently have <128 tiles
+        worth of real work (qkv_a has 17 tiles, q_b ~48, O_proj ~56),
+        so reducing the per-task occupancy from 128 to 80 frees ~48
+        worker slots per dense wave to overlap with concurrent ROPE /
+        rmsnorm / KV gather tasks. Measured: 412 → 402 us/MoE-layer
+        (−2.4%) on the 19-layer TP=4 EP=2 mbt=128 decode iter.
+
+        Override via env `MPK_FP8_DENSE_NUM_WORKERS` for experiments
+        (sweep showed 64 crashes nvshmem barrier, 80/96 both work but
+        80 is faster). `_fp8_dense_kv_b_proj` keeps full `num_workers`
+        independently — the runtime_m_mode=1 + large M path has tighter
+        constraints and crashes at <128.
 
         Each task strides through output tiles internally, so lowering num_workers
         below the actual tile count just means each task does more iterations.
@@ -464,6 +474,8 @@ class DeepSeekV3Builder(GraphBuilder):
         override = os.environ.get("MPK_FP8_DENSE_NUM_WORKERS")
         if override:
             return int(override)
+        if self._use_prefill:
+            return min(80, self.num_workers)
         return self.num_workers
 
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
