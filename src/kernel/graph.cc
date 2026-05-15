@@ -812,13 +812,17 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   else if (name == "quantize_fp8_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
         customized->bgraph, params, true /*scale_ue8m0*/);
+    // B15: params.size() == 5 means expert_active mode (active_mode=5)
+    // with meta as 2nd input. Otherwise legacy 1-input.
+    int num_inputs_q = (params.size() == 5) ? 2 : 1;
     task_config[op] =
-        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+        std::make_tuple(num_inputs_q, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "quantize_fp8_f32scale_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
         customized->bgraph, params, false /*scale_ue8m0*/);
+    int num_inputs_q = (params.size() == 5) ? 2 : 1;
     task_config[op] =
-        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+        std::make_tuple(num_inputs_q, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "linear_fp8_sm100") {
     int variant_id = task_register->register_linear_fp8_sm100_task(
         customized->bgraph, params, false);

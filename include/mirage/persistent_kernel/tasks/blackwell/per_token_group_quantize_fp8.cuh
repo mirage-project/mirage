@@ -75,7 +75,12 @@ __device__ __forceinline__ void
                                            float const max_8bit,
                                            int const scale_outer_stride,
                                            int const row_idx,
-                                           int const group_tile_idx) {
+                                           int const group_tile_idx,
+                                           int const row_count_cap = -1) {
+  // B15 (2026-05-15): row_count_cap is an optional per-CTA row-count
+  // upper bound (used by NEW MoE silu_out quantize where the row axis
+  // is permuted-expert layout and we want to cap by per-expert
+  // actual_count). -1 sentinel = no cap (use BATCH_SIZE template).
   // Pointers
   T const *input = static_cast<T const *>(input_ptr);
   DST_T *output_q = static_cast<DST_T *>(output_q_ptr);
@@ -115,6 +120,15 @@ __device__ __forceinline__ void
   for (int r = 0; r < ROWS_PER_TASK; ++r) {
     int const batch_idx = task_idx * ROWS_PER_TASK + r;
     if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
+      return;
+    }
+    // B15: optional per-CTA row-count cap (e.g., NEW MoE silu_out
+    // quantize bounded by per-expert actual_count). For inactive
+    // expert (cap=0) we don't even enter this body since the codegen
+    // returns earlier; for active expert with actual_count K, we
+    // quantize the first K rows of the CTA's tile and skip the rest.
+    if (row_count_cap >= 0 &&
+        batch_idx - task_idx * ROWS_PER_TASK >= row_count_cap) {
       return;
     }
     // Input row may live in a wider parent buffer (GLOBAL_STRIDE) than the

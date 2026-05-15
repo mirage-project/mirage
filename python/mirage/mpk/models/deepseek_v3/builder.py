@@ -2391,20 +2391,38 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         if upto < 6: return
         # 6) Quantize SiLU → UE8M0, then transpose to K-outermost.
-        # B12 (2026-05-15): process_all_rows=True because new_moe_silu_out
-        # has M_TOTAL = E_LOCAL × BM_PADDING rows (permuted-expert layout),
-        # not token-indexed. The default token-based active_rows skip was
-        # leaving rows 128..16383 uninitialized in decode and feeding
-        # stale silu_fp8 to the W2 group GEMM for every routed expert > 0.
-        self.mpk.quantize_fp8_layer(
-            input=new_moe_silu_out,
-            output_fp8=new_moe_silu_fp8,
-            output_scale=new_moe_silu_scale_Mfirst,
-            grid_dim=(m_total, 1, 1),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=True,
-            process_all_rows=True,
-        )
+        # B15 (2026-05-15): when active-skip is on, supply meta so the
+        # quantize codegen reads active_mask[my_expert] (skip inactive
+        # expert tile entirely) + actual_count[my_expert] (cap inner
+        # row loop to actual_count instead of BM_PADDING). Decode iter
+        # active=1 → ~120/128 CTAs early-return + 8 active CTAs process
+        # 1 row instead of 128.
+        if self._new_moe_active_skip:
+            num_local_experts = m_total // bm_pad
+            self.mpk.quantize_fp8_layer(
+                input=new_moe_silu_out,
+                output_fp8=new_moe_silu_fp8,
+                output_scale=new_moe_silu_scale_Mfirst,
+                grid_dim=(m_total, 1, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=True,
+                expert_active_meta=new_moe_meta,
+                expert_active_e_local=num_local_experts,
+                expert_active_bm_padding=bm_pad,
+            )
+        else:
+            # B12 fallback (no active-skip): process_all_rows still
+            # required because the row axis is permuted-expert layout,
+            # not token-indexed.
+            self.mpk.quantize_fp8_layer(
+                input=new_moe_silu_out,
+                output_fp8=new_moe_silu_fp8,
+                output_scale=new_moe_silu_scale_Mfirst,
+                grid_dim=(m_total, 1, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=True,
+                process_all_rows=True,
+            )
         if upto < 7: return
         self.mpk.transpose_scale_sm100_layer(
             scale_in=new_moe_silu_scale_Mfirst,

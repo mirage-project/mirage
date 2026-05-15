@@ -4829,17 +4829,30 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   //   size 4: [active_mode, hidden_size_override, input_stride_override,
   //            in_offset_elems] — QKV-a fused path uses this to quantize
   //            a slice of a wider buffer.
-  assert(params.size() == 0 || params.size() == 1 || params.size() == 4);
+  //   size 5: [active_mode=5, expert_meta_offset, e_local,
+  //            bm_padding, ctas_per_expert] — B15 per-expert
+  //            active-rows skip for NEW MoE silu_out quantize.
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 4 ||
+         params.size() == 5);
   int active_mode = params.empty() ? 0 : params[0];
   // active_mode 4 (B12): no token-indexed skip — process every CTA's
   // ROWS_PER_TASK chunk unconditionally. Used by NEW MoE silu_out
   // quantize where rows are permuted-expert layout, not token index.
-  assert(active_mode >= 0 && active_mode <= 4);
+  // active_mode 5 (B15): per-expert active-rows cap. Meta is supplied
+  // as a 4th tb_graph input; codegen pre-reads active_mask[my_expert]
+  // (skip if 0) then actual_count[my_expert] and caps the kernel's
+  // ROWS_PER_TASK inner loop.
+  assert(active_mode >= 0 && active_mode <= 5);
   bool has_slice_override = (params.size() == 4);
+  bool has_expert_active = (params.size() == 5);
+  int expert_meta_offset = has_expert_active ? params[1] : -1;
+  int expert_e_local = has_expert_active ? params[2] : 0;
+  int expert_bm_padding = has_expert_active ? params[3] : 0;
+  int expert_ctas_per_expert = has_expert_active ? params[4] : 1;
   int batch_size = 0, hidden_size = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 1;
+  int num_inputs = has_expert_active ? 2 : 1;
   int num_outputs = 2;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -4904,6 +4917,25 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     // permuted-expert layout (M_TOTAL = E_LOCAL × BM_PADDING) and the
     // token-indexed active_rows_ would silently leave most rows
     // uninitialized, feeding stale silu_fp8 to the W2 group GEMM.
+  } else if (active_mode == 5) {
+    // B15: per-expert active-rows skip. Skip CTA entirely when expert
+    // is inactive (active_mask[my_expert]=0). Otherwise read
+    // actual_count and pass to kernel as row_count_cap to bound the
+    // ROWS_PER_TASK inner loop. CTA→expert mapping: with grid_y =
+    // num_workers and BM_PADDING == ROWS_PER_TASK, my_expert =
+    // task_metadata.request_id / ctas_per_expert.
+    code.e("int const *active_mask_q_ = "
+           "static_cast<int const *>(task_desc->input_ptrs[1]) + $;",
+           expert_meta_offset);
+    code.e("int my_expert_q_ = task_desc->task_metadata.request_id / $;",
+           expert_ctas_per_expert);
+    code.e("if (!active_mask_q_[my_expert_q_]) return;");
+    code.e("int row_count_cap_ = active_mask_q_[$ + my_expert_q_];",
+           expert_e_local);
+    code.e("if (row_count_cap_ <= 0) return;");
+    code.e("if (row_count_cap_ > $) row_count_cap_ = $;",
+           expert_bm_padding,
+           expert_bm_padding);
   } else {
     code.e("int active_rows_ = "
            "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS] * $;",
@@ -4961,7 +4993,12 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   code.e("    1e-10f, -448.0f, 448.0f,");
   code.e("    $,", aligned_batch);
   code.e("    task_desc->task_metadata.request_id,");
-  code.e("    task_desc->task_metadata.kv_idx);");
+  if (active_mode == 5) {
+    code.e("    task_desc->task_metadata.kv_idx,");
+    code.e("    row_count_cap_);");
+  } else {
+    code.e("    task_desc->task_metadata.kv_idx);");
+  }
   code.e("}");
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }

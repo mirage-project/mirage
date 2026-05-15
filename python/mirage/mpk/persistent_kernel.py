@@ -2203,6 +2203,9 @@ class PersistentKernel:
         input_stride_override: int = None,
         in_offset_elems: int = 0,
         process_all_rows: bool = False,
+        expert_active_meta: DTensor = None,
+        expert_active_e_local: int = 0,
+        expert_active_bm_padding: int = 0,
     ):
         """Quantize BF16 input to FP8 with block-wise scale.
 
@@ -2247,23 +2250,49 @@ class PersistentKernel:
         )
         grid_dim = (group_tiles, grid_y, 1)
         if process_all_rows:
-            # active_mode=4 (sentinel) -> task_register emits no skip check
-            # and quantizes ROWS_PER_TASK rows for every CTA. The token-
-            # indexed `active_rows_` short-circuit makes no sense when the
-            # row axis is permuted-expert layout (NEW MoE silu_out).
-            assert active_mode == 0, (
-                "process_all_rows is incompatible with explicit active_mode")
+            assert active_mode == 0
             active_mode = 4
-        if slice_override:
+        if expert_active_meta is not None:
+            # B15: per-expert active-rows cap.
+            assert active_mode in (0, 4), \
+                "expert_active_meta is incompatible with token-indexed " \
+                "active_mode (1/2/3); use it with process_all_rows or default"
+            assert expert_active_e_local > 0
+            assert expert_active_bm_padding > 0
+            active_mode = 5
+        if active_mode == 5:
+            # params: [active_mode, expert_meta_offset, e_local,
+            #          bm_padding, ctas_per_expert]
+            assert expert_active_meta is not None
+            expert_meta_offset = expert_active_meta.dim(1)
+            row_count = 1
+            for axis in range(input.num_dims - 1):
+                row_count *= input.dim(axis)
+            rows_per_cta = max(1, row_count // max(grid_dim[1] or 1, 1))
+            ctas_per_expert = max(1,
+                                  expert_active_bm_padding // rows_per_cta)
+            params = [5, expert_meta_offset, expert_active_e_local,
+                      expert_active_bm_padding, ctas_per_expert]
+        elif slice_override:
             params = [active_mode, hidden_size,
                       input_stride_override, in_offset_elems]
         else:
             params = [] if active_mode == 0 else [active_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # CRITICAL ORDERING: task_register reads
+        # input_ptrs[0]=input bf16, output_ptrs[0]=output_fp8, output_ptrs[1]=output_scale,
+        # and (B15) input_ptrs[1]=expert_active_meta when active_mode==5.
+        # graph.cc tuple for active_mode==5 is (num_inputs=2, num_outputs=2),
+        # so wrapper must order operands as [input, meta, output_fp8, output_scale].
         tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        operands = [input]
+        if expert_active_meta is not None:
+            tb_graph.new_input(expert_active_meta, (-1, -1, -1), -1, True)
+            operands.append(expert_active_meta)
         tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([input, output_fp8, output_scale], tb_graph)
+        operands.extend([output_fp8, output_scale])
+        self.kn_graph.customized(operands, tb_graph)
         task_name = "quantize_fp8_sm100" if scale_ue8m0 else "quantize_fp8_f32scale_sm100"
         self.kn_graph.register_task(tb_graph, task_name, params)
 
