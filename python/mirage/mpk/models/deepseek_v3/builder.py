@@ -516,7 +516,9 @@ class DeepSeekV3Builder(GraphBuilder):
                        output, residual=None, gate_mode: int = 0,
                        input_row_stride: int = None,
                        input_col_offset: int = 0,
-                       share_quantize_tag: str = None):
+                       share_quantize_tag: str = None,
+                       input_fp8_override=None,
+                       input_scale_override=None):
         """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
 
         Replaces the old `linear_fp8_sm100` path which has a row-coverage
@@ -568,8 +570,23 @@ class DeepSeekV3Builder(GraphBuilder):
             raise ValueError("FP8 linear v2 expects 2D weight + scale.")
 
         reduction_size = weight_fp8_raw.dim(1)
-        input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
-            reduction_size)
+        # B37 (2026-05-15): caller may pre-allocate the FP8 + scale buffers
+        # and bypass the shared cache. Used by the fused
+        # rmsnorm+quantize path to give the fused task a unique writer for
+        # its FP8/scale outputs — otherwise the shared buffers carry
+        # multiple-writer semantics across layers, the fused task becomes a
+        # join-consumer, and `build_annotated_graph` flags the embedding
+        # producer with case 3 (fork-producer + join-producer).
+        if input_fp8_override is not None and input_scale_override is not None:
+            input_fp8 = input_fp8_override
+            input_scale = input_scale_override
+        elif input_fp8_override is None and input_scale_override is None:
+            input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
+                reduction_size)
+        else:
+            raise ValueError(
+                "input_fp8_override and input_scale_override must be both "
+                "set or both None")
         # B24: emit quantize only on the FIRST call that supplies a given
         # share_quantize_tag this layer; subsequent calls reuse the buffer.
         # The shared-quantize variant uses active_mode=0 (always run) so
@@ -814,7 +831,9 @@ class DeepSeekV3Builder(GraphBuilder):
                      grid_dim, block_dim, residual=None, gate_mode: int = 0,
                      input_row_stride: int = None,
                      input_col_offset: int = 0,
-                     share_quantize_tag: str = None):
+                     share_quantize_tag: str = None,
+                     input_fp8_override=None,
+                     input_scale_override=None):
         """Quantize BF16 input → FP8, then run FP8 GEMM.
 
         Now routes through the new `fp8_gemm_dense_smallm/mediumm_sm100`
@@ -859,6 +878,8 @@ class DeepSeekV3Builder(GraphBuilder):
             input_row_stride=input_row_stride,
             input_col_offset=input_col_offset,
             share_quantize_tag=share_quantize_tag,
+            input_fp8_override=input_fp8_override,
+            input_scale_override=input_scale_override,
         )
 
     def _fused_rmsnorm_quantize_qkv_a_tag(self, layer_idx: int) -> str:
@@ -878,18 +899,66 @@ class DeepSeekV3Builder(GraphBuilder):
         + float32 scale buffers in one fused task.
 
         Returns the share_quantize_tag the caller MUST forward to
-        `_fp8_linear(share_quantize_tag=...)` so the downstream qkv_a
-        GEMM skips its internal quantize (the fused task has already
-        published valid bytes into the cached buffer).
+        `_fp8_linear(share_quantize_tag=...)`.
 
-        Buffer ownership: `_fp8_mbt_buffers_for_reduction_f32scale(K)`
-        caches `(fp8_buf, scale_buf)` keyed on K. We must call it BEFORE
-        the fused task so the buffer DTensors exist when we wire the
-        task; the qkv_a `_fp8_linear_v2` call later in the same layer
-        will reuse the same cached buffers.
+        Buffer ownership (2026-05-15 case-3 fix): unlike the standalone
+        quantize path (which uses the cross-layer SHARED FP8/scale
+        buffers via `_fp8_mbt_buffers_for_reduction_f32scale`), the fused
+        task here allocates **per-layer-unique** FP8 + scale buffers.
+
+        Why: the fused task takes its FP8/scale outputs as store_in_dmem
+        inputs in the task graph (the kernel's "outputs" are wired as
+        input slots — MPK convention). If those buffers are shared across
+        layers (multiple writers across the megakernel's task list), the
+        annotated-graph builder sees the fused task as a join-consumer,
+        and the producer of its `input` slot (embedding at layer 0) ends
+        up as both a fork-producer (other consumers exist) and a
+        join-producer (this consumer is a join-consumer) — case 3
+        violation. With per-layer-unique buffers the fused task has a
+        unique writer per buffer, breaks the join, and the AG accepts.
+
+        Cost: extra `mbt * K + mbt * (K/128) * 4` bytes per layer (~14 KB
+        for K=7168 at mbt=128). Trade-off vs the B23/B24 dedup pattern is
+        accepted because qkv_a has no other quantize peer to dedup with
+        (kv_b/q_b use different K).
+
+        The per-layer buffers are stashed on `self._fused_qkv_a_bufs`
+        keyed by layer_idx so the qkv_a `_fp8_linear` call site can pull
+        them as `input_fp8_override` / `input_scale_override`.
         """
-        input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
-            reduction_size)
+        mbt = self.max_num_batched_tokens
+        group_size = 128
+        num_groups = (reduction_size + group_size - 1) // group_size
+        if not hasattr(self, "_fused_qkv_a_bufs"):
+            self._fused_qkv_a_bufs = {}
+        if not hasattr(self, "_fused_rmsnorm_out_per_layer"):
+            self._fused_rmsnorm_out_per_layer = {}
+        if layer_idx not in self._fused_qkv_a_bufs:
+            input_fp8 = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=float8_e4m3,
+                name=f"fused_qkv_a_fp8_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            input_scale = self.mpk.new_tensor(
+                dims=(mbt, num_groups), dtype=float32,
+                name=f"fused_qkv_a_scale_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            self._fused_qkv_a_bufs[layer_idx] = (input_fp8, input_scale)
+        if layer_idx not in self._fused_rmsnorm_out_per_layer:
+            # Per-layer-unique BF16 rmsnorm output buffer. The shared
+            # `self.rmsnorm_out` is reused across all layers, so the AG
+            # sees layer N's fused task reading from layer (N-1)'s write
+            # via store_in_dmem — making the fused task a join-consumer
+            # (case-3 trigger at embedding). With per-layer unique buffer,
+            # only ONE writer per buffer.
+            self._fused_rmsnorm_out_per_layer[layer_idx] = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=bfloat16,
+                name=f"fused_rmsnorm_out_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+        input_fp8, input_scale = self._fused_qkv_a_bufs[layer_idx]
+        rmsnorm_out_bf16 = self._fused_rmsnorm_out_per_layer[layer_idx]
         # Pre-populate the emitted-set so _fp8_linear_v2 will skip the
         # internal quantize call that would otherwise overwrite the
         # fused-task output bytes with identical-but-redundant work.
@@ -900,16 +969,20 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # Float32 scale path (matches _fp8_mbt_buffers_for_reduction_f32scale
         # layout; dense GEMM consumes (M, K/128) f32 row-major scales).
+        # `output_bf16` uses the per-layer-unique buffer (case-3 fix);
+        # emit_bf16=False because nothing downstream reads it in fused
+        # mode (qkv_a GEMM reads fp8/scale directly). Kernel writes the
+        # FP8 + scale only.
         self.mpk.fused_rmsnorm_quantize_fp8_layer(
             input=input_x,
             weight=w_norm,
-            output_bf16=self.rmsnorm_out,
+            output_bf16=rmsnorm_out_bf16,
             output_fp8=input_fp8,
             output_scale=input_scale,
             grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
             scale_ue8m0=False,
-            emit_bf16=True,
+            emit_bf16=False,
         )
         return tag
 
@@ -1912,14 +1985,22 @@ class DeepSeekV3Builder(GraphBuilder):
         # B37: when fused rmsnorm+quantize is active, the share_quantize_tag
         # is pre-populated in _fp8_quantize_emitted by the input_layernorm
         # call site, so _fp8_linear_v2's internal quantize is skipped.
+        # Also pull the per-layer-unique FP8/scale buffers the fused task
+        # wrote to (case-3 fix — see `_emit_fused_rmsnorm_qkv_a_quantize`
+        # docstring).
         qkv_a_quantize_tag = (
             self._fused_rmsnorm_quantize_qkv_a_tag(layer_idx)
             if self._fused_rmsnorm_quantize else None)
+        qkv_a_fp8_ovr, qkv_a_scale_ovr = None, None
+        if self._fused_rmsnorm_quantize:
+            qkv_a_fp8_ovr, qkv_a_scale_ovr = self._fused_qkv_a_bufs[layer_idx]
         self._fp8_linear(
             self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
-            share_quantize_tag=qkv_a_quantize_tag)
+            share_quantize_tag=qkv_a_quantize_tag,
+            input_fp8_override=qkv_a_fp8_ovr,
+            input_scale_override=qkv_a_scale_ovr)
 
         # Diagnostic (PRE-RMSnorm dump 2026-05-13): captures RAW qkv_a_out
         # immediately after the fused GEMM, before any consumer touches it.
