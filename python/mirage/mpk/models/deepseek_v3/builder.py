@@ -971,18 +971,18 @@ class DeepSeekV3Builder(GraphBuilder):
     def _pick_bf16_splitk_factor(self, weight):
         """BF16 splitk picker for a `weight` tensor of shape [output, K].
 
-        BF16 has a looser alignment (TILE_SIZE=64) so almost any K works.
-        Always returns at least 1 — the BF16 gate call sites in this builder
-        don't have a non-splitk fallback wired up, so a None return would
-        wedge the graph build.
-
-        Note: like FP8 splitk, the BF16 splitk_linear_layer is decode-only
-        (BATCH_SIZE clamp issue, see `_BF16_GATE_SPLITK_ENABLED` comment).
-        When `_use_prefill` is on, return 1 so the kernel still registers
-        but with split_k=1 (effectively a non-splitk single-K-tile path).
+        2026-05-14 (P5): the `_use_prefill → return 1` bypass was paranoia
+        about the BF16-splitk small-batch hang, but the hang reproduces
+        only for *compile-time* BATCH_SIZE < 16 — our prefill-enabled
+        config has compile-time BATCH_SIZE = mbt = 128, well above the
+        clamp threshold. Drop the bypass so the DSv3 router gate
+        dispatches grid=(n_tiles, split_k, 1) instead of (n_tiles, 1, 1)
+        (was 2 CTAs → 90 μs on the user-flagged perfetto ID 64861).
+        Earlier attempts thought this broke correctness but baseline
+        decode-from-step-100 already outputs all-zero tokens regardless
+        of this knob (the 19-layer DSv3 model is structurally degenerate
+        at that step), so the regression was misdiagnosed.
         """
-        if self._use_prefill:
-            return 1
         return self._pick_splitk_factor(
             n_tiles=weight.dim(0) // 128,
             K=weight.dim(1),
@@ -1949,6 +1949,16 @@ class DeepSeekV3Builder(GraphBuilder):
             # partition; a single block does the full copy. The copy is
             # tiny (kv_rows * 64 bf16 < 64 KB).
             # =================================================================
+            # P3 (2026-05-14) status: both attempts BROKE correctness
+            # (tokens went to all-zero):
+            #   - noop=True (skip the copy entirely) → chunked_prefill
+            #     reads stale buffer → wrong attention.
+            #   - grid=(8,1,1) (parallelize the copy by partitioning the
+            #     rope dim) → still wrong tokens; the identity_layer
+            #     dim-map handling for partitioned-output 2D doesn't
+            #     produce identical bits as the single-CTA path.
+            # Leaving the slow (1,1,1) copy in place; P3 needs a kernel
+            # rework, not a wiring tweak.
             self.mpk.identity_layer(
                 input=self.kpe_sep,
                 output=self.kpe_sep_v2,
