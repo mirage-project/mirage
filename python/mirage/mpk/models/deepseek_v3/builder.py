@@ -1926,7 +1926,7 @@ class DeepSeekV3Builder(GraphBuilder):
         rope_q_grid = (
             self.mpk.max_num_batched_requests,
             self.num_local_q_heads,
-            (self.max_num_batched_tokens + 15) // 16,
+            1,  # B35: TILE_Q==mbt -> 1 CTA per (req, head); kernel inner-loop covers all tokens
         )
         # B25 (2026-05-15): in dual-dispatch the fused (absorbed) ROPE_Q
         # only matters on decode iters and the split (unabsorbed) ROPE_Q
@@ -1938,6 +1938,7 @@ class DeepSeekV3Builder(GraphBuilder):
             sin_pos_embed=self.sin_pos_embed,
             num_heads=self.num_local_q_heads,
             grid_dim=rope_q_grid,
+            q_tile_size=self.max_num_batched_tokens,
             phase_gate=2 if self._use_prefill else 0,
         )
         if self._use_prefill:
@@ -1951,6 +1952,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 sin_pos_embed=self.sin_pos_embed,
                 num_heads=self.num_local_q_heads,
                 grid_dim=rope_q_grid,
+                q_tile_size=self.max_num_batched_tokens,
                 qfused_mode=1 if self._qb_fused else 0,
                 phase_gate=1,
             )
@@ -1963,8 +1965,9 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(
                 self.mpk.max_num_batched_requests,
                 1,
-                (self.max_num_batched_tokens + 15) // 16,
+                1,  # B35: TILE_Q==mbt collapses grid.z to 1
             ),
+            q_tile_size=self.max_num_batched_tokens,
             k_pe_row_stride=self._qkv_a_row_stride,
             k_pe_offset=self._qkv_a_k_pe_offset,
         )
@@ -3283,7 +3286,7 @@ class DeepSeekV3Builder(GraphBuilder):
         rope_q_grid = (
             self.mpk.max_num_batched_requests,
             self.num_local_q_heads,
-            (self.max_num_batched_tokens + 15) // 16,
+            1,  # B35: TILE_Q==mbt -> 1 CTA per (req, head); kernel inner-loop covers all tokens
         )
         self.mpk.deepseek_mla_rope_q_fused_layer(
             q_nope_pe=self.q_nope_pe,
@@ -3291,6 +3294,7 @@ class DeepSeekV3Builder(GraphBuilder):
             sin_pos_embed=self.sin_pos_embed,
             num_heads=self.num_local_q_heads,
             grid_dim=rope_q_grid,
+            q_tile_size=self.max_num_batched_tokens,
         )
         if use_mtp_prefill_attention:
             self.mpk.deepseek_mla_rope_q_split_layer(
@@ -3299,6 +3303,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 sin_pos_embed=self.sin_pos_embed,
                 num_heads=self.num_local_q_heads,
                 grid_dim=rope_q_grid,
+                q_tile_size=self.max_num_batched_tokens,
             )
         self.mpk.deepseek_mla_rope_k_layer(
             k_pe=self.k_pe_out,
@@ -3307,8 +3312,9 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(
                 self.mpk.max_num_batched_requests,
                 1,
-                (self.max_num_batched_tokens + 15) // 16,
+                1,  # B35: TILE_Q==mbt collapses grid.z to 1
             ),
+            q_tile_size=self.max_num_batched_tokens,
         )
 
         w_kv_a_ln = self._cached_attach(
