@@ -365,10 +365,18 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
+        kv_cache: Optional[dict] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
+        # KV cache pool registered at top level (Option-III in the
+        # PyTorch-module refactor). New-API attention layers retrieve
+        # their per-layer slice via ``self.get_kv_cache(layer_idx)``.
+        # Expected shape: dict with keys "k_cache" and "v_cache", each
+        # mapping to a tensor whose dim-0 is num_layers. None when the
+        # legacy demo wires KV cache through model state instead.
+        self._kv_cache = kv_cache
 
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
@@ -446,6 +454,29 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
+
+    def compile_scope(self):
+        # Returning the free-function contextmanager (rather than implementing
+        # it inline) keeps the ContextVar binding logic in one place — see
+        # mirage.mpk.context.compile_scope. Imported lazily to avoid a hard
+        # import-time cycle (context.py only references PersistentKernel under
+        # TYPE_CHECKING).
+        from .context import compile_scope as _compile_scope
+        return _compile_scope(self)
+
+    def get_kv_cache(self, layer_idx: int):
+        # Returns the (k_slice, v_slice) torch tensors for one decoder
+        # layer's paged KV cache. The pool was registered into the PK
+        # at construction via ``kv_cache={"k_cache": ..., "v_cache": ...}``.
+        # New-API ``PagedAttention.compile()`` calls this then
+        # ``attach_input`` to convert to DTensors.
+        if self._kv_cache is None:
+            raise RuntimeError(
+                "PersistentKernel was constructed without kv_cache=; "
+                "pass kv_cache={'k_cache': k_pool, 'v_cache': v_pool} "
+                "where each pool has dim-0 == num_layers."
+            )
+        return self._kv_cache["k_cache"][layer_idx], self._kv_cache["v_cache"][layer_idx]
 
     def _apply_test_mode_meta_defaults(self):
         # Allocate any missing meta tensors with shapes derived from the
