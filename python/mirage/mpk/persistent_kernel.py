@@ -1344,11 +1344,16 @@ class PersistentKernel:
         c_latent_offset_elems: int = 0,
         k_pe_row_stride: int = None,
         k_pe_offset_elems: int = 0,
+        num_gather_splits: int = 1,
     ):
         """Append paged KV once, then materialize decode or prefill views.
 
         Stride/offset overrides let the kernel read c_latent / k_pe from a
         wider parent buffer (QKV-a fused path). Defaults preserve legacy.
+
+        num_gather_splits > 1 fans the formerly-serial seq_pos loop in
+        append+gather phases over `num_gather_splits` CTAs (each CTA strides by
+        the split count). Caller must set `grid_dim[1] == num_gather_splits`.
         """
         d_k, d_v, page_size = mla_params
         slice_override = (
@@ -1356,7 +1361,19 @@ class PersistentKernel:
             c_latent_offset_elems != 0 or
             k_pe_row_stride is not None or
             k_pe_offset_elems != 0)
-        if slice_override:
+        if num_gather_splits > 1:
+            assert grid_dim[1] == num_gather_splits, (
+                f"grid_dim.y ({grid_dim[1]}) must match num_gather_splits "
+                f"({num_gather_splits}) for the fan-out path.")
+            params = [
+                d_k, d_v, page_size,
+                c_latent_row_stride if c_latent_row_stride is not None else d_v,
+                c_latent_offset_elems,
+                k_pe_row_stride if k_pe_row_stride is not None else 128,
+                k_pe_offset_elems,
+                num_gather_splits,
+            ]
+        elif slice_override:
             params = [
                 d_k, d_v, page_size,
                 c_latent_row_stride if c_latent_row_stride is not None else d_v,
@@ -1367,9 +1384,14 @@ class PersistentKernel:
         else:
             params = [d_k, d_v, page_size]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
-        tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
-        tb_graph.new_input(paged_cache, (-1, 2, -1), 1, True)
+        # With num_gather_splits>1 the kernel partitions seq_pos itself
+        # (strided by split_idx = grid.y). All CTAs read the same base
+        # pointers, so dim_maps must NOT slice any tensor along grid.y.
+        # Pre-existing single-split callers also work with all -1 since
+        # grid.y=1 makes slicing a no-op either way.
+        tb_graph.new_input(c_latent_new, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_pe_new, (-1, -1, -1), -1, True)
+        tb_graph.new_input(paged_cache, (-1, -1, -1), 1, True)
         tb_graph.new_input(contiguous_kv, (-1, -1, -1), -1, True)
         tb_graph.new_input(ckv_sep, (-1, -1, -1), -1, True)
         tb_graph.new_input(kpe_sep, (-1, -1, -1), -1, True)

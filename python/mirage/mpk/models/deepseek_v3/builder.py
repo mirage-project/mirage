@@ -295,6 +295,14 @@ class DeepSeekV3Builder(GraphBuilder):
         # split rmsnorm + standalone quantize chain.
         self._fused_rmsnorm_quantize = (
             os.environ.get("MPK_DSV3_FUSED_RMSNORM_QUANTIZE", "1") == "1")
+        # C1 (2026-05-16): fan the MLA KV-gather unified task across multiple
+        # CTAs by striding seq_pos. The legacy 1-CTA gather was 121 μs/layer
+        # (15% of layer wallclock) with 127 workers idle. With N splits each
+        # CTA strides seq_pos by N, so wallclock drops to ~121/N μs/layer.
+        # MPK_DSV3_KV_GATHER_SPLITS=N (default 8); set to 1 to disable.
+        self._kv_gather_splits = int(
+            os.environ.get("MPK_DSV3_KV_GATHER_SPLITS", "8"))
+        assert self._kv_gather_splits >= 1 and self._kv_gather_splits <= 128
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
@@ -2221,8 +2229,12 @@ class DeepSeekV3Builder(GraphBuilder):
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                grid_dim=(
+                    self.mpk.max_num_batched_requests,
+                    self._kv_gather_splits,
+                    1),
                 block_dim=(128, 1, 1),
+                num_gather_splits=self._kv_gather_splits,
                 **kv_gather_slice_kwargs,
             )
             # =================================================================

@@ -34,8 +34,8 @@
 //       -I include \
 //       -I include/mirage/persistent_kernel \
 //       --expt-relaxed-constexpr -std=c++20 \
-//       tests/runtime_python/blackwell/sm100_fp8_gemm_dense/bench_decode_no_splitk.cu \
-//       -o /tmp/bench_decode_no_splitk -lcuda
+//       tests/runtime_python/blackwell/sm100_fp8_gemm_dense/bench_decode_no_splitk.cu
+//       \ -o /tmp/bench_decode_no_splitk -lcuda
 //   # Run on any clean B200 (pick a free GPU index; default is 0):
 //   CUDA_VISIBLE_DEVICES=1 /tmp/bench_decode_no_splitk 0
 //
@@ -83,23 +83,23 @@
 //
 // =============================================================================
 
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <cuda_fp8.h>
-#include <cudaTypedefs.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cuda.h>
+#include <cudaTypedefs.h>
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
 #include <vector>
-#include <algorithm>
 
 #include "tasks/blackwell/fp8_gemm_dense_mediumm_sm100.cuh"
 
 using bf16 = __nv_bfloat16;
 
 constexpr int M = 128, N = 7168, K = 16384;
-constexpr int BN = 128, NS = 3;          // mediumm uses NE=4 internally
-constexpr int NUM_WORKERS = 80;          // _fp8_dense_num_workers() default
+constexpr int BN = 128, NS = 3; // mediumm uses NE=4 internally
+constexpr int NUM_WORKERS = 80; // _fp8_dense_num_workers() default
 constexpr int N_ITER_MAX = 256;
 
 __device__ uint32_t per_iter_ns[NUM_WORKERS * N_ITER_MAX];
@@ -110,18 +110,31 @@ __device__ __forceinline__ uint32_t get_globaltimer() {
   return ret;
 }
 
-__global__ __launch_bounds__(256, 1) void
-    persistent_gemm_bench(CUtensorMap const *ta_ptr,
-                          CUtensorMap const *tb_ptr,
-                          float const *sa, float const *sb,
-                          bf16 *C, int n_iter) {
+__global__
+    __launch_bounds__(256,
+                      1) void persistent_gemm_bench(CUtensorMap const *ta_ptr,
+                                                    CUtensorMap const *tb_ptr,
+                                                    float const *sa,
+                                                    float const *sb,
+                                                    bf16 *C,
+                                                    int n_iter) {
   for (int it = 0; it < n_iter; it++) {
     __syncthreads();
     uint32_t t0 = 0;
-    if (threadIdx.x == 0) t0 = get_globaltimer();
+    if (threadIdx.x == 0) {
+      t0 = get_globaltimer();
+    }
     // __noinline__ wrapper that mirrors megakernel dispatch.
-    kernel::fp8_gemm_dense_mediumm::fp8_gemm_dense_mediumm_sm100_task_impl<BN, NS>(
-        ta_ptr, tb_ptr, sa, sb, C, M, N, K,
+    kernel::fp8_gemm_dense_mediumm::fp8_gemm_dense_mediumm_sm100_task_impl<BN,
+                                                                           NS>(
+        ta_ptr,
+        tb_ptr,
+        sa,
+        sb,
+        C,
+        M,
+        N,
+        K,
         /*worker_idx=*/blockIdx.x,
         /*num_workers=*/NUM_WORKERS);
     __syncthreads();
@@ -137,13 +150,18 @@ void make_tma_desc(CUtensorMap &desc, void *base, uint64_t outer, uint64_t k) {
   uint64_t gs[1] = {(uint64_t)k};
   uint32_t bd[2] = {128, 128};
   uint32_t es[2] = {1, 1};
-  CUresult err = cuTensorMapEncodeTiled(
-      &desc, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2,
-      base, gd, gs, bd, es,
-      CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CU_TENSOR_MAP_SWIZZLE_128B,
-      CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  CUresult err = cuTensorMapEncodeTiled(&desc,
+                                        CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                        2,
+                                        base,
+                                        gd,
+                                        gs,
+                                        bd,
+                                        es,
+                                        CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                        CU_TENSOR_MAP_SWIZZLE_128B,
+                                        CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   if (err != CUDA_SUCCESS) {
     char const *errstr = nullptr;
     cuGetErrorString(err, &errstr);
@@ -152,31 +170,41 @@ void make_tma_desc(CUtensorMap &desc, void *base, uint64_t outer, uint64_t k) {
   }
 }
 
-void run_bench(int n_iter, CUtensorMap *d_ta, CUtensorMap *d_tb,
-               float *d_sa, float *d_sb, bf16 *d_c, size_t smem) {
+void run_bench(int n_iter,
+               CUtensorMap *d_ta,
+               CUtensorMap *d_tb,
+               float *d_sa,
+               float *d_sb,
+               bf16 *d_c,
+               size_t smem) {
   for (int i = 0; i < 3; i++) {
-    persistent_gemm_bench<<<NUM_WORKERS, 256, smem>>>(d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
+    persistent_gemm_bench<<<NUM_WORKERS, 256, smem>>>(
+        d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
   }
   cudaDeviceSynchronize();
 
   cudaEvent_t s, e;
-  cudaEventCreate(&s); cudaEventCreate(&e);
+  cudaEventCreate(&s);
+  cudaEventCreate(&e);
   cudaEventRecord(s);
-  persistent_gemm_bench<<<NUM_WORKERS, 256, smem>>>(d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
+  persistent_gemm_bench<<<NUM_WORKERS, 256, smem>>>(
+      d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
   cudaEventRecord(e);
   cudaEventSynchronize(e);
   float total_ms = 0;
   cudaEventElapsedTime(&total_ms, s, e);
 
   std::vector<uint32_t> h_iter(NUM_WORKERS * N_ITER_MAX);
-  cudaMemcpyFromSymbol(h_iter.data(), per_iter_ns,
-                       sizeof(uint32_t) * NUM_WORKERS * N_ITER_MAX);
+  cudaMemcpyFromSymbol(
+      h_iter.data(), per_iter_ns, sizeof(uint32_t) * NUM_WORKERS * N_ITER_MAX);
 
   std::vector<uint32_t> max_per_iter(n_iter, 0);
   for (int it = 0; it < n_iter; it++) {
     for (int wi = 0; wi < NUM_WORKERS; wi++) {
       uint32_t v = h_iter[wi * N_ITER_MAX + it];
-      if (v > max_per_iter[it]) max_per_iter[it] = v;
+      if (v > max_per_iter[it]) {
+        max_per_iter[it] = v;
+      }
     }
   }
 
@@ -194,34 +222,48 @@ void run_bench(int n_iter, CUtensorMap *d_ta, CUtensorMap *d_tb,
 
   printf("\n== N_ITER=%d ==\n", n_iter);
   printf("  cudaEvent total: %.2f μs (=%.3f μs/iter)\n",
-         total_ms * 1000.0, total_ms * 1000.0 / n_iter);
+         total_ms * 1000.0,
+         total_ms * 1000.0 / n_iter);
   printf("  iter[0] max-across-CTAs: %u ns (%.2f μs) [COLD]\n",
-         max_per_iter[0], max_per_iter[0] / 1000.0);
+         max_per_iter[0],
+         max_per_iter[0] / 1000.0);
   printf("  iter[1] max-across-CTAs: %u ns (%.2f μs)\n",
-         max_per_iter[1], max_per_iter[1] / 1000.0);
+         max_per_iter[1],
+         max_per_iter[1] / 1000.0);
   if (n_iter > 4) {
     printf("  iter[%d] max-across-CTAs: %u ns (%.2f μs)\n",
-           n_iter / 2, max_per_iter[n_iter / 2],
+           n_iter / 2,
+           max_per_iter[n_iter / 2],
            max_per_iter[n_iter / 2] / 1000.0);
     printf("  iter[%d] max-across-CTAs: %u ns (%.2f μs)\n",
-           n_iter - 1, max_per_iter[n_iter - 1],
+           n_iter - 1,
+           max_per_iter[n_iter - 1],
            max_per_iter[n_iter - 1] / 1000.0);
   }
   printf("  steady-state (iters 1..%d × %d CTAs):\n", n_iter - 1, NUM_WORKERS);
   printf("    min=%u  p50=%u  p99=%u  max=%u ns\n",
-         ss_min, ss_p50, ss_p99, ss_max);
-  printf("    p50=%.2f μs  max=%.2f μs\n",
-         ss_p50 / 1000.0, ss_max / 1000.0);
+         ss_min,
+         ss_p50,
+         ss_p99,
+         ss_max);
+  printf("    p50=%.2f μs  max=%.2f μs\n", ss_p50 / 1000.0, ss_max / 1000.0);
 }
 
 int main(int argc, char **argv) {
   int dev = (argc > 1) ? atoi(argv[1]) : 0;
   cudaSetDevice(dev);
-  printf("=== fp8_gemm_dense MEDIUMM standalone bench (baseline, NO SplitK) ===\n");
+  printf("=== fp8_gemm_dense MEDIUMM standalone bench (baseline, NO SplitK) "
+         "===\n");
   printf("Shape: M=%d K=%d N=%d, BN=%d NS=%d NE=4 (mediumm), num_workers=%d\n",
-         M, K, N, BN, NS, NUM_WORKERS);
+         M,
+         K,
+         N,
+         BN,
+         NS,
+         NUM_WORKERS);
   printf("Roofline: B weight = N*K = %.1f MB, at 8 TB/s ≈ %.2f μs (full GPU)\n",
-         (double)N * K / 1e6, (double)N * K / 8e12 * 1e6);
+         (double)N * K / 1e6,
+         (double)N * K / 8e12 * 1e6);
   printf("Current measured: steady-state p50 ≈ 58 μs (4× over roofline).\n");
   printf("Target after SplitK rewrite: ≤30 μs (≥2× speedup over baseline).\n");
 
@@ -257,16 +299,21 @@ int main(int argc, char **argv) {
   size_t smem = kernel::fp8_gemm_dense_common::smem_size_tpl<BN, NS, 4>();
   printf("smem size: %zu bytes\n", smem);
   cudaFuncSetAttribute(persistent_gemm_bench,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       (int)smem);
 
   // N_ITER sweep: cold-cache first iter, steady-state later iters, and watch
   // for DVFS / preemption outliers at large N_ITER.
   for (int n : {16, 64, 256}) {
-    run_bench(n, d_ta, d_tb, d_sa, d_sb, (bf16*)d_c, smem);
+    run_bench(n, d_ta, d_tb, d_sa, d_sb, (bf16 *)d_c, smem);
   }
 
-  cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
-  cudaFree(d_sa); cudaFree(d_sb);
-  cudaFree(d_ta); cudaFree(d_tb);
+  cudaFree(d_a);
+  cudaFree(d_b);
+  cudaFree(d_c);
+  cudaFree(d_sa);
+  cudaFree(d_sb);
+  cudaFree(d_ta);
+  cudaFree(d_tb);
   return 0;
 }

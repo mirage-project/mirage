@@ -109,8 +109,9 @@ __device__ __forceinline__ uint64_t mkdesc_sk(int a) {
 __device__ __forceinline__ void red_add_bf16x2(__nv_bfloat16 *ptr,
                                                uint32_t val) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("red.relaxed.gpu.global.add.noftz.bf16x2 [%0], %1;"
-               ::"l"(ptr), "r"(val) : "memory");
+  asm volatile("red.relaxed.gpu.global.add.noftz.bf16x2 [%0], %1;" ::"l"(ptr),
+               "r"(val)
+               : "memory");
 #else
   // Fallback (slow): scalar atomic on each half via 32-bit CAS.
   (void)ptr;
@@ -370,30 +371,28 @@ __device__ __forceinline__ void
               // SPLIT_K==1: equivalent to the non-split kernel — direct
               // store is faster than an atomic add into a pre-zeroed
               // buffer. Kept for testing / parameter-sweep symmetry.
-              asm volatile(
-                  "st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
-                  "{%1,%2,%3,%4};" ::"l"(row + n),
-                  "r"(r0),
-                  "r"(r1),
-                  "r"(r2),
-                  "r"(r3)
-                  : "memory");
-              asm volatile(
-                  "st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
-                  "{%1,%2,%3,%4};" ::"l"(row + n + 8),
-                  "r"(r4),
-                  "r"(r5),
-                  "r"(r6),
-                  "r"(r7)
-                  : "memory");
+              asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
+                           "{%1,%2,%3,%4};" ::"l"(row + n),
+                           "r"(r0),
+                           "r"(r1),
+                           "r"(r2),
+                           "r"(r3)
+                           : "memory");
+              asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
+                           "{%1,%2,%3,%4};" ::"l"(row + n + 8),
+                           "r"(r4),
+                           "r"(r5),
+                           "r"(r6),
+                           "r"(r7)
+                           : "memory");
             }
           } else {
             // Tail (partial 16-col group at output edge): per-element
             // scalar reduce-add to handle non-aligned bounds.
             for (int j = 0; j < 16 && on + n + j < N; j += 2) {
               if (on + n + j + 1 < N) {
-                nv_bfloat162 b = __floats2bfloat162_rn(acc[n + j],
-                                                       acc[n + j + 1]);
+                nv_bfloat162 b =
+                    __floats2bfloat162_rn(acc[n + j], acc[n + j + 1]);
                 uint32_t r = *reinterpret_cast<uint32_t *>(&b);
                 if constexpr (SPLIT_K > 1) {
                   red_add_bf16x2(row + n + j, r);

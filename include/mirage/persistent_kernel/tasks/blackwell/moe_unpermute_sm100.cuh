@@ -118,14 +118,10 @@ __device__ __forceinline__ void
     // [hid_start, hid_end). HIDDEN_SPLIT=1 keeps the legacy
     // single-CTA-owns-full-hidden shape.
     constexpr int HIDDEN_PER_SPLIT =
-        HIDDEN_SPLIT > 0
-            ? (HIDDEN + HIDDEN_SPLIT - 1) / HIDDEN_SPLIT
-            : HIDDEN;
+        HIDDEN_SPLIT > 0 ? (HIDDEN + HIDDEN_SPLIT - 1) / HIDDEN_SPLIT : HIDDEN;
     int const hid_start = hidden_partition * HIDDEN_PER_SPLIT;
     int const hid_end_unclamped = hid_start + HIDDEN_PER_SPLIT;
-    int const hid_end = hid_end_unclamped < HIDDEN
-                            ? hid_end_unclamped
-                            : HIDDEN;
+    int const hid_end = hid_end_unclamped < HIDDEN ? hid_end_unclamped : HIDDEN;
     for (int i = hid_start + threadIdx.x; i < hid_end; i += blockDim.x) {
       float acc = float(d_res[(size_t)my_token * OUTPUT_STRIDE + i]);
 #pragma unroll

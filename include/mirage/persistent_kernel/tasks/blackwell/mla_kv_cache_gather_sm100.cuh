@@ -138,11 +138,20 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   }
 }
 
+// 2026-05-16 (C1): NUM_GATHER_SPLITS parameter parallelizes the sequential
+// seq_pos loop in both phases across multiple CTAs. Each CTA handles a
+// strided subset of seq_pos values (seq_pos % NUM_GATHER_SPLITS == split_idx).
+// The partition is consistent between append (step 1) and gather (step 2):
+// CTA i only writes paged_cache[seq_pos] where seq_pos is in its slice, and
+// only reads paged_cache[seq_pos] where seq_pos is in its slice. No
+// cross-CTA RAW dependency, so no inter-CTA fence is needed. Legacy callers
+// pass NUM_GATHER_SPLITS=1 and split_idx=0 for unchanged behavior.
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
           int PAGE_SIZE, // Page size (e.g., 128)
           int K_PE_ROW_STRIDE = D_K - D_V,
-          int C_LATENT_ROW_STRIDE = D_V>
+          int C_LATENT_ROW_STRIDE = D_V,
+          int NUM_GATHER_SPLITS = 1>
 __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
     void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new
                                   // c_latent (normed)
@@ -156,7 +165,8 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
     bool prompt_prefill,
-    int request_id) {
+    int request_id,
+    int split_idx = 0) {
   using T = __nv_bfloat16;
   int const tid = threadIdx.x;
   int const NUM_THREADS = 128;
@@ -187,9 +197,14 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
     return;
   }
 
+  // Step 1: Append. Iterate over new tokens; CTA processes only the tokens
+  // whose absolute seq_pos falls in this CTA's stride slice.
   int const kv_start_pos = seq_len - num_new_tokens;
   for (int tok = 0; tok < num_new_tokens; tok++) {
     int const seq_pos = kv_start_pos + tok;
+    if ((seq_pos % NUM_GATHER_SPLITS) != split_idx) {
+      continue;
+    }
     int const page_idx = page_indices[seq_pos / PAGE_SIZE];
     int const pos_in_page = seq_pos % PAGE_SIZE;
     T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
@@ -214,7 +229,12 @@ __device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
   if (!prompt_prefill && contiguous_kv_ptr == paged_cache_ptr) {
     return;
   }
-  for (int seq_pos = 0; seq_pos < seq_len; seq_pos++) {
+  // Step 2: Gather. Read positions in the CTA's stride slice. Pos outside
+  // [kv_start_pos, seq_len) were written by THIS CTA on a prior iteration
+  // (consistent partition). Pos in [kv_start_pos, seq_len) ∩ slice were
+  // written by THIS CTA in step 1 above; __syncthreads protects that RAW.
+  for (int seq_pos = split_idx; seq_pos < seq_len;
+       seq_pos += NUM_GATHER_SPLITS) {
     int const page_idx = page_indices[seq_pos / PAGE_SIZE];
     int const pos_in_page = seq_pos % PAGE_SIZE;
     T const *src = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;

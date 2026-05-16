@@ -476,10 +476,12 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            // Unified MLA KV gather: same grid/request mapping as both
-            // split and non-split variants.
+            // Unified MLA KV gather: request_id = bid.x. When the builder
+            // requests fan-out (grid_dim.y > 1), kv_idx carries the gather
+            // split index so each CTA strides seq_pos by NUM_GATHER_SPLITS.
             if (task_type == TASK_MLA_KV_GATHER_UNIFIED_SM100) {
               task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
             }
             // DeepSeek MLA RoPE: grid=(request_slot, local_head, q_tile).
             if (task_type == TASK_DEEPSEEK_MLA_ROPE_SM100) {

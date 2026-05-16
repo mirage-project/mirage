@@ -49,21 +49,21 @@
 
 namespace kernel {
 
-template <typename T,
-          typename DST_T,
-          int BATCH_SIZE,
-          int HIDDEN_DIM,
-          int GROUP_SIZE,
-          int NUM_THREADS = 256,
-          int IN_OFFSET = 0,
-          int OUT_OFFSET = 0,
-          int IN_ROW_STRIDE = HIDDEN_DIM,
-          int OUT_ROW_STRIDE = HIDDEN_DIM,
-          int FP8_ROW_STRIDE = HIDDEN_DIM,
-          bool SCALE_UE8M0 = true,
-          bool EMIT_BF16 = true,
-          typename SCALE_PACKED_T =
-              std::conditional_t<SCALE_UE8M0, uint32_t, float>>
+template <
+    typename T,
+    typename DST_T,
+    int BATCH_SIZE,
+    int HIDDEN_DIM,
+    int GROUP_SIZE,
+    int NUM_THREADS = 256,
+    int IN_OFFSET = 0,
+    int OUT_OFFSET = 0,
+    int IN_ROW_STRIDE = HIDDEN_DIM,
+    int OUT_ROW_STRIDE = HIDDEN_DIM,
+    int FP8_ROW_STRIDE = HIDDEN_DIM,
+    bool SCALE_UE8M0 = true,
+    bool EMIT_BF16 = true,
+    typename SCALE_PACKED_T = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
 __device__ __forceinline__ void
     fused_rmsnorm_quantize_fp8_impl(void const *__restrict__ input_ptr,
                                     void const *__restrict__ weight_ptr,
@@ -114,8 +114,8 @@ __device__ __forceinline__ void
   // Layout:
   //   [0                          .. HIDDEN_DIM)               input row (bf16)
   //   [HIDDEN_DIM                 .. 2*HIDDEN_DIM)             weight (bf16)
-  //   [2*HIDDEN_DIM               .. 3*HIDDEN_DIM)             normalized (bf16)
-  //   plus a small region for reduce + per-group packed scale bytes.
+  //   [2*HIDDEN_DIM               .. 3*HIDDEN_DIM)             normalized
+  //   (bf16) plus a small region for reduce + per-group packed scale bytes.
   constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET = sizeof(T) * HIDDEN_DIM;
   constexpr size_t SHARED_OUTPUT_BUFFER_OFFSET =
       SHARED_WEIGHT_BUFFER_OFFSET + sizeof(T) * HIDDEN_DIM;
@@ -131,8 +131,7 @@ __device__ __forceinline__ void
       reinterpret_cast<T *>(smem + SHARED_WEIGHT_BUFFER_OFFSET);
   T *shared_output_buffer =
       reinterpret_cast<T *>(smem + SHARED_OUTPUT_BUFFER_OFFSET);
-  float *reduce_smem =
-      reinterpret_cast<float *>(smem + REDUCE_BUFFER_OFFSET);
+  float *reduce_smem = reinterpret_cast<float *>(smem + REDUCE_BUFFER_OFFSET);
   uint8_t *packed_scale_bytes =
       reinterpret_cast<uint8_t *>(smem + PACKED_SCALE_BYTES_OFFSET);
 
@@ -153,10 +152,9 @@ __device__ __forceinline__ void
     T const *__restrict__ curr_d_input = static_cast<T const *>(input_ptr) +
                                          IN_OFFSET + batch_idx * IN_ROW_STRIDE;
     T *__restrict__ curr_d_output =
-        EMIT_BF16
-            ? static_cast<T *>(output_bf16_ptr) + OUT_OFFSET +
-                  batch_idx * OUT_ROW_STRIDE
-            : nullptr;
+        EMIT_BF16 ? static_cast<T *>(output_bf16_ptr) + OUT_OFFSET +
+                        batch_idx * OUT_ROW_STRIDE
+                  : nullptr;
     DST_T *__restrict__ curr_d_fp8 =
         static_cast<DST_T *>(output_fp8_ptr) + batch_idx * FP8_ROW_STRIDE;
     SCALE_PACKED_T *__restrict__ d_scale =
@@ -297,8 +295,7 @@ __device__ __forceinline__ void
 #pragma unroll
       for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD_FP8; ++ele_idx) {
         int const idx = smem_group_base + lane_idx + ele_idx * WARP_SIZE;
-        float const orig_val =
-            static_cast<float>(shared_output_buffer[idx]);
+        float const orig_val = static_cast<float>(shared_output_buffer[idx]);
         float const quant_val =
             fminf(fmaxf(orig_val / y_scale, min_8bit), max_8bit);
         curr_d_fp8[out_group_base + lane_idx + ele_idx * WARP_SIZE] =

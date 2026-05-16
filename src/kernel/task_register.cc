@@ -5155,7 +5155,7 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
   code.e("    task_desc->output_ptrs[0],"); // output bf16
   code.e("    task_desc->output_ptrs[1],"); // output fp8
   code.e("    task_desc->output_ptrs[2],"); // output scale
-  code.e("    1e-6f,");                    // rms eps
+  code.e("    1e-6f,");                     // rms eps
   code.e("    1e-10f,"); // quantize scale eps (floor for local_max)
   code.e("    -448.0f, 448.0f,");
   code.e("    $,", aligned_batch);
@@ -6498,20 +6498,26 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   // paged cache once. Decode gets a dense concatenated [CKV,KPE] view when
   // needed; prompt prefill gets split CKV/KPE views for kv_b_proj + PR674 MLA.
   //
-  // params (same scheme as register_mla_kv_gather_sm100_task):
+  // params:
   //   size 3 (legacy): [d_k, d_v, page_size].
   //   size 7 (QKV-a fused): adds [c_latent_row_stride, c_latent_offset_elems,
   //                               k_pe_row_stride, k_pe_offset_elems].
+  //   size 8 (gather fan-out, 2026-05-16 C1): also append [num_gather_splits].
+  //   When NUM_GATHER_SPLITS > 1, the builder passes grid_dim.y = N_SPLITS, and
+  //   each CTA strides seq_pos by N_SPLITS so the formerly-serial gather/append
+  //   loops run in parallel across N_SPLITS workers.
   (void)bgraph;
-  assert(params.size() == 3 || params.size() == 7);
+  assert(params.size() == 3 || params.size() == 7 || params.size() == 8);
 
   int d_k = params[0];
   int d_v = params[1];
   int page_size = params[2];
-  int c_latent_row_stride = (params.size() == 7) ? params[3] : d_v;
-  int c_latent_offset = (params.size() == 7) ? params[4] : 0;
-  int k_pe_row_stride = (params.size() == 7) ? params[5] : 128;
-  int k_pe_offset = (params.size() == 7) ? params[6] : 0;
+  int c_latent_row_stride = (params.size() >= 7) ? params[3] : d_v;
+  int c_latent_offset = (params.size() >= 7) ? params[4] : 0;
+  int k_pe_row_stride = (params.size() >= 7) ? params[5] : 128;
+  int k_pe_offset = (params.size() >= 7) ? params[6] : 0;
+  int num_gather_splits = (params.size() == 8) ? params[7] : 1;
+  assert(num_gather_splits >= 1);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6559,12 +6565,14 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
          "static_cast<nv_bfloat16*>(task_desc->output_ptrs[1]) + "
          "bi_ * MPK_MAX_SEQ_LENGTH * $;",
          d_k - d_v);
-  code.e("kernel::mla_kv_cache_gather_unified_sm100_task_impl<$, $, $, $, $>(",
-         d_k,
-         d_v,
-         page_size,
-         k_pe_row_stride,
-         c_latent_row_stride);
+  code.e(
+      "kernel::mla_kv_cache_gather_unified_sm100_task_impl<$, $, $, $, $, $>(",
+      d_k,
+      d_v,
+      page_size,
+      k_pe_row_stride,
+      c_latent_row_stride,
+      num_gather_splits);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    paged_cache_ptr_,"); // paged_cache
@@ -6576,7 +6584,8 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    prompt_prefill_,");
-  code.e("    task_desc->task_metadata.request_id);");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_UNIFIED_SM100,
                                code.to_string());

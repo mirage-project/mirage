@@ -45,8 +45,8 @@
 //       -I include \
 //       -I include/mirage/persistent_kernel \
 //       --expt-relaxed-constexpr -std=c++20 \
-//       tests/runtime_python/blackwell/sm100_fp8_gemm_dense/bench_decode_splitk.cu \
-//       -o /tmp/bench_decode_splitk -lcuda
+//       tests/runtime_python/blackwell/sm100_fp8_gemm_dense/bench_decode_splitk.cu
+//       \ -o /tmp/bench_decode_splitk -lcuda
 //   CUDA_VISIBLE_DEVICES=1 /tmp/bench_decode_splitk 0
 //
 // WHAT THE KERNEL OWNER NEEDS TO DO
@@ -64,10 +64,12 @@
 //      via demo/deepseek_v3/demo.py (TP=4 EP=2 19-layer trace).
 //   4. The TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 task type wiring (task
 //      tuple, runtime metadata, codegen) in
-//        src/kernel/task_register.cc:6044  (register_fp8_gemm_dense_decode_splitk_sm100_task)
+//        src/kernel/task_register.cc:6044
+//        (register_fp8_gemm_dense_decode_splitk_sm100_task)
 //        src/kernel/runtime.cc:355         (kv_idx / request_id metadata)
 //        src/kernel/graph.cc:871           (task tuple registration)
-//        include/mirage/persistent_kernel/tma.cuh:1607, :2270  (TMA descriptors)
+//        include/mirage/persistent_kernel/tma.cuh:1607, :2270  (TMA
+//        descriptors)
 //      is already in place — just the kernel body needs to be correct.
 //   5. The Python wrapper that prepends `tensor_init_layer` to pre-zero the
 //      output (required by SplitK's red.add accumulation) is in
@@ -100,15 +102,15 @@
 //
 // =============================================================================
 
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
-#include <cuda_fp8.h>
-#include <cudaTypedefs.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cuda.h>
+#include <cudaTypedefs.h>
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
 #include <vector>
-#include <algorithm>
 
 #include "tasks/blackwell/fp8_gemm_dense_decode_splitk_sm100.cuh"
 
@@ -126,20 +128,32 @@ __device__ __forceinline__ uint32_t get_globaltimer() {
   return ret;
 }
 
-__global__ __launch_bounds__(256, 1) void
-    persistent_splitk_bench(CUtensorMap const *ta_ptr,
-                            CUtensorMap const *tb_ptr,
-                            float const *sa, float const *sb,
-                            bf16 *C, int n_iter) {
+__global__
+    __launch_bounds__(256,
+                      1) void persistent_splitk_bench(CUtensorMap const *ta_ptr,
+                                                      CUtensorMap const *tb_ptr,
+                                                      float const *sa,
+                                                      float const *sb,
+                                                      bf16 *C,
+                                                      int n_iter) {
   for (int it = 0; it < n_iter; it++) {
     __syncthreads();
     uint32_t t0 = 0;
-    if (threadIdx.x == 0) t0 = get_globaltimer();
-    kernel::fp8_gemm_dense_decode_splitk::fp8_gemm_dense_decode_splitk_sm100_task_impl<
-        BN, NS, NE, SPLIT_K>(
-        ta_ptr, tb_ptr, sa, sb, C, M, N, K,
-        /*worker_idx=*/blockIdx.x,
-        /*num_workers=*/gridDim.x);
+    if (threadIdx.x == 0) {
+      t0 = get_globaltimer();
+    }
+    kernel::fp8_gemm_dense_decode_splitk::
+        fp8_gemm_dense_decode_splitk_sm100_task_impl<BN, NS, NE, SPLIT_K>(
+            ta_ptr,
+            tb_ptr,
+            sa,
+            sb,
+            C,
+            M,
+            N,
+            K,
+            /*worker_idx=*/blockIdx.x,
+            /*num_workers=*/gridDim.x);
     __syncthreads();
     if (threadIdx.x == 0) {
       uint32_t t1 = get_globaltimer();
@@ -153,13 +167,18 @@ void make_tma_desc(CUtensorMap &desc, void *base, uint64_t outer, uint64_t k) {
   uint64_t gs[1] = {(uint64_t)k};
   uint32_t bd[2] = {128, 128};
   uint32_t es[2] = {1, 1};
-  CUresult err = cuTensorMapEncodeTiled(
-      &desc, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2,
-      base, gd, gs, bd, es,
-      CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CU_TENSOR_MAP_SWIZZLE_128B,
-      CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  CUresult err = cuTensorMapEncodeTiled(&desc,
+                                        CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                        2,
+                                        base,
+                                        gd,
+                                        gs,
+                                        bd,
+                                        es,
+                                        CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                        CU_TENSOR_MAP_SWIZZLE_128B,
+                                        CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   if (err != CUDA_SUCCESS) {
     char const *errstr;
     cuGetErrorString(err, &errstr);
@@ -168,34 +187,46 @@ void make_tma_desc(CUtensorMap &desc, void *base, uint64_t outer, uint64_t k) {
   }
 }
 
-void run_bench(int num_workers, int n_iter,
-               CUtensorMap *d_ta, CUtensorMap *d_tb,
-               float *d_sa, float *d_sb, bf16 *d_c, size_t smem) {
+void run_bench(int num_workers,
+               int n_iter,
+               CUtensorMap *d_ta,
+               CUtensorMap *d_tb,
+               float *d_sa,
+               float *d_sb,
+               bf16 *d_c,
+               size_t smem) {
   // Pre-zero C for SplitK red.add accumulation.
   cudaMemset(d_c, 0, M * N * sizeof(bf16));
 
   for (int i = 0; i < 3; i++) {
-    persistent_splitk_bench<<<num_workers, 256, smem>>>(d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
+    persistent_splitk_bench<<<num_workers, 256, smem>>>(
+        d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
     cudaMemset(d_c, 0, M * N * sizeof(bf16));
   }
   cudaDeviceSynchronize();
   auto rc = cudaGetLastError();
   if (rc != cudaSuccess) {
     printf("  ABORT (num_workers=%d): warmup CUDA error %d (%s)\n",
-           num_workers, rc, cudaGetErrorString(rc));
+           num_workers,
+           rc,
+           cudaGetErrorString(rc));
     return;
   }
 
   cudaEvent_t s, e;
-  cudaEventCreate(&s); cudaEventCreate(&e);
+  cudaEventCreate(&s);
+  cudaEventCreate(&e);
   cudaEventRecord(s);
-  persistent_splitk_bench<<<num_workers, 256, smem>>>(d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
+  persistent_splitk_bench<<<num_workers, 256, smem>>>(
+      d_ta, d_tb, d_sa, d_sb, d_c, n_iter);
   cudaEventRecord(e);
   cudaEventSynchronize(e);
   rc = cudaGetLastError();
   if (rc != cudaSuccess) {
     printf("  ABORT (num_workers=%d): timed-run CUDA error %d (%s)\n",
-           num_workers, rc, cudaGetErrorString(rc));
+           num_workers,
+           rc,
+           cudaGetErrorString(rc));
     return;
   }
 
@@ -203,14 +234,16 @@ void run_bench(int num_workers, int n_iter,
   cudaEventElapsedTime(&total_ms, s, e);
 
   std::vector<uint32_t> h_iter(256 * N_ITER_MAX);
-  cudaMemcpyFromSymbol(h_iter.data(), per_iter_ns,
-                       sizeof(uint32_t) * 256 * N_ITER_MAX);
+  cudaMemcpyFromSymbol(
+      h_iter.data(), per_iter_ns, sizeof(uint32_t) * 256 * N_ITER_MAX);
 
   std::vector<uint32_t> max_per_iter(n_iter, 0);
   for (int it = 0; it < n_iter; it++) {
     for (int wi = 0; wi < num_workers; wi++) {
       uint32_t v = h_iter[wi * N_ITER_MAX + it];
-      if (v > max_per_iter[it]) max_per_iter[it] = v;
+      if (v > max_per_iter[it]) {
+        max_per_iter[it] = v;
+      }
     }
   }
 
@@ -226,22 +259,34 @@ void run_bench(int num_workers, int n_iter,
   uint32_t ss_p50 = steady[steady.size() / 2];
   uint32_t ss_max = steady.back();
 
-  printf("== num_workers=%d N_ITER=%d (total tiles = %d, K-slice depth = %d) ==\n",
-         num_workers, n_iter, (N / BN) * SPLIT_K, K / 128 / SPLIT_K);
+  printf(
+      "== num_workers=%d N_ITER=%d (total tiles = %d, K-slice depth = %d) ==\n",
+      num_workers,
+      n_iter,
+      (N / BN) * SPLIT_K,
+      K / 128 / SPLIT_K);
   printf("  cudaEvent total: %.2f μs (=%.3f μs/iter)\n",
-         total_ms * 1000.0, total_ms * 1000.0 / n_iter);
+         total_ms * 1000.0,
+         total_ms * 1000.0 / n_iter);
   printf("  iter[0] cold: %u ns (%.2f μs)\n",
-         max_per_iter[0], max_per_iter[0] / 1000.0);
+         max_per_iter[0],
+         max_per_iter[0] / 1000.0);
   printf("  iter[1]: %u ns (%.2f μs)\n",
-         max_per_iter[1], max_per_iter[1] / 1000.0);
+         max_per_iter[1],
+         max_per_iter[1] / 1000.0);
   if (n_iter > 4) {
     printf("  iter[%d]: %u ns (%.2f μs)\n",
-           n_iter - 1, max_per_iter[n_iter - 1],
+           n_iter - 1,
+           max_per_iter[n_iter - 1],
            max_per_iter[n_iter - 1] / 1000.0);
   }
   printf("  steady-state (iters 1..%d × %d CTAs):\n", n_iter - 1, num_workers);
   printf("    min=%u  p50=%u  max=%u ns  (p50=%.2f μs, max=%.2f μs)\n",
-         ss_min, ss_p50, ss_max, ss_p50 / 1000.0, ss_max / 1000.0);
+         ss_min,
+         ss_p50,
+         ss_max,
+         ss_p50 / 1000.0,
+         ss_max / 1000.0);
 }
 
 int main(int argc, char **argv) {
@@ -249,12 +294,21 @@ int main(int argc, char **argv) {
   cudaSetDevice(dev);
   printf("=== fp8_gemm_dense SplitK standalone bench ===\n");
   printf("Shape: M=%d K=%d N=%d, BN=%d NS=%d NE=%d SK=%d\n",
-         M, K, N, BN, NS, NE, SPLIT_K);
+         M,
+         K,
+         N,
+         BN,
+         NS,
+         NE,
+         SPLIT_K);
   printf("Tiles total = mm*nn*SK = 1*%d*%d = %d\n",
-         N / BN, SPLIT_K, (N / BN) * SPLIT_K);
+         N / BN,
+         SPLIT_K,
+         (N / BN) * SPLIT_K);
   printf("CURRENT STATUS: kernel crashes with unspecified launch failure in\n");
   printf("ALL tested num_workers (including 224 = perfect 1-tile-per-CTA).\n");
-  printf("Target after rewrite: p50 ≤ 30 μs (cf bench_decode_no_splitk ~58 μs).\n");
+  printf("Target after rewrite: p50 ≤ 30 μs (cf bench_decode_no_splitk ~58 "
+         "μs).\n");
 
   size_t a_bytes = (size_t)M * K;
   size_t b_bytes = (size_t)N * K;
@@ -288,18 +342,23 @@ int main(int argc, char **argv) {
       fp8_gemm_dense_decode_splitk_smem_size<BN, NS, NE, SPLIT_K>();
   printf("smem size: %zu bytes\n", smem);
   cudaFuncSetAttribute(persistent_splitk_bench,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       (int)smem);
 
   // Sweep num_workers: 80 = builder default (creates multi-tile-iter);
   // 128 = megakernel full worker pool; 224 = match total tile count
   // (perfect 1-tile-per-CTA). All three currently crash.
   for (int nw : {80, 128, 224}) {
     printf("\n");
-    run_bench(nw, /*n_iter=*/16, d_ta, d_tb, d_sa, d_sb, (bf16*)d_c, smem);
+    run_bench(nw, /*n_iter=*/16, d_ta, d_tb, d_sa, d_sb, (bf16 *)d_c, smem);
   }
 
-  cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
-  cudaFree(d_sa); cudaFree(d_sb);
-  cudaFree(d_ta); cudaFree(d_tb);
+  cudaFree(d_a);
+  cudaFree(d_b);
+  cudaFree(d_c);
+  cudaFree(d_sa);
+  cudaFree(d_sb);
+  cudaFree(d_ta);
+  cudaFree(d_tb);
   return 0;
 }
