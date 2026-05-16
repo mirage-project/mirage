@@ -73,12 +73,14 @@ def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
 # The threadblock partition asserts (mbt % grid.x == 0), so when mbt is not a
 # multiple of the preferred rows-per-task we fall back to the largest divisor
 # of mbt at or below it (typically aligned to powers of two in real configs).
-# C2 (2026-05-16): rows-per-CTA tuning. Default 2 for mbt=128 → 64 CTAs
-# per call. Empirical: 8 → 4 saved 17 μs/layer; 4 → 2 saved 10 μs/layer;
-# expect rows=1 diminishing returns at num_workers=128. Per-CTA wallclock
-# now ~4.75 μs avg, max 9 μs (was 16.4/29 at rows=8). Env override:
-# MPK_DSV3_RMSNORM_ROWS_PER_TASK={1,2,4,8}.
-_RMSNORM_ROWS_PER_TASK = int(os.environ.get("MPK_DSV3_RMSNORM_ROWS_PER_TASK", "2"))
+# C2 (2026-05-16): rows-per-CTA tuning sweep.
+#   8 → 4: -17 μs/layer (max 29 → 16 μs)
+#   4 → 2: -10 μs/layer (max 16 → 9 μs)
+#   2 → 1: -2  μs/layer (max  9 → 5 μs, tail-latency win)
+# At rows=1, grid=128 = exactly num_workers, but RMSnorm and other tasks
+# don't seem to contend severely. Empirically still positive.
+# Env override: MPK_DSV3_RMSNORM_ROWS_PER_TASK={1,2,4,8}.
+_RMSNORM_ROWS_PER_TASK = int(os.environ.get("MPK_DSV3_RMSNORM_ROWS_PER_TASK", "1"))
 
 
 def _rmsnorm_grid(mbt: int) -> tuple:
