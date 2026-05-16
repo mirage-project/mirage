@@ -375,10 +375,18 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
+        kv_cache: Optional[dict] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
+        # KV cache pool registered at top level (Option-III in the
+        # PyTorch-module refactor). New-API attention layers retrieve
+        # their per-layer slice via ``self.get_kv_cache(layer_idx)``.
+        # Expected shape: dict with keys "k_cache" and "v_cache", each
+        # mapping to a tensor whose dim-0 is num_layers. None when the
+        # legacy demo wires KV cache through model state instead.
+        self._kv_cache = kv_cache
 
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
@@ -452,7 +460,75 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
-    
+
+    def compile_scope(self):
+        # Returning the free-function contextmanager (rather than implementing
+        # it inline) keeps the ContextVar binding logic in one place — see
+        # mirage.mpk.context.compile_scope. Imported lazily to avoid a hard
+        # import-time cycle (context.py only references PersistentKernel under
+        # TYPE_CHECKING).
+        from .context import compile_scope as _compile_scope
+        return _compile_scope(self)
+
+    def get_kv_cache(self, layer_idx: int):
+        # Returns the (k_slice, v_slice) torch tensors for one decoder
+        # layer's paged KV cache. The pool was registered into the PK
+        # at construction via ``kv_cache={"k_cache": ..., "v_cache": ...}``.
+        # New-API ``PagedAttention.compile()`` calls this then
+        # ``attach_input`` to convert to DTensors.
+        if self._kv_cache is None:
+            raise RuntimeError(
+                "PersistentKernel was constructed without kv_cache=; "
+                "pass kv_cache={'k_cache': k_pool, 'v_cache': v_pool} "
+                "where each pool has dim-0 == num_layers."
+            )
+        return self._kv_cache["k_cache"][layer_idx], self._kv_cache["v_cache"][layer_idx]
+
+    def _apply_test_mode_meta_defaults(self):
+        # Allocate any missing meta tensors with shapes derived from the
+        # kernel-level params. Mirrors the production wiring in
+        # demo/qwen3/demo.py (qo/paged_kv buffers sized to max_num_*).
+        # `total_num_requests` is taken from `tokens.shape[0]` after this
+        # function runs, so default `tokens` to a single-request buffer.
+        device = "cuda"
+        if "tokens" not in self.meta_tensors:
+            self.meta_tensors["tokens"] = torch.zeros(
+                1, self.max_seq_length, dtype=torch.int64, device=device)
+        n_req = self.meta_tensors["tokens"].shape[0]
+        if "step" not in self.meta_tensors:
+            self.meta_tensors["step"] = torch.zeros(
+                n_req, dtype=torch.int32, device=device)
+        if "prompt_lengths" not in self.meta_tensors:
+            # Default to a single prefill that fills one iter's batched-token
+            # budget. Test authors override for decode/multi-request scenarios.
+            self.meta_tensors["prompt_lengths"] = torch.full(
+                (n_req,), self.max_num_batched_tokens,
+                dtype=torch.int32, device=device)
+        if "input_tokens" not in self.meta_tensors:
+            self.meta_tensors["input_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "output_tokens" not in self.meta_tensors:
+            self.meta_tensors["output_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "num_new_tokens" not in self.meta_tensors:
+            self.meta_tensors["num_new_tokens"] = torch.zeros(
+                1, dtype=torch.int32, device=device)
+        if "qo_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["qo_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indices_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indices_buffer"] = torch.zeros(
+                self.max_num_pages, dtype=torch.int32, device=device)
+        if "paged_kv_last_page_len_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_last_page_len_buffer"] = torch.zeros(
+                self.max_num_batched_requests,
+                dtype=torch.int32, device=device)
+
     @classmethod
     def get_default_init_parameters(cls):
         return {
