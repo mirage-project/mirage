@@ -3254,11 +3254,21 @@ class DeepSeekV3Builder(GraphBuilder):
             #                      * permuted_weights[same row])
             # — i.e. the topk-weighted combine AND the shared-residual add
             # in one task. Skips the OLD moe_mul_sum_add entirely.
+            # 2026-05-15: MOE_UNPERMUTE sits on the post-W2 critical path
+            # (nothing else runs concurrently — see perfetto), so the per-task
+            # wallclock is what matters, NOT freeing worker slots. Force
+            # rows_per_cta=1 so the kernel fan-out matches the worker pool
+            # (mbt=128 → 128 CTAs each doing 1 token of unpermute work). With
+            # rows_per_cta=8 (the wrapper default tuned for the OPPOSITE
+            # constraint of leaving workers free for concurrent tasks), each
+            # of the 16 active CTAs had to chew through 8 row-blocks
+            # serially, giving 28-32 μs straggler wallclock per layer.
             self.mpk.moe_unpermute_sm100_layer(
                 permuted_output=self._new_moe_layer_w2_out,
                 meta=self._new_moe_layer_meta,
                 residual=shared_residual,
                 output=moe_output,
+                rows_per_cta=1,
             )
         else:
             self.mpk.moe_mul_sum_add_layer(
