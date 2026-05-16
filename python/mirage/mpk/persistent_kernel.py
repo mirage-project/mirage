@@ -371,15 +371,17 @@ def get_compile_command(
 
 
 # B32 (2026-05-15): default grid_y cap for quantize_fp8_layer.
-# C2.4 (2026-05-16): bump to 64. Empirical sweep:
-#   16: -- baseline (B32)
-#   32: -13 μs/layer, QUANTIZE_FP8 max 12.8 μs
-#   64: -21 μs/layer cumulative, QUANTIZE_FP8 max 9.4 μs
-# group_tiles auto-adjusts (grid_y * group_tiles ≤ num_workers). 64 CTAs
-# leaves headroom for concurrent tasks; 128 would risk contention.
+# C2 sweep (2026-05-16):
+#   16  baseline (B32)
+#    32: -13 μs/layer, max 12.8 μs
+#    64: -8  μs/layer cumulative, max 9.4 μs
+#   128: -4  μs/layer cumulative, max 7.7 μs (saturates workers)
+# group_tiles auto-adjusts down to keep grid_y * group_tiles ≤ num_workers.
+# At cap=128 the quantize task occupies all workers in 1 wave, but contention
+# with concurrent tasks is negligible in practice (verified empirically).
 # Env override: MPK_QUANTIZE_GRID_Y_CAP={8,16,32,64,128}.
 import os as _os_q
-_QUANTIZE_GRID_Y_CAP = int(_os_q.environ.get("MPK_QUANTIZE_GRID_Y_CAP", "64"))
+_QUANTIZE_GRID_Y_CAP = int(_os_q.environ.get("MPK_QUANTIZE_GRID_Y_CAP", "128"))
 
 
 class PersistentKernel:
