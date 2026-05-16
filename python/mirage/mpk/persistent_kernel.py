@@ -2830,6 +2830,10 @@ class PersistentKernel:
         params = [M, K_PACKED]
         # Pick grid_x = min(num_workers, M / 16) so each CTA handles
         # >=16 rows. Avoids degenerate per-CTA work for tiny M.
+        # C2.7 attempted bumping rows_per_cta_min 16→256 (fewer CTAs, more
+        # work each) — REGRESSED +17 μs/layer because the per-CTA wallclock
+        # scales linearly with rows (kernel is BW-bound, not launch-bound).
+        # Leave at 16.
         rows_per_cta_min = 16
         num_ctas = max(1, min(self.num_workers, M // rows_per_cta_min))
         grid_dim = (num_ctas, 1, 1)
