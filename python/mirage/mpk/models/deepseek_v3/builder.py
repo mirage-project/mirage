@@ -3296,7 +3296,13 @@ class DeepSeekV3Builder(GraphBuilder):
                 meta=self._new_moe_layer_meta,
                 residual=shared_residual,
                 output=moe_output,
-                rows_per_cta=1,
+                # C4 (2026-05-16): rows_per_cta 1→8 collapses grid to
+                # (16, 8, 1)=128 CTAs = 1 wave (was 1024 CTAs = 8 waves).
+                # Per-CTA work 8x more but wave-transition overhead × 7
+                # was dominating cluster wallclock at ~17 μs/call. Env
+                # override: MPK_DSV3_UNPERMUTE_ROWS_PER_CTA={1,2,4,8}.
+                rows_per_cta=int(os.environ.get(
+                    "MPK_DSV3_UNPERMUTE_ROWS_PER_CTA", "8")),
                 hidden_split=8,
             )
         else:
