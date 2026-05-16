@@ -284,7 +284,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         int page_idx = page_indices[cp_finished_seq_len / PAGE_SIZE];
 #pragma unroll
         for (int chunk_idx = threadIdx.x;
-             chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
+             chunk_idx < next_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
              chunk_idx += NUM_THREADS) {
           int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
           int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;

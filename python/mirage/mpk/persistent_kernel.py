@@ -366,10 +366,18 @@ class PersistentKernel:
         use_cutlass_kernel: bool,
         eos_token_id: int64 = -1,
         test_mode: bool = False,
+        kv_cache: Optional[dict] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
+        # KV cache pool registered at top level (Option-III in the
+        # PyTorch-module refactor). New-API attention layers retrieve
+        # their per-layer slice via ``self.get_kv_cache(layer_idx)``.
+        # Expected shape: dict with keys "k_cache" and "v_cache", each
+        # mapping to a tensor whose dim-0 is num_layers. None when the
+        # legacy demo wires KV cache through model state instead.
+        self._kv_cache = kv_cache
 
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
@@ -442,7 +450,75 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
-    
+
+    def compile_scope(self):
+        # Returning the free-function contextmanager (rather than implementing
+        # it inline) keeps the ContextVar binding logic in one place — see
+        # mirage.mpk.context.compile_scope. Imported lazily to avoid a hard
+        # import-time cycle (context.py only references PersistentKernel under
+        # TYPE_CHECKING).
+        from .context import compile_scope as _compile_scope
+        return _compile_scope(self)
+
+    def get_kv_cache(self, layer_idx: int):
+        # Returns the (k_slice, v_slice) torch tensors for one decoder
+        # layer's paged KV cache. The pool was registered into the PK
+        # at construction via ``kv_cache={"k_cache": ..., "v_cache": ...}``.
+        # New-API ``PagedAttention.compile()`` calls this then
+        # ``attach_input`` to convert to DTensors.
+        if self._kv_cache is None:
+            raise RuntimeError(
+                "PersistentKernel was constructed without kv_cache=; "
+                "pass kv_cache={'k_cache': k_pool, 'v_cache': v_pool} "
+                "where each pool has dim-0 == num_layers."
+            )
+        return self._kv_cache["k_cache"][layer_idx], self._kv_cache["v_cache"][layer_idx]
+
+    def _apply_test_mode_meta_defaults(self):
+        # Allocate any missing meta tensors with shapes derived from the
+        # kernel-level params. Mirrors the production wiring in
+        # demo/qwen3/demo.py (qo/paged_kv buffers sized to max_num_*).
+        # `total_num_requests` is taken from `tokens.shape[0]` after this
+        # function runs, so default `tokens` to a single-request buffer.
+        device = "cuda"
+        if "tokens" not in self.meta_tensors:
+            self.meta_tensors["tokens"] = torch.zeros(
+                1, self.max_seq_length, dtype=torch.int64, device=device)
+        n_req = self.meta_tensors["tokens"].shape[0]
+        if "step" not in self.meta_tensors:
+            self.meta_tensors["step"] = torch.zeros(
+                n_req, dtype=torch.int32, device=device)
+        if "prompt_lengths" not in self.meta_tensors:
+            # Default to a single prefill that fills one iter's batched-token
+            # budget. Test authors override for decode/multi-request scenarios.
+            self.meta_tensors["prompt_lengths"] = torch.full(
+                (n_req,), self.max_num_batched_tokens,
+                dtype=torch.int32, device=device)
+        if "input_tokens" not in self.meta_tensors:
+            self.meta_tensors["input_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "output_tokens" not in self.meta_tensors:
+            self.meta_tensors["output_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "num_new_tokens" not in self.meta_tensors:
+            self.meta_tensors["num_new_tokens"] = torch.zeros(
+                1, dtype=torch.int32, device=device)
+        if "qo_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["qo_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indices_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indices_buffer"] = torch.zeros(
+                self.max_num_pages, dtype=torch.int32, device=device)
+        if "paged_kv_last_page_len_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_last_page_len_buffer"] = torch.zeros(
+                self.max_num_batched_requests,
+                dtype=torch.int32, device=device)
+
     @classmethod
     def get_default_init_parameters(cls):
         return {
@@ -1607,6 +1683,302 @@ class PersistentKernel:
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_sm100", params)
+
+    def _fp8_group_gemm_layer_impl(
+        self,
+        task_name: str,
+        a_fp8: DTensor,
+        b_fp8: DTensor,
+        sfa_packed: DTensor,
+        sfb_packed: DTensor,
+        m_indices: DTensor,
+        output: DTensor,
+        num_workers: int,
+    ):
+        """Shared registration helper for the SM100 grouped FP8 block-scaled
+        GEMM tasks (`fp8_group_gemm_smallm_sm100` / `fp8_group_gemm_largem_sm100`).
+
+        Computes  D[r, :] = (A[r, :] * scale_a[r]) @ (B[m_indices[r]].T * scale_b)
+        with hardware UE8M0 dequant via `tcgen05.mma.kind::mxf8f6f4.block_scale`.
+        Rows in each BM=128 block must share the same expert id.
+
+        Shape symbols
+        -------------
+            M_total : total number of rows across all experts (must be a
+                      multiple of BM=128; pad-rows can carry a dummy expert).
+            K       : reduction dim (must be a multiple of BK=128).
+            N       : per-expert output dim.
+            E       : number of experts.
+            nk       = ceil(K / 128)              UE8M0 scales per row.
+            num_sf_k = ceil(nk / 4)               uint32-packed scale columns
+                                                   (4 UE8M0 per uint32 along K).
+
+        DTensor inputs / output
+        -----------------------
+        a_fp8       (M_total, K)            fp8_e4m3 (attached as uint8)
+                    row-major, K innermost. Activations (already permuted so
+                    that contiguous BM=128 row-blocks share one expert).
+
+        b_fp8       (E, N, K)               fp8_e4m3 (attached as uint8)
+                    row-major per expert (K innermost). Kernel views the
+                    underlying buffer as logical [K, E*N] via its TMA descriptor.
+
+        sfa_packed  (num_sf_k, M_total)     uint32, UE8M0-packed
+                    Row-major with M_total innermost — the TMA descriptor
+                    interprets it as logical [M_total, num_sf_k]. Each uint32
+                    packs 4 consecutive UE8M0 scales along the K-block axis
+                    (one scale per 128-K-element block per row).
+
+        sfb_packed  (num_sf_k, E*N)         uint32, UE8M0-packed
+                    Same packing convention as SFA. Built by expanding the
+                    per-expert per-block scale [E, N/128, K/128] →
+                    [E*N, K/128] (repeat_interleave along N) → pack to
+                    [num_sf_k, E*N] uint32. One scale per output element per
+                    128-K-element block (after expansion).
+
+        m_indices   (M_total,)              int32
+                    Expert id per A row. Rows in [bm*BM, (bm+1)*BM) for any
+                    bm must share the same expert (only m_indices[bm*BM] is
+                    read per block). For static permuted layouts this is
+                    typically `arange(M_total) // BM_PADDING`.
+
+        output      (M_total, N)            bf16
+                    Row-major, N innermost. Written via TMA store.
+
+        Other params
+        ------------
+        task_name   : "fp8_group_gemm_smallm_sm100" (BN=64, NS=8) or
+                      "fp8_group_gemm_largem_sm100" (BN=128, NS=6); picks the
+                      tile/stage variant. Dispatch policy lives in
+                      `fp8_group_gemm_layer`.
+        num_workers : grid_dim.x. Each task instance handles a stride of
+                      (bm, bn) tiles `task_desc.task_metadata.request_id ::
+                      num_workers`; pick `self.num_workers` so every worker
+                      gets a slice.
+
+        Partitioning
+        ------------
+        All six tensors are registered with input_map (-1,-1,-1): every task
+        gets the full base pointer. Tile selection is internal to the kernel
+        (driven by worker_idx + num_workers), not by MPK's TBGraph slicer.
+        block_dim is fixed at (256, 1, 1) — 8 warps with hard-coded roles
+        (TMA-load / UTCCP-transpose / MMA-issue / epilogue+TMA-store).
+        """
+        assert a_fp8.num_dims == 2
+        assert b_fp8.num_dims == 3
+        assert output.num_dims == 2
+        M_total = a_fp8.dim(0)
+        K = a_fp8.dim(1)
+        E = b_fp8.dim(0)
+        N = b_fp8.dim(1)
+        assert b_fp8.dim(2) == K
+        assert m_indices.dim(0) == M_total
+        params = [M_total, N, K, E, num_workers]
+        grid_dim = (num_workers, 1, 1)
+        block_dim = (256, 1, 1)  # 8 warps fixed by kernel role layout
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(a_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(b_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sfa_packed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output],
+            tb_graph)
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def fp8_group_gemm_smallm_layer(
+        self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+        num_workers,
+    ):
+        # Smallm variant: BN=64, NS=8. Best for K>4096 && MPE<=8 (gate_up
+        # M{1,4,8} on DSv3). MoE decode niche.
+        self._fp8_group_gemm_layer_impl(
+            "fp8_group_gemm_smallm_sm100",
+            a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+            num_workers)
+
+    def fp8_group_gemm_largem_layer(
+        self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+        num_workers,
+    ):
+        # Largem variant: BN=128, NS=6. Default for everything outside the
+        # smallm niche (most MoE configs incl. all prefill MPE >= 16 and any
+        # K <= 4096 layer like down_proj).
+        self._fp8_group_gemm_layer_impl(
+            "fp8_group_gemm_largem_sm100",
+            a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+            num_workers)
+
+    def fp8_group_gemm_layer(
+        self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+        num_workers,
+    ):
+        # Auto-dispatcher: pick smallm/largem by (K, M_per_expert).
+        K = a_fp8.dim(1)
+        M_total = a_fp8.dim(0)
+        E = b_fp8.dim(0)
+        MPE = M_total // E
+        if K > 4096 and MPE <= 8:
+            self.fp8_group_gemm_smallm_layer(
+                a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+                num_workers)
+        else:
+            self.fp8_group_gemm_largem_layer(
+                a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+                num_workers)
+
+    def moe_permute_sm100_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        topk_weights: DTensor,
+        routing_indices: DTensor,
+        permuted_fp8: DTensor,
+        permuted_scale: DTensor,
+        meta: DTensor,
+        bm_padding: int = 128,
+    ):
+        """MoE expand-permute-sort task — peripheral glue for the PR-674
+        grouped FP8 GEMM. See moe_permute_sm100.cuh for the exact contract.
+
+        One CTA per local expert (grid_dim = (E_local, 1, 1)). Scans
+        routing_indices[my_expert, :], gathers matched tokens, and copies
+        FP8 row + UE8M0-packed scale into the permuted layout. Small
+        per-row metadata (permuted_weights + token_to_permuted) is packed
+        into one int32 `meta` buffer so the task stays within MPK's
+        3-outputs-per-task limit:
+
+          meta[0       : M_TOTAL]            = permuted_weights (f32 bits)
+          meta[M_TOTAL : M_TOTAL + MBT*TOPK] = token_to_permuted (row + 1;
+                                                  0 = not routed locally;
+                                                  caller must tensor_init
+                                                  zero this region each
+                                                  iter).
+
+        `m_indices` is a STATIC constant the builder sets up once via
+        attach_input (pattern: m_indices[r] = r / BM_PADDING). It is fed
+        directly to the grouped FP8 GEMM and is NOT a per-iter output.
+
+        IMPORTANT: input_scale must be UE8M0-PACKED uint32 (produced by
+        quantize_fp8_layer with scale_ue8m0=True).
+        """
+        assert input_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert topk_weights.num_dims == 2
+        assert routing_indices.num_dims == 2
+        assert permuted_fp8.num_dims == 2
+        assert permuted_scale.num_dims == 2
+        # meta is shaped (2, M_TOTAL + MBT*TOPK) int32 — see builder.py for
+        # the BATCH_SIZE=2 rationale (full-byte tensor_init).
+        assert meta.num_dims == 2
+        assert meta.dim(0) == 2
+
+        K = input_fp8.dim(1)
+        K_PACKED = input_scale.dim(1)
+        MBT = input_fp8.dim(0)
+        TOPK = topk_weights.dim(1)
+        E_LOCAL = routing_indices.dim(0)
+        M_TOTAL = E_LOCAL * bm_padding
+        assert routing_indices.dim(1) == MBT
+        assert topk_weights.dim(0) == MBT
+        assert permuted_fp8.dim(0) == M_TOTAL
+        assert permuted_fp8.dim(1) == K
+        assert permuted_scale.dim(0) == K_PACKED
+        assert permuted_scale.dim(1) == M_TOTAL
+        assert meta.dim(1) == M_TOTAL + MBT * TOPK, (
+            f"meta length must be {M_TOTAL + MBT * TOPK}, got {meta.dim(1)}")
+
+        params = [K, K_PACKED, MBT, TOPK, E_LOCAL, bm_padding]
+        grid_dim = (E_LOCAL, 1, 1)
+        block_dim = (128, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(topk_weights, (-1, -1, -1), -1, True)
+        # routing_indices: (-1, -1, -1) so the kernel sees the FULL (E_LOCAL, MBT)
+        # buffer and computes its expert row from task_metadata.expert_offset.
+        tb_graph.new_input(routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(permuted_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(permuted_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, topk_weights, routing_indices,
+             permuted_fp8, permuted_scale, meta], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_permute_sm100", params)
+
+    def moe_unpermute_sm100_layer(
+        self,
+        permuted_output: DTensor,
+        meta: DTensor,
+        residual: DTensor,
+        output: DTensor,
+    ):
+        """MoE combine-unpermute task — inverse of moe_permute_sm100. See
+        moe_unpermute_sm100.cuh for the contract. One CTA per token
+        (grid_dim = (MBT, 1, 1)). Decodes `meta` into permuted_weights +
+        token_to_permuted, then writes
+        `output[t] = residual[t] +
+                     sum_k(permuted_output[token_to_permuted[t,k]-1]
+                            * permuted_weights[same row])`.
+        """
+        assert permuted_output.num_dims == 2
+        # meta is shaped (2, M_TOTAL + MBT*TOPK) int32 — see
+        # moe_permute_sm100_layer for the layout contract.
+        assert meta.num_dims == 2
+        assert meta.dim(0) == 2
+        assert residual.num_dims == 2
+        assert output.num_dims == 2
+
+        MBT = residual.dim(0)
+        HIDDEN = permuted_output.dim(1)
+        M_TOTAL = permuted_output.dim(0)
+        # meta = M_TOTAL (weights) + MBT*TOPK (token_to_permuted) entries.
+        meta_len = meta.dim(1)
+        TOPK = (meta_len - M_TOTAL) // MBT
+        assert M_TOTAL + MBT * TOPK == meta_len
+        assert residual.dim(1) == HIDDEN
+        assert output.dim(0) == MBT
+        assert output.dim(1) == HIDDEN
+
+        params = [MBT, TOPK, HIDDEN, M_TOTAL]
+        grid_dim = (MBT, 1, 1)
+        block_dim = (128, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # All inputs/outputs are (-1, -1, -1) so the kernel sees the FULL
+        # tensors and indexes them with task_metadata.request_id (= my_token).
+        tb_graph.new_input(permuted_output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+        tb_graph.new_input(residual, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [permuted_output, meta, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_unpermute_sm100", params)
+
+    def transpose_scale_sm100_layer(
+        self, scale_in: DTensor, scale_out: DTensor,
+    ):
+        """(M, K_PACKED) uint32 → (K_PACKED, M) uint32 via single-CTA copy.
+
+        Bridges quantize_fp8_layer's M-outermost packed scale output to the
+        K-outermost layout the PR-674 fp8_group_gemm SFA/SFB TMA descriptors
+        require. See transpose_scale_sm100.cuh.
+        """
+        assert scale_in.num_dims == 2
+        assert scale_out.num_dims == 2
+        M = scale_in.dim(0)
+        K_PACKED = scale_in.dim(1)
+        assert scale_out.dim(0) == K_PACKED
+        assert scale_out.dim(1) == M
+        params = [M, K_PACKED]
+        grid_dim = (1, 1, 1)
+        block_dim = (128, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(scale_in, (-1, -1, -1), -1, True)
+        tb_graph.new_input(scale_out, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([scale_in, scale_out], tb_graph)
+        self.kn_graph.register_task(tb_graph, "transpose_scale_sm100", params)
 
     def linear_fp8_with_residual_layer(
         self,
