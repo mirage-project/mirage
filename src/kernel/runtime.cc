@@ -353,9 +353,13 @@ void register_mugraph(
                 task_type == TASK_MOE_PERMUTE_SM100) {
               task.task_metadata.expert_offset = bid.x;
             }
-            // moe_unpermute uses request_id = bid.x (one CTA per token).
+            // moe_unpermute uses request_id = bid.x (token index) and
+            // kv_idx = bid.y (HIDDEN_SPLIT partition index — see
+            // moe_unpermute_sm100.cuh). grid.y > 1 lets multiple CTAs
+            // share one token by splitting the HIDDEN axis.
             if (task_type == TASK_MOE_UNPERMUTE_SM100) {
               task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
             }
             // transpose_scale_sm100 (B13): grid_x CTAs stripe M.
             // request_id = bid.x = the CTA's chunk index.

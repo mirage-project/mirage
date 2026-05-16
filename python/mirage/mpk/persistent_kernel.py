@@ -2713,6 +2713,7 @@ class PersistentKernel:
         residual: DTensor,
         output: DTensor,
         rows_per_cta: int = 8,
+        hidden_split: int = 1,
     ):
         """MoE combine-unpermute task — inverse of moe_permute_sm100. See
         moe_unpermute_sm100.cuh for the contract. Decodes `meta` into
@@ -2755,7 +2756,17 @@ class PersistentKernel:
         params = [MBT, TOPK, HIDDEN, M_TOTAL]
         rows_per_cta_safe = max(1, int(rows_per_cta))
         grid_x = max(1, (MBT + rows_per_cta_safe - 1) // rows_per_cta_safe)
-        grid_dim = (grid_x, 1, 1)
+        # 2026-05-15 stragglers fix: grid.y = hidden_split spreads each
+        # token's HIDDEN work across hidden_split CTAs. For decode
+        # (active_rows=1) only 1*hidden_split CTAs do work — bumping
+        # hidden_split splits the 32 μs per-token straggler across
+        # more SMs concurrently. task_register passes hidden_split as
+        # the kernel's HIDDEN_SPLIT template and bid.y becomes the
+        # partition index (kv_idx). HIDDEN must be divisible by
+        # hidden_split for clean partitions; the kernel rounds up
+        # via ceil-div and clamps the upper partition to HIDDEN.
+        hidden_split_safe = max(1, int(hidden_split))
+        grid_dim = (grid_x, hidden_split_safe, 1)
         block_dim = (128, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # All inputs/outputs are (-1, -1, -1) so the kernel sees the FULL

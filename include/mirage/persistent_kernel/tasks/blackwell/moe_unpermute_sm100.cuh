@@ -51,13 +51,15 @@ template <int MBT,
           int HIDDEN,
           int M_TOTAL,
           int OUTPUT_STRIDE,
-          int ROWS_PER_TASK = 1>
+          int ROWS_PER_TASK = 1,
+          int HIDDEN_SPLIT = 1>
 __device__ __forceinline__ void
     moe_unpermute_sm100_task_impl(void const *permuted_output_ptr,
                                   void const *meta_ptr,
                                   void const *residual_ptr,
                                   void *output_ptr,
                                   int task_idx,
+                                  int hidden_partition,
                                   int num_active_rows) {
   using bf16 = cute::bfloat16_t;
   bf16 const *__restrict__ d_in =
@@ -111,7 +113,20 @@ __device__ __forceinline__ void
 
     // Accumulate per-element: out[i] = residual[i]
     //                                + sum_k(d_in[rows[k]][i] * weights[k]).
-    for (int i = threadIdx.x; i < HIDDEN; i += blockDim.x) {
+    // 2026-05-15 (B36-followup): hidden_partition splits the HIDDEN
+    // axis across HIDDEN_SPLIT CTAs. Each CTA owns the range
+    // [hid_start, hid_end). HIDDEN_SPLIT=1 keeps the legacy
+    // single-CTA-owns-full-hidden shape.
+    constexpr int HIDDEN_PER_SPLIT =
+        HIDDEN_SPLIT > 0
+            ? (HIDDEN + HIDDEN_SPLIT - 1) / HIDDEN_SPLIT
+            : HIDDEN;
+    int const hid_start = hidden_partition * HIDDEN_PER_SPLIT;
+    int const hid_end_unclamped = hid_start + HIDDEN_PER_SPLIT;
+    int const hid_end = hid_end_unclamped < HIDDEN
+                            ? hid_end_unclamped
+                            : HIDDEN;
+    for (int i = hid_start + threadIdx.x; i < hid_end; i += blockDim.x) {
       float acc = float(d_res[(size_t)my_token * OUTPUT_STRIDE + i]);
 #pragma unroll
       for (int k = 0; k < TOPK; ++k) {

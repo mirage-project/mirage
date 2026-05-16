@@ -6246,20 +6246,33 @@ int TaskRegister::register_moe_unpermute_sm100_task(
     rows_per_task = 1;
   }
 
+  // 2026-05-15 stragglers fix: HIDDEN_SPLIT = grid.y partitions the
+  // HIDDEN axis across HIDDEN_SPLIT CTAs per token. Decode case
+  // (1 active token) has only HIDDEN_SPLIT CTAs doing actual compute
+  // — bumping HIDDEN_SPLIT spreads the 32 μs straggler across more
+  // SMs in parallel. Prefill grid balloons to MBT*HIDDEN_SPLIT CTAs
+  // but per-CTA work shrinks proportionally.
+  int hidden_split = bgraph.grid_dim.y > 0 ? (int)bgraph.grid_dim.y : 1;
+  if (hidden_split < 1) {
+    hidden_split = 1;
+  }
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::moe_unpermute_sm100_task_impl<$, $, $, $, $, $>(",
+  code.e("kernel::moe_unpermute_sm100_task_impl<$, $, $, $, $, $, $>(",
          MBT,
          TOPK,
          HIDDEN,
          M_TOTAL,
          output_stride,
-         rows_per_task);
+         rows_per_task,
+         hidden_split);
   code.e("    task_desc->input_ptrs[0],");  // permuted_output
   code.e("    task_desc->input_ptrs[1],");  // meta
   code.e("    task_desc->input_ptrs[2],");  // residual
   code.e("    task_desc->output_ptrs[0],"); // output
   code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx,");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_UNPERMUTE_SM100, code.to_string());
 }

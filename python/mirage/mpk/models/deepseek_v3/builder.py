@@ -3263,12 +3263,22 @@ class DeepSeekV3Builder(GraphBuilder):
             # constraint of leaving workers free for concurrent tasks), each
             # of the 16 active CTAs had to chew through 8 row-blocks
             # serially, giving 28-32 μs straggler wallclock per layer.
+            # 2026-05-15 stragglers fix: hidden_split=8 partitions the
+            # HIDDEN axis across 8 CTAs per token. For decode
+            # (active_rows=1) this gives 8 CTAs working on token 0's
+            # hidden cols concurrently — the previous 32 μs per-token
+            # straggler shrinks by ~8x. For prefill (active_rows=128)
+            # the grid balloons to 128*8=1024 CTAs but each CTA does
+            # 1/8 the per-token compute, so the longest CTA wallclock
+            # also shrinks (overall MOE_UNPERMUTE wave bounded by the
+            # slowest CTA, not total work).
             self.mpk.moe_unpermute_sm100_layer(
                 permuted_output=self._new_moe_layer_w2_out,
                 meta=self._new_moe_layer_meta,
                 residual=shared_residual,
                 output=moe_output,
                 rows_per_cta=1,
+                hidden_split=8,
             )
         else:
             self.mpk.moe_mul_sum_add_layer(
