@@ -286,12 +286,15 @@ class DeepSeekV3Builder(GraphBuilder):
         self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "0") == "1"
         # B37 (2026-05-15): replace the (input_layernorm RMSNorm + qkv_a
         # quantize) two-task chain with one fused kernel that writes BF16
-        # rmsnorm_out and FP8 + scale in one pass. Saves ~10 us/layer on
-        # TP=4 EP=2 mbt=128 decode by eliminating one dispatch wave plus a
-        # bf16 HBM round-trip. Default OFF; A/B under
-        # MPK_DSV3_FUSED_RMSNORM_QUANTIZE=1.
+        # rmsnorm_out and FP8 + scale in one pass. Saves ~30 μs/layer
+        # (−5.7% per decode iter on TP=4 EP=2 mbt=128) by eliminating one
+        # dispatch wave plus a bf16 HBM round-trip.
+        # Default ON (2026-05-15) after the case-3 fix at commit 27dd8771
+        # made the task graph annotate correctly. Set
+        # MPK_DSV3_FUSED_RMSNORM_QUANTIZE=0 to fall back to the legacy
+        # split rmsnorm + standalone quantize chain.
         self._fused_rmsnorm_quantize = (
-            os.environ.get("MPK_DSV3_FUSED_RMSNORM_QUANTIZE", "0") == "1")
+            os.environ.get("MPK_DSV3_FUSED_RMSNORM_QUANTIZE", "1") == "1")
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
