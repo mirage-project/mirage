@@ -6047,6 +6047,104 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
       TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
 }
 
+// D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but
+// the kernel call emits FP8 + packed UE8M0 scale outputs. Task tuple is
+// (4 inputs, 2 outputs): output_ptrs[0] = FP8 buffer, output_ptrs[1] =
+// packed-scale uint32 buffer. params layout unchanged (M, N, K,
+// num_workers, optional runtime_m_mode); `scale_outer_stride` is derived
+// from N at codegen time (= N/128 = number of K-groups per row, since
+// BN=128 and we statically restrict the fused path to BN=128).
+static int register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
+                                                  std::vector<int> const &params,
+                                                  char const *namespace_name,
+                                                  char const *fn_name,
+                                                  TaskType task_type) {
+  assert(params.size() == 4 || params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
+  assert(runtime_m_mode >= 0 && runtime_m_mode <= 3);
+  // BN=128 fixed (per task_impl_tpl<BN=128, NS=3, NE=...>); each consumer
+  // thread owns exactly one K-group → scale_outer_stride is the per-row
+  // number of K-groups = N / 128.
+  assert(N % 128 == 0 &&
+         "fp8_gemm_dense_fp8out requires N divisible by 128 (one K-group "
+         "per BN tile, per-row scale layout)");
+  int scale_outer_stride = N / 128;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  if (runtime_m_mode == 1) {
+    code.e("int req_id_ = runtime_config.request_ids[0];");
+    code.e("if (req_id_ < 0) return;");
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
+           "runtime_config.prompt_length[req_id_] && q_len_ > 8;");
+    code.e("if (!prompt_prefill_) return;");
+    code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[0];");
+    code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
+    code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+           "runtime_config.paged_kv_last_page_len_buffer[0];");
+  } else if (runtime_m_mode == 2 || runtime_m_mode == 3) {
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    if (runtime_m_mode == 2) {
+      code.e("if (q_len_ <= 8) return;");
+    } else {
+      code.e("if (q_len_ > 8) return;");
+    }
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
+  } else {
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
+  }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_fp8_e4m3*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<uint32_t*>(task_desc->output_ptrs[1]),");
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $,", num_workers);
+  code.e("    $);", scale_outer_stride);
+  code.e("}");
+  return self->register_task_variant(task_type, code.to_string());
+}
+
+int TaskRegister::register_fp8_gemm_dense_smallm_fp8out_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_fp8out_variant(
+      this,
+      params,
+      "fp8_gemm_dense_smallm",
+      "fp8_gemm_dense_smallm_fp8out_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100);
+}
+
+int TaskRegister::register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_fp8out_variant(
+      this,
+      params,
+      "fp8_gemm_dense_mediumm",
+      "fp8_gemm_dense_mediumm_fp8out_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100);
+}
+
 // SplitK decode variant. params: [M, N, K, num_workers, SPLIT_K]. Always
 // runs with runtime_m_mode=3 (decode-only Q_LEN<=8 + active_rows cap)
 // inline; that gate is baked in (no override). Kernel template:

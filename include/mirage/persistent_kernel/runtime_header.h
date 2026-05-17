@@ -250,6 +250,13 @@ enum TaskType {
   // BF16 HBM round-trip of silu_out per layer. Behind
   // `MPK_DSV3_FUSED_SILU_QUANTIZE=1`.
   TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100 = 317,
+  // D1 (2026-05-17): dense FP8 GEMM with epilogue UE8M0 quantize. Output is
+  // FP8 + packed UE8M0 scale (instead of bf16), eliminating the standalone
+  // per_token_group_quantize_fp8 task that follows q_b_nope in the
+  // MPK_DSV3_BMM=1 Q-up chain. Saves one dispatch + one BF16 HBM round-trip.
+  // Behind `MPK_DSV3_FUSED_QB_QUANTIZE=1`.
+  TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 = 318,
+  TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 = 319,
   TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

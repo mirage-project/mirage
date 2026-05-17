@@ -193,6 +193,10 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_decode_splitk_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_smallm_fp8out_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fused_rmsnorm_quantize_fp8_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_group_gemm_smallm_sm100_task(
