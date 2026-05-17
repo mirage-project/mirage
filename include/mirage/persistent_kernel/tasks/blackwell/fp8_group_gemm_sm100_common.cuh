@@ -27,15 +27,20 @@
 // with UE8M0 scales), 4 warp roles (TMA load / UTCCP transpose / MMA issue /
 // epilogue with TMA store), setmaxnreg register reallocation.
 //
-// Inputs (all FP8 e4m3 except scales):
-//   A_fp8    [M_total, K]              row-major (K innermost)
-//   B_fp8    [E, N, K]                 per-expert weights (viewed as [K, E*N])
-//   sfa      [M_total, num_sf_k]       packed UE8M0 uint32 (4 UE8M0/uint32)
-//   sfb      [E*N, num_sf_k]           packed UE8M0 uint32, per-element
-//   expanded m_indices[M_total]                 int32, expert id per row (rows
-//   in
+// Inputs (all FP8 e4m3 except scales). All shapes use PyTorch convention
+// (outermost first, innermost last):
+//   A_fp8    [M_total, K]              row-major, K innermost
+//   B_fp8    [E, N, K]                 per-expert weights, K innermost
+//                                      (flattens to [E*N, K] for the kernel)
+//   sfa      [num_sf_k, M_total]       packed UE8M0 uint32 (4 UE8M0/uint32);
+//                                      M_total innermost — transposed vs. the
+//                                      natural [M_total, num_sf_k] producer
+//                                      layout (see transpose_scale_sm100)
+//   sfb      [num_sf_k, E*N]           packed UE8M0 uint32 (4 UE8M0/uint32);
+//                                      E*N innermost — same transposition
+//   m_indices[M_total]                 int32, expert id per row (rows in
 //                                      [bm*BM, (bm+1)*BM) must share expert)
-//   D_bf16   [M_total, N]              bf16 output
+//   D_bf16   [M_total, N]              bf16 output, N innermost
 //
 // MPK adaptation: each task instance handles a slice of (bm, bn) tiles via
 // persistent loop strided by num_workers. Register layer with
@@ -117,11 +122,12 @@ __device__ __forceinline__ void st_shared_u32_addr(uint32_t addr, uint32_t v) {
 
 template <int BN, int NS>
 __device__ __noinline__ void task_impl_tpl(
-    CUtensorMap const *ta_ptr,   // A: [K, M_total] FP8
-    CUtensorMap const *tb_ptr,   // B: [K, E*N] FP8
-    CUtensorMap const *tsfa_ptr, // SFA: [M_total, num_sf_k] uint32 packed
-    CUtensorMap const *tsfb_ptr, // SFB: [E*N, num_sf_k] uint32 packed
-    CUtensorMap const *td_ptr,   // D: [N, M_total] BF16 (TMA store)
+    // All shapes below are PyTorch convention (innermost dim is last).
+    CUtensorMap const *ta_ptr,   // A:   [M_total, K]         FP8, K innermost
+    CUtensorMap const *tb_ptr,   // B:   [E*N, K]             FP8, K innermost
+    CUtensorMap const *tsfa_ptr, // SFA: [num_sf_k, M_total]  uint32, M innermost
+    CUtensorMap const *tsfb_ptr, // SFB: [num_sf_k, E*N]      uint32, E*N innermost
+    CUtensorMap const *td_ptr,   // D:   [M_total, N]         BF16, N innermost
     int const *__restrict__ m_indices,
     int const M_total,
     int const N,

@@ -4,6 +4,7 @@
 #include "tasks/ampere/merge_splitkv.cuh"
 #include "tasks/ampere/multitoken_paged_attention_split_kv.cuh"
 #include "tasks/ampere/silu_mul.cuh"
+#include "tasks/ampere/single_batch_extend.cuh"
 #ifdef USE_NVSHMEM
 #include "tasks/ampere/allreduce.cuh"
 #endif // USE_NVSHMEM
@@ -67,6 +68,8 @@
 #include "softmax_gather_sm100.cuh"
 #include "tasks/common/sampling.cuh"
 #include "tasks/speculative_decoding/mtp_token_ops.cuh"
+#include "tasks/speculative_decoding/prompt_lookup.cuh"
+#include "tasks/speculative_decoding/target_verify.cuh"
 #include "tasks/speculative_decoding/target_verify_mtp.cuh"
 #include "tensor_init.cuh"
 #include "topk_sigmoid_sm100.cuh"

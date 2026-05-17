@@ -255,12 +255,49 @@ class LinearWithResidual(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        pk.linear_with_residual_layer(
-            input=x,
-            weight=w_dt,
-            residual=residual,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.linear_with_residual_layer``). Each catalog
+        # module owns its own task wiring so adding a new layer doesn't
+        # require editing ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert x.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert w_dt.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        assert residual.num_dims == 2  # (batch_size, hidden_size)
+        assert out_dt.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (-1, -1, -1), 1, True)
+        tb_graph.new_input(w_dt, (0, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), -1, True)
+        tb_graph.new_input(out_dt, (1, -1, -1), -1, True)
+        pk.kn_graph.customized([x, w_dt, residual, out_dt], tb_graph)
+
+        # On non-root TP ranks the residual must NOT be added — the
+        # allreduce-merge step adds it exactly once on rank 0. Task
+        # param[0] is ``enable_residual``.
+        enable_residual = 1
+        if pk.world_size > 1 and pk.mpi_rank != 0:
+            enable_residual = 0
+        params = [enable_residual]
+
+        if 100 <= pk.target_cc < 120:
+            pk.kn_graph.register_task(
+                tb_graph, "linear_with_residual_sm100", params
+            )
+        elif 90 <= pk.target_cc < 100:
+            # Hopper: the legacy code had a branch on per-task output
+            # width that always picked the swapAB variant, so we use the
+            # one variant unconditionally.
+            pk.kn_graph.register_task(
+                tb_graph, "linear_swapAB_with_residual_hopper", params
+            )
+        elif 80 <= pk.target_cc < 90:
+            pk.kn_graph.register_task(tb_graph, "linear_with_residual")
+        else:
+            raise RuntimeError(
+                f"LinearWithResidual.compile: unsupported compute "
+                f"capability {pk.target_cc}. Supported: SM80-89 (Ampere), "
+                f"SM90 (Hopper), SM100-119 (Blackwell)."
+            )
         return out_dt

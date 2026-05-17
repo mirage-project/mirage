@@ -215,11 +215,28 @@ class Identity(MPKModule):
             # here to avoid coupling).
             out_dt = output
 
-        pk.identity_layer(
-            input=x,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-            dependent_tensor=dependent,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.identity_layer``). Each catalog module owns
+        # its own task wiring so adding a new layer doesn't require
+        # editing ``persistent_kernel.py``.
+        #
+        # The ``dependent`` kwarg is accepted for API parity with the old
+        # pk method but is not consumed by the task body (the original
+        # method also did not wire it into the graph — see persistent_
+        # kernel.py:identity_layer). It is reserved for a future
+        # explicit dependency edge.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert x.num_dims == out_dt.num_dims
+        last_dim = 0
+        for i in range(x.num_dims):
+            assert x.dim(i) == out_dt.dim(i)
+            last_dim = i
+        assert last_dim == 1 or last_dim == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (last_dim, -1, -1), 1, True)
+        tb_graph.new_input(out_dt, (last_dim, -1, -1), 1, True)
+        pk.kn_graph.customized([x, out_dt], tb_graph)
+        pk.kn_graph.register_task(tb_graph, "identity")
         return out_dt

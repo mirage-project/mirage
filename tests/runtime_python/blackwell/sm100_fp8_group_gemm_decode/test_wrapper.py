@@ -26,9 +26,11 @@ def float_to_ue8m0(t):
 
 
 def pack_sf(scales_2d):
-    """[dim, nk] fp32 -> [num_sf_k, dim] uint32 row-major (matches source's
-    prepare_sf which writes packed[sk*dim + d]; the TMA descriptor reads
-    gd=[M_total, num_sf_k] gs=[M_total*4] which is this transposed layout)."""
+    """[dim, nk] fp32 -> [num_sf_k, dim] uint32 row-major (dim innermost).
+
+    Matches source's prepare_sf which writes packed[sk*dim + d]. The kernel's
+    TMA descriptor uses innermost-first dim order: g=(dim, num_sf_k),
+    leading_stride=(dim*4 bytes) — same physical layout, different notation."""
     dim, nk = scales_2d.shape
     num_sf_k = (nk + 3) // 4
     ue = float_to_ue8m0(scales_2d).to(torch.int64)  # [dim, nk]

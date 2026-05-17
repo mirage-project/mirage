@@ -2258,14 +2258,15 @@ class PersistentKernel:
                     that contiguous BM=128 row-blocks share one expert).
 
         b_fp8       (E, N, K)               fp8_e4m3 (attached as uint8)
-                    row-major per expert (K innermost). Kernel views the
-                    underlying buffer as logical [K, E*N] via its TMA descriptor.
+                    row-major per expert (K innermost). The kernel flattens
+                    the buffer to (E*N, K) for its TMA descriptor; same memory.
 
         sfa_packed  (num_sf_k, M_total)     uint32, UE8M0-packed
-                    Row-major with M_total innermost — the TMA descriptor
-                    interprets it as logical [M_total, num_sf_k]. Each uint32
-                    packs 4 consecutive UE8M0 scales along the K-block axis
-                    (one scale per 128-K-element block per row).
+                    Row-major with M_total innermost (PyTorch shape order;
+                    same memory the kernel's TMA descriptor describes with
+                    g=(M_total, num_sf_k) in its innermost-first convention).
+                    Each uint32 packs 4 consecutive UE8M0 scales along the
+                    K-block axis (one scale per 128-K-element block per row).
 
         sfb_packed  (num_sf_k, E*N)         uint32, UE8M0-packed
                     Same packing convention as SFA. Built by expanding the

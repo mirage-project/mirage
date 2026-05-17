@@ -261,10 +261,18 @@ class Argmax(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        pk.argmax_layer(
-            input=x,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.argmax_layer``). Each catalog module owns
+        # its own task wiring so adding a new layer doesn't require
+        # editing ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert x.num_dims == 2  # (batch_size, vocab_size)
+        assert out_dt.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (-1, -1, -1), -1, True)
+        tb_graph.new_input(out_dt, (-1, -1, -1), -1, True)
+        pk.kn_graph.customized([x, out_dt], tb_graph)
+        pk.kn_graph.register_task(tb_graph, "argmax")
         return out_dt

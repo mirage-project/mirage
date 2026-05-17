@@ -91,7 +91,8 @@ static void run_impl(Kernel k_func,
   CUtensorMap ta, tb, tsfa, tsfb, td;
   int nk = (K + 127) / 128;
   int num_sf_k = (nk + 3) / 4;
-  // A: [K, M_total] FP8 (uint8 raw)
+  // A: [M_total, K] FP8 (uint8 raw); K innermost.
+  // TMA descriptor uses innermost-first dim order, so g[0]=K, g[1]=M_total.
   {
     uint64_t g[2] = {(uint64_t)K, (uint64_t)M_total};
     uint64_t s[1] = {(uint64_t)K};
@@ -110,7 +111,7 @@ static void run_impl(Kernel k_func,
                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
   }
-  // B: [K, E*N] FP8
+  // B: [E*N, K] FP8; K innermost. (TMA g[0]=K, g[1]=E*N.)
   {
     uint64_t g[2] = {(uint64_t)K, (uint64_t)E * N};
     uint64_t s[1] = {(uint64_t)K};
@@ -129,7 +130,8 @@ static void run_impl(Kernel k_func,
                                CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
   }
-  // SFA: [M_total, num_sf_k] uint32
+  // SFA: [num_sf_k, M_total] uint32; M_total innermost.
+  // (TMA g[0]=M_total, g[1]=num_sf_k.)
   {
     uint64_t g[2] = {(uint64_t)M_total, (uint64_t)num_sf_k};
     uint64_t s[1] = {(uint64_t)M_total * sizeof(uint32_t)};
@@ -148,7 +150,7 @@ static void run_impl(Kernel k_func,
                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
   }
-  // SFB: [E*N, num_sf_k] uint32
+  // SFB: [num_sf_k, E*N] uint32; E*N innermost. (TMA g[0]=E*N, g[1]=num_sf_k.)
   {
     uint64_t g[2] = {(uint64_t)E * N, (uint64_t)num_sf_k};
     uint64_t s[1] = {(uint64_t)E * N * sizeof(uint32_t)};
@@ -167,7 +169,7 @@ static void run_impl(Kernel k_func,
                                CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
   }
-  // D: [N, M_total] BF16
+  // D: [M_total, N] BF16; N innermost. (TMA g[0]=N, g[1]=M_total.)
   {
     uint64_t g[2] = {(uint64_t)N, (uint64_t)M_total};
     uint64_t s[1] = {(uint64_t)N * sizeof(bf16)};
