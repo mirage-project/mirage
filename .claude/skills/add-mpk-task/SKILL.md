@@ -5,18 +5,25 @@ description: Step-by-step guide for adding a new task implementation to Mirage P
 
 You are helping the user add a new task to the MPK (Mirage Persistent Kernel) runtime. A "task" is a single fused GPU operation (one thread block's worth of work) that runs as a node in the megakernel's task graph.
 
+There are **two layers** to add a new operator:
+
+1. **Kernel + registration** (Steps 1-6): the CUDA implementation, the `TaskType` enum, the task-name → registration-function dispatch, and the code-generation function. This part is the same for every task.
+2. **Python catalog module** (Step 7): an `MPKModule` subclass that owns its own `forward()` (PyTorch reference), `auto_grid_dim()` (parallelism heuristic), and `compile()` (TBGraph + `register_task` wiring). New layers live under `python/mirage/mpk/layers/<family>/<my_module>.py`.
+
+The legacy `pk.foo_layer()` methods on `PersistentKernel` are kept for back-compat but are **not** the path forward — adding a new layer should not require editing `python/mirage/mpk/persistent_kernel.py`.
+
 ## Task Lifecycle Overview
 
-A task flows through 7 files across 4 layers:
-
 ```
-Python (user API)
-  → graph.cc (name→type dispatch)
-    → task_register.cc (code generation)
-      → runtime_header.h (enum)
-      → tasks/{arch}/{my_task}.cuh (CUDA kernel)
-        → generated _execute_task() dispatch
-          → persistent_kernel.cuh (runtime scheduler)
+Python (catalog module)
+  ├── MPKModule.forward()    — PyTorch reference (for correctness oracle)
+  └── MPKModule.compile()    — builds TBGraph, calls register_task
+        → graph.cc (name→type dispatch)
+          → task_register.cc (code generation)
+            → runtime_header.h (enum)
+            → tasks/{arch}/{my_task}.cuh (CUDA kernel)
+              → generated _execute_task() dispatch
+                → persistent_kernel.cuh (runtime scheduler)
 ```
 
 ## Step-by-Step: 7 Files to Touch
@@ -25,16 +32,7 @@ Python (user API)
 
 ### Step 1 — `include/mirage/persistent_kernel/runtime_header.h`
 
-Add a new value to the `TaskType` enum. Pick a number in the appropriate range:
-- **100–149**: Ampere (baseline)
-- **150–198**: Hopper (SM90)
-- **230–298**: Blackwell (SM100)
-- **300–349**: Multi-GPU
-
-```cpp
-// Example: adding TASK_MY_OP in the Ampere range
-TASK_MY_OP = 122,  // pick next available number in your range
-```
+Add a new value to the `TaskType` enum. If your task uses TMA descriptors, also add it to the relevant range / dispatch table in `runtime.cc` (see the existing `TASK_SM100_TMA_START_TASK` band or one of the explicit `MLA_*` / `FP8_*` `if`-branches around line 1240-1268 of `src/kernel/runtime.cc`).
 
 ---
 
@@ -71,9 +69,6 @@ __device__ __forceinline__ void my_op_impl(
   T       *d_output = static_cast<T *>(output_ptr);
 
   // ... kernel logic ...
-
-  // No __syncthreads() needed after the last store — the runtime's
-  // worker loop does a __syncthreads() after _execute_task() returns.
 }
 
 } // namespace kernel
@@ -91,28 +86,13 @@ __device__ __forceinline__ void my_op_impl(
 
 ### Step 3 — `include/mirage/persistent_kernel/tasks/{arch}/task_header.cuh`
 
-Add an `#include` for your new file if the architecture's `task_header.cuh` does not already pull it in via a wildcard:
-
-```cpp
-#include "tasks/ampere/my_task.cuh"   // add this line
-```
-
-Also add your `TaskType` to the `task_type_to_name` map in `src/kernel/runtime.cc` (search for the existing map entries like `{TASK_RMS_NORM, "TASK_RMS_NORM"}`):
-
-```cpp
-{TASK_MY_OP, "TASK_MY_OP"},
-```
+Add an `#include` for your new file. The megakernel codegen uses this bundle to find every `kernel::*_kernel` symbol — forgetting to include yours produces nvcc errors like `namespace "kernel" has no member ...`.
 
 ---
 
 ### Step 4 — `include/mirage/kernel/task_register.h`
 
 Declare the new registration function in the `TaskRegister` class:
-
-```cpp
-int register_my_op_task(threadblock::Graph const &bgraph,
-                        std::vector<int> const &params);
-```
 
 ---
 
@@ -125,65 +105,43 @@ Implement the registration function. Its job is to:
 ```cpp
 int TaskRegister::register_my_op_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params) {
-  // params is whatever you pass from Python as the third arg to register_task().
-  // params.size() == 0 if you pass nothing.
   assert(params.size() == 0);
-
-  // bgraph.operators contains (num_inputs + num_outputs) TBInputOp nodes,
-  // inputs first in registration order.
-  int num_inputs  = 2;  // must match tb_graph.new_input() calls for inputs
-  int num_outputs = 1;  // must match tb_graph.new_input() calls for outputs
+  int num_inputs  = 2;
+  int num_outputs = 1;
   assert(bgraph.operators.size() == (size_t)(num_inputs + num_outputs));
 
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
     auto *iop = static_cast<tb::TBInputOp *>(op);
-    if (input_ops.size() < (size_t)num_inputs)
-      input_ops.push_back(iop);
-    else
-      output_ops.push_back(iop);
+    if (input_ops.size() < (size_t)num_inputs) input_ops.push_back(iop);
+    else                                       output_ops.push_back(iop);
   }
 
-  // Extract tensor dimensions from the output tensor descriptor.
-  // output_tensors[0] holds the STensor (shared memory tensor) shape.
-  assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size  = output_ops[0]->output_tensors[0].dim[0];
   int hidden_dim  = output_ops[0]->output_tensors[0].dim[1];
 
-  // For stride of a KN-level tensor, cast through owner_op:
-  // kn::KNInputOp *kn_op = static_cast<kn::KNInputOp *>(
-  //     output_ops[0]->dtensor.owner_op);
-  // int output_stride = static_cast<int>(kn_op->input_strides[0]);
-
-  // Generate the code string. "$" is a placeholder replaced with the
-  // corresponding argument value by CodeKeeper::e().
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::my_op_impl<bfloat16, $, $>(", batch_size, hidden_dim);
-  code.e("    task_desc->input_ptrs[0],");   // input
-  code.e("    task_desc->input_ptrs[1],");   // weight
-  code.e("    task_desc->output_ptrs[0],");  // output
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0],");
   code.e("    1e-6f);");
 
-  // register_task_variant deduplicates: same code string → same variant_id.
   return register_task_variant(TASK_MY_OP, code.to_string());
 }
 ```
 
 **Reading tensor properties from `bgraph`:**
-- `input_ops[i]->dtensor` — the kernel-level DTensor for input i (global shape/strides).
-- `output_ops[i]->dtensor` — the kernel-level DTensor for output i.
-- `output_ops[i]->output_tensors[0]` — the threadblock-level STensor (may differ in dims/strides).
-- `dtensor.dim[d]`, `dtensor.num_dims` — global tensor dimensions.
-- `dtensor.owner_op` — the upstream KN operator; cast to `kn::KNInputOp *` to get `input_strides`.
+- `input_ops[i]->dtensor` — kernel-level DTensor for input i (global shape/strides).
+- `output_ops[i]->dtensor` — kernel-level DTensor for output i.
+- `output_ops[i]->output_tensors[0]` — threadblock-level STensor (may differ in dims/strides).
+- `dtensor.owner_op` cast to `kn::KNInputOp *` for `input_strides`.
 
 **Injecting runtime metadata via `code.e()`:**
-- `runtime_config.tokens` — pointer to the token buffer.
-- `runtime_config.step[i]` — current decode step for request i.
-- `runtime_config.qo_indptr_buffer` — paged attention indptr.
-- `task_desc->task_metadata.request_id` — which request this task handles.
-- `task_desc->task_metadata.kv_idx` — KV cache chunk index (for split-KV).
+- `runtime_config.tokens` / `step[i]` / `qo_indptr_buffer` — meta-tensor pointers.
+- `task_desc->task_metadata.request_id` / `expert_offset` / `kv_idx` — per-task fields.
 
 ---
 
@@ -194,62 +152,154 @@ Add an `else if` branch mapping your task name string to the registration functi
 ```cpp
 } else if (name == "my_op") {
   int variant_id = task_register->register_my_op_task(customized->bgraph, params);
-  // Tuple: (num_inputs, num_outputs, TaskType, variant_id)
-  // num_inputs/num_outputs must match what register_my_op_task expects.
-  task_config[op] = std::make_tuple(2, 1, TASK_MY_OP, variant_id);
+  task_config[op] = std::make_tuple(2, 1, TASK_MY_OP, variant_id);  // (num_inputs, num_outputs, TaskType, variant_id)
 }
 ```
-
-**`task_config` tuple fields:**
-1. `num_inputs` — must equal the number of `input_ops` in `register_my_op_task`
-2. `num_outputs` — must equal the number of `output_ops`
-3. `TaskType` — the enum value you added in Step 1
-4. `variant_id` — returned by `register_task_variant()`
 
 Maximum: **7 inputs, 3 outputs** per task (hard limit in `runtime_header.h`).
 
 ---
 
-### Step 7 — `python/mirage/mpk/persistent_kernel.py`
+### Step 7 — Add a catalog module (NEW APPROACH)
 
-Add a Python method that users call to insert your task into the computation graph:
+Create `python/mirage/mpk/layers/<family>/<my_module>.py`. Inherit from `MPKModule` and implement the trio: `forward()` (eager PyTorch reference), `auto_grid_dim()` (parallelism heuristic), `compile()` (registers the task on `current_pk().kn_graph`).
 
 ```python
-def my_op_layer(
-    self,
-    input: DTensor,    # first input tensor
-    weight: DTensor,   # second input tensor
-    output: DTensor,   # output tensor
-    grid_dim: tuple,   # (num_tasks_x, num_tasks_y, num_tasks_z)
-    block_dim: tuple,  # MUST be (128,1,1) for Ampere or (256,1,1) for Hopper/Blackwell
-):
-    assert input.num_dims == 2
-    assert output.num_dims == 2
+"""<one-line summary>.
 
-    # TBGraph partition scheme: new_input(tensor, partition, forloop_dim, is_write)
-    # partition: (-1,-1,-1) = whole tensor per task (no partitioning)
-    #            (0,-1,-1)  = split along dim 0 (grid_dim.x tasks)
-    #            (1,-1,-1)  = split along dim 1
-    # forloop_dim: dimension iterated in forloop (-1 = none, 0 = first dim, ...)
-    # is_write: True if this tensor is written by the task
-    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    tb_graph.new_input(input,  (0, -1, -1), 1, True)   # input, split on dim0
-    tb_graph.new_input(weight, (-1, -1, -1), 0, True)  # weight, no split
-    tb_graph.new_input(output, (0, -1, -1), 1, True)   # output, split on dim0
+Kernel: ``include/mirage/persistent_kernel/tasks/<arch>/my_task.cuh``
+Task name: ``my_op``
+"""
+from __future__ import annotations
+from typing import Any, Optional, Tuple
 
-    self.kn_graph.customized([input, weight, output], tb_graph)
-    # String name must exactly match the else-if branch in graph.cc.
-    # params list corresponds to params[] in register_my_op_task().
-    self.kn_graph.register_task(tb_graph, "my_op", [])  # [] = no params
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from .._base import MPKModule  # adjust dot count for your subpackage
+
+__all__ = ["MyOp"]
+
+GridDim  = Tuple[int, int, int]
+BlockDim = Tuple[int, int, int]
+
+
+class MyOp(MPKModule):
+    """<≤6-line description + __init__ arg list>."""
+
+    def __init__(self, hidden_dim: int, *, prefix: str = "") -> None:
+        super().__init__(prefix=prefix)
+        self.hidden_dim = hidden_dim
+        # any nn.Parameter weights go here; load_state_dict will populate them
+        self.weight = nn.Parameter(torch.empty(hidden_dim, dtype=torch.bfloat16))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Eager reference: <one-line math>."""
+        # Reference implementation; this is the correctness oracle used by tests.
+        var = x.float().pow(2).mean(-1, keepdim=True)
+        return (x.float() * torch.rsqrt(var + 1e-6) * self.weight).to(x.dtype)
+
+    def auto_grid_dim(self, x_dt: Any) -> GridDim:
+        """One CTA per token row, capped at ``num_workers``."""
+        from ... import context as _ctx
+        pk = _ctx.current_pk()
+        # Target num_workers (148 on Blackwell B200) to saturate the runtime.
+        # Document any kernel-side hard constraint that bounds the grid below
+        # num_workers (e.g. "one CTA per expert", "MMA-M=128 alignment").
+        return (min(int(pk.num_workers), pk.max_num_batched_tokens), 1, 1)
+
+    def compile(
+        self,
+        x: Any,
+        *,
+        output: Optional[Any] = None,
+        grid_dim: Optional[GridDim] = None,
+        block_dim: Optional[BlockDim] = None,
+    ) -> Any:
+        """Register one ``my_op`` task.
+
+        Tensor contract:
+          x      : (batch_size, hidden_dim) bf16, row-major contiguous
+          weight : (hidden_dim,) bf16, nn.Parameter
+          output : (batch_size, hidden_dim) bf16, allocated if None
+
+        Notes (≤2 lines): hidden_dim must be a multiple of 128 (Ampere) / 64
+        (Hopper/Blackwell); slice-offset kwargs are unsupported.
+        """
+        from ... import context as _ctx
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        pk = _ctx.current_pk()
+        if grid_dim is None:  grid_dim = self.auto_grid_dim(x)
+        if block_dim is None: block_dim = self.default_block_dim()
+
+        w_dt = pk.attach_input(self.weight, name=f"{self.prefix}weight")
+        batch = x.dim(0)
+        if output is None:
+            out_dt = pk.new_tensor(dims=(batch, self.hidden_dim), dtype=x.dtype,
+                                   name=f"{self.prefix}my_op_out")
+        elif isinstance(output, torch.Tensor):
+            out_dt = pk.attach_input(output, name=f"{self.prefix}my_op_out")
+        else:
+            out_dt = output
+
+        # ----- TBGraph construction (formerly pk.my_op_layer body) -----
+        assert x.num_dims == 2
+        assert out_dt.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x,    (0, -1, -1), 1, True)   # partition x on dim 0 (batch)
+        tb_graph.new_input(w_dt, (-1, -1, -1), 0, True)  # weight: no partition
+        tb_graph.new_input(out_dt, (0, -1, -1), 1, True) # output: partition on batch
+        pk.kn_graph.customized([x, w_dt, out_dt], tb_graph)
+
+        # Architecture-specific task-name dispatch — read each arch's .cuh.
+        if 100 <= pk.target_cc < 120:
+            pk.kn_graph.register_task(tb_graph, "my_op_sm100")
+        elif 90 <= pk.target_cc < 100:
+            pk.kn_graph.register_task(tb_graph, "my_op_hopper")
+        elif 80 <= pk.target_cc < 90:
+            pk.kn_graph.register_task(tb_graph, "my_op")
+        else:
+            raise RuntimeError(f"MyOp: unsupported cc {pk.target_cc}")
+        return out_dt
 ```
 
-You could reference /mpk-internals skill to futher understand how this works.
+After creating the file, re-export the class in `python/mirage/mpk/layers/<family>/__init__.py` and in `python/mirage/mpk/layers/__init__.py`.
+
+**Why this is the new path**:
+- The catalog module owns its task wiring — no edits to `persistent_kernel.py`.
+- `forward()` gives a free correctness oracle for tests.
+- `auto_grid_dim()` keeps callers from re-deriving the heuristic.
+- Composability: model authors compose `MyOp` like any `nn.Module`.
+
+**Variant split convention** (apply when your task has 2+ behavioral variants):
+- Variants that differ by kernel (e.g. `linear_sm100` vs `linear_swapAB_hopper`, FP8 vs bf16): **split into separate classes** in the same file. Share `__init__` / `forward` / `auto_grid_dim` via a private `_MyOpBase(MPKModule)` and override only `compile()` in each subclass.
+- Variants that differ only by a numeric template parameter (e.g. `tp_size in {2,4,8}`): keep as a single class with a kwarg.
+- Optionally keep a back-compat factory function (`MyOp(..., variant="foo")` returns the right subclass) when you have existing callers — see `MoETopkRouting` in `python/mirage/mpk/layers/moe/routing.py` for the pattern.
+
+**Documentation convention** (used uniformly across the catalog):
+- Module docstring ≤8 lines: what + which `.cuh`.
+- Class docstring ≤6 lines: what + `__init__` arg list.
+- `forward()` ≤3 lines: math equation.
+- `auto_grid_dim()` ≤3 lines: parallelism axis + dominating constraint.
+- `compile()` ≤15 lines including the **tensor contract** block. Every input/output gets: shape (named dims), dtype, layout, special attribute (TMA alignment, slice-override semantics, etc.). The contract is mandatory.
+- DELETE: historical rationale, PR refs, dates, design alternatives.
+
+---
+
+## Legacy path (back-compat only)
+
+If you must add a `pk.my_op_layer(...)` method on `PersistentKernel` itself (e.g. an existing builder needs the method), you can still do so in `python/mirage/mpk/persistent_kernel.py`. The new catalog module is preferred; the legacy method should just call the catalog module under the hood once one exists. New code should not require touching `persistent_kernel.py`.
 
 ---
 
 ## Critical Constraints
 
-### block_dim Must Match WORKER_NUM_THREADS
+### block_dim Must Match Each Kernel's Documented NUM_THREADS
+
+The default worker `WORKER_NUM_THREADS` (defined in `include/mirage/persistent_kernel/tasks/common/worker_config.h`) is:
 
 ```
 Ampere (SM80/86/89):   block_dim = (128, 1, 1)
@@ -257,23 +307,19 @@ Hopper (SM90):         block_dim = (256, 1, 1)
 Blackwell (SM100):     block_dim = (256, 1, 1)
 ```
 
-Defined in `include/mirage/persistent_kernel/tasks/common/worker_config.h`. The worker launch configuration uses this constant — a mismatch does **not** produce a compile error but will silently corrupt results because your kernel will have different warp/thread assumptions than what the scheduler expects. Use `mi.get_configurations_from_gpu(rank)` to probe the GPU if needed. In practice, use the correct `block_dim` based on `self.target_cc >= 90`.
+Defined in `include/mirage/persistent_kernel/tasks/common/worker_config.h`. A mismatch does **not** produce a compile error but silently corrupts results. `MPKModule.default_block_dim()` returns the right value based on `current_pk().target_cc`.
 
 ### TBGraph Operator Order
 
-`bgraph.operators` is ordered exactly as `tb_graph.new_input()` was called. The first `num_inputs` entries are inputs; the remaining `num_outputs` are outputs. The split in `register_my_op_task` must match this exactly.
+`bgraph.operators` is ordered exactly as `tb_graph.new_input()` was called. The first `num_inputs` entries are inputs; the remaining are outputs.
 
 ### grid_dim Sizing
 
-`grid_dim.x * grid_dim.y * grid_dim.z` = total number of task instances. Each becomes one thread block assigned to one worker SM. For good load balance, make the total task count a multiple of `num_workers`. The C++ runtime does not validate this — mismatches cause load imbalance or incorrect results.
+`grid_dim.x * grid_dim.y * grid_dim.z` = total task instances. **Target `current_pk().num_workers`** (148 on Blackwell) to saturate the runtime. If kernel constraints force a smaller grid (e.g. `kernel requires grid.y == num_kv_heads`), document the constraint in `auto_grid_dim()`'s docstring.
 
 ### Variant Deduplication
 
-`register_task_variant()` deduplicates by the generated code string. Two calls with the same template parameters produce the same code string and share a `variant_id`. You don't need to manage this manually.
-
-### Architecture-Specific Tasks
-
-If your task only makes sense for one GPU generation (e.g., uses TMA or WGMMA), name it with a suffix (`_hopper`, `_sm100`) and guard the TBGraph building with `if self.target_cc >= 90`. See `paged_attention_layer()` vs `paged_attention_hopper()` in `persistent_kernel.py` for the pattern.
+`register_task_variant()` deduplicates by the generated code string. Two calls with the same template parameters share a `variant_id`.
 
 ### Tasks Must Be blockIdx-Agnostic
 
@@ -282,133 +328,76 @@ The persistent kernel runtime dispatches tasks to **arbitrary** worker thread bl
 **Anti-pattern — WRONG:**
 ```cpp
 int batch_idx = blockIdx.x;  // WRONG: blockIdx is the worker ID, not the task ID
-int expert_id = blockIdx.x % num_experts;  // WRONG: same reason
+int expert_id = blockIdx.x % num_experts;  // WRONG
 ```
 
-**Correct approach:** All per-task information is in the `TaskDesc` struct passed to `_execute_task()`:
-- `task_desc->input_ptrs[i]` / `task_desc->output_ptrs[i]` — already point to the correct per-task data slice (partitioned by grid_dim via TBGraph)
-- `task_desc->task_metadata.expert_offset` — which expert subset this task handles
-- `task_desc->task_metadata.request_id` — which request this task belongs to
+**Correct:** per-task data lives in the `TaskDesc`:
+- `task_desc->input_ptrs[i]` / `output_ptrs[i]` — already point at the correct per-task slice (partitioned by grid_dim via TBGraph)
+- `task_desc->task_metadata.expert_offset` / `request_id` — per-task fields set during code-gen
 
-The runtime handles the mapping from grid coordinates to task metadata during task graph generation. Your kernel just reads from the pointers and metadata it receives.
+The runtime resolves grid coordinates → per-task pointers during task graph generation.
 
 ---
 
 ## Verification
 
-Adding a new task requires **three parts**:
-1. **Kernel correctness** (Steps A–C) — Test the CUDA kernel directly via a pybind11 wrapper
-2. **Pipeline correctness** (Step 8) — Test the full Python API → code generation → runtime path via test mode
-3. **Performance benchmark** (Step 9) — Measure latency/throughput across representative shapes
+A new task should be tested **two ways**:
 
-### Step A — Add kernel wrapper to `runtime_kernel_wrapper.cu`
+1. **Catalog test** at `tests/runtime_python/layers/test_<module>.py` — uses `test_mode=True`, calls `module.forward()` for the reference, runs `pk()` for the MPK output, compares with `torch.testing.assert_close`. This is the primary correctness oracle and is cheap (one file per module).
+2. **Kernel-wrapper test + benchmark** at `tests/runtime_python/{arch}/sm100_<task>/` — wraps the `__device__` kernel in a `__global__` launcher via pybind11 so you can test the CUDA kernel without going through the megakernel codegen. Useful for low-level kernel debugging and performance benchmarking.
 
-The wrapper file wraps each `__device__ __forceinline__` kernel in a `__global__` launcher and exposes it via pybind11. Follow the pattern used by existing tasks (e.g., `linear_kernel_wrapper` at line ~1230):
+### Catalog test (Step 7-A) — preferred for correctness
 
-```cpp
-// 1. Add a __global__ wrapper that calls your device function
-template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
-__global__ void my_op_kernel_wrapper(void const *input_ptr,
-                                     void const *weight_ptr,
-                                     void *output_ptr,
-                                     float eps) {
-  // You could modify the input ptr for different threadblocks to mimic the real runtime
-  // (e.g., add blockIdx.x * BATCH_SIZE * HIDDEN_DIM * sizeof(T) to input_ptr for batch partitioning)
-  kernel::my_op_impl<T, BATCH_SIZE, HIDDEN_DIM>(input_ptr, weight_ptr, output_ptr, eps);
-}
-
-// 2. Add a launch helper that hardcodes dims and sets shared memory size
-template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
-void launch_my_op(void const *input_ptr, void const *weight_ptr,
-                  void *output_ptr, float eps) {
-  dim3 grid_dim(1, 1, 1);                 // Adjust as needed for testing your op
-  dim3 block_dim(128, 1, 1);              // 128 for Ampere; 256 for Hopper/Blackwell
-  size_t smem_size = 3 * HIDDEN_DIM * sizeof(T) + 128;  // input + weight + output buffers
-
-  cudaFuncSetAttribute(my_op_kernel_wrapper<T, BATCH_SIZE, HIDDEN_DIM>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-  my_op_kernel_wrapper<T, BATCH_SIZE, HIDDEN_DIM>
-      <<<grid_dim, block_dim, smem_size>>>(input_ptr, weight_ptr, output_ptr, eps);
-  cudaDeviceSynchronize();
-}
-
-// 3. Add the Python-facing C++ function with dimension dispatch
-void my_op(torch::Tensor input, torch::Tensor weight, torch::Tensor output, float eps) {
-  void const *input_ptr  = input.data_ptr();
-  void const *weight_ptr = weight.data_ptr();
-  void       *output_ptr = output.data_ptr();
-  int hidden_dim = input.size(1);
-  // dispatch on runtime dim; add cases for each size you want to test
-  if (hidden_dim == 4096) {
-    launch_my_op<bfloat16, 1, 4096>(input_ptr, weight_ptr, output_ptr, eps);
-  } else {
-    printf("Unsupported hidden_dim: %d\n", hidden_dim);
-  }
-}
-```
-
-Then register it in `PYBIND11_MODULE`:
-```cpp
-m.def("my_op", &my_op, "My new op kernel");
-```
-
-### Step B — Rebuild the test extension
-
-```bash
-pip setup.py build_ext --inplace   # rebuilds runtime_kernel.so
-```
-
-For Blackwell-specific tasks, use the corresponding setup in `tests/runtime_python/blackwell/sm100_{task}/setup.py` instead. Arch-specific setups pass `-DMIRAGE_GRACE_BLACKWELL` and `-gencode=arch=compute_100a,code=sm_100a`.
-
-### Step C — Write and run the test script
-
-Create `tests/runtime_python/test_my_op.py`:
+Create `tests/runtime_python/layers/test_my_op.py`:
 
 ```python
-import torch
-import runtime_kernel
+import os, sys, torch, mirage
+from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.layers.<family>.my_op_module import MyOp
 
-dtype  = torch.bfloat16
-device = "cuda"
-hidden_dim = 4096
+def test_my_op_testmode():
+    device, dtype = "cuda", torch.bfloat16
+    torch.manual_seed(0)
+    batch, hidden = 2, 4096
+    x = torch.randn(batch, hidden, dtype=dtype, device=device)
+    out = torch.zeros(batch, hidden, dtype=dtype, device=device)
 
-input  = torch.randn(1, hidden_dim, dtype=dtype, device=device)
-weight = torch.randn(hidden_dim,    dtype=dtype, device=device)
-output = torch.empty(1, hidden_dim, dtype=dtype, device=device)
+    m = MyOp(hidden_dim=hidden).to(device, dtype)
+    ref = m.forward(x)
 
-runtime_kernel.my_op(input, weight, output, eps=1e-6)
+    num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
+    params = PersistentKernel.get_default_init_parameters()
+    params["test_mode"] = True
+    params["num_workers"] = num_workers
+    params["num_local_schedulers"] = num_schedulers
+    params["max_num_batched_tokens"] = batch
+    params["max_num_batched_requests"] = batch
+    pk = PersistentKernel(**params)
 
-# PyTorch reference
-variance = input.pow(2).mean(-1, keepdim=True)
-ref = input * torch.rsqrt(variance + 1e-6) * weight
+    x_dt = pk.attach_input(x, name="x")
+    with pk.compile_scope():
+        m.compile(x_dt, output=out)
 
-print("Max abs error:", (output - ref).abs().max().item())
-print("Ratio (kernel / torch):", (output / ref).flatten()[:8])
+    pk.compile(output_dir=os.path.dirname(__file__))
+    pk()
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+    print("PASSED")
+    pk.finalize()
+
+if __name__ == "__main__":
+    test_my_op_testmode()
 ```
 
-Run it:
-```bash
-cd tests/runtime_python
-python test_my_op.py
-```
+See `/test-mode` for the full pattern, and `tests/runtime_python/layers/test_rmsnorm.py` / `test_paged_attention.py` for canonical examples.
 
-A ratio close to 1.0 everywhere (or max abs error within bfloat16 rounding, ~1e-2) indicates a correct implementation.
+### Kernel-wrapper test + benchmark (Steps A-C, 9) — only when kernel-level debugging is needed
 
----
+For each kernel, there can be a dedicated folder in `tests/runtime_python/{arch}/sm100_<task>/` hosting:
+- `runtime_kernel_wrapper.cu` — `__global__` wrapper + pybind11 binding for the `__device__` impl.
+- `setup.py` — builds the wrapper with arch-specific flags.
+- `test_<task>.py` — direct CUDA invocation + numerical compare against a `pytorch_reference.py`.
+- `bench_<task>.py` — perf measurements over 3-4 representative shapes.
 
-### Step 8 — Runtime Test with `test_mode`
-
-After verifying the kernel in isolation (Steps A–C), test it through the full MPK compilation pipeline using test mode. This validates the Python layer method (Step 7), task registration (Steps 5–6), code generation, and runtime dispatch end-to-end.
-
-Create `tests/runtime_python/test_mode/test_my_op_testmode.py`. See the `/test-mode` skill for the complete API guide, examples, and debugging tips.
-
----
-
-### Step 9 — Performance Benchmark
-
-Create a benchmark alongside the kernel wrapper test at `tests/runtime_python/blackwell/<task>/bench_<task>.py`. It should:
-
-1. Define at least 3–4 representative shape configurations (small, medium, production-scale).
-2. Warm up the kernel (16+ iterations).
-3. Measure latency using `torch.cuda.Event(enable_timing=True)` over 100+ repetitions.
-4. Report average time (ms) per configuration.
+This path is heavier — only invest in it when you need to profile the kernel in isolation. The catalog test is the daily-driver.
