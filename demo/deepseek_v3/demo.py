@@ -1369,25 +1369,6 @@ if __name__ == "__main__":
                     os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
                 )
                 print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
-            # Debug-only: when MPK_DSV3_FP8_BUF_ATTACH=1, builder attaches the
-            # shared FP8 input/scale buffers as torch tensors so we can inspect
-            # their post-megakernel state here.
-            if getattr(mpk, "_fp8_input_torch", None) is not None:
-                for rsize, tensor in mpk._fp8_input_torch.items():
-                    name = f"fp8_input_v2_{rsize}.pt"
-                    torch.save(tensor.detach().view(torch.uint8).cpu(),
-                               os.path.join(args.dump_hidden_dir, name))
-                    print(f"Saved {name} to {args.dump_hidden_dir}")
-                for rsize, tensor in mpk._fp8_scale_torch.items():
-                    name = f"fp8_scale_v2_{rsize}.pt"
-                    torch.save(tensor.detach().cpu(),
-                               os.path.join(args.dump_hidden_dir, name))
-                    print(f"Saved {name} to {args.dump_hidden_dir}")
-            if getattr(mpk, "_rmsnorm_out_torch", None) is not None:
-                torch.save(mpk._rmsnorm_out_torch.detach().cpu(),
-                           os.path.join(args.dump_hidden_dir, "rmsnorm_out_attached.pt"))
-                print(f"Saved rmsnorm_out_attached.pt to {args.dump_hidden_dir}")
-
             for _attr, _fname in [
                 ("dump_ckv_sep_tensor", "ckv_sep.pt"),
                 ("dump_kpe_sep_tensor", "kpe_sep.pt"),
