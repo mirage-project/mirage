@@ -15,6 +15,7 @@
 
 from CCore cimport *
 from cpython cimport array
+from libc.stdlib cimport malloc, free
 import ctypes
 import array
 import numpy as np
@@ -477,13 +478,34 @@ cdef class DTensor:
             else:
                 return self.c_ptr.guid
 
+    property base_guid:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.base_guid
+
+    property view_offset:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.view_offset
+
+    property is_virtual:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return False
+            else:
+                return self.c_ptr.base_guid != 0
+
     property tensor:
         def __get__(self):
             if self.c_ptr == NULL:
                 return None
             else:
                 return ctypes.cast(<unsigned long long>self.c_ptr, ctypes.c_void_p)
-        
+
         def __set__(self, value):
             self._set_tensor(value)
 
@@ -511,6 +533,18 @@ cdef class DTensor:
         else:
             assert False , "Error: index out of range"
             return None
+
+    @property
+    def shape(self):
+        if self.c_ptr == NULL:
+            return None
+        return tuple(self.c_ptr.dim[i] for i in range(self.c_ptr.num_dims))
+
+    @property
+    def stride(self):
+        if self.c_ptr == NULL:
+            return None
+        return tuple(self.c_ptr.stride[i] for i in range(self.c_ptr.num_dims))
 
 cdef class STensor:
     cdef CppSTensor* c_ptr # Hold a CppSTensor instance
@@ -1025,6 +1059,60 @@ cdef class CyKNGraph:
         cdef CppDTensor* ptr = self.p_kgraph.shuffle_tensors(cinputs, shuffled_dim, num_groups, cname)
         output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(output)
+
+    def view(self, DTensor input, list new_shape):
+        """Create a virtual DTensor (view) with a new shape, sharing the
+        underlying memory of `input`. Total element count must match."""
+        cdef vector[int] cshape
+        cshape.resize(len(new_shape))
+        for i in range(len(new_shape)):
+            cshape[i] = new_shape[i]
+        cdef CppDTensor* ptr = self.p_kgraph.view(input.c_ptr, cshape)
+        output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(output)
+
+    def narrow(self, DTensor input, int dim, int start, int length):
+        """Create a virtual DTensor that is a contiguous sub-window of
+        `input` along `dim`, from `start` for `length` elements."""
+        cdef CppDTensor* ptr = self.p_kgraph.narrow(input.c_ptr, dim, start, length)
+        output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(output)
+
+    def split(self, DTensor input, sizes_or_chunks, int dim):
+        """Split `input` into virtual DTensors along `dim`.
+
+        sizes_or_chunks may be:
+          - int N: split into N equal-sized slices (input.dim[dim] must be
+            divisible by N).
+          - list of ints: explicit sizes; their sum must equal
+            input.dim[dim].
+        Returns a list of view DTensors.
+        """
+        cdef vector[int] csizes
+        if isinstance(sizes_or_chunks, int):
+            n = int(sizes_or_chunks)
+            assert n > 0, "chunk count must be positive"
+            slice_dim = input.dim(dim)
+            assert slice_dim % n == 0, \
+                "input.dim[dim] (%d) must be divisible by chunk count (%d)" % (slice_dim, n)
+            slice_len = slice_dim // n
+            csizes.resize(n)
+            for i in range(n):
+                csizes[i] = slice_len
+        else:
+            csizes.resize(len(sizes_or_chunks))
+            for i in range(len(sizes_or_chunks)):
+                csizes[i] = int(sizes_or_chunks[i])
+        cdef int num_outputs = csizes.size()
+        cdef CppDTensor** outputs = <CppDTensor**>malloc(num_outputs * sizeof(CppDTensor*))
+        if outputs == NULL:
+            raise MemoryError("failed to allocate split output buffer")
+        cdef int produced = self.p_kgraph.split(input.c_ptr, csizes, dim, outputs)
+        result = []
+        for i in range(produced):
+            result.append(DTensor(ctypes.cast(<unsigned long long>outputs[i], ctypes.c_void_p)))
+        free(outputs)
+        return result
 
 
     def register_task(self, CyTBGraph bgraph, str task_type, list[int] params):
