@@ -1126,6 +1126,100 @@ class DeepSeekV3Builder(GraphBuilder):
             pe_only=True,
         )
 
+    def _bmm_decode_o_path(self, state_dict, attn, layer_idx, residual):
+        """C9 (2026-05-16): post-attn BMM path for MPK_DSV3_BMM=1.
+
+        Replaces the load-time-absorbed decode o_proj (fused with W_UV)
+        with runtime BMM + smaller linear:
+          quantize(attn_out)           → attn_out_fp8 (mbt, H, 512) FP8
+          BMM(attn_out_fp8, kv_b_v_bmm) → attn_out_reduced (mbt, H, 128) bf16
+          fp8_linear_with_residual(attn_out_reduced, o_proj_original) → attn_proj_out
+
+        The o_proj_original.weight is the SAME weight used by the prefill
+        path (hidden × H*128, FP8). After BMM, decode + prefill both use
+        the smaller unabsorbed o_proj.
+
+        Gate: this entire path runs only on decode iters (Q_LEN<=8) via
+        the FP8 linear's gate_mode=2 + BMM's MMA_N=16 decode constraint.
+
+        Returns: None (writes attn_proj_out directly).
+        """
+        H_local = self.num_local_q_heads
+        mbt = self.max_num_batched_tokens
+        V_HEAD_DIM = 128  # post-attn V un-absorption dim per head
+        KV_LORA = 512     # current attn_out per-head dim
+
+        if not hasattr(self, "_bmm_decode_o_buffers"):
+            self._bmm_decode_o_buffers = {}
+            # FP8 + UE8M0 packed scale of attn_out. K=512 → packed_K=1.
+            self._bmm_decode_o_buffers["attn_out_fp8"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, KV_LORA), dtype=float8_e4m3,
+                name="attn_out_bmm_fp8", io_category="cuda_tensor")
+            self._bmm_decode_o_buffers["attn_out_scale"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, 1), dtype=uint32,
+                name="attn_out_bmm_scale", io_category="cuda_tensor")
+            # BMM output: reduced attn (mbt, H, 128). Allocate as 2D so it
+            # feeds directly into _fp8_linear without a reshape — BMM
+            # wrapper accepts 2D or 3D output per its docstring.
+            self._bmm_decode_o_buffers["attn_out_reduced"] = self.mpk.new_tensor(
+                dims=(mbt, H_local * V_HEAD_DIM), dtype=bfloat16,
+                name="attn_out_reduced_2d", io_category="cuda_tensor")
+
+        attn_out_fp8 = self._bmm_decode_o_buffers["attn_out_fp8"]
+        attn_out_scale = self._bmm_decode_o_buffers["attn_out_scale"]
+        attn_out_reduced = self._bmm_decode_o_buffers["attn_out_reduced"]
+
+        # Step 1: quantize attn_out BF16 → FP8 + UE8M0 packed scale.
+        # Input self.attn_out is (mbt, H*KV_LORA) 2D. Output is 3D (mbt, H, KV_LORA).
+        # Same byte layout; the kernel writes row-by-row using global batch_idx.
+        active_mode_o = 3 if self._use_prefill else 0  # decode-only on dual-dispatch
+        self.mpk.quantize_fp8_layer(
+            input=self.attn_out,
+            output_fp8=attn_out_fp8,
+            output_scale=attn_out_scale,
+            grid_dim=(1, mbt * H_local, 1),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=True,
+            active_mode=active_mode_o,
+        )
+
+        # Step 2: BMM(attn_out_fp8, kv_b_v_bmm) → attn_out_reduced (mbt, H, 128).
+        # kv_b_v_bmm prepared in demo.py: per-head (H, 128, 512) FP8.
+        w_kvv_bmm = self.mpk.attach_input(
+            torch_tensor=state_dict[f"{attn}kv_b_v_bmm.weight"],
+            name=f"layer_{layer_idx}_kv_b_v_bmm")
+        s_kvv_bmm = self.mpk.attach_input(
+            torch_tensor=state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"],
+            name=f"layer_{layer_idx}_kv_b_v_bmm_scale")
+        self.mpk.linear_fp8_bmm_sm100_layer(
+            input_fp8=attn_out_fp8,
+            input_scale=attn_out_scale,
+            weight_fp8=w_kvv_bmm,
+            weight_scale=s_kvv_bmm,
+            output=attn_out_reduced,
+            # D_out=128, BMM constraint D_out/grid.x must be multiple of MMA_M=128
+            # → grid.x must be 1.
+            grid_dim=(1, H_local, 1),
+            block_dim=(256, 1, 1),
+        )
+
+        # Step 3: smaller o_proj linear with residual.
+        # Use the o_proj_original.weight (FP8, hidden × H*128, saved by demo.py
+        # before W_UV fusion). gate_mode=2 = decode-only.
+        w_o_orig, s_o_orig = self._attach_fp8_weight(
+            state_dict, f"{attn}o_proj_original.weight",
+            f"layer_{layer_idx}_o_proj_original_bmm")
+        self._fp8_linear(
+            attn_out_reduced,
+            w_o_orig,
+            s_o_orig,
+            self.attn_proj_out,
+            grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+            block_dim=(128, 1, 1),
+            residual=residual,
+            gate_mode=2 if self._use_prefill else 0,
+        )
+
     def _fp8_dense_kv_b_proj(
         self, ckv, weight, weight_scale, output, tag: str,
         shared_quantize_tag: str = None,
@@ -2478,42 +2572,55 @@ class DeepSeekV3Builder(GraphBuilder):
                 residual=self.x,
                 gate_mode=1,
             )
-            w_o_decode, s_o_decode = self._attach_fp8_weight(
-                state_dict, f"{attn}o_proj.weight",
-                f"layer_{layer_idx}_o_proj")
-            self._fp8_linear(
-                self.attn_out,
-                w_o_decode,
-                s_o_decode,
-                self.attn_proj_out,
-                grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
-                block_dim=(128, 1, 1),
-                residual=self.x,
-                gate_mode=2,
-            )
-        else:
-            w_o, s_o = self._attach_fp8_weight(
-                state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
-            o_split_k = self._pick_fp8_splitk_factor(w_o)
-            if o_split_k is not None and self.world_size == 1:
-                self.attn_proj_out = self.x
-                self._fp8_linear_splitk(
-                    self.attn_out, w_o, s_o, self.attn_proj_out,
-                    split_k=o_split_k, residual=self.x)
-            elif o_split_k is not None:
-                self._fp8_linear_splitk(
-                    self.attn_out, w_o, s_o, self.attn_proj_out,
-                    split_k=o_split_k, residual=self.x)
+            # C9: BMM post-attn path replaces the fused decode o_proj
+            # (absorbed with W_UV) with: quantize(attn_out) → BMM(kv_b_v_bmm)
+            # → smaller o_proj_original linear. Eliminates the H*512 fused
+            # GEMM in favor of an H*128 unabsorbed GEMM + BMM. Gated by
+            # _dsv3_bmm. The BMM is decode-only via gate_mode=2.
+            if self._dsv3_bmm:
+                self._bmm_decode_o_path(state_dict, attn, layer_idx, residual=self.x)
             else:
+                w_o_decode, s_o_decode = self._attach_fp8_weight(
+                    state_dict, f"{attn}o_proj.weight",
+                    f"layer_{layer_idx}_o_proj")
                 self._fp8_linear(
                     self.attn_out,
-                    w_o,
-                    s_o,
+                    w_o_decode,
+                    s_o_decode,
                     self.attn_proj_out,
                     grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
                     block_dim=(128, 1, 1),
                     residual=self.x,
+                    gate_mode=2,
                 )
+        else:
+            # Pure decode (mbt<=8). When _dsv3_bmm=True, route through the
+            # post-attn BMM path; otherwise legacy absorbed o_proj.
+            if self._dsv3_bmm:
+                self._bmm_decode_o_path(state_dict, attn, layer_idx, residual=self.x)
+            else:
+                w_o, s_o = self._attach_fp8_weight(
+                    state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
+                o_split_k = self._pick_fp8_splitk_factor(w_o)
+                if o_split_k is not None and self.world_size == 1:
+                    self.attn_proj_out = self.x
+                    self._fp8_linear_splitk(
+                        self.attn_out, w_o, s_o, self.attn_proj_out,
+                        split_k=o_split_k, residual=self.x)
+                elif o_split_k is not None:
+                    self._fp8_linear_splitk(
+                        self.attn_out, w_o, s_o, self.attn_proj_out,
+                        split_k=o_split_k, residual=self.x)
+                else:
+                    self._fp8_linear(
+                        self.attn_out,
+                        w_o,
+                        s_o,
+                        self.attn_proj_out,
+                        grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+                        block_dim=(128, 1, 1),
+                        residual=self.x,
+                    )
 
     def _build_dense_mlp(self, layer_idx: int, state_dict: dict):
         """Build dense MLP for layers 0-2 (FP8 weights)."""
