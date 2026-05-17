@@ -5063,21 +5063,30 @@ int TaskRegister::register_moe_silu_mul_quantize_fp8_sm100_task(
   //
   // tb_graph inputs (in order):
   //   [0] input bf16   [M_TOTAL, 2*K_INTER]  (w13_out: gate || up halves)
-  //   [1] output_fp8  uint8 [M_TOTAL, K_INTER]   (silu_fp8, store_in_dmem)
-  //   [2] output_scale uint32                    (UE8M0 K-outer packed)
+  //   With ACTIVE_SKIP:
+  //   [1] meta int32 [2, ...] (NEW MoE meta; mask + actual_count rows)
+  //   Outputs (via store_in_dmem):
+  //   [out0] silu_fp8  [M_TOTAL, K_INTER]   FP8
+  //   [out1] silu_scale K-outer UE8M0 uint32
   //
   // params (optional):
   //   params[0] = K_INTER override (default = input.dim(1)/2)
   //   params[1] = ROWS_PER_TASK (default = 1)
+  //   With ACTIVE_SKIP (params.size()==5):
+  //   params[2] = active_mask_offset (int offset into meta)
+  //   params[3] = e_local (num local experts)
+  //   params[4] = bm_padding (rows per expert in permuted buffer)
   //
   // The fused task writes (M_TOTAL, K_INTER) FP8 + UE8M0 K-outer scale with
   // the SAME layout the standalone `quantize_fp8` task produces — downstream
   // moe_permute / fp8_group_gemm consumers see byte-identical scale data.
-  assert(params.size() == 0 || params.size() == 1 || params.size() == 2);
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 2 ||
+         params.size() == 5);
+  bool const has_active = (params.size() == 5);
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int const num_inputs = 1;
+  int const num_inputs = has_active ? 2 : 1;
   int const num_outputs = 2;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -5095,34 +5104,41 @@ int TaskRegister::register_moe_silu_mul_quantize_fp8_sm100_task(
   int const k_inter_default = in_row_full / 2;
   int const k_inter = params.size() >= 1 ? params[0] : k_inter_default;
   int const rows_per_task = params.size() >= 2 ? params[1] : 1;
+  int const active_mask_offset = has_active ? params[2] : 0;
+  int const e_local = has_active ? params[3] : 0;
+  int const bm_padding = has_active ? params[4] : 0;
   assert(in_row_full == 2 * k_inter);
   assert(out_row_full == k_inter);
 
-  // grid.x must equal ceil(M_TOTAL / rows_per_task) so each CTA owns
-  // ROWS_PER_TASK consecutive rows; we don't enforce here, builder does.
-  // batch_size used for aligned_batch (UE8M0 column stride).
   int const aligned_batch = ((m_total + 3) / 4) * 4;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("{");
-  // Active-rows cap: B11/B15 style — for NEW MoE silu, rows live in
-  // permuted-expert layout, so cap is per-expert actual_count fed by
-  // moe_permute's meta. Builder gates this; without an active mask we use
-  // ROWS_PER_TASK as the upper bound by passing row_count_cap=-1.
-  code.e("kernel::moe_silu_mul_quantize_fp8_task_impl<$, 128, $, $, "
-         "cute::bfloat16_t, __nv_fp8_e4m3, $>(",
+  // Template: K_INTER, GROUP_SIZE, IN_ROW_STRIDE, OUT_ROW_STRIDE, BM_PADDING,
+  //           E_LOCAL, T, DST_T, ROWS_PER_TASK, ACTIVE_SKIP
+  code.e("kernel::moe_silu_mul_quantize_fp8_task_impl<$, 128, $, $, $, $, "
+         "cute::bfloat16_t, __nv_fp8_e4m3, $, $>(",
          k_inter,
          /*IN_ROW_STRIDE=*/in_row_full,
          /*OUT_ROW_STRIDE=*/out_row_full,
-         rows_per_task);
-  code.e("    task_desc->input_ptrs[0],");  // w13_out (real input slot)
-  code.e("    task_desc->output_ptrs[0],"); // silu_fp8 (output slot 0)
-  code.e("    task_desc->output_ptrs[1],"); // silu_scale (output slot 1)
+         has_active ? bm_padding : 1,
+         has_active ? e_local : 1,
+         rows_per_task,
+         has_active ? "true" : "false");
+  code.e("    task_desc->input_ptrs[0],");   // w13_out (real input slot)
+  code.e("    task_desc->output_ptrs[0],");  // silu_fp8 (output slot 0)
+  code.e("    task_desc->output_ptrs[1],");  // silu_scale (output slot 1)
+  if (has_active) {
+    code.e("    static_cast<int const*>(task_desc->input_ptrs[1]) + $,",
+           active_mask_offset);
+  } else {
+    code.e("    nullptr,");
+  }
   code.e("    1e-10f, -448.0f, 448.0f,");
   code.e("    $,", aligned_batch);
   code.e("    task_desc->task_metadata.request_id,"); // task_idx = row_idx
-  code.e("    -1);"); // no row_count_cap for now (B15-style cap is a future opt)
+  code.e("    -1);"); // no row_count_cap (caller may still bound it later)
   code.e("}");
   return register_task_variant(TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100,
                                code.to_string());

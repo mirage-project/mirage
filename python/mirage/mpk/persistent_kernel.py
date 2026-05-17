@@ -3313,6 +3313,8 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         rows_per_task: int = 1,
+        meta: DTensor = None,
+        bm_padding: int = 0,
     ):
         """C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
 
@@ -3346,14 +3348,31 @@ class PersistentKernel:
         # input_map: per-CTA base pointer pre-offset on row dim (= grid.x).
         # Kernel walks ROWS_PER_TASK rows from there.
         tb_graph.new_input(input, (0, -1, -1), 1, True)
+        # ACTIVE_SKIP path: pass meta as a real input (dim_maps -1 = full
+        # base pointer); kernel reads active_mask + actual_count_per_expert
+        # starting at the supplied offset.
+        operators = [input]
+        active_mask_offset = 0
+        e_local = 0
+        if meta is not None:
+            assert bm_padding > 0
+            assert meta.num_dims == 2
+            tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+            operators.append(meta)
+            active_mask_offset = meta.dim(1)
+            e_local = max(1, input.dim(0) // bm_padding)
         tb_graph.new_input(output_fp8, (0, -1, -1), 1, True)
         # output_scale: 2D but K-outer (or M-outer "shape lie"); kernel
         # reconstructs global row from task_metadata.request_id, so the
         # buffer base pointer is what matters. dim_maps = (-1, -1, -1).
         tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [input, output_fp8, output_scale], tb_graph)
-        params = [k_inter, rows_per_task]
+        operators.extend([output_fp8, output_scale])
+        self.kn_graph.customized(operators, tb_graph)
+        if meta is not None:
+            params = [k_inter, rows_per_task, active_mask_offset, e_local,
+                      bm_padding]
+        else:
+            params = [k_inter, rows_per_task]
         self.kn_graph.register_task(
             tb_graph, "moe_silu_mul_quantize_fp8_sm100", params)
 

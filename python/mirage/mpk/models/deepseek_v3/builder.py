@@ -2947,6 +2947,12 @@ class DeepSeekV3Builder(GraphBuilder):
         # path does more silu·mul work on inactive rows than the
         # standalone path. Future: thread the active-skip through.
         if self._fused_silu_quantize:
+            # C18 (2026-05-17): pass meta + bm_padding when active-skip is
+            # enabled so the kernel skips inactive-expert rows (matches B11
+            # silu_mul + B15 quantize_fp8 behavior). Without active-skip,
+            # the fused kernel processes garbage rows and regresses badly.
+            _silu_quant_meta = (
+                new_moe_meta if self._new_moe_active_skip else None)
             self.mpk.moe_silu_mul_quantize_fp8_sm100_layer(
                 input=new_moe_w13_out,
                 output_fp8=new_moe_silu_fp8,
@@ -2954,6 +2960,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 grid_dim=(m_total, 1, 1),
                 block_dim=(128, 1, 1),
                 rows_per_task=1,
+                meta=_silu_quant_meta,
+                bm_padding=bm_pad,
             )
             if upto < 7: return
             # Skip the standalone silu_mul + quantize (steps 5+6).

@@ -53,13 +53,18 @@ template <int K_INTER,           // per-row silu output dim (= 2048 DSv3)
           int GROUP_SIZE,        // 128
           int IN_ROW_STRIDE,     // distance between rows in w13_out (= 2*K_INTER)
           int OUT_ROW_STRIDE,    // distance between rows in silu_fp8 (= K_INTER)
+          int BM_PADDING,        // rows per expert in permuted layout (16 DSv3)
+          int E_LOCAL,           // num local experts per rank
           typename T,            // bf16
           typename DST_T,        // fp8_e4m3
-          int ROWS_PER_TASK = 1>
+          int ROWS_PER_TASK = 1,
+          bool ACTIVE_SKIP = false>
 __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
     void const *__restrict__ input_ptr,    // w13_out: [m_total, 2*K_INTER] bf16
     void *__restrict__ output_q_ptr,       // silu_fp8: [m_total, K_INTER] FP8
     void *__restrict__ output_s_ptr,       // silu_scale: K-outer UE8M0 uint32
+    int const *__restrict__ active_mask,   // [E_LOCAL] flag + [E_LOCAL] count
+                                           // (nullptr or ignored when !ACTIVE_SKIP).
     float const eps,                       // scale floor (e.g., 1e-10)
     float const min_8bit,                  // -448
     float const max_8bit,                  // 448
@@ -84,6 +89,23 @@ __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
                 "K_INTER must be a multiple of GROUP_SIZE");
   static_assert(GROUP_SIZE == 128,
                 "Packed UE8M0 scale requires GROUP_SIZE == 128");
+
+  // ---- ACTIVE_SKIP: check expert mask + actual_count ----
+  // Compute my_expert = row_idx / BM_PADDING; slot_in_expert = row_idx %
+  // BM_PADDING. Skip whole-expert if inactive; else cap slot_in_expert
+  // against actual_count so padding rows produce no silu output.
+  int my_expert = 0;
+  int slot_in_expert = 0;
+  int my_actual_count = BM_PADDING;
+  if constexpr (ACTIVE_SKIP) {
+    my_expert = row_idx / BM_PADDING;
+    slot_in_expert = row_idx - my_expert * BM_PADDING;
+    if (my_expert < 0 || my_expert >= E_LOCAL) return;
+    if (active_mask[my_expert] == 0) return;
+    my_actual_count = active_mask[E_LOCAL + my_expert];
+    if (my_actual_count <= 0) return;
+    if (slot_in_expert >= my_actual_count) return;
+  }
 
   // ---- Thread layout ----
   int const thread_idx = threadIdx.x;
