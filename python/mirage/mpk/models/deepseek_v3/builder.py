@@ -2912,9 +2912,115 @@ class DeepSeekV3Builder(GraphBuilder):
             meta=new_moe_meta if self._new_moe_active_skip else None,
         )
 
+    def _build_shared_expert(self, layer_idx: int, prefix: str, state_dict: dict):
+        """Register shared-expert dense FP8 path. Returns ``shared_residual``
+        which the routed-MoE finalize step (moe_unpermute / moe_mul_sum_add)
+        adds to the per-token routed contribution.
+
+        Registered ahead of the routed-MoE block (C12, 2026-05-17) so the
+        runtime scheduler stamps these tasks onto workers before the W13
+        group-GEMM wave. Both paths depend only on ``self.rmsnorm_out``, so
+        the reorder is dep-safe and may expose worker-level parallelism via
+        EVENT_LAUNCH_MASSIVE_TASKS round-robin (see scheduler topology notes).
+        """
+        shared_prefix = f"{prefix}shared_experts."
+
+        # gate_proj + up_proj fused (FP8) — use _attach_fp8_weight for requantize
+        shared_gate_w = state_dict[f"{shared_prefix}gate_proj.weight"]
+        shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
+        gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
+        has_shared_scale = gate_scale_key in state_dict
+        if shared_gate_w.shape[0] != self.moe_intermediate_size:
+            pass  # shard mismatch warning removed
+        from ..utils import shuffle_tensors as _shuffle_tensors
+        out_dim_total = shared_gate_w.shape[0] + shared_up_w.shape[0]
+        linear_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
+        scale_dim_0 = shared_gate_w.shape[0] // 128
+        shared_split = min(linear_grid // 2, scale_dim_0)
+        while shared_gate_w.shape[0] % shared_split != 0 or scale_dim_0 % shared_split != 0:
+            shared_split -= 1
+            if shared_split < 1:
+                shared_split = 1; break
+        fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
+        state_dict[f"{fused_key}.weight"] = _shuffle_tensors(
+            [shared_gate_w, shared_up_w], split=shared_split, dim=0)
+        if has_shared_scale:
+            shared_gate_s = state_dict[gate_scale_key]
+            shared_up_s = state_dict[f"{shared_prefix}up_proj.weight_scale_inv"]
+            state_dict[f"{fused_key}.weight_scale_inv"] = _shuffle_tensors(
+                [shared_gate_s, shared_up_s], split=shared_split, dim=0)
+        w_shared_gate_up, s_shared_gate_up = self._attach_fp8_weight(
+            state_dict, f"{fused_key}.weight",
+            f"layer_{layer_idx}_shared_expert_gate_up")
+        shared_mid = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, 2 * self.moe_intermediate_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_shared_mid",
+            io_category="cuda_tensor",
+        )
+        shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
+        if shared_gu_split_k is not None:
+            self._fp8_linear_splitk(
+                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
+                shared_mid, split_k=shared_gu_split_k)
+        else:
+            self._fp8_linear(self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
+                             shared_mid,
+                             grid_dim=(grid_for_rmsnorm_linear_layer(
+                                 w_shared_gate_up.dim(0)), 1, 1),
+                             block_dim=(128, 1, 1))
+
+        # silu_mul + down_proj
+        shared_silu_out = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.moe_intermediate_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_shared_silu",
+            io_category="cuda_tensor",
+        )
+        w_shared_down, s_shared_down = self._attach_fp8_weight(
+            state_dict, f"{shared_prefix}down_proj.weight",
+            f"layer_{layer_idx}_shared_expert_down")
+        _down_w = state_dict[f"{shared_prefix}down_proj.weight"]
+        if _down_w.shape[1] != self.moe_intermediate_size:
+            pass  # shard mismatch warning removed
+        shared_residual = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_shared_residual",
+            io_category="cuda_tensor",
+        )
+        self._silu_mul_fp8_linear(
+            shared_mid,
+            shared_silu_out,
+            w_shared_down,
+            s_shared_down,
+            shared_residual,
+            silu_grid_dim=(shared_split, 1, 1),
+            linear_grid_dim=(self.hidden_size // 64, 1, 1),
+            block_dim=(128, 1, 1),
+            residual=None,
+        )
+        return shared_residual
+
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):
         """Build MoE MLP for layers 3-60."""
         prefix = f"model.layers.{layer_idx}.mlp."
+
+        # C12 (2026-05-17, NULL RESULT): Register shared_expert BEFORE routed
+        # MoE via MPK_DSV3_SHARED_EXPERT_FIRST=1. Hypothesis: same fork-event
+        # broadcast lets shared_expert's FP8 GEMMs occupy workers ahead of
+        # W13 group_gemm. Tested at TP=4 EP=2 mbt=128 19l: ON 1306 μs/layer
+        # vs OFF 1282 μs (within noise, ~1.9%). Overlap analysis: only ~7 μs
+        # shared_expert × W13 per layer because W13 is 80% mbarrier-stalled
+        # (242 μs span / 42 μs compute union), so its idle slots happen
+        # during waits the runtime doesn't schedule into. Default OFF; helper
+        # kept for future scheduler-side experiments.
+        _shared_first = os.environ.get(
+            "MPK_DSV3_SHARED_EXPERT_FIRST", "0") == "1"
+        shared_residual = None
+        if _shared_first:
+            shared_residual = self._build_shared_expert(
+                layer_idx, prefix, state_dict)
 
         # Router
         w_gate = self.mpk.attach_input(
@@ -3281,93 +3387,13 @@ class DeepSeekV3Builder(GraphBuilder):
             else:
                 raise RuntimeError("No bf16 moe experts for now.")
 
-        # ---- Shared Expert (1 expert, TP parallel, same as dense MLP) ----
-        # Shared expert runs on ALL tokens independently of routing.
-        # Its output is added to the residual before the routed expert reduction:
-        #   final = sum(routed * weights) + (residual + shared_expert_out)
-        shared_prefix = f"{prefix}shared_experts."
-
-        # gate_proj + up_proj fused (FP8) — use _attach_fp8_weight for requantize
-        shared_gate_w = state_dict[f"{shared_prefix}gate_proj.weight"]
-        shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
-        gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
-        has_shared_scale = gate_scale_key in state_dict
-        # Verify shard was applied: gate_proj.shape[0] should equal moe_intermediate_size
-        if shared_gate_w.shape[0] != self.moe_intermediate_size:
-            pass  # shard mismatch warning removed
-        # Interleave gate/up at split = min(linear_grid//2, scale_dim_0).
-        # Scale dim 0 is moe_intermediate_size/128. For small intermediate (2048),
-        # scale_dim_0 = 16 which limits the split.
-        from ..utils import shuffle_tensors as _shuffle_tensors
-        out_dim_total = shared_gate_w.shape[0] + shared_up_w.shape[0]
-        linear_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
-        scale_dim_0 = shared_gate_w.shape[0] // 128  # rows per gate scale
-        shared_split = min(linear_grid // 2, scale_dim_0)
-        # Ensure both weight rows and scale rows divide evenly by split
-        while shared_gate_w.shape[0] % shared_split != 0 or scale_dim_0 % shared_split != 0:
-            shared_split -= 1
-            if shared_split < 1:
-                shared_split = 1; break
-        fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
-        state_dict[f"{fused_key}.weight"] = _shuffle_tensors(
-            [shared_gate_w, shared_up_w], split=shared_split, dim=0)
-        if has_shared_scale:
-            shared_gate_s = state_dict[gate_scale_key]
-            shared_up_s = state_dict[f"{shared_prefix}up_proj.weight_scale_inv"]
-            state_dict[f"{fused_key}.weight_scale_inv"] = _shuffle_tensors(
-                [shared_gate_s, shared_up_s], split=shared_split, dim=0)
-        w_shared_gate_up, s_shared_gate_up = self._attach_fp8_weight(
-            state_dict, f"{fused_key}.weight",
-            f"layer_{layer_idx}_shared_expert_gate_up")
-        shared_mid = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, 2 * self.moe_intermediate_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_shared_mid",
-            io_category="cuda_tensor",
-        )
-        shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
-        if shared_gu_split_k is not None:
-            self._fp8_linear_splitk(
-                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
-                shared_mid, split_k=shared_gu_split_k)
-        else:
-            self._fp8_linear(self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
-                             shared_mid,
-                             grid_dim=(grid_for_rmsnorm_linear_layer(
-                                 w_shared_gate_up.dim(0)), 1, 1),
-                             block_dim=(128, 1, 1))
-
-        # silu_mul: grid must equal shared_split (matching the interleave granularity).
-        shared_silu_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.moe_intermediate_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_shared_silu",
-            io_category="cuda_tensor",
-        )
-        # down_proj: shared_residual = shared_down(shared_silu_out) [partial sum for TP>1]
-        w_shared_down, s_shared_down = self._attach_fp8_weight(
-            state_dict, f"{shared_prefix}down_proj.weight",
-            f"layer_{layer_idx}_shared_expert_down")
-        _down_w = state_dict[f"{shared_prefix}down_proj.weight"]
-        if _down_w.shape[1] != self.moe_intermediate_size:
-            pass  # shard mismatch warning removed
-        shared_residual = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_shared_residual",
-            io_category="cuda_tensor",
-        )
-        self._silu_mul_fp8_linear(
-            shared_mid,
-            shared_silu_out,
-            w_shared_down,
-            s_shared_down,
-            shared_residual,
-            silu_grid_dim=(shared_split, 1, 1),
-            linear_grid_dim=(self.hidden_size // 64, 1, 1),
-            block_dim=(128, 1, 1),
-            residual=None,
-        )
+        # ---- Shared Expert ----
+        # Registered earlier via _build_shared_expert() at the top of
+        # _build_moe_mlp when MPK_DSV3_SHARED_EXPERT_FIRST=1 (default, C12).
+        # Fall back to legacy registration order otherwise.
+        if shared_residual is None:
+            shared_residual = self._build_shared_expert(
+                layer_idx, prefix, state_dict)
 
         # Final MoE contribution before transformer residual:
         #   routed_experts * topk_weights + shared_expert

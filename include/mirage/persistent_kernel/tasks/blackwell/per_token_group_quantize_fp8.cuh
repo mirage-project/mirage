@@ -178,8 +178,8 @@ __device__ __forceinline__ void
       }
 
       // Pack scale: only 1 byte (NUM_GROUPS_PER_ROW=1) so packed_idx=0.
-      // UE8M0 K-outer layout: output_s[packed_idx * scale_outer_stride + batch_idx].
-      // Lane 0 of this warp writes its row's scale uint32 directly.
+      // UE8M0 K-outer layout: output_s[packed_idx * scale_outer_stride +
+      // batch_idx]. Lane 0 of this warp writes its row's scale uint32 directly.
       if (lane_idx == 0) {
         uint32_t const packed_scale = static_cast<uint32_t>(scale_quant);
         output_s[0 * scale_outer_stride + batch_idx] =
