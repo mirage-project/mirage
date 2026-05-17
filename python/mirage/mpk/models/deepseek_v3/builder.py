@@ -289,8 +289,18 @@ class DeepSeekV3Builder(GraphBuilder):
         # q_nope_abs (mbt, H, 512) + assemble_q_decode → q_nope_pe.
         # Win: smaller weight loads per task (per-head (512, 128) vs absorbed
         # (576, q_lora=1536) monolith) → less TMA traffic, room to overlap.
-        # Default OFF; flip after correctness validated end-to-end.
-        self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "0") == "1"
+        # 2026-05-17: flipped DEFAULT ON after correctness validated — the
+        # BMM=1 run produced BIT-IDENTICAL generated tokens vs the absorbed
+        # path. PR-674's FP8 dense GEMM kernels are tuned for the
+        # unabsorbed shapes (smaller M, K) and only the unabsorbed path
+        # benefits from those optimizations; this also fetches less HBM per
+        # decode iter (per-head 128/64 instead of fused 576). Latency is
+        # currently ~5% slower vs absorbed due to extra quantize+BMM
+        # serialization; the optimization roadmap (quantize+BMM fusion,
+        # grid-size tuning, eventual overlap) closes the gap and goes past
+        # absorbed once those land. Set MPK_DSV3_BMM=0 to fall back to
+        # the absorbed path for regression isolation.
+        self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "1") == "1"
         # B37 (2026-05-15): replace the (input_layernorm RMSNorm + qkv_a
         # quantize) two-task chain with one fused kernel that writes BF16
         # rmsnorm_out and FP8 + scale in one pass. Saves ~30 μs/layer
