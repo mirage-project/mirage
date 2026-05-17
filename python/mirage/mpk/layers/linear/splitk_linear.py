@@ -1,38 +1,12 @@
-"""BF16 split-K dense linear — qwen3 / DeepSeek V3 ``o_proj`` fast path.
+"""BF16 split-K dense linear.
 
-Wraps :meth:`PersistentKernel.splitk_linear_layer` — task
-``splitk_linear_sm100`` on Blackwell, ``splitk_linear_swapAB_hopper``
-on Hopper. The split-K variant fans the K-axis reduction out across
-``grid.y`` CTAs and uses ``tma_reduce_add_async`` to accumulate
-partials into ``output``.
+Per-arch task kernel:
+* SM90  Hopper   : ``tasks/hopper/linear_swapAB_hopper.cuh``  (``splitk_linear_swapAB_hopper``)
+* SM100 Blackwell: ``tasks/blackwell/linear_sm100_mpk.cuh``   (``splitk_linear_sm100``)
 
-The kernel unconditionally **adds** the partial product onto whatever
-``output`` already contains. The ``accumulate`` flag matches the pk
-method:
-
-* ``accumulate=True`` — caller owns ``output`` (e.g. a residual stream).
-  The matmul is added on top, no pre-zero.
-* ``accumulate=False`` — module prepends a ``tensor_init`` task that
-  zeroes ``output`` before the linear runs, so the final result is a
-  pure ``F.linear`` sum.
-
-Tensor contract
----------------
-
-* ``x``      : ``(batch_size, in_features)`` bf16. ``in_features`` is
-               the per-rank K shard.
-* ``weight`` : ``(out_features, in_features)`` bf16. Standard
-               ``nn.Linear`` layout.
-* ``output`` : ``(batch_size, out_features)`` bf16. **Required as a
-               caller-allocated DTensor** (the kernel reduce-adds into
-               it).
-
-Grid heuristic
---------------
-
-The qwen3 demo splits ``out_features // 128`` along grid.x and uses
-``grid.y = 128 * 128 // out_features`` (a fixed ``128*128`` total
-tile-count budget). We mirror that and cap at ``num_workers``.
+The kernel reduce-adds partial products onto ``output`` via
+``tma_reduce_add_async``; we prepend a ``tensor_init`` zeroer when
+``accumulate=False``.
 """
 from __future__ import annotations
 
@@ -52,12 +26,11 @@ class SplitKLinear(MPKModule):
     """BF16 split-K dense linear.
 
     Args:
-        in_features:  K (reduction) axis. Must be divisible by the
-            kernel TILE_SIZE — 128 on SM100, 64 on Hopper.
-        out_features: N (output) axis. Must be divisible by 128 on
-            SM100.
-        accumulate:   See module docstring.
-        prefix:       HF state_dict / tensor-name prefix.
+        in_features:  K (reduction) axis. Multiple of TILE_SIZE (128 SM100, 64 Hopper).
+        out_features: N (output) axis. Multiple of 128 on SM100.
+        accumulate:   True = matmul is added onto caller-owned ``output``;
+                      False = a tensor_init zero is inserted first.
+        prefix:       state_dict / tensor-name prefix.
     """
 
     def __init__(
@@ -81,30 +54,21 @@ class SplitKLinear(MPKModule):
         x: torch.Tensor,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """``F.linear(x, weight)`` plus optional accumulate onto ``output``.
-
-        For ``accumulate=True`` the caller passes the prior ``output``
-        (typically the residual stream); the result is the sum.
-        """
+        """``F.linear(x, weight)`` + (optional) accumulate onto ``output``."""
         result = F.linear(x, self.weight)
         if self.accumulate:
             if output is None:
                 raise ValueError(
-                    "SplitKLinear(accumulate=True).forward requires the "
-                    "prior `output` tensor (the residual stream)."
+                    "SplitKLinear(accumulate=True).forward requires `output`."
                 )
             result = result + output
         return result
 
     def auto_grid_dim(self, x: Any = None) -> GridDim:
-        """``(out_features // 128, 128 * 128 // out_features, 1)``.
+        """``(out_features // 128, 128*128 // out_features, 1)``: N along grid.x, K-split along grid.y.
 
-        Matches the qwen3 demo's pick (``demo/qwen3/demo.py`` and
-        ``models/qwen3/builder.py:385``):
-
-            grid_dim = (hidden_size // 128, 128 * 128 // hidden_size, 1)
-
-        Cap at ``num_workers`` so the worker pool isn't oversubscribed.
+        gy is shrunk so per-task K stays a multiple of 128, then capped so
+        total CTAs ``<= num_workers``.
         """
         from ... import context as _ctx
 
@@ -115,10 +79,7 @@ class SplitKLinear(MPKModule):
                 "a multiple of 128."
             )
         gx = self.out_features // 128
-        # Default grid.y = 128*128 // out_features; clamp to >=1 and
-        # ensure it doesn't oversubscribe workers.
         gy = max(1, (128 * 128) // max(1, self.out_features))
-        # Ensure in_features // gy is a multiple of 128 (per-task K).
         while gy > 1 and (self.in_features // gy) % 128 != 0:
             gy -= 1
         gx = max(1, min(gx, int(pk.num_workers)))
@@ -126,7 +87,6 @@ class SplitKLinear(MPKModule):
         return (gx, gy, 1)
 
     def default_block_dim(self) -> BlockDim:
-        """SM100 kernel uses 256 threads; the Hopper swapAB variant the same."""
         return (256, 1, 1)
 
     def compile(
@@ -137,16 +97,16 @@ class SplitKLinear(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> Any:
-        """Register the ``splitk_linear`` task.
+        """Register the ``splitk_linear_*`` task: K-split GEMM with reduce-add into ``output``.
 
-        Args:
-            x:        Input DTensor ``(B, in_features)`` bf16.
-            output:   Caller-allocated DTensor ``(B, out_features)`` bf16
-                — see module docstring on the accumulate contract.
-            grid_dim / block_dim: Explicit overrides.
+        Tensor contract:
+          x:      (B, in_features) bf16, row-major. A operand, partition (-1,1,-1) — K sharded along grid.y.
+          weight: (out_features, in_features) bf16, row-major. B operand, partition (0,1,-1) — N along grid.x, K along grid.y.
+          output: (B, out_features) bf16, row-major, caller-allocated. partition (1,-1,-1); kernel TMA reduce-adds partials.
 
-        Returns:
-            ``output`` (the kernel writes into it in-place).
+        Notes: out_features mult of 128 (SM100); per-task K mult of TILE_SIZE (128 SM100 / 64 Hopper); TMA-aligned.
+        accumulate=False prepends ``tensor_init_layer`` to zero ``output`` before reduce-add; True keeps caller bias.
+        grid.y = K-split count.
         """
         from ... import context as _ctx
 
@@ -159,15 +119,12 @@ class SplitKLinear(MPKModule):
 
         w_dt = pk.attach_input(self.weight, name=f"{self.prefix}weight")
 
-        # Inlined task registration (was pk.splitk_linear_layer). The kernel
-        # always reduce-adds onto `output`; for accumulate=False we prepend
-        # a tensor_init that zeroes `output` first.
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 
-        assert x.num_dims == 2     # (batch_size, hidden_size / world_size)
-        assert w_dt.num_dims == 2  # (hidden_size, hidden_size / world_size)
-        assert output.num_dims == 2  # (batch_size, hidden_size)
+        assert x.num_dims == 2
+        assert w_dt.num_dims == 2
+        assert output.num_dims == 2
         if not self.accumulate:
             pk.tensor_init_layer(
                 target=output,

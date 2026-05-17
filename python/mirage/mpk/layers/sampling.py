@@ -1,20 +1,12 @@
 """Stochastic token sampling via Gumbel-Max.
 
-Wraps :meth:`PersistentKernel.sampling_sm100_layer` — task
-``sampling_sm100``. Implements ``argmax(logits + Gumbel(0, 1))``, which
-is equivalent to sampling from the softmax distribution.
-
-The PRNG seed is baked into the task as a kernel parameter (the kernel
-uses a deterministic stateless PRNG keyed by ``(seed, batch_idx,
-vocab_idx)``).
-
-Forward reference
------------------
-
-``forward()`` adds standard Gumbel noise to the logits and takes the
-argmax over the vocab axis. The result depends on the seed; tests
-should use ``argmax`` (no noise) when comparing eager-vs-compiled, or
-pass the same seed and use a fixed RNG.
+Backed by ``tasks/common/sampling.cuh`` (``sampling_from_logits_kernel``)
+dispatched as task ``sampling_sm100``. Implements
+``argmax(logits + Gumbel(0,1))``, equivalent to sampling from
+softmax(logits). The kernel uses a stateless PRNG keyed by
+``(seed, batch_idx, vocab_idx)``. Logits are bf16; **output is int32**
+token ids — callers that index into an embedding table must cast to
+int64.
 """
 from __future__ import annotations
 
@@ -33,11 +25,8 @@ __all__ = ["SamplingSM100"]
 class SamplingSM100(MPKModule):
     """Gumbel-Max stochastic sampling over the vocab axis.
 
-    Args:
-        seed: Deterministic PRNG seed baked into the kernel task. The
-            kernel uses a stateless hash keyed on
-            ``(seed, batch_idx, vocab_idx)``.
-        prefix: Reserved. No parameters live here.
+    Input ``(B, V)`` bf16, output ``(B, 1)`` int32. ``seed`` is baked
+    into the task as a kernel parameter.
     """
 
     def __init__(
@@ -50,22 +39,12 @@ class SamplingSM100(MPKModule):
         self.seed = seed
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        """``argmax(logits + Gumbel(0, 1))``.
+        """``argmax(logits + Gumbel(0,1))`` returned as int32.
 
-        The reference uses ``torch``'s default RNG (NOT the kernel's
-        stateless hash). For bit-equivalent comparison the test driver
-        should either compare via the same seed scheme or compare
-        ``argmax`` outputs (top-1 of plain logits).
-
-        Args:
-            logits: ``(batch_size, vocab_size)`` float (any dtype).
-
-        Returns:
-            ``(batch_size, 1)`` int32 token ids. Callers that need int64
-            (e.g. to index into an embedding table) should cast at the
-            use site: ``tokens64 = tokens.to(torch.int64)``.
+        Uses ``torch``'s default RNG, NOT the kernel's stateless hash —
+        tests should compare via ``argmax`` of plain logits or replicate
+        the same seed scheme for bit-equivalence.
         """
-        # Gumbel(0, 1) = -log(-log(U)).
         u = torch.rand_like(logits.float()).clamp_min(1e-12)
         gumbel = -torch.log(-torch.log(u))
         tokens = (logits.float() + gumbel).argmax(dim=-1, keepdim=True)
@@ -86,21 +65,15 @@ class SamplingSM100(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> Any:
-        """Register a ``sampling_sm100`` task.
+        """Register a ``sampling_sm100`` task — Gumbel-Max stochastic sampling.
 
-        Args:
-            logits: ``(B, V)`` float DTensor.
-            output: ``None`` allocates a ``(B, 1)`` int32 DTensor (the
-                underlying ``kernel::sampling_from_logits_kernel<..., int>``
-                writes int32 token ids; the previous int64 declaration
-                left the upper 32 bits stale). ``torch.Tensor`` or
-                ``DTensor`` route as the other catalog modules do.
-                Downstream consumers that index into embedding tables
-                should cast: ``tokens64 = output.to(torch.int64)``.
-            grid_dim / block_dim: explicit overrides.
+        Tensor contract:
+          logits: (B, V) bf16, per-row logits.
+          output: (B, 1) **int32** (NOT int64 — load-bearing), sampled token id.
 
-        Returns:
-            ``output``.
+        Notes: kernel uses a stateless PRNG keyed by ``(seed, batch_idx,
+        vocab_idx)``; ``seed`` is baked into the task as a kernel parameter.
+        Callers indexing into an embedding table must cast int32 → int64.
         """
         import torch as _torch
         from .. import context as _ctx
@@ -126,12 +99,11 @@ class SamplingSM100(MPKModule):
         else:
             out_dt = output
 
-        # Inlined task registration (was pk.sampling_sm100_layer).
         from ...core import CyTBGraph
         from ...kernel import TBGraph
 
-        assert logits.num_dims == 2  # (batch_size, vocab_size)
-        assert out_dt.num_dims == 2  # (batch_size, 1)
+        assert logits.num_dims == 2
+        assert out_dt.num_dims == 2
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(logits, (0, -1, -1), -1, True)
         tb_graph.new_input(out_dt, (0, -1, -1), -1, True)

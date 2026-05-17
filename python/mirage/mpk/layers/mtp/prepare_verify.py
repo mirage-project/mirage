@@ -1,35 +1,15 @@
-"""MTP verify-phase setup — write candidate tokens into the rolling buffer.
+"""MTP verify-phase token-buffer setup.
 
-Catalog wrapper around :meth:`PersistentKernel.mtp_prepare_verify_layer`
-(task ``mtp_prepare_verify``). Runs once per MTP iteration, AFTER the
-main-model argmax has produced ``main_token`` and the MTP draft loop has
-accumulated ``draft_tokens``, but BEFORE the target-model verify pass.
-
-What the kernel does
---------------------
-
-Conceptually::
-
-    pos = step[0] + num_new_tokens[0]    # current write head into tokens_buffer
-    tokens_buffer[pos]                   = main_token[mbt - 1]
-    tokens_buffer[pos+1 : pos+1+num_draft_tokens] = draft_tokens
-
-so the next target-model step finds ``num_draft_tokens + 1`` candidate
-tokens laid out in the same per-request token buffer that the rest of
-the kernel reads via ``runtime_config.tokens``.
-
-Runtime-metadata dependence
----------------------------
-
-Both ``step`` and ``num_new_tokens`` are MPK runtime meta-tensors (the
-per-request decode position and per-iteration new-token count). The
-kernel reads them directly to compute the write offset into the rolling
-``tokens_buffer``. A standalone PyTorch reference would need the entire
-meta-tensor stack — so :meth:`forward` raises ``NotImplementedError``.
+Wraps task ``mtp_prepare_verify`` (``mtp_prepare_verify_input_kernel``)
+in ``include/mirage/persistent_kernel/tasks/speculative_decoding/mtp_token_ops.cuh``.
+Lays out ``[main_token, draft_0..draft_{K-1}]`` into
+``tokens_buffer[req, step+1 : step+K+2]`` so the target model's next
+forward pass sees ``num_draft_tokens + 1`` candidate tokens. The kernel
+also writes ``num_new_tokens[req] = NUM_DRAFT + 1`` (clamped).
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 from .._base import BlockDim, GridDim, MPKModule
 from ...context import current_pk
@@ -41,17 +21,11 @@ __all__ = ["MTPPrepareVerify"]
 
 
 class MTPPrepareVerify(MPKModule):
-    """Write main-model token + draft tokens into the rolling token buffer.
+    """Write main + draft tokens into the rolling token buffer.
 
-    Wraps :meth:`PersistentKernel.mtp_prepare_verify_layer`.
-
-    Args:
-        num_draft_tokens: Number of draft tokens MTP emits per
-            iteration. Baked into the task params.
-        max_seq_len:      Max per-request sequence length — the stride
-            into ``tokens_buffer`` per request. Baked into params.
-        prefix:           vLLM/HF state_dict prefix; no weights here, so
-            this is only used as a debug uniquifier.
+    Wraps task ``mtp_prepare_verify``. Params
+    ``[num_draft_tokens, max_seq_len]``; also reads ``qo_indptr`` /
+    ``request_ids`` and skips chunk-prefill slots (``qo_len > 8``).
     """
 
     def __init__(
@@ -75,33 +49,18 @@ class MTPPrepareVerify(MPKModule):
         self.num_draft_tokens = num_draft_tokens
         self.max_seq_len = max_seq_len
 
-    # ------------------------------------------------------------------
-    # PyTorch reference — depends on runtime meta-tensors; not feasible.
-    # ------------------------------------------------------------------
     def forward(self, *args, **kwargs):
+        """No plain-PyTorch reference: the kernel reads MPK meta-tensors
+        (``step``, ``qo_indptr``, ``request_ids``) and writes
+        ``num_new_tokens``. Use test-mode for end-to-end validation."""
         raise NotImplementedError(
-            "MTPPrepareVerify.forward() has no plain-PyTorch reference: "
-            "the kernel reads MPK runtime meta-tensors (step, "
-            "num_new_tokens) to compute the write offset into the "
-            "rolling tokens buffer. Use the test-mode driver to "
-            "validate end-to-end."
+            "MTPPrepareVerify.forward(): runtime meta-tensors required."
         )
 
-    # ------------------------------------------------------------------
-    # Grid heuristic.
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
-        """Default grid ``(1, 1, 1)``.
-
-        The kernel walks ``num_draft_tokens + 1`` writes serially per
-        request; a single CTA is sufficient. Matches the DeepSeek V3
-        builder caller.
-        """
+        """``(1, 1, 1)`` — one CTA writes ``num_draft_tokens + 1`` slots."""
         return (1, 1, 1)
 
-    # ------------------------------------------------------------------
-    # MPK compile path.
-    # ------------------------------------------------------------------
     def compile(
         self,
         main_token: DTensor,
@@ -113,23 +72,20 @@ class MTPPrepareVerify(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register one ``mtp_prepare_verify`` task on the active PK.
+        """Register one ``mtp_prepare_verify`` task.
 
-        Args:
-            main_token:     ``(mbt, 1)`` int64 — main-model argmax.
-            draft_tokens:   ``(batch, num_draft_tokens)`` int64 — MTP
-                            draft outputs.
-            tokens_buffer:  ``(batch, max_seq_len)`` int64 — rolling
-                            token buffer the kernel writes into.
-            step:           Runtime meta-tensor: per-request decode
-                            position.
-            num_new_tokens: Runtime meta-tensor: per-iteration count of
-                            new tokens.
-            grid_dim:       Override; ``None`` -> :meth:`auto_grid_dim`.
-            block_dim:      Override; ``None`` -> :meth:`default_block_dim`.
+        Tensor contract:
+          main_token:     (batch_size, 1) int64, dense. Main argmax.
+          draft_tokens:   (batch_size, num_draft_tokens) int64, dense.
+          tokens_buffer:  (num_requests, max_seq_len) int64, dense.
+                          In/out: writes ``[req, step+1 : step+K+2]``.
+          step:           (num_requests,) int32. Per-request decode step.
+          num_new_tokens: (num_requests,) int32. Output;
+                          set to ``NUM_DRAFT + 1`` (clamped).
+        Params: ``[num_draft_tokens, max_seq_len]``.
 
-        Returns:
-            ``tokens_buffer`` (consumed for its side effect).
+        Notes: kernel reads ``runtime_config.qo_indptr_buffer`` /
+        ``request_ids`` and skips chunk-prefill (qo_len>8 or <1).
         """
         pk = current_pk()
 
@@ -140,7 +96,6 @@ class MTPPrepareVerify(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (formerly pk.mtp_prepare_verify_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 

@@ -1,33 +1,15 @@
-"""MTP scatter primitives — token (int64) and probability (float32).
+"""MTP slot scatter primitives (int64 token / float32 prob).
 
-These two leaves wrap the compile-time-indexed scatter helpers that MPK
-uses to accumulate per-draft-step state into a wider buffer during the
-DeepSeek V3 MTP / speculative-decode loop:
-
-* :class:`MTPTokenScatter` -> :meth:`PersistentKernel.mtp_token_scatter_layer`
-  -> task ``mtp_token_scatter``. Copies one ``int64`` token-id per
-  request from ``src: (batch_size, 1)`` into the ``slot_idx``-th column
-  of ``dst: (batch_size, num_slots)`` (the per-iteration draft-token
-  accumulator the verifier later reads).
-
-* :class:`MTPFloatScatter` -> :meth:`PersistentKernel.mtp_float_scatter_layer`
-  -> task ``mtp_float_scatter``. Same shape contract, but ``float32`` —
-  used to stash the per-step draft probability (``softmax_gather``
-  output) into a wider ``[batch_size, num_slots]`` float buffer for the
-  probabilistic verifier.
-
-Both kernels read ``slot_idx`` as a compile-time constant baked into
-``params``; the kernel is unrolled per slot, so the caller picks the
-slot at ``compile()`` time (one task per draft step). The MPK runtime
-walks ``batch_size`` and writes into the chosen column.
-
-These layers are graph-shape primitives during MTP's draft loop, not
-data-dependent reductions; the :meth:`forward` reference is a plain
-column-write that mirrors the kernel byte-for-byte.
+Two single-purpose wrappers around tasks ``mtp_token_scatter`` and
+``mtp_float_scatter`` defined in
+``include/mirage/persistent_kernel/tasks/speculative_decoding/mtp_token_ops.cuh``.
+Each writes one column of a ``(batch_size, num_slots)`` accumulator at
+the compile-time-baked ``slot_idx``; the kernel iterates batch with
+``threadIdx.x``.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -41,22 +23,10 @@ __all__ = ["MTPTokenScatter", "MTPFloatScatter"]
 
 
 class MTPTokenScatter(MPKModule):
-    """Scatter per-request int64 tokens into one column of a wide buffer.
+    """Scatter ``src: (batch_size, 1) int64`` into ``dst[:, slot_idx]``.
 
-    Wraps :meth:`PersistentKernel.mtp_token_scatter_layer` (task
-    ``mtp_token_scatter``). Used by DeepSeek V3's MTP draft loop to
-    accumulate each iteration's predicted token into the
-    ``[batch_size, num_slots]`` draft-token buffer that the verifier
-    consumes.
-
-    Args:
-        batch_size: First dim of ``src`` / ``dst`` (number of concurrent
-            requests).
-        num_slots:  Width of ``dst`` (max number of draft tokens MTP
-            ever emits per request, i.e. one column per draft step).
-        prefix:     vLLM/HF state_dict prefix; the scatter has no
-            weights, so this is only used as a uniquifier when
-            debugging.
+    Wraps task ``mtp_token_scatter``; ``slot_idx`` is a compile-time
+    constant so MTP unrolls one task per draft step.
     """
 
     def __init__(
@@ -78,28 +48,13 @@ class MTPTokenScatter(MPKModule):
         self.batch_size = batch_size
         self.num_slots = num_slots
 
-    # ------------------------------------------------------------------
-    # PyTorch reference path — pure column write.
-    # ------------------------------------------------------------------
     def forward(
         self,
         src: torch.Tensor,
         dst: torch.Tensor,
         slot_idx: int,
     ) -> torch.Tensor:
-        """Reference: ``dst[:, slot_idx] = src[:, 0]``.
-
-        Args:
-            src:      ``(batch_size, 1)`` int64.
-            dst:      ``(batch_size, num_slots)`` int64. Mutated
-                      in-place AND returned, matching the kernel's
-                      side-effect-on-``dst`` contract.
-            slot_idx: Column index, in ``[0, num_slots)``.
-
-        Returns:
-            ``dst`` (after the in-place write), to allow chained use in
-            functional-style reference code.
-        """
+        """Reference: ``dst[:, slot_idx] = src[:, 0]`` (int64, in-place)."""
         if src.dim() != 2 or src.shape[1] != 1:
             raise ValueError(
                 f"MTPTokenScatter.forward expects src of shape "
@@ -118,21 +73,10 @@ class MTPTokenScatter(MPKModule):
         dst[:, slot_idx] = src[:, 0]
         return dst
 
-    # ------------------------------------------------------------------
-    # Grid heuristic.
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
-        """Default grid: ``(1, 1, 1)``.
-
-        The kernel iterates over ``batch_size`` internally (one column
-        write per request), so a single CTA suffices. Matches the
-        DeepSeek V3 builder caller (always ``grid_dim=(1, 1, 1)``).
-        """
+        """``(1, 1, 1)`` — kernel walks ``batch_size`` via ``threadIdx.x``."""
         return (1, 1, 1)
 
-    # ------------------------------------------------------------------
-    # MPK compile path.
-    # ------------------------------------------------------------------
     def compile(
         self,
         src: DTensor,
@@ -142,21 +86,16 @@ class MTPTokenScatter(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register one ``mtp_token_scatter`` task on the active PK.
+        """Register one ``mtp_token_scatter`` task.
 
-        Args:
-            src:      ``DTensor`` of shape ``(batch_size, 1)`` int64.
-            dst:      ``DTensor`` of shape ``(batch_size, num_slots)``
-                      int64. Mutated by the kernel and returned (so
-                      caller code can chain).
-            slot_idx: Compile-time column index baked into the task
-                      params; one task instance per draft step.
-            grid_dim: Override; ``None`` -> :meth:`auto_grid_dim`.
-            block_dim: Override; ``None`` -> :meth:`default_block_dim`.
+        Tensor contract:
+          src: (batch_size, 1) int64, dense. Per-batch draft token.
+          dst: (batch_size, num_slots) int64, dense. In-place output;
+               kernel writes ``dst[b, slot_idx] = src[b]`` only.
+        Params (compile-time): ``[batch_size, num_slots, slot_idx]``.
 
-        Returns:
-            ``dst`` (the scatter is consumed for its side effect on
-            ``dst``; returning it lets callers thread the dependency).
+        Notes: ``0 <= slot_idx < num_slots``. No runtime meta-tensor
+        dependency. Returned ``dst`` is the mutated buffer.
         """
         pk = current_pk()
 
@@ -171,7 +110,6 @@ class MTPTokenScatter(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (formerly pk.mtp_token_scatter_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 
@@ -185,18 +123,11 @@ class MTPTokenScatter(MPKModule):
 
 
 class MTPFloatScatter(MPKModule):
-    """Scatter per-request float32 probabilities into one column.
+    """Scatter ``src: (batch_size, 1) float32`` into ``dst[:, slot_idx]``.
 
-    Wraps :meth:`PersistentKernel.mtp_float_scatter_layer` (task
-    ``mtp_float_scatter``). Same compile-time-index pattern as
-    :class:`MTPTokenScatter`, but for float32 — used by the
-    probabilistic MTP verifier to stash per-step draft probabilities
-    into a ``[batch_size, num_slots]`` float buffer.
-
-    Args:
-        batch_size: First dim of ``src`` / ``dst``.
-        num_slots:  Width of ``dst`` (max number of draft tokens).
-        prefix:     vLLM/HF state_dict prefix.
+    Wraps task ``mtp_float_scatter``; same shape contract as
+    :class:`MTPTokenScatter` but float32, used to stash per-step draft
+    probabilities for the probabilistic verifier.
     """
 
     def __init__(
@@ -218,9 +149,6 @@ class MTPFloatScatter(MPKModule):
         self.batch_size = batch_size
         self.num_slots = num_slots
 
-    # ------------------------------------------------------------------
-    # PyTorch reference path — pure column write.
-    # ------------------------------------------------------------------
     def forward(
         self,
         src: torch.Tensor,
@@ -246,18 +174,10 @@ class MTPFloatScatter(MPKModule):
         dst[:, slot_idx] = src[:, 0]
         return dst
 
-    # ------------------------------------------------------------------
-    # Grid heuristic.
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
-        """Default grid ``(1, 1, 1)`` — same reasoning as
-        :class:`MTPTokenScatter`.
-        """
+        """``(1, 1, 1)`` — same single-CTA pattern as :class:`MTPTokenScatter`."""
         return (1, 1, 1)
 
-    # ------------------------------------------------------------------
-    # MPK compile path.
-    # ------------------------------------------------------------------
     def compile(
         self,
         src: DTensor,
@@ -267,19 +187,16 @@ class MTPFloatScatter(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register one ``mtp_float_scatter`` task on the active PK.
+        """Register one ``mtp_float_scatter`` task.
 
-        Args:
-            src:      ``(batch_size, 1)`` float32 DTensor — typically a
-                      ``softmax_gather`` output.
-            dst:      ``(batch_size, num_slots)`` float32 DTensor —
-                      per-step prob accumulator.
-            slot_idx: Compile-time column index.
-            grid_dim: Override; ``None`` -> :meth:`auto_grid_dim`.
-            block_dim: Override; ``None`` -> :meth:`default_block_dim`.
+        Tensor contract:
+          src: (batch_size, 1) float32, dense. Per-batch draft prob.
+          dst: (batch_size, num_slots) float32, dense. In-place output;
+               kernel writes ``dst[b, slot_idx] = src[b]`` only.
+        Params (compile-time): ``[batch_size, num_slots, slot_idx]``.
 
-        Returns:
-            ``dst`` (consumed for its side effect).
+        Notes: ``0 <= slot_idx < num_slots``. No runtime meta-tensor
+        dependency. Returned ``dst`` is the mutated buffer.
         """
         pk = current_pk()
 
@@ -294,7 +211,6 @@ class MTPFloatScatter(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (formerly pk.mtp_float_scatter_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 

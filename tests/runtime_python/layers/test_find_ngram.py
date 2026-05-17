@@ -15,7 +15,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
-from mirage.mpk.layers.mtp.find_ngram import FindNgram
+from mirage.mpk.layers.mtp.find_ngram import FindNgramPartial, FindNgramGlobal
 
 
 def _make_pk(batch_size, max_seq):
@@ -41,7 +41,7 @@ def test_find_ngram_partial_smoke():
 
     tokens = torch.zeros(batch_size, seq_len, dtype=torch.int64, device=device)
     output = torch.zeros(batch_size, num_tasks, dtype=torch.int64, device=device)
-    module = FindNgram(ngram_size=ngram_size, scope="partial")
+    module = FindNgramPartial(ngram_size=ngram_size)
 
     pk = _make_pk(batch_size, seq_len)
     tokens_dt = pk.attach_input(tokens, name="tokens")
@@ -76,8 +76,7 @@ def test_find_ngram_global_smoke():
     tokens = torch.zeros(batch_size, vocab, dtype=torch.int64, device=device)
     output = torch.zeros(batch_size, spec_length + 1, dtype=torch.int64,
                         device=device)
-    module = FindNgram(ngram_size=ngram_size, spec_length=spec_length,
-                       scope="global")
+    module = FindNgramGlobal(ngram_size=ngram_size, spec_length=spec_length)
 
     pk = _make_pk(batch_size, vocab)
     partial_dt = pk.attach_input(partial_results, name="partial")

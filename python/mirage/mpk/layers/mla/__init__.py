@@ -1,40 +1,67 @@
 """MLA (Multi-head Latent Attention) catalog layers — DeepSeek V3.
 
 Re-exports the catalog modules wrapping :class:`PersistentKernel`'s
-MLA pk methods. Each module owns one (or a small variant set of)
-``mla_*_sm100`` MPK task(s); see each module's docstring for
-per-variant task names and tensor contracts.
+MLA pk methods. See each module's docstring for the kernel ``.cuh``
+it wraps and tensor contracts.
 
-Variant maps:
+Q-side RoPE (``deepseek_mla_rope_sm100.cuh``): :class:`MLARopeQSingle`,
+:class:`MLARopeQFused`, :class:`MLARopeQSplit`, :class:`MLARopeK`.
 
-* :class:`MLAKVGather` — ``variant in {"standard", "split", "unified"}``
-  -> tasks ``mla_kv_gather_sm100`` / ``mla_kv_gather_split_sm100`` /
-  ``mla_kv_gather_unified_sm100``.
-* :class:`MLARopeQ` — ``variant in {"single", "fused", "split"}`` ->
-  tasks ``deepseek_mla_rope_q_sm100`` /
-  ``deepseek_mla_rope_q_fused_sm100`` /
-  ``deepseek_mla_rope_q_split_sm100``.
-* :class:`MLARopeK` — standalone, task ``deepseek_mla_rope_k_sm100``.
-* :class:`MLADecode` / :class:`MLAReduce` — tasks
-  ``mla_decode_sm100`` / ``mla_reduce_sm100``.
-* :class:`MLAPrefill` — 7 variants; see module docstring.
-* :class:`MLAMtpDecodeTP` / :class:`MLAMtpReduceTP` —
-  ``tp_size in {1,2,4,8}`` -> the per-TP decode/reduce task variants.
+Paged KV gather (``mla_kv_cache_gather_sm100.cuh`` /
+``mla_kv_cache_gather_split_sm100.cuh``): :class:`MLAKVGatherStandard`,
+:class:`MLAKVGatherSplit`, :class:`MLAKVGatherUnified`.
+
+Legacy ``MLARopeQ(variant=...)`` / ``MLAKVGather(variant=...)`` factory
+functions are also exported for existing model/test/demo call sites.
 """
 
-from .kv_gather import MLAKVGather
-from .rope import MLARopeQ, MLARopeK
+from .kv_gather import (
+    MLAKVGather,  # legacy factory
+    MLAKVGatherStandard,
+    MLAKVGatherSplit,
+    MLAKVGatherUnified,
+)
+from .rope import (
+    MLARopeQ,  # legacy factory
+    MLARopeQSingle,
+    MLARopeQFused,
+    MLARopeQSplit,
+    MLARopeK,
+)
 from .decode import MLADecode, MLAReduce
-from .prefill import MLAPrefill
+from .prefill import (
+    MLAPrefillAbsorbed,
+    MLAPrefillPlain,
+    MLAPrefillUnified,
+    MLAPrefillTP8,
+    MLAPrefillTP8Chunked,
+    MLAPrefillTP8ChunkedSplitK,
+    MLAPrefillTP8ChunkedReduce,
+)
 from .mtp_decode import MLAMtpDecodeTP, MLAMtpReduceTP
 
 __all__ = [
+    # MLA KV gather (3 variants + legacy factory)
     "MLAKVGather",
+    "MLAKVGatherStandard",
+    "MLAKVGatherSplit",
+    "MLAKVGatherUnified",
+    # MLA RoPE (3 Q variants + K + legacy Q factory)
     "MLARopeQ",
+    "MLARopeQSingle",
+    "MLARopeQFused",
+    "MLARopeQSplit",
     "MLARopeK",
+    # MLA attention
     "MLADecode",
     "MLAReduce",
-    "MLAPrefill",
+    "MLAPrefillAbsorbed",
+    "MLAPrefillPlain",
+    "MLAPrefillUnified",
+    "MLAPrefillTP8",
+    "MLAPrefillTP8Chunked",
+    "MLAPrefillTP8ChunkedSplitK",
+    "MLAPrefillTP8ChunkedReduce",
     "MLAMtpDecodeTP",
     "MLAMtpReduceTP",
 ]

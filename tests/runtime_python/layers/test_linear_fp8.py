@@ -37,8 +37,6 @@ def test_linear_fp8_smoke():
         in_features=in_features,
         out_features=out_features,
         scale_ue8m0=True,
-        swap_ab=False,
-        residual=False,
         prefix="lfp8_",
     ).to(device=device)
     with torch.no_grad():
@@ -86,7 +84,7 @@ def test_linear_fp8_compile_only():
     """
     m = LinearFP8(
         in_features=512, out_features=256,
-        scale_ue8m0=True, swap_ab=False, residual=False, prefix="lfp8c_",
+        scale_ue8m0=True, prefix="lfp8c_",
     )
     assert m.weight.shape == (256, 512)
     assert m.weight_scale.shape == (256, 4)  # M, packed_K (512//128=4)

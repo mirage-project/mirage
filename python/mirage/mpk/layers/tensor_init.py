@@ -1,40 +1,15 @@
-"""Zero-fill a tensor with a dependency-chained task.
+"""Zero-fill a tensor with a chained dependency edge.
 
-Wraps :meth:`PersistentKernel.tensor_init_layer` — task ``tensor_init``.
+Backed by ``tasks/blackwell/tensor_init.cuh``
+(``tensor_init_zero_sm100_task_impl``). Blackwell/sm100-only — there
+is no Ampere or Hopper variant. ``OUTPUT_SIZE`` must be a multiple of
+8 (16B vector store, per the kernel ``static_assert``).
 
-The pk method zeroes ``target`` and uses ``dummy`` as a dep-only edge
-(it appears as both an input and an output of the task so the MPK
-dep-tracker chains ``tensor_init`` between the producer of ``dummy``
-and any downstream consumer of ``dummy``). The kernel never reads or
-writes ``dummy``'s data.
-
-Typical use is inside the DSv3 / qwen3 builder before a split-K linear
-that uses ``tma_reduce_add_async`` and therefore needs its output
-buffer pre-zeroed. See ``persistent_kernel.py:splitk_linear_layer``
-where the accumulate=False branch invokes ``tensor_init_layer``
-internally.
-
-Tensor contract
----------------
-
-* ``target``           : the buffer to zero (any shape / dtype the kernel
-                         can write bytes to).
-* ``dummy``            : dependency carrier — typically the producer of
-                         ``target`` in the same iteration (e.g. the
-                         input of the consumer split-K linear).
-* ``dummy_input_map``  : MPK partition map ``(x, y, z)`` for ``dummy``
-                         (passes through to ``TBGraph.new_input``).
-* ``target_input_map`` : MPK partition map for ``target``.
-
-The auto grid heuristic just mirrors whatever the caller threads
-through; ``tensor_init`` has no kernel-specific alignment requirement.
-
-Forward
--------
-
-``forward()`` returns a zeroed tensor with the same shape / dtype as
-``target``. The PyTorch reference doesn't involve ``dummy`` (the
-dependency is a graph artifact, not algebra).
+``dummy`` is a dep-only edge: it appears as both an input and an output
+of the task so the MPK scheduler chains ``tensor_init`` between the
+producer of ``dummy`` and any downstream consumer; the kernel never
+reads or writes ``dummy``'s data. Typical use: pre-zero the output of a
+split-K linear that uses ``tma_reduce_add_async``.
 """
 from __future__ import annotations
 
@@ -49,21 +24,13 @@ __all__ = ["TensorInit"]
 
 
 class TensorInit(MPKModule):
-    """Zero-fill ``target`` and chain a dep edge through ``dummy``.
-
-    Args:
-        prefix: Reserved. No parameters live in this module.
-    """
+    """Zero-fill ``target`` and chain a dep edge through ``dummy``."""
 
     def __init__(self, *, prefix: str = "") -> None:
         super().__init__(prefix=prefix)
 
     def forward(self, target: torch.Tensor) -> torch.Tensor:
-        """Return ``torch.zeros_like(target)``.
-
-        The pk method's ``dummy`` argument is a dep-only graph edge —
-        the algebra is a pure zero-fill.
-        """
+        """Return ``torch.zeros_like(target)`` (algebra is a pure zero-fill)."""
         return torch.zeros_like(target)
 
     def auto_grid_dim(
@@ -71,9 +38,8 @@ class TensorInit(MPKModule):
         target: Any = None,
         dummy: Any = None,
     ) -> GridDim:
-        """No kernel-mandated grid; the legacy callers pass an explicit
-        ``grid_dim`` (typically the consumer linear's grid). We default
-        to ``(num_workers, 1, 1)`` as a saturate-the-pool fallback.
+        """``(num_workers, 1, 1)`` — saturate the pool; the kernel has no
+        kernel-side alignment constraint other than ``OUTPUT_SIZE % 8 == 0``.
         """
         from .. import context as _ctx
 
@@ -90,21 +56,17 @@ class TensorInit(MPKModule):
         dummy_input_map: Tuple[int, int, int] = (-1, 1, -1),
         target_input_map: Tuple[int, int, int] = (1, -1, -1),
     ) -> Any:
-        """Register a ``tensor_init`` task.
+        """Register a ``tensor_init`` task (Blackwell/SM100-only zero-fill).
 
-        Args:
-            target: DTensor to zero.
-            dummy:  DTensor carrying the dep edge (often the consumer's
-                input).
-            grid_dim / block_dim: explicit overrides; ``None`` falls
-                back to :meth:`auto_grid_dim` / :meth:`default_block_dim`.
-            dummy_input_map / target_input_map: MPK partition maps for
-                ``dummy`` and ``target`` respectively. Defaults match
-                the SplitK linear usage in
-                ``persistent_kernel.py:splitk_linear_layer``.
+        Tensor contract:
+          target: (*shape) any dtype, zeroed by the kernel at runtime.
+          dummy:  any DTensor, dep-only edge (appears as both input and output;
+                  data is never read or written). Used to chain the task
+                  between ``dummy``'s producer and downstream consumers.
 
-        Returns:
-            ``target`` (now scheduled to be zeroed at graph runtime).
+        Notes: requires ``output_size % 8 == 0`` (16B vector store
+        ``static_assert``). ``dummy_input_map`` / ``target_input_map`` default
+        to the SplitK-linear partitioning. Returns ``target``.
         """
         from .. import context as _ctx
 
@@ -115,17 +77,10 @@ class TensorInit(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (the body that used to live on
-        # ``PersistentKernel.tensor_init_layer``). Each catalog module
-        # owns its own task wiring so adding a new layer doesn't require
-        # editing ``persistent_kernel.py``.
-        #
-        # The bgraph order is [dummy, target, dummy] -> arity (1, 2):
-        #   input_ops[0]  = dummy   (read dep)
-        #   output_ops[0] = target  (the buffer the kernel zeroes)
-        #   output_ops[1] = dummy   (dep-only write)
-        # ``dummy`` carries a dependency edge only — the kernel never
-        # reads or writes its data.
+        # bgraph arity (1 input, 2 outputs):
+        #   input_ops[0]  = dummy  (read dep)
+        #   output_ops[0] = target (zeroed by the kernel)
+        #   output_ops[1] = dummy  (dep-only write)
         from ...core import CyTBGraph
         from ...kernel import TBGraph
 
