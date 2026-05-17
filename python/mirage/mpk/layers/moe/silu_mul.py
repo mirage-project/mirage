@@ -1,42 +1,14 @@
-"""MoE SiLU-Mul activation — accepts both 2-D and 3-D layouts.
+"""MoE SiLU-Mul activation (2-D or 3-D input).
 
-Wraps :meth:`PersistentKernel.moe_silu_mul_layer` (task ``moe_silu_mul``).
-The underlying kernel accepts two layouts:
-
-* **3-D** (legacy / OLD MoE path):
-  ``input  (batch_size, num_experts_per_tok, 2 * intermediate_size)``,
-  ``output (batch_size, num_experts_per_tok, intermediate_size)``.
-  Used by qwen3 MoE (post-W13 → pre-W2) and DeepSeek V3's OLD per-expert
-  W13/W2 pipeline. The first row half is the gate, the second half is
-  the up.
-
-* **2-D** (NEW MoE path, PR-674 group GEMM):
-  ``input  (m_total, 2 * intermediate_size)``,
-  ``output (m_total, intermediate_size)`` (where ``m_total = E_local *
-  bm_padding`` is the post-permute row count). Internally the codegen
-  treats this as ``(m_total, 1, 2*intermediate_size)`` —
-  ``num_experts_per_tok = 1`` — so the same kernel can serve both
-  layouts.
-
-Halved gate/up layout: like the dense :class:`SiluMul`, per-task the
-input is ``[gate | up]`` over the trailing axis. Per-task slab width is
-``2 * intermediate_size / grid.x`` (3-D) or analogous (2-D).
-
-Parallelism
------------
-
-* 3-D layout: ``grid_dim = (batch_size, num_experts_per_tok, 1)``,
-  i.e. one CTA per (token, slot). Block 128.
-* 2-D layout: ``grid_dim = (m_total_or_capped, 1, 1)``. The DeepSeek V3
-  NEW path uses ``min(pk.num_workers, m_total)`` for grid.x.
-
-Forward (PyTorch reference) implements ``SiLU(gate) * up`` in fp32 (to
-match the kernel) and returns the result in the input dtype. Accepts
-the same 2-D or 3-D layout the kernel does.
+Wraps the ``moe_silu_mul`` task (kernel:
+``include/mirage/persistent_kernel/tasks/blackwell/silu_mul.cuh`` via
+the moe task variant). One kernel serves both 3-D ``(B, K, 2*inter)``
+and 2-D ``(M, 2*inter)`` input layouts; the trailing axis is
+``[gate | up]``.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -50,63 +22,37 @@ __all__ = ["MoESiluMul"]
 
 
 class MoESiluMul(MPKModule):
-    """SiLU-Mul activation for the MoE pipeline (2-D or 3-D layout).
+    """SiLU-Mul over the trailing ``2*intermediate_size`` axis.
 
-    Args:
-        intermediate_size: Per-side gate/up width. Trailing input dim
-            is ``2 * intermediate_size``; trailing output dim is
-            ``intermediate_size``.
-        prefix: HF state_dict prefix (no weights live on this module —
-            used only for output DTensor names).
+    Accepts 3-D ``(B, K, 2*inter)`` (per-token, per-slot — feeds W2)
+    and 2-D ``(M, 2*inter)`` (post-permute grouped path) layouts.
+    Computes ``SiLU(gate) * up`` in fp32, returns the input dtype.
     """
 
-    def __init__(
-        self,
-        intermediate_size: int,
-        *,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, intermediate_size: int, *, prefix: str = "") -> None:
         super().__init__(prefix=prefix)
         self.intermediate_size = intermediate_size
 
-    # ------------------------------------------------------------------
-    # PyTorch reference
-    # ------------------------------------------------------------------
     def forward(self, gateup: torch.Tensor) -> torch.Tensor:
-        """``SiLU(gate) * up`` over the trailing axis.
-
-        Accepts 2-D ``(M, 2*intermediate)`` or 3-D
-        ``(B, K, 2*intermediate)``. Computes in fp32, returns in the
-        input dtype.
-        """
+        """``SiLU(gate) * up`` in fp32 over the trailing axis."""
         if gateup.dim() not in (2, 3):
             raise ValueError(
-                "MoESiluMul.forward expects 2-D or 3-D input; "
-                f"got {gateup.dim()}-D"
+                f"MoESiluMul.forward expects 2-D or 3-D input; got {gateup.dim()}-D"
             )
         if gateup.size(-1) != 2 * self.intermediate_size:
             raise ValueError(
-                "MoESiluMul: input trailing dim must equal "
-                f"2*intermediate_size={2*self.intermediate_size}; "
-                f"got {gateup.size(-1)}"
+                f"trailing dim must equal 2*intermediate_size="
+                f"{2*self.intermediate_size}; got {gateup.size(-1)}"
             )
         gate = gateup[..., : self.intermediate_size]
         up = gateup[..., self.intermediate_size :]
         return (F.silu(gate.float()) * up.float()).to(gateup.dtype)
 
-    # ------------------------------------------------------------------
-    # Grid heuristic
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, input_dt: DTensor) -> GridDim:
-        """Default grid: ``(B, K, 1)`` for 3-D inputs, ``(M_capped, 1, 1)`` for 2-D.
-
-        The legacy demos use ``(batch_size, num_experts_per_tok, 1)`` for
-        the 3-D layout (qwen3 + DeepSeek V3 OLD MoE), and
-        ``(min(pk.num_workers, m_total), 1, 1)`` for the 2-D NEW-MoE
-        layout. We mirror both here.
+        """3-D: ``(B, K, 1)`` — one CTA per (token, slot).
+        2-D: ``(min(num_workers, M), 1, 1)`` — stripe over M to saturate workers.
         """
         from ... import context as _ctx
-
         pk = _ctx.current_pk()
         if input_dt.num_dims == 3:
             return (input_dt.dim(0), input_dt.dim(1), 1)
@@ -117,9 +63,6 @@ class MoESiluMul(MPKModule):
     def default_block_dim(self) -> BlockDim:
         return (128, 1, 1)
 
-    # ------------------------------------------------------------------
-    # Compile
-    # ------------------------------------------------------------------
     def compile(
         self,
         gateup: DTensor,
@@ -128,55 +71,45 @@ class MoESiluMul(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register a ``moe_silu_mul`` task.
+        """Register ``moe_silu_mul`` — SiLU(gate) * up over the trailing axis.
 
-        Args:
-            gateup: 2-D ``(M, 2*intermediate_size)`` or 3-D
-                ``(B, K, 2*intermediate_size)`` input.
-            output: Caller-allocated output of matching rank and shape
-                with trailing dim ``intermediate_size``.
-            grid_dim, block_dim: see :class:`MPKModule`.
+        Tensor contract:
+          gateup: (B, num_experts_per_tok, 2*intermediate_size) bf16 (3-D, per-token-per-slot)
+            OR (M_total, 2*intermediate_size) bf16 (2-D, post-permute grouped path).
+            Trailing axis layout = [gate(intermediate) | up(intermediate)].
+          output: (B, num_experts_per_tok, intermediate_size) bf16 (3-D)
+            OR (M_total, intermediate_size) bf16 (2-D). Rank MUST match gateup.
+
+        Notes: 3-D grid is (B, K, 1) one CTA per token-slot; 2-D grid stripes M over
+        num_workers. ``num_experts_per_tok`` is implicit (=1 for the 2-D layout).
         """
         from ... import context as _ctx
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
 
         pk = _ctx.current_pk()
-
         if gateup.num_dims not in (2, 3):
             raise ValueError(
-                f"MoESiluMul expects 2-D or 3-D gateup; "
-                f"got num_dims={gateup.num_dims}"
+                f"MoESiluMul expects 2-D or 3-D gateup; got num_dims={gateup.num_dims}"
             )
         if gateup.num_dims != output.num_dims:
             raise ValueError(
                 "MoESiluMul: gateup and output must have matching rank "
-                f"(gateup.num_dims={gateup.num_dims}, output.num_dims={output.num_dims})"
+                f"({gateup.num_dims} vs {output.num_dims})"
             )
         if gateup.dim(gateup.num_dims - 1) != 2 * self.intermediate_size:
             raise ValueError(
-                "MoESiluMul: gateup trailing dim must equal "
-                f"2*intermediate_size={2*self.intermediate_size}; "
-                f"got {gateup.dim(gateup.num_dims - 1)}"
+                f"gateup trailing dim must equal 2*intermediate_size="
+                f"{2*self.intermediate_size}; got {gateup.dim(gateup.num_dims - 1)}"
             )
         if output.dim(output.num_dims - 1) != self.intermediate_size:
             raise ValueError(
-                "MoESiluMul: output trailing dim must equal "
-                f"intermediate_size={self.intermediate_size}; "
-                f"got {output.dim(output.num_dims - 1)}"
+                f"output trailing dim must equal intermediate_size="
+                f"{self.intermediate_size}; got {output.dim(output.num_dims - 1)}"
             )
 
-        if grid_dim is None:
-            grid_dim = self.auto_grid_dim(gateup)
-        if block_dim is None:
-            block_dim = self.default_block_dim()
-
-        # Inlined task registration (formerly pk.moe_silu_mul_layer). The
-        # underlying kernel accepts both 2-D (NEW MoE path) and 3-D (OLD
-        # MoE path) layouts; the input_map differs per rank.
-        from ....core import CyTBGraph
-        from ....kernel import TBGraph
-
-        assert gateup.num_dims in (2, 3)
-        assert output.num_dims == gateup.num_dims
+        grid_dim = grid_dim or self.auto_grid_dim(gateup)
+        block_dim = block_dim or self.default_block_dim()
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         if gateup.num_dims == 3:
             tb_graph.new_input(gateup, (0, 1, -1), -1, True)

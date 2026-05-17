@@ -1,34 +1,15 @@
-"""N-gram lookup for prompt-lookup speculative decode.
+"""N-gram lookup for prompt-lookup speculative decoding.
 
-One class :class:`FindNgram` with a ``scope`` kwarg picking between two
-pk methods:
-
-* ``scope="partial"`` -> :meth:`PersistentKernel.find_ngram_partial_layer`
-  -> task ``find_ngram_partial``. Scans the request's existing tokens
-  for the most recent matching n-gram and emits a per-task partial
-  result tensor of shape ``(batch, num_tasks)``. ``grid.y`` is the
-  task fan-out.
-* ``scope="global"``  -> :meth:`PersistentKernel.find_ngram_global_layer`
-  -> task ``find_ngram_global``. Reduces all partial results into a
-  single ``(batch, spec_length + 1)`` speculative-token vector — the
-  draft tokens for the next iteration.
-
-This is the prompt-lookup spec-decode handler (no MTP / no draft model
-— just look for a repeated prefix in the request's own tokens). It is
-NOT a DeepSeek V3 path; it lives next to the MTP helpers because it is
-part of the same speculative-decode infrastructure.
-
-Runtime-metadata dependence
----------------------------
-
-Both kernels read MPK's rolling ``tokens`` and ``step`` meta-tensors to
-know where to scan from. A plain PyTorch reference cannot model the
-scan without those — :meth:`forward` therefore raises
-``NotImplementedError``.
+Two wrappers around tasks ``find_ngram_partial`` /
+``find_ngram_global`` in
+``include/mirage/persistent_kernel/tasks/speculative_decoding/prompt_lookup.cuh``.
+:class:`FindNgramPartial` fans the scan out across ``blockIdx.x``;
+:class:`FindNgramGlobal` reduces partial results and emits draft
+tokens reading ``runtime_config.tokens + step``.
 """
 from __future__ import annotations
 
-from typing import Literal, Optional, Tuple
+from typing import Optional
 
 from .._base import BlockDim, GridDim, MPKModule
 from ...context import current_pk
@@ -36,24 +17,102 @@ from ...context import current_pk
 from ....core import DTensor
 
 
-__all__ = ["FindNgram"]
+__all__ = ["FindNgramPartial", "FindNgramGlobal"]
 
 
-NgramScope = Literal["partial", "global"]
+class _FindNgramBase(MPKModule):
+    """Shared ctor / forward skeleton for the two find-ngram variants.
+
+    Both kernels read MPK runtime meta-tensors (``tokens`` / ``step``) to
+    scan the request's history, so no plain-PyTorch reference is
+    feasible.
+    """
+
+    def __init__(
+        self,
+        ngram_size: int = 3,
+        *,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(prefix=prefix)
+        if ngram_size <= 0:
+            raise ValueError(
+                f"{type(self).__name__} ngram_size must be positive; "
+                f"got {ngram_size}"
+            )
+        self.ngram_size = ngram_size
+
+    def forward(self, *args, **kwargs):
+        """No plain-PyTorch reference: kernel reads runtime ``tokens`` /
+        ``step``. Use test-mode for end-to-end validation."""
+        raise NotImplementedError(
+            f"{type(self).__name__}.forward(): runtime meta-tensors required."
+        )
 
 
-class FindNgram(MPKModule):
-    """N-gram lookup over the request's own tokens.
+class FindNgramPartial(_FindNgramBase):
+    """Per-task n-gram match scan over the request's own tokens.
 
-    Args:
-        ngram_size:  Length of the n-gram pattern to search for. Baked
-            into the task params. (Default 3 mirrors the pk method.)
-        spec_length: For ``scope="global"`` only — number of draft
-            tokens to emit after the matched suffix (so the global
-            output is ``(batch, spec_length + 1)``).
-        scope:       ``"partial"`` (per-task scan) or ``"global"``
-            (reduce + emit draft tokens).
-        prefix:      vLLM/HF state_dict prefix.
+    Wraps task ``find_ngram_partial``. The kernel uses ``blockIdx.x`` as
+    ``task_id`` to fan out the scan over the input sequence and writes
+    one ``int64`` per task (the first match index, or ``LLONG_MAX``).
+    """
+
+    def auto_grid_dim(self, *_: DTensor) -> GridDim:
+        """``(1, 1, 1)`` default; callers typically override with
+        ``grid.x = num_partial_tasks`` to fan out the scan."""
+        return (1, 1, 1)
+
+    def compile(
+        self,
+        input: DTensor,
+        output: DTensor,
+        *,
+        grid_dim: Optional[GridDim] = None,
+        block_dim: Optional[BlockDim] = None,
+    ) -> DTensor:
+        """Register one ``find_ngram_partial`` task.
+
+        Tensor contract:
+          input:  (batch_size, seq_len) int64, dense. Token history.
+                  Kernel scans ``[0, input_token_num - NGRAM)``.
+          output: (batch_size, num_partial_tasks) int64, dense. Per-task
+                  match position (``LLONG_MAX`` if no match); ``grid.x =
+                  num_partial_tasks`` fans the scan across CTAs.
+        Params: ``[ngram_size]``; ``num_partial_tasks`` inferred from
+        ``output.dim[1]`` at registrar.
+
+        Notes: kernel reads ``runtime_config.step[0] + 1`` as the
+        scanned length; ``blockIdx.x`` is the task_id (fan-out).
+        """
+        pk = current_pk()
+
+        if grid_dim is None:
+            grid_dim = self.auto_grid_dim(input, output)
+        if block_dim is None:
+            block_dim = self.default_block_dim()
+
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert input.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        pk.kn_graph.customized([input, output], tb_graph)
+        pk.kn_graph.register_task(
+            tb_graph, "find_ngram_partial", [self.ngram_size]
+        )
+        return output
+
+
+class FindNgramGlobal(_FindNgramBase):
+    """Reduce partial results and emit ``spec_length + 1`` draft tokens.
+
+    Wraps task ``find_ngram_global``. Reads ``tokens[step]`` plus
+    ``tokens[match_idx + ngram_size + i]`` for the next
+    ``spec_length`` positions; out-of-range slots emit ``-1``.
     """
 
     def __init__(
@@ -61,137 +120,66 @@ class FindNgram(MPKModule):
         ngram_size: int = 3,
         spec_length: int = 5,
         *,
-        scope: NgramScope = "partial",
         prefix: str = "",
     ) -> None:
-        super().__init__(prefix=prefix)
-        if scope not in ("partial", "global"):
+        super().__init__(ngram_size=ngram_size, prefix=prefix)
+        if spec_length <= 0:
             raise ValueError(
-                f"FindNgram scope must be 'partial' or 'global'; got {scope!r}"
-            )
-        if ngram_size <= 0:
-            raise ValueError(
-                f"FindNgram ngram_size must be positive; got {ngram_size}"
-            )
-        if scope == "global" and spec_length <= 0:
-            raise ValueError(
-                f"FindNgram(scope='global') spec_length must be positive; "
+                f"FindNgramGlobal spec_length must be positive; "
                 f"got {spec_length}"
             )
-        self.ngram_size = ngram_size
         self.spec_length = spec_length
-        self.scope = scope
 
-    # ------------------------------------------------------------------
-    # PyTorch reference — runtime-driven.
-    # ------------------------------------------------------------------
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"FindNgram(scope={self.scope!r}).forward() has no plain-PyTorch "
-            "reference: the kernel reads MPK runtime meta-tensors "
-            "(tokens, step) to scan the request's history. Use the "
-            "test-mode driver for end-to-end validation."
-        )
-
-    # ------------------------------------------------------------------
-    # Grid heuristic.
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
-        """Per-scope default grid.
-
-        * ``partial``: ``(1, 1, 1)`` — caller typically passes a wider
-          grid (with ``grid.y = num_tasks``) explicitly. The pk method
-          does not enforce a grid; the kernel uses ``grid.y`` for task
-          fan-out. We default to ``(1, 1, 1)`` and let callers override.
-        * ``global``:  ``(1, 1, 1)`` — matches the ``prompt_lookup_spec_handler``
-          caller in pk (``grid_dim=(1, 1, 1)``).
-        """
+        """``(1, 1, 1)`` — single-CTA reduce + emit."""
         return (1, 1, 1)
 
-    # ------------------------------------------------------------------
-    # MPK compile path — dispatch on ``scope``.
-    # ------------------------------------------------------------------
     def compile(
         self,
-        *,
-        input: Optional[DTensor] = None,
-        partial_results: Optional[DTensor] = None,
-        tokens: Optional[DTensor] = None,
+        partial_results: DTensor,
+        tokens: DTensor,
         output: DTensor,
+        *,
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register one find_ngram task on the active PK.
+        """Register one ``find_ngram_global`` task.
 
-        Required-arg matrix:
+        Tensor contract:
+          partial_results: (batch_size, num_partial_tasks) int64, dense.
+                           Output of :class:`FindNgramPartial`.
+          tokens:          (batch_size, vocab_or_seq_len) int64, dense.
+                           Token history; kernel indexes by step+offset.
+          output:          (batch_size, spec_length + 1) int64, dense.
+                           Slot 0 = ``tokens[step]``; slots 1.. are the
+                           next ``spec_length`` n-gram successors
+                           (``-1`` when OOB or no match).
+        Params: ``[ngram_size, spec_length]``; ``num_partial_tasks``
+        inferred from ``partial_results.dim[1]``.
 
-        * ``scope="partial"``: ``input`` (the per-request tokens
-          ``(batch, seq_len)``) and ``output``
-          (``(batch, num_tasks)``) — both required.
-        * ``scope="global"``: ``partial_results`` (output of the
-          partial scan), ``tokens`` (request tokens, ``(batch, vocab)``
-          per the pk method's contract), and ``output``
-          (``(batch, spec_length + 1)`` int64 — the draft tokens for
-          the next iteration).
-
-        Returns:
-            ``output`` (consumed for its side effect).
+        Notes: kernel reads ``runtime_config.step[0]``.
         """
         pk = current_pk()
 
         if grid_dim is None:
-            grid_dim = self.auto_grid_dim()
+            grid_dim = self.auto_grid_dim(partial_results, tokens, output)
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (formerly pk.find_ngram_*_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 
-        if self.scope == "partial":
-            if input is None:
-                raise ValueError(
-                    "FindNgram(scope='partial').compile requires "
-                    "input= (the per-request tokens DTensor)."
-                )
-            if partial_results is not None or tokens is not None:
-                raise ValueError(
-                    "FindNgram(scope='partial') consumes only "
-                    "(input, output); pass scope='global' if you also "
-                    "want a partial_results + tokens reduction."
-                )
-            assert input.num_dims == 2  # (batch_size, seq_len)
-            assert output.num_dims == 2  # (batch_size, num_tasks)
-            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            tb_graph.new_input(input, (-1, -1, -1), -1, True)
-            tb_graph.new_input(output, (1, -1, -1), -1, True)
-            pk.kn_graph.customized([input, output], tb_graph)
-            pk.kn_graph.register_task(
-                tb_graph, "find_ngram_partial", [self.ngram_size]
-            )
-        else:  # "global"
-            if partial_results is None or tokens is None:
-                raise ValueError(
-                    "FindNgram(scope='global').compile requires "
-                    "partial_results= and tokens= DTensors."
-                )
-            if input is not None:
-                raise ValueError(
-                    "FindNgram(scope='global') does not consume input=; "
-                    "pass partial_results= and tokens= instead."
-                )
-            assert partial_results.num_dims == 2  # (batch_size, num_tasks)
-            assert tokens.num_dims == 2  # (batch_size, vocab_size)
-            assert output.num_dims == 2  # (batch_size, 1)
-            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            tb_graph.new_input(partial_results, (-1, -1, -1), -1, True)
-            tb_graph.new_input(tokens, (-1, -1, -1), -1, True)
-            tb_graph.new_input(output, (-1, -1, -1), -1, True)
-            pk.kn_graph.customized(
-                [partial_results, tokens, output], tb_graph
-            )
-            pk.kn_graph.register_task(
-                tb_graph, "find_ngram_global", [self.ngram_size, self.spec_length]
-            )
-
+        assert partial_results.num_dims == 2
+        assert tokens.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(partial_results, (-1, -1, -1), -1, True)
+        tb_graph.new_input(tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        pk.kn_graph.customized(
+            [partial_results, tokens, output], tb_graph
+        )
+        pk.kn_graph.register_task(
+            tb_graph, "find_ngram_global", [self.ngram_size, self.spec_length]
+        )
         return output

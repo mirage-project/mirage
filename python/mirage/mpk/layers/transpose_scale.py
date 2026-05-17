@@ -1,30 +1,13 @@
-"""Transpose ``(M, K_PACKED) → (K_PACKED, M)`` for the FP8 group-GEMM SFA layout.
+"""Transpose UE8M0-packed scale buffer ``(M, K_PACKED) → (K_PACKED, M)``.
 
-Wraps :meth:`PersistentKernel.transpose_scale_sm100_layer` — task
-``transpose_scale_sm100``. The kernel is a single-CTA copy that bridges
-:meth:`QuantizeFP8`'s M-outermost packed-uint32 scale output to the
-K-outermost layout the ``fp8_group_gemm_*`` TMA descriptors require.
-
-Both shapes carry the same UE8M0-packed bytes; only the dim order
-changes. See ``transpose_scale_sm100.cuh`` for the actual copy loop.
-
-Forward reference
------------------
-
-``forward()`` is a plain ``scale_in.transpose(0, 1)`` of the
-``uint32``-packed buffer — the bytes are the same after transpose
-because each ``uint32`` is treated atomically along the K-block axis.
-
-Grid / block
-------------
-
-Fixed at ``(1, 1, 1)`` / ``(128, 1, 1)`` by the pk method (single CTA).
-``compile()`` accepts ``grid_dim`` / ``block_dim`` overrides for API
-parity but rejects non-default values.
+Backed by ``tasks/blackwell/transpose_scale_sm100.cuh``
+(``transpose_scale_sm100_task_impl``). Bridges :class:`QuantizeFP8UE8M0`'s
+M-outermost output to the K-outermost layout that ``fp8_group_gemm_*``
+SFA/SFB TMA descriptors expect. Single-CTA, uint32 elementwise copy.
 """
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 
@@ -37,10 +20,10 @@ __all__ = ["TransposeScale"]
 
 
 class TransposeScale(MPKModule):
-    """``(M, K_PACKED) uint32 → (K_PACKED, M) uint32`` transpose.
+    """``(M, K_PACKED) uint32 → (K_PACKED, M) uint32``.
 
-    Args:
-        prefix: Reserved. No parameters live here.
+    Single CTA, fixed grid ``(1, 1, 1)`` and block ``(128, 1, 1)`` —
+    overrides must equal the auto values or be ``None``.
     """
 
     def __init__(self, *, prefix: str = "") -> None:
@@ -51,6 +34,7 @@ class TransposeScale(MPKModule):
         return scale_in.transpose(0, 1).contiguous()
 
     def auto_grid_dim(self, scale_in: Any = None) -> GridDim:
+        """Single CTA: ``(1, 1, 1)`` — kernel is one-CTA only."""
         return (1, 1, 1)
 
     def default_block_dim(self) -> BlockDim:
@@ -66,16 +50,14 @@ class TransposeScale(MPKModule):
     ) -> Any:
         """Register a ``transpose_scale_sm100`` task.
 
-        Args:
-            scale_in:  ``(M, K_PACKED)`` uint32 DTensor.
-            scale_out: ``None`` allocates a fresh ``(K_PACKED, M)``
-                uint32 DTensor; ``torch.Tensor`` attaches a host buffer;
-                ``DTensor`` is used as-is.
-            grid_dim / block_dim: Must equal the auto values
-                (``(1, 1, 1)`` / ``(128, 1, 1)``) or be ``None``.
+        Tensor contract:
+          scale_in:  (M, K_PACKED) uint32, M-outermost UE8M0-packed scales.
+          scale_out: (K_PACKED, M) uint32, K-outermost transposed scales.
 
-        Returns:
-            ``scale_out``.
+        Notes: SM100-only; single-CTA — ``grid_dim`` is fixed at ``(1, 1, 1)``
+        and ``block_dim`` at ``(128, 1, 1)``; overrides must match or be
+        ``None``. Bridges :class:`QuantizeFP8UE8M0` output to the layout the
+        FP8 group GEMM SFA/SFB TMA descriptors expect.
         """
         import torch as _torch
         from .. import context as _ctx
@@ -108,7 +90,6 @@ class TransposeScale(MPKModule):
         else:
             out_dt = scale_out
 
-        # Inlined task registration (was pk.transpose_scale_sm100_layer).
         from ...core import CyTBGraph
         from ...kernel import TBGraph
 
@@ -117,11 +98,9 @@ class TransposeScale(MPKModule):
         assert out_dt.dim(0) == K_PACKED
         assert out_dt.dim(1) == M
         params = [M, K_PACKED]
-        grid_dim_local = (1, 1, 1)
-        block_dim_local = (128, 1, 1)
-        tb_graph = TBGraph(CyTBGraph(grid_dim_local, block_dim_local, 1, 64))
+        tb_graph = TBGraph(CyTBGraph((1, 1, 1), (128, 1, 1), 1, 64))
         tb_graph.new_input(scale_in, (-1, -1, -1), -1, True)
-        tb_graph.new_input(out_dt,   (-1, -1, -1), -1, True)
+        tb_graph.new_input(out_dt, (-1, -1, -1), -1, True)
         pk.kn_graph.customized([scale_in, out_dt], tb_graph)
         pk.kn_graph.register_task(tb_graph, "transpose_scale_sm100", params)
         return out_dt
