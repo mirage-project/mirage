@@ -207,7 +207,11 @@ class Eagle3Builder:
         assert self._lm_head_w.shape == (self._padded_draft_vocab, self.hidden_size)
         self._kept_tensors.append(self._lm_head_w)
 
-        # 6. KV cache: own buffer, single layer.
+        # 6. Paged draft KV cache (own buffer, single layer). Layout
+        # (max_num_pages, page_size, num_kv_heads, head_dim) — matches
+        # target's paged cache layout. The kernel writes K/V at the position
+        # determined by runtime_config indptr + (for K>1) the per-step
+        # TAIL_OFFSET template parameter (see paged_attention_layer wrapper).
         self._k_cache_buf = torch.zeros(
             (self.max_num_pages, self.page_size, self.num_kv_heads, self.head_dim),
             dtype=torch.bfloat16, device="cuda")
@@ -250,6 +254,7 @@ class Eagle3Builder:
             self.sd["norm.weight"].contiguous(), "eagle3_norm")
         self.w_lm_head = self._attach(self._lm_head_w, "eagle3_lm_head")
         self.d2t = self._attach(self._d2t, "eagle3_d2t")
+        # Paged draft KV cache (separate from target's paged cache).
         self.k_cache = self._attach(self._k_cache_buf, "eagle3_k_cache")
         self.v_cache = self._attach(self._v_cache_buf, "eagle3_v_cache")
         self.dummy_norm = self._attach(
@@ -308,17 +313,28 @@ class Eagle3Builder:
         self.all_draft_ids = self._new(
             (mbt, self.num_draft_steps), int64, "eagle3_all_draft_ids")
 
-    # ------------------------------------------------------------------
-    # Public entry
-    # ------------------------------------------------------------------
     def build_draft_loop(
         self,
         aux_h0,      # DTensor, target hidden at capture layer 0
         aux_h1,
         aux_h2,
         target_argmax_token,  # DTensor (mbt, 1) int64 — main's argmax
+        accepted_count,       # DTensor (mbt, 1) int32 — verify_strict output
+                              # (kept in signature for demo compat; not used
+                              # by the paged_attention path)
     ):
         """Register the Eagle3 draft loop tasks on self.mpk's graph.
+
+        Uses MPK's `paged_attention_layer`:
+          - K=1: default behavior (writes mbt K/Vs at [step, step+mbt))
+          - K>1: passes q_len_override=1 + tail_offset=K-1-step so step k
+            writes exactly 1 K/V at absolute position [step+k]. The K draft
+            steps are serialized through the natural compute chain (step k+1
+            embeds step k's d2t-remapped token), so each step's attention
+            sees all prior steps' K/V writes via release/acquire fences.
+
+        See /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
+        for the full design.
 
         Inputs are kernel-level DTensors produced earlier in the target graph.
         After this returns, self.all_draft_ids contains the K draft tokens per
@@ -402,19 +418,43 @@ class Eagle3Builder:
                 block_dim=bd_small,
             )
 
-            # 7. Paged attention (no q_norm/k_norm: Eagle3 Llama-style block).
-            self.mpk.paged_attention_layer(
-                input=self.attn_in,
-                k_cache=self.k_cache, v_cache=self.v_cache,
-                q_norm=self.dummy_norm, k_norm=self.dummy_norm,
-                cos_pos_embed=self.cos_pos_embed,
-                sin_pos_embed=self.sin_pos_embed,
-                output=self.attn_out,
-                grid_dim=(self.mpk.max_num_batched_requests,
-                          self.num_kv_heads, 1),
-                block_dim=bd_small,
-                enable_qk_norm=False,
-            )
+            # 7. Eagle3 draft attention via paged_attention_layer.
+            # K=1: default behavior (write mbt K/Vs at [step, step+mbt))
+            # K>1: each step writes 1 K/V at position [step+k] via
+            #      q_len_override + tail_offset template params.
+            # See /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
+            if K == 1:
+                self.mpk.paged_attention_layer(
+                    input=self.attn_in,
+                    k_cache=self.k_cache, v_cache=self.v_cache,
+                    q_norm=self.dummy_norm, k_norm=self.dummy_norm,
+                    cos_pos_embed=self.cos_pos_embed,
+                    sin_pos_embed=self.sin_pos_embed,
+                    output=self.attn_out,
+                    grid_dim=(self.mpk.max_num_batched_requests,
+                              self.num_kv_heads, 1),
+                    block_dim=bd_small,
+                    enable_qk_norm=False,
+                )
+            else:
+                # mbt = K + 1; step k should write 1 K/V at absolute pos step+k.
+                # tail_offset = mbt - 1 - k = K - k (so kernel sees
+                # seq_len_eff = step+mbt - tail_offset = step+1+k, writes
+                # [step+k, step+k+1), attends [0, step+k+1)).
+                self.mpk.paged_attention_layer(
+                    input=self.attn_in,
+                    k_cache=self.k_cache, v_cache=self.v_cache,
+                    q_norm=self.dummy_norm, k_norm=self.dummy_norm,
+                    cos_pos_embed=self.cos_pos_embed,
+                    sin_pos_embed=self.sin_pos_embed,
+                    output=self.attn_out,
+                    grid_dim=(self.mpk.max_num_batched_requests,
+                              self.num_kv_heads, 1),
+                    block_dim=bd_small,
+                    enable_qk_norm=False,
+                    q_len_override=1,
+                    tail_offset=K - step,
+                )
 
             # 8. o_proj + residual. Residual is the H-dim step_hidden (not the
             #    2H pre-attn). This mirrors sglang's llama_eagle3 forward.

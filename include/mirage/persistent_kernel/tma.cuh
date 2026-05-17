@@ -1627,7 +1627,8 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_EAGLE3_AUX_CONCAT:
     case TASK_EAGLE3_INPUT_CONCAT:
     case TASK_EAGLE3_D2T_REMAP:
-    case TASK_EAGLE3_COMMIT: {
+    case TASK_EAGLE3_COMMIT:
+    case TASK_EAGLE3_STEP0_INPUT_PREP: {
       break;
     }
     default:

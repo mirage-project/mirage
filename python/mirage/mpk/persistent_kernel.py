@@ -801,6 +801,8 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         enable_qk_norm: bool = True,
+        q_len_override: int = 0,
+        tail_offset: int = 0,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -841,7 +843,12 @@ class PersistentKernel:
         # params[3]: rotary_embed
         # params[4]: max_seq_len
         # params[5]: page_size
-        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size]
+        # params[6]: q_len_override (only included if non-zero; for Eagle3 K>1 chain)
+        # params[7]: tail_offset    (only included if non-zero; for Eagle3 K>1 chain)
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+                  self.max_seq_length, self.page_size]
+        if q_len_override != 0 or tail_offset != 0:
+            params.extend([q_len_override, tail_offset])
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -2422,7 +2429,6 @@ class PersistentKernel:
         tokens_buffer: DTensor,     # (max_requests, max_seq_len) int64 — written in-place
         num_new_tokens: DTensor,    # (max_requests,) int32 — OUTPUT (= accept_count)
         drafts_prev: DTensor,       # (max_requests, K) int64 — attach_input cross-iter snapshot dst
-        debug_stats: DTensor,       # (2,) int32 — [iter_count, sum_accepted_drafts]
         grid_dim: tuple,
         block_dim: tuple,
         num_draft_tokens: int,      # K
@@ -2456,10 +2462,9 @@ class PersistentKernel:
         tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
         tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
         tb_graph.new_input(drafts_prev, (-1, -1, -1), -1, True)
-        tb_graph.new_input(debug_stats, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [target_argmax, draft_tokens_new, accepted_count, tokens_buffer,
-             num_new_tokens, drafts_prev, debug_stats],
+             num_new_tokens, drafts_prev],
             tb_graph)
         self.kn_graph.register_task(tb_graph, "eagle3_commit", params)
 
@@ -2489,6 +2494,44 @@ class PersistentKernel:
         tb_graph.new_input(target_token, (-1, -1, -1), -1, True)
         self.kn_graph.customized([hot_token, d2t_table, target_token], tb_graph)
         self.kn_graph.register_task(tb_graph, "eagle3_d2t_remap", params)
+
+    def eagle3_step0_input_prep_layer(
+        self,
+        argmax_out: DTensor,      # (mbt, 1) int64 — target's argmax
+        aux_h0: DTensor,          # (mbt, H) bf16
+        aux_h1: DTensor,
+        aux_h2: DTensor,
+        accepted_count: DTensor,  # (1, 1) or (mbt, 1) int32 from verify
+        selected_token: DTensor,  # (1, 1) int64 — OUTPUT
+        aux_concat: DTensor,      # (1, 3*H) bf16 — OUTPUT
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Eagle3 K>1 serial-flow step 0 input prep: select slot (ac-1) from
+        the K+1 mbt slots and concat aux_h0/h1/h2 into (1, 3H) for eh_proj.
+        """
+        assert argmax_out.num_dims == 2
+        assert aux_h0.num_dims == 2 and aux_h1.num_dims == 2 and aux_h2.num_dims == 2
+        batch_size = argmax_out.dim(0)
+        hidden_dim = aux_h0.dim(1)
+        assert aux_h1.dim(1) == hidden_dim and aux_h2.dim(1) == hidden_dim
+        assert selected_token.num_dims == 2
+        assert aux_concat.num_dims == 2
+        assert aux_concat.dim(1) == 3 * hidden_dim
+        params = [batch_size, hidden_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(argmax_out, (-1, -1, -1), -1, True)
+        tb_graph.new_input(aux_h0, (-1, -1, -1), -1, True)
+        tb_graph.new_input(aux_h1, (-1, -1, -1), -1, True)
+        tb_graph.new_input(aux_h2, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(selected_token, (-1, -1, -1), -1, True)
+        tb_graph.new_input(aux_concat, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [argmax_out, aux_h0, aux_h1, aux_h2, accepted_count,
+             selected_token, aux_concat],
+            tb_graph)
+        self.kn_graph.register_task(tb_graph, "eagle3_step0_input_prep", params)
 
     def compile(
         self,

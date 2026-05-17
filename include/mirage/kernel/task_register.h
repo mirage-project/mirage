@@ -194,6 +194,8 @@ public:
                                      std::vector<int> const &params);
   int register_eagle3_commit_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
+  int register_eagle3_step0_input_prep_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

@@ -1911,7 +1911,9 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
-  assert(params.size() == 6);
+  // params[6]: q_len_override (optional, default 0)
+  // params[7]: tail_offset    (optional, default 0)
+  assert(params.size() == 6 || params.size() == 8);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -1935,6 +1937,8 @@ int TaskRegister::register_paged_attention_sm100_task(
   int kv_stride = head_dim * num_kv_heads;
   int max_seq_len = params[4];
   int page_size = params[5];
+  int q_len_override = (params.size() >= 7) ? params[6] : 0;
+  int tail_offset = (params.size() >= 8) ? params[7] : 0;
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -1943,9 +1947,14 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // Template params: T, NUM_QO_HEADS, NUM_KV_HEADS, KV_CACHE_STRIDE,
+  // QKV_STRIDE, O_STRIDE, HEAD_DIM, MAX_SEQ_LEN, PAGE_SIZE, MAX_TOKENS,
+  // Q_LEN_OVERRIDE, TAIL_OFFSET. MAX_TOKENS=3 to support Eagle3 K=2 (mbt=3
+  // target attention). Beyond mbt=3 will need switching target's spec_decode
+  // path to single_batch_extend_attention or further smem budget work.
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $>(",
+         "$, $, $, $, 3, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -1953,7 +1962,9 @@ int TaskRegister::register_paged_attention_sm100_task(
          output_size,
          head_dim,
          max_seq_len,
-         page_size);
+         page_size,
+         q_len_override,
+         tail_offset);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -4489,9 +4500,30 @@ int TaskRegister::register_eagle3_commit_task(
   code.e("    runtime_config.prompt_length,");        // prompt_length (global)
   code.e("    task_desc->output_ptrs[0],");           // new_token_nums
   code.e("    task_desc->output_ptrs[1],");           // drafts_prev (attach_input snapshot)
-  code.e("    task_desc->output_ptrs[2],");           // debug_stats (attach_input)
   code.e("    task_desc->task_metadata.request_id);"); // request_id
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
+}
+
+int TaskRegister::register_eagle3_step0_input_prep_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: batch_size (= mbt = K+1), params[1]: hidden_dim
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int hidden_dim = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::eagle3_step0_input_prep_kernel<bfloat16, $, $>(",
+         batch_size,
+         hidden_dim);
+  code.e("    task_desc->input_ptrs[0],");   // argmax_out
+  code.e("    task_desc->input_ptrs[1],");   // aux_h0
+  code.e("    task_desc->input_ptrs[2],");   // aux_h1
+  code.e("    task_desc->input_ptrs[3],");   // aux_h2
+  code.e("    task_desc->input_ptrs[4],");   // accepted_count
+  code.e("    task_desc->output_ptrs[0],");  // selected_token (1, 1)
+  code.e("    task_desc->output_ptrs[1]);"); // aux_concat (1, 3H)
+  return register_task_variant(TASK_EAGLE3_STEP0_INPUT_PREP, code.to_string());
 }
 
 // ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============

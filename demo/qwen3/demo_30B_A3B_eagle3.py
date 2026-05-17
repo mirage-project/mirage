@@ -829,32 +829,32 @@ if __name__ == "__main__":
                 torch_tensor=eagle3_drafts_prev_buf,
                 name="eagle3_drafts_prev",
             )
-            # Debug stats: [iter_count, sum_accepted_drafts]
-            eagle3_debug_stats_buf = torch.zeros(
-                (2,), dtype=torch.int32, device="cuda")
-            eagle3_debug_stats = mpk.attach_input(
-                torch_tensor=eagle3_debug_stats_buf,
-                name="eagle3_debug_stats",
-            )
 
-            # Build draft loop first (registers scatter writer of
-            # all_draft_ids); verify still references all_draft_ids via the
-            # attach_input drafts_prev (NOT via the in-graph DTensor) so the
-            # within-iter dep scatter→verify is broken.
-            eagle3.build_draft_loop(
-                aux_h0=eagle3_aux_h0,
-                aux_h1=eagle3_aux_h1,
-                aux_h2=eagle3_aux_h2,
-                target_argmax_token=argmax_out,
-            )
+            # Unified Eagle3 draft path: verify_strict registers first (its
+            # accepted_count is wired into the draft loop even though the K=1
+            # path's attention kernel doesn't consume ac yet — keeps the API
+            # ready for the K>1 decode-chain extension). The draft attention
+            # is the new flat-cache `eagle3_draft_chain_step_attn` kernel with
+            # NUM_TOKENS=mbt, USE_AC_OFFSET=False — writes mbt KV at positions
+            # [step, step+mbt-1] every iter, naturally covering prefill and
+            # decode through the "N tokens in → N KV writes out" contract.
+            # K>1 prefill (NUM_TOKENS=K+1 > 2 with NUM_Q_PER_KV=8) is gated by
+            # a static_assert in the kernel until the MMA m-loop extension.
             mpk.mtp_verify_strict_layer(
-                draft_token_ids=eagle3_drafts_prev,  # attach_input (prev iter)
+                draft_token_ids=eagle3_drafts_prev,
                 target_token_ids=argmax_out,
                 accepted_count=accepted_count,
                 output_tokens=verified_output,
                 grid_dim=(mbt_e, 1, 1),
                 block_dim=(128, 1, 1),
                 num_draft_tokens=K,
+            )
+            eagle3.build_draft_loop(
+                aux_h0=eagle3_aux_h0,
+                aux_h1=eagle3_aux_h1,
+                aux_h2=eagle3_aux_h2,
+                target_argmax_token=argmax_out,
+                accepted_count=accepted_count,
             )
 
             # Single-edge-per-pair design: pass argmax_out (from argmax_reduce)
@@ -872,11 +872,10 @@ if __name__ == "__main__":
                 tokens_buffer=d_tokens,
                 num_new_tokens=d_num_new,
                 drafts_prev=eagle3_drafts_prev,
-                debug_stats=eagle3_debug_stats,
                 grid_dim=(mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
                 num_draft_tokens=K,
-                batch_size=mbt_e,
+                batch_size=mbt_e,  # all_draft_ids is (mbt, K) — unified path
                 max_seq_len=args.max_seq_length,
             )
         elif spec_decode_config:
@@ -977,19 +976,6 @@ if __name__ == "__main__":
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
-        if args.eagle3:
-            stats = eagle3_debug_stats_buf.cpu().tolist()
-            iter_count, sum_accepted = stats[0], stats[1]
-            avg_ac = (iter_count + sum_accepted) / max(iter_count, 1)
-            print(
-                f"[Eagle3 stats] iter_count={iter_count}, "
-                f"sum_accepted_drafts={sum_accepted}, "
-                f"avg ac per iter={avg_ac:.3f} "
-                f"(= 1.0 means all drafts rejected; max possible = {args.num_draft_steps + 1})"
-            )
-            last_drafts = eagle3_drafts_prev_buf.cpu().tolist()
-            print(f"[Eagle3 stats] last iter drafts_prev (mbt x K)={last_drafts}; "
-                  f"(0 means hot_id was in lm_head padded range → d2t sentinel)")
         pass
     if world_size > 1:
         dist.destroy_process_group()

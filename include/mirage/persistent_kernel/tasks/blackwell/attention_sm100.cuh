@@ -40,7 +40,19 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
-          int MAX_TOKENS = 2>
+          int MAX_TOKENS = 3,
+          // Eagle3 K>1 chain support:
+          //   Q_LEN_OVERRIDE > 0 → override `num_tokens` derived from
+          //   `qo_indptr`. Kernel reads first Q_LEN_OVERRIDE q-tokens from
+          //   the packed QKV tensor (slots [0, Q_LEN_OVERRIDE)) instead of
+          //   the full slice that qo_indptr describes.
+          //   TAIL_OFFSET shifts the effective `seq_len` backward by this
+          //   many positions. Writes new K/V to cache at
+          //   [seq_len_eff - num_tokens, seq_len_eff) and attends over
+          //   [0, seq_len_eff). Default 0 = legacy behavior.
+          // See /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
+          int Q_LEN_OVERRIDE = 0,
+          int TAIL_OFFSET = 0>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -90,7 +102,11 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     if (first_token_pos == last_token_pos) {
       return;
     }
-    int const num_tokens = last_token_pos - first_token_pos;
+    // Q_LEN_OVERRIDE: when > 0, override num_tokens (Eagle3 K>1 draft uses
+    // 1). Reads q-tokens from input slots [0, Q_LEN_OVERRIDE).
+    int const num_tokens = (Q_LEN_OVERRIDE > 0)
+                               ? Q_LEN_OVERRIDE
+                               : (last_token_pos - first_token_pos);
 
     // NOTE(Jinchen): to simplify the implementation, we assume that the
     // metadata of the paged KV cache includes the new tokens, i.e., spaces are
@@ -99,8 +115,12 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     int const first_page_pos = paged_kv_indptr_buffer_ptr[request_id];
     int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
     int const num_pages = last_page_pos - first_page_pos;
+    // TAIL_OFFSET: when > 0, shift effective seq_len backward (Eagle3 K>1
+    // draft step k uses TAIL_OFFSET = K-1-k so step k writes 1 K/V at
+    // absolute position [step + k] and attends [0, step + k + 1)).
     int const seq_len = (num_pages - 1) * PAGE_SIZE +
-                        paged_kv_last_page_len_buffer_ptr[request_id];
+                        paged_kv_last_page_len_buffer_ptr[request_id] -
+                        TAIL_OFFSET;
     // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
 
     // Page indices are read directly from global memory (L2-cached)
@@ -282,9 +302,14 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                               : 0;
       if (next_iter_len > 0) {
         int page_idx = page_indices[cp_finished_seq_len / PAGE_SIZE];
+        // FIX: loop bound was `curr_iter_len` (stale first-iter value); should
+        // be `next_iter_len` (the tile being loaded). The original OOB-read
+        // QKV input for `dst_row >= next_iter_len`, which lands in
+        // unmapped memory at higher mbt values → illegal access. See plan
+        // /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
 #pragma unroll
         for (int chunk_idx = threadIdx.x;
-             chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
+             chunk_idx < next_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
              chunk_idx += NUM_THREADS) {
           int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
           int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;

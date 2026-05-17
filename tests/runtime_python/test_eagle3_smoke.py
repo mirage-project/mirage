@@ -100,9 +100,13 @@ eagle3 = Eagle3Builder(
     num_draft_steps=K,
     use_aux_norm=False,
 )
+accepted_count_dummy = mpk.new_tensor(
+    dims=(mbt, 1), dtype=mi.int32,
+    name="smoke_accepted_count", io_category="cuda_tensor")
 all_draft_ids = eagle3.build_draft_loop(
     aux_h0=aux_h0, aux_h1=aux_h1, aux_h2=aux_h2,
     target_argmax_token=target_argmax,
+    accepted_count=accepted_count_dummy,
 )
 print(f"build_draft_loop returned all_draft_ids: dims={[all_draft_ids.dim(i) for i in range(all_draft_ids.num_dims)]}")
 
