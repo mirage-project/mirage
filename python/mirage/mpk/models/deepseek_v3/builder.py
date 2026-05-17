@@ -2068,6 +2068,16 @@ class DeepSeekV3Builder(GraphBuilder):
         qb_slice_kwargs = dict(
             input_row_stride=self._qkv_a_row_stride,
             input_col_offset=self._qkv_a_q_offset)
+        # B24 (2026-05-15): when dual-dispatch is active, decode q_b
+        # and prefill q_b both quantize self.q_a_out with K=q_lora=1536.
+        # Share the quantize task between them — saves one ~5 us wave
+        # dispatch per layer on decode iters (the prefill quantize was
+        # early-exiting on decode but still paying the dispatch cost).
+        # Hoisted above the bmm branch so _dsv3_bmm path can still share
+        # quantize with prefill q_b_nope/pe below (fixes UnboundLocalError).
+        qb_share_tag = (
+            f"layer_{layer_idx}_qb_q_a_shared"
+            if self._use_prefill else None)
         if self._dsv3_bmm:
             # MPK_DSV3_BMM=1: replace the load-time absorbed q_b_proj with
             # runtime BMM-based absorption. Five tasks instead of one
@@ -2076,14 +2086,6 @@ class DeepSeekV3Builder(GraphBuilder):
             self._bmm_decode_q_path(state_dict, attn, layer_idx, qb_slice_kwargs)
         else:
             # Existing absorbed-Q path (default).
-            # B24 (2026-05-15): when dual-dispatch is active, decode q_b
-            # and prefill q_b both quantize self.q_a_out with K=q_lora=1536.
-            # Share the quantize task between them — saves one ~5 us wave
-            # dispatch per layer on decode iters (the prefill quantize was
-            # early-exiting on decode but still paying the dispatch cost).
-            qb_share_tag = (
-                f"layer_{layer_idx}_qb_q_a_shared"
-                if self._use_prefill else None)
             w_q_b, s_q_b = self._attach_fp8_weight(
                 state_dict, f"{attn}q_b_proj.weight",
                 f"layer_{layer_idx}_q_b_proj")
