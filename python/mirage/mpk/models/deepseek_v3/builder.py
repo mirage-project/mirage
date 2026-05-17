@@ -3098,12 +3098,17 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         # Router is full-replica on every rank; no inter-rank synchronization is
         # needed before the local top-k routing mask is produced.
+        # C13 (2026-05-17): VPT 8 -> 16 (env MPK_DSV3_TOPK_VPT) makes the
+        # kernel template pick ROWS_PER_WARP=2 instead of 1. block_dim stays
+        # at 256 (8 warps); only ROWS_PER_CTA changes from 8 to 16. The
+        # change actually lives in src/kernel/task_register.cc (template arg);
+        # this comment exists so callers know the parity.
         self.mpk.moe_topk_sigmoid_routing_layer(
             input=router_logits,
             bias=w_bias,
             output=(moe_topk_weights, moe_routing_indices, moe_mask),
             grid_dim=(1, 1, 1),
-            block_dim=(256, 1, 1),  # 8 warps required by topk kernel
+            block_dim=(256, 1, 1),
             local_expert_start=self.local_expert_start,
         )
 

@@ -2537,9 +2537,22 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // C13 (2026-05-17, REVERTED): tried VPT 8 -> 16 to double ROWS_PER_WARP
+  // and halve outer-loop iters. Per-call TOPK_SIGMOID dropped 109 -> 83 μs
+  // (-24%), BUT the megakernel's per-token latency REGRESSED 86 -> 122 ms
+  // (+42%) — likely register pressure from VPT=16 inflating per-thread
+  // arrays (row_chunk[16] + biased_chunk[16]) and globally pinning the
+  // megakernel to a lower occupancy via the shared __launch_bounds__.
+  // Revert keeps the env hook for opt-in only; default = legacy VPT=8.
+  char const *_vpt_env = std::getenv("MPK_DSV3_TOPK_VPT");
+  int topk_vpt = _vpt_env ? std::atoi(_vpt_env) : 8;
+  if (topk_vpt < 4 || topk_vpt > 32 ||
+      (topk_vpt & (topk_vpt - 1)) != 0) {
+    topk_vpt = 8;
+  }
   code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
          "$, $, $>(",
-         /*VPT=*/8,
+         /*VPT=*/topk_vpt,
          /*EXPERTS=*/num_experts,
          /*LOCAL_EXPERTS=*/num_local_experts,
          /*WARPS_PER_TB=*/8,
