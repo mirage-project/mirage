@@ -1735,6 +1735,13 @@ class DeepSeekV3Builder(GraphBuilder):
         self._qkv_a_c_latent_offset = self.q_lora_rank             # 1536
         self._qkv_a_k_pe_offset = self.q_lora_rank + self.kv_lora_rank  # 2048
         # All three downstream "slots" share the same backing buffer.
+        # NOTE (C20, 2026-05-17): we considered replacing this aliasing
+        # with `mpk.narrow` views, but the existing task_register reads
+        # `dtensor.dim[1]` (not `stride[0]`) for IN_ROW_STRIDE in
+        # rmsnorm/quantize/fp8_gemm kernels. A view of qkv_a_out has
+        # dim[1]=slot_width but stride[0]=parent_width — using dim as
+        # stride would CORRUPT the adjacent slot. View API integration
+        # for this fused tensor requires task_register updates first.
         self.q_a_out = self.qkv_a_out
         self.q_a_out_buf = None
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
@@ -1795,6 +1802,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # the builder passes (row_stride, offset, process_dim) so each kernel
         # reads/writes only its slice.
         self.c_latent_out_buf = None
+        # See note above: aliased to qkv_a_out until task_register learns to
+        # read `stride[0]` instead of `dim[1]` for IN_ROW_STRIDE on views.
         self.c_latent_out = self.qkv_a_out
         self.k_pe_out = self.qkv_a_out
         # Combined KV entry after layernorm: [batch, 576]
