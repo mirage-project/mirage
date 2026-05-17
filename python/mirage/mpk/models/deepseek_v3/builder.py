@@ -2746,19 +2746,21 @@ class DeepSeekV3Builder(GraphBuilder):
             bm_padding=bm_pad,
         )
         if upto < 6: return
-        # 6) Quantize SiLU → UE8M0, then transpose to K-outermost.
-        # B15 (2026-05-15): when active-skip is on, supply meta so the
-        # quantize codegen reads active_mask[my_expert] (skip inactive
-        # expert tile entirely) + actual_count[my_expert] (cap inner
-        # row loop to actual_count instead of BM_PADDING). Decode iter
-        # active=1 → ~120/128 CTAs early-return + 8 active CTAs process
-        # 1 row instead of 128.
+        # 6) Quantize SiLU → UE8M0 directly into K-outermost layout.
+        # C8 (2026-05-16): quantize_fp8 kernel writes UE8M0 packed scale at
+        # offset `packed_idx * aligned_batch + batch_idx` which IS K-outer
+        # row-major. The previous (m_total, K_PACKED) declaration was a
+        # "shape lie" that required a separate transpose_scale task to
+        # reconcile. By declaring the output as (K_PACKED, m_total) the
+        # write pattern matches the declared shape, and the downstream W2
+        # SFA TMA descriptor (which expects K-outer) reads correct bytes
+        # directly — eliminating TRANSPOSE_SCALE (-19 μs/layer).
         if self._new_moe_active_skip:
             num_local_experts = m_total // bm_pad
             self.mpk.quantize_fp8_layer(
                 input=new_moe_silu_out,
                 output_fp8=new_moe_silu_fp8,
-                output_scale=new_moe_silu_scale_Mfirst,
+                output_scale=new_moe_silu_scale,
                 grid_dim=(m_total, 1, 1),
                 block_dim=(128, 1, 1),
                 scale_ue8m0=True,
@@ -2773,17 +2775,14 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.quantize_fp8_layer(
                 input=new_moe_silu_out,
                 output_fp8=new_moe_silu_fp8,
-                output_scale=new_moe_silu_scale_Mfirst,
+                output_scale=new_moe_silu_scale,
                 grid_dim=(m_total, 1, 1),
                 block_dim=(128, 1, 1),
                 scale_ue8m0=True,
                 process_all_rows=True,
             )
-        if upto < 7: return
-        self.mpk.transpose_scale_sm100_layer(
-            scale_in=new_moe_silu_scale_Mfirst,
-            scale_out=new_moe_silu_scale,
-        )
+        # C8: transpose_scale eliminated — quantize_fp8 writes directly
+        # into the K-outer-declared new_moe_silu_scale.
         if upto < 8: return
         # 7+8) Pack W2 weight scale + attach W2 weight + Group GEMM W2.
         w2_scale_key_for_pack = f"{prefix}experts.w2.weight_scale_inv"
