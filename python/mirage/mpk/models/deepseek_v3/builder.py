@@ -2291,7 +2291,7 @@ class DeepSeekV3Builder(GraphBuilder):
                                   new_moe_input_fp8, new_moe_input_scale,
                                   new_moe_permuted_in_fp8,
                                   new_moe_permuted_in_scale,
-                                  new_moe_meta, new_moe_meta_dummy,
+                                  new_moe_meta,
                                   new_moe_w13_out, new_moe_silu_out,
                                   new_moe_silu_fp8,
                                   new_moe_silu_scale_Mfirst,
@@ -2317,10 +2317,15 @@ class DeepSeekV3Builder(GraphBuilder):
             scale_ue8m0=True,
         )
         if upto < 2: return
-        # 2) Zero-init meta.
+        # 2) Zero-init meta. The dummy=new_moe_input_fp8 trick chains the
+        # tensor_init between the upstream quantize_fp8 (which writes
+        # new_moe_input_fp8) and the downstream moe_permute_sm100 (which reads
+        # new_moe_input_fp8). With those RAW edges in place, no WAW edge on
+        # `new_moe_meta` is required to serialize this zero-fill against
+        # moe_permute's write of the same buffer — the Q→T→P chain dominates.
         self.mpk.tensor_init_layer(
             target=new_moe_meta,
-            dummy=new_moe_meta_dummy,
+            dummy=new_moe_input_fp8,
             grid_dim=(1, 1, 1), block_dim=(128, 1, 1),
             dummy_input_map=(-1, -1, -1),
             target_input_map=(-1, -1, -1),
@@ -2563,10 +2568,6 @@ class DeepSeekV3Builder(GraphBuilder):
                 dtype=int32,
                 name=f"layer_{layer_idx}_new_moe_meta",
                 io_category="cuda_tensor")
-            new_moe_meta_dummy = self.mpk.new_tensor(
-                dims=(1, 1), dtype=int32,
-                name=f"layer_{layer_idx}_new_moe_meta_dummy",
-                io_category="cuda_tensor")
             new_moe_w13_out = self.mpk.new_tensor(
                 dims=(m_total, N_w13), dtype=bfloat16,
                 name=f"layer_{layer_idx}_new_moe_w13_out",
@@ -2604,7 +2605,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     moe_topk_weights, moe_routing_indices,
                     new_moe_input_fp8, new_moe_input_scale,
                     new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-                    new_moe_meta, new_moe_meta_dummy,
+                    new_moe_meta,
                     new_moe_w13_out, new_moe_silu_out,
                     new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
                     new_moe_silu_scale, new_moe_w2_out)
