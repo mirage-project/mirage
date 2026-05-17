@@ -2,6 +2,13 @@
 
 from .linear import Linear
 from .linear_with_residual import LinearWithResidual
+from .parallel_linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+    RowParallelLinearWithResidual,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+)
 from .linear_fp8 import (
     LinearFP8,
     LinearFP8WithResidual,
@@ -21,6 +28,11 @@ from .fp8_group_gemm import (
 __all__ = [
     "Linear",
     "LinearWithResidual",
+    "ColumnParallelLinear",
+    "RowParallelLinear",
+    "RowParallelLinearWithResidual",
+    "MergedColumnParallelLinear",
+    "QKVParallelLinear",
     "LinearFP8",
     "LinearFP8WithResidual",
     "LinearFP8SwapAB",
