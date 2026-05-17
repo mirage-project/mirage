@@ -115,6 +115,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // wrote g MOST RECENTLY before L. After L is processed, L's outputs update
   // last_writer. Subsequent reads see L as the new writer. This is exactly
   // SSA-style def-use: we're implicitly renaming the reused buffer.
+  //
+  // Tensor-init writes need a program-order WAW edge to the next writer of the
+  // same guid. MPK uses this for MoE zero-fill followed by expert accumulation;
+  // without the edge, parallel-path scheduling can run the two writers
+  // concurrently even though the old linear schedule made zero-fill visible
+  // first. We intentionally do not add WAW edges for arbitrary scratch reuse:
+  // RAW edges already protect live ranges, and global WAW edges over-constrain
+  // common recycled scratch buffers.
   // ---------------------------------------------------------------------
   // Multi-writer last-writer map, keyed by the underlying storage's GUID
   // (resolve_base_guid). Each entry records the (layer, out_slot) producer
@@ -240,6 +248,61 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       bool o_is_virtual = odt.is_virtual();
       int64_t o_off = o_is_virtual ? odt.view_offset : 0;
       int64_t o_size = static_cast<int64_t>(odt.bytes_size());
+
+      // Preserve the TASK_TENSOR_INIT WAW behaviour: if the previous writer
+      // was a zero-fill (init) for the SAME tensor (matching guid + window),
+      // add an explicit WAW edge so the next writer waits for init.
+      if (!o_is_virtual) {
+        auto wit = last_writers.find(base);
+        if (wit != last_writers.end()) {
+          for (WriterEntry const &we : wit->second) {
+            if (we.is_virtual_writer) {
+              continue;
+            }
+            if (ag.layers[we.layer].task_type !=
+                mirage::runtime::TASK_TENSOR_INIT) {
+              continue;
+            }
+            bool duplicate_edge = false;
+            for (int eidx : ag.layers[layer_idx].in_edges) {
+              EdgeInfo const &existing = ag.edges[eidx];
+              if (existing.prod_layer == we.layer &&
+                  existing.out_slot == we.out_slot &&
+                  existing.tensor_guid == static_cast<size_t>(odt.guid)) {
+                duplicate_edge = true;
+                break;
+              }
+            }
+            if (!duplicate_edge) {
+              EdgeInfo e;
+              e.prod_layer = we.layer;
+              e.cons_layer = layer_idx;
+              e.out_slot = we.out_slot;
+              e.in_slot = -1;
+              e.tensor_guid = odt.guid;
+              e.input_map = output_ops[out_slot]->input_map;
+              auto const *prod_op = ag.layers[we.layer].op;
+              std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
+              split_bgraph_ops(prod_op->bgraph,
+                               ag.layers[we.layer].num_inputs,
+                               prod_inputs,
+                               prod_outputs);
+              if (we.out_slot < 0 ||
+                  we.out_slot >= (int)prod_outputs.size()) {
+                throw std::runtime_error(
+                    "build_annotated_graph: invalid out_slot for WAW producer");
+              }
+              e.output_map = prod_outputs[we.out_slot]->input_map;
+              // WAW edges keep the non-virtual semantics they had before;
+              // is_barrier_edge stays false unless we explicitly need it.
+              int edge_idx = (int)ag.edges.size();
+              ag.edges.push_back(e);
+              ag.layers[layer_idx].in_edges.push_back(edge_idx);
+              ag.layers[we.layer].out_edges.push_back(edge_idx);
+            }
+          }
+        }
+      }
 
       WriterEntry we{layer_idx, out_slot, o_off, o_size, o_is_virtual};
       if (!o_is_virtual) {
@@ -457,6 +520,19 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       msg << "build_annotated_graph: layer " << i
           << " is both a join-consumer and a fork-consumer (case 2); "
              "a task cannot have two trigger_events.";
+      msg << " task_type=" << static_cast<int>(ag.layers[i].task_type)
+          << " in_edges=";
+      for (int eidx : ag.layers[i].in_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
+      msg << " out_edges=";
+      for (int eidx : ag.layers[i].out_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
       throw std::runtime_error(msg.str());
     }
     if (is_join_producer[i] && ag.layers[i].is_fork_producer) {
@@ -464,6 +540,61 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       msg << "build_annotated_graph: layer " << i
           << " is both a join-producer and a fork-producer (case 3); "
              "a task cannot have two dependent_events.";
+      msg << " task_type=" << static_cast<int>(ag.layers[i].task_type)
+          << " in_edges=";
+      for (int eidx : ag.layers[i].in_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
+      msg << " out_edges=";
+      for (int eidx : ag.layers[i].out_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
+      // Diagnostic: dump each consumer's in_edges so we can see which
+      // consumer is the join-consumer that made this layer a
+      // join-producer.
+      for (int eidx : ag.layers[i].out_edges) {
+        int cons = ag.edges[eidx].cons_layer;
+        if (cons < 0 || cons >= (int)ag.layers.size()) {
+          continue;
+        }
+        auto const &CL = ag.layers[cons];
+        msg << "\n  consumer L" << cons
+            << " task_type=" << static_cast<int>(CL.task_type)
+            << (CL.is_join_consumer ? " [JOIN-CONSUMER]" : "")
+            << " in=" << CL.in_edges.size() << ":";
+        for (int ie : CL.in_edges) {
+          auto const &ce = ag.edges[ie];
+          msg << " [" << ce.prod_layer << ":" << ce.out_slot << "->" << cons
+              << ":" << ce.in_slot << " guid=" << ce.tensor_guid << "]";
+        }
+      }
+      // Extra diagnostic: for the first non-join-consumer fork-out
+      // sibling of i (typically L1 = fused task), dump its forward
+      // reachable set + out_edges so we can see why the strip pass
+      // didn't remove i->{join-consumer} (it should have, if the
+      // sibling reaches the join-consumer via a longer path).
+      for (int eidx : ag.layers[i].out_edges) {
+        int cons = ag.edges[eidx].cons_layer;
+        if (cons < 0 || cons >= (int)ag.layers.size()) {
+          continue;
+        }
+        if (ag.layers[cons].is_join_consumer) {
+          continue;
+        }
+        msg << "\n  sibling L" << cons
+            << " task_type=" << static_cast<int>(ag.layers[cons].task_type)
+            << " out_edges:";
+        for (int oe : ag.layers[cons].out_edges) {
+          auto const &oce = ag.edges[oe];
+          msg << " [L" << cons << ":" << oce.out_slot << "->L" << oce.cons_layer
+              << ":" << oce.in_slot << " guid=" << oce.tensor_guid << "]";
+        }
+        break;
+      }
       throw std::runtime_error(msg.str());
     }
   }
@@ -616,7 +747,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     ForkGroupInfo fg;
     fg.producer_layer = i;
-    fg.outgoing_edges = ag.layers[i].out_edges;
+    std::unordered_set<int> seen_consumers;
+    for (int eidx : ag.layers[i].out_edges) {
+      int cons_layer = ag.edges[eidx].cons_layer;
+      if (seen_consumers.insert(cons_layer).second) {
+        fg.outgoing_edges.push_back(eidx);
+      }
+    }
 
     // N-way LCM per grid axis.
     std::array<int, 3> lcm_last3{};
@@ -695,7 +832,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     JoinGroupInfo jg;
     jg.consumer_layer = i;
-    jg.incoming_edges = ag.layers[i].in_edges;
+    std::unordered_set<int> seen_producers;
+    for (int eidx : ag.layers[i].in_edges) {
+      int prod_layer = ag.edges[eidx].prod_layer;
+      if (seen_producers.insert(prod_layer).second) {
+        jg.incoming_edges.push_back(eidx);
+      }
+    }
 
     std::array<int, 3> lcm_last3{};
     for (int g = 0; g < 3; g++) {
