@@ -184,11 +184,26 @@ def add(
     if block_dim is None:
         block_dim = _default_block_dim(pk.target_cc)
 
-    pk.elementwise_add_layer(
-        input_a=a,
-        input_b=b,
-        output=out_dt,
-        grid_dim=grid_dim,
-        block_dim=block_dim,
-    )
+    # Inlined task registration (the body that used to live on
+    # ``PersistentKernel.elementwise_add_layer``). Each catalog module
+    # owns its own task wiring so adding a new layer doesn't require
+    # editing ``persistent_kernel.py``.
+    #
+    # The pk method also exposes a ``in_a_row_stride`` / ``in_a_col_offset``
+    # column-slice variant. ``add()`` does not surface that knob (matches
+    # legacy behaviour); callers that need it must register the task
+    # directly. The single SM100 kernel handles every supported arch in
+    # the legacy pk method.
+    from ....core import CyTBGraph
+    from ....kernel import TBGraph
+
+    assert a.num_dims == 2
+    assert b.num_dims == 2
+    assert out_dt.num_dims == 2
+    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+    tb_graph.new_input(a, (0, -1, -1), -1, True)
+    tb_graph.new_input(b, (0, -1, -1), -1, True)
+    tb_graph.new_input(out_dt, (0, -1, -1), -1, True)
+    pk.kn_graph.customized([a, b, out_dt], tb_graph)
+    pk.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
     return out_dt

@@ -1,14 +1,14 @@
 """Dense bf16 linear projection (no bias, no residual) for the MPK catalog.
 
-Backed by :meth:`PersistentKernel.linear_layer`. The underlying CUDA tasks
-are architecture-specific:
+The underlying CUDA tasks are architecture-specific:
 
 * ``include/mirage/persistent_kernel/tasks/ampere/linear.cuh``        (CC 80–89, task ``"linear"``)
 * ``include/mirage/persistent_kernel/tasks/hopper/linear_swapAB_hopper.cuh`` (CC 90, task ``"linear_swapAB_hopper"``)
 * ``include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_mpk.cuh``  (CC 100, task ``"linear_sm100"``)
 
-The python wrapper in ``persistent_kernel.py`` (line ~2935) picks the
-task name from ``self.target_cc``; we delegate to it unchanged.
+``compile()`` registers the task directly on ``current_pk().kn_graph`` —
+no ``pk.linear_layer`` indirection. The task-name dispatch lives here,
+not on PersistentKernel.
 
 Tensor contract
 ---------------
@@ -274,11 +274,35 @@ class Linear(MPKModule):
             # DTensor (or DTensor-like) — caller owns the registration.
             out_dt = output
 
-        pk.linear_layer(
-            input=x,
-            weight=w_dt,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.linear_layer``). Each catalog module owns its
+        # own task wiring so adding a new layer doesn't require editing
+        # ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert x.num_dims == 2
+        assert w_dt.num_dims == 2
+        assert out_dt.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (-1, -1, -1), 1, True)
+        tb_graph.new_input(w_dt, (0, -1, -1), 1, True)
+        tb_graph.new_input(out_dt, (1, -1, -1), -1, True)
+        pk.kn_graph.customized([x, w_dt, out_dt], tb_graph)
+
+        if 100 <= pk.target_cc < 120:
+            pk.kn_graph.register_task(tb_graph, "linear_sm100")
+        elif 90 <= pk.target_cc < 100:
+            # Hopper: swapAB variant. The legacy code had a now-vestigial
+            # branch on per-task output width that always picked the same
+            # task name, so we use the one variant unconditionally.
+            pk.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
+        elif 80 <= pk.target_cc < 90:
+            pk.kn_graph.register_task(tb_graph, "linear")
+        else:
+            raise RuntimeError(
+                f"Linear.compile: unsupported compute capability "
+                f"{pk.target_cc}. Supported: SM80-89 (Ampere), SM90 "
+                f"(Hopper), SM100-119 (Blackwell)."
+            )
         return out_dt
