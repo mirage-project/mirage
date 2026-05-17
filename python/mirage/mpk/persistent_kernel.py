@@ -204,7 +204,7 @@ def _mla_tp4_head_groups():
     return value
 
 def _mla_tp4_rd_dv():
-    value = int(os.environ.get("MPK_MLA_TP4_RD_DV", "2"))
+    value = int(os.environ.get("MPK_MLA_TP4_RD_DV", "4"))
     if value not in (2, 4, 8):
         raise ValueError("MPK_MLA_TP4_RD_DV must be one of 2, 4, 8")
     return value

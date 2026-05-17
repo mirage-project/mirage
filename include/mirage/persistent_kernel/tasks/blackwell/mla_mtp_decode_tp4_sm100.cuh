@@ -69,8 +69,11 @@ static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES + 1024;
 // Reduce kernel. Each reduce CTA covers RD_DV value columns. Keeping this as a
 // compile-time knob lets us ablate the tradeoff between many tiny CTAs
 // (RD_DV=2) and more serial work inside each CTA (RD_DV>2).
+// C19 (2026-05-17): default 2 → 4 collapses the reduce grid from 256 CTAs
+// to 128 CTAs, fitting in exactly one wave on the 128-worker persistent
+// runtime. Saves the second-wave latency on the MLA decode critical path.
 #ifndef MIRAGE_MLA_TP4_RD_DV
-#define MIRAGE_MLA_TP4_RD_DV 2
+#define MIRAGE_MLA_TP4_RD_DV 4
 #endif
 static constexpr int RD_DV = MIRAGE_MLA_TP4_RD_DV;
 static_assert(RD_DV == 2 || RD_DV == 4 || RD_DV == 8,
