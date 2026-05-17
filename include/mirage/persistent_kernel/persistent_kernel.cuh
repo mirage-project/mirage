@@ -972,6 +972,11 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                event_id,
                count);
 #endif
+        // if (threadIdx.x == 0 && task_desc->task_type == 251) {
+        //     printf("[splitk_ev] event_index=%lu count=%llu num_triggers=%d iter=%llu\n",
+        //           event_index, count, num_triggers,
+        //           get_task_iteration_num(task_ids[queue_pos]));
+        // }
 
         if ((count + 1) == static_cast<EventCounter>(num_triggers) *
                                get_task_iteration_num(task_ids[queue_pos])) {
