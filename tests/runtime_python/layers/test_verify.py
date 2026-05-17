@@ -11,7 +11,10 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
-from mirage.mpk.layers.mtp.verify import MTPVerify, MTPAcceptCommit
+from mirage.mpk.layers.mtp.verify import (
+    MTPVerifyStrict, MTPVerifyProbabilistic, MTPVerifyTargetGreedy,
+    MTPAcceptCommit,
+)
 
 
 def _make_pk(batch_size):
@@ -58,7 +61,7 @@ def test_verify_strict_smoke():
         batch_size, num_draft_tokens + 1, dtype=torch.int64, device=device,
     )
 
-    m = MTPVerify(num_draft_tokens=num_draft_tokens, mode="strict", prefix="v_")
+    m = MTPVerifyStrict(num_draft_tokens=num_draft_tokens, prefix="v_")
     pk = _make_pk(batch_size)
 
     d_dt = pk.attach_input(draft_tok, name="draft_strict")
@@ -95,8 +98,8 @@ def test_verify_target_greedy_smoke():
         batch_size, num_draft_tokens + 1, dtype=torch.int64, device=device,
     )
 
-    m = MTPVerify(
-        num_draft_tokens=num_draft_tokens, mode="target_greedy", prefix="vg_",
+    m = MTPVerifyTargetGreedy(
+        num_draft_tokens=num_draft_tokens, prefix="vg_",
     )
     pk = _make_pk(batch_size)
     d_dt = pk.attach_input(draft_tok, name="draft_greedy")
@@ -105,7 +108,7 @@ def test_verify_target_greedy_smoke():
     o_dt = pk.attach_input(output_tokens, name="output_greedy")
 
     with pk.compile_scope():
-        _ = m.compile(d_dt, t_dt, a_dt, o_dt)
+        _ = m.compile(d_dt, t_dt, a_dt)
 
     print("Compiling MTPVerify(target_greedy)...")
     _run_and_check(pk, accepted_count, output_tokens)
@@ -139,8 +142,8 @@ def test_verify_probabilistic_smoke():
     )
     seed = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
-    m = MTPVerify(
-        num_draft_tokens=num_draft_tokens, mode="probabilistic", prefix="vp_",
+    m = MTPVerifyProbabilistic(
+        num_draft_tokens=num_draft_tokens, prefix="vp_",
     )
     pk = _make_pk(batch_size)
 
@@ -153,10 +156,8 @@ def test_verify_probabilistic_smoke():
     sd_dt = pk.attach_input(seed, name="seed_prob")
 
     with pk.compile_scope():
-        _ = m.compile(
-            d_dt, t_dt, a_dt, o_dt,
-            target_probs=tp_dt, draft_probs=dp_dt, seed=sd_dt,
-        )
+        # New positional order: draft, target, target_probs, draft_probs, seed, accepted_count, output_tokens
+        _ = m.compile(d_dt, t_dt, tp_dt, dp_dt, sd_dt, a_dt, o_dt)
 
     print("Compiling MTPVerify(probabilistic)...")
     _run_and_check(pk, accepted_count, output_tokens, target_probs, draft_probs)

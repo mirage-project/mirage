@@ -1,35 +1,14 @@
-"""Probability buffer scatter/extract — symmetric pair for prob accumulation.
+"""Rolling probability buffer scatter / extract (SM100).
 
-Two SM100 helpers that move per-step probabilities in and out of a
-``(batch, max_positions)`` rolling float32 buffer keyed by a runtime
-``step``/``offset`` int32 meta-tensor:
-
-* :class:`ProbScatter` -> :meth:`PersistentKernel.prob_scatter_layer`
-  -> task ``prob_scatter_sm100``. Writes ``prob[b, 0]`` into
-  ``buffer[b, step_counter[b]]``.
-
-* :class:`ProbExtract` -> :meth:`PersistentKernel.prob_extract_layer`
-  -> task ``prob_extract_sm100``. Reads
-  ``buffer[b, offset[b]+1 : offset[b]+1+num_extract]`` into a
-  contiguous ``(batch, num_extract)`` output.
-
-These are the read/write halves of the probabilistic-MTP target-probability
-buffer: main-model softmax-gather results are scattered each iteration via
-:class:`ProbScatter`, and at verify time the target probabilities for the
-next ``num_extract`` positions are extracted via :class:`ProbExtract`.
-
-Runtime-metadata dependence
----------------------------
-Both kernels read an int32 ``step_counter`` / ``offset`` tensor. In
-production these are MPK runtime meta-tensors (see the DeepSeek V3
-builder ``_cached_attach(step_tensor, ...)`` pattern), but they appear as
-ordinary input DTensors to these layers. :meth:`forward` is provided as
-a faithful PyTorch reference that takes the offset/counter as a real
-torch tensor.
+Symmetric pair around ``prob_scatter_sm100`` / ``prob_extract_sm100``
+in ``include/mirage/persistent_kernel/tasks/blackwell/prob_scatter_sm100.cuh``.
+``ProbScatter`` writes ``buffer[b, step_counter[b]]``; ``ProbExtract``
+reads ``buffer[b, offset[b]+1 : offset[b]+1+num_extract]`` (verify
+starts at ``step+1``). Both indices are int32 runtime meta-tensors.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -43,17 +22,10 @@ __all__ = ["ProbScatter", "ProbExtract"]
 
 
 class ProbScatter(MPKModule):
-    """Scatter per-request prob into a rolling per-position buffer.
+    """Scatter ``prob[b, 0]`` into ``buffer[b, step_counter[b]]``.
 
-    Wraps :meth:`PersistentKernel.prob_scatter_layer` (task
-    ``prob_scatter_sm100``). For each batch row ``b``::
-
-        buffer[b, step_counter[b]] = prob[b, 0]
-
-    Args:
-        max_positions: Width of ``buffer`` (max number of positions
-            tracked). Baked into the task params.
-        prefix:        vLLM/HF state_dict prefix.
+    Wraps task ``prob_scatter_sm100``. Params: ``[max_positions]``.
+    ``step_counter`` is int32; out-of-range positions are dropped.
     """
 
     def __init__(
@@ -70,26 +42,13 @@ class ProbScatter(MPKModule):
             )
         self.max_positions = max_positions
 
-    # ------------------------------------------------------------------
-    # PyTorch reference.
-    # ------------------------------------------------------------------
     def forward(
         self,
         prob: torch.Tensor,
         step_counter: torch.Tensor,
         buffer: torch.Tensor,
     ) -> torch.Tensor:
-        """Reference: ``buffer[b, step_counter[b]] = prob[b, 0]``.
-
-        Args:
-            prob:         ``(batch, 1)`` float32.
-            step_counter: ``(batch,)`` int32 (or int64) — per-request
-                          write position into ``buffer``.
-            buffer:       ``(batch, max_positions)`` float32. Mutated.
-
-        Returns:
-            ``buffer`` (after in-place write).
-        """
+        """Reference: ``buffer[b, step_counter[b]] = prob[b, 0]`` (in-place)."""
         if prob.dim() != 2 or prob.shape[1] != 1:
             raise ValueError(
                 f"ProbScatter.forward expects prob of shape (batch, 1); "
@@ -113,16 +72,11 @@ class ProbScatter(MPKModule):
         buffer[batch_idx, pos] = prob[:, 0]
         return buffer
 
-    # ------------------------------------------------------------------
-    # Grid heuristic.
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
-        """Default grid ``(1, 1, 1)``."""
+        """``(1, 1, 1)`` — kernel loops batch internally (``tid==0`` writes
+        all rows); single scalar write per batch element."""
         return (1, 1, 1)
 
-    # ------------------------------------------------------------------
-    # MPK compile path.
-    # ------------------------------------------------------------------
     def compile(
         self,
         prob: DTensor,
@@ -132,17 +86,18 @@ class ProbScatter(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register one ``prob_scatter_sm100`` task on the active PK.
+        """Register one ``prob_scatter_sm100`` task.
 
-        Args:
-            prob:         ``(batch, 1)`` float32 DTensor.
-            step_counter: ``(batch,)`` int32 DTensor — runtime step.
-            buffer:       ``(batch, max_positions)`` float32 DTensor.
-            grid_dim:     Override; ``None`` -> :meth:`auto_grid_dim`.
-            block_dim:    Override; ``None`` -> :meth:`default_block_dim`.
+        Tensor contract:
+          prob:         (batch_size, 1) float32, dense. Per-batch prob.
+          step_counter: (batch_size,) int32. Runtime position index per
+                        batch row; kernel reads ``step_counter[b]``.
+          buffer:       (batch_size, max_positions) float32, dense.
+                        In-place output; writes a single column per row
+                        (``buffer[b, step_counter[b]]``), no-op if OOB.
+        Params: ``[max_positions]``; ``batch_size`` inferred.
 
-        Returns:
-            ``buffer`` (consumed for its side effect).
+        Notes: ``step_counter`` is the runtime meta-tensor dependency.
         """
         pk = current_pk()
 
@@ -151,7 +106,6 @@ class ProbScatter(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (formerly pk.prob_scatter_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 
@@ -166,18 +120,11 @@ class ProbScatter(MPKModule):
 
 
 class ProbExtract(MPKModule):
-    """Extract a contiguous slice of the rolling prob buffer.
+    """Read ``buffer[b, offset[b]+1 : offset[b]+1+num_extract]``.
 
-    Wraps :meth:`PersistentKernel.prob_extract_layer` (task
-    ``prob_extract_sm100``). For each batch row ``b``::
-
-        output[b, :] = buffer[b, offset[b]+1 : offset[b]+1+num_extract]
-
-    Args:
-        max_positions: Width of ``buffer``. Baked into params.
-        num_extract:   Number of positions to read into ``output``
-            (typically ``num_draft_tokens``). Baked into params.
-        prefix:        vLLM/HF state_dict prefix.
+    Wraps task ``prob_extract_sm100``. Params:
+    ``[max_positions, num_extract]``. The ``+1`` matches the verifier
+    starting at ``step + 1``; out-of-range reads emit ``0.0f``.
     """
 
     def __init__(
@@ -201,24 +148,12 @@ class ProbExtract(MPKModule):
         self.max_positions = max_positions
         self.num_extract = num_extract
 
-    # ------------------------------------------------------------------
-    # PyTorch reference.
-    # ------------------------------------------------------------------
     def forward(
         self,
         buffer: torch.Tensor,
         offset: torch.Tensor,
     ) -> torch.Tensor:
-        """Reference: ``buffer[b, offset[b]+1 : offset[b]+1+num_extract]``.
-
-        Args:
-            buffer: ``(batch, max_positions)`` float32.
-            offset: ``(batch,)`` int32 — per-request start (kernel reads
-                    ``offset[b]+1 .. offset[b]+num_extract``).
-
-        Returns:
-            ``(batch, num_extract)`` float32.
-        """
+        """Reference: ``buffer[b, offset[b]+1 : offset[b]+1+num_extract]``."""
         if buffer.dim() != 2:
             raise ValueError(
                 f"ProbExtract.forward expects 2-D buffer; "
@@ -236,22 +171,16 @@ class ProbExtract(MPKModule):
             device=buffer.device,
             dtype=buffer.dtype,
         )
-        # Faithful loop — kernel does the same indexing per request.
         for b in range(batch):
             start = int(offsets[b].item()) + 1
             out[b] = buffer[b, start : start + self.num_extract]
         return out
 
-    # ------------------------------------------------------------------
-    # Grid heuristic.
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
-        """Default grid ``(1, 1, 1)``."""
+        """``(1, 1, 1)`` — kernel parallelises ``num_extract`` along
+        ``threadIdx.x`` and strides batch internally; one CTA suffices."""
         return (1, 1, 1)
 
-    # ------------------------------------------------------------------
-    # MPK compile path.
-    # ------------------------------------------------------------------
     def compile(
         self,
         buffer: DTensor,
@@ -261,18 +190,19 @@ class ProbExtract(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register one ``prob_extract_sm100`` task on the active PK.
+        """Register one ``prob_extract_sm100`` task.
 
-        Args:
-            buffer: ``(batch, max_positions)`` float32 DTensor.
-            offset: ``(batch,)`` int32 DTensor — runtime offset.
-            output: ``(batch, num_extract)`` float32 DTensor. Written by
-                    the kernel.
-            grid_dim: Override; ``None`` -> :meth:`auto_grid_dim`.
-            block_dim: Override; ``None`` -> :meth:`default_block_dim`.
+        Tensor contract:
+          buffer: (batch_size, max_positions) float32, dense. Source
+                  rolling prob buffer.
+          offset: (batch_size,) int32. Runtime offset per row; kernel
+                  reads ``buffer[b, offset[b]+1 : offset[b]+1+K]``.
+          output: (batch_size, num_extract) float32, dense. Output;
+                  out-of-range slots get ``0.0f``.
+        Params: ``[max_positions, num_extract]``.
 
-        Returns:
-            ``output`` (consumed for its side effect).
+        Notes: ``offset`` is the runtime meta-tensor dependency; the
+        ``+1`` aligns with verify starting at ``step + 1``.
         """
         pk = current_pk()
 
@@ -281,7 +211,6 @@ class ProbExtract(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (formerly pk.prob_extract_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 

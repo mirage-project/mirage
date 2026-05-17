@@ -1,31 +1,15 @@
-"""MTP embedding-input builder — populate per-iteration token buffer.
+"""MTP per-iteration embedding-input builder.
 
-Catalog wrapper around
-:meth:`PersistentKernel.mtp_build_embed_input_layer` (task
-``mtp_build_embed_input``). Builds the ``mtp_input_tokens`` buffer that
-MTP feeds into its embedding lookup each iteration.
-
-vLLM-aligned semantics (see ``vllm/v1/spec_decode/eagle.py`` L666-669):
-
-* positions ``[0..mbt-2]`` of ``mtp_input_tokens`` read from the
-  shifted ground-truth prompt tokens
-  (``runtime_config.tokens[step[0] + i + 1]``) — i.e. teacher-forced
-  inputs during prefill / early decode.
-* position ``mbt - 1`` reads from ``output_tokens[mbt - 1]`` — the
-  current iteration's main-model argmax token.
-
-Runtime-metadata dependence
----------------------------
-
-The kernel reads ``runtime_config.tokens`` (the rolling tokens buffer)
-and ``runtime_config.step`` directly. They are MPK runtime meta-tensors
-and are NOT exposed as DTensor inputs to this layer. Consequently, a
-plain PyTorch reference of :meth:`forward` is not feasible without
-recreating the runtime — :meth:`forward` raises ``NotImplementedError``.
+Wraps task ``mtp_build_embed_input`` (``mtp_build_embed_input_kernel``)
+in ``include/mirage/persistent_kernel/tasks/speculative_decoding/mtp_token_ops.cuh``.
+For positions ``[0..mbt-2]`` reads the shifted prompt tokens from
+``runtime_config.tokens[step+i+1]``; position ``mbt-1`` reads the
+current main-model argmax. Result is the ``mtp_input_tokens`` buffer
+fed to MTP's embedding lookup.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 from .._base import BlockDim, GridDim, MPKModule
 from ...context import current_pk
@@ -37,16 +21,11 @@ __all__ = ["MTPBuildEmbedInput"]
 
 
 class MTPBuildEmbedInput(MPKModule):
-    """Populate ``mtp_input_tokens`` per MTP iteration.
+    """Populate ``mtp_input_tokens: (mbt, 1) int64`` per MTP iteration.
 
-    Wraps :meth:`PersistentKernel.mtp_build_embed_input_layer`.
-
-    Args:
-        batch_size:  First dim of ``output_tokens`` / ``mtp_input_tokens``.
-            Baked into the task params.
-        max_seq_len: Per-request stride into the runtime ``tokens``
-            buffer. Baked into params.
-        prefix:      vLLM/HF state_dict prefix.
+    Wraps task ``mtp_build_embed_input``. Params:
+    ``[batch_size, max_seq_len]``. Kernel also reads ``qo_indptr`` /
+    ``request_ids`` and clamps to ``qo_len in [1, 8]``.
     """
 
     def __init__(
@@ -68,33 +47,18 @@ class MTPBuildEmbedInput(MPKModule):
         self.batch_size = batch_size
         self.max_seq_len = max_seq_len
 
-    # ------------------------------------------------------------------
-    # PyTorch reference — depends on runtime meta-tensors.
-    # ------------------------------------------------------------------
     def forward(self, *args, **kwargs):
+        """No plain-PyTorch reference: the kernel reads
+        ``runtime_config.tokens`` and ``runtime_config.step``. Use
+        test-mode for end-to-end validation."""
         raise NotImplementedError(
-            "MTPBuildEmbedInput.forward() has no plain-PyTorch reference: "
-            "the kernel reads runtime_config.tokens and "
-            "runtime_config.step (MPK runtime meta-tensors) to fill "
-            "positions [0..mbt-2]. Use test-mode for end-to-end "
-            "validation."
+            "MTPBuildEmbedInput.forward(): runtime meta-tensors required."
         )
 
-    # ------------------------------------------------------------------
-    # Grid heuristic.
-    # ------------------------------------------------------------------
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
-        """Default grid ``(1, 1, 1)``.
-
-        The kernel iterates over the ``mbt`` positions internally per
-        request. One CTA is sufficient; matches the DeepSeek V3 builder
-        caller.
-        """
+        """``(1, 1, 1)`` — one CTA strides ``qo_len`` positions."""
         return (1, 1, 1)
 
-    # ------------------------------------------------------------------
-    # MPK compile path.
-    # ------------------------------------------------------------------
     def compile(
         self,
         output_tokens: DTensor,
@@ -103,17 +67,18 @@ class MTPBuildEmbedInput(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> DTensor:
-        """Register one ``mtp_build_embed_input`` task on the active PK.
+        """Register one ``mtp_build_embed_input`` task.
 
-        Args:
-            output_tokens:    ``(mbt, 1)`` int64 — main-model argmax.
-            mtp_input_tokens: ``(mbt, 1)`` int64 — MTP embed input
-                              buffer the kernel writes.
-            grid_dim:         Override; ``None`` -> :meth:`auto_grid_dim`.
-            block_dim:        Override; ``None`` -> :meth:`default_block_dim`.
+        Tensor contract:
+          output_tokens:    (batch_size, 1) int64, dense. Main argmax
+                            for the current MTP iteration.
+          mtp_input_tokens: (batch_size, 1) int64, dense. Output; the
+                            token IDs to embed for MTP's next step.
+        Params: ``[batch_size, max_seq_len]``.
 
-        Returns:
-            ``mtp_input_tokens`` (consumed for its side effect).
+        Notes: kernel reads ``runtime_config.tokens`` (full sequence
+        buffer), ``runtime_config.step``, ``qo_indptr_buffer`` and
+        ``request_ids``; clamped to ``qo_len in [1, 8]``.
         """
         pk = current_pk()
 
@@ -122,7 +87,6 @@ class MTPBuildEmbedInput(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (formerly pk.mtp_build_embed_input_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 

@@ -1,31 +1,14 @@
 """Interleave per-head ``q_nope`` with ``q_pe`` for MLA decode.
 
-Wraps :meth:`PersistentKernel.assemble_q_decode_sm100_layer` — task
-``assemble_q_decode_sm100``. Builds the per-head ``[nope | pe]``
-layout the MLA attention kernel expects:
+Backed by ``tasks/blackwell/assemble_q_decode_sm100.cuh``
+(``assemble_q_decode_sm100_task_impl``). Builds the per-head
+``[nope | pe]`` layout the MLA attention kernel expects. Single-CTA per
+token (kernel partitions over ``blockDim.x`` internally). Used in the
+DSv3 ``MPK_DSV3_BMM=1`` decode Q path.
 
-    q_nope_pe[n, h, :D_nope] = q_nope_abs[n, h, :]
-    q_nope_pe[n, h, D_nope:] = q_pe[n, h, :]
-
-Used by the DSv3 ``MPK_DSV3_BMM=1`` decode Q path:
-
-    rmsnorm_linear(q_a, q_b_nope) → q_nope          (N, H, 128)
-    quantize_fp8(q_nope)         → q_nope_fp8       (N, H, 128)
-    linear_fp8_bmm_sm100(...)    → q_nope_abs       (N, H, 512)
-    rmsnorm_linear(q_a, q_b_pe)  → q_pe             (N, H, 64)
-    assemble_q_decode_sm100(...) → q_nope_pe        (N, H, 576)
-
-The PE-only mode (``pe_only=True``) writes only the trailing ``D_pe``
-slice and leaves ``q_nope_abs`` untouched — used when ``q_nope_abs``
-has already been written into the output buffer via a prior task
-(saves one TMA roundtrip).
-
-Forward reference
------------------
-
-``forward()`` concatenates ``q_nope_abs`` and ``q_pe`` along the
-trailing axis. ``pe_only=True`` returns just ``q_pe`` (the caller is
-expected to have populated the nope half itself).
+``pe_only=True`` writes only the trailing ``D_pe`` slice and leaves
+``q_nope_abs`` untouched — used when the nope half was already written
+into the destination buffer by a prior task (saves one TMA roundtrip).
 """
 from __future__ import annotations
 
@@ -40,14 +23,7 @@ __all__ = ["AssembleQDecode"]
 
 
 class AssembleQDecode(MPKModule):
-    """Interleave per-head ``q_nope`` with ``q_pe`` into ``[nope | pe]``.
-
-    Args:
-        pe_only: If ``True``, only write the PE half of ``q_nope_pe``.
-            The caller must have populated the nope half. Default
-            ``False`` (full assemble).
-        prefix: Reserved. No parameters live here.
-    """
+    """Interleave per-head ``q_nope`` with ``q_pe`` into ``[nope | pe]``."""
 
     def __init__(self, *, pe_only: bool = False, prefix: str = "") -> None:
         super().__init__(prefix=prefix)
@@ -79,18 +55,17 @@ class AssembleQDecode(MPKModule):
         grid_dim: Optional[GridDim] = None,
         block_dim: Optional[BlockDim] = None,
     ) -> Any:
-        """Register a ``assemble_q_decode_sm100`` task.
+        """Register an ``assemble_q_decode_sm100`` task — interleave ``[nope | pe]``.
 
-        Args:
-            q_nope_abs: ``(N, H, D_nope)`` bf16 DTensor.
-            q_pe:       ``(N, H, D_pe)`` bf16 DTensor.
-            q_nope_pe:  ``(N, H, D_nope + D_pe)`` or
-                ``(N, H * (D_nope + D_pe))`` bf16 DTensor — the
-                kernel handles either layout.
-            grid_dim / block_dim: explicit overrides.
+        Tensor contract:
+          q_nope_abs: (N, H, D_nope)             bf16, nope half of per-head Q.
+          q_pe:       (N, H, D_pe)               bf16, RoPE-applied half of Q.
+          q_nope_pe:  (N, H, D_nope + D_pe) OR
+                      (N, H * (D_nope + D_pe))   bf16, destination ``[nope | pe]``.
 
-        Returns:
-            ``q_nope_pe``.
+        Notes: SM100-only; one CTA per token. ``pe_only=True`` writes only the
+        trailing ``D_pe`` slice and leaves ``q_nope_abs`` untouched (used when
+        the nope half was already written by a prior task — saves one TMA RTT).
         """
         from .. import context as _ctx
 
@@ -101,9 +76,6 @@ class AssembleQDecode(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        # Inlined task registration (was pk.assemble_q_decode_sm100_layer).
-        # q_nope_pe may be 3D (N, H, D_TOTAL) or 2D (N, H*D_TOTAL) — same
-        # byte layout. The kernel handles either via its register codegen.
         from ...core import CyTBGraph
         from ...kernel import TBGraph
 
@@ -121,8 +93,8 @@ class AssembleQDecode(MPKModule):
             assert q_nope_pe.dim(1) == H * D_TOTAL
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_nope_abs, (0, -1, -1), -1, True)
-        tb_graph.new_input(q_pe,       (0, -1, -1), -1, True)
-        tb_graph.new_input(q_nope_pe,  (0, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (0, -1, -1), -1, True)
+        tb_graph.new_input(q_nope_pe, (0, -1, -1), -1, True)
         pk.kn_graph.customized([q_nope_abs, q_pe, q_nope_pe], tb_graph)
         params = [1] if self.pe_only else []
         pk.kn_graph.register_task(tb_graph, "assemble_q_decode_sm100", params)

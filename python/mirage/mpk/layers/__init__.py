@@ -15,7 +15,7 @@ from ._base import MPKModule
 # Standalone utility modules
 from .allreduce import AllReduce
 from .tensor_init import TensorInit
-from .quantize_fp8 import QuantizeFP8
+from .quantize_fp8 import QuantizeFP8, QuantizeFP8UE8M0, QuantizeFP8F32Scale
 from .transpose_scale import TransposeScale
 from .assemble_q_decode import AssembleQDecode
 from .sampling import SamplingSM100
@@ -34,10 +34,21 @@ from .norm.rmsnorm_linear import RMSNormLinear
 # Linear / GEMM
 from .linear.linear import Linear
 from .linear.linear_with_residual import LinearWithResidual
-from .linear.linear_fp8 import LinearFP8, LinearFP8BMM, LinearSplitKFP8SwapAB
+from .linear.linear_fp8 import (
+    LinearFP8,
+    LinearFP8WithResidual,
+    LinearFP8SwapAB,
+    LinearFP8SwapABWithResidual,
+    LinearFP8BMM,
+    LinearSplitKFP8SwapAB,
+)
 from .linear.splitk_linear import SplitKLinear
-from .linear.fp8_gemm_dense import FP8GEMMDense
-from .linear.fp8_group_gemm import FP8GroupGEMM
+from .linear.fp8_gemm_dense import FP8GEMMDenseSmallM, FP8GEMMDenseMediumM
+from .linear.fp8_group_gemm import (
+    FP8GroupGEMMSmallM,
+    FP8GroupGEMMLargeM,
+    FP8GroupGEMMAuto,
+)
 
 # Activation
 from .activation.silu_mul import SiluMul, SiluMulLinearWithResidual
@@ -58,20 +69,41 @@ from .attention.single_batch_extend_attention import SingleBatchExtendAttention
 
 # MLA (Multi-head Latent Attention — DeepSeek V3)
 from .mla import (
+    # Paged KV gather (3 variants + legacy factory)
     MLAKVGather,
+    MLAKVGatherStandard,
+    MLAKVGatherSplit,
+    MLAKVGatherUnified,
+    # Q-side RoPE (3 variants + legacy factory) + K-side RoPE
     MLARopeQ,
+    MLARopeQSingle,
+    MLARopeQFused,
+    MLARopeQSplit,
     MLARopeK,
+    # Attention
     MLADecode,
     MLAReduce,
-    MLAPrefill,
+    MLAPrefillAbsorbed,
+    MLAPrefillPlain,
+    MLAPrefillUnified,
+    MLAPrefillTP8,
+    MLAPrefillTP8Chunked,
+    MLAPrefillTP8ChunkedSplitK,
+    MLAPrefillTP8ChunkedReduce,
     MLAMtpDecodeTP,
     MLAMtpReduceTP,
 )
 
 # MoE (Mixture-of-Experts — qwen3 + DeepSeek V3)
 from .moe import (
+    MoETopkSoftmaxRouting,
+    MoETopkSigmoidRouting,
     MoETopkRouting,
+    MoEW13BF16,
+    MoEW13FP8,
     MoEW13,
+    MoEW2BF16,
+    MoEW2FP8,
     MoEW2,
     MoESiluMul,
     MoeMulSumAdd,
@@ -88,9 +120,12 @@ from .mtp import (
     SoftmaxGather,
     ProbScatter,
     ProbExtract,
-    MTPVerify,
+    MTPVerifyProbabilistic,
+    MTPVerifyStrict,
+    MTPVerifyTargetGreedy,
     MTPAcceptCommit,
-    FindNgram,
+    FindNgramPartial,
+    FindNgramGlobal,
 )
 
 __all__ = [
@@ -99,6 +134,8 @@ __all__ = [
     "AllReduce",
     "TensorInit",
     "QuantizeFP8",
+    "QuantizeFP8UE8M0",
+    "QuantizeFP8F32Scale",
     "TransposeScale",
     "AssembleQDecode",
     "SamplingSM100",
@@ -114,11 +151,17 @@ __all__ = [
     "Linear",
     "LinearWithResidual",
     "LinearFP8",
+    "LinearFP8WithResidual",
+    "LinearFP8SwapAB",
+    "LinearFP8SwapABWithResidual",
     "LinearFP8BMM",
     "LinearSplitKFP8SwapAB",
     "SplitKLinear",
-    "FP8GEMMDense",
-    "FP8GroupGEMM",
+    "FP8GEMMDenseSmallM",
+    "FP8GEMMDenseMediumM",
+    "FP8GroupGEMMSmallM",
+    "FP8GroupGEMMLargeM",
+    "FP8GroupGEMMAuto",
     # activation
     "SiluMul",
     "SiluMulLinearWithResidual",
@@ -135,16 +178,34 @@ __all__ = [
     "SingleBatchExtendAttention",
     # MLA
     "MLAKVGather",
+    "MLAKVGatherStandard",
+    "MLAKVGatherSplit",
+    "MLAKVGatherUnified",
     "MLARopeQ",
+    "MLARopeQSingle",
+    "MLARopeQFused",
+    "MLARopeQSplit",
     "MLARopeK",
     "MLADecode",
     "MLAReduce",
-    "MLAPrefill",
+    "MLAPrefillAbsorbed",
+    "MLAPrefillPlain",
+    "MLAPrefillUnified",
+    "MLAPrefillTP8",
+    "MLAPrefillTP8Chunked",
+    "MLAPrefillTP8ChunkedSplitK",
+    "MLAPrefillTP8ChunkedReduce",
     "MLAMtpDecodeTP",
     "MLAMtpReduceTP",
     # MoE
+    "MoETopkSoftmaxRouting",
+    "MoETopkSigmoidRouting",
     "MoETopkRouting",
+    "MoEW13BF16",
+    "MoEW13FP8",
     "MoEW13",
+    "MoEW2BF16",
+    "MoEW2FP8",
     "MoEW2",
     "MoESiluMul",
     "MoeMulSumAdd",
@@ -158,7 +219,10 @@ __all__ = [
     "SoftmaxGather",
     "ProbScatter",
     "ProbExtract",
-    "MTPVerify",
+    "MTPVerifyProbabilistic",
+    "MTPVerifyStrict",
+    "MTPVerifyTargetGreedy",
     "MTPAcceptCommit",
-    "FindNgram",
+    "FindNgramPartial",
+    "FindNgramGlobal",
 ]
