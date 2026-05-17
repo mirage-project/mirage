@@ -3381,13 +3381,19 @@ class PersistentKernel:
         assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
         assert output.num_dims == 2  # (batch_size, hidden_size)
         if not accumulate:
+            # C5 (2026-05-16): partition target along BOTH grid.x (dim 1, N)
+            # AND grid.y (dim 0, M) so the prepended zero-fill runs on all
+            # grid.x * grid.y CTAs in a single wave instead of being collapsed
+            # to grid.x CTAs by the wrapper's "redundant axis" optimization.
+            # For router gate (grid=(2, 64, 1)) this turns 2-CTA / 12 μs into
+            # 128-CTA / ~1 wave. Requires output.dim(0) divisible by grid.y.
             self.tensor_init_layer(
                 target=output,
                 dummy=input,
                 grid_dim=grid_dim,
                 block_dim=block_dim,
                 dummy_input_map=(-1, 1, -1),
-                target_input_map=(1, -1, -1),
+                target_input_map=(1, 0, -1),
             )
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, 1, -1), 1, True)
