@@ -495,30 +495,16 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_mbt_f32_bufs = {}
         cache_key = reduction_size
         if cache_key not in self._fp8_mbt_f32_bufs:
-            # 2026-05-13 DEBUG: optionally attach the FP8 input + scale buffers
-            # as torch tensors so we can inspect them post-megakernel from Python.
-            if os.environ.get("MPK_DSV3_FP8_BUF_ATTACH", "0") == "1":
-                import torch as _torch
-                if not hasattr(self.mpk, "_fp8_input_torch"):
-                    self.mpk._fp8_input_torch = {}
-                    self.mpk._fp8_scale_torch = {}
-                fp8_t = _torch.zeros((mbt, reduction_size), dtype=_torch.float8_e4m3fn, device="cuda")
-                scale_t = _torch.zeros((mbt, num_groups), dtype=_torch.float32, device="cuda")
-                self.mpk._fp8_input_torch[reduction_size] = fp8_t
-                self.mpk._fp8_scale_torch[reduction_size] = scale_t
-                fp8_buf = self.mpk.attach_input(torch_tensor=fp8_t, name=f"fp8_input_v2_{reduction_size}_shared")
-                scale_buf = self.mpk.attach_input(torch_tensor=scale_t, name=f"fp8_scale_v2_{reduction_size}_shared")
-            else:
-                fp8_buf = self.mpk.new_tensor(
-                    dims=(mbt, reduction_size), dtype=float8_e4m3,
-                    name=f"fp8_input_v2_{reduction_size}_shared",
-                    io_category="cuda_tensor",
-                )
-                scale_buf = self.mpk.new_tensor(
-                    dims=(mbt, num_groups), dtype=float32,
-                    name=f"fp8_scale_v2_{reduction_size}_shared",
-                    io_category="cuda_tensor",
-                )
+            fp8_buf = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=float8_e4m3,
+                name=f"fp8_input_v2_{reduction_size}_shared",
+                io_category="cuda_tensor",
+            )
+            scale_buf = self.mpk.new_tensor(
+                dims=(mbt, num_groups), dtype=float32,
+                name=f"fp8_scale_v2_{reduction_size}_shared",
+                io_category="cuda_tensor",
+            )
             self._fp8_mbt_f32_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_mbt_f32_bufs[cache_key]
 
@@ -1703,27 +1689,12 @@ class DeepSeekV3Builder(GraphBuilder):
             print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
 
         # RMSNorm output
-        # 2026-05-13 DEBUG: optionally attach rmsnorm_out as a torch tensor
-        # (bypassing MPK's buffer pool) AND pre-fill with a sentinel value
-        # so we can tell post-megakernel whether rows are
-        #   (a) still at sentinel → rmsnorm task never wrote them (skip bug)
-        #   (b) zero → something else wrote zero over them (overwrite bug)
-        #   (c) normal rmsnorm output → rmsnorm wrote but quantize saw something else
-        if os.environ.get("MPK_DSV3_RMSNORM_OUT_ATTACH", "0") == "1":
-            import torch as _torch
-            sentinel = float(os.environ.get("MPK_DSV3_RMSNORM_SENTINEL", "0.0"))
-            self.mpk._rmsnorm_out_torch = _torch.full(
-                (mbt, self.hidden_size), sentinel,
-                dtype=_torch.bfloat16, device="cuda")
-            self.rmsnorm_out = self.mpk.attach_input(
-                torch_tensor=self.mpk._rmsnorm_out_torch, name="rmsnorm_out")
-        else:
-            self.rmsnorm_out = self.mpk.new_tensor(
-                dims=(mbt, self.hidden_size),
-                dtype=bfloat16,
-                name="rmsnorm_out",
-                io_category="cuda_tensor",
-            )
+        self.rmsnorm_out = self.mpk.new_tensor(
+            dims=(mbt, self.hidden_size),
+            dtype=bfloat16,
+            name="rmsnorm_out",
+            io_category="cuda_tensor",
+        )
 
         # MLA projections — QKV-a fusion (landed 2026-05-13, made default).
         # Single qkv_a_out (mbt, QKV_A_FUSED_N) buffer; the fused FP8 GEMM
