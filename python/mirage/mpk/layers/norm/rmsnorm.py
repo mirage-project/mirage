@@ -289,14 +289,31 @@ class RMSNorm(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        pk.rmsnorm_layer(
-            input=x,
-            weight=w_dt,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-            process_dim=process_dim,
-            in_offset_elems=in_offset_elems,
-            out_offset_elems=out_offset_elems,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.rmsnorm_layer``). Each catalog module owns
+        # its own task wiring so adding a new layer doesn't require
+        # editing ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert x.num_dims == 2
+        assert out_dt.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (0, -1, -1), 1, True)
+        tb_graph.new_input(w_dt, (-1, -1, -1), 0, True)
+        tb_graph.new_input(out_dt, (0, -1, -1), 1, True)
+        pk.kn_graph.customized([x, w_dt, out_dt], tb_graph)
+
+        task_name = "rmsnorm_hopper" if pk.target_cc >= 90 else "rmsnorm"
+        if (process_dim is None and in_offset_elems == 0
+                and out_offset_elems == 0):
+            pk.kn_graph.register_task(tb_graph, task_name)
+        else:
+            if process_dim is None:
+                process_dim = out_dt.dim(1)
+            pk.kn_graph.register_task(
+                tb_graph,
+                task_name,
+                [process_dim, in_offset_elems, out_offset_elems],
+            )
         return out_dt

@@ -286,12 +286,23 @@ class SiluMul(MPKModule):
         else:
             out_dt = output
 
-        pk.silu_mul_layer(
-            input=gateup,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.silu_mul_layer``). Each catalog module owns
+        # its own task wiring so adding a new layer doesn't require
+        # editing ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert gateup.num_dims == 2  # (batch_size, 2 * intermediate_size)
+        assert out_dt.num_dims == 2  # (batch_size, intermediate_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(gateup, (1, -1, -1), 1, True)
+        tb_graph.new_input(out_dt, (1, -1, -1), 1, True)
+        pk.kn_graph.customized([gateup, out_dt], tb_graph)
+        # The legacy pk method used the same task name for Hopper and
+        # Ampere/Blackwell (the ``_hopper`` branch fell through to the
+        # default), so we register the single ``silu_mul`` task name.
+        pk.kn_graph.register_task(tb_graph, "silu_mul")
         return out_dt
 
 
@@ -475,12 +486,23 @@ class SiluMulLinearWithResidual(MPKModule):
         else:
             out_dt = output
 
-        pk.silu_mul_linear_with_residual_layer(
-            input=gateup,
-            weight=weight_dt,
-            residual=residual,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.silu_mul_linear_with_residual_layer``).
+        # Each catalog module owns its own task wiring so adding a new
+        # layer doesn't require editing ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert gateup.num_dims == 2  # (batch_size, 2*intermediate_size)
+        assert weight_dt.num_dims == 2  # (hidden_size, intermediate_size)
+        assert residual.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(gateup, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight_dt, (0, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), 1, True)
+        tb_graph.new_input(out_dt, (1, -1, -1), 1, True)
+        pk.kn_graph.customized(
+            [gateup, weight_dt, residual, out_dt], tb_graph
         )
+        pk.kn_graph.register_task(tb_graph, "silu_mul_linear_with_residual")
         return out_dt
