@@ -110,9 +110,7 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   batch_size = output_ops[0]->output_tensors[0].dim[0];
   output_size = output_ops[0]->output_tensors[0].dim[1];
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -207,10 +205,7 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -441,15 +436,8 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[1];
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[0]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("int num_active_tokens_ = $;", batch_size);
@@ -498,9 +486,6 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
   // Both input and output tensors should be row major
   assert(input_ops[0]->dtensor.layout == layout::DmemRowMajor);
   assert(output_ops[0]->dtensor.layout == layout::DmemRowMajor);
-  // Both input and output tensors should be INPUT OP
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   // Shape should be guranteed by higher-level APIs
 
   int outer_dim_size = 1, inner_dim_size, outer_dim_stride, output_size;
@@ -567,10 +552,7 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1] / 2;
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -613,10 +595,7 @@ int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -752,12 +731,10 @@ int TaskRegister::register_reduction_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // get output stride
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  // get strides (C20: from dtensor.stride[0] — view-safe; for root tensors
+  // this equals owner_op's input_strides[0])
+  int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   assert(input_stride == output_stride);
   // Register reduction kernel
   mirage::transpiler::CodeKeeper code;
@@ -896,10 +873,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1347,10 +1321,7 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1507,10 +1478,7 @@ int TaskRegister::register_linear_cutlass_hopper_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   constexpr int TILE_SIZE = 128;
 
   mirage::transpiler::CodeKeeper code;
@@ -1675,15 +1643,8 @@ int TaskRegister::register_silu_mul_hopper_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[1];
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[0]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::silu_mul_task_impl_hopper<bfloat16, $, $, $, $>(",
@@ -1719,9 +1680,7 @@ int TaskRegister::register_embedding_hopper_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   batch_size = output_ops[0]->output_tensors[0].dim[0];
   output_size = output_ops[0]->output_tensors[0].dim[1];
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1770,10 +1729,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1924,10 +1880,7 @@ int TaskRegister::register_splitk_linear_sm100_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->output_tensors[0].dim[1];
   reduction_stride = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -2465,15 +2418,8 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
   assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[1];
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[0]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_softmax_task_impl<cute::bfloat16_t, $, $, $, $>(",
@@ -2638,10 +2584,7 @@ int TaskRegister::register_moe_linear_sm100_task(
   assert(input_ops[3]->output_tensors[0].num_dims == 1);
   assert(input_ops[3]->output_tensors[0].dim[0] == num_experts + 1);
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   orig_output_size = input_ops[1]->dtensor.dim[1];
 
   mirage::transpiler::CodeKeeper code;
@@ -2852,10 +2795,7 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   assert(input_ops[5]->output_tensors[0].dim[0] == num_experts + 1);
 
   // Output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   orig_output_size = input_ops[2]->dtensor.dim[1];
 
   int k_scale = reduction_size / 128; // K/128 scale groups
@@ -3094,24 +3034,14 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
     output_size = output_ops[0]->output_tensors[0].dim[1];
     assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
   }
-  // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
+  // get input/output strides (C20: stride[N-2] is the row-walk stride
+  // regardless of rank; view-safe).
   if (out_dims == 3) {
-    input_stride = input_ops[0]->dtensor.dim[2];
-    assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
+    input_stride = static_cast<int>(input_ops[0]->dtensor.stride[1]);
+    output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   } else {
-    // 2D input: stride along the row dim is just the inner-dim length.
-    input_stride = input_ops[0]->dtensor.dim[1];
-  }
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  if (out_dims == 3) {
-    output_stride = static_cast<int>(kn_input_op->input_strides[1]);
-  } else {
-    output_stride = output_ops[0]->dtensor.dim[1];
+    input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+    output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   }
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -3189,15 +3119,8 @@ int TaskRegister::register_moe_mul_sum_add_sm100_task(
              input_ops[2]->output_tensors[0].dim[1] &&
          input_ops[0]->output_tensors[0].dim[2] == output_size);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = static_cast<int>(kn_input_op->input_strides[1]);
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::mul_sum_add_sm100_task_impl<cute::bfloat16_t, $, $, $, $>(",
@@ -3256,10 +3179,7 @@ int TaskRegister::register_moe_linear_sm90_task(
   assert(input_ops[3]->output_tensors[0].num_dims == 1);
   assert(input_ops[3]->output_tensors[0].dim[0] == num_experts + 1);
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   orig_output_size = input_ops[1]->dtensor.dim[1];
 
   mirage::transpiler::CodeKeeper code;
@@ -3424,10 +3344,7 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4705,11 +4622,8 @@ int TaskRegister::register_nvshmem_allgather_strided_put_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 3);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // get output stride
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  // Row stride (C20: dtensor.stride[0] is view-safe).
+  int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
   // For this allgather task, input and output share the same stride
   int output_stride = input_stride;
   // Register nvshmem copy task (allgather)
@@ -4768,11 +4682,8 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // get output stride
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  // Row stride (C20: dtensor.stride[0] is view-safe).
+  int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
   // For this allgather task, input and output share the same stride
   int output_stride = input_stride;
   // Register tile allreduce task
@@ -5326,10 +5237,7 @@ int TaskRegister::register_linear_fp8_sm100_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2); // input_fp8
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5457,10 +5365,7 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
 
   // Output stride (column dim) in global memory. For the MPK FP8 swapAB
   // kernel we always treat the output as row-major BF16 [BATCH, OUTPUT].
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // Codegen mirrors register_linear_sm100_task (BF16 MPK) with the only
   // additions being: (a) FP8 element type for A/B, (b) two raw uint32_t*
@@ -5669,10 +5574,7 @@ int TaskRegister::register_splitk_linear_fp8_swapAB_sm100_task(
   assert(reduction_size_full % reduction_size_per_task == 0 &&
          "full K must be a multiple of per-task K (uniform split)");
 
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5885,20 +5787,16 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
          "linear_fp8_bmm_sm100 requires D_in divisible by 128");
 
   // Row strides (in elements) for the global gmem tensors. With 3D inputs:
-  //   input  [N, H, D_in] -> input_strides[0] = H * D_in
+  //   input  [N, H, D_in] -> stride[0] = H * D_in
   //   weight [H, D_out, D_in] -> stride between rows within a head is D_in
-  //   output [N, H, D_out] -> output_strides[0] = H * D_out
-  // Use the dtensor owner's input_strides[0] for the leading-row strides;
-  // those are recorded from the source tensor at attach time and survive
-  // grid partitioning. Within-head weight row stride = D_in (contiguous).
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *input_kn =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  kn::KNInputOp *output_kn =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int input_row_stride = static_cast<int>(input_kn->input_strides[0]);
-  int output_row_stride = static_cast<int>(output_kn->input_strides[0]);
+  //   output [N, H, D_out] -> stride[0] = H * D_out
+  // C20 (2026-05-17): read from dtensor.stride[0] instead of the owner_op's
+  // input_strides[0] — view-safe (mpk.narrow inherits parent stride; root
+  // tensors have stride populated by input.cc and fixup_legacy_strides).
+  int input_row_stride =
+      static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int output_row_stride =
+      static_cast<int>(output_ops[0]->dtensor.stride[0]);
   // Fallback if the recorded leading stride happens to be 0 (no source
   // tensor metadata): default to the contiguous packed strides.
   if (input_row_stride == 0) {
@@ -6347,11 +6245,7 @@ int TaskRegister::register_moe_unpermute_sm100_task(
     }
   }
   int output_stride = HIDDEN;
-  if (output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP) {
-    kn::KNInputOp *kn_input_op =
-        static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-    output_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  }
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // B33: rows_per_task = ceil(MBT / grid.x). When the wrapper passes
   // grid.x < MBT the kernel internally loops over multiple tokens per CTA
