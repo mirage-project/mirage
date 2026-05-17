@@ -1735,13 +1735,16 @@ class DeepSeekV3Builder(GraphBuilder):
         self._qkv_a_c_latent_offset = self.q_lora_rank             # 1536
         self._qkv_a_k_pe_offset = self.q_lora_rank + self.kv_lora_rank  # 2048
         # All three downstream "slots" share the same backing buffer.
-        # NOTE (C20, 2026-05-17): we considered replacing this aliasing
-        # with `mpk.narrow` views, but the existing task_register reads
-        # `dtensor.dim[1]` (not `stride[0]`) for IN_ROW_STRIDE in
-        # rmsnorm/quantize/fp8_gemm kernels. A view of qkv_a_out has
-        # dim[1]=slot_width but stride[0]=parent_width — using dim as
-        # stride would CORRUPT the adjacent slot. View API integration
-        # for this fused tensor requires task_register updates first.
+        # NOTE (C20, 2026-05-17): View API migration deferred. Reviewer
+        # audit identified two blockers: (a) ~30 task_register sites do
+        # `assert(dtensor.owner_op->op_type == KN_INPUT_OP)` then read
+        # `kn_input_op->input_strides[i]`. Views set `owner_op = nullptr`
+        # (src/kernel/view.cc:80) → null-deref before any stride logic
+        # runs. (b) rmsnorm_hopper and per_token_group_quantize_fp8 read
+        # `dtensor.dim[1]` for IN_ROW_STRIDE; for a narrow view that
+        # equals the slot width instead of the parent's row width, which
+        # would silently overwrite the adjacent slot. Migration plan
+        # tracked in task #106; do NOT start without explicit approval.
         self.q_a_out = self.qkv_a_out
         self.q_a_out_buf = None
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
