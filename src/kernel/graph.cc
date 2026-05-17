@@ -869,6 +869,21 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         4, 1, TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_smallm_fp8out_sm100") {
+    // D1 (2026-05-17): fp8out variant — 4 inputs + 2 outputs (FP8 C and
+    // packed UE8M0 scale). Fuses what was a downstream
+    // per_token_group_quantize_fp8 into the GEMM epilogue.
+    int variant_id =
+        task_register->register_fp8_gemm_dense_smallm_fp8out_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 2, TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_mediumm_fp8out_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 2, TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100, variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
     // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
     // 2 real inputs (input, weight) + 3 outputs

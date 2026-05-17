@@ -302,6 +302,16 @@ class DeepSeekV3Builder(GraphBuilder):
         # absorbed once those land. Set MPK_DSV3_BMM=0 to fall back to
         # the absorbed path for regression isolation.
         self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "1") == "1"
+        # D1 (2026-05-17): fuse the q_b_nope FP8 GEMM with its downstream
+        # per_token_group_quantize_fp8 task. The new
+        # fp8_gemm_dense_*_fp8out kernel computes a per-row UE8M0 scale in
+        # registers (each consumer thread already holds the full BN=128
+        # K-group) and writes FP8 + packed scale directly, eliminating the
+        # bf16 HBM round-trip + standalone quantize dispatch wave on the
+        # BMM Q-up critical path. Default OFF until correctness validated;
+        # flip via MPK_DSV3_FUSED_QB_QUANTIZE=1.
+        self._fused_qb_quantize = (
+            os.environ.get("MPK_DSV3_FUSED_QB_QUANTIZE", "0") == "1")
         # B37 (2026-05-15): replace the (input_layernorm RMSNorm + qkv_a
         # quantize) two-task chain with one fused kernel that writes BF16
         # rmsnorm_out and FP8 + scale in one pass. Saves ~30 μs/layer
@@ -1064,38 +1074,71 @@ class DeepSeekV3Builder(GraphBuilder):
         q_nope_scale = self._bmm_decode_buffers["q_nope_scale"]
         q_nope_abs = self._bmm_decode_buffers["q_nope_abs"]
 
-        # 1) q_b_nope FP8 dense GEMM → q_nope_3d (mbt, H, 128)
         w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
             state_dict, f"{attn}q_b_nope.weight",
             f"layer_{layer_idx}_q_b_nope_decode")
-        self._fp8_linear(
-            self.q_a_out, w_q_b_nope, s_q_b_nope, q_nope_3d,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
-            block_dim=(128, 1, 1),
-            gate_mode=2 if self._use_prefill else 0,
-            **qb_slice_kwargs)
-        # 2) q_b_pe FP8 dense GEMM → q_pe_3d (mbt, H, 64)
         w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
             state_dict, f"{attn}q_b_pe.weight",
             f"layer_{layer_idx}_q_b_pe_decode")
+        # 1) q_b_pe FIRST so its _fp8_linear emits the q_a input-side
+        # quantize task (shared via qb_share_tag with q_b_nope's downstream
+        # consumer). When _fused_qb_quantize is OFF (legacy path), the
+        # order between q_b_nope and q_b_pe doesn't matter; when it's ON,
+        # we want the input-quantize task already emitted before the
+        # fused q_b_nope GEMM since the fused GEMM reads the same q_a
+        # FP8 buffer and skips the redundant quantize via the share tag.
         self._fp8_linear(
             self.q_a_out, w_q_b_pe, s_q_b_pe, q_pe_3d,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
             gate_mode=2 if self._use_prefill else 0,
             **qb_slice_kwargs)
-        # 3) Quantize q_nope BF16 → FP8 + UE8M0 packed scale.
-        # Each row's K=128, so packed_K=1. row_count = mbt * H rows.
-        active_mode_bmm = 3 if self._use_prefill else 0  # decode-only when prefill enabled
-        self.mpk.quantize_fp8_layer(
-            input=q_nope_3d,
-            output_fp8=q_nope_fp8,
-            output_scale=q_nope_scale,
-            grid_dim=(1, mbt * H_local, 1),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=True,
-            active_mode=active_mode_bmm,
-        )
+        if self._fused_qb_quantize:
+            # 2 fused) q_b_nope FP8 dense GEMM with epilogue UE8M0 quantize
+            # → q_nope_fp8 + q_nope_scale directly. Reads q_a's FP8 / scale
+            # from the shared cache (the q_b_pe call above already emitted
+            # the quantize). Replaces the (bf16 q_b_nope GEMM →
+            # quantize_fp8) two-task chain with one task; saves ~9 μs/layer
+            # on the BMM Q-up critical path.
+            reduction_size = w_q_b_nope.dim(1)
+            input_fp8_buf, input_scale_buf = (
+                self._fp8_mbt_buffers_for_reduction_f32scale(reduction_size))
+            gemm_fp8out_layer = (
+                self.mpk.fp8_gemm_dense_smallm_fp8out_layer
+                if self.mpk.max_seq_length <= 512
+                else self.mpk.fp8_gemm_dense_mediumm_fp8out_layer
+            )
+            gemm_runtime_m_mode = 3 if self._use_prefill else 0
+            gemm_fp8out_layer(
+                input_fp8=input_fp8_buf,
+                weight_fp8=w_q_b_nope,
+                input_scale=input_scale_buf,
+                weight_scale=s_q_b_nope,
+                output_fp8=q_nope_fp8,
+                output_scale=q_nope_scale,
+                num_workers=self._fp8_dense_num_workers(),
+                runtime_m_mode=gemm_runtime_m_mode,
+            )
+        else:
+            # 2) q_b_nope FP8 dense GEMM → q_nope_3d (mbt, H, 128) bf16
+            self._fp8_linear(
+                self.q_a_out, w_q_b_nope, s_q_b_nope, q_nope_3d,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
+                block_dim=(128, 1, 1),
+                gate_mode=2 if self._use_prefill else 0,
+                **qb_slice_kwargs)
+            # 3) Quantize q_nope BF16 → FP8 + UE8M0 packed scale.
+            # Each row's K=128, so packed_K=1. row_count = mbt * H rows.
+            active_mode_bmm = 3 if self._use_prefill else 0  # decode-only when prefill enabled
+            self.mpk.quantize_fp8_layer(
+                input=q_nope_3d,
+                output_fp8=q_nope_fp8,
+                output_scale=q_nope_scale,
+                grid_dim=(1, mbt * H_local, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=True,
+                active_mode=active_mode_bmm,
+            )
         # 4) BMM(q_nope_fp8, kv_b_k_bmm) → q_nope_abs (mbt, H, 512).
         w_kvk_bmm = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}kv_b_k_bmm.weight"],

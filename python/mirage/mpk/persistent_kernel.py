@@ -3002,6 +3002,81 @@ class PersistentKernel:
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
+    # D1 (2026-05-17): variants that fuse per-128-col-group UE8M0 quantize
+    # into the GEMM epilogue — output is FP8 + packed scale uint32 instead
+    # of bf16. Eliminates the downstream per_token_group_quantize_fp8 task
+    # in the BMM Q-up chain (q_b_nope_decode → quantize → BMM): we drop
+    # the quantize task and the BMM reads our FP8 + scale directly.
+    def _fp8_gemm_dense_fp8out_layer_impl(
+        self,
+        task_name: str,
+        input_fp8: DTensor,
+        weight_fp8: DTensor,
+        input_scale: DTensor,
+        weight_scale: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        num_workers: int,
+        runtime_m_mode: int = 0,
+    ):
+        # Same A/B/sa/sb input plumbing as the bf16 variant. Outputs are two
+        # tensors (FP8 buf + packed uint32 scale); the bgraph attaches both
+        # so the task tuple is (4 inputs, 2 outputs). Scale layout: flat
+        # uint32 stride = N/128 entries per row (one per K-group), matching
+        # what per_token_group_quantize_fp8 produces today for the BMM
+        # input on the q_b_nope path.
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output_fp8.num_dims in (2, 3)
+        assert output_scale.num_dims in (2, 3)
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output_fp8.dim(0) == M
+        out_flat_n = (output_fp8.dim(1) if output_fp8.num_dims == 2
+                      else output_fp8.dim(1) * output_fp8.dim(2))
+        assert out_flat_n == N, (out_flat_n, N)
+        assert N % 128 == 0, (
+            "fp8_gemm_dense_fp8out requires N divisible by 128: " + str(N))
+        params = [M, N, K, num_workers]
+        if runtime_m_mode:
+            params.append(runtime_m_mode)
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale,
+             output_fp8, output_scale],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def fp8_gemm_dense_smallm_fp8out_layer(
+        self, input_fp8, weight_fp8, input_scale, weight_scale,
+        output_fp8, output_scale, num_workers, runtime_m_mode: int = 0):
+        self._fp8_gemm_dense_fp8out_layer_impl(
+            "fp8_gemm_dense_smallm_fp8out_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale,
+            output_fp8, output_scale, num_workers,
+            runtime_m_mode=runtime_m_mode)
+
+    def fp8_gemm_dense_mediumm_fp8out_layer(
+        self, input_fp8, weight_fp8, input_scale, weight_scale,
+        output_fp8, output_scale, num_workers, runtime_m_mode: int = 0):
+        self._fp8_gemm_dense_fp8out_layer_impl(
+            "fp8_gemm_dense_mediumm_fp8out_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale,
+            output_fp8, output_scale, num_workers,
+            runtime_m_mode=runtime_m_mode)
+
     def fp8_gemm_dense_decode_splitk_layer(self, input_fp8, weight_fp8,
                                             input_scale, weight_scale, output,
                                             num_workers, split_k: int = 4):
