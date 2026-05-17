@@ -1,41 +1,11 @@
-"""Single-batch extend (multi-token decode / speculative-verify) attention.
+"""Single-batch extend attention (multi-token decode / spec-verify).
 
-Wraps :meth:`PersistentKernel.single_batch_extend_attention_layer` —
-task ``single_batch_extend_attention``. Identical algebra to the plain
-``Attention`` kernel but processes ``extend_num + 1`` tokens at once
-(the trailing tokens are the candidates being verified in
-speculative decode). Used by the qwen3 / DSv3 MTP-verify path.
-
-Tensor contract
----------------
-
-* ``input``        : ``(extend_num + 1, fused_outdim)`` bf16 — fused
-                     QKV after the qkv projection. Same row layout as
-                     plain ``Attention``: ``[q | k | v]``.
-* ``k_cache`` / ``v_cache``: ``(B=1, max_seq_len, kv_heads, head_dim)``
-                     bf16. The kernel reads ``[0, S]`` and writes the
-                     new ``extend_num + 1`` positions at
-                     ``[S - extend_num, S]``.
-* ``q_norm`` / ``k_norm``: ``(head_dim,)`` bf16 (per-head RMSNorm).
-* ``cos_pos_embed`` / ``sin_pos_embed``: ``(max_seq_len, head_dim)``.
-* ``output``       : ``(extend_num + 1, hidden_size)`` bf16.
-
-The kernel's parameter contract (see pk method):
-
-* ``params[0]`` = num_q_heads
-* ``params[1]`` = num_kv_heads
-* ``params[2]`` = qk_norm flag
-* ``params[3]`` = rotary_embed flag
-* ``params[4]`` = extend_num  (``= input.dim(0) - 1``)
-* ``params[5]`` = output_stride
-
-Forward reference
------------------
-
-The extend variant follows the same fused norm + RoPE + KV-append +
-softmax-attention recipe as plain ``Attention`` but applied across
-``T = extend_num + 1`` tokens. The reference here mirrors
-:class:`Attention.forward` with an explicit ``T`` axis.
+Wraps :meth:`PersistentKernel.single_batch_extend_attention_layer`
+(task ``"single_batch_extend_attention"``). Code-gen emits
+``kernel::single_batch_extend_kernel`` from
+``include/mirage/persistent_kernel/tasks/ampere/single_batch_extend.cuh``;
+the Blackwell ``task_header.cuh`` re-includes the same Ampere file, so
+there is no separate SM90/SM100 variant.
 """
 from __future__ import annotations
 
@@ -75,21 +45,14 @@ def _per_head_rmsnorm(
 
 
 class SingleBatchExtendAttention(MPKModule):
-    """Multi-token extend variant of the plain single-batch attention.
+    """Multi-token extend variant of single-batch decode attention.
 
-    Args:
-        num_heads: Total query heads (``H``).
-        num_kv_heads: KV heads (``H_kv``).
-        head_dim: Per-head channel count (``D``).
-        layer_idx: Index of this attention layer in the parent model.
-            Stored for Phase-3 KV-cache lookup parity with
-            :class:`Attention`.
-        prefix: HF state_dict prefix. ``q_norm`` / ``k_norm`` load from
-            ``{prefix}q_norm.weight`` / ``{prefix}k_norm.weight``.
-
-    Attributes:
-        q_norm: ``(D,)`` bf16 per-head RMS scale on q before RoPE.
-        k_norm: ``(D,)`` bf16 per-head RMS scale on k before RoPE.
+    Identical algebra to :class:`Attention` but processes
+    ``T = extend_num + 1`` tokens at once (trailing tokens are candidates
+    being verified in speculative decode).  Input ``(T, fused_outdim)``
+    with ``[q | k | v]`` per row; ``k_cache``/``v_cache`` are
+    ``(B=1, max_seq_len, H_kv, D)`` and get appended at
+    ``[seq_len - T, seq_len)``.
     """
 
     def __init__(
@@ -126,20 +89,7 @@ class SingleBatchExtendAttention(MPKModule):
         *,
         seq_len: int,
     ) -> torch.Tensor:
-        """Faithful reference: per-head norm + RoPE + KV append + softmax-attn.
-
-        Args:
-            q_proj: ``(T, H * D)`` post-q_proj tensor where ``T = extend_num + 1``.
-            k_proj: ``(T, H_kv * D)``
-            v_proj: ``(T, H_kv * D)``
-            cos / sin: ``(max_seq_len, D)`` RoPE tables.
-            k_cache / v_cache: ``(B=1, max_seq_len, H_kv, D)``. Updated
-                in place at positions ``[seq_len - T, seq_len)``.
-            seq_len: Total cached length AFTER this call's append.
-
-        Returns:
-            ``(T, H * D)`` bf16.
-        """
+        """PyTorch reference across ``T = extend_num + 1`` tokens."""
         T = q_proj.shape[0]
         H, H_kv, D = self.num_heads, self.num_kv_heads, self.head_dim
         q = q_proj.view(1, T, H, D)
@@ -166,15 +116,8 @@ class SingleBatchExtendAttention(MPKModule):
         return attn.transpose(1, 2).contiguous().view(T, H * D)
 
     def auto_grid_dim(self, input_dt: Any) -> GridDim:
-        """``(extend_num + 1, num_kv_heads, 1)`` — one CTA per (token, kv-head).
-
-        Matches the canonical launch in
-        ``persistent_kernel.py:single_batch_extend_attention_layer``
-        (the docstring comments show ``grid_dim = (6, 8, 1)`` for the
-        ``extend_num=5`` / ``num_kv_heads=8`` case).
-        """
-        T = input_dt.dim(0)
-        return (T, self.num_kv_heads, 1)
+        """``(extend_num + 1, num_kv_heads, 1)`` — one CTA per (token, kv-head)."""
+        return (input_dt.dim(0), self.num_kv_heads, 1)
 
     def default_block_dim(self) -> BlockDim:
         """Kernel hard-wires 128 threads (single-batch decode family)."""
@@ -193,20 +136,20 @@ class SingleBatchExtendAttention(MPKModule):
         block_dim: Optional[BlockDim] = None,
         name: Optional[str] = None,
     ) -> Any:
-        """Register the ``single_batch_extend_attention`` task.
+        """Register ``single_batch_extend_attention`` (Ampere/Hopper only — no SM100 variant).
 
-        Args:
-            input: ``(extend_num + 1, fused_outdim)`` bf16 DTensor.
-            k_cache / v_cache: ``(B=1, max_seq_len, H_kv, D)`` bf16.
-            cos / sin: ``(max_seq_len, D)`` bf16 RoPE tables.
-            output: ``None``, ``torch.Tensor``, or ``DTensor`` —
-                same routing as the rest of the catalog.
-            grid_dim / block_dim: explicit overrides.
-            name: prefix for the auto-allocated output buffer.
+        Tensor contract:
+          input:   (T, (NQ + 2*NKV) * D)         bf16, fused QKV; T = extend_num + 1.
+          k_cache: (1, max_seq_len, NKV, D)      bf16, contiguous (B=1) KV cache.
+          v_cache: (1, max_seq_len, NKV, D)      bf16, contiguous (B=1) KV cache.
+          cos:     (max_seq_len, D)              bf16, RoPE table.
+          sin:     (max_seq_len, D)              bf16, RoPE table.
+          q_norm:  (D,)                          bf16, per-head RMSNorm weight (auto-attached).
+          k_norm:  (D,)                          bf16, per-head RMSNorm weight (auto-attached).
+          output:  (T, NQ * D)                   bf16, attention output.
 
-        Returns:
-            The output DTensor of shape
-            ``(extend_num + 1, num_heads * head_dim)``.
+        Notes: appends k/v at ``[seq_len - T, seq_len)``; non-causal across the
+        extend block. Meta deps: ``step`` for the position window.
         """
         import torch as _torch
         from ...context import current_pk
@@ -233,22 +176,16 @@ class SingleBatchExtendAttention(MPKModule):
         else:
             out_dt = output
 
-        q_norm_dt = pk.attach_input(
-            self.q_norm.data, name=f"{prefix}q_norm"
-        )
-        k_norm_dt = pk.attach_input(
-            self.k_norm.data, name=f"{prefix}k_norm"
-        )
+        q_norm_dt = pk.attach_input(self.q_norm.data, name=f"{prefix}q_norm")
+        k_norm_dt = pk.attach_input(self.k_norm.data, name=f"{prefix}k_norm")
 
-        # Inlined task registration (the body that used to live on
-        # PersistentKernel.single_batch_extend_attention_layer).
         from ....core import CyTBGraph
         from ....kernel import TBGraph
 
-        assert input.num_dims == 2  # (batch_size, fused_outdim / world_size)
-        assert out_dt.num_dims == 2  # (batch_size, hidden_size / world_size)
-        assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
-        assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+        assert input.num_dims == 2
+        assert out_dt.num_dims == 2
+        assert k_cache.num_dims == 4
+        assert v_cache.num_dims == 4
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
         num_q_heads = out_dt.dim(1) // head_dim
@@ -257,25 +194,20 @@ class SingleBatchExtendAttention(MPKModule):
 
         extend_num = input.dim(0) - 1
         if cos is not None or sin is not None:
-            assert cos.num_dims == 2  # (seq_len, head_dim)
-            assert sin.num_dims == 2  # (seq_len, head_dim)
+            assert cos.num_dims == 2
+            assert sin.num_dims == 2
             assert cos.dim(1) == head_dim
             assert sin.dim(1) == head_dim
             rotary_embed = 1
         qk_norm = 0
         if q_norm_dt is not None or k_norm_dt is not None:
-            assert q_norm_dt.num_dims == 1  # (head_dim)
-            assert k_norm_dt.num_dims == 1  # (head_dim)
+            assert q_norm_dt.num_dims == 1
+            assert k_norm_dt.num_dims == 1
             qk_norm = 1
             assert q_norm_dt.dim(0) == head_dim
             assert k_norm_dt.dim(0) == head_dim
 
-        # params[0]: num_q_heads
-        # params[1]: num_kv_heads
-        # params[2]: qk_norm
-        # params[3]: rotary_embed
-        # params[4]: extend_num
-        # params[5]: output_stride
+        # params: [num_q_heads, num_kv_heads, qk_norm, rotary_embed, extend_num, output_stride]
         params = [
             num_q_heads, num_kv_heads, qk_norm, rotary_embed,
             extend_num, output_stride,
@@ -291,16 +223,7 @@ class SingleBatchExtendAttention(MPKModule):
         tb_graph.new_input(sin, (-1, -1, -1), -1, True)
         tb_graph.new_input(out_dt, (0, 1, -1), -1, True)
         pk.kn_graph.customized(
-            [
-                input,
-                k_cache,
-                v_cache,
-                q_norm_dt,
-                k_norm_dt,
-                cos,
-                sin,
-                out_dt,
-            ],
+            [input, k_cache, v_cache, q_norm_dt, k_norm_dt, cos, sin, out_dt],
             tb_graph,
         )
         pk.kn_graph.register_task(

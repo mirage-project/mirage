@@ -10,7 +10,7 @@ import sys
 import torch
 
 import mirage
-from mirage.mpk.layers.mla.prefill import MLAPrefill
+from mirage.mpk.layers.mla.prefill import MLAPrefillAbsorbed
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 
@@ -74,9 +74,8 @@ def test_mla_prefill_absorbed_smoke():
     kv_dt = pk.attach_input(kv, name="mlapre_kv")
     out_dt = pk.attach_input(output, name="mlapre_out")
 
-    m = MLAPrefill(
+    m = MLAPrefillAbsorbed(
         num_heads=num_heads,
-        variant="absorbed",
         seq_len=seq_len,
         d_ckv=d_ckv,
         d_kpe=d_kpe,

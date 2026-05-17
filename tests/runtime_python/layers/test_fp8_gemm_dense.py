@@ -17,31 +17,30 @@ import sys
 
 import torch
 
-from mirage.mpk.layers.linear.fp8_gemm_dense import FP8GEMMDense
+from mirage.mpk.layers.linear.fp8_gemm_dense import (
+    FP8GEMMDenseSmallM, FP8GEMMDenseMediumM,
+)
 
 
 def test_fp8_gemm_dense_smallm_compile_only():
-    m = FP8GEMMDense(
-        in_features=512, out_features=256, scale_ue8m0=False,
-        variant="smallm", prefix="dgsm_",
+    m = FP8GEMMDenseSmallM(
+        in_features=512, out_features=256, scale_ue8m0=False, prefix="dgsm_",
     )
     assert m.weight.shape == (256, 512), f"weight: {m.weight.shape}"
-    # block-scaled fp32 layout: (M//128, K//128)
     assert m.weight_scale.shape == (256 // 128, 512 // 128), \
         f"weight_scale: {m.weight_scale.shape}"
     assert m.weight_scale.dtype == torch.float32
-    print("PASSED: FP8GEMMDense(smallm) Python-side shapes correct")
+    print("PASSED: FP8GEMMDenseSmallM Python-side shapes correct")
 
 
 def test_fp8_gemm_dense_mediumm_compile_only():
-    m = FP8GEMMDense(
-        in_features=512, out_features=256, scale_ue8m0=False,
-        variant="mediumm", prefix="dgmm_",
+    m = FP8GEMMDenseMediumM(
+        in_features=512, out_features=256, scale_ue8m0=False, prefix="dgmm_",
     )
     assert m.weight.shape == (256, 512)
     assert m.weight_scale.shape == (2, 4)
     assert m.weight_scale.dtype == torch.float32
-    print("PASSED: FP8GEMMDense(mediumm) Python-side shapes correct")
+    print("PASSED: FP8GEMMDenseMediumM Python-side shapes correct")
 
 
 if __name__ == "__main__":

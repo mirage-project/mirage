@@ -11,17 +11,18 @@ Full runtime exercise validated by demo/deepseek_v3/demo_new.py
 
 import torch
 
-from mirage.mpk.layers.linear.fp8_group_gemm import FP8GroupGEMM
+from mirage.mpk.layers.linear.fp8_group_gemm import (
+    FP8GroupGEMMSmallM, FP8GroupGEMMLargeM,
+)
 
 
 def test_fp8_group_gemm_smallm_compile_only():
     num_experts = 4
     in_features = 512
     out_features = 256
-    m = FP8GroupGEMM(
+    m = FP8GroupGEMMSmallM(
         in_features=in_features, out_features=out_features,
-        num_experts=num_experts, scale_ue8m0=True, variant="smallm",
-        prefix="ggsm_",
+        num_experts=num_experts, scale_ue8m0=True, prefix="ggsm_",
     )
     # weight shape: (E, N, K)
     assert m.weight.shape == (num_experts, out_features, in_features), \
@@ -41,10 +42,9 @@ def test_fp8_group_gemm_largem_compile_only():
     num_experts = 4
     in_features = 512
     out_features = 256
-    m = FP8GroupGEMM(
+    m = FP8GroupGEMMLargeM(
         in_features=in_features, out_features=out_features,
-        num_experts=num_experts, scale_ue8m0=True, variant="largem",
-        prefix="gglm_",
+        num_experts=num_experts, scale_ue8m0=True, prefix="gglm_",
     )
     assert m.weight.shape == (num_experts, out_features, in_features)
     packed_k = in_features // 128
