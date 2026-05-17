@@ -1254,6 +1254,17 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int hidden_dim_full = output_ops[0]->output_tensors[0].dim[1];
+  // C20 (2026-05-17): use stride[0] (in elements) instead of dim[1] for the
+  // row-walk stride. For root tensors stride[0] == dim[1] (row-major
+  // default), so non-view callers see no behavior change. For `mpk.narrow`
+  // views, dim[1] = slot_width but stride[0] = parent_width — using stride
+  // here is what prevents the kernel from overwriting the adjacent slot
+  // when stepping to row i+1. compute width (HIDDEN_DIM template param)
+  // still derives from dim/process_dim.
+  int in_row_stride =
+      static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int out_row_stride =
+      static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // Currently assume that each rmsnorm task processes one token
   // assert(batch_size == 1);
@@ -1294,8 +1305,8 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
          process_dim,
          in_offset,
          out_offset,
-         hidden_dim_full,
-         hidden_dim_full);
+         in_row_stride,
+         out_row_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
@@ -4927,9 +4938,15 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     batch_size = input_ops[0]->output_tensors[0].dim[0];
     hidden_size = input_ops[0]->output_tensors[0].dim[1];
   }
-  // GLOBAL_STRIDE = hidden_size (stride between rows in linearized layout)
-  int input_stride = (ndims == 3) ? input_ops[0]->dtensor.dim[2]
-                                  : input_ops[0]->dtensor.dim[1];
+  // GLOBAL_STRIDE = stride between rows in linearized layout. C20
+  // (2026-05-17): use stride[0] (in elements) instead of dim[1]; for non-view
+  // tensors these are equal, but for an `mpk.narrow` view dim[1] is the
+  // slot width while stride[0] is the parent's full row width — the
+  // latter is what the kernel must walk by to avoid stepping into the
+  // adjacent slot.
+  int input_stride = (ndims == 3)
+                         ? static_cast<int>(input_ops[0]->dtensor.stride[1])
+                         : static_cast<int>(input_ops[0]->dtensor.stride[0]);
   int in_offset_elems = 0;
   if (has_slice_override) {
     hidden_size = params[1];
