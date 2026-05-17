@@ -68,6 +68,13 @@ KNReductionOp::KNReductionOp(Graph *_kgraph,
   assert(dim < output.num_dims);
   assert(output.dim[dim] % size == 0);
   output.dim[dim] = size;
+  // Reduction allocates fresh memory for the smaller output, so recompute
+  // row-major strides from the post-reduction shape rather than inheriting
+  // the (now-wrong) strides copied from `input`.
+  for (int i = output.num_dims - 1; i >= 0; i--) {
+    output.stride[i] =
+        (i == output.num_dims - 1) ? 1 : output.stride[i + 1] * output.dim[i + 1];
+  }
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;

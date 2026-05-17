@@ -182,8 +182,23 @@ public:
   static std::atomic<int64_t> next_guid;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
-    DTensor, data_type, layout, num_dims, dim, stride, guid, base_guid, view_offset)
+// Custom serialization. We can't use NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE
+// because cache files serialized before stride / base_guid / view_offset
+// existed don't carry those fields, and the strict variant of the macro
+// throws on missing keys. Instead:
+//   - to_json writes all fields including the new ones;
+//   - from_json reads each field with `.value(...)` so missing keys fall
+//     back to the default-constructed DTensor's value (all-zero), then
+//     calls fixup_legacy_strides to recompute row-major strides when the
+//     loaded payload lacked the stride field.
+void to_json(nlohmann::json &j, DTensor const &t);
+void from_json(nlohmann::json const &j, DTensor &t);
+
+// Recompute row-major strides on a freshly-deserialized DTensor when it
+// came from an old JSON cache that didn't carry the stride field (so all
+// stride[i] are zero). For tensors that DID carry strides this is a no-op.
+// Safe to call after every DTensor JSON parse.
+void fixup_legacy_strides(DTensor &t);
 
 } // namespace kernel
 } // namespace mirage

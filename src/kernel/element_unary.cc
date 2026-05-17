@@ -161,6 +161,8 @@ KNElementUnaryOp::KNElementUnaryOp(Graph *_kgraph,
                                    DTensor const &input,
                                    mirage::type::KNOperatorType type)
     : mirage::kernel::KNOperator(_kgraph, type, input) {
+  // Shape-preserving op: dim[] and stride[] both carry over from `input`
+  // verbatim via the DTensor copy; no need to recompute strides.
   DTensor output = input;
   output.owner_op = this;
   output.owner_ts_idx = 0;

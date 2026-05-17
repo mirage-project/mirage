@@ -50,6 +50,10 @@ KNAllReduceOp::KNAllReduceOp(Graph *_kgraph,
                              bool _inplace)
     : KNOperator(_kgraph, mirage::type::KN_ALLREDUCE_OP, input),
       inplace(_inplace) {
+  // Shape-preserving op: dim[] and stride[] both carry over from `input`
+  // verbatim via the DTensor copy; no need to recompute strides (true for
+  // both inplace and out-of-place — the out-of-place allocation matches
+  // the input's shape).
   DTensor output;
   output = input;
   output.owner_op = this;
