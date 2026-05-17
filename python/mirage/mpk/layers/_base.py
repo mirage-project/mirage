@@ -33,7 +33,7 @@ module's weight load from ``state_dict["model.layers.3.self_attn.q_proj.weight"]
 without any custom loader plumbing.
 """
 
-from typing import Tuple
+from typing import Iterable, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -85,3 +85,109 @@ class MPKModule(nn.Module):
         from .. import context as _ctx
         pk = _ctx.current_pk()
         return (128, 1, 1) if pk.target_cc < 90 else (256, 1, 1)
+
+    # ------------------------------------------------------------------
+    # Weight loading (vLLM-style streaming)
+    # ------------------------------------------------------------------
+    def load_weights(
+        self,
+        weights: Iterable[Tuple[str, torch.Tensor]],
+    ) -> Set[str]:
+        """Default routing by HF state_dict key paths.
+
+        ``weights`` is an iterable of ``(name, tensor)`` where ``name`` is
+        the key path RELATIVE to ``self`` — for the top-level model these
+        are the safetensors / HF state_dict keys; recursive calls receive
+        names with the module's own dotted path already stripped.
+
+        Routing rule: for each ``(name, tensor)`` we find the descendant
+        :class:`MPKModule` whose dotted path (from
+        ``self.named_modules()``) is the longest matching strict prefix of
+        ``name``. The weight is then dispatched to that descendant's
+        ``load_weights`` with the dotted path stripped (so the descendant
+        sees a name relative to itself). When the deepest match is ``self``
+        — i.e., the parameter belongs directly to this module — we look up
+        ``name`` in ``self._parameters`` and invoke either the parameter's
+        ``weight_loader`` callback (TP-aware leaves) or a plain ``copy_``.
+
+        Note: routing uses the dotted path from ``named_modules()``, NOT
+        ``self.prefix``. ``self.prefix`` is reserved for MPK kernel-tensor
+        naming and may contain underscore separators distinct from HF's
+        dotted keys.
+
+        Override on composite modules that need fused-key handling (e.g.,
+        ``Qwen3Attention`` mapping HF ``q_proj.weight`` →
+        ``qkv_proj.weight`` with ``shard_id="q"``); the override applies a
+        name-remap table, then delegates the rest to
+        ``super().load_weights``.
+
+        Returns the set of names (relative to ``self``) that were consumed;
+        the top-level caller compares against the iterator's full set to
+        detect missing/extra keys.
+        """
+        weights_list = list(weights)
+        consumed: Set[str] = set()
+
+        # Build a routing table from named_modules(): the dotted path
+        # produced by named_modules is precisely the HF state_dict key
+        # prefix (sans trailing dot). Sort by descending prefix length so
+        # the first match is the deepest.
+        routing = [(self, "")]
+        for name, mod in self.named_modules():
+            if isinstance(mod, MPKModule) and mod is not self and name:
+                routing.append((mod, name + "."))
+        routing.sort(key=lambda mp: -len(mp[1]))
+
+        # Group weights by destination module.
+        # value layout: (module, hf_prefix, list-of-(name, tensor))
+        groups = {}
+        for name, tensor in weights_list:
+            for mod, prefix in routing:
+                if prefix == "" or name.startswith(prefix):
+                    if id(mod) not in groups:
+                        groups[id(mod)] = (mod, prefix, [])
+                    groups[id(mod)][2].append((name, tensor))
+                    break
+
+        for mod, prefix, group in groups.values():
+            if mod is self:
+                # Local parameters: looked up by relative name.
+                for name, tensor in group:
+                    if name in self._parameters and self._parameters[name] is not None:
+                        param = self._parameters[name]
+                        loader = getattr(param, "weight_loader", None)
+                        if loader is not None:
+                            loader(param, tensor)
+                        else:
+                            param.data.copy_(tensor)
+                        consumed.add(name)
+            else:
+                # Recurse with prefix stripped so the descendant sees names
+                # relative to itself.
+                stripped = [(n[len(prefix):], t) for n, t in group]
+                sub = mod.load_weights(stripped)
+                for s in sub:
+                    consumed.add(prefix + s)
+
+        return consumed
+
+    def process_weights(self) -> None:
+        """Hook for post-load weight transforms.
+
+        Runs AFTER all weights of this module's subtree have been loaded by
+        :meth:`load_weights`. Default: recursively call ``process_weights``
+        on every child :class:`MPKModule`. The default is a no-op at leaves.
+
+        Override on modules that need post-load tensor transforms such as
+        KV absorption (DeepSeek MLA), FP8 weight-scale TMA repack, or any
+        cross-parameter fusion that depends on multiple children already
+        being loaded.
+
+        Overrides SHOULD call ``super().process_weights()`` first so leaf
+        transforms run before composite-level transforms — this matches the
+        natural order (a composite that consumes children's loaded params
+        wants those leaves already in their post-load state).
+        """
+        for child in self.children():
+            if isinstance(child, MPKModule):
+                child.process_weights()

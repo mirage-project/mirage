@@ -1,65 +1,39 @@
 """Qwen3 model defined against the new ``mirage.mpk.layers`` catalog.
 
-This is the Phase-3 deliverable of the PyTorch-module refactor: a clean
-``nn.Module`` tree that mirrors the wiring of ``demo/qwen3/demo.py``
-exactly on the MPK ``compile()`` side, while presenting a normal
-PyTorch reference on ``forward()``.
+TP-aware: when constructed inside ``with pk.compile_scope():`` and
+``pk.parallel_config.tp_size > 1``, every projection allocates a sharded
+weight at ``__init__`` time and an explicit ``AllReduce`` is inserted
+after ``o_proj`` (attention) and ``down_proj`` (MLP) to reduce the
+row-parallel partial sums. With ``tp_size == 1`` the AllReduce is a
+no-op (the call is conditional) and the entire model is unsharded —
+identical token stream to ``demo/qwen3/demo.py`` is the v1 verification
+oracle.
 
-What lives where:
+Weight loading: ``model.load_weights(safetensors_iter)`` walks the
+HF-state-dict iterator and dispatches each ``(name, mmap-view)`` tuple to
+the deepest matching submodule by dotted path (the routing built from
+``named_modules()`` inside ``MPKModule.load_weights``). TP-aware leaves
+(``ColumnParallelLinear``, ``RowParallelLinearWithResidual``) attach a
+``weight_loader`` callback to their ``nn.Parameter`` that narrows the
+unsharded source to this rank's slice before ``copy_``.
 
-  * ``Qwen3MLP`` owns ``gate_up_proj`` (fused Linear), ``down_proj``
-    (LinearWithResidual), and the ``SiluMul`` activation.
-  * ``Qwen3Attention`` owns ``qkv_proj`` (fused Linear), ``q_norm`` /
-    ``k_norm`` (per-head RMS scales living on the ``PagedAttention``
-    leaf — re-exposed here via ``self.attn``), and ``o_proj``
-    (LinearWithResidual).
-  * ``Qwen3DecoderLayer`` owns the two ``RMSNorm`` instances and
-    sequences attention then MLP.
-  * ``Qwen3Model`` owns ``embed_tokens`` (``Embed``), the
-    ``rotary_emb`` (``RotaryEmbedding``), the layer list, and the
-    final ``norm``.
-  * ``Qwen3ForCausalLM`` adds ``lm_head`` (``Linear``) and the
-    ``ArgmaxPartial`` + ``ArgmaxReduce`` greedy-decode head.
+Two HF state_dict idiosyncrasies are handled by ``Qwen3Attention``:
 
-HF state_dict compatibility:
+  * ``q_norm`` / ``k_norm`` live as ``Qwen3RMSNorm`` modules in HF (so
+    HF key ``...self_attn.q_norm.weight``). The catalog ``PagedAttention``
+    leaf exposes them as raw ``nn.Parameter`` named ``q_norm`` / ``k_norm``
+    (no ``.weight`` suffix). ``Qwen3Attention.load_weights`` rewrites the
+    suffix before delegating to ``super().load_weights``.
 
-  * Qwen3's checkpoint stores ``q_proj`` / ``k_proj`` / ``v_proj``
-    separately. ``Qwen3Attention._load_from_state_dict`` reads all
-    three and interleaves them into a single fused
-    ``qkv_proj.weight`` using the same kv-group shuffle the existing
-    demo applies via ``pk.shuffle_tensors``.
-  * Same idea for ``gate_proj`` + ``up_proj`` -> ``gate_up_proj.weight``
-    in ``Qwen3MLP``.
-  * Qwen3's ``q_norm`` / ``k_norm`` live as ``Qwen3RMSNorm`` modules in
-    HF (state_dict key ``...self_attn.q_norm.weight``). The catalog
-    ``PagedAttention`` exposes them as raw ``nn.Parameter`` s named
-    ``q_norm`` / ``k_norm`` (no ``.weight`` suffix); the override
-    in ``Qwen3Attention`` strips the suffix before forwarding.
-
-KV cache:
-
-  * Per the Option-III decision, the *driver* allocates a single
-    (num_layers, max_num_pages, page_size, num_kv_heads, head_dim)
-    pool for k and v, registers it on the PK via
-    ``PersistentKernel(kv_cache={"k_cache": k_pool, "v_cache": v_pool})``,
-    and each ``PagedAttention`` layer fetches its slice via
-    ``current_pk().get_kv_cache(layer_idx)`` inside ``compile()``.
-  * ``Qwen3Model.__init__`` therefore does NOT allocate KV cache; the
-    driver does. ``forward()`` (the PyTorch reference) keeps its own
-    contiguous in-module cache as ``nn.Buffer`` solely for the
-    single-batch eager reference path (see decision #5 in the plan).
-
-What this module DOES NOT handle (in scope of follow-up PRs):
-
-  * Tensor parallelism / world_size > 1. The catalog is unsharded;
-    ``Qwen3*`` here assumes ``world_size == 1``.
-  * The legacy demo's ``--split-kv-cache`` and ``--spec-decode`` paths.
-  * Sampling beyond greedy.
+KV cache: per-rank cache only contains this rank's KV heads.
+``Qwen3Model.__init__`` does NOT allocate KV cache; the driver does and
+passes the pool to PK via ``kv_cache=``. Per-layer KV cache is fetched
+via ``current_pk().get_kv_cache(layer_idx)`` at compile time.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -67,17 +41,17 @@ import torch.nn.functional as F
 
 from ...context import current_pk
 from ...layers import (
-    Argmax,
+    AllReduce,
     ArgmaxPartial,
     ArgmaxReduce,
+    ColumnParallelLinear,
     Embed,
     Linear,
-    LinearWithResidual,
     MPKModule,
     PagedAttention,
     RMSNorm,
     RotaryEmbedding,
-    SiluMul,
+    RowParallelLinearWithResidual,
 )
 
 
@@ -86,50 +60,11 @@ from ...layers import (
 # ---------------------------------------------------------------------------
 
 
-def _interleave_qkv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    num_kv_heads: int) -> torch.Tensor:
-    """Mirror ``pk.shuffle_tensors([w_q, w_k, w_v], num_groups=num_kv_heads)``.
-
-    Each kv-group g produces a block of rows arranged
-    ``[ q[g*qpg : (g+1)*qpg] | k[g*kpg : (g+1)*kpg] | v[g*kpg : (g+1)*kpg] ]``
-    where ``qpg = q.shape[0] // num_kv_heads`` and
-    ``kpg = k.shape[0] // num_kv_heads``. The result is what the GQA
-    attention kernel expects to read row-major.
-    """
-    qpg = q.shape[0] // num_kv_heads
-    kpg = k.shape[0] // num_kv_heads
-    blocks = []
-    for g in range(num_kv_heads):
-        blocks.append(q[g * qpg:(g + 1) * qpg])
-        blocks.append(k[g * kpg:(g + 1) * kpg])
-        blocks.append(v[g * kpg:(g + 1) * kpg])
-    return torch.cat(blocks, dim=0)
-
-
-def _interleave_gate_up(gate: torch.Tensor, up: torch.Tensor,
-                        num_groups: int) -> torch.Tensor:
-    """Mirror ``pk.shuffle_tensors([gate, up], num_groups=num_groups)``.
-
-    Output is ``num_groups`` slab-pairs, each of which is
-    ``[ gate[g*gpg : (g+1)*gpg] | up[g*upg : (g+1)*upg] ]``. The
-    silu_mul kernel reads halved per slab-pair, so this layout is what
-    makes the fused MLP correct after a multi-task gate+up linear.
-    """
-    gpg = gate.shape[0] // num_groups
-    upg = up.shape[0] // num_groups
-    blocks = []
-    for g in range(num_groups):
-        blocks.append(gate[g * gpg:(g + 1) * gpg])
-        blocks.append(up[g * upg:(g + 1) * upg])
-    return torch.cat(blocks, dim=0)
-
-
 def _grid_for_linear(size: int, use_cutlass: bool = True) -> int:
     """Mirror ``grid_for_rmsnorm_linear_layer`` from demo/qwen3/demo.py.
 
-    Picks the tile divisor that the kernel's task atom expects. Order
-    of preference matches the existing demo so the new path emits the
-    same task graph.
+    Picks the tile divisor that the kernel's task atom expects so the
+    generated task graph matches the legacy demo's bytes-for-bytes.
     """
     if size % 64 == 0 and not use_cutlass:
         return size // 64
@@ -150,74 +85,76 @@ def _grid_for_linear(size: int, use_cutlass: bool = True) -> int:
 
 class Qwen3MLP(MPKModule):
     """gate_proj + up_proj fused via shuffle_tensors at compile time, then
-    silu_mul, then down_proj + residual.
+    silu_mul, then down_proj + residual + (optional) AllReduce.
 
-    Matches the OLD demo's wiring exactly: 3 separate ``nn.Parameter``
-    weights loaded directly from HF (no Python interleave), fused into a
-    single linear via ``pk.shuffle_tensors`` at compile time. The silu_mul
-    kernel sees the slab-pair-interleaved layout this produces.
+    Under TP, gate_proj/up_proj are column-parallel (each rank holds
+    ``intermediate_size // tp_size`` rows of the unsharded weight); the
+    compile path still calls ``pk.shuffle_tensors`` on the two sharded
+    weights — kernels emit one fused linear over the sharded intermediate
+    space. down_proj is row-parallel: weight is
+    ``(hidden, intermediate_size // tp_size)``; the kernel's
+    ``enable_residual`` task param is forced off on non-rank-0, then the
+    follow-up AllReduce sums partials and the residual is added once.
     """
 
     def __init__(self, config, *, prefix: str = ""):
         super().__init__(prefix=prefix)
+        self.config = config
+        pc = current_pk().parallel_config
+        self.tp_size = pc.tp_size
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        # Three separate parameters loaded directly from HF state_dict.
-        # NOT catalog Linear modules (we bypass per-Linear-task path and
-        # do the runtime shuffle ourselves).
-        self.gate_proj_weight = nn.Parameter(
-            torch.empty(self.intermediate_size, self.hidden_size)
-        )
-        self.up_proj_weight = nn.Parameter(
-            torch.empty(self.intermediate_size, self.hidden_size)
-        )
-        self.down_proj_weight = nn.Parameter(
-            torch.empty(self.hidden_size, self.intermediate_size)
-        )
+        self.intermediate_size_per_partition = config.intermediate_size // pc.tp_size
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
-                              strict, missing_keys, unexpected_keys,
-                              error_msgs):
-        # Map HF keys ``mlp.gate_proj.weight`` etc. to our parameter names.
-        for hf_name, param in [
-            ("gate_proj.weight", self.gate_proj_weight),
-            ("up_proj.weight", self.up_proj_weight),
-            ("down_proj.weight", self.down_proj_weight),
-        ]:
-            hf_key = prefix + hf_name
-            if hf_key in state_dict:
-                with torch.no_grad():
-                    param.copy_(state_dict.pop(hf_key))
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys,
-            unexpected_keys, error_msgs
+        # All three projections are catalog leaves so HF state_dict keys
+        # (...mlp.gate_proj.weight etc.) match by named_modules() path.
+        self.gate_proj = ColumnParallelLinear(
+            self.hidden_size, self.intermediate_size,
+            prefix=f"{prefix}gate_proj_",
         )
+        self.up_proj = ColumnParallelLinear(
+            self.hidden_size, self.intermediate_size,
+            prefix=f"{prefix}up_proj_",
+        )
+        self.down_proj = RowParallelLinearWithResidual(
+            self.intermediate_size, self.hidden_size,
+            prefix=f"{prefix}down_proj_",
+        )
+        if self.tp_size > 1:
+            self.allreduce = AllReduce(prefix=f"{prefix}mlp_allreduce_")
 
     def forward(self, x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        # PyTorch reference: faithful SiLU(gate(x)) * up(x) -> down + residual.
-        gate = F.linear(x, self.gate_proj_weight)
-        up = F.linear(x, self.up_proj_weight)
+        # PyTorch reference. With tp>1, gate_proj/up_proj/down_proj act on
+        # local slices; result is this rank's partial. The caller is
+        # expected to AllReduce externally — same single-rank-slice
+        # semantics as the compile path.
+        gate = self.gate_proj(x)
+        up = self.up_proj(x)
         silu_out = (F.silu(gate.float()) * up.float()).to(x.dtype)
-        return F.linear(silu_out, self.down_proj_weight) + residual
+        # down_proj.forward inherits LinearWithResidual.forward which
+        # already includes the residual add.
+        return self.down_proj(silu_out, residual)
 
     def auto_grid_dim(self, *args, **kwargs):
         raise NotImplementedError("composite module — see child compile()s")
 
     def compile(self, x_dt, residual_dt, *, output=None):
-        """Per-layer mlp_mid and silu_mul_out."""
+        """Compile MLP path. ``output`` is the caller-supplied DTensor for
+        the final hidden activation (post-AllReduce when tp>1).
+        """
         pk = current_pk()
         from ....core import bfloat16 as _mi_bf16
-        fused_out = 2 * self.intermediate_size
+
+        fused_out = 2 * self.intermediate_size_per_partition
         num_tasks_linear = _grid_for_linear(fused_out)
 
-        # Attach individual weights
+        # Per-partition sharded weights, fused at compile via shuffle_tensors.
         w_gate_dt = pk.attach_input(
-            self.gate_proj_weight, name=f"{self.prefix}gate_proj_weight"
+            self.gate_proj.weight, name=f"{self.prefix}gate_proj_weight",
         )
         w_up_dt = pk.attach_input(
-            self.up_proj_weight, name=f"{self.prefix}up_proj_weight"
+            self.up_proj.weight, name=f"{self.prefix}up_proj_weight",
         )
-        # Runtime fusion via shuffle_tensors (slab-pair interleave).
         w_gateup_dt = pk.shuffle_tensors(
             inputs=[w_gate_dt, w_up_dt],
             shuffled_dim=0,
@@ -225,7 +162,6 @@ class Qwen3MLP(MPKModule):
             name=f"{self.prefix}gateup_proj",
         )
 
-        # PER-LAYER mlp_mid
         per_layer_mlp_mid = pk.new_tensor(
             dims=(pk.max_num_batched_tokens, fused_out),
             dtype=_mi_bf16,
@@ -238,9 +174,9 @@ class Qwen3MLP(MPKModule):
             grid_dim=(num_tasks_linear, 1, 1),
             block_dim=(128, 1, 1),
         )
-        # PER-LAYER silu_mul_out
+
         per_layer_silu_mul_out = pk.new_tensor(
-            dims=(pk.max_num_batched_tokens, self.intermediate_size),
+            dims=(pk.max_num_batched_tokens, self.intermediate_size_per_partition),
             dtype=_mi_bf16,
             name=f"{self.prefix}per_layer_silu_mul_out",
         )
@@ -251,9 +187,10 @@ class Qwen3MLP(MPKModule):
             block_dim=(128, 1, 1),
         )
 
-        # down_proj + residual into output DTensor.
+        # down_proj + residual. Under TP this writes a per-rank partial to
+        # ``output`` (an NVSHMEM-symmetric tensor when tp>1).
         w_down_dt = pk.attach_input(
-            self.down_proj_weight, name=f"{self.prefix}down_proj_weight"
+            self.down_proj.weight, name=f"{self.prefix}down_proj_weight",
         )
         pk.linear_with_residual_layer(
             input=per_layer_silu_mul_out,
@@ -272,87 +209,85 @@ class Qwen3MLP(MPKModule):
 
 
 class Qwen3Attention(MPKModule):
-    """q/k/v separate weights, fused via shuffle_tensors at compile time,
-    PagedAttention, o_proj + residual. Matches OLD demo wiring exactly.
-
-    ``q_norm`` and ``k_norm`` live on the inner ``PagedAttention``.
+    """q/k/v as separate column-parallel linears, fused at compile time via
+    ``shuffle_tensors``; paged attention runs on the per-rank head slice;
+    o_proj is row-parallel-with-residual followed by AllReduce (tp>1).
     """
 
     def __init__(self, config, layer_idx: int, *, prefix: str = ""):
         super().__init__(prefix=prefix)
         self.config = config
         self.layer_idx = layer_idx
+        pc = current_pk().parallel_config
+        self.tp_size = pc.tp_size
+
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
+        self.num_heads_per_partition = self.num_heads // self.tp_size
+        self.num_kv_heads_per_partition = self.num_kv_heads // self.tp_size
 
-        # Three separate weights loaded directly from HF state_dict.
-        # NOT catalog Linear modules (we bypass per-Linear-task path and
-        # do the runtime shuffle ourselves).
-        self.q_proj_weight = nn.Parameter(
-            torch.empty(self.num_heads * self.head_dim, self.hidden_size)
+        # q/k/v as catalog leaves; HF state_dict keys match named_modules() paths.
+        self.q_proj = ColumnParallelLinear(
+            self.hidden_size, self.num_heads * self.head_dim,
+            prefix=f"{prefix}q_proj_",
         )
-        self.k_proj_weight = nn.Parameter(
-            torch.empty(self.num_kv_heads * self.head_dim, self.hidden_size)
+        self.k_proj = ColumnParallelLinear(
+            self.hidden_size, self.num_kv_heads * self.head_dim,
+            prefix=f"{prefix}k_proj_",
         )
-        self.v_proj_weight = nn.Parameter(
-            torch.empty(self.num_kv_heads * self.head_dim, self.hidden_size)
+        self.v_proj = ColumnParallelLinear(
+            self.hidden_size, self.num_kv_heads * self.head_dim,
+            prefix=f"{prefix}v_proj_",
         )
-        # The PagedAttention leaf owns q_norm / k_norm parameters.
         self.attn = PagedAttention(
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
+            num_heads=self.num_heads_per_partition,
+            num_kv_heads=self.num_kv_heads_per_partition,
             head_dim=self.head_dim,
             layer_idx=layer_idx,
             prefix=f"{prefix}",
         )
-        self.o_proj_weight = nn.Parameter(
-            torch.empty(self.hidden_size, self.num_heads * self.head_dim)
+        self.o_proj = RowParallelLinearWithResidual(
+            self.num_heads * self.head_dim, self.hidden_size,
+            prefix=f"{prefix}o_proj_",
         )
+        if self.tp_size > 1:
+            self.allreduce = AllReduce(prefix=f"{prefix}attn_allreduce_")
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
-                              strict, missing_keys, unexpected_keys,
-                              error_msgs):
-        # Map HF keys to our parameters.
-        for hf_name, param in [
-            ("q_proj.weight", self.q_proj_weight),
-            ("k_proj.weight", self.k_proj_weight),
-            ("v_proj.weight", self.v_proj_weight),
-            ("o_proj.weight", self.o_proj_weight),
-        ]:
-            hf_key = prefix + hf_name
-            if hf_key in state_dict:
-                with torch.no_grad():
-                    param.copy_(state_dict.pop(hf_key))
+    def load_weights(
+        self, weights: Iterable[Tuple[str, torch.Tensor]],
+    ) -> Set[str]:
+        """Two HF-vs-catalog name idiosyncrasies on this module:
 
-        # q_norm/k_norm: HF stores them as Qwen3RMSNorm modules with
-        # `.weight` inside; the catalog PagedAttention exposes them as
-        # raw nn.Parameters named `q_norm` / `k_norm`. Strip the suffix.
-        for name in ("q_norm", "k_norm"):
-            hf_key = prefix + f"{name}.weight"
-            if hf_key in state_dict:
-                with torch.no_grad():
-                    getattr(self.attn, name).copy_(state_dict.pop(hf_key))
+          * HF ``q_norm.weight`` / ``k_norm.weight`` (a Qwen3RMSNorm module
+            with a ``weight`` Parameter inside) → the catalog's
+            ``PagedAttention.q_norm`` / ``.k_norm`` (raw nn.Parameter, no
+            ``.weight`` suffix). Strip the suffix before delegating so
+            default routing finds the right Parameter.
+        """
+        weights_list = list(weights)
+        remapped = []
+        name_map = {}  # remapped → original (for accurate consumed reporting)
+        for name, tensor in weights_list:
+            if name == "q_norm.weight":
+                new = "attn.q_norm"
+                remapped.append((new, tensor))
+                name_map[new] = name
+            elif name == "k_norm.weight":
+                new = "attn.k_norm"
+                remapped.append((new, tensor))
+                name_map[new] = name
+            else:
+                remapped.append((name, tensor))
+        consumed = super().load_weights(remapped)
+        return {name_map.get(n, n) for n in consumed}
 
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys,
-            unexpected_keys, error_msgs
-        )
-
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                positions: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        # PyTorch reference path with the separate-weight layout.
+    def forward(self, x, cos, sin, positions, residual):
         bsz, tlen, _ = x.shape
-        q = F.linear(x, self.q_proj_weight).view(
-            bsz, tlen, self.num_heads, self.head_dim
-        )
-        k = F.linear(x, self.k_proj_weight).view(
-            bsz, tlen, self.num_kv_heads, self.head_dim
-        )
-        v = F.linear(x, self.v_proj_weight).view(
-            bsz, tlen, self.num_kv_heads, self.head_dim
-        )
+        q = self.q_proj(x).view(bsz, tlen, self.num_heads_per_partition, self.head_dim)
+        k = self.k_proj(x).view(bsz, tlen, self.num_kv_heads_per_partition, self.head_dim)
+        v = self.v_proj(x).view(bsz, tlen, self.num_kv_heads_per_partition, self.head_dim)
         from ...layers.attention.attention import (
             _apply_rotary as _ar, _per_head_rmsnorm as _phr,
         )
@@ -360,49 +295,61 @@ class Qwen3Attention(MPKModule):
         k = _phr(k, self.attn.k_norm)
         q = _ar(q, cos[positions], sin[positions])
         k = _ar(k, cos[positions], sin[positions])
-        # Single-batch attention over the new q against the new k/v
-        # (cache is empty here — reference is for single-call usage).
-        k_full = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=2)
-        v_full = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=2)
+        groups = self.num_heads_per_partition // self.num_kv_heads_per_partition
+        k_full = k.repeat_interleave(groups, dim=2)
+        v_full = v.repeat_interleave(groups, dim=2)
         scale = self.head_dim ** -0.5
         attn = (q.transpose(1, 2) @ k_full.transpose(1, 2).transpose(-1, -2)) * scale
         if tlen > 1:
             mask = torch.triu(
-                torch.full((tlen, tlen), float("-inf"), device=x.device), diagonal=1
+                torch.full((tlen, tlen), float("-inf"), device=x.device),
+                diagonal=1,
             )
             attn = attn + mask
         probs = attn.softmax(dim=-1).to(x.dtype)
         ctx = probs @ v_full.transpose(1, 2)
-        ctx = ctx.transpose(1, 2).reshape(bsz, tlen, self.num_heads * self.head_dim)
-        return F.linear(ctx, self.o_proj_weight) + residual
+        ctx = ctx.transpose(1, 2).reshape(
+            bsz, tlen, self.num_heads_per_partition * self.head_dim,
+        )
+        # o_proj is RowParallelLinearWithResidual → forward gives partial
+        # + residual on local input slice. Single-rank slice semantics.
+        return self.o_proj(ctx, residual)
 
     def auto_grid_dim(self, *args, **kwargs):
         raise NotImplementedError("composite module — see child compile()s")
 
     def compile(self, x_dt, cos_dt, sin_dt, *, residual_dt, output=None):
-        """Per-layer allocation for attn_in, attn_out, and the fused qkv
-        weight. Output (attn_proj_out) is passed in by the caller.
+        """Build the attention sub-block task graph.
+
+        Allocates per-layer ``attn_in`` (fused QKV output, NVSHMEM-symmetric
+        when tp>1 is unnecessary since q/k/v are local) and ``attn_out``,
+        then fetches per-rank KV-cache pool and runs paged attention with
+        per-partition head counts.
         """
         pk = current_pk()
         from ....core import bfloat16 as _mi_bf16
-        fused_outdim = (self.num_heads + 2 * self.num_kv_heads) * self.head_dim
+
+        # Per-partition fused QKV outdim.
+        fused_outdim = (
+            (self.num_heads + 2 * self.num_kv_heads) * self.head_dim
+        ) // self.tp_size
         num_tasks_qkv = _grid_for_linear(fused_outdim)
 
-        # Attach individual q/k/v weights, fuse via runtime shuffle_tensors.
-        # Matches OLD demo exactly.
+        # Attach SHARDED q/k/v weights. Each rank holds its own slice;
+        # shuffle_tensors fuses them locally by KV-group ordering.
         w_q_dt = pk.attach_input(
-            self.q_proj_weight, name=f"{self.prefix}q_proj_weight"
+            self.q_proj.weight, name=f"{self.prefix}q_proj_weight",
         )
         w_k_dt = pk.attach_input(
-            self.k_proj_weight, name=f"{self.prefix}k_proj_weight"
+            self.k_proj.weight, name=f"{self.prefix}k_proj_weight",
         )
         w_v_dt = pk.attach_input(
-            self.v_proj_weight, name=f"{self.prefix}v_proj_weight"
+            self.v_proj.weight, name=f"{self.prefix}v_proj_weight",
         )
         w_qkv_dt = pk.shuffle_tensors(
             inputs=[w_q_dt, w_k_dt, w_v_dt],
             shuffled_dim=0,
-            num_groups=self.num_kv_heads,
+            num_groups=self.num_kv_heads_per_partition,
             name=f"{self.prefix}qkv_proj",
         )
 
@@ -419,30 +366,33 @@ class Qwen3Attention(MPKModule):
             block_dim=(128, 1, 1),
         )
 
-        # Fetch per-layer KV cache via the Option-III PK helper, then
-        # attach to PK as inputs for the paged attention task.
+        # Per-rank KV cache slice (dim 0 = layer; remaining dims = pages,
+        # page_size, num_kv_heads_per_partition, head_dim).
         k_cache_torch, v_cache_torch = pk.get_kv_cache(self.layer_idx)
         k_cache_dt = pk.attach_input(
-            k_cache_torch, name=f"{self.prefix}k_cache"
+            k_cache_torch, name=f"{self.prefix}k_cache",
         )
         v_cache_dt = pk.attach_input(
-            v_cache_torch, name=f"{self.prefix}v_cache"
+            v_cache_torch, name=f"{self.prefix}v_cache",
         )
 
         per_layer_attn_out = pk.new_tensor(
-            dims=(pk.max_num_batched_tokens, self.num_heads * self.head_dim),
+            dims=(pk.max_num_batched_tokens,
+                  self.num_heads_per_partition * self.head_dim),
             dtype=_mi_bf16,
             name=f"{self.prefix}per_layer_attn_out",
         )
         self.attn.compile(
             per_layer_attn_in, k_cache_dt, v_cache_dt, cos_dt, sin_dt,
             output=per_layer_attn_out,
-            grid_dim=(pk.max_num_batched_requests, self.num_kv_heads, 1),
+            grid_dim=(pk.max_num_batched_requests,
+                      self.num_kv_heads_per_partition, 1),
             block_dim=(128, 1, 1),
         )
 
+        # o_proj is row-parallel; weight is (hidden, in_per_partition).
         w_o_dt = pk.attach_input(
-            self.o_proj_weight, name=f"{self.prefix}o_proj_weight"
+            self.o_proj.weight, name=f"{self.prefix}o_proj_weight",
         )
         pk.linear_with_residual_layer(
             input=per_layer_attn_out,
@@ -463,13 +413,15 @@ class Qwen3Attention(MPKModule):
 class Qwen3DecoderLayer(MPKModule):
     def __init__(self, config, layer_idx: int, *, prefix: str = ""):
         super().__init__(prefix=prefix)
+        pc = current_pk().parallel_config
+        self.tp_size = pc.tp_size
         self.input_layernorm = RMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
             prefix=f"{prefix}input_layernorm_",
         )
         self.self_attn = Qwen3Attention(
-            config, layer_idx, prefix=f"{prefix}self_attn_"
+            config, layer_idx, prefix=f"{prefix}self_attn_",
         )
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size,
@@ -481,36 +433,44 @@ class Qwen3DecoderLayer(MPKModule):
     def forward(self, x, cos, sin, positions):
         attn_resid = x
         h = self.input_layernorm(x)
-        h = self.self_attn(h, cos, sin, positions, residual=attn_resid)
+        h = self.self_attn(h, cos, sin, positions, attn_resid)
         mlp_resid = h
         h2 = self.post_attention_layernorm(h)
-        return self.mlp(h2, residual=mlp_resid)
+        return self.mlp(h2, mlp_resid)
 
     def auto_grid_dim(self, *args, **kwargs):
         raise NotImplementedError("composite module — see child compile()s")
 
     def compile(self, x_dt, cos_dt, sin_dt):
-        """Compile one decoder layer. Every intermediate is allocated
-        per-layer (no cross-layer aliasing).
-        """
         pk = current_pk()
         from ....core import bfloat16 as _mi_bf16
         hidden = self.input_layernorm.hidden_size
 
-        per_layer_mlp_out = pk.new_tensor(
-            dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
-            name=f"{self.prefix}per_layer_mlp_out")
+        # Per-layer intermediate buffers. Under TP the projection
+        # outputs cross ranks via NVSHMEM, so those tensors get
+        # io_category="nvshmem_tensor".
+        nvshmem_kind = "nvshmem_tensor" if self.tp_size > 1 else "cuda_tensor"
+
         per_layer_attn_proj_out = pk.new_tensor(
             dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
-            name=f"{self.prefix}per_layer_attn_proj_out")
+            name=f"{self.prefix}per_layer_attn_proj_out",
+            io_category=nvshmem_kind,
+        )
+        per_layer_mlp_out = pk.new_tensor(
+            dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
+            name=f"{self.prefix}per_layer_mlp_out",
+            io_category=nvshmem_kind,
+        )
         per_layer_rmsnorm_attn_out = pk.new_tensor(
             dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
-            name=f"{self.prefix}per_layer_rmsnorm_attn_out")
+            name=f"{self.prefix}per_layer_rmsnorm_attn_out",
+        )
         per_layer_rmsnorm_mlp_out = pk.new_tensor(
             dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
-            name=f"{self.prefix}per_layer_rmsnorm_mlp_out")
+            name=f"{self.prefix}per_layer_rmsnorm_mlp_out",
+        )
 
-        # Attention sub-block: rmsnorm -> qkv linear -> paged attention -> o_proj + residual.
+        # Attention sub-block: rmsnorm → qkv linear → paged attn → o_proj+resid
         self.input_layernorm.compile(
             x_dt,
             output=per_layer_rmsnorm_attn_out,
@@ -522,18 +482,67 @@ class Qwen3DecoderLayer(MPKModule):
             residual_dt=x_dt,
             output=per_layer_attn_proj_out,
         )
-        # MLP sub-block: rmsnorm -> gate_up linear -> silu_mul -> down_proj + residual.
+
+        # AllReduce after attention (tp > 1).
+        if self.tp_size > 1:
+            attn_allreduce_out = pk.new_tensor(
+                dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
+                name=f"{self.prefix}per_layer_attn_allreduce_out",
+                io_category="nvshmem_tensor",
+            )
+            allreduce_buf = pk.new_tensor(
+                dims=(pk.world_size, pk.max_num_batched_tokens, hidden),
+                dtype=_mi_bf16,
+                name=f"{self.prefix}per_layer_attn_allreduce_buf",
+                io_category="nvshmem_tensor",
+            )
+            self.self_attn.allreduce.compile(
+                input=per_layer_attn_proj_out,
+                buffer=allreduce_buf,
+                output=attn_allreduce_out,
+                grid_dim=(hidden // 64, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            mlp_input = attn_allreduce_out
+            mlp_residual = attn_allreduce_out
+        else:
+            mlp_input = per_layer_attn_proj_out
+            mlp_residual = per_layer_attn_proj_out
+
+        # MLP sub-block: rmsnorm → gateup linear → silu_mul → down_proj+resid
         self.post_attention_layernorm.compile(
-            per_layer_attn_proj_out,
+            mlp_input,
             output=per_layer_rmsnorm_mlp_out,
             grid_dim=(pk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
         self.mlp.compile(
             per_layer_rmsnorm_mlp_out,
-            residual_dt=per_layer_attn_proj_out,
+            residual_dt=mlp_residual,
             output=per_layer_mlp_out,
         )
+
+        # AllReduce after MLP (tp > 1).
+        if self.tp_size > 1:
+            mlp_allreduce_out = pk.new_tensor(
+                dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
+                name=f"{self.prefix}per_layer_mlp_allreduce_out",
+                io_category="nvshmem_tensor",
+            )
+            allreduce_buf_mlp = pk.new_tensor(
+                dims=(pk.world_size, pk.max_num_batched_tokens, hidden),
+                dtype=_mi_bf16,
+                name=f"{self.prefix}per_layer_mlp_allreduce_buf",
+                io_category="nvshmem_tensor",
+            )
+            self.mlp.allreduce.compile(
+                input=per_layer_mlp_out,
+                buffer=allreduce_buf_mlp,
+                output=mlp_allreduce_out,
+                grid_dim=(hidden // 64, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            return mlp_allreduce_out
         return per_layer_mlp_out
 
 
@@ -550,11 +559,6 @@ class Qwen3Model(MPKModule):
             config.vocab_size, config.hidden_size,
             prefix=f"{prefix}embed_tokens_",
         )
-        # Cap precomputed cos/sin to 4096 positions to mirror what the
-        # existing demo passes to ``pk.paged_attention_layer`` (it slices
-        # the HF rotary table to ``[:4096, :]``). The paged-attention task
-        # template bakes cos.dim(0) into its codegen; mismatching against
-        # the legacy build causes a runtime illegal-address crash.
         self.rotary_emb = RotaryEmbedding(
             head_dim=config.head_dim,
             max_position_embeddings=min(4096, config.max_position_embeddings),
@@ -563,7 +567,7 @@ class Qwen3Model(MPKModule):
         )
         self.layers = nn.ModuleList([
             Qwen3DecoderLayer(
-                config, layer_idx=i, prefix=f"{prefix}layers_{i}_"
+                config, layer_idx=i, prefix=f"{prefix}layers_{i}_",
             )
             for i in range(config.num_hidden_layers)
         ])
@@ -573,9 +577,9 @@ class Qwen3Model(MPKModule):
             prefix=f"{prefix}norm_",
         )
 
-    def forward(self, input_tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_tokens):
         positions = torch.arange(
-            input_tokens.shape[-1], device=input_tokens.device
+            input_tokens.shape[-1], device=input_tokens.device,
         )
         h = self.embed_tokens(input_tokens)
         cos, sin = self.rotary_emb.cos, self.rotary_emb.sin
@@ -606,7 +610,6 @@ class Qwen3Model(MPKModule):
         h_dt = embed_out_dt
         for layer in self.layers:
             h_dt = layer.compile(h_dt, cos_dt, sin_dt)
-        # Final RMSNorm output is per-layer (no aliasing).
         final_rmsnorm_out = pk.new_tensor(
             dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
             name=f"{self.prefix}final_rmsnorm_out",
@@ -628,38 +631,21 @@ class Qwen3Model(MPKModule):
 class Qwen3ForCausalLM(MPKModule):
     """Full Qwen3 model + lm_head + split-reduce argmax for greedy decode.
 
-    Drop-in target for the canonical smoke command::
-
-        python demo/qwen3/demo_new.py --model <hf-or-local-path> \\
-            --max-num-batched-requests 1
-
-    Driver responsibilities (see ``demo/qwen3/demo_new.py``):
-      * Allocate the KV cache pool and pass it to PK via ``kv_cache=``.
-      * Allocate meta_tensors (step, tokens, qo_indptr, paged_kv_*).
-      * Pre-pad ``lm_head.weight`` to a vocab size divisible by the
-        argmax-partial grid (153600 in the demo).
-      * Pass the ``output_tokens`` torch tensor through ``model.compile()``
-        for argmax-reduce readback.
+    lm_head is replicated (not vocab-parallel) in v1. Driver pre-pads its
+    weight to a multiple of the argmax-partial grid (153600 in the demo).
     """
 
     def __init__(self, config, *, prefix: str = ""):
         super().__init__(prefix=prefix)
         self.config = config
         self.model = Qwen3Model(config, prefix=f"{prefix}model_")
-        # The lm_head's out_dim is padded to a multiple of the argmax
-        # partial-grid; padding lives in the driver, so the param shape
-        # below uses the unpadded vocab_size and the driver overwrites
-        # self.lm_head.weight after instantiation with the padded
-        # weight.
         self.lm_head = Linear(
             config.hidden_size, config.vocab_size,
             prefix=f"{prefix}lm_head_",
         )
-        # Greedy-decode head: split-reduce so the large vocab fans out
-        # across CTAs (see /home/zepengz/.claude/plans for rationale).
         self.argmax_partial = ArgmaxPartial(
             vocab_size=config.vocab_size,
-            num_partial_tasks=1,  # placeholder; overwritten in compile()
+            num_partial_tasks=1,
             prefix=f"{prefix}argmax_partial_",
         )
         self.argmax_reduce = ArgmaxReduce(
@@ -667,7 +653,7 @@ class Qwen3ForCausalLM(MPKModule):
             prefix=f"{prefix}argmax_reduce_",
         )
 
-    def forward(self, input_tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_tokens):
         h = self.model(input_tokens)
         logits = F.linear(h, self.lm_head.weight)
         return torch.argmax(logits, dim=-1, keepdim=True)
@@ -677,34 +663,13 @@ class Qwen3ForCausalLM(MPKModule):
 
     def compile(self, input_tokens_dt, *, output_tokens=None,
                 lm_head_padded_vocab: Optional[int] = None):
-        """Build the full task graph.
-
-        Args:
-            input_tokens_dt: DTensor produced by
-                ``pk.attach_input(input_tokens_torch, name='input_token')``.
-            output_tokens: torch.Tensor (max_num_batched_tokens, 1) int64,
-                pre-allocated by the driver. Bound as the final
-                argmax-reduce output for readback.
-            lm_head_padded_vocab: vocab dimension after padding (153600
-                in the demo). Must equal ``self.lm_head.weight.shape[0]``;
-                the driver pre-pads the weight then passes the size here
-                so this module knows the actual GEMM output shape.
-        """
         pk = current_pk()
         h_dt = self.model.compile(input_tokens_dt)
-
-        # lm_head: same num_workers-driven grid as the demo.
         logits_dt = self.lm_head.compile(
             h_dt,
             grid_dim=(pk.num_workers, 1, 1),
             block_dim=(128, 1, 1),
         )
-
-        # Argmax split-reduce. Per the demo, partial grid is num_workers,
-        # reduce grid is 1.
-        # CHUNK_SIZE coupling between partial and reduce is implicit (see
-        # the ArgmaxPartial/Reduce module docstrings); partial must
-        # compile before reduce within the same scope.
         self.argmax_partial.num_partial_tasks = pk.num_workers
         self.argmax_reduce.num_partial_tasks = pk.num_workers
         part_val_dt, part_idx_dt = self.argmax_partial.compile(
