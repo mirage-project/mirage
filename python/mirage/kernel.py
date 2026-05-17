@@ -789,6 +789,16 @@ class KNGraph:
     ):
         return self.cygraph.shuffle_tensors(input, shuffled_dim, num_groups, name)
 
+    # Virtual-tensor (view) operations
+    def view(self, input: DTensor, new_shape: list) -> DTensor:
+        return self.cygraph.view(input, list(new_shape))
+
+    def narrow(self, input: DTensor, dim: int, start: int, length: int) -> DTensor:
+        return self.cygraph.narrow(input, dim, start, length)
+
+    def split(self, input: DTensor, sizes_or_chunks, dim: int) -> list:
+        return self.cygraph.split(input, sizes_or_chunks, dim)
+
     def register_task(self, bgraph: TBGraph, task_type: str, params: list[int] = None):
         return self.cygraph.register_task(bgraph.cygraph, task_type, params)
 

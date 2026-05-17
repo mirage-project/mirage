@@ -143,6 +143,23 @@ public:
   std::vector<DTensor> chunk(DTensor const &input, int chunk_size, int dim);
   int chunk(DTensor const *input, int chunk_size, int dim);
   KNOperator *create_chunk_op(DTensor const &input, int chunk_size, int dim);
+  // view / split / narrow — virtual tensors (views) that share underlying
+  // memory with `input`. They construct DTensors with `base_guid` pointing to
+  // the root storage tensor and `view_offset` set to the byte offset within
+  // that storage. They DO NOT create KNOperator instances and do not appear in
+  // `operators`; downstream layers see them as ordinary DTensors.
+  DTensor view(DTensor const &input, std::vector<int> const &new_shape);
+  DTensor *view(DTensor const *input, std::vector<int> const &new_shape);
+  std::vector<DTensor> split(DTensor const &input,
+                             std::vector<int> const &sizes,
+                             int dim);
+  std::vector<DTensor> split(DTensor const &input, int chunk_size, int dim);
+  int split(DTensor const *input,
+            std::vector<int> const &sizes,
+            int dim,
+            DTensor **outputs);
+  DTensor narrow(DTensor const &input, int dim, int start, int length);
+  DTensor *narrow(DTensor const *input, int dim, int start, int length);
   // customized operator
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
