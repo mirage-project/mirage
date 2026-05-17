@@ -1740,22 +1740,23 @@ class DeepSeekV3Builder(GraphBuilder):
             dims=(mbt, qkv_a_total),
             dtype=bfloat16, name="qkv_a_out", io_category="cuda_tensor",
         )
+        # C20 (2026-05-17): each logical slot is a `mpk.narrow` view of
+        # qkv_a_out. The view bakes the slot's byte offset into base_ptr
+        # (via view_offset) and inherits the parent row stride into
+        # view.stride[0]. Consumers read the slot from base_ptr (no extra
+        # in_offset needed) and walk rows by view.stride[0]; task_register,
+        # the FP8 TMA descriptor builder (tma.cuh) and annotated_graph's
+        # 2D bbox window-overlap check were all updated in
+        # P1/P2/B3/bbox commits to consume the view metadata uniformly.
+        # The explicit *_offset / row_stride params remaining at callsites
+        # become decorative — they encode 0 offset + parent row stride,
+        # which matches what the view already supplies.
         self._qkv_a_row_stride = qkv_a_total
         self._qkv_a_q_offset = 0
-        self._qkv_a_c_latent_offset = self.q_lora_rank             # 1536
-        self._qkv_a_k_pe_offset = self.q_lora_rank + self.kv_lora_rank  # 2048
-        # All three downstream "slots" share the same backing buffer.
-        # NOTE (C20, 2026-05-17): View API migration deferred. Reviewer
-        # audit identified two blockers: (a) ~30 task_register sites do
-        # `assert(dtensor.owner_op->op_type == KN_INPUT_OP)` then read
-        # `kn_input_op->input_strides[i]`. Views set `owner_op = nullptr`
-        # (src/kernel/view.cc:80) → null-deref before any stride logic
-        # runs. (b) rmsnorm_hopper and per_token_group_quantize_fp8 read
-        # `dtensor.dim[1]` for IN_ROW_STRIDE; for a narrow view that
-        # equals the slot width instead of the parent's row width, which
-        # would silently overwrite the adjacent slot. Migration plan
-        # tracked in task #106; do NOT start without explicit approval.
-        self.q_a_out = self.qkv_a_out
+        self._qkv_a_c_latent_offset = 0
+        self._qkv_a_k_pe_offset = 0
+        self.q_a_out = self.mpk.narrow(
+            self.qkv_a_out, dim=1, start=0, length=self.q_lora_rank)
         self.q_a_out_buf = None
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
         self.q_nope_pe_buf = None
@@ -1810,15 +1811,20 @@ class DeepSeekV3Builder(GraphBuilder):
                 dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
                 dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
             )
-        # kv_a outputs (c_latent + k_pe) live inside the fused qkv_a_out
-        # buffer; downstream consumers receive the FULL qkv_a_out DTensor and
-        # the builder passes (row_stride, offset, process_dim) so each kernel
-        # reads/writes only its slice.
+        # kv_a outputs (c_latent + k_pe) are `mpk.narrow` views of the
+        # fused qkv_a_out, mirroring q_a_out above. The view encodes the
+        # slot's start offset; downstream consumers see the slot's slice
+        # width via view.dim[1] and the parent row stride via
+        # view.stride[0]. See C20 note above q_a_out.
         self.c_latent_out_buf = None
-        # See note above: aliased to qkv_a_out until task_register learns to
-        # read `stride[0]` instead of `dim[1]` for IN_ROW_STRIDE on views.
-        self.c_latent_out = self.qkv_a_out
-        self.k_pe_out = self.qkv_a_out
+        self.c_latent_out = self.mpk.narrow(
+            self.qkv_a_out, dim=1,
+            start=self.q_lora_rank,
+            length=self.kv_lora_rank)
+        self.k_pe_out = self.mpk.narrow(
+            self.qkv_a_out, dim=1,
+            start=self.q_lora_rank + self.kv_lora_rank,
+            length=QK_ROPE_HEAD_DIM)
         # Combined KV entry after layernorm: [batch, 576]
         self.kv_combined = self.mpk.new_tensor(
             dims=(mbt, self.qk_head_dim),  # [batch, 576]
