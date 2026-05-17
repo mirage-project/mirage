@@ -17,6 +17,7 @@ from .multigpu import (
   allocate_nvshmem_teams,
   auto_select_allreduce_implementation,
 )
+from .parallel import ParallelConfig
 from typing import Optional
 
 HARD_CODE = """
@@ -406,6 +407,7 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         test_mode: bool = False,
         kv_cache: Optional[dict] = None,
+        parallel_config: Optional[ParallelConfig] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -421,6 +423,26 @@ class PersistentKernel:
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
         self.mode = mode
+        # Back-compat: if no explicit ParallelConfig is supplied, derive one
+        # from the legacy world_size/mpi_rank args. Default ``tp_size=world_size,
+        # ep_size=1`` matches the existing Qwen3 builder's "world == TP" wiring
+        # (python/mirage/mpk/models/qwen3/builder.py:14). Callers that need MoE
+        # EP×TP nesting (DeepSeek) must pass an explicit ParallelConfig.
+        if parallel_config is None:
+            parallel_config = ParallelConfig(
+                world_size=world_size, rank=mpi_rank,
+                tp_size=world_size, ep_size=1,
+            )
+        else:
+            # Sanity: explicit ParallelConfig must agree with positional args.
+            if parallel_config.world_size != world_size or parallel_config.rank != mpi_rank:
+                raise ValueError(
+                    f"PersistentKernel: parallel_config "
+                    f"(world_size={parallel_config.world_size}, rank={parallel_config.rank}) "
+                    f"disagrees with positional args "
+                    f"(world_size={world_size}, mpi_rank={mpi_rank})."
+                )
+        self.parallel_config = parallel_config
         self.world_size = world_size
         self.mpi_rank = mpi_rank
         self.num_workers = num_workers
@@ -582,6 +604,7 @@ class PersistentKernel:
             "spec_decode_config": None,
             "use_cutlass_kernel": False,
             "eos_token_id": -1,
+            "parallel_config": None,
         }
 
     def _save_kernel_metadata(self, path: str) -> None:
