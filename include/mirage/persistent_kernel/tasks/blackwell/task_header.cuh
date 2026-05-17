@@ -62,6 +62,7 @@
 #include "mla_unified_sm100.cuh"
 #include "moe_linear_sm100.cuh"
 #include "moe_permute_sm100.cuh"
+#include "moe_silu_mul_quantize_fp8_sm100.cuh"
 #include "moe_unpermute_sm100.cuh"
 #include "mul_sum_add_sm100.cuh"
 #include "per_token_group_quantize_fp8.cuh"

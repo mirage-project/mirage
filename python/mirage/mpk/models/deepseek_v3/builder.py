@@ -310,6 +310,11 @@ class DeepSeekV3Builder(GraphBuilder):
         self._fused_post_attn_rmsnorm_quantize = (
             os.environ.get("MPK_DSV3_FUSED_POST_ATTN_RMSNORM_QUANTIZE",
                            "0") == "1")
+        # C18 (2026-05-17): fuse NEW MoE moe_silu_mul + quantize_fp8 into
+        # one task. Eliminates BF16 silu_out HBM round-trip + one task
+        # launch. Default OFF; flip via MPK_DSV3_FUSED_SILU_QUANTIZE=1.
+        self._fused_silu_quantize = (
+            os.environ.get("MPK_DSV3_FUSED_SILU_QUANTIZE", "0") == "1")
         # C1 (2026-05-16): fan the MLA KV-gather unified task across multiple
         # CTAs by striding seq_pos. The legacy 1-CTA gather was 121 μs/layer
         # (15% of layer wallclock) with 127 workers idle. With N splits each
@@ -2935,53 +2940,72 @@ class DeepSeekV3Builder(GraphBuilder):
         # (= m_total / grid_dim.x rows per CTA). So each CTA processes
         # m_total/num_workers rows in-bounds, fully parallel across SMs.
         _silu_grid = min(self.mpk.num_workers, m_total)
-        self.mpk.moe_silu_mul_layer(
-            input=new_moe_w13_out,
-            output=new_moe_silu_out,
-            grid_dim=(_silu_grid, 1, 1),
-            block_dim=(128, 1, 1),
-            meta=new_moe_meta if self._new_moe_active_skip else None,
-            # bm_padding = per-expert row count in the permuted buffer.
-            # Wrapper combines with rows_per_cta (= input.dim(0)/grid.x)
-            # to derive my_expert = bid.x / (bm_padding / rows_per_cta).
-            bm_padding=bm_pad,
-        )
-        if upto < 6: return
-        # 6) Quantize SiLU → UE8M0 directly into K-outermost layout.
-        # C8 (2026-05-16): quantize_fp8 kernel writes UE8M0 packed scale at
-        # offset `packed_idx * aligned_batch + batch_idx` which IS K-outer
-        # row-major. The previous (m_total, K_PACKED) declaration was a
-        # "shape lie" that required a separate transpose_scale task to
-        # reconcile. By declaring the output as (K_PACKED, m_total) the
-        # write pattern matches the declared shape, and the downstream W2
-        # SFA TMA descriptor (which expects K-outer) reads correct bytes
-        # directly — eliminating TRANSPOSE_SCALE (-19 μs/layer).
-        if self._new_moe_active_skip:
-            num_local_experts = m_total // bm_pad
-            self.mpk.quantize_fp8_layer(
-                input=new_moe_silu_out,
+        # C18 (2026-05-17): when env-gated, fuse silu·mul + quantize_fp8
+        # into one task. Skip both standalone steps. Note: the fused
+        # kernel doesn't yet implement the B11/B15 active-expert skip
+        # (it processes every row); for ACTIVE_SKIP=1 callers, the fused
+        # path does more silu·mul work on inactive rows than the
+        # standalone path. Future: thread the active-skip through.
+        if self._fused_silu_quantize:
+            self.mpk.moe_silu_mul_quantize_fp8_sm100_layer(
+                input=new_moe_w13_out,
                 output_fp8=new_moe_silu_fp8,
                 output_scale=new_moe_silu_scale,
                 grid_dim=(m_total, 1, 1),
                 block_dim=(128, 1, 1),
-                scale_ue8m0=True,
-                expert_active_meta=new_moe_meta,
-                expert_active_e_local=num_local_experts,
-                expert_active_bm_padding=bm_pad,
+                rows_per_task=1,
             )
+            if upto < 7: return
+            # Skip the standalone silu_mul + quantize (steps 5+6).
+            # Jump straight to step 7 (W2 GEMM).
         else:
-            # B12 fallback (no active-skip): process_all_rows still
-            # required because the row axis is permuted-expert layout,
-            # not token-indexed.
-            self.mpk.quantize_fp8_layer(
-                input=new_moe_silu_out,
-                output_fp8=new_moe_silu_fp8,
-                output_scale=new_moe_silu_scale,
-                grid_dim=(m_total, 1, 1),
+            self.mpk.moe_silu_mul_layer(
+                input=new_moe_w13_out,
+                output=new_moe_silu_out,
+                grid_dim=(_silu_grid, 1, 1),
                 block_dim=(128, 1, 1),
-                scale_ue8m0=True,
-                process_all_rows=True,
+                meta=new_moe_meta if self._new_moe_active_skip else None,
+                # bm_padding = per-expert row count in the permuted buffer.
+                # Wrapper combines with rows_per_cta (= input.dim(0)/grid.x)
+                # to derive my_expert = bid.x / (bm_padding / rows_per_cta).
+                bm_padding=bm_pad,
             )
+            if upto < 6: return
+            # 6) Quantize SiLU → UE8M0 directly into K-outermost layout.
+            # C8 (2026-05-16): quantize_fp8 kernel writes UE8M0 packed scale at
+            # offset `packed_idx * aligned_batch + batch_idx` which IS K-outer
+            # row-major. The previous (m_total, K_PACKED) declaration was a
+            # "shape lie" that required a separate transpose_scale task to
+            # reconcile. By declaring the output as (K_PACKED, m_total) the
+            # write pattern matches the declared shape, and the downstream W2
+            # SFA TMA descriptor (which expects K-outer) reads correct bytes
+            # directly — eliminating TRANSPOSE_SCALE (-19 μs/layer).
+            if self._new_moe_active_skip:
+                num_local_experts = m_total // bm_pad
+                self.mpk.quantize_fp8_layer(
+                    input=new_moe_silu_out,
+                    output_fp8=new_moe_silu_fp8,
+                    output_scale=new_moe_silu_scale,
+                    grid_dim=(m_total, 1, 1),
+                    block_dim=(128, 1, 1),
+                    scale_ue8m0=True,
+                    expert_active_meta=new_moe_meta,
+                    expert_active_e_local=num_local_experts,
+                    expert_active_bm_padding=bm_pad,
+                )
+            else:
+                # B12 fallback (no active-skip): process_all_rows still
+                # required because the row axis is permuted-expert layout,
+                # not token-indexed.
+                self.mpk.quantize_fp8_layer(
+                    input=new_moe_silu_out,
+                    output_fp8=new_moe_silu_fp8,
+                    output_scale=new_moe_silu_scale,
+                    grid_dim=(m_total, 1, 1),
+                    block_dim=(128, 1, 1),
+                    scale_ue8m0=True,
+                    process_all_rows=True,
+                )
         # C8: transpose_scale eliminated — quantize_fp8 writes directly
         # into the K-outer-declared new_moe_silu_scale.
         if upto < 8: return

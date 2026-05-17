@@ -869,6 +869,18 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         4, 1, TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100, variant_id);
+  } else if (name == "moe_silu_mul_quantize_fp8_sm100") {
+    // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
+    // 1 real input (w13_out bf16) + 2 outputs (silu_fp8, silu_scale). Both
+    // outputs are wired via `tb_graph.new_input(store_in_dmem=True)`. Tuple
+    // splits them into output slots (1 input, 2 outputs) so AG populates
+    // last_writer for the FP8/scale buffers (avoids embedding case-3
+    // misclassification, same logic as B37).
+    int variant_id =
+        task_register->register_moe_silu_mul_quantize_fp8_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        1, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
     // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
     // 2 real inputs (input, weight) + 3 outputs

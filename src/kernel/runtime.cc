@@ -366,6 +366,11 @@ void register_mugraph(
             if (task_type == TASK_TRANSPOSE_SCALE_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // C18 fused moe silu·mul + quantize: grid_x CTAs map 1:1 to
+            // m_total rows. request_id = bid.x (= row_idx in the kernel).
+            if (task_type == TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // Set paged attention split kv task kv_idx
             if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 ||
                 task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 ||
@@ -1979,6 +1984,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_TRANSPOSE_SCALE_SM100] = "TASK_TRANSPOSE_SCALE_SM100";
   task_type_to_name[TASK_ASSEMBLE_Q_DECODE_SM100] =
       "TASK_ASSEMBLE_Q_DECODE_SM100";
+  task_type_to_name[TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100] =
+      "TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

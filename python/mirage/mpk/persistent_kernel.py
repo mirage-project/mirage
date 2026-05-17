@@ -3304,7 +3304,59 @@ class PersistentKernel:
         operators.append(output)
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, "moe_silu_mul", params)
-            
+
+    def moe_silu_mul_quantize_fp8_sm100_layer(
+        self,
+        input: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        rows_per_task: int = 1,
+    ):
+        """C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
+
+        Replaces the (moe_silu_mul → bf16 silu_out → quantize_fp8) chain for
+        the NEW MoE path. Writes silu_fp8 + UE8M0 K-outer packed scale in one
+        kernel, eliminating one task launch and one BF16 HBM round-trip of
+        silu_out (~4 MB at DSv3 m_total=2048 / K_INTER=2048).
+
+        Arguments:
+          input:        w13_out [m_total, 2*K_INTER] bf16 (gate || up halves).
+          output_fp8:   silu_fp8 [m_total, K_INTER] FP8 e4m3 (store_in_dmem).
+          output_scale: silu_scale K-outer UE8M0 packed uint32. Declare as
+                        (K_PACKED, m_total) for K-outer (preferred; matches
+                        the C8 pattern) — the kernel writes
+                        `output_s[packed_idx * aligned_batch + batch_idx]`
+                        regardless of declared shape.
+          rows_per_task: ROWS_PER_TASK template arg; default 1 (one CTA per
+                         row), matching the standalone quantize_fp8 grid
+                         shape (m_total, 1, 1).
+        """
+        assert input.num_dims == 2
+        assert output_fp8.num_dims == 2
+        assert output_scale.num_dims == 2
+        assert input.dim(0) == output_fp8.dim(0)
+        assert input.dim(1) == 2 * output_fp8.dim(1), (
+            f"input must be 2× output_fp8 along K axis "
+            f"(gate||up halves): in={input.dim(1)}, out={output_fp8.dim(1)}")
+        k_inter = output_fp8.dim(1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # input_map: per-CTA base pointer pre-offset on row dim (= grid.x).
+        # Kernel walks ROWS_PER_TASK rows from there.
+        tb_graph.new_input(input, (0, -1, -1), 1, True)
+        tb_graph.new_input(output_fp8, (0, -1, -1), 1, True)
+        # output_scale: 2D but K-outer (or M-outer "shape lie"); kernel
+        # reconstructs global row from task_metadata.request_id, so the
+        # buffer base pointer is what matters. dim_maps = (-1, -1, -1).
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, output_fp8, output_scale], tb_graph)
+        params = [k_inter, rows_per_task]
+        self.kn_graph.register_task(
+            tb_graph, "moe_silu_mul_quantize_fp8_sm100", params)
+
     def moe_w2_linear_layer(
         self,
         input: DTensor,

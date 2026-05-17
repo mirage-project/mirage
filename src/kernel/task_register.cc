@@ -5057,6 +5057,77 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
 }
 
+int TaskRegister::register_moe_silu_mul_quantize_fp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
+  //
+  // tb_graph inputs (in order):
+  //   [0] input bf16   [M_TOTAL, 2*K_INTER]  (w13_out: gate || up halves)
+  //   [1] output_fp8  uint8 [M_TOTAL, K_INTER]   (silu_fp8, store_in_dmem)
+  //   [2] output_scale uint32                    (UE8M0 K-outer packed)
+  //
+  // params (optional):
+  //   params[0] = K_INTER override (default = input.dim(1)/2)
+  //   params[1] = ROWS_PER_TASK (default = 1)
+  //
+  // The fused task writes (M_TOTAL, K_INTER) FP8 + UE8M0 K-outer scale with
+  // the SAME layout the standalone `quantize_fp8` task produces — downstream
+  // moe_permute / fp8_group_gemm consumers see byte-identical scale data.
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 2);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int const num_inputs = 1;
+  int const num_outputs = 2;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  int const m_total = input_ops[0]->dtensor.dim[0];
+  int const in_row_full = input_ops[0]->dtensor.dim[1];
+  int const out_row_full = output_ops[0]->dtensor.dim[1];
+  int const k_inter_default = in_row_full / 2;
+  int const k_inter = params.size() >= 1 ? params[0] : k_inter_default;
+  int const rows_per_task = params.size() >= 2 ? params[1] : 1;
+  assert(in_row_full == 2 * k_inter);
+  assert(out_row_full == k_inter);
+
+  // grid.x must equal ceil(M_TOTAL / rows_per_task) so each CTA owns
+  // ROWS_PER_TASK consecutive rows; we don't enforce here, builder does.
+  // batch_size used for aligned_batch (UE8M0 column stride).
+  int const aligned_batch = ((m_total + 3) / 4) * 4;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Active-rows cap: B11/B15 style — for NEW MoE silu, rows live in
+  // permuted-expert layout, so cap is per-expert actual_count fed by
+  // moe_permute's meta. Builder gates this; without an active mask we use
+  // ROWS_PER_TASK as the upper bound by passing row_count_cap=-1.
+  code.e("kernel::moe_silu_mul_quantize_fp8_task_impl<$, 128, $, $, "
+         "cute::bfloat16_t, __nv_fp8_e4m3, $>(",
+         k_inter,
+         /*IN_ROW_STRIDE=*/in_row_full,
+         /*OUT_ROW_STRIDE=*/out_row_full,
+         rows_per_task);
+  code.e("    task_desc->input_ptrs[0],");  // w13_out (real input slot)
+  code.e("    task_desc->output_ptrs[0],"); // silu_fp8 (output slot 0)
+  code.e("    task_desc->output_ptrs[1],"); // silu_scale (output slot 1)
+  code.e("    1e-10f, -448.0f, 448.0f,");
+  code.e("    $,", aligned_batch);
+  code.e("    task_desc->task_metadata.request_id,"); // task_idx = row_idx
+  code.e("    -1);"); // no row_count_cap for now (B15-style cap is a future opt)
+  code.e("}");
+  return register_task_variant(TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
