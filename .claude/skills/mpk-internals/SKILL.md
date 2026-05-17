@@ -66,11 +66,18 @@ The compilation method does the following in order:
 
 ### How layers build the graph
 
-Each layer method (e.g., `rmsnorm_layer`, `linear_layer`, `moe_w13_fp8_layer`) does:
-1. Create a `TBGraph` with `CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)`
-2. Call `tb_graph.new_input(dtensor, partition, forloop_dim, store_in_dmem)` for each input and output
-3. Call `self.kn_graph.customized([tensors...], tb_graph)` to register the operator
-4. Call `self.kn_graph.register_task(tb_graph, "task_name")` which dispatches to C++ `Graph::register_task()`
+There are two ways to build an MPK task graph:
+
+**A. The catalog (`python/mirage/mpk/layers/`) — preferred.** Each layer is an `MPKModule` subclass whose `compile()` method does the TBGraph construction itself:
+1. Resolve `pk = current_pk()` from the `compile_scope()` context.
+2. Attach weights via `pk.attach_input(...)` and allocate intermediate buffers via `pk.new_tensor(...)`.
+3. Build a `TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))` and call `tb_graph.new_input(dtensor, partition, forloop_dim, store_in_dmem)` for every input + output (in input-then-output order).
+4. Call `pk.kn_graph.customized([tensors...], tb_graph)` to register the operator.
+5. Call `pk.kn_graph.register_task(tb_graph, "task_name", [params])` to dispatch to C++ `Graph::register_task()`.
+
+In this style, `PersistentKernel` is a lightweight proxy: it exposes `kn_graph`, `target_cc`, `num_workers`, `max_num_*`, `attach_input`, `new_tensor`, `shuffle_tensors`, `compile_scope`, and `kv_cache`. Adding a new layer does NOT require editing `persistent_kernel.py`.
+
+**B. Legacy `pk.foo_layer()` methods on `PersistentKernel`.** These do steps 3-5 internally. The catalog modules used to delegate to them but no longer do. The legacy methods are kept alive because the legacy `GraphBuilder`-based models (e.g. `python/mirage/mpk/models/deepseek_v3/builder.py`) and the legacy `demo/<model>/demo.py` drivers still call them. Both paths produce the exact same JSON / `_execute_task` dispatch — the C++ side is unchanged.
 
 ### HARD_CODE: the Python C extension wrapper
 
@@ -169,6 +176,24 @@ def moe_w13_linear_layer(self, input, weight, moe_routing_indices,
     self.kn_graph.customized([input, weight, moe_routing_indices, moe_mask, output], tb_graph)
     self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm100")
 ```
+
+### Catalog API: `MPKModule` and `pk.compile_scope()`
+
+The catalog at `python/mirage/mpk/layers/` is a parallel `nn.Module`-style API on top of the same TBGraph machinery. Three pieces:
+
+1. **`mirage.mpk.layers._base.MPKModule(torch.nn.Module)`** — base class. Provides `default_block_dim()` and abstract `forward()` / `auto_grid_dim()` / `compile()`. Every leaf layer (`Linear`, `RMSNorm`, `PagedAttention`, `MoEW13BF16`, etc.) subclasses it.
+
+2. **`mirage.mpk.context`** — `current_pk()` returns the `PersistentKernel` active inside a `with pk.compile_scope():` block. Stored via `contextvars.ContextVar`. Raises a clear `RuntimeError` if called outside.
+
+3. **Per-module contract**:
+   - `__init__(self, *config, *, prefix="")` — takes architectural params (head_dim, num_experts, …) and a state_dict prefix. Allocates `nn.Parameter`s here.
+   - `forward(self, ...)` — eager PyTorch reference. The correctness oracle for unit tests. For runtime-meta-driven ops (paged decode, MTP), `forward()` may `raise NotImplementedError` with a clear reason.
+   - `auto_grid_dim(self, input_dt)` — return `(gx, gy, gz)` targeting `current_pk().num_workers`. Document any hard kernel constraint that bounds it below `num_workers`.
+   - `compile(self, *args, *, output=None, grid_dim=None, block_dim=None, ...)` — does the TBGraph construction. Resolution: explicit `grid_dim` > `self.auto_grid_dim(...)` > raise. `block_dim` from `self.default_block_dim()` (which reads `current_pk().target_cc`).
+
+Variant split convention: variants that differ by kernel name (`linear_sm100` vs `linear_swapAB_hopper`, FP8 vs bf16) are **separate classes** in the same file with a shared `_BaseClass(MPKModule)`. Variants that differ only by a numeric template param (e.g. `tp_size in {2,4,8}`) stay as a single class with a kwarg. Several files retain optional back-compat factory shims (`MyClass(..., variant="foo")` → `MyClassFoo`) for legacy callers.
+
+Catalog tests live one-to-one at `tests/runtime_python/layers/test_<module>.py` and use `test_mode=True` to exercise the full compile pipeline. See `/test-mode` and `tests/runtime_python/layers/test_paged_attention.py` for the pattern.
 
 ### How partitioning connects to task pointers
 
