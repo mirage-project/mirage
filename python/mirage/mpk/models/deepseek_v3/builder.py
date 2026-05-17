@@ -308,10 +308,14 @@ class DeepSeekV3Builder(GraphBuilder):
         # registers (each consumer thread already holds the full BN=128
         # K-group) and writes FP8 + packed scale directly, eliminating the
         # bf16 HBM round-trip + standalone quantize dispatch wave on the
-        # BMM Q-up critical path. Default OFF until correctness validated;
-        # flip via MPK_DSV3_FUSED_QB_QUANTIZE=1.
+        # BMM Q-up critical path.
+        # Default ON after 5-run validation: text bit-identical to unfused,
+        # median per-token 6.692 ms vs 6.735 ms unfused (n=5, max-min 3 μs)
+        # = -43 μs/iter saved (~2.5 μs/MoE-layer × 17). Set
+        # MPK_DSV3_FUSED_QB_QUANTIZE=0 to revert to the legacy
+        # bf16-GEMM-then-standalone-quantize chain for regression isolation.
         self._fused_qb_quantize = (
-            os.environ.get("MPK_DSV3_FUSED_QB_QUANTIZE", "0") == "1")
+            os.environ.get("MPK_DSV3_FUSED_QB_QUANTIZE", "1") == "1")
         # B37 (2026-05-15): replace the (input_layernorm RMSNorm + qkv_a
         # quantize) two-task chain with one fused kernel that writes BF16
         # rmsnorm_out and FP8 + scale in one pass. Saves ~30 μs/layer
