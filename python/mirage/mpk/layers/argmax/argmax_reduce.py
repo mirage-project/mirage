@@ -363,10 +363,37 @@ class ArgmaxReduce(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        pk.argmax_reduce_layer(
-            input=(partial_values, partial_indices),
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.argmax_reduce_layer``). Each catalog module
+        # owns its own task wiring so adding a new layer doesn't require
+        # editing ``persistent_kernel.py``.
+        #
+        # ``pk.argmax_partial_output_size`` is set by
+        # :class:`ArgmaxPartial.compile`; the reduce kernel uses it to
+        # reconstruct global vocab indices from chunk-local positions.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert partial_values.num_dims == 2  # (batch_size, num_tasks)
+        assert partial_indices.num_dims == 2  # (batch_size, num_tasks)
+        assert out_dt.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(partial_values, (1, 0, -1), -1, True)
+        tb_graph.new_input(partial_indices, (1, 0, -1), -1, True)
+        tb_graph.new_input(out_dt, (0, 1, -1), -1, True)
+        pk.kn_graph.customized(
+            [partial_values, partial_indices, out_dt], tb_graph
         )
+        if pk.target_cc == 100:
+            pk.kn_graph.register_task(
+                tb_graph,
+                "argmax_reduce_sm100",
+                [pk.argmax_partial_output_size],
+            )
+        else:
+            pk.kn_graph.register_task(
+                tb_graph,
+                "argmax_reduce",
+                [pk.argmax_partial_output_size],
+            )
         return out_dt

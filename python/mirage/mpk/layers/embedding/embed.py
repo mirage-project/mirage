@@ -200,12 +200,19 @@ class Embed(MPKModule):
             # Assume it's already a DTensor — leave it alone.
             out_dt = output
 
-        pk.embed_layer(
-            input=input_dt,
-            weight=weight_dt,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-            input_source=input_source,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.embed_layer``). Each catalog module owns its
+        # own task wiring so adding a new layer doesn't require editing
+        # ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_dt, (-1, 1, -1), -1, True)
+        tb_graph.new_input(weight_dt, (1, -1, -1), -1, True)
+        tb_graph.new_input(out_dt, (1, 0, -1), -1, True)
+        pk.kn_graph.customized([input_dt, weight_dt, out_dt], tb_graph)
+        # The legacy pk method used a ternary that picked
+        # "embedding" on both branches; collapsed here for clarity.
+        pk.kn_graph.register_task(tb_graph, "embedding", [input_source])
         return out_dt

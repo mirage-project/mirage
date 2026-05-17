@@ -549,16 +549,86 @@ class PagedAttention(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        pk.paged_attention_layer(
-            input=input,
-            k_cache=k_cache,
-            v_cache=v_cache,
-            q_norm=q_norm_dt,
-            k_norm=k_norm_dt,
-            cos_pos_embed=cos,
-            sin_pos_embed=sin,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.paged_attention_layer``). Each catalog
+        # module owns its own task wiring so adding a new layer doesn't
+        # require editing ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
+        assert out_dt.num_dims == 2  # (num_tokens, hidden_size / world_size)
+        assert k_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
+        assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
+        assert k_cache.dim(0) == pk.max_num_pages
+        assert v_cache.dim(0) == pk.max_num_pages
+        assert k_cache.dim(1) == pk.page_size
+        assert v_cache.dim(1) == pk.page_size
+        head_dim = k_cache.dim(3)
+        num_kv_heads = k_cache.dim(2)
+        num_q_heads = out_dt.dim(1) // head_dim
+        rotary_embed = 0
+        if cos is not None or sin is not None:
+            assert cos.num_dims == 2  # (seq_len, head_dim)
+            assert sin.num_dims == 2  # (seq_len, head_dim)
+            assert cos.dim(1) == head_dim
+            assert sin.dim(1) == head_dim
+            rotary_embed = 1
+        qk_norm = 0
+        if q_norm_dt is not None or k_norm_dt is not None:
+            assert q_norm_dt.num_dims == 1  # (head_dim)
+            assert k_norm_dt.num_dims == 1  # (head_dim)
+            qk_norm = 1
+            assert q_norm_dt.dim(0) == head_dim
+            assert k_norm_dt.dim(0) == head_dim
+
+        # params[0]: num_q_heads
+        # params[1]: num_kv_heads
+        # params[2]: qk_norm
+        # params[3]: rotary_embed
+        # params[4]: max_seq_len
+        # params[5]: page_size
+        params = [
+            num_q_heads,
+            num_kv_heads,
+            qk_norm,
+            rotary_embed,
+            pk.max_seq_length,
+            pk.page_size,
+        ]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        assert grid_dim[0] == pk.max_num_batched_requests
+        assert grid_dim[1] == num_kv_heads
+        tb_graph.new_input(input, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(q_norm_dt, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm_dt, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin, (-1, -1, -1), -1, True)
+        tb_graph.new_input(out_dt, (-1, 1, -1), -1, True)
+        pk.kn_graph.customized(
+            [
+                input,
+                k_cache,
+                v_cache,
+                q_norm_dt,
+                k_norm_dt,
+                cos,
+                sin,
+                out_dt,
+            ],
+            tb_graph,
         )
+        if pk.target_cc == 90:
+            pk.kn_graph.register_task(
+                tb_graph, "paged_attention_hopper", params
+            )
+        elif pk.target_cc == 100:
+            pk.kn_graph.register_task(
+                tb_graph, "paged_attention_sm100", params
+            )
+        else:
+            pk.kn_graph.register_task(tb_graph, "paged_attention", params)
         return out_dt

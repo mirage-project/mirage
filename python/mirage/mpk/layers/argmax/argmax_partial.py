@@ -369,10 +369,35 @@ class ArgmaxPartial(MPKModule):
                 f"(the kernel derives CHUNK_SIZE from grid_dim[0])."
             )
 
-        pk.argmax_partial_layer(
-            input=x,
-            output=(values_dt, indices_dt),
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.argmax_partial_layer``). Each catalog module
+        # owns its own task wiring so adding a new layer doesn't require
+        # editing ``persistent_kernel.py``.
+        #
+        # IMPORTANT: this writes ``pk.argmax_partial_output_size`` as a
+        # side effect — :class:`ArgmaxReduce` reads that attribute from
+        # the PK instance to recover the per-chunk size for its
+        # reconstruction kernel. ``ArgmaxPartial.compile`` MUST run
+        # before ``ArgmaxReduce.compile`` in the same compile scope.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        assert x.num_dims == 2  # (batch_size, vocab_size)
+        assert values_dt.num_dims == 2  # (batch_size, num_tasks)
+        assert indices_dt.num_dims == 2  # (batch_size, num_tasks)
+        num_tasks = grid_dim[0]
+        pk.argmax_partial_output_size = x.dim(1) // num_tasks
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (1, 0, -1), -1, True)
+        tb_graph.new_input(values_dt, (1, 0, -1), -1, True)
+        tb_graph.new_input(indices_dt, (1, 0, -1), -1, True)
+        pk.kn_graph.customized([x, values_dt, indices_dt], tb_graph)
+        if pk.target_cc == 100 or pk.target_cc == 90:
+            pk.kn_graph.register_task(
+                tb_graph, "argmax_partial_sm100", [num_tasks]
+            )
+        else:
+            pk.kn_graph.register_task(
+                tb_graph, "argmax_partial", [num_tasks]
+            )
         return values_dt, indices_dt

@@ -400,12 +400,22 @@ class RMSNormLinear(MPKModule):
         if block_dim is None:
             block_dim = self.default_block_dim()
 
-        pk.rmsnorm_linear_layer(
-            input=x,
-            weight_norm=wn_dt,
-            weight_linear=wl_dt,
-            output=out_dt,
-            grid_dim=grid_dim,
-            block_dim=block_dim,
-        )
+        # Inlined task registration (the body that used to live on
+        # ``PersistentKernel.rmsnorm_linear_layer``). Each catalog module
+        # owns its own task wiring so adding a new layer doesn't require
+        # editing ``persistent_kernel.py``.
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        # Currently assume that the input/weight_linear/output are 2D tensors.
+        assert x.num_dims == 2
+        assert wl_dt.num_dims == 2
+        assert out_dt.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (-1, -1, -1), 1, True)
+        tb_graph.new_input(wn_dt, (-1, -1, -1), 0, True)
+        tb_graph.new_input(wl_dt, (0, -1, -1), 1, True)
+        tb_graph.new_input(out_dt, (1, -1, -1), -1, True)
+        pk.kn_graph.customized([x, wn_dt, wl_dt, out_dt], tb_graph)
+        pk.kn_graph.register_task(tb_graph, "rmsnorm_linear")
         return out_dt
