@@ -116,6 +116,79 @@ __device__ __forceinline__ void
   // ceil(BATCH_SIZE / ROWS_PER_TASK) ≤ num_workers and keep one task wave
   // on the persistent runtime instead of overflowing the scheduler queue.
   int const task_idx = row_idx;
+
+  // C11 fast path (2026-05-17): when NUM_GROUPS_PER_ROW == 1 (typical K=128
+  // case used by BMM Q-side q_nope quantize), the original serial-row loop
+  // leaves num_groups_per_block-1 warps idle per row (1 group per row × 1
+  // warp does the work, the rest sit idle). Restructure: each warp processes
+  // its OWN row in parallel, num_groups_per_block rows per outer iter.
+  // For 128-thread block (= 4 warps) + ROWS_PER_TASK=32, this gives 8 iters
+  // instead of 32 → ~4× speedup on the BMM Q-side q_nope quantize task.
+  if constexpr (NUM_GROUPS_PER_ROW == 1 && SCALE_UE8M0) {
+    // Each warp owns one row per iter. Group is always group_idx=0 so
+    // packed_idx=0 (one packed uint32 per row, low byte = UE8M0).
+    constexpr int ROWS_PER_ITER = 4; // = blockDim.x / WARP_SIZE for 128 threads
+    static_assert(ROWS_PER_ITER == 4,
+                  "C11 fast path assumes 128-thread block (4 warps)");
+#pragma unroll 1
+    for (int r_base = 0; r_base < ROWS_PER_TASK; r_base += ROWS_PER_ITER) {
+      int const r = r_base + warp_idx;
+      if (r >= ROWS_PER_TASK) {
+        continue;
+      }
+      int const batch_idx = task_idx * ROWS_PER_TASK + r;
+      if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
+        continue;
+      }
+      if (row_count_cap >= 0 && r >= row_count_cap) {
+        continue;
+      }
+      // 1 group per row, group_idx=0.
+      int const input_row_base = batch_idx * GLOBAL_STRIDE;
+      int const output_row_base = batch_idx * OUTPUT_STRIDE;
+      int const input_group_base = input_row_base + 0; // GROUP_SIZE * 0
+      int const output_group_base = output_row_base + 0;
+
+      // Per-warp local max across ELEMENTS_PER_THREAD elements.
+      float local_max = eps;
+#pragma unroll
+      for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
+        int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
+        float const abs_val = fabsf(static_cast<float>(input[input_idx]));
+        local_max = fmaxf(abs_val, local_max);
+      }
+      // Warp-reduce max.
+      float group_max = group_reduce_max<WARP_SIZE>(local_max);
+      group_max = fmaxf(group_max, 1e-10f);
+      float y_scale = group_max / max_8bit;
+      uint8_t const scale_quant =
+          __shfl_sync(0xffffffff, encode_ue8m0(y_scale), 0, WARP_SIZE);
+      y_scale = exp2f(static_cast<float>(scale_quant) - 127.0f);
+
+      // Quantize this row.
+#pragma unroll
+      for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
+        int const input_idx = input_group_base + lane_idx + ele_idx * WARP_SIZE;
+        int const output_idx =
+            output_group_base + lane_idx + ele_idx * WARP_SIZE;
+        float const orig_val = static_cast<float>(input[input_idx]);
+        float const quant_val =
+            fminf(fmaxf(orig_val / y_scale, min_8bit), max_8bit);
+        output_q[output_idx] = __nv_fp8_e4m3(quant_val);
+      }
+
+      // Pack scale: only 1 byte (NUM_GROUPS_PER_ROW=1) so packed_idx=0.
+      // UE8M0 K-outer layout: output_s[packed_idx * scale_outer_stride + batch_idx].
+      // Lane 0 of this warp writes its row's scale uint32 directly.
+      if (lane_idx == 0) {
+        uint32_t const packed_scale = static_cast<uint32_t>(scale_quant);
+        output_s[0 * scale_outer_stride + batch_idx] =
+            static_cast<SCALE_PACKED_T>(packed_scale);
+      }
+    }
+    return; // Fast path complete; skip the generic loop below.
+  }
+
 #pragma unroll 1
   for (int r = 0; r < ROWS_PER_TASK; ++r) {
     int const batch_idx = task_idx * ROWS_PER_TASK + r;
