@@ -104,6 +104,8 @@ KNRMSNormOp::KNRMSNormOp(Graph *_kgraph,
   for (size_t i = 0; i < normalized_shape.size(); i++) {
     normalized_size *= normalized_shape[i];
   }
+  // Shape-preserving op: dim[] and stride[] both carry over from `input`
+  // verbatim via the DTensor copy; no need to recompute strides.
   DTensor output = input;
   output.owner_op = this;
   output.owner_ts_idx = 0;

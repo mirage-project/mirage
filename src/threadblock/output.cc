@@ -99,6 +99,16 @@ TBOutputOp::TBOutputOp(Graph *_graph,
   if (forloop_dim >= 0) {
     dtensor.dim[forloop_dim] *= bgraph->forloop_range;
   }
+
+  // The DTensor's stride[] is part of operator==, std::hash, and the JSON
+  // schema, and is consumed by codegen (runtime.cc) for views derived from
+  // it. Compute row-major strides from the final dim[] now that dim folding
+  // is done, so the tensor is well-formed by the time it leaves this op.
+  for (int i = dtensor.num_dims - 1; i >= 0; i--) {
+    dtensor.stride[i] = (i == dtensor.num_dims - 1)
+                            ? 1
+                            : dtensor.stride[i + 1] * dtensor.dim[i + 1];
+  }
 }
 
 TBOutputOp::~TBOutputOp() {
