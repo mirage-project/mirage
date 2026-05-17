@@ -72,6 +72,9 @@ KNInputOp::KNInputOp(Graph *_graph,
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {
     tensor.dim[i] = dims[i];
+    // Copy the user-provided strides onto the tensor so that views can
+    // inherit them and codegen does not need to walk back to this input op.
+    tensor.stride[i] = static_cast<int64_t>(strides[i]);
   }
   tensor.data_type = data_type;
   tensor.layout = layout;

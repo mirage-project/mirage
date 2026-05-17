@@ -124,10 +124,32 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // RAW edges already protect live ranges, and global WAW edges over-constrain
   // common recycled scratch buffers.
   // ---------------------------------------------------------------------
-  std::unordered_map<size_t, std::pair<int, int>> last_writer;
+  // Multi-writer last-writer map, keyed by the underlying storage's GUID
+  // (resolve_base_guid). Each entry records the (layer, out_slot) producer
+  // plus the byte window [view_offset, view_offset + size_bytes) that the
+  // write touched, and whether that producer wrote a view or the full
+  // storage tensor.
+  //
+  // Why a list (not a single writer): write-views allow multiple producers to
+  // write disjoint slices of one storage tensor. A subsequent reader that
+  // touches the full tensor must depend on ALL those writers; a reader that
+  // touches one slice depends only on writers whose windows overlap.
+  struct WriterEntry {
+    int layer;
+    int out_slot;
+    int64_t view_offset;
+    int64_t size_bytes;
+    bool is_virtual_writer;
+  };
+  std::unordered_map<size_t, std::vector<WriterEntry>> last_writers;
 
   // Map KNCustomizedOp* -> layer index so downstream passes can locate by op.
   std::unordered_map<KNCustomizedOp const *, int> op_to_layer;
+
+  auto window_overlaps = [](int64_t a_off, int64_t a_size,
+                            int64_t b_off, int64_t b_size) -> bool {
+    return (a_off < b_off + b_size) && (b_off < a_off + a_size);
+  };
 
   for (auto const &op : kn_graph.operators) {
     if (op->op_type == mirage::type::KN_INPUT_OP) {
@@ -166,93 +188,128 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     ag.layers.push_back(li);
     op_to_layer[cur_op] = layer_idx;
 
-    // Read inputs: bind each to its current last_writer (if any).
+    // Read inputs: for each producer-tensor whose window overlaps this read,
+    // add an edge. Window analysis is the only place where view semantics
+    // change graph construction; event building reads `is_barrier_edge` and
+    // emits one coarse event instead of GCD-based per-tile events.
     for (int in_slot = 0; in_slot < num_inputs; in_slot++) {
       auto *ip = input_ops[in_slot];
-      size_t guid = ip->dtensor.guid;
-      auto wit = last_writer.find(guid);
-      if (wit == last_writer.end()) {
+      DTensor const &cdt = ip->dtensor;
+      size_t base = cdt.resolve_base_guid();
+      auto wit = last_writers.find(base);
+      if (wit == last_writers.end()) {
         // Graph input — no edge in the DAG.
         continue;
       }
-      int prod_layer = wit->second.first;
-      int out_slot = wit->second.second;
+      int64_t c_off = cdt.is_virtual() ? cdt.view_offset : 0;
+      int64_t c_size = static_cast<int64_t>(cdt.bytes_size());
+      bool c_is_virtual = cdt.is_virtual();
 
-      EdgeInfo e;
-      e.prod_layer = prod_layer;
-      e.cons_layer = layer_idx;
-      e.out_slot = out_slot;
-      e.in_slot = in_slot;
-      e.tensor_guid = guid;
-      e.input_map = ip->input_map;
+      for (WriterEntry const &we : wit->second) {
+        if (!window_overlaps(c_off, c_size, we.view_offset, we.size_bytes)) {
+          continue;
+        }
+        EdgeInfo e;
+        e.prod_layer = we.layer;
+        e.cons_layer = layer_idx;
+        e.out_slot = we.out_slot;
+        e.in_slot = in_slot;
+        e.tensor_guid = cdt.guid;
+        e.input_map = ip->input_map;
+        e.is_barrier_edge = c_is_virtual || we.is_virtual_writer;
 
-      // Recover output_map from producer's output_op at out_slot.
-      auto const *prod_op = ag.layers[prod_layer].op;
-      std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
-      split_bgraph_ops(prod_op->bgraph,
-                       ag.layers[prod_layer].num_inputs,
-                       prod_inputs,
-                       prod_outputs);
-      if (out_slot < 0 || out_slot >= (int)prod_outputs.size()) {
-        throw std::runtime_error(
-            "build_annotated_graph: invalid out_slot for producer");
+        auto const *prod_op = ag.layers[we.layer].op;
+        std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
+        split_bgraph_ops(prod_op->bgraph,
+                         ag.layers[we.layer].num_inputs,
+                         prod_inputs,
+                         prod_outputs);
+        if (we.out_slot < 0 || we.out_slot >= (int)prod_outputs.size()) {
+          throw std::runtime_error(
+              "build_annotated_graph: invalid out_slot for producer");
+        }
+        e.output_map = prod_outputs[we.out_slot]->input_map;
+
+        int edge_idx = (int)ag.edges.size();
+        ag.edges.push_back(e);
+        ag.layers[layer_idx].in_edges.push_back(edge_idx);
+        ag.layers[we.layer].out_edges.push_back(edge_idx);
       }
-      e.output_map = prod_outputs[out_slot]->input_map;
-
-      int edge_idx = (int)ag.edges.size();
-      ag.edges.push_back(e);
-      ag.layers[layer_idx].in_edges.push_back(edge_idx);
-      ag.layers[prod_layer].out_edges.push_back(edge_idx);
     }
 
-    // Write outputs: update last_writer after inputs are bound.
+    // Write outputs: update last_writers after inputs are bound.
+    // - Non-virtual writes overwrite the full storage tensor: clear all prior
+    //   writers and start fresh with a single full-window entry.
+    // - Virtual (write-view) writes append a partial entry so multiple
+    //   producers writing disjoint slices coexist.
     for (int out_slot = 0; out_slot < num_outputs; out_slot++) {
-      size_t guid = output_ops[out_slot]->dtensor.guid;
-      auto wit = last_writer.find(guid);
-      if (wit != last_writer.end() && ag.layers[wit->second.first].task_type ==
-                                          mirage::runtime::TASK_TENSOR_INIT) {
-        int prod_layer = wit->second.first;
-        int prod_out_slot = wit->second.second;
-        bool duplicate_edge = false;
-        for (int eidx : ag.layers[layer_idx].in_edges) {
-          EdgeInfo const &existing = ag.edges[eidx];
-          if (existing.prod_layer == prod_layer &&
-              existing.out_slot == prod_out_slot &&
-              existing.tensor_guid == guid) {
-            duplicate_edge = true;
-            break;
-          }
-        }
-        if (!duplicate_edge) {
-          EdgeInfo e;
-          e.prod_layer = prod_layer;
-          e.cons_layer = layer_idx;
-          e.out_slot = prod_out_slot;
-          e.in_slot = -1;
-          e.tensor_guid = guid;
-          // A WAW edge has no consumer input slot; use the consumer's output
-          // partition so event generation tracks the written buffer layout.
-          e.input_map = output_ops[out_slot]->input_map;
+      DTensor const &odt = output_ops[out_slot]->dtensor;
+      size_t base = odt.resolve_base_guid();
+      bool o_is_virtual = odt.is_virtual();
+      int64_t o_off = o_is_virtual ? odt.view_offset : 0;
+      int64_t o_size = static_cast<int64_t>(odt.bytes_size());
 
-          auto const *prod_op = ag.layers[prod_layer].op;
-          std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
-          split_bgraph_ops(prod_op->bgraph,
-                           ag.layers[prod_layer].num_inputs,
-                           prod_inputs,
-                           prod_outputs);
-          if (prod_out_slot < 0 || prod_out_slot >= (int)prod_outputs.size()) {
-            throw std::runtime_error(
-                "build_annotated_graph: invalid out_slot for WAW producer");
+      // Preserve the TASK_TENSOR_INIT WAW behaviour: if the previous writer
+      // was a zero-fill (init) for the SAME tensor (matching guid + window),
+      // add an explicit WAW edge so the next writer waits for init.
+      if (!o_is_virtual) {
+        auto wit = last_writers.find(base);
+        if (wit != last_writers.end()) {
+          for (WriterEntry const &we : wit->second) {
+            if (we.is_virtual_writer) {
+              continue;
+            }
+            if (ag.layers[we.layer].task_type !=
+                mirage::runtime::TASK_TENSOR_INIT) {
+              continue;
+            }
+            bool duplicate_edge = false;
+            for (int eidx : ag.layers[layer_idx].in_edges) {
+              EdgeInfo const &existing = ag.edges[eidx];
+              if (existing.prod_layer == we.layer &&
+                  existing.out_slot == we.out_slot &&
+                  existing.tensor_guid == static_cast<size_t>(odt.guid)) {
+                duplicate_edge = true;
+                break;
+              }
+            }
+            if (!duplicate_edge) {
+              EdgeInfo e;
+              e.prod_layer = we.layer;
+              e.cons_layer = layer_idx;
+              e.out_slot = we.out_slot;
+              e.in_slot = -1;
+              e.tensor_guid = odt.guid;
+              e.input_map = output_ops[out_slot]->input_map;
+              auto const *prod_op = ag.layers[we.layer].op;
+              std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
+              split_bgraph_ops(prod_op->bgraph,
+                               ag.layers[we.layer].num_inputs,
+                               prod_inputs,
+                               prod_outputs);
+              if (we.out_slot < 0 ||
+                  we.out_slot >= (int)prod_outputs.size()) {
+                throw std::runtime_error(
+                    "build_annotated_graph: invalid out_slot for WAW producer");
+              }
+              e.output_map = prod_outputs[we.out_slot]->input_map;
+              // WAW edges keep the non-virtual semantics they had before;
+              // is_barrier_edge stays false unless we explicitly need it.
+              int edge_idx = (int)ag.edges.size();
+              ag.edges.push_back(e);
+              ag.layers[layer_idx].in_edges.push_back(edge_idx);
+              ag.layers[we.layer].out_edges.push_back(edge_idx);
+            }
           }
-          e.output_map = prod_outputs[prod_out_slot]->input_map;
-
-          int edge_idx = (int)ag.edges.size();
-          ag.edges.push_back(e);
-          ag.layers[layer_idx].in_edges.push_back(edge_idx);
-          ag.layers[prod_layer].out_edges.push_back(edge_idx);
         }
       }
-      last_writer[guid] = {layer_idx, out_slot};
+
+      WriterEntry we{layer_idx, out_slot, o_off, o_size, o_is_virtual};
+      if (!o_is_virtual) {
+        // A full-storage write supersedes any prior writers (view or full).
+        last_writers[base].clear();
+      }
+      last_writers[base].push_back(we);
     }
   }
 
@@ -342,6 +399,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     std::vector<char> strip_flag(ag.edges.size(), 0);
     for (size_t eidx = 0; eidx < ag.edges.size(); eidx++) {
       auto const &e = ag.edges[eidx];
+      // Never strip a barrier edge — a longer non-barrier path provides only
+      // fine-grained per-tile synchronization on its constituent edges, which
+      // does not transitively imply "all of u finished before v starts" that
+      // the barrier guarantees.
+      if (e.is_barrier_edge) {
+        continue;
+      }
       int u = e.prod_layer, v = e.cons_layer;
       // Does any intermediate w (successor of u other than v) reach v?
       for (int oe : ag.layers[u].out_edges) {
@@ -393,6 +457,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // plain chain. This showed up when dry-running qwen3 and was the cause
   // of the first wave of spurious compile errors.
   // ---------------------------------------------------------------------
+  // Barrier edges (view-induced) participate in classification just like
+  // fine-grained edges. After step (g) gives a barrier edge event_dim=1
+  // (and hence last3 = full grid_dim), the fork/join LCM uniformly
+  // degrades a mixed bundle to a single event, which is exactly the
+  // barrier semantic. This routes sibling write-views or sibling
+  // read-views of one parent through the standard fork/join paths
+  // instead of an ad-hoc barrier branch.
   for (int i = 0; i < V; i++) {
     std::unordered_set<int> distinct_cons, distinct_prod;
     for (int eidx : ag.layers[i].out_edges) {
@@ -578,10 +649,22 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     auto const *prod_op = ag.layers[e.prod_layer].op;
     auto const *cons_op = ag.layers[e.cons_layer].op;
-    auto prod_part = build_partition(prod_op->bgraph.grid_dim, e.output_map);
-    auto cons_part = build_partition(cons_op->bgraph.grid_dim, e.input_map);
-    for (int d = 0; d < (int)mirage::config::MAX_TENSOR_DIMS; d++) {
-      e.event_dim[d] = std::gcd(prod_part[d], cons_part[d]);
+    if (e.is_barrier_edge) {
+      // View-induced barrier: event_dim = (1, 1, ..., 1) yields last3 =
+      // full grid_dim on both sides, i.e. ONE event per edge spanning all
+      // producer tasks and launching all consumer tasks. Downstream fork
+      // and join LCM passes automatically degrade any mixed bundle that
+      // contains this edge to a single event, which is exactly the
+      // coarse-barrier semantic we want for views.
+      for (int d = 0; d < (int)mirage::config::MAX_TENSOR_DIMS; d++) {
+        e.event_dim[d] = 1;
+      }
+    } else {
+      auto prod_part = build_partition(prod_op->bgraph.grid_dim, e.output_map);
+      auto cons_part = build_partition(cons_op->bgraph.grid_dim, e.input_map);
+      for (int d = 0; d < (int)mirage::config::MAX_TENSOR_DIMS; d++) {
+        e.event_dim[d] = std::gcd(prod_part[d], cons_part[d]);
+      }
     }
     e.producer_side_view.event_dim = e.event_dim;
     e.producer_side_view.grid_dim = prod_op->bgraph.grid_dim;
@@ -803,6 +886,14 @@ std::string maybe_dump_annotated_graph(AnnotatedGraph const &ag) {
        << " out=" << L.out_edges.size() << (L.is_fork_producer ? " [FORK]" : "")
        << (L.is_join_consumer ? " [JOIN]" : "")
        << (L.fork_parent_group >= 0 ? " [fork-consumer]" : "") << "\n";
+  }
+  os << "  edges:\n";
+  for (size_t i = 0; i < ag.edges.size(); i++) {
+    auto const &e = ag.edges[i];
+    os << "    [" << i << "] " << e.prod_layer << ":" << e.out_slot << " -> "
+       << e.cons_layer << ":" << e.in_slot << " guid=" << e.tensor_guid
+       << (e.is_barrier_edge ? " [BARRIER]" : "")
+       << (e.is_residual_stripped ? " [STRIPPED]" : "") << "\n";
   }
   os << "  ordered_layers: [";
   for (size_t i = 0; i < ag.ordered_layers.size(); i++) {

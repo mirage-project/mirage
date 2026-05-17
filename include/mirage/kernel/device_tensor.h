@@ -45,14 +45,20 @@ struct alignas(16) DTensor {
       if (dim[i] != b.dim[i]) {
         return false;
       }
-      // if (stride[i] != b.stride[i]) {
-      //   return false;
-      // }
+      if (stride[i] != b.stride[i]) {
+        return false;
+      }
     }
     if (owner_op != b.owner_op) {
       return false;
     }
     if (owner_ts_idx != b.owner_ts_idx) {
+      return false;
+    }
+    if (base_guid != b.base_guid) {
+      return false;
+    }
+    if (view_offset != b.view_offset) {
       return false;
     }
     assert(data_offset == b.data_offset);
@@ -72,14 +78,20 @@ struct alignas(16) DTensor {
       if (dim[i] != b.dim[i]) {
         return true;
       }
-      // if (stride[i] != b.stride[i]) {
-      //   return true;
-      // }
+      if (stride[i] != b.stride[i]) {
+        return true;
+      }
     }
     if (owner_op != b.owner_op) {
       return true;
     }
     if (owner_ts_idx != b.owner_ts_idx) {
+      return true;
+    }
+    if (base_guid != b.base_guid) {
+      return true;
+    }
+    if (view_offset != b.view_offset) {
       return true;
     }
     assert(data_offset == b.data_offset);
@@ -106,6 +118,26 @@ struct alignas(16) DTensor {
     return num_elements() * data_type_size;
   }
 
+  // Virtual-tensor (view) helpers.
+  //
+  // A storage tensor has base_guid == 0 (the default), meaning it owns its
+  // underlying memory. A virtual tensor (view) has base_guid set to the GUID
+  // of its root storage tensor and view_offset set to its byte offset within
+  // that storage. Multi-level views are flattened to root at construction.
+  inline bool is_virtual() const {
+    return base_guid != 0;
+  }
+  // Returns the GUID identifying the underlying storage for both storage
+  // tensors and views. Dependency analysis keys on this.
+  inline type::GuidType resolve_base_guid() const {
+    return is_virtual() ? base_guid : guid;
+  }
+  // Byte size of this tensor's logical window. For views in Phase 1
+  // (row-major contiguous), this equals data_size().
+  inline size_t bytes_size() const {
+    return data_size();
+  }
+
   static const DTensor EMPTY_TENSOR;
 
   // hash related functions
@@ -119,8 +151,22 @@ public:
   mirage::layout::DmemLayout layout;
   int num_dims;
   int dim[mirage::config::MAX_TENSOR_DIMS];
+  // Per-element strides along each dim, in tensor elements (NOT bytes). For
+  // storage tensors created via new_input these come from the user's stride
+  // tuple. For views they are computed at view construction time from the
+  // parent's stride pattern (same-rank case: inherit; reshape case: row-major
+  // from new dims). Codegen reads this directly for per-task offset
+  // arithmetic, so a view works without walking back to its parent op.
+  int64_t stride[mirage::config::MAX_TENSOR_DIMS];
   type::GuidType guid;
-  // int stride[MAX_TENSOR_DIMS];
+  // GUID of the underlying storage tensor for views; 0 if this tensor owns
+  // its own memory. Used by dependency analysis to match producer/consumer
+  // edges on the root buffer.
+  type::GuidType base_guid;
+  // Byte offset of this view within its root storage's allocation. 0 for
+  // storage tensors. Set at view construction time so window-overlap analysis
+  // works before the memory planner has assigned absolute data_offset.
+  int64_t view_offset;
   //  DTensor fields
   KNOperator *owner_op;
   int owner_ts_idx;
@@ -137,7 +183,7 @@ public:
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
-    DTensor, data_type, layout, num_dims, dim, guid)
+    DTensor, data_type, layout, num_dims, dim, stride, guid, base_guid, view_offset)
 
 } // namespace kernel
 } // namespace mirage

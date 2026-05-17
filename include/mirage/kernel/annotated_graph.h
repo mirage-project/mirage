@@ -86,6 +86,11 @@ struct EdgeInfo {
   int fork_group_id = -1;
   int join_group_id = -1;
   bool is_residual_stripped = false;
+  // True when either the producer's output tensor or the consumer's input
+  // tensor is a virtual DTensor (view). The event builder collapses such
+  // edges to a single coarse barrier event instead of using GCD-based
+  // per-tile events; classification (fork/join) and LCM passes skip them.
+  bool is_barrier_edge = false;
 };
 
 // Group of edges sharing a single fork-producer layer.

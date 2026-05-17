@@ -30,8 +30,10 @@ DTensor::DTensor() {
   num_dims = 0;
   for (int i = 0; i < mirage::config::MAX_TENSOR_DIMS; i++) {
     dim[i] = 0;
-    // stride[i] = 0;
+    stride[i] = 0;
   }
+  base_guid = 0;
+  view_offset = 0;
   owner_op = nullptr;
   owner_ts_idx = -1000;
   data_offset = -1000;
@@ -119,10 +121,12 @@ size_t hash<mirage::kernel::DTensor>::operator()(
   hash_combine(ret, tensor.num_dims);
   for (int i = 0; i < tensor.num_dims; i++) {
     hash_combine(ret, tensor.dim[i]);
-    // hash_combine(ret, tensor.stride[i]);
+    hash_combine(ret, tensor.stride[i]);
   }
   hash_combine(ret, tensor.owner_op);
   hash_combine(ret, tensor.owner_ts_idx);
+  hash_combine(ret, tensor.base_guid);
+  hash_combine(ret, tensor.view_offset);
   hash_combine(ret, tensor.data_offset);
   return ret;
 }
