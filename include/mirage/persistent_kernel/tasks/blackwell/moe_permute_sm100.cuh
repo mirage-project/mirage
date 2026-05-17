@@ -101,32 +101,53 @@ __device__ __forceinline__ void
   int const tid = threadIdx.x;
   int const nthreads = blockDim.x;
 
-  // Phase 1: scan routing_indices[my_expert, 0..MBT-1] deterministically
-  // (single-thread sequential) so that re-runs and downstream consumers
-  // agree on per-expert slot ordering without atomic-ordering ambiguity.
+  // Phase 1: scan routing_indices[my_expert, 0..MBT-1] deterministically.
+  // C16 (2026-05-17): warp-parallel via __ballot_sync + __popc, still
+  // deterministic. Each iter of the for loop processes 32 consecutive
+  // positions; lane 0 atomicAdd's the chunk count into s_count, which
+  // preserves chunk order (warp executes iterations sequentially). Within
+  // a chunk, lane_idx == bit-position in __ballot_sync mask, so
+  // popc(mask & ((1<<lane)-1)) gives the deterministic intra-chunk slot.
   __shared__ int s_count;
   __shared__ int s_matched_token[BM_PADDING];
   __shared__ int s_matched_slot[BM_PADDING]; // 0-indexed (routing_val - 1)
 
   if (tid == 0) {
-    int count = 0;
+    s_count = 0;
+  }
+  __syncthreads();
+
+  // Only warp 0 cooperates on the scan. Other warps idle here — Phase 2
+  // re-engages them. This trades 13 μs of single-thread work for ~1 μs
+  // of warp-parallel work (scan_end=128 → 4 chunks of 32 lanes).
+  {
     int const my_routing_base = my_expert * MBT;
-    // Bound the scan by num_active_rows: topk_sigmoid zero-inits routing
-    // for the full [0, MBT) range but only writes [0, num_active_rows),
-    // so rows >= num_active_rows always carry slot_1idx==0 and would be
-    // skipped anyway. For decode (num_active_rows=1) this drops the
-    // per-CTA scan from 128 iters to 1.
     int const scan_end = (num_active_rows < MBT) ? num_active_rows : MBT;
+    if (tid < 32) {
+      int const lane = tid;
 #pragma unroll 1
-    for (int t = 0; t < scan_end; ++t) {
-      int32_t slot_1idx = routing[my_routing_base + t];
-      if (slot_1idx > 0 && count < BM_PADDING) {
-        s_matched_token[count] = t;
-        s_matched_slot[count] = slot_1idx - 1;
-        ++count;
+      for (int chunk_base = 0; chunk_base < scan_end; chunk_base += 32) {
+        int const t = chunk_base + lane;
+        int32_t slot_1idx = (t < scan_end) ? routing[my_routing_base + t] : 0;
+        unsigned const mask = __ballot_sync(0xffffffff, slot_1idx > 0);
+        int const my_offset = __popc(mask & ((1u << lane) - 1));
+        int const chunk_count = __popc(mask);
+        int base_slot;
+        if (lane == 0) {
+          base_slot = s_count;
+          s_count += chunk_count;
+        }
+        base_slot = __shfl_sync(0xffffffff, base_slot, 0);
+        int const my_slot = base_slot + my_offset;
+        if (slot_1idx > 0 && my_slot < BM_PADDING) {
+          s_matched_token[my_slot] = t;
+          s_matched_slot[my_slot] = slot_1idx - 1;
+        }
+      }
+      if (lane == 0 && s_count > BM_PADDING) {
+        s_count = BM_PADDING;
       }
     }
-    s_count = count;
   }
   __syncthreads();
   int const actual_count = s_count;
