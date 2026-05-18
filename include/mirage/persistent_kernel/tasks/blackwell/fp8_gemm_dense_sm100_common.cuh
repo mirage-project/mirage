@@ -141,6 +141,13 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   // localized to this kernel.
   return;
 #endif
+#ifdef MPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE
+  // Skip variants with compile-time N >= MPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE.
+  // Used to bisect which task variant triggers the TP=2 mb_arrive_tx fault.
+  if (N >= MPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE) {
+    return;
+  }
+#endif
   constexpr int BM = 128, BK = 128, UK = 32;
   int const tid = threadIdx.x, wid = tid / 32;
   int const nn = (N + BN - 1) / BN, nk = (K + BK - 1) / BK;

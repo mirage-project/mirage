@@ -301,6 +301,10 @@ def get_compile_command(
         common_cmd.append("-DMPK_AR_PRINT_MC=1")
     if os.environ.get("MPK_DEBUG_SKIP_FP8_GEMM_DENSE", "0") == "1":
         common_cmd.append("-DMPK_DEBUG_SKIP_FP8_GEMM_DENSE=1")
+    fp8_dense_skip_n_ge = os.environ.get("MPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE")
+    if fp8_dense_skip_n_ge:
+        common_cmd.append(
+            f"-DMPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE={int(fp8_dense_skip_n_ge)}")
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
