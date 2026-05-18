@@ -564,6 +564,13 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
   // --- Phase 2: NVLS multicast ld_reduce -> local store ---
   nvshmemi_team_t *teami = nvshmemi_device_state_d.team_pool[team];
   void *mc_src = mpkar_mc_ptr(teami, input_ptr);
+#ifdef MPK_AR_PRINT_MC
+  if (threadIdx.x == 0) {
+    printf("[AR blk=%d] team=%d teami=%p input=%p mc=%p nvls_rsc=%p\n",
+           (int)blockIdx.x, (int)team, teami, input_ptr, mc_src,
+           teami ? teami->nvls_rsc_base_ptr : nullptr);
+  }
+#endif
 #ifdef MPK_AR_SKIP_REDUCE
   // Skip NVLS reduce entirely; just copy input → output (per-PE, no AR).
   // Used only for measuring barrier-vs-reduce cost; produces wrong output.
