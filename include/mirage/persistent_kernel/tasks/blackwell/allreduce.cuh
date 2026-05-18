@@ -565,10 +565,23 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
   nvshmemi_team_t *teami = nvshmemi_device_state_d.team_pool[team];
   void *mc_src = mpkar_mc_ptr(teami, input_ptr);
 #ifdef MPK_AR_PRINT_MC
-  if (threadIdx.x == 0) {
-    printf("[AR blk=%d] team=%d teami=%p input=%p mc=%p nvls_rsc=%p\n",
-           (int)blockIdx.x, (int)team, teami, input_ptr, mc_src,
-           teami ? teami->nvls_rsc_base_ptr : nullptr);
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    // Also dump TEAM_WORLD (team 0) and TEAM_SHARED (team 2) nvls state
+    // to see if THOSE have valid NVLS resources, or whether NVLS is broken
+    // for all teams on this NVSHMEM build.
+    nvshmemi_team_t *team0 = nvshmemi_device_state_d.team_pool[0];
+    nvshmemi_team_t *team2 = nvshmemi_device_state_d.team_pool[2];
+    printf("[AR-once] team=%d nvls_rsc=%p | team0 nvls_rsc=%p | team2 "
+           "nvls_rsc=%p\n",
+           (int)team,
+           teami ? teami->nvls_rsc_base_ptr : nullptr,
+           team0 ? team0->nvls_rsc_base_ptr : nullptr,
+           team2 ? team2->nvls_rsc_base_ptr : nullptr);
+    printf("[AR-once] team0->team_idx=%d size=%d my_pe=%d | input=%p mc=%p\n",
+           team0 ? team0->team_idx : -1,
+           team0 ? team0->size : -1,
+           team0 ? team0->my_pe : -1,
+           input_ptr, mc_src);
   }
 #endif
 #ifdef MPK_AR_SKIP_REDUCE

@@ -240,14 +240,25 @@ def auto_select_allreduce_implementation(
 ) -> AllReduceStrategy:
     """
     Automatically select the best AllReduce implementation.
-    
+
     Args:
         num_gpus: Number of GPUs involved in the collective
         device_id: GPU device ID to query capabilities
-        
+
     Returns:
         An AllReduceStrategy instance ready to register tasks
     """
+    # MPK_FORCE_ALLGATHER_AR=1 forces the AllgatherReduce fallback even when
+    # NVLS multicast is reported as supported. Used 2026-05-18 to work around
+    # a TP=2 NVSHMEM 3.6.5 issue where `team->nvls_rsc_base_ptr` is NULL on
+    # the device side for every team (including NVSHMEM_TEAM_WORLD) even
+    # though the host log claims `Setting up NVLS resources for team N`. The
+    # NvshmemTile kernel then dereferences NULL via `multimem.ld_reduce` and
+    # the persistent megakernel aborts with cudaErrorIllegalAddress (700).
+    if os.environ.get("MPK_FORCE_ALLGATHER_AR", "0") == "1":
+        print("MPK: forcing AllgatherReduce AR (MPK_FORCE_ALLGATHER_AR=1).")
+        return AllReduceStrategy_AllgatherReduce()
+
     capabilities = get_collective_capabilities(num_gpus, device_id)
 
     # For SM >= 90, prefer tile-based allreduce if available
