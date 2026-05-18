@@ -53,8 +53,19 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 // (la_smem[MAX_SK*128]). FP8 group GEMM (NS=6, BN=128) needs ~216KB
 // dynamic SMEM, so we bump from 207 -> 222 to fit it. Stays under total
 // 228KB hardware limit when combined with the 6KB worker reserved static.
+// DEBUG override (2026-05-18): MPK_SMEM_KB_BUDGET env can shrink this
+// for cooperative-launch capacity testing. TP=2 megakernel may use
+// slightly more static SMEM than TP=4 (different MLA decode variant);
+// the 222 KB default leaves zero headroom against the 228 KB hw limit
+// → cuLaunchCooperativeKernel rejects the launch on TP=2 with no
+// useful error message.
+#ifdef MPK_SMEM_KB_OVERRIDE
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    MPK_SMEM_KB_OVERRIDE * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#else
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     222 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#endif
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
