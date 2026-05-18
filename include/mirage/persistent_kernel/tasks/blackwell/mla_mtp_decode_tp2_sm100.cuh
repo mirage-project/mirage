@@ -157,6 +157,9 @@ __device__ __noinline__ void
   if (Q_LEN > 8) {
     return;
   }
+#ifdef MPK_DEBUG_SKIP_MLA_TP2_MAIN
+  return;
+#endif
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
@@ -781,6 +784,9 @@ __device__ __noinline__ void
   if (Q_LEN > 8) {
     return;
   }
+#ifdef MPK_DEBUG_SKIP_MLA_TP2_REDUCE
+  return;
+#endif
   int const dv_base = block_x * RD_DV;
   int const gi = block_y;
   int const bi = block_z;

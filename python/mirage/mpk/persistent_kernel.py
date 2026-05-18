@@ -280,6 +280,23 @@ def get_compile_command(
     smem_kb_override = os.environ.get("MPK_SMEM_KB_OVERRIDE")
     if smem_kb_override:
         common_cmd.append(f"-DMPK_SMEM_KB_OVERRIDE={int(smem_kb_override)}")
+    # MPK_AR_SKIP_REDUCE / MPK_AR_SKIP_BARRIER: bypass parts of the NVSHMEM
+    # tile allreduce kernel for crash bisection. AR_SKIP_REDUCE replaces the
+    # multimem.ld_reduce with a plain per-PE memcpy (output is wrong but the
+    # kernel doesn't touch the NVLS multicast pointer). AR_SKIP_BARRIER skips
+    # the dissemination barrier before the reduce.
+    if os.environ.get("MPK_AR_SKIP_REDUCE", "0") == "1":
+        common_cmd.append("-DMPK_AR_SKIP_REDUCE=1")
+    if os.environ.get("MPK_AR_SKIP_BARRIER", "0") == "1":
+        common_cmd.append("-DMPK_AR_SKIP_BARRIER=1")
+    # Debug knobs for TP=2 crash bisection: turn an MLA-TP2 kernel into a no-op
+    # at the very start (after the Q_LEN>8 dual-dispatch gate). If the
+    # megakernel runs to completion with one of these set, the crash root cause
+    # lives in that kernel.
+    if os.environ.get("MPK_DEBUG_SKIP_MLA_TP2_MAIN", "0") == "1":
+        common_cmd.append("-DMPK_DEBUG_SKIP_MLA_TP2_MAIN=1")
+    if os.environ.get("MPK_DEBUG_SKIP_MLA_TP2_REDUCE", "0") == "1":
+        common_cmd.append("-DMPK_DEBUG_SKIP_MLA_TP2_REDUCE=1")
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
