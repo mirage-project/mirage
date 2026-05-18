@@ -7046,8 +7046,12 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
     code.e("      $f,", _sm);
   }
   code.e("      kv_len_,");
-  // See generic MTP decode: task metadata is laid out for static num_splits.
-  code.e("      $,", num_splits);
+  // Use the runtime number of active KV tiles (sk_rt_) so the main writes
+  // the partial buffer in a compact layout matching what the reduce reads.
+  // Matches TP=4 pattern; passing compile-time num_splits made the kernel
+  // index past the active si range and read stale partial slots in the
+  // reduce — works for kv_len = num_splits * 128 but not for short context.
+  code.e("      sk_rt_,");
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
   code.e("      $,",
@@ -7092,8 +7096,10 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  // See generic MTP reduce: partial layout is static-num_splits based.
-  code.e("      $,", num_splits);
+  // Match the main task's runtime compact split layout (sk_rt_). Passing
+  // compile-time num_splits read stale partial slots beyond sk_rt_; the
+  // main now also passes sk_rt_, so the two stay in sync for short context.
+  code.e("      sk_rt_,");
   code.e("      $,", num_groups);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
