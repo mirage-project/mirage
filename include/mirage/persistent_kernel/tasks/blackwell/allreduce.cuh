@@ -478,6 +478,89 @@ static __device__ __forceinline__ uint32_t
   return out.bits;
 }
 
+// ========================= P2P fallback reduce (no NVLS) =====================
+// Used when the team has no NVLS multicast resource — observed on NVSHMEM
+// 3.6.5 under MPK's team_split_strided setup where every team has
+// `nvls_rsc_base_ptr == NULL` on the device side (see TP=2 debug session
+// 2026-05-18). Reads this PE's local copy + every peer's heap mirror via
+// `peer_heap_base_p2p`, sums in bf16, stores. bf16 only (matches DSv3 AR
+// instantiation).
+template <typename T>
+static __device__ __forceinline__ void mpkar_p2p_reduce_v4_block(
+    int4 *__restrict__ dst,
+    void const *local_input_ptr,
+    nvshmemi_team_t *teami,
+    int nelems_v4) {
+  static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
+                "P2P AR fallback currently bf16 only.");
+  int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
+  int const npes = teami->size;
+  for (int j = threadIdx.x; j < nelems_v4; j += blockDim.x) {
+    int4 acc = local_v4[j];
+    for (int p = 0; p < npes; p++) {
+      int peer_world_pe = teami->pe_mapping[p];
+      if (peer_world_pe == nvshmemi_device_state_d.mype) {
+        continue;
+      }
+      int4 *peer_v4 = reinterpret_cast<int4 *>(
+          mpkar_peer_ptr(local_input_ptr, peer_world_pe));
+      int4 const peer_val = peer_v4[j];
+      acc.x = mpkar_add_bf16x2(static_cast<uint32_t>(acc.x),
+                               static_cast<uint32_t>(peer_val.x));
+      acc.y = mpkar_add_bf16x2(static_cast<uint32_t>(acc.y),
+                               static_cast<uint32_t>(peer_val.y));
+      acc.z = mpkar_add_bf16x2(static_cast<uint32_t>(acc.z),
+                               static_cast<uint32_t>(peer_val.z));
+      acc.w = mpkar_add_bf16x2(static_cast<uint32_t>(acc.w),
+                               static_cast<uint32_t>(peer_val.w));
+    }
+    dst[j] = acc;
+  }
+}
+
+template <typename T>
+static __device__ __forceinline__ void mpkar_p2p_reduce_add_residual_v4_block(
+    int4 *__restrict__ dst,
+    void const *local_input_ptr,
+    int4 const *__restrict__ residual,
+    nvshmemi_team_t *teami,
+    int nelems_v4) {
+  static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
+                "P2P AR fallback currently bf16 only.");
+  int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
+  int const npes = teami->size;
+  for (int j = threadIdx.x; j < nelems_v4; j += blockDim.x) {
+    int4 acc = local_v4[j];
+    for (int p = 0; p < npes; p++) {
+      int peer_world_pe = teami->pe_mapping[p];
+      if (peer_world_pe == nvshmemi_device_state_d.mype) {
+        continue;
+      }
+      int4 *peer_v4 = reinterpret_cast<int4 *>(
+          mpkar_peer_ptr(local_input_ptr, peer_world_pe));
+      int4 const peer_val = peer_v4[j];
+      acc.x = mpkar_add_bf16x2(static_cast<uint32_t>(acc.x),
+                               static_cast<uint32_t>(peer_val.x));
+      acc.y = mpkar_add_bf16x2(static_cast<uint32_t>(acc.y),
+                               static_cast<uint32_t>(peer_val.y));
+      acc.z = mpkar_add_bf16x2(static_cast<uint32_t>(acc.z),
+                               static_cast<uint32_t>(peer_val.z));
+      acc.w = mpkar_add_bf16x2(static_cast<uint32_t>(acc.w),
+                               static_cast<uint32_t>(peer_val.w));
+    }
+    int4 const r4 = residual[j];
+    acc.x = mpkar_add_bf16x2(static_cast<uint32_t>(acc.x),
+                             static_cast<uint32_t>(r4.x));
+    acc.y = mpkar_add_bf16x2(static_cast<uint32_t>(acc.y),
+                             static_cast<uint32_t>(r4.y));
+    acc.z = mpkar_add_bf16x2(static_cast<uint32_t>(acc.z),
+                             static_cast<uint32_t>(r4.z));
+    acc.w = mpkar_add_bf16x2(static_cast<uint32_t>(acc.w),
+                             static_cast<uint32_t>(r4.w));
+    dst[j] = acc;
+  }
+}
+
 // Same NVLS reduce as above, but adds a local residual before the final store.
 // This is the safe fusion point for tensor-parallel MoE residuals: every rank
 // contributes only its partial MLP output to NVLS, and residual is added once
@@ -566,22 +649,28 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
   void *mc_src = mpkar_mc_ptr(teami, input_ptr);
 #ifdef MPK_AR_PRINT_MC
   if (threadIdx.x == 0 && blockIdx.x == 0) {
-    // Also dump TEAM_WORLD (team 0) and TEAM_SHARED (team 2) nvls state
-    // to see if THOSE have valid NVLS resources, or whether NVLS is broken
-    // for all teams on this NVSHMEM build.
     nvshmemi_team_t *team0 = nvshmemi_device_state_d.team_pool[0];
     nvshmemi_team_t *team2 = nvshmemi_device_state_d.team_pool[2];
-    printf("[AR-once] team=%d nvls_rsc=%p | team0 nvls_rsc=%p | team2 "
-           "nvls_rsc=%p\n",
+    // Dump BOTH nvls_rsc AND nvls_rsc_base_ptr — different NVSHMEM
+    // builds populate one but not the other.
+    printf("[AR-once] team=%d nvls_rsc=%p nvls_rsc_base_ptr=%p\n",
            (int)team,
-           teami ? teami->nvls_rsc_base_ptr : nullptr,
+           teami ? teami->nvls_rsc : nullptr,
+           teami ? teami->nvls_rsc_base_ptr : nullptr);
+    printf("[AR-once] team0 nvls_rsc=%p base_ptr=%p | team2 nvls_rsc=%p "
+           "base_ptr=%p\n",
+           team0 ? team0->nvls_rsc : nullptr,
            team0 ? team0->nvls_rsc_base_ptr : nullptr,
+           team2 ? team2->nvls_rsc : nullptr,
            team2 ? team2->nvls_rsc_base_ptr : nullptr);
-    printf("[AR-once] team0->team_idx=%d size=%d my_pe=%d | input=%p mc=%p\n",
+    printf("[AR-once] team0 idx=%d size=%d mype=%d | input=%p mc=%p "
+           "heap_base=%p heap_size=%llu\n",
            team0 ? team0->team_idx : -1,
            team0 ? team0->size : -1,
            team0 ? team0->my_pe : -1,
-           input_ptr, mc_src);
+           input_ptr, mc_src,
+           nvshmemi_device_state_d.heap_base,
+           (unsigned long long)nvshmemi_device_state_d.heap_size);
   }
 #endif
 #ifdef MPK_AR_SKIP_REDUCE
@@ -622,27 +711,56 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
   int4 const *src_mc_v4 = reinterpret_cast<int4 const *>(mc_src);
   int4 const *residual_v4 = reinterpret_cast<int4 const *>(residual_ptr);
 
+  // Pick NVLS path when the team has a multicast resource bound, otherwise
+  // fall back to the P2P reduce that reads each peer's heap mirror directly.
+  // mc_src is NULL whenever the team has no NVLS rsc (observed on NVSHMEM
+  // 3.6.5 under MPK's team_split_strided setup — see TP=2 debug session
+  // 2026-05-18). The fallback uses peer_heap_base_p2p, which is populated by
+  // NVSHMEM for any p2p-connected GPU pair (no NVLS dependency).
+  bool const use_nvls = (mc_src != nullptr);
   if constexpr (OUTPUT_SIZE == OUTPUT_STRIDE) {
-    // Contiguous: one pass over all rows
     int total_v4 = V4_PER_ROW * num_active_rows;
     if constexpr (ADD_RESIDUAL) {
-      mpkar_nvls_reduce_add_residual_v4_block<T>(
-          dst_v4, src_mc_v4, residual_v4, total_v4);
+      if (use_nvls) {
+        mpkar_nvls_reduce_add_residual_v4_block<T>(
+            dst_v4, src_mc_v4, residual_v4, total_v4);
+      } else {
+        mpkar_p2p_reduce_add_residual_v4_block<T>(
+            dst_v4, input_ptr, residual_v4, teami, total_v4);
+      }
     } else {
-      mpkar_nvls_reduce_v4_block<T>(dst_v4, src_mc_v4, total_v4);
+      if (use_nvls) {
+        mpkar_nvls_reduce_v4_block<T>(dst_v4, src_mc_v4, total_v4);
+      } else {
+        mpkar_p2p_reduce_v4_block<T>(dst_v4, input_ptr, teami, total_v4);
+      }
     }
   } else {
-    // Strided: per-row
     for (int row = 0; row < num_active_rows; row++) {
+      void const *row_input =
+          static_cast<char const *>(input_ptr) +
+          row * STRIDE_V4 * (int)sizeof(int4);
       if constexpr (ADD_RESIDUAL) {
-        mpkar_nvls_reduce_add_residual_v4_block<T>(dst_v4 + row * STRIDE_V4,
-                                                   src_mc_v4 + row * STRIDE_V4,
-                                                   residual_v4 +
-                                                       row * STRIDE_V4,
-                                                   V4_PER_ROW);
+        if (use_nvls) {
+          mpkar_nvls_reduce_add_residual_v4_block<T>(
+              dst_v4 + row * STRIDE_V4,
+              src_mc_v4 + row * STRIDE_V4,
+              residual_v4 + row * STRIDE_V4,
+              V4_PER_ROW);
+        } else {
+          mpkar_p2p_reduce_add_residual_v4_block<T>(
+              dst_v4 + row * STRIDE_V4, row_input,
+              residual_v4 + row * STRIDE_V4, teami, V4_PER_ROW);
+        }
       } else {
-        mpkar_nvls_reduce_v4_block<T>(
-            dst_v4 + row * STRIDE_V4, src_mc_v4 + row * STRIDE_V4, V4_PER_ROW);
+        if (use_nvls) {
+          mpkar_nvls_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4,
+                                         src_mc_v4 + row * STRIDE_V4,
+                                         V4_PER_ROW);
+        } else {
+          mpkar_p2p_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4, row_input,
+                                       teami, V4_PER_ROW);
+        }
       }
     }
   }
