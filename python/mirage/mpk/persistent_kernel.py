@@ -273,6 +273,13 @@ def get_compile_command(
     # (e.g., to debug cooperative-launch capacity issues on TP=2).
     if os.environ.get("MPK_PTXAS_VERBOSE", "0") == "1":
         common_cmd.append("--ptxas-options=-v")
+    # MPK_SMEM_KB_OVERRIDE: override MAX_DYNAMIC_SHARED_MEMORY_SIZE (in KB)
+    # before WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE subtraction. Default
+    # 222 KB on B200 leaves zero headroom against the 228 KB SM limit;
+    # reducing this provides margin for cooperative-launch capacity.
+    smem_kb_override = os.environ.get("MPK_SMEM_KB_OVERRIDE")
+    if smem_kb_override:
+        common_cmd.append(f"-DMPK_SMEM_KB_OVERRIDE={int(smem_kb_override)}")
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
