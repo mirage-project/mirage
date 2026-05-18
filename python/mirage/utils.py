@@ -46,7 +46,7 @@ def get_configurations_from_gpu(rank):
     # trims 4 SMs of margin and rebalances workers+schedulers
     # accordingly.
     sm_budget_override = _os.environ.get("MPK_SM_BUDGET")
-    if sm_budget_override is not None:
+    if sm_budget_override:
         sm_budget = int(sm_budget_override)
         assert 8 <= sm_budget <= sm_cnt, (
             f"MPK_SM_BUDGET={sm_budget} out of range [8, {sm_cnt}]")
@@ -60,11 +60,21 @@ def get_configurations_from_gpu(rank):
     # DSv3-scale graphs but margin-tight; worker=144 leaves only 16
     # schedulers and may starve the event-dispatcher.
     forced = _os.environ.get("MPK_FORCE_NUM_WORKERS")
-    if forced is not None:
+    if forced:
         worker = int(forced)
         assert worker < sm_cnt_for_split, (
             f"MPK_FORCE_NUM_WORKERS={worker} >= sm_budget={sm_cnt_for_split} "
             "would leave 0 schedulers")
+        # MPK_FORCE_NUM_SCHEDULERS lets us decouple scheduler count from the
+        # `4*(sm_cnt - worker)` formula. Used to tune the (workers,
+        # schedulers) pair so that (a) `worker // schedulers + 1` stays at
+        # MAX_WORKER_PER_SCHEDULER=2 (the only compile-time variant that
+        # currently passes B200 cooperative launch in TP=2 debug) and (b)
+        # `worker + schedulers/4` lands at a cooperative-launch-friendly
+        # grid size (typically ≤140 on a 148-SM B200 in TP=2).
+        sched_forced = _os.environ.get("MPK_FORCE_NUM_SCHEDULERS")
+        if sched_forced:
+            return worker, int(sched_forced)
         return worker, get_scheduler(sm_cnt_for_split, worker)
     worker = 0
     if sm_cnt_for_split >= 160:
