@@ -486,11 +486,11 @@ static __device__ __forceinline__ uint32_t
 // `peer_heap_base_p2p`, sums in bf16, stores. bf16 only (matches DSv3 AR
 // instantiation).
 template <typename T>
-static __device__ __forceinline__ void mpkar_p2p_reduce_v4_block(
-    int4 *__restrict__ dst,
-    void const *local_input_ptr,
-    nvshmemi_team_t *teami,
-    int nelems_v4) {
+static __device__ __forceinline__ void
+    mpkar_p2p_reduce_v4_block(int4 *__restrict__ dst,
+                              void const *local_input_ptr,
+                              nvshmemi_team_t *teami,
+                              int nelems_v4) {
   static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
                 "P2P AR fallback currently bf16 only.");
   int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
@@ -519,12 +519,12 @@ static __device__ __forceinline__ void mpkar_p2p_reduce_v4_block(
 }
 
 template <typename T>
-static __device__ __forceinline__ void mpkar_p2p_reduce_add_residual_v4_block(
-    int4 *__restrict__ dst,
-    void const *local_input_ptr,
-    int4 const *__restrict__ residual,
-    nvshmemi_team_t *teami,
-    int nelems_v4) {
+static __device__ __forceinline__ void
+    mpkar_p2p_reduce_add_residual_v4_block(int4 *__restrict__ dst,
+                                           void const *local_input_ptr,
+                                           int4 const *__restrict__ residual,
+                                           nvshmemi_team_t *teami,
+                                           int nelems_v4) {
   static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
                 "P2P AR fallback currently bf16 only.");
   int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
@@ -668,7 +668,8 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
            team0 ? team0->team_idx : -1,
            team0 ? team0->size : -1,
            team0 ? team0->my_pe : -1,
-           input_ptr, mc_src,
+           input_ptr,
+           mc_src,
            nvshmemi_device_state_d.heap_base,
            (unsigned long long)nvshmemi_device_state_d.heap_size);
   }
@@ -737,9 +738,8 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
     }
   } else {
     for (int row = 0; row < num_active_rows; row++) {
-      void const *row_input =
-          static_cast<char const *>(input_ptr) +
-          row * STRIDE_V4 * (int)sizeof(int4);
+      void const *row_input = static_cast<char const *>(input_ptr) +
+                              row * STRIDE_V4 * (int)sizeof(int4);
       if constexpr (ADD_RESIDUAL) {
         if (use_nvls) {
           mpkar_nvls_reduce_add_residual_v4_block<T>(
@@ -748,18 +748,21 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
               residual_v4 + row * STRIDE_V4,
               V4_PER_ROW);
         } else {
-          mpkar_p2p_reduce_add_residual_v4_block<T>(
-              dst_v4 + row * STRIDE_V4, row_input,
-              residual_v4 + row * STRIDE_V4, teami, V4_PER_ROW);
+          mpkar_p2p_reduce_add_residual_v4_block<T>(dst_v4 + row * STRIDE_V4,
+                                                    row_input,
+                                                    residual_v4 +
+                                                        row * STRIDE_V4,
+                                                    teami,
+                                                    V4_PER_ROW);
         }
       } else {
         if (use_nvls) {
           mpkar_nvls_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4,
-                                         src_mc_v4 + row * STRIDE_V4,
-                                         V4_PER_ROW);
+                                        src_mc_v4 + row * STRIDE_V4,
+                                        V4_PER_ROW);
         } else {
-          mpkar_p2p_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4, row_input,
-                                       teami, V4_PER_ROW);
+          mpkar_p2p_reduce_v4_block<T>(
+              dst_v4 + row * STRIDE_V4, row_input, teami, V4_PER_ROW);
         }
       }
     }

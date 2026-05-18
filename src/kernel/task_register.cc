@@ -1235,10 +1235,8 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   // here is what prevents the kernel from overwriting the adjacent slot
   // when stepping to row i+1. compute width (HIDDEN_DIM template param)
   // still derives from dim/process_dim.
-  int in_row_stride =
-      static_cast<int>(input_ops[0]->dtensor.stride[0]);
-  int out_row_stride =
-      static_cast<int>(output_ops[0]->dtensor.stride[0]);
+  int in_row_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int out_row_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // Currently assume that each rmsnorm task processes one token
   // assert(batch_size == 1);
@@ -2503,8 +2501,7 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   // Revert keeps the env hook for opt-in only; default = legacy VPT=8.
   char const *_vpt_env = std::getenv("MPK_DSV3_TOPK_VPT");
   int topk_vpt = _vpt_env ? std::atoi(_vpt_env) : 8;
-  if (topk_vpt < 4 || topk_vpt > 32 ||
-      (topk_vpt & (topk_vpt - 1)) != 0) {
+  if (topk_vpt < 4 || topk_vpt > 32 || (topk_vpt & (topk_vpt - 1)) != 0) {
     topk_vpt = 8;
   }
   code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
@@ -5054,9 +5051,9 @@ int TaskRegister::register_moe_silu_mul_quantize_fp8_sm100_task(
          has_active ? e_local : 1,
          rows_per_task,
          has_active ? "true" : "false");
-  code.e("    task_desc->input_ptrs[0],");   // w13_out (real input slot)
-  code.e("    task_desc->output_ptrs[0],");  // silu_fp8 (output slot 0)
-  code.e("    task_desc->output_ptrs[1],");  // silu_scale (output slot 1)
+  code.e("    task_desc->input_ptrs[0],");  // w13_out (real input slot)
+  code.e("    task_desc->output_ptrs[0],"); // silu_fp8 (output slot 0)
+  code.e("    task_desc->output_ptrs[1],"); // silu_scale (output slot 1)
   if (has_active) {
     code.e("    static_cast<int const*>(task_desc->input_ptrs[1]) + $,",
            active_mask_offset);
@@ -5793,10 +5790,8 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   // C20 (2026-05-17): read from dtensor.stride[0] instead of the owner_op's
   // input_strides[0] — view-safe (mpk.narrow inherits parent stride; root
   // tensors have stride populated by input.cc and fixup_legacy_strides).
-  int input_row_stride =
-      static_cast<int>(input_ops[0]->dtensor.stride[0]);
-  int output_row_stride =
-      static_cast<int>(output_ops[0]->dtensor.stride[0]);
+  int input_row_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int output_row_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   // Fallback if the recorded leading stride happens to be 0 (no source
   // tensor metadata): default to the contiguous packed strides.
   if (input_row_stride == 0) {
@@ -6054,11 +6049,12 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
 // num_workers, optional runtime_m_mode); `scale_outer_stride` is derived
 // from N at codegen time (= N/128 = number of K-groups per row, since
 // BN=128 and we statically restrict the fused path to BN=128).
-static int register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
-                                                  std::vector<int> const &params,
-                                                  char const *namespace_name,
-                                                  char const *fn_name,
-                                                  TaskType task_type) {
+static int
+    register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
+                                           std::vector<int> const &params,
+                                           char const *namespace_name,
+                                           char const *fn_name,
+                                           TaskType task_type) {
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;

@@ -896,8 +896,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     int const num_inputs_silu_q = (params.size() == 5) ? 2 : 1;
     task_config[op] = std::make_tuple(
-        num_inputs_silu_q, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100,
-        variant_id);
+        num_inputs_silu_q, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
     // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
     // 2 real inputs (input, weight) + 3 outputs

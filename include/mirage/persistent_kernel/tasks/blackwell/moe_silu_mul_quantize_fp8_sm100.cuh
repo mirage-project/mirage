@@ -49,28 +49,29 @@
 
 namespace kernel {
 
-template <int K_INTER,           // per-row silu output dim (= 2048 DSv3)
-          int GROUP_SIZE,        // 128
-          int IN_ROW_STRIDE,     // distance between rows in w13_out (= 2*K_INTER)
-          int OUT_ROW_STRIDE,    // distance between rows in silu_fp8 (= K_INTER)
-          int BM_PADDING,        // rows per expert in permuted layout (16 DSv3)
-          int E_LOCAL,           // num local experts per rank
-          typename T,            // bf16
-          typename DST_T,        // fp8_e4m3
+template <int K_INTER,        // per-row silu output dim (= 2048 DSv3)
+          int GROUP_SIZE,     // 128
+          int IN_ROW_STRIDE,  // distance between rows in w13_out (= 2*K_INTER)
+          int OUT_ROW_STRIDE, // distance between rows in silu_fp8 (= K_INTER)
+          int BM_PADDING,     // rows per expert in permuted layout (16 DSv3)
+          int E_LOCAL,        // num local experts per rank
+          typename T,         // bf16
+          typename DST_T,     // fp8_e4m3
           int ROWS_PER_TASK = 1,
           bool ACTIVE_SKIP = false>
 __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
-    void const *__restrict__ input_ptr,    // w13_out: [m_total, 2*K_INTER] bf16
-    void *__restrict__ output_q_ptr,       // silu_fp8: [m_total, K_INTER] FP8
-    void *__restrict__ output_s_ptr,       // silu_scale: K-outer UE8M0 uint32
-    int const *__restrict__ active_mask,   // [E_LOCAL] flag + [E_LOCAL] count
-                                           // (nullptr or ignored when !ACTIVE_SKIP).
-    float const eps,                       // scale floor (e.g., 1e-10)
-    float const min_8bit,                  // -448
-    float const max_8bit,                  // 448
-    int const scale_outer_stride,          // == aligned_batch (M_TOTAL padded)
-    int const row_idx,                     // = task_metadata.request_id
-    int const row_count_cap                // -1 = no cap; else stop after N
+    void const *__restrict__ input_ptr, // w13_out: [m_total, 2*K_INTER] bf16
+    void *__restrict__ output_q_ptr,    // silu_fp8: [m_total, K_INTER] FP8
+    void *__restrict__ output_s_ptr,    // silu_scale: K-outer UE8M0 uint32
+    int const
+        *__restrict__ active_mask, // [E_LOCAL] flag + [E_LOCAL] count
+                                   // (nullptr or ignored when !ACTIVE_SKIP).
+    float const eps,               // scale floor (e.g., 1e-10)
+    float const min_8bit,          // -448
+    float const max_8bit,          // 448
+    int const scale_outer_stride,  // == aligned_batch (M_TOTAL padded)
+    int const row_idx,             // = task_metadata.request_id
+    int const row_count_cap        // -1 = no cap; else stop after N
 ) {
   // ---- Type pointers ----
   T const *__restrict__ input = static_cast<T const *>(input_ptr);
@@ -79,9 +80,9 @@ __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
 
   // ---- Constants ----
   constexpr int WARP_SIZE = 32;
-  constexpr int ELEMENTS_PER_THREAD = GROUP_SIZE / WARP_SIZE;  // 4 for 128/32
-  constexpr int NUM_GROUPS_PER_ROW = K_INTER / GROUP_SIZE;     // 16 for K=2048
-  constexpr int SCALE_ALIGNMENT = 4;  // UE8M0: 4 bytes per uint32
+  constexpr int ELEMENTS_PER_THREAD = GROUP_SIZE / WARP_SIZE; // 4 for 128/32
+  constexpr int NUM_GROUPS_PER_ROW = K_INTER / GROUP_SIZE;    // 16 for K=2048
+  constexpr int SCALE_ALIGNMENT = 4; // UE8M0: 4 bytes per uint32
 
   __shared__ uint8_t packed_scale_bytes[NUM_GROUPS_PER_ROW];
 
@@ -100,18 +101,26 @@ __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
   if constexpr (ACTIVE_SKIP) {
     my_expert = row_idx / BM_PADDING;
     slot_in_expert = row_idx - my_expert * BM_PADDING;
-    if (my_expert < 0 || my_expert >= E_LOCAL) return;
-    if (active_mask[my_expert] == 0) return;
+    if (my_expert < 0 || my_expert >= E_LOCAL) {
+      return;
+    }
+    if (active_mask[my_expert] == 0) {
+      return;
+    }
     my_actual_count = active_mask[E_LOCAL + my_expert];
-    if (my_actual_count <= 0) return;
-    if (slot_in_expert >= my_actual_count) return;
+    if (my_actual_count <= 0) {
+      return;
+    }
+    if (slot_in_expert >= my_actual_count) {
+      return;
+    }
   }
 
   // ---- Thread layout ----
   int const thread_idx = threadIdx.x;
   int const lane_idx = thread_idx % WARP_SIZE;
   int const warp_idx = thread_idx / WARP_SIZE;
-  int const num_groups_per_block = blockDim.x / WARP_SIZE;  // 4 for 128 threads
+  int const num_groups_per_block = blockDim.x / WARP_SIZE; // 4 for 128 threads
 
   // ---- Row loop (ROWS_PER_TASK consecutive rows from this CTA) ----
   // The runtime pre-offsets `input_ptr` and `output_q_ptr` by
@@ -126,7 +135,7 @@ __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
       return;
     }
 
-    int const input_row_base = r * IN_ROW_STRIDE;       // gate half base
+    int const input_row_base = r * IN_ROW_STRIDE; // gate half base
     int const output_row_base = r * OUT_ROW_STRIDE;
 
     // ---- Group loop (each warp processes its own groups) ----
@@ -144,10 +153,12 @@ __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
 #pragma unroll
       for (int ele_idx = 0; ele_idx < ELEMENTS_PER_THREAD; ++ele_idx) {
         int const idx_in_group = lane_idx + ele_idx * WARP_SIZE;
-        float const gate = static_cast<float>(input[input_gate_base + idx_in_group]);
-        float const mul  = static_cast<float>(input[input_up_base + idx_in_group]);
-        float const sig  = 1.0f / (1.0f + __expf(-gate));
-        float const sm   = gate * sig * mul;
+        float const gate =
+            static_cast<float>(input[input_gate_base + idx_in_group]);
+        float const mul =
+            static_cast<float>(input[input_up_base + idx_in_group]);
+        float const sig = 1.0f / (1.0f + __expf(-gate));
+        float const sm = gate * sig * mul;
         silu_mul_vals[ele_idx] = sm;
         float const abs_val = fabsf(sm);
         local_max = fmaxf(abs_val, local_max);
@@ -178,7 +189,8 @@ __device__ __forceinline__ void moe_silu_mul_quantize_fp8_task_impl(
     __syncthreads();
 #pragma unroll
     for (int packed_idx = thread_idx;
-         packed_idx < (NUM_GROUPS_PER_ROW + SCALE_ALIGNMENT - 1) / SCALE_ALIGNMENT;
+         packed_idx <
+         (NUM_GROUPS_PER_ROW + SCALE_ALIGNMENT - 1) / SCALE_ALIGNMENT;
          packed_idx += blockDim.x) {
       uint32_t packed_scale = 0;
 #pragma unroll

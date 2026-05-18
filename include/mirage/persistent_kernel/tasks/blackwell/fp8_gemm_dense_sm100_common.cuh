@@ -112,25 +112,21 @@ __device__ __forceinline__ uint64_t mkdesc(int a) {
 //             that per_token_group_quantize_fp8_task_impl produces (with
 //             packed_k=1 for BN=128 single-group rows) — downstream FP8 BMM /
 //             linear consumers see the same bit layout.
-template <int BN,
-          int NS,
-          int NE,
-          bool EPILOGUE_QUANTIZE_FP8 = false>
-__device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
-                                              CUtensorMap const *tb_ptr,
-                                              float const *__restrict__ sa,
-                                              float const *__restrict__ sb,
-                                              __nv_bfloat16 *__restrict__ C,
-                                              int const M,
-                                              int const N,
-                                              int const K,
-                                              int const worker_idx,
-                                              int const num_workers,
-                                              __nv_fp8_e4m3 *__restrict__ C_fp8
-                                              = nullptr,
-                                              uint32_t *__restrict__ C_scale
-                                              = nullptr,
-                                              int scale_outer_stride = 0) {
+template <int BN, int NS, int NE, bool EPILOGUE_QUANTIZE_FP8 = false>
+__device__ __forceinline__ void
+    task_impl_tpl(CUtensorMap const *ta_ptr,
+                  CUtensorMap const *tb_ptr,
+                  float const *__restrict__ sa,
+                  float const *__restrict__ sb,
+                  __nv_bfloat16 *__restrict__ C,
+                  int const M,
+                  int const N,
+                  int const K,
+                  int const worker_idx,
+                  int const num_workers,
+                  __nv_fp8_e4m3 *__restrict__ C_fp8 = nullptr,
+                  uint32_t *__restrict__ C_scale = nullptr,
+                  int scale_outer_stride = 0) {
   static_assert(!EPILOGUE_QUANTIZE_FP8 || BN == 128,
                 "EPILOGUE_QUANTIZE_FP8 requires BN==128 (one K-group per "
                 "consumer thread for per-row scale).");
@@ -345,8 +341,7 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
           // instruction the bf16 path uses (size-match: 16 bf16 = 32 bytes
           // = .v4.b32 ×2, whereas 16 fp8 = 16 bytes = .v4.b32 ×1).
           int group_idx = on / 128; // one group per BN=128 CTA tile
-          __nv_fp8_e4m3 *row_fp8 =
-              C_fp8 + (long long)mi * N + on;
+          __nv_fp8_e4m3 *row_fp8 = C_fp8 + (long long)mi * N + on;
           float local_max = 1e-30f;
 #pragma unroll
           for (int n = 0; n < BN; n++) {
@@ -369,14 +364,13 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
               uint32_t r1 = *reinterpret_cast<uint32_t *>(&packed[4]);
               uint32_t r2 = *reinterpret_cast<uint32_t *>(&packed[8]);
               uint32_t r3 = *reinterpret_cast<uint32_t *>(&packed[12]);
-              asm volatile(
-                  "st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
-                  "{%1,%2,%3,%4};" ::"l"(row_fp8 + n),
-                  "r"(r0),
-                  "r"(r1),
-                  "r"(r2),
-                  "r"(r3)
-                  : "memory");
+              asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
+                           "{%1,%2,%3,%4};" ::"l"(row_fp8 + n),
+                           "r"(r0),
+                           "r"(r1),
+                           "r"(r2),
+                           "r"(r3)
+                           : "memory");
             } else {
               for (int j = 0; j < 16 && on + n + j < N; j++) {
                 float qv = acc[n + j] * inv_scale;
@@ -396,22 +390,14 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
 #pragma unroll
           for (int n = 0; n < BN; n += 16) {
             if (on + n + 15 < N) {
-              nv_bfloat162 b0 =
-                  __floats2bfloat162_rn(acc[n + 0], acc[n + 1]);
-              nv_bfloat162 b1 =
-                  __floats2bfloat162_rn(acc[n + 2], acc[n + 3]);
-              nv_bfloat162 b2 =
-                  __floats2bfloat162_rn(acc[n + 4], acc[n + 5]);
-              nv_bfloat162 b3 =
-                  __floats2bfloat162_rn(acc[n + 6], acc[n + 7]);
-              nv_bfloat162 b4 =
-                  __floats2bfloat162_rn(acc[n + 8], acc[n + 9]);
-              nv_bfloat162 b5 =
-                  __floats2bfloat162_rn(acc[n + 10], acc[n + 11]);
-              nv_bfloat162 b6 =
-                  __floats2bfloat162_rn(acc[n + 12], acc[n + 13]);
-              nv_bfloat162 b7 =
-                  __floats2bfloat162_rn(acc[n + 14], acc[n + 15]);
+              nv_bfloat162 b0 = __floats2bfloat162_rn(acc[n + 0], acc[n + 1]);
+              nv_bfloat162 b1 = __floats2bfloat162_rn(acc[n + 2], acc[n + 3]);
+              nv_bfloat162 b2 = __floats2bfloat162_rn(acc[n + 4], acc[n + 5]);
+              nv_bfloat162 b3 = __floats2bfloat162_rn(acc[n + 6], acc[n + 7]);
+              nv_bfloat162 b4 = __floats2bfloat162_rn(acc[n + 8], acc[n + 9]);
+              nv_bfloat162 b5 = __floats2bfloat162_rn(acc[n + 10], acc[n + 11]);
+              nv_bfloat162 b6 = __floats2bfloat162_rn(acc[n + 12], acc[n + 13]);
+              nv_bfloat162 b7 = __floats2bfloat162_rn(acc[n + 14], acc[n + 15]);
               uint32_t r0 = *reinterpret_cast<uint32_t *>(&b0);
               uint32_t r1 = *reinterpret_cast<uint32_t *>(&b1);
               uint32_t r2 = *reinterpret_cast<uint32_t *>(&b2);
@@ -420,22 +406,20 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
               uint32_t r5 = *reinterpret_cast<uint32_t *>(&b5);
               uint32_t r6 = *reinterpret_cast<uint32_t *>(&b6);
               uint32_t r7 = *reinterpret_cast<uint32_t *>(&b7);
-              asm volatile(
-                  "st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
-                  "{%1,%2,%3,%4};" ::"l"(row + n),
-                  "r"(r0),
-                  "r"(r1),
-                  "r"(r2),
-                  "r"(r3)
-                  : "memory");
-              asm volatile(
-                  "st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
-                  "{%1,%2,%3,%4};" ::"l"(row + n + 8),
-                  "r"(r4),
-                  "r"(r5),
-                  "r"(r6),
-                  "r"(r7)
-                  : "memory");
+              asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
+                           "{%1,%2,%3,%4};" ::"l"(row + n),
+                           "r"(r0),
+                           "r"(r1),
+                           "r"(r2),
+                           "r"(r3)
+                           : "memory");
+              asm volatile("st.relaxed.cta.global.L1::no_allocate.v4.b32 [%0], "
+                           "{%1,%2,%3,%4};" ::"l"(row + n + 8),
+                           "r"(r4),
+                           "r"(r5),
+                           "r"(r6),
+                           "r"(r7)
+                           : "memory");
             } else {
               for (int j = 0; j < 16 && on + n + j < N; j++) {
                 row[n + j] = __float2bfloat16(acc[n + j]);

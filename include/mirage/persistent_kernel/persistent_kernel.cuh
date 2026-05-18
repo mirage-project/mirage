@@ -1605,7 +1605,9 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
         int ov = atoi(override);
         if (ov > 0 && ov < num_sms_to_use) {
           printf("MPK: forcing num_sms_to_use %d -> %d "
-                 "(MPK_NUM_SMS_OVERRIDE)\n", num_sms_to_use, ov);
+                 "(MPK_NUM_SMS_OVERRIDE)\n",
+                 num_sms_to_use,
+                 ov);
           num_sms_to_use = ov;
         }
       }

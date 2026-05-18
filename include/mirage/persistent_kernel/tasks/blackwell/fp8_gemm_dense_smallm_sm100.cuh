@@ -44,20 +44,19 @@ __device__ __noinline__ void
 // Eliminates the standalone per_token_group_quantize_fp8 task that today
 // runs immediately downstream on the q_b_nope BMM-decode path.
 template <int BN, int NS>
-__device__ __noinline__ void
-    fp8_gemm_dense_smallm_fp8out_sm100_task_impl(
-        CUtensorMap const *ta_ptr,
-        CUtensorMap const *tb_ptr,
-        float const *__restrict__ sa,
-        float const *__restrict__ sb,
-        __nv_fp8_e4m3 *__restrict__ C_fp8,
-        uint32_t *__restrict__ C_scale,
-        int const M,
-        int const N,
-        int const K,
-        int const worker_idx,
-        int const num_workers,
-        int const scale_outer_stride) {
+__device__ __noinline__ void fp8_gemm_dense_smallm_fp8out_sm100_task_impl(
+    CUtensorMap const *ta_ptr,
+    CUtensorMap const *tb_ptr,
+    float const *__restrict__ sa,
+    float const *__restrict__ sb,
+    __nv_fp8_e4m3 *__restrict__ C_fp8,
+    uint32_t *__restrict__ C_scale,
+    int const M,
+    int const N,
+    int const K,
+    int const worker_idx,
+    int const num_workers,
+    int const scale_outer_stride) {
   fp8_gemm_dense_common::task_impl_tpl<BN,
                                        NS,
                                        /*NE=*/2,

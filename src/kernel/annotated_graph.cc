@@ -149,10 +149,10 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   struct WriterEntry {
     int layer;
     int out_slot;
-    int64_t row_first;  // first row written (elements along outer dim)
-    int64_t row_last;   // one past last row
-    int64_t col_first;  // first col written (elements along inner dim)
-    int64_t col_last;   // one past last col
+    int64_t row_first; // first row written (elements along outer dim)
+    int64_t row_last;  // one past last row
+    int64_t col_first; // first col written (elements along inner dim)
+    int64_t col_last;  // one past last col
     bool is_virtual_writer;
   };
   std::unordered_map<size_t, std::vector<WriterEntry>> last_writers;
@@ -186,10 +186,8 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
           dt.view_offset / static_cast<int64_t>(dtype_size);
       int64_t row_first = view_off_elems / row_stride;
       int64_t col_first = view_off_elems % row_stride;
-      return BBox{row_first,
-                  row_first + dim0,
-                  col_first,
-                  col_first + dim_inner};
+      return BBox{
+          row_first, row_first + dim0, col_first, col_first + dim_inner};
     }
     return BBox{0, dim0, 0, row_stride};
   };
@@ -283,8 +281,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         }
         WriterEntry const &we = *rit;
         // Row overlap is a fast reject.
-        if (!(we.row_first < rbox.row_last &&
-              rbox.row_first < we.row_last)) {
+        if (!(we.row_first < rbox.row_last && rbox.row_first < we.row_last)) {
           continue;
         }
         bool wrote_anything = false;
@@ -386,8 +383,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
                                ag.layers[we.layer].num_inputs,
                                prod_inputs,
                                prod_outputs);
-              if (we.out_slot < 0 ||
-                  we.out_slot >= (int)prod_outputs.size()) {
+              if (we.out_slot < 0 || we.out_slot >= (int)prod_outputs.size()) {
                 throw std::runtime_error(
                     "build_annotated_graph: invalid out_slot for WAW producer");
               }

@@ -46,20 +46,19 @@ __device__ __noinline__ void
 // D1 (2026-05-17): see smallm header — same epilogue-fused UE8M0 quantize
 // variant, NE=4 TMEM staging.
 template <int BN, int NS>
-__device__ __noinline__ void
-    fp8_gemm_dense_mediumm_fp8out_sm100_task_impl(
-        CUtensorMap const *ta_ptr,
-        CUtensorMap const *tb_ptr,
-        float const *__restrict__ sa,
-        float const *__restrict__ sb,
-        __nv_fp8_e4m3 *__restrict__ C_fp8,
-        uint32_t *__restrict__ C_scale,
-        int const M,
-        int const N,
-        int const K,
-        int const worker_idx,
-        int const num_workers,
-        int const scale_outer_stride) {
+__device__ __noinline__ void fp8_gemm_dense_mediumm_fp8out_sm100_task_impl(
+    CUtensorMap const *ta_ptr,
+    CUtensorMap const *tb_ptr,
+    float const *__restrict__ sa,
+    float const *__restrict__ sb,
+    __nv_fp8_e4m3 *__restrict__ C_fp8,
+    uint32_t *__restrict__ C_scale,
+    int const M,
+    int const N,
+    int const K,
+    int const worker_idx,
+    int const num_workers,
+    int const scale_outer_stride) {
   fp8_gemm_dense_common::task_impl_tpl<BN,
                                        NS,
                                        /*NE=*/4,
