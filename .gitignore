@@ -94,3 +94,21 @@ ncu_tmp
 .clangd
 /pr.md
 *.log
+
+# Local working dirs — NEVER push (user rule 2026-05-14)
+# scratch/ holds session notes, perf journals, analysis scripts, log files —
+# all personal/per-session, must not pollute the public PR or remote.
+# scripts/ holds local test helpers — same policy.
+scratch/
+scripts/
+
+# Repo-root debug artifacts that build up over sessions and should never
+# be committed (perfetto CSVs, per-rank profiler dumps, dated notes,
+# session lockfiles).
+/*.csv
+/0[0-9][0-9][0-9]*.md
+/test.sm_*.cubin
+/package-lock.json
+/uv.lock
+/ONBOARDING.md
+/1
