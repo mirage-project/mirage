@@ -32,9 +32,23 @@ def get_scheduler(sm_cnt, worker):
 # them.
 def get_configurations_from_gpu(rank):
     # Reference: https://github.com/mirage-project/mirage/issues/354
+    import os as _os
     props = torch.cuda.get_device_properties(rank)
     sm_cnt = props.multi_processor_count
     print("sm_cnt: ", sm_cnt)
+    # MPK_FORCE_NUM_WORKERS env override (experimental). Use only when you
+    # know what scheduler count the rest of the chip still has room for —
+    # `get_scheduler` uses `4 * (sm_cnt - worker)`, so worker=136 on a
+    # 148-SM B200 leaves 48 schedulers (12 SMs × 4) which is plenty for
+    # DSv3-scale graphs but margin-tight; worker=144 leaves only 16
+    # schedulers and may starve the event-dispatcher.
+    forced = _os.environ.get("MPK_FORCE_NUM_WORKERS")
+    if forced is not None:
+        worker = int(forced)
+        assert worker < sm_cnt, (
+            f"MPK_FORCE_NUM_WORKERS={worker} >= sm_cnt={sm_cnt} would leave 0 "
+            "schedulers")
+        return worker, get_scheduler(sm_cnt, worker)
     worker = 0
     if sm_cnt >= 160:
         worker = 144
