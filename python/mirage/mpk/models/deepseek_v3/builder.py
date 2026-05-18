@@ -2669,10 +2669,50 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict, f"{prefix}mlp.gate_up_proj.weight",
             f"layer_{layer_idx}_gate_up_proj")
         gate_up_split_k = self._pick_fp8_splitk_factor(w_gate_up)
+        # TP=2 workaround (2026-05-18): the fp8_gemm_dense_mediumm kernel
+        # faults with cudaErrorLaunchFailure (719) at `mb_arrive_tx` when
+        # invoked with the TP=2 gate_up shape (M=8, N=18432, K=7168). Other
+        # sizes (N=2176 qkv_a, N=4096 q_b_pe, N=7168 o_proj, N=9216 TP=4
+        # gate_up, N=36864 TP=1 gate_up) all run cleanly. The root cause is
+        # in the kernel and likely requires kernel-team-level fix. As a
+        # builder-side workaround, split the gate_up GEMM into two sub-calls
+        # each with N=9216 (= TP=4's known-good size). The first sub-call
+        # produces the local gate half; the second produces the local up
+        # half. silu_mul reads them from disjoint output slots — layout is
+        # preserved. See [[project-tp2-debug-session-20260518]].
+        split_tp2_gate_up = (
+            os.environ.get("MPK_DSV3_TP2_GATE_UP_SPLIT", "1") == "1"
+            and self.world_size == 2
+            and gate_up_split_k is None
+            and w_gate_up.dim(0) % 2 == 0
+        )
         if gate_up_split_k is not None:
             self._fp8_linear_splitk(
                 self.rmsnorm_out, w_gate_up, s_gate_up, self.mlp_mid,
                 split_k=gate_up_split_k)
+        elif split_tp2_gate_up:
+            N_full = w_gate_up.dim(0)
+            N_half = N_full // 2
+            # Each half-weight is [N_half, K]; scale half is [N_half/128, K/128].
+            w_gate = self.mpk.narrow(w_gate_up, dim=0, start=0, length=N_half)
+            w_up = self.mpk.narrow(
+                w_gate_up, dim=0, start=N_half, length=N_half)
+            s_gate = self.mpk.narrow(
+                s_gate_up, dim=0, start=0, length=N_half // 128)
+            s_up = self.mpk.narrow(
+                s_gate_up, dim=0, start=N_half // 128,
+                length=N_half // 128)
+            mlp_mid_gate = self.mpk.narrow(
+                self.mlp_mid, dim=1, start=0, length=N_half)
+            mlp_mid_up = self.mpk.narrow(
+                self.mlp_mid, dim=1, start=N_half, length=N_half)
+            half_grid = grid_for_rmsnorm_linear_layer(N_half)
+            self._fp8_linear(self.rmsnorm_out, w_gate, s_gate, mlp_mid_gate,
+                             grid_dim=(half_grid, 1, 1),
+                             block_dim=(128, 1, 1))
+            self._fp8_linear(self.rmsnorm_out, w_up, s_up, mlp_mid_up,
+                             grid_dim=(half_grid, 1, 1),
+                             block_dim=(128, 1, 1))
         else:
             gate_up_grid = grid_for_rmsnorm_linear_layer(w_gate_up.dim(0))
             self._fp8_linear(self.rmsnorm_out, w_gate_up, s_gate_up, self.mlp_mid,
