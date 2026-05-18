@@ -1818,9 +1818,14 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         }
       }
       if (param_id == 0) {
-        // Q: may be flat [mbt, num_heads*D_K]; reinterpret as [B*Q*heads, D_K]
+        // Q: may be flat [mbt, num_heads*D_K] (2D) or per-head [mbt, num_heads,
+        // D_K] (3D — produced when the upstream q_b GEMM emits the BMM
+        // layout). Reinterpret either form as [B*Q*heads, D_K].
         constexpr int D_K = 576;
         int total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
+        if (tensor_desc.num_dims == 3) {
+          total_elements *= tensor_desc.dim[2];
+        }
         int total_rows = total_elements / D_K;
         int k_iters = D_K / BK;
         uint64_t gd[3] = {
