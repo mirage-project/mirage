@@ -252,6 +252,11 @@ def get_compile_command(
         f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_mla_tp4_head_groups()}",
         f"-DMIRAGE_MLA_TP4_RD_DV={_mla_tp4_rd_dv()}",
     ]
+    # MPK_PTXAS_VERBOSE=1 dumps register/spill info per kernel during JIT
+    # compile. Useful to identify worst-offender kernels in the megakernel
+    # (e.g., to debug cooperative-launch capacity issues on TP=2).
+    if os.environ.get("MPK_PTXAS_VERBOSE", "0") == "1":
+        common_cmd.append("--ptxas-options=-v")
     flags = [
         "-shared",
         _detect_cxx_standard(),
