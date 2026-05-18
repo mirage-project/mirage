@@ -135,6 +135,12 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
                 "EPILOGUE_QUANTIZE_FP8 requires BN==128 (one K-group per "
                 "consumer thread for per-row scale).");
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
+#ifdef MPK_DEBUG_SKIP_FP8_GEMM_DENSE
+  // Debug knob: skip the entire dense GEMM kernel body (return immediately).
+  // Used 2026-05-18 to test whether the TP=2 mid-megakernel 719 crash is
+  // localized to this kernel.
+  return;
+#endif
   constexpr int BM = 128, BK = 128, UK = 32;
   int const tid = threadIdx.x, wid = tid / 32;
   int const nn = (N + BN - 1) / BN, nk = (K + BK - 1) / BK;
