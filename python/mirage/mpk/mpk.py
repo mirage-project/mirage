@@ -197,6 +197,20 @@ class MPK:
         self.paged_kv_indices_buffer = args.paged_kv_indices_buffer
         self.paged_kv_last_page_len_buffer = args.paged_kv_last_page_len_buffer
         self.paged_kv_indices_snapshot = args.paged_kv_indices_snapshot
+        
+        self.pinned_ring_capacity    = args.pinned_ring_capacity
+        self.pinned_req_ready        = args.pinned_req_ready
+        self.pinned_req_request_id   = args.pinned_req_request_id
+        self.pinned_req_prompt_len   = args.pinned_req_prompt_len
+        self.pinned_req_initial_step = args.pinned_req_initial_step
+        self.pinned_comp_ready       = args.pinned_comp_ready
+        self.pinned_comp_request_id  = args.pinned_comp_request_id
+        self.pinned_comp_buffer_row  = args.pinned_comp_buffer_row
+        self.pinned_comp_final_step  = args.pinned_comp_final_step
+        self.pinned_shutdown         = args.pinned_shutdown
+        self.pinned_step             = args.pinned_step
+        self.pinned_inbox_tokens     = args.pinned_inbox_tokens
+        self.pinned_rid_at_row       = args.pinned_rid_at_row
 
         self.profiler_tensor = args.profiler_tensor
         self.spec_decode_config = args.spec_decode_config
@@ -240,19 +254,6 @@ class MPK:
             "pinned_inbox_tokens":     args.pinned_inbox_tokens,
             "pinned_rid_at_row":       args.pinned_rid_at_row,
         }
-        self.pinned_ring_capacity    = args.pinned_ring_capacity
-        self.pinned_req_ready        = args.pinned_req_ready
-        self.pinned_req_request_id   = args.pinned_req_request_id
-        self.pinned_req_prompt_len   = args.pinned_req_prompt_len
-        self.pinned_req_initial_step = args.pinned_req_initial_step
-        self.pinned_comp_ready       = args.pinned_comp_ready
-        self.pinned_comp_request_id  = args.pinned_comp_request_id
-        self.pinned_comp_buffer_row  = args.pinned_comp_buffer_row
-        self.pinned_comp_final_step  = args.pinned_comp_final_step
-        self.pinned_shutdown         = args.pinned_shutdown
-        self.pinned_step             = args.pinned_step
-        self.pinned_inbox_tokens     = args.pinned_inbox_tokens
-        self.pinned_rid_at_row       = args.pinned_rid_at_row
         self.persistent_kernel = PersistentKernel(
             mode=args.mode,
             world_size=self.world_size,
