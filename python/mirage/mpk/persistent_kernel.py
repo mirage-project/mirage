@@ -284,6 +284,7 @@ def get_compile_command(
         raise ValueError(f"Invalid persistent kernel mode: {mpk.mode}")
 
     flags = flags + [f"-DMPK_MAX_NUM_BATCHED_REQUESTS={mpk.max_num_batched_requests}"]
+
     flags = flags + [f"-DMPK_MAX_NUM_BATCHED_TOKENS={mpk.max_num_batched_tokens}"]
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
@@ -2516,9 +2517,12 @@ class PersistentKernel:
             "pinned_req_initial_step",
             "pinned_comp_ready",
             "pinned_comp_request_id",
+            "pinned_comp_buffer_row",
             "pinned_comp_final_step",
             "pinned_shutdown",
             "pinned_step",
+            "pinned_inbox_tokens",
+            "pinned_rid_at_row",
         ]
         meta_tensors_ptr = []
         for key in expected_order:
@@ -2636,9 +2640,12 @@ class PersistentKernel:
             meta_tensors.append(self.meta_tensors["pinned_req_initial_step"])
             meta_tensors.append(self.meta_tensors["pinned_comp_ready"])
             meta_tensors.append(self.meta_tensors["pinned_comp_request_id"])
+            meta_tensors.append(self.meta_tensors["pinned_comp_buffer_row"])
             meta_tensors.append(self.meta_tensors["pinned_comp_final_step"])
             meta_tensors.append(self.meta_tensors["pinned_shutdown"])
             meta_tensors.append(self.meta_tensors["pinned_step"])
+            meta_tensors.append(self.meta_tensors["pinned_inbox_tokens"])
+            meta_tensors.append(self.meta_tensors["pinned_rid_at_row"])
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0

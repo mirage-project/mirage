@@ -380,6 +380,7 @@ struct RuntimeConfig {
   // ready with acquire, processes, then clears to 0.
   int32_t volatile *pinned_comp_ready; // 0=empty, 1=completion ready
   int32_t *pinned_comp_request_id;
+  int32_t *pinned_comp_buffer_row;
   int32_t *pinned_comp_final_step;
   // GPU-private ring cursors — allocated with gpu_malloc, never touched by CPU.
   int32_t *gpu_req_head;  // GPU consumer cursor into pinned request ring
@@ -389,7 +390,21 @@ struct RuntimeConfig {
   int32_t volatile *pinned_shutdown; // 0=running, 1=shutdown requested
   // Per-request step progress: GPU writes after each decode step so CPU can
   // poll for streaming output without touching GPU memory.
-  int32_t *pinned_step; // [max_num_batched_requests], pinned, GPU writes
+  int32_t *pinned_step; // [total_inflight], pinned, indexed by buffer row
+  // Pinned inbox: CPU writes prompt tokens here before submitting a request
+  // via the ring buffer. GPU copies from inbox to the allocated buffer row.
+  int64_t *pinned_inbox_tokens; // [MPK_PINNED_RING_CAPACITY * max_seq_length], pinned (one inbox per ring slot)
+  // Pinned rid→row mapping: GPU writes pinned_rid_at_row[row] = rid when
+  // allocating a buffer row so CPU can discover which row its request is
+  // on by scanning rows, then poll pinned_step[row] for per-step streaming.
+  int32_t *pinned_rid_at_row; // [total_inflight], pinned
+  // Running queue rid tracking: request_rids[i] stores the original rid
+  // for active batch slot i (GPU device memory).
+  int *request_rids; // [MPK_MAX_NUM_BATCHED_REQUESTS]
+  // Free row pool — stack of available buffer row indices (GPU device
+  // memory).  Sized for max_num_batched_requests (no GPU waiting queue).
+  int *free_rows;    // [MPK_MAX_NUM_BATCHED_REQUESTS]
+  int *free_row_top; // stack pointer
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;

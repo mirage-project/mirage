@@ -103,32 +103,6 @@ class ModelRunner:
 
     # ── Execution ─────────────────────────────────────────────────────────────
 
-    def init(self, n: int) -> None:
-        """Initialize the persistent kernel for exactly *n* active requests.
-
-        Call before :meth:`__call__`.  Passing ``n < max_num_batched_requests``
-        prevents the kernel from trying to process uninitialized empty slots.
-        """
-        pk = self.mpk.persistent_kernel
-        model_tensor_names = list(pk._model_tensors.keys())
-        model_tensor_ptrs = [t.data_ptr() for t in pk._model_tensors.values()]
-        pk.init_func(
-            self.mpk.meta_tensors_ptr,
-            self.mpk.profiler_buffer_ptr,
-            pk.mpi_rank,
-            pk.num_workers,
-            pk.num_local_schedulers,
-            pk.num_remote_schedulers,
-            pk.max_seq_length,
-            n,
-            pk.eos_token_id,
-            pk.allocate_nvshmem_teams,
-            pk.test_mode,
-            model_tensor_names,
-            model_tensor_ptrs,
-            "",  # Empty JSON path = use __FILE__ based path
-        )
-
     def __call__(self) -> None:
         """Launch the MPK persistent kernel.
 
@@ -170,9 +144,19 @@ class ModelRunner:
 
     @staticmethod
     def _allocate_meta_tensors(config: RunnerConfig) -> dict[str, torch.Tensor]:
-        """Allocate the GPU buffers shared between the MPK kernel and the manager."""
+        """Allocate the GPU and pinned buffers shared between MPK kernel and manager.
+
+        Per-request buffers (indexed by buffer row) are sized for the total
+        inflight capacity.  Batch-slot buffers are sized for
+        ``max_num_batched_requests`` only.
+
+        Pinned (page-locked) tensors are allocated here so MPK does not need
+        to perform any allocation — it only reads pointers.
+        """
         n_req = config.max_num_batched_requests
         n_tok = config.max_num_batched_tokens
+        cap = config.pinned_ring_capacity
+
         return dict(
             step=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
             tokens=torch.zeros(n_req, config.max_seq_length, dtype=torch.int64, device="cuda"),
@@ -184,4 +168,19 @@ class ModelRunner:
             paged_kv_indptr_buffer=torch.zeros(n_req + 1, dtype=torch.int32, device="cuda"),
             paged_kv_indices_buffer=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
             paged_kv_last_page_len_buffer=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
+            paged_kv_indices_snapshot=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
+            # Pinned ring buffers for CPU↔GPU communication.  pin_memory()
+            # gives a stable physical address so no DMA copy is needed.
+            pinned_req_ready=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_req_request_id=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_req_prompt_len=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_req_initial_step=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_comp_ready=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_comp_request_id=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_comp_buffer_row=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_comp_final_step=torch.zeros(cap, dtype=torch.int32).pin_memory(),
+            pinned_shutdown=torch.zeros(1, dtype=torch.int32).pin_memory(),
+            pinned_step=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
+            pinned_inbox_tokens=torch.zeros(cap, config.max_seq_length, dtype=torch.int64).pin_memory(),
+            pinned_rid_at_row=torch.full((n_req,), -1, dtype=torch.int32).pin_memory(),
         )

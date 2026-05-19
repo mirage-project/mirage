@@ -172,6 +172,15 @@ __global__ void init_kernel(RuntimeConfig config) {
     // pinned_comp_ready[] are already zeroed by Python)
     *config.gpu_req_head  = 0;
     *config.gpu_comp_tail = 0;
+    // Initialize request_rids
+    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      config.request_rids[i] = -1;
+    }
+    // Initialize free row pool: push all batch-slots onto the stack
+    *config.free_row_top = 0;
+    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      config.free_rows[(*config.free_row_top)++] = i;
+    }
 #endif
 #endif
   }
@@ -409,15 +418,17 @@ __device__ __forceinline__ bool
 // prepare_next_batch for MODE_ONLINE_PINNED.
 //
 // CPU-GPU handshake via pinned (page-locked) ring buffers:
-//   Request ring  — CPU producer writes request metadata then sets ready=1.
-//                   GPU consumes with ld.acquire.sys, clears ready=0.
-//   Completion ring — GPU writes completion info then sets ready=1 with
+//   Request ring  — CPU writes {rid, prompt_len, initial_step} + inbox tokens,
+//                   then sets ready=1. GPU consumes with ld.acquire.sys.
+//   Completion ring — GPU writes {rid, final_step} then sets ready=1 with
 //                     st.release.sys. CPU drains in a background thread.
 //
-// Lock-free power-of-2 ring: index = cursor & (MPK_PINNED_RING_CAPACITY - 1).
-// GPU cursors (gpu_req_head, gpu_comp_tail) live in regular GPU memory.
+// Scheduling: GPU maintains running_queue (active batch) and waiting_queue
+// (pending requests). New ring entries go to waiting_queue first, then are
+// admitted to running_queue when slots open. GPU manages a free row pool
+// for the token buffer so request IDs (rid) can increment without bound.
 //
-// Admission is batched: all available pinned slots are drained in one call.
+// Lock-free power-of-2 rings: index = cursor & (MPK_PINNED_RING_CAPACITY - 1).
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   __shared__ int smem_kv_indices[MPK_MAX_NUM_PAGES];
@@ -425,34 +436,35 @@ __device__ __forceinline__ bool
   int page_queue_tail = *config.page_queue_tail;
   int gpu_req_head    = *config.gpu_req_head;
   int gpu_comp_tail   = *config.gpu_comp_tail;
+  int free_row_top    = *config.free_row_top;
   const int ring_mask = MPK_PINNED_RING_CAPACITY - 1;
 
   // ── Step 1: finalize previous batch ────────────────────────────────────────
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int16_t request_id = config.request_ids[i];
-    if (request_id == -1) {
+    int16_t row = config.request_ids[i];
+    if (row == -1) {
       continue;
     }
 
-    int step       = config.step[request_id];
+    int step       = config.step[row];
     int qo_indptr  = config.qo_indptr_buffer[i];
     int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
-    int prompt_len = config.prompt_length[request_id];
+    int prompt_len = config.prompt_length[row];
 
     // Move output tokens into the token buffer.
     for (int j = 0; j < num_tokens; j++) {
       if (step + j + 1 >= prompt_len &&
           step + j + 1 < config.max_seq_length) {
-        config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
+        config.tokens[row * MPK_MAX_SEQ_LENGTH + step + j + 1] =
             config.output_tokens[qo_indptr + j];
       }
     }
-    config.step[request_id] = step + num_tokens;
+    config.step[row] = step + num_tokens;
 
     // Per-step notification: release store so that all token buffer
     // writes happen-before, guaranteeing CPU sees complete token data
     // when it observes the updated step.
-    st_release_sys_i32(&config.pinned_step[request_id],
+    st_release_sys_i32(&config.pinned_step[row],
                        (int32_t)(step + num_tokens));
 
 #ifdef MPK_ENABLE_PROFILING
@@ -460,21 +472,29 @@ __device__ __forceinline__ bool
 #else
     bool done =
         (step + num_tokens + 1 >= config.max_seq_length) ||
-        ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
+        ((config.tokens[row * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
           config.eos_token_id) &&
          (step + num_tokens >= prompt_len));
 #endif
 
     if (done) {
-      config.request_ids[i] = -1;
+      int rid = config.request_rids[i];
 
-      // Write completion entry so CPU background thread can collect the output.
+      // Write completion entry so CPU background thread can collect the
+      // output. Reports the original rid (not the buffer row).
       int comp_slot = gpu_comp_tail & ring_mask;
-      config.pinned_comp_request_id[comp_slot] = (int32_t)request_id;
+      config.pinned_comp_request_id[comp_slot] = (int32_t)rid;
+      config.pinned_comp_buffer_row[comp_slot] = (int32_t)row;
       config.pinned_comp_final_step[comp_slot] = (int32_t)(step + num_tokens);
-      // Release store: CPU sees data before the ready flag.
       st_release_sys_i32(&config.pinned_comp_ready[comp_slot], 1);
       gpu_comp_tail++;
+
+      // Free the buffer row back to the pool.
+      config.free_rows[free_row_top++] = (int)row;
+      config.pinned_rid_at_row[row] = (int32_t)-1;
+      // Mark batch slot as empty.
+      config.request_ids[i]   = -1;
+      config.request_rids[i]  = -1;
 
       // Free pages back to the page queue.
       int kv_indptr = config.paged_kv_indptr_buffer[i];
@@ -498,20 +518,21 @@ __device__ __forceinline__ bool
   int num_reqs = 0, num_tokens = 0, num_pages = 0;
 
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int16_t request_id = config.request_ids[i];
-    if (request_id == -1) {
+    int16_t row = config.request_ids[i];
+    if (row == -1) {
       continue;
     }
 
     int kv_indptr     = config.paged_kv_indptr_buffer[i];
     int num_old_pages = config.paged_kv_indptr_buffer[i + 1] - kv_indptr;
 
-    config.request_ids[num_reqs]            = request_id;
+    config.request_ids[num_reqs]            = row;
+    config.request_rids[num_reqs]           = config.request_rids[i];
     config.qo_indptr_buffer[num_reqs]       = num_tokens;
     config.paged_kv_indptr_buffer[num_reqs] = num_pages;
 
-    int step      = config.step[request_id];
-    int remaining = config.prompt_length[request_id] - step;
+    int step      = config.step[row];
+    int remaining = config.prompt_length[row] - step;
     int num_new_tokens;
     if (remaining > 0) {
       num_new_tokens = min(remaining, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
@@ -521,7 +542,7 @@ __device__ __forceinline__ bool
 
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
-          config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j];
+          config.tokens[row * MPK_MAX_SEQ_LENGTH + step + j];
     }
 
     int num_new_pages =
@@ -544,42 +565,41 @@ __device__ __forceinline__ bool
     num_reqs++;
   }
 
-  // ── Step 4: batched admission from pinned request ring ─────────────────────
-  // Drain ALL ready entries until the batch is full or the ring is empty.
-  // When the batch is completely empty (no active requests and ring is empty),
-  // spin-wait instead of exiting so the kernel stays alive for future requests.
+  // ── Step 4: drain request ring → directly admit to running batch ──────────
+  // Each ring slot has its own independent inbox; entries that cannot be
+  // admitted yet stay in the ring (ready=1) and will be retried next iteration.
   while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
+         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS &&
+         free_row_top > 0) {
     int req_slot = gpu_req_head & ring_mask;
-    // Acquire load: ensures we see data written by CPU before ready=1.
     int32_t rdy = ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]);
     if (rdy == 0) {
-      if (num_reqs > 0 || num_tokens > 0) {
-        break; // partial batch ready — proceed with what we have
-      }
-      // Completely empty batch: spin instead of exiting.
-      // Check CPU shutdown signal; if set, break out (num_tokens stays 0 →
-      // return false below, which terminates the kernel).
-      if (ld_acquire_sys_i32(config.pinned_shutdown) != 0) {
-        break;
-      }
-      __nanosleep(100);
-      continue; // retry ring read
+      break; // ring empty
     }
 
     int32_t new_rid      = config.pinned_req_request_id[req_slot];
     int32_t prompt_len   = config.pinned_req_prompt_len[req_slot];
     int32_t initial_step = config.pinned_req_initial_step[req_slot];
 
-    // Clear the slot so CPU can reuse it.
+    // Pop a free buffer row and copy inbox tokens from this ring slot.
+    int row = config.free_rows[--free_row_top];
+    int inbox_base = req_slot * MPK_MAX_SEQ_LENGTH;
+    for (int j = 0; j < prompt_len; j++) {
+      config.tokens[row * MPK_MAX_SEQ_LENGTH + j] =
+          config.pinned_inbox_tokens[inbox_base + j];
+    }
+    config.prompt_length[row] = prompt_len;
+    config.step[row]          = initial_step;
+    // Let CPU discover which row this rid is on by scanning pinned_rid_at_row.
+    config.pinned_rid_at_row[row] = (int32_t)new_rid;
+
+    // Clear the ring slot so CPU can reuse it.
     st_release_sys_i32(&config.pinned_req_ready[req_slot], 0);
     gpu_req_head++;
 
-    // Write scheduling metadata (tokens[] already filled by CPU).
-    config.prompt_length[new_rid] = prompt_len;
-    config.step[new_rid]          = initial_step;
-
-    config.request_ids[num_reqs]            = (int16_t)new_rid;
+    // Fill batch slot.
+    config.request_ids[num_reqs]            = (int16_t)row;
+    config.request_rids[num_reqs]           = new_rid;
     config.qo_indptr_buffer[num_reqs]       = num_tokens;
     config.paged_kv_indptr_buffer[num_reqs] = num_pages;
 
@@ -589,7 +609,7 @@ __device__ __forceinline__ bool
 
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
-          config.tokens[new_rid * MPK_MAX_SEQ_LENGTH + initial_step + j];
+          config.tokens[row * MPK_MAX_SEQ_LENGTH + initial_step + j];
     }
 
     int num_new_pages =
@@ -608,25 +628,34 @@ __device__ __forceinline__ bool
     num_reqs++;
   }
 
-  // ── Step 5: clear unused slots ──────────────────────────────────────────────
+  // ── Step 5: clear unused slots ─────────────────────────────────────────────
   for (int i = num_reqs; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    config.request_ids[i] = -1;
+    config.request_ids[i]  = -1;
+    config.request_rids[i] = -1;
   }
   for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     config.qo_indptr_buffer[i]       = num_tokens;
     config.paged_kv_indptr_buffer[i] = num_pages;
   }
 
-  // ── Step 6: update page queue and ring cursors ──────────────────────────────
+  // ── Step 6: update cursors and spin-wait / shutdown ────────────────────────
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
   *config.gpu_req_head    = gpu_req_head;
   *config.gpu_comp_tail   = gpu_comp_tail;
+  *config.free_row_top    = free_row_top;
 
-  // Step 4's spin-wait ensures we only reach here with num_tokens > 0 (batch
-  // has work) or num_tokens == 0 (shutdown was signalled while batch was
-  // empty).  The return value drives whether the scheduler dispatches another
-  // begin_task_graph (true) or terminates (false).
+  // If the batch is completely empty (no active requests, ring empty),
+  // spin-wait instead of exiting so the kernel stays alive for future
+  // requests.  Check shutdown signal to terminate.
+  if (num_tokens == 0) {
+    if (ld_acquire_sys_i32(config.pinned_shutdown) != 0) {
+      return false; // terminate kernel
+    }
+    __nanosleep(100);
+    return true; // idle — keep kernel alive, scheduler will re-invoke
+  }
+
   return (num_tokens > 0);
 }
 #endif
@@ -1393,7 +1422,7 @@ static RuntimeConfig global_runtime_config;
 // Global model tensors map for runtime tensor lookup
 static std::map<std::string, void *> global_model_tensors;
 
-// meta_tensors[0]: seq_length
+// meta_tensors[0]: step
 // meta_tensors[1]: tokens
 // meta_tensors[2]: input_tokens
 // meta_tensors[3]: output_tokens
@@ -1403,6 +1432,20 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[7]: paged_kv_indptr_buffer
 // meta_tensors[8]: paged_kv_indices_buffer
 // meta_tensors[9]: paged_kv_last_page_len_buffer
+// meta_tensors[10]: paged_kv_indices_snapshot
+// MODE_ONLINE_PINNED only (indices 11..22):
+// meta_tensors[11]: pinned_req_ready
+// meta_tensors[12]: pinned_req_request_id
+// meta_tensors[13]: pinned_req_prompt_len
+// meta_tensors[14]: pinned_req_initial_step
+// meta_tensors[15]: pinned_comp_ready
+// meta_tensors[16]: pinned_comp_request_id
+// meta_tensors[17]: pinned_comp_buffer_row
+// meta_tensors[18]: pinned_comp_final_step
+// meta_tensors[19]: pinned_shutdown
+// meta_tensors[20]: pinned_step
+// meta_tensors[21]: pinned_inbox_tokens
+// meta_tensors[22]: pinned_rid_at_row
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
@@ -1431,10 +1474,10 @@ extern "C" void
     global_model_tensors[model_tensor_names[i]] = model_tensor_ptrs[i];
   }
   // meta_tensors[0..10] are always required.
-  // meta_tensors[11..18]: pinned ring pointers (MODE_ONLINE_PINNED only,
+  // meta_tensors[11..22]: pinned ring pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 20);
+  assert(meta_tensors.size() == 23);
 #else
   assert(meta_tensors.size() == 11);
 #endif
@@ -1466,12 +1509,18 @@ extern "C" void
       static_cast<volatile int32_t *>(meta_tensors[15]);
   global_runtime_config.pinned_comp_request_id =
       static_cast<int32_t *>(meta_tensors[16]);
-  global_runtime_config.pinned_comp_final_step =
+  global_runtime_config.pinned_comp_buffer_row =
       static_cast<int32_t *>(meta_tensors[17]);
+  global_runtime_config.pinned_comp_final_step =
+      static_cast<int32_t *>(meta_tensors[18]);
   global_runtime_config.pinned_shutdown =
-      static_cast<volatile int32_t *>(meta_tensors[18]);
+      static_cast<volatile int32_t *>(meta_tensors[19]);
   global_runtime_config.pinned_step =
-      static_cast<int32_t *>(meta_tensors[19]);
+      static_cast<int32_t *>(meta_tensors[20]);
+  global_runtime_config.pinned_inbox_tokens =
+      static_cast<int64_t *>(meta_tensors[21]);
+  global_runtime_config.pinned_rid_at_row =
+      static_cast<int32_t *>(meta_tensors[22]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
@@ -1564,6 +1613,12 @@ extern "C" void
   // GPU-private ring cursors; never accessed by CPU.
   global_runtime_config.gpu_req_head  = gpu_malloc<int32_t>(sizeof(int32_t));
   global_runtime_config.gpu_comp_tail = gpu_malloc<int32_t>(sizeof(int32_t));
+  // Free row pool (GPU device memory)
+  global_runtime_config.request_rids =
+      gpu_malloc<int>(sizeof(int) * MPK_MAX_NUM_BATCHED_REQUESTS);
+  global_runtime_config.free_rows =
+      gpu_malloc<int>(sizeof(int) * MPK_MAX_NUM_BATCHED_REQUESTS);
+  global_runtime_config.free_row_top = gpu_malloc<int>(sizeof(int));
 #endif
 #endif
   // 136-worker B200 runs can temporarily outpace the default queue depth on
@@ -1840,7 +1895,10 @@ extern "C" void finalize_persistent_kernel() {
 #if defined(MODE_ONLINE_PINNED)
   gpu_free(global_runtime_config.gpu_req_head);
   gpu_free(global_runtime_config.gpu_comp_tail);
-  // pinned ring arrays (meta_tensors[10..16]) are Python-owned; do not free.
+  gpu_free(global_runtime_config.request_rids);
+  gpu_free(global_runtime_config.free_rows);
+  gpu_free(global_runtime_config.free_row_top);
+  // pinned ring arrays (meta_tensors[11..22]) are Python-owned; do not free.
 #endif
 #endif
   int num_workers = global_runtime_config.num_workers;

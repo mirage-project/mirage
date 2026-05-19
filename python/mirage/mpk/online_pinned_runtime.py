@@ -4,29 +4,31 @@ OnlinePinnedRuntime — CPU-side driver for MODE_ONLINE_PINNED persistent kernel
 The kernel uses two lock-free power-of-2 ring buffers backed by pinned
 (page-locked) memory so both CPU and GPU can access them without DMA copies.
 
-  Request ring  (CPU→GPU): CPU writes metadata then sets ready=1 (release);
-                            GPU polls with ld.acquire.sys, clears to 0 when done.
-  Completion ring (GPU→CPU): GPU writes fields then sets ready=1 (st.release.sys);
-                              CPU polls with acquire, collects, clears to 0.
+  Request ring  (CPU→GPU): CPU writes {rid, prompt_len, initial_step} then
+                            sets ready=1; GPU drains directly into running batch.
+  Completion ring (GPU→CPU): GPU writes {rid, buffer_row, final_step} then
+                              sets ready=1; CPU polls, collects, clears to 0.
 
-The GPU-private cursors (gpu_req_head, gpu_comp_tail) live in regular GPU memory
-and are never touched by the CPU.  The CPU maintains its own counters
-(cpu_req_tail, cpu_comp_head) locally in this class.
+Each ring slot has its own independent pinned inbox buffer, so concurrent
+submits can write prompt tokens without overwriting each other.  The GPU
+copies inbox tokens to the assigned buffer row when admitting a request.
+
+When the batch and ring are full, requests queue on the CPU side in a
+``collections.deque`` and are flushed into the ring as slots free up.
 
 Usage::
 
     runtime = OnlinePinnedRuntime(mpk)
-    # load tokens into mpk.tokens[request_id, :prompt_len] before submitting
-    runtime.submit_request(request_id=0, prompt_len=32)
-    runtime.submit_request(request_id=1, prompt_len=64)
-    runtime.wait_all(num_requests=2)
-    tokens = runtime.get_output_tokens(request_id=0)
+    runtime.submit(rid=0, token_ids=[...])
+    runtime.submit(rid=1, token_ids=[...])
+    buffer_row, final_step = runtime.wait_for_request(rid=0, timeout=60)
+    tokens = runtime.read_tokens_at_row(buffer_row, final_step)
 """
 
+import collections
 import time
 import threading
-from typing import Dict, List, Optional
-from unittest import result
+from typing import Deque, Dict, List, Optional, Tuple
 
 import torch
 
@@ -35,230 +37,214 @@ class OnlinePinnedRuntime:
     """CPU-side helper for the online_pinned persistent kernel mode."""
 
     def __init__(self, mpk):
-        """
-        Parameters
-        ----------
-        mpk : MPK
-            Fully initialised MPK object whose mode is 'online_pinned'.
-        """
         assert mpk.metadata.mode == "online_pinned", (
             f"OnlinePinnedRuntime requires mode='online_pinned', got {mpk.metadata.mode}"
         )
         self._mpk = mpk
         self._cap = mpk.pinned_ring_capacity
         self._mask = self._cap - 1
+        self._total_inflight = mpk.total_num_requests
 
         # Pinned CPU↔GPU ring arrays (allocated in mpk.py, shape=[cap])
-        self._req_ready        = mpk.pinned_req_ready        # int32, pinned
-        self._req_request_id   = mpk.pinned_req_request_id   # int32, pinned
-        self._req_prompt_len   = mpk.pinned_req_prompt_len   # int32, pinned
-        self._req_initial_step = mpk.pinned_req_initial_step # int32, pinned
-        self._comp_ready       = mpk.pinned_comp_ready       # int32, pinned
-        self._comp_request_id  = mpk.pinned_comp_request_id  # int32, pinned
-        self._comp_final_step  = mpk.pinned_comp_final_step  # int32, pinned
-        self._shutdown         = mpk.pinned_shutdown         # int32[1], pinned
-        self._pinned_step      = mpk.pinned_step             # int32[max_requests], pinned
+        self._req_ready         = mpk.pinned_req_ready        # int32, pinned
+        self._req_request_id    = mpk.pinned_req_request_id   # int32, pinned
+        self._req_prompt_len    = mpk.pinned_req_prompt_len   # int32, pinned
+        self._req_initial_step  = mpk.pinned_req_initial_step # int32, pinned
+        self._comp_ready        = mpk.pinned_comp_ready       # int32, pinned
+        self._comp_request_id   = mpk.pinned_comp_request_id  # int32, pinned
+        self._comp_buffer_row   = mpk.pinned_comp_buffer_row  # int32, pinned
+        self._comp_final_step   = mpk.pinned_comp_final_step  # int32, pinned
+        self._shutdown          = mpk.pinned_shutdown         # int32[1], pinned
+        self._pinned_step       = mpk.pinned_step             # int32[max_batched], pinned
+        self._inbox_tokens      = mpk.pinned_inbox_tokens     # int64[cap, max_seq_len], pinned
+        self._pinned_rid_at_row = mpk.pinned_rid_at_row       # int32[max_batched], pinned
 
-        # CPU-private ring cursors (int, not tensors)
-        self._cpu_req_tail  = 0  # next slot to write into the request ring
-        self._cpu_comp_head = 0  # next slot to read from the completion ring
+        # CPU-private ring cursors.
+        self._cpu_req_tail  = 0  # next ring slot to write
+        self._cpu_req_ack   = 0  # last slot known to be consumed by GPU
+        self._cpu_comp_head = 0
 
-        # Dedicated stream for HtoD copies in load_tokens. Using the default
-        # stream would deadlock: the persistent kernel runs on the default stream
-        # and copy_(non_blocking=False) would synchronize it, blocking until the
-        # kernel finishes — which never happens while waiting for more requests.
+        # CPU-side waiting queue: holds (rid, token_ids) tuples that couldn't
+        # be written to the ring because it was full.
+        self._waiting: Deque[Tuple[int, torch.Tensor]] = collections.deque()
+        self._waiting_lock = threading.Lock()
+
+        # Dedicated stream for HtoD / DtoH copies.
         self._write_stream = torch.cuda.Stream(device=mpk.tokens.device)
 
-        # Completion tracking: request_id → final_step
-        self._completions: Dict[int, int] = {}
-        self._lock = threading.Lock() # protect self._completions from having concurrent threads access
+        # Completion tracking: rid → (buffer_row, final_step)
+        self._completions: Dict[int, Tuple[int, int]] = {}
+        self._lock = threading.RLock()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ────────────────────────────────────────────────────────
 
-    def load_tokens(
-        self,
-        request_id: int,
-        input_ids: torch.Tensor,
-    ) -> None:
-        """Copy prompt token IDs into the GPU token buffer for this request.
+    def submit(self, rid: int, token_ids: torch.Tensor, initial_step: int = 0) -> bool:
+        """Stage prompt tokens and write a request into the CPU→GPU ring.
 
-        Must be called before ``submit_request`` so the GPU sees the tokens
-        when it processes the ring entry.
+        Writes tokens to the slot-specific inbox so concurrent requests never
+        overwrite each other.  If the ring is full, the request is enqueued
+        to the CPU-side waiting deque instead.
 
         Parameters
         ----------
-        request_id : row index into mpk.tokens
-        input_ids  : 1-D int64 tensor of prompt token IDs (CPU or CUDA)
-        """
-        prompt_len = input_ids.shape[0]
-        with torch.cuda.stream(self._write_stream):
-            self._mpk.tokens[request_id, :prompt_len].copy_(input_ids, non_blocking=True)
-        self._write_stream.synchronize()
-
-    def submit_request(
-        self,
-        request_id: int,
-        prompt_len: int,
-        initial_step: int = 0,
-    ) -> None:
-        """Write one request entry into the CPU→GPU ring.
-
-        Call ``load_tokens`` first to ensure prompt tokens are in GPU memory.
-
-        Parameters
-        ----------
-        request_id    : index into the token/step/prompt_length arrays
-        prompt_len    : number of prompt tokens for this request
-        initial_step  : starting decode step (0 unless prefix-cache is used)
-        """
-        slot = self._cpu_req_tail & self._mask
-        # Write data fields first, then the ready flag (release semantics are
-        # handled by PyTorch's CPU memory model; the GPU side uses
-        # ld.acquire.sys to see these writes before the flag).
-        self._req_request_id[slot]   = request_id
-        self._req_prompt_len[slot]   = prompt_len
-        self._req_initial_step[slot] = initial_step
-        # Memory barrier: ensure data is visible before setting ready=1.
-        # torch has no explicit fence API, but Python assignment on pinned
-        # memory is ordered on x86/ARM; use a full memory fence via ctypes if
-        # needed on non-x86 platforms.  For now, the store order is sufficient
-        # on x86 because stores are not reordered with prior stores.
-        self._req_ready[slot] = 1
-        self._cpu_req_tail += 1
-
-    def drain_completions(self) -> List[int]:
-        """Non-blocking poll: collect all newly completed request IDs.
-
-        Returns a list of request IDs that have finished since the last call.
-        """
-        finished = []
-        while True:
-            slot = self._cpu_comp_head & self._mask
-            if self._comp_ready[slot].item() == 0:
-                break
-            request_id  = int(self._comp_request_id[slot].item())
-            final_step  = int(self._comp_final_step[slot].item())
-            # Clear the slot so the GPU can reuse it.
-            self._comp_ready[slot] = 0
-            self._cpu_comp_head += 1
-            with self._lock:
-                self._completions[request_id] = final_step
-            finished.append(request_id)
-        return finished
-
-    def get_current_step(self, request_id: int) -> int:
-        """Return the latest decode step written by the GPU for *request_id*.
-
-        The step is the index of the last generated+prompt token, so the
-        number of tokens available in the token buffer is step + 1.
-        Returns 0 if no decode progress has been recorded yet (the request
-        may still be in prefill or not yet admitted by the GPU).
-        """
-        return int(self._pinned_step[request_id].item())
-
-    def drain_step_progress(self) -> Dict[int, int]:
-        """Non-blocking poll: return {request_id: current_step} for all active
-        requests that have made progress since last call.
-
-        Only returns requests whose step has advanced; stalled/idle requests
-        are not included.
-        """
-        # pinned_step is shared memory; safe to read without locking.
-        # We track previous step per request to detect changes.
-        if not hasattr(self, '_prev_steps'):
-            self._prev_steps: Dict[int, int] = {}
-        progress = {}
-        for rid in range(self._mpk.metadata.max_num_batched_requests):
-            s = int(self._pinned_step[rid].item())
-            if s <= 0:
-                continue
-            prev = self._prev_steps.get(rid, 0)
-            if s > prev:
-                self._prev_steps[rid] = s
-                progress[rid] = s
-        return progress
-
-    def wait_all(
-        self,
-        num_requests: int,
-        timeout: float = 60.0,
-        poll_interval: float = 1e-4,
-    ) -> Dict[int, int]:
-        """Block until *num_requests* completions have been collected.
-
-        Parameters
-        ----------
-        num_requests  : total number of requests submitted (and expected back)
-        timeout       : seconds before raising TimeoutError
-        poll_interval : seconds between polls
+        rid          : unique request identifier (never repeats)
+        token_ids    : 1-D int64 tensor of token IDs (CPU or CUDA)
+        initial_step : starting decode step (0 unless prefix-cache is used)
 
         Returns
         -------
-        dict mapping request_id → final_step for all completed requests
+        True if the request was written to the ring, False if enqueued to
+        the CPU waiting deque.
+        """
+        prompt_len = token_ids.shape[0]
+        slot = self._cpu_req_tail & self._mask
+
+        # Check if this ring slot is free.
+        if self._req_ready[slot].item() != 0:
+            # Ring full — enqueue to CPU-side waiting.
+            with self._waiting_lock:
+                self._waiting.append((rid, token_ids.clone(), initial_step))
+            return False
+
+        # Copy prompt tokens to this slot's inbox.
+        with torch.cuda.stream(self._write_stream):
+            self._inbox_tokens[slot, :prompt_len].copy_(token_ids, non_blocking=True)
+        self._write_stream.synchronize()
+
+        # Write ring entry.
+        self._req_request_id[slot]   = rid
+        self._req_prompt_len[slot]   = prompt_len
+        self._req_initial_step[slot] = initial_step
+        self._req_ready[slot] = 1
+        self._cpu_req_tail += 1
+        return True
+
+    def flush_waiting(self) -> int:
+        """Move one waiting request from the CPU deque into the ring, if possible.
+
+        Returns the number of requests flushed (0 or 1).
+        Called from :meth:`drain_completions` so waiting requests are
+        gradually fed into the ring as slots free up.
+        """
+        with self._waiting_lock:
+            if not self._waiting:
+                return 0
+            slot = self._cpu_req_tail & self._mask
+            if self._req_ready[slot].item() != 0:
+                return 0  # ring still full
+            rid, token_ids, initial_step = self._waiting.popleft()
+
+        prompt_len = token_ids.shape[0]
+        with torch.cuda.stream(self._write_stream):
+            self._inbox_tokens[slot, :prompt_len].copy_(token_ids, non_blocking=True)
+        self._write_stream.synchronize()
+        self._req_request_id[slot]   = rid
+        self._req_prompt_len[slot]   = prompt_len
+        self._req_initial_step[slot] = initial_step
+        self._req_ready[slot] = 1
+        self._cpu_req_tail += 1
+        return 1
+
+    def drain_completions(self) -> List[Tuple[int, int, int]]:
+        """Non-blocking poll: collect all newly completed requests.
+
+        Returns a list of ``(rid, buffer_row, final_step)`` tuples for
+        requests that have finished since the last call.
+        """
+        finished = []
+        while True:
+            with self._lock:
+                slot = self._cpu_comp_head & self._mask
+                if self._comp_ready[slot].item() == 0:
+                    break
+                rid         = int(self._comp_request_id[slot].item())
+                buffer_row  = int(self._comp_buffer_row[slot].item())
+                final_step  = int(self._comp_final_step[slot].item())
+                self._comp_ready[slot] = 0
+                self._cpu_comp_head += 1
+                self._completions[rid] = (buffer_row, final_step)
+            finished.append((rid, buffer_row, final_step))
+
+        # While we're here, check if ring slots have freed up.
+        self.flush_waiting()
+        return finished
+
+    def wait_for_request(
+        self,
+        rid: int,
+        timeout: float = 60.0,
+        poll_interval: float = 1e-4,
+    ) -> Tuple[int, int]:
+        """Block until a specific *rid* completes.
+
+        Returns ``(buffer_row, final_step)``.
+        Raises ``TimeoutError`` if the request does not complete in time.
         """
         deadline = time.monotonic() + timeout
         while True:
             self.drain_completions()
             with self._lock:
-                if len(self._completions) >= num_requests:
-                    return dict(self._completions)
+                if rid in self._completions:
+                    return self._completions[rid]
             if time.monotonic() > deadline:
-                with self._lock:
-                    done = len(self._completions)
                 raise TimeoutError(
-                    f"wait_all timed out: {done}/{num_requests} requests completed"
+                    f"wait_for_request timed out for rid={rid}"
                 )
             time.sleep(poll_interval)
 
-    def read_tokens(self, request_id: int, up_to_step: int) -> torch.Tensor:
-        """Read tokens [0..up_to_step] for *request_id* from the GPU buffer.
+    def read_tokens_at_row(self, buffer_row: int, final_step: int) -> torch.Tensor:
+        """Read tokens [0..final_step] from *buffer_row*.
 
-        Unlike :meth:`get_output_tokens`, this does not require the request to
-        have completed.  The caller must ensure *up_to_step* corresponds to a
-        step that the GPU has already written (e.g. via :meth:`get_current_step`).
+        Parameters
+        ----------
+        buffer_row : row index into the token buffer
+        final_step : number of tokens available (prompt + generated) - 1
         """
         with torch.cuda.stream(self._write_stream):
-            result = self._mpk.tokens[request_id, : up_to_step + 1].clone()
+            result = self._mpk.tokens[buffer_row, : final_step + 1].clone()
         self._write_stream.synchronize()
         return result
 
-    def get_output_tokens(self, request_id: int) -> torch.Tensor:
-        """Return the generated token sequence for a completed request.
-
-        Returns a 1-D int64 CPU tensor of length final_step+1 (prompt +
-        generated).  Safe to call on the default stream because
-        cudaStreamWaitEvent has been removed from the kernel launch path;
-        the completion ring entry guarantees tokens are already in DRAM.
-
-        Raises KeyError if the request has not completed yet.
-        """
+    def release_request(self, rid: int) -> None:
+        """Remove a completed request from the completion bookkeeping."""
         with self._lock:
-            final_step = self._completions[request_id]
-        with torch.cuda.stream(self._write_stream):
-            result = self._mpk.tokens[request_id, : final_step + 1].clone()
-        self._write_stream.synchronize()
-        return result
+            self._completions.pop(rid, None)
 
+    def get_current_step_at_row(self, buffer_row: int) -> int:
+        """Return the latest decode step written by the GPU for *buffer_row*."""
+        return int(self._pinned_step[buffer_row].item())
+
+    def find_row_for_rid(self, rid: int) -> int:
+        """Scan ``pinned_rid_at_row`` to find which buffer row holds *rid*.
+
+        Returns the row index, or -1 if the GPU hasn't assigned a row yet.
+        """
+        for r in range(self._total_inflight):
+            if int(self._pinned_rid_at_row[r].item()) == rid:
+                return r
+        return -1
+
+    @property
+    def waiting_count(self) -> int:
+        """Number of requests queued on the CPU side."""
+        with self._waiting_lock:
+            return len(self._waiting)
 
     def shutdown(self) -> None:
-        """Signal the GPU persistent kernel to terminate.
-
-        The kernel will exit its spin-wait loop in ``prepare_next_batch``
-        after seeing this flag.  Call after all requests have been submitted
-        (i.e. after the submit thread finishes) so no in-flight work is lost.
-        """
+        """Signal the GPU persistent kernel to terminate."""
         self._shutdown[0] = 1
 
     def reset(self) -> None:
-        """Clear completion bookkeeping for a new inference session.
-        It is not used anywhere right now, because mpk start only once in the whole inference lifecycle
-        """
-        self._cpu_req_tail  = 0
-        self._cpu_comp_head = 0
-        self._shutdown[0]   = 0  # clear shutdown flag for next session
+        """Clear completion bookkeeping and ring state for a new session."""
+        self._cpu_req_tail    = 0
+        self._cpu_req_ack     = 0
+        self._cpu_comp_head   = 0
+        self._shutdown[0]     = 0
         with self._lock:
             self._completions.clear()
-            self._comp_ready.zero_()  # clear completion ring ready flags
-            self._req_ready.zero_()   # clear request ring ready flags
+        with self._waiting_lock:
+            self._waiting.clear()
+        self._comp_ready.zero_()
+        self._req_ready.zero_()
+        self._req_request_id.zero_()
+        self._pinned_rid_at_row.fill_(-1)

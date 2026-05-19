@@ -10,3 +10,5 @@ transformers==4.57.1
 protobuf
 tg4perfetto @ git+https://github.com/flashinfer-ai/tg4perfetto.git
 cuda-python
+fastapi
+uvicorn

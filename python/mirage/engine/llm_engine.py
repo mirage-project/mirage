@@ -1,20 +1,27 @@
-"""LLMEngine — serving loop built on OnlinePinnedRuntime.
+"""LLMEngine — concurrent serving loop backed on persistent kernel + ring buffer.
 """
 
 from __future__ import annotations
 
-import time
 import threading
-from time import perf_counter
+
 import torch
-from tqdm.auto import tqdm
 
 from .model_runner import ModelRunner
+from .tokenizer_manager import TokenizerManager
 from ..mpk.online_pinned_runtime import OnlinePinnedRuntime
 
 
 class LLMEngine:
     """Generation loop backed by the ``online_pinned`` persistent kernel.
+
+    The kernel runs in a background thread so the engine can accept requests
+    concurrently.  Each call to :meth:`submit` allocates a unique, never-
+    repeating *request id* (rid), stages tokens in the pinned inbox, writes a
+    ring-buffer entry, and then blocks until the GPU reports completion for
+    that specific rid.  The GPU manages its own buffer-row pool and a
+    waiting/running queue pair, so the CPU does not need to reason about
+    slot availability.
 
     Args:
         model_runner: A fully constructed :class:`ModelRunner` whose MPK is
@@ -24,354 +31,190 @@ class LLMEngine:
     def __init__(self, model_runner: ModelRunner) -> None:
         self.model_runner = model_runner
         self.runtime: OnlinePinnedRuntime = model_runner.runtime
-        self.tokenizer = model_runner.tokenizer
+        self.tokenizer_manager = TokenizerManager(model_runner.tokenizer)
+
+        # Monotonically incrementing request id (never wraps).
+        self._next_rid: int = 0
+
+        # Serialises ring-buffer writes so two callers do not interleave.
+        self._submit_lock = threading.RLock()
+
+        # Background kernel bookkeeping.
+        self._kernel_launched: threading.Event = threading.Event()
         self._kernel_thread: threading.Thread | None = None
-        self._kernel_started: threading.Event = threading.Event()
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────
 
-    def generate(
+    def submit(
         self,
-        prompts: list[str],
-        use_template: bool = True,
-        use_tqdm: bool = True,
-        timeout: float = 120.0,
-        poll_interval: float = 1e-4,
-    ) -> list[dict]:
-        """Tokenize, submit, run, and collect completions for a list of prompts.
-        TODO: OpenAI server add requests, feel free to modify anything in this function
-        Args:
-            prompts:       List of string prompts.
-            use_template:  Apply the model's chat template before tokenizing.
-            use_tqdm:      Display a per-request progress bar.
-            timeout:       Seconds to wait before raising :exc:`TimeoutError`.
-            poll_interval: Seconds between completion-ring polls.
-
-        Returns:
-            Results in the same order as *prompts*, each a dict::
-
-                {"text": str, "token_ids": list[int]}
-        """
-        n = len(prompts)
-        assert n <= self.model_runner.config.max_num_batched_requests, (
-            f"Too many prompts ({n}); max_num_batched_requests="
-            f"{self.model_runner.config.max_num_batched_requests}"
-        )
-
-        # 1. Tokenize ─────────────────────────────────────────────────────────
-        all_token_ids: list[list[int]] = [
-            self._tokenize(p, use_template) for p in prompts
-        ]
-
-        # 2. Reset ring-buffer state for this session ─────────────────────────
-        self.runtime.reset()
-
-        # 3. Init kernel for exactly n requests ───────────────────────────────
-        self.model_runner.init(n)
-
-        # 4. Load tokens and submit ring entries (request IDs = 0 .. n-1) ─────
-        for rid, token_ids in enumerate(all_token_ids):
-            t = torch.tensor(token_ids, dtype=torch.int64)
-            self.runtime.load_tokens(rid, t)
-            self.runtime.submit_request(rid, prompt_len=len(token_ids))
-        # activate if all requests are pre-loaded
-        self.model_runner()
-        completions = self.runtime.wait_all(n,timeout)
-        
-        # activate if submit requests incrementally
-        # # 5. Launch kernel in background thread ───────────────────────────────
-        # kernel_thread = threading.Thread(target=self.model_runner, daemon=True)
-        # kernel_thread.start() # same to self.model_runner() but run in background thread
-
-        # # 6. Poll completion ring ─────────────────────────────────────────────
-        # pbar = tqdm(total=n, desc="Generating", dynamic_ncols=True) if use_tqdm else None
-        # completed: list[int] = []
-        # t_start = perf_counter()
-        # try:
-        #     while len(completed) < n:
-        #         newly_done = self.runtime.drain_completions() # collect all newly completed request IDs
-        #         if newly_done:
-        #             completed.extend(newly_done)
-        #             if pbar is not None:
-        #                 pbar.update(len(newly_done))
-        #         else:
-        #             time.sleep(poll_interval)
-        #         if perf_counter() - t_start > timeout:
-        #             raise TimeoutError(
-        #                 f"generate() timed out: {len(completed)}/{n} requests completed"
-        #             )
-        # finally:
-        #     if pbar is not None:
-        #         pbar.close()
-        #     kernel_thread.join(timeout=5.0)
-
-        # 7. Decode and return in original prompt order ───────────────────────
-        results = []
-        for rid, token_ids in enumerate(all_token_ids):
-            prompt_len = len(token_ids)
-            full_tokens = self.runtime.get_output_tokens(rid)  # prompt + generated
-            output_ids = full_tokens[prompt_len:].tolist()     # generated only
-            results.append({
-                "text": self.tokenizer.decode(output_ids, skip_special_tokens=True),
-                "token_ids": output_ids,
-            })
-        return results
-
-    def generate_incremental(
-        self,
-        arrivals: list[tuple[str, float]],
+        prompt: str,
         use_template: bool = True,
         timeout: float = 120.0,
         poll_interval: float = 1e-4,
-    ) -> list[dict]:
-        """Initialize the kernel and submit prompts incrementally.
-
-        Handles the full lifecycle: init, kernel launch, and completion
-        collection.  Prompts are fed into the ring buffer at the specified
-        delays so the GPU can start on early requests while later ones are
-        still arriving.  Each request is decoded as soon as it completes.
-
-        The submit thread is started before the kernel so that at least one
-        request is in the ring buffer when the persistent kernel begins,
-        preventing it from seeing an empty batch on its first
-        EVENT_END_OF_TASK_GRAPH and terminating immediately.
-
-        Args:
-            arrivals:      List of ``(prompt, delay_microseconds)`` pairs.  Delays
-                           are relative to the start of this call.
-            use_template:  Apply the model's chat template before tokenizing.
-            timeout:       Seconds to wait before raising :exc:`TimeoutError`.
-            poll_interval: Seconds between completion-ring polls.
-
-        Returns:
-            Results in the same order as *arrivals*, each a dict::
-
-                {"text": str, "token_ids": list[int]}
-        """
-        n = len(arrivals)
-        assert n <= self.model_runner.config.max_num_batched_requests, (
-            f"Too many arrivals ({n}); max_num_batched_requests="
-            f"{self.model_runner.config.max_num_batched_requests}"
-        )
-
-        prompts = [p for p, _ in arrivals]
-        delays  = [d for _, d in arrivals]
-
-        # 1. Init for this session ─────────────────────────────────────────────
-        self.runtime.reset()
-        self.model_runner.init(n)
-
-        # 2. Tokenize all prompts up front ────────────────────────────────────
-        all_token_ids: list[list[int]] = [
-            self._tokenize(p, use_template) for p in prompts
-        ]
-
-        # 3. Start submit thread first; wait until the first request is in the
-        #    ring before launching the kernel. We must guarantee there is at least
-        #    one request at GPU side
-        t0 = perf_counter()
-        debug_t = perf_counter()
-        first_submitted = threading.Event()
-        submit_exc: list[BaseException] = []  # captures submit thread exceptions
-
-        def _submit_loop():
-            try:
-                for rid, (token_ids, delay) in enumerate(zip(all_token_ids, delays)):
-                    wait = t0 + delay / 1_000_000 - perf_counter()
-                    if wait > 0:
-                        time.sleep(wait)
-                    t = torch.tensor(token_ids, dtype=torch.int64)
-                    self.runtime.load_tokens(rid, t)
-                    self.runtime.submit_request(rid, prompt_len=len(token_ids))
-                    #print(f"request {rid} has been submitted!",flush=True) # DEBUG PRINT
-                    first_submitted.set()  # signal after first submission
-            except Exception as e:
-                submit_exc.append(e)
-                first_submitted.set()  # unblock main thread so it doesn't hang
-
-        submit_thread = threading.Thread(target=_submit_loop, daemon=True)
-        submit_thread.start()
-        first_submitted.wait()  # block until at least one request is in the ring
-        if submit_exc:
-            raise submit_exc[0]  # surface the exception immediately
-
-        # 4. Launch kernel — ring buffer now has at least one request ──────────
-        self._kernel_thread = threading.Thread(target=self.model_runner, daemon=True)
-        self._kernel_thread.start()
-
-        # 5. Poll completion ring — decode each request as soon as it completes
-        results: list[dict | None] = [None] * n
-        num_completed = 0
-        try:
-            while num_completed < n:
-                newly_done = self.runtime.drain_completions()
-                for rid in newly_done:
-                    prompt_len = len(all_token_ids[rid])
-                    full_tokens = self.runtime.get_output_tokens(rid)
-                    output_ids = full_tokens[prompt_len:].tolist()
-                    results[rid] = {
-                        "text": self.tokenizer.decode(output_ids, skip_special_tokens=True),
-                        "token_ids": output_ids,
-                    }
-                    print(f"\nPrompt: {self.tokenizer.decode(all_token_ids[rid],skip_special_tokens=True)!r}")
-                    print(f"Completion: {results[rid]['text']!r}")
-                num_completed += len(newly_done)
-                if not newly_done:
-                    time.sleep(poll_interval)
-                if perf_counter() - t0 > timeout:
-                    raise TimeoutError(
-                        f"generate_incremental() timed out: {num_completed}/{n} completed"
-                    )
-                if perf_counter() - debug_t > 5.0:
-                    debug_t = perf_counter()
-                    print(f"step[0:n]={self.model_runner.mpk.step[:n].tolist()}", flush=True)
-                    print(f"req_ready={self.runtime._req_ready.tolist()}", flush=True)
-                    print(f"comp_ready={self.runtime._comp_ready.tolist()}", flush=True)
-
-        finally:
-            submit_thread.join()
-            self.runtime.shutdown()  # signal kernel to exit its spin-wait
-
-        return results  # type: ignore[return-value]
-
-    def stream_incremental(
-        self,
-        arrivals: list[tuple[str, float]],
-        use_template: bool = True,
-        timeout: float = 120.0,
-        poll_interval: float = 1e-4,
+        stream: bool = False,
     ):
-        """Generator: yield tokens as they are generated by each request.
+        """Submit a single prompt for generation.
 
-        Like :meth:`generate_incremental` but yields ``(request_id, new_text,
-        is_final)`` tuples whenever the GPU advances a decode step, so the
-        caller can display streaming output without waiting for EOS.
+        Safe to call concurrently — each invocation gets a unique rid and
+        serialises the ring-buffer write under an internal lock.
 
-        Parameters
-        ----------
-        arrivals : list[tuple[str, float]]
-            ``(prompt, delay_microseconds)`` pairs.
-        use_template : bool
-            Apply chat template before tokenizing.
-        timeout : float
-            Seconds before raising :exc:`TimeoutError`.
-        poll_interval : float
-            Seconds between completion-ring polls.
+        Args:
+            prompt:        String prompt.
+            use_template:  Apply chat template before tokenizing.
+            timeout:       Seconds to wait before raising :exc:`TimeoutError`.
+            poll_interval: Seconds between completion-ring polls.
+            stream:        If True, returns a generator yielding ``(text,
+                           is_final)`` tuples. Otherwise returns a dict.
 
-        Yields
-        ------
-        (request_id, new_text_since_last_yield, is_final)
+        Returns:
+            When stream=False: ``{"text": str, "token_ids": list[int]}``
+            When stream=True:  generator yielding ``(text, is_final)``
         """
-        n = len(arrivals)
-        assert n <= self.model_runner.config.max_num_batched_requests, (
-            f"Too many arrivals ({n}); max_num_batched_requests="
-            f"{self.model_runner.config.max_num_batched_requests}"
-        )
+        token_ids = self.tokenizer_manager.tokenize(prompt, use_template)
+        prompt_len = len(token_ids)
 
-        prompts = [p for p, _ in arrivals]
-        delays  = [d for _, d in arrivals]
+        rid = self._next_rid
+        self._next_rid += 1
 
-        # 1. Init ────────────────────────────────────────────────────────────
-        self.runtime.reset()
-        self.model_runner.init(n)
+        t = torch.tensor(token_ids, dtype=torch.int64)
+        with self._submit_lock:
+            self._ensure_kernel_running()
+            self.runtime.submit(rid, t)
 
-        # 2. Tokenize ────────────────────────────────────────────────────────
-        all_token_ids: list[list[int]] = [
-            self._tokenize(p, use_template) for p in prompts
-        ]
-
-        # 3. Submit thread ───────────────────────────────────────────────────
-        t0 = perf_counter()
-        first_submitted = threading.Event()
-        submit_exc: list[BaseException] = []
-
-        def _submit_loop():
-            try:
-                for rid, (token_ids, delay) in enumerate(zip(all_token_ids, delays)):
-                    wait = t0 + delay / 1_000_000 - perf_counter()
-                    if wait > 0:
-                        time.sleep(wait)
-                    t = torch.tensor(token_ids, dtype=torch.int64)
-                    self.runtime.load_tokens(rid, t)
-                    self.runtime.submit_request(rid, prompt_len=len(token_ids))
-                    first_submitted.set()
-            except Exception as e:
-                submit_exc.append(e)
-                first_submitted.set()
-
-        submit_thread = threading.Thread(target=_submit_loop, daemon=True)
-        submit_thread.start()
-        first_submitted.wait()
-        if submit_exc:
-            raise submit_exc[0]
-
-        # 4. Launch kernel ───────────────────────────────────────────────────
-        self._kernel_thread = threading.Thread(target=self.model_runner, daemon=True)
-        self._kernel_thread.start()
-
-        # 5. Streaming poll loop ─────────────────────────────────────────────
-        last_yield_step: dict[int, int] = {}  # request_id → last yielded step
-        completed: set[int] = set()
-
-        try:
-            while len(completed) < n:
-                # Check final completions
-                newly_done = self.runtime.drain_completions()
-                for rid in newly_done:
-                    prompt_len = len(all_token_ids[rid])
-                    final_step = self.runtime._completions.get(rid, 0)
-                    prev_step = last_yield_step.get(rid, prompt_len - 1)
-                    if final_step > prev_step:
-                        new_tokens = self.runtime.read_tokens(rid, final_step)
-                        new_ids = new_tokens[prev_step + 1 : final_step + 1].tolist()
-                        if new_ids:
-                            text = self.tokenizer.decode(new_ids, skip_special_tokens=True)
-                            last_yield_step[rid] = final_step
-                            yield (rid, text, True)
-                    completed.add(rid)
-
-                # Check per-step progress for in-flight requests
-                step_progress = self.runtime.drain_step_progress()
-                for rid, step in step_progress.items():
-                    if rid in completed:
-                        continue
-                    prompt_len = len(all_token_ids[rid])
-                    prev_step = last_yield_step.get(rid, prompt_len - 1)
-                    if step > prev_step:
-                        new_tokens = self.runtime.read_tokens(rid, step)
-                        new_ids = new_tokens[prev_step + 1 : step + 1].tolist()
-                        if new_ids:
-                            text = self.tokenizer.decode(new_ids, skip_special_tokens=True)
-                            last_yield_step[rid] = step
-                            yield (rid, text, False)
-
-                if not newly_done and not step_progress:
-                    time.sleep(poll_interval)
-
-                if perf_counter() - t0 > timeout:
-                    raise TimeoutError(
-                        f"stream_incremental() timed out: "
-                        f"{len(completed)}/{n} completed"
-                    )
-
-        finally:
-            submit_thread.join()
-            self.runtime.shutdown()
-
-    def close(self):
-        self.runtime.shutdown() # signal kernel to exit its spin-wait
-
-    # ── Private helpers ───────────────────────────────────────────────────────
-
-    def _tokenize(self, prompt: str, use_template: bool) -> list[int]:
-        if use_template:
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ]
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+        if stream:
+            return self._submit_stream(rid, prompt_len, timeout, poll_interval)
         else:
-            text = prompt
-        return self.tokenizer([text], return_tensors="pt").input_ids[0].tolist()
+            buffer_row, final_step = self.runtime.wait_for_request(
+                rid, timeout, poll_interval)
+            full_tokens = self.runtime.read_tokens_at_row(buffer_row, final_step)
+            output_ids = full_tokens[prompt_len:].tolist()
+            self.runtime.release_request(rid)
+            return {
+                "text": self.tokenizer_manager.decode(output_ids),
+                "token_ids": output_ids,
+            }
+
+    # ── Internal ──────────────────────────────────────────────────────────
+
+    def _ensure_kernel_running(self) -> None:
+        """Launch the persistent kernel once in a background daemon thread."""
+        if self._kernel_launched.is_set():
+            return
+        with self._submit_lock:
+            if self._kernel_launched.is_set():
+                return
+            self.runtime.reset()
+            self._kernel_thread = threading.Thread(
+                target=self.model_runner, daemon=True)
+            self._kernel_thread.start()
+            self._kernel_launched.set()
+
+    def _submit_stream(
+        self,
+        rid: int,
+        prompt_len: int,
+        timeout: float,
+        poll_interval: float,
+    ):
+        """Generator: yield ``(text, is_final)`` as tokens are decoded.
+
+        Scans ``pinned_rid_at_row`` to discover the buffer row, then polls
+        per-step progress so each new token is yielded immediately.
+        """
+        import queue
+
+        q: queue.Queue = queue.Queue()
+        exc_info: list[BaseException] = []
+
+        def _run():
+            try:
+                # 1. Discover buffer row by scanning pinned_rid_at_row.
+                deadline = time.monotonic() + timeout
+                row = -1
+                while row == -1:
+                    row = self.runtime.find_row_for_rid(rid)
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(
+                            f"stream timed out waiting for row assignment, rid={rid}")
+                    import time as _time
+                    _time.sleep(poll_interval)
+
+                # 2. Poll per-step progress — yield each new token.
+                completed = False
+                last_yielded_step = prompt_len - 1
+                deadline = time.monotonic() + timeout
+
+                while not completed:
+                    # Check if request has finished.
+                    newly_done = self.runtime.drain_completions()
+                    for done_rid, _, final_step in newly_done:
+                        if done_rid == rid:
+                            completed = True
+                            # Yield remaining tokens up to final_step.
+                            current_step = final_step
+                            if current_step > last_yielded_step:
+                                new_tokens = self.runtime.read_tokens_at_row(
+                                    row, current_step)
+                                new_ids = new_tokens[
+                                    last_yielded_step + 1 : current_step + 1
+                                ].tolist()
+                                for j, tid in enumerate(new_ids):
+                                    text = self.tokenizer_manager.decode_single(tid)
+                                    is_final = (completed and
+                                                j == len(new_ids) - 1)
+                                    q.put((text, is_final))
+                                    last_yielded_step += 1
+                            else:
+                                q.put(("", True))
+                            break
+
+                    # Poll step progress for in-flight tokens.
+                    current_step = self.runtime.get_current_step_at_row(row)
+                    if current_step > last_yielded_step:
+                        new_tokens = self.runtime.read_tokens_at_row(
+                            row, current_step)
+                        new_ids = new_tokens[
+                            last_yielded_step + 1 : current_step + 1
+                        ].tolist()
+                        for tid in new_ids:
+                            text = self.tokenizer_manager.decode_single(tid)
+                            last_yielded_step += 1
+                            q.put((text, False))
+
+                    if time.monotonic() > deadline and not completed:
+                        raise TimeoutError(
+                            f"stream timed out for rid={rid}")
+
+                    import time as _time
+                    _time.sleep(poll_interval)
+
+                self.runtime.release_request(rid)
+
+            except BaseException as e:
+                exc_info.append(e)
+                q.put(("__error__", True))
+
+        import time
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+        def generator():
+            while True:
+                try:
+                    text, is_final = q.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if text == "__error__":
+                    break
+                yield (text, is_final)
+                if is_final:
+                    break
+            if exc_info:
+                raise exc_info[0]
+            thread.join()
+
+        return generator()
+
+    def close(self) -> None:
+        """Signal the GPU kernel to shut down at the next idle cycle."""
+        self.runtime.shutdown()
