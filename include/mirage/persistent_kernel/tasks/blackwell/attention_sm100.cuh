@@ -116,8 +116,15 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
     int const num_pages = last_page_pos - first_page_pos;
     // TAIL_OFFSET: when > 0, shift effective seq_len backward (Eagle3 K>1
-    // draft step k uses TAIL_OFFSET = K-1-k so step k writes 1 K/V at
-    // absolute position [step + k] and attends [0, step + k + 1)).
+    // draft step k uses TAIL_OFFSET = K-k so step k writes 1 K/V at cache
+    // position step + k and attends [0, step + k + 1).
+    // Derivation: seq_len_no_offset = step + mbt = step + K + 1 (after
+    // prepare_next_batch); with num_tokens = Q_LEN_OVERRIDE = 1 and
+    // TAIL_OFFSET = K - k, seq_len_eff = step + k + 1, so kernel writes at
+    // [seq_len_eff - 1, seq_len_eff) = [step + k, step + k + 1).
+    // Cache convention: K=1 default-attention writes K/Vs at [step, step+mbt)
+    // with cache position N storing K/V for the *next* token (shift-by-1
+    // relative to the sequence). K>1 step k follows the same convention.
     int const seq_len = (num_pages - 1) * PAGE_SIZE +
                         paged_kv_last_page_len_buffer_ptr[request_id] -
                         TAIL_OFFSET;

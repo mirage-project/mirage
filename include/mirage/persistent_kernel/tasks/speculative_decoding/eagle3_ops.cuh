@@ -301,20 +301,24 @@ __device__ __forceinline__ void
     }
   }
 
-  // Select the correct slot for the new K-token chain that aligns with the
-  // next iter's prefix.
+  // Select the source slot in all_draft_ids for the new K-token chain.
   //
-  // Each iter-N slot b's K-step chain predicts positions
-  //   step_N + b + 2, step_N + b + 3, ..., step_N + b + K + 1
-  // Next iter's verify reads drafts_prev[k] expecting a prediction at position
-  // step_{N+1} + 1 + k = step_N + ac + 1 + k. The matching slot is b = ac - 1.
-  // The tokens-buffer write at step+ac+1+k must use the SAME slot, otherwise
-  // the next iter's target gets a wrong-position token in its mbt-window and
-  // every subsequent verify gets a corrupted KV state.
-  // Clamp src_slot to [0, BATCH_SIZE-1] for safety (ac ∈ [1, K+1]; the
-  // BATCH_SIZE=K+1 → ac=K+1 maps to slot K which is out of bounds and means
-  // "all drafts accepted — no valid continuation slot", clamp to last).
-  int src_slot = ac - 1;
+  // K=1 produces mbt parallel chains (default attention processes all mbt
+  // input slots, each predicting one token under a different "ac assumption").
+  // Slot b's prediction is for position step_N + b + 2, so commit picks
+  // src_slot = ac - 1 to match the next iter's expected position.
+  //
+  // K>1 instead runs a sequential per-iter loop with Q_LEN_OVERRIDE=1, so the
+  // draft kernel writes only slot 0 of attn_out (see attention_sm100.cuh
+  // output-write loop bound by `num_tokens * NUM_QO_PER_KV * HEAD_DIM`).
+  // Slots 1..mbt-1 propagate stale/garbage values through the downstream
+  // rmsnorm → MLP → argmax → d2t_remap pipeline (each grid_dim=(mbt, ...))
+  // and into all_draft_ids[1..mbt-1, :]. Picking those rows commits garbage
+  // for next iter and collapses K>1 accept rate. Until a proper mbt-parallel
+  // K>1 chain is implemented, force slot 0. ac>=2 cases still write the
+  // chain at positions misaligned by (ac-1), but slot 0's chain is at least
+  // a valid prediction.
+  int src_slot = (K > 1) ? 0 : (ac - 1);
   if (src_slot < 0) src_slot = 0;
   if (src_slot >= BATCH_SIZE) src_slot = BATCH_SIZE - 1;
 

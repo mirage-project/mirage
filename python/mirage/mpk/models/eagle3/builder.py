@@ -437,10 +437,16 @@ class Eagle3Builder:
                     enable_qk_norm=False,
                 )
             else:
-                # mbt = K + 1; step k should write 1 K/V at absolute pos step+k.
-                # tail_offset = mbt - 1 - k = K - k (so kernel sees
-                # seq_len_eff = step+mbt - tail_offset = step+1+k, writes
-                # [step+k, step+k+1), attends [0, step+k+1)).
+                # mbt = K + 1; step k writes 1 K/V at cache position step+k.
+                # This matches the K=1 default-attention convention: K=1 default
+                # writes 2 K/Vs at [step, step+2), with cache position N storing
+                # the K/V for the token that will be at actual sequence position
+                # N+1 (i.e. shift-by-1). Following that convention, K>1 step k
+                # writes at cache position step+k (representing the token at
+                # actual position step+k+1).
+                # tail_offset = mbt - 1 - k = K - k (kernel sees seq_len_eff =
+                # step+mbt - tail_offset = step+k+1, writes [step+k, step+k+1),
+                # attends [0, step+k+1)).
                 self.mpk.paged_attention_layer(
                     input=self.attn_in,
                     k_cache=self.k_cache, v_cache=self.v_cache,
