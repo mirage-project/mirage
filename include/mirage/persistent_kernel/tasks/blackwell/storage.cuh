@@ -55,10 +55,10 @@ struct PipedSharedStorage {
 };
 
 // Linear task storage with scale factors (SFA/SFB).
-template <class TypeA,  // Tensor A data type
-          class TypeB,  // Tensor B data type
-          class TypeC,  // Tensor C data type
-          class TypeSF, // Scale factor data type
+template <class TypeA,
+          class TypeB,
+          class TypeC,
+          class TypeSF,
           class ASmemLayout,
           class BSmemLayout,
           class CSmemLayout,
@@ -75,12 +75,13 @@ struct PipedSharedStorageWithSF {
 
   alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
-
+  alignas(16) cute::uint64_t sf_full_mbar_ptr[Num_AB_Stage];
+  alignas(16) cute::uint64_t sf_empty_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
   alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
 
-  alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
-  alignas(16) cute::uint32_t tmem_columns;  // TMEM column allocation size
+  alignas(16) cute::uint32_t tmem_base_ptr;
+  alignas(16) cute::uint32_t tmem_columns;
 
   CUTE_DEVICE constexpr auto tensor_sA() {
     return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{});

@@ -68,6 +68,47 @@ struct tma_4d {
   }
 
 public:
+  __host__ __device__ inline CUtensorMap *get_tma_descriptor() const {
+    return desc_ptr;
+  }
+
+  template <int NDIM>
+  __device__ inline void prefetch(int const (&tma_coords)[NDIM]) const {
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+    uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
+
+    int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
+    if constexpr (NDIM > 0) {
+      c0 = tma_coords[0];
+    }
+    if constexpr (NDIM > 1) {
+      c1 = tma_coords[1];
+    }
+    if constexpr (NDIM > 2) {
+      c2 = tma_coords[2];
+    }
+    if constexpr (NDIM > 3) {
+      c3 = tma_coords[3];
+    }
+    if constexpr (NDIM > 4) {
+      c4 = tma_coords[4];
+    }
+
+    asm volatile("cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
+                 "[%0, {%1, %2, %3, %4, %5}];"
+                 :
+                 : "l"(gmem_int_desc),
+                   "r"(c0),
+                   "r"(c1),
+                   "r"(c2),
+                   "r"(c3),
+                   "r"(c4)
+                 : "memory");
+#elif defined(__CUDA_ARCH__)
+    asm volatile("brkpt;\n" ::);
+#endif
+  }
+
   template <int NDIM>
   __device__ inline void tma_cp_async(Barrier &mbar,
                                       T *smem_ptr,

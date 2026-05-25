@@ -68,6 +68,47 @@ struct tma_3d {
   }
 
 public:
+  __host__ __device__ inline CUtensorMap *get_tma_descriptor() const {
+    return desc_ptr;
+  }
+
+  template <int NDIM>
+  __device__ inline void prefetch(int const (&tma_coords)[NDIM]) const {
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+    uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
+
+    int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
+    if constexpr (NDIM > 0) {
+      c0 = tma_coords[0];
+    }
+    if constexpr (NDIM > 1) {
+      c1 = tma_coords[1];
+    }
+    if constexpr (NDIM > 2) {
+      c2 = tma_coords[2];
+    }
+    if constexpr (NDIM > 3) {
+      c3 = tma_coords[3];
+    }
+    if constexpr (NDIM > 4) {
+      c4 = tma_coords[4];
+    }
+
+    asm volatile("cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
+                 "[%0, {%1, %2, %3, %4, %5}];"
+                 :
+                 : "l"(gmem_int_desc),
+                   "r"(c0),
+                   "r"(c1),
+                   "r"(c2),
+                   "r"(c3),
+                   "r"(c4)
+                 : "memory");
+#elif defined(__CUDA_ARCH__)
+    asm volatile("brkpt;\n" ::);
+#endif
+  }
+
   template <int NDIM>
   __device__ inline void tma_cp_async(Barrier &mbar,
                                       T *smem_ptr,
@@ -75,21 +116,21 @@ public:
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
-        int smem_offset = SMEM_STRIDE_ * j;
+        int smem_offset = SMEM_STRIDE_ * (i * SMEM_REPEAT_COL + j);
         int const tma_coords_local[NDIM] = {
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
             tma_coords[2]};
 #if 0
-          printf("tma_coords: %d, %d, %d\n", tma_coords[0], tma_coords[1], tma_coords[2]);
-          printf("tma_coords_local: %d, %d, %d\n",
-                 tma_coords_local[0],
-                 tma_coords_local[1],
-                 tma_coords_local[2]);
-          printf("smem_offset: %d\n", smem_offset);
-          printf("smem_ptr: %p\n", smem_ptr);
-          printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
-          printf("mbar: %p\n", &mbar);
+        printf("tma_coords: %d, %d, %d\n", tma_coords[0], tma_coords[1], tma_coords[2]);
+        printf("tma_coords_local: %d, %d, %d\n",
+                tma_coords_local[0],
+                tma_coords_local[1],
+                tma_coords_local[2]);
+        printf("smem_offset: %d\n", smem_offset);
+        printf("smem_ptr: %p\n", smem_ptr);
+        printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
+        printf("mbar: %p\n", &mbar);
 #endif
         launch_tma_cp_async(mbar, smem_ptr + smem_offset, tma_coords_local);
       }
@@ -99,7 +140,7 @@ public:
   template <int NDIM>
   __device__ inline void launch_tma_cp_async(
       Barrier &mbar, T *smem_ptr, int const (&tma_coords)[NDIM]) const {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
     uint32_t smem_int_mbar =
         static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
@@ -147,7 +188,7 @@ public:
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
-        int smem_offset = SMEM_STRIDE_ * j;
+        int smem_offset = SMEM_STRIDE_ * (i * SMEM_REPEAT_COL + j);
         int const tma_coords_local[NDIM] = {
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
@@ -161,7 +202,7 @@ public:
   __device__ inline void
       launch_tma_store_async(void *smem_ptr,
                              int const (&tma_coords)[NDIM]) const {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
     uint32_t smem_int_ptr =
         static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
