@@ -263,6 +263,7 @@ __device__ __forceinline__ void
                          void const *__restrict__ prompt_length_ptr,
                          void *__restrict__ new_token_nums_ptr,
                          void *__restrict__ drafts_prev_ptr,
+                         void *__restrict__ accept_hist_ptr,
                          int request_id) {
   // Single-edge per (producer, consumer) pair design:
   //   argmax_out (from argmax_reduce)             : 1 edge
@@ -334,8 +335,73 @@ __device__ __forceinline__ void
   // Snapshot current iter's drafts (shape [BATCH_SIZE=K+1, K]) into the
   // attach_input slot for next iter's verify_strict to consume. The next iter's
   // verify reads drafts_prev[0..K-1] (the first K entries).
+  // BUT FIRST: record the OLD drafts_prev (what THIS iter's verify just
+  // compared against argmax) into the trace, so we can byte-compare what was
+  // verified vs what the target predicted.
+  long long old_drafts_prev[8];  // K <= 8 (well bounded for spec decode)
+  if (t_id == 0) {
+    for (int i = 0; i < K; i++) {
+      old_drafts_prev[i] = drafts_prev[i];
+    }
+  }
   if (t_id < K) {
     drafts_prev[t_id] = drafts[src_slot * K + t_id];
+  }
+
+  // Debug-instrumentation: atomically increment accept-rate histogram bin
+  // for this iter's `ac`. `ac` lies in [1, K+1] (verify_strict guarantees);
+  // bin 0 is reserved for "iters that ran the commit kernel" sanity counter.
+  //
+  // Measured values (B200 GPU 4, Qwen3-30B-A3B, prompt-len 39, gen-len ~400):
+  //   K=1: hist=[0,184,154]      → step-0 accept = 45.6%   (matches baseline)
+  //   K=2: hist=[0,259,41,18]    → step-0 accept = 18.6%   (vs expected ~46%)
+  //                              → step-1 cond = 30.5%
+  //                              → per-draft = 12.1%
+  //
+  // Root cause investigation (2026-05-22):
+  //   - NOT the Q_LEN_OVERRIDE=1+TAIL_OFFSET=K-step path: running K=2 step 0
+  //     with DEFAULT attention (mbt=3, no overrides) still gives 19.7% step 0
+  //   - NOT the argmax_partial_grid_dim=(workers,1,1) restriction: the argmax
+  //     kernel iterates num_active_tokens=mbt internally regardless of grid_y,
+  //     so all mbt slots are computed
+  //   - NOT cross-step state corruption: scatter writes are column-wise
+  //     (step k writes column k), step ordering serialized by MPK
+  //   - ROOT CAUSE ISOLATED (via device-side trace, 2026-05-23): the bug is
+  //     in `paged_attention_sm100` at MAX_TOKENS=3, NOT in the eagle3 commit
+  //     or scatter logic. Byte-comparing K=1 (mbt=2) vs K=2 (mbt=3) traces on
+  //     the same prompt: at iter 0 both produce argmax[0]=12 (identical), but
+  //     at iter 1 with identical `tokens[step]=12` input and identical past
+  //     K/V cache content (causal mask should make slot 0 independent of
+  //     slots 1, 2), K=1 produces argmax[0]=17 while K=2 produces
+  //     argmax[0]=525. The target main fwd's slot-0 attention output diverges
+  //     between MAX_TOKENS=2 and MAX_TOKENS=3 despite identical mathematical
+  //     inputs to slot 0. Candidate fix sites in attention_sm100.cuh:
+  //       (a) MMA_ITERS_M=2 garbage propagation: m=1 tile has -inf m_local
+  //           that may NaN-poison slot 0's accumulator path
+  //       (b) causal mask formula `col + iter*KV_TILE <= token_idx + seq_len
+  //           - num_tokens` (line 519) at MAX_TOKENS=3 with small seq_len
+  //       (c) cache write/read overlap when seq_len-num_tokens shifts left by
+  //           one position from mbt=2 to mbt=3
+  if (t_id == 0 && accept_hist_ptr != nullptr) {
+    int *hist = static_cast<int *>(accept_hist_ptr);
+    atomicAdd(&hist[ac], 1);
+    // Tail trace: layout = [hist 0..K+1, trace_counter at K+2,
+    // then per-iter records of 2K+2 ints: (ac, argmax[0..K], drafts_prev[0..K-1])].
+    // Capacity is host-allocated; we cap captured iters at 16 here.
+    int const TRACE_COUNTER_OFFSET = K + 2;
+    int const RECORD_SIZE = 2 * K + 2;
+    int const MAX_TRACE_ITERS = 16;
+    int trace_idx = atomicAdd(&hist[TRACE_COUNTER_OFFSET], 1);
+    if (trace_idx < MAX_TRACE_ITERS) {
+      int base = TRACE_COUNTER_OFFSET + 1 + trace_idx * RECORD_SIZE;
+      hist[base + 0] = ac;
+      for (int i = 0; i < K + 1; i++) {
+        hist[base + 1 + i] = (int)(argmax[i] & 0xFFFFFFFF);
+      }
+      for (int i = 0; i < K; i++) {
+        hist[base + 1 + (K + 1) + i] = (int)(old_drafts_prev[i] & 0xFFFFFFFF);
+      }
+    }
   }
 
   // Publish step-advance signal to runtime.

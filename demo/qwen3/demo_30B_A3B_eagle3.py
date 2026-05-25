@@ -756,8 +756,8 @@ if __name__ == "__main__":
         )
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
-            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-                                       spec_decode_config.spec_length + 1, 
+            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)),
+                                       spec_decode_config.spec_length + 1,
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
@@ -865,6 +865,16 @@ if __name__ == "__main__":
                 torch_tensor=tokens, name="eagle3_commit_tokens")
             d_num_new = mpk.attach_input(
                 torch_tensor=num_new_tokens, name="eagle3_commit_num_new")
+            # Debug: per-iter accept-rate histogram (bin 0 reserved; bins 1..K+1
+            # hold counts for ac=1..K+1) + trace tail. Layout:
+            #   [0..K+1]: histogram bins
+            #   [K+2]:    trace counter (atomicAdd writer index)
+            #   [K+3..]:  per-iter records of size 2K+2 ints:
+            #             (ac, argmax[0..K], old_drafts_prev[0..K-1])
+            # Capped at 16 iters in the kernel. Sized to 256 ints for headroom.
+            accept_hist_buf = torch.zeros(256, dtype=torch.int32, device="cuda")
+            d_accept_hist = mpk.attach_input(
+                torch_tensor=accept_hist_buf, name="eagle3_accept_hist")
             mpk.eagle3_commit_layer(
                 target_argmax=argmax_out,
                 draft_tokens_new=eagle3._attach_cache["eagle3_all_draft_ids"],
@@ -872,6 +882,7 @@ if __name__ == "__main__":
                 tokens_buffer=d_tokens,
                 num_new_tokens=d_num_new,
                 drafts_prev=eagle3_drafts_prev,
+                accept_hist=d_accept_hist,
                 grid_dim=(mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
                 num_draft_tokens=K,
@@ -976,6 +987,30 @@ if __name__ == "__main__":
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
-        pass
+        if args.eagle3:
+            buf = accept_hist_buf.cpu().tolist()
+            hist = buf[:K + 2]
+            total_iters = sum(hist[1:K + 2])  # bins 1..K+1
+            print(f"[eagle3-debug] accept_hist (bin i = #iters with ac=i): {hist}")
+            if total_iters > 0:
+                # Per-step accept rates. For K=2: ac=1 means 0 drafts accepted,
+                # ac=2 means draft 0 accepted, ac=3 means both accepted.
+                step_accepts = [sum(hist[s + 2 : K + 2]) for s in range(K)]
+                step_rates = [a / total_iters for a in step_accepts]
+                per_draft = sum(step_accepts) / (K * total_iters)
+                print(f"[eagle3-debug] total iters: {total_iters}")
+                for s in range(K):
+                    print(f"[eagle3-debug] step {s} accept rate: {step_rates[s]:.3f} ({step_accepts[s]}/{total_iters})")
+                print(f"[eagle3-debug] per-draft accept rate: {per_draft:.3f}")
+            # Dump per-iter trace: (ac, argmax[0..K], old_drafts_prev[0..K-1])
+            trace_count = min(buf[K + 2], 16)
+            record_size = 2 * K + 2
+            print(f"[eagle3-debug] trace_count={trace_count} record_size={record_size}")
+            for it in range(trace_count):
+                base = K + 3 + it * record_size
+                ac = buf[base + 0]
+                argmax = buf[base + 1 : base + 1 + (K + 1)]
+                old_drafts = buf[base + 1 + (K + 1) : base + 1 + (K + 1) + K]
+                print(f"[eagle3-debug] iter {it}: ac={ac} argmax={argmax} old_drafts_prev={old_drafts}")
     if world_size > 1:
         dist.destroy_process_group()

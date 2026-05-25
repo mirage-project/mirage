@@ -1947,11 +1947,7 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // Template params: T, NUM_QO_HEADS, NUM_KV_HEADS, KV_CACHE_STRIDE,
-  // QKV_STRIDE, O_STRIDE, HEAD_DIM, MAX_SEQ_LEN, PAGE_SIZE, MAX_TOKENS,
-  // Q_LEN_OVERRIDE, TAIL_OFFSET. MAX_TOKENS=3 to support Eagle3 K=2 (mbt=3
-  // target attention). Beyond mbt=3 will need switching target's spec_decode
-  // path to single_batch_extend_attention or further smem budget work.
+  // MAX_TOKENS=3 supports Eagle3 K=2 (mbt=3 target attention).
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
          "$, $, $, $, 3, $, $>(",
@@ -4500,6 +4496,7 @@ int TaskRegister::register_eagle3_commit_task(
   code.e("    runtime_config.prompt_length,");        // prompt_length (global)
   code.e("    task_desc->output_ptrs[0],");           // new_token_nums
   code.e("    task_desc->output_ptrs[1],");           // drafts_prev (attach_input snapshot)
+  code.e("    task_desc->input_ptrs[4],");            // accept_hist (attach_input; debug)
   code.e("    task_desc->task_metadata.request_id);"); // request_id
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }

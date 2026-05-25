@@ -853,10 +853,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "eagle3_commit") {
     int variant_id = task_register->register_eagle3_commit_task(
         customized->bgraph, params);
-    // Inputs:  argmax_out, draft_tokens_new, accepted_count, tokens_buffer
+    // Inputs:  argmax_out, draft_tokens_new, accepted_count, tokens_buffer,
+    //          accept_hist (attach_input, kernel writes via atomicAdd; debug)
     // Outputs: new_token_nums, drafts_prev (cross-iter snapshot)
     // (step / prompt_length read from runtime_config)
-    task_config[op] = std::make_tuple(4, 2, TASK_EAGLE3_COMMIT, variant_id);
+    task_config[op] = std::make_tuple(5, 2, TASK_EAGLE3_COMMIT, variant_id);
   } else if (name == "eagle3_step0_input_prep") {
     int variant_id = task_register->register_eagle3_step0_input_prep_task(
         customized->bgraph, params);

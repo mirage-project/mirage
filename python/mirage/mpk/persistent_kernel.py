@@ -2429,6 +2429,7 @@ class PersistentKernel:
         tokens_buffer: DTensor,     # (max_requests, max_seq_len) int64 — written in-place
         num_new_tokens: DTensor,    # (max_requests,) int32 — OUTPUT (= accept_count)
         drafts_prev: DTensor,       # (max_requests, K) int64 — attach_input cross-iter snapshot dst
+        accept_hist: DTensor,       # (K+2,) int32 — debug: atomicAdd histogram of ac values
         grid_dim: tuple,
         block_dim: tuple,
         num_draft_tokens: int,      # K
@@ -2460,11 +2461,12 @@ class PersistentKernel:
         tb_graph.new_input(draft_tokens_new, (-1, -1, -1), -1, True)
         tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
         tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accept_hist, (-1, -1, -1), -1, True)
         tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
         tb_graph.new_input(drafts_prev, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [target_argmax, draft_tokens_new, accepted_count, tokens_buffer,
-             num_new_tokens, drafts_prev],
+             accept_hist, num_new_tokens, drafts_prev],
             tb_graph)
         self.kn_graph.register_task(tb_graph, "eagle3_commit", params)
 
