@@ -478,20 +478,31 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
 #pragma unroll
       for (int m = 0; m < MMA_ITERS_M; m++) {
         // FIX (Eagle3 K>=2 / MAX_TOKENS=3 contamination bug):
-        // Empirically, when m=1's m16n8k16 mma instructions execute alongside
-        // m=0's in the same unrolled loop, the m=0 accumulator x_frag_f[0]
-        // gets contaminated (even though both arrays should be in separate
-        // registers). Verified by device-side trace: at num_tokens=3 iter 1,
-        // skipping the m>0 MMA changes m=0's softmax output (slot 0 accept
-        // rate jumps from 18.6% to 31.7%). Suspected cause: NVCC inline-asm
-        // register allocator reuses regs between the two MMA macro
-        // expansions when they appear in an unrolled loop.
-        // Workaround: skip the MMA entirely for m>0. This sacrifices slot 2's
-        // attention output (only used when ac=K+1=3 to write tokens[step+3])
-        // but recovers slot 0/1 fidelity which dominates accept rate.
-        // TODO: cleaner fix would be to declare x_frag_f as separate scalars
-        // or use __restrict__-style allocator hint via explicit register
-        // pinning, but those require deeper kernel restructuring.
+        // When m=1's m16n8k16 mma executes alongside m=0's in the unrolled
+        // loop, m=0's accumulator x_frag_f[0] gets contaminated. Verified by
+        // device-side trace: at num_tokens=3 iter 1, skipping the m>0 MMA
+        // changes m=0's softmax output (slot 0 accept rate jumps from 18.6%
+        // to 31.7%) — and clearing x_frag_f[m>0] AFTER the MMA produces the
+        // same recovery. So the m=1 MMA is corrupting m=0's x_frag_f despite
+        // them being declared in separate elements of a `float[MMA_ITERS_M][8]`.
+        //
+        // Phase 3 attempts that DID NOT help (the contamination persists at
+        // the SASS level, with NVCC producing functionally identical kernel
+        // binaries):
+        //   - `+f` read-write constraint on MMA macro
+        //   - per-m q_frag/kt_frag inside the loop body
+        //   - `asm volatile("":::"memory")` barrier between m-iters
+        //
+        // Workaround: skip the MMA entirely for m>0. This sacrifices slot
+        // m*16..(m+1)*16's attention output. For K=2 (mbt=3, MMA_ITERS_M=2)
+        // that's slot 2 — used only when ac=K+1=3 to write tokens[step+3].
+        // Net K=2 accept rate improves from 18.6% to 31.7% because slot 0/1
+        // fidelity dominates.
+        //
+        // TODO(Phase 3+): proper fix likely requires switching the SM100 path
+        // from m16n8k16 PTX MMAs to wgmma m64n64k16 (Hopper-style; one MMA
+        // tile covers all 3 slots, MMA_ITERS_M=1), or using SM100-native
+        // tcgen05 instructions. Both are substantial kernel rewrites.
         if (m > 0) {
           continue;
         }
