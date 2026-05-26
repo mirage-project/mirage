@@ -36,8 +36,9 @@
 // * row_count_cap: optional per-CTA cap so decode iterations (active_rows <
 //   ROWS_PER_TASK rows for the trailing CTA) don't normalize/quantize stale
 //   bf16. Matches the B34 active-rows convention used by rmsnorm_hopper.
-// * IN_OFFSET / OUT_OFFSET / IN_ROW_STRIDE / OUT_ROW_STRIDE preserve the
-//   FuseTensor slice path: input may live in a wider parent buffer.
+// * IN_ROW_STRIDE / OUT_ROW_STRIDE / FP8_ROW_STRIDE: parent row width when
+//   the caller passes mpk.narrow views. Per-task base pointers are already
+//   offset by the runtime, so no in-kernel column shift is needed.
 #pragma once
 #include "../common/common_header.cuh"
 #include "../common/utils.cuh"
@@ -56,8 +57,6 @@ template <
     int HIDDEN_DIM,
     int GROUP_SIZE,
     int NUM_THREADS = 256,
-    int IN_OFFSET = 0,
-    int OUT_OFFSET = 0,
     int IN_ROW_STRIDE = HIDDEN_DIM,
     int OUT_ROW_STRIDE = HIDDEN_DIM,
     int FP8_ROW_STRIDE = HIDDEN_DIM,
@@ -149,10 +148,10 @@ __device__ __forceinline__ void
     // both need the global row index).
     int const global_batch_idx = task_idx * BATCH_SIZE + batch_idx;
 
-    T const *__restrict__ curr_d_input = static_cast<T const *>(input_ptr) +
-                                         IN_OFFSET + batch_idx * IN_ROW_STRIDE;
+    T const *__restrict__ curr_d_input =
+        static_cast<T const *>(input_ptr) + batch_idx * IN_ROW_STRIDE;
     T *__restrict__ curr_d_output =
-        EMIT_BF16 ? static_cast<T *>(output_bf16_ptr) + OUT_OFFSET +
+        EMIT_BF16 ? static_cast<T *>(output_bf16_ptr) +
                         batch_idx * OUT_ROW_STRIDE
                   : nullptr;
     DST_T *__restrict__ curr_d_fp8 =

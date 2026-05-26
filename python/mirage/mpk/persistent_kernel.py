@@ -720,8 +720,6 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         process_dim: int = None,
-        in_offset_elems: int = 0,
-        out_offset_elems: int = 0,
         scale_ue8m0: bool = True,
         emit_bf16: bool = True,
         eps: float = 1e-6,  # accepted for API parity; kernel hardcodes 1e-6f
@@ -736,9 +734,11 @@ class PersistentKernel:
         (~10 μs/layer expected at TP=4 EP=2 mbt=128 decode).
 
         Parameters mirror the two underlying calls:
-          * `process_dim` / `in_offset_elems` / `out_offset_elems` select
-            a column slice of a wider parent buffer (QKV-a FuseTensor
-            path). Defaults preserve legacy contiguous behaviour.
+          * `process_dim` selects a column slice the kernel normalises and
+            quantises per row. For column-slice inputs/outputs against a
+            wider parent buffer, pass `input` / `output_bf16` / `output_fp8`
+            as `mpk.narrow` views — the runtime sets the per-task base
+            pointers from each view's stride[0] + view_offset.
           * `scale_ue8m0=True` writes packed UE8M0 uint32 scales in the
             column-major `[packed_k, aligned_batch]` layout that the new
             FP8 dense GEMMs (`fp8_gemm_dense_smallm/mediumm_sm100`) read.
@@ -774,8 +774,8 @@ class PersistentKernel:
         assert output_fp8.dim(1) == process_dim, (
             f"output_fp8 second dim must equal process_dim "
             f"({output_fp8.dim(1)} vs {process_dim})")
-        assert in_offset_elems + process_dim <= legacy_hidden
-        assert out_offset_elems + process_dim <= output_bf16.dim(1)
+        assert process_dim <= legacy_hidden
+        assert process_dim <= output_bf16.dim(1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # IMPORTANT: input order MUST match the C++ task_register reader.
@@ -802,8 +802,6 @@ class PersistentKernel:
             [input, weight, output_bf16, output_fp8, output_scale], tb_graph)
         params = [
             process_dim,
-            in_offset_elems,
-            out_offset_elems,
             1 if scale_ue8m0 else 0,
             1 if emit_bf16 else 0,
         ]

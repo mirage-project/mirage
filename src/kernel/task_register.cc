@@ -4989,17 +4989,19 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
   //                                              [packed_k, aligned_batch])
   //
   // params (optional, default = legacy contiguous + UE8M0 scale):
-  //   params[0] = process_dim     (HIDDEN_DIM the kernel processes per row)
-  //   params[1] = in_offset_elems (skip elements at start of each row)
-  //   params[2] = out_offset_elems (same, for bf16 output)
-  //   params[3] = scale_ue8m0 (1=UE8M0 packed uint32, 0=float32 scale)
-  //   params[4] = emit_bf16 (1=write bf16 output, 0=skip the bf16 store)
+  //   params[0] = process_dim   (HIDDEN_DIM the kernel processes per row)
+  //   params[1] = scale_ue8m0   (1=UE8M0 packed uint32, 0=float32 scale)
+  //   params[2] = emit_bf16     (1=write bf16 output, 0=skip the bf16 store)
+  //
+  // For column-slice inputs/outputs the caller passes mpk.narrow views;
+  // the runtime sets per-task base pointers from the view's stride[0] and
+  // view_offset, so no in-kernel offset shift is required.
   //
   // The bf16 output is stored as the 3rd input tensor (store_in_dmem),
   // matching the MPK convention used by mla_decode/mla_prefill — codegen
   // reads `input_ptrs[2]` for the output pointer.
-  assert(params.size() == 0 || params.size() == 3 || params.size() == 4 ||
-         params.size() == 5);
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 2 ||
+         params.size() == 3);
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -5020,15 +5022,13 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
   int output_bf16_full = output_ops[0]->dtensor.dim[1];
   int output_fp8_full = output_ops[1]->dtensor.dim[1];
 
-  int process_dim = params.size() >= 3 ? params[0] : hidden_dim_full;
-  int in_offset = params.size() >= 3 ? params[1] : 0;
-  int out_offset = params.size() >= 3 ? params[2] : 0;
-  int scale_ue8m0 = params.size() >= 4 ? params[3] : 1;
-  int emit_bf16 = params.size() >= 5 ? params[4] : 1;
+  int process_dim = params.size() >= 1 ? params[0] : hidden_dim_full;
+  int scale_ue8m0 = params.size() >= 2 ? params[1] : 1;
+  int emit_bf16 = params.size() >= 3 ? params[2] : 1;
   assert(scale_ue8m0 == 0 || scale_ue8m0 == 1);
   assert(emit_bf16 == 0 || emit_bf16 == 1);
-  assert(in_offset + process_dim <= hidden_dim_full);
-  assert(out_offset + process_dim <= output_bf16_full);
+  assert(process_dim <= hidden_dim_full);
+  assert(process_dim <= output_bf16_full);
 
   // BATCH_SIZE per CTA = ceil(batch / grid_x).
   int const grid_x = bgraph.grid_dim.x > 0 ? (int)bgraph.grid_dim.x : 1;
@@ -5066,14 +5066,12 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
          "active_rows_fused_ - task_first_row_fused_;");
 
   // Kernel template params: T, DST_T, BATCH_SIZE, HIDDEN_DIM, GROUP_SIZE,
-  // NUM_THREADS, IN_OFFSET, OUT_OFFSET, IN_ROW_STRIDE, OUT_ROW_STRIDE,
-  // FP8_ROW_STRIDE, SCALE_UE8M0, EMIT_BF16.
+  // NUM_THREADS, IN_ROW_STRIDE, OUT_ROW_STRIDE, FP8_ROW_STRIDE,
+  // SCALE_UE8M0, EMIT_BF16.
   code.e("kernel::fused_rmsnorm_quantize_fp8_impl<bfloat16, __nv_fp8_e4m3,"
-         " $, $, 128, 256, $, $, $, $, $, $, $>(",
+         " $, $, 128, 256, $, $, $, $, $>(",
          batch_size,
          process_dim,
-         in_offset,
-         out_offset,
          hidden_dim_full,
          output_bf16_full,
          output_fp8_full,
