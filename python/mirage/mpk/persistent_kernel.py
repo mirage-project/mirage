@@ -27,22 +27,6 @@ HARD_CODE = """
 
 extern std::string g_task_graph_json_path;
 
-// Stubs for host symbols from libnvshmem_device.a that collective_launch.cpp.o
-// references. We don't link the full device archive (it forces -rdc=true), so
-// Host-side stubs for symbols normally in libnvshmem_device.a.
-// We don't link the .a (it forces rdc=true → 255 regs on SM100a).
-// Init is done via nvshmemid_hostlib_init_attr + our callback.
-#ifdef NVSHMEM_NO_DEVICE_LIB
-// Stubs for host-side symbols from libnvshmem_device.a needed by collective_launch.cpp.o
-struct nvshmemi_device_only_state_stub { char data[1024]; };
-nvshmemi_device_only_state_stub nvshmemi_device_only_state;
-extern "C" {
-  void nvshmemi_finalize() {}
-  void _Z31nvshmemi_check_state_and_init_dv() {}
-  void* nvshmemi_get_device_state_ptrs() { return nullptr; }
-}
-#endif
-
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path;
   std::vector<void*> meta_tensors;
@@ -268,18 +252,10 @@ def get_compile_command(
         f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_mla_tp4_head_groups()}",
         f"-DMIRAGE_MLA_TP4_RD_DV={_mla_tp4_rd_dv()}",
     ]
-    # rdc=true is the default on every NVSHMEM build. The old Blackwell
-    # rdc=false + self-contained-allreduce workaround (hand-rolled
-    # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
-    # because rdc=true previously inflated registers 166→255 on sm_100a) is
-    # kept behind MPK_RDC_FALSE=1 as a safety escape hatch — on CUDA 13.2 +
-    # NVSHMEM 3.6.5 the register-spill issue is gone (verified 2026-04-22 at
-    # TP=2 and TP=4 across mbt∈{1,64} and MTP spec∈{0,1,3}).
-    _rdc_false = os.environ.get("MPK_RDC_FALSE", "0") == "1" and target_cc >= 100
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if (not use_nvshmem or _rdc_false) else "-rdc=true",
+        "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -318,31 +294,11 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        if _rdc_false:
-            # Blackwell MPK_RDC_FALSE=1 escape hatch: self-contained allreduce,
-            # no libnvshmem_device.a (kept for regression isolation; see the
-            # block above for when this path is needed).
-            _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
-            _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
-            os.makedirs(_host_obj_dir, exist_ok=True)
-            _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
-            if not os.path.exists(_coll_obj):
-                import subprocess as _sp
-                _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
-            nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
-                             _coll_obj,
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
-        else:
-            # Default path: standard NVSHMEM link with device library +
-            # rdc=true. Used everywhere unless MPK_RDC_FALSE=1 on Blackwell.
-            nvshmem_flags = ["-DUSE_NVSHMEM",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        nvshmem_flags = ["-DUSE_NVSHMEM",
+                         "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
+                         "-Xlinker", "--disable-new-dtags",
+                         "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                         "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -4230,10 +4186,6 @@ class PersistentKernel:
             self._save_kernel_metadata(metadata_path)
 
         import importlib.util
-
-        # Set MPK_SO_PATH so init_persistent_kernel() can load the module via
-        # cuLibraryLoadFromFile for nvshmemx_culibrary_init (NVSHMEM_NO_DEVICE_LIB mode).
-        os.environ["MPK_SO_PATH"] = so_path
 
         spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
         mod = importlib.util.module_from_spec(spec)
