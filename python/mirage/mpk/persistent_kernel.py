@@ -2983,17 +2983,13 @@ class PersistentKernel:
         assert output.num_dims in (2, 3)
         params = []
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        in_h_axis = 1 if input_fp8.num_dims == 3 else 1
-        in_sc_h_axis = 1 if input_scale.num_dims == 3 else 1
+        # input_fp8 / input_scale: grid.y splits the head axis, which is dim 1
+        # in both 2D ((N, H*D_in), partitioned into H equal slices of D_in) and
+        # 3D ((N, H, D_in)) layouts.
         out_h_axis = 1
         out_m_axis = 2 if output.num_dims == 3 else 1
-        # input_fp8 / input_scale: grid.y splits the head axis. For 3D
-        # (N, H, D_in), head axis is dim 1; for 2D (N, H*D_in), head
-        # axis is also dim 1 because the partition map's axis index
-        # refers to the DTensor's dim sequence; dim 1 still partitions
-        # into H equal slices of D_in each (per-CTA STensor.dim[1] = D_in).
-        tb_graph.new_input(input_fp8,    (-1, in_h_axis, -1), -1, True)
-        tb_graph.new_input(input_scale,  (-1, in_sc_h_axis, -1), -1, True)
+        tb_graph.new_input(input_fp8,    (-1, 1, -1), -1, True)
+        tb_graph.new_input(input_scale,  (-1, 1, -1), -1, True)
         # weight_fp8 / weight_scale [H, D_out, D_in or packed_K]:
         # grid.x splits dim 1 (D_out), grid.y splits dim 0 (H).
         tb_graph.new_input(weight_fp8,   (1, 0, -1), -1, True)
