@@ -22,19 +22,6 @@
     }                                                                          \
   } while (0)
 
-#define PRINT_LAYOUT(x)                                                        \
-  do {                                                                         \
-    if (thread0()) {                                                           \
-      printf("%s:", #x);                                                       \
-      cute::print_layout(x);                                                   \
-      printf("\n");                                                            \
-    }                                                                          \
-  } while (0)
-
-#define WARM_UP 0
-
-#define DEBUG_EXPERT_IDX 95
-
 constexpr int log2_constexpr(int n, int p = 0) {
   return (n <= 1) ? p : log2_constexpr(n >> 1, p + 1);
 }
