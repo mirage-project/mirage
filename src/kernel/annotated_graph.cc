@@ -115,37 +115,18 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // wrote g MOST RECENTLY before L. After L is processed, L's outputs update
   // last_writer. Subsequent reads see L as the new writer. This is exactly
   // SSA-style def-use: we're implicitly renaming the reused buffer.
-  //
-  // Tensor-init writes need a program-order WAW edge to the next writer of the
-  // same guid. MPK uses this for MoE zero-fill followed by expert accumulation;
-  // without the edge, parallel-path scheduling can run the two writers
-  // concurrently even though the old linear schedule made zero-fill visible
-  // first. We intentionally do not add WAW edges for arbitrary scratch reuse:
-  // RAW edges already protect live ranges, and global WAW edges over-constrain
-  // common recycled scratch buffers.
   // ---------------------------------------------------------------------
   // Multi-writer last-writer map, keyed by the underlying storage's GUID
   // (resolve_base_guid). Each entry records the (layer, out_slot) producer
-  // plus the byte window [view_offset, view_offset + size_bytes) that the
-  // write touched, and whether that producer wrote a view or the full
-  // storage tensor.
+  // plus the bounding box of the parent storage region the writer touched
+  // (in parent-element coordinates), and whether the producer wrote a view
+  // or the full storage tensor.
   //
-  // Why a list (not a single writer): write-views allow multiple producers to
-  // write disjoint slices of one storage tensor. A subsequent reader that
-  // touches the full tensor must depend on ALL those writers; a reader that
-  // touches one slice depends only on writers whose windows overlap.
-  // C20 (2026-05-17): track each writer's 2D bounding box in the parent
-  // storage's element coordinates instead of a single contiguous byte
-  // window. A 2D narrow along the inner dim (e.g. q_a slot [0:1536) of
-  // qkv_a_out [128, 2176]) writes a STRIDED pattern in memory, not a
-  // contiguous byte range — `bytes_size()` over-states the footprint
-  // and the old single-axis window check fired on disjoint column
-  // slices, producing spurious WAW in_edges (kv_gather seeing q_a
-  // rmsnorm as a producer, then failing case-2 fork+join validation).
-  // For 2D views/roots we decompose view_offset (bytes) into
-  // (row_first, col_first) using the parent row stride that the view
-  // already inherits in stride[0]. Higher-D views currently fall back
-  // to the conservative col window [0, parent_row_stride).
+  // Why a list (not a single writer): write-views allow multiple producers
+  // to write disjoint slices of one storage tensor. A subsequent reader
+  // that touches the full tensor must depend on ALL those writers; a
+  // reader that touches one slice depends only on writers whose bboxes
+  // overlap. The shadow-cover walk below handles fragment-level coverage.
   struct WriterEntry {
     int layer;
     int out_slot;
@@ -312,6 +293,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         e.in_slot = in_slot;
         e.tensor_guid = cdt.guid;
         e.input_map = ip->input_map;
+        // Barrier edge: at least one endpoint is a non-trivial view of the
+        // shared parent storage. Both endpoints already resolve to the same
+        // base (the `last_writers` map keys on resolve_base_guid), so this
+        // distinguishes the "both base" case (regular per-tile edge) from
+        // (view, view-of-same-base) and (view, base) / (base, view) — the
+        // latter three need the all-of-producer → all-of-consumer barrier
+        // semantic because producer-to-consumer tile partitions don't match
+        // through a view boundary.
         e.is_barrier_edge = c_is_virtual || we.is_virtual_writer;
 
         auto const *prod_op = ag.layers[we.layer].op;
@@ -338,14 +327,6 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     //   writers and start fresh with a single full-window entry.
     // - Virtual (write-view) writes append a partial entry so multiple
     //   producers writing disjoint slices coexist.
-    //
-    // No TENSOR_INIT WAW edge is emitted here: tensor_init_layer takes a
-    // `dummy` DTensor as both input and output, and every live caller picks
-    // a `dummy` whose producer is upstream of the init and whose consumer is
-    // the same layer that next reads/writes `target`. Those RAW edges
-    // (producer-of-dummy -> init -> consumer-of-dummy/target) serialize the
-    // init naturally, and adding a manual WAW on `target` here would only
-    // duplicate the chain.
     for (int out_slot = 0; out_slot < num_outputs; out_slot++) {
       DTensor const &odt = output_ops[out_slot]->dtensor;
       size_t base = odt.resolve_base_guid();
