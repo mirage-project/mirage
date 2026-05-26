@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import threading
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -61,28 +62,36 @@ def _extract_prompt(messages: list[dict]) -> str:
     return ""
 
 
-async def _stream_bridge(engine: LLMEngine, prompt: str) -> AsyncGenerator[str, None]:
-    """Bridge a synchronous streaming generator to async SSE chunks."""
+async def _stream_bridge(
+    engine: LLMEngine, prompt: str, timeout: float,
+) -> AsyncGenerator[str, None]:
+    """Bridge a synchronous streaming generator to async SSE chunks.
+
+    Each request gets its own daemon thread so concurrent requests are never
+    gated by the default ``ThreadPoolExecutor`` pool size.  Items produced by
+    the thread are handed to the event loop via ``call_soon_threadsafe`` so
+    that the asyncio queue is accessed only from the event-loop thread.
+    """
+    loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
-    def _run():
-        try:
-            for text, is_final in engine.submit(prompt, stream=True):
-                queue.put_nowait((text, is_final, None))
-        except Exception as exc:
-            queue.put_nowait(("", True, str(exc)))
+    def _put(text: str, is_final: bool, error: str | None) -> None:
+        """Called on the event-loop thread; safe to touch the asyncio queue."""
+        queue.put_nowait((text, is_final, error))
 
-    loop = asyncio.get_running_loop()
-    future = loop.run_in_executor(None, _run)
+    def _run() -> None:
+        try:
+            gen = engine.submit(prompt, stream=True, timeout=timeout)
+            for text, is_final in gen:
+                loop.call_soon_threadsafe(_put, text, is_final, None)
+        except BaseException as exc:
+            loop.call_soon_threadsafe(_put, "", True, str(exc))
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
 
     while True:
-        try:
-            text, is_final, error = queue.get_nowait()
-        except asyncio.QueueEmpty:
-            if future.done():
-                break
-            await asyncio.sleep(0.01)
-            continue
+        text, is_final, error = await queue.get()
 
         if error:
             yield f"data: {{\"error\": \"{error}\"}}\n\n"
@@ -95,6 +104,7 @@ async def _stream_bridge(engine: LLMEngine, prompt: str) -> AsyncGenerator[str, 
         if is_final:
             break
 
+    thread.join()
     yield "data: [DONE]\n\n"
 
 
@@ -106,16 +116,18 @@ async def chat_completions(request: Request):
     body = await _parse_json(request)
     prompt = _extract_prompt(body.get("messages", []))
     stream = body.get("stream", False)
+    timeout = request.app.state.request_timeout
 
     if stream:
         return StreamingResponse(
-            _stream_bridge(request.app.state.engine, prompt),
+            _stream_bridge(request.app.state.engine, prompt, timeout),
             media_type="text/event-stream",
         )
     else:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            None, lambda: request.app.state.engine.submit(prompt),
+            None, lambda: request.app.state.engine.submit(
+                prompt, timeout=timeout),
         )
         return {
             "id": "chatcmpl-0",
@@ -133,16 +145,18 @@ async def completions(request: Request):
     body = await _parse_json(request)
     prompt = body.get("prompt", "")
     stream = body.get("stream", False)
+    timeout = request.app.state.request_timeout
 
     if stream:
         return StreamingResponse(
-            _stream_bridge(request.app.state.engine, prompt),
+            _stream_bridge(request.app.state.engine, prompt, timeout),
             media_type="text/event-stream",
         )
     else:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            None, lambda: request.app.state.engine.submit(prompt),
+            None, lambda: request.app.state.engine.submit(
+                prompt, timeout=timeout),
         )
         return {
             "id": "cmpl-0",
@@ -170,6 +184,8 @@ def main():
     parser.add_argument("--max-num-pages", default=16, type=int)
     parser.add_argument("--page-size", default=4096, type=int)
     parser.add_argument("--output-dir", default=None, help="Output directory for compiled artifacts")
+    parser.add_argument("--request-timeout", default=7200.0, type=float,
+                        help="Per-request timeout in seconds (default: 7200)")
     args = parser.parse_args()
 
     config = RunnerConfig(
@@ -183,6 +199,7 @@ def main():
         output_dir=args.output_dir,
     )
     app.state.runner_config = config
+    app.state.request_timeout = args.request_timeout
     uvicorn.run(app, host=args.host, port=args.port)
 
 

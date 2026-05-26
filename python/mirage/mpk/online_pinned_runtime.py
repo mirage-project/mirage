@@ -72,9 +72,22 @@ class OnlinePinnedRuntime:
         # Dedicated stream for HtoD / DtoH copies.
         self._write_stream = torch.cuda.Stream(device=mpk.tokens.device)
 
+        # Serialises ring-slot reservation between submit() and flush_waiting().
+        # Without this lock the two callers can claim the same slot (they both
+        # read _cpu_req_tail outside any shared critical section), creating a
+        # hole in the request ring.  The GPU stops draining at the first
+        # ready==0 slot, so the hole permanently blocks every entry behind it.
+        self._ring_lock = threading.Lock()
+
         # Completion tracking: rid → (buffer_row, final_step)
         self._completions: Dict[int, Tuple[int, int]] = {}
         self._lock = threading.RLock()
+
+        # Persistent drain thread — ensures completions are drained and waiting
+        # requests are flushed even when no streaming threads are alive.
+        self._drain_stop = threading.Event()
+        self._drain_thread = threading.Thread(target=self._drain_loop, daemon=True)
+        self._drain_thread.start()
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -97,26 +110,28 @@ class OnlinePinnedRuntime:
         the CPU waiting deque.
         """
         prompt_len = token_ids.shape[0]
-        slot = self._cpu_req_tail & self._mask
 
-        # Check if this ring slot is free.
-        if self._req_ready[slot].item() != 0:
-            # Ring full — enqueue to CPU-side waiting.
-            with self._waiting_lock:
-                self._waiting.append((rid, token_ids.clone(), initial_step))
-            return False
+        # Atomically claim the next ring slot.  Must be serialised with
+        # flush_waiting() so the two paths never grab the same slot.
+        with self._ring_lock:
+            slot = self._cpu_req_tail & self._mask
+            if self._req_ready[slot].item() != 0:
+                # Ring full — enqueue to CPU-side waiting.
+                with self._waiting_lock:
+                    self._waiting.append((rid, token_ids.clone(), initial_step))
+                return False
+            self._cpu_req_tail += 1  # reserve slot
 
         # Copy prompt tokens to this slot's inbox.
         with torch.cuda.stream(self._write_stream):
             self._inbox_tokens[slot, :prompt_len].copy_(token_ids, non_blocking=True)
         self._write_stream.synchronize()
 
-        # Write ring entry.
+        # Publish ring entry.
         self._req_request_id[slot]   = rid
         self._req_prompt_len[slot]   = prompt_len
         self._req_initial_step[slot] = initial_step
         self._req_ready[slot] = 1
-        self._cpu_req_tail += 1
         return True
 
     def flush_waiting(self) -> int:
@@ -126,12 +141,23 @@ class OnlinePinnedRuntime:
         Called from :meth:`drain_completions` so waiting requests are
         gradually fed into the ring as slots free up.
         """
-        with self._waiting_lock:
-            if not self._waiting:
-                return 0
+        # Reserve ring slot first (serialised with submit), then pop from
+        # the waiting deque.  This ordering prevents a lost request if the
+        # ring is full: we never remove a request from waiting unless we
+        # have a guaranteed ring slot.
+        with self._ring_lock:
             slot = self._cpu_req_tail & self._mask
             if self._req_ready[slot].item() != 0:
                 return 0  # ring still full
+            self._cpu_req_tail += 1  # reserve slot
+
+        with self._waiting_lock:
+            if not self._waiting:
+                # Rare: submit() drained the deque between our check and now.
+                # Put the reserved slot back.
+                with self._ring_lock:
+                    self._cpu_req_tail -= 1
+                return 0
             rid, token_ids, initial_step = self._waiting.popleft()
 
         prompt_len = token_ids.shape[0]
@@ -142,7 +168,6 @@ class OnlinePinnedRuntime:
         self._req_prompt_len[slot]   = prompt_len
         self._req_initial_step[slot] = initial_step
         self._req_ready[slot] = 1
-        self._cpu_req_tail += 1
         return 1
 
     def drain_completions(self) -> List[Tuple[int, int, int]]:
@@ -165,9 +190,21 @@ class OnlinePinnedRuntime:
                 self._completions[rid] = (buffer_row, final_step)
             finished.append((rid, buffer_row, final_step))
 
-        # While we're here, check if ring slots have freed up.
-        self.flush_waiting()
+        # Flush all waiting requests while ring slots are free.
+        while self.flush_waiting():
+            pass
         return finished
+
+    def _drain_loop(self) -> None:
+        """Persistent background loop that drains completions and flushes
+        waiting requests, ensuring forward progress even when all per-request
+        streaming threads have exited."""
+        while not self._drain_stop.is_set():
+            try:
+                self.drain_completions()
+            except Exception:
+                pass
+            self._drain_stop.wait(0.0002)
 
     def wait_for_request(
         self,
@@ -205,6 +242,13 @@ class OnlinePinnedRuntime:
         self._write_stream.synchronize()
         return result
 
+    def read_tokens_range(self, buffer_row: int, start: int, end: int) -> torch.Tensor:
+        """Read tokens [start..end] (inclusive) from *buffer_row*."""
+        with torch.cuda.stream(self._write_stream):
+            result = self._mpk.tokens[buffer_row, start : end + 1].clone()
+        self._write_stream.synchronize()
+        return result
+
     def release_request(self, rid: int) -> None:
         """Remove a completed request from the completion bookkeeping."""
         with self._lock:
@@ -233,6 +277,7 @@ class OnlinePinnedRuntime:
     def shutdown(self) -> None:
         """Signal the GPU persistent kernel to terminate."""
         self._shutdown[0] = 1
+        self._drain_stop.set()
 
     def reset(self) -> None:
         """Clear completion bookkeeping and ring state for a new session."""
