@@ -225,18 +225,6 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
-#ifdef MPK_DEBUG_BATCH
-      printf("[BATCH finalize] slot=%d req=%d old_step=%d num_tokens=%d "
-             "prompt_len=%d new_step=%d last_token=%lld eos=%lld\n",
-             i,
-             (int)request_id,
-             step,
-             num_tokens,
-             prompt_len,
-             config.step[request_id],
-             config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + num_tokens],
-             config.eos_token_id);
-#endif
 #if defined(MPK_ENABLE_PROFILING) || defined(MPK_TEST_MODE)
       if (true)
 #else
@@ -248,16 +236,6 @@ __device__ __forceinline__ bool
       {
         // Request is done
         config.request_ids[i] = -1;
-#ifdef MPK_DEBUG_BATCH
-        printf("[BATCH done] slot=%d req=%d step=%d num_tokens=%d "
-               "max_seq=%d prompt_len=%d\n",
-               i,
-               (int)request_id,
-               step,
-               num_tokens,
-               config.max_seq_length,
-               prompt_len);
-#endif
         // Free pages
         int kv_indptr = config.paged_kv_indptr_buffer[i];
         int num_pages = config.paged_kv_indptr_buffer[i + 1] - kv_indptr;
@@ -310,17 +288,6 @@ __device__ __forceinline__ bool
             min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
         num_new_tokens = min(num_new_tokens, remaining_seq);
       }
-#ifdef MPK_DEBUG_BATCH
-      printf("[BATCH active] slot=%d req=%d step=%d prompt_len=%d "
-             "schedule_tokens=%d token_budget=%d remaining_slots=%d\n",
-             num_reqs,
-             (int)request_id,
-             step,
-             config.prompt_length[request_id],
-             num_new_tokens,
-             MPK_MAX_NUM_BATCHED_TOKENS,
-             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
-#endif
       // Move tokens to input_tokens
       for (int j = 0; j < num_new_tokens; j++) {
         config.input_tokens[num_tokens + j] =
@@ -383,16 +350,6 @@ __device__ __forceinline__ bool
           min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       num_new_tokens = min(num_new_tokens, remaining_seq);
     }
-#ifdef MPK_DEBUG_BATCH
-    printf("[BATCH new] slot=%d req=%d step=%d prompt_len=%d "
-           "schedule_tokens=%d token_budget=%d\n",
-           num_reqs,
-           next_request_id,
-           step,
-           prompt_len,
-           num_new_tokens,
-           MPK_MAX_NUM_BATCHED_TOKENS);
-#endif
     // Move tokens to input tokens
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
@@ -429,25 +386,9 @@ __device__ __forceinline__ bool
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
 
-  // printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
-  //        config.step[0],
-  //        config.step[1],
-  //        config.step[2],
-  //        config.step[3],
-  //        config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
-
   if (num_tokens == 0) {
-#ifdef MPK_DEBUG_BATCH
-    printf("[BATCH stop] no active tokens\n");
-#endif
     return false;
   } else {
-#ifdef MPK_DEBUG_BATCH
-    printf("[BATCH continue] active_reqs=%d active_tokens=%d next_req=%d\n",
-           num_reqs,
-           num_tokens,
-           *config.next_request_id);
-#endif
     return true;
   }
 }
