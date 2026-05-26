@@ -342,7 +342,7 @@ m.def("my_op", &my_op, "My new op kernel");
 ### Step B — Rebuild the test extension
 
 ```bash
-pip setup.py build_ext --inplace   # rebuilds runtime_kernel.so
+python setup.py build_ext --inplace   # rebuilds runtime_kernel.so
 ```
 
 For Blackwell-specific tasks, use the corresponding setup in `tests/runtime_python/blackwell/sm100_{task}/setup.py` instead. Arch-specific setups pass `-DMIRAGE_GRACE_BLACKWELL` and `-gencode=arch=compute_100a,code=sm_100a`.
