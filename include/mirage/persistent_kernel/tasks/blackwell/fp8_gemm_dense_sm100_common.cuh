@@ -140,6 +140,19 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   int const nn = (N + BN - 1) / BN, nk = (K + BK - 1) / BK;
   int const total = ((M + BM - 1) / BM) * nn;
 
+  // 2026-05-26 (Q1): skip the entire mb_init + tcgen05.alloc + __syncthreads +
+  // membar.gl + tcgen05.dealloc sequence for CTAs that have no tile to
+  // compute. Decode-time perfetto traces showed ~8% of MEDIUMM instances
+  // sitting in a 3-4μs band that's pure dispatch overhead — these are CTAs
+  // where `worker_idx >= total`. The branch is uniform across all 256 threads
+  // of the CTA so the early return is safe. Saves ~2μs of per-idle-CTA
+  // overhead; doesn't move per-task end-to-end (real-work CTAs determine
+  // task completion at 20-35μs), but cleans up trace clutter and saves SM
+  // cycles for concurrent tasks.
+  if (worker_idx >= total) {
+    return;
+  }
+
   extern __shared__ __align__(1024) uint8_t sm_raw_fp8gemm[];
   int sb_base = __cvta_generic_to_shared(sm_raw_fp8gemm);
   int sb_aligned = (sb_base + 1023) & ~1023;
