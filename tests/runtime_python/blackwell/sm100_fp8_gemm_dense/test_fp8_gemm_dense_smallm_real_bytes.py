@@ -99,26 +99,16 @@ def compress_ranges(zr):
 
 
 def main():
-    import importlib.util
-    import subprocess
+    import glob
+    from _build_helper import ensure_extension_built
 
-    so_name = "runtime_kernel_blackwell_fp8_gemm_dense"
-    so_path = os.path.join(THIS_DIR, f"{so_name}.cpython-311-x86_64-linux-gnu.so")
+    # Force rebuild if the wrapper has been touched since the .so was built.
     wrapper_cu = os.path.join(THIS_DIR, "runtime_kernel_wrapper_sm100.cu")
-    needs_rebuild = (
-        not os.path.exists(so_path)
-        or os.path.getmtime(wrapper_cu) > os.path.getmtime(so_path))
-    if needs_rebuild:
-        print("Building C++ extension...")
-        build_dir = os.path.join(THIS_DIR, "build")
-        import shutil
-        if os.path.exists(build_dir):
-            shutil.rmtree(build_dir)
-        if os.path.exists(so_path):
-            os.remove(so_path)
-        subprocess.check_call(
-            [sys.executable, "setup.py", "build_ext", "--inplace"],
-            cwd=THIS_DIR)
+    so_paths = glob.glob(os.path.join(
+        THIS_DIR, "runtime_kernel_blackwell_fp8_gemm_dense.cpython-*.so"))
+    force = bool(so_paths) and os.path.getmtime(wrapper_cu) > min(
+        os.path.getmtime(p) for p in so_paths)
+    ensure_extension_built(force=force)
     import runtime_kernel_blackwell_fp8_gemm_dense as kernel_mod
 
     device = "cuda"

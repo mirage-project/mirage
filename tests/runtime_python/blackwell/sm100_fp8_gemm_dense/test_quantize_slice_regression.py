@@ -53,16 +53,8 @@ def reference_quantize(a_bf16_wide):
 
 
 def main():
-    import importlib.util
-    import subprocess
-
-    so_name = "runtime_kernel_blackwell_fp8_gemm_dense"
-    so_path = os.path.join(THIS_DIR, f"{so_name}.cpython-311-x86_64-linux-gnu.so")
-    if not os.path.exists(so_path):
-        print("Building C++ extension...")
-        subprocess.check_call(
-            [sys.executable, "setup.py", "build_ext", "--inplace"],
-            cwd=THIS_DIR)
+    from _build_helper import ensure_extension_built
+    ensure_extension_built()
     import runtime_kernel_blackwell_fp8_gemm_dense as kernel_mod
 
     device = "cuda"
