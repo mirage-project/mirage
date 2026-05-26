@@ -950,11 +950,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
-        // Check if we want to continue. Test mode runs through the active
-        // mode's prepare_next_batch (typically MODE_OFFLINE) and terminates
-        // naturally on the second call: the always-finalize shortcut clears
-        // the in-flight request in Step 1, and Step 4 finds next_request_id
-        // already at total_num_requests, so num_tokens == 0 → returns false.
 #ifdef MODE_ONLINE_NOTOKEN
         if (!prepare_next_batch(config, iteration_num))
 #else
@@ -1313,15 +1308,7 @@ extern "C" void
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
-  // The split launch starts worker_kernel and scheduler_kernel as two CUDA
-  // kernels. On B200 the DeepSeek configuration uses 128 worker CTAs and 80
-  // scheduler CTAs, but not all 208 CTAs can be resident at once. The scheduler
-  // still assigns tasks to all logical workers; if some worker CTAs never
-  // become resident, their event triggers never fire and the task graph hangs.
-  // The single-kernel launch packs scheduler warps into dedicated scheduler
-  // CTAs and uses exactly num_workers + num_schedulers / 4 CTAs, matching the
-  // intended SM partition.
-  global_runtime_config.split_worker_scheduler = false;
+  global_runtime_config.split_worker_scheduler = true;
 
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
