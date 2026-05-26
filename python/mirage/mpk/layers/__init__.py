@@ -34,13 +34,6 @@ from .norm.rmsnorm_linear import RMSNormLinear
 # Linear / GEMM
 from .linear.linear import Linear
 from .linear.linear_with_residual import LinearWithResidual
-from .linear.parallel_linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-    RowParallelLinearWithResidual,
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-)
 from .linear.linear_fp8 import (
     LinearFP8,
     LinearFP8WithResidual,
@@ -157,11 +150,6 @@ __all__ = [
     # linear
     "Linear",
     "LinearWithResidual",
-    "ColumnParallelLinear",
-    "RowParallelLinear",
-    "RowParallelLinearWithResidual",
-    "MergedColumnParallelLinear",
-    "QKVParallelLinear",
     "LinearFP8",
     "LinearFP8WithResidual",
     "LinearFP8SwapAB",
