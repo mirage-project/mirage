@@ -4781,13 +4781,14 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // params layout:
   //   size 0: defaults (active_mode=0, no row-slice overrides).
   //   size 1: [active_mode] (legacy).
-  //   size 4: [active_mode, hidden_size_override, input_stride_override,
-  //            in_offset_elems] — QKV-a fused path uses this to quantize
-  //            a slice of a wider buffer.
+  //   size 3: [active_mode, hidden_size_override, input_stride_override] —
+  //            QKV-a path. Quantizes a column slice of a wider buffer; the
+  //            per-task base pointer is already offset by the runtime from
+  //            the input's mpk.narrow view.
   //   size 5: [active_mode=5, expert_meta_offset, e_local,
   //            bm_padding, ctas_per_expert] — B15 per-expert
   //            active-rows skip for NEW MoE silu_out quantize.
-  assert(params.size() == 0 || params.size() == 1 || params.size() == 4 ||
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 3 ||
          params.size() == 5);
   int active_mode = params.empty() ? 0 : params[0];
   // active_mode 4 (B12): no token-indexed skip — process every CTA's
@@ -4798,7 +4799,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // (skip if 0) then actual_count[my_expert] and caps the kernel's
   // ROWS_PER_TASK inner loop.
   assert(active_mode >= 0 && active_mode <= 5);
-  bool has_slice_override = (params.size() == 4);
+  bool has_slice_override = (params.size() == 3);
   bool has_expert_active = (params.size() == 5);
   int expert_meta_offset = has_expert_active ? params[1] : -1;
   int expert_e_local = has_expert_active ? params[2] : 0;
@@ -4837,11 +4838,9 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   int input_stride = (ndims == 3)
                          ? static_cast<int>(input_ops[0]->dtensor.stride[1])
                          : static_cast<int>(input_ops[0]->dtensor.stride[0]);
-  int in_offset_elems = 0;
   if (has_slice_override) {
     hidden_size = params[1];
     input_stride = params[2];
-    in_offset_elems = params[3];
   }
   int active_row_multiplier =
       (ndims == 3) ? input_ops[0]->output_tensors[0].dim[1] : 1;
@@ -4936,15 +4935,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
          scale_ue8m0 ? "true" : "false",
          output_stride,
          rows_per_task);
-  if (in_offset_elems != 0) {
-    // QKV-a fused slice: pre-offset the input pointer so the kernel reads
-    // the right column window from a wider buffer.
-    code.e("    static_cast<cute::bfloat16_t const*>(task_desc->input_ptrs[0])"
-           " + $,",
-           in_offset_elems);
-  } else {
-    code.e("    task_desc->input_ptrs[0],"); // input bf16
-  }
+  code.e("    task_desc->input_ptrs[0],"); // input bf16
   code.e("    task_desc->output_ptrs[0],"); // output fp8
   code.e("    task_desc->output_ptrs[1],"); // output scale
   // scale_outer_stride: for UE8M0 column-major layout [packed_k,

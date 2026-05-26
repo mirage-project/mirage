@@ -529,7 +529,6 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
                        output, residual=None, gate_mode: int = 0,
                        input_row_stride: int = None,
-                       input_col_offset: int = 0,
                        share_quantize_tag: str = None,
                        input_fp8_override=None,
                        input_scale_override=None):
@@ -556,11 +555,12 @@ class DeepSeekV3Builder(GraphBuilder):
             residual epilogue).
         gate_mode: 0=always run, 1=prefill phase only, 2=decode phase only
             (mirrors the dense-GEMM `runtime_m_mode`).
-        input_row_stride / input_col_offset: when reading a column slice of
-            a wider input buffer (QKV-a fused path), specify the parent's
-            row stride and the slice's start column. K (= weight.dim(1))
-            tells the kernel how many cols to actually quantize per row.
-            Defaults preserve legacy contiguous reads.
+        input_row_stride: parent's row stride when the input is a narrow
+            view of a wider buffer (QKV-a path). K (= weight.dim(1)) tells
+            the kernel how many cols to actually quantize per row. The
+            per-task base pointer is already offset by the runtime from
+            the view's view_offset, so no column-offset is needed here.
+            Default None preserves legacy contiguous reads.
         share_quantize_tag: B24 (2026-05-15). Dual-dispatch GEMMs reading the
             same input slice (e.g., decode q_b + prefill q_b both reading
             q_a_out[..., :q_lora]) emit two quantize tasks that write
@@ -624,12 +624,9 @@ class DeepSeekV3Builder(GraphBuilder):
                       else 0)
             )
             quantize_kwargs = {}
-            if input_row_stride is not None or input_col_offset != 0:
+            if input_row_stride is not None:
                 quantize_kwargs["hidden_size_override"] = reduction_size
-                quantize_kwargs["input_stride_override"] = (
-                    input_row_stride if input_row_stride is not None
-                    else input_bf16.dim(1))
-                quantize_kwargs["in_offset_elems"] = input_col_offset
+                quantize_kwargs["input_stride_override"] = input_row_stride
             self.mpk.quantize_fp8_layer(
                 input=input_bf16,
                 output_fp8=input_fp8,
@@ -852,7 +849,6 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                      grid_dim, block_dim, residual=None, gate_mode: int = 0,
                      input_row_stride: int = None,
-                     input_col_offset: int = 0,
                      share_quantize_tag: str = None,
                      input_fp8_override=None,
                      input_scale_override=None):
@@ -898,7 +894,6 @@ class DeepSeekV3Builder(GraphBuilder):
             residual=residual,
             gate_mode=gate_mode,
             input_row_stride=input_row_stride,
-            input_col_offset=input_col_offset,
             share_quantize_tag=share_quantize_tag,
             input_fp8_override=input_fp8_override,
             input_scale_override=input_scale_override,
@@ -1638,9 +1633,6 @@ class DeepSeekV3Builder(GraphBuilder):
         # become decorative — they encode 0 offset + parent row stride,
         # which matches what the view already supplies.
         self._qkv_a_row_stride = qkv_a_total
-        self._qkv_a_q_offset = 0
-        self._qkv_a_c_latent_offset = 0
-        self._qkv_a_k_pe_offset = 0
         self.q_a_out = self.mpk.narrow(
             self.qkv_a_out, dim=1, start=0, length=self.q_lora_rank)
         self.q_a_out_buf = None
@@ -2161,11 +2153,11 @@ class DeepSeekV3Builder(GraphBuilder):
         # Step 3: q_b projections.
         # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
         # Prefill uses vLLM's original split q_b [H*128] + [H*64].
-        # QKV-a fused: q_a_out aliases qkv_a_out (mbt, 2176); pass the slice
-        # row stride + offset so the FP8 quantize reads only q_a's 1536 cols.
-        qb_slice_kwargs = dict(
-            input_row_stride=self._qkv_a_row_stride,
-            input_col_offset=self._qkv_a_q_offset)
+        # q_a_out is an mpk.narrow view of qkv_a_out (mbt, 2176). The
+        # narrow's view_offset already lands the per-task base pointer at
+        # cols [0:1536); the FP8 quantize only needs the parent's row
+        # stride to walk by the correct distance per row.
+        qb_slice_kwargs = dict(input_row_stride=self._qkv_a_row_stride)
         # B24 (2026-05-15): when dual-dispatch is active, decode q_b
         # and prefill q_b both quantize self.q_a_out with K=q_lora=1536.
         # Share the quantize task between them — saves one ~5 us wave

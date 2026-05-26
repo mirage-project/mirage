@@ -2253,7 +2253,6 @@ class PersistentKernel:
         active_mode: int = 0,
         hidden_size_override: int = None,
         input_stride_override: int = None,
-        in_offset_elems: int = 0,
         process_all_rows: bool = False,
         expert_active_meta: DTensor = None,
         expert_active_e_local: int = 0,
@@ -2264,10 +2263,12 @@ class PersistentKernel:
         scale_ue8m0=True: output scale is packed UE8M0 uint32 (for FP8 linear GEMM)
         scale_ue8m0=False: output scale is float32 (for MoE group GEMM)
 
-        hidden_size_override / input_stride_override / in_offset_elems support
-        quantizing a column slice of a wider input buffer (QKV-a fused path).
-        Defaults preserve legacy whole-row quantize. The OUTPUT buffer should
-        be sized for the slice (hidden_size_override columns).
+        hidden_size_override / input_stride_override support quantizing a
+        column slice of a wider input buffer (QKV-a path). Defaults
+        preserve legacy whole-row quantize. The OUTPUT buffer should be
+        sized for the slice (hidden_size_override columns). For column
+        slices, pass the input as an mpk.narrow view; the runtime sets
+        the per-task base pointer from the view's view_offset.
 
         process_all_rows=True: disable the token-indexed `active_rows`
         skip and process EVERY logical row (batch_size). Use for
@@ -2282,8 +2283,7 @@ class PersistentKernel:
         for axis in range(input.num_dims - 1):
             row_count *= input.dim(axis)
         slice_override = (hidden_size_override is not None or
-                          input_stride_override is not None or
-                          in_offset_elems != 0)
+                          input_stride_override is not None)
         hidden_size = hidden_size_override or legacy_hidden_size
         if input_stride_override is None:
             input_stride_override = legacy_hidden_size
@@ -2344,8 +2344,7 @@ class PersistentKernel:
             params = [5, expert_meta_offset, expert_active_e_local,
                       expert_active_bm_padding, ctas_per_expert]
         elif slice_override:
-            params = [active_mode, hidden_size,
-                      input_stride_override, in_offset_elems]
+            params = [active_mode, hidden_size, input_stride_override]
         else:
             params = [] if active_mode == 0 else [active_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
