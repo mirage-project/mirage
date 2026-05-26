@@ -103,6 +103,14 @@ __device__ __forceinline__ void
     static_assert(std::is_same_v<SCALE_PACKED_T, uint32_t>,
                   "Packed UE8M0 scale must be stored as uint32");
   }
+  // GROUP_TILES tiles each cover NUM_GROUPS_PER_ROW / GROUP_TILES consecutive
+  // groups of one row. To prevent neighbour tiles from racing on the same
+  // packed_idx slot (or reading uninitialized bytes from packed_scale_bytes),
+  // tile boundaries must fall on SCALE_ALIGNMENT-group boundaries.
+  static_assert(NUM_GROUPS_PER_ROW % GROUP_TILES == 0,
+                "GROUP_TILES must divide NUM_GROUPS_PER_ROW");
+  static_assert(((NUM_GROUPS_PER_ROW / GROUP_TILES) % SCALE_ALIGNMENT) == 0,
+                "groups per tile must be a multiple of SCALE_ALIGNMENT");
 
   // Calculate indices
   int const thread_idx = threadIdx.x;
