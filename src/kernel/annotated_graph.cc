@@ -162,11 +162,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
 
   // Compute the writer/reader's 2D bbox in the parent's element coordinates.
   // For non-views: row range [0, dim[0]), col range [0, stride[0]). For 2D
-  // narrow views (inner-dim narrow): row range [0, dim[0]), col range
-  // [view_offset/dtype_size, +dim[1]). For 2D narrow views (outer-dim narrow):
-  // row range [view_offset / (stride[0] * dtype_size), +dim[0]), col range
-  // [0, stride[0]). Combined narrows decompose via divmod. Higher-rank views
-  // collapse all inner dims into one row stride and skip the row check.
+  // narrow views: decompose view_offset into (row_first, col_first) using
+  // row_stride = stride[0]. For views with num_dims >= 3 we don't yet have a
+  // correct multi-axis decomposition (dim_inner only covers the innermost
+  // axis; middle-axis offsets are invisible), so we fall back to the same
+  // conservative full-row window as the non-view branch. This is
+  // pessimistic — it will report overlap for two disjoint 3D narrow views —
+  // but never miss a real overlap.
   auto compute_bbox = [](DTensor const &dt) {
     struct BBox {
       int64_t row_first;
@@ -178,10 +180,9 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     int64_t row_stride =
         dt.num_dims >= 2 ? static_cast<int64_t>(dt.stride[0]) : 1;
     int64_t dim0 = dt.num_dims >= 1 ? static_cast<int64_t>(dt.dim[0]) : 1;
-    int64_t dim_inner = dt.num_dims >= 2
-                            ? static_cast<int64_t>(dt.dim[dt.num_dims - 1])
-                            : row_stride;
-    if (dt.is_virtual() && dtype_size > 0 && row_stride > 0) {
+    if (dt.is_virtual() && dt.num_dims == 2 && dtype_size > 0 &&
+        row_stride > 0) {
+      int64_t dim_inner = static_cast<int64_t>(dt.dim[1]);
       int64_t view_off_elems =
           dt.view_offset / static_cast<int64_t>(dtype_size);
       int64_t row_first = view_off_elems / row_stride;
