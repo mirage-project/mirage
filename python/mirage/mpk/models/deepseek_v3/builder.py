@@ -11,6 +11,7 @@ runtime only needs compressed KV cache [c_latent(512), k_pe(64)] = 576 dims.
 """
 
 import math
+import functools
 import os
 import torch
 from typing import Optional
@@ -405,49 +406,43 @@ class DeepSeekV3Builder(GraphBuilder):
             gate_mode=gate_mode,
         )
 
-    def _fp8_linear_grid_dim(self, weight, grid_dim):
-        """Pick grid_x for the FP8 swapAB non-splitk kernel.
-
-        The kernel asserts `output_size_per_task % MMA_M=128 == 0` and
-        iterates m_tile internally, so a single task can cover *any positive
-        multiple* of 128 output cols — 128 is the minimum, not the only
-        allowed shard width. (The earlier comment "validated for N=128 task
-        shards" was conservative; the cause of hangs at small shards was
-        smaller-than-128, not larger-than-128.)
-
-        With that, pick grid_x as the largest divisor of `output_size // 128`
-        that is <= num_workers, so the layer fits in a single worker wave
-        with the most parallelism the kernel allows. For shapes where
-        `output_size // 128 <= num_workers`, this is the original behavior
-        (one MMA_M tile per task).
-        """
-        output_size = weight.dim(0)
+    @staticmethod
+    @functools.lru_cache(maxsize=None)
+    def _fp8_linear_grid_x(output_size: int, num_workers: int) -> int:
+        """Pure inner: pick grid_x for FP8 swapAB non-splitk given shape."""
         if output_size % 128 != 0:
             raise ValueError(
                 "FP8 linear runtime currently requires a 128-aligned output "
                 f"dimension, got {output_size}")
         max_n_tiles = output_size // 128
-        if max_n_tiles <= self.num_workers:
-            grid_x = max_n_tiles
-        else:
-            # Largest divisor of max_n_tiles that fits in one wave.
-            best = 1
-            i = 1
-            while i * i <= max_n_tiles:
-                if max_n_tiles % i == 0:
-                    if i <= self.num_workers:
-                        best = max(best, i)
-                    other = max_n_tiles // i
-                    if other <= self.num_workers:
-                        best = max(best, other)
-                i += 1
-            # If max_n_tiles has no decent divisor ≤ num_workers (e.g. prime),
-            # 1-task-per-layer is far worse than letting a small overflow
-            # wave run. Fall back to max_n_tiles in that pathological case.
-            if best * 4 < self.num_workers:
-                grid_x = max_n_tiles
-            else:
-                grid_x = best
+        if max_n_tiles <= num_workers:
+            return max_n_tiles
+        # Largest divisor of max_n_tiles that fits in one wave.
+        best = 1
+        i = 1
+        while i * i <= max_n_tiles:
+            if max_n_tiles % i == 0:
+                if i <= num_workers:
+                    best = max(best, i)
+                other = max_n_tiles // i
+                if other <= num_workers:
+                    best = max(best, other)
+            i += 1
+        # If max_n_tiles has no decent divisor <= num_workers (e.g. prime),
+        # 1-task-per-layer is far worse than letting a small overflow wave run.
+        if best * 4 < num_workers:
+            return max_n_tiles
+        return best
+
+    def _fp8_linear_grid_dim(self, weight, grid_dim):
+        """Pick grid_x for the FP8 swapAB non-splitk kernel.
+
+        The kernel asserts `output_size_per_task % MMA_M=128 == 0` and
+        iterates m_tile internally, so a single task can cover any positive
+        multiple of 128 output cols. We pick the largest divisor of
+        output_size/128 that fits in one worker wave (see _fp8_linear_grid_x).
+        """
+        grid_x = self._fp8_linear_grid_x(weight.dim(0), self.num_workers)
         return (grid_x, grid_dim[1], grid_dim[2])
 
     def _can_use_decode_fp8_linear(self, input_fp8, weight, output, grid_dim):
