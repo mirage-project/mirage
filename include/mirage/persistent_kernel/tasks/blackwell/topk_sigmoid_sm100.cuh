@@ -392,14 +392,35 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   __syncthreads();
 
   // ---- Phase 7: Compact active expert IDs ----
+  // Warp-ballot prefix compaction (replaces the per-active-expert serial
+  // atomicAdd, which serialized ~num_active atomics to one counter ≈ 1.6μs
+  // of dependent-op latency on this single, latency-bound CTA — ncu showed
+  // 0.03% SM throughput, so the cost here is stall, not work). Same C16
+  // pattern used in moe_permute Phase 1. Deterministic (ascending
+  // local_expert order); the consumer treats active_expert_ids as a set so
+  // order is irrelevant. Race-free: only warp 0 scans, reads are warp-
+  // lockstep before writes within a 32-lane chunk, and later chunks read
+  // local_expert >= 32 which the writes (compacted into [0, count) with
+  // count <= num_experts_per_tok) never touch.
   if (mpk_active_expert_ids != nullptr) {
-    for (int expert = start_expert + threadIdx.x; expert < end_expert;
-         expert += blockDim.x) {
-      int const local_expert = expert - start_expert;
-      int const mark = mpk_active_expert_ids[local_expert];
-      if (mark >= 0) {
-        int const pos = atomicAdd(mpk_active_expert_ids + LOCAL_EXPERTS, 1);
-        mpk_active_expert_ids[pos] = local_expert;
+    if (threadIdx.x < WARP_SIZE_SIGMOID) {
+      int const lane = threadIdx.x;
+      int count = 0;
+      for (int chunk_base = 0; chunk_base < LOCAL_EXPERTS;
+           chunk_base += WARP_SIZE_SIGMOID) {
+        int const local_expert = chunk_base + lane;
+        int const mark = (local_expert < LOCAL_EXPERTS)
+                             ? mpk_active_expert_ids[local_expert]
+                             : -1;
+        unsigned const ballot = __ballot_sync(0xffffffff, mark >= 0);
+        int const my_offset = __popc(ballot & ((1u << lane) - 1));
+        if (mark >= 0) {
+          mpk_active_expert_ids[count + my_offset] = local_expert;
+        }
+        count += __popc(ballot);
+      }
+      if (lane == 0) {
+        mpk_active_expert_ids[LOCAL_EXPERTS] = count;
       }
     }
   }

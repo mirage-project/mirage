@@ -61,7 +61,8 @@ __global__ __launch_bounds__(256) void topk_sigmoid_kernel(
                                                mpk_active_expert_ids,
                                                /*start_expert=*/0,
                                                /*end_expert=*/EXPERTS,
-                                               routed_scaling_factor);
+                                               routed_scaling_factor,
+                                               /*num_active_rows=*/num_rows);
   __syncthreads();
 }
 
