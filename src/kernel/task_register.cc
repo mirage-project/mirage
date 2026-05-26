@@ -2212,13 +2212,8 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_elementwise_add_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params (optional):
-  //   size 0 (legacy): input_a contiguous with the output's row stride.
-  //   size 2: [in_a_stride, in_a_offset] — input_a reads a column slice of
-  //           a wider buffer. Used by QKV-a fused diagnostics where
-  //           input_a is qkv_a_out (mbt, 2176) and we dump a particular
-  //           slice into a smaller (mbt, OUT_SIZE) tensor.
-  assert(params.size() == 0 || params.size() == 2);
+  assert(params.size() == 0);
+  (void)params;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -2238,16 +2233,12 @@ int TaskRegister::register_elementwise_add_sm100_task(
   // P1/P2 invariant: row stride is dtensor.stride[0], not dim[1] (which is
   // the logical column count and differs for views).
   int output_stride = output_ops[0]->dtensor.stride[0];
-  int in_a_stride = (params.size() == 2) ? params[0] : output_stride;
-  int in_a_offset = (params.size() == 2) ? params[1] : 0;
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::elementwise_add_task_impl<cute::bfloat16_t, $, $, $, $, $>(",
+  code.e("kernel::elementwise_add_task_impl<cute::bfloat16_t, $, $, $>(",
          batch_size,
          output_size,
-         output_stride,
-         in_a_stride,
-         in_a_offset);
+         output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0]);");

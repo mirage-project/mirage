@@ -3485,14 +3485,12 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
-        in_a_row_stride: int = None,
-        in_a_col_offset: int = 0,
     ):
         """Element-wise add: output = input_a + input_b.
 
-        in_a_row_stride / in_a_col_offset let input_a read a column slice
-        of a wider buffer (e.g. dump qkv_a_out's q_a slice into a (mbt, 1536)
-        tensor). Defaults keep the legacy (matching shapes) behaviour.
+        For a column-slice input_a against a wider parent buffer, pass an
+        `mpk.narrow` view: the runtime sets the per-task base pointer from
+        the view's stride[0] + view_offset.
         """
         assert input_a.num_dims == 2
         assert input_b.num_dims == 2
@@ -3502,16 +3500,7 @@ class PersistentKernel:
         tb_graph.new_input(input_b, (0, -1, -1), -1, True)
         tb_graph.new_input(output, (0, -1, -1), -1, True)
         self.kn_graph.customized([input_a, input_b, output], tb_graph)
-        slice_override = (in_a_row_stride is not None or
-                          in_a_col_offset != 0)
-        if slice_override:
-            if in_a_row_stride is None:
-                in_a_row_stride = input_a.dim(1)
-            self.kn_graph.register_task(
-                tb_graph, "elementwise_add_sm100",
-                [in_a_row_stride, in_a_col_offset])
-        else:
-            self.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
+        self.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
 
     def silu_mul_linear_with_residual_layer(
         self,
