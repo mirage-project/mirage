@@ -53,6 +53,7 @@ from ...layers import (
     RotaryEmbedding,
     RowParallelLinearWithResidual,
 )
+from .._registry import register_model
 
 
 # ---------------------------------------------------------------------------
@@ -628,12 +629,19 @@ class Qwen3Model(MPKModule):
 # ---------------------------------------------------------------------------
 
 
+@register_model("Qwen3ForCausalLM")
 class Qwen3ForCausalLM(MPKModule):
     """Full Qwen3 model + lm_head + split-reduce argmax for greedy decode.
 
-    lm_head is replicated (not vocab-parallel) in v1. Driver pre-pads its
-    weight to a multiple of the argmax-partial grid (153600 in the demo).
+    lm_head is replicated (not vocab-parallel) in v1. ``process_weights``
+    pads the lm_head's vocab dim to ``LM_HEAD_PADDED_VOCAB`` so the
+    argmax-partial grid divides it evenly (mirrors the legacy demo).
+    The driver no longer touches lm_head shape.
     """
+
+    # Padded vocab matches the legacy demo's argmax-partial tile math.
+    # See demo/qwen3/demo.py: ``max_factor_leq_n(153600, 96 // ...)``.
+    LM_HEAD_PADDED_VOCAB: int = 153600
 
     def __init__(self, config, *, prefix: str = ""):
         super().__init__(prefix=prefix)
@@ -658,11 +666,37 @@ class Qwen3ForCausalLM(MPKModule):
         logits = F.linear(h, self.lm_head.weight)
         return torch.argmax(logits, dim=-1, keepdim=True)
 
+    def process_weights(self) -> None:
+        """Post-load: pad lm_head + bind argmax_partial num_partial_tasks
+        to the live ``num_workers``. ``process_weights`` runs inside
+        ``compile_scope`` so ``current_pk()`` is valid.
+        """
+        super().process_weights()
+        pk = current_pk()
+        padded = self.LM_HEAD_PADDED_VOCAB
+        if self.lm_head.out_features < padded:
+            old_w = self.lm_head.weight.data
+            padded_weight = torch.zeros(
+                padded, old_w.shape[1],
+                dtype=old_w.dtype, device=old_w.device,
+            )
+            padded_weight[: old_w.shape[0]] = old_w
+            self.lm_head.weight = nn.Parameter(padded_weight)
+            self.lm_head.out_features = padded
+            self.argmax_partial.vocab_size = padded
+        elif self.lm_head.out_features > padded:
+            raise ValueError(
+                f"Qwen3ForCausalLM.process_weights: lm_head out_features "
+                f"({self.lm_head.out_features}) exceeds LM_HEAD_PADDED_VOCAB "
+                f"({padded}); raise the class attribute.",
+            )
+        self.argmax_partial.num_partial_tasks = pk.num_workers
+        self.argmax_reduce.num_partial_tasks = pk.num_workers
+
     def auto_grid_dim(self, *args, **kwargs):
         raise NotImplementedError("composite module — see child compile()s")
 
-    def compile(self, input_tokens_dt, *, output_tokens=None,
-                lm_head_padded_vocab: Optional[int] = None):
+    def compile(self, input_tokens_dt, *, output_tokens=None):
         pk = current_pk()
         h_dt = self.model.compile(input_tokens_dt)
         logits_dt = self.lm_head.compile(
@@ -670,8 +704,6 @@ class Qwen3ForCausalLM(MPKModule):
             grid_dim=(pk.num_workers, 1, 1),
             block_dim=(128, 1, 1),
         )
-        self.argmax_partial.num_partial_tasks = pk.num_workers
-        self.argmax_reduce.num_partial_tasks = pk.num_workers
         part_val_dt, part_idx_dt = self.argmax_partial.compile(
             logits_dt,
             grid_dim=(pk.num_workers, 1, 1),
