@@ -25,7 +25,7 @@ Run:
     cd tests/runtime_python/blackwell/sm100_fp8_gemm_dense
     rm -rf build *.so   # force rebuild after wrapper changes
     python setup.py build_ext --inplace
-    python test_fp8_gemm_dense_smallm_n2176_bug.py
+    python test_fp8_gemm_dense_smallm_n2176_regression.py
 """
 
 import os
