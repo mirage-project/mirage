@@ -29,7 +29,7 @@
 //     standalone kernel time when run inside the persistent megakernel).
 //
 // HOW TO BUILD + RUN
-//   cd /home/muhengl/mirage
+//   cd $MIRAGE_HOME
 //   /usr/local/cuda/bin/nvcc -O3 -gencode=arch=compute_100a,code=sm_100a \
 //       -I include \
 //       -I include/mirage/persistent_kernel \

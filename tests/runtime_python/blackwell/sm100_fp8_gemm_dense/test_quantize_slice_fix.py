@@ -67,10 +67,11 @@ def main():
 
     device = "cuda"
     # Use the actual MPK input bytes for realism (same as test_real_bytes).
+    dump_dir = os.environ.get("MPK_DSV3_DUMP_DIR")
     dump_path = (
-        "/home/muhengl/mirage/outputs/dpskv3_qkva_fused_pre_rmsnorm/dump/"
-        "layer0_input_norm.pt")
-    if os.path.exists(dump_path):
+        os.path.join(dump_dir, "layer0_input_norm.pt")
+        if dump_dir else None)
+    if dump_path is not None and os.path.exists(dump_path):
         print(f"Loading bf16 input from: {dump_path}")
         a_bf16_orig = torch.load(dump_path, weights_only=True).to(device)
         # Tile / pad to (128, 2176) — the wider qkv_a_out layout

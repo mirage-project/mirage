@@ -92,7 +92,12 @@ def main():
     # =========================================================================
     # Test 1: MPK real bytes
     # =========================================================================
-    mpk_dump_dir = "/home/muhengl/mirage/outputs/dpskv3_qkva_layer0_only/dump"
+    mpk_dump_dir = os.environ.get("MPK_DSV3_DUMP_DIR")
+    if not mpk_dump_dir or not os.path.isdir(mpk_dump_dir):
+        import pytest
+        pytest.skip(
+            "set MPK_DSV3_DUMP_DIR to a directory containing "
+            "layer0_input_norm.pt to run this test")
     rmsnorm_out = torch.load(
         f"{mpk_dump_dir}/layer0_input_norm.pt", weights_only=True
     ).to(device).contiguous()

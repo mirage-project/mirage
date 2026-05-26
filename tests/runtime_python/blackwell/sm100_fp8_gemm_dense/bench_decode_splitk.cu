@@ -40,7 +40,7 @@
 //     B = SplitK p50. Below 1.5× means SplitK isn't worth shipping.
 //
 // HOW TO BUILD + RUN
-//   cd /home/muhengl/mirage
+//   cd $MIRAGE_HOME
 //   /usr/local/cuda/bin/nvcc -O3 -gencode=arch=compute_100a,code=sm_100a \
 //       -I include \
 //       -I include/mirage/persistent_kernel \

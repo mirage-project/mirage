@@ -124,13 +124,25 @@ def main():
     device = "cuda"
 
     # === Load real MPK bytes ===
-    dump_dir = "/home/muhengl/mirage/outputs/dpskv3_qkva_fused_pre_rmsnorm/dump"
+    dump_dir = os.environ.get("MPK_DSV3_DUMP_DIR")
+    if not dump_dir or not os.path.isdir(dump_dir):
+        import pytest
+        pytest.skip(
+            "set MPK_DSV3_DUMP_DIR to a directory containing "
+            "layer0_input_norm.pt to run this test")
     input_norm_path = os.path.join(dump_dir, "layer0_input_norm.pt")
     print(f"Loading input from: {input_norm_path}")
     a_bf16 = torch.load(input_norm_path, weights_only=True).to(device)
     print(f"  a_bf16 shape={tuple(a_bf16.shape)} dtype={a_bf16.dtype}")
 
-    cache_root = "/tmp/dpskv3_v8_weight_cache_qkva_fused_2176"
+    cache_root = os.environ.get(
+        "MPK_DSV3_WEIGHT_CACHE",
+        "/tmp/dpskv3_v8_weight_cache_qkva_fused_2176")
+    if not os.path.isdir(cache_root):
+        import pytest
+        pytest.skip(
+            "set MPK_DSV3_WEIGHT_CACHE to the dpskv3 qkva-fused weight cache "
+            "directory to run this test")
     weight_file = None
     for sub in sorted(os.listdir(cache_root)):
         sp = os.path.join(cache_root, sub)
