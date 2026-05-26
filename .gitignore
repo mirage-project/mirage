@@ -86,24 +86,9 @@ ncu_tmp
 
 # Local-only Claude docs / scratch PR description — never push
 /CLAUDE.md
-/pr.md
-/codex-sub-agent.md
 
-# Local working dirs — NEVER push (user rule 2026-05-14)
-# scratch/ holds session notes, perf journals, analysis scripts, log files —
-# all personal/per-session, must not pollute the public PR or remote.
-# scripts/ holds local test helpers — same policy.
-scratch/
-scripts/
+# Profile
+/profile
+/results
 
-# Local IDE / clangd config (per-user).
 .clangd
-
-# Local debug artifacts (profile dumps, bench results, repro scripts).
-/profile/
-/results/
-/mirage_*.csv
-/run*.sh
-/docs/superpowers/
-/docs/deepseek_v3_test_mode_coverage.md
-tests/runtime_python/blackwell/bench_fp8_3way/
