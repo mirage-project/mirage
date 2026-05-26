@@ -2199,7 +2199,10 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->dtensor.num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int output_size = output_ops[0]->output_tensors[0].dim[1];
-  int output_stride = output_ops[0]->dtensor.dim[1];
+  // Row stride must come from dtensor.stride[0] (P1/P2 invariant): for views
+  // this differs from dim[1] (the logical column count) and reading dim[1]
+  // here would corrupt the parent buffer.
+  int output_stride = output_ops[0]->dtensor.stride[0];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -2236,7 +2239,9 @@ int TaskRegister::register_elementwise_add_sm100_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int output_size = output_ops[0]->output_tensors[0].dim[1];
-  int output_stride = output_ops[0]->dtensor.dim[1];
+  // P1/P2 invariant: row stride is dtensor.stride[0], not dim[1] (which is
+  // the logical column count and differs for views).
+  int output_stride = output_ops[0]->dtensor.stride[0];
   int in_a_stride = (params.size() == 2) ? params[0] : output_stride;
   int in_a_offset = (params.size() == 2) ? params[1] : 0;
   mirage::transpiler::CodeKeeper code;
