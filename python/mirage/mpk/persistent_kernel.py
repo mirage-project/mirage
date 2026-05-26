@@ -18,7 +18,38 @@ from .multigpu import (
   auto_select_allreduce_implementation,
 )
 from .parallel import ParallelConfig
-from typing import Optional
+from typing import List, Optional, TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from .configs.mpk_config import MPKConfig
+    from .configs.runtime import RuntimeConfig
+
+
+def _allocate_meta_tensors(rt: "RuntimeConfig", max_num_pages: int) -> dict:
+    """Allocate the 10 meta tensors that PersistentKernel expects, with
+    shapes / dtypes matching the legacy demo's live (non-test) path.
+
+    All buffers live on ``cuda``. ``tokens``/``prompt_lengths`` are
+    zero-initialized; :meth:`PersistentKernel.run` fills them per call.
+    """
+    device = "cuda"
+    n_req = rt.max_num_batched_requests
+    return {
+        "tokens": torch.zeros((n_req, rt.max_seq_length),
+                              dtype=torch.long, device=device),
+        "step": torch.zeros((n_req,), dtype=torch.int32, device=device),
+        "prompt_lengths": torch.zeros((n_req,), dtype=torch.int32, device=device),
+        "input_tokens": torch.zeros((rt.max_num_batched_tokens, 1),
+                                    dtype=torch.long, device=device),
+        "output_tokens": torch.zeros((rt.max_num_batched_tokens, 1),
+                                     dtype=torch.long, device=device),
+        "num_new_tokens": torch.full((n_req,), 1,
+                                     dtype=torch.int32, device=device),
+        "qo_indptr_buffer": torch.empty(n_req + 1, dtype=torch.int32, device=device),
+        "paged_kv_indptr_buffer": torch.empty(n_req + 1, dtype=torch.int32, device=device),
+        "paged_kv_indices_buffer": torch.empty(max_num_pages, dtype=torch.int32, device=device),
+        "paged_kv_last_page_len_buffer": torch.empty(n_req, dtype=torch.int32, device=device),
+    }
 
 HARD_CODE = """
 #include <Python.h>
@@ -583,6 +614,282 @@ class PersistentKernel:
             self.meta_tensors["paged_kv_last_page_len_buffer"] = torch.zeros(
                 self.max_num_batched_requests,
                 dtype=torch.int32, device=device)
+
+    @classmethod
+    def build_from_config(cls, cfg: "MPKConfig") -> "PersistentKernel":
+        """Construct a PersistentKernel + model + nvcc-compiled megakernel from a single :class:`MPKConfig`.
+
+        Does, in order:
+          1. ``cfg.validate()`` — early sanity checks (TP divides head counts, etc.).
+          2. Allocate the per-rank KV pool from HF + Parallel + KVCache.
+          3. Allocate the 10 meta tensors from RuntimeConfig.
+          4. Auto-resolve ``num_workers`` / ``num_local_schedulers`` from
+             :func:`mirage.get_configurations_from_gpu` if unset.
+          5. Construct the PK via the back-compat ``__init__``.
+          6. Resolve the model class via the registry (`hf.architectures[0]`).
+          7. Inside ``compile_scope``: instantiate model, ``load_weights`` from
+             safetensors, ``process_weights`` (post-load transforms), attach
+             input tokens DTensor, ``model.compile(...)``.
+          8. nvcc-compile the megakernel.
+
+        Returns the PK with ``pk.model`` and ``pk._mpk_config`` attached.
+        After that, the user is expected to call :meth:`run` (high-level
+        prompt → text) or :meth:`run_tokens` (token-level).
+        """
+        import mirage as mi
+        from .configs.mpk_config import MPKConfig as _MPKConfig
+        from .speculative import SpecDecodeConfig
+
+        assert isinstance(cfg, _MPKConfig), (
+            f"build_from_config: expected MPKConfig, got {type(cfg)}"
+        )
+        cfg.validate()
+        hf = cfg.hf
+        rt = cfg.runtime
+        pc = cfg.parallel
+        kvc = cfg.kv_cache
+
+        # ---- 1. KV cache pool (per-rank) ----------------------------------
+        num_kv_per_rank = hf.num_key_value_heads // pc.tp_size
+        kv_shape = (
+            hf.num_hidden_layers, kvc.max_num_pages, kvc.page_size,
+            num_kv_per_rank, hf.head_dim,
+        )
+        k_pool = torch.zeros(kv_shape, dtype=kvc.dtype, device="cuda")
+        v_pool = torch.zeros(kv_shape, dtype=kvc.dtype, device="cuda")
+
+        # ---- 2. Meta tensors ----------------------------------------------
+        meta = _allocate_meta_tensors(rt, kvc.max_num_pages)
+
+        # ---- 3. Scheduler resolution from GPU if unset --------------------
+        nw, ns = rt.num_workers, rt.num_local_schedulers
+        if nw is None or ns is None:
+            gnw, gns = mi.get_configurations_from_gpu(0)
+            nw = nw if nw is not None else gnw
+            ns = ns if ns is not None else gns
+
+        # ---- 4. Spec-decode passthrough ----------------------------------
+        if cfg.spec_decode is not None:
+            spec = cfg.spec_decode
+        else:
+            spec = mi.mpk.spec_decode_class(None, 3, 5)
+
+        # ---- 5. eos resolution -------------------------------------------
+        # None  = auto-fill from HF;  -1 = ignore_eos;  N = explicit.
+        if rt.eos_token_id is None:
+            tc_eos = getattr(hf.transformers_config, "eos_token_id", -1)
+            eos = tc_eos if isinstance(tc_eos, int) else -1
+        else:
+            eos = rt.eos_token_id
+
+        # ---- 6. Construct PK via back-compat __init__ --------------------
+        pk = cls(
+            mode=rt.mode,
+            world_size=pc.world_size, mpi_rank=pc.rank,
+            num_workers=nw, num_local_schedulers=ns,
+            num_remote_schedulers=rt.num_remote_schedulers,
+            max_seq_length=rt.max_seq_length,
+            max_num_batched_requests=rt.max_num_batched_requests,
+            max_num_batched_tokens=rt.max_num_batched_tokens,
+            max_num_pages=kvc.max_num_pages,
+            page_size=kvc.page_size,
+            meta_tensors=meta,
+            profiler_tensor=rt.profiler_tensor,
+            trace_name=rt.trace_name,
+            spec_decode_config=spec,
+            use_cutlass_kernel=rt.use_cutlass_kernel,
+            eos_token_id=eos,
+            test_mode=rt.test_mode,
+            kv_cache={"k_cache": k_pool, "v_cache": v_pool},
+            parallel_config=pc,
+        )
+        pk._mpk_config = cfg
+
+        # ---- 7. Resolve the model class via the registry -----------------
+        from .models._registry import resolve_model_class
+        archs = getattr(hf.transformers_config, "architectures", None) or []
+        if not archs:
+            raise ValueError(
+                "build_from_config: HF config has no 'architectures' field; "
+                "cannot resolve MPK model class."
+            )
+        ModelCls = resolve_model_class(archs[0])
+
+        # ---- 8. Instantiate + load weights + compile ---------------------
+        from .weight_loader import (
+            safetensors_weights_iterator, find_safetensors_files,
+        )
+        with pk.compile_scope():
+            with torch.device("cuda"):
+                model = ModelCls(hf.transformers_config).to(
+                    "cuda", dtype=torch.bfloat16,
+                )
+            files = find_safetensors_files(hf.model_path)
+            model.load_weights(safetensors_weights_iterator(files))
+            model.process_weights()
+            input_tokens_dt = pk.attach_input(
+                meta["input_tokens"], name="input_token",
+            )
+            # ForCausalLM.compile signature: (input_tokens_dt, *,
+            # output_tokens=...). Match Qwen3's keyword name.
+            model.compile(input_tokens_dt, output_tokens=meta["output_tokens"])
+
+        # ---- 9. nvcc compile --------------------------------------------
+        out_dir = rt.output_dir
+        if out_dir is not None and pc.world_size > 1:
+            out_dir = os.path.join(out_dir, f"rank{pc.rank}")
+            os.makedirs(out_dir, exist_ok=True)
+        pk.compile(output_dir=out_dir)
+
+        pk.model = model
+        return pk
+
+    @property
+    def tokenizer(self):
+        """Lazy ``AutoTokenizer.from_pretrained(hf.model_path)``.
+
+        Available only on PKs built via :meth:`build_from_config` (the
+        legacy ``__init__`` path doesn't know the model path).
+        """
+        if not hasattr(self, "_tokenizer"):
+            cfg = getattr(self, "_mpk_config", None)
+            if cfg is None:
+                raise RuntimeError(
+                    "PersistentKernel.tokenizer requires a PK built via "
+                    "build_from_config(mpk_config); the legacy constructor "
+                    "path has no associated model_path."
+                )
+            from transformers import AutoTokenizer
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                cfg.hf.model_path, trust_remote_code=cfg.hf.trust_remote_code,
+            )
+        return self._tokenizer
+
+    def run(
+        self,
+        prompt: Union[str, List[str]],
+        max_new_tokens: Optional[int] = None,
+        *,
+        apply_chat_template: bool = True,
+        system_prompt: Optional[str] = (
+            "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+        ),
+    ) -> Union[str, List[str]]:
+        """High-level: tokenize → validate → launch → decode → return text.
+
+        ``prompt`` may be a single string or a list of strings (batched).
+        ``apply_chat_template`` wraps the prompt in the tokenizer's chat
+        template (with ``system_prompt`` as the system turn). Pass
+        ``apply_chat_template=False`` for raw-prompt completion.
+        """
+        cfg = getattr(self, "_mpk_config", None)
+        if cfg is None:
+            raise RuntimeError(
+                "PersistentKernel.run requires a PK built via "
+                "build_from_config(mpk_config)."
+            )
+        rt = cfg.runtime
+        is_batch = isinstance(prompt, list)
+        prompts = list(prompt) if is_batch else [prompt]
+        n = len(prompts)
+        if n > rt.max_num_batched_requests:
+            raise ValueError(
+                f"PersistentKernel.run: got {n} prompts but "
+                f"RuntimeConfig.max_num_batched_requests = "
+                f"{rt.max_num_batched_requests}. Either batch in chunks or "
+                f"rebuild with a higher max_num_batched_requests."
+            )
+
+        tok = self.tokenizer
+        input_ids_list = []
+        for p in prompts:
+            if apply_chat_template:
+                messages = []
+                if system_prompt is not None:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": p})
+                text = tok.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                )
+            else:
+                text = p
+            ids = tok([text], return_tensors="pt").input_ids[0]
+            input_ids_list.append(ids)
+
+        # Validate seq-length cap per prompt.
+        for i, ids in enumerate(input_ids_list):
+            plen = ids.shape[0]
+            tail = max_new_tokens if max_new_tokens is not None else 0
+            if plen + tail > rt.max_seq_length:
+                raise ValueError(
+                    f"PersistentKernel.run: prompt {i} length ({plen}) + "
+                    f"max_new_tokens ({tail}) exceeds "
+                    f"RuntimeConfig.max_seq_length ({rt.max_seq_length}). "
+                    f"Either trim the prompt or rebuild with a higher "
+                    f"max_seq_length."
+                )
+
+        # Fill meta tensors.
+        tokens = self.meta_tensors["tokens"]
+        prompt_lengths = self.meta_tensors["prompt_lengths"]
+        step = self.meta_tensors["step"]
+        tokens.zero_()
+        prompt_lengths.zero_()
+        step.zero_()
+        for i, ids in enumerate(input_ids_list):
+            plen = ids.shape[0]
+            tokens[i, :plen] = ids.to(device=tokens.device, dtype=tokens.dtype)
+            prompt_lengths[i] = plen
+
+        # Launch + sync.
+        self()
+        torch.cuda.synchronize()
+
+        # Decode each request up to step[i].
+        texts: List[str] = []
+        for i in range(n):
+            end = int(step[i].item()) + 1
+            generated = tokens[i, :end].tolist()
+            texts.append(tok.decode(generated, skip_special_tokens=True))
+
+        return texts if is_batch else texts[0]
+
+    def run_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Token-level entrypoint for tests / non-chat callers.
+
+        ``input_ids`` shape: ``(batch, seq_len)`` int64. Fills the
+        ``tokens`` + ``prompt_lengths`` meta tensors, launches the
+        kernel, and returns ``tokens[i, :step[i]+1]`` per request as a
+        list of 1-D tensors (variable length per request).
+        """
+        if input_ids.dim() != 2:
+            raise ValueError(
+                f"run_tokens: input_ids must be 2-D (batch, seq_len); got "
+                f"shape {tuple(input_ids.shape)}.",
+            )
+        n, plen = input_ids.shape
+        tokens = self.meta_tensors["tokens"]
+        prompt_lengths = self.meta_tensors["prompt_lengths"]
+        step = self.meta_tensors["step"]
+        if n > tokens.shape[0]:
+            raise ValueError(
+                f"run_tokens: batch {n} exceeds max_num_batched_requests "
+                f"({tokens.shape[0]}).",
+            )
+        if plen > tokens.shape[1]:
+            raise ValueError(
+                f"run_tokens: seq_len {plen} exceeds max_seq_length "
+                f"({tokens.shape[1]}).",
+            )
+        tokens.zero_()
+        prompt_lengths.zero_()
+        step.zero_()
+        tokens[:n, :plen] = input_ids.to(device=tokens.device, dtype=tokens.dtype)
+        prompt_lengths[:n] = plen
+
+        self()
+        torch.cuda.synchronize()
+        return [tokens[i, :int(step[i].item()) + 1].clone() for i in range(n)]
 
     @classmethod
     def get_default_init_parameters(cls):
