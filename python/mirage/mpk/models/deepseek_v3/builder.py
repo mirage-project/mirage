@@ -335,10 +335,15 @@ class DeepSeekV3Builder(GraphBuilder):
         assert self._kv_gather_splits >= 1 and self._kv_gather_splits <= 128
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
+        # Honour the new MPK_DSV3_MLA_* names with backward-compat fallback
+        # to the old MPK_MLA_* spellings (set by older scripts).
         self._mla_single_split_max_kv_tiles = int(
-            os.environ.get("MPK_MLA_SINGLE_SPLIT_MAX_KV_TILES", "1"))
+            os.environ.get(
+                "MPK_DSV3_MLA_SINGLE_SPLIT_MAX_KV_TILES",
+                os.environ.get("MPK_MLA_SINGLE_SPLIT_MAX_KV_TILES", "1")))
         self._mla_num_splits_override = os.environ.get(
-            "MPK_MLA_NUM_SPLITS_OVERRIDE")
+            "MPK_DSV3_MLA_NUM_SPLITS_OVERRIDE",
+            os.environ.get("MPK_MLA_NUM_SPLITS_OVERRIDE"))
 
         # MTP config
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)
