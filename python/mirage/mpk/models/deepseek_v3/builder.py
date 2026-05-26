@@ -2316,14 +2316,13 @@ class DeepSeekV3Builder(GraphBuilder):
         mla_decode_kv = (
             layer_cache if self._direct_paged_decode_kv else self.contiguous_kv
         )
-        # c_latent and k_pe live at offsets 1536 / 2048 of the 2176-wide
-        # qkv_a_out row. Pass row strides + offsets so the gather kernel
-        # reads the right slice for each input.
+        # c_latent_out / k_pe_out are mpk.narrow views of the qkv_a_out
+        # (mbt, 2176) parent. The narrow's view_offset already lands the
+        # per-task base pointer at the correct column; only the parent's
+        # row stride needs to be communicated.
         kv_gather_slice_kwargs = dict(
             c_latent_row_stride=self._qkv_a_row_stride,
-            c_latent_offset_elems=self._qkv_a_c_latent_offset,
-            k_pe_row_stride=self._qkv_a_row_stride,
-            k_pe_offset_elems=self._qkv_a_k_pe_offset)
+            k_pe_row_stride=self._qkv_a_row_stride)
         if self._use_prefill:
             self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,

@@ -6272,19 +6272,17 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   //   size 3 (legacy): [d_k, d_v, page_size]
   //     c_latent input  is contiguous (mbt, d_v)            -> stride d_v
   //     k_pe     input  is contiguous (mbt, 128 padded)     -> stride 128
-  //   size 7 (QKV-a fused): adds
-  //     [c_latent_row_stride, c_latent_offset_elems,
-  //      k_pe_row_stride,     k_pe_offset_elems]
-  //   The two inputs may live at different col-offsets inside a wider buffer.
-  assert(params.size() == 3 || params.size() == 7);
+  //   size 5 (narrow-view): adds [c_latent_row_stride, k_pe_row_stride]
+  //     to express the parent's row width when c_latent / k_pe are
+  //     mpk.narrow views of a wider buffer. The per-task base pointer is
+  //     already offset by the runtime from each view's view_offset.
+  assert(params.size() == 3 || params.size() == 5);
 
   int d_k = params[0];
   int d_v = params[1];
   int page_size = params[2];
-  int c_latent_row_stride = (params.size() == 7) ? params[3] : d_v;
-  int c_latent_offset = (params.size() == 7) ? params[4] : 0;
-  int k_pe_row_stride = (params.size() == 7) ? params[5] : 128;
-  int k_pe_offset = (params.size() == 7) ? params[6] : 0;
+  int c_latent_row_stride = (params.size() == 5) ? params[3] : d_v;
+  int k_pe_row_stride = (params.size() == 5) ? params[4] : 128;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6297,14 +6295,12 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          "runtime_config.paged_kv_last_page_len_buffer[bi_];");
   code.e("  auto *c_latent_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
-         "qo_fp_ * $ + $;",
-         c_latent_row_stride,
-         c_latent_offset);
+         "qo_fp_ * $;",
+         c_latent_row_stride);
   code.e("  auto *k_pe_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
-         "qo_fp_ * $ + $;",
-         k_pe_row_stride,
-         k_pe_offset);
+         "qo_fp_ * $;",
+         k_pe_row_stride);
   code.e("  auto *paged_cache_ptr_ = "
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[2]);");
   code.e("  auto *contiguous_kv_base_ = "
@@ -6400,24 +6396,25 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   // needed; prompt prefill gets split CKV/KPE views for kv_b_proj + PR674 MLA.
   //
   // params:
-  //   size 3 (legacy): [d_k, d_v, page_size].
-  //   size 7 (QKV-a fused): adds [c_latent_row_stride, c_latent_offset_elems,
-  //                               k_pe_row_stride, k_pe_offset_elems].
-  //   size 8 (gather fan-out, 2026-05-16 C1): also append [num_gather_splits].
+  //   size 3 (legacy):     [d_k, d_v, page_size]
+  //   size 5 (narrow-view): adds [c_latent_row_stride, k_pe_row_stride]
+  //                         for callers that pass mpk.narrow views of a
+  //                         wider parent buffer. Per-task base pointers
+  //                         are already offset by the runtime from each
+  //                         view's view_offset.
+  //   size 6 (gather fan-out, 2026-05-16 C1): also append [num_gather_splits].
   //   When NUM_GATHER_SPLITS > 1, the builder passes grid_dim.y = N_SPLITS, and
   //   each CTA strides seq_pos by N_SPLITS so the formerly-serial gather/append
   //   loops run in parallel across N_SPLITS workers.
   (void)bgraph;
-  assert(params.size() == 3 || params.size() == 7 || params.size() == 8);
+  assert(params.size() == 3 || params.size() == 5 || params.size() == 6);
 
   int d_k = params[0];
   int d_v = params[1];
   int page_size = params[2];
-  int c_latent_row_stride = (params.size() >= 7) ? params[3] : d_v;
-  int c_latent_offset = (params.size() >= 7) ? params[4] : 0;
-  int k_pe_row_stride = (params.size() >= 7) ? params[5] : 128;
-  int k_pe_offset = (params.size() >= 7) ? params[6] : 0;
-  int num_gather_splits = (params.size() == 8) ? params[7] : 1;
+  int c_latent_row_stride = (params.size() >= 5) ? params[3] : d_v;
+  int k_pe_row_stride = (params.size() >= 5) ? params[4] : 128;
+  int num_gather_splits = (params.size() == 6) ? params[5] : 1;
   assert(num_gather_splits >= 1);
 
   mirage::transpiler::CodeKeeper code;
@@ -6438,14 +6435,12 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   code.e("  prompt_prefill_ = prompt_prefill_ && q_len_ > 8;");
   code.e("  auto *c_latent_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
-         "qo_fp_ * $ + $;",
-         c_latent_row_stride,
-         c_latent_offset);
+         "qo_fp_ * $;",
+         c_latent_row_stride);
   code.e("  auto *k_pe_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
-         "qo_fp_ * $ + $;",
-         k_pe_row_stride,
-         k_pe_offset);
+         "qo_fp_ * $;",
+         k_pe_row_stride);
   code.e("  auto *paged_cache_ptr_ = "
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[2]);");
   code.e("  auto *contiguous_kv_base_ = "

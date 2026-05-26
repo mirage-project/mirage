@@ -1186,27 +1186,18 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         c_latent_row_stride: int = None,
-        c_latent_offset_elems: int = 0,
         k_pe_row_stride: int = None,
-        k_pe_offset_elems: int = 0,
     ):
-        # Stride/offset overrides let the kernel read c_latent / k_pe from
-        # a wider parent buffer (QKV-a fused: qkv_a_out (mbt, 2176) with
-        # c_latent at [1536:2048) and k_pe at [2048:2112)). Defaults
-        # preserve legacy contiguous inputs.
+        # Optional row-stride overrides communicate the parent's row width
+        # when c_latent_new / k_pe_new are mpk.narrow views of a wider
+        # buffer (QKV-a path). Per-task base pointers are already offset by
+        # the runtime from each view's view_offset.
         d_k, d_v, page_size = mla_params
-        slice_override = (
-            c_latent_row_stride is not None or
-            c_latent_offset_elems != 0 or
-            k_pe_row_stride is not None or
-            k_pe_offset_elems != 0)
-        if slice_override:
+        if c_latent_row_stride is not None or k_pe_row_stride is not None:
             params = [
                 d_k, d_v, page_size,
                 c_latent_row_stride if c_latent_row_stride is not None else d_v,
-                c_latent_offset_elems,
                 k_pe_row_stride if k_pe_row_stride is not None else 128,
-                k_pe_offset_elems,
             ]
         else:
             params = [d_k, d_v, page_size]
@@ -1260,26 +1251,23 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         c_latent_row_stride: int = None,
-        c_latent_offset_elems: int = 0,
         k_pe_row_stride: int = None,
-        k_pe_offset_elems: int = 0,
         num_gather_splits: int = 1,
     ):
         """Append paged KV once, then materialize decode or prefill views.
 
-        Stride/offset overrides let the kernel read c_latent / k_pe from a
-        wider parent buffer (QKV-a fused path). Defaults preserve legacy.
+        Optional row-stride overrides communicate the parent's row width
+        when c_latent_new / k_pe_new are mpk.narrow views of a wider
+        buffer (QKV-a path). Per-task base pointers are already offset by
+        the runtime from each view's view_offset.
 
         num_gather_splits > 1 fans the formerly-serial seq_pos loop in
         append+gather phases over `num_gather_splits` CTAs (each CTA strides by
         the split count). Caller must set `grid_dim[1] == num_gather_splits`.
         """
         d_k, d_v, page_size = mla_params
-        slice_override = (
-            c_latent_row_stride is not None or
-            c_latent_offset_elems != 0 or
-            k_pe_row_stride is not None or
-            k_pe_offset_elems != 0)
+        has_stride_override = (
+            c_latent_row_stride is not None or k_pe_row_stride is not None)
         if num_gather_splits > 1:
             assert grid_dim[1] == num_gather_splits, (
                 f"grid_dim.y ({grid_dim[1]}) must match num_gather_splits "
@@ -1287,18 +1275,14 @@ class PersistentKernel:
             params = [
                 d_k, d_v, page_size,
                 c_latent_row_stride if c_latent_row_stride is not None else d_v,
-                c_latent_offset_elems,
                 k_pe_row_stride if k_pe_row_stride is not None else 128,
-                k_pe_offset_elems,
                 num_gather_splits,
             ]
-        elif slice_override:
+        elif has_stride_override:
             params = [
                 d_k, d_v, page_size,
                 c_latent_row_stride if c_latent_row_stride is not None else d_v,
-                c_latent_offset_elems,
                 k_pe_row_stride if k_pe_row_stride is not None else 128,
-                k_pe_offset_elems,
             ]
         else:
             params = [d_k, d_v, page_size]
