@@ -23,23 +23,11 @@ class PromptLookupConfig(SpecDecodeConfig):
 @dataclass
 class Eagle3Config(SpecDecodeConfig):
     method: Literal["eagle3"] = "eagle3"
-    # K = number of draft tokens generated per iteration. After verify, up to
-    # K accepted + 1 bonus token are committed per step.
-    spec_length: int = 4
-    # HF repo or local path to the Eagle3 draft model. Must be a
-    # LlamaForCausalLMEagle3-compatible checkpoint trained against the target.
+    spec_length: int = 5
     draft_model_path: str = (
         "lmsys/SGLang-EAGLE3-Qwen3-30B-A3B-Instruct-2507-SpecForge-Nex")
-    # Target layer indices whose pre-layer hidden state is captured as aux
-    # input to the draft. None → use default [2, num_layers//2, num_layers-3]
-    # (matches sglang's qwen3.py:682-695 behavior).
-    aux_layer_ids: Optional[List[int]] = None
-    # If True, apply per-aux RMSNorm (hidden_norm) before concat. Most public
-    # Eagle3 checkpoints (incl. the default above) do NOT set this in
-    # eagle_config; safe default is False.
+    aux_layer_ids: Optional[List[int]] = None # Default [2, num_layers//2, num_layers-3]
     use_aux_norm: bool = False
-    # Verification mode. "strict" reuses MTP's strict verify kernel.
-    # "probabilistic" is not yet wired for Eagle3 (TODO).
     rejection_sample_method: Literal["strict", "probabilistic"] = "strict"
 
 

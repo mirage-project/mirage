@@ -4501,28 +4501,6 @@ int TaskRegister::register_eagle3_commit_task(
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }
 
-int TaskRegister::register_eagle3_step0_input_prep_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params[0]: batch_size (= mbt = K+1), params[1]: hidden_dim
-  assert(params.size() == 2);
-  int batch_size = params[0];
-  int hidden_dim = params[1];
-
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  code.e("kernel::eagle3_step0_input_prep_kernel<bfloat16, $, $>(",
-         batch_size,
-         hidden_dim);
-  code.e("    task_desc->input_ptrs[0],");   // argmax_out
-  code.e("    task_desc->input_ptrs[1],");   // aux_h0
-  code.e("    task_desc->input_ptrs[2],");   // aux_h1
-  code.e("    task_desc->input_ptrs[3],");   // aux_h2
-  code.e("    task_desc->input_ptrs[4],");   // accepted_count
-  code.e("    task_desc->output_ptrs[0],");  // selected_token (1, 1)
-  code.e("    task_desc->output_ptrs[1]);"); // aux_concat (1, 3H)
-  return register_task_variant(TASK_EAGLE3_STEP0_INPUT_PREP, code.to_string());
-}
-
 // ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
 //
 // Three variants (TP=2/4/8) share structure but differ:

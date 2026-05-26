@@ -218,11 +218,7 @@ __device__ __forceinline__ bool
       int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
       int prompt_len = config.prompt_length[request_id];
 #ifdef MPK_SPEC_DECODE
-      // Eagle3 / spec-decode path: in decode (past prefill) the eagle3_commit
-      // kernel has already written verified tokens + new drafts to the tokens
-      // buffer AND published the step advance via new_token_nums. Skip the
-      // default output_tokens→tokens writeback (would clobber drafts) and
-      // advance step by accept_count instead of num_tokens.
+      // Eagle3 / spec-decode path
       int step_advance;
       if (step >= prompt_len) {
         // Decode: step += accepted_count (eagle3_commit writes this; 0 means
@@ -244,7 +240,6 @@ __device__ __forceinline__ bool
       }
       config.step[request_id] = step + step_advance;
 #else
-      // Original (non-spec) path
       for (int j = 0; j < num_tokens; j++) {
         if (step + j + 1 >= prompt_len &&
             step + j + 1 < config.max_seq_length) {

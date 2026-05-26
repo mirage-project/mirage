@@ -41,16 +41,6 @@ template <typename T,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
           int MAX_TOKENS = 3,
-          // Eagle3 K>1 chain support:
-          //   Q_LEN_OVERRIDE > 0 → override `num_tokens` derived from
-          //   `qo_indptr`. Kernel reads first Q_LEN_OVERRIDE q-tokens from
-          //   the packed QKV tensor (slots [0, Q_LEN_OVERRIDE)) instead of
-          //   the full slice that qo_indptr describes.
-          //   TAIL_OFFSET shifts the effective `seq_len` backward by this
-          //   many positions. Writes new K/V to cache at
-          //   [seq_len_eff - num_tokens, seq_len_eff) and attends over
-          //   [0, seq_len_eff). Default 0 = legacy behavior.
-          // See /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
           int Q_LEN_OVERRIDE = 0,
           int TAIL_OFFSET = 0>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
@@ -102,8 +92,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     if (first_token_pos == last_token_pos) {
       return;
     }
-    // Q_LEN_OVERRIDE: when > 0, override num_tokens (Eagle3 K>1 draft uses
-    // 1). Reads q-tokens from input slots [0, Q_LEN_OVERRIDE).
     int const num_tokens = (Q_LEN_OVERRIDE > 0)
                                ? Q_LEN_OVERRIDE
                                : (last_token_pos - first_token_pos);
@@ -115,16 +103,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     int const first_page_pos = paged_kv_indptr_buffer_ptr[request_id];
     int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
     int const num_pages = last_page_pos - first_page_pos;
-    // TAIL_OFFSET: when > 0, shift effective seq_len backward (Eagle3 K>1
-    // draft step k uses TAIL_OFFSET = K-k so step k writes 1 K/V at cache
-    // position step + k and attends [0, step + k + 1).
-    // Derivation: seq_len_no_offset = step + mbt = step + K + 1 (after
-    // prepare_next_batch); with num_tokens = Q_LEN_OVERRIDE = 1 and
-    // TAIL_OFFSET = K - k, seq_len_eff = step + k + 1, so kernel writes at
-    // [seq_len_eff - 1, seq_len_eff) = [step + k, step + k + 1).
-    // Cache convention: K=1 default-attention writes K/Vs at [step, step+mbt)
-    // with cache position N storing K/V for the *next* token (shift-by-1
-    // relative to the sequence). K>1 step k follows the same convention.
     int const seq_len = (num_pages - 1) * PAGE_SIZE +
                         paged_kv_last_page_len_buffer_ptr[request_id] -
                         TAIL_OFFSET;

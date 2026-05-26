@@ -1,28 +1,11 @@
-"""Eagle3 draft model graph builder for MPK.
-
-Builds the Eagle3 speculative decoding draft loop on top of an existing target
-model graph. The draft is a single Llama-style transformer block whose
-attention QKV input takes ``2 * hidden_size`` (concat of token embedding and
-projected hidden), with its own ``draft_vocab_size``-sized lm_head and a
-``d2t`` table mapping draft ids back to target vocab.
-
-See [/home/letianr/.claude/plans/mpk-eagle3-qwen3-sglang-claude-skills-s-merry-rocket.md]
-for the design rationale and phase breakdown.
-
-Currently targets the SM100 path (the only path where MTP + verify kernels are
-wired). World-size > 1 not supported in v1.
-"""
-
 import json
 import os
-from typing import List, Optional
 
 import torch
 from safetensors.torch import load_file
 
 from ..utils import (
     grid_for_rmsnorm_linear_layer,
-    inplace_shuffle_tensors,
     shuffle_tensors,
 )
 from ...persistent_kernel import PersistentKernel
@@ -95,7 +78,6 @@ class Eagle3Builder:
         self.max_num_pages = mpk.max_num_pages
         self.page_size = mpk.page_size
 
-        # Draft architecture parameters (from HF config.json)
         self.hidden_size = int(draft_config["hidden_size"])
         assert self.hidden_size == target_hidden_size, (
             f"Eagle3 draft hidden_size ({self.hidden_size}) must match target "
@@ -105,28 +87,18 @@ class Eagle3Builder:
         self.num_kv_heads = int(draft_config["num_key_value_heads"])
         self.head_dim = int(draft_config["head_dim"])
         self.draft_vocab_size = int(draft_config["draft_vocab_size"])
-        # Fused QKV output dim (Qwen3-style packing: Q + K + V along dim 0).
         self.fused_outdim_qkv = (
             self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
-        # Fused gate+up dim
         self.fused_outdim_gateup = 2 * self.intermediate_size
 
-        # Argmax over hot vocab: 32000 is divisible by num_workers (96) only
-        # when num_workers divides 32000. 32000 = 2^7 * 5^3, divisible by 64.
-        # Use the same num_workers grid the dense Qwen3 builder uses; the
-        # partial kernel handles uneven splits internally.
         self.num_draft_steps = num_draft_steps
         self.target_w_embed = target_w_embed
         self.cos_pos_embed = cos_pos_embed
         self.sin_pos_embed = sin_pos_embed
 
-        # Caches so we don't double-attach across draft steps.
         self._attach_cache = {}
-        self._kept_tensors = []  # keep PyTorch tensors alive (mpk stores raw ptrs)
+        self._kept_tensors = []
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     def _attach(self, tensor: torch.Tensor, name: str):
         if name in self._attach_cache:
             return self._attach_cache[name]
@@ -144,14 +116,11 @@ class Eagle3Builder:
         self._attach_cache[name] = dt
         return dt
 
-    # ------------------------------------------------------------------
-    # Weight preparation (one-time)
-    # ------------------------------------------------------------------
     def _prepare_weights(self):
         """Shuffle Q/K/V and gate/up into MPK's fused layouts; build d2t."""
         sd = self.sd
 
-        # 1. Fused QKV. Eagle3 q/k/v weights take input dim = 2 * hidden_size.
+        # Fused QKV. Eagle3 q/k/v weights take input dim = 2 * hidden_size.
         q = sd["midlayer.self_attn.q_proj.weight"]   # (num_q*head_dim, 2H)
         k = sd["midlayer.self_attn.k_proj.weight"]   # (num_kv*head_dim, 2H)
         v = sd["midlayer.self_attn.v_proj.weight"]   # (num_kv*head_dim, 2H)
@@ -161,7 +130,7 @@ class Eagle3Builder:
         self._qkv_w = shuffle_tensors([q, k, v], self.num_kv_heads, 0)
         self._kept_tensors.append(self._qkv_w)
 
-        # 2. Fused gate+up.
+        # Fused gate+up.
         gate = sd["midlayer.mlp.gate_proj.weight"]   # (interm, H)
         up = sd["midlayer.mlp.up_proj.weight"]       # (interm, H)
         rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(
@@ -169,7 +138,7 @@ class Eagle3Builder:
         self._gateup_w = shuffle_tensors([gate, up], rmsnorm_num_tasks // 2, 0)
         self._kept_tensors.append(self._gateup_w)
 
-        # 3. d2t table. State dict has it as int64 (sglang loads it as int64).
+        # d2t table. State dict has it as int64 (sglang loads it as int64).
         # Convention: target_id = hot_id + d2t[hot_id].
         d2t = sd["d2t"]
         if d2t.dtype != torch.int64:
@@ -177,18 +146,15 @@ class Eagle3Builder:
         self._d2t = d2t.contiguous()
         self._kept_tensors.append(self._d2t)
 
-        # 4. fc / eh_proj (3H → H), only used at step 0.
+        # fc / eh_proj (3H → H), only used at step 0.
         fc = sd["fc.weight"]
         assert fc.shape == (self.hidden_size, 3 * self.hidden_size)
         self._fc_w = fc.contiguous()
         self._kept_tensors.append(self._fc_w)
 
-        # 5. lm_head. Eagle3 uses hot vocab head; size 32000.
+        # lm_head. Eagle3 uses hot vocab head; size 32000.
         # Pad rows to make per-task output 16B-aligned so cuTensorMapEncodeTiled
         # accepts the OUTPUT TMA descriptor. 32000 → 32256 (= 96 × 336 elements);
-        # per-task = 336 bf16 = 672 bytes ≡ 0 mod 16. Pad rows are zeros (same
-        # strategy as target lm_head padding 151936 → 153600). Argmax over real
-        # logits dominates zeros in practice; hot_id stays in [0, 32000).
         lm = sd["lm_head.weight"]
         assert lm.shape == (self.draft_vocab_size, self.hidden_size)
         self._padded_draft_vocab = 32256
@@ -207,11 +173,8 @@ class Eagle3Builder:
         assert self._lm_head_w.shape == (self._padded_draft_vocab, self.hidden_size)
         self._kept_tensors.append(self._lm_head_w)
 
-        # 6. Paged draft KV cache (own buffer, single layer). Layout
-        # (max_num_pages, page_size, num_kv_heads, head_dim) — matches
-        # target's paged cache layout. The kernel writes K/V at the position
-        # determined by runtime_config indptr + (for K>1) the per-step
-        # TAIL_OFFSET template parameter (see paged_attention_layer wrapper).
+        # Paged draft KV cache (own buffer, single layer). Layout
+        # (max_num_pages, page_size, num_kv_heads, head_dim)
         self._k_cache_buf = torch.zeros(
             (self.max_num_pages, self.page_size, self.num_kv_heads, self.head_dim),
             dtype=torch.bfloat16, device="cuda")
@@ -219,19 +182,13 @@ class Eagle3Builder:
         self._kept_tensors.append(self._k_cache_buf)
         self._kept_tensors.append(self._v_cache_buf)
 
-        # 7. Dummy q_norm/k_norm (head_dim,) for paged_attention_layer slot.
-        # qk_norm is disabled via enable_qk_norm=False but the slot needs a
-        # valid DTensor.
+        # Dummy q_norm/k_norm (head_dim,) for paged_attention_layer slot.
         self._dummy_norm_buf = torch.zeros(
             (self.head_dim,), dtype=torch.bfloat16, device="cuda")
         self._kept_tensors.append(self._dummy_norm_buf)
 
     def _attach_weights(self):
         """Attach the prepared weights to the mpk graph."""
-        # Eagle3 draft uses TWO RMSNorms before QKV:
-        #   input_layernorm over the H-dim EMBED only
-        #   hidden_norm     over the H-dim HIDDEN only
-        # then concat → 2H → QKV. (sglang llama_eagle3.LlamaDecoderLayer.forward)
         self.w_input_ln = self._attach(
             self.sd["midlayer.input_layernorm.weight"].contiguous(),
             "eagle3_input_layernorm")
@@ -282,8 +239,6 @@ class Eagle3Builder:
             (mbt, H), bfloat16, "eagle3_draft_hidden")
         self.qkv_in_2H = self._new(
             (mbt, 2 * H), bfloat16, "eagle3_qkv_in_2H")
-        self.ln_out = self._new(
-            (mbt, 2 * H), bfloat16, "eagle3_ln_out")
         self.attn_in = self._new(
             (mbt, self.fused_outdim_qkv), bfloat16, "eagle3_attn_in")
         self.attn_out = self._new(
@@ -325,16 +280,13 @@ class Eagle3Builder:
     ):
         """Register the Eagle3 draft loop tasks on self.mpk's graph.
 
-        Uses MPK's `paged_attention_layer`:
-          - K=1: default behavior (writes mbt K/Vs at [step, step+mbt))
+        Uses MPK's paged_attention_layer:
+          - K=1: writes mbt K/Vs at [step, step+mbt)
           - K>1: passes q_len_override=1 + tail_offset=K-1-step so step k
             writes exactly 1 K/V at absolute position [step+k]. The K draft
             steps are serialized through the natural compute chain (step k+1
             embeds step k's d2t-remapped token), so each step's attention
             sees all prior steps' K/V writes via release/acquire fences.
-
-        See /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
-        for the full design.
 
         Inputs are kernel-level DTensors produced earlier in the target graph.
         After this returns, self.all_draft_ids contains the K draft tokens per
@@ -350,20 +302,12 @@ class Eagle3Builder:
         H = self.hidden_size
 
         # The block_dim convention: 256 for SM>=90 / Blackwell, 128 for Ampere.
-        # ALL kernels on Blackwell require 256 threads (NUM_THREADS hardcoded
-        # in SM100 task templates); passing (128,1,1) causes illegal-instruction
-        # crashes at runtime.
         bd_compute = (256, 1, 1) if self.mpk.target_cc >= 90 else (128, 1, 1)
         bd_small = bd_compute
 
         for step in range(K):
-            # 1. Pick the draft input token for this step
-            #    step 0 → target's argmax token (the bonus token from main fwd)
-            #    step>0 → previous draft's d2t-remapped (target-vocab) token
             draft_in_token = target_argmax_token if step == 0 else self.target_token
 
-            # 2. Embed lookup (shared with target). Embed kernel reads from
-            #    runtime token buffer via input_source=1 (input_token).
             self.mpk.embed_layer(
                 input=draft_in_token, weight=self.target_w_embed,
                 output=self.embed_out,
@@ -371,15 +315,12 @@ class Eagle3Builder:
                 input_source=1,
             )
 
-            # 3. Compute hidden_in (the H-dim hidden state).
             if step == 0:
-                # step 0: concat(h0, h1, h2) → 3H → eh_proj → H
                 self.mpk.eagle3_aux_concat_layer(
                     h0=aux_h0, h1=aux_h1, h2=aux_h2,
                     output=self.aux_concat_out,
                     grid_dim=(1, 1, 1), block_dim=bd_compute,
                 )
-                # fc: 3H → H
                 self.mpk.linear_layer(
                     input=self.aux_concat_out, weight=self.w_fc,
                     output=self.hidden_in,
@@ -388,13 +329,8 @@ class Eagle3Builder:
                 )
                 step_hidden = self.hidden_in
             else:
-                # step>0: reuse the draft block's output hidden from previous iter.
                 step_hidden = self.draft_hidden
 
-            # 4. Per-branch RMSNorm BEFORE concat (sglang Eagle3 convention):
-            #   embed   → input_layernorm → embed_normed   (H)
-            #   hidden  → hidden_norm     → hidden_normed  (H)
-            # Then concat the two normed tensors into the 2H QKV input.
             self.mpk.rmsnorm_layer(
                 input=self.embed_out, weight=self.w_input_ln,
                 output=self.embed_normed,
@@ -411,18 +347,12 @@ class Eagle3Builder:
                 grid_dim=(1, 1, 1), block_dim=bd_compute,
             )
 
-            # 5. fused QKV projection: (fused_outdim_qkv, 2H)
             self.mpk.linear_layer(
                 input=self.qkv_in_2H, weight=self.w_qkv, output=self.attn_in,
                 grid_dim=(grid_for_rmsnorm_linear_layer(self.w_qkv.dim(0)), 1, 1),
                 block_dim=bd_small,
             )
 
-            # 7. Eagle3 draft attention via paged_attention_layer.
-            # K=1: default behavior (write mbt K/Vs at [step, step+mbt))
-            # K>1: each step writes 1 K/V at position [step+k] via
-            #      q_len_override + tail_offset template params.
-            # See /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
             if K == 1:
                 self.mpk.paged_attention_layer(
                     input=self.attn_in,
@@ -437,16 +367,6 @@ class Eagle3Builder:
                     enable_qk_norm=False,
                 )
             else:
-                # mbt = K + 1; step k writes 1 K/V at cache position step+k.
-                # This matches the K=1 default-attention convention: K=1 default
-                # writes 2 K/Vs at [step, step+2), with cache position N storing
-                # the K/V for the token that will be at actual sequence position
-                # N+1 (i.e. shift-by-1). Following that convention, K>1 step k
-                # writes at cache position step+k (representing the token at
-                # actual position step+k+1).
-                # tail_offset = mbt - 1 - k = K - k (kernel sees seq_len_eff =
-                # step+mbt - tail_offset = step+k+1, writes [step+k, step+k+1),
-                # attends [0, step+k+1)).
                 self.mpk.paged_attention_layer(
                     input=self.attn_in,
                     k_cache=self.k_cache, v_cache=self.v_cache,
@@ -462,22 +382,18 @@ class Eagle3Builder:
                     tail_offset=K - step,
                 )
 
-            # 8. o_proj + residual. Residual is the H-dim step_hidden (not the
-            #    2H pre-attn). This mirrors sglang's llama_eagle3 forward.
             self.mpk.linear_with_residual_layer(
                 input=self.attn_out, weight=self.w_o,
                 residual=step_hidden, output=self.attn_proj_out,
                 grid_dim=(H // 64, 1, 1), block_dim=bd_small,
             )
 
-            # 9. post_attention_layernorm
             self.mpk.rmsnorm_layer(
                 input=self.attn_proj_out, weight=self.w_post_ln,
                 output=self.post_ln_out,
                 grid_dim=(mbt, 1, 1), block_dim=bd_small,
             )
 
-            # 10. MLP: gate_up linear → silu_mul → down + residual
             gateup_num_tasks = grid_for_rmsnorm_linear_layer(self.w_gateup.dim(0))
             self.mpk.linear_layer(
                 input=self.post_ln_out, weight=self.w_gateup,
@@ -494,7 +410,6 @@ class Eagle3Builder:
                 grid_dim=(H // 64, 1, 1), block_dim=bd_small,
             )
 
-            # 11. final norm + lm_head (hot vocab)
             self.mpk.rmsnorm_layer(
                 input=self.draft_hidden, weight=self.w_final_norm,
                 output=self.norm_out,
@@ -507,7 +422,6 @@ class Eagle3Builder:
                 block_dim=bd_small,
             )
 
-            # 12. argmax (hot vocab → hot_token id)
             self.mpk.argmax_partial_layer(
                 input=self.logits_hot,
                 output=(self.argmax_part_value, self.argmax_part_index),
@@ -519,8 +433,6 @@ class Eagle3Builder:
                 grid_dim=(1, 1, 1), block_dim=bd_small,
             )
 
-            # 13. d2t remap: hot_id → target vocab id (guarded against padded
-            # argmax: hot_id ≥ draft_vocab_size → sentinel 0)
             self.mpk.eagle3_d2t_remap_layer(
                 hot_token=self.hot_token, d2t_table=self.d2t,
                 target_token=self.target_token,
@@ -528,7 +440,6 @@ class Eagle3Builder:
                 draft_vocab_real=self.draft_vocab_size,
             )
 
-            # 14. scatter target_token into all_draft_ids[:, step]
             self.mpk.mtp_token_scatter_layer(
                 src=self.target_token, dst=self.all_draft_ids,
                 grid_dim=(1, 1, 1), block_dim=bd_small,

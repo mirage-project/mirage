@@ -285,9 +285,7 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
-    # Eagle3 v2: gate OFFLINE runtime's spec-decode-aware step advance behind a
-    # compile-time flag. Only enabled when the user configured Eagle3 (others
-    # like promptlookup / DeepSeek MTP keep original semantics).
+
     spec_cfg = getattr(mpk, 'spec_decode_config', None)
     if spec_cfg is not None and getattr(spec_cfg, 'method', None) == 'eagle3':
         flags = flags + ["-DMPK_SPEC_DECODE"]
@@ -823,11 +821,6 @@ class PersistentKernel:
             assert cos_pos_embed.dim(1) == head_dim
             assert sin_pos_embed.dim(1) == head_dim
             rotary_embed = 1
-        # The underlying task's input slots require valid DTensors for
-        # q_norm / k_norm even when norm is disabled (the kernel template's
-        # qk_norm=0 branch ignores the values but the slot must be bound).
-        # Callers that don't have real norm weights can attach a dummy tensor
-        # of shape (head_dim,) and pass enable_qk_norm=False.
         assert q_norm is not None and k_norm is not None, (
             "q_norm/k_norm must be valid DTensors; pass a dummy + "
             "enable_qk_norm=False when norm is disabled")
@@ -2349,8 +2342,7 @@ class PersistentKernel:
         """Generic memcpy: dst[i,j] = src[i,j] for a 2D bf16 tensor.
 
         Used by Eagle3 to capture target's intermediate hidden states into
-        dedicated aux buffers (since MPK's per-layer intermediates are reused
-        across layers and get overwritten).
+        dedicated aux buffers.
         """
         assert input.num_dims == 2
         assert output.num_dims == 2
@@ -2374,10 +2366,6 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        """Concatenate 3 (batch, H) aux hidden states into (batch, 3H).
-
-        Used at Eagle3 draft step 0 to feed h_low/h_mid/h_high through eh_proj.
-        """
         assert h0.num_dims == 2 and h1.num_dims == 2 and h2.num_dims == 2
         assert output.num_dims == 2
         assert h0.dim(0) == h1.dim(0) == h2.dim(0) == output.dim(0)
@@ -2402,10 +2390,6 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        """Concatenate (embed, hidden) → (batch, 2H) for Eagle3 draft attn QKV.
-
-        Matches sglang's `torch.cat([embeds, hidden_states], dim=-1)`.
-        """
         assert embed.num_dims == 2 and hidden.num_dims == 2
         assert output.num_dims == 2
         assert embed.dim(0) == hidden.dim(0) == output.dim(0)
@@ -2436,25 +2420,6 @@ class PersistentKernel:
         batch_size: int,            # mbt
         max_seq_len: int,
     ):
-        """Eagle3 post-verify commit (single-edge-per-pair design).
-
-        Each producer→consumer pair has exactly one edge to preserve MPK's
-        graph invariant:
-          argmax_reduce → eagle3_commit (target_argmax)             [1 edge]
-          mtp_token_scatter → eagle3_commit (draft_tokens_new)      [1 edge]
-          mtp_verify_strict → eagle3_commit (accepted_count)        [1 edge]
-          attach_input → tokens_buffer, num_new_tokens, drafts_prev [no edges]
-
-        Writes:
-         - Verified prefix tokens[step+1..step+ac] = target_argmax[0..ac-1]
-           (= same values as verify_strict's output_tokens, but reading
-            target_argmax avoids a 2nd edge from verify_strict)
-         - New drafts tokens[step+ac+1..step+ac+K] = draft_tokens_new
-         - num_new_tokens[req] = ac (= step_advance signal for runtime)
-         - drafts_prev[req, :] = draft_tokens_new (cross-iter snapshot;
-           consumed by NEXT iter's verify_strict via attach_input)
-         - Prompt-guarded (skip writes where pos < prompt_length[req]).
-         """
         params = [num_draft_tokens, batch_size, max_seq_len]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(target_argmax, (-1, -1, -1), -1, True)
@@ -2480,10 +2445,6 @@ class PersistentKernel:
         draft_vocab_real: int,   # = d2t_table.dim(0); argmax indices ≥ this come from
                                  # lm_head's padded rows and must be sentinel-mapped to 0
     ):
-        """Map Eagle3 draft hot-vocab id to target vocab id:
-            target_id = hot_id + d2t[hot_id]  (if hot_id < draft_vocab_real)
-            target_id = 0                      (otherwise — padded-row argmax)
-        """
         assert hot_token.num_dims == 2
         assert d2t_table.num_dims == 1
         assert target_token.num_dims == 2
@@ -2496,44 +2457,6 @@ class PersistentKernel:
         tb_graph.new_input(target_token, (-1, -1, -1), -1, True)
         self.kn_graph.customized([hot_token, d2t_table, target_token], tb_graph)
         self.kn_graph.register_task(tb_graph, "eagle3_d2t_remap", params)
-
-    def eagle3_step0_input_prep_layer(
-        self,
-        argmax_out: DTensor,      # (mbt, 1) int64 — target's argmax
-        aux_h0: DTensor,          # (mbt, H) bf16
-        aux_h1: DTensor,
-        aux_h2: DTensor,
-        accepted_count: DTensor,  # (1, 1) or (mbt, 1) int32 from verify
-        selected_token: DTensor,  # (1, 1) int64 — OUTPUT
-        aux_concat: DTensor,      # (1, 3*H) bf16 — OUTPUT
-        grid_dim: tuple,
-        block_dim: tuple,
-    ):
-        """Eagle3 K>1 serial-flow step 0 input prep: select slot (ac-1) from
-        the K+1 mbt slots and concat aux_h0/h1/h2 into (1, 3H) for eh_proj.
-        """
-        assert argmax_out.num_dims == 2
-        assert aux_h0.num_dims == 2 and aux_h1.num_dims == 2 and aux_h2.num_dims == 2
-        batch_size = argmax_out.dim(0)
-        hidden_dim = aux_h0.dim(1)
-        assert aux_h1.dim(1) == hidden_dim and aux_h2.dim(1) == hidden_dim
-        assert selected_token.num_dims == 2
-        assert aux_concat.num_dims == 2
-        assert aux_concat.dim(1) == 3 * hidden_dim
-        params = [batch_size, hidden_dim]
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(argmax_out, (-1, -1, -1), -1, True)
-        tb_graph.new_input(aux_h0, (-1, -1, -1), -1, True)
-        tb_graph.new_input(aux_h1, (-1, -1, -1), -1, True)
-        tb_graph.new_input(aux_h2, (-1, -1, -1), -1, True)
-        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
-        tb_graph.new_input(selected_token, (-1, -1, -1), -1, True)
-        tb_graph.new_input(aux_concat, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [argmax_out, aux_h0, aux_h1, aux_h2, accepted_count,
-             selected_token, aux_concat],
-            tb_graph)
-        self.kn_graph.register_task(tb_graph, "eagle3_step0_input_prep", params)
 
     def compile(
         self,
