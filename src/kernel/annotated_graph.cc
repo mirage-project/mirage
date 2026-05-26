@@ -127,13 +127,21 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // that touches the full tensor must depend on ALL those writers; a
   // reader that touches one slice depends only on writers whose bboxes
   // overlap. The shadow-cover walk below handles fragment-level coverage.
+  //
+  // BBox is an N-dim hyperrectangle [lo[i], hi[i]) per axis in the parent's
+  // element coordinates. `rank` is the active dim count (== the DTensor's
+  // num_dims for a same-rank view; reshape views currently fall back to a
+  // conservative full-parent bbox).
+  static constexpr int kMaxBBoxRank = mirage::config::MAX_TENSOR_DIMS;
+  struct BBox {
+    int rank;
+    int64_t lo[kMaxBBoxRank];
+    int64_t hi[kMaxBBoxRank];
+  };
   struct WriterEntry {
     int layer;
     int out_slot;
-    int64_t row_first; // first row written (elements along outer dim)
-    int64_t row_last;  // one past last row
-    int64_t col_first; // first col written (elements along inner dim)
-    int64_t col_last;  // one past last col
+    BBox bbox;
     bool is_virtual_writer;
   };
   std::unordered_map<size_t, std::vector<WriterEntry>> last_writers;
@@ -141,37 +149,124 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // Map KNCustomizedOp* -> layer index so downstream passes can locate by op.
   std::unordered_map<KNCustomizedOp const *, int> op_to_layer;
 
-  // Compute the writer/reader's 2D bbox in the parent's element coordinates.
-  // For non-views: row range [0, dim[0]), col range [0, stride[0]). For 2D
-  // narrow views: decompose view_offset into (row_first, col_first) using
-  // row_stride = stride[0]. For views with num_dims >= 3 we don't yet have a
-  // correct multi-axis decomposition (dim_inner only covers the innermost
-  // axis; middle-axis offsets are invisible), so we fall back to the same
-  // conservative full-row window as the non-view branch. This is
-  // pessimistic — it will report overlap for two disjoint 3D narrow views —
-  // but never miss a real overlap.
+  // Compute a DTensor's bbox in parent-element coordinates.
+  //   * Non-virtual tensor: [0, dim[i]) per axis. (The parent is the tensor
+  //     itself.)
+  //   * Same-rank narrow view of a row-major-contiguous parent: divmod
+  //     view_offset through the view's stride[] (which equals the parent's
+  //     stride[] for same-rank narrows) to recover the per-axis start
+  //     coordinate; extent is dim[i].
+  //   * Reshape view (different rank than parent) or anything not
+  //     row-major-decomposable: conservative fallback that treats the view
+  //     as the whole parent. This is pessimistic — disjoint reshape views
+  //     overlap by construction — but never misses a real overlap.
   auto compute_bbox = [](DTensor const &dt) {
-    struct BBox {
-      int64_t row_first;
-      int64_t row_last;
-      int64_t col_first;
-      int64_t col_last;
-    };
-    size_t dtype_size = mirage::type::get_datatype_size(dt.data_type);
-    int64_t row_stride =
-        dt.num_dims >= 2 ? static_cast<int64_t>(dt.stride[0]) : 1;
-    int64_t dim0 = dt.num_dims >= 1 ? static_cast<int64_t>(dt.dim[0]) : 1;
-    if (dt.is_virtual() && dt.num_dims == 2 && dtype_size > 0 &&
-        row_stride > 0) {
-      int64_t dim_inner = static_cast<int64_t>(dt.dim[1]);
-      int64_t view_off_elems =
-          dt.view_offset / static_cast<int64_t>(dtype_size);
-      int64_t row_first = view_off_elems / row_stride;
-      int64_t col_first = view_off_elems % row_stride;
-      return BBox{
-          row_first, row_first + dim0, col_first, col_first + dim_inner};
+    BBox b{};
+    b.rank = dt.num_dims;
+    if (b.rank <= 0) {
+      b.rank = 1;
+      b.lo[0] = 0;
+      b.hi[0] = 1;
+      return b;
     }
-    return BBox{0, dim0, 0, row_stride};
+    auto fill_full_parent = [&] {
+      // Outer dim spans dim[0]; remaining axes span up to stride[i-1] so the
+      // hyperrectangle covers the entire parent row stride.
+      for (int i = 0; i < b.rank; ++i) {
+        b.lo[i] = 0;
+      }
+      b.hi[0] = static_cast<int64_t>(dt.dim[0]);
+      for (int i = 1; i < b.rank; ++i) {
+        // Use stride of the previous axis as the conservative bound on the
+        // inner span (parent's row width / inner-strip width).
+        int64_t outer_stride = static_cast<int64_t>(dt.stride[i - 1]);
+        int64_t inner_dim = static_cast<int64_t>(dt.dim[i]);
+        b.hi[i] = outer_stride > inner_dim ? outer_stride : inner_dim;
+      }
+    };
+    if (!dt.is_virtual()) {
+      for (int i = 0; i < b.rank; ++i) {
+        b.lo[i] = 0;
+        b.hi[i] = static_cast<int64_t>(dt.dim[i]);
+      }
+      return b;
+    }
+    size_t dtype_size = mirage::type::get_datatype_size(dt.data_type);
+    if (dtype_size == 0) {
+      fill_full_parent();
+      return b;
+    }
+    int64_t off_elems = dt.view_offset / static_cast<int64_t>(dtype_size);
+    // Same-rank narrow decomposition. We divmod by outer strides to peel
+    // off coordinates; innermost stride is implicitly 1 (row-major).
+    bool ok = true;
+    int64_t residual = off_elems;
+    for (int i = 0; i < b.rank - 1; ++i) {
+      int64_t s = static_cast<int64_t>(dt.stride[i]);
+      if (s <= 0) {
+        ok = false;
+        break;
+      }
+      b.lo[i] = residual / s;
+      residual = residual % s;
+      b.hi[i] = b.lo[i] + static_cast<int64_t>(dt.dim[i]);
+    }
+    if (!ok) {
+      fill_full_parent();
+      return b;
+    }
+    b.lo[b.rank - 1] = residual;
+    b.hi[b.rank - 1] = residual + static_cast<int64_t>(dt.dim[b.rank - 1]);
+    return b;
+  };
+
+  // Intersect two bboxes. Returns false if they don't overlap on every axis.
+  // Caller may pass bboxes of different ranks (e.g., a reshape-view fallback
+  // mixed with a same-rank narrow) — in that case we treat them as
+  // "definitely overlap" since neither side can localize the other.
+  auto bbox_intersect =
+      [](BBox const &a, BBox const &b, BBox &out) -> bool {
+    if (a.rank != b.rank) {
+      // Cannot meaningfully intersect; assume overlap. The caller's
+      // shadow-cover loop will skip detailed coverage tracking for the
+      // unknown axes.
+      out = a;
+      return true;
+    }
+    out.rank = a.rank;
+    for (int i = 0; i < a.rank; ++i) {
+      int64_t lo = std::max(a.lo[i], b.lo[i]);
+      int64_t hi = std::min(a.hi[i], b.hi[i]);
+      if (lo >= hi) {
+        return false;
+      }
+      out.lo[i] = lo;
+      out.hi[i] = hi;
+    }
+    return true;
+  };
+
+  // Subtract `cut` from `frag` (where `cut` is known to intersect `frag`,
+  // and both have the same rank). Returns up to 2*rank disjoint sub-pieces
+  // covering frag \ cut.
+  auto bbox_subtract = [](BBox const &frag, BBox const &cut) {
+    std::vector<BBox> pieces;
+    BBox cur = frag;
+    for (int d = 0; d < frag.rank; ++d) {
+      if (cut.lo[d] > cur.lo[d]) {
+        BBox piece = cur;
+        piece.hi[d] = cut.lo[d];
+        pieces.push_back(piece);
+      }
+      if (cut.hi[d] < cur.hi[d]) {
+        BBox piece = cur;
+        piece.lo[d] = cut.hi[d];
+        pieces.push_back(piece);
+      }
+      cur.lo[d] = cut.lo[d];
+      cur.hi[d] = cut.hi[d];
+    }
+    return pieces;
   };
 
   for (auto const &op : kn_graph.operators) {
@@ -228,63 +323,51 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       bool c_is_virtual = cdt.is_virtual();
 
       // C20 (2026-05-17): shadow-aware edge selection. Walk writers in
-      // REVERSE layer order, tracking the still-uncovered column range
-      // of the reader. Each writer only contributes an edge for the
-      // sub-range it most-recently wrote — later writers shadow earlier
-      // ones over the columns they overwrote. Without this, a full
-      // qkv_a_proj producer (cols [0, 2176)) stays as a stale producer
-      // of every narrow-view consumer downstream even after rmsnorm
-      // and other view-writes have fully overwritten the slot they
-      // read; downstream MLA kv_gather then sees two distinct
-      // producers per slot and trips case-2/case-3 fork/join checks.
-      // Row range is assumed full for the readers we currently
-      // support (no row-slice views yet); only the column dimension
-      // gets fragment-cover tracking.
-      std::vector<std::pair<int64_t, int64_t>> uncovered_cols;
-      uncovered_cols.push_back({rbox.col_first, rbox.col_last});
+      // REVERSE layer order, tracking the still-uncovered region of the
+      // reader's bbox as a union of N-dim hyperrectangles. Each writer
+      // only contributes an edge for the sub-region it most-recently
+      // wrote — later writers shadow earlier ones over the bytes they
+      // overwrote.
+      //
+      // Without this, a full qkv_a_proj producer (cols [0, 2176)) stays
+      // as a stale producer of every narrow-view consumer downstream
+      // even after rmsnorm and other view-writes have fully overwritten
+      // the slot they read; downstream MLA kv_gather then sees two
+      // distinct producers per slot and trips case-2/case-3 fork/join
+      // checks.
+      std::vector<BBox> uncovered;
+      uncovered.push_back(rbox);
       auto const &writers = wit->second;
       for (auto rit = writers.rbegin(); rit != writers.rend(); ++rit) {
-        if (uncovered_cols.empty()) {
+        if (uncovered.empty()) {
           break;
         }
         WriterEntry const &we = *rit;
-        // Row overlap is a fast reject.
-        if (!(we.row_first < rbox.row_last && rbox.row_first < we.row_last)) {
-          continue;
-        }
         bool wrote_anything = false;
-        std::vector<std::pair<int64_t, int64_t>> new_uncovered;
-        for (auto const &frag : uncovered_cols) {
-          int64_t a = std::max(we.col_first, frag.first);
-          int64_t b = std::min(we.col_last, frag.second);
-          if (a < b) {
-            wrote_anything = true;
-            if (frag.first < a) {
-              new_uncovered.push_back({frag.first, a});
-            }
-            if (b < frag.second) {
-              new_uncovered.push_back({b, frag.second});
-            }
-          } else {
+        std::vector<BBox> new_uncovered;
+        new_uncovered.reserve(uncovered.size());
+        for (auto const &frag : uncovered) {
+          BBox cut;
+          if (!bbox_intersect(frag, we.bbox, cut)) {
+            // No overlap — keep frag intact.
             new_uncovered.push_back(frag);
+            continue;
+          }
+          wrote_anything = true;
+          if (cut.rank != frag.rank) {
+            // Rank mismatch fallback: bbox_intersect returned `frag` as a
+            // conservative overlap; treat the writer as fully covering
+            // this frag (drop it from uncovered).
+            continue;
+          }
+          for (BBox const &piece : bbox_subtract(frag, cut)) {
+            new_uncovered.push_back(piece);
           }
         }
         if (!wrote_anything) {
           continue;
         }
-        // Shadow-cover only tracks columns. If we are about to short-circuit
-        // (uncovered_cols emptied by this writer), the writer's row range
-        // must fully cover the reader's, otherwise rows above/below this
-        // writer's range still need RAW edges from earlier writers.
-        if (new_uncovered.empty()) {
-          if (we.row_first > rbox.row_first || we.row_last < rbox.row_last) {
-            throw std::runtime_error(
-                "build_annotated_graph: writer covers all reader columns but "
-                "not all reader rows — row-fragmented producers are not "
-                "supported yet");
-          }
-        }
-        uncovered_cols = std::move(new_uncovered);
+        uncovered = std::move(new_uncovered);
 
         EdgeInfo e;
         e.prod_layer = we.layer;
@@ -331,15 +414,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       DTensor const &odt = output_ops[out_slot]->dtensor;
       size_t base = odt.resolve_base_guid();
       bool o_is_virtual = odt.is_virtual();
-      auto wbox = compute_bbox(odt);
-
-      WriterEntry we{layer_idx,
-                     out_slot,
-                     wbox.row_first,
-                     wbox.row_last,
-                     wbox.col_first,
-                     wbox.col_last,
-                     o_is_virtual};
+      WriterEntry we{layer_idx, out_slot, compute_bbox(odt), o_is_virtual};
       if (!o_is_virtual) {
         // A full-storage write supersedes any prior writers (view or full).
         last_writers[base].clear();
