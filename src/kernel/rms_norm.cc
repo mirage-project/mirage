@@ -110,6 +110,10 @@ KNRMSNormOp::KNRMSNormOp(Graph *_kgraph,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
+  // Output gets its own allocation; clear base_guid/view_offset so codegen
+  // does not route writes through input's parent IODesc when input is a view.
+  output.base_guid = 0;
+  output.view_offset = 0;
   kgraph->allocate(output);
   output_tensors.push_back(output);
 }

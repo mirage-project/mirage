@@ -167,6 +167,11 @@ KNElementUnaryOp::KNElementUnaryOp(Graph *_kgraph,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
+  // The output gets its own allocation below; it is not a view of input.
+  // Clearing base_guid/view_offset prevents codegen from routing writes
+  // through the input's parent IODesc when `input` is a view.
+  output.base_guid = 0;
+  output.view_offset = 0;
   kgraph->allocate(output);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
