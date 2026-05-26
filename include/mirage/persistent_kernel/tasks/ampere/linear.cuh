@@ -21,19 +21,16 @@
 #include "smem_layout.cuh"
 #include "tasks/common/common_header.cuh"
 
-// DCHECK is a developer-toggle assertion; flip kMirageLinearDebug to true
-// during local debugging. Using a file-scope constexpr instead of `#define
-// DEBUG 0` avoids polluting the common DEBUG identifier (CUTLASS headers
-// included downstream check for DEBUG in macro form).
-static constexpr bool kMirageLinearDebug = false;
+#define DEBUG 0
+
+#if DEBUG
 #define DCHECK(condition)                                                      \
-  do {                                                                         \
-    if constexpr (kMirageLinearDebug) {                                        \
-      if ((condition) == 0) {                                                  \
-        printf("Dcheck failed at %s:%d\n", __FILE__, __LINE__);                \
-      }                                                                        \
-    }                                                                          \
-  } while (0)
+  if ((condition) == 0) {                                                      \
+    printf("Dcheck failed at %s:%d\n", __FILE__, __LINE__);                    \
+  }
+#else
+#define DCHECK(condition)
+#endif // DEBUG
 
 namespace kernel {
 
