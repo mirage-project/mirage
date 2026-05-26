@@ -33,6 +33,15 @@ TaskRegister *TaskRegister::get_instance() {
   return singleton;
 }
 
+// P1/P2 invariant: row stride is dtensor.stride[0], not dim[1]. For root
+// tensors stride[0] == dim[1] (row-major contiguous); for views stride[0]
+// is the parent's row width while dim[1] is the slot's logical column count.
+// All task registrations that walk rows should call this helper.
+static inline int row_stride(kn::DTensor const &t) {
+  assert(t.num_dims >= 2);
+  return t.stride[0];
+}
+
 static bool graph_input_has_num_dims(threadblock::Graph const &bgraph,
                                      size_t index,
                                      int num_dims) {
@@ -303,7 +312,7 @@ int TaskRegister::register_paged_attention_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
-  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int qkv_stride = row_stride(input_ops[0]->dtensor);
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
   int num_kv_heads = params[1];
@@ -1031,7 +1040,7 @@ int TaskRegister::register_paged_attention_hopper_task(
 
   // Shapes/strides
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
-  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int qkv_stride = row_stride(input_ops[0]->dtensor);
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
   int num_kv_heads = params[1];
@@ -1879,7 +1888,7 @@ int TaskRegister::register_splitk_linear_sm100_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->output_tensors[0].dim[1];
-  reduction_stride = input_ops[0]->dtensor.dim[1];
+  reduction_stride = row_stride(input_ops[0]->dtensor);
   output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
@@ -2022,7 +2031,7 @@ int TaskRegister::register_paged_attention_sm100_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
-  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int qkv_stride = row_stride(input_ops[0]->dtensor);
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
   int num_kv_heads = params[1];
@@ -3500,7 +3509,7 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 3); // lse
   assert(output_ops[1]->output_tensors[0].num_dims == 3); // output_tmp
 
-  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int qkv_stride = row_stride(input_ops[0]->dtensor);
   int num_q_heads = params[0];
   int num_kv_heads = params[1];
   int head_dim = input_ops[1]->output_tensors[0].dim[3];
@@ -3581,7 +3590,7 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
-  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int qkv_stride = row_stride(input_ops[0]->dtensor);
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads_per_kv = params[0];
   int head_dim = params[1];
@@ -4537,7 +4546,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 3); // lse
   assert(output_ops[1]->output_tensors[0].num_dims == 3); // output_tmp
 
-  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int qkv_stride = row_stride(input_ops[0]->dtensor);
   int num_q_heads = params[0];
   int num_kv_heads = params[1];
   int head_dim = input_ops[1]->output_tensors[0].dim[3];
