@@ -631,9 +631,11 @@ class PersistentKernel:
         self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
         # Track tensor for kernel reuse - tensor pointer can be passed at runtime
         self._model_tensors[name] = torch_tensor
-        # Sanitize name for C++ codegen (dots are illegal in identifiers)
+        # Sanitize name for C++ codegen (dots are illegal in identifiers).
+        # Skip the second attach when the name was already valid.
         safe_name = name.replace('.', '_')
-        self.kn_graph.attach_torch_tensor(t, torch_tensor, safe_name)
+        if safe_name != name:
+            self.kn_graph.attach_torch_tensor(t, torch_tensor, safe_name)
         # Keep a reference to the PyTorch tensor so it is not garbage-collected.
         # The generated persistent kernel code stores the raw GPU data pointer;
         # if the tensor is freed, the pointer becomes dangling.
