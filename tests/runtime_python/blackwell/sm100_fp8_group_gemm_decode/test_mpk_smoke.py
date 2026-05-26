@@ -68,7 +68,7 @@ def main():
     print("compiling...", flush=True)
     pk.compile(output_dir=folder)
     print("running...", flush=True)
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     D_ref = torch_reference(A_fp8, B_fp8, sa, sb_block, m_indices, MPE, E, K, N)
