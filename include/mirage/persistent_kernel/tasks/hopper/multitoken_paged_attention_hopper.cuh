@@ -28,7 +28,6 @@
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
-#define USE_TMA_Q 0
 namespace kernel {
 
 template <typename T,
@@ -286,13 +285,6 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
     // prefetch
     // load q
-#if USE_TMA_Q
-    if (lane_idx == 0 && warp_idx % 4 == 0) {
-      set_barrier_transaction_bytes(
-          q_barrier[0], MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM * sizeof(T));
-      tma_q.tma_cp_async(q_barrier[0], q_smem(0, 0), {0, 0, 0});
-    }
-#else
 #pragma unroll
     for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
          chunk_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM / CP_CHUNK_SIZE;
@@ -304,7 +296,6 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       int dst_col = src_col % HEAD_DIM;
       load_smem(q_smem(dst_row, dst_col), q_dmem(src_row, src_col));
     }
-#endif
 
     // load k and v
     int page_idx_0 = page_indices[kv_cache_offset / PAGE_SIZE];
@@ -428,10 +419,6 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
       }
     }
-
-#if USE_TMA_Q
-    wait(q_barrier[0], 0);
-#endif
 
     for (int iter = 0; iter < num_iters; iter++) {
       int phase = (iter / Kstages) % 2;
