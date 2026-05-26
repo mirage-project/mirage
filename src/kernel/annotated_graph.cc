@@ -294,6 +294,19 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         if (!wrote_anything) {
           continue;
         }
+        // Shadow-cover only tracks columns. If we are about to short-circuit
+        // (uncovered_cols emptied by this writer), the writer's row range
+        // must fully cover the reader's, otherwise rows above/below this
+        // writer's range still need RAW edges from earlier writers.
+        if (new_uncovered.empty()) {
+          if (we.row_first > rbox.row_first ||
+              we.row_last < rbox.row_last) {
+            throw std::runtime_error(
+                "build_annotated_graph: writer covers all reader columns but "
+                "not all reader rows — row-fragmented producers are not "
+                "supported yet");
+          }
+        }
         uncovered_cols = std::move(new_uncovered);
 
         EdgeInfo e;
