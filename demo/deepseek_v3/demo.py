@@ -1429,90 +1429,10 @@ if __name__ == "__main__":
             print(f"Saved tokens to {save_path}")
 
     else:
-        raise RuntimeError("Pytorch ref is not allowed for now, which may cause OOM.")
-        # Native PyTorch path (without Mirage)
-        # DeepSeek V3 requires the model implementation for non-Mirage inference
-        try:
-            from transformers import AutoModelForCausalLM
-            print(f"Loading DeepSeek V3 model from: {args.model_path}")
-            with torch.device("cuda"):
-                model = AutoModelForCausalLM.from_pretrained(
-                    args.model_path,
-                    torch_dtype=torch.bfloat16,
-                    trust_remote_code=True,
-                ).to("cuda")
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load DeepSeek V3 model for native inference: {e}. "
-                "For native PyTorch inference, ensure transformers supports the model "
-                "or use --use-mirage for Mirage megakernel inference."
-            )
-
-        prompt_len = prompt_lengths[0].item()
-        output_len = (
-            args.max_new_tokens
-            if args.max_new_tokens is not None
-            else (tokens.size(1) - prompt_len)
+        raise RuntimeError(
+            "Native PyTorch path is disabled for DeepSeek V3 (OOM on single GPU). "
+            "Re-run with --use-mirage for Mirage megakernel inference."
         )
-        output_len = max(0, min(output_len, tokens.size(1) - prompt_len))
-        decode_limit = prompt_len + output_len
-        prev_pos = 0
-        stream = torch.cuda.Stream()
-
-        for cur_pos in range(prompt_len, decode_limit):
-            step.fill_(cur_pos - 1)
-            input_ids = tokens[:1, prev_pos:cur_pos]
-            with torch.no_grad():
-                logits = model(input_ids=input_ids).logits
-            next_token = logits[:, -1, :].argmax(dim=-1)
-            tokens[0, cur_pos] = next_token[0]
-            prev_pos = cur_pos
-            eos_id = config.eos_token_id
-            if isinstance(eos_id, list):
-                if next_token[0].item() in eos_id:
-                    break
-            elif next_token[0].item() == eos_id:
-                break
-            if cur_pos == prompt_len:
-                torch.cuda.synchronize()
-                starter.record()
-
-        ender.record()
-        torch.cuda.synchronize()
-        run_time = starter.elapsed_time(ender)
-
-        end_idx = prev_pos + 1
-        generated_ids = tokens[:1, :end_idx]
-        response = safe_tokenizer_decode(
-            tokenizer, generated_ids, context="torch request 0"
-        )
-        print(response)
-        print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, cur_pos - prompt_len,
-                run_time / max(cur_pos - prompt_len, 1)
-            )
-        )
-
-        # Dump outputs to json
-        if save_path and rank == 0:
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
-            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
-            token_ids = tokens[0, prompt_len:slice_end].tolist()
-            out = {
-                "token_ids": token_ids,
-                "text": safe_tokenizer_decode(
-                    tokenizer, tokens[0, :end_idx], context="torch request 0"
-                ),
-                "latency_ms_per_token": per_tok_ms,
-                "prompt_length": prompt_len,
-                "generate_length": tokens_generated,
-                "mode": "torch",
-            }
-            with open(save_path, "w") as f:
-                json.dump(out, f, indent=2)
-            print(f"Saved tokens to {save_path}")
 
     if "mpk" in locals() and hasattr(mpk, "finalize") and not getattr(
         mpk, "__finalized__", True
