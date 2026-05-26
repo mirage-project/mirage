@@ -644,48 +644,6 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
             << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
       }
-      // Diagnostic: dump each consumer's in_edges so we can see which
-      // consumer is the join-consumer that made this layer a
-      // join-producer.
-      for (int eidx : ag.layers[i].out_edges) {
-        int cons = ag.edges[eidx].cons_layer;
-        if (cons < 0 || cons >= (int)ag.layers.size()) {
-          continue;
-        }
-        auto const &CL = ag.layers[cons];
-        msg << "\n  consumer L" << cons
-            << " task_type=" << static_cast<int>(CL.task_type)
-            << (CL.is_join_consumer ? " [JOIN-CONSUMER]" : "")
-            << " in=" << CL.in_edges.size() << ":";
-        for (int ie : CL.in_edges) {
-          auto const &ce = ag.edges[ie];
-          msg << " [" << ce.prod_layer << ":" << ce.out_slot << "->" << cons
-              << ":" << ce.in_slot << " guid=" << ce.tensor_guid << "]";
-        }
-      }
-      // Extra diagnostic: for the first non-join-consumer fork-out
-      // sibling of i (typically L1 = fused task), dump its forward
-      // reachable set + out_edges so we can see why the strip pass
-      // didn't remove i->{join-consumer} (it should have, if the
-      // sibling reaches the join-consumer via a longer path).
-      for (int eidx : ag.layers[i].out_edges) {
-        int cons = ag.edges[eidx].cons_layer;
-        if (cons < 0 || cons >= (int)ag.layers.size()) {
-          continue;
-        }
-        if (ag.layers[cons].is_join_consumer) {
-          continue;
-        }
-        msg << "\n  sibling L" << cons
-            << " task_type=" << static_cast<int>(ag.layers[cons].task_type)
-            << " out_edges:";
-        for (int oe : ag.layers[cons].out_edges) {
-          auto const &oce = ag.edges[oe];
-          msg << " [L" << cons << ":" << oce.out_slot << "->L" << oce.cons_layer
-              << ":" << oce.in_slot << " guid=" << oce.tensor_guid << "]";
-        }
-        break;
-      }
       throw std::runtime_error(msg.str());
     }
   }
