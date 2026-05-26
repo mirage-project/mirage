@@ -361,6 +361,14 @@ void register_mugraph(
               task.task_metadata.request_id = bid.x;
               task.task_metadata.kv_idx = bid.y;
             }
+            // assemble_q_decode: grid.x = token index (dim_map (0,-1,-1)
+            // offsets each CTA's ptr to its token). request_id = bid.x lets
+            // the task_register gate inactive-token CTAs at decode — with
+            // active_rows=1 only token 0 survives, freeing the other 127
+            // workers for the concurrent attention-branch GEMMs.
+            if (task_type == TASK_ASSEMBLE_Q_DECODE_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // transpose_scale_sm100 (B13): grid_x CTAs stripe M.
             // request_id = bid.x = the CTA's chunk index.
             if (task_type == TASK_TRANSPOSE_SCALE_SM100) {

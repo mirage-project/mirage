@@ -6337,6 +6337,16 @@ int TaskRegister::register_assemble_q_decode_sm100_task(
   assert(D_NOPE + D_PE == D_TOTAL);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // Active-row gate: request_id = bid.x = this CTA's token index (set in
+  // runtime.cc register_mugraph). The dim_map (0,-1,-1) already offset each
+  // CTA's ptr to its token. At decode active_rows=1, only token 0 survives;
+  // tokens 1..mbt-1 are padding (their q_nope_pe slots are never read by MLA
+  // decode), so early-exiting their CTAs is safe and frees ~127 workers for
+  // the concurrent attention-branch GEMMs. Correct for prefill too (keeps
+  // CTAs 0..active_rows-1).
+  code.e("int active_rows_aq_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("if (task_desc->task_metadata.request_id >= active_rows_aq_) return;");
   code.e("kernel::assemble_q_decode_sm100_task_impl<$, $, $, $>(",
          H,
          D_NOPE,
