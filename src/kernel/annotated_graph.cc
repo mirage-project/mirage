@@ -348,10 +348,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       bool o_is_virtual = odt.is_virtual();
       auto wbox = compute_bbox(odt);
 
-      // Preserve the TASK_TENSOR_INIT WAW behaviour: if the previous writer
-      // was a zero-fill (init) for the SAME tensor (matching guid + window),
-      // add an explicit WAW edge so the next writer waits for init.
-      if (!o_is_virtual) {
+      // Preserve the TASK_TENSOR_INIT WAW behaviour: if a previous writer
+      // was a zero-fill (init) for the same storage and its bbox overlaps
+      // this writer's, add an explicit WAW edge so the writer waits for init.
+      // This fires for both non-virtual and virtual (write-view) writers —
+      // an init zero-fill of a parent storage must complete before any view
+      // writes into it, e.g. MoE pipelines that init then partial-write
+      // through mpk.narrow slots.
+      {
         auto wit = last_writers.find(base);
         if (wit != last_writers.end()) {
           for (WriterEntry const &we : wit->second) {
@@ -360,6 +364,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
             }
             if (ag.layers[we.layer].task_type !=
                 mirage::runtime::TASK_TENSOR_INIT) {
+              continue;
+            }
+            bool overlaps = (we.row_first < wbox.row_last &&
+                             wbox.row_first < we.row_last) &&
+                            (we.col_first < wbox.col_last &&
+                             wbox.col_first < we.col_last);
+            if (!overlaps) {
               continue;
             }
             bool duplicate_edge = false;
@@ -392,8 +403,10 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
                     "build_annotated_graph: invalid out_slot for WAW producer");
               }
               e.output_map = prod_outputs[we.out_slot]->input_map;
-              // WAW edges keep the non-virtual semantics they had before;
-              // is_barrier_edge stays false unless we explicitly need it.
+              // Virtual-writer WAW edges run through the barrier path
+              // because the writer only updates part of the storage; the
+              // init must fully precede any partial overwrite.
+              e.is_barrier_edge = o_is_virtual;
               int edge_idx = (int)ag.edges.size();
               ag.edges.push_back(e);
               ag.layers[layer_idx].in_edges.push_back(edge_idx);
