@@ -67,7 +67,8 @@ __device__ __forceinline__ void
                                 void *permuted_fp8_ptr,
                                 void *permuted_scale_ptr,
                                 void *meta_ptr,
-                                int my_expert) {
+                                int my_expert,
+                                int num_active_rows) {
   uint8_t const *__restrict__ in_fp8 =
       static_cast<uint8_t const *>(input_fp8_ptr);
   uint32_t const *__restrict__ in_scale =
@@ -83,35 +84,70 @@ __device__ __forceinline__ void
   int32_t *__restrict__ meta = static_cast<int32_t *>(meta_ptr);
 
   // Sub-regions inside the meta buffer.
+  // The meta tensor is shape (2, M_TOTAL + MBT*TOPK) int32 — see the wrapper
+  // docstring. Row 0 holds out_weights (float32 bits) + tok_to_perm; row 1
+  // was unused historically (tensor_init artifact) and now carries the
+  // per-expert active mask consumed by fp8_group_gemm to skip whole-expert
+  // tile blocks where no token routed locally.
   constexpr int M_TOTAL = E_LOCAL * BM_PADDING;
+  constexpr int META_ROW_STRIDE = M_TOTAL + MBT * TOPK;
   float *__restrict__ out_weights =
       reinterpret_cast<float *>(meta);                // [0 : M_TOTAL)
   int32_t *__restrict__ tok_to_perm = meta + M_TOTAL; // [M_TOTAL : ...)
+  int32_t *__restrict__ active_expert_mask =
+      meta + META_ROW_STRIDE; // [META_ROW_STRIDE : META_ROW_STRIDE + E_LOCAL)
 
   int const my_row_base = my_expert * BM_PADDING;
   int const tid = threadIdx.x;
   int const nthreads = blockDim.x;
 
-  // Phase 1: scan routing_indices[my_expert, 0..MBT-1] deterministically
-  // (single-thread sequential) so that re-runs and downstream consumers
-  // agree on per-expert slot ordering without atomic-ordering ambiguity.
+  // Phase 1: scan routing_indices[my_expert, 0..MBT-1] deterministically.
+  // C16 (2026-05-17): warp-parallel via __ballot_sync + __popc, still
+  // deterministic. Each iter of the for loop processes 32 consecutive
+  // positions; lane 0 atomicAdd's the chunk count into s_count, which
+  // preserves chunk order (warp executes iterations sequentially). Within
+  // a chunk, lane_idx == bit-position in __ballot_sync mask, so
+  // popc(mask & ((1<<lane)-1)) gives the deterministic intra-chunk slot.
   __shared__ int s_count;
   __shared__ int s_matched_token[BM_PADDING];
   __shared__ int s_matched_slot[BM_PADDING]; // 0-indexed (routing_val - 1)
 
   if (tid == 0) {
-    int count = 0;
+    s_count = 0;
+  }
+  __syncthreads();
+
+  // Only warp 0 cooperates on the scan. Other warps idle here — Phase 2
+  // re-engages them. This trades 13 μs of single-thread work for ~1 μs
+  // of warp-parallel work (scan_end=128 → 4 chunks of 32 lanes).
+  {
     int const my_routing_base = my_expert * MBT;
+    int const scan_end = (num_active_rows < MBT) ? num_active_rows : MBT;
+    if (tid < 32) {
+      int const lane = tid;
 #pragma unroll 1
-    for (int t = 0; t < MBT; ++t) {
-      int32_t slot_1idx = routing[my_routing_base + t];
-      if (slot_1idx > 0 && count < BM_PADDING) {
-        s_matched_token[count] = t;
-        s_matched_slot[count] = slot_1idx - 1;
-        ++count;
+      for (int chunk_base = 0; chunk_base < scan_end; chunk_base += 32) {
+        int const t = chunk_base + lane;
+        int32_t slot_1idx = (t < scan_end) ? routing[my_routing_base + t] : 0;
+        unsigned const mask = __ballot_sync(0xffffffff, slot_1idx > 0);
+        int const my_offset = __popc(mask & ((1u << lane) - 1));
+        int const chunk_count = __popc(mask);
+        int base_slot;
+        if (lane == 0) {
+          base_slot = s_count;
+          s_count += chunk_count;
+        }
+        base_slot = __shfl_sync(0xffffffff, base_slot, 0);
+        int const my_slot = base_slot + my_offset;
+        if (slot_1idx > 0 && my_slot < BM_PADDING) {
+          s_matched_token[my_slot] = t;
+          s_matched_slot[my_slot] = slot_1idx - 1;
+        }
+      }
+      if (lane == 0 && s_count > BM_PADDING) {
+        s_count = BM_PADDING;
       }
     }
-    s_count = count;
   }
   __syncthreads();
   int const actual_count = s_count;
@@ -152,6 +188,24 @@ __device__ __forceinline__ void
       // the GEMM output for these rows will be multiplied by 0.
       out_weights[row] = 0.0f;
     }
+  }
+
+  // Phase 3: publish per-expert active mask + actual row count.
+  //
+  // active_expert_mask[expert]: 0/1 — used by fp8_group_gemm + silu_mul
+  // D1/D3 short-circuits.
+  //
+  // actual_count_per_expert[expert]: number of real (non-padding) routed
+  // rows this iter. Decode (active_token=1) routes at most 1 row per
+  // selected expert; the silu_mul kernel can use this to bound its
+  // ROWS_PER_CTA loop instead of always processing all BM_PADDING (=128)
+  // rows. Layout in row 1 of meta (after active_expert_mask):
+  //
+  //   meta[META_ROW_STRIDE       : META_ROW_STRIDE +   E_LOCAL] = mask
+  //   meta[META_ROW_STRIDE+E_LOC : META_ROW_STRIDE + 2*E_LOCAL] = count
+  if (tid == 0) {
+    active_expert_mask[my_expert] = (actual_count > 0) ? 1 : 0;
+    active_expert_mask[E_LOCAL + my_expert] = actual_count;
   }
 }
 

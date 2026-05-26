@@ -797,6 +797,31 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_k_bmm.weight"] = bmm_w_q
                     state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"] = (
                         bmm_scale_packed)
+
+                    # BMM repack of kv_b_v for MPK_DSV3_BMM=1 post-attn path.
+                    # W_UV is already (H, V_HEAD_DIM=128, KV_LORA=512). BMM
+                    # kernel expects weight [H, D_out, D_in] = (H, 128, 512).
+                    # NO transpose needed unlike kv_b_k_bmm. Per-row UE8M0
+                    # scale with K=512 → packed_K=1 (one uint32 per row).
+                    W_UV_bmm = W_UV.contiguous()  # (H, 128, 512)
+                    bmm_v_amax = W_UV_bmm.abs().amax(dim=-1, keepdim=True).clamp(
+                        min=1e-12)
+                    bmm_v_scale_inv_f32 = (bmm_v_amax / 448.0).squeeze(-1)  # (H, 128)
+                    bmm_v_w_q = (W_UV_bmm / bmm_v_amax).clamp(-448, 448).to(
+                        torch.float8_e4m3fn).contiguous()  # (H, 128, 512) FP8
+                    pos_v = torch.where(
+                        bmm_v_scale_inv_f32 > 0, bmm_v_scale_inv_f32,
+                        torch.full_like(bmm_v_scale_inv_f32, 1e-30))
+                    log2_v = torch.ceil(torch.log2(pos_v))
+                    ue_v = (log2_v + 127.0).clamp(0, 255).to(torch.uint8)
+                    ue_v = torch.where(bmm_v_scale_inv_f32 > 0, ue_v,
+                                       torch.zeros_like(ue_v))
+                    bmm_v_scale_packed = ue_v.to(torch.uint32).unsqueeze(-1).contiguous()
+                    # ^ shape (H, 128, 1) uint32, low byte holds UE8M0 exponent.
+                    state_dict[f"{attn}kv_b_v_bmm.weight"] = bmm_v_w_q
+                    state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"] = (
+                        bmm_v_scale_packed)
+
                     # DEBUG 2026-05-10: also store bf16 versions of the
                     # split kv_b weights for the BF16 ablation in
                     # _fp8_dense_kv_b_proj. Used to verify whether the FP8
@@ -1025,6 +1050,10 @@ if __name__ == "__main__":
                     # shards the same way.
                     (r"self_attn\.kv_b_k_bmm\.weight",                       0),
                     (r"self_attn\.kv_b_k_bmm\.weight_scale_ue8m0",           0),
+                    # BMM repack of kv_b_v: per-head (H, 128, 512); shard
+                    # head dim (dim=0). Same sharding as kv_b_k_bmm.
+                    (r"self_attn\.kv_b_v_bmm\.weight",                       0),
+                    (r"self_attn\.kv_b_v_bmm\.weight_scale_ue8m0",           0),
                     (r"self_attn\.kv_b_k_bf16\.weight",                      0),
                     (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
@@ -1340,25 +1369,6 @@ if __name__ == "__main__":
                     os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
                 )
                 print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
-            # Debug-only: when MPK_DSV3_FP8_BUF_ATTACH=1, builder attaches the
-            # shared FP8 input/scale buffers as torch tensors so we can inspect
-            # their post-megakernel state here.
-            if getattr(mpk, "_fp8_input_torch", None) is not None:
-                for rsize, tensor in mpk._fp8_input_torch.items():
-                    name = f"fp8_input_v2_{rsize}.pt"
-                    torch.save(tensor.detach().view(torch.uint8).cpu(),
-                               os.path.join(args.dump_hidden_dir, name))
-                    print(f"Saved {name} to {args.dump_hidden_dir}")
-                for rsize, tensor in mpk._fp8_scale_torch.items():
-                    name = f"fp8_scale_v2_{rsize}.pt"
-                    torch.save(tensor.detach().cpu(),
-                               os.path.join(args.dump_hidden_dir, name))
-                    print(f"Saved {name} to {args.dump_hidden_dir}")
-            if getattr(mpk, "_rmsnorm_out_torch", None) is not None:
-                torch.save(mpk._rmsnorm_out_torch.detach().cpu(),
-                           os.path.join(args.dump_hidden_dir, "rmsnorm_out_attached.pt"))
-                print(f"Saved rmsnorm_out_attached.pt to {args.dump_hidden_dir}")
-
             for _attr, _fname in [
                 ("dump_ckv_sep_tensor", "ckv_sep.pt"),
                 ("dump_kpe_sep_tensor", "kpe_sep.pt"),

@@ -204,7 +204,7 @@ def _mla_tp4_head_groups():
     return value
 
 def _mla_tp4_rd_dv():
-    value = int(os.environ.get("MPK_MLA_TP4_RD_DV", "2"))
+    value = int(os.environ.get("MPK_MLA_TP4_RD_DV", "4"))
     if value not in (2, 4, 8):
         raise ValueError("MPK_MLA_TP4_RD_DV must be one of 2, 4, 8")
     return value
@@ -368,6 +368,20 @@ def get_compile_command(
         flags = flags + ["-DMPK_ENABLE_PROFILING"]
 
     return common_cmd + specific_cmd + flags
+
+
+# B32 (2026-05-15): default grid_y cap for quantize_fp8_layer.
+# C2 sweep (2026-05-16):
+#   16  baseline (B32)
+#    32: -13 μs/layer, max 12.8 μs
+#    64: -8  μs/layer cumulative, max 9.4 μs
+#   128: -4  μs/layer cumulative, max 7.7 μs (saturates workers)
+# group_tiles auto-adjusts down to keep grid_y * group_tiles ≤ num_workers.
+# At cap=128 the quantize task occupies all workers in 1 wave, but contention
+# with concurrent tasks is negligible in practice (verified empirically).
+# Env override: MPK_QUANTIZE_GRID_Y_CAP={8,16,32,64,128}.
+import os as _os_q
+_QUANTIZE_GRID_Y_CAP = int(_os_q.environ.get("MPK_QUANTIZE_GRID_Y_CAP", "128"))
 
 
 class PersistentKernel:
@@ -778,6 +792,106 @@ class PersistentKernel:
                 task_name,
                 [process_dim, in_offset_elems, out_offset_elems],
             )
+
+    def fused_rmsnorm_quantize_fp8_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output_bf16: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        process_dim: int = None,
+        in_offset_elems: int = 0,
+        out_offset_elems: int = 0,
+        scale_ue8m0: bool = True,
+        emit_bf16: bool = True,
+        eps: float = 1e-6,  # accepted for API parity; kernel hardcodes 1e-6f
+        epsilon: float = None,  # alias for `eps` to match older call sites
+        group_size: int = 128,  # kernel currently asserts GROUP_SIZE == 128
+    ):
+        """B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+
+        Replaces the two-task chain `rmsnorm_layer` + `quantize_fp8_layer`
+        when the BF16 rmsnorm output is consumed (only) by an FP8 dense
+        GEMM. Saves one dispatch wave + one BF16 HBM round-trip per layer
+        (~10 μs/layer expected at TP=4 EP=2 mbt=128 decode).
+
+        Parameters mirror the two underlying calls:
+          * `process_dim` / `in_offset_elems` / `out_offset_elems` select
+            a column slice of a wider parent buffer (QKV-a FuseTensor
+            path). Defaults preserve legacy contiguous behaviour.
+          * `scale_ue8m0=True` writes packed UE8M0 uint32 scales in the
+            column-major `[packed_k, aligned_batch]` layout that the new
+            FP8 dense GEMMs (`fp8_gemm_dense_smallm/mediumm_sm100`) read.
+            `False` writes float32 scales in `[batch, num_groups]`
+            row-major (MoE permute path).
+          * `emit_bf16=False` skips writing the BF16 normalized output to
+            HBM. Use when no downstream consumer needs the BF16 (e.g.,
+            pre-qkv_a where only the FP8 path reads the result). Defaults
+            to True so the wrapper is a strict superset of `rmsnorm_layer`.
+          * `eps` / `epsilon`: RMS epsilon (kernel hard-codes 1e-6f today;
+            accepted only for API parity).
+          * `group_size`: FP8 quantization group size; kernel requires 128.
+        """
+        del eps, epsilon  # API parity only, kernel uses 1e-6f hard-coded.
+        if group_size != 128:
+            raise ValueError(
+                f"fused_rmsnorm_quantize_fp8_layer requires group_size=128, "
+                f"got {group_size}")
+        assert input.num_dims == 2
+        assert weight.num_dims == 1
+        assert output_bf16.num_dims == 2
+        assert output_fp8.num_dims == 2
+        # output_scale shape is layout-dependent: packed UE8M0 is
+        # (packed_k, aligned_batch) column-major; float32 is
+        # (batch, num_groups) row-major. Both are 2D.
+        assert output_scale.num_dims == 2
+        assert input.dim(0) == output_bf16.dim(0)
+        assert input.dim(1) == output_bf16.dim(1)
+        assert output_fp8.dim(0) == input.dim(0)
+        legacy_hidden = input.dim(1)
+        if process_dim is None:
+            process_dim = legacy_hidden
+        assert output_fp8.dim(1) == process_dim, (
+            f"output_fp8 second dim must equal process_dim "
+            f"({output_fp8.dim(1)} vs {process_dim})")
+        assert in_offset_elems + process_dim <= legacy_hidden
+        assert out_offset_elems + process_dim <= output_bf16.dim(1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # IMPORTANT: input order MUST match the C++ task_register reader.
+        # input_ptrs[0]=input, [1]=weight, [2]=output_bf16, [3]=output_fp8,
+        # [4]=output_scale. We pass outputs via `store_in_dmem=True` inputs
+        # so the (num_inputs, num_outputs) tuple in graph.cc is (5, 0).
+        #
+        # Per-CTA pointer offsetting via dim_maps:
+        #   input / output_bf16 / output_fp8: row dim 0 → grid.x, so each
+        #     CTA's base pointer is pre-offset to its row-block. The kernel
+        #     then walks `batch_idx in [0, BATCH_SIZE)` within that block.
+        #   weight: 1D, shared across all CTAs (dim_maps all -1).
+        #   output_scale: 2D but BOTH UE8M0 (col-major) and float32
+        #     (row-major) layouts need the GLOBAL row index, which the
+        #     kernel reconstructs from task_idx = task_metadata.request_id.
+        #     dim_maps stays (-1, -1, -1) so the kernel sees the buffer
+        #     base pointer.
+        tb_graph.new_input(input, (0, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 0, True)
+        tb_graph.new_input(output_bf16, (0, -1, -1), 1, True)
+        tb_graph.new_input(output_fp8, (0, -1, -1), 1, True)
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, weight, output_bf16, output_fp8, output_scale], tb_graph)
+        params = [
+            process_dim,
+            in_offset_elems,
+            out_offset_elems,
+            1 if scale_ue8m0 else 0,
+            1 if emit_bf16 else 0,
+        ]
+        self.kn_graph.register_task(
+            tb_graph, "fused_rmsnorm_quantize_fp8_sm100", params)
 
     def rmsnorm_linear_layer(
         self,
@@ -1234,11 +1348,16 @@ class PersistentKernel:
         c_latent_offset_elems: int = 0,
         k_pe_row_stride: int = None,
         k_pe_offset_elems: int = 0,
+        num_gather_splits: int = 1,
     ):
         """Append paged KV once, then materialize decode or prefill views.
 
         Stride/offset overrides let the kernel read c_latent / k_pe from a
         wider parent buffer (QKV-a fused path). Defaults preserve legacy.
+
+        num_gather_splits > 1 fans the formerly-serial seq_pos loop in
+        append+gather phases over `num_gather_splits` CTAs (each CTA strides by
+        the split count). Caller must set `grid_dim[1] == num_gather_splits`.
         """
         d_k, d_v, page_size = mla_params
         slice_override = (
@@ -1246,7 +1365,19 @@ class PersistentKernel:
             c_latent_offset_elems != 0 or
             k_pe_row_stride is not None or
             k_pe_offset_elems != 0)
-        if slice_override:
+        if num_gather_splits > 1:
+            assert grid_dim[1] == num_gather_splits, (
+                f"grid_dim.y ({grid_dim[1]}) must match num_gather_splits "
+                f"({num_gather_splits}) for the fan-out path.")
+            params = [
+                d_k, d_v, page_size,
+                c_latent_row_stride if c_latent_row_stride is not None else d_v,
+                c_latent_offset_elems,
+                k_pe_row_stride if k_pe_row_stride is not None else 128,
+                k_pe_offset_elems,
+                num_gather_splits,
+            ]
+        elif slice_override:
             params = [
                 d_k, d_v, page_size,
                 c_latent_row_stride if c_latent_row_stride is not None else d_v,
@@ -1257,9 +1388,14 @@ class PersistentKernel:
         else:
             params = [d_k, d_v, page_size]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
-        tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
-        tb_graph.new_input(paged_cache, (-1, 2, -1), 1, True)
+        # With num_gather_splits>1 the kernel partitions seq_pos itself
+        # (strided by split_idx = grid.y). All CTAs read the same base
+        # pointers, so dim_maps must NOT slice any tensor along grid.y.
+        # Pre-existing single-split callers also work with all -1 since
+        # grid.y=1 makes slicing a no-op either way.
+        tb_graph.new_input(c_latent_new, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_pe_new, (-1, -1, -1), -1, True)
+        tb_graph.new_input(paged_cache, (-1, -1, -1), 1, True)
         tb_graph.new_input(contiguous_kv, (-1, -1, -1), -1, True)
         tb_graph.new_input(ckv_sep, (-1, -1, -1), -1, True)
         tb_graph.new_input(kpe_sep, (-1, -1, -1), -1, True)
@@ -1321,8 +1457,15 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple = (128, 1, 1),
         q_tile_size: int = 16,
+        phase_gate: int = 0,
     ):
+        # phase_gate=2 (decode-only, B25 2026-05-15): codegen emits a
+        # `if (Q_LEN > 8) return;` gate so the kernel skips the rotation
+        # on prefill iters where q_nope_pe is stale (the absorbed q_b
+        # decode GEMM early-exits via gate_mode=2 on prefill iters).
         params = [num_heads, q_tile_size]
+        if phase_gate != 0:
+            params.append(phase_gate)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
@@ -1345,13 +1488,24 @@ class PersistentKernel:
         block_dim: tuple = (128, 1, 1),
         q_tile_size: int = 16,
         qfused_mode: int = 0,
+        phase_gate: int = 0,
     ):
         # qfused_mode = 0: q_pe is a standalone (mbt, num_heads*64) tensor.
         # qfused_mode = 1: q_pe is the same DTensor as the fused q_b_prefill
         # buffer (mbt, num_heads*192) with row-swap layout. Kernel uses
         # row_stride = num_heads*192 and pe_base_in_row = num_heads*128.
+        # phase_gate=1 (prefill-only, B25 2026-05-15): codegen emits a
+        # `if (Q_LEN <= 8) return;` gate so the kernel skips the rotation
+        # on decode iters where the q_b_prefill_fused buffer is stale
+        # (the unabsorbed q_b prefill GEMM early-exits via gate_mode=1
+        # on decode iters; chunked_prefill itself returns early too).
         params = [num_heads, q_tile_size]
-        if qfused_mode != 0:
+        # The codegen reads phase_gate at params[3], so qfused_mode (params[2])
+        # must be present when phase_gate is set, even if 0.
+        if phase_gate != 0:
+            params.append(qfused_mode)
+            params.append(phase_gate)
+        elif qfused_mode != 0:
             params.append(qfused_mode)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
@@ -1944,7 +2098,22 @@ class PersistentKernel:
         an output of the task so the MPK dep-tracker chains tensor_init between
         the producer of `dummy` and any downstream consumer of `dummy`. The
         kernel never reads or writes `dummy`'s data.
+
+        Optimization: when `target_input_map[i]` == -1 for grid axis `i`, that
+        grid axis does NOT partition `target`, so all CTAs on that axis would
+        zero the same target tile redundantly (1 logical wave with K-fold
+        replication). Collapse such redundant axes to 1 — the dep edge stays
+        task-level (no CTA-level partner-tracking in the runtime), so reducing
+        the CTA count does not affect downstream consumers. Saves the splitk
+        prepend-tensor_init from launching grid_y replicates of the same zero
+        tile.
         """
+        gx, gy, gz = grid_dim
+        if target_input_map[1] == -1 and gy > 1:
+            gy = 1
+        if target_input_map[2] == -1 and gz > 1:
+            gz = 1
+        grid_dim = (gx, gy, gz)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # bgraph order = [dummy, target, dummy] -> arity (1, 2):
         #   input_ops[0]  = dummy   (read dep)
@@ -2146,13 +2315,26 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
 
     # === FP8 Dense Layers ===
-    def _fp8_quantize_group_tiles(self, hidden_size: int, scale_ue8m0: bool) -> int:
+    def _fp8_quantize_group_tiles(
+        self, hidden_size: int, scale_ue8m0: bool, max_tiles: int = 16
+    ) -> int:
+        """Pick the per-row group-tile count for quantize_fp8.
+
+        ``max_tiles`` is the caller's upper bound — passed by
+        ``quantize_fp8_layer`` as ``num_workers // grid_y`` so the total
+        launched CTAs (group_tiles * grid_y) stays ≤ num_workers and the
+        task fits in a single dispatch wave. For prefill where row_count
+        >= num_workers this collapses to ``group_tiles = 1`` (each CTA
+        owns all groups for its row(s)); for decode-style row_count=1 it
+        scales up to use idle workers, capped by num_groups and the UE8M0
+        4-group alignment.
+        """
         num_groups = max(1, hidden_size // 128)
         if scale_ue8m0:
             # Packed UE8M0 stores four group scales per uint32. Split only at
             # four-group boundaries so each CTA owns whole packed scale words.
             group_tiles = 1
-            for candidate in range(min(16, num_groups), 1, -1):
+            for candidate in range(min(max_tiles, num_groups), 1, -1):
                 if num_groups % candidate == 0:
                     groups_per_tile = num_groups // candidate
                     if groups_per_tile % 4 == 0:
@@ -2160,7 +2342,7 @@ class PersistentKernel:
                         break
             return group_tiles
         # Float-scale MoE quantization has no packing hazard.
-        return min(4, max(1, num_groups // 8))
+        return min(min(max_tiles, 4), max(1, num_groups // 8))
 
     def quantize_fp8_layer(
         self,
@@ -2174,6 +2356,10 @@ class PersistentKernel:
         hidden_size_override: int = None,
         input_stride_override: int = None,
         in_offset_elems: int = 0,
+        process_all_rows: bool = False,
+        expert_active_meta: DTensor = None,
+        expert_active_e_local: int = 0,
+        expert_active_bm_padding: int = 0,
     ):
         """Quantize BF16 input to FP8 with block-wise scale.
 
@@ -2184,6 +2370,14 @@ class PersistentKernel:
         quantizing a column slice of a wider input buffer (QKV-a fused path).
         Defaults preserve legacy whole-row quantize. The OUTPUT buffer should
         be sized for the slice (hidden_size_override columns).
+
+        process_all_rows=True: disable the token-indexed `active_rows`
+        skip and process EVERY logical row (batch_size). Use for
+        permuted-layout buffers (e.g. NEW MoE silu_out at M_TOTAL =
+        E_LOCAL × BM_PADDING rows) where the row index is NOT the token
+        index — the default skip path was silently leaving rows
+        128..M_TOTAL-1 uninitialized in decode, feeding stale silu_fp8
+        into the W2 group GEMM for every routed expert > 0.
         """
         legacy_hidden_size = input.dim(input.num_dims - 1)
         row_count = 1
@@ -2195,25 +2389,82 @@ class PersistentKernel:
         hidden_size = hidden_size_override or legacy_hidden_size
         if input_stride_override is None:
             input_stride_override = legacy_hidden_size
-        group_tiles = self._fp8_quantize_group_tiles(hidden_size, scale_ue8m0)
-        # Cap grid.y at num_workers so total CTAs launched per task instance
-        # stays ≤ num_workers (single wave on persistent runtime). The kernel
-        # gets ROWS_PER_TASK = ceil(row_count / grid.y) template param via the
-        # C++ register and internally loops over multiple rows per CTA. For
-        # the legacy case (row_count ≤ num_workers) grid.y == row_count and
-        # ROWS_PER_TASK = 1, matching the original behavior.
-        grid_y = min(row_count, max(self.num_workers, 1))
+        # B32 (2026-05-15): collapse grid_y so the kernel's ROWS_PER_TASK
+        # multi-row inner loop kicks in instead of dispatching one CTA per
+        # row. Old code overwrote grid_y = min(row_count, num_workers),
+        # which silently defeated the kernel's ROWS_PER_TASK contract (see
+        # per_token_group_quantize_fp8.cuh:113-130). The user-supplied
+        # `grid_dim` arg is intentionally ignored — every existing caller
+        # passes a legacy "one CTA per row" shape that the wrapper has
+        # always overwritten anyway. The new policy:
+        #   * active_mode=5 (B15 per-expert skip): grid_y = E_local so
+        #     rows_per_cta == bm_padding (ctas_per_expert == 1). Required
+        #     because the kernel's row_count_cap clips the per-CTA inner
+        #     loop only, not multi-CTA-per-expert.
+        #   * otherwise: grid_y = min(row_count, _QUANTIZE_GRID_Y_CAP) so
+        #     each CTA covers ~ROWS_PER_TASK = row_count / grid_y rows.
+        #     Downstream consumers (FP8 GEMM, permute) are insensitive
+        #     to stale rows past active_rows, so over-quantizing in
+        #     decode is benign — same as today.
+        del grid_dim  # see comment above; legacy callers expect override.
+        if process_all_rows:
+            assert active_mode == 0
+            active_mode = 4
+        if expert_active_meta is not None:
+            # B15: per-expert active-rows cap.
+            assert active_mode in (0, 4), \
+                "expert_active_meta is incompatible with token-indexed " \
+                "active_mode (1/2/3); use it with process_all_rows or default"
+            assert expert_active_e_local > 0
+            assert expert_active_bm_padding > 0
+            active_mode = 5
+        total_workers = max(self.num_workers, 1)
+        if active_mode == 5:
+            # B15 invariant: ctas_per_expert == 1 → grid_y = E_local.
+            # Otherwise the cap (kernel row_count_cap, applied per-CTA)
+            # would let CTAs past CTA-0 of each expert mis-quantize rows
+            # past actual_count. With grid_y = E_local, each CTA covers
+            # exactly one expert's bm_padding rows, and the cap correctly
+            # clips the inner loop at actual_count.
+            grid_y = max(1, expert_active_e_local)
+        else:
+            grid_y = min(row_count, _QUANTIZE_GRID_Y_CAP)
+        grid_y = max(1, min(grid_y, total_workers))
+        workers_per_row = max(1, total_workers // grid_y)
+        group_tiles = self._fp8_quantize_group_tiles(
+            hidden_size, scale_ue8m0, max_tiles=workers_per_row
+        )
         grid_dim = (group_tiles, grid_y, 1)
-        if slice_override:
+        if active_mode == 5:
+            # params: [active_mode, expert_meta_offset, e_local,
+            #          bm_padding, ctas_per_expert]
+            assert expert_active_meta is not None
+            expert_meta_offset = expert_active_meta.dim(1)
+            rows_per_cta = max(1, row_count // max(grid_dim[1] or 1, 1))
+            ctas_per_expert = max(1,
+                                  expert_active_bm_padding // rows_per_cta)
+            params = [5, expert_meta_offset, expert_active_e_local,
+                      expert_active_bm_padding, ctas_per_expert]
+        elif slice_override:
             params = [active_mode, hidden_size,
                       input_stride_override, in_offset_elems]
         else:
             params = [] if active_mode == 0 else [active_mode]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # CRITICAL ORDERING: task_register reads
+        # input_ptrs[0]=input bf16, output_ptrs[0]=output_fp8, output_ptrs[1]=output_scale,
+        # and (B15) input_ptrs[1]=expert_active_meta when active_mode==5.
+        # graph.cc tuple for active_mode==5 is (num_inputs=2, num_outputs=2),
+        # so wrapper must order operands as [input, meta, output_fp8, output_scale].
         tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        operands = [input]
+        if expert_active_meta is not None:
+            tb_graph.new_input(expert_active_meta, (-1, -1, -1), -1, True)
+            operands.append(expert_active_meta)
         tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([input, output_fp8, output_scale], tb_graph)
+        operands.extend([output_fp8, output_scale])
+        self.kn_graph.customized(operands, tb_graph)
         task_name = "quantize_fp8_sm100" if scale_ue8m0 else "quantize_fp8_f32scale_sm100"
         self.kn_graph.register_task(tb_graph, task_name, params)
 
@@ -2255,6 +2506,7 @@ class PersistentKernel:
         m_indices: DTensor,
         output: DTensor,
         num_workers: int,
+        meta: DTensor = None,
     ):
         """Shared registration helper for the SM100 grouped FP8 block-scaled
         GEMM tasks (`fp8_group_gemm_smallm_sm100` / `fp8_group_gemm_largem_sm100`).
@@ -2335,7 +2587,15 @@ class PersistentKernel:
         N = b_fp8.dim(1)
         assert b_fp8.dim(2) == K
         assert m_indices.dim(0) == M_total
-        params = [M_total, N, K, E, num_workers]
+        if meta is None:
+            active_mask_offset = -1
+        else:
+            assert meta.num_dims == 2
+            # meta layout: row 0 = out_weights+tok_to_perm (length M_total+MBT*TOPK).
+            # Row 1's first E entries hold active_expert_mask (int32).
+            # Flat offset of row 1: meta.dim(1) (since row 0 occupies that).
+            active_mask_offset = meta.dim(1)
+        params = [M_total, N, K, E, num_workers, active_mask_offset]
         grid_dim = (num_workers, 1, 1)
         block_dim = (256, 1, 1)  # 8 warps fixed by kernel role layout
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -2345,25 +2605,27 @@ class PersistentKernel:
         tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output],
-            tb_graph)
+        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output]
+        if meta is not None:
+            tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+            operators.append(meta)
+        self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 
     def fp8_group_gemm_smallm_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-        num_workers,
+        num_workers, meta=None,
     ):
         # Smallm variant: BN=64, NS=8. Best for K>4096 && MPE<=8 (gate_up
         # M{1,4,8} on DSv3). MoE decode niche.
         self._fp8_group_gemm_layer_impl(
             "fp8_group_gemm_smallm_sm100",
             a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-            num_workers)
+            num_workers, meta=meta)
 
     def fp8_group_gemm_largem_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-        num_workers,
+        num_workers, meta=None,
     ):
         # Largem variant: BN=128, NS=6. Default for everything outside the
         # smallm niche (most MoE configs incl. all prefill MPE >= 16 and any
@@ -2371,11 +2633,11 @@ class PersistentKernel:
         self._fp8_group_gemm_layer_impl(
             "fp8_group_gemm_largem_sm100",
             a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-            num_workers)
+            num_workers, meta=meta)
 
     def fp8_group_gemm_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-        num_workers,
+        num_workers, meta=None,
     ):
         # Auto-dispatcher: pick smallm/largem by (K, M_per_expert).
         K = a_fp8.dim(1)
@@ -2385,11 +2647,11 @@ class PersistentKernel:
         if K > 4096 and MPE <= 8:
             self.fp8_group_gemm_smallm_layer(
                 a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-                num_workers)
+                num_workers, meta=meta)
         else:
             self.fp8_group_gemm_largem_layer(
                 a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-                num_workers)
+                num_workers, meta=meta)
 
     def moe_permute_sm100_layer(
         self,
@@ -2476,14 +2738,27 @@ class PersistentKernel:
         meta: DTensor,
         residual: DTensor,
         output: DTensor,
+        rows_per_cta: int = 8,
+        hidden_split: int = 1,
     ):
         """MoE combine-unpermute task — inverse of moe_permute_sm100. See
-        moe_unpermute_sm100.cuh for the contract. One CTA per token
-        (grid_dim = (MBT, 1, 1)). Decodes `meta` into permuted_weights +
-        token_to_permuted, then writes
+        moe_unpermute_sm100.cuh for the contract. Decodes `meta` into
+        permuted_weights + token_to_permuted, then writes
         `output[t] = residual[t] +
                      sum_k(permuted_output[token_to_permuted[t,k]-1]
                             * permuted_weights[same row])`.
+
+        B33 (2026-05-15): grid_dim = (ceil(MBT / rows_per_cta), 1, 1). The
+        kernel's ROWS_PER_TASK template (moe_unpermute_sm100.cuh) loops
+        `ceil(MBT / grid.x)` tokens per CTA, so each CTA handles
+        rows_per_cta consecutive tokens. Default rows_per_cta=8 gives 16
+        CTAs for MBT=128 (vs 128 CTAs at rows_per_cta=1), freeing 112
+        worker slots per unpermute wave for concurrent tasks. For
+        decode (active_rows=1) only CTA 0 does work; the rest pass the
+        my_token >= num_active_rows check and exit immediately, same as
+        before. Setting rows_per_cta=1 preserves the legacy 1-CTA-per-
+        token shape. The codegen recomputes ROWS_PER_TASK from grid.x so
+        this kwarg only affects launch fan-out, not correctness.
         """
         assert permuted_output.num_dims == 2
         # meta is shaped (2, M_TOTAL + MBT*TOPK) int32 — see
@@ -2505,11 +2780,24 @@ class PersistentKernel:
         assert output.dim(1) == HIDDEN
 
         params = [MBT, TOPK, HIDDEN, M_TOTAL]
-        grid_dim = (MBT, 1, 1)
+        rows_per_cta_safe = max(1, int(rows_per_cta))
+        grid_x = max(1, (MBT + rows_per_cta_safe - 1) // rows_per_cta_safe)
+        # 2026-05-15 stragglers fix: grid.y = hidden_split spreads each
+        # token's HIDDEN work across hidden_split CTAs. For decode
+        # (active_rows=1) only 1*hidden_split CTAs do work — bumping
+        # hidden_split splits the 32 μs per-token straggler across
+        # more SMs concurrently. task_register passes hidden_split as
+        # the kernel's HIDDEN_SPLIT template and bid.y becomes the
+        # partition index (kv_idx). HIDDEN must be divisible by
+        # hidden_split for clean partitions; the kernel rounds up
+        # via ceil-div and clamps the upper partition to HIDDEN.
+        hidden_split_safe = max(1, int(hidden_split))
+        grid_dim = (grid_x, hidden_split_safe, 1)
         block_dim = (128, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # All inputs/outputs are (-1, -1, -1) so the kernel sees the FULL
-        # tensors and indexes them with task_metadata.request_id (= my_token).
+        # tensors and indexes them with task_metadata.request_id (= task_idx).
+        # task_idx * ROWS_PER_TASK + r is the per-CTA token id (kernel-side).
         tb_graph.new_input(permuted_output, (-1, -1, -1), -1, True)
         tb_graph.new_input(meta, (-1, -1, -1), -1, True)
         tb_graph.new_input(residual, (-1, -1, -1), -1, True)
@@ -2521,11 +2809,17 @@ class PersistentKernel:
     def transpose_scale_sm100_layer(
         self, scale_in: DTensor, scale_out: DTensor,
     ):
-        """(M, K_PACKED) uint32 → (K_PACKED, M) uint32 via single-CTA copy.
+        """(M, K_PACKED) uint32 → (K_PACKED, M) uint32 via multi-CTA copy.
 
         Bridges quantize_fp8_layer's M-outermost packed scale output to the
         K-outermost layout the PR-674 fp8_group_gemm SFA/SFB TMA descriptors
         require. See transpose_scale_sm100.cuh.
+
+        B13 (2026-05-15): stripe M across `min(num_workers, M//16)` CTAs.
+        Disjoint write ranges (M dimension), no cross-CTA sync needed.
+        For DSv3 NEW MoE silu_scale (M=16384, K_PACKED=2 → 128 KB),
+        single-CTA was 53 μs; multi-CTA expected to drop to a single
+        wave ~3-5 μs.
         """
         assert scale_in.num_dims == 2
         assert scale_out.num_dims == 2
@@ -2534,7 +2828,15 @@ class PersistentKernel:
         assert scale_out.dim(0) == K_PACKED
         assert scale_out.dim(1) == M
         params = [M, K_PACKED]
-        grid_dim = (1, 1, 1)
+        # Pick grid_x = min(num_workers, M / 16) so each CTA handles
+        # >=16 rows. Avoids degenerate per-CTA work for tiny M.
+        # C2.7 attempted bumping rows_per_cta_min 16→256 (fewer CTAs, more
+        # work each) — REGRESSED +17 μs/layer because the per-CTA wallclock
+        # scales linearly with rows (kernel is BW-bound, not launch-bound).
+        # Leave at 16.
+        rows_per_cta_min = 16
+        num_ctas = max(1, min(self.num_workers, M // rows_per_cta_min))
+        grid_dim = (num_ctas, 1, 1)
         block_dim = (128, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(scale_in, (-1, -1, -1), -1, True)
@@ -2801,6 +3103,81 @@ class PersistentKernel:
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
+    def fp8_gemm_dense_decode_splitk_layer(self, input_fp8, weight_fp8,
+                                            input_scale, weight_scale, output,
+                                            num_workers, split_k: int = 4):
+        """Decode-only SplitK FP8 dense GEMM.
+
+        Decomposes the K axis across `split_k` CTAs per (m_tile, n_tile)
+        and atomically accumulates BF16 partials into `output` via
+        red.global.add.bf16x2. Kernel bakes in runtime_m_mode=3
+        (decode-phase gate Q_LEN<=8 + active_rows cap), so prefill iters
+        early-exit before the wave starts.
+
+        IMPORTANT: the kernel relies on `output` being pre-zeroed each
+        iteration — this wrapper prepends a `tensor_init_layer` that
+        zeroes `output` before the GEMM. The dep-tracker chains them.
+
+        Args
+        ----
+        input_fp8:    (M, K) FP8 e4m3, row-major.
+        weight_fp8:   (N, K) FP8 e4m3, row-major.
+        input_scale:  (M, K/128) float32 per-128-K group scale for A.
+        weight_scale: (N/128, K/128) float32 per-128x128-block scale for B.
+        output:       (M, N) BF16. Pre-zeroed by the prepended tensor_init.
+        num_workers:  persistent worker count (= grid_dim.x for this task).
+        split_k:      K-split factor. K / (128 * split_k) must be integer.
+                      split_k=4 is the DSv3 decode O_proj sweet spot.
+        """
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims in (2, 3)
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N
+        assert split_k >= 1 and split_k <= 8
+        # Kernel-side BK=128; K must split evenly across split_k slices at
+        # the 128-K boundary so scale-tile boundaries align with K slices.
+        assert K % (128 * split_k) == 0, (
+            f"fp8_gemm_dense_decode_splitk: K={K} must be divisible by "
+            f"128 * split_k={128 * split_k}")
+        params = [M, N, K, num_workers, split_k]
+        # Prepend tensor_init to zero `output` before each GEMM iter. Use
+        # `input_fp8` as the "dummy" input — its dep edge gates the
+        # tensor_init on the upstream quantize task; the wider task DAG
+        # then gates the GEMM on the tensor_init via the `output` write.
+        # grid_dim mirrors the GEMM so the dep-tracker sees a tight chain;
+        # tensor_init_layer auto-collapses redundant grid.y/z dims when
+        # target_input_map[i] == -1.
+        self.tensor_init_layer(
+            target=output,
+            dummy=input_fp8,
+            grid_dim=(num_workers, 1, 1),
+            block_dim=(128, 1, 1),
+            dummy_input_map=(-1, -1, -1),
+            target_input_map=(-1, -1, -1),
+        )
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_decode_splitk_sm100", params)
+
     def linear_splitk_swapAB_fp8_layer(
         self,
         input_fp8: DTensor,
@@ -2863,24 +3240,142 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        meta: DTensor = None,
+        bm_padding: int = 128,
     ):
         # Accepts both:
         #   3D (batch, num_experts_per_tok, intermediate) — OLD MoE path.
         #   2D (M_total, intermediate) — NEW MoE path. Treated as (M_total, 1, N)
         #   inside the task_register codegen (num_experts_per_tok = 1).
+        #
+        # When ``meta`` is supplied (NEW MoE only), the kernel early-returns
+        # if active_expert_mask[my_expert] == 0 so we skip the entire
+        # silu+mul work for inactive-expert blocks. The mask lives at
+        # meta[1, 0:E_LOCAL] (= flat offset meta.dim(1)). The CTA→expert
+        # mapping depends on how grid.x partitions the M dim:
+        #   ctas_per_expert = bm_padding // rows_per_cta
+        #   my_expert       = bid.x / ctas_per_expert
+        # For the standard NEW MoE config (grid.x == num_local_experts,
+        # bm_padding == rows_per_cta == 128), ctas_per_expert == 1 and
+        # my_expert == bid.x.
         assert input.num_dims in (2, 3)
         assert output.num_dims == input.num_dims
-        if input.num_dims == 3:
-            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            tb_graph.new_input(input, (0, 1, -1), -1, True)
-            tb_graph.new_input(output, (0, 1, -1), -1, True)
+        if meta is None:
+            active_mask_offset = -1
+            ctas_per_expert = 0
+            e_local = 0
         else:
-            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            tb_graph.new_input(input, (0, -1, -1), -1, True)
-            tb_graph.new_input(output, (0, -1, -1), -1, True)
-        self.kn_graph.customized([input, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "moe_silu_mul")
-            
+            assert meta.num_dims == 2
+            assert grid_dim[1] == 1 and grid_dim[2] == 1, (
+                "active-mask skip requires grid.y == grid.z == 1")
+            rows_per_cta = max(1, input.dim(0) // grid_dim[0])
+            ctas_per_expert = max(1, bm_padding // rows_per_cta)
+            active_mask_offset = meta.dim(1)
+            # E_LOCAL inferred from the permuted-layout input row count:
+            # M_TOTAL = E_LOCAL * BM_PADDING. moe_permute writes
+            # active_expert_mask[0..E_LOCAL-1] followed by
+            # actual_count_per_expert[0..E_LOCAL-1] starting at meta row 1.
+            e_local = max(1, input.dim(0) // bm_padding)
+        params = [active_mask_offset, ctas_per_expert, e_local]
+        # CRITICAL ORDERING (2026-05-14):
+        # task_register.cc reads input_ptrs[0] as silu input and
+        # output_ptrs[0] as silu output. graph.cc tuple is
+        # `(num_inputs_silu, 1, TASK_SILU_MUL, ...)` (line 642), so the
+        # last `register_task` operand becomes output_ptrs[0]. The active-
+        # mask skip (D3) reads input_ptrs[1] as the meta pointer. The
+        # required operand order is therefore
+        #     [silu_input, meta, silu_output]   (meta case)
+        #     [silu_input, silu_output]         (legacy)
+        # The earlier `[input, output, meta]` order silently wrote silu
+        # results into the meta buffer and left silu_out uninitialized,
+        # which propagated into a zero W2 GEMM input and effectively
+        # null-out the MoE contribution for every layer.
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        if input.num_dims == 3:
+            input_map = (0, 1, -1)
+        else:
+            input_map = (0, -1, -1)
+        tb_graph.new_input(input, input_map, -1, True)
+        operators = [input]
+        if meta is not None:
+            tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+            operators.append(meta)
+        tb_graph.new_input(output, input_map, -1, True)
+        operators.append(output)
+        self.kn_graph.customized(operators, tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_silu_mul", params)
+
+    def moe_silu_mul_quantize_fp8_sm100_layer(
+        self,
+        input: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        rows_per_task: int = 1,
+        meta: DTensor = None,
+        bm_padding: int = 0,
+    ):
+        """C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
+
+        Replaces the (moe_silu_mul → bf16 silu_out → quantize_fp8) chain for
+        the NEW MoE path. Writes silu_fp8 + UE8M0 K-outer packed scale in one
+        kernel, eliminating one task launch and one BF16 HBM round-trip of
+        silu_out (~4 MB at DSv3 m_total=2048 / K_INTER=2048).
+
+        Arguments:
+          input:        w13_out [m_total, 2*K_INTER] bf16 (gate || up halves).
+          output_fp8:   silu_fp8 [m_total, K_INTER] FP8 e4m3 (store_in_dmem).
+          output_scale: silu_scale K-outer UE8M0 packed uint32. Declare as
+                        (K_PACKED, m_total) for K-outer (preferred; matches
+                        the C8 pattern) — the kernel writes
+                        `output_s[packed_idx * aligned_batch + batch_idx]`
+                        regardless of declared shape.
+          rows_per_task: ROWS_PER_TASK template arg; default 1 (one CTA per
+                         row), matching the standalone quantize_fp8 grid
+                         shape (m_total, 1, 1).
+        """
+        assert input.num_dims == 2
+        assert output_fp8.num_dims == 2
+        assert output_scale.num_dims == 2
+        assert input.dim(0) == output_fp8.dim(0)
+        assert input.dim(1) == 2 * output_fp8.dim(1), (
+            f"input must be 2× output_fp8 along K axis "
+            f"(gate||up halves): in={input.dim(1)}, out={output_fp8.dim(1)}")
+        k_inter = output_fp8.dim(1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # input_map: per-CTA base pointer pre-offset on row dim (= grid.x).
+        # Kernel walks ROWS_PER_TASK rows from there.
+        tb_graph.new_input(input, (0, -1, -1), 1, True)
+        # ACTIVE_SKIP path: pass meta as a real input (dim_maps -1 = full
+        # base pointer); kernel reads active_mask + actual_count_per_expert
+        # starting at the supplied offset.
+        operators = [input]
+        active_mask_offset = 0
+        e_local = 0
+        if meta is not None:
+            assert bm_padding > 0
+            assert meta.num_dims == 2
+            tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+            operators.append(meta)
+            active_mask_offset = meta.dim(1)
+            e_local = max(1, input.dim(0) // bm_padding)
+        tb_graph.new_input(output_fp8, (0, -1, -1), 1, True)
+        # output_scale: 2D but K-outer (or M-outer "shape lie"); kernel
+        # reconstructs global row from task_metadata.request_id, so the
+        # buffer base pointer is what matters. dim_maps = (-1, -1, -1).
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        operators.extend([output_fp8, output_scale])
+        self.kn_graph.customized(operators, tb_graph)
+        if meta is not None:
+            params = [k_inter, rows_per_task, active_mask_offset, e_local,
+                      bm_padding]
+        else:
+            params = [k_inter, rows_per_task]
+        self.kn_graph.register_task(
+            tb_graph, "moe_silu_mul_quantize_fp8_sm100", params)
+
     def moe_w2_linear_layer(
         self,
         input: DTensor,
@@ -2957,13 +3452,19 @@ class PersistentKernel:
         assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
         assert output.num_dims == 2  # (batch_size, hidden_size)
         if not accumulate:
+            # C5 (2026-05-16): partition target along BOTH grid.x (dim 1, N)
+            # AND grid.y (dim 0, M) so the prepended zero-fill runs on all
+            # grid.x * grid.y CTAs in a single wave instead of being collapsed
+            # to grid.x CTAs by the wrapper's "redundant axis" optimization.
+            # For router gate (grid=(2, 64, 1)) this turns 2-CTA / 12 μs into
+            # 128-CTA / ~1 wave. Requires output.dim(0) divisible by grid.y.
             self.tensor_init_layer(
                 target=output,
                 dummy=input,
                 grid_dim=grid_dim,
                 block_dim=block_dim,
                 dummy_input_map=(-1, 1, -1),
-                target_input_map=(1, -1, -1),
+                target_input_map=(1, 0, -1),
             )
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, 1, -1), 1, True)
@@ -3110,7 +3611,20 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         dependent_tensor: DTensor = None,
+        noop: bool = False,
+        gate_decode_q_len: bool = False,
     ):
+        # When ``noop`` is True we still register the task graph node (so
+        # downstream task-graph constraints — case-3 fork+join — are
+        # preserved) but the codegen emits an empty kernel body. Use for
+        # phantom-bridge identities where the output buffer is only
+        # plumbed for the dependency edge, not actually consumed.
+        # When ``gate_decode_q_len`` is True the codegen emits a runtime
+        # Q_LEN check (request 0): if Q_LEN <= 8 (decode iter) the kernel
+        # returns before doing the BF16 copy. Use for kpe_sep_v2 in the
+        # chunked-prefill phantom bridge — chunked_prefill itself has a
+        # Q_LEN > 8 gate, so the output buffer is never read on decode
+        # iters and the copy is wasted ~16 μs.
         # TODO: Add support from kn_graph
         last_dim = 0
         assert input.num_dims == output.num_dims
@@ -3122,7 +3636,8 @@ class PersistentKernel:
         tb_graph.new_input(input, (last_dim, -1, -1), 1, True)
         tb_graph.new_input(output, (last_dim, -1, -1), 1, True)
         self.kn_graph.customized([input, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "identity")
+        params = [1 if noop else 0, 1 if gate_decode_q_len else 0]
+        self.kn_graph.register_task(tb_graph, "identity", params)
 
     def elementwise_add_layer(
         self,

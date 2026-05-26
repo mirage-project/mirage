@@ -115,6 +115,14 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // wrote g MOST RECENTLY before L. After L is processed, L's outputs update
   // last_writer. Subsequent reads see L as the new writer. This is exactly
   // SSA-style def-use: we're implicitly renaming the reused buffer.
+  //
+  // Tensor-init writes need a program-order WAW edge to the next writer of the
+  // same guid. MPK uses this for MoE zero-fill followed by expert accumulation;
+  // without the edge, parallel-path scheduling can run the two writers
+  // concurrently even though the old linear schedule made zero-fill visible
+  // first. We intentionally do not add WAW edges for arbitrary scratch reuse:
+  // RAW edges already protect live ranges, and global WAW edges over-constrain
+  // common recycled scratch buffers.
   // ---------------------------------------------------------------------
   // Multi-writer last-writer map, keyed by the underlying storage's GUID
   // (resolve_base_guid). Each entry records the (layer, out_slot) producer
@@ -126,11 +134,25 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // write disjoint slices of one storage tensor. A subsequent reader that
   // touches the full tensor must depend on ALL those writers; a reader that
   // touches one slice depends only on writers whose windows overlap.
+  // C20 (2026-05-17): track each writer's 2D bounding box in the parent
+  // storage's element coordinates instead of a single contiguous byte
+  // window. A 2D narrow along the inner dim (e.g. q_a slot [0:1536) of
+  // qkv_a_out [128, 2176]) writes a STRIDED pattern in memory, not a
+  // contiguous byte range — `bytes_size()` over-states the footprint
+  // and the old single-axis window check fired on disjoint column
+  // slices, producing spurious WAW in_edges (kv_gather seeing q_a
+  // rmsnorm as a producer, then failing case-2 fork+join validation).
+  // For 2D views/roots we decompose view_offset (bytes) into
+  // (row_first, col_first) using the parent row stride that the view
+  // already inherits in stride[0]. Higher-D views currently fall back
+  // to the conservative col window [0, parent_row_stride).
   struct WriterEntry {
     int layer;
     int out_slot;
-    int64_t view_offset;
-    int64_t size_bytes;
+    int64_t row_first;  // first row written (elements along outer dim)
+    int64_t row_last;   // one past last row
+    int64_t col_first;  // first col written (elements along inner dim)
+    int64_t col_last;   // one past last col
     bool is_virtual_writer;
   };
   std::unordered_map<size_t, std::vector<WriterEntry>> last_writers;
@@ -138,9 +160,52 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // Map KNCustomizedOp* -> layer index so downstream passes can locate by op.
   std::unordered_map<KNCustomizedOp const *, int> op_to_layer;
 
-  auto window_overlaps = [](int64_t a_off, int64_t a_size,
-                            int64_t b_off, int64_t b_size) -> bool {
-    return (a_off < b_off + b_size) && (b_off < a_off + a_size);
+  // Compute the writer/reader's 2D bbox in the parent's element coordinates.
+  // For non-views: row range [0, dim[0]), col range [0, stride[0]). For 2D
+  // narrow views (inner-dim narrow): row range [0, dim[0]), col range
+  // [view_offset/dtype_size, +dim[1]). For 2D narrow views (outer-dim narrow):
+  // row range [view_offset / (stride[0] * dtype_size), +dim[0]), col range
+  // [0, stride[0]). Combined narrows decompose via divmod. Higher-rank views
+  // collapse all inner dims into one row stride and skip the row check.
+  auto compute_bbox = [](DTensor const &dt) {
+    struct BBox {
+      int64_t row_first;
+      int64_t row_last;
+      int64_t col_first;
+      int64_t col_last;
+    };
+    size_t dtype_size = mirage::type::get_datatype_size(dt.data_type);
+    int64_t row_stride =
+        dt.num_dims >= 2 ? static_cast<int64_t>(dt.stride[0]) : 1;
+    int64_t dim0 = dt.num_dims >= 1 ? static_cast<int64_t>(dt.dim[0]) : 1;
+    int64_t dim_inner = dt.num_dims >= 2
+                            ? static_cast<int64_t>(dt.dim[dt.num_dims - 1])
+                            : row_stride;
+    if (dt.is_virtual() && dtype_size > 0 && row_stride > 0) {
+      int64_t view_off_elems =
+          dt.view_offset / static_cast<int64_t>(dtype_size);
+      int64_t row_first = view_off_elems / row_stride;
+      int64_t col_first = view_off_elems % row_stride;
+      return BBox{row_first,
+                  row_first + dim0,
+                  col_first,
+                  col_first + dim_inner};
+    }
+    return BBox{0, dim0, 0, row_stride};
+  };
+
+  // 2D bbox overlap: row ranges must intersect AND col ranges must intersect.
+  auto bbox_overlaps = [](int64_t a_row_first,
+                          int64_t a_row_last,
+                          int64_t a_col_first,
+                          int64_t a_col_last,
+                          int64_t b_row_first,
+                          int64_t b_row_last,
+                          int64_t b_col_first,
+                          int64_t b_col_last) -> bool {
+    bool rows = (a_row_first < b_row_last) && (b_row_first < a_row_last);
+    bool cols = (a_col_first < b_col_last) && (b_col_first < a_col_last);
+    return rows && cols;
   };
 
   for (auto const &op : kn_graph.operators) {
@@ -193,14 +258,57 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         // Graph input — no edge in the DAG.
         continue;
       }
-      int64_t c_off = cdt.is_virtual() ? cdt.view_offset : 0;
-      int64_t c_size = static_cast<int64_t>(cdt.bytes_size());
+      auto rbox = compute_bbox(cdt);
       bool c_is_virtual = cdt.is_virtual();
 
-      for (WriterEntry const &we : wit->second) {
-        if (!window_overlaps(c_off, c_size, we.view_offset, we.size_bytes)) {
+      // C20 (2026-05-17): shadow-aware edge selection. Walk writers in
+      // REVERSE layer order, tracking the still-uncovered column range
+      // of the reader. Each writer only contributes an edge for the
+      // sub-range it most-recently wrote — later writers shadow earlier
+      // ones over the columns they overwrote. Without this, a full
+      // qkv_a_proj producer (cols [0, 2176)) stays as a stale producer
+      // of every narrow-view consumer downstream even after rmsnorm
+      // and other view-writes have fully overwritten the slot they
+      // read; downstream MLA kv_gather then sees two distinct
+      // producers per slot and trips case-2/case-3 fork/join checks.
+      // Row range is assumed full for the readers we currently
+      // support (no row-slice views yet); only the column dimension
+      // gets fragment-cover tracking.
+      std::vector<std::pair<int64_t, int64_t>> uncovered_cols;
+      uncovered_cols.push_back({rbox.col_first, rbox.col_last});
+      auto const &writers = wit->second;
+      for (auto rit = writers.rbegin(); rit != writers.rend(); ++rit) {
+        if (uncovered_cols.empty()) {
+          break;
+        }
+        WriterEntry const &we = *rit;
+        // Row overlap is a fast reject.
+        if (!(we.row_first < rbox.row_last &&
+              rbox.row_first < we.row_last)) {
           continue;
         }
+        bool wrote_anything = false;
+        std::vector<std::pair<int64_t, int64_t>> new_uncovered;
+        for (auto const &frag : uncovered_cols) {
+          int64_t a = std::max(we.col_first, frag.first);
+          int64_t b = std::min(we.col_last, frag.second);
+          if (a < b) {
+            wrote_anything = true;
+            if (frag.first < a) {
+              new_uncovered.push_back({frag.first, a});
+            }
+            if (b < frag.second) {
+              new_uncovered.push_back({b, frag.second});
+            }
+          } else {
+            new_uncovered.push_back(frag);
+          }
+        }
+        if (!wrote_anything) {
+          continue;
+        }
+        uncovered_cols = std::move(new_uncovered);
+
         EdgeInfo e;
         e.prod_layer = we.layer;
         e.cons_layer = layer_idx;
@@ -238,10 +346,70 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       DTensor const &odt = output_ops[out_slot]->dtensor;
       size_t base = odt.resolve_base_guid();
       bool o_is_virtual = odt.is_virtual();
-      int64_t o_off = o_is_virtual ? odt.view_offset : 0;
-      int64_t o_size = static_cast<int64_t>(odt.bytes_size());
+      auto wbox = compute_bbox(odt);
 
-      WriterEntry we{layer_idx, out_slot, o_off, o_size, o_is_virtual};
+      // Preserve the TASK_TENSOR_INIT WAW behaviour: if the previous writer
+      // was a zero-fill (init) for the SAME tensor (matching guid + window),
+      // add an explicit WAW edge so the next writer waits for init.
+      if (!o_is_virtual) {
+        auto wit = last_writers.find(base);
+        if (wit != last_writers.end()) {
+          for (WriterEntry const &we : wit->second) {
+            if (we.is_virtual_writer) {
+              continue;
+            }
+            if (ag.layers[we.layer].task_type !=
+                mirage::runtime::TASK_TENSOR_INIT) {
+              continue;
+            }
+            bool duplicate_edge = false;
+            for (int eidx : ag.layers[layer_idx].in_edges) {
+              EdgeInfo const &existing = ag.edges[eidx];
+              if (existing.prod_layer == we.layer &&
+                  existing.out_slot == we.out_slot &&
+                  existing.tensor_guid == static_cast<size_t>(odt.guid)) {
+                duplicate_edge = true;
+                break;
+              }
+            }
+            if (!duplicate_edge) {
+              EdgeInfo e;
+              e.prod_layer = we.layer;
+              e.cons_layer = layer_idx;
+              e.out_slot = we.out_slot;
+              e.in_slot = -1;
+              e.tensor_guid = odt.guid;
+              e.input_map = output_ops[out_slot]->input_map;
+              auto const *prod_op = ag.layers[we.layer].op;
+              std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
+              split_bgraph_ops(prod_op->bgraph,
+                               ag.layers[we.layer].num_inputs,
+                               prod_inputs,
+                               prod_outputs);
+              if (we.out_slot < 0 ||
+                  we.out_slot >= (int)prod_outputs.size()) {
+                throw std::runtime_error(
+                    "build_annotated_graph: invalid out_slot for WAW producer");
+              }
+              e.output_map = prod_outputs[we.out_slot]->input_map;
+              // WAW edges keep the non-virtual semantics they had before;
+              // is_barrier_edge stays false unless we explicitly need it.
+              int edge_idx = (int)ag.edges.size();
+              ag.edges.push_back(e);
+              ag.layers[layer_idx].in_edges.push_back(edge_idx);
+              ag.layers[we.layer].out_edges.push_back(edge_idx);
+            }
+          }
+        }
+      }
+
+      WriterEntry we{layer_idx,
+                     out_slot,
+                     wbox.row_first,
+                     wbox.row_last,
+                     wbox.col_first,
+                     wbox.col_last,
+                     o_is_virtual};
       if (!o_is_virtual) {
         // A full-storage write supersedes any prior writers (view or full).
         last_writers[base].clear();
@@ -457,6 +625,19 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       msg << "build_annotated_graph: layer " << i
           << " is both a join-consumer and a fork-consumer (case 2); "
              "a task cannot have two trigger_events.";
+      msg << " task_type=" << static_cast<int>(ag.layers[i].task_type)
+          << " in_edges=";
+      for (int eidx : ag.layers[i].in_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
+      msg << " out_edges=";
+      for (int eidx : ag.layers[i].out_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
       throw std::runtime_error(msg.str());
     }
     if (is_join_producer[i] && ag.layers[i].is_fork_producer) {
@@ -464,6 +645,61 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       msg << "build_annotated_graph: layer " << i
           << " is both a join-producer and a fork-producer (case 3); "
              "a task cannot have two dependent_events.";
+      msg << " task_type=" << static_cast<int>(ag.layers[i].task_type)
+          << " in_edges=";
+      for (int eidx : ag.layers[i].in_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
+      msg << " out_edges=";
+      for (int eidx : ag.layers[i].out_edges) {
+        auto const &e = ag.edges[eidx];
+        msg << " [" << e.prod_layer << ":" << e.out_slot << "->" << e.cons_layer
+            << ":" << e.in_slot << " guid=" << e.tensor_guid << "]";
+      }
+      // Diagnostic: dump each consumer's in_edges so we can see which
+      // consumer is the join-consumer that made this layer a
+      // join-producer.
+      for (int eidx : ag.layers[i].out_edges) {
+        int cons = ag.edges[eidx].cons_layer;
+        if (cons < 0 || cons >= (int)ag.layers.size()) {
+          continue;
+        }
+        auto const &CL = ag.layers[cons];
+        msg << "\n  consumer L" << cons
+            << " task_type=" << static_cast<int>(CL.task_type)
+            << (CL.is_join_consumer ? " [JOIN-CONSUMER]" : "")
+            << " in=" << CL.in_edges.size() << ":";
+        for (int ie : CL.in_edges) {
+          auto const &ce = ag.edges[ie];
+          msg << " [" << ce.prod_layer << ":" << ce.out_slot << "->" << cons
+              << ":" << ce.in_slot << " guid=" << ce.tensor_guid << "]";
+        }
+      }
+      // Extra diagnostic: for the first non-join-consumer fork-out
+      // sibling of i (typically L1 = fused task), dump its forward
+      // reachable set + out_edges so we can see why the strip pass
+      // didn't remove i->{join-consumer} (it should have, if the
+      // sibling reaches the join-consumer via a longer path).
+      for (int eidx : ag.layers[i].out_edges) {
+        int cons = ag.edges[eidx].cons_layer;
+        if (cons < 0 || cons >= (int)ag.layers.size()) {
+          continue;
+        }
+        if (ag.layers[cons].is_join_consumer) {
+          continue;
+        }
+        msg << "\n  sibling L" << cons
+            << " task_type=" << static_cast<int>(ag.layers[cons].task_type)
+            << " out_edges:";
+        for (int oe : ag.layers[cons].out_edges) {
+          auto const &oce = ag.edges[oe];
+          msg << " [L" << cons << ":" << oce.out_slot << "->L" << oce.cons_layer
+              << ":" << oce.in_slot << " guid=" << oce.tensor_guid << "]";
+        }
+        break;
+      }
       throw std::runtime_error(msg.str());
     }
   }
@@ -616,7 +852,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     ForkGroupInfo fg;
     fg.producer_layer = i;
-    fg.outgoing_edges = ag.layers[i].out_edges;
+    std::unordered_set<int> seen_consumers;
+    for (int eidx : ag.layers[i].out_edges) {
+      int cons_layer = ag.edges[eidx].cons_layer;
+      if (seen_consumers.insert(cons_layer).second) {
+        fg.outgoing_edges.push_back(eidx);
+      }
+    }
 
     // N-way LCM per grid axis.
     std::array<int, 3> lcm_last3{};
@@ -695,7 +937,13 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     }
     JoinGroupInfo jg;
     jg.consumer_layer = i;
-    jg.incoming_edges = ag.layers[i].in_edges;
+    std::unordered_set<int> seen_producers;
+    for (int eidx : ag.layers[i].in_edges) {
+      int prod_layer = ag.edges[eidx].prod_layer;
+      if (seen_producers.insert(prod_layer).second) {
+        jg.incoming_edges.push_back(eidx);
+      }
+    }
 
     std::array<int, 3> lcm_last3{};
     for (int g = 0; g < 3; g++) {

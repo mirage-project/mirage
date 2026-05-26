@@ -110,9 +110,7 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   batch_size = output_ops[0]->output_tensors[0].dim[0];
   output_size = output_ops[0]->output_tensors[0].dim[1];
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -207,10 +205,7 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -441,15 +436,8 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[1];
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[0]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("int num_active_tokens_ = $;", batch_size);
@@ -470,7 +458,18 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params: [] (legacy copy) OR [noop_flag] (when 1, emit empty body — the
+  //   task graph node still exists for case-3 fork+join shaping but the
+  //   kernel does nothing, just `return;`)
+  //   OR [noop_flag, gate_decode_q_len_flag] (when gate_decode_q_len_flag==1,
+  //   emit a runtime Q_LEN gate at the top of the kernel that returns
+  //   immediately if request 0's Q_LEN <= 8. This makes the kpe_sep_v2
+  //   phantom-bridge identity a noop on decode iters while still doing the
+  //   real BF16 copy on chunked-prefill iters — saving ~16 μs per decode
+  //   layer).
+  assert(params.size() <= 2);
+  bool is_noop = (params.size() >= 1 && params[0] == 1);
+  bool gate_decode_q_len = (params.size() >= 2 && params[1] == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -487,9 +486,6 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
   // Both input and output tensors should be row major
   assert(input_ops[0]->dtensor.layout == layout::DmemRowMajor);
   assert(output_ops[0]->dtensor.layout == layout::DmemRowMajor);
-  // Both input and output tensors should be INPUT OP
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   // Shape should be guranteed by higher-level APIs
 
   int outer_dim_size = 1, inner_dim_size, outer_dim_stride, output_size;
@@ -506,13 +502,29 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
-         outer_dim_size,
-         inner_dim_size,
-         outer_dim_stride,
-         output_size);
-  code.e("    task_desc->input_ptrs[0],");
-  code.e("    task_desc->output_ptrs[0]);");
+  if (is_noop) {
+    // Empty kernel body — task exists only as a task-graph fork/join
+    // shaping node. No data motion, just return.
+    code.e("// identity_task no-op variant (graph-shaping only)");
+  } else {
+    if (gate_decode_q_len) {
+      // Runtime Q_LEN gate: skip the BF16 copy entirely on decode iters
+      // (Q_LEN <= 8). Used by the kpe_sep_v2 phantom-bridge identity in the
+      // chunked-prefill task graph: chunked_prefill itself has a Q_LEN > 8
+      // gate, so its kpe_sep_v2 input is never read on decode iters, and
+      // letting the buffer keep stale data is harmless.
+      code.e("int q_len_id_ = runtime_config.qo_indptr_buffer[1] - "
+             "runtime_config.qo_indptr_buffer[0];");
+      code.e("if (q_len_id_ <= 8) return;");
+    }
+    code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
+           outer_dim_size,
+           inner_dim_size,
+           outer_dim_stride,
+           output_size);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->output_ptrs[0]);");
+  }
   return register_task_variant(TASK_IDENTITY, code.to_string());
 }
 
@@ -540,10 +552,7 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1] / 2;
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -586,10 +595,7 @@ int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -725,12 +731,10 @@ int TaskRegister::register_reduction_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // get output stride
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  // get strides (C20: from dtensor.stride[0] — view-safe; for root tensors
+  // this equals owner_op's input_strides[0])
+  int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   assert(input_stride == output_stride);
   // Register reduction kernel
   mirage::transpiler::CodeKeeper code;
@@ -869,10 +873,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1227,6 +1228,17 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int hidden_dim_full = output_ops[0]->output_tensors[0].dim[1];
+  // C20 (2026-05-17): use stride[0] (in elements) instead of dim[1] for the
+  // row-walk stride. For root tensors stride[0] == dim[1] (row-major
+  // default), so non-view callers see no behavior change. For `mpk.narrow`
+  // views, dim[1] = slot_width but stride[0] = parent_width — using stride
+  // here is what prevents the kernel from overwriting the adjacent slot
+  // when stepping to row i+1. compute width (HIDDEN_DIM template param)
+  // still derives from dim/process_dim.
+  int in_row_stride =
+      static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int out_row_stride =
+      static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // Currently assume that each rmsnorm task processes one token
   // assert(batch_size == 1);
@@ -1238,18 +1250,42 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   int out_offset = params.size() == 3 ? params[2] : 0;
   assert(in_offset + process_dim <= hidden_dim_full);
   assert(out_offset + process_dim <= hidden_dim_full);
+  int dtensor_batch = output_ops[0]->dtensor.dim[0];
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // B34 (2026-05-15): builder may shrink grid.x below mbt so each CTA
+  // handles BATCH_SIZE > 1 rows. Skip CTAs whose first row is past the
+  // active token count, and clamp the kernel's inner row-loop to the
+  // remaining active rows so we don't normalize/overwrite stale bf16.
+  // In MPK_TEST_MODE qo_indptr_buffer is uninitialised (zeros), so fall
+  // back to the full DTensor batch dim (no skip) to keep unit-tests
+  // working — matches the silu_mul test-mode escape hatch.
+  code.e("int active_rows_rms_ = $;", dtensor_batch);
+  code.e("#ifndef MPK_TEST_MODE");
+  code.e("active_rows_rms_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("#endif");
+  code.e("int task_first_row_ = "
+         "task_desc->task_metadata.request_id * $;",
+         batch_size);
+  code.e("if (task_first_row_ >= active_rows_rms_) return;");
+  code.e("int row_count_cap_ = active_rows_rms_ - task_first_row_;");
   // NUM_THREADS defaults to 256; explicit so we can append IN/OUT_OFFSET.
-  code.e("kernel::rms_norm_hopper_impl<bfloat16, $, $, 256, $, $>(",
+  // IN_ROW_STRIDE / OUT_ROW_STRIDE = hidden_dim_full so multi-row CTAs walk
+  // by the actual physical row width (matters for QKV-a fused slice paths
+  // where process_dim < hidden_dim_full).
+  code.e("kernel::rms_norm_hopper_impl<bfloat16, $, $, 256, $, $, $, $>(",
          batch_size,
          process_dim,
          in_offset,
-         out_offset);
+         out_offset,
+         in_row_stride,
+         out_row_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    1e-6f);");
+  code.e("    1e-6f,");
+  code.e("    row_count_cap_);");
   return register_task_variant(TASK_RMS_NORM_HOPPER, code.to_string());
 }
 
@@ -1285,10 +1321,7 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1445,10 +1478,7 @@ int TaskRegister::register_linear_cutlass_hopper_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   constexpr int TILE_SIZE = 128;
 
   mirage::transpiler::CodeKeeper code;
@@ -1613,15 +1643,8 @@ int TaskRegister::register_silu_mul_hopper_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[1];
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[0]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::silu_mul_task_impl_hopper<bfloat16, $, $, $, $>(",
@@ -1657,9 +1680,7 @@ int TaskRegister::register_embedding_hopper_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   batch_size = output_ops[0]->output_tensors[0].dim[0];
   output_size = output_ops[0]->output_tensors[0].dim[1];
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1708,10 +1729,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1862,10 +1880,7 @@ int TaskRegister::register_splitk_linear_sm100_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->output_tensors[0].dim[1];
   reduction_stride = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -2403,15 +2418,8 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
   assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = input_ops[0]->dtensor.dim[1];
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[0]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_softmax_task_impl<cute::bfloat16_t, $, $, $, $>(",
@@ -2486,9 +2494,22 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // C13 (2026-05-17, REVERTED): tried VPT 8 -> 16 to double ROWS_PER_WARP
+  // and halve outer-loop iters. Per-call TOPK_SIGMOID dropped 109 -> 83 μs
+  // (-24%), BUT the megakernel's per-token latency REGRESSED 86 -> 122 ms
+  // (+42%) — likely register pressure from VPT=16 inflating per-thread
+  // arrays (row_chunk[16] + biased_chunk[16]) and globally pinning the
+  // megakernel to a lower occupancy via the shared __launch_bounds__.
+  // Revert keeps the env hook for opt-in only; default = legacy VPT=8.
+  char const *_vpt_env = std::getenv("MPK_DSV3_TOPK_VPT");
+  int topk_vpt = _vpt_env ? std::atoi(_vpt_env) : 8;
+  if (topk_vpt < 4 || topk_vpt > 32 ||
+      (topk_vpt & (topk_vpt - 1)) != 0) {
+    topk_vpt = 8;
+  }
   code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
          "$, $, $>(",
-         /*VPT=*/8,
+         /*VPT=*/topk_vpt,
          /*EXPERTS=*/num_experts,
          /*LOCAL_EXPERTS=*/num_local_experts,
          /*WARPS_PER_TB=*/8,
@@ -2506,7 +2527,16 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   code.e("    task_desc->output_ptrs[2],");
   code.e("    $,", local_expert_start);
   code.e("    $,", local_expert_end);
-  code.e("    $f);", scaling_factor);
+  code.e("    $f,", scaling_factor);
+  // P6 (2026-05-14): bound compute loop to runtime active tokens. The
+  // initial "broke correctness" reading was a misdiagnosis — the
+  // 19-layer DSv3 baseline already outputs all-zero tokens at
+  // profile_start_step=100 (verified by `git stash` baseline test:
+  // same all-zero output), so the regression I attributed to P6 was
+  // baseline noise. The kernel-side skip is safe: Phase 0 init zeroes
+  // the full [0, num_rows) routing range, downstream moe_permute's
+  // `slot_1idx > 0` filter treats padded slots as "no routing".
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
 }
 
@@ -2554,10 +2584,7 @@ int TaskRegister::register_moe_linear_sm100_task(
   assert(input_ops[3]->output_tensors[0].num_dims == 1);
   assert(input_ops[3]->output_tensors[0].dim[0] == num_experts + 1);
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   orig_output_size = input_ops[1]->dtensor.dim[1];
 
   mirage::transpiler::CodeKeeper code;
@@ -2768,10 +2795,7 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   assert(input_ops[5]->output_tensors[0].dim[0] == num_experts + 1);
 
   // Output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   orig_output_size = input_ops[2]->dtensor.dim[1];
 
   int k_scale = reduction_size / 128; // K/128 scale groups
@@ -2957,12 +2981,32 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params: [] (legacy) OR [active_mask_offset, ctas_per_expert, e_local]
+  //                       (NEW MoE D3+B11).
+  //   active_mask_offset == -1 -> meta input not supplied, no skip.
+  //   active_mask_offset >= 0  -> meta is input_ptrs[1], active mask lives
+  //                               at meta + active_mask_offset (int32),
+  //                               my_expert = bid.x / ctas_per_expert.
+  //                               B11: meta + active_mask_offset + e_local
+  //                               holds per-expert actual_count (real row
+  //                               count, ≤ BM_PADDING) — used to bound the
+  //                               silu*mul loop.
+  assert(params.size() == 0 || params.size() == 2 || params.size() == 3);
+  int active_mask_offset = -1;
+  int ctas_per_expert = 0;
+  int e_local = 0;
+  if (params.size() >= 2) {
+    active_mask_offset = params[0];
+    ctas_per_expert = params[1];
+  }
+  if (params.size() >= 3) {
+    e_local = params[2];
+  }
   int batch_size = 0, num_experts_per_tok = 0, output_size = 0, input_stride,
       output_stride;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 1;
+  int num_inputs = (active_mask_offset >= 0) ? 2 : 1;
   int num_outputs = 1;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -2990,27 +3034,46 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
     output_size = output_ops[0]->output_tensors[0].dim[1];
     assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
   }
-  // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
+  // get input/output strides (C20: stride[N-2] is the row-walk stride
+  // regardless of rank; view-safe).
   if (out_dims == 3) {
-    input_stride = input_ops[0]->dtensor.dim[2];
-    assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
+    input_stride = static_cast<int>(input_ops[0]->dtensor.stride[1]);
+    output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   } else {
-    // 2D input: stride along the row dim is just the inner-dim length.
-    input_stride = input_ops[0]->dtensor.dim[1];
-  }
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  if (out_dims == 3) {
-    output_stride = static_cast<int>(kn_input_op->input_strides[1]);
-  } else {
-    output_stride = output_ops[0]->dtensor.dim[1];
+    input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+    output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   }
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // For NEW MoE with active-mask: read mask + actual_count from meta. The
+  // mask lives at meta[1, 0:E_LOCAL] (flat offset M_TOTAL+MBT*TOPK), the
+  // per-expert actual_count lives immediately after at [E_LOCAL:2*E_LOCAL].
+  // Both are written by moe_permute Phase 3.
+  // For non-active-mask path (legacy), we still pass the compile-time
+  // (num_experts_per_tok * batch_size) as the row bound.
+  bool has_active = (active_mask_offset >= 0 && ctas_per_expert > 0);
+  if (has_active) {
+    // D3 + B11 (2026-05-15): per-CTA short-circuit when this CTA's
+    // expert is inactive; otherwise read actual_count to cap the row
+    // loop. For decode (active_token=1) each routed expert sees only
+    // 1 real row, vs the BM_PADDING (=128) padded layout, so the
+    // ROWS_PER_CTA work drops 128× on the active CTA.
+    code.e("int const *active_mask_silu_ = "
+           "static_cast<int const *>(task_desc->input_ptrs[1]) + $;",
+           active_mask_offset);
+    // active_mask_silu_[0..E_LOCAL-1]      = active flag
+    // active_mask_silu_[E_LOCAL..2E_LOCAL] = actual_count
+    code.e("int my_expert_silu_ = task_desc->task_metadata.request_id / $;",
+           ctas_per_expert);
+    code.e("if (!active_mask_silu_[my_expert_silu_]) return;");
+    // actual_count_per_expert lives at meta + active_mask_offset + e_local.
+    // For B11 we cap silu*mul's row count to actual_count instead of
+    // BM_PADDING (=128). Decode iter: actual_count ~= 1 (8 active
+    // experts/iter, 1 routed row each), vs 128 padded rows.
+    code.e("int silu_rows_ = active_mask_silu_[$ + my_expert_silu_];", e_local);
+    code.e("if (silu_rows_ <= 0) return;");
+    code.e("if (silu_rows_ > $) silu_rows_ = $;", batch_size, batch_size);
+  }
   code.e("kernel::silu_mul_task_impl<bfloat16, $, $, $, $>(",
          batch_size,
          output_size,
@@ -3018,7 +3081,11 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
          output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    $);", num_experts_per_tok * batch_size);
+  if (has_active) {
+    code.e("    silu_rows_);");
+  } else {
+    code.e("    $);", num_experts_per_tok * batch_size);
+  }
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
@@ -3052,15 +3119,8 @@ int TaskRegister::register_moe_mul_sum_add_sm100_task(
              input_ops[2]->output_tensors[0].dim[1] &&
          input_ops[0]->output_tensors[0].dim[2] == output_size);
   // get input stride
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  input_stride = static_cast<int>(kn_input_op->input_strides[1]);
-  assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
-  // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::mul_sum_add_sm100_task_impl<cute::bfloat16_t, $, $, $, $>(",
@@ -3119,10 +3179,7 @@ int TaskRegister::register_moe_linear_sm90_task(
   assert(input_ops[3]->output_tensors[0].num_dims == 1);
   assert(input_ops[3]->output_tensors[0].dim[0] == num_experts + 1);
   // get output stride
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[1]);
   orig_output_size = input_ops[1]->dtensor.dim[1];
 
   mirage::transpiler::CodeKeeper code;
@@ -3287,10 +3344,7 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4568,11 +4622,8 @@ int TaskRegister::register_nvshmem_allgather_strided_put_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 3);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // get output stride
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  // Row stride (C20: dtensor.stride[0] is view-safe).
+  int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
   // For this allgather task, input and output share the same stride
   int output_stride = input_stride;
   // Register nvshmem copy task (allgather)
@@ -4631,11 +4682,8 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // get output stride
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  // Row stride (C20: dtensor.stride[0] is view-safe).
+  int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
   // For this allgather task, input and output share the same stride
   int output_stride = input_stride;
   // Register tile allreduce task
@@ -4757,14 +4805,30 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   //   size 4: [active_mode, hidden_size_override, input_stride_override,
   //            in_offset_elems] — QKV-a fused path uses this to quantize
   //            a slice of a wider buffer.
-  assert(params.size() == 0 || params.size() == 1 || params.size() == 4);
+  //   size 5: [active_mode=5, expert_meta_offset, e_local,
+  //            bm_padding, ctas_per_expert] — B15 per-expert
+  //            active-rows skip for NEW MoE silu_out quantize.
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 4 ||
+         params.size() == 5);
   int active_mode = params.empty() ? 0 : params[0];
-  assert(active_mode >= 0 && active_mode <= 3);
+  // active_mode 4 (B12): no token-indexed skip — process every CTA's
+  // ROWS_PER_TASK chunk unconditionally. Used by NEW MoE silu_out
+  // quantize where rows are permuted-expert layout, not token index.
+  // active_mode 5 (B15): per-expert active-rows cap. Meta is supplied
+  // as a 4th tb_graph input; codegen pre-reads active_mask[my_expert]
+  // (skip if 0) then actual_count[my_expert] and caps the kernel's
+  // ROWS_PER_TASK inner loop.
+  assert(active_mode >= 0 && active_mode <= 5);
   bool has_slice_override = (params.size() == 4);
+  bool has_expert_active = (params.size() == 5);
+  int expert_meta_offset = has_expert_active ? params[1] : -1;
+  int expert_e_local = has_expert_active ? params[2] : 0;
+  int expert_bm_padding = has_expert_active ? params[3] : 0;
+  int expert_ctas_per_expert = has_expert_active ? params[4] : 1;
   int batch_size = 0, hidden_size = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 1;
+  int num_inputs = has_expert_active ? 2 : 1;
   int num_outputs = 2;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -4785,9 +4849,15 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     batch_size = input_ops[0]->output_tensors[0].dim[0];
     hidden_size = input_ops[0]->output_tensors[0].dim[1];
   }
-  // GLOBAL_STRIDE = hidden_size (stride between rows in linearized layout)
-  int input_stride = (ndims == 3) ? input_ops[0]->dtensor.dim[2]
-                                  : input_ops[0]->dtensor.dim[1];
+  // GLOBAL_STRIDE = stride between rows in linearized layout. C20
+  // (2026-05-17): use stride[0] (in elements) instead of dim[1]; for non-view
+  // tensors these are equal, but for an `mpk.narrow` view dim[1] is the
+  // slot width while stride[0] is the parent's full row width — the
+  // latter is what the kernel must walk by to avoid stepping into the
+  // adjacent slot.
+  int input_stride = (ndims == 3)
+                         ? static_cast<int>(input_ops[0]->dtensor.stride[1])
+                         : static_cast<int>(input_ops[0]->dtensor.stride[0]);
   int in_offset_elems = 0;
   if (has_slice_override) {
     hidden_size = params[1];
@@ -4823,6 +4893,31 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     code.e("int seq_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
            "runtime_config.paged_kv_last_page_len_buffer[bi_];");
     code.e("if (row_local_ < 0 || row_local_ >= seq_len_) return;");
+  } else if (active_mode == 4) {
+    // process_all_rows: no skip — every CTA quantizes its
+    // ROWS_PER_TASK chunk. For NEW MoE silu_out where rows index a
+    // permuted-expert layout (M_TOTAL = E_LOCAL × BM_PADDING) and the
+    // token-indexed active_rows_ would silently leave most rows
+    // uninitialized, feeding stale silu_fp8 to the W2 group GEMM.
+  } else if (active_mode == 5) {
+    // B15: per-expert active-rows skip. Skip CTA entirely when expert
+    // is inactive (active_mask[my_expert]=0). Otherwise read
+    // actual_count and pass to kernel as row_count_cap to bound the
+    // ROWS_PER_TASK inner loop. CTA→expert mapping: with grid_y =
+    // num_workers and BM_PADDING == ROWS_PER_TASK, my_expert =
+    // task_metadata.request_id / ctas_per_expert.
+    code.e("int const *active_mask_q_ = "
+           "static_cast<int const *>(task_desc->input_ptrs[1]) + $;",
+           expert_meta_offset);
+    code.e("int my_expert_q_ = task_desc->task_metadata.request_id / $;",
+           expert_ctas_per_expert);
+    code.e("if (!active_mask_q_[my_expert_q_]) return;");
+    code.e("int row_count_cap_ = active_mask_q_[$ + my_expert_q_];",
+           expert_e_local);
+    code.e("if (row_count_cap_ <= 0) return;");
+    code.e("if (row_count_cap_ > $) row_count_cap_ = $;",
+           expert_bm_padding,
+           expert_bm_padding);
   } else {
     code.e("int active_rows_ = "
            "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS] * $;",
@@ -4880,9 +4975,223 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   code.e("    1e-10f, -448.0f, 448.0f,");
   code.e("    $,", aligned_batch);
   code.e("    task_desc->task_metadata.request_id,");
-  code.e("    task_desc->task_metadata.kv_idx);");
+  if (active_mode == 5) {
+    code.e("    task_desc->task_metadata.kv_idx,");
+    code.e("    row_count_cap_);");
+  } else {
+    code.e("    task_desc->task_metadata.kv_idx);");
+  }
   code.e("}");
   return register_task_variant(TASK_QUANTIZE_FP8_SM100, code.to_string());
+}
+
+int TaskRegister::register_moe_silu_mul_quantize_fp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
+  //
+  // tb_graph inputs (in order):
+  //   [0] input bf16   [M_TOTAL, 2*K_INTER]  (w13_out: gate || up halves)
+  //   With ACTIVE_SKIP:
+  //   [1] meta int32 [2, ...] (NEW MoE meta; mask + actual_count rows)
+  //   Outputs (via store_in_dmem):
+  //   [out0] silu_fp8  [M_TOTAL, K_INTER]   FP8
+  //   [out1] silu_scale K-outer UE8M0 uint32
+  //
+  // params (optional):
+  //   params[0] = K_INTER override (default = input.dim(1)/2)
+  //   params[1] = ROWS_PER_TASK (default = 1)
+  //   With ACTIVE_SKIP (params.size()==5):
+  //   params[2] = active_mask_offset (int offset into meta)
+  //   params[3] = e_local (num local experts)
+  //   params[4] = bm_padding (rows per expert in permuted buffer)
+  //
+  // The fused task writes (M_TOTAL, K_INTER) FP8 + UE8M0 K-outer scale with
+  // the SAME layout the standalone `quantize_fp8` task produces — downstream
+  // moe_permute / fp8_group_gemm consumers see byte-identical scale data.
+  assert(params.size() == 0 || params.size() == 1 || params.size() == 2 ||
+         params.size() == 5);
+  bool const has_active = (params.size() == 5);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int const num_inputs = has_active ? 2 : 1;
+  int const num_outputs = 2;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  int const m_total = input_ops[0]->dtensor.dim[0];
+  int const in_row_full = input_ops[0]->dtensor.dim[1];
+  int const out_row_full = output_ops[0]->dtensor.dim[1];
+  int const k_inter_default = in_row_full / 2;
+  int const k_inter = params.size() >= 1 ? params[0] : k_inter_default;
+  int const rows_per_task = params.size() >= 2 ? params[1] : 1;
+  int const active_mask_offset = has_active ? params[2] : 0;
+  int const e_local = has_active ? params[3] : 0;
+  int const bm_padding = has_active ? params[4] : 0;
+  assert(in_row_full == 2 * k_inter);
+  assert(out_row_full == k_inter);
+
+  int const aligned_batch = ((m_total + 3) / 4) * 4;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Template: K_INTER, GROUP_SIZE, IN_ROW_STRIDE, OUT_ROW_STRIDE, BM_PADDING,
+  //           E_LOCAL, T, DST_T, ROWS_PER_TASK, ACTIVE_SKIP
+  code.e("kernel::moe_silu_mul_quantize_fp8_task_impl<$, 128, $, $, $, $, "
+         "cute::bfloat16_t, __nv_fp8_e4m3, $, $>(",
+         k_inter,
+         /*IN_ROW_STRIDE=*/in_row_full,
+         /*OUT_ROW_STRIDE=*/out_row_full,
+         has_active ? bm_padding : 1,
+         has_active ? e_local : 1,
+         rows_per_task,
+         has_active ? "true" : "false");
+  code.e("    task_desc->input_ptrs[0],");   // w13_out (real input slot)
+  code.e("    task_desc->output_ptrs[0],");  // silu_fp8 (output slot 0)
+  code.e("    task_desc->output_ptrs[1],");  // silu_scale (output slot 1)
+  if (has_active) {
+    code.e("    static_cast<int const*>(task_desc->input_ptrs[1]) + $,",
+           active_mask_offset);
+  } else {
+    code.e("    nullptr,");
+  }
+  code.e("    1e-10f, -448.0f, 448.0f,");
+  code.e("    $,", aligned_batch);
+  code.e("    task_desc->task_metadata.request_id,"); // task_idx = row_idx
+  code.e("    -1);"); // no row_count_cap (caller may still bound it later)
+  code.e("}");
+  return register_task_variant(TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+  //
+  // tb_graph inputs (in order):
+  //   [0] input bf16  [M, K_full]              (row-major, possibly wider
+  //                                              than process_dim)
+  //   [1] weight bf16 [process_dim]            (rms weight)
+  //   [2] output_bf16 [M, K_full]              (normalized bf16 output —
+  //                                              optional; the kernel still
+  //                                              computes it in smem)
+  //   [3] output_fp8  [M, process_dim]         (per-row FP8 quantized)
+  //   [4] output_scale uint32                  (packed UE8M0 column-major
+  //                                              [packed_k, aligned_batch])
+  //
+  // params (optional, default = legacy contiguous + UE8M0 scale):
+  //   params[0] = process_dim     (HIDDEN_DIM the kernel processes per row)
+  //   params[1] = in_offset_elems (skip elements at start of each row)
+  //   params[2] = out_offset_elems (same, for bf16 output)
+  //   params[3] = scale_ue8m0 (1=UE8M0 packed uint32, 0=float32 scale)
+  //   params[4] = emit_bf16 (1=write bf16 output, 0=skip the bf16 store)
+  //
+  // The bf16 output is stored as the 3rd input tensor (store_in_dmem),
+  // matching the MPK convention used by mla_decode/mla_prefill — codegen
+  // reads `input_ptrs[2]` for the output pointer.
+  assert(params.size() == 0 || params.size() == 3 || params.size() == 4 ||
+         params.size() == 5);
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int const num_inputs = 2;
+  int const num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  int dtensor_batch = input_ops[0]->dtensor.dim[0];
+  int hidden_dim_full = input_ops[0]->dtensor.dim[1];
+  int output_bf16_full = output_ops[0]->dtensor.dim[1];
+  int output_fp8_full = output_ops[1]->dtensor.dim[1];
+
+  int process_dim = params.size() >= 3 ? params[0] : hidden_dim_full;
+  int in_offset = params.size() >= 3 ? params[1] : 0;
+  int out_offset = params.size() >= 3 ? params[2] : 0;
+  int scale_ue8m0 = params.size() >= 4 ? params[3] : 1;
+  int emit_bf16 = params.size() >= 5 ? params[4] : 1;
+  assert(scale_ue8m0 == 0 || scale_ue8m0 == 1);
+  assert(emit_bf16 == 0 || emit_bf16 == 1);
+  assert(in_offset + process_dim <= hidden_dim_full);
+  assert(out_offset + process_dim <= output_bf16_full);
+
+  // BATCH_SIZE per CTA = ceil(batch / grid_x).
+  int const grid_x = bgraph.grid_dim.x > 0 ? (int)bgraph.grid_dim.x : 1;
+  int batch_size = (dtensor_batch + grid_x - 1) / grid_x;
+  if (batch_size < 1) {
+    batch_size = 1;
+  }
+
+  // UE8M0 column-major scale layout requires the alignment to align with
+  // the batch axis dim (see quantize kernel). For the float32 path,
+  // scale_outer_stride is unused (writes go to [batch, num_groups] row-
+  // major) but we still pass a sane value.
+  constexpr int GROUP_SIZE = 128;
+  int const aligned_batch =
+      scale_ue8m0 ? ((dtensor_batch + 3) / 4) * 4 : dtensor_batch;
+  (void)GROUP_SIZE;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Active-rows gate (B34 convention): skip CTAs whose first row is past
+  // the active token count, and clamp the inner loop to the remaining
+  // active rows so we don't normalize/overwrite stale bf16.
+  code.e("int active_rows_fused_ = $;", dtensor_batch);
+  code.e("#ifndef MPK_TEST_MODE");
+  code.e("active_rows_fused_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("#endif");
+  code.e("int task_first_row_fused_ = "
+         "task_desc->task_metadata.request_id * $;",
+         batch_size);
+  code.e("if (task_first_row_fused_ < 0) task_first_row_fused_ = 0;");
+  code.e("if (task_first_row_fused_ >= active_rows_fused_) return;");
+  code.e("int row_count_cap_fused_ = "
+         "active_rows_fused_ - task_first_row_fused_;");
+
+  // Kernel template params: T, DST_T, BATCH_SIZE, HIDDEN_DIM, GROUP_SIZE,
+  // NUM_THREADS, IN_OFFSET, OUT_OFFSET, IN_ROW_STRIDE, OUT_ROW_STRIDE,
+  // FP8_ROW_STRIDE, SCALE_UE8M0, EMIT_BF16.
+  code.e("kernel::fused_rmsnorm_quantize_fp8_impl<bfloat16, __nv_fp8_e4m3,"
+         " $, $, 128, 256, $, $, $, $, $, $, $>(",
+         batch_size,
+         process_dim,
+         in_offset,
+         out_offset,
+         hidden_dim_full,
+         output_bf16_full,
+         output_fp8_full,
+         scale_ue8m0 ? "true" : "false",
+         emit_bf16 ? "true" : "false");
+  code.e("    task_desc->input_ptrs[0],");  // input bf16
+  code.e("    task_desc->input_ptrs[1],");  // weight bf16
+  code.e("    task_desc->output_ptrs[0],"); // output bf16
+  code.e("    task_desc->output_ptrs[1],"); // output fp8
+  code.e("    task_desc->output_ptrs[2],"); // output scale
+  code.e("    1e-6f,");                     // rms eps
+  code.e("    1e-10f,"); // quantize scale eps (floor for local_max)
+  code.e("    -448.0f, 448.0f,");
+  code.e("    $,", aligned_batch);
+  code.e("    task_desc->task_metadata.request_id,"); // task_idx
+  code.e("    row_count_cap_fused_);");
+  code.e("}");
+  return register_task_variant(TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100,
+                               code.to_string());
 }
 
 int TaskRegister::register_linear_fp8_sm100_task(
@@ -4928,10 +5237,7 @@ int TaskRegister::register_linear_fp8_sm100_task(
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2); // input_fp8
   reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5059,10 +5365,7 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
 
   // Output stride (column dim) in global memory. For the MPK FP8 swapAB
   // kernel we always treat the output as row-major BF16 [BATCH, OUTPUT].
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // Codegen mirrors register_linear_sm100_task (BF16 MPK) with the only
   // additions being: (a) FP8 element type for A/B, (b) two raw uint32_t*
@@ -5271,10 +5574,7 @@ int TaskRegister::register_splitk_linear_fp8_swapAB_sm100_task(
   assert(reduction_size_full % reduction_size_per_task == 0 &&
          "full K must be a multiple of per-task K (uniform split)");
 
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5487,20 +5787,16 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
          "linear_fp8_bmm_sm100 requires D_in divisible by 128");
 
   // Row strides (in elements) for the global gmem tensors. With 3D inputs:
-  //   input  [N, H, D_in] -> input_strides[0] = H * D_in
+  //   input  [N, H, D_in] -> stride[0] = H * D_in
   //   weight [H, D_out, D_in] -> stride between rows within a head is D_in
-  //   output [N, H, D_out] -> output_strides[0] = H * D_out
-  // Use the dtensor owner's input_strides[0] for the leading-row strides;
-  // those are recorded from the source tensor at attach time and survive
-  // grid partitioning. Within-head weight row stride = D_in (contiguous).
-  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *input_kn =
-      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
-  kn::KNInputOp *output_kn =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  int input_row_stride = static_cast<int>(input_kn->input_strides[0]);
-  int output_row_stride = static_cast<int>(output_kn->input_strides[0]);
+  //   output [N, H, D_out] -> stride[0] = H * D_out
+  // C20 (2026-05-17): read from dtensor.stride[0] instead of the owner_op's
+  // input_strides[0] — view-safe (mpk.narrow inherits parent stride; root
+  // tensors have stride populated by input.cc and fixup_legacy_strides).
+  int input_row_stride =
+      static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int output_row_stride =
+      static_cast<int>(output_ops[0]->dtensor.stride[0]);
   // Fallback if the recorded leading stride happens to be 0 (no source
   // tensor metadata): default to the contiguous packed strides.
   if (input_row_stride == 0) {
@@ -5658,10 +5954,19 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   (2026-05-13).
   // runtime_m_mode=1: gates to prompt-prefill and uses request 0's current
   //   kv_len as runtime M. This is used for ckv -> kv_b_proj decompression.
+  // runtime_m_mode=2 (B20, 2026-05-15): prefill-phase gate (Q_LEN > 8) but
+  //   keep active_rows as runtime M. Used for the prefill-only branch of
+  //   the dual-dispatch O_proj (prefill O_proj reads attn_unabsorbed which
+  //   is only valid on prefill iters; decode iters early-exit so the GEMM
+  //   doesn't burn ~30 μs on a wasted wave).
+  // runtime_m_mode=3 (B20, 2026-05-15): decode-phase gate (Q_LEN <= 8) with
+  //   active_rows as runtime M. Used for the decode-only branch of the
+  //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
+  //   valid on decode iters; prefill iters early-exit).
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
-  assert(runtime_m_mode == 0 || runtime_m_mode == 1);
+  assert(runtime_m_mode >= 0 && runtime_m_mode <= 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5678,6 +5983,19 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
     code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
            "runtime_config.paged_kv_last_page_len_buffer[0];");
+  } else if (runtime_m_mode == 2 || runtime_m_mode == 3) {
+    // Phase gate + active_rows cap. Mode 2 = prefill-only, 3 = decode-only.
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    if (runtime_m_mode == 2) {
+      code.e("if (q_len_ <= 8) return;");
+    } else {
+      code.e("if (q_len_ > 8) return;");
+    }
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
   } else {
     // 2026-05-13 ROOT-CAUSE FIX: cap M at active_rows so decode iters
     // (active_rows=1) don't overwrite output rows 1..M-1 with garbage.
@@ -5729,6 +6047,63 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
       TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
 }
 
+// SplitK decode variant. params: [M, N, K, num_workers, SPLIT_K]. Always
+// runs with runtime_m_mode=3 (decode-only Q_LEN<=8 + active_rows cap)
+// inline; that gate is baked in (no override). Kernel template:
+// <BN=128, NS=3, NE=2, SPLIT_K>. NE=2 matches the smallm sweet spot
+// (decode active_rows is tiny so wide TMEM staging wastes registers).
+//
+// Caller MUST pre-zero the output tensor (the Python wrapper prepends a
+// tensor_init); the kernel uses red.global.add.bf16x2 PTX atomics to
+// accumulate SPLIT_K partials per (m_tile, n_tile).
+int TaskRegister::register_fp8_gemm_dense_decode_splitk_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int split_k = params[4];
+  // BK=128 in the kernel; nk = K / 128 must be divisible by split_k so
+  // the K slice boundaries align with the per-128 scale rows.
+  assert(K % (128 * split_k) == 0 &&
+         "fp8_gemm_dense_decode_splitk requires K divisible by 128 * SPLIT_K");
+  assert(split_k >= 1 && split_k <= 8 &&
+         "fp8_gemm_dense_decode_splitk: SPLIT_K in [1, 8]");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // runtime_m_mode=3 (decode-phase gate + active_rows cap) inline.
+  code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+         "runtime_config.qo_indptr_buffer[0];");
+  code.e("if (q_len_ > 8) return;");
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+  code.e("if (runtime_m_ <= 0) return;");
+  // <BN, NS, NE, SPLIT_K> = <128, 3, 2, split_k>.
+  code.e("kernel::fp8_gemm_dense_decode_splitk::fp8_gemm_dense_decode_splitk_"
+         "sm100_task_impl<$, $, $, $>(",
+         128,
+         3,
+         2,
+         split_k);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", num_workers);
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100,
+                               code.to_string());
+}
+
 // Shared codegen for both group GEMM variants (smallm/largem). Variant
 // only changes the namespace + function name + TaskType.
 static int register_fp8_group_gemm_variant(TaskRegister *self,
@@ -5736,10 +6111,15 @@ static int register_fp8_group_gemm_variant(TaskRegister *self,
                                            char const *namespace_name,
                                            char const *fn_name,
                                            TaskType task_type) {
-  // params: [M_total, N, K, E, num_workers]
-  assert(params.size() == 5);
+  // params: [M_total, N, K, E, num_workers, active_mask_offset]
+  // active_mask_offset == -1 means caller did not supply a meta buffer;
+  // pass nullptr so the kernel processes every tile (legacy behavior).
+  // active_mask_offset >= 0 means input_ptrs[5] is the meta buffer (int32)
+  // and the per-expert active mask lives at meta + active_mask_offset.
+  assert(params.size() == 6);
   int M_total = params[0], N = params[1], K = params[2], E = params[3];
   int num_workers = params[4];
+  int active_mask_offset = params[5];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -5755,6 +6135,13 @@ static int register_fp8_group_gemm_variant(TaskRegister *self,
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]),");  // D
   code.e("    static_cast<const int*>(task_desc->input_ptrs[4]),"); // m_indices
+  if (active_mask_offset >= 0) {
+    code.e("    static_cast<const int*>(task_desc->input_ptrs[5]) + "
+           "$,",
+           active_mask_offset); // active_expert_mask
+  } else {
+    code.e("    nullptr,"); // no active mask supplied
+  }
   code.e("    $,", M_total);
   code.e("    $,", N);
   code.e("    $,", K);
@@ -5823,7 +6210,8 @@ int TaskRegister::register_moe_permute_sm100_task(
   code.e("    task_desc->output_ptrs[0],"); // permuted_fp8
   code.e("    task_desc->output_ptrs[1],"); // permuted_scale (transposed)
   code.e("    task_desc->output_ptrs[2],"); // meta (packed weights+tok2perm)
-  code.e("    task_desc->task_metadata.expert_offset);");
+  code.e("    task_desc->task_metadata.expert_offset,");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_PERMUTE_SM100, code.to_string());
 }
 
@@ -5833,7 +6221,11 @@ int TaskRegister::register_moe_permute_sm100_task(
 //             meta (M_TOTAL + MBT*TOPK,) i32 (= permuted_weights+token2perm),
 //             residual (MBT, HIDDEN) bf16
 // Outputs (1): output (MBT, HIDDEN) bf16
-// Grid: (MBT, 1, 1). request_id = bid.x set by runtime.
+// Grid: (ceil(MBT / ROWS_PER_TASK), 1, 1). request_id = bid.x set by runtime.
+// B33 (2026-05-15): added ROWS_PER_TASK template — when the wrapper shrinks
+// grid_dim.x below MBT, the kernel loops ROWS_PER_TASK = ceil(MBT / grid.x)
+// tokens per CTA. Default grid.x == MBT keeps ROWS_PER_TASK == 1 and the
+// legacy 1-CTA-per-token shape unchanged.
 int TaskRegister::register_moe_unpermute_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
@@ -5853,40 +6245,68 @@ int TaskRegister::register_moe_unpermute_sm100_task(
     }
   }
   int output_stride = HIDDEN;
-  if (output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP) {
-    kn::KNInputOp *kn_input_op =
-        static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-    output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
+
+  // B33: rows_per_task = ceil(MBT / grid.x). When the wrapper passes
+  // grid.x < MBT the kernel internally loops over multiple tokens per CTA
+  // so the total launched CTAs stay ≤ num_workers. Default grid.x == MBT
+  // gives rows_per_task == 1 (legacy 1-CTA-per-token contract).
+  int grid_x_safe = bgraph.grid_dim.x > 0 ? (int)bgraph.grid_dim.x : 1;
+  int rows_per_task = (MBT + grid_x_safe - 1) / grid_x_safe;
+  if (rows_per_task < 1) {
+    rows_per_task = 1;
+  }
+
+  // 2026-05-15 stragglers fix: HIDDEN_SPLIT = grid.y partitions the
+  // HIDDEN axis across HIDDEN_SPLIT CTAs per token. Decode case
+  // (1 active token) has only HIDDEN_SPLIT CTAs doing actual compute
+  // — bumping HIDDEN_SPLIT spreads the 32 μs straggler across more
+  // SMs in parallel. Prefill grid balloons to MBT*HIDDEN_SPLIT CTAs
+  // but per-CTA work shrinks proportionally.
+  int hidden_split = bgraph.grid_dim.y > 0 ? (int)bgraph.grid_dim.y : 1;
+  if (hidden_split < 1) {
+    hidden_split = 1;
   }
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::moe_unpermute_sm100_task_impl<$, $, $, $, $>(",
+  code.e("kernel::moe_unpermute_sm100_task_impl<$, $, $, $, $, $, $>(",
          MBT,
          TOPK,
          HIDDEN,
          M_TOTAL,
-         output_stride);
+         output_stride,
+         rows_per_task,
+         hidden_split);
   code.e("    task_desc->input_ptrs[0],");  // permuted_output
   code.e("    task_desc->input_ptrs[1],");  // meta
   code.e("    task_desc->input_ptrs[2],");  // residual
   code.e("    task_desc->output_ptrs[0],"); // output
-  code.e("    task_desc->task_metadata.request_id);");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_UNPERMUTE_SM100, code.to_string());
 }
 
 // transpose_scale_sm100 — (M, K_PACKED) uint32 → (K_PACKED, M) uint32.
-// Params: [M, K_PACKED]. 1 input, 1 output, single CTA (grid=(1,1,1)).
+// Params: [M, K_PACKED]. 1 input, 1 output.
+// B13 (2026-05-15): grid_dim.x CTAs stripe M; each CTA handles a
+// disjoint chunk of rows. cta_idx / num_ctas passed via task metadata.
 int TaskRegister::register_transpose_scale_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  (void)bgraph;
   assert(params.size() == 2);
   int M = params[0], K_PACKED = params[1];
+  int num_ctas = (int)bgraph.grid_dim.x;
+  if (num_ctas < 1) {
+    num_ctas = 1;
+  }
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::transpose_scale_sm100_task_impl<$, $>(", M, K_PACKED);
-  code.e("    task_desc->input_ptrs[0],");   // in (M, K_PACKED)
-  code.e("    task_desc->output_ptrs[0]);"); // out (K_PACKED, M)
+  code.e("    task_desc->input_ptrs[0],");            // in (M, K_PACKED)
+  code.e("    task_desc->output_ptrs[0],");           // out (K_PACKED, M)
+  code.e("    task_desc->task_metadata.request_id,"); // cta_idx = bid.x
+  code.e("    $);", num_ctas);
   return register_task_variant(TASK_TRANSPOSE_SCALE_SM100, code.to_string());
 }
 
@@ -6089,20 +6509,26 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   // paged cache once. Decode gets a dense concatenated [CKV,KPE] view when
   // needed; prompt prefill gets split CKV/KPE views for kv_b_proj + PR674 MLA.
   //
-  // params (same scheme as register_mla_kv_gather_sm100_task):
+  // params:
   //   size 3 (legacy): [d_k, d_v, page_size].
   //   size 7 (QKV-a fused): adds [c_latent_row_stride, c_latent_offset_elems,
   //                               k_pe_row_stride, k_pe_offset_elems].
+  //   size 8 (gather fan-out, 2026-05-16 C1): also append [num_gather_splits].
+  //   When NUM_GATHER_SPLITS > 1, the builder passes grid_dim.y = N_SPLITS, and
+  //   each CTA strides seq_pos by N_SPLITS so the formerly-serial gather/append
+  //   loops run in parallel across N_SPLITS workers.
   (void)bgraph;
-  assert(params.size() == 3 || params.size() == 7);
+  assert(params.size() == 3 || params.size() == 7 || params.size() == 8);
 
   int d_k = params[0];
   int d_v = params[1];
   int page_size = params[2];
-  int c_latent_row_stride = (params.size() == 7) ? params[3] : d_v;
-  int c_latent_offset = (params.size() == 7) ? params[4] : 0;
-  int k_pe_row_stride = (params.size() == 7) ? params[5] : 128;
-  int k_pe_offset = (params.size() == 7) ? params[6] : 0;
+  int c_latent_row_stride = (params.size() >= 7) ? params[3] : d_v;
+  int c_latent_offset = (params.size() >= 7) ? params[4] : 0;
+  int k_pe_row_stride = (params.size() >= 7) ? params[5] : 128;
+  int k_pe_offset = (params.size() >= 7) ? params[6] : 0;
+  int num_gather_splits = (params.size() == 8) ? params[7] : 1;
+  assert(num_gather_splits >= 1);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6150,12 +6576,14 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
          "static_cast<nv_bfloat16*>(task_desc->output_ptrs[1]) + "
          "bi_ * MPK_MAX_SEQ_LENGTH * $;",
          d_k - d_v);
-  code.e("kernel::mla_kv_cache_gather_unified_sm100_task_impl<$, $, $, $, $>(",
-         d_k,
-         d_v,
-         page_size,
-         k_pe_row_stride,
-         c_latent_row_stride);
+  code.e(
+      "kernel::mla_kv_cache_gather_unified_sm100_task_impl<$, $, $, $, $, $>(",
+      d_k,
+      d_v,
+      page_size,
+      k_pe_row_stride,
+      c_latent_row_stride,
+      num_gather_splits);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    paged_cache_ptr_,"); // paged_cache
@@ -6167,7 +6595,8 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    prompt_prefill_,");
-  code.e("    task_desc->task_metadata.request_id);");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    task_desc->task_metadata.kv_idx);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_UNIFIED_SM100,
                                code.to_string());
@@ -6207,14 +6636,30 @@ int TaskRegister::register_deepseek_mla_rope_q_sm100_task(
 int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  assert(params.size() == 2);
+  // params: [num_heads, tile_q [, phase_gate]]
+  //   phase_gate (optional, default 0):
+  //     0 = no gate (legacy)
+  //     2 = decode-only (skip if Q_LEN > 8) — used for the fused
+  //         absorbed-Q ROPE in dual-dispatch. On prefill iters the q_b
+  //         decode GEMM early-exits via gate_mode=2, leaving q_nope_pe
+  //         with stale data; rotating stale data is wasted work.
+  assert(params.size() == 2 || params.size() == 3);
   int num_heads = params[0];
   int tile_q = params[1];
+  int phase_gate = (params.size() == 3) ? params[2] : 0;
   assert(num_heads > 0);
   assert(tile_q > 0);
+  assert(phase_gate == 0 || phase_gate == 2);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  if (phase_gate == 2) {
+    code.e("{");
+    code.e("int q_len_rope_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    code.e("if (q_len_rope_ > 8) return;");
+    code.e("}");
+  }
   code.e("kernel::deepseek_mla_rope_sm100_task_impl<$, $, false, true, false>(",
          num_heads,
          tile_q);
@@ -6235,22 +6680,38 @@ int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
 int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  // params: [num_heads, tile_q [, qfused_mode]]
+  // params: [num_heads, tile_q [, qfused_mode [, phase_gate]]]
   //   qfused_mode (optional, default 0):
   //     0 = legacy separate q_pe buffer, row stride = num_heads * 64,
   //         per-head stride 64. q_pe is a standalone (mbt, H*64) tensor.
   //     1 = row-swap fused q_b_prefill_fused (mbt, H*192), pe slice starts
   //         at H*128 within each row. Per-head pe stride = 64. Used when
   //         MPK_DSV3_QB_FUSED=1.
-  assert(params.size() == 2 || params.size() == 3);
+  //   phase_gate (optional, default 0):
+  //     0 = no gate (legacy)
+  //     1 = prefill-only (skip if Q_LEN <= 8) — used for the unabsorbed-Q
+  //         ROPE in dual-dispatch. On decode iters the q_b prefill GEMM
+  //         early-exits via gate_mode=1 (and chunked_prefill itself
+  //         returns), so rotating the (stale) q_b_prefill_fused buffer
+  //         on decode iters is wasted work.
+  assert(params.size() == 2 || params.size() == 3 || params.size() == 4);
   int num_heads = params[0];
   int tile_q = params[1];
-  int qfused_mode = (params.size() == 3) ? params[2] : 0;
+  int qfused_mode = (params.size() >= 3) ? params[2] : 0;
+  int phase_gate = (params.size() >= 4) ? params[3] : 0;
   assert(num_heads > 0);
   assert(tile_q > 0);
+  assert(phase_gate == 0 || phase_gate == 1);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  if (phase_gate == 1) {
+    code.e("{");
+    code.e("int q_len_rope_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    code.e("if (q_len_rope_ <= 8) return;");
+    code.e("}");
+  }
   if (qfused_mode == 1) {
     // Row-swap fused layout: pe of head h at offset
     //   row * (num_heads * 192) + (num_heads * 128) + h * 64

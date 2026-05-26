@@ -129,6 +129,11 @@ __device__ __noinline__ void task_impl_tpl(
     CUtensorMap const *tsfb_ptr, // SFB: [num_sf_k, E*N]      uint32, E*N innermost
     CUtensorMap const *td_ptr,   // D:   [M_total, N]         BF16, N innermost
     int const *__restrict__ m_indices,
+    int const *__restrict__ active_expert_mask, // [E] int32, 0 = expert
+                                                // received no routings this
+                                                // iter → skip its tile rows.
+                                                // nullptr = legacy / always
+                                                // process every tile.
     int const M_total,
     int const N,
     int const K,
@@ -240,6 +245,15 @@ __device__ __noinline__ void task_impl_tpl(
       int bm = bidx / nn, bn = bidx % nn;
       int m_start = bm * BM;
       int expert_id = (m_start < M_total) ? __ldg(m_indices + m_start) : 0;
+      // Skip this whole tile when the expert received no routings this
+      // iter (mask written by moe_permute). All warps make the same
+      // decision deterministically from m_indices + active_expert_mask
+      // so the mbarrier handshakes stay consistent. nullptr mask = always
+      // process every tile (legacy / non-MoE callers).
+      if (active_expert_mask != nullptr &&
+          !__ldg(active_expert_mask + expert_id)) {
+        continue;
+      }
       int om = m_start;
       int on = expert_id * N + bn * BN;
 
@@ -286,6 +300,18 @@ __device__ __noinline__ void task_impl_tpl(
       if (bidx >= total) {
         break;
       }
+      // Same skip check as warp 0 — all warps must short-circuit in
+      // lockstep, otherwise the mbarrier handshake for this iter's stage
+      // is unsynced.
+      if (active_expert_mask != nullptr) {
+        int bm_skip = bidx / nn;
+        int m_start_skip = bm_skip * BM;
+        int expert_skip =
+            (m_start_skip < M_total) ? __ldg(m_indices + m_start_skip) : 0;
+        if (!__ldg(active_expert_mask + expert_skip)) {
+          continue;
+        }
+      }
       for (int ki = 0; ki < nk; ki++, gki++) {
         int s = gki % NS;
         int ph = (gki / NS) & 1;
@@ -308,6 +334,15 @@ __device__ __noinline__ void task_impl_tpl(
       int bidx = iter * num_workers + worker_idx;
       if (bidx >= total) {
         break;
+      }
+      if (active_expert_mask != nullptr) {
+        int bm_skip = bidx / nn;
+        int m_start_skip = bm_skip * BM;
+        int expert_skip =
+            (m_start_skip < M_total) ? __ldg(m_indices + m_start_skip) : 0;
+        if (!__ldg(active_expert_mask + expert_skip)) {
+          continue;
+        }
       }
       int accum_idx = iter % NE;
       int accum_ph = (iter / NE) & 1;
@@ -378,6 +413,11 @@ __device__ __noinline__ void task_impl_tpl(
       }
       int bm = bidx / nn, bn = bidx % nn;
       int m_start = bm * BM;
+      int expert_id = (m_start < M_total) ? __ldg(m_indices + m_start) : 0;
+      if (active_expert_mask != nullptr &&
+          !__ldg(active_expert_mask + expert_id)) {
+        continue;
+      }
       int om = m_start;
       int on = bn * BN;
       int accum_idx = iter % NE;

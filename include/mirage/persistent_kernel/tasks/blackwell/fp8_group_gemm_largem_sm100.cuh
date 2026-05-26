@@ -27,25 +27,27 @@ namespace fp8_group_gemm_largem {
 constexpr int BN = 128;
 constexpr int NS = 6;
 
-__device__ __noinline__ void
-    fp8_group_gemm_largem_sm100_task_impl(CUtensorMap const *ta_ptr,
-                                          CUtensorMap const *tb_ptr,
-                                          CUtensorMap const *tsfa_ptr,
-                                          CUtensorMap const *tsfb_ptr,
-                                          CUtensorMap const *td_ptr,
-                                          int const *__restrict__ m_indices,
-                                          int const M_total,
-                                          int const N,
-                                          int const K,
-                                          int const E,
-                                          int const worker_idx,
-                                          int const num_workers) {
+__device__ __noinline__ void fp8_group_gemm_largem_sm100_task_impl(
+    CUtensorMap const *ta_ptr,
+    CUtensorMap const *tb_ptr,
+    CUtensorMap const *tsfa_ptr,
+    CUtensorMap const *tsfb_ptr,
+    CUtensorMap const *td_ptr,
+    int const *__restrict__ m_indices,
+    int const *__restrict__ active_expert_mask,
+    int const M_total,
+    int const N,
+    int const K,
+    int const E,
+    int const worker_idx,
+    int const num_workers) {
   fp8_group_gemm_common::task_impl_tpl<BN, NS>(ta_ptr,
                                                tb_ptr,
                                                tsfa_ptr,
                                                tsfb_ptr,
                                                td_ptr,
                                                m_indices,
+                                               active_expert_mask,
                                                M_total,
                                                N,
                                                K,

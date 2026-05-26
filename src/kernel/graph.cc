@@ -642,7 +642,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "moe_silu_mul") {
     int variant_id =
         task_register->register_moe_silu_mul_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+    // params: [] (legacy 1 input) OR
+    //         [active_mask_offset, ctas_per_expert{, e_local}] (2 inputs,
+    //         meta supplied for NEW MoE D3 skip + B11 actual_count bound).
+    int num_inputs_silu = (params.size() >= 2 && params[0] >= 0) ? 2 : 1;
+    task_config[op] =
+        std::make_tuple(num_inputs_silu, 1, TASK_SILU_MUL, variant_id);
   } else if (name == "moe_w2_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, false /*w13_linear*/);
@@ -807,13 +812,17 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   else if (name == "quantize_fp8_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
         customized->bgraph, params, true /*scale_ue8m0*/);
+    // B15: params.size() == 5 means expert_active mode (active_mode=5)
+    // with meta as 2nd input. Otherwise legacy 1-input.
+    int num_inputs_q = (params.size() == 5) ? 2 : 1;
     task_config[op] =
-        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+        std::make_tuple(num_inputs_q, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "quantize_fp8_f32scale_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
         customized->bgraph, params, false /*scale_ue8m0*/);
+    int num_inputs_q = (params.size() == 5) ? 2 : 1;
     task_config[op] =
-        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+        std::make_tuple(num_inputs_q, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "linear_fp8_sm100") {
     int variant_id = task_register->register_linear_fp8_sm100_task(
         customized->bgraph, params, false);
@@ -854,18 +863,58 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_MEDIUMM_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_decode_splitk_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_decode_splitk_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 1, TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100, variant_id);
+  } else if (name == "moe_silu_mul_quantize_fp8_sm100") {
+    // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
+    // Either 1 input (w13_out) or 2 inputs (w13_out + meta when ACTIVE_SKIP).
+    // Always 2 outputs (silu_fp8, silu_scale, both via store_in_dmem).
+    // params layout: [K_INTER, ROWS_PER_TASK] (legacy 1 input) OR
+    //                [K_INTER, ROWS_PER_TASK, active_mask_offset, e_local,
+    //                 bm_padding] (5 params, meta supplied → 2 inputs).
+    int variant_id =
+        task_register->register_moe_silu_mul_quantize_fp8_sm100_task(
+            customized->bgraph, params);
+    int const num_inputs_silu_q = (params.size() == 5) ? 2 : 1;
+    task_config[op] = std::make_tuple(
+        num_inputs_silu_q, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100,
+        variant_id);
+  } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
+    // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+    // 2 real inputs (input, weight) + 3 outputs
+    // (output_bf16, output_fp8, output_scale). All 3 outputs are wired
+    // via `tb_graph.new_input(store_in_dmem=True)` in the Python
+    // wrapper, but the tuple MUST split them into the output slots so
+    // build_annotated_graph populates last_writer for the FP8/scale
+    // buffers — otherwise downstream FP8 GEMM has no producer edge,
+    // residual stripping can't find the chain, and the embedding gets
+    // misclassified as a case-3 fork+join-producer.
+    int variant_id =
+        task_register->register_fused_rmsnorm_quantize_fp8_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        2, 3, TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "fp8_group_gemm_smallm_sm100") {
-    // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + 1 output (D_bf16). All
-    // 4 first inputs + the output carry TMA descriptors; m_indices direct LDG.
+    // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + optional 6th (meta for
+    // per-expert active mask) + 1 output (D_bf16). All 4 first inputs +
+    // the output carry TMA descriptors; m_indices + active mask are direct
+    // LDG. The 6th-input case is signaled by params[5] >= 0 (= flat offset
+    // of active_expert_mask inside meta).
     int variant_id = task_register->register_fp8_group_gemm_smallm_sm100_task(
         customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(5, 1, TASK_FP8_GROUP_GEMM_SMALLM_SM100, variant_id);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_SMALLM_SM100, variant_id);
   } else if (name == "fp8_group_gemm_largem_sm100") {
     int variant_id = task_register->register_fp8_group_gemm_largem_sm100_task(
         customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(5, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
   } else if (name == "moe_permute_sm100") {
     // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
     // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).

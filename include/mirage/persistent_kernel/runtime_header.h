@@ -211,6 +211,19 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
   TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 306,
   TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 307,
+  // SplitK decode variant of the dense FP8 GEMM. K is partitioned across
+  // SPLIT_K CTAs (per output tile) which atomically reduce-add their
+  // partial sums into a pre-zeroed BF16 output. Targets DSv3 decode
+  // O_proj (M=128 mbt, K=16384 = 32*512 absorbed, N=7168 hidden shard),
+  // where the stock kernel runs 56 tiles in 1 underutilized wave; with
+  // SPLIT_K=4 we run 224 tiles in 3 better-utilized waves, each tile
+  // doing K/4 work. Gated behind MPK_DSV3_DECODE_OPROJ_SPLITK=1.
+  TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 = 308,
+  // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize. Replaces
+  // the (RMSNorm bf16 -> Quantize fp8) two-task chain that feeds the qkv_a
+  // FP8 dense GEMM. Saves one dispatch wave and one bf16 HBM round-trip
+  // per layer. Behind `MPK_DSV3_FUSED_RMSNORM_QUANTIZE=1`.
+  TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100 = 309,
   // Grouped FP8 GEMM for MoE (DSv3, cherry-picked from PR674 f24dcd85).
   // Fused block_scale MMA with UE8M0 scales. 5 TMA descriptors
   // (A, B, SFA, SFB, D output). Two variants share kernel body; differ
@@ -231,6 +244,12 @@ enum TaskType {
   // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
   // (N, H, 576) that the MLA decode TMA expects.
   TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
+  // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
+  // Replaces the (moe_silu_mul bf16 -> quantize_fp8 fp8+scale) two-task
+  // chain feeding the W2 FP8 group GEMM. Saves one dispatch wave + one
+  // BF16 HBM round-trip of silu_out per layer. Behind
+  // `MPK_DSV3_FUSED_SILU_QUANTIZE=1`.
+  TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100 = 317,
   TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

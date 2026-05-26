@@ -65,6 +65,39 @@ def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
     return 1
 
 
+# B34 (2026-05-15): multi-row-per-CTA grid for RMSNorm. Shrinks grid.x from
+# mbt down to ~mbt//8 so each CTA processes ~8 rows via the kernel's existing
+# batch_idx loop, gated by a runtime row_count_cap (active_rows - first_row)
+# so decode iters don't overwrite inactive rows with stale-bf16 normalized
+# output. Frees up worker slots that previously sat idle when active_rows < mbt.
+# The threadblock partition asserts (mbt % grid.x == 0), so when mbt is not a
+# multiple of the preferred rows-per-task we fall back to the largest divisor
+# of mbt at or below it (typically aligned to powers of two in real configs).
+# C2 (2026-05-16): rows-per-CTA tuning sweep.
+#   8 → 4: -17 μs/layer (max 29 → 16 μs)
+#   4 → 2: -10 μs/layer (max 16 → 9 μs)
+#   2 → 1: -2  μs/layer (max  9 → 5 μs, tail-latency win)
+# At rows=1, grid=128 = exactly num_workers, but RMSnorm and other tasks
+# don't seem to contend severely. Empirically still positive.
+# Env override: MPK_DSV3_RMSNORM_ROWS_PER_TASK={1,2,4,8}.
+_RMSNORM_ROWS_PER_TASK = int(os.environ.get("MPK_DSV3_RMSNORM_ROWS_PER_TASK", "1"))
+
+
+def _rmsnorm_grid(mbt: int) -> tuple:
+    if mbt <= _RMSNORM_ROWS_PER_TASK:
+        # Single-CTA covers the whole batch — kernel BATCH_SIZE = mbt.
+        return (1, 1, 1)
+    target = mbt // _RMSNORM_ROWS_PER_TASK
+    # Snap to a divisor of mbt at or above `target` so grid_x divides mbt.
+    # Walk up from target until we find a divisor; bounded by mbt itself.
+    g = target
+    while g <= mbt and mbt % g != 0:
+        g += 1
+    if g > mbt:
+        g = mbt  # legacy 1-row-per-CTA fallback
+    return (g, 1, 1)
+
+
 def _moe_expert_grid_x(max_num_batched_tokens: int,
                        num_experts: int = NUM_EXPERTS,
                        preferred_groups: int | None = None) -> int:
@@ -225,6 +258,12 @@ class DeepSeekV3Builder(GraphBuilder):
         # OFF; A/B test under MPK_DSV3_NEW_MOE=1 then flip default after
         # correctness + perf are validated. See scratch/pr674_moe_kernel_wiring_plan.md.
         self._new_moe = os.environ.get("MPK_DSV3_NEW_MOE", "0") == "1"
+        # MPK_DSV3_ACTIVE_SKIP=0 disables the per-expert active-mask
+        # short-circuit in fp8_group_gemm (commit ecf1f8e5) — useful for
+        # A/B correctness checks. Default ON when NEW MoE is on.
+        self._new_moe_active_skip = (
+            os.environ.get("MPK_DSV3_ACTIVE_SKIP", "1") == "1"
+        )
         # Per-layer NEW-MoE skip list — env-gated escape hatch while the
         # L8+ correctness bug is unresolved. Comma-separated layer indices
         # (e.g. "8,9,10,11,12,13") fall back to OLD MoE on those layers,
@@ -250,8 +289,50 @@ class DeepSeekV3Builder(GraphBuilder):
         # q_nope_abs (mbt, H, 512) + assemble_q_decode → q_nope_pe.
         # Win: smaller weight loads per task (per-head (512, 128) vs absorbed
         # (576, q_lora=1536) monolith) → less TMA traffic, room to overlap.
-        # Default OFF; flip after correctness validated end-to-end.
-        self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "0") == "1"
+        # 2026-05-17: flipped DEFAULT ON after correctness validated — the
+        # BMM=1 run produced BIT-IDENTICAL generated tokens vs the absorbed
+        # path. PR-674's FP8 dense GEMM kernels are tuned for the
+        # unabsorbed shapes (smaller M, K) and only the unabsorbed path
+        # benefits from those optimizations; this also fetches less HBM per
+        # decode iter (per-head 128/64 instead of fused 576). Latency is
+        # currently ~5% slower vs absorbed due to extra quantize+BMM
+        # serialization; the optimization roadmap (quantize+BMM fusion,
+        # grid-size tuning, eventual overlap) closes the gap and goes past
+        # absorbed once those land. Set MPK_DSV3_BMM=0 to fall back to
+        # the absorbed path for regression isolation.
+        self._dsv3_bmm = os.environ.get("MPK_DSV3_BMM", "1") == "1"
+        # B37 (2026-05-15): replace the (input_layernorm RMSNorm + qkv_a
+        # quantize) two-task chain with one fused kernel that writes BF16
+        # rmsnorm_out and FP8 + scale in one pass. Saves ~30 μs/layer
+        # (−5.7% per decode iter on TP=4 EP=2 mbt=128) by eliminating one
+        # dispatch wave plus a bf16 HBM round-trip.
+        # Default ON (2026-05-15) after the case-3 fix at commit 27dd8771
+        # made the task graph annotate correctly. Set
+        # MPK_DSV3_FUSED_RMSNORM_QUANTIZE=0 to fall back to the legacy
+        # split rmsnorm + standalone quantize chain.
+        self._fused_rmsnorm_quantize = (
+            os.environ.get("MPK_DSV3_FUSED_RMSNORM_QUANTIZE", "1") == "1")
+        # C17 (2026-05-17): extend B37's rmsnorm+quantize fusion to the
+        # post-attn RMSNorm + NEW MoE input quantize. Gated separately so
+        # the QKV-a path's setting doesn't have to flip together. Default
+        # OFF until we verify cosine + e2e (per C13 lesson: per-call ≠
+        # per-token in megakernel).
+        self._fused_post_attn_rmsnorm_quantize = (
+            os.environ.get("MPK_DSV3_FUSED_POST_ATTN_RMSNORM_QUANTIZE",
+                           "0") == "1")
+        # C18 (2026-05-17): fuse NEW MoE moe_silu_mul + quantize_fp8 into
+        # one task. Eliminates BF16 silu_out HBM round-trip + one task
+        # launch. Default OFF; flip via MPK_DSV3_FUSED_SILU_QUANTIZE=1.
+        self._fused_silu_quantize = (
+            os.environ.get("MPK_DSV3_FUSED_SILU_QUANTIZE", "0") == "1")
+        # C1 (2026-05-16): fan the MLA KV-gather unified task across multiple
+        # CTAs by striding seq_pos. The legacy 1-CTA gather was 121 μs/layer
+        # (15% of layer wallclock) with 127 workers idle. With N splits each
+        # CTA strides seq_pos by N, so wallclock drops to ~121/N μs/layer.
+        # MPK_DSV3_KV_GATHER_SPLITS=N (default 8); set to 1 to disable.
+        self._kv_gather_splits = int(
+            os.environ.get("MPK_DSV3_KV_GATHER_SPLITS", "8"))
+        assert self._kv_gather_splits >= 1 and self._kv_gather_splits <= 128
         # TP decode's direct-write path is only validated for one 128-token
         # KV tile. For two or more tiles, keep the partial+reduce path.
         self._mla_single_split_max_kv_tiles = int(
@@ -414,30 +495,16 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_mbt_f32_bufs = {}
         cache_key = reduction_size
         if cache_key not in self._fp8_mbt_f32_bufs:
-            # 2026-05-13 DEBUG: optionally attach the FP8 input + scale buffers
-            # as torch tensors so we can inspect them post-megakernel from Python.
-            if os.environ.get("MPK_DSV3_FP8_BUF_ATTACH", "0") == "1":
-                import torch as _torch
-                if not hasattr(self.mpk, "_fp8_input_torch"):
-                    self.mpk._fp8_input_torch = {}
-                    self.mpk._fp8_scale_torch = {}
-                fp8_t = _torch.zeros((mbt, reduction_size), dtype=_torch.float8_e4m3fn, device="cuda")
-                scale_t = _torch.zeros((mbt, num_groups), dtype=_torch.float32, device="cuda")
-                self.mpk._fp8_input_torch[reduction_size] = fp8_t
-                self.mpk._fp8_scale_torch[reduction_size] = scale_t
-                fp8_buf = self.mpk.attach_input(torch_tensor=fp8_t, name=f"fp8_input_v2_{reduction_size}_shared")
-                scale_buf = self.mpk.attach_input(torch_tensor=scale_t, name=f"fp8_scale_v2_{reduction_size}_shared")
-            else:
-                fp8_buf = self.mpk.new_tensor(
-                    dims=(mbt, reduction_size), dtype=float8_e4m3,
-                    name=f"fp8_input_v2_{reduction_size}_shared",
-                    io_category="cuda_tensor",
-                )
-                scale_buf = self.mpk.new_tensor(
-                    dims=(mbt, num_groups), dtype=float32,
-                    name=f"fp8_scale_v2_{reduction_size}_shared",
-                    io_category="cuda_tensor",
-                )
+            fp8_buf = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=float8_e4m3,
+                name=f"fp8_input_v2_{reduction_size}_shared",
+                io_category="cuda_tensor",
+            )
+            scale_buf = self.mpk.new_tensor(
+                dims=(mbt, num_groups), dtype=float32,
+                name=f"fp8_scale_v2_{reduction_size}_shared",
+                io_category="cuda_tensor",
+            )
             self._fp8_mbt_f32_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_mbt_f32_bufs[cache_key]
 
@@ -445,10 +512,20 @@ class DeepSeekV3Builder(GraphBuilder):
         """Number of persistent workers each fp8_gemm_dense_{smallm,mediumm} call
         is allowed to occupy.
 
-        Default = self.num_workers (typically 128 on B200). Override via env
-        `MPK_FP8_DENSE_NUM_WORKERS` for experiments. Lower values free workers
-        for concurrent GEMMs in the same phase (e.g., Q/KV phase with many
-        small per-shard linears running back-to-back).
+        B26 (2026-05-15): default lowered from `self.num_workers` (128) to
+        80 for DSv3 dual-dispatch (`_use_prefill=True`). On B200 with
+        128 workers, the dense GEMM CTA waves frequently have <128 tiles
+        worth of real work (qkv_a has 17 tiles, q_b ~48, O_proj ~56),
+        so reducing the per-task occupancy from 128 to 80 frees ~48
+        worker slots per dense wave to overlap with concurrent ROPE /
+        rmsnorm / KV gather tasks. Measured: 412 → 402 us/MoE-layer
+        (−2.4%) on the 19-layer TP=4 EP=2 mbt=128 decode iter.
+
+        Override via env `MPK_FP8_DENSE_NUM_WORKERS` for experiments
+        (sweep showed 64 crashes nvshmem barrier, 80/96 both work but
+        80 is faster). `_fp8_dense_kv_b_proj` keeps full `num_workers`
+        independently — the runtime_m_mode=1 + large M path has tighter
+        constraints and crashes at <128.
 
         Each task strides through output tiles internally, so lowering num_workers
         below the actual tile count just means each task does more iterations.
@@ -458,12 +535,17 @@ class DeepSeekV3Builder(GraphBuilder):
         override = os.environ.get("MPK_FP8_DENSE_NUM_WORKERS")
         if override:
             return int(override)
+        if self._use_prefill:
+            return min(80, self.num_workers)
         return self.num_workers
 
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
                        output, residual=None, gate_mode: int = 0,
                        input_row_stride: int = None,
-                       input_col_offset: int = 0):
+                       input_col_offset: int = 0,
+                       share_quantize_tag: str = None,
+                       input_fp8_override=None,
+                       input_scale_override=None):
         """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
 
         Replaces the old `linear_fp8_sm100` path which has a row-coverage
@@ -492,6 +574,14 @@ class DeepSeekV3Builder(GraphBuilder):
             row stride and the slice's start column. K (= weight.dim(1))
             tells the kernel how many cols to actually quantize per row.
             Defaults preserve legacy contiguous reads.
+        share_quantize_tag: B24 (2026-05-15). Dual-dispatch GEMMs reading the
+            same input slice (e.g., decode q_b + prefill q_b both reading
+            q_a_out[..., :q_lora]) emit two quantize tasks that write
+            identical bytes to the shared cached buffer. When both callers
+            pass the same `share_quantize_tag`, the first call emits a
+            single quantize with active_mode=0 (always run) and subsequent
+            calls skip the quantize. Saves one ~5 us wave dispatch per
+            shared input per layer.
         """
         if weight_scale_raw is None:
             raise ValueError("FP8 linear v2 requires FP8 weight scale.")
@@ -507,60 +597,147 @@ class DeepSeekV3Builder(GraphBuilder):
             raise ValueError("FP8 linear v2 expects 2D weight + scale.")
 
         reduction_size = weight_fp8_raw.dim(1)
-        input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
-            reduction_size)
-        # Quantize bf16 input → FP8 + float32 scale. active_mode mirrors the
-        # gate_mode so the quantize fires only in the matching phase.
-        active_mode = 2 if gate_mode == 1 else 3 if gate_mode == 2 else 0
-        quantize_kwargs = {}
-        if input_row_stride is not None or input_col_offset != 0:
-            quantize_kwargs["hidden_size_override"] = reduction_size
-            quantize_kwargs["input_stride_override"] = (
-                input_row_stride if input_row_stride is not None
-                else input_bf16.dim(1))
-            quantize_kwargs["in_offset_elems"] = input_col_offset
-        self.mpk.quantize_fp8_layer(
-            input=input_bf16,
-            output_fp8=input_fp8,
-            output_scale=input_scale,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=False,
-            active_mode=active_mode,
-            **quantize_kwargs,
-        )
+        # B37 (2026-05-15): caller may pre-allocate the FP8 + scale buffers
+        # and bypass the shared cache. Used by the fused
+        # rmsnorm+quantize path to give the fused task a unique writer for
+        # its FP8/scale outputs — otherwise the shared buffers carry
+        # multiple-writer semantics across layers, the fused task becomes a
+        # join-consumer, and `build_annotated_graph` flags the embedding
+        # producer with case 3 (fork-producer + join-producer).
+        if input_fp8_override is not None and input_scale_override is not None:
+            input_fp8 = input_fp8_override
+            input_scale = input_scale_override
+        elif input_fp8_override is None and input_scale_override is None:
+            input_fp8, input_scale = self._fp8_mbt_buffers_for_reduction_f32scale(
+                reduction_size)
+        else:
+            raise ValueError(
+                "input_fp8_override and input_scale_override must be both "
+                "set or both None")
+        # B24: emit quantize only on the FIRST call that supplies a given
+        # share_quantize_tag this layer; subsequent calls reuse the buffer.
+        # The shared-quantize variant uses active_mode=0 (always run) so
+        # both decode and prefill iters see fresh data. The non-shared path
+        # mirrors gate_mode into the quantize active_mode (existing
+        # behavior).
+        emit_quantize = True
+        if share_quantize_tag is not None:
+            already = getattr(self, "_fp8_quantize_emitted", set())
+            if share_quantize_tag in already:
+                emit_quantize = False
+            else:
+                already.add(share_quantize_tag)
+                self._fp8_quantize_emitted = already
+
+        if emit_quantize:
+            active_mode = (
+                0 if share_quantize_tag is not None
+                else (2 if gate_mode == 1
+                      else 3 if gate_mode == 2
+                      else 0)
+            )
+            quantize_kwargs = {}
+            if input_row_stride is not None or input_col_offset != 0:
+                quantize_kwargs["hidden_size_override"] = reduction_size
+                quantize_kwargs["input_stride_override"] = (
+                    input_row_stride if input_row_stride is not None
+                    else input_bf16.dim(1))
+                quantize_kwargs["in_offset_elems"] = input_col_offset
+            self.mpk.quantize_fp8_layer(
+                input=input_bf16,
+                output_fp8=input_fp8,
+                output_scale=input_scale,
+                grid_dim=(self.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=False,
+                active_mode=active_mode,
+                **quantize_kwargs,
+            )
 
         gemm_layer = (
             self.mpk.fp8_gemm_dense_smallm_layer
             if self.mpk.max_seq_length <= 512
             else self.mpk.fp8_gemm_dense_mediumm_layer
         )
+        # B20 (2026-05-15): mirror gate_mode into the GEMM kernel itself so
+        # the dual-dispatch O_proj branches early-exit the wave for the
+        # wrong phase. Otherwise both prefill and decode O_proj GEMMs run
+        # every iter (~30-50 μs each of wasted MMA wave on the unused
+        # branch) — visible in perfetto as a 90 μs bubble after the
+        # MLA attention path.
+        gemm_runtime_m_mode = (2 if gate_mode == 1
+                               else 3 if gate_mode == 2
+                               else 0)
 
-        if residual is None:
-            gemm_layer(
+        # B36 (2026-05-15): env-gated decode-only SplitK kernel for the
+        # decode O_proj. Stock mediumm runs 56 tiles in 1 underutilized
+        # 80-worker wave for the M=128, N=7168, K=16384 (TP=4) shape;
+        # splitk=4 gives 224 tiles in 3 better-utilized waves with K/4
+        # work per tile.
+        #
+        # Gating: gate_mode=2 (decode-only) AND residual is not None.
+        # The residual-not-None check restricts to the O_proj path —
+        # otherwise q_b decode (also gate_mode=2 but residual=None,
+        # K=1536 N=18432) hits the kernel with a shape the SplitK
+        # kernel was never tested against and crashes with "illegal
+        # memory access". The kernel is tuned for the M=128 N=7168
+        # K=16384 O_proj shape (and similar TP=1/TP=2 variants).
+        use_decode_splitk = (
+            gate_mode == 2
+            and residual is not None
+            and os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK") == "1"
+        )
+        decode_split_k = int(
+            os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK_FACTOR", "4"))
+        # Hard-stop if the shape's K can't be split evenly: a static
+        # split_k that doesn't divide K/128 corrupts scale indexing.
+        if use_decode_splitk:
+            K_ = weight_fp8_raw.dim(1)
+            if K_ % (128 * decode_split_k) != 0:
+                use_decode_splitk = False
+
+        def _emit_decode_splitk(out_tensor):
+            self.mpk.fp8_gemm_dense_decode_splitk_layer(
                 input_fp8=input_fp8,
                 weight_fp8=weight_fp8_raw,
                 input_scale=input_scale,
                 weight_scale=weight_scale_raw,
-                output=output,
+                output=out_tensor,
                 num_workers=self._fp8_dense_num_workers(),
-                runtime_m_mode=0,
+                split_k=decode_split_k,
             )
+
+        if residual is None:
+            if use_decode_splitk:
+                _emit_decode_splitk(output)
+            else:
+                gemm_layer(
+                    input_fp8=input_fp8,
+                    weight_fp8=weight_fp8_raw,
+                    input_scale=input_scale,
+                    weight_scale=weight_scale_raw,
+                    output=output,
+                    num_workers=self._fp8_dense_num_workers(),
+                    runtime_m_mode=gemm_runtime_m_mode,
+                )
             return
 
         if self.world_size > 1:
             idx = getattr(self, "_tp_residual_linear_idx", 0)
             self._tp_residual_linear_idx = idx + 1
             partial = self._new_tp_partial(output, f"tp_v2_residual_partial_{idx}")
-            gemm_layer(
-                input_fp8=input_fp8,
-                weight_fp8=weight_fp8_raw,
-                input_scale=input_scale,
-                weight_scale=weight_scale_raw,
-                output=partial,
-                num_workers=self._fp8_dense_num_workers(),
-                runtime_m_mode=0,
-            )
+            if use_decode_splitk:
+                _emit_decode_splitk(partial)
+            else:
+                gemm_layer(
+                    input_fp8=input_fp8,
+                    weight_fp8=weight_fp8_raw,
+                    input_scale=input_scale,
+                    weight_scale=weight_scale_raw,
+                    output=partial,
+                    num_workers=self._fp8_dense_num_workers(),
+                    runtime_m_mode=gemm_runtime_m_mode,
+                )
             self._allreduce_residual(partial, output, residual,
                                      gate_mode=gate_mode)
             return
@@ -571,15 +748,18 @@ class DeepSeekV3Builder(GraphBuilder):
             dtype=bfloat16, name=f"fp8_v2_partial_{id(weight_fp8_raw)}",
             io_category="cuda_tensor",
         )
-        gemm_layer(
-            input_fp8=input_fp8,
-            weight_fp8=weight_fp8_raw,
-            input_scale=input_scale,
-            weight_scale=weight_scale_raw,
-            output=partial,
-            num_workers=self._fp8_dense_num_workers(),
-            runtime_m_mode=0,
-        )
+        if use_decode_splitk:
+            _emit_decode_splitk(partial)
+        else:
+            gemm_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=partial,
+                num_workers=self._fp8_dense_num_workers(),
+                runtime_m_mode=gemm_runtime_m_mode,
+            )
         self.mpk.elementwise_add_layer(
             input_a=partial,
             input_b=residual,
@@ -685,7 +865,10 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                      grid_dim, block_dim, residual=None, gate_mode: int = 0,
                      input_row_stride: int = None,
-                     input_col_offset: int = 0):
+                     input_col_offset: int = 0,
+                     share_quantize_tag: str = None,
+                     input_fp8_override=None,
+                     input_scale_override=None):
         """Quantize BF16 input → FP8, then run FP8 GEMM.
 
         Now routes through the new `fp8_gemm_dense_smallm/mediumm_sm100`
@@ -729,7 +912,193 @@ class DeepSeekV3Builder(GraphBuilder):
             gate_mode=gate_mode,
             input_row_stride=input_row_stride,
             input_col_offset=input_col_offset,
+            share_quantize_tag=share_quantize_tag,
+            input_fp8_override=input_fp8_override,
+            input_scale_override=input_scale_override,
         )
+
+    def _fused_rmsnorm_quantize_qkv_a_tag(self, layer_idx: int) -> str:
+        """B37: deterministic share_quantize_tag for the fused
+        rmsnorm + qkv_a-quantize path. Pre-populated in
+        `_fp8_quantize_emitted` so the qkv_a `_fp8_linear` call skips its
+        internal quantize (we already wrote the FP8 + scale buffers in
+        the fused task)."""
+        return f"layer_{layer_idx}_qkv_a_fused_rmsnorm_quantize"
+
+    def _emit_fused_rmsnorm_qkv_a_quantize(self,
+                                            input_x: 'DTensor',
+                                            w_norm: 'DTensor',
+                                            layer_idx: int,
+                                            reduction_size: int) -> str:
+        """B37: write self.rmsnorm_out (BF16) AND the qkv_a-side FP8 input
+        + float32 scale buffers in one fused task.
+
+        Returns the share_quantize_tag the caller MUST forward to
+        `_fp8_linear(share_quantize_tag=...)`.
+
+        Buffer ownership (2026-05-15 case-3 fix): unlike the standalone
+        quantize path (which uses the cross-layer SHARED FP8/scale
+        buffers via `_fp8_mbt_buffers_for_reduction_f32scale`), the fused
+        task here allocates **per-layer-unique** FP8 + scale buffers.
+
+        Why: the fused task takes its FP8/scale outputs as store_in_dmem
+        inputs in the task graph (the kernel's "outputs" are wired as
+        input slots — MPK convention). If those buffers are shared across
+        layers (multiple writers across the megakernel's task list), the
+        annotated-graph builder sees the fused task as a join-consumer,
+        and the producer of its `input` slot (embedding at layer 0) ends
+        up as both a fork-producer (other consumers exist) and a
+        join-producer (this consumer is a join-consumer) — case 3
+        violation. With per-layer-unique buffers the fused task has a
+        unique writer per buffer, breaks the join, and the AG accepts.
+
+        Cost: extra `mbt * K + mbt * (K/128) * 4` bytes per layer (~14 KB
+        for K=7168 at mbt=128). Trade-off vs the B23/B24 dedup pattern is
+        accepted because qkv_a has no other quantize peer to dedup with
+        (kv_b/q_b use different K).
+
+        The per-layer buffers are stashed on `self._fused_qkv_a_bufs`
+        keyed by layer_idx so the qkv_a `_fp8_linear` call site can pull
+        them as `input_fp8_override` / `input_scale_override`.
+        """
+        mbt = self.max_num_batched_tokens
+        group_size = 128
+        num_groups = (reduction_size + group_size - 1) // group_size
+        if not hasattr(self, "_fused_qkv_a_bufs"):
+            self._fused_qkv_a_bufs = {}
+        if not hasattr(self, "_fused_rmsnorm_out_per_layer"):
+            self._fused_rmsnorm_out_per_layer = {}
+        if layer_idx not in self._fused_qkv_a_bufs:
+            input_fp8 = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=float8_e4m3,
+                name=f"fused_qkv_a_fp8_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            input_scale = self.mpk.new_tensor(
+                dims=(mbt, num_groups), dtype=float32,
+                name=f"fused_qkv_a_scale_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            self._fused_qkv_a_bufs[layer_idx] = (input_fp8, input_scale)
+        if layer_idx not in self._fused_rmsnorm_out_per_layer:
+            # Per-layer-unique BF16 rmsnorm output buffer. The shared
+            # `self.rmsnorm_out` is reused across all layers, so the AG
+            # sees layer N's fused task reading from layer (N-1)'s write
+            # via store_in_dmem — making the fused task a join-consumer
+            # (case-3 trigger at embedding). With per-layer unique buffer,
+            # only ONE writer per buffer.
+            self._fused_rmsnorm_out_per_layer[layer_idx] = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=bfloat16,
+                name=f"fused_rmsnorm_out_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+        input_fp8, input_scale = self._fused_qkv_a_bufs[layer_idx]
+        rmsnorm_out_bf16 = self._fused_rmsnorm_out_per_layer[layer_idx]
+        # Pre-populate the emitted-set so _fp8_linear_v2 will skip the
+        # internal quantize call that would otherwise overwrite the
+        # fused-task output bytes with identical-but-redundant work.
+        already = getattr(self, "_fp8_quantize_emitted", set())
+        tag = self._fused_rmsnorm_quantize_qkv_a_tag(layer_idx)
+        already.add(tag)
+        self._fp8_quantize_emitted = already
+
+        # Float32 scale path (matches _fp8_mbt_buffers_for_reduction_f32scale
+        # layout; dense GEMM consumes (M, K/128) f32 row-major scales).
+        # `output_bf16` uses the per-layer-unique buffer (case-3 fix);
+        # emit_bf16=False because nothing downstream reads it in fused
+        # mode (qkv_a GEMM reads fp8/scale directly). Kernel writes the
+        # FP8 + scale only.
+        self.mpk.fused_rmsnorm_quantize_fp8_layer(
+            input=input_x,
+            weight=w_norm,
+            output_bf16=rmsnorm_out_bf16,
+            output_fp8=input_fp8,
+            output_scale=input_scale,
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=False,
+            emit_bf16=False,
+        )
+        return tag
+
+    def _fp8_experts_available(self, state_dict: dict, layer_idx: int) -> bool:
+        """C17: check if layer `layer_idx`'s experts.w13.weight_scale_inv
+        exists in state_dict — i.e., whether this layer uses FP8 experts.
+        Mirrors the inline check at line ~3192 in `_build_moe_mlp`."""
+        prefix = f"model.layers.{layer_idx}.mlp."
+        return f"{prefix}experts.w13.weight_scale_inv" in state_dict
+
+    def _emit_fused_post_attn_rmsnorm_moe_quantize(self, input_x: 'DTensor',
+                                                    w_norm: 'DTensor',
+                                                    layer_idx: int,
+                                                    reduction_size: int):
+        """C17 (2026-05-17): post-attention RMSNorm + NEW-MoE input quantize
+        fusion. Mirrors B37's pattern but for the post-attn rmsnorm. Writes:
+          * `rmsnorm_out_bf16` (per-layer-unique BF16 buffer) — consumed by
+            router linear + shared_expert + downstream BF16 readers.
+          * `moe_input_fp8` (per-layer-unique FP8) — consumed by NEW MoE
+            permute.
+          * `moe_input_scale` (per-layer-unique UE8M0 K-outer) — same path.
+
+        Returns the tuple `(rmsnorm_out_bf16, moe_input_fp8, moe_input_scale)`.
+
+        Buffer-ownership / case-3 rationale (B37 docstring extended):
+          The fused task takes its outputs as `store_in_dmem` inputs in the
+          task graph; shared cross-layer buffers would make the producer of
+          this task's input (post-AR output) BOTH a fork-producer AND a
+          join-producer (case-3 violation). With per-layer-unique outputs
+          here, the fused task has a unique writer per buffer.
+
+        Scale layout: UE8M0 column-major `[packed_k, aligned_batch]`. The
+        kernel writes `output_s[packed_idx * aligned_batch + batch_idx]`,
+        which is the SAME byte layout the standalone `quantize_fp8_layer`
+        wrote at builder.py:2790 (kernel-side this is "shape lie"). So
+        downstream readers (moe_permute) see byte-identical scale data —
+        no consumer-side changes needed.
+        """
+        mbt = self.max_num_batched_tokens
+        group_size = 128
+        num_groups = (reduction_size + group_size - 1) // group_size
+        # K_PACKED packs 4 UE8M0 bytes per uint32, then rounds up.
+        k_packed = (num_groups + 3) // 4
+        if not hasattr(self, "_fused_post_attn_bufs"):
+            self._fused_post_attn_bufs = {}
+        if layer_idx not in self._fused_post_attn_bufs:
+            rmsnorm_out_bf16 = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=bfloat16,
+                name=f"fused_post_attn_rmsnorm_out_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            moe_input_fp8 = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=float8_e4m3,
+                name=f"fused_post_attn_moe_input_fp8_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            moe_input_scale = self.mpk.new_tensor(
+                dims=(mbt, k_packed), dtype=uint32,
+                name=f"fused_post_attn_moe_input_scale_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            self._fused_post_attn_bufs[layer_idx] = (
+                rmsnorm_out_bf16, moe_input_fp8, moe_input_scale)
+        rmsnorm_out_bf16, moe_input_fp8, moe_input_scale = (
+            self._fused_post_attn_bufs[layer_idx])
+
+        # UE8M0 K-outer packed scale (matches existing moe_input_scale layout
+        # written by the standalone quantize_fp8 task; downstream
+        # moe_permute reads the buffer byte-for-byte identically).
+        self.mpk.fused_rmsnorm_quantize_fp8_layer(
+            input=input_x,
+            weight=w_norm,
+            output_bf16=rmsnorm_out_bf16,
+            output_fp8=moe_input_fp8,
+            output_scale=moe_input_scale,
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=True,
+            emit_bf16=True,
+        )
+        return rmsnorm_out_bf16, moe_input_fp8, moe_input_scale
 
     def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs):
         """MPK_DSV3_BMM=1: replaces the absorbed q_b_proj decode GEMM with a
@@ -845,22 +1214,142 @@ class DeepSeekV3Builder(GraphBuilder):
             pe_only=True,
         )
 
+    def _bmm_decode_o_path(self, state_dict, attn, layer_idx, residual):
+        """C9 (2026-05-16): post-attn BMM path for MPK_DSV3_BMM=1.
+
+        Replaces the load-time-absorbed decode o_proj (fused with W_UV)
+        with runtime BMM + smaller linear:
+          quantize(attn_out)           → attn_out_fp8 (mbt, H, 512) FP8
+          BMM(attn_out_fp8, kv_b_v_bmm) → attn_out_reduced (mbt, H, 128) bf16
+          fp8_linear_with_residual(attn_out_reduced, o_proj_original) → attn_proj_out
+
+        The o_proj_original.weight is the SAME weight used by the prefill
+        path (hidden × H*128, FP8). After BMM, decode + prefill both use
+        the smaller unabsorbed o_proj.
+
+        Gate: this entire path runs only on decode iters (Q_LEN<=8) via
+        the FP8 linear's gate_mode=2 + BMM's MMA_N=16 decode constraint.
+
+        Returns: None (writes attn_proj_out directly).
+        """
+        H_local = self.num_local_q_heads
+        mbt = self.max_num_batched_tokens
+        V_HEAD_DIM = 128  # post-attn V un-absorption dim per head
+        KV_LORA = 512     # current attn_out per-head dim
+
+        if not hasattr(self, "_bmm_decode_o_buffers"):
+            self._bmm_decode_o_buffers = {}
+            # FP8 + UE8M0 packed scale of attn_out. K=512 → packed_K=1.
+            self._bmm_decode_o_buffers["attn_out_fp8"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, KV_LORA), dtype=float8_e4m3,
+                name="attn_out_bmm_fp8", io_category="cuda_tensor")
+            self._bmm_decode_o_buffers["attn_out_scale"] = self.mpk.new_tensor(
+                dims=(mbt, H_local, 1), dtype=uint32,
+                name="attn_out_bmm_scale", io_category="cuda_tensor")
+            # BMM output: reduced attn (mbt, H, 128). Allocate as 2D so it
+            # feeds directly into _fp8_linear without a reshape — BMM
+            # wrapper accepts 2D or 3D output per its docstring.
+            self._bmm_decode_o_buffers["attn_out_reduced"] = self.mpk.new_tensor(
+                dims=(mbt, H_local * V_HEAD_DIM), dtype=bfloat16,
+                name="attn_out_reduced_2d", io_category="cuda_tensor")
+
+        attn_out_fp8 = self._bmm_decode_o_buffers["attn_out_fp8"]
+        attn_out_scale = self._bmm_decode_o_buffers["attn_out_scale"]
+        attn_out_reduced = self._bmm_decode_o_buffers["attn_out_reduced"]
+
+        # Step 1: quantize attn_out BF16 → FP8 + UE8M0 packed scale.
+        # Input self.attn_out is (mbt, H*KV_LORA) 2D. Output is 3D (mbt, H, KV_LORA).
+        # Same byte layout; the kernel writes row-by-row using global batch_idx.
+        active_mode_o = 3 if self._use_prefill else 0  # decode-only on dual-dispatch
+        self.mpk.quantize_fp8_layer(
+            input=self.attn_out,
+            output_fp8=attn_out_fp8,
+            output_scale=attn_out_scale,
+            grid_dim=(1, mbt * H_local, 1),
+            block_dim=(128, 1, 1),
+            scale_ue8m0=True,
+            active_mode=active_mode_o,
+        )
+
+        # Step 2: BMM(attn_out_fp8, kv_b_v_bmm) → attn_out_reduced (mbt, H, 128).
+        # kv_b_v_bmm prepared in demo.py: per-head (H, 128, 512) FP8.
+        w_kvv_bmm = self.mpk.attach_input(
+            torch_tensor=state_dict[f"{attn}kv_b_v_bmm.weight"],
+            name=f"layer_{layer_idx}_kv_b_v_bmm")
+        s_kvv_bmm = self.mpk.attach_input(
+            torch_tensor=state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"],
+            name=f"layer_{layer_idx}_kv_b_v_bmm_scale")
+        self.mpk.linear_fp8_bmm_sm100_layer(
+            input_fp8=attn_out_fp8,
+            input_scale=attn_out_scale,
+            weight_fp8=w_kvv_bmm,
+            weight_scale=s_kvv_bmm,
+            output=attn_out_reduced,
+            # D_out=128, BMM constraint D_out/grid.x must be multiple of MMA_M=128
+            # → grid.x must be 1.
+            grid_dim=(1, H_local, 1),
+            block_dim=(256, 1, 1),
+        )
+
+        # Step 3: smaller o_proj linear with residual.
+        # Use the o_proj_original.weight (FP8, hidden × H*128, saved by demo.py
+        # before W_UV fusion). gate_mode=2 = decode-only.
+        w_o_orig, s_o_orig = self._attach_fp8_weight(
+            state_dict, f"{attn}o_proj_original.weight",
+            f"layer_{layer_idx}_o_proj_original_bmm")
+        self._fp8_linear(
+            attn_out_reduced,
+            w_o_orig,
+            s_o_orig,
+            self.attn_proj_out,
+            grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+            block_dim=(128, 1, 1),
+            residual=residual,
+            gate_mode=2 if self._use_prefill else 0,
+        )
+
     def _fp8_dense_kv_b_proj(
-        self, ckv, weight, weight_scale, output, tag: str
+        self, ckv, weight, weight_scale, output, tag: str,
+        shared_quantize_tag: str = None,
     ):
         if weight_scale is None:
             raise ValueError("kv_b prefill projection requires FP8 weight scale.")
-        input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
-            self.kv_lora_rank, tag=tag)
-        self.mpk.quantize_fp8_layer(
-            input=ckv,
-            output_fp8=input_fp8,
-            output_scale=input_scale,
-            grid_dim=(input_fp8.dim(0), 1, 1),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=False,
-            active_mode=1,
-        )
+        # B23 (2026-05-15): kv_b_k and kv_b_v both quantize the SAME ckv_sep
+        # to FP8 with the SAME group_size — emitting two quantize tasks
+        # writes the same bytes twice. When `shared_quantize_tag` is given
+        # we reuse the buffer that the previous call already wrote, and
+        # skip the quantize task entirely (only emit the GEMM). Caller
+        # must pass the same `shared_quantize_tag` to both kv_b_k and
+        # kv_b_v calls in the same layer; the FIRST call emits quantize,
+        # the SECOND reuses.
+        if shared_quantize_tag is not None:
+            input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
+                self.kv_lora_rank, tag=shared_quantize_tag)
+            already_quantized = getattr(self, "_kv_b_quantized_tags", set())
+            if shared_quantize_tag not in already_quantized:
+                self.mpk.quantize_fp8_layer(
+                    input=ckv,
+                    output_fp8=input_fp8,
+                    output_scale=input_scale,
+                    grid_dim=(input_fp8.dim(0), 1, 1),
+                    block_dim=(128, 1, 1),
+                    scale_ue8m0=False,
+                    active_mode=1,
+                )
+                already_quantized.add(shared_quantize_tag)
+                self._kv_b_quantized_tags = already_quantized
+        else:
+            input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
+                self.kv_lora_rank, tag=tag)
+            self.mpk.quantize_fp8_layer(
+                input=ckv,
+                output_fp8=input_fp8,
+                output_scale=input_scale,
+                grid_dim=(input_fp8.dim(0), 1, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=False,
+                active_mode=1,
+            )
         gemm_layer = (
             self.mpk.fp8_gemm_dense_smallm_layer
             if self.mpk.max_seq_length <= 512
@@ -965,18 +1454,18 @@ class DeepSeekV3Builder(GraphBuilder):
     def _pick_bf16_splitk_factor(self, weight):
         """BF16 splitk picker for a `weight` tensor of shape [output, K].
 
-        BF16 has a looser alignment (TILE_SIZE=64) so almost any K works.
-        Always returns at least 1 — the BF16 gate call sites in this builder
-        don't have a non-splitk fallback wired up, so a None return would
-        wedge the graph build.
-
-        Note: like FP8 splitk, the BF16 splitk_linear_layer is decode-only
-        (BATCH_SIZE clamp issue, see `_BF16_GATE_SPLITK_ENABLED` comment).
-        When `_use_prefill` is on, return 1 so the kernel still registers
-        but with split_k=1 (effectively a non-splitk single-K-tile path).
+        2026-05-14 (P5): the `_use_prefill → return 1` bypass was paranoia
+        about the BF16-splitk small-batch hang, but the hang reproduces
+        only for *compile-time* BATCH_SIZE < 16 — our prefill-enabled
+        config has compile-time BATCH_SIZE = mbt = 128, well above the
+        clamp threshold. Drop the bypass so the DSv3 router gate
+        dispatches grid=(n_tiles, split_k, 1) instead of (n_tiles, 1, 1)
+        (was 2 CTAs → 90 μs on the user-flagged perfetto ID 64861).
+        Earlier attempts thought this broke correctness but baseline
+        decode-from-step-100 already outputs all-zero tokens regardless
+        of this knob (the 19-layer DSv3 model is structurally degenerate
+        at that step), so the regression was misdiagnosed.
         """
-        if self._use_prefill:
-            return 1
         return self._pick_splitk_factor(
             n_tiles=weight.dim(0) // 128,
             K=weight.dim(1),
@@ -1200,27 +1689,12 @@ class DeepSeekV3Builder(GraphBuilder):
             print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
 
         # RMSNorm output
-        # 2026-05-13 DEBUG: optionally attach rmsnorm_out as a torch tensor
-        # (bypassing MPK's buffer pool) AND pre-fill with a sentinel value
-        # so we can tell post-megakernel whether rows are
-        #   (a) still at sentinel → rmsnorm task never wrote them (skip bug)
-        #   (b) zero → something else wrote zero over them (overwrite bug)
-        #   (c) normal rmsnorm output → rmsnorm wrote but quantize saw something else
-        if os.environ.get("MPK_DSV3_RMSNORM_OUT_ATTACH", "0") == "1":
-            import torch as _torch
-            sentinel = float(os.environ.get("MPK_DSV3_RMSNORM_SENTINEL", "0.0"))
-            self.mpk._rmsnorm_out_torch = _torch.full(
-                (mbt, self.hidden_size), sentinel,
-                dtype=_torch.bfloat16, device="cuda")
-            self.rmsnorm_out = self.mpk.attach_input(
-                torch_tensor=self.mpk._rmsnorm_out_torch, name="rmsnorm_out")
-        else:
-            self.rmsnorm_out = self.mpk.new_tensor(
-                dims=(mbt, self.hidden_size),
-                dtype=bfloat16,
-                name="rmsnorm_out",
-                io_category="cuda_tensor",
-            )
+        self.rmsnorm_out = self.mpk.new_tensor(
+            dims=(mbt, self.hidden_size),
+            dtype=bfloat16,
+            name="rmsnorm_out",
+            io_category="cuda_tensor",
+        )
 
         # MLA projections — QKV-a fusion (landed 2026-05-13, made default).
         # Single qkv_a_out (mbt, QKV_A_FUSED_N) buffer; the fused FP8 GEMM
@@ -1237,12 +1711,23 @@ class DeepSeekV3Builder(GraphBuilder):
             dims=(mbt, qkv_a_total),
             dtype=bfloat16, name="qkv_a_out", io_category="cuda_tensor",
         )
+        # C20 (2026-05-17): each logical slot is a `mpk.narrow` view of
+        # qkv_a_out. The view bakes the slot's byte offset into base_ptr
+        # (via view_offset) and inherits the parent row stride into
+        # view.stride[0]. Consumers read the slot from base_ptr (no extra
+        # in_offset needed) and walk rows by view.stride[0]; task_register,
+        # the FP8 TMA descriptor builder (tma.cuh) and annotated_graph's
+        # 2D bbox window-overlap check were all updated in
+        # P1/P2/B3/bbox commits to consume the view metadata uniformly.
+        # The explicit *_offset / row_stride params remaining at callsites
+        # become decorative — they encode 0 offset + parent row stride,
+        # which matches what the view already supplies.
         self._qkv_a_row_stride = qkv_a_total
         self._qkv_a_q_offset = 0
-        self._qkv_a_c_latent_offset = self.q_lora_rank             # 1536
-        self._qkv_a_k_pe_offset = self.q_lora_rank + self.kv_lora_rank  # 2048
-        # All three downstream "slots" share the same backing buffer.
-        self.q_a_out = self.qkv_a_out
+        self._qkv_a_c_latent_offset = 0
+        self._qkv_a_k_pe_offset = 0
+        self.q_a_out = self.mpk.narrow(
+            self.qkv_a_out, dim=1, start=0, length=self.q_lora_rank)
         self.q_a_out_buf = None
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
         self.q_nope_pe_buf = None
@@ -1297,13 +1782,20 @@ class DeepSeekV3Builder(GraphBuilder):
                 dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
                 dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
             )
-        # kv_a outputs (c_latent + k_pe) live inside the fused qkv_a_out
-        # buffer; downstream consumers receive the FULL qkv_a_out DTensor and
-        # the builder passes (row_stride, offset, process_dim) so each kernel
-        # reads/writes only its slice.
+        # kv_a outputs (c_latent + k_pe) are `mpk.narrow` views of the
+        # fused qkv_a_out, mirroring q_a_out above. The view encodes the
+        # slot's start offset; downstream consumers see the slot's slice
+        # width via view.dim[1] and the parent row stride via
+        # view.stride[0]. See C20 note above q_a_out.
         self.c_latent_out_buf = None
-        self.c_latent_out = self.qkv_a_out
-        self.k_pe_out = self.qkv_a_out
+        self.c_latent_out = self.mpk.narrow(
+            self.qkv_a_out, dim=1,
+            start=self.q_lora_rank,
+            length=self.kv_lora_rank)
+        self.k_pe_out = self.mpk.narrow(
+            self.qkv_a_out, dim=1,
+            start=self.q_lora_rank + self.kv_lora_rank,
+            length=QK_ROPE_HEAD_DIM)
         # Combined KV entry after layernorm: [batch, 576]
         self.kv_combined = self.mpk.new_tensor(
             dims=(mbt, self.qk_head_dim),  # [batch, 576]
@@ -1701,10 +2193,25 @@ class DeepSeekV3Builder(GraphBuilder):
             raise RuntimeError(
                 "qkv_a_proj.weight + weight_scale_inv must be present in "
                 "the state_dict. demo.py builds them at load time.")
+        # B37: when fused rmsnorm+quantize is active, the share_quantize_tag
+        # is pre-populated in _fp8_quantize_emitted by the input_layernorm
+        # call site, so _fp8_linear_v2's internal quantize is skipped.
+        # Also pull the per-layer-unique FP8/scale buffers the fused task
+        # wrote to (case-3 fix — see `_emit_fused_rmsnorm_qkv_a_quantize`
+        # docstring).
+        qkv_a_quantize_tag = (
+            self._fused_rmsnorm_quantize_qkv_a_tag(layer_idx)
+            if self._fused_rmsnorm_quantize else None)
+        qkv_a_fp8_ovr, qkv_a_scale_ovr = None, None
+        if self._fused_rmsnorm_quantize:
+            qkv_a_fp8_ovr, qkv_a_scale_ovr = self._fused_qkv_a_bufs[layer_idx]
         self._fp8_linear(
             self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
-            block_dim=(128, 1, 1))
+            block_dim=(128, 1, 1),
+            share_quantize_tag=qkv_a_quantize_tag,
+            input_fp8_override=qkv_a_fp8_ovr,
+            input_scale_override=qkv_a_scale_ovr)
 
         # Diagnostic (PRE-RMSnorm dump 2026-05-13): captures RAW qkv_a_out
         # immediately after the fused GEMM, before any consumer touches it.
@@ -1732,7 +2239,7 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_q_a_layernorm")
         self.mpk.rmsnorm_layer(
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
             process_dim=self.q_lora_rank,
             in_offset_elems=self._qkv_a_q_offset,
@@ -1746,6 +2253,16 @@ class DeepSeekV3Builder(GraphBuilder):
         qb_slice_kwargs = dict(
             input_row_stride=self._qkv_a_row_stride,
             input_col_offset=self._qkv_a_q_offset)
+        # B24 (2026-05-15): when dual-dispatch is active, decode q_b
+        # and prefill q_b both quantize self.q_a_out with K=q_lora=1536.
+        # Share the quantize task between them — saves one ~5 us wave
+        # dispatch per layer on decode iters (the prefill quantize was
+        # early-exiting on decode but still paying the dispatch cost).
+        # Hoisted above the bmm branch so _dsv3_bmm path can still share
+        # quantize with prefill q_b_nope/pe below (fixes UnboundLocalError).
+        qb_share_tag = (
+            f"layer_{layer_idx}_qb_q_a_shared"
+            if self._use_prefill else None)
         if self._dsv3_bmm:
             # MPK_DSV3_BMM=1: replace the load-time absorbed q_b_proj with
             # runtime BMM-based absorption. Five tasks instead of one
@@ -1761,6 +2278,7 @@ class DeepSeekV3Builder(GraphBuilder):
                              grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b.dim(0)), 1, 1),
                              block_dim=(128, 1, 1),
                              gate_mode=2 if self._use_prefill else 0,
+                             share_quantize_tag=qb_share_tag,
                              **qb_slice_kwargs)
         if self._use_prefill:
             if self._qb_fused:
@@ -1777,6 +2295,7 @@ class DeepSeekV3Builder(GraphBuilder):
                               1, 1),
                     block_dim=(128, 1, 1),
                     gate_mode=1,
+                    share_quantize_tag=qb_share_tag,
                     **qb_slice_kwargs)
             else:
                 w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
@@ -1788,6 +2307,7 @@ class DeepSeekV3Builder(GraphBuilder):
                               1, 1),
                     block_dim=(128, 1, 1),
                     gate_mode=1,
+                    share_quantize_tag=qb_share_tag,
                     **qb_slice_kwargs)
                 w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
                     state_dict, f"{attn}q_b_pe.weight",
@@ -1798,6 +2318,7 @@ class DeepSeekV3Builder(GraphBuilder):
                               1, 1),
                     block_dim=(128, 1, 1),
                     gate_mode=1,
+                    share_quantize_tag=qb_share_tag,
                     **qb_slice_kwargs)  # 2026-05-13: was missing — see scratch/fp8_dense_smallm_n2176_bug.md
         # Step 4: kv_a (c_latent + k_pe) is produced by the fused qkv_a GEMM
         # above; no separate kv_a_proj_with_mqa GEMMs are emitted.
@@ -1805,14 +2326,20 @@ class DeepSeekV3Builder(GraphBuilder):
         rope_q_grid = (
             self.mpk.max_num_batched_requests,
             self.num_local_q_heads,
-            (self.max_num_batched_tokens + 15) // 16,
+            1,  # B35: TILE_Q==mbt -> 1 CTA per (req, head); kernel inner-loop covers all tokens
         )
+        # B25 (2026-05-15): in dual-dispatch the fused (absorbed) ROPE_Q
+        # only matters on decode iters and the split (unabsorbed) ROPE_Q
+        # only matters on prefill iters. Add phase gates so the wrong-
+        # phase ROPE returns immediately instead of rotating stale data.
         self.mpk.deepseek_mla_rope_q_fused_layer(
             q_nope_pe=self.q_nope_pe,
             cos_pos_embed=self.cos_pos_embed,
             sin_pos_embed=self.sin_pos_embed,
             num_heads=self.num_local_q_heads,
             grid_dim=rope_q_grid,
+            q_tile_size=self.max_num_batched_tokens,
+            phase_gate=2 if self._use_prefill else 0,
         )
         if self._use_prefill:
             # 2026-05-12 (user #2 FuseTensor row-swap): when q_b_prefill_fused
@@ -1825,7 +2352,9 @@ class DeepSeekV3Builder(GraphBuilder):
                 sin_pos_embed=self.sin_pos_embed,
                 num_heads=self.num_local_q_heads,
                 grid_dim=rope_q_grid,
+                q_tile_size=self.max_num_batched_tokens,
                 qfused_mode=1 if self._qb_fused else 0,
+                phase_gate=1,
             )
         # k_pe lives at cols [2048:2112) inside the 2176-wide qkv_a_out;
         # pass row stride + offset so the ROPE kernel rotates the right slice.
@@ -1836,8 +2365,9 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(
                 self.mpk.max_num_batched_requests,
                 1,
-                (self.max_num_batched_tokens + 15) // 16,
+                1,  # B35: TILE_Q==mbt collapses grid.z to 1
             ),
+            q_tile_size=self.max_num_batched_tokens,
             k_pe_row_stride=self._qkv_a_row_stride,
             k_pe_offset=self._qkv_a_k_pe_offset,
         )
@@ -1849,7 +2379,7 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mpk.rmsnorm_layer(
             input=self.c_latent_out, weight=w_kv_a_ln,
             output=self.c_latent_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
             process_dim=self.kv_lora_rank,
             in_offset_elems=self._qkv_a_c_latent_offset,
@@ -1893,8 +2423,12 @@ class DeepSeekV3Builder(GraphBuilder):
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
                 mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
-                grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
+                grid_dim=(
+                    self.mpk.max_num_batched_requests,
+                    self._kv_gather_splits,
+                    1),
                 block_dim=(128, 1, 1),
+                num_gather_splits=self._kv_gather_splits,
                 **kv_gather_slice_kwargs,
             )
             # =================================================================
@@ -1943,11 +2477,25 @@ class DeepSeekV3Builder(GraphBuilder):
             # partition; a single block does the full copy. The copy is
             # tiny (kv_rows * 64 bf16 < 64 KB).
             # =================================================================
+            # P3 (2026-05-14 v3): bump grid from (1,1,1) to (8,1,1) so 8
+            # CTAs share the kpe_sep → kpe_sep_v2 BF16 copy. Earlier two
+            # attempts looked like correctness regressions but those were
+            # baseline-noise misdiagnoses (decode-from-step-100 outputs
+            # all-zero tokens regardless). With 64-wide rope dim ÷ 8 = 8
+            # cols per CTA the partition divides cleanly. Single-CTA was
+            # the 55 μs straggler in perfetto (user-flagged ID 63112).
             self.mpk.identity_layer(
                 input=self.kpe_sep,
                 output=self.kpe_sep_v2,
-                grid_dim=(1, 1, 1),
+                grid_dim=(8, 1, 1),
                 block_dim=(128, 1, 1),
+                # B19 (2026-05-15): decode iter has Q_LEN=1 and chunked_prefill
+                # early-returns via its own Q_LEN > 8 gate. The copy here is
+                # wasted ~16 μs/layer in decode. Gate the body on Q_LEN > 8
+                # so decode iters skip the copy entirely (kpe_sep_v2 keeps
+                # stale data, harmless because chunked_prefill doesn't read
+                # it on decode).
+                gate_decode_q_len=True,
             )
         else:
             self.mpk.mla_kv_gather_layer(
@@ -1967,12 +2515,20 @@ class DeepSeekV3Builder(GraphBuilder):
             w_kv_b_v, s_kv_b_v = self._attach_raw_fp8_weight(
                 state_dict, f"{attn}kv_b_v.weight",
                 f"layer_{layer_idx}_kv_b_v")
+            # B23 (2026-05-15): share the FP8 quantize of ckv_sep between
+            # kv_b_k and kv_b_v — both operate on the same input with the
+            # same group_size, so emitting two quantize tasks duplicates
+            # the bytes (and one extra ~5 μs dispatch wave on decode iters
+            # where both early-exit). One quantize, two GEMM consumers.
+            kv_b_shared_tag = f"layer_{layer_idx}_kv_b_shared"
             self._fp8_dense_kv_b_proj(
                 self.ckv_sep, w_kv_b_k, s_kv_b_k, self.prefill_k_nope,
-                tag=f"layer_{layer_idx}_kv_b_k")
+                tag=f"layer_{layer_idx}_kv_b_k",
+                shared_quantize_tag=kv_b_shared_tag)
             self._fp8_dense_kv_b_proj(
                 self.ckv_sep, w_kv_b_v, s_kv_b_v, self.prefill_v,
-                tag=f"layer_{layer_idx}_kv_b_v")
+                tag=f"layer_{layer_idx}_kv_b_v",
+                shared_quantize_tag=kv_b_shared_tag)
             self.mpk.mla_prefill_tp8_chunked_layer(
                 q_nope=self.q_nope,
                 q_pe=self.q_pe,
@@ -2107,42 +2663,55 @@ class DeepSeekV3Builder(GraphBuilder):
                 residual=self.x,
                 gate_mode=1,
             )
-            w_o_decode, s_o_decode = self._attach_fp8_weight(
-                state_dict, f"{attn}o_proj.weight",
-                f"layer_{layer_idx}_o_proj")
-            self._fp8_linear(
-                self.attn_out,
-                w_o_decode,
-                s_o_decode,
-                self.attn_proj_out,
-                grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
-                block_dim=(128, 1, 1),
-                residual=self.x,
-                gate_mode=2,
-            )
-        else:
-            w_o, s_o = self._attach_fp8_weight(
-                state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
-            o_split_k = self._pick_fp8_splitk_factor(w_o)
-            if o_split_k is not None and self.world_size == 1:
-                self.attn_proj_out = self.x
-                self._fp8_linear_splitk(
-                    self.attn_out, w_o, s_o, self.attn_proj_out,
-                    split_k=o_split_k, residual=self.x)
-            elif o_split_k is not None:
-                self._fp8_linear_splitk(
-                    self.attn_out, w_o, s_o, self.attn_proj_out,
-                    split_k=o_split_k, residual=self.x)
+            # C9: BMM post-attn path replaces the fused decode o_proj
+            # (absorbed with W_UV) with: quantize(attn_out) → BMM(kv_b_v_bmm)
+            # → smaller o_proj_original linear. Eliminates the H*512 fused
+            # GEMM in favor of an H*128 unabsorbed GEMM + BMM. Gated by
+            # _dsv3_bmm. The BMM is decode-only via gate_mode=2.
+            if self._dsv3_bmm:
+                self._bmm_decode_o_path(state_dict, attn, layer_idx, residual=self.x)
             else:
+                w_o_decode, s_o_decode = self._attach_fp8_weight(
+                    state_dict, f"{attn}o_proj.weight",
+                    f"layer_{layer_idx}_o_proj")
                 self._fp8_linear(
                     self.attn_out,
-                    w_o,
-                    s_o,
+                    w_o_decode,
+                    s_o_decode,
                     self.attn_proj_out,
                     grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
                     block_dim=(128, 1, 1),
                     residual=self.x,
+                    gate_mode=2,
                 )
+        else:
+            # Pure decode (mbt<=8). When _dsv3_bmm=True, route through the
+            # post-attn BMM path; otherwise legacy absorbed o_proj.
+            if self._dsv3_bmm:
+                self._bmm_decode_o_path(state_dict, attn, layer_idx, residual=self.x)
+            else:
+                w_o, s_o = self._attach_fp8_weight(
+                    state_dict, f"{attn}o_proj.weight", f"layer_{layer_idx}_o_proj")
+                o_split_k = self._pick_fp8_splitk_factor(w_o)
+                if o_split_k is not None and self.world_size == 1:
+                    self.attn_proj_out = self.x
+                    self._fp8_linear_splitk(
+                        self.attn_out, w_o, s_o, self.attn_proj_out,
+                        split_k=o_split_k, residual=self.x)
+                elif o_split_k is not None:
+                    self._fp8_linear_splitk(
+                        self.attn_out, w_o, s_o, self.attn_proj_out,
+                        split_k=o_split_k, residual=self.x)
+                else:
+                    self._fp8_linear(
+                        self.attn_out,
+                        w_o,
+                        s_o,
+                        self.attn_proj_out,
+                        grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+                        block_dim=(128, 1, 1),
+                        residual=self.x,
+                    )
 
     def _build_dense_mlp(self, layer_idx: int, state_dict: dict):
         """Build dense MLP for layers 0-2 (FP8 weights)."""
@@ -2309,13 +2878,18 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict, w13_scale_key,
             f"layer_{layer_idx}_experts_w13_scale_ue8m0")
         # 1) Quantize MoE input with UE8M0-packed scale.
-        self.mpk.quantize_fp8_layer(
-            input=self.rmsnorm_out,
-            output_fp8=new_moe_input_fp8,
-            output_scale=new_moe_input_scale,
-            grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
-            scale_ue8m0=True,
-        )
+        # C17 (2026-05-17): when post-attn rmsnorm was fused with this
+        # quantize (via _emit_fused_post_attn_rmsnorm_moe_quantize at
+        # build_layers), the FP8 + scale buffers are already filled by
+        # the fused task — skip the redundant standalone quantize call.
+        if layer_idx not in getattr(self, "_fused_post_attn_bufs", {}):
+            self.mpk.quantize_fp8_layer(
+                input=self.rmsnorm_out,
+                output_fp8=new_moe_input_fp8,
+                output_scale=new_moe_input_scale,
+                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                scale_ue8m0=True,
+            )
         if upto < 2: return
         # 2) Zero-init meta. The dummy=new_moe_input_fp8 trick chains the
         # tensor_init between the upstream quantize_fp8 (which writes
@@ -2352,6 +2926,7 @@ class DeepSeekV3Builder(GraphBuilder):
             m_indices=self.new_moe_m_indices_dt,
             output=new_moe_w13_out,
             num_workers=self.mpk.num_workers,
+            meta=new_moe_meta if self._new_moe_active_skip else None,
         )
         if upto < 5: return
         # 5) SiLU+MUL.
@@ -2364,27 +2939,82 @@ class DeepSeekV3Builder(GraphBuilder):
         # (= m_total / grid_dim.x rows per CTA). So each CTA processes
         # m_total/num_workers rows in-bounds, fully parallel across SMs.
         _silu_grid = min(self.mpk.num_workers, m_total)
-        self.mpk.moe_silu_mul_layer(
-            input=new_moe_w13_out,
-            output=new_moe_silu_out,
-            grid_dim=(_silu_grid, 1, 1),
-            block_dim=(128, 1, 1),
-        )
-        if upto < 6: return
-        # 6) Quantize SiLU → UE8M0, then transpose to K-outermost.
-        self.mpk.quantize_fp8_layer(
-            input=new_moe_silu_out,
-            output_fp8=new_moe_silu_fp8,
-            output_scale=new_moe_silu_scale_Mfirst,
-            grid_dim=(m_total, 1, 1),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=True,
-        )
-        if upto < 7: return
-        self.mpk.transpose_scale_sm100_layer(
-            scale_in=new_moe_silu_scale_Mfirst,
-            scale_out=new_moe_silu_scale,
-        )
+        # C18 (2026-05-17): when env-gated, fuse silu·mul + quantize_fp8
+        # into one task. Skip both standalone steps. Note: the fused
+        # kernel doesn't yet implement the B11/B15 active-expert skip
+        # (it processes every row); for ACTIVE_SKIP=1 callers, the fused
+        # path does more silu·mul work on inactive rows than the
+        # standalone path. Future: thread the active-skip through.
+        if self._fused_silu_quantize:
+            # C18 (2026-05-17): pass meta + bm_padding when active-skip is
+            # enabled so the kernel skips inactive-expert rows (matches B11
+            # silu_mul + B15 quantize_fp8 behavior). Without active-skip,
+            # the fused kernel processes garbage rows and regresses badly.
+            _silu_quant_meta = (
+                new_moe_meta if self._new_moe_active_skip else None)
+            self.mpk.moe_silu_mul_quantize_fp8_sm100_layer(
+                input=new_moe_w13_out,
+                output_fp8=new_moe_silu_fp8,
+                output_scale=new_moe_silu_scale,
+                grid_dim=(m_total, 1, 1),
+                block_dim=(128, 1, 1),
+                rows_per_task=1,
+                meta=_silu_quant_meta,
+                bm_padding=bm_pad,
+            )
+            if upto < 7: return
+            # Skip the standalone silu_mul + quantize (steps 5+6).
+            # Jump straight to step 7 (W2 GEMM).
+        else:
+            self.mpk.moe_silu_mul_layer(
+                input=new_moe_w13_out,
+                output=new_moe_silu_out,
+                grid_dim=(_silu_grid, 1, 1),
+                block_dim=(128, 1, 1),
+                meta=new_moe_meta if self._new_moe_active_skip else None,
+                # bm_padding = per-expert row count in the permuted buffer.
+                # Wrapper combines with rows_per_cta (= input.dim(0)/grid.x)
+                # to derive my_expert = bid.x / (bm_padding / rows_per_cta).
+                bm_padding=bm_pad,
+            )
+            if upto < 6: return
+            # 6) Quantize SiLU → UE8M0 directly into K-outermost layout.
+            # C8 (2026-05-16): quantize_fp8 kernel writes UE8M0 packed scale at
+            # offset `packed_idx * aligned_batch + batch_idx` which IS K-outer
+            # row-major. The previous (m_total, K_PACKED) declaration was a
+            # "shape lie" that required a separate transpose_scale task to
+            # reconcile. By declaring the output as (K_PACKED, m_total) the
+            # write pattern matches the declared shape, and the downstream W2
+            # SFA TMA descriptor (which expects K-outer) reads correct bytes
+            # directly — eliminating TRANSPOSE_SCALE (-19 μs/layer).
+            if self._new_moe_active_skip:
+                num_local_experts = m_total // bm_pad
+                self.mpk.quantize_fp8_layer(
+                    input=new_moe_silu_out,
+                    output_fp8=new_moe_silu_fp8,
+                    output_scale=new_moe_silu_scale,
+                    grid_dim=(m_total, 1, 1),
+                    block_dim=(128, 1, 1),
+                    scale_ue8m0=True,
+                    expert_active_meta=new_moe_meta,
+                    expert_active_e_local=num_local_experts,
+                    expert_active_bm_padding=bm_pad,
+                )
+            else:
+                # B12 fallback (no active-skip): process_all_rows still
+                # required because the row axis is permuted-expert layout,
+                # not token-indexed.
+                self.mpk.quantize_fp8_layer(
+                    input=new_moe_silu_out,
+                    output_fp8=new_moe_silu_fp8,
+                    output_scale=new_moe_silu_scale,
+                    grid_dim=(m_total, 1, 1),
+                    block_dim=(128, 1, 1),
+                    scale_ue8m0=True,
+                    process_all_rows=True,
+                )
+        # C8: transpose_scale eliminated — quantize_fp8 writes directly
+        # into the K-outer-declared new_moe_silu_scale.
         if upto < 8: return
         # 7+8) Pack W2 weight scale + attach W2 weight + Group GEMM W2.
         w2_scale_key_for_pack = f"{prefix}experts.w2.weight_scale_inv"
@@ -2402,11 +3032,118 @@ class DeepSeekV3Builder(GraphBuilder):
             m_indices=self.new_moe_m_indices_dt,
             output=new_moe_w2_out,
             num_workers=self.mpk.num_workers,
+            meta=new_moe_meta if self._new_moe_active_skip else None,
         )
+
+    def _build_shared_expert(self, layer_idx: int, prefix: str, state_dict: dict):
+        """Register shared-expert dense FP8 path. Returns ``shared_residual``
+        which the routed-MoE finalize step (moe_unpermute / moe_mul_sum_add)
+        adds to the per-token routed contribution.
+
+        Registered ahead of the routed-MoE block (C12, 2026-05-17) so the
+        runtime scheduler stamps these tasks onto workers before the W13
+        group-GEMM wave. Both paths depend only on ``self.rmsnorm_out``, so
+        the reorder is dep-safe and may expose worker-level parallelism via
+        EVENT_LAUNCH_MASSIVE_TASKS round-robin (see scheduler topology notes).
+        """
+        shared_prefix = f"{prefix}shared_experts."
+
+        # gate_proj + up_proj fused (FP8) — use _attach_fp8_weight for requantize
+        shared_gate_w = state_dict[f"{shared_prefix}gate_proj.weight"]
+        shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
+        gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
+        has_shared_scale = gate_scale_key in state_dict
+        if shared_gate_w.shape[0] != self.moe_intermediate_size:
+            pass  # shard mismatch warning removed
+        from ..utils import shuffle_tensors as _shuffle_tensors
+        out_dim_total = shared_gate_w.shape[0] + shared_up_w.shape[0]
+        linear_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
+        scale_dim_0 = shared_gate_w.shape[0] // 128
+        shared_split = min(linear_grid // 2, scale_dim_0)
+        while shared_gate_w.shape[0] % shared_split != 0 or scale_dim_0 % shared_split != 0:
+            shared_split -= 1
+            if shared_split < 1:
+                shared_split = 1; break
+        fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
+        state_dict[f"{fused_key}.weight"] = _shuffle_tensors(
+            [shared_gate_w, shared_up_w], split=shared_split, dim=0)
+        if has_shared_scale:
+            shared_gate_s = state_dict[gate_scale_key]
+            shared_up_s = state_dict[f"{shared_prefix}up_proj.weight_scale_inv"]
+            state_dict[f"{fused_key}.weight_scale_inv"] = _shuffle_tensors(
+                [shared_gate_s, shared_up_s], split=shared_split, dim=0)
+        w_shared_gate_up, s_shared_gate_up = self._attach_fp8_weight(
+            state_dict, f"{fused_key}.weight",
+            f"layer_{layer_idx}_shared_expert_gate_up")
+        shared_mid = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, 2 * self.moe_intermediate_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_shared_mid",
+            io_category="cuda_tensor",
+        )
+        shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
+        if shared_gu_split_k is not None:
+            self._fp8_linear_splitk(
+                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
+                shared_mid, split_k=shared_gu_split_k)
+        else:
+            self._fp8_linear(self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
+                             shared_mid,
+                             grid_dim=(grid_for_rmsnorm_linear_layer(
+                                 w_shared_gate_up.dim(0)), 1, 1),
+                             block_dim=(128, 1, 1))
+
+        # silu_mul + down_proj
+        shared_silu_out = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.moe_intermediate_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_shared_silu",
+            io_category="cuda_tensor",
+        )
+        w_shared_down, s_shared_down = self._attach_fp8_weight(
+            state_dict, f"{shared_prefix}down_proj.weight",
+            f"layer_{layer_idx}_shared_expert_down")
+        _down_w = state_dict[f"{shared_prefix}down_proj.weight"]
+        if _down_w.shape[1] != self.moe_intermediate_size:
+            pass  # shard mismatch warning removed
+        shared_residual = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_shared_residual",
+            io_category="cuda_tensor",
+        )
+        self._silu_mul_fp8_linear(
+            shared_mid,
+            shared_silu_out,
+            w_shared_down,
+            s_shared_down,
+            shared_residual,
+            silu_grid_dim=(shared_split, 1, 1),
+            linear_grid_dim=(self.hidden_size // 64, 1, 1),
+            block_dim=(128, 1, 1),
+            residual=None,
+        )
+        return shared_residual
 
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):
         """Build MoE MLP for layers 3-60."""
         prefix = f"model.layers.{layer_idx}.mlp."
+
+        # C12 (2026-05-17, NULL RESULT): Register shared_expert BEFORE routed
+        # MoE via MPK_DSV3_SHARED_EXPERT_FIRST=1. Hypothesis: same fork-event
+        # broadcast lets shared_expert's FP8 GEMMs occupy workers ahead of
+        # W13 group_gemm. Tested at TP=4 EP=2 mbt=128 19l: ON 1306 μs/layer
+        # vs OFF 1282 μs (within noise, ~1.9%). Overlap analysis: only ~7 μs
+        # shared_expert × W13 per layer because W13 is 80% mbarrier-stalled
+        # (242 μs span / 42 μs compute union), so its idle slots happen
+        # during waits the runtime doesn't schedule into. Default OFF; helper
+        # kept for future scheduler-side experiments.
+        _shared_first = os.environ.get(
+            "MPK_DSV3_SHARED_EXPERT_FIRST", "0") == "1"
+        shared_residual = None
+        if _shared_first:
+            shared_residual = self._build_shared_expert(
+                layer_idx, prefix, state_dict)
 
         # Router
         w_gate = self.mpk.attach_input(
@@ -2484,12 +3221,17 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         # Router is full-replica on every rank; no inter-rank synchronization is
         # needed before the local top-k routing mask is produced.
+        # C13 (2026-05-17): VPT 8 -> 16 (env MPK_DSV3_TOPK_VPT) makes the
+        # kernel template pick ROWS_PER_WARP=2 instead of 1. block_dim stays
+        # at 256 (8 warps); only ROWS_PER_CTA changes from 8 to 16. The
+        # change actually lives in src/kernel/task_register.cc (template arg);
+        # this comment exists so callers know the parity.
         self.mpk.moe_topk_sigmoid_routing_layer(
             input=router_logits,
             bias=w_bias,
             output=(moe_topk_weights, moe_routing_indices, moe_mask),
             grid_dim=(1, 1, 1),
-            block_dim=(256, 1, 1),  # 8 warps required by topk kernel
+            block_dim=(256, 1, 1),
             local_expert_start=self.local_expert_start,
         )
 
@@ -2539,14 +3281,24 @@ class DeepSeekV3Builder(GraphBuilder):
 
             # Per-layer allocations (NOT shared across MoE layers — sharing
             # tripped MPK's dep tracker on case-3 fork+join).
-            new_moe_input_fp8 = self.mpk.new_tensor(
-                dims=(mbt, K), dtype=float8_e4m3,
-                name=f"layer_{layer_idx}_new_moe_input_fp8",
-                io_category="cuda_tensor")
-            new_moe_input_scale = self.mpk.new_tensor(
-                dims=(mbt, K_PACKED_K), dtype=uint32,
-                name=f"layer_{layer_idx}_new_moe_input_scale",
-                io_category="cuda_tensor")
+            # C17 (2026-05-17): if post-attn rmsnorm+quantize was fused for
+            # this layer, the fused task already wrote new_moe_input_fp8 +
+            # new_moe_input_scale into a per-layer buffer — reuse those
+            # instead of allocating new (otherwise we'd lose the fused
+            # output and _new_moe_dispatch_inline would re-quantize anyway).
+            _post_attn_bufs = getattr(self, "_fused_post_attn_bufs", {})
+            if layer_idx in _post_attn_bufs:
+                _, new_moe_input_fp8, new_moe_input_scale = (
+                    _post_attn_bufs[layer_idx])
+            else:
+                new_moe_input_fp8 = self.mpk.new_tensor(
+                    dims=(mbt, K), dtype=float8_e4m3,
+                    name=f"layer_{layer_idx}_new_moe_input_fp8",
+                    io_category="cuda_tensor")
+                new_moe_input_scale = self.mpk.new_tensor(
+                    dims=(mbt, K_PACKED_K), dtype=uint32,
+                    name=f"layer_{layer_idx}_new_moe_input_scale",
+                    io_category="cuda_tensor")
             new_moe_permuted_in_fp8 = self.mpk.new_tensor(
                 dims=(m_total, K), dtype=float8_e4m3,
                 name=f"layer_{layer_idx}_new_moe_permuted_in_fp8",
@@ -2773,93 +3525,13 @@ class DeepSeekV3Builder(GraphBuilder):
             else:
                 raise RuntimeError("No bf16 moe experts for now.")
 
-        # ---- Shared Expert (1 expert, TP parallel, same as dense MLP) ----
-        # Shared expert runs on ALL tokens independently of routing.
-        # Its output is added to the residual before the routed expert reduction:
-        #   final = sum(routed * weights) + (residual + shared_expert_out)
-        shared_prefix = f"{prefix}shared_experts."
-
-        # gate_proj + up_proj fused (FP8) — use _attach_fp8_weight for requantize
-        shared_gate_w = state_dict[f"{shared_prefix}gate_proj.weight"]
-        shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
-        gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
-        has_shared_scale = gate_scale_key in state_dict
-        # Verify shard was applied: gate_proj.shape[0] should equal moe_intermediate_size
-        if shared_gate_w.shape[0] != self.moe_intermediate_size:
-            pass  # shard mismatch warning removed
-        # Interleave gate/up at split = min(linear_grid//2, scale_dim_0).
-        # Scale dim 0 is moe_intermediate_size/128. For small intermediate (2048),
-        # scale_dim_0 = 16 which limits the split.
-        from ..utils import shuffle_tensors as _shuffle_tensors
-        out_dim_total = shared_gate_w.shape[0] + shared_up_w.shape[0]
-        linear_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
-        scale_dim_0 = shared_gate_w.shape[0] // 128  # rows per gate scale
-        shared_split = min(linear_grid // 2, scale_dim_0)
-        # Ensure both weight rows and scale rows divide evenly by split
-        while shared_gate_w.shape[0] % shared_split != 0 or scale_dim_0 % shared_split != 0:
-            shared_split -= 1
-            if shared_split < 1:
-                shared_split = 1; break
-        fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
-        state_dict[f"{fused_key}.weight"] = _shuffle_tensors(
-            [shared_gate_w, shared_up_w], split=shared_split, dim=0)
-        if has_shared_scale:
-            shared_gate_s = state_dict[gate_scale_key]
-            shared_up_s = state_dict[f"{shared_prefix}up_proj.weight_scale_inv"]
-            state_dict[f"{fused_key}.weight_scale_inv"] = _shuffle_tensors(
-                [shared_gate_s, shared_up_s], split=shared_split, dim=0)
-        w_shared_gate_up, s_shared_gate_up = self._attach_fp8_weight(
-            state_dict, f"{fused_key}.weight",
-            f"layer_{layer_idx}_shared_expert_gate_up")
-        shared_mid = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, 2 * self.moe_intermediate_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_shared_mid",
-            io_category="cuda_tensor",
-        )
-        shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
-        if shared_gu_split_k is not None:
-            self._fp8_linear_splitk(
-                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
-                shared_mid, split_k=shared_gu_split_k)
-        else:
-            self._fp8_linear(self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
-                             shared_mid,
-                             grid_dim=(grid_for_rmsnorm_linear_layer(
-                                 w_shared_gate_up.dim(0)), 1, 1),
-                             block_dim=(128, 1, 1))
-
-        # silu_mul: grid must equal shared_split (matching the interleave granularity).
-        shared_silu_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.moe_intermediate_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_shared_silu",
-            io_category="cuda_tensor",
-        )
-        # down_proj: shared_residual = shared_down(shared_silu_out) [partial sum for TP>1]
-        w_shared_down, s_shared_down = self._attach_fp8_weight(
-            state_dict, f"{shared_prefix}down_proj.weight",
-            f"layer_{layer_idx}_shared_expert_down")
-        _down_w = state_dict[f"{shared_prefix}down_proj.weight"]
-        if _down_w.shape[1] != self.moe_intermediate_size:
-            pass  # shard mismatch warning removed
-        shared_residual = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_shared_residual",
-            io_category="cuda_tensor",
-        )
-        self._silu_mul_fp8_linear(
-            shared_mid,
-            shared_silu_out,
-            w_shared_down,
-            s_shared_down,
-            shared_residual,
-            silu_grid_dim=(shared_split, 1, 1),
-            linear_grid_dim=(self.hidden_size // 64, 1, 1),
-            block_dim=(128, 1, 1),
-            residual=None,
-        )
+        # ---- Shared Expert ----
+        # Registered earlier via _build_shared_expert() at the top of
+        # _build_moe_mlp when MPK_DSV3_SHARED_EXPERT_FIRST=1 (default, C12).
+        # Fall back to legacy registration order otherwise.
+        if shared_residual is None:
+            shared_residual = self._build_shared_expert(
+                layer_idx, prefix, state_dict)
 
         # Final MoE contribution before transformer residual:
         #   routed_experts * topk_weights + shared_expert
@@ -2873,11 +3545,37 @@ class DeepSeekV3Builder(GraphBuilder):
             #                      * permuted_weights[same row])
             # — i.e. the topk-weighted combine AND the shared-residual add
             # in one task. Skips the OLD moe_mul_sum_add entirely.
+            # 2026-05-15: MOE_UNPERMUTE sits on the post-W2 critical path
+            # (nothing else runs concurrently — see perfetto), so the per-task
+            # wallclock is what matters, NOT freeing worker slots. Force
+            # rows_per_cta=1 so the kernel fan-out matches the worker pool
+            # (mbt=128 → 128 CTAs each doing 1 token of unpermute work). With
+            # rows_per_cta=8 (the wrapper default tuned for the OPPOSITE
+            # constraint of leaving workers free for concurrent tasks), each
+            # of the 16 active CTAs had to chew through 8 row-blocks
+            # serially, giving 28-32 μs straggler wallclock per layer.
+            # 2026-05-15 stragglers fix: hidden_split=8 partitions the
+            # HIDDEN axis across 8 CTAs per token. For decode
+            # (active_rows=1) this gives 8 CTAs working on token 0's
+            # hidden cols concurrently — the previous 32 μs per-token
+            # straggler shrinks by ~8x. For prefill (active_rows=128)
+            # the grid balloons to 128*8=1024 CTAs but each CTA does
+            # 1/8 the per-token compute, so the longest CTA wallclock
+            # also shrinks (overall MOE_UNPERMUTE wave bounded by the
+            # slowest CTA, not total work).
             self.mpk.moe_unpermute_sm100_layer(
                 permuted_output=self._new_moe_layer_w2_out,
                 meta=self._new_moe_layer_meta,
                 residual=shared_residual,
                 output=moe_output,
+                # C4 (2026-05-16): rows_per_cta 1→8 collapses grid to
+                # (16, 8, 1)=128 CTAs = 1 wave (was 1024 CTAs = 8 waves).
+                # Per-CTA work 8x more but wave-transition overhead × 7
+                # was dominating cluster wallclock at ~17 μs/call. Env
+                # override: MPK_DSV3_UNPERMUTE_ROWS_PER_CTA={1,2,4,8}.
+                rows_per_cta=int(os.environ.get(
+                    "MPK_DSV3_UNPERMUTE_ROWS_PER_CTA", "8")),
+                hidden_split=8,
             )
         else:
             self.mpk.moe_mul_sum_add_layer(
@@ -2924,7 +3622,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         self.mpk.rmsnorm_layer(
             input=self.mtp_x, weight=w_norm, output=self.rmsnorm_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
         )
 
@@ -2949,7 +3647,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         self.mpk.rmsnorm_layer(
             input=self.mtp_x, weight=w_post_norm, output=self.rmsnorm_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
         )
 
@@ -3018,7 +3716,8 @@ class DeepSeekV3Builder(GraphBuilder):
             f"mtp_{attn}q_a_layernorm")
         self.mpk.rmsnorm_layer(
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1))
 
         # MTP runs both prefill and decode attention so its KV cache and
         # per-position hidden states are populated correctly. Mirrors vLLM's
@@ -3102,7 +3801,7 @@ class DeepSeekV3Builder(GraphBuilder):
         rope_q_grid = (
             self.mpk.max_num_batched_requests,
             self.num_local_q_heads,
-            (self.max_num_batched_tokens + 15) // 16,
+            1,  # B35: TILE_Q==mbt -> 1 CTA per (req, head); kernel inner-loop covers all tokens
         )
         self.mpk.deepseek_mla_rope_q_fused_layer(
             q_nope_pe=self.q_nope_pe,
@@ -3110,6 +3809,7 @@ class DeepSeekV3Builder(GraphBuilder):
             sin_pos_embed=self.sin_pos_embed,
             num_heads=self.num_local_q_heads,
             grid_dim=rope_q_grid,
+            q_tile_size=self.max_num_batched_tokens,
         )
         if use_mtp_prefill_attention:
             self.mpk.deepseek_mla_rope_q_split_layer(
@@ -3118,6 +3818,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 sin_pos_embed=self.sin_pos_embed,
                 num_heads=self.num_local_q_heads,
                 grid_dim=rope_q_grid,
+                q_tile_size=self.max_num_batched_tokens,
             )
         self.mpk.deepseek_mla_rope_k_layer(
             k_pe=self.k_pe_out,
@@ -3126,8 +3827,9 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(
                 self.mpk.max_num_batched_requests,
                 1,
-                (self.max_num_batched_tokens + 15) // 16,
+                1,  # B35: TILE_Q==mbt collapses grid.z to 1
             ),
+            q_tile_size=self.max_num_batched_tokens,
         )
 
         w_kv_a_ln = self._cached_attach(
@@ -3135,7 +3837,8 @@ class DeepSeekV3Builder(GraphBuilder):
             f"mtp_{attn}kv_a_layernorm")
         self.mpk.rmsnorm_layer(
             input=self.c_latent_out, weight=w_kv_a_ln, output=self.c_latent_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1))
 
         # MTP attention uses its own KV cache and decode-only MLA kernels.
         q_len_mla = self.max_num_batched_tokens
@@ -3710,14 +4413,14 @@ class DeepSeekV3Builder(GraphBuilder):
             # 3. enorm(embed_out)
             self.mpk.rmsnorm_layer(
                 input=mtp_embed_out, weight=w_enorm, output=mtp_enorm_out,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=_rmsnorm_grid(mbt), block_dim=(128, 1, 1),
             )
 
             # 4. hnorm(previous_hidden_states)
             hidden_input = main_hidden_states if step == 0 else self.mtp_x
             self.mpk.rmsnorm_layer(
                 input=hidden_input, weight=w_hnorm, output=mtp_hnorm_out,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=_rmsnorm_grid(mbt), block_dim=(128, 1, 1),
             )
 
             # 5. eh_proj: output = W1 @ enorm_out + W2 @ hnorm_out
@@ -3749,7 +4452,7 @@ class DeepSeekV3Builder(GraphBuilder):
             )
             self.mpk.rmsnorm_layer(
                 input=self.mtp_x, weight=w_mtp_norm, output=self.rmsnorm_out,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                grid_dim=_rmsnorm_grid(mbt), block_dim=(128, 1, 1),
             )
 
             # Shared lm_head (saved during build_from_dict)
@@ -4061,11 +4764,24 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=state_dict[f"{prefix}input_layernorm.weight"],
                 name=f"layer_{i}_input_layernorm",
             )
-            self.mpk.rmsnorm_layer(
-                input=self.x, weight=w_norm, output=self.rmsnorm_out,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            # B37: when env-gated, fuse the input-layernorm RMSNorm with
+            # the downstream qkv_a FP8 quantize. The fused task writes the
+            # BF16 normalized output AND the FP8 + scale buffers in one
+            # pass, so the qkv_a `_fp8_linear` call can skip its internal
+            # quantize via share_quantize_tag.
+            if self._fused_rmsnorm_quantize:
+                self._emit_fused_rmsnorm_qkv_a_quantize(
+                    input_x=self.x,
+                    w_norm=w_norm,
+                    layer_idx=i,
+                    reduction_size=self.hidden_size,
+                )
+            else:
+                self.mpk.rmsnorm_layer(
+                    input=self.x, weight=w_norm, output=self.rmsnorm_out,
+                    grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+                    block_dim=(128, 1, 1),
+                )
 
             if i == 0 and layer0_intra_dts is not None:
                 # Dump self.rmsnorm_out (= input-layernormed embed) into slot 0
@@ -4103,11 +4819,37 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=state_dict[f"{prefix}post_attention_layernorm.weight"],
                 name=f"layer_{i}_post_attn_layernorm",
             )
-            self.mpk.rmsnorm_layer(
-                input=self.x, weight=w_post_norm, output=self.rmsnorm_out,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            # C17 (2026-05-17): when env-gated, fuse post-attn rmsnorm + NEW
+            # MoE input quantize into one task. The fused task writes a
+            # per-layer-unique rmsnorm_out + per-layer-unique moe_input_fp8 +
+            # moe_input_scale; we rebind self.rmsnorm_out so all downstream
+            # consumers in this layer (router linear, shared_expert, fp8
+            # MoE permute via _build_moe_mlp) read the per-layer buffer.
+            # Gating constraints:
+            #   * layer must be MoE (i >= FIRST_MOE_LAYER)
+            #   * use_fp8_experts must be true (NEW MoE path)
+            #   * NEW_MOE env must be on (otherwise OLD path quantize_fp8
+            #     uses float32 scale, not UE8M0 — fused kernel writes UE8M0
+            #     only)
+            _post_attn_fuse_eligible = (
+                self._fused_post_attn_rmsnorm_quantize
+                and i >= FIRST_MOE_LAYER
+                and self._new_moe
+                and self._fp8_experts_available(state_dict, i))
+            if _post_attn_fuse_eligible:
+                rmsnorm_out_bf16, _, _ = (
+                    self._emit_fused_post_attn_rmsnorm_moe_quantize(
+                        input_x=self.x, w_norm=w_post_norm,
+                        layer_idx=i,
+                        reduction_size=self.hidden_size,
+                    ))
+                self.rmsnorm_out = rmsnorm_out_bf16
+            else:
+                self.mpk.rmsnorm_layer(
+                    input=self.x, weight=w_post_norm, output=self.rmsnorm_out,
+                    grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+                    block_dim=(128, 1, 1),
+                )
 
             # MLP: dense (layers 0-2) or MoE (layers 3-60)
             if i < FIRST_MOE_LAYER:
@@ -4234,7 +4976,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         self.mpk.rmsnorm_layer(
             input=self.x, weight=w_final_norm, output=self.rmsnorm_out,
-            grid_dim=(self.max_num_batched_tokens, 1, 1),
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
         )
 
