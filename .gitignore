@@ -95,3 +95,15 @@ ncu_tmp
 # scripts/ holds local test helpers — same policy.
 scratch/
 scripts/
+
+# Local IDE / clangd config (per-user).
+.clangd
+
+# Local debug artifacts (profile dumps, bench results, repro scripts).
+/profile/
+/results/
+/mirage_*.csv
+/run*.sh
+/docs/superpowers/
+/docs/deepseek_v3_test_mode_coverage.md
+tests/runtime_python/blackwell/bench_fp8_3way/
