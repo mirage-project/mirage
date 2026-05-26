@@ -41,9 +41,6 @@ class RunnerConfig:
     tensor_parallel_size: int = 1
     """Number of GPUs for tensor parallelism (matches ``mpirun -n`` count)."""
 
-    enforce_eager: bool = False
-    """Disable CUDA graph capture when ``True`` (useful for debugging)."""
-
     output_dir: Optional[str] = None
     """Directory for compiled kernel artefacts; ``None`` uses a temp dir."""
 
