@@ -20,6 +20,7 @@
 #include "mirage/kernel/operator.h"
 #include "mirage/kernel/runtime.h"
 #include "mirage/threadblock/graph.h"
+#include <memory>
 #include <vector>
 
 namespace mirage {
@@ -205,6 +206,11 @@ public:
 
 public:
   std::vector<mirage::kernel::KNOperator *> operators;
+  // Storage for view DTensors returned by view/narrow/split (pointer forms).
+  // Views are not KNOperators and don't go in `operators`; they need somewhere
+  // to live so the raw pointers handed back to Cython stay valid for the
+  // Graph's lifetime.
+  std::vector<std::unique_ptr<DTensor>> view_storage;
   dim3 gpu_dim;
   // memory allocator
   // device memory offset manager
