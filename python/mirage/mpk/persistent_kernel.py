@@ -380,8 +380,7 @@ def get_compile_command(
 # At cap=128 the quantize task occupies all workers in 1 wave, but contention
 # with concurrent tasks is negligible in practice (verified empirically).
 # Env override: MPK_QUANTIZE_GRID_Y_CAP={8,16,32,64,128}.
-import os as _os_q
-_QUANTIZE_GRID_Y_CAP = int(_os_q.environ.get("MPK_QUANTIZE_GRID_Y_CAP", "128"))
+_QUANTIZE_GRID_Y_CAP = int(os.environ.get("MPK_QUANTIZE_GRID_Y_CAP", "128"))
 
 
 class PersistentKernel:
