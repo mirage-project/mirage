@@ -80,7 +80,15 @@ def get_configurations_from_gpu(rank):
     if sm_cnt_for_split >= 160:
         worker = 144
     elif sm_cnt_for_split >= 144:
-        worker = 128
+        # B200 has 148 SMs. Empirically -83 μs/tok (n=3, σ=15μs) at TP=4
+        # DSv3 EP=2 19l mbt=128 by going 128→136 workers (with 48 schedulers
+        # = 12 scheduler-SMs to keep the 136 + 12 = 148 launch total). The 3
+        # TP=4 dense-GEMM variants (qkv_a/o_proj/gate_up) all stay single-iter
+        # at total ≤ 56 tiles ≤ 136, so the multi-iter ph-state bug
+        # ([[project_b36_splitk_parked]]) is not exposed. TP=1/2/8 also
+        # verified single-iter or empirically-tolerant at 136. Override via
+        # MPK_FORCE_NUM_WORKERS if needed.
+        worker = 136
     elif sm_cnt_for_split >= 132:
         worker = 128
     elif sm_cnt_for_split >= 108:
