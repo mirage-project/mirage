@@ -244,12 +244,6 @@ enum TaskType {
   // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
   // (N, H, 576) that the MLA decode TMA expects.
   TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
-  // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
-  // Replaces the (moe_silu_mul bf16 -> quantize_fp8 fp8+scale) two-task
-  // chain feeding the W2 FP8 group GEMM. Saves one dispatch wave + one
-  // BF16 HBM round-trip of silu_out per layer. Behind
-  // `MPK_DSV3_FUSED_SILU_QUANTIZE=1`.
-  TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100 = 317,
   TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

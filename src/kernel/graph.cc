@@ -869,20 +869,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         4, 1, TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100, variant_id);
-  } else if (name == "moe_silu_mul_quantize_fp8_sm100") {
-    // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
-    // Either 1 input (w13_out) or 2 inputs (w13_out + meta when ACTIVE_SKIP).
-    // Always 2 outputs (silu_fp8, silu_scale, both via store_in_dmem).
-    // params layout: [K_INTER, ROWS_PER_TASK] (legacy 1 input) OR
-    //                [K_INTER, ROWS_PER_TASK, active_mask_offset, e_local,
-    //                 bm_padding] (5 params, meta supplied → 2 inputs).
-    int variant_id =
-        task_register->register_moe_silu_mul_quantize_fp8_sm100_task(
-            customized->bgraph, params);
-    int const num_inputs_silu_q = (params.size() == 5) ? 2 : 1;
-    task_config[op] = std::make_tuple(
-        num_inputs_silu_q, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100,
-        variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
     // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
     // 2 real inputs (input, weight) + 3 outputs
