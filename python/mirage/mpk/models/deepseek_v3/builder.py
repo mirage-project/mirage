@@ -2282,7 +2282,6 @@ class DeepSeekV3Builder(GraphBuilder):
             ),
             q_tile_size=self.max_num_batched_tokens,
             k_pe_row_stride=self._qkv_a_row_stride,
-            k_pe_offset=self._qkv_a_k_pe_offset,
         )
 
         # Step 5: kv_a_layernorm on c_latent slice [1536:2048) of qkv_a_out.

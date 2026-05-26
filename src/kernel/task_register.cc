@@ -6645,31 +6645,27 @@ int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
 int TaskRegister::register_deepseek_mla_rope_k_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  // params: [tile_q [, k_pe_row_stride [, k_pe_offset]]]
-  // - Legacy (1 param): standalone k_pe buffer (mbt, 128) → K_PE_STRIDE=128,
-  // K_PE_OFFSET=0.
-  // - QKV-a fused (3 params): k_pe lives at offset `k_pe_offset` within a
-  //   wider (mbt, k_pe_row_stride) buffer. Builder passes e.g. (16, 2176, 2048)
-  //   so the kernel rotates qkv_a_out[:, 2048:2112] in place. Defaults keep
-  //   legacy callers unaffected.
-  assert(params.size() == 1 || params.size() == 3);
+  // params: [tile_q [, k_pe_row_stride]]
+  // - Legacy (1 param): standalone k_pe buffer (mbt, 128) → K_PE_STRIDE=128.
+  // - Narrow-view (2 params): k_pe is a column slice of a wider buffer
+  //   (e.g., qkv_a_out (mbt, 2176) with k_pe at cols [2048:2112)). The
+  //   per-task base pointer is already offset by the runtime from the
+  //   view's view_offset; only the row stride needs to be communicated.
+  assert(params.size() == 1 || params.size() == 2);
   int tile_q = params[0];
   assert(tile_q > 0);
-  int k_pe_row_stride = (params.size() == 3) ? params[1] : 128;
-  int k_pe_offset = (params.size() == 3) ? params[2] : 0;
+  int k_pe_row_stride = (params.size() == 2) ? params[1] : 128;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // Template params (positionally):
   //   NUM_HEADS=1, TILE_Q, HAS_SPLIT_Q=false, DO_Q=false, DO_K=true,
   //   FUSED_HEAD_DIM=576 (unused for K), ROPE_DIM=64, K_PE_STRIDE,
-  //   Q_ROW_STRIDE_OVERRIDE=0, Q_PE_BASE_IN_ROW=0, Q_PE_HEAD_STRIDE=0,
-  //   K_PE_OFFSET
+  //   Q_ROW_STRIDE_OVERRIDE=0, Q_PE_BASE_IN_ROW=0, Q_PE_HEAD_STRIDE=0
   code.e("kernel::deepseek_mla_rope_sm100_task_impl<"
-         "1, $, false, false, true, 576, 64, $, 0, 0, 0, $>(",
+         "1, $, false, false, true, 576, 64, $, 0, 0, 0>(",
          tile_q,
-         k_pe_row_stride,
-         k_pe_offset);
+         k_pe_row_stride);
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
   code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");

@@ -1443,16 +1443,15 @@ class PersistentKernel:
         block_dim: tuple = (128, 1, 1),
         q_tile_size: int = 16,
         k_pe_row_stride: int = None,
-        k_pe_offset: int = 0,
     ):
-        # k_pe_row_stride / k_pe_offset support running the K_PE rotation
-        # in-place on a slice of a wider buffer (e.g., qkv_a_out (mbt, 2176)
-        # where k_pe lives at cols [2048:2112)). Defaults preserve legacy.
+        # `k_pe_row_stride` sets the parent's row width when `k_pe` is a
+        # narrow view of a wider buffer (e.g., qkv_a_out (mbt, 2176) with
+        # k_pe at cols [2048:2112)). The per-task base pointer is already
+        # offset by the runtime from the view's view_offset, so no
+        # in-kernel column shift is needed.
         params = [q_tile_size]
-        if k_pe_row_stride is not None or k_pe_offset != 0:
-            if k_pe_row_stride is None:
-                k_pe_row_stride = 128
-            params = [q_tile_size, k_pe_row_stride, k_pe_offset]
+        if k_pe_row_stride is not None:
+            params = [q_tile_size, k_pe_row_stride]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(k_pe, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
