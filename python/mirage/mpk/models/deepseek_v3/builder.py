@@ -3012,22 +3012,6 @@ class DeepSeekV3Builder(GraphBuilder):
         """Build MoE MLP for layers 3-60."""
         prefix = f"model.layers.{layer_idx}.mlp."
 
-        # C12 (2026-05-17, NULL RESULT): Register shared_expert BEFORE routed
-        # MoE via MPK_DSV3_SHARED_EXPERT_FIRST=1. Hypothesis: same fork-event
-        # broadcast lets shared_expert's FP8 GEMMs occupy workers ahead of
-        # W13 group_gemm. Tested at TP=4 EP=2 mbt=128 19l: ON 1306 μs/layer
-        # vs OFF 1282 μs (within noise, ~1.9%). Overlap analysis: only ~7 μs
-        # shared_expert × W13 per layer because W13 is 80% mbarrier-stalled
-        # (242 μs span / 42 μs compute union), so its idle slots happen
-        # during waits the runtime doesn't schedule into. Default OFF; helper
-        # kept for future scheduler-side experiments.
-        _shared_first = os.environ.get(
-            "MPK_DSV3_SHARED_EXPERT_FIRST", "0") == "1"
-        shared_residual = None
-        if _shared_first:
-            shared_residual = self._build_shared_expert(
-                layer_idx, prefix, state_dict)
-
         # Router
         w_gate = self.mpk.attach_input(
             torch_tensor=state_dict[f"{prefix}gate.weight"],
@@ -3399,12 +3383,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 raise RuntimeError("No bf16 moe experts for now.")
 
         # ---- Shared Expert ----
-        # Registered earlier via _build_shared_expert() at the top of
-        # _build_moe_mlp when MPK_DSV3_SHARED_EXPERT_FIRST=1 (default, C12).
-        # Fall back to legacy registration order otherwise.
-        if shared_residual is None:
-            shared_residual = self._build_shared_expert(
-                layer_idx, prefix, state_dict)
+        shared_residual = self._build_shared_expert(
+            layer_idx, prefix, state_dict)
 
         # Final MoE contribution before transformer residual:
         #   routed_experts * topk_weights + shared_expert
