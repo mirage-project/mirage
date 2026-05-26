@@ -342,79 +342,19 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     //   writers and start fresh with a single full-window entry.
     // - Virtual (write-view) writes append a partial entry so multiple
     //   producers writing disjoint slices coexist.
+    //
+    // No TENSOR_INIT WAW edge is emitted here: tensor_init_layer takes a
+    // `dummy` DTensor as both input and output, and every live caller picks
+    // a `dummy` whose producer is upstream of the init and whose consumer is
+    // the same layer that next reads/writes `target`. Those RAW edges
+    // (producer-of-dummy -> init -> consumer-of-dummy/target) serialize the
+    // init naturally, and adding a manual WAW on `target` here would only
+    // duplicate the chain.
     for (int out_slot = 0; out_slot < num_outputs; out_slot++) {
       DTensor const &odt = output_ops[out_slot]->dtensor;
       size_t base = odt.resolve_base_guid();
       bool o_is_virtual = odt.is_virtual();
       auto wbox = compute_bbox(odt);
-
-      // Preserve the TASK_TENSOR_INIT WAW behaviour: if a previous writer
-      // was a zero-fill (init) for the same storage and its bbox overlaps
-      // this writer's, add an explicit WAW edge so the writer waits for init.
-      // This fires for both non-virtual and virtual (write-view) writers —
-      // an init zero-fill of a parent storage must complete before any view
-      // writes into it, e.g. MoE pipelines that init then partial-write
-      // through mpk.narrow slots.
-      {
-        auto wit = last_writers.find(base);
-        if (wit != last_writers.end()) {
-          for (WriterEntry const &we : wit->second) {
-            if (we.is_virtual_writer) {
-              continue;
-            }
-            if (ag.layers[we.layer].task_type !=
-                mirage::runtime::TASK_TENSOR_INIT) {
-              continue;
-            }
-            bool overlaps = (we.row_first < wbox.row_last &&
-                             wbox.row_first < we.row_last) &&
-                            (we.col_first < wbox.col_last &&
-                             wbox.col_first < we.col_last);
-            if (!overlaps) {
-              continue;
-            }
-            bool duplicate_edge = false;
-            for (int eidx : ag.layers[layer_idx].in_edges) {
-              EdgeInfo const &existing = ag.edges[eidx];
-              if (existing.prod_layer == we.layer &&
-                  existing.out_slot == we.out_slot &&
-                  existing.tensor_guid == static_cast<size_t>(odt.guid)) {
-                duplicate_edge = true;
-                break;
-              }
-            }
-            if (!duplicate_edge) {
-              EdgeInfo e;
-              e.prod_layer = we.layer;
-              e.cons_layer = layer_idx;
-              e.out_slot = we.out_slot;
-              e.in_slot = -1;
-              e.tensor_guid = odt.guid;
-              e.input_map = output_ops[out_slot]->input_map;
-              auto const *prod_op = ag.layers[we.layer].op;
-              std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
-              split_bgraph_ops(prod_op->bgraph,
-                               ag.layers[we.layer].num_inputs,
-                               prod_inputs,
-                               prod_outputs);
-              if (we.out_slot < 0 ||
-                  we.out_slot >= (int)prod_outputs.size()) {
-                throw std::runtime_error(
-                    "build_annotated_graph: invalid out_slot for WAW producer");
-              }
-              e.output_map = prod_outputs[we.out_slot]->input_map;
-              // Virtual-writer WAW edges run through the barrier path
-              // because the writer only updates part of the storage; the
-              // init must fully precede any partial overwrite.
-              e.is_barrier_edge = o_is_virtual;
-              int edge_idx = (int)ag.edges.size();
-              ag.edges.push_back(e);
-              ag.layers[layer_idx].in_edges.push_back(edge_idx);
-              ag.layers[we.layer].out_edges.push_back(edge_idx);
-            }
-          }
-        }
-      }
 
       WriterEntry we{layer_idx,
                      out_slot,
