@@ -557,30 +557,11 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
 
   // --- Phase 1: ensure local data is visible, then cross-GPU barrier ---
   __threadfence();
-#ifndef MPK_AR_SKIP_BARRIER
   mpkar_sync_block(team);
-#endif
 
   // --- Phase 2: NVLS multicast ld_reduce -> local store ---
   nvshmemi_team_t *teami = nvshmemi_device_state_d.team_pool[team];
   void *mc_src = mpkar_mc_ptr(teami, input_ptr);
-#ifdef MPK_AR_SKIP_REDUCE
-  // Skip NVLS reduce entirely; just copy input → output (per-PE, no AR).
-  // Used only for measuring barrier-vs-reduce cost; produces wrong output.
-  {
-    int4 *dst_v4_dbg = reinterpret_cast<int4 *>(output_ptr);
-    int4 const *src_v4_dbg = reinterpret_cast<int4 const *>(input_ptr);
-    constexpr int ELEMS_PER_V4_DBG = 16 / sizeof(T);
-    constexpr int V4_PER_ROW_DBG = OUTPUT_SIZE / ELEMS_PER_V4_DBG;
-    int const total_v4_dbg = V4_PER_ROW_DBG * num_active_rows;
-    for (int j = threadIdx.x; j < total_v4_dbg; j += blockDim.x) {
-      dst_v4_dbg[j] = src_v4_dbg[j];
-    }
-    __threadfence();
-    __syncthreads();
-    return;
-  }
-#endif
 
   // Compute number of int4 (16-byte) elements.
   // For 2D tile with shape [OUTPUT_SIZE, active_tokens] and stride
