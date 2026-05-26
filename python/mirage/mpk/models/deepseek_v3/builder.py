@@ -313,19 +313,6 @@ class DeepSeekV3Builder(GraphBuilder):
         # split rmsnorm + standalone quantize chain.
         self._fused_rmsnorm_quantize = (
             os.environ.get("MPK_DSV3_FUSED_RMSNORM_QUANTIZE", "1") == "1")
-        # C17 (2026-05-17): extend B37's rmsnorm+quantize fusion to the
-        # post-attn RMSNorm + NEW MoE input quantize. Gated separately so
-        # the QKV-a path's setting doesn't have to flip together. Default
-        # OFF until we verify cosine + e2e (per C13 lesson: per-call ≠
-        # per-token in megakernel).
-        self._fused_post_attn_rmsnorm_quantize = (
-            os.environ.get("MPK_DSV3_FUSED_POST_ATTN_RMSNORM_QUANTIZE",
-                           "0") == "1")
-        # C18 (2026-05-17): fuse NEW MoE moe_silu_mul + quantize_fp8 into
-        # one task. Eliminates BF16 silu_out HBM round-trip + one task
-        # launch. Default OFF; flip via MPK_DSV3_FUSED_SILU_QUANTIZE=1.
-        self._fused_silu_quantize = (
-            os.environ.get("MPK_DSV3_FUSED_SILU_QUANTIZE", "0") == "1")
         # C1 (2026-05-16): fan the MLA KV-gather unified task across multiple
         # CTAs by striding seq_pos. The legacy 1-CTA gather was 121 μs/layer
         # (15% of layer wallclock) with 127 workers idle. With N splits each
@@ -1027,78 +1014,6 @@ class DeepSeekV3Builder(GraphBuilder):
         Mirrors the inline check at line ~3192 in `_build_moe_mlp`."""
         prefix = f"model.layers.{layer_idx}.mlp."
         return f"{prefix}experts.w13.weight_scale_inv" in state_dict
-
-    def _emit_fused_post_attn_rmsnorm_moe_quantize(self, input_x: 'DTensor',
-                                                    w_norm: 'DTensor',
-                                                    layer_idx: int,
-                                                    reduction_size: int):
-        """C17 (2026-05-17): post-attention RMSNorm + NEW-MoE input quantize
-        fusion. Mirrors B37's pattern but for the post-attn rmsnorm. Writes:
-          * `rmsnorm_out_bf16` (per-layer-unique BF16 buffer) — consumed by
-            router linear + shared_expert + downstream BF16 readers.
-          * `moe_input_fp8` (per-layer-unique FP8) — consumed by NEW MoE
-            permute.
-          * `moe_input_scale` (per-layer-unique UE8M0 K-outer) — same path.
-
-        Returns the tuple `(rmsnorm_out_bf16, moe_input_fp8, moe_input_scale)`.
-
-        Buffer-ownership / case-3 rationale (B37 docstring extended):
-          The fused task takes its outputs as `store_in_dmem` inputs in the
-          task graph; shared cross-layer buffers would make the producer of
-          this task's input (post-AR output) BOTH a fork-producer AND a
-          join-producer (case-3 violation). With per-layer-unique outputs
-          here, the fused task has a unique writer per buffer.
-
-        Scale layout: UE8M0 column-major `[packed_k, aligned_batch]`. The
-        kernel writes `output_s[packed_idx * aligned_batch + batch_idx]`,
-        which is the SAME byte layout the standalone `quantize_fp8_layer`
-        wrote at builder.py:2790 (kernel-side this is "shape lie"). So
-        downstream readers (moe_permute) see byte-identical scale data —
-        no consumer-side changes needed.
-        """
-        mbt = self.max_num_batched_tokens
-        group_size = 128
-        num_groups = (reduction_size + group_size - 1) // group_size
-        # K_PACKED packs 4 UE8M0 bytes per uint32, then rounds up.
-        k_packed = (num_groups + 3) // 4
-        if not hasattr(self, "_fused_post_attn_bufs"):
-            self._fused_post_attn_bufs = {}
-        if layer_idx not in self._fused_post_attn_bufs:
-            rmsnorm_out_bf16 = self.mpk.new_tensor(
-                dims=(mbt, reduction_size), dtype=bfloat16,
-                name=f"fused_post_attn_rmsnorm_out_layer_{layer_idx}",
-                io_category="cuda_tensor",
-            )
-            moe_input_fp8 = self.mpk.new_tensor(
-                dims=(mbt, reduction_size), dtype=float8_e4m3,
-                name=f"fused_post_attn_moe_input_fp8_layer_{layer_idx}",
-                io_category="cuda_tensor",
-            )
-            moe_input_scale = self.mpk.new_tensor(
-                dims=(mbt, k_packed), dtype=uint32,
-                name=f"fused_post_attn_moe_input_scale_layer_{layer_idx}",
-                io_category="cuda_tensor",
-            )
-            self._fused_post_attn_bufs[layer_idx] = (
-                rmsnorm_out_bf16, moe_input_fp8, moe_input_scale)
-        rmsnorm_out_bf16, moe_input_fp8, moe_input_scale = (
-            self._fused_post_attn_bufs[layer_idx])
-
-        # UE8M0 K-outer packed scale (matches existing moe_input_scale layout
-        # written by the standalone quantize_fp8 task; downstream
-        # moe_permute reads the buffer byte-for-byte identically).
-        self.mpk.fused_rmsnorm_quantize_fp8_layer(
-            input=input_x,
-            weight=w_norm,
-            output_bf16=rmsnorm_out_bf16,
-            output_fp8=moe_input_fp8,
-            output_scale=moe_input_scale,
-            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
-            block_dim=(128, 1, 1),
-            scale_ue8m0=True,
-            emit_bf16=True,
-        )
-        return rmsnorm_out_bf16, moe_input_fp8, moe_input_scale
 
     def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs):
         """MPK_DSV3_BMM=1: replaces the absorbed q_b_proj decode GEMM with a
@@ -2878,18 +2793,13 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict, w13_scale_key,
             f"layer_{layer_idx}_experts_w13_scale_ue8m0")
         # 1) Quantize MoE input with UE8M0-packed scale.
-        # C17 (2026-05-17): when post-attn rmsnorm was fused with this
-        # quantize (via _emit_fused_post_attn_rmsnorm_moe_quantize at
-        # build_layers), the FP8 + scale buffers are already filled by
-        # the fused task — skip the redundant standalone quantize call.
-        if layer_idx not in getattr(self, "_fused_post_attn_bufs", {}):
-            self.mpk.quantize_fp8_layer(
-                input=self.rmsnorm_out,
-                output_fp8=new_moe_input_fp8,
-                output_scale=new_moe_input_scale,
-                grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
-                scale_ue8m0=True,
-            )
+        self.mpk.quantize_fp8_layer(
+            input=self.rmsnorm_out,
+            output_fp8=new_moe_input_fp8,
+            output_scale=new_moe_input_scale,
+            grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+            scale_ue8m0=True,
+        )
         if upto < 2: return
         # 2) Zero-init meta. The dummy=new_moe_input_fp8 trick chains the
         # tensor_init between the upstream quantize_fp8 (which writes
@@ -2939,80 +2849,53 @@ class DeepSeekV3Builder(GraphBuilder):
         # (= m_total / grid_dim.x rows per CTA). So each CTA processes
         # m_total/num_workers rows in-bounds, fully parallel across SMs.
         _silu_grid = min(self.mpk.num_workers, m_total)
-        # C18 (2026-05-17): when env-gated, fuse silu·mul + quantize_fp8
-        # into one task. Skip both standalone steps. Note: the fused
-        # kernel doesn't yet implement the B11/B15 active-expert skip
-        # (it processes every row); for ACTIVE_SKIP=1 callers, the fused
-        # path does more silu·mul work on inactive rows than the
-        # standalone path. Future: thread the active-skip through.
-        if self._fused_silu_quantize:
-            # C18 (2026-05-17): pass meta + bm_padding when active-skip is
-            # enabled so the kernel skips inactive-expert rows (matches B11
-            # silu_mul + B15 quantize_fp8 behavior). Without active-skip,
-            # the fused kernel processes garbage rows and regresses badly.
-            _silu_quant_meta = (
-                new_moe_meta if self._new_moe_active_skip else None)
-            self.mpk.moe_silu_mul_quantize_fp8_sm100_layer(
-                input=new_moe_w13_out,
+        self.mpk.moe_silu_mul_layer(
+            input=new_moe_w13_out,
+            output=new_moe_silu_out,
+            grid_dim=(_silu_grid, 1, 1),
+            block_dim=(128, 1, 1),
+            meta=new_moe_meta if self._new_moe_active_skip else None,
+            # bm_padding = per-expert row count in the permuted buffer.
+            # Wrapper combines with rows_per_cta (= input.dim(0)/grid.x)
+            # to derive my_expert = bid.x / (bm_padding / rows_per_cta).
+            bm_padding=bm_pad,
+        )
+        if upto < 6: return
+        # 6) Quantize SiLU → UE8M0 directly into K-outermost layout.
+        # C8 (2026-05-16): quantize_fp8 kernel writes UE8M0 packed scale at
+        # offset `packed_idx * aligned_batch + batch_idx` which IS K-outer
+        # row-major. The previous (m_total, K_PACKED) declaration was a
+        # "shape lie" that required a separate transpose_scale task to
+        # reconcile. By declaring the output as (K_PACKED, m_total) the
+        # write pattern matches the declared shape, and the downstream W2
+        # SFA TMA descriptor (which expects K-outer) reads correct bytes
+        # directly — eliminating TRANSPOSE_SCALE (-19 μs/layer).
+        if self._new_moe_active_skip:
+            num_local_experts = m_total // bm_pad
+            self.mpk.quantize_fp8_layer(
+                input=new_moe_silu_out,
                 output_fp8=new_moe_silu_fp8,
                 output_scale=new_moe_silu_scale,
                 grid_dim=(m_total, 1, 1),
                 block_dim=(128, 1, 1),
-                rows_per_task=1,
-                meta=_silu_quant_meta,
-                bm_padding=bm_pad,
+                scale_ue8m0=True,
+                expert_active_meta=new_moe_meta,
+                expert_active_e_local=num_local_experts,
+                expert_active_bm_padding=bm_pad,
             )
-            if upto < 7: return
-            # Skip the standalone silu_mul + quantize (steps 5+6).
-            # Jump straight to step 7 (W2 GEMM).
         else:
-            self.mpk.moe_silu_mul_layer(
-                input=new_moe_w13_out,
-                output=new_moe_silu_out,
-                grid_dim=(_silu_grid, 1, 1),
+            # B12 fallback (no active-skip): process_all_rows still
+            # required because the row axis is permuted-expert layout,
+            # not token-indexed.
+            self.mpk.quantize_fp8_layer(
+                input=new_moe_silu_out,
+                output_fp8=new_moe_silu_fp8,
+                output_scale=new_moe_silu_scale,
+                grid_dim=(m_total, 1, 1),
                 block_dim=(128, 1, 1),
-                meta=new_moe_meta if self._new_moe_active_skip else None,
-                # bm_padding = per-expert row count in the permuted buffer.
-                # Wrapper combines with rows_per_cta (= input.dim(0)/grid.x)
-                # to derive my_expert = bid.x / (bm_padding / rows_per_cta).
-                bm_padding=bm_pad,
+                scale_ue8m0=True,
+                process_all_rows=True,
             )
-            if upto < 6: return
-            # 6) Quantize SiLU → UE8M0 directly into K-outermost layout.
-            # C8 (2026-05-16): quantize_fp8 kernel writes UE8M0 packed scale at
-            # offset `packed_idx * aligned_batch + batch_idx` which IS K-outer
-            # row-major. The previous (m_total, K_PACKED) declaration was a
-            # "shape lie" that required a separate transpose_scale task to
-            # reconcile. By declaring the output as (K_PACKED, m_total) the
-            # write pattern matches the declared shape, and the downstream W2
-            # SFA TMA descriptor (which expects K-outer) reads correct bytes
-            # directly — eliminating TRANSPOSE_SCALE (-19 μs/layer).
-            if self._new_moe_active_skip:
-                num_local_experts = m_total // bm_pad
-                self.mpk.quantize_fp8_layer(
-                    input=new_moe_silu_out,
-                    output_fp8=new_moe_silu_fp8,
-                    output_scale=new_moe_silu_scale,
-                    grid_dim=(m_total, 1, 1),
-                    block_dim=(128, 1, 1),
-                    scale_ue8m0=True,
-                    expert_active_meta=new_moe_meta,
-                    expert_active_e_local=num_local_experts,
-                    expert_active_bm_padding=bm_pad,
-                )
-            else:
-                # B12 fallback (no active-skip): process_all_rows still
-                # required because the row axis is permuted-expert layout,
-                # not token-indexed.
-                self.mpk.quantize_fp8_layer(
-                    input=new_moe_silu_out,
-                    output_fp8=new_moe_silu_fp8,
-                    output_scale=new_moe_silu_scale,
-                    grid_dim=(m_total, 1, 1),
-                    block_dim=(128, 1, 1),
-                    scale_ue8m0=True,
-                    process_all_rows=True,
-                )
         # C8: transpose_scale eliminated — quantize_fp8 writes directly
         # into the K-outer-declared new_moe_silu_scale.
         if upto < 8: return
@@ -3281,24 +3164,14 @@ class DeepSeekV3Builder(GraphBuilder):
 
             # Per-layer allocations (NOT shared across MoE layers — sharing
             # tripped MPK's dep tracker on case-3 fork+join).
-            # C17 (2026-05-17): if post-attn rmsnorm+quantize was fused for
-            # this layer, the fused task already wrote new_moe_input_fp8 +
-            # new_moe_input_scale into a per-layer buffer — reuse those
-            # instead of allocating new (otherwise we'd lose the fused
-            # output and _new_moe_dispatch_inline would re-quantize anyway).
-            _post_attn_bufs = getattr(self, "_fused_post_attn_bufs", {})
-            if layer_idx in _post_attn_bufs:
-                _, new_moe_input_fp8, new_moe_input_scale = (
-                    _post_attn_bufs[layer_idx])
-            else:
-                new_moe_input_fp8 = self.mpk.new_tensor(
-                    dims=(mbt, K), dtype=float8_e4m3,
-                    name=f"layer_{layer_idx}_new_moe_input_fp8",
-                    io_category="cuda_tensor")
-                new_moe_input_scale = self.mpk.new_tensor(
-                    dims=(mbt, K_PACKED_K), dtype=uint32,
-                    name=f"layer_{layer_idx}_new_moe_input_scale",
-                    io_category="cuda_tensor")
+            new_moe_input_fp8 = self.mpk.new_tensor(
+                dims=(mbt, K), dtype=float8_e4m3,
+                name=f"layer_{layer_idx}_new_moe_input_fp8",
+                io_category="cuda_tensor")
+            new_moe_input_scale = self.mpk.new_tensor(
+                dims=(mbt, K_PACKED_K), dtype=uint32,
+                name=f"layer_{layer_idx}_new_moe_input_scale",
+                io_category="cuda_tensor")
             new_moe_permuted_in_fp8 = self.mpk.new_tensor(
                 dims=(m_total, K), dtype=float8_e4m3,
                 name=f"layer_{layer_idx}_new_moe_permuted_in_fp8",
@@ -4819,37 +4692,11 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=state_dict[f"{prefix}post_attention_layernorm.weight"],
                 name=f"layer_{i}_post_attn_layernorm",
             )
-            # C17 (2026-05-17): when env-gated, fuse post-attn rmsnorm + NEW
-            # MoE input quantize into one task. The fused task writes a
-            # per-layer-unique rmsnorm_out + per-layer-unique moe_input_fp8 +
-            # moe_input_scale; we rebind self.rmsnorm_out so all downstream
-            # consumers in this layer (router linear, shared_expert, fp8
-            # MoE permute via _build_moe_mlp) read the per-layer buffer.
-            # Gating constraints:
-            #   * layer must be MoE (i >= FIRST_MOE_LAYER)
-            #   * use_fp8_experts must be true (NEW MoE path)
-            #   * NEW_MOE env must be on (otherwise OLD path quantize_fp8
-            #     uses float32 scale, not UE8M0 — fused kernel writes UE8M0
-            #     only)
-            _post_attn_fuse_eligible = (
-                self._fused_post_attn_rmsnorm_quantize
-                and i >= FIRST_MOE_LAYER
-                and self._new_moe
-                and self._fp8_experts_available(state_dict, i))
-            if _post_attn_fuse_eligible:
-                rmsnorm_out_bf16, _, _ = (
-                    self._emit_fused_post_attn_rmsnorm_moe_quantize(
-                        input_x=self.x, w_norm=w_post_norm,
-                        layer_idx=i,
-                        reduction_size=self.hidden_size,
-                    ))
-                self.rmsnorm_out = rmsnorm_out_bf16
-            else:
-                self.mpk.rmsnorm_layer(
-                    input=self.x, weight=w_post_norm, output=self.rmsnorm_out,
-                    grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
-                    block_dim=(128, 1, 1),
-                )
+            self.mpk.rmsnorm_layer(
+                input=self.x, weight=w_post_norm, output=self.rmsnorm_out,
+                grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+                block_dim=(128, 1, 1),
+            )
 
             # MLP: dense (layers 0-2) or MoE (layers 3-60)
             if i < FIRST_MOE_LAYER:
