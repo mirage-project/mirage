@@ -219,15 +219,16 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_splitk_sm100_task_impl(
   }
 
   // Write partial: stride D_V+4 per row (extra 4 = m, d, _, _).
-  // Layout: partial[split_id][bat][qb][head][row][D_V+4]. The standalone
-  // computes pbase as (split_id+bat)*stride_bat — accidentally OK for B=1
-  // (bat=0) but wrong for B>1. We reproduce the same layout exactly.
+  // Layout: partial[bat][split_id][qb][head][row][D_V+4]. Per-batch contiguous,
+  // so split_id stride = nqb * H * BM * (D_V+4) and the kernel does not need
+  // to know the outer batch count B — the reduce kernel mirrors this layout.
   long long const stride_row = D_V + 4;
   long long const stride_head = (long long)BM * stride_row;
   long long const stride_qb = (long long)H * stride_head;
-  long long const stride_bat = (long long)nqb * stride_qb;
+  long long const stride_split = (long long)nqb * stride_qb;
+  long long const stride_bat = (long long)num_splits * stride_split;
   long long const pbase =
-      (long long)split_id * stride_bat + (long long)bat * stride_bat +
+      (long long)bat * stride_bat + (long long)split_id * stride_split +
       (long long)qb * stride_qb + (long long)head * stride_head;
   int g = lid / 4, t2 = lid % 4;
   {
@@ -288,10 +289,12 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   int const qs = qb * BM;
   int const row = threadIdx.x / 4;
   int const col_group = threadIdx.x % 4;
+  // Mirror of write layout: partial[bat][split_id][qb][head][row][D_V+4].
   long long const stride_row = D_V + 4;
   long long const stride_head = (long long)BM * stride_row;
   long long const stride_qb = (long long)H * stride_head;
-  long long const stride_bat = (long long)nqb * stride_qb;
+  long long const stride_split = (long long)nqb * stride_qb;
+  long long const stride_bat = (long long)num_splits * stride_split;
   if (qs + row >= q_len) {
     return;
   }
@@ -305,9 +308,10 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   int const d_start = col_group * 32;
 
   for (int s = 0; s < num_splits; s++) {
-    long long roff = (long long)s * stride_bat + (long long)bat * stride_bat +
-                     (long long)qb * stride_qb + (long long)head * stride_head +
-                     (long long)row * stride_row;
+    long long roff =
+        (long long)bat * stride_bat + (long long)s * stride_split +
+        (long long)qb * stride_qb + (long long)head * stride_head +
+        (long long)row * stride_row;
     float m_s = -INFINITY, d_s = 0.f;
     if (col_group == 0) {
       m_s = partial[roff + D_V];
