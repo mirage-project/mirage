@@ -434,13 +434,6 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     std::vector<char> strip_flag(ag.edges.size(), 0);
     for (size_t eidx = 0; eidx < ag.edges.size(); eidx++) {
       auto const &e = ag.edges[eidx];
-      // Never strip a barrier edge — a longer non-barrier path provides only
-      // fine-grained per-tile synchronization on its constituent edges, which
-      // does not transitively imply "all of u finished before v starts" that
-      // the barrier guarantees.
-      if (e.is_barrier_edge) {
-        continue;
-      }
       int u = e.prod_layer, v = e.cons_layer;
       // Does any intermediate w (successor of u other than v) reach v?
       for (int oe : ag.layers[u].out_edges) {
