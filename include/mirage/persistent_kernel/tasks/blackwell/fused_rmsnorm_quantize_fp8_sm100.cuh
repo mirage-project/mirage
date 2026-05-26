@@ -151,9 +151,9 @@ __device__ __forceinline__ void
     T const *__restrict__ curr_d_input =
         static_cast<T const *>(input_ptr) + batch_idx * IN_ROW_STRIDE;
     T *__restrict__ curr_d_output =
-        EMIT_BF16 ? static_cast<T *>(output_bf16_ptr) +
-                        batch_idx * OUT_ROW_STRIDE
-                  : nullptr;
+        EMIT_BF16
+            ? static_cast<T *>(output_bf16_ptr) + batch_idx * OUT_ROW_STRIDE
+            : nullptr;
     DST_T *__restrict__ curr_d_fp8 =
         static_cast<DST_T *>(output_fp8_ptr) + batch_idx * FP8_ROW_STRIDE;
     SCALE_PACKED_T *__restrict__ d_scale =

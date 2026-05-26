@@ -71,15 +71,17 @@ DTensor make_view(DTensor const &parent,
     v.dim[i] = new_dims[i];
   }
   set_view_strides(v, parent);
-  // Flatten multi-level views to the root storage. Non-virtual parents (base_guid==0)
-  // become this view's base_guid; virtual parents pass their base_guid through.
+  // Flatten multi-level views to the root storage. Non-virtual parents
+  // (base_guid==0) become this view's base_guid; virtual parents pass their
+  // base_guid through.
   v.base_guid = parent.is_virtual() ? parent.base_guid : parent.guid;
   v.view_offset = parent.view_offset + additional_byte_offset;
   v.guid = DTensor::next_guid++;
   // Views are not the output of any KNOperator.
   v.owner_op = nullptr;
   v.owner_ts_idx = -1;
-  // data_offset (absolute) will be resolved by codegen as base.data_offset + view_offset.
+  // data_offset (absolute) will be resolved by codegen as base.data_offset +
+  // view_offset.
   v.data_offset = -1;
   v.fp_offset = -1;
   return v;
@@ -88,19 +90,23 @@ DTensor make_view(DTensor const &parent,
 } // namespace
 
 DTensor Graph::view(DTensor const &input, std::vector<int> const &new_shape) {
-  if (new_shape.empty() || (int)new_shape.size() > mirage::config::MAX_TENSOR_DIMS) {
-    throw std::runtime_error("Graph::view: invalid number of dimensions in new_shape");
+  if (new_shape.empty() ||
+      (int)new_shape.size() > mirage::config::MAX_TENSOR_DIMS) {
+    throw std::runtime_error(
+        "Graph::view: invalid number of dimensions in new_shape");
   }
   size_t old_elems = input.num_elements();
   size_t new_elems = 1;
   for (int d : new_shape) {
     if (d <= 0) {
-      throw std::runtime_error("Graph::view: every dimension in new_shape must be positive");
+      throw std::runtime_error(
+          "Graph::view: every dimension in new_shape must be positive");
     }
     new_elems *= static_cast<size_t>(d);
   }
   if (old_elems != new_elems) {
-    throw std::runtime_error("Graph::view: total element count must match the input");
+    throw std::runtime_error(
+        "Graph::view: total element count must match the input");
   }
   // Pure reshape — no additional byte offset within the parent.
   return make_view(input, new_shape, /*additional_byte_offset=*/0);
@@ -117,11 +123,13 @@ DTensor Graph::narrow(DTensor const &input, int dim, int start, int length) {
     throw std::runtime_error("Graph::narrow: dim out of range");
   }
   if (start < 0 || length <= 0 || start + length > input.dim[dim]) {
-    throw std::runtime_error("Graph::narrow: [start, start+length) out of range");
+    throw std::runtime_error(
+        "Graph::narrow: [start, start+length) out of range");
   }
   std::vector<int> new_dims(input.dim, input.dim + input.num_dims);
   new_dims[dim] = length;
-  int64_t offset = static_cast<int64_t>(start) * row_major_byte_stride(input, dim);
+  int64_t offset =
+      static_cast<int64_t>(start) * row_major_byte_stride(input, dim);
   return make_view(input, new_dims, offset);
 }
 
@@ -139,12 +147,14 @@ std::vector<DTensor>
   int total = 0;
   for (int s : sizes) {
     if (s <= 0) {
-      throw std::runtime_error("Graph::split: each split size must be positive");
+      throw std::runtime_error(
+          "Graph::split: each split size must be positive");
     }
     total += s;
   }
   if (total != input.dim[dim]) {
-    throw std::runtime_error("Graph::split: sum of split sizes does not match input dim");
+    throw std::runtime_error(
+        "Graph::split: sum of split sizes does not match input dim");
   }
   std::vector<DTensor> outputs;
   outputs.reserve(sizes.size());
@@ -166,7 +176,8 @@ std::vector<DTensor>
     throw std::runtime_error("Graph::split: dim out of range");
   }
   if (chunk_size <= 0 || input.dim[dim] % chunk_size != 0) {
-    throw std::runtime_error("Graph::split: input.dim[dim] must be divisible by chunk_size");
+    throw std::runtime_error(
+        "Graph::split: input.dim[dim] must be divisible by chunk_size");
   }
   int slice_len = input.dim[dim] / chunk_size;
   std::vector<int> sizes(chunk_size, slice_len);

@@ -308,10 +308,9 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_reduce_sm100_task_impl(
   int const d_start = col_group * 32;
 
   for (int s = 0; s < num_splits; s++) {
-    long long roff =
-        (long long)bat * stride_bat + (long long)s * stride_split +
-        (long long)qb * stride_qb + (long long)head * stride_head +
-        (long long)row * stride_row;
+    long long roff = (long long)bat * stride_bat + (long long)s * stride_split +
+                     (long long)qb * stride_qb + (long long)head * stride_head +
+                     (long long)row * stride_row;
     float m_s = -INFINITY, d_s = 0.f;
     if (col_group == 0) {
       m_s = partial[roff + D_V];

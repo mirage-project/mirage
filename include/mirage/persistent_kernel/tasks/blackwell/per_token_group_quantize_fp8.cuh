@@ -112,11 +112,10 @@ __device__ __forceinline__ void
   // (e.g., HIDDEN_SIZE = GROUP_SIZE = 128 gives NUM_GROUPS_PER_ROW = 1).
   static_assert(NUM_GROUPS_PER_ROW % GROUP_TILES == 0,
                 "GROUP_TILES must divide NUM_GROUPS_PER_ROW");
-  static_assert(
-      GROUP_TILES == 1
-          || ((NUM_GROUPS_PER_ROW / GROUP_TILES) % SCALE_ALIGNMENT) == 0,
-      "groups per tile must be a multiple of SCALE_ALIGNMENT when "
-      "GROUP_TILES > 1");
+  static_assert(GROUP_TILES == 1 ||
+                    ((NUM_GROUPS_PER_ROW / GROUP_TILES) % SCALE_ALIGNMENT) == 0,
+                "groups per tile must be a multiple of SCALE_ALIGNMENT when "
+                "GROUP_TILES > 1");
 
   // Calculate indices
   int const thread_idx = threadIdx.x;

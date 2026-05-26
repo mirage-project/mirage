@@ -14,7 +14,6 @@
  */
 
 #pragma once
-#include "tasks/common/common_header.cuh"
 #include "element_binary.cuh"
 #include "element_unary.cuh"
 #include "mma.cuh"
@@ -22,6 +21,7 @@
 #include "reduction.cuh"
 #include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
+#include "tasks/common/common_header.cuh"
 namespace kernel {
 
 // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128

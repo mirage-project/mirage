@@ -148,7 +148,8 @@ __device__ __forceinline__ void
 #if MPK_DEBUG
         printf("MOE_PERMUTE overflow: expert s_count=%d cap=%d "
                "(routings beyond cap would be silently dropped)\n",
-               s_count, BM_PADDING);
+               s_count,
+               BM_PADDING);
         __trap();
 #endif
         s_count = BM_PADDING;

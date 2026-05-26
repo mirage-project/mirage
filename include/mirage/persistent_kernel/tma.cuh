@@ -1637,7 +1637,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       int outer = tensor_desc.dim[0];
       int K_local = tensor_desc.dim[1];
       uint64_t row_stride_bytes =
-          (uint64_t)tensor_desc.stride[0];  // FP8: 1 byte per element
+          (uint64_t)tensor_desc.stride[0]; // FP8: 1 byte per element
       uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
       uint64_t gs[1] = {row_stride_bytes};
       uint32_t bd[2] = {BK_BOX, OUTER_BOX};

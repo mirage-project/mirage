@@ -98,8 +98,7 @@ __device__ __forceinline__ void
       if (head_idx != 0) {
         continue;
       }
-      __nv_bfloat16 *k_tok =
-          k_pe + static_cast<long long>(row) * K_PE_STRIDE;
+      __nv_bfloat16 *k_tok = k_pe + static_cast<long long>(row) * K_PE_STRIDE;
       float const k0 = __bfloat162float(k_tok[d0]);
       float const k1 = __bfloat162float(k_tok[d1]);
       k_tok[d0] = __float2bfloat16(k0 * c - k1 * s);

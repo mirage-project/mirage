@@ -174,9 +174,7 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
   int process_dim = params.size() == 1 ? params[0] : hidden_dim_full;
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::rms_norm_impl<bfloat16, $, $>(",
-         batch_size,
-         process_dim);
+  code.e("kernel::rms_norm_impl<bfloat16, $, $>(", batch_size, process_dim);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
@@ -1237,10 +1235,8 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   // here is what prevents the kernel from overwriting the adjacent slot
   // when stepping to row i+1. compute width (HIDDEN_DIM template param)
   // still derives from dim/process_dim.
-  int in_row_stride =
-      static_cast<int>(input_ops[0]->dtensor.stride[0]);
-  int out_row_stride =
-      static_cast<int>(output_ops[0]->dtensor.stride[0]);
+  int in_row_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int out_row_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // Currently assume that each rmsnorm task processes one token
   // assert(batch_size == 1);
@@ -4935,7 +4931,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
          scale_ue8m0 ? "true" : "false",
          output_stride,
          rows_per_task);
-  code.e("    task_desc->input_ptrs[0],"); // input bf16
+  code.e("    task_desc->input_ptrs[0],");  // input bf16
   code.e("    task_desc->output_ptrs[0],"); // output fp8
   code.e("    task_desc->output_ptrs[1],"); // output scale
   // scale_outer_stride: for UE8M0 column-major layout [packed_k,
@@ -5674,10 +5670,8 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   // C20 (2026-05-17): read from dtensor.stride[0] instead of the owner_op's
   // input_strides[0] — view-safe (mpk.narrow inherits parent stride; root
   // tensors have stride populated by input.cc and fixup_legacy_strides).
-  int input_row_stride =
-      static_cast<int>(input_ops[0]->dtensor.stride[0]);
-  int output_row_stride =
-      static_cast<int>(output_ops[0]->dtensor.stride[0]);
+  int input_row_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int output_row_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   // Fallback if the recorded leading stride happens to be 0 (no source
   // tensor metadata): default to the contiguous packed strides.
   if (input_row_stride == 0) {
