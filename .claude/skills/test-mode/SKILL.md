@@ -122,7 +122,12 @@ Registers a PyTorch CUDA tensor with the computation graph. Returns a `DTensor` 
 
 - Call for **every** tensor — inputs, weights, AND outputs.
 - Output tensors are modified **in-place** when the kernel runs.
-- Tensor must be **contiguous** (row-major / C-order).
+- Tensor layout: 2D **row-major** is the standard case. `attach_input`
+  also accepts **padded** row-major slices (each outer stride covers at
+  least a contiguous row at the next level; innermost stride must still
+  be 1) and **column-major** 2D tensors where the kernel expects them
+  (e.g., FP8 scale tensors). For the default contiguous case just pass
+  a `torch.contiguous()` tensor.
 - Name must be **unique** across all attached tensors.
 
 ### `pk.compile(output_dir=None)`
