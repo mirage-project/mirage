@@ -171,18 +171,12 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.dim[0] == input_ops[0]->dtensor.dim[0]);
   assert(output_ops[0]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
-  int process_dim = params.size() == 3 ? params[0] : hidden_dim_full;
-  int in_offset = params.size() == 3 ? params[1] : 0;
-  int out_offset = params.size() == 3 ? params[2] : 0;
-  assert(in_offset + process_dim <= hidden_dim_full);
-  assert(out_offset + process_dim <= hidden_dim_full);
+  int process_dim = params.size() == 1 ? params[0] : hidden_dim_full;
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::rms_norm_impl<bfloat16, $, $, $, $>(",
+  code.e("kernel::rms_norm_impl<bfloat16, $, $>(",
          batch_size,
-         process_dim,
-         in_offset,
-         out_offset);
+         process_dim);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
@@ -1215,11 +1209,10 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
   // params (optional, default = legacy contiguous):
   //   params[0] = process_dim    (HIDDEN_DIM the kernel processes per row).
-  //   params[1] = in_offset_elems  (skip elements at start of each row).
-  //   params[2] = out_offset_elems (same, for output).
-  // QKV-a fused path uses these so q_a_layernorm / kv_a_layernorm can run
-  // in-place on a wider qkv_a_out buffer.
-  assert(params.size() == 0 || params.size() == 3);
+  // For column-slice RMSNorm the caller passes a mpk.narrow input/output;
+  // in_row_stride / out_row_stride below come from stride[0] of the narrow
+  // and naturally walk the parent's row width.
+  assert(params.size() == 0 || params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -1254,11 +1247,8 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.dim[0] == input_ops[0]->dtensor.dim[0]);
   assert(output_ops[0]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
-  int process_dim = params.size() == 3 ? params[0] : hidden_dim_full;
-  int in_offset = params.size() == 3 ? params[1] : 0;
-  int out_offset = params.size() == 3 ? params[2] : 0;
-  assert(in_offset + process_dim <= hidden_dim_full);
-  assert(out_offset + process_dim <= hidden_dim_full);
+  int process_dim = params.size() == 1 ? params[0] : hidden_dim_full;
+  assert(process_dim <= hidden_dim_full);
   int dtensor_batch = output_ops[0]->dtensor.dim[0];
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1279,15 +1269,12 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
          batch_size);
   code.e("if (task_first_row_ >= active_rows_rms_) return;");
   code.e("int row_count_cap_ = active_rows_rms_ - task_first_row_;");
-  // NUM_THREADS defaults to 256; explicit so we can append IN/OUT_OFFSET.
-  // IN_ROW_STRIDE / OUT_ROW_STRIDE = hidden_dim_full so multi-row CTAs walk
-  // by the actual physical row width (matters for QKV-a fused slice paths
-  // where process_dim < hidden_dim_full).
-  code.e("kernel::rms_norm_hopper_impl<bfloat16, $, $, 256, $, $, $, $>(",
+  // IN_ROW_STRIDE / OUT_ROW_STRIDE come from stride[0] so multi-row CTAs
+  // walk the parent's row width (matters for column-slice RMSNorm where
+  // process_dim < hidden_dim_full).
+  code.e("kernel::rms_norm_hopper_impl<bfloat16, $, $, 256, $, $>(",
          batch_size,
          process_dim,
-         in_offset,
-         out_offset,
          in_row_stride,
          out_row_stride);
   code.e("    task_desc->input_ptrs[0],");

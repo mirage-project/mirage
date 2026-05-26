@@ -2156,9 +2156,7 @@ class DeepSeekV3Builder(GraphBuilder):
             input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
             grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
-            process_dim=self.q_lora_rank,
-            in_offset_elems=self._qkv_a_q_offset,
-            out_offset_elems=self._qkv_a_q_offset)
+            process_dim=self.q_lora_rank)
 
         # Step 3: q_b projections.
         # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
@@ -2296,9 +2294,7 @@ class DeepSeekV3Builder(GraphBuilder):
             output=self.c_latent_out,
             grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
-            process_dim=self.kv_lora_rank,
-            in_offset_elems=self._qkv_a_c_latent_offset,
-            out_offset_elems=self._qkv_a_c_latent_offset)
+            process_dim=self.kv_lora_rank)
 
         # Step 6: MLA attention (KV gather + unified prefill/decode + reduce).
         # When `_use_prefill` is True, register one MLA main task that chooses

@@ -16,17 +16,10 @@
 #include "tasks/common/common_header.cuh"
 namespace kernel {
 
-// 2026-05-12 (user #2 part-a) FuseTensor support: when IN_OFFSET / OUT_OFFSET
-// are non-zero, the kernel reads/writes a (1, HIDDEN_DIM) slice that starts
-// at the given offset *within the row* of input_ptr / output_ptr. The
-// per-task row pointer is still pre-offset by the runtime using the parent
-// DTensor's row stride (so an in-place call on a wider qkv_a_out buffer
-// works correctly). Defaults preserve legacy contiguous behaviour.
-template <typename T,
-          int BATCH_SIZE,
-          int HIDDEN_DIM,
-          int IN_OFFSET = 0,
-          int OUT_OFFSET = 0>
+// Per-task row pointers are pre-offset by the runtime using the parent
+// DTensor's row stride, so an in-place call on a narrow view of a wider
+// buffer works correctly without any kernel-side offset adjustment.
+template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
 __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
                                               void const *weight_ptr,
                                               void *output_ptr,
@@ -52,9 +45,9 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
   constexpr int NUM_TILES = HIDDEN_DIM / TILE_SIZE;
   constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * HIDDEN_DIM / CHUNK_SIZE;
 
-  T const *__restrict__ d_input = static_cast<T const *>(input_ptr) + IN_OFFSET;
+  T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
-  T *__restrict__ d_output = static_cast<T *>(output_ptr) + OUT_OFFSET;
+  T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
   // using InputDmem =
   //     dmem_row_const<T, BATCH_SIZE, HIDDEN_DIM, HIDDEN_DIM>;

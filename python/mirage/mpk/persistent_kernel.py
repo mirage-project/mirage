@@ -691,14 +691,12 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         process_dim: int = None,
-        in_offset_elems: int = 0,
-        out_offset_elems: int = 0,
     ):
-        # process_dim / in_offset_elems / out_offset_elems support
-        # row-slice RMSnorm where input/output are slices of a wider buffer
-        # (e.g., QKV-a fused qkv_a_out where q_a_layernorm reads
-        # cols [0:1536) and kv_a_layernorm reads cols [1536:2048)). Defaults
-        # match legacy contiguous behaviour.
+        # `process_dim` lets a caller normalise over fewer than the full
+        # `output.dim(1)` columns. For column-slice RMSNorm against a wider
+        # parent buffer, pass `input` / `output` as `mpk.narrow` views — the
+        # runtime sets the per-task base pointers from the view's stride[0]
+        # and offset, so the kernel does not need any explicit offset.
         assert input.num_dims == 2
         assert output.num_dims == 2
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -707,17 +705,10 @@ class PersistentKernel:
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
         task_name = "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm"
-        if (process_dim is None and in_offset_elems == 0
-                and out_offset_elems == 0):
+        if process_dim is None:
             self.kn_graph.register_task(tb_graph, task_name)
         else:
-            if process_dim is None:
-                process_dim = output.dim(1)
-            self.kn_graph.register_task(
-                tb_graph,
-                task_name,
-                [process_dim, in_offset_elems, out_offset_elems],
-            )
+            self.kn_graph.register_task(tb_graph, task_name, [process_dim])
 
     def fused_rmsnorm_quantize_fp8_layer(
         self,
