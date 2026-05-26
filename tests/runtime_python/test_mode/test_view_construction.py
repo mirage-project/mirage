@@ -10,7 +10,6 @@ verify:
   - Error paths raise.
 """
 
-import sys
 
 import mirage
 
@@ -25,8 +24,7 @@ def _row_major_byte_stride(dims, dtype_size, dim_idx):
 
 def _expect(cond, msg):
     if not cond:
-        print(f"FAIL: {msg}")
-        sys.exit(1)
+        raise AssertionError(msg)
 
 
 def test_view_basics():
@@ -50,8 +48,8 @@ def test_view_basics():
     # view shape must match total elements.
     try:
         g.view(T, [3, 8])
-        print("FAIL: view with mismatched element count should raise")
-        sys.exit(1)
+        raise AssertionError(
+            "view with mismatched element count should raise")
     except RuntimeError as e:
         _expect("total element count" in str(e), f"unexpected error: {e}")
 
@@ -107,8 +105,7 @@ def test_narrow():
     # Bounds check.
     try:
         g.narrow(T, 0, 7, 5)  # 7+5 > 8
-        print("FAIL: out-of-range narrow should raise")
-        sys.exit(1)
+        raise AssertionError("out-of-range narrow should raise")
     except RuntimeError as e:
         _expect("out of range" in str(e), f"unexpected error: {e}")
     print("  OK")
