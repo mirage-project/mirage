@@ -62,9 +62,7 @@ struct tma_4d {
 
     cudaPointerAttributes attr;
     cudaPointerGetAttributes(&attr, desc_ptr);
-#ifdef MIRAGE_DEBUG_HOPPER
-    std::cout << "Memory type: " << attr.type << std::endl;
-#endif
+    (void)attr;
   }
 
 public:

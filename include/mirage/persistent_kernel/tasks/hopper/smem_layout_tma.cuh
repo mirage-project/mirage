@@ -63,18 +63,6 @@ struct smem_tma {
       size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
       size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
                           (icol << M) + offset_in_bank;
-#ifdef MIRAGE_DEBUG_HOPPER
-      if (logical_idx == 0 && threadIdx.x == 0) {
-        printf("block_idx: %llu\n", block_idx);
-        printf("in_block_idx: %llu\n", in_block_idx);
-        printf("irow: %llu\n", irow);
-        printf("icol: %llu\n", icol);
-        printf("offset_in_bank: %llu\n", offset_in_bank);
-        printf("phy_offset: %llu\n", phy_offset);
-        printf("base_ptr[logical_idx]: %f\n", (float)base_ptr[logical_idx]);
-        printf("base_ptr[phy_offset]: %f\n", (float)base_ptr[phy_offset]);
-      }
-#endif
       return phy_offset;
     }
   }
