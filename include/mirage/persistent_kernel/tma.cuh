@@ -1508,12 +1508,15 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA;
 
       // param 2 = K [S, 192]; param 3 = V [S, 128]. Both share identical
-      // TMA descriptor shape except for d_last (K_ITERS).
+      // TMA descriptor shape except for d_last (K_ITERS). Row stride comes
+      // from stride[0] (in elements) so views with stride[0] != dim[1]
+      // walk the parent's row width, not the slot width.
       int total_rows = tensor_desc.dim[0]; // S
       int d_last = tensor_desc.dim[1];     // 192 for K, 128 for V
       int k_iters = d_last / BK;
+      uint64_t row_stride_bytes = (uint64_t)tensor_desc.stride[0] * 2;
       uint64_t gd[3] = {(uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
-      uint64_t gs[2] = {(uint64_t)d_last * 2, (uint64_t)BK * 2};
+      uint64_t gs[2] = {row_stride_bytes, (uint64_t)BK * 2};
       uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BN_BOX, 1};
       uint32_t es[3] = {1, 1, 1};
       CUresult err = cuTensorMapEncodeTiled(tma_desc,
@@ -1553,8 +1556,10 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         for (int i = 0; i < tensor_desc.num_dims - 1; i++) {
           total_rows *= tensor_desc.dim[i];
         }
+        // Row stride in BF16 bytes; honour stride[0] for narrow-view safety.
+        uint64_t row_stride_bytes = (uint64_t)tensor_desc.stride[0] * 2;
         uint64_t gd[2] = {(uint64_t)d_last, (uint64_t)total_rows};
-        uint64_t gs[1] = {(uint64_t)d_last * 2};
+        uint64_t gs[1] = {row_stride_bytes};
         uint32_t bd[2] = {(uint32_t)BK, (uint32_t)BN_BOX};
         uint32_t es[2] = {1, 1};
         CUresult err = cuTensorMapEncodeTiled(tma_desc,
@@ -1583,9 +1588,14 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           d_last = tensor_desc.dim[2];
         }
         int num_blocks = H_local * (d_last / BK);
+        // Row stride in BF16 bytes; honour stride[0] for narrow-view safety.
+        // For both 2D ([S, H*128]) and 3D ([S, H, 128]) layouts the parent's
+        // stride[0] equals H_local * d_last under contiguous allocation, but
+        // a slot view will report a larger stride[0].
+        uint64_t row_stride_bytes = (uint64_t)tensor_desc.stride[0] * 2;
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)num_blocks};
-        uint64_t gs[2] = {(uint64_t)H_local * d_last * 2, (uint64_t)BK * 2};
+        uint64_t gs[2] = {row_stride_bytes, (uint64_t)BK * 2};
         uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BN_BOX, 1};
         uint32_t es[3] = {1, 1, 1};
         CUresult err = cuTensorMapEncodeTiled(tma_desc,
