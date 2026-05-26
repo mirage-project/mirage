@@ -194,20 +194,6 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     return BBox{0, dim0, 0, row_stride};
   };
 
-  // 2D bbox overlap: row ranges must intersect AND col ranges must intersect.
-  auto bbox_overlaps = [](int64_t a_row_first,
-                          int64_t a_row_last,
-                          int64_t a_col_first,
-                          int64_t a_col_last,
-                          int64_t b_row_first,
-                          int64_t b_row_last,
-                          int64_t b_col_first,
-                          int64_t b_col_last) -> bool {
-    bool rows = (a_row_first < b_row_last) && (b_row_first < a_row_last);
-    bool cols = (a_col_first < b_col_last) && (b_col_first < a_col_last);
-    return rows && cols;
-  };
-
   for (auto const &op : kn_graph.operators) {
     if (op->op_type == mirage::type::KN_INPUT_OP) {
       continue;
