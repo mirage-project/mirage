@@ -225,7 +225,9 @@ You could reference /mpk-internals skill to futher understand how this works.
 
 ## Critical Constraints
 
-### block_dim Must Match WORKER_NUM_THREADS
+### block_dim Must Match Each Kernel's Documented NUM_THREADS
+
+The default worker `WORKER_NUM_THREADS` (defined in `include/mirage/persistent_kernel/tasks/common/worker_config.h`) is:
 
 ```
 Ampere (SM80/86/89):   block_dim = (128, 1, 1)
@@ -233,7 +235,14 @@ Hopper (SM90):         block_dim = (256, 1, 1)
 Blackwell (SM100):     block_dim = (256, 1, 1)
 ```
 
-Defined in `include/mirage/persistent_kernel/tasks/common/worker_config.h`. The worker launch configuration uses this constant — a mismatch does **not** produce a compile error but will silently corrupt results because your kernel will have different warp/thread assumptions than what the scheduler expects. Use `mi.get_configurations_from_gpu(rank)` to probe the GPU if needed. In practice, use the correct `block_dim` based on `self.target_cc >= 90`.
+These are the **most common** values. Individual kernels may legitimately
+use a smaller block_dim — e.g., `per_token_group_quantize_fp8` on SM100
+uses `NUM_THREADS = 128`. Always cross-check the `__device__` function in
+the `.cuh` file you're calling and pass the matching `block_dim`. A
+mismatch does **not** produce a compile error but will silently corrupt
+results because your kernel will have different warp/thread assumptions
+than what the scheduler expects. Use `mi.get_configurations_from_gpu(rank)`
+to probe the GPU if needed.
 
 ### TBGraph Operator Order
 
