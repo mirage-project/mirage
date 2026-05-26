@@ -91,6 +91,11 @@ __device__ __forceinline__ void
   //     the decode iter, and the pre-MoE residual is re-added on the
   //     post-AR path for all rows independently, so leaving inactive
   //     rows untouched here cannot affect the active row's logits.
+  // Dispatch contract: active rows are CONTIGUOUS from 0 to num_active_rows.
+  // The early-exit below assumes that and skips writing inactive rows; if a
+  // future router interleaves active and inactive rows mid-batch, inactive
+  // rows AFTER an active row would silently retain stale data. The
+  // contiguous-prefix layout is enforced by qo_indptr in task_register.cc.
 #pragma unroll 1
   for (int r = 0; r < ROWS_PER_TASK; ++r) {
     int const my_token = task_idx * ROWS_PER_TASK + r;
