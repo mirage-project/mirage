@@ -1,0 +1,59 @@
+name: Wheel PR Build
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'python/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'deps/**'
+      - 'scripts/release/**'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - 'CMakeLists.txt'
+      - 'config.cmake'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheel-pr-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-wheel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PR_PYTHON: cp311
+      PR_CUDA: cu124
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build single PR wheel tuple
+        run: |
+          scripts/release/build-wheels.sh \
+            --src "$GITHUB_WORKSPACE" \
+            --python "$PR_PYTHON" \
+            --cuda "$PR_CUDA" \
+            --out "$GITHUB_WORKSPACE/dist/wheels"
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: wheel-pr-${{ env.PR_PYTHON }}-${{ env.PR_CUDA }}
+          path: dist/wheels/*

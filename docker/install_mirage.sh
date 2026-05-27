@@ -19,21 +19,6 @@ set -u
 set -o pipefail
 
 cd /usr
-git clone --recursive -b python https://github.com/jiazhihao/attention_superoptimizer.git mirage
-# build z3
-cd /usr/mirage/deps/z3
-mkdir -p build
-cd build
-cmake ..
-make -j
-# build mirage runtime
+git clone --recursive https://github.com/mirage-project/mirage.git mirage
 cd /usr/mirage
-mkdir -p build
-cd build
-export Z3_DIR=/usr/mirage/deps/z3/build
-export CUDACXX=/usr/local/cuda/bin/nvcc
-cmake ..
-make -j
-# build mirage python package
-cd /usr/mirage/python
-python setup.py install
+pip install .

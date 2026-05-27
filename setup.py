@@ -15,7 +15,6 @@
 import os
 import shutil
 from os import path
-from pathlib import Path
 import sys
 import sysconfig
 from setuptools import find_packages, setup, Command
@@ -53,6 +52,7 @@ z3_path = path.dirname(z3.__file__)
 version_file = os.path.join(os.path.dirname(__file__), "python/mirage/version.py")
 with open(version_file, "r") as f:
     exec(f.read())  # This will define __version__
+
 
 def get_backend_macros(config_file):
     flags = {
@@ -252,12 +252,6 @@ class build_py(_build_py):
                 shutil.copy2(so_path, lib_dir)
         super().run()
 
-setup_args = {}
-
-# Create requirements list from requirements.txt
-with open(Path(__file__).parent / "requirements.txt", "r") as reqs_file:
-    requirements = reqs_file.read().strip().split("\n")
-print(f"Requirements: {requirements}")
 
 INCLUDE_BASE = "python/mirage/include"
 
@@ -281,9 +275,7 @@ def copy_include():
             path.join(INCLUDE_BASE, "mirage/triton_transpiler/runtime"),
             path.join(INCLUDE_BASE, "mirage/persistent_kernel"),
         ]
-        for include_mirage_dir, include_mirage_dst in zip(
-            include_mirage_dirs, include_mirage_dsts
-        ):
+        for include_mirage_dir, include_mirage_dst in zip(include_mirage_dirs, include_mirage_dsts):
             shutil.copytree(include_mirage_dir, include_mirage_dst)
 
         config_h_src = path.join(
@@ -310,7 +302,6 @@ with copy_include() as copied:
         version=__version__,
         description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
         zip_safe=False,
-        install_requires=requirements,
         packages=find_packages(where="python"),
         package_dir={"": "python"},
         package_data={"mirage": ["lib/*.so"]},
@@ -318,5 +309,4 @@ with copy_include() as copied:
         url="https://github.com/mirage-project/mirage",
         ext_modules=config_cython(),
         include_package_data=True,
-        # **setup_args,
     )

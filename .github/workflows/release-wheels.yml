@@ -9,6 +9,10 @@ on:
         description: 'Publish to PyPI'
         type: boolean
         default: false
+      use_test_pypi:
+        description: 'Publish to Test PyPI instead of production PyPI'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -16,103 +20,70 @@ permissions:
 
 jobs:
   build-wheels:
-    name: Build wheel (Python ${{ matrix.python }}, CUDA ${{ matrix.cuda }})
-    runs-on: ubuntu-22.04
-    container:
-      image: quay.io/pypa/manylinux_2_28_x86_64
+    name: Build wheel (Python ${{ matrix.python }}, CUDA ${{ matrix.cuda_tag }})
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.10', '3.11', '3.12']
-        cuda: ['12.1.1', '12.4.1', '12.6.2', '12.8.1']
+        python: ['cp310', 'cp311', 'cp312']
+        cuda_tag: ['cu121', 'cu124', 'cu126', 'cu128']
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
-      - name: Install dependencies
-        run: .github/workflows/helpers/install_dependencies_manylinux.sh "${{ matrix.cuda }}" "${{ matrix.python }}"
 
-      - name: Setup environment variables
+      - name: Free disk space
         run: |
-          # Set compiler and CUDA env vars
-          CUDA_MAJOR=$(echo "${{ matrix.cuda }}" | cut -d. -f1)
-          CUDA_MINOR=$(echo "${{ matrix.cuda }}" | cut -d. -f2)
-          CUDA_PATH="/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
 
-          echo "CUDACXX=${CUDA_PATH}/bin/nvcc" >> $GITHUB_ENV
-          echo "CUDA_HOME=${CUDA_PATH}" >> $GITHUB_ENV
-          # CC and CXX are already set by install_dependencies_manylinux.sh
-          # (pointing to gcc-toolset-12 for CUDA compatibility)
-          echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Build wheel
         run: |
-          # Extract CUDA short version (e.g., 12.1.1 -> cu121)
-          CUDA_SHORT=$(echo "${{ matrix.cuda }}" | cut -d. -f1,2 | tr -d '.')
-          echo "CUDA_SHORT=cu${CUDA_SHORT}" >> $GITHUB_ENV
-
-          # Strip git+ URLs from requirements.txt before building
-          # (PyPI rejects packages with git+ dependencies in metadata)
-          sed -i '/git+/d' requirements.txt
-
-          pip wheel . --no-deps -w raw-dist/
-
-      - name: Repair wheel with auditwheel
-        run: |
-          CUDA_MAJOR=$(echo "${{ matrix.cuda }}" | cut -d. -f1)
-          CUDA_MINOR=$(echo "${{ matrix.cuda }}" | cut -d. -f2)
-          CUDA_LIB="/usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}/lib64"
-
-          # Add CUDA and Z3 library paths so auditwheel can find shared libs
-          export LD_LIBRARY_PATH="${Z3_LIB_DIR}:${CUDA_LIB}:${LD_LIBRARY_PATH:-}"
-
-          mkdir -p dist/
-          for whl in raw-dist/*.whl; do
-            # Repair and bundle shared libraries
-            auditwheel repair "$whl" \
-              --plat manylinux_2_28_x86_64 \
-              -w repaired/ \
-              --exclude libcuda.so.1 \
-              --exclude libnvidia-ml.so.1 \
-              || {
-                echo "WARNING: auditwheel repair failed, using original wheel"
-                cp "$whl" repaired/
-              }
-          done
-
-          # Rename wheels to include CUDA version
-          for whl in repaired/*.whl; do
-            base=$(basename "$whl")
-            new_name=$(echo "$base" | sed "s/\(mirage_project-[0-9.]*\)/\1+${CUDA_SHORT}/")
-            cp "$whl" "dist/${new_name}"
-          done
+          scripts/release/build-wheels.sh \
+            --src "$GITHUB_WORKSPACE" \
+            --out "$GITHUB_WORKSPACE/dist" \
+            --python "${{ matrix.python }}" \
+            --cuda "${{ matrix.cuda_tag }}"
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: wheel-py${{ matrix.python }}-cu${{ matrix.cuda }}
+          name: wheel-${{ matrix.python }}-${{ matrix.cuda_tag }}
           path: dist/*.whl
 
   release:
     name: Create GitHub Release
     needs: build-wheels
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Get version
+      - name: Resolve and verify version
         run: |
-          version=$(python3 -c "exec(open('python/mirage/version.py').read()); print(__version__)")
-          echo "VERSION=${version}" >> $GITHUB_ENV
+          # The tag is the authoritative version for a release. version.py
+          # is checked only to catch a human tagging out of sync with source.
+          tag_ver="${GITHUB_REF_NAME#v}"
+          file_ver=$(awk -F'"' '/^__version__[[:space:]]*=/ {print $2; exit}' python/mirage/version.py)
+          [ "$tag_ver" = "$file_ver" ] || {
+            echo "tag v${tag_ver} does not match python/mirage/version.py (${file_ver})" >&2
+            exit 1
+          }
+          echo "VERSION=${tag_ver}" >> "$GITHUB_ENV"
 
       - name: Download all wheel artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: wheels
           pattern: wheel-*
@@ -122,7 +93,7 @@ jobs:
         run: ls -la wheels/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           name: v${{ env.VERSION }}
           body: |
@@ -148,24 +119,24 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build-wheels
-    runs-on: ubuntu-latest
-    if: >
-      (startsWith(github.ref, 'refs/tags/v') || inputs.publish_pypi) &&
-      vars.DEPLOY_TO_TEST_PYPI != ''
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_pypi
+    permissions:
+      id-token: write
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.10'
 
       - name: Download all wheel artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: wheels
           pattern: wheel-*
@@ -173,7 +144,6 @@ jobs:
 
       - name: Prepare wheels for PyPI (strip local version)
         run: |
-          pip install wheel
           mkdir -p dist/
 
           # PyPI rejects local versions (+cuXXX), so we upload only the
@@ -196,11 +166,11 @@ jobs:
           python -m build --sdist --outdir dist/ .
 
       - name: Publish to Test PyPI
-        if: vars.DEPLOY_TO_TEST_PYPI == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        if: inputs.use_test_pypi
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
 
       - name: Publish to PyPI
-        if: vars.DEPLOY_TO_TEST_PYPI == 'false'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        if: ${{ !inputs.use_test_pypi }}
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

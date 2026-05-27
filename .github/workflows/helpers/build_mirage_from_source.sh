@@ -22,22 +22,6 @@ fi
 # shellcheck source=.github/workflows/helpers/set_env.sh
 source "$(dirname "$0")/set_env.sh"
 
+# Build and install Mirage via pip (setup.py handles cargo, cmake, cython)
 cd "$MIRAGE_ROOT" || { echo "Error: Could not change directory to $MIRAGE_ROOT"; exit 1; }
-mkdir -p build 
-cd build || { echo "Error: Could not change directory to build"; exit 1; }
-
-# Configure with CMake using Z3 location
-cmake .. \
--DZ3_CXX_INCLUDE_DIRS="${Z3_INCLUDE_PATH}" \
--DZ3_LIBRARIES="${Z3_LIB_PATH}" \
--DCMAKE_C_COMPILER="$CC" \
--DCMAKE_CXX_COMPILER="$CXX"
-
-# Build with multiple cores
-make -j"$(nproc)"
-
-# Install Mirage
-cd "$MIRAGE_ROOT" || { echo "Error: Could not change directory to $MIRAGE_ROOT"; exit 1; }
-# Add LD_LIBRARY_PATH for Z3
-export LD_LIBRARY_PATH="/usr/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 pip install -e .

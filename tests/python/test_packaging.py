@@ -64,10 +64,11 @@ def _create_venv(base: pathlib.Path, name: str) -> pathlib.Path:
     targets Linux (CUDA requirement), so Windows is not supported.
     """
     venv_dir: pathlib.Path = base / name
-    venv.create(venv_dir, with_pip=True)
+    # with_pip=False so this works on uv-managed Pythons that may not bundle pip.
+    venv.create(venv_dir, with_pip=False)
     python: pathlib.Path = venv_dir / "bin" / "python"
     subprocess.check_call(
-        [python, "-m", "pip", "install", "--upgrade", "pip"],
+        [python, "-m", "ensurepip", "--upgrade"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=_clean_env(),

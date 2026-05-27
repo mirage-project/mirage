@@ -1,10 +1,31 @@
+[project]
+name = "mirage-project"
+version = "0.2.4"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "z3-solver==4.16",
+    "graphviz>=0.20",
+    "cuda-python>=12.0",
+    "tqdm>=4.60",
+    "triton>=3.1",
+    "safetensors>=0.4",
+    "transformers==4.57.1",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+profiling = ["tg4perfetto"]
+
+[tool.uv.sources]
+tg4perfetto = { git = "https://github.com/flashinfer-ai/tg4perfetto.git", rev = "2c1248a2f08e93c83fb312a544b701223c0d0bf3" }
+
 [build-system]
 requires = [
     "setuptools>=49.4.0",
     "cmake>=3.24",
     "cython>=0.28",
-    "z3-solver",
-    "graphviz"
+    "z3-solver==4.16",
 ]
 build-backend = "setuptools.build_meta"
 

@@ -1,19 +1,16 @@
 #!/bin/bash
 # Script to free up space on GitHub Actions runner
 
-set -e
+# Best-effort cleanup — nothing here should block the build.
+set +e
 
 echo "Freeing up disk space on GitHub Actions runner..."
 df -h
 
-# Remove unnecessary large packages
+# Remove unnecessary large packages (best-effort, packages may not exist)
 echo "Removing unnecessary large packages..."
-sudo apt-get remove -y '^dotnet-.*'
-sudo apt-get remove -y '^llvm-.*'
-sudo apt-get remove -y 'php.*'
-sudo apt-get remove -y '^mongodb-.*'
-sudo apt-get remove -y '^mysql-.*'
-sudo apt-get remove -y azure-cli google-cloud-sdk google-chrome-stable firefox
+sudo apt-get remove -y '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' '^mysql-.*' \
+    azure-cli google-cloud-sdk google-chrome-stable firefox 2>/dev/null || true
 sudo apt-get autoremove -y
 sudo apt-get clean
 

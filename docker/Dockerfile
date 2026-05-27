@@ -13,30 +13,29 @@
 # limitations under the License.
 #
 
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu20.04
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends wget sudo binutils git && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget sudo binutils git python3 python3-pip python3-venv \
+    g++ make libboost-all-dev curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN wget -c https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
-    mv Miniconda3-latest-Linux-x86_64.sh ~/Miniconda3-latest-Linux-x86_64.sh && \
-    chmod +x ~/Miniconda3-latest-Linux-x86_64.sh && \
-    ~/Miniconda3-latest-Linux-x86_64.sh -b -p /opt/conda && \
-    rm ~/Miniconda3-latest-Linux-x86_64.sh && \
-    /opt/conda/bin/conda upgrade --all && \
-    /opt/conda/bin/conda install conda-build conda-verify && \
-    /opt/conda/bin/conda clean -ya
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:$PATH"
 
-RUN /opt/conda/bin/conda install cmake make
-RUN /opt/conda/bin/conda install -c conda-forge numpy
-RUN /opt/conda/bin/conda install -c anaconda cython
+# Install CMake
+RUN wget -O cmake.sh https://github.com/Kitware/CMake/releases/download/v3.27.0/cmake-3.27.0-linux-x86_64.sh && \
+    mkdir -p /opt/cmake && sh cmake.sh --skip-license --prefix=/opt/cmake && \
+    ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake && \
+    rm cmake.sh
 
-ENV PATH /opt/conda/bin:$PATH
-ENV MIRAGE_HOME /usr/mirage/
-ENV LD_LIBRARY_PATH /usr/mirage/deps/z3/build/:$LD_LIBRARY_PATH
+# Install PyTorch
+RUN pip3 install torch==2.5.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
+
+ENV MIRAGE_HOME=/usr/mirage/
 
 COPY install_mirage.sh /install/install_mirage.sh
 RUN bash /install/install_mirage.sh
 
 WORKDIR /usr/mirage
-#RUN chmod -R a+w /usr/mirage
