@@ -412,7 +412,6 @@ struct RuntimeConfig {
   bool split_worker_scheduler;
   cudaStream_t worker_stream, scheduler_stream;
   cudaEvent_t prepare_done_event;
-  cudaEvent_t worker_done_event, scheduler_done_event;
 #ifdef USE_NVSHMEM
   nvshmem_team_t *nvshmem_teams;
 #endif
