@@ -559,8 +559,8 @@ __device__ __noinline__ void
           if (cute::elect_one_sync()) {
 #pragma unroll
             for (int k_sub = 0; k_sub < NUM_K_SUBTILES; ++k_sub) {
-              const uint32_t sfa_id = k_sub;
-              const uint32_t sfb_id = k_sub;
+              uint32_t const sfa_id = k_sub;
+              uint32_t const sfb_id = k_sub;
               auto const runtime_instr_desc =
                   kernel::sm100::make_runtime_instr_desc_with_sf_id(
                       instr_desc, sfa_id, sfb_id);

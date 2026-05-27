@@ -165,7 +165,7 @@ __device__ __forceinline__ void
                                 uint64_t philox_seed,
                                 uint64_t philox_offset,
                                 int batch_size) {
-  const uint32_t tx = threadIdx.x;
+  uint32_t const tx = threadIdx.x;
 
   using SharedMem = typename BlockReduce<SamplingDataAndIndex<DType, IdType>,
                                          BLOCK_THREADS,
