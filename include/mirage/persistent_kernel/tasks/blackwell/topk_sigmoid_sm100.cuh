@@ -155,14 +155,19 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   int const warp_idx = threadIdx.x / WARP_SIZE_SIGMOID;
   int const lane_idx = threadIdx.x % WARP_SIZE_SIGMOID;
   int const warp_base_row = warp_idx * ROWS_PER_WARP;
-
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
-  int const thread_row = warp_base_row + thread_row_in_warp;
-  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
-                                 ? 0x0000ffff
-                                 : 0xffffffff;
 
-  if (thread_row < num_rows) {
+  // Outer loop over row chunks lets a single CTA score arbitrary num_rows
+  // (8 rows per chunk at VPT=8). Without this, only rows [0, 8) would be
+  // scored and any rows beyond would be left with uninitialized outputs.
+  static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
+  for (int chunk_base = 0; chunk_base < num_rows; chunk_base += ROWS_PER_CTA) {
+    int const thread_row = chunk_base + warp_base_row + thread_row_in_warp;
+    uint32_t const warp_mask =
+        (num_rows % 2 == 1 && thread_row == num_rows - 1) ? 0x0000ffff
+                                                          : 0xffffffff;
+
+    if (thread_row < num_rows) {
 
     bool const row_is_active = finished ? !finished[thread_row] : true;
 
@@ -344,8 +349,9 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
         output[out_idx] = output[out_idx] * inv_sum * routed_scaling_factor;
       }
     }
-  }
-  __syncthreads();
+    } // if (thread_row < num_rows)
+    __syncthreads(); // serialize between row chunks
+  }   // for chunk_base
 
   // ---- Phase 7: Compact active expert IDs ----
   if (mpk_active_expert_ids != nullptr) {

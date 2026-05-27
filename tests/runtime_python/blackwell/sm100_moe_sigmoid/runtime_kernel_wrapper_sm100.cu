@@ -64,8 +64,6 @@ __global__ __launch_bounds__(256) void topk_sigmoid_kernel(
   __syncthreads();
 }
 
-// Multi-CTA scoring + Phase 7 compaction kernels for large num_rows.
-// Same template params as topk_sigmoid_kernel above.
 template <typename T,
           int EXPERTS,
           int BYTES_PER_LDG,
@@ -134,10 +132,10 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
   dim3 block_dim(256, 1, 1);
 
   // DeepSeek V3: 256 experts, 8 groups of 32, top-4 groups, top-8 experts.
-  // Small NUM_TOKENS -> single-CTA fused kernel (Phase 0..7 inline,
-  // matches the original kernel). Large NUM_TOKENS -> multi-CTA scoring +
-  // separate compaction kernel on the same stream.
-  constexpr int NUM_TOKENS_THRESHOLD = 8; // 8 warps/CTA * 1 row/warp at VPT=8
+  // NUM_TOKENS <= 32: single-CTA kernel
+  // NUM_TOKENS >  32: multi-CTA kernel + separate compaction kernel
+  constexpr int NUM_TOKENS_THRESHOLD = 32;
+  constexpr int ROWS_PER_CTA = 8; // multi-CTA chunk size (8 warps/CTA at VPT=8)
   if (OUTPUT_SIZE == 256 && num_groups == 8 && topk_group == 4) {
     using T = bfloat16;
     constexpr int EXP = 256;
@@ -153,8 +151,7 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
                                        NUM_TOKENS,
                                        routed_scaling_factor);
     } else {
-      int const grid_x =
-          (NUM_TOKENS + NUM_TOKENS_THRESHOLD - 1) / NUM_TOKENS_THRESHOLD;
+      int const grid_x = (NUM_TOKENS + ROWS_PER_CTA - 1) / ROWS_PER_CTA;
       dim3 grid_dim(grid_x, 1, 1);
       topk_sigmoid_kernel_multi<T, EXP, BPL, 8, 4, 32, 8>
           <<<grid_dim, block_dim>>>(gating_output_ptr,
