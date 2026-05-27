@@ -123,11 +123,13 @@ __device__ __forceinline__ void st_shared_u32_addr(uint32_t addr, uint32_t v) {
 template <int BN, int NS>
 __device__ __noinline__ void task_impl_tpl(
     // All shapes below are PyTorch convention (innermost dim is last).
-    CUtensorMap const *ta_ptr,   // A:   [M_total, K]         FP8, K innermost
-    CUtensorMap const *tb_ptr,   // B:   [E*N, K]             FP8, K innermost
-    CUtensorMap const *tsfa_ptr, // SFA: [num_sf_k, M_total]  uint32, M innermost
-    CUtensorMap const *tsfb_ptr, // SFB: [num_sf_k, E*N]      uint32, E*N innermost
-    CUtensorMap const *td_ptr,   // D:   [M_total, N]         BF16, N innermost
+    CUtensorMap const *ta_ptr, // A:   [M_total, K]         FP8, K innermost
+    CUtensorMap const *tb_ptr, // B:   [E*N, K]             FP8, K innermost
+    CUtensorMap const
+        *tsfa_ptr, // SFA: [num_sf_k, M_total]  uint32, M innermost
+    CUtensorMap const
+        *tsfb_ptr, // SFB: [num_sf_k, E*N]      uint32, E*N innermost
+    CUtensorMap const *td_ptr, // D:   [M_total, N]         BF16, N innermost
     int const *__restrict__ m_indices,
     int const M_total,
     int const N,
