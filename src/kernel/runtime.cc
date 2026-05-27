@@ -1686,9 +1686,9 @@ TaskGraphResult print_task_graph(
             global_json_tasks[task_id] = json_task;
             global_json_filled[task_id] = 1;
           } // subtask_id
-        }   // bid.z
-      }     // bid.y
-    }       // bid.x
+        } // bid.z
+      } // bid.y
+    } // bid.x
 
     task_pos += op_total_subtasks;
   }

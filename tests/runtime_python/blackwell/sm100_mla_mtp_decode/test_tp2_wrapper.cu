@@ -24,8 +24,8 @@ using namespace kernel::mla_mtp_tp2;
 // ===== Thin __global__ shims forwarding blockIdx to __device__ functions =====
 template <bool SINGLE_TILE>
 __global__ __launch_bounds__(TB) void shim_main(
-    const __grid_constant__ CUtensorMap Q_tm,
-    const __grid_constant__ CUtensorMap KV_tm,
+    __grid_constant__ const CUtensorMap Q_tm,
+    __grid_constant__ const CUtensorMap KV_tm,
     nv_bfloat16 *Oa,
     float *La,
     float ss,

@@ -466,7 +466,7 @@ __device__ __forceinline__ void
   if (warp_idx == 5) {
     // DMA warp (1)
 
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
     cute::ThrCopy thr_copy_b = copyB.get_slice(lane_idx);
     cute::Tensor tBgB = thr_copy_b.partition_S(gB); // (ThrB, ThrTile_N)
     cute::Tensor tBsB = thr_copy_b.partition_D(sB); // (ThrB, ThrTile_N)
@@ -565,9 +565,9 @@ __device__ __forceinline__ void
             tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
 
           } // end for k_tile
-        }   // end for n_tile
-      }     // end for m_tile
-    }       // end for expert_idx
+        } // end for n_tile
+      } // end for m_tile
+    } // end for expert_idx
   } else if (warp_idx == 4) {
     // MMA warp (1)
 
@@ -659,8 +659,8 @@ __device__ __forceinline__ void
           num_tiles_executed++;
 
         } // end for n_tile
-      }   // end for m_tile
-    }     // end for expert_idx
+      } // end for m_tile
+    } // end for expert_idx
   } else if (warp_idx < 4) {
     // Epilogue warps (4)
 
@@ -797,9 +797,9 @@ __device__ __forceinline__ void
 
           num_tiles_executed++;
         } // end for n_tile
-      }   // end for m_tile
-    }     // end for expert_idx
-  }       // end of epilogue warps
+      } // end for m_tile
+    } // end for expert_idx
+  } // end of epilogue warps
   __syncthreads();
 
   if (warp_idx == 0) {

@@ -287,7 +287,7 @@ __device__ __forceinline__ cute::UMMA::SmemDescriptor
   desc.version_ = 1;
   desc.lbo_mode_ = 0;
   desc.layout_type_ = 0; // SWIZZLE_NONE
-  const uint32_t uint_ptr = cute::cast_smem_ptr_to_uint(smem_ptr);
+  uint32_t const uint_ptr = cute::cast_smem_ptr_to_uint(smem_ptr);
   desc.start_address_ = static_cast<uint16_t>(uint_ptr >> 4);
   desc.base_offset_ = 0;
   desc.stride_byte_offset_ = 8; // 8 * 16 = 128 bytes between 32-element groups
@@ -320,7 +320,7 @@ __device__ __forceinline__ cute::UMMA::SmemDescriptor
 //
 // Must be called by all 32 threads of the warp simultaneously.
 __device__ __forceinline__ void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
-  const uint32_t lane_idx = cutlass::canonical_lane_idx();
+  uint32_t const lane_idx = cutlass::canonical_lane_idx();
   uint32_t values[4];
 // Phase 1: Read — each lane reads 4 non-contiguous elements
 #pragma unroll
@@ -804,7 +804,7 @@ __device__ __forceinline__ void
   //   - Completion signaled by cpasync_barrier_arrive_noinc on b_full barrier
   //
   if (warp_idx == 5) {
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
 
     // total_k_tile_count tracks the cumulative K-tile index across ALL
     // work units, used to compute the rotating smem buffer index and
@@ -982,10 +982,10 @@ __device__ __forceinline__ void
             smem_wr_buffer = smem_wr_buffer_next;
             tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
           } // end k_tile loop
-        }   // end n_tile loop
-      }     // end m_tile loop
-    }       // end expert loop
-  }         // end warp 5 (DMA warp)
+        } // end n_tile loop
+      } // end m_tile loop
+    } // end expert loop
+  } // end warp 5 (DMA warp)
   // ================================================================
   // WARP 4 -- MMA WARP: Scale Loading + UTCCP + FP8 Block-Scaled UMMA
   // ================================================================
@@ -1023,9 +1023,9 @@ __device__ __forceinline__ void
     // Compute absolute TMEM column addresses for the three regions.
     // These are column indices within the TMEM allocation, used by UMMA
     // (accumulator destination) and UTCCP (scale factor destination).
-    const uint32_t tmem_base = shared_storage.tmem_base_ptr;
-    const uint32_t sfa_tmem = tmem_base + kTmemStartColOfSFA; // weight scales
-    const uint32_t sfb_tmem = tmem_base + kTmemStartColOfSFB; // input scales
+    uint32_t const tmem_base = shared_storage.tmem_base_ptr;
+    uint32_t const sfa_tmem = tmem_base + kTmemStartColOfSFA; // weight scales
+    uint32_t const sfb_tmem = tmem_base + kTmemStartColOfSFB; // input scales
 
     // UTCCP type: copies 4 columns x 32 rows x 128 bits from smem to TMEM.
     // "4x32dp128bit_1cta" = 4 columns, 32 depth, 128-bit data path, 1 CTA.
@@ -1088,7 +1088,7 @@ __device__ __forceinline__ void
     // Lane i holds the lo-word for stage i (i < NUM_AB_STAGE).
     // Stage offset = i * (MMA_M * bK * sizeof(uint8_t)) / 16  (in 16-byte
     // units)
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
     uint32_t a_desc_lo =
         (lane_idx < (uint32_t)NUM_AB_STAGE)
             ? (a_desc.lo + lane_idx * (MMA_M * bK * sizeof(uint8_t)) / 16)
@@ -1229,8 +1229,8 @@ __device__ __forceinline__ void
                 // replicated), the choice doesn't matter for per-128-K
                 // quantization — but it would matter if finer-grained
                 // (per-32-K) quantization were used in the future.
-                const uint32_t sfa_id = k_sub;
-                const uint32_t sfb_id = k_sub;
+                uint32_t const sfa_id = k_sub;
+                uint32_t const sfb_id = k_sub;
                 // Build the runtime instruction descriptor with this sub-tile's
                 // scale factor byte selector. This modifies the base instr_desc
                 // to include sfa_id and sfb_id fields.
@@ -1318,9 +1318,9 @@ __device__ __forceinline__ void
               &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
           num_tiles_executed++;
         } // end n_tile loop
-      }   // end m_tile loop
-    }     // end expert loop
-  }       // end warp 4 (MMA warp)
+      } // end m_tile loop
+    } // end expert loop
+  } // end warp 4 (MMA warp)
   // ================================================================
   // WARP 6 -- SCALE WARP: Load float32 scales, convert to UE8M0, transpose
   // ================================================================
@@ -1337,7 +1337,7 @@ __device__ __forceinline__ void
   // it with DMA loads and prior UMMA execution.
   //
   else if (warp_idx == 6) {
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
 
     int total_k_tile_count = 0;
     for (int activated_expert_offset = expert_offset;
@@ -1413,10 +1413,10 @@ __device__ __forceinline__ void
               cute::arrive_barrier(shared_storage.sf_ready_mbar_ptr[smem_buf]);
             }
           } // end k_tile loop
-        }   // end n_tile loop
-      }     // end m_tile loop
-    }       // end expert loop
-  }         // end warp 6 (scale warp)
+        } // end n_tile loop
+      } // end m_tile loop
+    } // end expert loop
+  } // end warp 6 (scale warp)
   // ================================================================
   // WARPS 0-3 -- EPILOGUE: TMEM -> BF16 -> Global Memory
   // ================================================================

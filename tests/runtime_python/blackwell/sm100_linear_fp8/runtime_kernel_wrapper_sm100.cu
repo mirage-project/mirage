@@ -257,13 +257,13 @@ CUtensorMap make_tma_2d_desc(torch::Tensor const &t,
   }
 
   CUtensorMap tensor_map{};
-  const cuuint64_t gmem_dims[2] = {static_cast<cuuint64_t>(gmem_inner_dim),
+  cuuint64_t const gmem_dims[2] = {static_cast<cuuint64_t>(gmem_inner_dim),
                                    static_cast<cuuint64_t>(gmem_outer_dim)};
-  const cuuint32_t smem_dims[2] = {static_cast<cuuint32_t>(smem_inner_dim),
+  cuuint32_t const smem_dims[2] = {static_cast<cuuint32_t>(smem_inner_dim),
                                    static_cast<cuuint32_t>(smem_outer_dim)};
-  const cuuint64_t gmem_strides[1] = {
+  cuuint64_t const gmem_strides[1] = {
       static_cast<cuuint64_t>(gmem_outer_stride * elem_size)};
-  const cuuint32_t elem_strides[2] = {1, 1};
+  cuuint32_t const elem_strides[2] = {1, 1};
   check_driver_success(
       cuTensorMapEncodeTiled(
           &tensor_map,

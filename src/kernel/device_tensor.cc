@@ -22,7 +22,7 @@
 namespace mirage {
 namespace kernel {
 
-/*static*/ const DTensor DTensor::EMPTY_TENSOR = {/*zero-initialization*/};
+/*static*/ DTensor const DTensor::EMPTY_TENSOR = {/*zero-initialization*/};
 
 DTensor::DTensor() {
   data_type = mirage::type::DT_UNKNOWN;
