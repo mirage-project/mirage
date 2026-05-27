@@ -72,6 +72,23 @@ __device__ __forceinline__ void
   }
 }
 
+// Forward declaration (defined below). Used by topk_sigmoid_task_impl when
+// FUSE_COMPACTION=true to run Phase 7 inline.
+template <int NUM_EXPERTS>
+__device__ __forceinline__ void
+compact_active_experts_impl(int *mpk_active_expert_ids,
+                            int const start_expert,
+                            int const end_expert);
+
+// FUSE_COMPACTION:
+//   true  -> caller guarantees grid is (1,1,1). Phase 7 (active-experts
+//            compaction) runs inline at the end of this device function,
+//            using intra-CTA __syncthreads. No separate compaction kernel
+//            launch is needed. This is the MPK invocation shape.
+//   false -> caller launches a multi-CTA grid. Phase 7 is omitted; the
+//            caller is responsible for launching compact_active_experts
+//            on the same stream after this kernel finishes. This is the
+//            standalone-wrapper invocation shape.
 template <typename T,
           int VPT,
           int NUM_EXPERTS,
@@ -80,7 +97,8 @@ template <typename T,
           int NUM_GROUPS,
           int TOPK_GROUP,
           int EXPERTS_PER_GROUP,
-          int TOPK_EXPERTS>
+          int TOPK_EXPERTS,
+          bool FUSE_COMPACTION = true>
 __device__ __forceinline__ void topk_sigmoid_task_impl(
     void *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
     void *__restrict__ bias_ptr,  // [NUM_EXPERTS] float
@@ -99,23 +117,6 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   float *output = static_cast<float *>(output_ptr);
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
   int *mpk_active_expert_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
-
-  // ---- Phase 0: Initialize routing structures ----
-  for (int expert = start_expert + threadIdx.x; expert < end_expert;
-       expert += blockDim.x) {
-    if (mpk_routing_indices != nullptr) {
-      for (int row = 0; row < num_rows; ++row) {
-        mpk_routing_indices[expert * num_rows + row] = 0;
-      }
-    }
-    if (mpk_active_expert_ids != nullptr) {
-      mpk_active_expert_ids[expert - start_expert] = -1;
-    }
-  }
-  if (threadIdx.x == 0 && mpk_active_expert_ids != nullptr) {
-    mpk_active_expert_ids[NUM_EXPERTS] = 0;
-  }
-  __syncthreads();
 
   // Compile-time checks
   static_assert(VPT == (VPT & -VPT), "VPT must be power of 2");
@@ -149,20 +150,61 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // Work partitioning
   static constexpr int ELTS_PER_WARP = WARP_SIZE_SIGMOID * VPT;
   static constexpr int ROWS_PER_WARP = ELTS_PER_WARP / ELTS_PER_ROW;
+  static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
   static_assert(ELTS_PER_WARP % ELTS_PER_ROW == 0,
                 "ELTS_PER_ROW must divide ELTS_PER_WARP");
 
   int const warp_idx = threadIdx.x / WARP_SIZE_SIGMOID;
   int const lane_idx = threadIdx.x % WARP_SIZE_SIGMOID;
-  int const warp_base_row = warp_idx * ROWS_PER_WARP;
-
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
-  int const thread_row = warp_base_row + thread_row_in_warp;
-  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
-                                 ? 0x0000ffff
-                                 : 0xffffffff;
 
-  if (thread_row < num_rows) {
+  // ---- Initialize mpk_active_expert_ids markers + counter. ----
+  // Idempotent -1 writes across CTAs in the multi-CTA case; trivially safe
+  // in the single-CTA case. The counter at slot [NUM_EXPERTS] is zeroed by
+  // thread 0 of every CTA — same idempotent-write semantics.
+  if (mpk_active_expert_ids != nullptr) {
+    for (int expert = start_expert + threadIdx.x; expert < end_expert;
+         expert += blockDim.x) {
+      mpk_active_expert_ids[expert - start_expert] = -1;
+    }
+    if (threadIdx.x == 0) {
+      mpk_active_expert_ids[NUM_EXPERTS] = 0;
+    }
+  }
+  // Note: the next __syncthreads inside the loop body (after the per-chunk
+  // routing_indices zeroing) serializes against these writes within this
+  // CTA, so we don't need a separate sync here.
+
+  // Row-chunk iteration:
+  //   FUSE_COMPACTION=true  -> one CTA loops over all chunks of the batch.
+  //   FUSE_COMPACTION=false -> one CTA per chunk, chosen by blockIdx.x.
+  int const chunk_base_start =
+      FUSE_COMPACTION ? 0 : (int)(blockIdx.x * ROWS_PER_CTA);
+  int const chunk_stride =
+      FUSE_COMPACTION ? ROWS_PER_CTA : num_rows; // > num_rows => single-iter
+
+  for (int cta_base_row = chunk_base_start; cta_base_row < num_rows;
+       cta_base_row += chunk_stride) {
+
+    int const warp_base_row = cta_base_row + warp_idx * ROWS_PER_WARP;
+    int const thread_row = warp_base_row + thread_row_in_warp;
+    uint32_t const warp_mask =
+        (num_rows % 2 == 1 && thread_row == num_rows - 1) ? 0x0000ffff
+                                                          : 0xffffffff;
+
+    // ---- Phase 0: zero this chunk's slice of mpk_routing_indices. ----
+    if (mpk_routing_indices != nullptr) {
+      int const row_lo = cta_base_row;
+      int const row_hi = min(cta_base_row + ROWS_PER_CTA, num_rows);
+      for (int expert = start_expert; expert < end_expert; ++expert) {
+        for (int row = row_lo + threadIdx.x; row < row_hi; row += blockDim.x) {
+          mpk_routing_indices[expert * num_rows + row] = 0;
+        }
+      }
+    }
+    __syncthreads();
+
+    if (thread_row < num_rows) {
 
     bool const row_is_active = finished ? !finished[thread_row] : true;
 
@@ -175,10 +217,8 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
 
     using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
     T row_chunk_temp[VPT];
-    AccessType *row_chunk_vec_ptr =
-        reinterpret_cast<AccessType *>(&row_chunk_temp);
-    AccessType *vec_thread_read_ptr =
-        reinterpret_cast<AccessType *>(thread_read_ptr);
+    AccessType *row_chunk_vec_ptr = reinterpret_cast<AccessType *>(&row_chunk_temp);
+    AccessType *vec_thread_read_ptr = reinterpret_cast<AccessType *>(thread_read_ptr);
 
     // Vectorized loads
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
@@ -190,19 +230,20 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
     // Compute sigmoid and biased scores
     float row_chunk[VPT];    // unbiased sigmoid scores (for final weights)
     float biased_chunk[VPT]; // sigmoid + bias (for selection)
-
     int const bias_offset = thread_group_idx * VPT;
     for (int ii = 0; ii < VPT; ++ii) {
       float logit = converter(row_chunk_temp[ii]);
-      row_chunk_temp[ii] = static_cast<T>(0); // reset for split-k
       float sig = 1.0f / (1.0f + expf(-logit));
       row_chunk[ii] = sig;
       biased_chunk[ii] = sig + bias[bias_offset + ii];
     }
 
-    // Write back zeros (same as softmax kernel, for split-k gate linear)
+    // Zero the logits buffer for next iteration's split-k gate linear.
+    // Decoupled from the sigmoid loop above so stores can issue in parallel
+    // with the math instead of waiting on the per-element zero writes.
+    AccessType zero_vec{};
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-      vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
+      vec_thread_read_ptr[ii * THREADS_PER_ROW] = zero_vec;
     }
 
     // ---- Phase 2: Group top-2 reduction ----
@@ -344,20 +385,55 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
         output[out_idx] = output[out_idx] * inv_sum * routed_scaling_factor;
       }
     }
+    } // if (thread_row < num_rows)
+
+    // Sync between chunks (only matters when looping, but cheap when not).
+    if (FUSE_COMPACTION) {
+      __syncthreads();
+    }
+  } // for cta_base_row
+
+  // ---- Phase 7: compaction. ----
+  // FUSE_COMPACTION=true: run inline now; the single CTA has finished all
+  // Phase 5 writes (last per-chunk __syncthreads ensures this), so the
+  // marker array is consistent.
+  // FUSE_COMPACTION=false: skipped here; caller launches a separate
+  // compaction kernel after this one returns.
+  if (FUSE_COMPACTION && mpk_active_expert_ids != nullptr) {
+    compact_active_experts_impl<NUM_EXPERTS>(
+        mpk_active_expert_ids, start_expert, end_expert);
+  }
+}
+
+// ---- Compaction kernel (runs after topk_sigmoid_task_impl across all CTAs).
+// Walks mpk_active_expert_ids: any slot whose marker is >= 0 is an expert
+// activated by some token; append it to a compact list starting at slot 0.
+// The counter at slot [NUM_EXPERTS] is used as an atomic cursor.
+// Two-phase to avoid read/write race on slots: every thread reads its slot
+// into a register, syncs, then writes the compact list.
+template <int NUM_EXPERTS>
+__device__ __forceinline__ void
+compact_active_experts_impl(int *mpk_active_expert_ids,
+                            int const start_expert,
+                            int const end_expert) {
+  // Each thread snapshots its assigned slots first.
+  constexpr int MAX_PER_THREAD = (NUM_EXPERTS + 255) / 256;
+  int marks[MAX_PER_THREAD];
+  int experts[MAX_PER_THREAD];
+  int n_local = 0;
+  for (int expert = start_expert + threadIdx.x; expert < end_expert;
+       expert += blockDim.x) {
+    int const local_expert = expert - start_expert;
+    if (mpk_active_expert_ids[local_expert] >= 0) {
+      marks[n_local] = local_expert;
+      experts[n_local] = expert;
+      ++n_local;
+    }
   }
   __syncthreads();
-
-  // ---- Phase 7: Compact active expert IDs ----
-  if (mpk_active_expert_ids != nullptr) {
-    for (int expert = start_expert + threadIdx.x; expert < end_expert;
-         expert += blockDim.x) {
-      int const local_expert = expert - start_expert;
-      int const mark = mpk_active_expert_ids[local_expert];
-      if (mark >= 0) {
-        int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
-        mpk_active_expert_ids[pos] = expert;
-      }
-    }
+  for (int i = 0; i < n_local; ++i) {
+    int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
+    mpk_active_expert_ids[pos] = experts[i];
   }
 }
 
