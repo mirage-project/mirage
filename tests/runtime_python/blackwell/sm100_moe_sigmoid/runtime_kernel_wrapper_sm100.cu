@@ -114,14 +114,14 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
                                int num_groups,
                                int topk_group) {
 
-  int const BATCH_SIZE = static_cast<int>(gating_output.size(0));
+  int const NUM_TOKENS = static_cast<int>(gating_output.size(0));
   int const OUTPUT_SIZE = static_cast<int>(gating_output.size(1));
   int const NUM_TOPK = static_cast<int>(topk_weights.size(1));
 
-  assert(topk_weights.size(0) == BATCH_SIZE &&
+  assert(topk_weights.size(0) == NUM_TOKENS &&
          topk_weights.size(1) == NUM_TOPK);
   assert(mpk_routing_indices.size(0) == OUTPUT_SIZE &&
-         mpk_routing_indices.size(1) == BATCH_SIZE);
+         mpk_routing_indices.size(1) == NUM_TOKENS);
   assert(mpk_active_expert_ids.size(0) == OUTPUT_SIZE + 1);
   assert(bias.size(0) == OUTPUT_SIZE);
 
@@ -134,15 +134,15 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
   dim3 block_dim(256, 1, 1);
 
   // DeepSeek V3: 256 experts, 8 groups of 32, top-4 groups, top-8 experts.
-  // Small num_rows -> single-CTA fused kernel (Phase 0..7 inline, matches
-  // the original kernel). Large num_rows -> multi-CTA scoring + separate
-  // compaction kernel on the same stream.
+  // Small NUM_TOKENS -> single-CTA fused kernel (Phase 0..7 inline,
+  // matches the original kernel). Large NUM_TOKENS -> multi-CTA scoring +
+  // separate compaction kernel on the same stream.
+  constexpr int NUM_TOKENS_THRESHOLD = 8; // 8 warps/CTA * 1 row/warp at VPT=8
   if (OUTPUT_SIZE == 256 && num_groups == 8 && topk_group == 4) {
     using T = bfloat16;
     constexpr int EXP = 256;
     constexpr int BPL = 16;
-    constexpr int ROWS_PER_CTA = 8; // 8 warps/CTA * 1 row/warp at VPT=8
-    if (BATCH_SIZE <= ROWS_PER_CTA) {
+    if (NUM_TOKENS <= NUM_TOKENS_THRESHOLD) {
       dim3 grid_dim(1, 1, 1);
       topk_sigmoid_kernel<T, EXP, BPL, 8, 4, 32, 8>
           <<<grid_dim, block_dim, 0>>>(gating_output_ptr,
@@ -150,10 +150,11 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
                                        topk_weights_ptr,
                                        mpk_routing_indices_ptr,
                                        mpk_active_expert_ids_ptr,
-                                       BATCH_SIZE,
+                                       NUM_TOKENS,
                                        routed_scaling_factor);
     } else {
-      int const grid_x = (BATCH_SIZE + ROWS_PER_CTA - 1) / ROWS_PER_CTA;
+      int const grid_x =
+          (NUM_TOKENS + NUM_TOKENS_THRESHOLD - 1) / NUM_TOKENS_THRESHOLD;
       dim3 grid_dim(grid_x, 1, 1);
       topk_sigmoid_kernel_multi<T, EXP, BPL, 8, 4, 32, 8>
           <<<grid_dim, block_dim>>>(gating_output_ptr,
@@ -161,7 +162,7 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
                                     topk_weights_ptr,
                                     mpk_routing_indices_ptr,
                                     mpk_active_expert_ids_ptr,
-                                    BATCH_SIZE,
+                                    NUM_TOKENS,
                                     routed_scaling_factor);
       compact_active_experts_kernel<EXP><<<1, 256>>>(
           static_cast<int *>(mpk_active_expert_ids_ptr));
