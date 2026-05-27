@@ -224,8 +224,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // Caller may pass bboxes of different ranks (e.g., a reshape-view fallback
   // mixed with a same-rank narrow) — in that case we treat them as
   // "definitely overlap" since neither side can localize the other.
-  auto bbox_intersect =
-      [](BBox const &a, BBox const &b, BBox &out) -> bool {
+  auto bbox_intersect = [](BBox const &a, BBox const &b, BBox &out) -> bool {
     if (a.rank != b.rank) {
       // Cannot meaningfully intersect; assume overlap. The caller's
       // shadow-cover loop will skip detailed coverage tracking for the
