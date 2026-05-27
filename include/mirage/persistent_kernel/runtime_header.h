@@ -199,6 +199,7 @@ enum TaskType {
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
   TASK_GET_NEXT_TASK = 203,
+  TASK_SCHD_PREPARE_BATCH = 204,
   // Multi-GPU tasks
   TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
