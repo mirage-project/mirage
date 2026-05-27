@@ -394,7 +394,8 @@ struct RuntimeConfig {
   int32_t *pinned_step; // [total_inflight], pinned, indexed by buffer row
   // Pinned inbox: CPU writes prompt tokens here before submitting a request
   // via the ring buffer. GPU copies from inbox to the allocated buffer row.
-  int64_t *pinned_inbox_tokens; // [MPK_PINNED_RING_CAPACITY * max_seq_length], pinned (one inbox per ring slot)
+  int64_t *pinned_inbox_tokens; // [MPK_PINNED_RING_CAPACITY * max_seq_length],
+                                // pinned (one inbox per ring slot)
   // Pinned rid→row mapping: GPU writes pinned_rid_at_row[row] = rid when
   // allocating a buffer row so CPU can discover which row its request is
   // on by scanning rows, then poll pinned_step[row] for per-step streaming.

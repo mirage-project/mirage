@@ -88,7 +88,7 @@ __device__ __forceinline__ int32_t
 
 // System-scope release store (int32): ensures prior writes are visible to CPU
 // before the handshake flag is updated.
-__device__ __forceinline__ void st_release_sys_i32(volatile int32_t *addr,
+__device__ __forceinline__ void st_release_sys_i32(int32_t volatile *addr,
                                                    int32_t val) {
   asm volatile("st.release.sys.b32 [%0], %1;"
                :
