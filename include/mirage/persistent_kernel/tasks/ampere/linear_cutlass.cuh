@@ -417,7 +417,7 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
 
           cute::gemm(tiled_mma, tCrD, tCrA(_, _, ik), tCrB(_, _, ik), tCrD);
         } // ik
-      } // itile
+      }   // itile
 
       // Epilogue: convert float accumulator result back to bfloat16_t and write
       // back use less shared memory as a scratchpad tile to use large wide
@@ -472,7 +472,7 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
       // cute::copy(s2g_tiled_copy_c, tCsC_s2g(_, _, _, 0), tCgC_s2g);
       cute::copy_if(s2g_tiled_copy_c, tCpC_ep, tCsC_s2g(_, _, _, 0), tCgC_s2g);
     } // n_iter < kLoopN 2
-  } // m_iter < LoopM 1
+  }   // m_iter < LoopM 1
 }
 } // namespace kernel
 

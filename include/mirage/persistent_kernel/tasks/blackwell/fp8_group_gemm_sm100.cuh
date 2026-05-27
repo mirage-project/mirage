@@ -982,10 +982,10 @@ __device__ __forceinline__ void
             smem_wr_buffer = smem_wr_buffer_next;
             tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
           } // end k_tile loop
-        } // end n_tile loop
-      } // end m_tile loop
-    } // end expert loop
-  } // end warp 5 (DMA warp)
+        }   // end n_tile loop
+      }     // end m_tile loop
+    }       // end expert loop
+  }         // end warp 5 (DMA warp)
   // ================================================================
   // WARP 4 -- MMA WARP: Scale Loading + UTCCP + FP8 Block-Scaled UMMA
   // ================================================================
@@ -1318,9 +1318,9 @@ __device__ __forceinline__ void
               &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
           num_tiles_executed++;
         } // end n_tile loop
-      } // end m_tile loop
-    } // end expert loop
-  } // end warp 4 (MMA warp)
+      }   // end m_tile loop
+    }     // end expert loop
+  }       // end warp 4 (MMA warp)
   // ================================================================
   // WARP 6 -- SCALE WARP: Load float32 scales, convert to UE8M0, transpose
   // ================================================================
@@ -1413,10 +1413,10 @@ __device__ __forceinline__ void
               cute::arrive_barrier(shared_storage.sf_ready_mbar_ptr[smem_buf]);
             }
           } // end k_tile loop
-        } // end n_tile loop
-      } // end m_tile loop
-    } // end expert loop
-  } // end warp 6 (scale warp)
+        }   // end n_tile loop
+      }     // end m_tile loop
+    }       // end expert loop
+  }         // end warp 6 (scale warp)
   // ================================================================
   // WARPS 0-3 -- EPILOGUE: TMEM -> BF16 -> Global Memory
   // ================================================================

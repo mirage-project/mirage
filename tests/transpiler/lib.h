@@ -666,9 +666,7 @@ vector<Testcase> all_testcases;
   namespace {                                                                  \
   class CONCAT(Testcase, counter) {                                            \
   public:                                                                      \
-    CONCAT(Testcase, counter)() {                                              \
-      all_testcases.push_back(testcase);                                       \
-    }                                                                          \
+    CONCAT(Testcase, counter)() { all_testcases.push_back(testcase); }         \
   } CONCAT(testcase_adder_, counter);                                          \
   }
 

@@ -624,9 +624,9 @@ __device__ __forceinline__ void
                       expf(m_prev - m[q_head_i * 2 + l]) +
                   o_new2 * expf(other_m - m[q_head_i * 2 + l]);
             } // frag_idx
-          } // n
-        } // warp_id
-      } // only warp_idx == 0
+          }   // n
+        }     // warp_id
+      }       // only warp_idx == 0
       __syncthreads();
 
     } // l

@@ -121,7 +121,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
           smem_input.at(row, col) = (T)v_rot;
         }
       } // i
-    } // head_idx
-  } // win_idx
+    }   // head_idx
+  }     // win_idx
 }
 } // namespace kernel

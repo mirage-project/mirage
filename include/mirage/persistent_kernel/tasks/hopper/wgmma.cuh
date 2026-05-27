@@ -40,7 +40,7 @@ constexpr size_t get_col_param() {
 }
 
 __device__ static inline uint64_t matrix_descriptor_encode(uint64_t x) {
-  return (((x) & 0x3FFFF) >> 0x4);
+  return (((x)&0x3FFFF) >> 0x4);
 }
 // from  kitten include/ops/group/wgmma/base/base.cuh
 template <typename SMEM, bool MNmajor = false>

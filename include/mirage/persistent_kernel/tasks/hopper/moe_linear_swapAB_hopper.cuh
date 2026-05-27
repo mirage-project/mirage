@@ -450,9 +450,9 @@ __device__ __forceinline__ void
             tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
 
           } // end for k_tile
-        } // end for n_tile
-      } // end for m_tile
-    } // end for expert_idx
+        }   // end for n_tile
+      }     // end for m_tile
+    }       // end for expert_idx
   } else if (warp_idx < 4) {
     // MMA warp (4)
     int total_k_tile_count = 0;
@@ -571,8 +571,8 @@ __device__ __forceinline__ void
             }
           }
         } // end for n_tile
-      } // end for m_tile
-    } // end for expert_idx
+      }   // end for m_tile
+    }     // end for expert_idx
   }
 
 } // end moe_linear_sm90_task_impl

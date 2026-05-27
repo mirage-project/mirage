@@ -101,8 +101,8 @@ struct ProfilerEntry {
   };
 };
 
-#define TB_SLEEP_MS(ms) tb::sleep_cycles((ms) * 1000000)
-#define TB_SLEEP_US(us) tb::sleep_cycles((us) * 1000)
+#define TB_SLEEP_MS(ms) tb::sleep_cycles((ms)*1000000)
+#define TB_SLEEP_US(us) tb::sleep_cycles((us)*1000)
 
 #define PROFILER_CLOSURE_PARAMS_DECL                                           \
   volatile tb::ProfilerEntry entry;                                            \
