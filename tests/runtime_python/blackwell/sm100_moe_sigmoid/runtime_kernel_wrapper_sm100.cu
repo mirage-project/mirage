@@ -134,8 +134,9 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
   // DeepSeek V3: 256 experts, 8 groups of 32, top-4 groups, top-8 experts.
   // NUM_TOKENS <= 32: single-CTA kernel
   // NUM_TOKENS >  32: multi-CTA kernel + separate compaction kernel
+  // Threshold of 32 chosen based on benchmarking
   constexpr int NUM_TOKENS_THRESHOLD = 32;
-  constexpr int ROWS_PER_CTA = 8; // multi-CTA chunk size (8 warps/CTA at VPT=8)
+  constexpr int ROWS_PER_CTA = 8;
   if (OUTPUT_SIZE == 256 && num_groups == 8 && topk_group == 4) {
     using T = bfloat16;
     constexpr int EXP = 256;
