@@ -1408,6 +1408,65 @@ class DeepSeekV3Builder(GraphBuilder):
             k_align=512,
         )
 
+    def _fp8_linear_builder_splitk(self, input_bf16, weight_key, state_dict,
+                                   output, split_k, name_prefix):
+        """Builder-side split-K for a decode M=1 starved K-bound GEMM.
+
+        Splits K into `split_k` CONTIGUOUS slices, runs split_k separate
+        `_fp8_linear` calls (each fills ceil(N/128) CTAs → split_k× parallel
+        working CTAs, filling idle SMs at decode M=1), then reduces the bf16
+        partials. Uses the WORKING dense kernel — orthogonal to the broken
+        decode_splitk/swapAB split-K kernels (which crash / can't compile at
+        BATCH=128). Verified facts this enables correctness:
+        - weight_scale (`.weight_scale_inv`) layout = [N/128, K/128] row-major
+          (the dense GEMM `sb`, indexed sb[(on/128)*nk + ki], nk=K/128), so a
+          K-slice = a contiguous slice on dim 1 → row-stride matches the
+          slice's own nk=Ks/128. (A narrow VIEW would NOT work: its row-stride
+          stays K/128.)
+        - `_attach_fp8_weight` is a passthrough (raw fp8 weight + f32 scale),
+          so slicing the state_dict tensors directly is valid.
+        - `_fp8_linear`'s input_col_offset/input_row_stride slice the bf16
+          input in-place (no input copy).
+        Precision: bf16 partial-sum vs the kernel's FP32 accumulate — verify
+        TP=2 token-match before enabling. Gated by MPK_DSV3_BUILDER_SPLITK.
+        """
+        import torch
+        wt = state_dict[f"{weight_key}.weight"]
+        st = state_dict[f"{weight_key}.weight_scale_inv"]
+        N, K_full = int(wt.shape[0]), int(wt.shape[1])
+        assert K_full % (128 * split_k) == 0, (K_full, split_k)
+        Ks = K_full // split_k
+        Ksg = Ks // 128
+        if not hasattr(self, "_builder_splitk_chunks"):
+            self._builder_splitk_chunks = []
+        partials = []
+        for i in range(split_k):
+            wc_t = wt[:, i * Ks:(i + 1) * Ks].contiguous()
+            sc_t = st[:, i * Ksg:(i + 1) * Ksg].to(torch.float32).contiguous()
+            # keep python refs alive — attach binds by pointer
+            self._builder_splitk_chunks += [wc_t, sc_t]
+            wc = self._safe_attach(wc_t, f"{name_prefix}_skw{i}")
+            sc = self._safe_attach(sc_t, f"{name_prefix}_sks{i}")
+            pi = self.mpk.new_tensor(
+                dims=(output.dim(0), N), dtype=bfloat16,
+                name=f"{name_prefix}_skp{i}", io_category="cuda_tensor")
+            self._fp8_linear(
+                input_bf16, wc, sc, pi,
+                grid_dim=(grid_for_rmsnorm_linear_layer(N), 1, 1),
+                block_dim=(128, 1, 1),
+                input_col_offset=i * Ks, input_row_stride=K_full)
+            partials.append(pi)
+        acc = partials[0]
+        for i in range(1, split_k):
+            out = output if i == split_k - 1 else self.mpk.new_tensor(
+                dims=(output.dim(0), N), dtype=bfloat16,
+                name=f"{name_prefix}_skacc{i}", io_category="cuda_tensor")
+            self.mpk.elementwise_add_layer(
+                input_a=acc, input_b=partials[i], output=out,
+                grid_dim=(grid_for_rmsnorm_linear_layer(N), 1, 1),
+                block_dim=(128, 1, 1))
+            acc = out
+
     def _pick_bf16_splitk_factor(self, weight):
         """BF16 splitk picker for a `weight` tensor of shape [output, K].
 
@@ -2159,6 +2218,13 @@ class DeepSeekV3Builder(GraphBuilder):
         qkv_a_fp8_ovr, qkv_a_scale_ovr = None, None
         if self._fused_rmsnorm_quantize:
             qkv_a_fp8_ovr, qkv_a_scale_ovr = self._fused_qkv_a_bufs[layer_idx]
+        # NOTE: builder-side split-K for qkv_a is NOT wired here — it trips the
+        # annotated_graph "case 3" (rmsnorm_out becomes both a fork-producer
+        # [the split-K partial GEMMs] and a join-producer), which the graph
+        # can't represent (a task can't have two dependent_events). Needs an
+        # identity_layer phantom bridge (cf. the chunked-prefill kpe_sep fix)
+        # to escape the fork+join. gate_up split-K works because its topology
+        # doesn't fork+join. TODO before re-enabling qkv_a split-K.
         self._fp8_linear(
             self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
@@ -3038,7 +3104,16 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
-        if shared_gu_split_k is not None:
+        _bsk = int(os.environ.get("MPK_DSV3_BUILDER_SPLITK", "0"))
+        if (_bsk >= 2 and has_shared_scale
+                and w_shared_gate_up.dim(1) % (128 * _bsk) == 0):
+            # Builder-side split-K (decode 1-CTA-GEMM parallelization, the
+            # −45μs system lever; the existing decode_splitk kernel crashes
+            # at TP=4 so we split-K via the working dense kernel + reduce).
+            self._fp8_linear_builder_splitk(
+                self.rmsnorm_out, fused_key, state_dict, shared_mid, _bsk,
+                f"layer_{layer_idx}_shared_gate_up")
+        elif shared_gu_split_k is not None:
             self._fp8_linear_splitk(
                 self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
                 shared_mid, split_k=shared_gu_split_k)
