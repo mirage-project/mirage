@@ -310,7 +310,8 @@ template <typename T,
           bool EPI_BATCHED,
           int EPI_BATCH_LA,
           bool OVERLAP_OUTPUT_MBAR,
-          bool HAS_BIAS_DEPRECATED>  // ignored; HAS_BIAS now picked at launch by residual_ptr
+          bool HAS_BIAS_DEPRECATED,  // ignored; HAS_BIAS chosen at launch from residual_ptr
+          bool PRODUCER_ARM_SCALE_MBAR = false>
 void launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
                                                void *input_sf_ptr,
                                                void *weight_ptr,
@@ -409,7 +410,8 @@ void launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
                                                  EPI_TILE_N, EPI_NUM_D_TILES,
                                                  EPI_BATCHED, EPI_BATCH_LA,
                                                  OVERLAP_OUTPUT_MBAR,
-                                                 /*HAS_BIAS=*/false>;
+                                                 /*HAS_BIAS=*/false,
+                                                 PRODUCER_ARM_SCALE_MBAR>;
   auto kernel_ptr_bias =
       kernel::linear_nvfp4_1d2d_2sm_sm100_kernel<REDUCTION_SIZE,
                                                  BLOCK_M, BLOCK_N, BLOCK_K,
@@ -417,7 +419,8 @@ void launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
                                                  EPI_TILE_N, EPI_NUM_D_TILES,
                                                  EPI_BATCHED, EPI_BATCH_LA,
                                                  OVERLAP_OUTPUT_MBAR,
-                                                 /*HAS_BIAS=*/true>;
+                                                 /*HAS_BIAS=*/true,
+                                                 PRODUCER_ARM_SCALE_MBAR>;
   if constexpr (smem_bytes > 48 * 1024) {
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(
         kernel_ptr_nobias, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
@@ -578,20 +581,24 @@ void launch_linear_nvfp4_1d2d_2sm_sm100(void *input_ptr,
     case 8192:
       switch (config_id) {
         case 0:
-          // S=5 picked per the stages-sweep study.
-          return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5, 4, 64, 2, false, 1, true, false>(
+          // cfg0: SG=8 (divides 32-row tile grid evenly, stable); producer-arm.
+          return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5, 8, 64, 2, false, 1, true, false, true>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
         case 10:
-          // Experiment: EPI_TILE_N=32, EPI_PIPE_DEPTH=8.
           return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5, 4, 32, 2, false, 1, true, false>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
         case 11:
-          // Experiment: OVERLAP_OUTPUT_MBAR=false.
           return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5, 4, 64, 2, false, 1, false, false>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
+        // SG ablation: cfg=100+SG.
+        case 101: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5,  1, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 102: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5,  2, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 104: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5,  4, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 108: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5,  8, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 116: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 8192, 128, 256, 256, 5, 16, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
         default:
           TORCH_CHECK(false,
                       "SM100 NVFP4 2SM 1d2d K=8192 unsupported config_id=",
@@ -601,35 +608,40 @@ void launch_linear_nvfp4_1d2d_2sm_sm100(void *input_ptr,
     case 16384:
       switch (config_id) {
         case 0:
-          // S=5 picked per the stages-sweep study.
-          return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5, 4, 64, 2, false, 1, true, false>(
-              input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
-              batch_size, output_size);
-        case 1:
-          return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5, 4, 64, 2, false, 1, true, false>(
+          // cfg0: SG=8 (divides 64-row tile grid, stable); producer-arm.
+          return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5, 8, 64, 2, false, 1, true, false, true>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
         case 3:
+          // NUM_STAGES=3 sweep point.
           return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 3, 4, 64, 2, false, 1, true, false>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
         case 9:
+          // NUM_STAGES=2 sweep point.
           return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 2, 4, 64, 2, false, 1, true, false>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
         case 10:
-          // Experiment: EPI_TILE_N=32, EPI_PIPE_DEPTH=8.
+          // EPI_TILE_N=32 experiment.
           return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5, 4, 32, 2, false, 1, true, false>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
         case 11:
-          // Experiment: OVERLAP_OUTPUT_MBAR=false.
+          // OVERLAP_OUTPUT_MBAR=false experiment.
           return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5, 4, 64, 2, false, 1, false, false>(
               input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
               batch_size, output_size);
+        // SG ablation: cfg=100+SG.
+        case 101: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5,  1, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 102: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5,  2, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 104: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5,  4, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 108: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5,  8, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 114: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5, 14, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
+        case 116: return launch_linear_nvfp4_1d2d_2sm_sm100_config<T, 16384, 128, 256, 256, 5, 16, 64, 2, false, 1, true, false, true>(input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr, batch_size, output_size);
         default:
           TORCH_CHECK(false,
-                      "SM100 NVFP4 2SM 1d2d K=16384 supports config_ids {0, 1, 3, 9}; got ",
+                      "SM100 NVFP4 2SM 1d2d K=16384 supports config_ids {0, 3, 9, 10, 11, 101..116}; got ",
                       config_id, ".");
       }
       break;

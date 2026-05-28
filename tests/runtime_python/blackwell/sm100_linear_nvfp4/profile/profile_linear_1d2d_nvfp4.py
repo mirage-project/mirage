@@ -4,6 +4,17 @@ import warnings
 import _runtime_path  # noqa: F401
 import torch
 
+# Import flashinfer BEFORE the Mirage runtime extension. Reverse order has
+# been observed to cause an intermittent CUDA launch failure under heavy
+# benchmarking at large shapes — the two extensions appear to fight over
+# some shared CUDA state when registered in the opposite order.
+try:
+    import flashinfer
+    _FLASHINFER_AVAILABLE = True
+except ImportError:
+    _FLASHINFER_AVAILABLE = False
+    warnings.warn("flashinfer not available; skipping flashinfer baselines")
+
 import runtime_kernel_blackwell_linear_nvfp4 as runtime_kernel_blackwell
 from nvfp4_util import (
     _pad_rows_uint8,
@@ -12,13 +23,6 @@ from nvfp4_util import (
     interleave_sf_tensor,
     make_random_nvfp4_tensors,
 )
-
-try:
-    import flashinfer
-    _FLASHINFER_AVAILABLE = True
-except ImportError:
-    _FLASHINFER_AVAILABLE = False
-    warnings.warn("flashinfer not available; skipping flashinfer baselines")
 
 
 DEVICE = "cuda"

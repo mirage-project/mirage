@@ -781,7 +781,8 @@ template <int REDUCTION_SIZE,
           bool EPI_BATCHED,
           int EPI_BATCH_LA,
           bool OVERLAP_OUTPUT_MBAR,
-          bool HAS_BIAS>
+          bool HAS_BIAS,
+          bool PRODUCER_ARM_SCALE_MBAR = false>
 __global__ __launch_bounds__(BLOCK_M + 4 * 32) void
 linear_nvfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
                                    const __grid_constant__ CUtensorMap B_tmap,
@@ -929,6 +930,11 @@ linear_nvfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
         const uint16_t self_mask = static_cast<uint16_t>(1u << cta_group_m);
 
         if (pipeline_iter >= NUM_STAGES) mbarrier_wait(mma_mbar_addr + stage_id * 8, mma_phase);
+        // Producer arms scale_mbar (off MMA's critical path). Receiver mbars
+        // still get multicast tx-byte fan-out from the HW unchanged.
+        if constexpr (PRODUCER_ARM_SCALE_MBAR) {
+          mbarrier_arrive_expect_tx_local(mbar_addr, SCALE_EXPECTED_TX);
+        }
         tma_3d_gmem2smem_multicast_g1(SFA_smem, &SFA_tmap, 0, 2 * (off_k / 64), off_m / 128, mbar_addr, self_mask, cache_A);
         tma_3d_gmem2smem_multicast_g1(SFB_smem + cta_group_m * SFB_TILE_BYTES, &SFB_tmap, 0, 2 * (off_k / 64), (off_n / 128) + cta_group_m, mbar_addr, 0b11, cache_B);
       }
@@ -969,7 +975,9 @@ linear_nvfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
             }
           };
 
-          mbarrier_arrive_expect_tx_local(scale_mbar_addr + stage_id * 8, SCALE_EXPECTED_TX);
+          if constexpr (!PRODUCER_ARM_SCALE_MBAR) {
+            mbarrier_arrive_expect_tx_local(scale_mbar_addr + stage_id * 8, SCALE_EXPECTED_TX);
+          }
           mbarrier_wait(scale_mbar_addr + stage_id * 8, tma_phase);
 
           #pragma unroll
