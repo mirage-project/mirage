@@ -484,6 +484,14 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_identity_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_IDENTITY, variant_id);
+  } else if (name == "identity_2in") {
+    // 2-input identity: copies input_ptrs[0] → output_ptrs[0]; input_ptrs[1]
+    // is a fake-dep handle that AnnotatedGraph uses to insert a producer
+    // edge (so the consumer waits on a producer that's NOT actually read).
+    // Used by MPK_DSV3_DEFER_SHARED_EXPERT decode lever.
+    int variant_id =
+        task_register->register_identity_2in_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_IDENTITY, variant_id);
   } else if (name == "silu_mul_linear_with_residual") {
     int variant_id = task_register->register_silu_mul_linear_with_residual_task(
         customized->bgraph, params);

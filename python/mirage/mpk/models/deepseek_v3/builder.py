@@ -1058,7 +1058,8 @@ class DeepSeekV3Builder(GraphBuilder):
         prefix = f"model.layers.{layer_idx}.mlp."
         return f"{prefix}experts.w13.weight_scale_inv" in state_dict
 
-    def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs):
+    def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs,
+                           qb_share_tag=None):
         """MPK_DSV3_BMM=1: replaces the absorbed q_b_proj decode GEMM with a
         per-head BMM chain that loads the unabsorbed weights at runtime:
 
@@ -1130,6 +1131,7 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
             gate_mode=2 if self._use_prefill else 0,
+            share_quantize_tag=qb_share_tag,
             **qb_slice_kwargs)
         if self._fused_qb_quantize:
             # 2 fused) q_b_nope FP8 dense GEMM with epilogue UE8M0 quantize
@@ -1164,6 +1166,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
                 gate_mode=2 if self._use_prefill else 0,
+                share_quantize_tag=qb_share_tag,
                 **qb_slice_kwargs)
             # 3) Quantize q_nope BF16 → FP8 + UE8M0 packed scale.
             # Each row's K=128, so packed_K=1. row_count = mbt * H rows.
@@ -1531,11 +1534,26 @@ class DeepSeekV3Builder(GraphBuilder):
             pi = self.mpk.new_tensor(
                 dims=(output.dim(0), N), dtype=bfloat16,
                 name=f"{name_prefix}_skp{i}", io_category="cuda_tensor")
+            # D2 (2026-05-28, analyzer #2): per-shard FP8 + float32 scale
+            # buffers so both shards' quantize tasks can run in PARALLEL.
+            # Pre-D2: all shards shared `fp8_input_v2_{Ks}_shared` keyed by
+            # reduction_size=Ks; shard 1's quantize would overwrite shard 0's
+            # bytes before shard 0's GEMM had read them → forced serial
+            # execution + lost K-parallelism win (sk=2's −9.65μs alone became
+            # only −1.8μs marginal in stack).
+            sk_fp8 = self.mpk.new_tensor(
+                dims=(output.dim(0), Ks), dtype=float8_e4m3,
+                name=f"{name_prefix}_sk{i}_fp8", io_category="cuda_tensor")
+            sk_scale = self.mpk.new_tensor(
+                dims=(output.dim(0), Ksg), dtype=float32,
+                name=f"{name_prefix}_sk{i}_scale", io_category="cuda_tensor")
             self._fp8_linear(
                 input_bf16, wc, sc, pi,
                 grid_dim=(grid_for_rmsnorm_linear_layer(N), 1, 1),
                 block_dim=(128, 1, 1),
-                input_col_offset=i * Ks, input_row_stride=K_full)
+                input_col_offset=i * Ks, input_row_stride=K_full,
+                input_fp8_override=sk_fp8,
+                input_scale_override=sk_scale)
             partials.append(pi)
         acc = partials[0]
         for i in range(1, split_k):
@@ -2419,7 +2437,8 @@ class DeepSeekV3Builder(GraphBuilder):
             # runtime BMM-based absorption. Five tasks instead of one
             # monolithic FP8 GEMM, but each task loads smaller per-head
             # weights → less TMA traffic, better overlap potential.
-            self._bmm_decode_q_path(state_dict, attn, layer_idx, qb_slice_kwargs)
+            self._bmm_decode_q_path(state_dict, attn, layer_idx, qb_slice_kwargs,
+                                    qb_share_tag=qb_share_tag)
         else:
             # Existing absorbed-Q path (default).
             w_q_b, s_q_b = self._attach_fp8_weight(
@@ -3244,6 +3263,47 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_shared_mid",
             io_category="cuda_tensor",
         )
+        # MPK_DSV3_DEFER_SHARED_EXPERT: insert a fake-dep identity that
+        # forces the shared-expert gate_up GEMM to wait until the
+        # routed-MoE W13 group GEMM has fired. Lever target: −15μs decode
+        # by overlapping shared_expert work (gate_up + silu + down ≈ 30μs)
+        # with routed-MoE silu/quantize/W2 (~50μs) instead of running it
+        # parallel to W13 where it competes for the same workers.
+        # Default OFF — must be byte-identical to baseline. Requires
+        # MPK_DSV3_SHARED_EXPERT_FIRST OFF (the default) so that the
+        # routed-MoE W13 buffer has been allocated by the time we run.
+        _defer_shared = os.environ.get(
+            "MPK_DSV3_DEFER_SHARED_EXPERT", "0") == "1"
+        _gemm_input = self.rmsnorm_out
+        if _defer_shared:
+            _w13_dep = getattr(self, "_routed_post_w13_buffer", None)
+            if _w13_dep is None:
+                # No routed-W13 buffer available (shared-first ordering, or
+                # _build_shared_expert called from a non-MoE context). Skip
+                # the defer rather than failing — keep behavior identical
+                # to env-off in that case.
+                pass
+            else:
+                _rms_src = self.rmsnorm_out
+                _rmsnorm_out_defer = self.mpk.new_tensor(
+                    dims=(_rms_src.dim(0), _rms_src.dim(1)),
+                    dtype=bfloat16,
+                    name=f"layer_{layer_idx}_rmsnorm_out_defer",
+                    io_category="cuda_tensor",
+                )
+                # grid.x must divide the inner dim. rmsnorm_out's inner dim
+                # is hidden_size (7168 = 56*128). Use the same pattern as
+                # the qkv_a phantom-bridge identity above.
+                _hid = _rms_src.dim(1)
+                _gx = 56 if (_hid % 56 == 0) else (8 if (_hid % 8 == 0) else 1)
+                self.mpk.identity_layer(
+                    input=_rms_src,
+                    output=_rmsnorm_out_defer,
+                    grid_dim=(_gx, 1, 1),
+                    block_dim=(128, 1, 1),
+                    extra_dep_input=_w13_dep,
+                )
+                _gemm_input = _rmsnorm_out_defer
         shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
         _bsk = int(os.environ.get("MPK_DSV3_BUILDER_SPLITK", "0"))
         if (_bsk >= 2 and has_shared_scale
@@ -3252,14 +3312,14 @@ class DeepSeekV3Builder(GraphBuilder):
             # −45μs system lever; the existing decode_splitk kernel crashes
             # at TP=4 so we split-K via the working dense kernel + reduce).
             self._fp8_linear_builder_splitk(
-                self.rmsnorm_out, fused_key, state_dict, shared_mid, _bsk,
+                _gemm_input, fused_key, state_dict, shared_mid, _bsk,
                 f"layer_{layer_idx}_shared_gate_up")
         elif shared_gu_split_k is not None:
             self._fp8_linear_splitk(
-                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
+                _gemm_input, w_shared_gate_up, s_shared_gate_up,
                 shared_mid, split_k=shared_gu_split_k)
         else:
-            self._fp8_linear(self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
+            self._fp8_linear(_gemm_input, w_shared_gate_up, s_shared_gate_up,
                              shared_mid,
                              grid_dim=(grid_for_rmsnorm_linear_layer(
                                  w_shared_gate_up.dim(0)), 1, 1),
@@ -3300,6 +3360,10 @@ class DeepSeekV3Builder(GraphBuilder):
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):
         """Build MoE MLP for layers 3-60."""
         prefix = f"model.layers.{layer_idx}.mlp."
+
+        # Reset per-layer routed-W13 stash (used by
+        # MPK_DSV3_DEFER_SHARED_EXPERT in _build_shared_expert).
+        self._routed_post_w13_buffer = None
 
         # Router
         w_gate = self.mpk.attach_input(
@@ -3470,6 +3534,10 @@ class DeepSeekV3Builder(GraphBuilder):
                 dims=(m_total, N_w13), dtype=bfloat16,
                 name=f"layer_{layer_idx}_new_moe_w13_out",
                 io_category="cuda_tensor")
+            # Stash for MPK_DSV3_DEFER_SHARED_EXPERT — _build_shared_expert
+            # uses this buffer as a fake-dep handle so the shared_expert
+            # gate_up GEMM is scheduled after the routed-MoE W13 GEMM.
+            self._routed_post_w13_buffer = new_moe_w13_out
             new_moe_silu_out = self.mpk.new_tensor(
                 dims=(m_total, K_intermediate), dtype=bfloat16,
                 name=f"layer_{layer_idx}_new_moe_silu_out",
@@ -3567,6 +3635,10 @@ class DeepSeekV3Builder(GraphBuilder):
                 name=f"layer_{layer_idx}_moe_mid",
                 io_category="cuda_tensor",
             )
+            # Stash for MPK_DSV3_DEFER_SHARED_EXPERT — _build_shared_expert
+            # uses this buffer as a fake-dep handle so the shared_expert
+            # gate_up GEMM is scheduled after the routed-MoE W13 GEMM.
+            self._routed_post_w13_buffer = moe_mid
 
             if use_fp8_experts:
                 # 2026-05-12: MoE W13 dominates prefill (88% of layer wallclock,

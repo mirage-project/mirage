@@ -529,6 +529,69 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_IDENTITY, code.to_string());
 }
 
+int TaskRegister::register_identity_2in_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params) {
+  // 2-input variant of register_identity_task. Same kernel body (read
+  // input_ptrs[0], write output_ptrs[0]) — input_ptrs[1] is a fake-dep
+  // handle the kernel never reads. Used to chain a copy task behind a
+  // distant producer in the runtime scheduler (e.g. defer the shared-
+  // expert gate_up GEMM behind the routed-MoE W13 group GEMM).
+  // Params semantics inherit from register_identity_task:
+  //   params[] (legacy copy) OR [noop_flag] OR [noop_flag, gate_decode_q_len].
+  assert(params.size() <= 2);
+  bool is_noop = (params.size() >= 1 && params[0] == 1);
+  bool gate_decode_q_len = (params.size() >= 2 && params[1] == 1);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // Both the real input (slot 0) and the output tensor should be row major.
+  // input_ops[1] is the fake-dep handle; layout is irrelevant since the
+  // kernel never dereferences it.
+  assert(input_ops[0]->dtensor.layout == layout::DmemRowMajor);
+  assert(output_ops[0]->dtensor.layout == layout::DmemRowMajor);
+
+  int outer_dim_size = 1, inner_dim_size, outer_dim_stride, output_size;
+  for (int i = 0; i < input_ops[0]->dtensor.num_dims - 1; i++) {
+    outer_dim_size *= input_ops[0]->dtensor.dim[i];
+  }
+  inner_dim_size =
+      input_ops[0]->dtensor.dim[input_ops[0]->dtensor.num_dims - 1];
+  outer_dim_stride = inner_dim_size;
+  output_size = output_ops[0]
+                    ->output_tensors[0]
+                    .dim[output_ops[0]->output_tensors[0].num_dims - 1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (is_noop) {
+    code.e("// identity_2in_task no-op variant (graph-shaping only)");
+  } else {
+    if (gate_decode_q_len) {
+      code.e("int q_len_id_ = runtime_config.qo_indptr_buffer[1] - "
+             "runtime_config.qo_indptr_buffer[0];");
+      code.e("if (q_len_id_ <= 8) return;");
+    }
+    code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
+           outer_dim_size,
+           inner_dim_size,
+           outer_dim_stride,
+           output_size);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->output_ptrs[0]);");
+  }
+  return register_task_variant(TASK_IDENTITY, code.to_string());
+}
+
 int TaskRegister::register_silu_mul_linear_with_residual_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);

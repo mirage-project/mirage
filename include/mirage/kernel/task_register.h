@@ -47,6 +47,15 @@ public:
                              std::vector<int> const &params);
   int register_identity_task(threadblock::Graph const &bgraph,
                              std::vector<int> const &params);
+  // Same kernel body as register_identity_task, but the bgraph carries
+  // (2 inputs, 1 output) instead of (1 input, 1 output). The second input
+  // is a fake-dep handle (only used to force a producer→consumer edge in
+  // AnnotatedGraph); the codegen ignores input_ptrs[1] and copies
+  // input_ptrs[0] → output_ptrs[0]. Used by MPK_DSV3_DEFER_SHARED_EXPERT
+  // to chain the shared_expert gate_up GEMM behind the routed-MoE W13
+  // GEMM at TP=4 EP=2 decode (the −15μs system lever).
+  int register_identity_2in_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
   int register_silu_mul_linear_with_residual_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_argmax_partial_task(threadblock::Graph const &bgraph,
