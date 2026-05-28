@@ -1753,6 +1753,10 @@ extern "C" void
   // Create events
   cudaEventCreateWithFlags(&global_runtime_config.prepare_done_event,
                            cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.worker_done_event,
+                           cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&global_runtime_config.scheduler_done_event,
+                           cudaEventDisableTiming);
 
   init_request_resources();
 #ifdef USE_NVSHMEM
@@ -1811,6 +1815,15 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
 
+    cudaEventRecord(global_runtime_config.worker_done_event,
+                    global_runtime_config.worker_stream);
+    cudaEventRecord(global_runtime_config.scheduler_done_event,
+                    global_runtime_config.scheduler_stream);
+
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.worker_done_event, 0);
+    cudaStreamWaitEvent(
+        default_stream, global_runtime_config.scheduler_done_event, 0);
     printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
     printf("a single persistent kernel\n");
@@ -1890,6 +1903,8 @@ extern "C" void finalize_persistent_kernel() {
 #endif
   // Free worker and scheduler streams
   cudaEventDestroy(global_runtime_config.prepare_done_event);
+  cudaEventDestroy(global_runtime_config.worker_done_event);
+  cudaEventDestroy(global_runtime_config.scheduler_done_event);
   cudaStreamDestroy(global_runtime_config.worker_stream);
   cudaStreamDestroy(global_runtime_config.scheduler_stream);
 }
