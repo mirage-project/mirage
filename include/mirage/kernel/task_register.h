@@ -185,6 +185,8 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_linear_fp8_bmm_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
+  int register_linear_fp8_bmm_dense_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params);
   int register_fp8_gemm_dense_smallm_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_mediumm_sm100_task(

@@ -245,7 +245,21 @@ enum TaskType {
   // Behind `MPK_DSV3_FUSED_QB_QUANTIZE=1`.
   TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 = 318,
   TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 = 319,
-  TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
+  // PR696 multi-CTA topk prefill path (default-OFF via MPK_DSV3_TOPK_MULTICTA).
+  // The single-CTA topk does marker-init + compaction inline; the multi-CTA
+  // variant cannot (cross-CTA marker-init race), so they become separate
+  // tasks: marker-init (active_expert_ids[0..LE)=-1, [LE]=0) BEFORE the
+  // multi-CTA topk (FUSE_COMPACTION=false), and a warp-ballot compaction
+  // AFTER. Slot 310 was the only free SM100 id; the init reuses the old END
+  // placeholder value 320 (END bumped to 321 — END is only a profiler name,
+  // never a range-check boundary, so this is safe).
+  TASK_MOE_TOPK_COMPACT_SM100 = 310,
+  TASK_MOE_TOPK_MARKER_INIT_SM100 = 320,
+  // Per-head FP8 BMM wrapping the DENSE block-scaled GEMM body (float32
+  // scales). Forward-compatible alternative to TASK_LINEAR_FP8_BMM_SM100
+  // (swapAB / UE8M0) for DSv3 decode BMM2. Behind MPK_DSV3_BMM_DENSE=1.
+  TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
+  TASK_SM100_TASK_END = 323, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

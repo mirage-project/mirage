@@ -112,25 +112,30 @@ __device__ __forceinline__ uint64_t mkdesc(int a) {
 //             that per_token_group_quantize_fp8_task_impl produces (with
 //             packed_k=1 for BN=128 single-group rows) — downstream FP8 BMM /
 //             linear consumers see the same bit layout.
-template <int BN,
-          int NS,
-          int NE,
-          bool EPILOGUE_QUANTIZE_FP8 = false>
-__device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
-                                              CUtensorMap const *tb_ptr,
-                                              float const *__restrict__ sa,
-                                              float const *__restrict__ sb,
-                                              __nv_bfloat16 *__restrict__ C,
-                                              int const M,
-                                              int const N,
-                                              int const K,
-                                              int const worker_idx,
-                                              int const num_workers,
-                                              __nv_fp8_e4m3 *__restrict__ C_fp8
-                                              = nullptr,
-                                              uint32_t *__restrict__ C_scale
-                                              = nullptr,
-                                              int scale_outer_stride = 0) {
+template <int BN, int NS, int NE, bool EPILOGUE_QUANTIZE_FP8 = false>
+__device__ __forceinline__ void
+    task_impl_tpl(CUtensorMap const *ta_ptr,
+                  CUtensorMap const *tb_ptr,
+                  float const *__restrict__ sa,
+                  float const *__restrict__ sb,
+                  __nv_bfloat16 *__restrict__ C,
+                  int const M,
+                  int const N,
+                  int const K,
+                  int const worker_idx,
+                  int const num_workers,
+                  __nv_fp8_e4m3 *__restrict__ C_fp8 = nullptr,
+                  uint32_t *__restrict__ C_scale = nullptr,
+                  int scale_outer_stride = 0,
+                  // Per-head BMM (linear_fp8_bmm_dense_sm100) packs the
+                  // activation scale as [M, H, nk] row-major, so consecutive
+                  // M-rows of one head stride by H*nk, not nk. A negative
+                  // value (default) means the legacy contiguous stride = nk.
+                  int sa_row_stride = -1,
+                  // Likewise the bf16 output C is [M, H, N] row-major for the
+                  // per-head BMM, so a row strides by H*N, not N. Negative
+                  // (default) means the legacy contiguous stride = N.
+                  int C_row_stride = -1) {
   static_assert(!EPILOGUE_QUANTIZE_FP8 || BN == 128,
                 "EPILOGUE_QUANTIZE_FP8 requires BN==128 (one K-group per "
                 "consumer thread for per-row scale).");
@@ -139,6 +144,12 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   int const tid = threadIdx.x, wid = tid / 32;
   int const nn = (N + BN - 1) / BN, nk = (K + BK - 1) / BK;
   int const total = ((M + BM - 1) / BM) * nn;
+  // Activation-scale row stride: legacy contiguous (= nk) unless the caller
+  // passes a larger stride (per-head BMM where sa is [M, H, nk] row-major).
+  int const sa_rs = (sa_row_stride > 0) ? sa_row_stride : nk;
+  // bf16-output row stride: legacy contiguous (= N) unless the caller passes
+  // a larger stride (per-head BMM where C is [M, H, N] row-major).
+  int const C_rs = (C_row_stride > 0) ? C_row_stride : N;
 
   // 2026-05-26 (Q1): skip the entire mb_init + tcgen05.alloc + __syncthreads +
   // membar.gl + tcgen05.dealloc sequence for CTAs that have no tile to
@@ -287,7 +298,7 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
       }
 
       for (int ki = 0; ki < nk; ki++, gki++) {
-        float sfa = (mi < M) ? __ldg(sa + mi * nk + ki) : 0.0f;
+        float sfa = (mi < M) ? __ldg(sa + mi * sa_rs + ki) : 0.0f;
         float sfb0 = __ldg(sb + (on / 128) * nk + ki);
         float sfb1 = 0.0f;
         if (BN > 128) {
@@ -392,7 +403,7 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
           uint32_t packed_scale = static_cast<uint32_t>(scale_byte);
           C_scale[mi * scale_outer_stride + group_idx] = packed_scale;
         } else {
-          __nv_bfloat16 *row = C + (long long)mi * N + on;
+          __nv_bfloat16 *row = C + (long long)mi * C_rs + on;
 #pragma unroll
           for (int n = 0; n < BN; n += 16) {
             if (on + n + 15 < N) {
