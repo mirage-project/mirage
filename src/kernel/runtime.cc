@@ -1301,7 +1301,8 @@ TaskGraphResult print_task_graph(
     // FP8 linear tasks need TMA (outside SM100_TMA range)
     code.e("if (task.at(\"task_type\") == TASK_LINEAR_FP8_SM100 || "
            "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 || "
-           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100) {");
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100 || "
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_DENSE_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
@@ -1986,6 +1987,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
       "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_BMM_DENSE_SM100] =
+      "TASK_LINEAR_FP8_BMM_DENSE_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_SMALLM_SM100] =
       "TASK_FP8_GROUP_GEMM_SMALLM_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_SM100] =

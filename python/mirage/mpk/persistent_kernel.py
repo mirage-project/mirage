@@ -2700,12 +2700,19 @@ class PersistentKernel:
         permuted_scale: DTensor,
         meta: DTensor,
         bm_padding: int = 128,
+        e_per_cta: int = 1,
     ):
         """MoE expand-permute-sort task — peripheral glue for the PR-674
         grouped FP8 GEMM. See moe_permute_sm100.cuh for the exact contract.
 
-        One CTA per local expert (grid_dim = (E_local, 1, 1)). Scans
-        routing_indices[my_expert, :], gathers matched tokens, and copies
+        By default one CTA per local expert (grid_dim = (E_local, 1, 1)).
+        `e_per_cta` (gated by the builder via MPK_DSV3_PERMUTE_EPC, default
+        1) lets each CTA own E_PER_CTA consecutive experts, shrinking the
+        launch to (E_local / E_PER_CTA, 1, 1). This collapses the decode
+        "permute valley" (128 CTAs vs ~8 active experts contending with the
+        shared-expert GEMM). E_PER_CTA==1 is byte-identical to the legacy
+        path. Scans routing_indices[expert, :], gathers matched tokens,
+        and copies
         FP8 row + UE8M0-packed scale into the permuted layout. Small
         per-row metadata (permuted_weights + token_to_permuted) is packed
         into one int32 `meta` buffer so the task stays within MPK's
@@ -2751,8 +2758,15 @@ class PersistentKernel:
         assert meta.dim(1) == M_TOTAL + MBT * TOPK, (
             f"meta length must be {M_TOTAL + MBT * TOPK}, got {meta.dim(1)}")
 
-        params = [K, K_PACKED, MBT, TOPK, E_LOCAL, bm_padding]
-        grid_dim = (E_LOCAL, 1, 1)
+        assert e_per_cta >= 1, "e_per_cta must be >= 1"
+        assert E_LOCAL % e_per_cta == 0, (
+            f"E_LOCAL ({E_LOCAL}) must be divisible by e_per_cta "
+            f"({e_per_cta})")
+        params = [K, K_PACKED, MBT, TOPK, E_LOCAL, bm_padding, e_per_cta]
+        # E_PER_CTA experts per CTA → (E_LOCAL / E_PER_CTA) CTAs. Each CTA
+        # derives its expert range from task_metadata.expert_offset (= bid.x,
+        # the CTA index) inside the kernel.
+        grid_dim = (E_LOCAL // e_per_cta, 1, 1)
         block_dim = (128, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
@@ -3078,6 +3092,67 @@ class PersistentKernel:
         self.kn_graph.customized(
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_bmm_sm100", params)
+
+    def linear_fp8_bmm_dense_sm100_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,    # (1, h_shards, 1)  (grid.x must be 1: D_out=128=BN)
+        block_dim: tuple,   # (256, 1, 1) on SM100
+    ):
+        # Per-head FP8 batched matmul wrapping the DENSE block-scaled GEMM body
+        # (float32 scales) instead of swapAB (UE8M0). Computes
+        #     output[n, h, :] = input[n, h, :] @ weight[h, :, :]^T  (per head)
+        # decode-only, batch_size <= 16, one head per CTA (grid.y == H).
+        #
+        # Forward-compatible alternative to linear_fp8_bmm_sm100_layer for the
+        # DSv3 decode BMM2 (o-down un-absorption): the float32 128-K-aligned
+        # block scales are split-K-friendly (when the kernel team lands dense
+        # split-K), whereas swapAB's UE8M0 packs at 512-K and cannot split a
+        # per-head K=512. Same math, different scale encoding.
+        #
+        # Tensor layouts (all 3D; dim 1 is the head axis for activation):
+        #   input_fp8     [N, H, D_in]
+        #   input_scale   [N, H, nk]          float32 (nk = D_in / 128)
+        #   weight_fp8    [H, D_out, D_in]
+        #   weight_scale  [H, D_out/128, nk]  float32 (D_out=128 -> dim1 = 1)
+        #   output        [N, H, D_out]       (2D [N, H*D_out] also accepted)
+        #
+        # Constraints (asserted at registration time):
+        #   - D_out (per head, = N) must be a multiple of BN=128 -> grid.x == 1
+        #   - D_in must be a multiple of BK=128
+        #   - batch_size N <= 16 (decode-only)
+        #   - H % grid.y == 0; first cut requires H_PER_TASK == 1 (grid.y == H)
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert input_fp8.num_dims == 3, (
+            "linear_fp8_bmm_dense requires 3D input [N, H, D_in]")
+        assert input_scale.num_dims == 3, (
+            "linear_fp8_bmm_dense requires 3D float32 input_scale [N, H, nk]")
+        assert output.num_dims in (2, 3)
+        assert grid_dim[0] == 1, (
+            "linear_fp8_bmm_dense requires grid.x == 1 (per-head D_out=128=BN)")
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # input_fp8 / input_scale: grid.y splits the head axis (dim 1).
+        tb_graph.new_input(input_fp8,   (-1, 1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, 1, -1), -1, True)
+        # weight_fp8 / weight_scale [H, ...]: grid.y splits dim 0 (H).
+        # grid.x == 1, so dim 1 (D_out) is not sharded.
+        tb_graph.new_input(weight_fp8,   (-1, 0, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, 0, -1), -1, True)
+        # output: dim 1 (H) split by grid.y. grid.x == 1 so D_out unsharded.
+        if output.num_dims == 3:
+            tb_graph.new_input(output, (-1, 1, -1), -1, True)
+        else:
+            tb_graph.new_input(output, (-1, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "linear_fp8_bmm_dense_sm100", params)
 
     def _fp8_gemm_dense_layer_impl(
         self,

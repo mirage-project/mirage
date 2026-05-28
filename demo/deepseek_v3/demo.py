@@ -822,6 +822,22 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"] = (
                         bmm_v_scale_packed)
 
+                    # Dense-BMM repack of kv_b_v for MPK_DSV3_BMM_DENSE=1: the
+                    # DENSE block-scaled GEMM body wants float32 128x128-block
+                    # scales (one scale per [128-row-block, 128-K-group]), NOT
+                    # the per-row UE8M0 scale above. kv_b_v_fp8 / kv_b_v_scale
+                    # (computed by _quantize_f32_to_checkpoint_fp8 just above)
+                    # are ALREADY 128x128-block-quantized: kv_b_v_fp8 is
+                    # [H*128, 512], kv_b_v_scale is [bM=H, bK=512/128=4].
+                    # Reshape per-head: weight [H, D_out=128, D_in=512],
+                    # scale [H, D_out/128=1, D_in/128=4] (float32, row-major).
+                    kv_lora_blk = kv_lora_rank // 128  # = 4 for K=512
+                    state_dict[f"{attn}kv_b_v_bmm_dense.weight"] = (
+                        kv_b_v_fp8.reshape(H_, v_dim, kv_lora_rank).contiguous())
+                    state_dict[f"{attn}kv_b_v_bmm_dense.weight_scale_inv"] = (
+                        kv_b_v_scale.reshape(H_, 1, kv_lora_blk).to(
+                            torch.float32).contiguous())
+
                     # DEBUG 2026-05-10: also store bf16 versions of the
                     # split kv_b weights for the BF16 ablation in
                     # _fp8_dense_kv_b_proj. Used to verify whether the FP8
@@ -1054,6 +1070,10 @@ if __name__ == "__main__":
                     # head dim (dim=0). Same sharding as kv_b_k_bmm.
                     (r"self_attn\.kv_b_v_bmm\.weight",                       0),
                     (r"self_attn\.kv_b_v_bmm\.weight_scale_ue8m0",           0),
+                    # Dense-BMM repack of kv_b_v: weight (H, 128, 512) FP8 +
+                    # float32 block scale (H, 1, 4). Shard head dim (dim=0).
+                    (r"self_attn\.kv_b_v_bmm_dense\.weight",                 0),
+                    (r"self_attn\.kv_b_v_bmm_dense\.weight_scale_inv",       0),
                     (r"self_attn\.kv_b_k_bf16\.weight",                      0),
                     (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
