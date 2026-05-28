@@ -1494,6 +1494,8 @@ extern "C" void
       static_cast<int *>(meta_tensors[8]);
   global_runtime_config.paged_kv_last_page_len_buffer =
       static_cast<int *>(meta_tensors[9]);
+  global_runtime_config.paged_kv_indices_snapshot =
+      static_cast<int *>(meta_tensors[10]);
 #if defined(MODE_ONLINE_PINNED)
   global_runtime_config.pinned_req_ready =
       static_cast<int32_t volatile *>(meta_tensors[11]);
