@@ -14,8 +14,8 @@ using namespace kernel;
 // ============ Wrapper kernels ============
 
 __global__ __launch_bounds__(MLA_TB) void mla_decode_wrapper(
-    const __grid_constant__ CUtensorMap Q_tm,
-    const __grid_constant__ CUtensorMap KV_tm,
+    __grid_constant__ const CUtensorMap Q_tm,
+    __grid_constant__ const CUtensorMap KV_tm,
     float *__restrict__ Oa,
     float *__restrict__ La,
     float ss,

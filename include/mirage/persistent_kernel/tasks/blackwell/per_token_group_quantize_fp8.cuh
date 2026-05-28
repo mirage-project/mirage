@@ -291,7 +291,7 @@ __device__ __forceinline__ void
 #pragma unroll
         for (int pack_idx = 0; pack_idx < SCALE_ALIGNMENT; ++pack_idx) {
           int const group_idx = packed_idx * SCALE_ALIGNMENT + pack_idx;
-          const uint8_t encoded = group_idx < NUM_GROUPS_PER_ROW
+          uint8_t const encoded = group_idx < NUM_GROUPS_PER_ROW
                                       ? packed_scale_bytes[group_idx]
                                       : 0;
           packed_scale |= static_cast<uint32_t>(encoded) << (pack_idx * 8);

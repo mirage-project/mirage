@@ -61,16 +61,16 @@ struct smem_row_tiled {
   }
 
   __device__ __forceinline__ T *operator()(uint32_t row, uint32_t col) const {
-    const uint32_t r_outer = row >> AtomRBits;          // /8
-    const uint32_t c_outer = col >> AtomCBits;          // /64
-    const uint32_t tile = r_outer * ColTiles + c_outer; //
+    uint32_t const r_outer = row >> AtomRBits;          // /8
+    uint32_t const c_outer = col >> AtomCBits;          // /64
+    uint32_t const tile = r_outer * ColTiles + c_outer; //
 
-    const uint32_t r_in = row & AtomRMask; // 0..7
-    const uint32_t c_in = col & AtomCMask; // 0..63
+    uint32_t const r_in = row & AtomRMask; // 0..7
+    uint32_t const c_in = col & AtomCMask; // 0..63
 
-    const uint32_t c_swz = c_in ^ ((r_in & MASK_B) << M);
+    uint32_t const c_swz = c_in ^ ((r_in & MASK_B) << M);
 
-    const uint32_t idx = (tile << AtomBits) | (r_in << AtomCBits) | c_swz;
+    uint32_t const idx = (tile << AtomBits) | (r_in << AtomCBits) | c_swz;
 
     return base_ptr + idx;
   }

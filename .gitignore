@@ -92,3 +92,5 @@ ncu_tmp
 /results
 
 .clangd
+/pr.md
+*.log

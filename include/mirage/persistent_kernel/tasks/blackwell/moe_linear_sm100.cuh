@@ -466,7 +466,7 @@ __device__ __forceinline__ void
   if (warp_idx == 5) {
     // DMA warp (1)
 
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
     cute::ThrCopy thr_copy_b = copyB.get_slice(lane_idx);
     cute::Tensor tBgB = thr_copy_b.partition_S(gB); // (ThrB, ThrTile_N)
     cute::Tensor tBsB = thr_copy_b.partition_D(sB); // (ThrB, ThrTile_N)

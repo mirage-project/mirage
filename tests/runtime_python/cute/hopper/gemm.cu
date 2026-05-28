@@ -262,8 +262,8 @@ template <typename CollectiveMainloop,
           typename TMA_A,
           typename TMA_B>
 __global__ __launch_bounds__(256, 1) void linear_kernel_hopper_cute_mpk_wrapper(
-    const __grid_constant__ TMA_A tma_a,
-    const __grid_constant__ TMA_B tma_b,
+    __grid_constant__ const TMA_A tma_a,
+    __grid_constant__ const TMA_B tma_b,
     void *output_ptr,
     void const *residual_ptr) {
   kernel::linear_cutlass_ws_hopper<CollectiveMainloop,

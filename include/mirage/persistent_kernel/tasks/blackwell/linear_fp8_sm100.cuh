@@ -90,8 +90,8 @@ __device__ __noinline__ void
   shape_m = SHAPE_M != 0 ? SHAPE_M : shape_m;
   shape_n = SHAPE_N != 0 ? SHAPE_N : shape_n;
   shape_k = SHAPE_K != 0 ? SHAPE_K : shape_k;
-  const uint32_t shape_sfa_k = ceil_div(shape_k, kGranKA * 4);
-  const uint32_t shape_sfb_k = ceil_div(shape_k, kGranKB * 4);
+  uint32_t const shape_sfa_k = ceil_div(shape_k, kGranKA * 4);
+  uint32_t const shape_sfb_k = ceil_div(shape_k, kGranKB * 4);
 
   bool is_leader_cta = cute::block_rank_in_cluster() == 0;
   auto const warp_idx = cutlass::canonical_warp_idx_sync();
@@ -336,7 +336,7 @@ __device__ __noinline__ void
                     shape_k, BLOCK_K, k_block_idx, m_block_idx);
 
         constexpr bool kIsBatchedMM = (kGemmType == GemmType::Batched);
-        const uint32_t batch_idx =
+        uint32_t const batch_idx =
             (kIsBatchedMM ? scheduler.current_group_idx : 0);
         if constexpr (kMajorA == cute::UMMA::Major::K) {
           tma_copy<BLOCK_K,
@@ -444,7 +444,7 @@ __device__ __noinline__ void
       tcgen05_after_thread_sync();
 
       auto empty_barrier_arrive = [&](bool const &do_tmem_full_arrive) {
-        auto umma_arrive = [](const uint64_t *barrier) {
+        auto umma_arrive = [](uint64_t const *barrier) {
           cutlass::arch::umma_arrive(barrier);
         };
         umma_arrive(reinterpret_cast<uint64_t *>(empty_barriers[stage_idx]));
@@ -462,7 +462,7 @@ __device__ __noinline__ void
         tcgen05_after_thread_sync();
 
         using cute_utccp_t = cute::SM100_UTCCP_4x32dp128bit_1cta;
-        const uint32_t sfa_stage_in_group_idx =
+        uint32_t const sfa_stage_in_group_idx =
             k_block_idx % kNumSFAStagesPerLoad;
         if (sfa_stage_in_group_idx == 0 && cute::elect_one_sync()) {
 #pragma unroll
@@ -472,7 +472,7 @@ __device__ __noinline__ void
             cute_utccp_t::copy(sf_desc, kTmemStartColOfSFA + i * 4);
           }
         }
-        const uint32_t sfb_stage_in_group_idx =
+        uint32_t const sfb_stage_in_group_idx =
             k_block_idx % kNumSFBStagesPerLoad;
         if (sfb_stage_in_group_idx == 0 && cute::elect_one_sync()) {
 #pragma unroll
@@ -493,9 +493,9 @@ __device__ __noinline__ void
         if (cute::elect_one_sync()) {
 #pragma unroll
           for (uint32_t k = 0; k < BLOCK_K / UMMA_K; ++k) {
-            const uint32_t sfa_id =
+            uint32_t const sfa_id =
                 (kGranKA == 32 ? k : sfa_stage_in_group_idx);
-            const uint32_t sfb_id =
+            uint32_t const sfb_id =
                 (kGranKB == 32 ? k : sfb_stage_in_group_idx);
             auto const &runtime_instr_desc =
                 make_runtime_instr_desc_with_sf_id(instr_desc, sfa_id, sfb_id);
@@ -780,12 +780,12 @@ __global__ void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads,
         uint32_t shape_m,
         uint32_t shape_n,
         uint32_t shape_k,
-        const __grid_constant__ cute::TmaDescriptor tensor_map_a,
-        const __grid_constant__ cute::TmaDescriptor tensor_map_b,
-        const __grid_constant__ cute::TmaDescriptor tensor_map_sfa,
-        const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
-        const __grid_constant__ cute::TmaDescriptor tensor_map_residual,
-        const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
+        __grid_constant__ const cute::TmaDescriptor tensor_map_a,
+        __grid_constant__ const cute::TmaDescriptor tensor_map_b,
+        __grid_constant__ const cute::TmaDescriptor tensor_map_sfa,
+        __grid_constant__ const cute::TmaDescriptor tensor_map_sfb,
+        __grid_constant__ const cute::TmaDescriptor tensor_map_residual,
+        __grid_constant__ const cute::TmaDescriptor tensor_map_cd) {
   linear_fp8_sm100_task_impl<kMajorA,
                              kMajorB,
                              kGranKA,

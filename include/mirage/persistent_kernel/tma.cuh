@@ -280,7 +280,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_LINEAR_HOPPER:
     case TASK_LINEAR_WITH_RESIDUAL_HOPPER: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -391,7 +391,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr int B = 3, M = 3, S = 3;
       constexpr int TMA_CP_ASYNC_SIZE = 64;
       constexpr int KV_TILE_SIZE = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
 
       auto &qkv =
           task_desc.inputs[0]; // [max_tokens, (num_q + 2*num_kv)*head_dim]
@@ -426,7 +426,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                                             ? num_q_heads
                                                             : num_kv_heads),
                                   static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
-        const size_t smem_repeat_col = static_cast<size_t>(
+        size_t const smem_repeat_col = static_cast<size_t>(
             (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
         fill_tma_desc<T, B, M, S, 3>(tma_desc,
                                      tensor_desc.base_ptr,
@@ -453,7 +453,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                   static_cast<uint32_t>(KV_TILE_SIZE),
                                   1u,
                                   static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
-        const size_t smem_repeat_col = static_cast<size_t>(
+        size_t const smem_repeat_col = static_cast<size_t>(
             (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
 
         fill_tma_desc<T, B, M, S, 4>(tma_desc,
@@ -476,7 +476,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint32_t smem_shape[3] = {static_cast<uint32_t>(max_tokens),
                                   static_cast<uint32_t>(num_q_heads),
                                   static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
-        const size_t smem_repeat_col = static_cast<size_t>(
+        size_t const smem_repeat_col = static_cast<size_t>(
             (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
         fill_tma_desc<T, B, M, S, 3>(tma_desc,
                                      tensor_desc.base_ptr,
@@ -494,7 +494,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_LINEAR_SWAPAB_HOPPER:
     case TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -587,7 +587,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_SPLITK_LINEAR_SWAPAB_HOPPER: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -660,7 +660,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_LINEAR_CUTLASS_HOPPER:
     case TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -713,7 +713,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_LINEAR_SM100:
     case TASK_LINEAR_WITH_RESIDUAL_SM100: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -1208,7 +1208,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_SPLITK_LINEAR_SM100: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -1284,7 +1284,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_MOE_W13_LINEAR_SM100:
     case TASK_MOE_W2_LINEAR_SM100: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -1322,7 +1322,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // FP8 E4M3 weight TMA (param_id == 2 is the weight tensor)
       // bK=128 tiles, MMA_M=128 rows per tile; FP8 = 1 byte per element.
       constexpr int FP8_BK = 128;
-      const size_t smem_repeat_row_fp8 = 1;
+      size_t const smem_repeat_row_fp8 = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;
@@ -1359,7 +1359,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_MOE_W13_LINEAR_SM90:
     case TASK_MOE_W2_LINEAR_SM90: {
       int const cp_async_size = 64;
-      const size_t smem_repeat_row = 1;
+      size_t const smem_repeat_row = 1;
       constexpr int B = 3;
       constexpr int M = 3;
       constexpr int S = 3;

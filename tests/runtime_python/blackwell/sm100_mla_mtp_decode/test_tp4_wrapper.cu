@@ -29,8 +29,8 @@ static constexpr int WRAPPER_THREADS = MIRAGE_MLA_TP4_WRAPPER_THREADS;
 // ===== Thin __global__ shims forwarding blockIdx to __device__ functions =====
 template <bool SINGLE_TILE>
 __global__ __launch_bounds__(WRAPPER_THREADS) void shim_main(
-    const __grid_constant__ CUtensorMap Q_tm,
-    const __grid_constant__ CUtensorMap KV_tm,
+    __grid_constant__ const CUtensorMap Q_tm,
+    __grid_constant__ const CUtensorMap KV_tm,
     nv_bfloat16 *Oa,
     float *La,
     float ss,

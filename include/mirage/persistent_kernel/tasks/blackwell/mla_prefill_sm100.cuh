@@ -94,7 +94,7 @@ __device__ __forceinline__ void ldmatrix_x4_trans(uint32_t reg[4], int addr) {
 }
 
 __device__ __forceinline__ void
-    mma_m16n8k16_bf16(const uint32_t A[4], const uint32_t B[2], float C[4]) {
+    mma_m16n8k16_bf16(uint32_t const A[4], uint32_t const B[2], float C[4]) {
   asm volatile(
       "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
       "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
@@ -102,8 +102,8 @@ __device__ __forceinline__ void
       : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]));
 }
 
-__device__ __forceinline__ void mma_m16n8k16_bf16_init(const uint32_t A[4],
-                                                       const uint32_t B[2],
+__device__ __forceinline__ void mma_m16n8k16_bf16_init(uint32_t const A[4],
+                                                       uint32_t const B[2],
                                                        float C[4]) {
   asm volatile(
       "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
@@ -122,13 +122,13 @@ __device__ __forceinline__ void mma_m16n8k16_bf16_init(const uint32_t A[4],
 }
 
 __device__ __forceinline__ void
-    mma_m16n16k16_bf16(const uint32_t A[4], const uint32_t B[4], float C[8]) {
+    mma_m16n16k16_bf16(uint32_t const A[4], uint32_t const B[4], float C[8]) {
   mma_m16n8k16_bf16(A, &B[0], &C[0]);
   mma_m16n8k16_bf16(A, &B[2], &C[4]);
 }
 
-__device__ __forceinline__ void mma_m16n16k16_bf16_init(const uint32_t A[4],
-                                                        const uint32_t B[4],
+__device__ __forceinline__ void mma_m16n16k16_bf16_init(uint32_t const A[4],
+                                                        uint32_t const B[4],
                                                         float C[8]) {
   mma_m16n8k16_bf16_init(A, &B[0], &C[0]);
   mma_m16n8k16_bf16_init(A, &B[2], &C[4]);
@@ -364,7 +364,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int col = i % (PF_D_CKV / 8);
         int kv_idx = kv_base + row;
         int addr = ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
-        const bf16 *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
+        bf16 const *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
         cp_async_128b(addr, ptr);
       }
       for (int i = tid; i < KPE_LOADS; i += PF_NUM_THREADS) {
@@ -373,7 +373,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int kv_idx = kv_base + row;
         int addr =
             kpe_smem(stage) + mla_prefill::swizzle<STRIDE_KPE_B>(row, col);
-        const bf16 *ptr =
+        bf16 const *ptr =
             KPE + (long long)kv_idx * mla_prefill::PF_D_KPE + col * 8;
         cp_async_128b(addr, ptr);
       }
@@ -383,7 +383,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int col = i % (PF_D_CKV / 8);
         int kv_idx = kv_base + row;
         int addr = ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
-        const bf16 *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
+        bf16 const *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
         cp_async_128b_pred(addr, ptr, kv_idx < S);
       }
       for (int i = tid; i < KPE_LOADS; i += PF_NUM_THREADS) {
@@ -392,7 +392,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int kv_idx = kv_base + row;
         int addr =
             kpe_smem(stage) + mla_prefill::swizzle<STRIDE_KPE_B>(row, col);
-        const bf16 *ptr =
+        bf16 const *ptr =
             KPE + (long long)kv_idx * mla_prefill::PF_D_KPE + col * 8;
         cp_async_128b_pred(addr, ptr, kv_idx < S);
       }

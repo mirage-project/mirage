@@ -93,7 +93,7 @@ __device__ __forceinline__ void ldm4t(uint32_t r[4], int a) {
       : "r"(a));
 }
 __device__ __forceinline__ void
-    hmma(const uint32_t A[4], const uint32_t B[2], float C[4]) {
+    hmma(uint32_t const A[4], uint32_t const B[2], float C[4]) {
   asm volatile(
       "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
       "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};\n"
@@ -101,7 +101,7 @@ __device__ __forceinline__ void
       : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]));
 }
 __device__ __forceinline__ void
-    hmma0(const uint32_t A[4], const uint32_t B[2], float C[4]) {
+    hmma0(uint32_t const A[4], uint32_t const B[2], float C[4]) {
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
                "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
                : "=f"(C[0]), "=f"(C[1]), "=f"(C[2]), "=f"(C[3])
@@ -117,12 +117,12 @@ __device__ __forceinline__ void
                  "f"(0.f));
 }
 __device__ __forceinline__ void
-    hmma16(const uint32_t A[4], const uint32_t B[4], float C[8]) {
+    hmma16(uint32_t const A[4], uint32_t const B[4], float C[8]) {
   hmma(A, &B[0], &C[0]);
   hmma(A, &B[2], &C[4]);
 }
 __device__ __forceinline__ void
-    hmma16_0(const uint32_t A[4], const uint32_t B[4], float C[8]) {
+    hmma16_0(uint32_t const A[4], uint32_t const B[4], float C[8]) {
   hmma0(A, &B[0], &C[0]);
   hmma0(A, &B[2], &C[4]);
 }

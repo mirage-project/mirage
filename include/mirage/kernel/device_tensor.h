@@ -142,7 +142,7 @@ struct alignas(16) DTensor {
     return data_size();
   }
 
-  static const DTensor EMPTY_TENSOR;
+  static DTensor const EMPTY_TENSOR;
 
   // hash related functions
   size_t get_owner_independent_hash() const;
