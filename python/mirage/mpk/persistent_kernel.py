@@ -3800,6 +3800,7 @@ class PersistentKernel:
         dependent_tensor: DTensor = None,
         noop: bool = False,
         gate_decode_q_len: bool = False,
+        extra_dep_input: DTensor = None,
     ):
         # When ``noop`` is True we still register the task graph node (so
         # downstream task-graph constraints — case-3 fork+join — are
@@ -3812,6 +3813,16 @@ class PersistentKernel:
         # chunked-prefill phantom bridge — chunked_prefill itself has a
         # Q_LEN > 8 gate, so the output buffer is never read on decode
         # iters and the copy is wasted ~16 μs.
+        # When ``extra_dep_input`` is non-None, this becomes the
+        # "identity_2in" variant: the kernel still copies ``input`` →
+        # ``output`` and never reads the extra tensor, but AnnotatedGraph
+        # records an additional producer→consumer edge from the writer of
+        # ``extra_dep_input`` to this task. Use this to insert a fake-dep
+        # edge that defers a downstream task behind an unrelated producer
+        # (e.g. defer shared_expert gate_up behind routed-MoE W13 in the
+        # MPK_DSV3_DEFER_SHARED_EXPERT decode lever). The extra dep handle
+        # may be any DTensor; its layout/shape are irrelevant since the
+        # kernel never dereferences it.
         # TODO: Add support from kn_graph
         last_dim = 0
         assert input.num_dims == output.num_dims
@@ -3821,10 +3832,20 @@ class PersistentKernel:
         assert last_dim == 1 or last_dim == 2
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (last_dim, -1, -1), 1, True)
+        if extra_dep_input is not None:
+            # Use the same dim_map as the real input — the value is only
+            # consulted for the producer→consumer edge construction in
+            # annotated_graph; the runtime never reads through this slot.
+            tb_graph.new_input(extra_dep_input, (last_dim, -1, -1), 1, True)
         tb_graph.new_input(output, (last_dim, -1, -1), 1, True)
-        self.kn_graph.customized([input, output], tb_graph)
-        params = [1 if noop else 0, 1 if gate_decode_q_len else 0]
-        self.kn_graph.register_task(tb_graph, "identity", params)
+        if extra_dep_input is not None:
+            self.kn_graph.customized([input, extra_dep_input, output], tb_graph)
+            params = [1 if noop else 0, 1 if gate_decode_q_len else 0]
+            self.kn_graph.register_task(tb_graph, "identity_2in", params)
+        else:
+            self.kn_graph.customized([input, output], tb_graph)
+            params = [1 if noop else 0, 1 if gate_decode_q_len else 0]
+            self.kn_graph.register_task(tb_graph, "identity", params)
 
     def elementwise_add_layer(
         self,
