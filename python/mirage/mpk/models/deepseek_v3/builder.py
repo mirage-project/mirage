@@ -354,6 +354,16 @@ class DeepSeekV3Builder(GraphBuilder):
         self._fused_post_attn_rmsnorm_quantize = (
             os.environ.get("MPK_DSV3_FUSED_POST_ATTN_RMSNORM_QUANTIZE",
                            "0") == "1")
+        # 2026-05-28: fuse the INNER q_a_layernorm + downstream q_b_GEMM
+        # input-quantize into one task. The depgraph chain shows a
+        # +1.4μs gap before q_a RMSnorm + 1.6μs gap before its QUANTIZE_FP8
+        # + 5.2μs gap before q_b GEMM = ~8μs of stacked dispatch/wave-spread
+        # latency. Fusion collapses 2 hops + their gap into 1 fused task.
+        # Default OFF; flip via MPK_DSV3_FUSED_Q_A_QUANTIZE=1. Same pattern
+        # as B37 qkv_a fusion (case-3 safe via per-layer-unique FP8/scale
+        # buffers). Estimated saving 2-3μs/layer.
+        self._fused_q_a_quantize = (
+            os.environ.get("MPK_DSV3_FUSED_Q_A_QUANTIZE", "0") == "1")
         # C18 (2026-05-17): fuse NEW MoE moe_silu_mul + quantize_fp8 into
         # one task. Eliminates BF16 silu_out HBM round-trip + one task
         # launch. Default OFF; flip via MPK_DSV3_FUSED_SILU_QUANTIZE=1.
@@ -1076,6 +1086,96 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         return tag
 
+    def _fused_q_a_quantize_tag(self, layer_idx: int) -> str:
+        """Deterministic tag for the q_a-layernorm + q_b-input-quantize
+        fusion. Pre-populated in `_fp8_quantize_emitted` so downstream
+        q_b `_fp8_linear` calls (BMM=1 and dual-dispatch prefill variants)
+        skip their internal quantize and read the FP8/scale the fused
+        task already wrote.
+        """
+        return f"layer_{layer_idx}_q_a_fused_quantize"
+
+    def _emit_fused_q_a_rmsnorm_quantize(self,
+                                          input_x: 'DTensor',
+                                          w_norm: 'DTensor',
+                                          layer_idx: int,
+                                          reduction_size: int,
+                                          in_offset_elems: int,
+                                          out_offset_elems: int) -> tuple:
+        """2026-05-28: fused q_a_layernorm + per-token-group FP8 quantize.
+
+        Analogous to `_emit_fused_rmsnorm_qkv_a_quantize` (B37) but for the
+        INNER q_a layernorm (after qkv_a GEMM, before q_b GEMMs). Reduces
+        the chain hop count by collapsing the 2-task chain (rmsnorm_layer
+        + q_b's internal quantize_fp8) into 1 fused task. Saves ~2-3μs/
+        layer on the decode critical-path chain (the +1.4 + +1.6 + part
+        of the +5.2μs gaps the analyzer flagged before q_b_GEMM).
+
+        Returns `(input_fp8, input_scale, tag)` — the caller threads
+        input_fp8/scale to q_b `_fp8_linear(..., input_fp8_override=...,
+        input_scale_override=...)` calls. The tag is also pre-populated
+        in `_fp8_quantize_emitted` so a `share_quantize_tag=tag` arg makes
+        downstream callers skip their quantize emission.
+
+        Buffer ownership (case-3 fix, B37 pattern):
+          The fused task takes its FP8/scale outputs as `store_in_dmem`
+          inputs in the task graph. Per-layer-unique buffers prevent the
+          fused task from being a cross-layer join-consumer.
+
+        emit_bf16=False: nothing downstream reads the rmsnormed BF16 q_a
+        as BF16. The q_b GEMM reads the FP8 (via the share_quantize_tag
+        + input_fp8_override threading); no other consumer of q_a_out's
+        q_a slice exists (verified by grep at builder.py audit time).
+        Skipping emit_bf16 saves an HBM round-trip too.
+
+        scale_ue8m0=False (float32): matches the new dense GEMM family's
+        expected scale layout (`_fp8_mbt_buffers_for_reduction_f32scale`).
+        """
+        mbt = self.max_num_batched_tokens
+        group_size = 128
+        num_groups = (reduction_size + group_size - 1) // group_size
+        if not hasattr(self, "_fused_q_a_bufs"):
+            self._fused_q_a_bufs = {}
+        if layer_idx not in self._fused_q_a_bufs:
+            input_fp8 = self.mpk.new_tensor(
+                dims=(mbt, reduction_size), dtype=float8_e4m3,
+                name=f"fused_q_a_fp8_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            input_scale = self.mpk.new_tensor(
+                dims=(mbt, num_groups), dtype=float32,
+                name=f"fused_q_a_scale_layer_{layer_idx}",
+                io_category="cuda_tensor",
+            )
+            self._fused_q_a_bufs[layer_idx] = (input_fp8, input_scale)
+        input_fp8, input_scale = self._fused_q_a_bufs[layer_idx]
+        # Pre-populate the emitted-set so _fp8_linear_v2 will skip the
+        # internal quantize call that would otherwise overwrite the
+        # fused-task output bytes with redundant work.
+        already = getattr(self, "_fp8_quantize_emitted", set())
+        tag = self._fused_q_a_quantize_tag(layer_idx)
+        already.add(tag)
+        self._fp8_quantize_emitted = already
+
+        # output_bf16: required argument but emit_bf16=False means the
+        # kernel never writes to it (we still need to pass a valid tensor;
+        # the input itself satisfies the dim assertions).
+        self.mpk.fused_rmsnorm_quantize_fp8_layer(
+            input=input_x,
+            weight=w_norm,
+            output_bf16=input_x,   # placeholder; emit_bf16=False skips write
+            output_fp8=input_fp8,
+            output_scale=input_scale,
+            grid_dim=_rmsnorm_grid(mbt),
+            block_dim=(128, 1, 1),
+            process_dim=reduction_size,
+            in_offset_elems=in_offset_elems,
+            out_offset_elems=out_offset_elems,
+            scale_ue8m0=False,
+            emit_bf16=False,
+        )
+        return input_fp8, input_scale, tag
+
     def _qkva_splitk_active(self) -> bool:
         """True when builder-side qkv_a split-K is env-enabled (MPK_DSV3_QKVA_SPLITK
         >= 2). The actual per-layer guard also checks K divisibility at the call
@@ -1163,7 +1263,9 @@ class DeepSeekV3Builder(GraphBuilder):
         return rmsnorm_out_bf16, moe_input_fp8, moe_input_scale
 
     def _bmm_decode_q_path(self, state_dict, attn, layer_idx, qb_slice_kwargs,
-                           qb_share_tag=None):
+                           qb_share_tag=None,
+                           qb_input_fp8_ovr=None,
+                           qb_input_scale_ovr=None):
         """MPK_DSV3_BMM=1: replaces the absorbed q_b_proj decode GEMM with a
         per-head BMM chain that loads the unabsorbed weights at runtime:
 
@@ -1236,6 +1338,8 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             gate_mode=2 if self._use_prefill else 0,
             share_quantize_tag=qb_share_tag,
+            input_fp8_override=qb_input_fp8_ovr,
+            input_scale_override=qb_input_scale_ovr,
             **qb_slice_kwargs)
         if self._fused_qb_quantize:
             # 2 fused) q_b_nope FP8 dense GEMM with epilogue UE8M0 quantize
@@ -1244,9 +1348,17 @@ class DeepSeekV3Builder(GraphBuilder):
             # the quantize). Replaces the (bf16 q_b_nope GEMM →
             # quantize_fp8) two-task chain with one task; saves ~9 μs/layer
             # on the BMM Q-up critical path.
+            # 2026-05-28: when MPK_DSV3_FUSED_Q_A_QUANTIZE=1, the q_a fused
+            # task wrote the FP8/scale into the per-layer buffers passed via
+            # qb_input_fp8_ovr / qb_input_scale_ovr. Use those instead of
+            # the cache (which is empty in fusion mode — q_b_pe call above
+            # also bypassed the cache via input_fp8_override).
             reduction_size = w_q_b_nope.dim(1)
-            input_fp8_buf, input_scale_buf = (
-                self._fp8_mbt_buffers_for_reduction_f32scale(reduction_size))
+            if qb_input_fp8_ovr is not None and qb_input_scale_ovr is not None:
+                input_fp8_buf, input_scale_buf = (qb_input_fp8_ovr, qb_input_scale_ovr)
+            else:
+                input_fp8_buf, input_scale_buf = (
+                    self._fp8_mbt_buffers_for_reduction_f32scale(reduction_size))
             gemm_fp8out_layer = (
                 self.mpk.fp8_gemm_dense_smallm_fp8out_layer
                 if self.mpk.max_seq_length <= 512
@@ -1271,6 +1383,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
                 gate_mode=2 if self._use_prefill else 0,
                 share_quantize_tag=qb_share_tag,
+                input_fp8_override=qb_input_fp8_ovr,
+                input_scale_override=qb_input_scale_ovr,
                 **qb_slice_kwargs)
             # 3) Quantize q_nope BF16 → FP8 + UE8M0 packed scale.
             # Each row's K=128, so packed_K=1. row_count = mbt * H rows.
@@ -2527,16 +2641,29 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # Step 2: q_a_layernorm (BF16 norm weight) — in-place RMSnorm of the
         # q_a slice [0:q_lora_rank) inside the fused qkv_a_out buffer.
+        # Optionally fuse into the downstream q_b input-quantize (saves
+        # ~2-3μs/layer on decode chain). Gated MPK_DSV3_FUSED_Q_A_QUANTIZE.
         w_q_a_ln = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}q_a_layernorm.weight"],
             name=f"layer_{layer_idx}_q_a_layernorm")
-        self.mpk.rmsnorm_layer(
-            input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
-            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
-            block_dim=(128, 1, 1),
-            process_dim=self.q_lora_rank,
-            in_offset_elems=self._qkv_a_q_offset,
-            out_offset_elems=self._qkv_a_q_offset)
+        q_a_fused_fp8_ovr = None
+        q_a_fused_scale_ovr = None
+        q_a_fused_tag = None
+        if self._fused_q_a_quantize:
+            q_a_fused_fp8_ovr, q_a_fused_scale_ovr, q_a_fused_tag = (
+                self._emit_fused_q_a_rmsnorm_quantize(
+                    input_x=self.q_a_out, w_norm=w_q_a_ln,
+                    layer_idx=layer_idx, reduction_size=self.q_lora_rank,
+                    in_offset_elems=self._qkv_a_q_offset,
+                    out_offset_elems=self._qkv_a_q_offset))
+        else:
+            self.mpk.rmsnorm_layer(
+                input=self.q_a_out, weight=w_q_a_ln, output=self.q_a_out,
+                grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+                block_dim=(128, 1, 1),
+                process_dim=self.q_lora_rank,
+                in_offset_elems=self._qkv_a_q_offset,
+                out_offset_elems=self._qkv_a_q_offset)
 
         # Step 3: q_b projections.
         # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
@@ -2553,16 +2680,28 @@ class DeepSeekV3Builder(GraphBuilder):
         # early-exiting on decode but still paying the dispatch cost).
         # Hoisted above the bmm branch so _dsv3_bmm path can still share
         # quantize with prefill q_b_nope/pe below (fixes UnboundLocalError).
+        # 2026-05-28: when MPK_DSV3_FUSED_Q_A_QUANTIZE=1 the q_a layernorm
+        # already emitted the FP8/scale into per-layer buffers via the
+        # fused task above; use that tag + thread the per-layer buffers as
+        # input_fp8_override / input_scale_override to all q_b GEMMs so
+        # they read from the per-layer buf (NOT the shared cache; case-3).
         qb_share_tag = (
-            f"layer_{layer_idx}_qb_q_a_shared"
-            if self._use_prefill else None)
+            q_a_fused_tag if q_a_fused_tag is not None
+            else (f"layer_{layer_idx}_qb_q_a_shared"
+                  if self._use_prefill else None))
+        # When fusion is off, these stay None and _fp8_linear falls back
+        # to the standard cache lookup keyed by reduction_size=1536.
+        qb_input_fp8_ovr = q_a_fused_fp8_ovr
+        qb_input_scale_ovr = q_a_fused_scale_ovr
         if self._dsv3_bmm:
             # MPK_DSV3_BMM=1: replace the load-time absorbed q_b_proj with
             # runtime BMM-based absorption. Five tasks instead of one
             # monolithic FP8 GEMM, but each task loads smaller per-head
             # weights → less TMA traffic, better overlap potential.
             self._bmm_decode_q_path(state_dict, attn, layer_idx, qb_slice_kwargs,
-                                    qb_share_tag=qb_share_tag)
+                                    qb_share_tag=qb_share_tag,
+                                    qb_input_fp8_ovr=qb_input_fp8_ovr,
+                                    qb_input_scale_ovr=qb_input_scale_ovr)
         else:
             # Existing absorbed-Q path (default).
             w_q_b, s_q_b = self._attach_fp8_weight(
@@ -2573,6 +2712,8 @@ class DeepSeekV3Builder(GraphBuilder):
                              block_dim=(128, 1, 1),
                              gate_mode=2 if self._use_prefill else 0,
                              share_quantize_tag=qb_share_tag,
+                             input_fp8_override=qb_input_fp8_ovr,
+                             input_scale_override=qb_input_scale_ovr,
                              **qb_slice_kwargs)
         if self._use_prefill:
             if self._qb_fused:
@@ -2590,6 +2731,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     block_dim=(128, 1, 1),
                     gate_mode=1,
                     share_quantize_tag=qb_share_tag,
+                    input_fp8_override=qb_input_fp8_ovr,
+                    input_scale_override=qb_input_scale_ovr,
                     **qb_slice_kwargs)
             else:
                 w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
@@ -2602,6 +2745,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     block_dim=(128, 1, 1),
                     gate_mode=1,
                     share_quantize_tag=qb_share_tag,
+                    input_fp8_override=qb_input_fp8_ovr,
+                    input_scale_override=qb_input_scale_ovr,
                     **qb_slice_kwargs)
                 w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
                     state_dict, f"{attn}q_b_pe.weight",
@@ -2613,6 +2758,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     block_dim=(128, 1, 1),
                     gate_mode=1,
                     share_quantize_tag=qb_share_tag,
+                    input_fp8_override=qb_input_fp8_ovr,
+                    input_scale_override=qb_input_scale_ovr,
                     **qb_slice_kwargs)  # 2026-05-13: was missing — see scratch/fp8_dense_smallm_n2176_bug.md
         # Step 4: kv_a (c_latent + k_pe) is produced by the fused qkv_a GEMM
         # above; no separate kv_a_proj_with_mqa GEMMs are emitted.
