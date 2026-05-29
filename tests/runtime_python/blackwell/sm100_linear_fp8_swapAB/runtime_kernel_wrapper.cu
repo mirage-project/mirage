@@ -3,8 +3,7 @@
 // Bypasses MPK's persistent-kernel runtime entirely and launches a single
 // CTA via __global__ wrapper. Used to debug the kernel body in isolation
 // with compute-sanitizer / cuda-gdb (build with SM100_LINEAR_FP8_MPK_DEBUG=1
-// to enable -G device debug info), and to benchmark the kernel directly
-// across DeepSeek V3 representative shapes via bench_linear_fp8_swapAB.py.
+// to enable -G device debug info).
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAStream.h>
@@ -252,9 +251,9 @@ size_t compute_smem_bytes() {
 // Per-shape launcher. Runs the kernel `repeat` times back-to-back on the
 // current CUDA stream, sharing one allocation of the device descriptor
 // memory across iterations. For repeat=1 this matches the original
-// per-call cost; bench_linear_fp8_swapAB.py uses repeat>1 to amortize the
-// cudaMalloc/cudaMemcpy/cudaLaunchKernelEx per-call overhead (~150-200µs)
-// so the timed signal is closer to actual kernel execution.
+// per-call cost; repeat>1 amortizes the cudaMalloc / cudaMemcpy /
+// cudaLaunchKernelEx per-call overhead (~150-200µs) so the timed signal
+// is closer to actual kernel execution.
 // =========================================================================
 template <int BATCH, int OUTPUT_SIZE, int K_>
 void launch_linear_fp8_swapAB(torch::Tensor &input_q,

@@ -2,9 +2,7 @@
 
 Runs ONE configuration (batch, N, K, grid_x, grid_y, accumulate) per
 invocation, prints PASS / FAIL on the last line, and exits non-zero on
-failure. Designed to be driven by ``run_matrix.py`` which spawns each
-config as a subprocess with a hard timeout — so deadlocks don't block the
-overall sweep.
+failure.
 
 Usage:
   CUDA_VISIBLE_DEVICES=<gpu> python test_splitk_linear_bf16_testmode.py \\
