@@ -11,6 +11,9 @@ concurrency:
 jobs:
   gpu-inference:
     runs-on: [self-hosted, gpu, b200]
+    defaults:
+      run:
+        shell: bash -l {0}
 
     env:
       CUBLAS_WORKSPACE_CONFIG: ":16:8"
