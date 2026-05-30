@@ -29,7 +29,7 @@ jobs:
         uses: conda-incubator/setup-miniconda@v3
         with:
           python-version: "3.11"
-          activate-environment: mirage-ci
+          activate-environment: mirage-ci-${{ github.run_id }}
           auto-activate-base: false
 
       - name: Install mirage
@@ -61,5 +61,6 @@ jobs:
       - name: Clean up workspace
         if: always()
         run: |
-          conda env remove -n mirage-ci -y
+          conda deactivate
+          conda env remove -n mirage-ci-${{ github.run_id }} -y
           rm -rf "${{ github.workspace }}"
