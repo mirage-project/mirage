@@ -10,13 +10,9 @@ concurrency:
 
 jobs:
   gpu-inference:
-    runs-on: [self-hosted, gpu, a100]
+    runs-on: [self-hosted, gpu, b200]
 
     env:
-      HF_HOME: /home/haojia/hf_cache
-      TRANSFORMERS_CACHE: /home/haojia/hf_cache
-      HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
-      CUDA_VISIBLE_DEVICES: "0"
       CUBLAS_WORKSPACE_CONFIG: ":16:8"
       PYTHONUNBUFFERED: "1"
 
@@ -26,30 +22,29 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup conda environment
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          python-version: "3.10"
+          python-version: "3.11"
+          activate-environment: mirage-ci
+          auto-activate-base: false
 
-      - name: Install Python deps
+      - name: Install mirage
         run: |
-          python -m pip install --upgrade pip
           pip install -e . -v
-          pip install pytest
 
-      - name: Warm up HF cache (optional)
+      - name: Set Envs
         run: |
-          mkdir -p "$HF_HOME"
-          echo "HF cache at $HF_HOME"
-
-      - name: Set MIRAGE_HOME
-        run: echo "MIRAGE_HOME=$PWD" >> $GITHUB_ENV
+          echo "MIRAGE_HOME=$PWD" >> $GITHUB_ENV
+          CUDA_VISIBLE_DEVICES=$(bash scripts/find_idle_gpus.sh --num-gpus 1)
+          echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >> $GITHUB_ENV
 
       - name: Run Qwen3 Torch vs MPK comparison
         env:
           MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
         run: |
-          bash tests/ci-tests/run_ci_tests_qwen3.sh
+          bash tests/ci-tests/run_ci_tests_qwen3.sh \
+            --model-path /raid/catalyst/models/Qwen3-8B
 
       - name: Upload artifacts on failure
         if: failure()
@@ -59,3 +54,9 @@ jobs:
           path: |
             outputs/
             logs/
+
+      - name: Clean up workspace
+        if: always()
+        run: |
+          conda env remove -n mirage-ci -y
+          rm -rf "${{ github.workspace }}"
