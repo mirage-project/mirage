@@ -1,6 +1,7 @@
 name: mpk-qwen-ci
 on:
   push:
+    branches: [mpk]
   pull_request:
   workflow_dispatch:
 

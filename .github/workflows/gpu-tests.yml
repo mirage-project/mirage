@@ -1,3 +1,6 @@
+# NOTE: This CI workflow is currently unavailable. The gpu-nvidia runner
+# (runs-on cloud service) is no longer functional as of April 2026.
+# Qwen3 CI has been migrated to ci-tests-qwen3.yml on a self-hosted B200 runner.
 name: "GPU Tests"
 on:
   push:
