@@ -63,4 +63,4 @@ jobs:
         run: |
           conda deactivate
           conda env remove -n mirage-ci-${{ github.run_id }} -y
-          rm -rf "${{ github.workspace }}"
+          rm -rf "${{ github.workspace }}/*"
