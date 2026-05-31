@@ -34,6 +34,7 @@ jobs:
         run: |
           conda activate mirage-ci-${{ github.run_id }}
           pip install -e . -v
+          pip install pytest
 
       - name: Set Envs
         run: |
