@@ -806,19 +806,19 @@ if __name__ == "__main__":
 
         end_idx = prev_pos + 1
         generated_ids = tokens[:, :end_idx]
+        tokens_generated = max(0, end_idx - prompt_len)
+        per_tok_ms = run_time / max(tokens_generated, 1)
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
         print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, cur_pos - prompt_len, run_time / (cur_pos - prompt_len)
+            "Prompt length {}, generate length {}, per-token latency {:.3f} ms".format(
+                prompt_len, tokens_generated, per_tok_ms
             )
         )
-        
+
         # -------- CI dumps outputs to json files ----------
         if save_path and rank == 0:
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
             slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
             token_ids = tokens[0, prompt_len:slice_end].tolist()
             out = {
@@ -849,8 +849,11 @@ if __name__ == "__main__":
         if total_num_requests > 1:
             print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
 
-        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
-              prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
+        tokens_generated = step.max().item() + 1 - prompt_lengths[0].item()
+        per_tok_ms = run_time / max(tokens_generated, 1)
+
+        print("Prompt length {}, generate length {}, per-token latency: {:.3f} ms".format(
+              prompt_lengths[0], tokens_generated, per_tok_ms
             )
         )
 
