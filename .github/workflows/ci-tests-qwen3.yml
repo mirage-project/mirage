@@ -27,11 +27,9 @@ jobs:
           submodules: recursive
 
       - name: Setup conda environment
-        uses: conda-incubator/setup-miniconda@v3
-        with:
-          python-version: "3.11"
-          activate-environment: mirage-ci-${{ github.run_id }}
-          auto-activate-base: false
+        run: |
+          conda create -n mirage-ci-${{ github.run_id }} python=3.11 -y
+          conda activate mirage-ci-${{ github.run_id }}
 
       - name: Install mirage
         run: |
