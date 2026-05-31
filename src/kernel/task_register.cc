@@ -2269,7 +2269,7 @@ int TaskRegister::register_mhc_linear_sm100_task(
 
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
-  constexpr int OUTPUT_SIZE = 128;  // OUT_PAD: weight padded rows / mixes col
+  constexpr int OUTPUT_SIZE = 128; // OUT_PAD: weight padded rows / mixes col
   // The TMA and matmul use BATCH_SIZE = the per-task bs slice. Since MPK
   // partitions tokens to CTAs, batch_size here is what one CTA processes.
   // For a single n_tile per task, BATCH_SIZE must equal MMA_N=16.
@@ -2288,28 +2288,46 @@ int TaskRegister::register_mhc_linear_sm100_task(
   // TMA_B (x_norm operand): [BATCH_SIZE, K] bf16
   code.e("using TMA_B = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
          "$, $, $, $, $, $, $, true>;",
-         B, M, S,
-         batch_size, reduction_size,
-         MMA_N, TMA_CP_ASYNC_SIZE,
-         reduction_size, 1, 1,
+         B,
+         M,
+         S,
+         batch_size,
+         reduction_size,
+         MMA_N,
+         TMA_CP_ASYNC_SIZE,
+         reduction_size,
+         1,
+         1,
          tma_cp_repeat_col,
          MMA_N * TMA_CP_ASYNC_SIZE);
   // TMA_A (weight operand): [OUTPUT_SIZE=128, K] bf16
   code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
          "$, $, $, $, $, $, $, true>;",
-         B, M, S,
-         OUTPUT_SIZE, reduction_size,
-         MMA_M, TMA_CP_ASYNC_SIZE,
-         reduction_size, 1, 1,
+         B,
+         M,
+         S,
+         OUTPUT_SIZE,
+         reduction_size,
+         MMA_M,
+         TMA_CP_ASYNC_SIZE,
+         reduction_size,
+         1,
+         1,
          tma_cp_repeat_col,
          MMA_M * TMA_CP_ASYNC_SIZE);
   // TMA_OUT: [BATCH_SIZE, OUTPUT_SIZE=128] bf16
   code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
          "$, $, $, $, $, $, $, true>;",
-         0, M, S,
-         batch_size, OUTPUT_SIZE,
-         MMA_N, MMA_M,
-         OUTPUT_SIZE, 1, 1,
+         0,
+         M,
+         S,
+         batch_size,
+         OUTPUT_SIZE,
+         MMA_N,
+         MMA_M,
+         OUTPUT_SIZE,
+         1,
+         1,
          /*output_atom_repeat_col=*/1,
          MMA_N * MMA_M);
   code.e("TMA_A tma_a(static_cast<CUtensorMap*>("
@@ -2318,17 +2336,21 @@ int TaskRegister::register_mhc_linear_sm100_task(
          "task_desc->input_tma_desc_ptrs[0][0]));");
   code.e("TMA_OUT tma_out(static_cast<CUtensorMap*>("
          "task_desc->output_tma_desc_ptrs[0][0]));");
-  code.e("kernel::mHC_linear_task_impl<cute::bfloat16_t, TMA_A, TMA_B, TMA_OUT,");
+  code.e(
+      "kernel::mHC_linear_task_impl<cute::bfloat16_t, TMA_A, TMA_B, TMA_OUT,");
   code.e("    /*MMA_M=*/$, /*MMA_N=*/$, /*BATCH_SIZE=*/$,",
-         MMA_M, MMA_N, batch_size);
+         MMA_M,
+         MMA_N,
+         batch_size);
   code.e("    /*OUTPUT_SIZE=*/$, /*REDUCTION_SIZE=*/$>(",
-         OUTPUT_SIZE, reduction_size);
+         OUTPUT_SIZE,
+         reduction_size);
   code.e("    tma_a, tma_b, tma_out, /*n_tile_override=*/0);");
   return register_task_variant(TASK_MHC_LINEAR_SM100, code.to_string());
 }
 
-int TaskRegister::register_mhc_tail_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_mhc_tail_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
   // mHC tail (K2 + K3 + K4 fused): runs per-CTA on TOKENS_PER_CTA tokens.
   //   mixes:    [TPC, MIX_STRIDE] bf16  (input 0; MIX_STRIDE = 128 padded)
   //   scale:    [3]               fp32  (input 1; broadcast)
@@ -2358,7 +2380,7 @@ int TaskRegister::register_mhc_tail_sm100_task(
     }
   }
 
-  constexpr int N = 4;  // tail kernel hardcoded to n=4
+  constexpr int N = 4; // tail kernel hardcoded to n=4
   // mixes [TPC, MIX_STRIDE]
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[0] == tokens_per_cta);
@@ -2378,16 +2400,17 @@ int TaskRegister::register_mhc_tail_sm100_task(
   code.e("extern __shared__ char mhc_tail_smem[];");
   code.e("kernel::mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl<");
   code.e("    bfloat16, /*N=*/$, /*C=*/$, /*TOKENS_PER_CTA=*/$,",
-         N, output_size, tokens_per_cta);
-  code.e("    /*BLOCK_THREADS=*/256, /*MIX_STRIDE=*/$>(",
-         mix_stride);
-  code.e("    task_desc->input_ptrs[0],");   // mixes
-  code.e("    task_desc->input_ptrs[1],");   // scale
-  code.e("    task_desc->input_ptrs[2],");   // base
-  code.e("    task_desc->input_ptrs[3],");   // x_orig
-  code.e("    task_desc->output_ptrs[0],");  // f_pre
-  code.e("    task_desc->output_ptrs[1],");  // h_post
-  code.e("    task_desc->output_ptrs[2],");  // comb
+         N,
+         output_size,
+         tokens_per_cta);
+  code.e("    /*BLOCK_THREADS=*/256, /*MIX_STRIDE=*/$>(", mix_stride);
+  code.e("    task_desc->input_ptrs[0],");  // mixes
+  code.e("    task_desc->input_ptrs[1],");  // scale
+  code.e("    task_desc->input_ptrs[2],");  // base
+  code.e("    task_desc->input_ptrs[3],");  // x_orig
+  code.e("    task_desc->output_ptrs[0],"); // f_pre
+  code.e("    task_desc->output_ptrs[1],"); // h_post
+  code.e("    task_desc->output_ptrs[2],"); // comb
   code.e("    /*sinkhorn_repeat=*/$,", sinkhorn_repeat);
   code.e("    /*sinkhorn_eps=*/$f,", sinkhorn_eps);
   code.e("    /*num_tokens=*/$,", tokens_per_cta);
@@ -2396,8 +2419,8 @@ int TaskRegister::register_mhc_tail_sm100_task(
   return register_task_variant(TASK_MHC_TAIL_SM100, code.to_string());
 }
 
-int TaskRegister::register_mhc_post_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_mhc_post_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
   // mHC_post: y = post*x + sum_t comb[k,t] * residual[t]
   //   residual: [bs, n, C] bf16
   //   x:        [bs, C]    bf16
@@ -2451,10 +2474,10 @@ int TaskRegister::register_mhc_post_sm100_task(
          output_size,
          num_topk,
          output_size);
-  code.e("    task_desc->input_ptrs[0],");  // residual
-  code.e("    task_desc->input_ptrs[1],");  // x
-  code.e("    task_desc->input_ptrs[2],");  // comb
-  code.e("    task_desc->input_ptrs[3],");  // post
+  code.e("    task_desc->input_ptrs[0],"); // residual
+  code.e("    task_desc->input_ptrs[1],"); // x
+  code.e("    task_desc->input_ptrs[2],"); // comb
+  code.e("    task_desc->input_ptrs[3],"); // post
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_MHC_POST_SM100, code.to_string());
 }

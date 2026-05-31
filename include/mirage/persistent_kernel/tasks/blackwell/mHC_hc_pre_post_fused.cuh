@@ -36,9 +36,12 @@
 
 namespace kernel {
 
-
-template <typename T_in, int N, int C, int TOKENS_PER_CTA = 32,
-          int BLOCK_THREADS = 256, int MIX_STRIDE = 0>
+template <typename T_in,
+          int N,
+          int C,
+          int TOKENS_PER_CTA = 32,
+          int BLOCK_THREADS = 256,
+          int MIX_STRIDE = 0>
 __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
     void const *mixes_ptr,
     void const *scale_ptr,
@@ -71,8 +74,7 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
   // Use 16-byte alignment for each block so float4 stores work.
   uintptr_t base_ptr_addr = reinterpret_cast<uintptr_t>(dyn_smem);
   base_ptr_addr = (base_ptr_addr + 15u) & ~uintptr_t(15);
-  float *h_pre_arr =
-      reinterpret_cast<float *>(base_ptr_addr);
+  float *h_pre_arr = reinterpret_cast<float *>(base_ptr_addr);
   float *h_post_arr = h_pre_arr + TOKENS_PER_CTA * N;
   float *h_res_arr = h_post_arr + TOKENS_PER_CTA * N;
   float *comb_arr = h_res_arr + TOKENS_PER_CTA * N * N;
@@ -108,15 +110,13 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
                             ? token_base_override
                             : (int)(blockIdx.x * TOKENS_PER_CTA);
   int const _tb_step = (token_base_override >= 0)
-                            ? num_tokens   // single-iteration in MPK mode
-                            : (int)(gridDim.x * TOKENS_PER_CTA);
-  for (int token_base = _tb_start;
-       token_base < num_tokens;
+                           ? num_tokens // single-iteration in MPK mode
+                           : (int)(gridDim.x * TOKENS_PER_CTA);
+  for (int token_base = _tb_start; token_base < num_tokens;
        token_base += _tb_step) {
-    int const tokens_this_iter =
-        TOKENS_PER_CTA < num_tokens - token_base
-            ? TOKENS_PER_CTA
-            : num_tokens - token_base;
+    int const tokens_this_iter = TOKENS_PER_CTA < num_tokens - token_base
+                                     ? TOKENS_PER_CTA
+                                     : num_tokens - token_base;
 
     // ---- Stage K2 ----
     int const total_k2 = tokens_this_iter * MIX_HC;
@@ -129,11 +129,17 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
       float alpha;
       int region, local;
       if (j < N) {
-        alpha = alpha_pre; region = 0; local = j;
+        alpha = alpha_pre;
+        region = 0;
+        local = j;
       } else if (j < 2 * N) {
-        alpha = alpha_post; region = 1; local = j - N;
+        alpha = alpha_post;
+        region = 1;
+        local = j - N;
       } else {
-        alpha = alpha_res; region = 2; local = j - 2 * N;
+        alpha = alpha_res;
+        region = 2;
+        local = j - 2 * N;
       }
       float const y = mix * alpha + bias;
       if (region == 0) {
@@ -149,8 +155,7 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
     // h_post coalesced gmem flush.
     {
       int const total_h_post = tokens_this_iter * N;
-      for (int idx = threadIdx.x; idx < total_h_post;
-           idx += BLOCK_THREADS) {
+      for (int idx = threadIdx.x; idx < total_h_post; idx += BLOCK_THREADS) {
         int const t = idx / N;
         int const j = idx % N;
         h_post_out_g[(token_base + t) * N + j] = h_post(t, j);
@@ -161,11 +166,11 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
     int const k3_token = warp * 32 + lane;
     if (warp < SINKHORN_WARPS && k3_token < tokens_this_iter) {
       int const t = k3_token;
-      float m00 = h_res(t, 0),  m01 = h_res(t, 1);
-      float m02 = h_res(t, 2),  m03 = h_res(t, 3);
-      float m10 = h_res(t, 4),  m11 = h_res(t, 5);
-      float m12 = h_res(t, 6),  m13 = h_res(t, 7);
-      float m20 = h_res(t, 8),  m21 = h_res(t, 9);
+      float m00 = h_res(t, 0), m01 = h_res(t, 1);
+      float m02 = h_res(t, 2), m03 = h_res(t, 3);
+      float m10 = h_res(t, 4), m11 = h_res(t, 5);
+      float m12 = h_res(t, 6), m13 = h_res(t, 7);
+      float m20 = h_res(t, 8), m21 = h_res(t, 9);
       float m22 = h_res(t, 10), m23 = h_res(t, 11);
       float m30 = h_res(t, 12), m31 = h_res(t, 13);
       float m32 = h_res(t, 14), m33 = h_res(t, 15);
@@ -174,14 +179,22 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
       float const rmax1 = fmaxf(fmaxf(m10, m11), fmaxf(m12, m13));
       float const rmax2 = fmaxf(fmaxf(m20, m21), fmaxf(m22, m23));
       float const rmax3 = fmaxf(fmaxf(m30, m31), fmaxf(m32, m33));
-      m00 = __expf(m00 - rmax0); m01 = __expf(m01 - rmax0);
-      m02 = __expf(m02 - rmax0); m03 = __expf(m03 - rmax0);
-      m10 = __expf(m10 - rmax1); m11 = __expf(m11 - rmax1);
-      m12 = __expf(m12 - rmax1); m13 = __expf(m13 - rmax1);
-      m20 = __expf(m20 - rmax2); m21 = __expf(m21 - rmax2);
-      m22 = __expf(m22 - rmax2); m23 = __expf(m23 - rmax2);
-      m30 = __expf(m30 - rmax3); m31 = __expf(m31 - rmax3);
-      m32 = __expf(m32 - rmax3); m33 = __expf(m33 - rmax3);
+      m00 = __expf(m00 - rmax0);
+      m01 = __expf(m01 - rmax0);
+      m02 = __expf(m02 - rmax0);
+      m03 = __expf(m03 - rmax0);
+      m10 = __expf(m10 - rmax1);
+      m11 = __expf(m11 - rmax1);
+      m12 = __expf(m12 - rmax1);
+      m13 = __expf(m13 - rmax1);
+      m20 = __expf(m20 - rmax2);
+      m21 = __expf(m21 - rmax2);
+      m22 = __expf(m22 - rmax2);
+      m23 = __expf(m23 - rmax2);
+      m30 = __expf(m30 - rmax3);
+      m31 = __expf(m31 - rmax3);
+      m32 = __expf(m32 - rmax3);
+      m33 = __expf(m33 - rmax3);
 
       float const rs0 = m00 + m01 + m02 + m03;
       float const rs1 = m10 + m11 + m12 + m13;
@@ -191,14 +204,22 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
       float const ri1 = __frcp_rn(rs1);
       float const ri2 = __frcp_rn(rs2);
       float const ri3 = __frcp_rn(rs3);
-      m00 = m00 * ri0 + sinkhorn_eps; m01 = m01 * ri0 + sinkhorn_eps;
-      m02 = m02 * ri0 + sinkhorn_eps; m03 = m03 * ri0 + sinkhorn_eps;
-      m10 = m10 * ri1 + sinkhorn_eps; m11 = m11 * ri1 + sinkhorn_eps;
-      m12 = m12 * ri1 + sinkhorn_eps; m13 = m13 * ri1 + sinkhorn_eps;
-      m20 = m20 * ri2 + sinkhorn_eps; m21 = m21 * ri2 + sinkhorn_eps;
-      m22 = m22 * ri2 + sinkhorn_eps; m23 = m23 * ri2 + sinkhorn_eps;
-      m30 = m30 * ri3 + sinkhorn_eps; m31 = m31 * ri3 + sinkhorn_eps;
-      m32 = m32 * ri3 + sinkhorn_eps; m33 = m33 * ri3 + sinkhorn_eps;
+      m00 = m00 * ri0 + sinkhorn_eps;
+      m01 = m01 * ri0 + sinkhorn_eps;
+      m02 = m02 * ri0 + sinkhorn_eps;
+      m03 = m03 * ri0 + sinkhorn_eps;
+      m10 = m10 * ri1 + sinkhorn_eps;
+      m11 = m11 * ri1 + sinkhorn_eps;
+      m12 = m12 * ri1 + sinkhorn_eps;
+      m13 = m13 * ri1 + sinkhorn_eps;
+      m20 = m20 * ri2 + sinkhorn_eps;
+      m21 = m21 * ri2 + sinkhorn_eps;
+      m22 = m22 * ri2 + sinkhorn_eps;
+      m23 = m23 * ri2 + sinkhorn_eps;
+      m30 = m30 * ri3 + sinkhorn_eps;
+      m31 = m31 * ri3 + sinkhorn_eps;
+      m32 = m32 * ri3 + sinkhorn_eps;
+      m33 = m33 * ri3 + sinkhorn_eps;
 
       int const steps = sinkhorn_repeat > 0 ? sinkhorn_repeat : 1;
 #pragma unroll 1
@@ -211,11 +232,25 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
         float const ci1 = __frcp_rn(cs1);
         float const ci2 = __frcp_rn(cs2);
         float const ci3 = __frcp_rn(cs3);
-        m00 *= ci0; m10 *= ci0; m20 *= ci0; m30 *= ci0;
-        m01 *= ci1; m11 *= ci1; m21 *= ci1; m31 *= ci1;
-        m02 *= ci2; m12 *= ci2; m22 *= ci2; m32 *= ci2;
-        m03 *= ci3; m13 *= ci3; m23 *= ci3; m33 *= ci3;
-        if (it == steps - 1) break;
+        m00 *= ci0;
+        m10 *= ci0;
+        m20 *= ci0;
+        m30 *= ci0;
+        m01 *= ci1;
+        m11 *= ci1;
+        m21 *= ci1;
+        m31 *= ci1;
+        m02 *= ci2;
+        m12 *= ci2;
+        m22 *= ci2;
+        m32 *= ci2;
+        m03 *= ci3;
+        m13 *= ci3;
+        m23 *= ci3;
+        m33 *= ci3;
+        if (it == steps - 1) {
+          break;
+        }
         float const rs0i = m00 + m01 + m02 + m03 + sinkhorn_eps;
         float const rs1i = m10 + m11 + m12 + m13 + sinkhorn_eps;
         float const rs2i = m20 + m21 + m22 + m23 + sinkhorn_eps;
@@ -224,17 +259,33 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
         float const ri1i = __frcp_rn(rs1i);
         float const ri2i = __frcp_rn(rs2i);
         float const ri3i = __frcp_rn(rs3i);
-        m00 *= ri0i; m01 *= ri0i; m02 *= ri0i; m03 *= ri0i;
-        m10 *= ri1i; m11 *= ri1i; m12 *= ri1i; m13 *= ri1i;
-        m20 *= ri2i; m21 *= ri2i; m22 *= ri2i; m23 *= ri2i;
-        m30 *= ri3i; m31 *= ri3i; m32 *= ri3i; m33 *= ri3i;
+        m00 *= ri0i;
+        m01 *= ri0i;
+        m02 *= ri0i;
+        m03 *= ri0i;
+        m10 *= ri1i;
+        m11 *= ri1i;
+        m12 *= ri1i;
+        m13 *= ri1i;
+        m20 *= ri2i;
+        m21 *= ri2i;
+        m22 *= ri2i;
+        m23 *= ri2i;
+        m30 *= ri3i;
+        m31 *= ri3i;
+        m32 *= ri3i;
+        m33 *= ri3i;
       }
 
       int const token = token_base + t;
-      *reinterpret_cast<float4 *>(&comb(t, 0))  = make_float4(m00, m01, m02, m03);
-      *reinterpret_cast<float4 *>(&comb(t, 4))  = make_float4(m10, m11, m12, m13);
-      *reinterpret_cast<float4 *>(&comb(t, 8))  = make_float4(m20, m21, m22, m23);
-      *reinterpret_cast<float4 *>(&comb(t, 12)) = make_float4(m30, m31, m32, m33);
+      *reinterpret_cast<float4 *>(&comb(t, 0)) =
+          make_float4(m00, m01, m02, m03);
+      *reinterpret_cast<float4 *>(&comb(t, 4)) =
+          make_float4(m10, m11, m12, m13);
+      *reinterpret_cast<float4 *>(&comb(t, 8)) =
+          make_float4(m20, m21, m22, m23);
+      *reinterpret_cast<float4 *>(&comb(t, 12)) =
+          make_float4(m30, m31, m32, m33);
       *reinterpret_cast<float4 *>(comb_out + token * N * N + 0) =
           make_float4(m00, m01, m02, m03);
       *reinterpret_cast<float4 *>(comb_out + token * N * N + 4) =
@@ -271,22 +322,26 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
       return linear_idx;
     };
 
-    auto issue_loads = [&](int li, uint4 &r0, uint4 &r1, uint4 &r2,
-                           uint4 &r3) {
+    auto issue_loads = [&](int li, uint4 &r0, uint4 &r1, uint4 &r2, uint4 &r3) {
       int const t = li / c_vec_count;
       int const v = li % c_vec_count;
       int const token = token_base + t;
       T_in const *x_t = x + token * N * C;
-      uint4 const *__restrict__ x_v0 = reinterpret_cast<uint4 const *>(x_t + 0 * C);
-      uint4 const *__restrict__ x_v1 = reinterpret_cast<uint4 const *>(x_t + 1 * C);
-      uint4 const *__restrict__ x_v2 = reinterpret_cast<uint4 const *>(x_t + 2 * C);
-      uint4 const *__restrict__ x_v3 = reinterpret_cast<uint4 const *>(x_t + 3 * C);
-      r0 = x_v0[v]; r1 = x_v1[v];
-      r2 = x_v2[v]; r3 = x_v3[v];
+      uint4 const *__restrict__ x_v0 =
+          reinterpret_cast<uint4 const *>(x_t + 0 * C);
+      uint4 const *__restrict__ x_v1 =
+          reinterpret_cast<uint4 const *>(x_t + 1 * C);
+      uint4 const *__restrict__ x_v2 =
+          reinterpret_cast<uint4 const *>(x_t + 2 * C);
+      uint4 const *__restrict__ x_v3 =
+          reinterpret_cast<uint4 const *>(x_t + 3 * C);
+      r0 = x_v0[v];
+      r1 = x_v1[v];
+      r2 = x_v2[v];
+      r3 = x_v3[v];
     };
 
-    auto compute_store = [&](int li, uint4 r0, uint4 r1, uint4 r2,
-                             uint4 r3) {
+    auto compute_store = [&](int li, uint4 r0, uint4 r1, uint4 r2, uint4 r3) {
       int const t = li / c_vec_count;
       int const v = li % c_vec_count;
       int const token = token_base + t;
@@ -333,8 +388,10 @@ __device__ __forceinline__ void mHC_hc_pre_tail_fused_v2_dyn_smem_task_impl(
           issue_loads(li_next, r0_next, r1_next, r2_next, r3_next);
         }
         compute_store(li, r0_cur, r1_cur, r2_cur, r3_cur);
-        r0_cur = r0_next; r1_cur = r1_next;
-        r2_cur = r2_next; r3_cur = r3_next;
+        r0_cur = r0_next;
+        r1_cur = r1_next;
+        r2_cur = r2_next;
+        r3_cur = r3_next;
       }
     }
     __syncthreads();

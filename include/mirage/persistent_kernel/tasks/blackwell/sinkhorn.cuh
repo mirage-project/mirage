@@ -31,12 +31,12 @@
 namespace kernel {
 
 template <int INPUT_TOKEN_STRIDE, int OUTPUT_TOKEN_STRIDE>
-__device__ __forceinline__ void sinkhorn_task_impl(
-    void const *__restrict__ comb_res_mix_ptr,
-    void *__restrict__ comb_res_mix_out_ptr,
-    int valid_tokens,
-    int repeat,
-    float eps) {
+__device__ __forceinline__ void
+    sinkhorn_task_impl(void const *__restrict__ comb_res_mix_ptr,
+                       void *__restrict__ comb_res_mix_out_ptr,
+                       int valid_tokens,
+                       int repeat,
+                       float eps) {
   float const *__restrict__ in = static_cast<float const *>(comb_res_mix_ptr);
   float *__restrict__ out = static_cast<float *>(comb_res_mix_out_ptr);
 
@@ -63,14 +63,22 @@ __device__ __forceinline__ void sinkhorn_task_impl(
     float const rmax2 = fmaxf(fmaxf(m20, m21), fmaxf(m22, m23));
     float const rmax3 = fmaxf(fmaxf(m30, m31), fmaxf(m32, m33));
 
-    m00 = __expf(m00 - rmax0); m01 = __expf(m01 - rmax0);
-    m02 = __expf(m02 - rmax0); m03 = __expf(m03 - rmax0);
-    m10 = __expf(m10 - rmax1); m11 = __expf(m11 - rmax1);
-    m12 = __expf(m12 - rmax1); m13 = __expf(m13 - rmax1);
-    m20 = __expf(m20 - rmax2); m21 = __expf(m21 - rmax2);
-    m22 = __expf(m22 - rmax2); m23 = __expf(m23 - rmax2);
-    m30 = __expf(m30 - rmax3); m31 = __expf(m31 - rmax3);
-    m32 = __expf(m32 - rmax3); m33 = __expf(m33 - rmax3);
+    m00 = __expf(m00 - rmax0);
+    m01 = __expf(m01 - rmax0);
+    m02 = __expf(m02 - rmax0);
+    m03 = __expf(m03 - rmax0);
+    m10 = __expf(m10 - rmax1);
+    m11 = __expf(m11 - rmax1);
+    m12 = __expf(m12 - rmax1);
+    m13 = __expf(m13 - rmax1);
+    m20 = __expf(m20 - rmax2);
+    m21 = __expf(m21 - rmax2);
+    m22 = __expf(m22 - rmax2);
+    m23 = __expf(m23 - rmax2);
+    m30 = __expf(m30 - rmax3);
+    m31 = __expf(m31 - rmax3);
+    m32 = __expf(m32 - rmax3);
+    m33 = __expf(m33 - rmax3);
 
     float const rs0 = m00 + m01 + m02 + m03;
     float const rs1 = m10 + m11 + m12 + m13;
@@ -80,14 +88,22 @@ __device__ __forceinline__ void sinkhorn_task_impl(
     float const ri1 = __frcp_rn(rs1);
     float const ri2 = __frcp_rn(rs2);
     float const ri3 = __frcp_rn(rs3);
-    m00 = m00 * ri0 + eps; m01 = m01 * ri0 + eps;
-    m02 = m02 * ri0 + eps; m03 = m03 * ri0 + eps;
-    m10 = m10 * ri1 + eps; m11 = m11 * ri1 + eps;
-    m12 = m12 * ri1 + eps; m13 = m13 * ri1 + eps;
-    m20 = m20 * ri2 + eps; m21 = m21 * ri2 + eps;
-    m22 = m22 * ri2 + eps; m23 = m23 * ri2 + eps;
-    m30 = m30 * ri3 + eps; m31 = m31 * ri3 + eps;
-    m32 = m32 * ri3 + eps; m33 = m33 * ri3 + eps;
+    m00 = m00 * ri0 + eps;
+    m01 = m01 * ri0 + eps;
+    m02 = m02 * ri0 + eps;
+    m03 = m03 * ri0 + eps;
+    m10 = m10 * ri1 + eps;
+    m11 = m11 * ri1 + eps;
+    m12 = m12 * ri1 + eps;
+    m13 = m13 * ri1 + eps;
+    m20 = m20 * ri2 + eps;
+    m21 = m21 * ri2 + eps;
+    m22 = m22 * ri2 + eps;
+    m23 = m23 * ri2 + eps;
+    m30 = m30 * ri3 + eps;
+    m31 = m31 * ri3 + eps;
+    m32 = m32 * ri3 + eps;
+    m33 = m33 * ri3 + eps;
 
     // Step 2: alternating col/row normalization, ending on col-norm.
     int const steps = repeat > 0 ? repeat : 1;
@@ -101,10 +117,22 @@ __device__ __forceinline__ void sinkhorn_task_impl(
       float const ci1 = __frcp_rn(cs1);
       float const ci2 = __frcp_rn(cs2);
       float const ci3 = __frcp_rn(cs3);
-      m00 *= ci0; m10 *= ci0; m20 *= ci0; m30 *= ci0;
-      m01 *= ci1; m11 *= ci1; m21 *= ci1; m31 *= ci1;
-      m02 *= ci2; m12 *= ci2; m22 *= ci2; m32 *= ci2;
-      m03 *= ci3; m13 *= ci3; m23 *= ci3; m33 *= ci3;
+      m00 *= ci0;
+      m10 *= ci0;
+      m20 *= ci0;
+      m30 *= ci0;
+      m01 *= ci1;
+      m11 *= ci1;
+      m21 *= ci1;
+      m31 *= ci1;
+      m02 *= ci2;
+      m12 *= ci2;
+      m22 *= ci2;
+      m32 *= ci2;
+      m03 *= ci3;
+      m13 *= ci3;
+      m23 *= ci3;
+      m33 *= ci3;
 
       if (it == steps - 1) {
         break;
@@ -118,16 +146,32 @@ __device__ __forceinline__ void sinkhorn_task_impl(
       float const ri1i = __frcp_rn(rs1i);
       float const ri2i = __frcp_rn(rs2i);
       float const ri3i = __frcp_rn(rs3i);
-      m00 *= ri0i; m01 *= ri0i; m02 *= ri0i; m03 *= ri0i;
-      m10 *= ri1i; m11 *= ri1i; m12 *= ri1i; m13 *= ri1i;
-      m20 *= ri2i; m21 *= ri2i; m22 *= ri2i; m23 *= ri2i;
-      m30 *= ri3i; m31 *= ri3i; m32 *= ri3i; m33 *= ri3i;
+      m00 *= ri0i;
+      m01 *= ri0i;
+      m02 *= ri0i;
+      m03 *= ri0i;
+      m10 *= ri1i;
+      m11 *= ri1i;
+      m12 *= ri1i;
+      m13 *= ri1i;
+      m20 *= ri2i;
+      m21 *= ri2i;
+      m22 *= ri2i;
+      m23 *= ri2i;
+      m30 *= ri3i;
+      m31 *= ri3i;
+      m32 *= ri3i;
+      m33 *= ri3i;
     }
 
-    reinterpret_cast<float4 *>(out + out_base)[0] = make_float4(m00, m01, m02, m03);
-    reinterpret_cast<float4 *>(out + out_base)[1] = make_float4(m10, m11, m12, m13);
-    reinterpret_cast<float4 *>(out + out_base)[2] = make_float4(m20, m21, m22, m23);
-    reinterpret_cast<float4 *>(out + out_base)[3] = make_float4(m30, m31, m32, m33);
+    reinterpret_cast<float4 *>(out + out_base)[0] =
+        make_float4(m00, m01, m02, m03);
+    reinterpret_cast<float4 *>(out + out_base)[1] =
+        make_float4(m10, m11, m12, m13);
+    reinterpret_cast<float4 *>(out + out_base)[2] =
+        make_float4(m20, m21, m22, m23);
+    reinterpret_cast<float4 *>(out + out_base)[3] =
+        make_float4(m30, m31, m32, m33);
   }
 }
 

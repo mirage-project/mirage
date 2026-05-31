@@ -36,10 +36,10 @@ template <typename T,
           int OUTPUT_STRIDE>
 __device__ __forceinline__ void
     mHC_mul_sum_add_with_outer_task_impl(void const *residual_ptr,
-                                           void const *x_ptr,
-                                           void const *comb_ptr,
-                                           void const *post_ptr,
-                                           void *output_ptr) {
+                                         void const *x_ptr,
+                                         void const *comb_ptr,
+                                         void const *post_ptr,
+                                         void *output_ptr) {
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T const *__restrict__ d_x = static_cast<T const *>(x_ptr);
   float const *__restrict__ d_comb = static_cast<float const *>(comb_ptr);

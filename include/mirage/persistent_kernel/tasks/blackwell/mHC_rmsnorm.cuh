@@ -24,11 +24,11 @@
 namespace kernel {
 
 template <typename T_in, typename T_out, int HIDDEN, int BLOCK_THREADS>
-__device__ __forceinline__ void mHC_rmsnorm_task_impl(void const *x_ptr,
-                                                      void       *y_ptr,
-                                                      float       eps) {
+__device__ __forceinline__ void
+    mHC_rmsnorm_task_impl(void const *x_ptr, void *y_ptr, float eps) {
   static_assert(BLOCK_THREADS % 32 == 0, "block size must be a multiple of 32");
-  static_assert(HIDDEN % BLOCK_THREADS == 0, "HIDDEN must be a multiple of BLOCK_THREADS");
+  static_assert(HIDDEN % BLOCK_THREADS == 0,
+                "HIDDEN must be a multiple of BLOCK_THREADS");
   constexpr int NUM_WARPS = BLOCK_THREADS / 32;
   static_assert(NUM_WARPS <= 32, "NUM_WARPS must fit in a single warp");
   // Each thread holds ELEMS_PER_THREAD inputs in registers across the two
