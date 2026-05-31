@@ -13,63 +13,27 @@
  * limitations under the License.
  */
 
-// Raw-CUDA rewrite of the small-batch (M<128) NVFP4 swapAB GEMM.
-//
-// Computes C[M,N] = X[M,K] (nvfp4) * W[N,K]^T (nvfp4) -> bf16, via the swapAB
-// trick: the MMA runs as C^T = W * X^T so weight rows (N) map to MMA_M=128 and
-// the small batch (M) maps to MMA_N. This mirrors the hand-written 1d2d 1SM
-// kernel (which is itself a swapAB kernel with a 128-wide batch tile) and
-// reuses its raw tcgen05 / TMA / mbarrier helpers verbatim. The only deltas vs
-// 1d2d are: 
-// (1) MMA_N is narrow (8/16/32/64/128), 
-// (2) the activation scale factors use the per-tile layout [ceil(M/mma_n), K/64, 32,4,4] indexed by the
-//     batch tile 
-// (3) the epilogue stages a [MMA_N, 128] (batch, output) tile in SMEM and TMA-stores it to the row-major [M, N] output.
+// Small-batch (M<128) NVFP4 swapAB GEMM. Runs the MMA as C^T = W * X^T so
+// weight rows (N) map to MMA_M=128 and the batch (M) maps to MMA_N. Versus
+// the 1d2d 1SM kernel: MMA_N is narrow (8/16/32/64/128), SFA uses the per-
+// tile layout indexed by batch tile, and the epilogue TMA-stores a (MMA_N,
+// 128) smem tile to row-major C[M,N].
 
 #pragma once
 
-#include "linear_nvfp4_1d2d_sm100.cuh"      // raw helpers: tcgen05_*, tma_*, mbarrier_*
-#include "linear_nvfp4_1d2d_2sm_sm100.cuh"  // init_C_tmap_2sm + tma_2d_smem2gmem store helpers
+#include "linear_fp4_primitives_sm100.cuh"  // templated PTX primitives shared
+                                              // across 1d2d 1SM / 2SM / swapAB
+#include "linear_nvfp4_1d2d_sm100.cuh"        // init_AB_tmap + 1d2d 1SM kernel
 
 namespace kernel {
 
-using nvfp4_1d2d_2sm_detail::tma_2d_smem2gmem;
-using nvfp4_1d2d_2sm_detail::tma_store_fence_2sm;
-using nvfp4_1d2d_2sm_detail::tma_store_arrive_2sm;
-using nvfp4_1d2d_2sm_detail::tma_store_wait_2sm;
-
 namespace nvfp4_swapAB_detail {
-
-using namespace nvfp4_1d2d_detail;  // WARP_SIZE, MMA_K, desc_encode, elect_sync,
-                                    // EVICT_*, mbarrier_*, tma_*, tcgen05_*
 
 __device__ __forceinline__ void swapab_arrive_local(int mbar_addr) {
   asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
                :
                : "r"(mbar_addr)
                : "memory");
-}
-
-// MMA variant with a parameterized accumulator TMEM column, so the kernel can
-// double-buffer two accumulators (the shared 1d2d helper hardcodes d_tmem=0).
-__device__ __forceinline__ void
-swapab_mma_nvfp4(int d_tmem, uint64_t a_desc, uint64_t b_desc, uint32_t i_desc,
-                 int scale_A_tmem, int scale_B_tmem, int enable_input_d) {
-  asm volatile(
-      "{\n\t"
-      ".reg .pred p;\n\t"
-      "setp.ne.b32 p, %6, 0;\n\t"
-      "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
-      "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
-      "}"
-      :
-      : "r"(d_tmem),
-        "l"(a_desc),
-        "l"(b_desc),
-        "r"(i_desc),
-        "r"(scale_A_tmem),
-        "r"(scale_B_tmem),
-        "r"(enable_input_d));
 }
 
 template <int MMA_N,
@@ -80,10 +44,10 @@ template <int MMA_N,
           bool NOBIAS>
 __global__ __launch_bounds__(128 + 3 * 32) void
 linear_nvfp4_swapAB_sm100_kernel(
-    const __grid_constant__ CUtensorMap A_tmap,   
-    const __grid_constant__ CUtensorMap B_tmap,   
-    const __grid_constant__ CUtensorMap C_tmap,   
-    const char *SFA_ptr,                          
+    const __grid_constant__ CUtensorMap A_tmap,
+    const __grid_constant__ CUtensorMap B_tmap,
+    const __grid_constant__ CUtensorMap C_tmap,
+    const char *SFA_ptr,
     const char *SFB_ptr,
     const type::bfloat16_t *bias_ptr,
     int M,
@@ -91,7 +55,8 @@ linear_nvfp4_swapAB_sm100_kernel(
   static_assert(BLOCK_K == 256, "BLOCK_K must be 256");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K must be divisible by MMA_K");
   static_assert(REDUCTION_SIZE % BLOCK_K == 0, "K must be divisible by BLOCK_K");
-  static_assert(MMA_N % 8 == 0 && MMA_N >= 8 && MMA_N <= 128, "MMA_N must be a multiple of 8 in [8,128] for the 1SM kernel");
+  static_assert(MMA_N % 8 == 0 && MMA_N >= 8 && MMA_N <= 128,
+                "MMA_N must be a multiple of 8 in [8,128]");
 
   constexpr int BLOCK_M = 128;
 
@@ -100,11 +65,11 @@ linear_nvfp4_swapAB_sm100_kernel(
   const int cta_idx = static_cast<int>(blockIdx.x);
   const int num_ctas = static_cast<int>(gridDim.x);
 
-  const int num_out_tiles = OUTPUT_SIZE / BLOCK_M;       
-  const int num_batch_tiles = (M + MMA_N - 1) / MMA_N;   
+  const int num_out_tiles = OUTPUT_SIZE / BLOCK_M;
+  const int num_batch_tiles = (M + MMA_N - 1) / MMA_N;
   const int num_tiles = num_out_tiles * num_batch_tiles;
 
-  constexpr int EPILOGUE_WARPS = BLOCK_M / WARP_SIZE;  
+  constexpr int EPILOGUE_WARPS = BLOCK_M / WARP_SIZE;
   constexpr int MMA_WARP = EPILOGUE_WARPS;
   constexpr int TMA_WARP = EPILOGUE_WARPS + 1;
   constexpr int INIT_WARP = EPILOGUE_WARPS + 2;
@@ -135,8 +100,8 @@ linear_nvfp4_swapAB_sm100_kernel(
   __shared__ int64_t mbars[NUM_STAGES * 2 + 2 * NUM_ACC_BUF];
   const int tma_mbar_addr = static_cast<int>(__cvta_generic_to_shared(mbars));
   const int mma_mbar_addr = tma_mbar_addr + NUM_STAGES * 8;
-  const int mainloop_mbar_addr = mma_mbar_addr + NUM_STAGES * 8;       // [NUM_ACC_BUF]
-  const int output_mbar_addr = mainloop_mbar_addr + NUM_ACC_BUF * 8;   // [NUM_ACC_BUF]
+  const int mainloop_mbar_addr = mma_mbar_addr + NUM_STAGES * 8;
+  const int output_mbar_addr = mainloop_mbar_addr + NUM_ACC_BUF * 8;
 
   if (warp_id == 0 && elect_sync()) {
     for (int i = 0; i < NUM_STAGES; i++) {
@@ -149,9 +114,9 @@ linear_nvfp4_swapAB_sm100_kernel(
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (warp_id == INIT_WARP) {
-    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
-                 :
-                 : "r"(smem), "r"(TMEM_ALLOC_COLS));
+    if constexpr (TMEM_ALLOC_COLS == 128) tmem_alloc<1, 128>(smem);
+    else if constexpr (TMEM_ALLOC_COLS == 256) tmem_alloc<1, 256>(smem);
+    else tmem_alloc<1, 512>(smem);
   }
   __syncthreads();
 
@@ -169,14 +134,13 @@ linear_nvfp4_swapAB_sm100_kernel(
     const int SBO = 8 * 128;
     return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
   };
-  
   auto make_desc_SF = [](int addr) -> uint64_t {
     const int SBO = 8 * 16;
     return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL);
   };
 
   if (warp_id == TMA_WARP && elect_sync()) {
-    // Weight (A) is the large operand here; keep it resident, evict activation.
+    // Weight (A) is large; keep resident. Activation (B) is small; evict.
     const uint64_t cache_A = EVICT_LAST;
     const uint64_t cache_B = EVICT_FIRST;
 
@@ -189,18 +153,15 @@ linear_nvfp4_swapAB_sm100_kernel(
       const int SFB_smem = SFA_smem + SFA_size;
 
       const int off_k = iter_k * BLOCK_K;
-      tma_3d_gmem2smem(A_smem, &A_tmap, 0, off_m, off_k / 256, ab_mbar, cache_A);
-      tma_3d_gmem2smem(B_smem, &B_tmap, 0, off_n, off_k / 256, ab_mbar, cache_B);
+      tma_load<3, 1>(A_smem, &A_tmap, 0, off_m, off_k / 256, ab_mbar, cache_A);
+      tma_load<3, 1>(B_smem, &B_tmap, 0, off_n, off_k / 256, ab_mbar, cache_B);
 
       const char *SFA_src = SFA_ptr + ((off_m / 128) * rest_k + off_k / 64) * 512;
       const char *SFB_src = SFB_ptr + (batch_tile * rest_k + off_k / 64) * 512;
-      tma_gmem2smem(SFA_smem, SFA_src, SFA_size, ab_mbar, cache_A);
-      tma_gmem2smem(SFB_smem, SFB_src, SFB_size, ab_mbar, cache_B);
+      tma_load_bulk(SFA_smem, SFA_src, SFA_size, ab_mbar, cache_A);
+      tma_load_bulk(SFB_smem, SFB_src, SFB_size, ab_mbar, cache_B);
 
-      asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
-                   :
-                   : "r"(ab_mbar), "r"(STAGE_SIZE)
-                   : "memory");
+      mbarrier_arrive_expect_tx_tile_local(ab_mbar, STAGE_SIZE);
     };
 
     for (int t = cta_idx, work_idx = 0; t < num_tiles; t += num_ctas, work_idx++) {
@@ -211,7 +172,7 @@ linear_nvfp4_swapAB_sm100_kernel(
         const int stage_id = pipeline_iter % NUM_STAGES;
         if (pipeline_iter >= NUM_STAGES) {
           const int mma_phase = ((pipeline_iter - NUM_STAGES) / NUM_STAGES) % 2;
-          mbarrier_wait(mma_mbar_addr + stage_id * 8, mma_phase);
+          mbarrier_wait_cta(mma_mbar_addr + stage_id * 8, mma_phase);
         }
         issue_tma(iter_k, stage_id, off_m, off_n, batch_tile);
       }
@@ -227,7 +188,7 @@ linear_nvfp4_swapAB_sm100_kernel(
 
       if (work_idx >= NUM_ACC_BUF) {
         const int buf_phase = ((work_idx - NUM_ACC_BUF) / NUM_ACC_BUF) % 2;
-        mbarrier_wait(output_mbar_addr + acc_buf * 8, buf_phase);
+        mbarrier_wait_cta(output_mbar_addr + acc_buf * 8, buf_phase);
       }
 
       for (int iter_k = 0; iter_k < num_iters; iter_k++) {
@@ -243,13 +204,13 @@ linear_nvfp4_swapAB_sm100_kernel(
         const uint64_t SFA_desc = make_desc_SF(SFA_smem);
         const uint64_t SFB_desc = make_desc_SF(SFB_smem);
 
-        mbarrier_wait(tma_mbar_addr + stage_id * 8, tma_phase);
+        mbarrier_wait_cta(tma_mbar_addr + stage_id * 8, tma_phase);
 
         for (int k = 0; k < BLOCK_K / MMA_K; k++) {
           uint64_t sfa_desc = SFA_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
           uint64_t sfb_desc = SFB_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
-          tcgen05_cp_nvfp4(SFA_tmem + stage_id * SF_STAGE_STRIDE + k * 4, sfa_desc);
-          tcgen05_cp_nvfp4(SFB_tmem + stage_id * SF_STAGE_STRIDE + k * 4, sfb_desc);
+          tcgen05_cp_fp4<1>(SFA_tmem + stage_id * SF_STAGE_STRIDE + k * 4, sfa_desc);
+          tcgen05_cp_fp4<1>(SFB_tmem + stage_id * SF_STAGE_STRIDE + k * 4, sfb_desc);
         }
 
         for (int k1 = 0; k1 < BLOCK_K / 256; k1++) {
@@ -260,21 +221,15 @@ linear_nvfp4_swapAB_sm100_kernel(
             const int scale_A_tmem = SFA_tmem + stage_id * SF_STAGE_STRIDE + k_sf * 4;
             const int scale_B_tmem = SFB_tmem + stage_id * SF_STAGE_STRIDE + k_sf * 4;
             const int enable_input_d = (k1 == 0 && k2 == 0) ? iter_k : 1;
-            swapab_mma_nvfp4(acc_base, a_desc, b_desc, i_desc, scale_A_tmem,
-                             scale_B_tmem, enable_input_d);
+            tcgen05_mma_nvfp4<1>(a_desc, b_desc, i_desc, scale_A_tmem,
+                                 scale_B_tmem, enable_input_d, acc_base);
           }
         }
 
-        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
-                     :
-                     : "r"(mma_mbar_addr + stage_id * 8)
-                     : "memory");
+        tcgen05_commit_arrive<1>(mma_mbar_addr + stage_id * 8);
       }
 
-      asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
-                   :
-                   : "r"(mainloop_mbar_addr + acc_buf * 8)
-                   : "memory");
+      tcgen05_commit_arrive<1>(mainloop_mbar_addr + acc_buf * 8);
     }
   }
   else if (warp_id < EPILOGUE_WARPS) {
@@ -294,7 +249,7 @@ linear_nvfp4_swapAB_sm100_kernel(
       type::bfloat16_t *out_smem = out_smem_base + acc_buf * OUT_TILE_ELEMS;
       const int out_smem_addr = out_smem_base_addr + acc_buf * OUT_TILE_BYTES;
 
-      mbarrier_wait(mainloop_mbar_addr + acc_buf * 8, buf_phase);
+      mbarrier_wait_cta(mainloop_mbar_addr + acc_buf * 8, buf_phase);
       asm volatile("tcgen05.fence::after_thread_sync;");
 
       float tmp[ACC_COLS];
@@ -319,12 +274,12 @@ linear_nvfp4_swapAB_sm100_kernel(
         out_smem[j * BLOCK_M + out_row] = acc_bf16;
       }
 
-      tma_store_fence_2sm();
+      tma_store_fence();
       asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
       if (warp_id == 0 && elect_sync()) {
-        tma_2d_smem2gmem(out_smem_addr, &C_tmap, off_m, off_n);
-        tma_store_arrive_2sm();
-        tma_store_wait_2sm<0>();
+        tma_store_2d(out_smem_addr, &C_tmap, off_m, off_n);
+        tma_store_commit();
+        tma_store_wait<0>();
       }
 
       asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
@@ -336,9 +291,9 @@ linear_nvfp4_swapAB_sm100_kernel(
 
   __syncthreads();
   if (warp_id == 0) {
-    asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
-                 :
-                 : "r"(0), "r"(TMEM_ALLOC_COLS));
+    if constexpr (TMEM_ALLOC_COLS == 128) tmem_dealloc<1, 128>(0);
+    else if constexpr (TMEM_ALLOC_COLS == 256) tmem_dealloc<1, 256>(0);
+    else tmem_dealloc<1, 512>(0);
   }
 }
 

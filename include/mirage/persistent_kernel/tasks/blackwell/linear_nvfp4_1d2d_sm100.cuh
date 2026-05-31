@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "common/bfloat16.h"
+#include "blackwell/linear_fp4_primitives_sm100.cuh"
 
 #include <c10/util/Exception.h>
 #include <cuda.h>
@@ -42,7 +43,7 @@ inline void check_cuda(cudaError_t err) {
   TORCH_CHECK(false, cudaGetErrorString(err));
 }
 
-inline void init_AB_tmap(CUtensorMap *tmap,
+inline void init_AB_tmap(CUtensorMap *tmap, 
                          const char *ptr,
                          uint64_t global_height,
                          uint64_t global_width,
@@ -71,468 +72,12 @@ inline void init_AB_tmap(CUtensorMap *tmap,
 }
 
 namespace kernel {
-namespace nvfp4_1d2d_detail {
 
-constexpr int WARP_SIZE = 32;
-constexpr int MMA_K = 64;
-constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ULL;
-constexpr uint64_t EVICT_LAST = 0x14F0000000000000ULL;
-
-__device__ __forceinline__ constexpr uint64_t desc_encode(uint64_t x) {
-  return (x & 0x3FFFFULL) >> 4ULL;
-}
-
-__device__ __forceinline__ uint32_t elect_sync() {
-  uint32_t pred = 0;
-  asm volatile(
-      "{\n\t"
-      ".reg .pred %%px;\n\t"
-      "elect.sync _|%%px, %1;\n\t"
-      "@%%px mov.s32 %0, 1;\n\t"
-      "}"
-      : "+r"(pred)
-      : "r"(0xFFFFFFFF));
-  return pred;
-}
-
-__device__ __forceinline__ void mbarrier_init(int mbar_addr, int count) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;"
-               :
-               : "r"(mbar_addr), "r"(count));
-}
-
-__device__ __forceinline__ void mbarrier_wait(int mbar_addr, int phase) {
-  uint32_t ticks = 0x989680;
-  asm volatile(
-      "{\n\t"
-      ".reg .pred P1;\n\t"
-      "LAB_WAIT:\n\t"
-      "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, %2;\n\t"
-      "@P1 bra.uni DONE;\n\t"
-      "bra.uni LAB_WAIT;\n\t"
-      "DONE:\n\t"
-      "}"
-      :
-      : "r"(mbar_addr), "r"(phase), "r"(ticks));
-}
-
-__device__ __forceinline__ void
-tma_gmem2smem(int dst, const void *src, int size, int mbar_addr, uint64_t cache_policy) {
-  asm volatile(
-      "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
-      "[%0], [%1], %2, [%3], %4;"
-      :
-      : "r"(dst), "l"(src), "r"(size), "r"(mbar_addr), "l"(cache_policy));
-}
-
-__device__ __forceinline__ void tma_3d_gmem2smem(int dst,
-                                                 const void *tmap_ptr,
-                                                 int x,
-                                                 int y,
-                                                 int z,
-                                                 int mbar_addr,
-                                                 uint64_t cache_policy) {
-  asm volatile(
-      "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes."
-      "cta_group::1.L2::cache_hint [%0], [%1, {%2, %3, %4}], [%5], %6;"
-      :
-      : "r"(dst),
-        "l"(tmap_ptr),
-        "r"(x),
-        "r"(y),
-        "r"(z),
-        "r"(mbar_addr),
-        "l"(cache_policy)
-      : "memory");
-}
-
-__device__ __forceinline__ void tcgen05_cp_nvfp4(int taddr, uint64_t s_desc) {
-  asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;" :: "r"(taddr), "l"(s_desc));
-}
-
-__device__ __forceinline__ void tcgen05_mma_nvfp4(uint64_t a_desc,
-                                                  uint64_t b_desc,
-                                                  uint32_t i_desc,
-                                                  int scale_A_tmem,
-                                                  int scale_B_tmem,
-                                                  int enable_input_d) {
-  const int d_tmem = 0;
-  asm volatile(
-      "{\n\t"
-      ".reg .pred p;\n\t"
-      "setp.ne.b32 p, %6, 0;\n\t"
-      "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
-      "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
-      "}"
-      :
-      : "r"(d_tmem),
-        "l"(a_desc),
-        "l"(b_desc),
-        "r"(i_desc),
-        "r"(scale_A_tmem),
-        "r"(scale_B_tmem),
-        "r"(enable_input_d));
-}
-
-struct SHAPE {
-  static constexpr char _32x32b[] = ".32x32b";
-  static constexpr char _16x128b[] = ".16x128b";
-  static constexpr char _16x256b[] = ".16x256b";
-};
-
-struct NUM {
-  static constexpr char x4[] = ".x4";
-  static constexpr char x8[] = ".x8";
-  static constexpr char x16[] = ".x16";
-  static constexpr char x32[] = ".x32";
-  static constexpr char x64[] = ".x64";
-  static constexpr char x128[] = ".x128";
-};
-
-template <const char *SHAPE_NAME, const char *NUM_NAME>
-__device__ __forceinline__ void tcgen05_ld_16regs(float *tmp, int row, int col) {
-  asm volatile(
-      "tcgen05.ld.sync.aligned%17%18.b32 "
-      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
-      "  %8,  %9, %10, %11, %12, %13, %14, %15}, [%16];"
-      : "=f"(tmp[0]),
-        "=f"(tmp[1]),
-        "=f"(tmp[2]),
-        "=f"(tmp[3]),
-        "=f"(tmp[4]),
-        "=f"(tmp[5]),
-        "=f"(tmp[6]),
-        "=f"(tmp[7]),
-        "=f"(tmp[8]),
-        "=f"(tmp[9]),
-        "=f"(tmp[10]),
-        "=f"(tmp[11]),
-        "=f"(tmp[12]),
-        "=f"(tmp[13]),
-        "=f"(tmp[14]),
-        "=f"(tmp[15])
-      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
-}
-
-template <const char *SHAPE_NAME, const char *NUM_NAME>
-__device__ __forceinline__ void tcgen05_ld_32regs(float *tmp, int row, int col) {
-  asm volatile(
-      "tcgen05.ld.sync.aligned%33%34.b32 "
-      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
-      "  %8,  %9, %10, %11, %12, %13, %14, %15, "
-      " %16, %17, %18, %19, %20, %21, %22, %23, "
-      " %24, %25, %26, %27, %28, %29, %30, %31}, [%32];"
-      : "=f"(tmp[0]),
-        "=f"(tmp[1]),
-        "=f"(tmp[2]),
-        "=f"(tmp[3]),
-        "=f"(tmp[4]),
-        "=f"(tmp[5]),
-        "=f"(tmp[6]),
-        "=f"(tmp[7]),
-        "=f"(tmp[8]),
-        "=f"(tmp[9]),
-        "=f"(tmp[10]),
-        "=f"(tmp[11]),
-        "=f"(tmp[12]),
-        "=f"(tmp[13]),
-        "=f"(tmp[14]),
-        "=f"(tmp[15]),
-        "=f"(tmp[16]),
-        "=f"(tmp[17]),
-        "=f"(tmp[18]),
-        "=f"(tmp[19]),
-        "=f"(tmp[20]),
-        "=f"(tmp[21]),
-        "=f"(tmp[22]),
-        "=f"(tmp[23]),
-        "=f"(tmp[24]),
-        "=f"(tmp[25]),
-        "=f"(tmp[26]),
-        "=f"(tmp[27]),
-        "=f"(tmp[28]),
-        "=f"(tmp[29]),
-        "=f"(tmp[30]),
-        "=f"(tmp[31])
-      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
-}
-
-template <const char *SHAPE_NAME, const char *NUM_NAME>
-__device__ __forceinline__ void tcgen05_ld_64regs(float *tmp, int row, int col) {
-  asm volatile(
-      "tcgen05.ld.sync.aligned%65%66.b32 "
-      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
-      "  %8,  %9, %10, %11, %12, %13, %14, %15, "
-      " %16, %17, %18, %19, %20, %21, %22, %23, "
-      " %24, %25, %26, %27, %28, %29, %30, %31, "
-      " %32, %33, %34, %35, %36, %37, %38, %39, "
-      " %40, %41, %42, %43, %44, %45, %46, %47, "
-      " %48, %49, %50, %51, %52, %53, %54, %55, "
-      " %56, %57, %58, %59, %60, %61, %62, %63}, [%64];"
-      : "=f"(tmp[0]),
-        "=f"(tmp[1]),
-        "=f"(tmp[2]),
-        "=f"(tmp[3]),
-        "=f"(tmp[4]),
-        "=f"(tmp[5]),
-        "=f"(tmp[6]),
-        "=f"(tmp[7]),
-        "=f"(tmp[8]),
-        "=f"(tmp[9]),
-        "=f"(tmp[10]),
-        "=f"(tmp[11]),
-        "=f"(tmp[12]),
-        "=f"(tmp[13]),
-        "=f"(tmp[14]),
-        "=f"(tmp[15]),
-        "=f"(tmp[16]),
-        "=f"(tmp[17]),
-        "=f"(tmp[18]),
-        "=f"(tmp[19]),
-        "=f"(tmp[20]),
-        "=f"(tmp[21]),
-        "=f"(tmp[22]),
-        "=f"(tmp[23]),
-        "=f"(tmp[24]),
-        "=f"(tmp[25]),
-        "=f"(tmp[26]),
-        "=f"(tmp[27]),
-        "=f"(tmp[28]),
-        "=f"(tmp[29]),
-        "=f"(tmp[30]),
-        "=f"(tmp[31]),
-        "=f"(tmp[32]),
-        "=f"(tmp[33]),
-        "=f"(tmp[34]),
-        "=f"(tmp[35]),
-        "=f"(tmp[36]),
-        "=f"(tmp[37]),
-        "=f"(tmp[38]),
-        "=f"(tmp[39]),
-        "=f"(tmp[40]),
-        "=f"(tmp[41]),
-        "=f"(tmp[42]),
-        "=f"(tmp[43]),
-        "=f"(tmp[44]),
-        "=f"(tmp[45]),
-        "=f"(tmp[46]),
-        "=f"(tmp[47]),
-        "=f"(tmp[48]),
-        "=f"(tmp[49]),
-        "=f"(tmp[50]),
-        "=f"(tmp[51]),
-        "=f"(tmp[52]),
-        "=f"(tmp[53]),
-        "=f"(tmp[54]),
-        "=f"(tmp[55]),
-        "=f"(tmp[56]),
-        "=f"(tmp[57]),
-        "=f"(tmp[58]),
-        "=f"(tmp[59]),
-        "=f"(tmp[60]),
-        "=f"(tmp[61]),
-        "=f"(tmp[62]),
-        "=f"(tmp[63])
-      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
-}
-
-template <const char *SHAPE_NAME, const char *NUM_NAME>
-__device__ __forceinline__ void tcgen05_ld_128regs(float *tmp, int row, int col) {
-  asm volatile(
-      "tcgen05.ld.sync.aligned%129%130.b32 "
-      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
-      "  %8,  %9, %10, %11, %12, %13, %14, %15, "
-      " %16, %17, %18, %19, %20, %21, %22, %23, "
-      " %24, %25, %26, %27, %28, %29, %30, %31, "
-      " %32, %33, %34, %35, %36, %37, %38, %39, "
-      " %40, %41, %42, %43, %44, %45, %46, %47, "
-      " %48, %49, %50, %51, %52, %53, %54, %55, "
-      " %56, %57, %58, %59, %60, %61, %62, %63, "
-      " %64, %65, %66, %67, %68, %69, %70, %71, "
-      " %72, %73, %74, %75, %76, %77, %78, %79, "
-      " %80, %81, %82, %83, %84, %85, %86, %87, "
-      " %88, %89, %90, %91, %92, %93, %94, %95, "
-      " %96, %97, %98, %99,%100,%101,%102,%103, "
-      "%104,%105,%106,%107,%108,%109,%110,%111, "
-      "%112,%113,%114,%115,%116,%117,%118,%119, "
-      "%120,%121,%122,%123,%124,%125,%126,%127}, [%128];"
-      : "=f"(tmp[0]),
-        "=f"(tmp[1]),
-        "=f"(tmp[2]),
-        "=f"(tmp[3]),
-        "=f"(tmp[4]),
-        "=f"(tmp[5]),
-        "=f"(tmp[6]),
-        "=f"(tmp[7]),
-        "=f"(tmp[8]),
-        "=f"(tmp[9]),
-        "=f"(tmp[10]),
-        "=f"(tmp[11]),
-        "=f"(tmp[12]),
-        "=f"(tmp[13]),
-        "=f"(tmp[14]),
-        "=f"(tmp[15]),
-        "=f"(tmp[16]),
-        "=f"(tmp[17]),
-        "=f"(tmp[18]),
-        "=f"(tmp[19]),
-        "=f"(tmp[20]),
-        "=f"(tmp[21]),
-        "=f"(tmp[22]),
-        "=f"(tmp[23]),
-        "=f"(tmp[24]),
-        "=f"(tmp[25]),
-        "=f"(tmp[26]),
-        "=f"(tmp[27]),
-        "=f"(tmp[28]),
-        "=f"(tmp[29]),
-        "=f"(tmp[30]),
-        "=f"(tmp[31]),
-        "=f"(tmp[32]),
-        "=f"(tmp[33]),
-        "=f"(tmp[34]),
-        "=f"(tmp[35]),
-        "=f"(tmp[36]),
-        "=f"(tmp[37]),
-        "=f"(tmp[38]),
-        "=f"(tmp[39]),
-        "=f"(tmp[40]),
-        "=f"(tmp[41]),
-        "=f"(tmp[42]),
-        "=f"(tmp[43]),
-        "=f"(tmp[44]),
-        "=f"(tmp[45]),
-        "=f"(tmp[46]),
-        "=f"(tmp[47]),
-        "=f"(tmp[48]),
-        "=f"(tmp[49]),
-        "=f"(tmp[50]),
-        "=f"(tmp[51]),
-        "=f"(tmp[52]),
-        "=f"(tmp[53]),
-        "=f"(tmp[54]),
-        "=f"(tmp[55]),
-        "=f"(tmp[56]),
-        "=f"(tmp[57]),
-        "=f"(tmp[58]),
-        "=f"(tmp[59]),
-        "=f"(tmp[60]),
-        "=f"(tmp[61]),
-        "=f"(tmp[62]),
-        "=f"(tmp[63]),
-        "=f"(tmp[64]),
-        "=f"(tmp[65]),
-        "=f"(tmp[66]),
-        "=f"(tmp[67]),
-        "=f"(tmp[68]),
-        "=f"(tmp[69]),
-        "=f"(tmp[70]),
-        "=f"(tmp[71]),
-        "=f"(tmp[72]),
-        "=f"(tmp[73]),
-        "=f"(tmp[74]),
-        "=f"(tmp[75]),
-        "=f"(tmp[76]),
-        "=f"(tmp[77]),
-        "=f"(tmp[78]),
-        "=f"(tmp[79]),
-        "=f"(tmp[80]),
-        "=f"(tmp[81]),
-        "=f"(tmp[82]),
-        "=f"(tmp[83]),
-        "=f"(tmp[84]),
-        "=f"(tmp[85]),
-        "=f"(tmp[86]),
-        "=f"(tmp[87]),
-        "=f"(tmp[88]),
-        "=f"(tmp[89]),
-        "=f"(tmp[90]),
-        "=f"(tmp[91]),
-        "=f"(tmp[92]),
-        "=f"(tmp[93]),
-        "=f"(tmp[94]),
-        "=f"(tmp[95]),
-        "=f"(tmp[96]),
-        "=f"(tmp[97]),
-        "=f"(tmp[98]),
-        "=f"(tmp[99]),
-        "=f"(tmp[100]),
-        "=f"(tmp[101]),
-        "=f"(tmp[102]),
-        "=f"(tmp[103]),
-        "=f"(tmp[104]),
-        "=f"(tmp[105]),
-        "=f"(tmp[106]),
-        "=f"(tmp[107]),
-        "=f"(tmp[108]),
-        "=f"(tmp[109]),
-        "=f"(tmp[110]),
-        "=f"(tmp[111]),
-        "=f"(tmp[112]),
-        "=f"(tmp[113]),
-        "=f"(tmp[114]),
-        "=f"(tmp[115]),
-        "=f"(tmp[116]),
-        "=f"(tmp[117]),
-        "=f"(tmp[118]),
-        "=f"(tmp[119]),
-        "=f"(tmp[120]),
-        "=f"(tmp[121]),
-        "=f"(tmp[122]),
-        "=f"(tmp[123]),
-        "=f"(tmp[124]),
-        "=f"(tmp[125]),
-        "=f"(tmp[126]),
-        "=f"(tmp[127])
-      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
-}
-
-__device__ __forceinline__ void tcgen05_ld_32x32bx32(float *tmp, int row, int col) {
-  tcgen05_ld_32regs<SHAPE::_32x32b, NUM::x32>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_32x32bx64(float *tmp, int row, int col) {
-  tcgen05_ld_64regs<SHAPE::_32x32b, NUM::x64>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_32x32bx128(float *tmp, int row, int col) {
-  tcgen05_ld_128regs<SHAPE::_32x32b, NUM::x128>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_16x128bx8(float *tmp, int row, int col) {
-  tcgen05_ld_16regs<SHAPE::_16x128b, NUM::x8>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_16x128bx16(float *tmp, int row, int col) {
-  tcgen05_ld_32regs<SHAPE::_16x128b, NUM::x16>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_16x128bx32(float *tmp, int row, int col) {
-  tcgen05_ld_64regs<SHAPE::_16x128b, NUM::x32>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_16x256bx4(float *tmp, int row, int col) {
-  tcgen05_ld_16regs<SHAPE::_16x256b, NUM::x4>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_16x256bx8(float *tmp, int row, int col) {
-  tcgen05_ld_32regs<SHAPE::_16x256b, NUM::x8>(tmp, row, col);
-}
-__device__ __forceinline__ void tcgen05_ld_16x256bx16(float *tmp, int row, int col) {
-  tcgen05_ld_64regs<SHAPE::_16x256b, NUM::x16>(tmp, row, col);
-}
-
-__device__ __forceinline__ void tcgen05_commit_arrive_cluster(int mbar_addr) {
-  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 "
-          "[%0];"
-          :
-          : "r"(mbar_addr)
-          : "memory");
-}
-
-}  // namespace nvfp4_1d2d_detail
-
-template <int BATCH_SIZE,
-          int OUTPUT_SIZE,
-          int REDUCTION_SIZE,
+template <int REDUCTION_SIZE,
           int BLOCK_M,
           int BLOCK_N,
           int BLOCK_K,
           int NUM_STAGES,
-          bool C_N_MAJOR,
           int EPI_BATCH_LA = 1>
 __global__ __launch_bounds__(BLOCK_M + 2 * 32) void
 linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
@@ -543,15 +88,12 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
                                const type::bfloat16_t *bias_ptr,
                                int M,
                                int N) {
-  using namespace nvfp4_1d2d_detail;
-
   static_assert(BLOCK_M == 128, "SM100 NVFP4 tcgen05 MMA uses BLOCK_M == 128");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K must be divisible by MMA_K");
   static_assert(REDUCTION_SIZE % BLOCK_K == 0, "K must be divisible by BLOCK_K");
   static_assert(BLOCK_N == 32 || BLOCK_N == 64 || BLOCK_N == 128, "BLOCK_N must be 32, 64, or 128");
 
   const int tid = threadIdx.x;
-  const int lane_id = tid % WARP_SIZE;
   const int warp_id = tid / WARP_SIZE;
 
   const int bid_m = blockIdx.x;
@@ -584,9 +126,7 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (warp_id == 1) {
-    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
-                 :
-                 : "r"(smem), "r"(BLOCK_N * 2));
+    tmem_alloc<1, BLOCK_N * 2>(smem);
   }
   __syncthreads();
 
@@ -613,18 +153,17 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
     const int SFB_smem = SFA_smem + SFA_size;
     const int off_k = iter_k * BLOCK_K;
 
-    tma_3d_gmem2smem(A_smem, &A_tmap, 0, off_m, off_k / 256, mbar_addr, cache_A);
-    tma_3d_gmem2smem(B_smem, &B_tmap, 0, off_n, off_k / 256, mbar_addr, cache_B);
+    tma_load<3, 1>(A_smem, &A_tmap, 0, off_m, off_k / 256, mbar_addr, cache_A);
+    tma_load<3, 1>(B_smem, &B_tmap, 0, off_n, off_k / 256, mbar_addr, cache_B);
 
     const int rest_k = REDUCTION_SIZE / 64;
     const char *SFA_src = SFA_ptr + ((off_m / 128) * rest_k + off_k / 64) * 512;
     const char *SFB_src = SFB_ptr + ((off_n / 128) * rest_k + off_k / 64) * 512;
 
-    tma_gmem2smem(SFA_smem, SFA_src, SFA_size, mbar_addr, cache_A);
-    tma_gmem2smem(SFB_smem, SFB_src, SFB_size, mbar_addr, cache_B);
+    tma_load_bulk(SFA_smem, SFA_src, SFA_size, mbar_addr, cache_A);
+    tma_load_bulk(SFB_smem, SFB_src, SFB_size, mbar_addr, cache_B);
 
-    asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
-                  :: "r"(mbar_addr), "r"(STAGE_SIZE) : "memory");
+    mbarrier_arrive_expect_tx_tile_local(mbar_addr, STAGE_SIZE);
   };
 
   if (warp_id == NUM_WARPS - 2 && elect_sync()) {
@@ -637,7 +176,7 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
     for (int iter_k = NUM_STAGES; iter_k < NUM_ITERS; iter_k++) {
       const int stage_id = iter_k % NUM_STAGES;
       const int mma_phase = (iter_k / NUM_STAGES - 1) % 2;
-      mbarrier_wait(mma_mbar_addr + stage_id * 8, mma_phase);
+      mbarrier_wait_cta(mma_mbar_addr + stage_id * 8, mma_phase);
       issue_tma(iter_k, stage_id);
     }
 
@@ -659,13 +198,13 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
       const uint64_t SFA_desc = SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
       const uint64_t SFB_desc = SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
 
-      mbarrier_wait(tma_mbar_addr + stage_id * 8, tma_phase);
+      mbarrier_wait_cta(tma_mbar_addr + stage_id * 8, tma_phase);
 
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
         uint64_t sfa_desc = SFA_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
         uint64_t sfb_desc = SFB_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
-        tcgen05_cp_nvfp4(SFA_tmem + k * 4, sfa_desc);
-        tcgen05_cp_nvfp4(SFB_tmem + k * 4, sfb_desc);
+        tcgen05_cp_fp4<1>(SFA_tmem + k * 4, sfa_desc);
+        tcgen05_cp_fp4<1>(SFB_tmem + k * 4, sfb_desc);
       }
 
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
@@ -678,13 +217,13 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
         const int scale_B_tmem = SFB_tmem + k * 4 + (bid_n % (128 / BLOCK_N)) * (BLOCK_N / 32);
         const int enable_input_d = (k == 0) ? iter_k : 1;
 
-        tcgen05_mma_nvfp4(a_desc, b_desc, i_desc, scale_A_tmem, scale_B_tmem, enable_input_d);
+        tcgen05_mma_nvfp4<1>(a_desc, b_desc, i_desc, scale_A_tmem, scale_B_tmem, enable_input_d);
       }
-      tcgen05_commit_arrive_cluster(mma_mbar_addr + stage_id * 8);
+      tcgen05_commit_arrive<1>(mma_mbar_addr + stage_id * 8);
     }
-    tcgen05_commit_arrive_cluster(mainloop_mbar_addr);
+    tcgen05_commit_arrive<1>(mainloop_mbar_addr);
   } else if (tid < BLOCK_M) {
-    mbarrier_wait(mainloop_mbar_addr, 0);
+    mbarrier_wait_cta(mainloop_mbar_addr, 0);
     asm volatile("tcgen05.fence::after_thread_sync;");
 
     auto epilogue_M_major = [&]() {
@@ -734,54 +273,11 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
       }
     };
 
-    auto epilogue_N_major = [&]() {
-      for (int m = 0; m < 32 / 16; m++) {
-        float tmp[BLOCK_N / 2];
-        if constexpr (BLOCK_N == 128) {
-          tcgen05_ld_16x256bx16(tmp, warp_id * 32 + m * 16, 0);
-        }
-        if constexpr (BLOCK_N == 64) {
-          tcgen05_ld_16x256bx8(tmp, warp_id * 32 + m * 16, 0);
-        }
-        if constexpr (BLOCK_N == 32) {
-          tcgen05_ld_16x256bx4(tmp, warp_id * 32 + m * 16, 0);
-        }
-        asm volatile("tcgen05.wait::ld.sync.aligned;");
-
-        for (int i = 0; i < BLOCK_N / 8; i++) {
-          const int row = off_m + warp_id * 32 + m * 16 + lane_id / 4;
-          const int col = off_n + i * 8 + (lane_id % 4) * 2;
-          const int off0 = (row + 0) * N + col;
-          const int off1 = (row + 8) * N + col;
-
-          type::bfloat16_t a00(tmp[i * 4 + 0]), a01(tmp[i * 4 + 1]);
-          type::bfloat16_t a10(tmp[i * 4 + 2]), a11(tmp[i * 4 + 3]);
-          if (bias_ptr != nullptr) {
-            C_ptr[off0 + 0] = type::bfloat16_t(float(a00) + float(bias_ptr[off0 + 0]));
-            C_ptr[off0 + 1] = type::bfloat16_t(float(a01) + float(bias_ptr[off0 + 1]));
-            C_ptr[off1 + 0] = type::bfloat16_t(float(a10) + float(bias_ptr[off1 + 0]));
-            C_ptr[off1 + 1] = type::bfloat16_t(float(a11) + float(bias_ptr[off1 + 1]));
-          } else {
-            C_ptr[off0 + 0] = a00;
-            C_ptr[off0 + 1] = a01;
-            C_ptr[off1 + 0] = a10;
-            C_ptr[off1 + 1] = a11;
-          }
-        }
-      }
-    };
-
-    if constexpr (C_N_MAJOR) {
-      epilogue_N_major();
-    } else {
-      epilogue_M_major();
-    }
+    epilogue_M_major();
 
     asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
     if (warp_id == 0) {
-      asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
-                   :
-                   : "r"(0), "r"(BLOCK_N * 2));
+      tmem_dealloc<1, BLOCK_N * 2>(0);
     }
   }
 }

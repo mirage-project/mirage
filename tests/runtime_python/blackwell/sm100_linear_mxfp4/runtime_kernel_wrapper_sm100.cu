@@ -296,7 +296,37 @@ void launch_linear_mxfp4_1d2d_2sm_sm100(void *input_ptr, void *input_sf_ptr,
                                         void *weight_ptr, void *weight_sf_ptr,
                                         void *output_ptr, void *residual_ptr,
                                         int batch_size, int output_size,
-                                        int reduction_size) {
+                                        int reduction_size,
+                                        int config_id = 0) {
+  // SG-ablation path (cfg = 100 + SG). Wired for K=16384 only; the production
+  // default (cfg=0) uses SG=4 across all K (empirical from the stages-sweep
+  // study and mirrored from NVFP4).
+  if (config_id >= 101 && config_id <= 164 && reduction_size == 16384) {
+    auto launch_sg = [&](auto SgTag) -> bool {
+      constexpr int SG = decltype(SgTag)::value;
+      if (config_id - 100 != SG) return false;
+      launch_linear_mxfp4_1d2d_2sm_sm100_config<16384, 128, 256, 256, 5, SG, 64, 2, false, 1, true>(
+          input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
+          batch_size, output_size);
+      return true;
+    };
+    bool dispatched =
+        launch_sg(std::integral_constant<int, 1>{})
+        || launch_sg(std::integral_constant<int, 2>{})
+        || launch_sg(std::integral_constant<int, 4>{})
+        || launch_sg(std::integral_constant<int, 8>{})
+        || launch_sg(std::integral_constant<int, 14>{})
+        || launch_sg(std::integral_constant<int, 16>{})
+        || launch_sg(std::integral_constant<int, 24>{})
+        || launch_sg(std::integral_constant<int, 32>{})
+        || launch_sg(std::integral_constant<int, 48>{})
+        || launch_sg(std::integral_constant<int, 64>{});
+    TORCH_CHECK(dispatched,
+                "linear_mxfp4_1d2d_2sm_sm100: SG ablation supports SG ∈ "
+                "{1,2,4,8,14,16,24,32,48,64}; got ", config_id - 100);
+    return;
+  }
+
   switch (reduction_size) {
     case 256:   return launch_linear_mxfp4_1d2d_2sm_sm100_config<256,   128, 256, 256, 4, 4, 64, 2, false, 1, true>(
         input_ptr, input_sf_ptr, weight_ptr, weight_sf_ptr, output_ptr, residual_ptr,
@@ -338,15 +368,19 @@ void launch_linear_mxfp4(torch::Tensor const& input,
                          c10::optional<at::Tensor> const& residual,
                          torch::Tensor const& output,
                          int batch_size, int output_size, int reduction_size,
-                         bool use_2sm) {
+                         bool use_2sm,
+                         int config_id = 0) {
   void *res_ptr = residual.has_value() ? residual->data_ptr() : nullptr;
   if (use_2sm) {
     launch_linear_mxfp4_1d2d_2sm_sm100(
         input.data_ptr(), input_sf.data_ptr(),
         weight.data_ptr(), weight_sf.data_ptr(),
         output.data_ptr(), res_ptr,
-        batch_size, output_size, reduction_size);
+        batch_size, output_size, reduction_size, config_id);
   } else {
+    // 1SM has no SG ablation (no persistent loop / supergroup mapping).
+    TORCH_CHECK(config_id == 0,
+                "MXFP4 1SM does not support config_id != 0; got ", config_id);
     launch_linear_mxfp4_1d2d_sm100(
         input.data_ptr(), input_sf.data_ptr(),
         weight.data_ptr(), weight_sf.data_ptr(),
@@ -360,14 +394,16 @@ torch::Tensor linear_mxfp4_sm100_no_quantization_kernel(torch::Tensor input,
                                                        torch::Tensor weight,
                                                        torch::Tensor weight_sf,
                                                        c10::optional<at::Tensor> residual,
-                                                       bool use_2sm) {
+                                                       bool use_2sm,
+                                                       int64_t config_id = 0) {
   const int batch_size    = static_cast<int>(input.size(0));
   const int output_size   = static_cast<int>(weight.size(0));
   const int reduction_size = static_cast<int>(weight.size(1)) * 2; // packed e2m1
   auto output = torch::empty({batch_size, output_size},
                              input.options().dtype(torch::kBFloat16));
   launch_linear_mxfp4(input, input_sf, weight, weight_sf, residual, output,
-                      batch_size, output_size, reduction_size, use_2sm);
+                      batch_size, output_size, reduction_size, use_2sm,
+                      static_cast<int>(config_id));
   return output;
 }
 
@@ -396,7 +432,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("input"), pybind11::arg("input_sf"),
         pybind11::arg("weight"), pybind11::arg("weight_sf"),
         pybind11::arg("residual") = c10::optional<at::Tensor>(),
-        pybind11::arg("use_2sm") = false);
+        pybind11::arg("use_2sm") = false,
+        pybind11::arg("config_id") = 0);
   m.def("linear_mxfp4_sm100", &linear_mxfp4_sm100_kernel,
         "MXFP4 linear; quantizes the input on-the-fly",
         pybind11::arg("input"), pybind11::arg("weight"),
