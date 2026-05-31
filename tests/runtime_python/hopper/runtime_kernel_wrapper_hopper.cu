@@ -38,10 +38,10 @@ template <typename T,
           typename TMA_OUT,
           int Kstages = 4>
 __global__ __launch_bounds__(256, 1) void linear_kernel_swapAB_hopper_wrapper(
-    const __grid_constant__ TMA_A tma_a,
-    const __grid_constant__ TMA_B tma_b,
-    const __grid_constant__ TMA_RESIDUAL tma_residual,
-    const __grid_constant__ TMA_OUT tma_out) {
+    __grid_constant__ const TMA_A tma_a,
+    __grid_constant__ const TMA_B tma_b,
+    __grid_constant__ const TMA_RESIDUAL tma_residual,
+    __grid_constant__ const TMA_OUT tma_out) {
 
   linear_swapAB_kernel_hopper<T,
                               BATCH_SIZE,
@@ -63,9 +63,9 @@ template <typename T,
           int Kstages = 4>
 __global__
     __launch_bounds__(256, 1) void linear_kernel_swapAB_no_residual_hopper_wrapper(
-        const __grid_constant__ TMA_A tma_a,
-        const __grid_constant__ TMA_B tma_b,
-        const __grid_constant__ TMA_OUT tma_out) {
+        __grid_constant__ const TMA_A tma_a,
+        __grid_constant__ const TMA_B tma_b,
+        __grid_constant__ const TMA_OUT tma_out) {
 
   linear_swapAB_kernel_hopper<T,
                               BATCH_SIZE,

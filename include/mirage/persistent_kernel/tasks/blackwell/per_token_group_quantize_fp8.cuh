@@ -109,7 +109,7 @@ __device__ __forceinline__ void
       float group_max = group_reduce_max<WARP_SIZE>(local_max);
       group_max = fmaxf(group_max, 1e-10f);
       y_scale = group_max / max_8bit;
-      const uint8_t scale_quant =
+      uint8_t const scale_quant =
           __shfl_sync(0xffffffff, encode_ue8m0(y_scale), 0, WARP_SIZE);
       y_scale = exp2f(static_cast<float>(scale_quant) - 127.0f);
       if (lane_idx == 0) {
@@ -149,7 +149,7 @@ __device__ __forceinline__ void
 #pragma unroll
       for (int pack_idx = 0; pack_idx < SCALE_ALIGNMENT; ++pack_idx) {
         int const group_idx = packed_idx * SCALE_ALIGNMENT + pack_idx;
-        const uint8_t encoded =
+        uint8_t const encoded =
             group_idx < NUM_GROUPS_PER_ROW ? packed_scale_bytes[group_idx] : 0;
         packed_scale |= static_cast<uint32_t>(encoded) << (pack_idx * 8);
       }

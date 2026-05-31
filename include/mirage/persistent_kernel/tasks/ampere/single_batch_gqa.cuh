@@ -60,10 +60,10 @@ __device__ __forceinline__ void
   int cp_finished_seq_len = curr_iter_len;
   int last_seq_len = curr_iter_len;
 
-  const __restrict__ T *d_q = static_cast<T const *>(qkv_ptr);
-  const __restrict__ T *d_k =
+  __restrict__ T const *d_q = static_cast<T const *>(qkv_ptr);
+  __restrict__ T const *d_k =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * NUM_Q_HEADS;
-  const __restrict__ T *d_v =
+  __restrict__ T const *d_v =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * (NUM_Q_HEADS + NUM_K_HEADS);
   T __restrict__ *d_k_cache = static_cast<T *>(k_cache_ptr);
   T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);

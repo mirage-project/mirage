@@ -466,9 +466,9 @@ struct Sm100FmhaMlaReductionKernel {
     auto blk_coord = make_coord(blockIdx.x, _0{}, blockIdx.z);
 
     __shared__ ElementAcc sLseScale[kMaxSplits];
-    const size_t offset_lseaccum =
+    size_t const offset_lseaccum =
         get<0>(blk_coord) + kNumHeads * params.split_kv * get<2>(blk_coord);
-    const size_t offset_lse = get<0>(blk_coord) + kNumHeads * get<2>(blk_coord);
+    size_t const offset_lse = get<0>(blk_coord) + kNumHeads * get<2>(blk_coord);
 
     Tensor gLSEaccum =
         make_tensor(make_gmem_ptr(params.ptr_lseaccum + offset_lseaccum),
@@ -546,7 +546,7 @@ struct Sm100FmhaMlaReductionKernel {
     __syncthreads();
 
     constexpr int Elements = kHeadDimLatent / MaxThreadsPerBlock;
-    const size_t offset_oaccum =
+    size_t const offset_oaccum =
         kHeadDimLatent * params.split_kv *
         (get<0>(blk_coord) + kNumHeads * get<2>(blk_coord));
     Tensor gOaccum =

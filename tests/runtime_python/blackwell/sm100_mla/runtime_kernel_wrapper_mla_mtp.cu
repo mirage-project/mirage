@@ -14,8 +14,8 @@ using namespace kernel::mla_mtp;
 // Thin wrappers forwarding blockIdx to device function params
 template <bool SINGLE_TILE>
 __global__ __launch_bounds__(TB) void mla_mtp_decode_wrapper(
-    const __grid_constant__ CUtensorMap Q_tm,
-    const __grid_constant__ CUtensorMap KV_tm,
+    __grid_constant__ const CUtensorMap Q_tm,
+    __grid_constant__ const CUtensorMap KV_tm,
     nv_bfloat16 *__restrict__ Oa,
     float *__restrict__ La,
     float ss,
