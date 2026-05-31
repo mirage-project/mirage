@@ -29,7 +29,6 @@ jobs:
       - name: Setup conda environment
         run: |
           conda create -n mirage-ci-${{ github.run_id }} python=3.11 -y
-          conda activate mirage-ci-${{ github.run_id }}
 
       - name: Install mirage
         run: |
@@ -45,6 +44,7 @@ jobs:
         env:
           MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
         run: |
+          conda activate mirage-ci-${{ github.run_id }}
           bash tests/ci-tests/run_ci_tests_qwen3.sh \
             --model-path /raid/catalyst/models/Qwen3-8B
 
@@ -60,6 +60,5 @@ jobs:
       - name: Clean up workspace
         if: always()
         run: |
-          conda deactivate
           conda env remove -n mirage-ci-${{ github.run_id }} -y
           rm -rf "${{ github.workspace }}/*"
