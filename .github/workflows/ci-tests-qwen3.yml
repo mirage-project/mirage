@@ -32,6 +32,7 @@ jobs:
 
       - name: Install mirage
         run: |
+          conda activate mirage-ci-${{ github.run_id }}
           pip install -e . -v
 
       - name: Set Envs
