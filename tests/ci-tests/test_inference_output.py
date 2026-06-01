@@ -40,26 +40,3 @@ def test_qwen3_torch_vs_mpk_tokens():
             f"torch_generate_len={torch_meta.get('generate_length')}, "
             f"mpk_generate_len={mpk_meta.get('generate_length')}"
         )
-
-
-def test_qwen3_perf_comparison():
-    """Print Torch vs MPK latency comparison (informational, never fails)."""
-    _, torch_meta = _load_tokens(TORCH_OUTPUT)
-    _, mpk_meta = _load_tokens(MPK_OUTPUT)
-
-    torch_lat = torch_meta.get("latency_ms_per_token")
-    mpk_lat = mpk_meta.get("latency_ms_per_token")
-    torch_len = torch_meta.get("generate_length", "?")
-    mpk_len = mpk_meta.get("generate_length", "?")
-
-    if torch_lat is None or mpk_lat is None:
-        pytest.skip("latency_ms_per_token missing in output JSON")
-
-    speedup = torch_lat / mpk_lat if mpk_lat > 0 else float("inf")
-
-    print("")
-    print("==================== Performance Comparison ====================")
-    print(f"  Torch:  {torch_lat:.3f} ms/token  (generated {torch_len} tokens)")
-    print(f"  MPK:    {mpk_lat:.3f} ms/token  (generated {mpk_len} tokens)")
-    print(f"  Speedup: {speedup:.2f}x")
-    print("===============================================================")
