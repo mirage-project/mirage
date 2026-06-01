@@ -1,9 +1,9 @@
 # DeepSeek V4 C4 Compressor Kernel TODO
 
-This draft note tracks the implementation decisions for the MPK
-`dsv4_c4_compress_sm100` task. The current branch intentionally wires a
-compile-safe skeleton first; the CUDA math is left as TODOs so the follow-up PR
-can implement one kernel at a time.
+This note tracks the implementation decisions for the MPK
+`dsv4_c4_compress_sm100` task. The branch now contains a correctness-first CUDA
+implementation for the DeepSeek V4 Flash Base CSA C4 compressor/cache insert.
+It is deliberately not a final performance kernel yet.
 
 ## Target
 
@@ -38,51 +38,69 @@ can implement one kernel at a time.
   - sparse attention index format
   - future FP8 KV cache format
 
-## Current Skeleton Contract
+## Current V1 Contract
 
 The MPK task consumes seven inputs to stay within `MAX_INPUTS_PER_TASK = 7`:
 
-1. `kv_score`: `[max_num_batched_tokens, 2048]`
+1. `kv_score`: float32 `[max_num_batched_tokens, 2048]`
 2. `token_meta`: int32 `[max_num_batched_tokens, 2]`
 3. `state_cache`: float32 `[max_requests, 8, 2048]`
 4. `c4_cache`: bf16 `[num_c4_pages, c4_page_size, 512]`
 5. `ape`: float32 `[8, 512]`
-6. `norm_weight`: `[512]`
+6. `norm_weight`: float32 `[512]`
 7. `rope_cos_sin`: float32 `[max_seq_len, 64]`
 
 `token_meta[:, 0]` is absolute sequence position. `token_meta[:, 1]` is the
 physical C4 cache slot, or `-1` when that token does not emit a compressed KV.
 
+`state_cache` stores raw kv/score rows, without APE added. The kernel adds APE
+only at compression time. This mirrors SGLang's state representation while
+matching the official Hugging Face `Compressor.forward` math.
+
+## Implemented In This Branch
+
+- Per-request CTA dispatch using `task_metadata.request_id = blockIdx.x`.
+- Unified prefill/decode task:
+  - prefill consumes each request's `qo_indptr_buffer` token range
+  - decode is represented by one-token ranges and can reuse the same compiled
+    graph across positions by updating the attached input tensors
+- Current-row state update:
+  - token at absolute position `p` writes row `4 + p % 4`
+- C4 boundary handling:
+  - `token_meta[:, 1] < 0` updates state only
+  - `token_meta[:, 1] >= 0` emits one compressed C4 cache row
+- Eight-slot pooling:
+  - overlap slots read previous block KV and score from rows `0..3`
+  - current slots read current block KV and score from rows `4..7`
+  - first C4 block masks overlap slots with score `-inf` and KV zero
+  - stable softmax is computed independently for every hidden dimension
+- Post-processing:
+  - fp32 weighted sum
+  - RMSNorm over 512 dimensions with epsilon `1e-6`
+  - GPT-J/interleaved RoPE on the last 64 dimensions at position
+    `absolute_position + 1 - 4`
+  - bf16 cache write to flattened physical C4 slot
+- State transition:
+  - after a C4 write, current rows shift into overlap rows
+  - for prefill windows, final current rows are rewritten to only the trailing
+    `seqlen % 4` remainder, matching the official start_pos==0 behavior
+
 ## Implementation TODO
 
-- Confirm whether MPK will produce `kv_score` as fp32 or bf16. DeepSeek's
-  official reference performs compression in fp32.
-- Decide whether checkpoint `ape` should be prepacked in the Python builder as
-  `[8, 512]` or attached raw as `[4, 1024]` and split inside CUDA.
-- Implement prefill semantics:
-  - `cutoff = seqlen - (seqlen % 4)`
-  - compressed blocks only for full C4 groups
-  - remainder tokens are saved in state
-  - first block invalid overlap is masked with score `-inf` and KV zero
-- Implement decode semantics:
-  - write current token into `state_cache[request, 4 + abs_pos % 4]`
-  - emit compressed KV only when `(abs_pos + 1) % 4 == 0`
-  - shift current state to overlap state after a cache write
-- Implement C4 weighted pooling:
-  - add APE before softmax
-  - stable softmax over the eight C4 overlap/current slots per hidden dim
-  - weighted KV sum in fp32
-- Implement post-processing:
-  - RMSNorm over 512 dims
-  - RoPE on the last 64 dims using position `abs_pos + 1 - 4`
-  - write BF16 result into `c4_cache[c4_slot]`
+- Add a high-level `MPKModule` leaf after PR #695's API lands on `mpk`.
+- Add runtime dtype variants if MPK's fused projection path produces bf16 or
+  fp8 `kv_score`. The current branch intentionally fixes fp32 for correctness.
+- Decide whether production builders should attach raw HF APE `[4, 1024]` and
+  split in CUDA. The current layer wrapper pre-packs `[8, 512]`.
 - Decide cache format:
   - correctness-first branch writes BF16 `[512]`
   - performance branch should consider FlashMLA FP8-with-scale cache
-- Decide C4 page size. This skeleton defaults to `128`; final DeepSeek V4
+- Decide C4 page size. This implementation defaults to `128`; final DeepSeek V4
   metadata may want a page size tied to raw-token pages.
-- Decide whether prefill and decode remain one task. SGLang separates some
-  paths; MPK may keep one runtime-gated task to match existing MLA patterns.
+- Optimize prefill separately. The current unified kernel is intentionally
+  simple and serializes the tokens of each request inside one CTA.
+- Add stronger debug validation for malformed `token_meta`, including C4 writes
+  not aligned to `(absolute_position + 1) % 4 == 0`.
 
 ## Follow-up Kernel Order
 

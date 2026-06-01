@@ -426,6 +426,11 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // DeepSeek V4 C4 compressor/cache insert: request_id = bid.x
+            // (builder uses grid=(max_num_batched_requests, 1, 1)).
+            if (task_type == TASK_DSV4_C4_COMPRESS_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // Set request_id for FP8 quantize (row index for column-major scale
             // output)
             if (task_type == TASK_QUANTIZE_FP8_SM100) {

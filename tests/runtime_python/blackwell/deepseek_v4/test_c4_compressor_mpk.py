@@ -14,7 +14,6 @@ KV_SCORE_DIM = 4 * HEAD_DIM
 C4_PAGE_SIZE = 128
 NORM_EPS = 1e-6
 COMPRESS_ROPE_THETA = 160000.0
-CUDA_TODO = "DSV4 C4 compressor CUDA TODO"
 
 
 def _skip_without_sm100_and_nvcc():
@@ -197,6 +196,7 @@ def _run_mpk_once(seq_lens):
     _skip_without_sm100_and_nvcc()
     try:
         from mirage.mpk.persistent_kernel import PersistentKernel
+        from mirage.mpk.layers.deepseek_v4 import DeepSeekV4C4Compressor
     except ImportError as exc:
         pytest.skip(f"MPK Python extension is not importable: {exc}")
 
@@ -229,7 +229,9 @@ def _run_mpk_once(seq_lens):
         test_mode=True,
     )
     try:
-        mpk.dsv4_c4_compress_layer(
+        layer = DeepSeekV4C4Compressor()
+        layer.compile(
+            mpk,
             kv_score=mpk.attach_input(kv_score, "dsv4_c4_kv_score"),
             token_meta=mpk.attach_input(token_meta, "dsv4_c4_token_meta"),
             state_cache=mpk.attach_input(state_cache, "dsv4_c4_state_cache"),
@@ -237,7 +239,6 @@ def _run_mpk_once(seq_lens):
             ape=mpk.attach_input(ape, "dsv4_c4_ape"),
             norm_weight=mpk.attach_input(norm_weight, "dsv4_c4_norm_weight"),
             rope_cos_sin=mpk.attach_input(rope_cos_sin, "dsv4_c4_rope_cos_sin"),
-            dsv4_params=(HEAD_DIM, ROPE_HEAD_DIM, KV_SCORE_DIM, C4_PAGE_SIZE),
             grid_dim=(batch, 1, 1),
             block_dim=(128, 1, 1),
         )
@@ -249,6 +250,71 @@ def _run_mpk_once(seq_lens):
             mpk.finalize()
 
     return kv_score, token_meta, ape, norm_weight, rope_cos_sin, state_cache, c4_cache
+
+
+def _run_mpk_incremental_decode(total_tokens=16):
+    _skip_without_sm100_and_nvcc()
+    try:
+        from mirage.mpk.persistent_kernel import PersistentKernel
+        from mirage.mpk.layers.deepseek_v4 import DeepSeekV4C4Compressor
+    except ImportError as exc:
+        pytest.skip(f"MPK Python extension is not importable: {exc}")
+
+    device = "cuda"
+    full_seq_lens = [total_tokens]
+    full_kv_score, full_token_meta, ape, norm_weight, rope_cos_sin, num_c4_pages = _make_case(
+        full_seq_lens, device
+    )
+    kv_score = torch.empty(1, KV_SCORE_DIM, dtype=torch.float32, device=device)
+    token_meta = torch.empty(1, 2, dtype=torch.int32, device=device)
+    state_cache = torch.zeros(1, 8, KV_SCORE_DIM, dtype=torch.float32, device=device)
+    c4_cache = torch.zeros(num_c4_pages, C4_PAGE_SIZE, HEAD_DIM, dtype=torch.bfloat16, device=device)
+
+    meta_tensors = _make_meta_tensors([1], total_tokens, max(1, num_c4_pages), device)
+    mpk = PersistentKernel(
+        mode="offline",
+        world_size=1,
+        mpi_rank=0,
+        num_workers=1,
+        num_local_schedulers=1,
+        num_remote_schedulers=0,
+        max_seq_length=total_tokens,
+        max_num_batched_requests=1,
+        max_num_batched_tokens=1,
+        max_num_pages=max(1, num_c4_pages),
+        page_size=C4_PAGE_SIZE,
+        meta_tensors=meta_tensors,
+        profiler_tensor=None,
+        trace_name="dsv4_c4_compressor_decode_test",
+        spec_decode_config=None,
+        use_cutlass_kernel=False,
+        test_mode=True,
+    )
+    try:
+        layer = DeepSeekV4C4Compressor()
+        layer.compile(
+            mpk,
+            kv_score=mpk.attach_input(kv_score, "dsv4_c4_decode_kv_score"),
+            token_meta=mpk.attach_input(token_meta, "dsv4_c4_decode_token_meta"),
+            state_cache=mpk.attach_input(state_cache, "dsv4_c4_decode_state_cache"),
+            c4_cache=mpk.attach_input(c4_cache, "dsv4_c4_decode_cache"),
+            ape=mpk.attach_input(ape, "dsv4_c4_decode_ape"),
+            norm_weight=mpk.attach_input(norm_weight, "dsv4_c4_decode_norm_weight"),
+            rope_cos_sin=mpk.attach_input(rope_cos_sin, "dsv4_c4_decode_rope_cos_sin"),
+            grid_dim=(1, 1, 1),
+            block_dim=(128, 1, 1),
+        )
+        mpk.compile()
+        for pos in range(total_tokens):
+            kv_score.copy_(full_kv_score[pos : pos + 1])
+            token_meta.copy_(full_token_meta[pos : pos + 1])
+            mpk.run_test_mode()
+        torch.cuda.synchronize()
+    finally:
+        if getattr(mpk, "_is_compiled", False) and not getattr(mpk, "__finalized__", False):
+            mpk.finalize()
+
+    return full_kv_score, full_token_meta, ape, norm_weight, rope_cos_sin, state_cache, c4_cache
 
 
 @pytest.mark.parametrize("seq_lens", ([3], [4], [7], [8], [3, 4], [3, 4, 7, 8]))
@@ -280,7 +346,6 @@ def test_mpk_dsv4_c4_compress_registration_smoke():
     _run_mpk_once([1])
 
 
-@pytest.mark.xfail(reason=CUDA_TODO, strict=False)
 def test_mpk_dsv4_c4_prefill_matches_deepseek_reference():
     seq_lens = [3, 4, 7, 8]
     kv_score, token_meta, ape, norm_weight, rope_cos_sin, state_cache, c4_cache = _run_mpk_once(seq_lens)
@@ -293,10 +358,11 @@ def test_mpk_dsv4_c4_prefill_matches_deepseek_reference():
     torch.testing.assert_close(actual_cache, expected_cache, rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.xfail(reason=CUDA_TODO, strict=False)
 def test_mpk_dsv4_c4_decode_matches_deepseek_reference():
     seq_lens = [16]
-    kv_score, token_meta, ape, norm_weight, rope_cos_sin, state_cache, c4_cache = _run_mpk_once(seq_lens)
+    kv_score, token_meta, ape, norm_weight, rope_cos_sin, state_cache, c4_cache = (
+        _run_mpk_incremental_decode(total_tokens=seq_lens[0])
+    )
     expected_state, expected_cache = _reference_decode(
         kv_score, seq_lens, token_meta, ape, norm_weight, rope_cos_sin
     )

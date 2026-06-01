@@ -1048,7 +1048,7 @@ class PersistentKernel:
             [c_latent_new, k_pe_new, paged_cache, ckv_sep, kpe_sep], tb_graph)
         self.kn_graph.register_task(tb_graph, "mla_kv_gather_split_sm100", params)
 
-    # DeepSeek V4 C4 KV compression/cache-insert skeleton.
+    # DeepSeek V4 C4 KV compression/cache-insert low-level task wrapper.
     def dsv4_c4_compress_layer(
         self,
         kv_score: DTensor,
@@ -1064,11 +1064,13 @@ class PersistentKernel:
     ):
         """Register the DeepSeek V4 Flash Base C4 compressor task.
 
-        This is a draft-PR wrapper for the SM100 C4 compressor/cache-insert
-        task. The CUDA body is currently a no-op stub with detailed TODOs.
+        This low-level wrapper is intentionally narrow: v1 only accepts the
+        DeepSeek V4 Flash Base CSA C4 constants and fp32 math tensors. Higher
+        level builders should prefer ``mirage.mpk.layers.deepseek_v4`` so this
+        method can remain a thin task-registration bridge.
 
         Args:
-            kv_score: [max_num_batched_tokens, 2048], produced by fused
+            kv_score: float32 [max_num_batched_tokens, 2048], produced by fused
                 wkv/wgate in the eventual V4 builder.
             token_meta: int32 [max_num_batched_tokens, 2], layout
                 {absolute_position, physical_c4_slot_or_minus_one}.
@@ -1076,13 +1078,31 @@ class PersistentKernel:
             c4_cache: bf16 [num_c4_pages, c4_page_size, 512], mutable output
                 cache for the correctness-first implementation.
             ape: float32 [8, 512], prepacked from official HF ape [4, 1024].
-            norm_weight: [512], RMSNorm weight.
+            norm_weight: float32 [512], RMSNorm weight.
             rope_cos_sin: float32 [max_seq_len, 64], GPT-J style cos/sin.
             dsv4_params: (head_dim, rope_head_dim, kv_score_dim, c4_page_size).
         """
         if self.target_cc < 100:
             raise ValueError(
                 f"dsv4_c4_compress_sm100 requires SM100+, got CC {self.target_cc}"
+            )
+
+        expected_params = (512, 64, 2048, 128)
+        if tuple(dsv4_params) != expected_params:
+            raise ValueError(
+                "dsv4_c4_compress_sm100 v1 only supports DeepSeek V4 Flash Base "
+                f"C4 params {expected_params}, got {tuple(dsv4_params)}"
+            )
+        if len(block_dim) != 3 or block_dim[1:] != (1, 1):
+            raise ValueError(f"block_dim must be (threads, 1, 1), got {block_dim}")
+        if block_dim[0] <= 0 or block_dim[0] > 256:
+            raise ValueError(
+                "dsv4_c4_compress_sm100 uses a fixed 256-entry shared reduction "
+                f"buffer, got block_dim[0]={block_dim[0]}"
+            )
+        if block_dim[0] & (block_dim[0] - 1):
+            raise ValueError(
+                f"dsv4_c4_compress_sm100 requires a power-of-two thread count, got {block_dim[0]}"
             )
 
         head_dim, rope_head_dim, kv_score_dim, c4_page_size = dsv4_params
