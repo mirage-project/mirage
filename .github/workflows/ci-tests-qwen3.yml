@@ -19,6 +19,7 @@ jobs:
     env:
       CUBLAS_WORKSPACE_CONFIG: ":16:8"
       PYTHONUNBUFFERED: "1"
+      HF_HOME: "/raid/catalyst/models"
 
     steps:
       - name: Checkout
@@ -47,8 +48,7 @@ jobs:
           MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
         run: |
           conda activate mirage-ci-${{ github.run_id }}
-          bash tests/ci-tests/run_ci_tests_qwen3.sh \
-            --model-path /raid/catalyst/models/Qwen3-8B
+          bash tests/ci-tests/run_ci_tests_qwen3.sh
 
       - name: Upload artifacts on failure
         if: failure()
