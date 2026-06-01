@@ -21,11 +21,13 @@
 
 #pragma once
 
-#include "linear_fp4_primitives_sm100.cuh"  // templated PTX primitives shared
+#include "blackwell/sm100_ptx.cuh"          // templated PTX primitives shared
                                               // across 1d2d 1SM / 2SM / swapAB
 #include "linear_nvfp4_1d2d_sm100.cuh"        // init_AB_tmap + 1d2d 1SM kernel
 
 namespace kernel {
+
+using namespace ::kernel::sm100_ptx;
 
 namespace nvfp4_swapAB_detail {
 
@@ -105,12 +107,12 @@ linear_nvfp4_swapAB_sm100_kernel(
 
   if (warp_id == 0 && elect_sync()) {
     for (int i = 0; i < NUM_STAGES; i++) {
-      mbarrier_init(tma_mbar_addr + i * 8, 1);
-      mbarrier_init(mma_mbar_addr + i * 8, 1);
+      mbar_init(tma_mbar_addr + i * 8, 1);
+      mbar_init(mma_mbar_addr + i * 8, 1);
     }
     for (int i = 0; i < NUM_ACC_BUF; i++) {
-      mbarrier_init(mainloop_mbar_addr + i * 8, 1);
-      mbarrier_init(output_mbar_addr + i * 8, 1);
+      mbar_init(mainloop_mbar_addr + i * 8, 1);
+      mbar_init(output_mbar_addr + i * 8, 1);
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (warp_id == INIT_WARP) {
@@ -132,11 +134,11 @@ linear_nvfp4_swapAB_sm100_kernel(
 
   auto make_desc_AB = [](int addr) -> uint64_t {
     const int SBO = 8 * 128;
-    return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
+    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
   };
   auto make_desc_SF = [](int addr) -> uint64_t {
     const int SBO = 8 * 16;
-    return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL);
+    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
   };
 
   if (warp_id == TMA_WARP && elect_sync()) {
@@ -172,7 +174,7 @@ linear_nvfp4_swapAB_sm100_kernel(
         const int stage_id = pipeline_iter % NUM_STAGES;
         if (pipeline_iter >= NUM_STAGES) {
           const int mma_phase = ((pipeline_iter - NUM_STAGES) / NUM_STAGES) % 2;
-          mbarrier_wait_cta(mma_mbar_addr + stage_id * 8, mma_phase);
+          mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
         }
         issue_tma(iter_k, stage_id, off_m, off_n, batch_tile);
       }
@@ -188,7 +190,7 @@ linear_nvfp4_swapAB_sm100_kernel(
 
       if (work_idx >= NUM_ACC_BUF) {
         const int buf_phase = ((work_idx - NUM_ACC_BUF) / NUM_ACC_BUF) % 2;
-        mbarrier_wait_cta(output_mbar_addr + acc_buf * 8, buf_phase);
+        mbar_wait(output_mbar_addr + acc_buf * 8, buf_phase);
       }
 
       for (int iter_k = 0; iter_k < num_iters; iter_k++) {
@@ -204,7 +206,7 @@ linear_nvfp4_swapAB_sm100_kernel(
         const uint64_t SFA_desc = make_desc_SF(SFA_smem);
         const uint64_t SFB_desc = make_desc_SF(SFB_smem);
 
-        mbarrier_wait_cta(tma_mbar_addr + stage_id * 8, tma_phase);
+        mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
 
         for (int k = 0; k < BLOCK_K / MMA_K; k++) {
           uint64_t sfa_desc = SFA_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
@@ -249,7 +251,7 @@ linear_nvfp4_swapAB_sm100_kernel(
       type::bfloat16_t *out_smem = out_smem_base + acc_buf * OUT_TILE_ELEMS;
       const int out_smem_addr = out_smem_base_addr + acc_buf * OUT_TILE_BYTES;
 
-      mbarrier_wait_cta(mainloop_mbar_addr + acc_buf * 8, buf_phase);
+      mbar_wait(mainloop_mbar_addr + acc_buf * 8, buf_phase);
       asm volatile("tcgen05.fence::after_thread_sync;");
 
       float tmp[ACC_COLS];

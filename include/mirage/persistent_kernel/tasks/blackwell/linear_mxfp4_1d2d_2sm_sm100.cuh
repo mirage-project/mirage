@@ -18,7 +18,7 @@
 #include <cstdint>
 
 #include "common/bfloat16.h"
-#include "blackwell/linear_fp4_primitives_sm100.cuh"
+#include "blackwell/sm100_ptx.cuh"
 #include "blackwell/linear_mxfp4_1d2d_sm100.cuh"  // SF_BYTES_PER_K_TILE, SF_TMEM_COLS_PER_MMA_K
 
 #include <c10/util/Exception.h>
@@ -143,6 +143,8 @@ inline void init_C_tmap_mx_2sm(CUtensorMap *tmap,
 
 namespace kernel {
 
+using namespace ::kernel::sm100_ptx;
+
 template <int REDUCTION_SIZE,
           int BLOCK_M,
           int BLOCK_N,
@@ -228,12 +230,12 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
 
   if (warp_id == 0 && elect_sync()) {
     for (int i = 0; i < NUM_STAGES; i++) {
-      mbarrier_init(tile_mbar_addr + i * 8, 1);
-      mbarrier_init(scale_mbar_addr + i * 8, 1);
-      mbarrier_init(mma_mbar_addr + i * 8, 1);
+      mbar_init(tile_mbar_addr + i * 8, 1);
+      mbar_init(scale_mbar_addr + i * 8, 1);
+      mbar_init(mma_mbar_addr + i * 8, 1);
     }
-    mbarrier_init(mainloop_mbar_addr, 1);
-    mbarrier_init(output_mbar_addr, 2);
+    mbar_init(mainloop_mbar_addr, 1);
+    mbar_init(output_mbar_addr, 2);
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (warp_id == 1) {
     tmem_alloc<2, TMEM_ALLOC_COLS>(smem);
@@ -247,11 +249,11 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
 
   auto make_desc_AB = [](int addr) -> uint64_t {
     const int SBO = 8 * 128;
-    return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
+    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
   };
   auto make_desc_SF = [](int addr) -> uint64_t {
     const int SBO = 8 * 16;
-    return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL);
+    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
   };
 
   if (warp_id == TILE_TMA_WARP && elect_sync()) {
@@ -269,7 +271,7 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
         const int B_smem = A_smem + A_size;
         const int off_k = iter_k * BLOCK_K;
 
-        if (pipeline_iter >= NUM_STAGES) mbarrier_wait_cta(mma_mbar_addr + stage_id * 8, mma_phase);
+        if (pipeline_iter >= NUM_STAGES) mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
         // Only CTA 0 arms the cluster-scope tile mbar; cta_group::2 TMA reports there.
         if (cta_group_m == 0) {
           mbarrier_arrive_expect_tx_tile_cluster(mbar_addr, TILE_EXPECTED_TX);
@@ -295,7 +297,7 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
         const int off_k = iter_k * BLOCK_K;
         const uint16_t self_mask = static_cast<uint16_t>(1u << cta_group_m);
 
-        if (pipeline_iter >= NUM_STAGES) mbarrier_wait_cta(mma_mbar_addr + stage_id * 8, mma_phase);
+        if (pipeline_iter >= NUM_STAGES) mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
         // SF atom covers 64 K-elements (same as NVFP4); 2 half-tiles per atom.
         tma_load_3d_multicast(SFA_smem, &SFA_tmap, 0, 2 * (off_k / 64), off_m / 128, mbar_addr, self_mask, cache_A);
         tma_load_3d_multicast(SFB_smem + cta_group_m * SFB_TILE_BYTES, &SFB_tmap, 0, 2 * (off_k / 64), (off_n / 128) + cta_group_m, mbar_addr, 0b11, cache_B);
@@ -312,7 +314,7 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
       for (int output_tile = cluster_idx, work_idx = 0; output_tile < num_output_tiles; output_tile += num_clusters, work_idx++) {
         const PersistentTile tile = map_supergroup_tile(output_tile, num_m_tiles, num_n_tiles, SUPERGROUP_SIZE);
         const int tile_n = tile.col_block;
-        mbarrier_wait_cta(output_mbar_addr, (work_idx - 1) % 2);
+        mbar_wait(output_mbar_addr, (work_idx - 1) % 2);
         asm volatile("tcgen05.fence::after_thread_sync;");
 
         for (int iter_k = 0; iter_k < NUM_ITERS; iter_k++) {
@@ -339,7 +341,7 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
           };
 
           mbarrier_arrive_expect_tx_local(scale_mbar_addr + stage_id * 8, SCALE_EXPECTED_TX);
-          mbarrier_wait_cta(scale_mbar_addr + stage_id * 8, tma_phase);
+          mbar_wait(scale_mbar_addr + stage_id * 8, tma_phase);
 
           #pragma unroll
           for (int k_sf = 0; k_sf < BLOCK_K / MMA_K; k_sf++) {
@@ -374,7 +376,7 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
       const int off_m = (tile.row_block * 2 + cta_group_m) * BLOCK_M;
       const int off_n = tile.col_block * BLOCK_N;
 
-      mbarrier_wait_cta(mainloop_mbar_addr, work_idx % 2);
+      mbar_wait(mainloop_mbar_addr, work_idx % 2);
       asm volatile("tcgen05.fence::after_thread_sync;");
 
       auto epilogue_M_major = [&]() {

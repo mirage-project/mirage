@@ -18,7 +18,7 @@
 #include <cstdint>
 
 #include "common/bfloat16.h"
-#include "blackwell/linear_fp4_primitives_sm100.cuh"
+#include "blackwell/sm100_ptx.cuh"
 
 #include <c10/util/Exception.h>
 #include <cuda.h>
@@ -73,6 +73,8 @@ inline void init_AB_tmap(CUtensorMap *tmap,
 
 namespace kernel {
 
+using namespace ::kernel::sm100_ptx;
+
 template <int REDUCTION_SIZE,
           int BLOCK_M,
           int BLOCK_N,
@@ -122,7 +124,7 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
 
   if (warp_id == 0 && elect_sync()) {
     for (int i = 0; i < NUM_STAGES * 2 + 1; i++) {
-      mbarrier_init(tma_mbar_addr + i * 8, 1);
+      mbar_init(tma_mbar_addr + i * 8, 1);
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (warp_id == 1) {
@@ -134,12 +136,12 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
 
   auto make_desc_AB = [](int addr) -> uint64_t {
     const int SBO = 8 * 128;
-    return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
+    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
   };
   
   auto make_desc_SF = [](int addr) -> uint64_t {
     const int SBO = 8 * 16;
-    return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL);
+    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
   };
 
   auto issue_tma = [&](int iter_k, int stage_id) {
@@ -176,7 +178,7 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
     for (int iter_k = NUM_STAGES; iter_k < NUM_ITERS; iter_k++) {
       const int stage_id = iter_k % NUM_STAGES;
       const int mma_phase = (iter_k / NUM_STAGES - 1) % 2;
-      mbarrier_wait_cta(mma_mbar_addr + stage_id * 8, mma_phase);
+      mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
       issue_tma(iter_k, stage_id);
     }
 
@@ -198,7 +200,7 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
       const uint64_t SFA_desc = SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
       const uint64_t SFB_desc = SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
 
-      mbarrier_wait_cta(tma_mbar_addr + stage_id * 8, tma_phase);
+      mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
 
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
         uint64_t sfa_desc = SFA_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
@@ -223,7 +225,7 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
     }
     tcgen05_commit_arrive<1>(mainloop_mbar_addr);
   } else if (tid < BLOCK_M) {
-    mbarrier_wait_cta(mainloop_mbar_addr, 0);
+    mbar_wait(mainloop_mbar_addr, 0);
     asm volatile("tcgen05.fence::after_thread_sync;");
 
     auto epilogue_M_major = [&]() {
