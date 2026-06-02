@@ -3703,7 +3703,8 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   // Inputs: [0] Q_nope [B,S,H,128], [1] Q_pe [B,S,H,64],
   //         [2] K [B,S,192] (nope+rope concat), [3] V [B,S,128]
   // Output: [0] O [B,S,H,128]
-  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V (input_tma_desc_ptrs[3][0]).
+  // TMA descriptors for K (input_tma_desc_ptrs[2][0]) and V
+  // (input_tma_desc_ptrs[3][0]).
   assert(params.size() == 2);
   int num_heads = params[0];
   int seq_len = params[1];
@@ -3718,16 +3719,15 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // V TMA
   code.e("    static_cast<const "
-         "__nv_bfloat16*>(task_desc->input_ptrs[0]),");           // Qn
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // Qn
   code.e("    static_cast<const "
-         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");           // Qp
-  code.e(
-      "    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
-  code.e("    $,", seq_len);                                          // S
-  code.e("    $,", num_heads);                                        // H
-  code.e("    $f,", sm_scale_log2);                                   // sml2
-  code.e("    task_desc->task_metadata.request_id,"); // head (bid.x)
-  code.e("    task_desc->task_metadata.kv_idx,");     // q_block (bid.y)
+         "__nv_bfloat16*>(task_desc->input_ptrs[1]),");                  // Qp
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // O
+  code.e("    $,", seq_len);                                             // S
+  code.e("    $,", num_heads);                                           // H
+  code.e("    $f,", sm_scale_log2);                                      // sml2
+  code.e("    task_desc->task_metadata.request_id,");         // head (bid.x)
+  code.e("    task_desc->task_metadata.kv_idx,");             // q_block (bid.y)
   code.e("    task_desc->task_metadata.merge_task_offset);"); // batch (bid.z)
   return register_task_variant(TASK_MLA_PREFILL_TP8_SM100, code.to_string());
 }
@@ -4471,8 +4471,8 @@ int TaskRegister::register_eagle3_d2t_remap_task(
   return register_task_variant(TASK_EAGLE3_D2T_REMAP, code.to_string());
 }
 
-int TaskRegister::register_eagle3_commit_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_eagle3_commit_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
   // params[0]: K (= num_draft_steps), params[1]: batch_size,
   // params[2]: max_seq_len
   // Matches mtp_prepare_verify pattern: tokens_buffer / step as INPUT
@@ -4484,19 +4484,18 @@ int TaskRegister::register_eagle3_commit_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::eagle3_commit_kernel<$, $, $>(",
-         K,
-         batch_size,
-         max_seq_len);
-  code.e("    task_desc->input_ptrs[3],");            // tokens_buffer
-  code.e("    task_desc->input_ptrs[0],");            // target_argmax (from argmax_reduce)
-  code.e("    task_desc->input_ptrs[1],");            // draft_tokens_new (from scatter)
-  code.e("    task_desc->input_ptrs[2],");            // accepted_count (from verify_strict)
-  code.e("    runtime_config.step,");                 // step (global)
-  code.e("    runtime_config.prompt_length,");        // prompt_length (global)
-  code.e("    task_desc->output_ptrs[0],");           // new_token_nums
-  code.e("    task_desc->output_ptrs[1],");           // drafts_prev (attach_input snapshot)
-  code.e("    task_desc->input_ptrs[4],");            // accept_hist (attach_input; debug)
+  code.e("kernel::eagle3_commit_kernel<$, $, $>(", K, batch_size, max_seq_len);
+  code.e("    task_desc->input_ptrs[3],"); // tokens_buffer
+  code.e("    task_desc->input_ptrs[0],"); // target_argmax (from argmax_reduce)
+  code.e("    task_desc->input_ptrs[1],"); // draft_tokens_new (from scatter)
+  code.e(
+      "    task_desc->input_ptrs[2],"); // accepted_count (from verify_strict)
+  code.e("    runtime_config.step,");   // step (global)
+  code.e("    runtime_config.prompt_length,"); // prompt_length (global)
+  code.e("    task_desc->output_ptrs[0],");    // new_token_nums
+  code.e(
+      "    task_desc->output_ptrs[1],"); // drafts_prev (attach_input snapshot)
+  code.e("    task_desc->input_ptrs[4],"); // accept_hist (attach_input; debug)
   code.e("    task_desc->task_metadata.request_id);"); // request_id
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }

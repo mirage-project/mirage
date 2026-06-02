@@ -722,7 +722,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "mla_prefill_tp8_sm100") {
     int variant_id = task_register->register_mla_prefill_tp8_sm100_task(
         customized->bgraph, params);
-    // 4 inputs (Q_nope, Q_pe, K, V), 1 output (O). K and V carry TMA descriptors.
+    // 4 inputs (Q_nope, Q_pe, K, V), 1 output (O). K and V carry TMA
+    // descriptors.
     task_config[op] =
         std::make_tuple(4, 1, TASK_MLA_PREFILL_TP8_SM100, variant_id);
   } else if (name == "mla_mtp_decode_sm100") {
@@ -851,8 +852,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_EAGLE3_D2T_REMAP, variant_id);
   } else if (name == "eagle3_commit") {
-    int variant_id = task_register->register_eagle3_commit_task(
-        customized->bgraph, params);
+    int variant_id =
+        task_register->register_eagle3_commit_task(customized->bgraph, params);
     // Inputs:  argmax_out, draft_tokens_new, accepted_count, tokens_buffer,
     //          accept_hist (attach_input, kernel writes via atomicAdd; debug)
     // Outputs: new_token_nums, drafts_prev (cross-iter snapshot)
