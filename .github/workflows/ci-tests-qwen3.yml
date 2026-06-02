@@ -44,6 +44,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >> $GITHUB_ENV
 
       - name: Run Qwen3 Torch vs MPK comparison
+        timeout-minutes: 10
         env:
           MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
         run: |
