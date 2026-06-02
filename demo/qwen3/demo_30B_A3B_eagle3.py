@@ -107,6 +107,11 @@ if __name__ == "__main__":
         "--num-draft-steps", type=int, default=4,
         help="K: number of Eagle3 draft tokens generated per iteration",
     )
+    parser.add_argument(
+        "--save-tokens", type=str, default=None,
+        help="If set, dump the generated token ids + run metadata as JSON to "
+             "this path (used by the EAGLE3 correctness test).",
+    )
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -1012,5 +1017,79 @@ if __name__ == "__main__":
                 argmax = buf[base + 1 : base + 1 + (K + 1)]
                 old_drafts = buf[base + 1 + (K + 1) : base + 1 + (K + 1) + K]
                 print(f"[eagle3-debug] iter {it}: ac={ac} argmax={argmax} old_drafts_prev={old_drafts}")
+
+        if args.save_tokens is not None and rank == 0:
+            import json as _json
+            import subprocess as _subprocess
+
+            prompt_len = int(prompt_lengths[0].item())
+            step_last = int(step[0].item())
+            # Generated stream only (prompt excluded, no cap). tokens[0, :step+1]
+            # is prompt + all accepted/committed tokens; slice off the prompt.
+            generated_token_ids = tokens[0, prompt_len : step_last + 1].cpu().tolist()
+
+            # max_tokens_compiled: the ACTUAL baked MAX_TOKENS, read from the
+            # generated kernel_<rank>.cu (NOT a Python-side assumption and NOT the
+            # attention_sm100.cuh header default — the codegen in task_register.cc
+            # hardcodes the SM100 attention MAX_TOKENS template arg, overriding the
+            # header). Parsed as the 10th template argument of the
+            # multitoken_paged_attention_sm100_task_impl<...> instantiation. Lets
+            # the correctness runner's fail-fast gate detect a stale build, since
+            # MPK metadata validation checks mbt only.
+            max_tokens_compiled = None
+            try:
+                _gen_kernel = f"kernel_{rank}.cu"
+                _marker = "multitoken_paged_attention_sm100_task_impl<bfloat16,"
+                with open(_gen_kernel) as _f:
+                    for _line in _f:
+                        _pos = _line.find(_marker)
+                        if _pos == -1:
+                            continue
+                        _args = _line[_pos + len(_marker):].split(">", 1)[0]
+                        _parts = [p.strip() for p in _args.split(",")]
+                        # template args after bfloat16: NUM_QO_PER_KV, NUM_KV,
+                        # KV_STRIDE, QKV_STRIDE, O_STRIDE, HEAD_DIM, MAX_SEQ_LEN,
+                        # PAGE_SIZE, MAX_TOKENS, Q_LEN_OVERRIDE, TAIL_OFFSET.
+                        # MAX_TOKENS is index 8 of _parts (0-based).
+                        max_tokens_compiled = int(_parts[8])
+                        break
+            except (OSError, ValueError, IndexError):
+                max_tokens_compiled = None
+
+            try:
+                commit_sha = _subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                ).decode().strip()
+            except Exception:
+                commit_sha = None
+
+            payload = {
+                "token_ids": generated_token_ids,
+                "prompt_length": prompt_len,
+                "generate_length": len(generated_token_ids),
+                "step_last": step_last,
+                "mbt": int(args.max_num_batched_tokens),
+                "max_tokens_compiled": max_tokens_compiled,
+                "model": model_name,
+                "commit_sha": commit_sha,
+                "transformers": __import__("transformers").__version__,
+                "torch": torch.__version__,
+                "cuda": torch.version.cuda,
+                "dtype": "bfloat16",
+                "tokenizer": model_name,
+                "mode": "mpk_eagle3" if args.eagle3 else "mpk",
+            }
+            if args.eagle3:
+                payload["K"] = int(args.num_draft_steps)
+                payload["accept_hist"] = hist
+            else:
+                payload["K"] = None
+                payload["accept_hist"] = None
+            os.makedirs(os.path.dirname(args.save_tokens) or ".", exist_ok=True)
+            with open(args.save_tokens, "w") as _f:
+                _json.dump(payload, _f, indent=2)
+            print(f"[save-tokens] wrote {len(generated_token_ids)} generated "
+                  f"tokens (+metadata) to {args.save_tokens}")
     if world_size > 1:
         dist.destroy_process_group()
