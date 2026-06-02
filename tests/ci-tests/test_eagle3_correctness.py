@@ -145,20 +145,32 @@ def test_eagle3_output_matches_greedy_torch():
     # (the megakernel broke a genuine tie the other way); any other mismatch is a
     # real divergence and fails.
     gaps = ref_meta.get("top2_logit_gaps")
+    top2 = ref_meta.get("top2_token_ids")
     accepted_ties = []
     for idx in range(L):
         if ref_tokens[idx] == mpk_tokens[idx]:
             continue
         gap = gaps[idx] if (isinstance(gaps, list) and idx < len(gaps)) else None
-        if gap is not None and gap <= TIE_TOLERANCE:
+        pair = top2[idx] if (isinstance(top2, list) and idx < len(top2)) else None
+        # Accept ONLY a genuine tie flip: the reference top-1/top-2 are within
+        # bf16 epsilon AND the mpk token is exactly the reference runner-up (the
+        # other co-equal candidate). This refuses to wave through an unrelated
+        # wrong token that merely lands at a coincidentally-close position.
+        is_tie = gap is not None and gap <= TIE_TOLERANCE
+        is_runner_up = pair is not None and mpk_tokens[idx] == pair[1]
+        if is_tie and is_runner_up:
             accepted_ties.append((idx, ref_tokens[idx], mpk_tokens[idx], gap))
             continue
         window = slice(max(0, idx - 3), idx + 4)
+        reason = (
+            f"gap={gap} (> tie tol {TIE_TOLERANCE}, not a tie)"
+            if not is_tie else
+            f"gap={gap} is a tie BUT mpk token {mpk_tokens[idx]} is not the "
+            f"reference runner-up {pair[1] if pair else None} — unrelated wrong token"
+        )
         pytest.fail(
             f"Token mismatch at generated index {idx}: "
-            f"ref={ref_tokens[idx]} mpk={mpk_tokens[idx]}; "
-            f"reference top-2 logit gap here = {gap} (> tie tol {TIE_TOLERANCE}, "
-            f"so NOT a tie — a real divergence); "
+            f"ref={ref_tokens[idx]} mpk={mpk_tokens[idx]}; {reason}; "
             f"ref window {list(range(window.start, window.stop))} = "
             f"{ref_tokens[window]}; mpk window = {mpk_tokens[window]}; "
             f"K={mpk_meta.get('K')} mbt={mpk_meta.get('mbt')} "

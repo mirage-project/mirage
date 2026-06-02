@@ -74,6 +74,7 @@ def greedy_decode(model, input_ids, num_tokens, eos_ids):
     """
     generated = []
     top2_gaps = []
+    top2_tokens = []
     past = None
     cur = input_ids
     for _ in range(num_tokens):
@@ -86,10 +87,14 @@ def greedy_decode(model, input_ids, num_tokens, eos_ids):
         tok = int(next_token[0].item())
         generated.append(tok)
         top2_gaps.append(gap)
+        # The runner-up token id, so the test can confirm a tie-driven mismatch
+        # is the megakernel picking THIS co-equal alternate (not an unrelated
+        # wrong token at a coincidentally-close position).
+        top2_tokens.append([int(top2.indices[0].item()), int(top2.indices[1].item())])
         if tok in eos_ids:
             break
         cur = next_token.unsqueeze(-1)
-    return generated, top2_gaps
+    return generated, top2_gaps, top2_tokens
 
 
 def main():
@@ -109,13 +114,14 @@ def main():
     prompt_text, prompt_ids = build_prompt_ids(tokenizer, device)
     eos_ids = eos_ids_from_config(model.config)
 
-    generated, top2_gaps = greedy_decode(
+    generated, top2_gaps, top2_tokens = greedy_decode(
         model, prompt_ids, args.num_tokens, eos_ids)
 
     prompt_token_ids = prompt_ids[0].tolist()
     payload = {
         "token_ids": generated,
         "top2_logit_gaps": top2_gaps,
+        "top2_token_ids": top2_tokens,
         "prompt_token_ids": prompt_token_ids,
         "prompt_text": prompt_text,
         "prompt_length": len(prompt_token_ids),
