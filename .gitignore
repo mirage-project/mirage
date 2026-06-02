@@ -85,4 +85,3 @@ ncu_tmp
 # Local-only Claude docs / scratch PR description — never push
 /CLAUDE.md
 /pr.md
-outputs/
