@@ -1950,7 +1950,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   // MAX_TOKENS=3 supports Eagle3 K=2 (mbt=3 target attention).
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $, 3, $, $>(",
+         "$, $, $, $, 6, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,

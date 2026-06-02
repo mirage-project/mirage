@@ -982,8 +982,14 @@ if __name__ == "__main__":
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             print(f"{generated_ids=}")
-            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            print(response)
+            # Guard the debug decode against out-of-range ids (e.g. a -1
+            # sentinel from an incompletely-committed slot) so a bad id does
+            # not abort before --save-tokens dumps the raw stream for analysis.
+            try:
+                response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+                print(response)
+            except (OverflowError, ValueError) as _e:
+                print(f"[decode-skip] invalid token id in output stream: {_e}")
         
         if total_num_requests > 1:
             print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")

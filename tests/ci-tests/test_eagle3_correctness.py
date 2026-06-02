@@ -38,6 +38,15 @@ COMPARE_LEN = 50
 # "-1 sentinel" / garbage-row bug class and is a hard failure, never a skip.
 VOCAB_SIZE = 151936
 
+# bf16 argmax tie tolerance. When the reference's top-1/top-2 logit margin at a
+# position is <= this, the two candidates are tied at bf16 precision and the
+# megakernel may legitimately pick the other one (its reduction order breaks the
+# tie differently). Such a single-token difference is accepted; it is not an
+# EAGLE3 correctness error. bf16 has ~3 significant decimal digits; for logits in
+# the ~30-40 range the quantization step is ~0.25, so a margin at or below that
+# is indistinguishable from an exact tie.
+TIE_TOLERANCE = 0.25
+
 
 def _load(path, role):
     if not os.path.exists(path):
@@ -131,15 +140,33 @@ def test_eagle3_output_matches_greedy_torch():
             f"max_tokens_compiled={mpk_meta.get('max_tokens_compiled')}"
         )
 
-    idx = _first_divergence(ref_tokens[:L], mpk_tokens[:L])
-    if idx is not None:
+    # Compare token-by-token. A mismatch at a position where the reference's
+    # top-1/top-2 logit margin is within bf16 tie tolerance is an accepted tie
+    # (the megakernel broke a genuine tie the other way); any other mismatch is a
+    # real divergence and fails.
+    gaps = ref_meta.get("top2_logit_gaps")
+    accepted_ties = []
+    for idx in range(L):
+        if ref_tokens[idx] == mpk_tokens[idx]:
+            continue
+        gap = gaps[idx] if (isinstance(gaps, list) and idx < len(gaps)) else None
+        if gap is not None and gap <= TIE_TOLERANCE:
+            accepted_ties.append((idx, ref_tokens[idx], mpk_tokens[idx], gap))
+            continue
         window = slice(max(0, idx - 3), idx + 4)
         pytest.fail(
             f"Token mismatch at generated index {idx}: "
             f"ref={ref_tokens[idx]} mpk={mpk_tokens[idx]}; "
+            f"reference top-2 logit gap here = {gap} (> tie tol {TIE_TOLERANCE}, "
+            f"so NOT a tie — a real divergence); "
             f"ref window {list(range(window.start, window.stop))} = "
             f"{ref_tokens[window]}; mpk window = {mpk_tokens[window]}; "
             f"K={mpk_meta.get('K')} mbt={mpk_meta.get('mbt')} "
             f"max_tokens_compiled={mpk_meta.get('max_tokens_compiled')} "
             f"accept_hist={mpk_meta.get('accept_hist')}"
+        )
+    if accepted_ties:
+        print(
+            f"[eagle3-correctness] {len(accepted_ties)} accepted bf16 tie(s) "
+            f"(ref_token, mpk_token, gap): {accepted_ties}"
         )

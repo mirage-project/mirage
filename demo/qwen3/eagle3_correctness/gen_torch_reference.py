@@ -61,24 +61,35 @@ def eos_ids_from_config(config):
 def greedy_decode(model, input_ids, num_tokens, eos_ids):
     """Manual greedy (argmax) autoregressive decode with KV cache.
 
-    Returns the list of GENERATED token ids (prompt excluded). Stops early when an
-    EOS id is produced, including that EOS token in the returned stream so the
-    comparison length matches the kernel's committed stream (which also writes the
-    EOS-producing token before stopping).
+    Returns (generated_token_ids, top2_gaps) where top2_gaps[i] is the logit
+    margin between the top-1 and top-2 candidates at generated position i. A near
+    zero gap means a bf16 argmax tie at that position: the megakernel may pick the
+    other co-equal token there (a different reduction order breaks the tie
+    differently), which is NOT an error. The correctness test uses this margin to
+    accept tie-driven single-token differences while still rejecting real
+    divergences (where the gap is large).
+
+    Stops early when an EOS id is produced, including that EOS token so the
+    comparison length matches the kernel's committed stream.
     """
     generated = []
+    top2_gaps = []
     past = None
     cur = input_ids
     for _ in range(num_tokens):
         out = model(input_ids=cur, use_cache=True, past_key_values=past)
         past = out.past_key_values
-        next_token = out.logits[:, -1, :].argmax(dim=-1)  # pure argmax, no sampling
+        logits = out.logits[:, -1, :].float()  # fp32 view of the bf16 logits
+        top2 = torch.topk(logits[0], 2)
+        gap = (top2.values[0] - top2.values[1]).item()
+        next_token = logits.argmax(dim=-1)  # pure argmax, no sampling
         tok = int(next_token[0].item())
         generated.append(tok)
+        top2_gaps.append(gap)
         if tok in eos_ids:
             break
         cur = next_token.unsqueeze(-1)
-    return generated
+    return generated, top2_gaps
 
 
 def main():
@@ -98,11 +109,13 @@ def main():
     prompt_text, prompt_ids = build_prompt_ids(tokenizer, device)
     eos_ids = eos_ids_from_config(model.config)
 
-    generated = greedy_decode(model, prompt_ids, args.num_tokens, eos_ids)
+    generated, top2_gaps = greedy_decode(
+        model, prompt_ids, args.num_tokens, eos_ids)
 
     prompt_token_ids = prompt_ids[0].tolist()
     payload = {
         "token_ids": generated,
+        "top2_logit_gaps": top2_gaps,
         "prompt_token_ids": prompt_token_ids,
         "prompt_text": prompt_text,
         "prompt_length": len(prompt_token_ids),

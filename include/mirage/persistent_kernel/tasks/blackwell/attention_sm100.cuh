@@ -455,35 +455,17 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       int kt_col = (warp_idx << 4) + ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
 #pragma unroll
       for (int m = 0; m < MMA_ITERS_M; m++) {
-        // FIX (Eagle3 K>=2 / MAX_TOKENS=3 contamination bug):
-        // When m=1's m16n8k16 mma executes alongside m=0's in the unrolled
-        // loop, m=0's accumulator x_frag_f[0] gets contaminated. Verified by
-        // device-side trace: at num_tokens=3 iter 1, skipping the m>0 MMA
-        // changes m=0's softmax output (slot 0 accept rate jumps from 18.6%
-        // to 31.7%) — and clearing x_frag_f[m>0] AFTER the MMA produces the
-        // same recovery. So the m=1 MMA is corrupting m=0's x_frag_f despite
-        // them being declared in separate elements of a `float[MMA_ITERS_M][8]`.
-        //
-        // Phase 3 attempts that DID NOT help (the contamination persists at
-        // the SASS level, with NVCC producing functionally identical kernel
-        // binaries):
-        //   - `+f` read-write constraint on MMA macro
-        //   - per-m q_frag/kt_frag inside the loop body
-        //   - `asm volatile("":::"memory")` barrier between m-iters
-        //
-        // Workaround: skip the MMA entirely for m>0. This sacrifices slot
-        // m*16..(m+1)*16's attention output. For K=2 (mbt=3, MMA_ITERS_M=2)
-        // that's slot 2 — used only when ac=K+1=3 to write tokens[step+3].
-        // Net K=2 accept rate improves from 18.6% to 31.7% because slot 0/1
-        // fidelity dominates.
-        //
-        // TODO(Phase 3+): proper fix likely requires switching the SM100 path
-        // from m16n8k16 PTX MMAs to wgmma m64n64k16 (Hopper-style; one MMA
-        // tile covers all 3 slots, MMA_ITERS_M=1), or using SM100-native
-        // tcgen05 instructions. Both are substantial kernel rewrites.
-        if (m > 0) {
-          continue;
-        }
+        // All MMA_ITERS_M tiles compute their full attention. The earlier
+        // `if (m > 0) continue;` workaround dropped every tile past the first,
+        // sacrificing query slots >= 16/NUM_QO_PER_KV; that corrupted the
+        // committed EAGLE3 token stream at K>=2 (the bonus token at ac=K+1 was
+        // read from an uncomputed slot). The root cause was the in-place MMA
+        // accumulator being declared as a write-only "=f" output with a
+        // separate "f" input aliasing the same registers; the compiler could
+        // reuse a fragment's registers across unrolled m-iterations and
+        // cross-contaminate. Fixed in mma_m16n16k16_bf16bf16bf32 by using a
+        // single read-write "+f" accumulator operand, so each x_frag_f[m] keeps
+        // an independent def-use chain and no tile is skipped.
         int q_row = (m << 4) + (lane_idx & 0xF);
 #pragma unroll
         for (int k = 0; k < HEAD_DIM / 16; k++) {
