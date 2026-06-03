@@ -15,9 +15,11 @@
 
 #include "mirage/kernel/graph.h"
 #include "mirage/kernel/task_register.h"
+#include "mirage/kernel/v2_role_codegen.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/utils/json_utils.h"
 #include <queue>
+#include <stdexcept>
 
 namespace mirage {
 namespace kernel {
@@ -438,9 +440,11 @@ void register_mugraph(
                   bid.x + bid.y * bgraph.grid_dim.x +
                   bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
             }
-            // v2 linear reads tile_idx from task_offset (= spatial_idx * BLOCK_M).
+            // v2/v3 linear reads tile_idx from task_offset (= spatial_idx).
             if (task_type == TASK_LINEAR_SM100_V2 ||
-                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100_V2) {
+                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100_V2 ||
+                task_type == TASK_LINEAR_SM100_V3 ||
+                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100_V3) {
               task.task_metadata.task_offset = bid.x;
             }
             // Initialize input tensors to the task
@@ -638,6 +642,37 @@ TaskGraphResult print_task_graph(
            "task.at(\"merge_task_offset\").get<int>();");
     code.e("task_desc.task_metadata.task_offset = "
            "task.at(\"task_offset\").get<int>();");
+    code.e("if (task.contains(\"planned_smem_page_regions\")) {");
+    code.e("int region_idx = 0;");
+    code.e("for (json const &region : task.at(\"planned_smem_page_regions\")) {");
+    code.e("if (region_idx >= MAX_SMEM_REGIONS_PER_TASK) {");
+    code.e("  throw std::runtime_error(\"task declares more than \" "
+           "\"MAX_SMEM_REGIONS_PER_TASK SMEM regions\");");
+    code.e("}");
+    code.e("int page_count = region.value(\"page_count\", 0);");
+    code.e("if (page_count <= 0) continue;");
+    code.e("auto const &pages = region.at(\"physical_pages\");");
+    code.e("if (pages.empty()) continue;");
+    code.e("int physical_page_start = pages.at(0).get<int>();");
+    // SmemPageRegionDesc only stores (start, count); the runtime treats the
+    // page span as [start, start + count). The planner enforces this for
+    // contiguous regions, but defend against a malformed JSON or a future
+    // non-contiguous region landing here without anyone noticing.
+    code.e("for (size_t pi = 1; pi < pages.size(); pi++) {");
+    code.e("  if (pages.at(pi).get<int>() != physical_page_start + (int)pi) {");
+    code.e("    throw std::runtime_error(\"non-contiguous physical_pages \" "
+           "\"in planned_smem_page_regions\");");
+    code.e("  }");
+    code.e("}");
+    code.e("task_desc.smem_regions[region_idx].physical_page_start = "
+           "physical_page_start;");
+    code.e("task_desc.smem_regions[region_idx].page_count = page_count;");
+    code.e("task_desc.smem_regions[region_idx].byte_offset = "
+           "region.value(\"byte_offset_in_first_page\", 0);");
+    code.e("region_idx++;");
+    code.e("}");
+    code.e("task_desc.num_smem_regions = region_idx;");
+    code.e("}");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -1194,6 +1229,46 @@ TaskGraphResult print_task_graph(
     task_pos += json_tasks.size();
   }
   assert(task_pos == all_tasks.size());
+
+  // Publish v2 SMEM region requirements for the page planner.
+  {
+    auto *reg = TaskRegister::get_instance();
+    auto &all = json_task_graph["all_tasks"];
+    for (size_t t = 0; t < all.size(); t++) {
+      auto &jt = all[t];
+      int task_type = jt.at("task_type").get<int>();
+      int variant_id = jt.at("variant_id").get<int>();
+      TaskSmemInfo info = reg->get_variant_smem_info(
+          static_cast<TaskType>(task_type), variant_id);
+      if (info.size < 0) {
+        throw std::runtime_error("invalid negative task SMEM size");
+      }
+      if (info.alignment <= 0 || (info.alignment & (info.alignment - 1)) != 0) {
+        throw std::runtime_error("task SMEM alignment must be a power of two");
+      }
+      jt["smem_alignment"] = info.alignment;
+      nlohmann::json regions = nlohmann::json::array();
+      for (TaskSmemRegion const &region : info.regions) {
+        if (region.size < 0) {
+          throw std::runtime_error("invalid negative task SMEM region size");
+        }
+        if (region.alignment <= 0 ||
+            (region.alignment & (region.alignment - 1)) != 0) {
+          throw std::runtime_error(
+              "task SMEM region alignment must be a power of two");
+        }
+        regions.push_back({{"name", region.name},
+                           {"size", region.size},
+                           {"alignment", region.alignment},
+                           {"page_count", region.page_count},
+                           {"can_pack", region.can_pack},
+                           {"release_step", region.release_step},
+                           {"contiguous", region.contiguous}});
+      }
+      jt["smem_regions"] = regions;
+    }
+  }
+
   // Add all events
   for (auto const &event : all_events) {
     tgbody.e(
@@ -1267,6 +1342,9 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_SM100_V2] = "TASK_LINEAR_SM100_V2";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100_V2] =
       "TASK_LINEAR_WITH_RESIDUAL_SM100_V2";
+  task_type_to_name[TASK_LINEAR_SM100_V3] = "TASK_LINEAR_SM100_V3";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100_V3] =
+      "TASK_LINEAR_WITH_RESIDUAL_SM100_V3";
   task_type_to_name[TASK_RMS_NORM_HOPPER_V2] = "TASK_RMS_NORM_HOPPER_V2";
   task_type_to_name[TASK_SILU_MUL_V2] = "TASK_SILU_MUL_V2";
   task_type_to_name[TASK_EMBEDDING_V2] = "TASK_EMBEDDING_V2";
@@ -1311,12 +1389,32 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
 
+  TaskRegister *task_register = TaskRegister::get_instance();
+  bool has_legacy_task_variants = false;
+  for (auto const &task : task_register->all_task_variants) {
+    if (task_register->all_v2_task_role_variants.count(task.first) == 0 &&
+        !task.second.empty()) {
+      has_legacy_task_variants = true;
+      break;
+    }
+  }
+
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");
   code.e("                   RuntimeConfig const &runtime_config) {");
-  TaskRegister *task_register = TaskRegister::get_instance();
+  if (has_legacy_task_variants) {
+    code.e("  void *runtime_smem = nullptr;");
+  }
+  code.e("  (void)task_desc;");
+  code.e("  (void)runtime_config;");
+  if (has_legacy_task_variants) {
+    code.e("  (void)runtime_smem;");
+  }
   bool first_task = true;
   for (auto const &task : task_register->all_task_variants) {
+    if (task_register->all_v2_task_role_variants.count(task.first) > 0) {
+      continue;
+    }
     for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
       std::string cond = first_task ? "if" : "else if";
       assert(task_type_to_name.find(task.first) != task_type_to_name.end());
@@ -1330,6 +1428,34 @@ TaskGraphResult print_task_graph(
     }
   }
   code.e("}");
+
+  code.e("__device__ __forceinline__");
+  code.e("void _execute_task_with_runtime(TaskDesc const* task_desc,");
+  code.e("                                RuntimeConfig const &runtime_config,");
+  code.e("                                void *runtime_smem) {");
+  code.e("  (void)task_desc;");
+  code.e("  (void)runtime_config;");
+  code.e("  (void)runtime_smem;");
+  first_task = true;
+  for (auto const &task : task_register->all_task_variants) {
+    if (task_register->all_v2_task_role_variants.count(task.first) > 0) {
+      continue;
+    }
+    for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
+      std::string cond = first_task ? "if" : "else if";
+      assert(task_type_to_name.find(task.first) != task_type_to_name.end());
+      code.e("$ (task_desc->task_type == $ && task_desc->variant_id == $) {",
+             cond,
+             task_type_to_name[task.first],
+             variant_id);
+      code.e("$", task.second[variant_id]);
+      code.e("}");
+      first_task = false;
+    }
+  }
+  code.e("}");
+
+  generate_v2_role_dispatch_code(code, task_type_to_name, *task_register);
 
   // Write json to output file
   // std::ofstream out("task_graph.json");

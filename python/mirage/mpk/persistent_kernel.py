@@ -5,6 +5,7 @@ import subprocess
 import shutil
 import sys
 import sysconfig
+import json
 
 from ..core import *
 from ..kernel import get_key_paths, KNGraph, TBGraph
@@ -16,6 +17,10 @@ from .multigpu import (
   auto_select_allreduce_implementation
 )
 from typing import Optional
+
+
+from .v2_smem_planner import add_v2_region_smem_plan
+from .v2_task_schedule import build_v2_worker_task_queues
 
 HARD_CODE = """
 #include <Python.h>
@@ -1321,6 +1326,64 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "linear_sm100_v2",
                                      [-1, 1, tiles_per_task])
 
+    def linear_layer_v3(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        block_dim: tuple = (192, 1, 1),
+        tiles_per_task: int = 1,
+    ):
+        """v3 linear: same shape contract as linear_layer_v2 but emits the
+        Channel/TmemChannel-based kernel in linear_sm100_v3.cuh."""
+        assert input.num_dims == 2
+        assert weight.num_dims == 2
+        assert output.num_dims == 2
+        N = weight.dim(0)
+        assert N % 128 == 0, f"linear_layer_v3 requires N divisible by 128, got {N}"
+        num_tiles = N // 128
+        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
+        grid_dim = (num_tasks, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input,  (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_sm100_v3",
+                                     [-1, 1, tiles_per_task])
+
+    def linear_with_residual_layer_v3(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        block_dim: tuple = (192, 1, 1),
+        tiles_per_task: int = 1,
+    ):
+        """v3 linear + residual: Channel/TmemChannel kernel
+        (linear_sm100_v3.cuh) with the HAS_RESIDUAL consumer path. Same shape
+        contract as linear_with_residual_layer_v2. Inputs are ordered
+        (input, weight, residual) so the consumer reads residual from
+        input_ptrs[2]; grid is sized exactly like linear_layer_v3."""
+        assert input.num_dims == 2
+        assert weight.num_dims == 2
+        assert residual.num_dims == 2
+        assert output.num_dims == 2
+        N = weight.dim(0)
+        assert N % 128 == 0, f"linear_with_residual_layer_v3 requires N divisible by 128, got {N}"
+        num_tiles = N // 128
+        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
+        grid_dim = (num_tasks, 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input,    (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight,   (-1, -1, -1), 1, True)
+        tb_graph.new_input(residual, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output,   (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100_v3",
+                                     [-1, 1, tiles_per_task])
+
     def linear_with_residual_layer_v2(
         self,
         input: DTensor,
@@ -1708,8 +1771,14 @@ class PersistentKernel:
         json_file_path = os.path.join(tempdir, "task_graph.json")
         # build if files are not exist
             
+        task_graph_json = results["json_file"]
+        if self.use_v2_runtime:
+            task_graph = json.loads(task_graph_json)
+            task_graph["v2_worker_task_queues"] = build_v2_worker_task_queues(
+                task_graph, self.num_workers)
+            task_graph_json = add_v2_region_smem_plan(json.dumps(task_graph))
         with open(json_file_path, "w") as f:
-            f.write(results["json_file"])
+            f.write(task_graph_json)
         v2_include = '#include "persistent_kernel_v2.cuh"\n' if self.use_v2_runtime else ""
         # Disambiguate "kernel::" in generated code so it always resolves to
         # the global ::kernel namespace. On the mla branch, cutlass pulls in
@@ -1925,7 +1994,7 @@ class PersistentKernel:
             self.launch_func(stream_ptr)
         if self.profiler_tensor is not None:
             from .profiler_persistent import export_to_perfetto_trace
-            
+
             if self.trace_name:
                 trace_name = self.trace_name + ".perfetto-trace"
             else:

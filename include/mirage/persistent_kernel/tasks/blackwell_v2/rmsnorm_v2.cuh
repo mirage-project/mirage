@@ -13,6 +13,9 @@
 #pragma once
 #include "../common/common_header.cuh"
 #include "../common/worker_config.h"
+#include "mirage/persistent_kernel/smem_buffer.cuh"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/rmsnorm_v2_spec.h"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/task_interface.cuh"
 
 namespace kernel {
 namespace rmsnorm_v2 {
@@ -22,13 +25,48 @@ __device__ inline void task_sync() {
     asm volatile("bar.sync 2, %0;" :: "n"(NUM_THREADS));
 }
 
+// SMEM buffer layout for rmsnorm_task<T, BATCH_SIZE, HIDDEN_DIM>.
+// Buffer offsets within the task's SMEM region are constexpr (sequential
+// per-task layout). PADDED_BYTES rounds each buffer to 1024 for TMA-swizzle
+// safety. v2 page-managed tasks address shared memory through page regions,
+// not a task-wide dynamic-SMEM offset.
+//
+// Phase semantics for rmsnorm:
+//   0 = TMA load (input/weight), 1 = compute (read input/weight, write output/reduce),
+//   2 = store (read output)
+template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
+struct RmsNormBuffers {
+    using B = mirage::runtime_v2::SmemBuffer<sizeof(T) * HIDDEN_DIM>;
+    using BReduce = mirage::runtime_v2::SmemBuffer<sizeof(float) * NUM_THREADS>;
+
+    B input;
+    B weight;
+    B output;
+    BReduce reduce;
+
+    __device__ explicit RmsNormBuffers(
+        char *base, mirage::runtime::TaskDesc const *task_desc)
+        : input (base + task_desc->smem_region_offset(REGION_INPUT)),
+          weight(base + task_desc->smem_region_offset(REGION_WEIGHT)),
+          output(base + task_desc->smem_region_offset(REGION_OUTPUT)),
+          reduce(base + task_desc->smem_region_offset(REGION_REDUCE)) {}
+};
+
+// Cross-check: the device-side typed view consumes exactly the regions the
+// planner reserves via make_smem_info(...) in rmsnorm_v2_spec.h. Both the
+// number of buffers in RmsNormBuffers and the ordinals used above must match
+// NUM_REGIONS / REGION_* declared there. If you add a buffer, update both.
+static_assert(NUM_REGIONS == 4, "RmsNormBuffers and make_smem_info must agree");
+
 template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
 __device__ __noinline__ void rms_norm_task(
-    void const *input_ptr,
-    void const *weight_ptr,
-    void *output_ptr,
-    float eps
-) {
+    mirage::runtime::TaskDesc const *task_desc,
+	    void const *input_ptr,
+	    void const *weight_ptr,
+	    void *output_ptr,
+	    float eps,
+	    void *runtime_smem
+	) {
     // v2 runtime launches with 512 threads; only first NUM_THREADS participate.
     if (threadIdx.x >= NUM_THREADS) return;
 
@@ -52,15 +90,13 @@ __device__ __noinline__ void rms_norm_task(
     T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
     T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-    constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET = sizeof(T) * HIDDEN_DIM;
-    constexpr size_t SHARED_OUTPUT_BUFFER_OFFSET =
-        SHARED_WEIGHT_BUFFER_OFFSET + sizeof(T) * HIDDEN_DIM;
-    constexpr size_t REDUCE_BUFFER_OFFSET =
-        SHARED_OUTPUT_BUFFER_OFFSET + sizeof(T) * HIDDEN_DIM;
-    T *shared_input_buffer  = (T *)(smem);
-    T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
-    T *shared_output_buffer = (T *)(smem + SHARED_OUTPUT_BUFFER_OFFSET);
-    float *reduce_smem = reinterpret_cast<float *>(smem + REDUCE_BUFFER_OFFSET);
+    // Buffer layout: typed view over planner-provided SMEM page regions.
+    using Buffers = RmsNormBuffers<T, BATCH_SIZE, HIDDEN_DIM>;
+	    Buffers bufs(smem, task_desc);
+	    T *shared_input_buffer  = bufs.input.template ptr<T>();
+	    T *shared_weight_buffer = bufs.weight.template ptr<T>();
+	    T *shared_output_buffer = bufs.output.template ptr<T>();
+	    float *reduce_smem      = bufs.reduce.template ptr<float>();
 
     // Warm up input tile for the first atoms
     {
@@ -123,8 +159,8 @@ __device__ __noinline__ void rms_norm_task(
     }
     task_sync();
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
-        if constexpr (BYTES_PER_CP == 16) {
+	    for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
+	        if constexpr (BYTES_PER_CP == 16) {
             *((__uint128_t *)((void *)&d_output[i * CHUNK_SIZE])) =
                 *((__uint128_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
         } else if constexpr (BYTES_PER_CP == 8) {
@@ -133,9 +169,74 @@ __device__ __noinline__ void rms_norm_task(
         } else {
             *((uint32_t *)((void *)&d_output[i * CHUNK_SIZE])) =
                 *((uint32_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
-        }
-    }
+	        }
+	    }
 }
+
+struct RmsNormLoader {
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *,
+      mirage::runtime::RuntimeConfig const &,
+      void *,
+      int) {}
+};
+
+struct RmsNormLauncher {
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *,
+      mirage::runtime::RuntimeConfig const &,
+      void *,
+      int) {}
+};
+
+struct RmsNormConsumer {
+  template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *task_desc,
+      mirage::runtime::RuntimeConfig const &runtime_config,
+      void *runtime_smem,
+      int) {
+    rms_norm_task<T, BATCH_SIZE, HIDDEN_DIM>(
+        task_desc,
+        task_desc->input_ptrs[0],
+        task_desc->input_ptrs[1],
+        task_desc->output_ptrs[0],
+        1e-6f,
+        runtime_smem);
+  }
+};
+
+struct RmsNormStorer {
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *,
+      mirage::runtime::RuntimeConfig const &,
+      void *,
+      int) {}
+};
+
+struct RmsNormTask : public ::kernel::v2_task::TaskInterface<RmsNormTask> {
+  using loader = RmsNormLoader;
+  using launcher = RmsNormLauncher;
+  using consumer = RmsNormConsumer;
+  using storer = RmsNormStorer;
+
+  static constexpr ::kernel::v2_task::TaskSpecView spec() {
+    return ::kernel::v2_task::TaskSpecView{
+        mirage::runtime::TASK_RMS_NORM_HOPPER_V2,
+        "rmsnorm",
+        0,
+        1024,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        0,
+    };
+  }
+};
 
 } // namespace rmsnorm_v2
 } // namespace kernel

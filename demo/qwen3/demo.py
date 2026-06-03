@@ -8,6 +8,8 @@ import os, json
 
 from models.qwen3_shard_loader import Qwen3ShardLoader
 from mirage.mpk.base_dynamic_shard_loader import ShardType
+from mirage.mpk.persistent_kernel import add_v2_region_smem_plan
+from mirage.mpk.v2_task_schedule import build_v2_worker_task_queues
 
 
 mapping = {
@@ -517,10 +519,11 @@ if __name__ == "__main__":
                 block_dim=(128, 1, 1),
             )
             if args.use_v2:
-                mpk.linear_layer_v2(
+                mpk.linear_layer_v3(
                     input=rmsnorm_out,
                     weight=w_qkv,
                     output=attn_in,
+                    tiles_per_task=1,
                 )
             else:
                 mpk.linear_layer(
@@ -609,11 +612,12 @@ if __name__ == "__main__":
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
             if args.use_v2:
-                mpk.linear_with_residual_layer_v2(
+                mpk.linear_with_residual_layer_v3(
                     input=attn_out,
                     weight=w,
                     residual=x,
                     output=attn_proj_out,
+                    tiles_per_task=1,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -672,11 +676,11 @@ if __name__ == "__main__":
             # )
 
             if args.use_v2:
-                mpk.linear_layer_v2(
+                mpk.linear_layer_v3(
                     input=rmsnorm_out,
                     weight=w_gatedup,
                     output=mlp_mid,
-                    tiles_per_task=3,
+                    tiles_per_task=1,
                 )
             else:
                 mpk.linear_layer(
@@ -705,11 +709,12 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
             if args.use_v2:
-                mpk.linear_with_residual_layer_v2(
+                mpk.linear_with_residual_layer_v3(
                     input=silu_mul_out,
                     weight=w,
                     residual=x,
                     output=mlp_out,
+                    tiles_per_task=1,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -745,10 +750,11 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
         if args.use_v2:
-            mpk.linear_layer_v2(
+            mpk.linear_layer_v3(
                 input=rmsnorm_out,
                 weight=w_proj,
                 output=argmax_in,
+                tiles_per_task=1,
             )
         else:
             mpk.linear_layer(
@@ -797,8 +803,14 @@ if __name__ == "__main__":
             )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
+        task_graph_json = results["json_file"]
+        if args.use_v2:
+            task_graph = json.loads(task_graph_json)
+            task_graph["v2_worker_task_queues"] = build_v2_worker_task_queues(
+                task_graph, mpk.num_workers)
+            task_graph_json = add_v2_region_smem_plan(json.dumps(task_graph))
         with open(f"task_graph_{rank}.json", "w") as f:
-            f.write(results["json_file"])
+            f.write(task_graph_json)
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 

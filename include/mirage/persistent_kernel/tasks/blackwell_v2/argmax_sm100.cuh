@@ -14,10 +14,34 @@
  */
 #pragma once
 #include "../common/utils.cuh"
+#include "mirage/persistent_kernel/smem_buffer.cuh"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/argmax_v2_spec.h"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/task_interface.cuh"
 
 #include <cutlass/arch/barrier.h>
 
 namespace kernel {
+
+// SMEM buffer layout for block_reduce_max_idx_sm100. Two small fixed-size
+// scratch arrays (one per warp, max 32 warps): idx i64 + val T.
+template <typename T>
+struct ArgmaxBuffers {
+    using IdxBuf = mirage::runtime_v2::SmemBuffer<sizeof(long long) * 32, 128>;
+    using ValBuf = mirage::runtime_v2::SmemBuffer<sizeof(T) * 32, 16>;
+
+    IdxBuf idxs;
+    ValBuf vals;
+
+    __device__ explicit ArgmaxBuffers(
+        char *smem, mirage::runtime::TaskDesc const *task_desc)
+        : idxs(smem + task_desc->smem_region_offset(::kernel::argmax_v2::REGION_IDX)),
+          vals(smem + task_desc->smem_region_offset(::kernel::argmax_v2::REGION_VAL)) {}
+};
+
+// Cross-check: ArgmaxBuffers above and make_smem_info() in argmax_v2_spec.h
+// must agree on region count and ordinals. Update both if you change this.
+static_assert(::kernel::argmax_v2::NUM_REGIONS == 2,
+              "ArgmaxBuffers and argmax_v2::make_smem_info must agree");
 namespace v2 {
 template <typename T>
 __device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val,
@@ -36,12 +60,13 @@ __device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val,
 
 template <typename T>
 __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
-                                                           long long &idx) {
-  // Align the shared memory to 128 bytes
+                                                           long long &idx,
+                                                           mirage::runtime::TaskDesc const *task_desc) {
+  // Buffer layout: 128-byte aligned idx scratch + tightly-packed val scratch.
   extern __shared__ char smem[];
-  long long *smem_idxs =
-      (long long *)((reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);
-  T *smem_vals = reinterpret_cast<T *>(smem_idxs + 32); // max 32 warps
+  ArgmaxBuffers<T> bufs(smem, task_desc);
+  long long *smem_idxs = bufs.idxs.template ptr<long long>();
+  T *smem_vals = bufs.vals.template ptr<T>();
 
   cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
 
@@ -76,22 +101,24 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
   }
 }
 
-template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
-__device__ __forceinline__ void
-    argmax_partial_sm100_kernel(void const *__restrict__ input_ptr,
-                                void *__restrict__ output_val_ptr,
-                                void *__restrict__ output_idx_ptr,
-                                int num_active_tokens) {
-  T const *__restrict__ input = static_cast<T const *>(input_ptr);
-  T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
-  long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
-
-  int tidx = threadIdx.x;
-
-  if (tidx < NUM_THREADS) {
-
-// TODO: try vectorize
-#pragma unroll
+	template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
+	__device__ __forceinline__ void
+	    argmax_partial_sm100_kernel(void const *__restrict__ input_ptr,
+		                                void *__restrict__ output_val_ptr,
+		                                void *__restrict__ output_idx_ptr,
+		                                mirage::runtime::TaskDesc const *task_desc,
+		                                int num_active_tokens,
+		                                void *runtime_smem) {
+	  T const *__restrict__ input = static_cast<T const *>(input_ptr);
+	  T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
+	  long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
+	
+	  int tidx = threadIdx.x;
+	
+	  if (tidx < NUM_THREADS) {
+	
+	// TODO: try vectorize
+	#pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
       long long local_idx = -1;
@@ -104,34 +131,36 @@ __device__ __forceinline__ void
         }
       }
 
-      block_reduce_max_idx_sm100<T>(local_max, local_idx);
+      block_reduce_max_idx_sm100<T>(local_max, local_idx, task_desc);
 
       if (tidx == 0) {
         output_val[batch_idx * NUM_PARTIAL_TASKS] = local_max;
-        output_idx[batch_idx * NUM_PARTIAL_TASKS] = local_idx;
-      }
-    }
-  }
-}
+	        output_idx[batch_idx * NUM_PARTIAL_TASKS] = local_idx;
+	      }
+	    }
+	  }
+	}
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
-    argmax_reduce_sm100_kernel(void const *__restrict__ input_val_ptr,
-                               void const *__restrict__ input_idx_ptr,
-                               void *__restrict__ final_output_ptr,
-                               int num_active_tokens) {
-  // int step,
-  // long long *tokens) {
-  T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
+	    argmax_reduce_sm100_kernel(void const *__restrict__ input_val_ptr,
+		                               void const *__restrict__ input_idx_ptr,
+		                               void *__restrict__ final_output_ptr,
+		                               mirage::runtime::TaskDesc const *task_desc,
+		                               int num_active_tokens,
+		                               void *runtime_smem) {
+	  // int step,
+	  // long long *tokens) {
+	  T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
   long long const *__restrict__ partial_idxs =
       static_cast<long long const *>(input_idx_ptr);
-  long long *__restrict__ final_output =
-      static_cast<long long *>(final_output_ptr);
-
-  int tidx = threadIdx.x;
-  if (tidx < NUM_THREADS) {
-// TODO: try vectorize
-#pragma unroll
+	  long long *__restrict__ final_output =
+	      static_cast<long long *>(final_output_ptr);
+	
+	  int tidx = threadIdx.x;
+	  if (tidx < NUM_THREADS) {
+	// TODO: try vectorize
+	#pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
       // Pack (chunk_index, relative_index) into a single 64-bit integer
@@ -148,7 +177,7 @@ __device__ __forceinline__ void
         }
       }
 
-      block_reduce_max_idx_sm100(local_max, local_packed_idx);
+      block_reduce_max_idx_sm100(local_max, local_packed_idx, task_desc);
 
       if (tidx == 0) {
         if (local_packed_idx != -1) {
@@ -161,11 +190,77 @@ __device__ __forceinline__ void
         } else {
           final_output[batch_idx] = -1;
           // tokens[step + 1] = -1;
-        }
-      }
-    }
+	        }
+	      }
+	    }
+	  }
+	}
+
+struct ArgmaxLoader {
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *,
+      mirage::runtime::RuntimeConfig const &,
+      void *,
+      int) {
+    // Argmax has no GMEM-to-SMEM load stage today. If it later owns pages,
+    // wait/finish for those pages belongs here, not in the runtime.
   }
-}
+};
+
+struct ArgmaxLauncher {
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *,
+      mirage::runtime::RuntimeConfig const &,
+      void *,
+      int) {
+    // Argmax does not launch tensor-core work.
+  }
+};
+
+struct ArgmaxConsumer {
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *,
+      mirage::runtime::RuntimeConfig const &,
+      void *,
+      int) {
+    // Argmax consumer work is generated from TaskRegister variants because the
+    // concrete template parameters are model-specific.
+  }
+};
+
+struct ArgmaxStorer {
+  __device__ __forceinline__ static void
+  run(mirage::runtime::TaskDesc const *,
+      mirage::runtime::RuntimeConfig const &,
+      void *,
+      int) {
+    // Current argmax kernels write their result from the consumer role.
+  }
+};
+
+struct ArgmaxTask : public ::kernel::v2_task::TaskInterface<ArgmaxTask> {
+  using loader = ArgmaxLoader;
+  using launcher = ArgmaxLauncher;
+  using consumer = ArgmaxConsumer;
+  using storer = ArgmaxStorer;
+
+  static constexpr ::kernel::v2_task::TaskSpecView spec() {
+    return ::kernel::v2_task::TaskSpecView{
+        mirage::runtime::TASK_ARGMAX_PARTIAL_SM100_V2,
+        "argmax",
+        0,
+        128,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        0,
+    };
+  }
+};
 
 } // namespace v2
 } // namespace kernel

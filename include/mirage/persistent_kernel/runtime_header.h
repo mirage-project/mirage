@@ -77,6 +77,12 @@ typedef unsigned long long int EventCounter;
 int const MAX_INPUTS_PER_TASK = 7;
 int const MAX_OUTPUTS_PER_TASK = 3;
 int const MAX_NUM_WORKERS = 128;
+int const MAX_SMEM_REGIONS_PER_TASK = 16;
+// Must match v2_smem_planner.NUM_PAGES. The planner partitions a CTA's
+// dynamic SMEM into TASK_SMEM_PAGE_SIZE-sized pages; this is the per-task
+// page-id space and the size of the runtime page_finished mbarrier array.
+int const MAX_SMEM_PAGES_PER_TASK = 14;
+int const TASK_SMEM_PAGE_SIZE = 16 * 1024;
 
 enum TaskType {
   TASK_TERMINATE = 0,
@@ -131,6 +137,10 @@ enum TaskType {
   // create_tma_desc_by_task fires via the range check in the generated .cu.
   TASK_LINEAR_SM100_V2 = 246,
   TASK_LINEAR_WITH_RESIDUAL_SM100_V2 = 247,
+  // v3 linear (blackwell_v2/linear_sm100_v3.cuh): Channel+drain primitives.
+  // Same TMA-range trigger as v2 (231..256).
+  TASK_LINEAR_SM100_V3 = 244,
+  TASK_LINEAR_WITH_RESIDUAL_SM100_V3 = 245,
   TASK_SPLITK_LINEAR_SM100 = 251,
   TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
   TASK_LINEAR_SM100 = 253,
@@ -206,13 +216,20 @@ struct EventDesc {
   TaskId first_task_id, last_task_id;
 };
 
+struct SmemPageRegionDesc {
+  int physical_page_start;
+  int page_count;
+  int byte_offset;
+};
+
 struct FullTaskDesc {
   FullTaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {
+        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
+        num_smem_regions(0) {
     task_metadata.raw_payload = ~0ull;
   }
-  FullTaskDesc() {
+  FullTaskDesc() : num_smem_regions(0) {
     task_metadata.raw_payload = ~0ull;
   }
   TaskType task_type;
@@ -222,6 +239,8 @@ struct FullTaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
+  int num_smem_regions;
+  SmemPageRegionDesc smem_regions[MAX_SMEM_REGIONS_PER_TASK];
   union TaskMetadata {
     struct {
       int expert_offset; // Used for MoE
@@ -246,7 +265,7 @@ struct alignas(16) TaskDesc {
   TaskDesc(FullTaskDesc t)
       : task_type(t.task_type), variant_id(t.variant_id),
         trigger_event(t.trigger_event), dependent_event(t.dependent_event),
-        task_metadata(t.task_metadata) {
+        num_smem_regions(t.num_smem_regions), task_metadata(t.task_metadata) {
     for (int i = 0; i < t.num_inputs; i++) {
       input_ptrs[i] = t.inputs[i].base_ptr;
     }
@@ -265,8 +284,11 @@ struct alignas(16) TaskDesc {
       }
     }
 #endif
+    for (int i = 0; i < t.num_smem_regions; i++) {
+      smem_regions[i] = t.smem_regions[i];
+    }
   }
-  TaskDesc() {
+  TaskDesc() : num_smem_regions(0) {
     task_metadata.raw_payload = ~0ull;
   }
   TaskType task_type;
@@ -281,7 +303,21 @@ struct alignas(16) TaskDesc {
   void *output_tma_desc_ptrs[MAX_OUTPUTS_PER_TASK]
                             [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
+  int num_smem_regions;
+  SmemPageRegionDesc smem_regions[MAX_SMEM_REGIONS_PER_TASK];
   FullTaskDesc::TaskMetadata task_metadata;
+
+  __device__ __forceinline__ int smem_region_offset(int region_idx) const {
+    SmemPageRegionDesc const &region = smem_regions[region_idx];
+    return region.physical_page_start * TASK_SMEM_PAGE_SIZE + region.byte_offset;
+  }
+
+  // First physical page backing a region (for the cross-task page lifecycle —
+  // SmemRing records its stage pages from this). A region spanning N pages
+  // occupies [physical_page_start, +N).
+  __device__ __forceinline__ int smem_region_page(int region_idx) const {
+    return smem_regions[region_idx].physical_page_start;
+  }
 };
 
 struct RuntimeConfig {

@@ -17,9 +17,53 @@
 
 #include "mirage/persistent_kernel/runtime_header.h"
 #include "mirage/threadblock/graph.h"
+#include <string>
+#include <vector>
 
 namespace mirage {
 namespace runtime {
+
+struct TaskSmemRegion {
+  std::string name;
+  int size = 0;
+  int alignment = 1;
+  int page_count = -1;
+  bool can_pack = false;
+  int release_step = 0;
+  bool contiguous = true;
+};
+
+struct TaskSmemInfo {
+  int size = 0;
+  int alignment = 1;
+  std::vector<TaskSmemRegion> regions;
+};
+
+struct TaskRoleVariantCode {
+  // Optional: op-declared body that the controller runs (single-thread)
+  // once per published instruction, before role warps wake. Use to
+  // mbar_init slots in runtime_smem->dynamic_semaphores[slot][i] that
+  // the role bodies will arrive/wait on.
+  std::string init_semaphores;
+  std::string loader;
+  std::string launcher;
+  std::string consumer;
+  std::string storer;
+
+  // Phase 3.5: page-lifecycle hooks. Defaults wire every task into the
+  // generic page protocol (every task arrives every page exactly once).
+  //   - auto_loader_page_lifecycle: codegen prepends every loader body
+  //     with a lane-parallel "wait every page; for pages this task does
+  //     not use, finish them immediately." If the user has no loader
+  //     body, codegen emits one anyway with just this prefix.
+  //   - auto_consumer_finish: codegen appends every consumer body with
+  //     a runtime_finish_region_range_pages over the task's regions
+  //     (i.e. the pages this task uses get released here). Set false
+  //     for tasks that release pages incrementally inside their body
+  //     (e.g. linear's per-stage release in 3.5b).
+  bool auto_loader_page_lifecycle = true;
+  bool auto_consumer_finish = true;
+};
 
 class TaskRegister {
 public:
@@ -101,6 +145,12 @@ public:
   int register_linear_sm100_v2_task(threadblock::Graph const &bgraph,
                                     std::vector<int> const &params,
                                     bool with_residual);
+  // v3 linear: same math as v2 but driven by typed Channel + TmemChannel
+  // primitives (blackwell_v2/linear_sm100_v3.cuh + channel.cuh). Encapsulated
+  // drain replaces the v2 role-warp re-init workaround.
+  int register_linear_sm100_v3_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params,
+                                    bool with_residual);
   // v2 dispatch variants for non-linear tasks. Emit same kernel calls as the
   // v1 versions, but register under TASK_X_V2 enums so the whole pipeline
   // goes through v2 codegen (no mixed v1/v2 dispatch in the task graph).
@@ -162,9 +212,26 @@ public:
                                            std::vector<int> const &params);
   // Multi-GPU tasks end
   int register_task_variant(TaskType type, std::string const &code);
+  void register_v2_task_role_variant(TaskType type,
+                                     int variant_id,
+                                     TaskRoleVariantCode code);
+
+  // Register the total SMEM bytes a (TaskType, variant_id) consumes. Current
+  // v2 codegen publishes this as metadata while keeping executable task bases
+  // at offset 0. A future per-SM allocator can use these sizes for placement
+  // once every task body supports non-zero offsets.
+  void register_variant_smem_size(TaskType type, int variant_id, int size);
+  void register_variant_smem_info(TaskType type,
+                                  int variant_id,
+                                  TaskSmemInfo info);
+  TaskSmemInfo get_variant_smem_info(TaskType type, int variant_id) const;
+  int get_variant_smem_size(TaskType type, int variant_id) const;
 
 public:
   std::map<TaskType, std::vector<std::string>> all_task_variants;
+  std::map<TaskType, std::vector<TaskRoleVariantCode>>
+      all_v2_task_role_variants;
+  std::map<TaskType, std::vector<TaskSmemInfo>> all_task_variant_smem_infos;
 };
 
 } // namespace runtime

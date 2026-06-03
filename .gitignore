@@ -9,6 +9,8 @@
 *.dylib
 *.dll
 
+*.md
+
 # Compiled executables
 *.exe
 

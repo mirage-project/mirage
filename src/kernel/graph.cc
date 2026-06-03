@@ -601,6 +601,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100_V2, variant_id);
+  } else if (name == "linear_sm100_v3") {
+    int variant_id = task_register->register_linear_sm100_v3_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR_SM100_V3, variant_id);
+  } else if (name == "linear_with_residual_sm100_v3") {
+    int variant_id = task_register->register_linear_sm100_v3_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100_V3, variant_id);
   } else if (name == "rmsnorm_hopper_v2") {
     int variant_id = task_register->register_rmsnorm_hopper_v2_task(
         customized->bgraph, params);

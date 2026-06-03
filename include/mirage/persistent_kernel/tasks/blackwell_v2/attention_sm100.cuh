@@ -15,6 +15,7 @@
 
 #pragma once
 #include "norm_sm100.cuh"
+#include "mirage/persistent_kernel/smem_buffer.cuh"
 #include "tasks/ampere/mma.cuh"
 #include "tasks/common/common_header.cuh"
 // #include "../element_binary.cuh"
@@ -29,6 +30,59 @@
 
 namespace kernel {
 namespace v2 {
+
+// SMEM buffer layout for multitoken_paged_attention task. Defined at namespace
+// scope (C++ disallows static data members in function-local classes).
+// NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS — recomputed here.
+template <typename T, int NUM_QO_HEADS, int NUM_KV_HEADS, int HEAD_DIM,
+          int MAX_TOKENS, int KV_TILE_SIZE, int MMA_ITERS_M, int N_THREADS>
+struct AttentionBuffersImpl {
+    static constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
+
+    using ZeroT  = mirage::runtime_v2::SmemBuffer<sizeof(T) * 8, 1>;
+    using QOT    = mirage::runtime_v2::SmemBuffer<sizeof(T) * MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM, 1>;
+    using KVT    = mirage::runtime_v2::SmemBuffer<sizeof(T) * KV_TILE_SIZE * HEAD_DIM, 1>;
+    using NormT  = mirage::runtime_v2::SmemBuffer<sizeof(float) * 4, sizeof(float)>;
+    using MDT    = mirage::runtime_v2::SmemBuffer<sizeof(float) * MMA_ITERS_M * N_THREADS * 2, 1>;
+    using OBufT  = mirage::runtime_v2::SmemBuffer<sizeof(float) * MMA_ITERS_M * N_THREADS * 64, 1>;
+
+    ZeroT zero;
+    QOT   s_q;
+    KVT   s_k, s_k_buffer, s_v, s_v_buffer;
+    QOT   s_o;
+    NormT s_q_norm_sum, s_k_norm_sum;
+    MDT   s_m_buffer, s_d_buffer;
+    OBufT s_o_buffer;
+
+    static constexpr int ZERO_OFFSET         = 0;
+    static constexpr int S_Q_OFFSET          = ZERO_OFFSET         + ZeroT::PADDED_BYTES;
+    static constexpr int S_K_OFFSET          = S_Q_OFFSET          + QOT::PADDED_BYTES;
+    static constexpr int S_K_BUFFER_OFFSET   = S_K_OFFSET          + KVT::PADDED_BYTES;
+    static constexpr int S_V_OFFSET          = S_K_BUFFER_OFFSET   + KVT::PADDED_BYTES;
+    static constexpr int S_V_BUFFER_OFFSET   = S_V_OFFSET          + KVT::PADDED_BYTES;
+    static constexpr int S_O_OFFSET          = S_V_BUFFER_OFFSET   + KVT::PADDED_BYTES;
+    static constexpr int S_Q_NORM_SUM_OFFSET = mirage::runtime_v2::round_up(
+        S_O_OFFSET + QOT::PADDED_BYTES, sizeof(float));
+    static constexpr int S_K_NORM_SUM_OFFSET = S_Q_NORM_SUM_OFFSET  + NormT::PADDED_BYTES;
+    static constexpr int S_M_BUFFER_OFFSET   = S_K_NORM_SUM_OFFSET  + NormT::PADDED_BYTES;
+    static constexpr int S_D_BUFFER_OFFSET   = S_M_BUFFER_OFFSET    + MDT::PADDED_BYTES;
+    static constexpr int S_O_BUFFER_OFFSET   = S_D_BUFFER_OFFSET    + MDT::PADDED_BYTES;
+    static constexpr int TOTAL_BYTES         = S_O_BUFFER_OFFSET    + OBufT::PADDED_BYTES;
+
+    __device__ explicit AttentionBuffersImpl(char *smem)
+        : zero(smem + ZERO_OFFSET),
+          s_q(smem + S_Q_OFFSET),
+          s_k(smem + S_K_OFFSET),
+          s_k_buffer(smem + S_K_BUFFER_OFFSET),
+          s_v(smem + S_V_OFFSET),
+          s_v_buffer(smem + S_V_BUFFER_OFFSET),
+          s_o(smem + S_O_OFFSET),
+          s_q_norm_sum(smem + S_Q_NORM_SUM_OFFSET),
+          s_k_norm_sum(smem + S_K_NORM_SUM_OFFSET),
+          s_m_buffer(smem + S_M_BUFFER_OFFSET),
+          s_d_buffer(smem + S_D_BUFFER_OFFSET),
+          s_o_buffer(smem + S_O_BUFFER_OFFSET) {}
+};
 
 // NOTE(Jinchen): this task implements the paged attention where a causal mask
 // is applied. In each task, we process one request with one or more tokens
@@ -153,71 +207,30 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         paged_v_cache_dmem(d_paged_v_cache);
     ODmem o_dmem(d_output);
 
-    // STensors' offsets and sizes
-    constexpr size_t ZERO_BUFFER_OFFSET = 0;
-    constexpr size_t ZERO_BUFFER_SIZE = sizeof(T) * 8;
-
-    constexpr size_t S_Q_OFFSET = ZERO_BUFFER_OFFSET + ZERO_BUFFER_SIZE;
-    constexpr size_t S_Q_SIZE =
-        sizeof(T) * MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM;
-
-    constexpr size_t S_K_OFFSET = S_Q_OFFSET + S_Q_SIZE;
-    constexpr size_t S_K_SIZE = sizeof(T) * KV_TILE_SIZE * HEAD_DIM;
-
-    constexpr size_t S_K_BUFFER_OFFSET = S_K_OFFSET + S_K_SIZE;
-    constexpr size_t S_K_BUFFER_SIZE = S_K_SIZE;
-
-    constexpr size_t S_V_OFFSET = S_K_BUFFER_OFFSET + S_K_BUFFER_SIZE;
-    constexpr size_t S_V_SIZE = S_K_SIZE;
-
-    constexpr size_t S_V_BUFFER_OFFSET = S_V_OFFSET + S_V_SIZE;
-    constexpr size_t S_V_BUFFER_SIZE = S_K_SIZE;
-
-    constexpr size_t S_O_OFFSET = S_V_BUFFER_OFFSET + S_V_BUFFER_SIZE;
-    constexpr size_t S_O_SIZE = S_Q_SIZE;
-
-    // align to size of float
-    constexpr size_t S_Q_NORM_SUM_OFFSET =
-        ((S_O_OFFSET + S_O_SIZE + sizeof(float) - 1) &
-         ~size_t(sizeof(float) - 1));
-    constexpr size_t S_Q_NORM_SUM_SIZE =
-        sizeof(float) * 4; // 4 floats for 4 warps
-
-    constexpr size_t S_K_NORM_SUM_OFFSET =
-        S_Q_NORM_SUM_OFFSET + S_Q_NORM_SUM_SIZE;
-    constexpr size_t S_K_NORM_SUM_SIZE = sizeof(float) * 4;
-
-    constexpr size_t S_M_BUFFER_OFFSET =
-        S_K_NORM_SUM_OFFSET + S_K_NORM_SUM_SIZE;
-    constexpr size_t S_M_BUFFER_SIZE =
-        sizeof(float) * MMA_ITERS_M * NUM_THREADS * 2;
-
-    constexpr size_t S_D_BUFFER_OFFSET = S_M_BUFFER_OFFSET + S_M_BUFFER_SIZE;
-    constexpr size_t S_D_BUFFER_SIZE =
-        sizeof(float) * MMA_ITERS_M * NUM_THREADS * 2;
-
-    constexpr size_t S_O_BUFFER_OFFSET = S_D_BUFFER_OFFSET + S_D_BUFFER_SIZE;
-    constexpr size_t S_O_BUFFER_SIZE =
-        sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
-    constexpr size_t S_TOTAL_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
-    static_assert(S_TOTAL_OFFSET <=
+    // SMEM buffer layout — typed view, offsets resolved at compile time.
+    using AttentionBuffers = AttentionBuffersImpl<T, NUM_QO_HEADS, NUM_KV_HEADS,
+                                                  HEAD_DIM, MAX_TOKENS,
+                                                  KV_TILE_SIZE,
+                                                  MMA_ITERS_M, NUM_THREADS>;
+    static_assert(AttentionBuffers::TOTAL_BYTES <=
                   mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
     extern __shared__ char smem[];
+    AttentionBuffers bufs(smem);
 
-    T *zero_buf = reinterpret_cast<T *>(smem + ZERO_BUFFER_OFFSET);
+    T *zero_buf = bufs.zero.template ptr<T>();
     clear_smem_buffer<T, 8>(zero_buf);
-    T *s_q = reinterpret_cast<T *>(smem + S_Q_OFFSET);
-    T *s_k = reinterpret_cast<T *>(smem + S_K_OFFSET);
-    T *s_k_buffer = reinterpret_cast<T *>(smem + S_K_BUFFER_OFFSET);
-    T *s_v = reinterpret_cast<T *>(smem + S_V_OFFSET);
-    T *s_v_buffer = reinterpret_cast<T *>(smem + S_V_BUFFER_OFFSET);
-    T *s_o = reinterpret_cast<T *>(smem + S_O_OFFSET);
-    float *s_q_norm_sum = reinterpret_cast<float *>(smem + S_Q_NORM_SUM_OFFSET);
-    float *s_k_norm_sum = reinterpret_cast<float *>(smem + S_K_NORM_SUM_OFFSET);
-    float *s_m_buffer = reinterpret_cast<float *>(smem + S_M_BUFFER_OFFSET);
-    float *s_d_buffer = reinterpret_cast<float *>(smem + S_D_BUFFER_OFFSET);
-    float *s_o_buffer = reinterpret_cast<float *>(smem + S_O_BUFFER_OFFSET);
+    T *s_q = bufs.s_q.template ptr<T>();
+    T *s_k = bufs.s_k.template ptr<T>();
+    T *s_k_buffer = bufs.s_k_buffer.template ptr<T>();
+    T *s_v = bufs.s_v.template ptr<T>();
+    T *s_v_buffer = bufs.s_v_buffer.template ptr<T>();
+    T *s_o = bufs.s_o.template ptr<T>();
+    float *s_q_norm_sum = bufs.s_q_norm_sum.template ptr<float>();
+    float *s_k_norm_sum = bufs.s_k_norm_sum.template ptr<float>();
+    float *s_m_buffer = bufs.s_m_buffer.template ptr<float>();
+    float *s_d_buffer = bufs.s_d_buffer.template ptr<float>();
+    float *s_o_buffer = bufs.s_o_buffer.template ptr<float>();
 
     // STensors' layouts
     using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;

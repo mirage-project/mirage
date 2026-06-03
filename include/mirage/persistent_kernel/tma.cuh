@@ -690,9 +690,11 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       break;
     }
     case TASK_LINEAR_SM100_V2:
-    case TASK_LINEAR_WITH_RESIDUAL_SM100_V2: {
-      // v2 linear uses rank=3 TMA descriptors matching blackwell_v2/
-      // linear_sm100_v2.cuh's init_tmap in the standalone test.
+    case TASK_LINEAR_WITH_RESIDUAL_SM100_V2:
+    case TASK_LINEAR_SM100_V3:
+    case TASK_LINEAR_WITH_RESIDUAL_SM100_V3: {
+      // v2/v3 linear uses rank=3 TMA descriptors matching blackwell_v2/
+      // linear_sm100_v{2,3}.cuh's init_tmap in the standalone test.
       // Layout: [64 (col chunk), rows, K/64 (k-chunks)] with 128B swizzle.
       constexpr int BK = 64;
       constexpr int BLOCK_K = 128;  // must match linear_sm100_v2.cuh
@@ -1178,9 +1180,11 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       break;
     }
     case TASK_LINEAR_SM100_V2:
-    case TASK_LINEAR_WITH_RESIDUAL_SM100_V2: {
+    case TASK_LINEAR_WITH_RESIDUAL_SM100_V2:
+    case TASK_LINEAR_SM100_V3:
+    case TASK_LINEAR_WITH_RESIDUAL_SM100_V3: {
       // Only inputs 0 (A) and 1 (W) get TMA descriptors. Residual (input 2)
-      // and output go through raw pointer stores in linear_sm100_v2.cuh.
+      // and output go through raw pointer stores in linear_sm100_v{2,3}.cuh.
       for (size_t param_id = 0; param_id < 2; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);

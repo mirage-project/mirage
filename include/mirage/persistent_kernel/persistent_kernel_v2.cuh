@@ -19,6 +19,8 @@
 
 #include <cuda_runtime.h>
 #include <vector>
+#include <thread>
+#include <chrono>
 #include <algorithm>
 #include <cstdio>
 
@@ -191,6 +193,7 @@ extern "C" inline void launch_persistent_kernel_v2(cudaStream_t default_stream) 
     mirage::runtime_v2::launch_worker_v2(global_runtime_config,
                                          global_runtime_config.num_workers,
                                          default_stream);
+
 
     cudaError_t err = cudaStreamSynchronize(default_stream);
     if (err != cudaSuccess) {
