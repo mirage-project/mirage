@@ -484,6 +484,9 @@ if __name__ == "__main__":
             input_source=1,
         )
         x = y
+        target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
+        # A current workaround to use splitk for only B200 GPUs
+        use_splitk = (target_cc == 100)
         for i, layer in enumerate(model.model.layers):
             # if i > 0:
             #     break
@@ -599,22 +602,24 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
-            mpk.linear_with_residual_layer(
-                input=attn_out,
-                weight=w,
-                residual=x,
-                output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            # attn_proj_out=x
-            # mpk.splitk_linear_layer(
-            #         input=attn_out,
-            #         weight=w,
-            #         output=attn_proj_out,
-            #         grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
-            #         block_dim=(256, 1, 1),
-            #     )
+            if use_splitk:
+                attn_proj_out = x
+                mpk.splitk_linear_layer(
+                    input=attn_out,
+                    weight=w,
+                    output=attn_proj_out,
+                    grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
+                    block_dim=(256, 1, 1),
+                )
+            else:
+                mpk.linear_with_residual_layer(
+                    input=attn_out,
+                    weight=w,
+                    residual=x,
+                    output=attn_proj_out,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             # reset residual input as x
             x = attn_proj_out
             # add allreduce if needed
@@ -677,22 +682,24 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            # mlp_out = x
-            # mpk.splitk_linear_layer(
-            #     input=silu_mul_out,
-            #     weight=w,
-            #     output=mlp_out,
-            #     grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
-            #     block_dim=(256, 1, 1),
-            # )
-            mpk.linear_with_residual_layer(
-                input=silu_mul_out,
-                weight=w,
-                residual=x,
-                output=mlp_out,
-                grid_dim=(hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if use_splitk:
+                mlp_out = x
+                mpk.splitk_linear_layer(
+                    input=silu_mul_out,
+                    weight=w,
+                    output=mlp_out,
+                    grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
+                    block_dim=(256, 1, 1),
+                )
+            else:
+                mpk.linear_with_residual_layer(
+                    input=silu_mul_out,
+                    weight=w,
+                    residual=x,
+                    output=mlp_out,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
             # reset residual input as x
             x = mlp_out
             if world_size > 1:
