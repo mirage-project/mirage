@@ -12,6 +12,7 @@ concurrency:
 jobs:
   gpu-inference:
     runs-on: [self-hosted, gpu, b200]
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash -l {0}
