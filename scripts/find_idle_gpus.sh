@@ -1,5 +1,6 @@
 #!/bin/bash
-# Find idle GPUs (0% utilization) and output their indices as comma-separated list.
+# Find idle GPUs (0% utilization and <=50% memory used) and output their
+# indices as comma-separated list.
 # Usage: ./scripts/find_idle_gpus.sh --num-gpus <N>
 
 set -euo pipefail
@@ -29,9 +30,9 @@ if ! command -v nvidia-smi &>/dev/null; then
   exit 1
 fi
 
-IDLE_GPUS=$(nvidia-smi --query-gpu=index,utilization.gpu \
+IDLE_GPUS=$(nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total \
                        --format=csv,noheader,nounits 2>/dev/null \
-            | awk -F ', ' '$2 == 0 {print $1}')
+            | awk -F ', ' '$2 == 0 && $4 > 0 && $3 / $4 <= 0.5 {print $1}')
 
 if [[ -z "$IDLE_GPUS" ]]; then
   echo "Error: no idle GPUs found." >&2
