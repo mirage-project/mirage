@@ -814,7 +814,7 @@ if __name__ == "__main__":
         end_idx = prev_pos + 1
         generated_ids = tokens[:, :end_idx]
         tokens_generated = max(0, end_idx - prompt_len)
-        per_tok_ms = run_time / max(tokens_generated, 1)
+        per_tok_ms = run_time / max(prompt_len + tokens_generated, 1)
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
@@ -857,7 +857,7 @@ if __name__ == "__main__":
             print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
 
         tokens_generated = step.max().item() + 1 - prompt_lengths[0].item()
-        per_tok_ms = run_time / max(tokens_generated, 1)
+        per_tok_ms = run_time / max(prompt_lengths[0].item() + tokens_generated, 1)
 
         print("Prompt length {}, generate length {}, per-token latency: {:.3f} ms".format(
               prompt_lengths[0], tokens_generated, per_tok_ms
@@ -869,7 +869,7 @@ if __name__ == "__main__":
             end_idx = step[0].item() + 1
             prompt_len = prompt_lengths[0].item()
             tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
+            per_tok_ms = per_tok_ms
             slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
             token_ids = tokens[0, prompt_len:slice_end].tolist()
             response_text = tokenizer.decode(tokens[0, :end_idx], skip_special_tokens=True)
