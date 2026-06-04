@@ -507,7 +507,8 @@ void register_mugraph(
                 task_type == TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
-                task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {
+                task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100 ||
+                task_type == TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100) {
               task.task_metadata.request_id = bid.x;
             }
             // SiLU + Mul (NEW MoE 2D path): grid=(num_workers, 1, 1).
@@ -1309,7 +1310,9 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == "
            "TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
-           "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {");
+           "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1988,6 +1991,8 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GROUP_GEMM_SMALLM_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_SM100] =
       "TASK_FP8_GROUP_GEMM_LARGEM_SM100";
+  task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100] =
+      "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100";
   task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";
   task_type_to_name[TASK_MOE_UNPERMUTE_SM100] = "TASK_MOE_UNPERMUTE_SM100";
   task_type_to_name[TASK_TRANSPOSE_SCALE_SM100] = "TASK_TRANSPOSE_SCALE_SM100";

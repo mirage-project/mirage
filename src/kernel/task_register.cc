@@ -6305,6 +6305,21 @@ int TaskRegister::register_fp8_group_gemm_largem_sm100_task(
       TASK_FP8_GROUP_GEMM_LARGEM_SM100);
 }
 
+// Compact-dispatch large-M group GEMM (PR #707 review split): same runtime
+// contract + TMA layout as the largem task, but the device impl loops only
+// active experts. Lives in its own task type so the fine-tuned largem kernel
+// (fp8_group_gemm_largem_sm100.cuh) stays byte-identical to baseline.
+int TaskRegister::register_fp8_group_gemm_largem_compact_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_group_gemm_variant(
+      this,
+      params,
+      "fp8_group_gemm_largem_compact",
+      "fp8_group_gemm_largem_compact_task_impl",
+      TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100);
+}
+
 // moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.
 // Params (compile-time): [K, K_PACKED, MBT, TOPK, E_LOCAL, BM_PADDING]
 // Inputs (4): input_fp8 (mbt, K) u8, input_scale (mbt, K_PACKED) u32 UE8M0,

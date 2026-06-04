@@ -28,7 +28,7 @@
 // correctness-equivalent re-encoding of the same math.
 //
 // A/B assignment is the OPPOSITE of swapAB: here A = activation (input),
-// B = weight, exactly as fp8_gemm_dense_common::task_impl_tpl expects
+// B = weight, exactly as fp8_gemm_dense_qout_common::task_impl_tpl expects
 // (ta_ptr = A[M,K], tb_ptr = B[N,K]).
 //
 // Per-head slicing comes from per-task TMA descriptors + per-head scale base
@@ -48,7 +48,7 @@
 
 #pragma once
 
-#include "fp8_gemm_dense_sm100_common.cuh"
+#include "fp8_gemm_dense_qout_sm100_common.cuh"
 
 namespace kernel {
 namespace linear_fp8_bmm_dense {
@@ -68,7 +68,7 @@ __device__ __noinline__ void
   // One head per CTA: the per-task TMA descriptors and per-head scale base
   // pointers already encode the head offset, so this CTA computes the entire
   // per-head tile by itself (worker_idx=0, num_workers=1).
-  fp8_gemm_dense_common::task_impl_tpl<BN, NS, NE>(ta_ptr,
+  fp8_gemm_dense_qout_common::task_impl_tpl<BN, NS, NE>(ta_ptr,
                                                    tb_ptr,
                                                    sa,
                                                    sb,
@@ -87,7 +87,7 @@ __device__ __noinline__ void
 
 template <int BN, int NS, int NE>
 __host__ __device__ inline constexpr int linear_fp8_bmm_dense_smem_size() {
-  return fp8_gemm_dense_common::smem_size_tpl<BN, NS, NE>();
+  return fp8_gemm_dense_qout_common::smem_size_tpl<BN, NS, NE>();
 }
 
 } // namespace linear_fp8_bmm_dense

@@ -227,6 +227,11 @@ enum TaskType {
   // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
   // (N, H, 576) that the MLA decode TMA expects.
   TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
+  // Compact-dispatch variant of the large-M FP8 group GEMM: loops only ACTIVE
+  // experts (decode skips ~97% idle tiles). Same TMA layout / runtime signature
+  // as TASK_FP8_GROUP_GEMM_LARGEM_SM100 (shares its TMA-desc dispatch); the
+  // fine-tuned largem kernel stays byte-identical (PR #707 review split).
+  TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100 = 317,
   // D1 (2026-05-17): dense FP8 GEMM with epilogue UE8M0 quantize. Output is
   // FP8 + packed UE8M0 scale (instead of bf16), eliminating the standalone
   // per_token_group_quantize_fp8 task that follows q_b_nope in the

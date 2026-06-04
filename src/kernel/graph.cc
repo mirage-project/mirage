@@ -921,6 +921,13 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
     task_config[op] = std::make_tuple(
         num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_largem_compact_sm100") {
+    int variant_id =
+        task_register->register_fp8_group_gemm_largem_compact_sm100_task(
+            customized->bgraph, params);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100, variant_id);
   } else if (name == "moe_permute_sm100") {
     // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
     // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).

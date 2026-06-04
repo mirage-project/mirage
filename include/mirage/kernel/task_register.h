@@ -203,6 +203,8 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_group_gemm_largem_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_group_gemm_largem_compact_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_moe_permute_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
   int register_moe_unpermute_sm100_task(threadblock::Graph const &bgraph,

@@ -20,7 +20,6 @@
 #pragma once
 
 #include "fp8_group_gemm_sm100_common.cuh"
-#include "fp8_group_gemm_largem_compact_sm100.cuh" // ferret ws8 compact-dispatch
 
 namespace kernel {
 namespace fp8_group_gemm_largem {
@@ -42,35 +41,23 @@ __device__ __noinline__ void fp8_group_gemm_largem_sm100_task_impl(
     int const E,
     int const worker_idx,
     int const num_workers) {
-  // COMPACT-DISPATCH (ferret ws8, 2026-06-01): loop only ACTIVE experts instead
-  // of all E_local*nn tile slots — at decode ~97% of tiles are idle skips. Drop-
-  // in for the common task_impl_tpl<128,6>: identical runtime signature + BN/NS
-  // config, same smem, and active_expert_mask==nullptr falls back to all-experts
-  // (== legacy behavior, so prefill / no-mask paths are unchanged). Standalone
-  // ~1.55x at decode_4active. Measuring the in-MPK per-MoE-layer Δ; the baseline
-  // arm is recovered by reverting this file via git.
-  fp8_group_gemm_largem_compact::fp8_group_gemm_largem_compact_task_impl(
-      ta_ptr,
-      tb_ptr,
-      tsfa_ptr,
-      tsfb_ptr,
-      td_ptr,
-      m_indices,
-      active_expert_mask,
-      M_total,
-      N,
-      K,
-      E,
-      worker_idx,
-      num_workers);
+  fp8_group_gemm_common::task_impl_tpl<BN, NS>(ta_ptr,
+                                               tb_ptr,
+                                               tsfa_ptr,
+                                               tsfb_ptr,
+                                               td_ptr,
+                                               m_indices,
+                                               active_expert_mask,
+                                               M_total,
+                                               N,
+                                               K,
+                                               E,
+                                               worker_idx,
+                                               num_workers);
 }
 
 inline constexpr int fp8_group_gemm_largem_smem_size() {
-  // max() so neither the common nor the compact path can OOB the dynamic smem
-  // budget (they are equal in practice; belt-and-suspenders for the JIT path).
-  int a = fp8_group_gemm_common::smem_size_tpl<BN, NS>();
-  int b = fp8_group_gemm_largem_compact::fp8_group_gemm_largem_compact_smem_size();
-  return a > b ? a : b;
+  return fp8_group_gemm_common::smem_size_tpl<BN, NS>();
 }
 
 } // namespace fp8_group_gemm_largem

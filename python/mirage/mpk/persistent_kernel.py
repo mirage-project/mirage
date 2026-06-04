@@ -2532,9 +2532,13 @@ class PersistentKernel:
     ):
         # Largem variant: BN=128, NS=6. Default for everything outside the
         # smallm niche (most MoE configs incl. all prefill MPE >= 16 and any
-        # K <= 4096 layer like down_proj).
+        # K <= 4096 layer like down_proj). Uses the compact-dispatch task
+        # (active-expert loop; behavioural drop-in — active_expert_mask=None
+        # falls back to all-experts). The proven largem kernel
+        # (fp8_group_gemm_largem_sm100) stays registered/available; flip the
+        # task name back to it to recover the baseline arm.
         self._fp8_group_gemm_layer_impl(
-            "fp8_group_gemm_largem_sm100",
+            "fp8_group_gemm_largem_compact_sm100",
             a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
             num_workers, meta=meta)
 
