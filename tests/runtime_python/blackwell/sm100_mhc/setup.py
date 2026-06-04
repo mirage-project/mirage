@@ -25,11 +25,15 @@ setup(
             depends=[
                 os.path.join(
                     this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_affine_split_activation.cuh",
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_post.cuh",
                 ),
                 os.path.join(
                     this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_mul_sum_add_with_outer.cuh",
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_post_pre.cuh",
+                ),
+                os.path.join(
+                    this_dir,
+                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_pre.cuh",
                 ),
                 os.path.join(
                     this_dir,
@@ -42,10 +46,6 @@ setup(
                 os.path.join(
                     this_dir,
                     "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_hc_pre_post_fused.cuh",
-                ),
-                os.path.join(
-                    this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_hc_pre_megakernel.cuh",
                 ),
                 os.path.join(
                     this_dir,

@@ -37,7 +37,7 @@
 #include "elementwise_add_sm100.cuh"
 #include "mHC_hc_pre_post_fused.cuh"
 #include "mHC_linear.cuh"
-#include "mHC_mul_sum_add_with_outer.cuh"
+#include "mHC_post.cuh"
 #include "mHC_rmsnorm.cuh"
 #include "mla_mtp_decode_sm100.cuh"
 #include "mla_mtp_decode_tp2_sm100.cuh"

@@ -85,5 +85,539 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
                : "memory");
 }
 
+constexpr int WARP_SIZE = 32;
+constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ULL;
+constexpr uint64_t EVICT_LAST = 0x14F0000000000000ULL;
+
+__device__ __forceinline__ uint32_t cluster_ctaid_x() {
+  uint32_t x;
+  asm volatile("mov.u32 %0, %%cluster_ctaid.x;" : "=r"(x));
+  return x;
+}
+
+__device__ __forceinline__ void cluster_sync() {
+  asm volatile("barrier.cluster.arrive.aligned;" ::: "memory");
+  asm volatile("barrier.cluster.wait.aligned;" ::: "memory");
+}
+
+__device__ __forceinline__ uint32_t map_shared_to_cta(int smem_addr,
+                                                       int dst_cta) {
+  uint32_t mapped;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;"
+               : "=r"(mapped)
+               : "r"(smem_addr), "r"(dst_cta));
+  return mapped;
+}
+
+__device__ __forceinline__ void mbarrier_wait_cluster(int mbar_addr,
+                                                       int phase) {
+  asm volatile(
+      "{\n\t"
+      ".reg .pred P1;\n\t"
+      "LAB_WAIT:\n\t"
+      "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [%0], %1;\n\t"
+      "@P1 bra.uni DONE;\n\t"
+      "bra.uni LAB_WAIT;\n\t"
+      "DONE:\n\t"
+      "}"
+      :
+      : "r"(mbar_addr), "r"(phase)
+      : "memory");
+}
+
+__device__ __forceinline__ void tma_load_bulk(
+    int dst, const void *src, int size, int mbar_addr, uint64_t cache_policy) {
+  asm volatile(
+      "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes."
+      "L2::cache_hint [%0], [%1], %2, [%3], %4;"
+      :
+      : "r"(dst), "l"(src), "r"(size), "r"(mbar_addr), "l"(cache_policy));
+}
+
+__device__ __forceinline__ void
+tma_load_2d(int dst, const void *tmap_ptr, int x, int y, int mbar_addr,
+            uint64_t cache_policy) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::"
+      "bytes.cta_group::1.L2::cache_hint "
+      "[%0], [%1, {%2, %3}], [%4], %5;"
+      :
+      : "r"(dst),
+        "l"(tmap_ptr),
+        "r"(x),
+        "r"(y),
+        "r"(mbar_addr),
+        "l"(cache_policy)
+      : "memory");
+}
+
+__device__ __forceinline__ void
+tma_store_2d(int smem_int_ptr, const void *tmap_ptr, int x, int y) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
+      "[%0, {%2, %3}], [%1];"
+      :
+      : "l"(tmap_ptr), "r"(smem_int_ptr), "r"(x), "r"(y)
+      : "memory");
+}
+
+__device__ __forceinline__ void tma_store_fence() {
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+}
+
+__device__ __forceinline__ void tma_store_commit() {
+  asm volatile("cp.async.bulk.commit_group;" ::: "memory");
+}
+
+template <int N>
+__device__ __forceinline__ void tma_store_wait() {
+  asm volatile("cp.async.bulk.wait_group %0;" ::"n"(N) : "memory");
+}
+
+__device__ __forceinline__ void
+tma_load_3d_multicast(int dst, const void *tmap_ptr, int x, int y, int z,
+                      int mbar_addr, uint16_t cta_mask,
+                      uint64_t cache_policy) {
+  asm volatile(
+      "cp.async.bulk.tensor.3d.shared::cluster.global.tile."
+      "mbarrier::complete_tx::bytes.multicast::cluster.L2::cache_hint "
+      "[%0], [%1, {%3, %4, %5}], [%2], %6, %7;"
+      :
+      : "r"(dst),
+        "l"(tmap_ptr),
+        "r"(mbar_addr),
+        "r"(x),
+        "r"(y),
+        "r"(z),
+        "h"(cta_mask),
+        "l"(cache_policy)
+      : "memory");
+}
+
+__device__ __forceinline__ void mbarrier_arrive_to_cta0(int mbar_addr) {
+  const uint32_t mbar_cta0 = map_shared_to_cta(mbar_addr, 0);
+  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];"
+               :
+               : "r"(mbar_cta0)
+               : "memory");
+}
+
+struct PersistentTile {
+  int row_block;
+  int col_block;
+};
+
+__device__ __forceinline__ PersistentTile
+map_supergroup_tile(int block_idx, int num_row_blocks, int num_col_blocks,
+                    int supergroup_size) {
+  const int num_blocks_per_supergroup = supergroup_size * num_col_blocks;
+  const int supergroup_idx = block_idx / num_blocks_per_supergroup;
+  const int idx_within_supergroup = block_idx % num_blocks_per_supergroup;
+  const int first_row = supergroup_idx * supergroup_size;
+  const int rows_in_supergroup =
+      min(supergroup_size, num_row_blocks - first_row);
+  const int row_within_supergroup = idx_within_supergroup % rows_in_supergroup;
+  const int col_block = idx_within_supergroup / rows_in_supergroup;
+  return {first_row + row_within_supergroup, col_block};
+}
+
+template <int RANK, int SM>
+__device__ __forceinline__ void
+tma_load(int dst, const void *tmap_ptr, int x, int y, int z, int mbar_addr,
+         uint64_t cache_policy) {
+  static_assert(RANK == 3, "tma_load currently only supports RANK=3");
+  if constexpr (SM == 1) {
+    asm volatile(
+        "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::"
+        "bytes.cta_group::1.L2::cache_hint "
+        "[%0], [%1, {%2, %3, %4}], [%5], %6;"
+        :
+        : "r"(dst),
+          "l"(tmap_ptr),
+          "r"(x),
+          "r"(y),
+          "r"(z),
+          "r"(mbar_addr),
+          "l"(cache_policy)
+        : "memory");
+  } else {
+    static_assert(SM == 2, "SM must be 1 or 2");
+    const uint32_t mbar_cta0 = map_shared_to_cta(mbar_addr, 0);
+    asm volatile(
+        "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global."
+        "mbarrier::complete_tx::bytes.L2::cache_hint "
+        "[%0], [%1, {%2, %3, %4}], [%5], %6;"
+        :
+        : "r"(dst),
+          "l"(tmap_ptr),
+          "r"(x),
+          "r"(y),
+          "r"(z),
+          "r"(mbar_cta0),
+          "l"(cache_policy)
+        : "memory");
+  }
+}
+
+// CTA-local arrive+expect_tx for the tile mbar (1SM form). Pure PTX wrapper.
+__device__ __forceinline__ void
+mbarrier_arrive_expect_tx_tile_local(int mbar_addr, int expected_tx) {
+  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 "
+               "_, [%0], %1;"
+               :
+               : "r"(mbar_addr), "r"(expected_tx)
+               : "memory");
+}
+
+// Cluster-scope arrive+expect_tx for the tile mbar (2SM form). Targets CTA 0's
+// mbar (TILE_EXPECTED_TX is the per-cluster total, reported to CTA 0 by the
+// cta_group::2 TMA). Pure PTX wrapper — callers gate to `cta_group_m == 0`.
+__device__ __forceinline__ void
+mbarrier_arrive_expect_tx_tile_cluster(int mbar_addr, int expected_tx) {
+  const uint32_t mapped_mbar = map_shared_to_cta(mbar_addr, 0);
+  asm volatile("mbarrier.arrive.expect_tx.shared::cluster.b64 "
+               "_, [%0], %1;"
+               :
+               : "r"(mapped_mbar), "r"(expected_tx)
+               : "memory");
+}
+
+// CTA-local arrive+expect_tx for the scale mbar (consumer-side arm). Pure
+// PTX wrapper — callers gate (e.g. `if (cta_group_m == 0)` in 2SM, where
+// only the MMA leader's CTA actually consumes this mbar; arming on CTA 1
+// would advance an unused mbar's phase and HW eventually faults).
+__device__ __forceinline__ void
+mbarrier_arrive_expect_tx_local(int mbar_addr, int expected_tx) {
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+               :
+               : "r"(mbar_addr), "r"(expected_tx)
+               : "memory");
+}
+
+// Tcgen05 scale-tile copy (gmem-desc -> tmem). PTX is format-agnostic (NVFP4
+// and MXFP4 use the same instruction); the source descriptor encoding /
+// SMEM stride differ but that's set up by the caller. cta_group selects
+// which subset of CTAs gets the broadcast.
+template <int SM>
+__device__ __forceinline__ void tcgen05_cp_fp4(int taddr, uint64_t s_desc) {
+  if constexpr (SM == 1) {
+    asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;"
+                 ::"r"(taddr), "l"(s_desc));
+  } else {
+    static_assert(SM == 2, "SM must be 1 or 2");
+    asm volatile("tcgen05.cp.cta_group::2.32x128b.warpx4 [%0], %1;"
+                 ::"r"(taddr), "l"(s_desc));
+  }
+}
+
+// NVFP4 MMA. d_tmem parameter supports double-buffered accumulators (swapAB
+// uses acc_buf × ACC_COLS; 1d2d single-buffer paths pass 0).
+template <int SM>
+__device__ __forceinline__ void
+tcgen05_mma_nvfp4(uint64_t a_desc, uint64_t b_desc, uint32_t i_desc,
+                  int scale_A_tmem, int scale_B_tmem, int enable_input_d,
+                  int d_tmem = 0) {
+  if constexpr (SM == 1) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %6, 0;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
+        "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+        "}"
+        :
+        : "r"(d_tmem),
+          "l"(a_desc),
+          "l"(b_desc),
+          "r"(i_desc),
+          "r"(scale_A_tmem),
+          "r"(scale_B_tmem),
+          "r"(enable_input_d));
+  } else {
+    static_assert(SM == 2, "SM must be 1 or 2");
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %6, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.scale_vec::4X "
+        "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+        "}"
+        :
+        : "r"(d_tmem),
+          "l"(a_desc),
+          "l"(b_desc),
+          "r"(i_desc),
+          "r"(scale_A_tmem),
+          "r"(scale_B_tmem),
+          "r"(enable_input_d));
+  }
+}
+
+// MXFP4 MMA. Native kind::mxf4 with block_scale.block32 (SFVecSize=32, the
+// MXFP4 group size). Same d_tmem semantics as the NVFP4 form.
+template <int SM>
+__device__ __forceinline__ void
+tcgen05_mma_mxfp4(uint64_t a_desc, uint64_t b_desc, uint32_t i_desc,
+                  int scale_A_tmem, int scale_B_tmem, int enable_input_d,
+                  int d_tmem = 0) {
+  if constexpr (SM == 1) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %6, 0;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.block32 "
+        "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+        "}"
+        :
+        : "r"(d_tmem),
+          "l"(a_desc),
+          "l"(b_desc),
+          "r"(i_desc),
+          "r"(scale_A_tmem),
+          "r"(scale_B_tmem),
+          "r"(enable_input_d));
+  } else {
+    static_assert(SM == 2, "SM must be 1 or 2");
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %6, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::mxf4.block_scale.block32 "
+        "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+        "}"
+        :
+        : "r"(d_tmem),
+          "l"(a_desc),
+          "l"(b_desc),
+          "r"(i_desc),
+          "r"(scale_A_tmem),
+          "r"(scale_B_tmem),
+          "r"(enable_input_d));
+  }
+}
+
+// Tcgen05 commit + arrive. SM=2 form is multicast::cluster (both CTAs'
+// mbars get the arrive); SM=1 is single-CTA cluster arrive.
+template <int SM>
+__device__ __forceinline__ void tcgen05_commit_arrive(int mbar_addr) {
+  if constexpr (SM == 1) {
+    asm volatile(
+        "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 "
+        "[%0];"
+        :
+        : "r"(mbar_addr)
+        : "memory");
+  } else {
+    static_assert(SM == 2, "SM must be 1 or 2");
+    constexpr uint16_t CTA_MASK_2SM = 0x3;
+    asm volatile(
+        "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster."
+        "multicast::cluster.b64 [%0], %1;"
+        :
+        : "r"(mbar_addr), "h"(CTA_MASK_2SM)
+        : "memory");
+  }
+}
+
+// Tmem alloc/dealloc. COLS picks the tmem region size (multiples of 32, up
+// to 512 per CTA).
+template <int SM, int COLS>
+__device__ __forceinline__ void tmem_alloc(int smem_addr) {
+  if constexpr (SM == 1) {
+    asm volatile(
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
+        :
+        : "r"(smem_addr), "r"(COLS));
+  } else {
+    static_assert(SM == 2, "SM must be 1 or 2");
+    asm volatile(
+        "tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;"
+        :
+        : "r"(smem_addr), "r"(COLS));
+  }
+}
+
+template <int SM, int COLS>
+__device__ __forceinline__ void tmem_dealloc(int base_col) {
+  if constexpr (SM == 1) {
+    asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
+                 :
+                 : "r"(base_col), "r"(COLS));
+  } else {
+    static_assert(SM == 2, "SM must be 1 or 2");
+    asm volatile("tcgen05.dealloc.cta_group::2.sync.aligned.b32 %0, %1;"
+                 :
+                 : "r"(base_col), "r"(COLS));
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Tcgen05 ld helpers (read accumulator tmem -> registers). SM=1-only PTX; no
+// SM=2 variant exists at the instruction level (tmem reads are per-CTA).
+// ----------------------------------------------------------------------------
+
+struct LD_SHAPE {
+  static constexpr char _32x32b[] = ".32x32b";
+  static constexpr char _16x256b[] = ".16x256b";
+};
+
+struct LD_NUM {
+  static constexpr char x4[] = ".x4";
+  static constexpr char x8[] = ".x8";
+  static constexpr char x16[] = ".x16";
+  static constexpr char x32[] = ".x32";
+  static constexpr char x64[] = ".x64";
+  static constexpr char x128[] = ".x128";
+};
+
+template <const char *SHAPE_NAME, const char *NUM_NAME>
+__device__ __forceinline__ void
+tcgen05_ld_16regs(float *tmp, int row, int col) {
+  asm volatile(
+      "tcgen05.ld.sync.aligned%17%18.b32 "
+      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+      "  %8,  %9, %10, %11, %12, %13, %14, %15}, [%16];"
+      : "=f"(tmp[0]),  "=f"(tmp[1]),  "=f"(tmp[2]),  "=f"(tmp[3]),
+        "=f"(tmp[4]),  "=f"(tmp[5]),  "=f"(tmp[6]),  "=f"(tmp[7]),
+        "=f"(tmp[8]),  "=f"(tmp[9]),  "=f"(tmp[10]), "=f"(tmp[11]),
+        "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15])
+      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
+}
+
+template <const char *SHAPE_NAME, const char *NUM_NAME>
+__device__ __forceinline__ void
+tcgen05_ld_32regs(float *tmp, int row, int col) {
+  asm volatile(
+      "tcgen05.ld.sync.aligned%33%34.b32 "
+      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+      "  %8,  %9, %10, %11, %12, %13, %14, %15, "
+      " %16, %17, %18, %19, %20, %21, %22, %23, "
+      " %24, %25, %26, %27, %28, %29, %30, %31}, [%32];"
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
+        "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7]),
+        "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
+        "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]),
+        "=f"(tmp[16]), "=f"(tmp[17]), "=f"(tmp[18]), "=f"(tmp[19]),
+        "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
+        "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]),
+        "=f"(tmp[28]), "=f"(tmp[29]), "=f"(tmp[30]), "=f"(tmp[31])
+      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
+}
+
+template <const char *SHAPE_NAME, const char *NUM_NAME>
+__device__ __forceinline__ void
+tcgen05_ld_64regs(float *tmp, int row, int col) {
+  asm volatile(
+      "tcgen05.ld.sync.aligned%65%66.b32 "
+      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+      "  %8,  %9, %10, %11, %12, %13, %14, %15, "
+      " %16, %17, %18, %19, %20, %21, %22, %23, "
+      " %24, %25, %26, %27, %28, %29, %30, %31, "
+      " %32, %33, %34, %35, %36, %37, %38, %39, "
+      " %40, %41, %42, %43, %44, %45, %46, %47, "
+      " %48, %49, %50, %51, %52, %53, %54, %55, "
+      " %56, %57, %58, %59, %60, %61, %62, %63}, [%64];"
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
+        "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7]),
+        "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
+        "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]),
+        "=f"(tmp[16]), "=f"(tmp[17]), "=f"(tmp[18]), "=f"(tmp[19]),
+        "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
+        "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]),
+        "=f"(tmp[28]), "=f"(tmp[29]), "=f"(tmp[30]), "=f"(tmp[31]),
+        "=f"(tmp[32]), "=f"(tmp[33]), "=f"(tmp[34]), "=f"(tmp[35]),
+        "=f"(tmp[36]), "=f"(tmp[37]), "=f"(tmp[38]), "=f"(tmp[39]),
+        "=f"(tmp[40]), "=f"(tmp[41]), "=f"(tmp[42]), "=f"(tmp[43]),
+        "=f"(tmp[44]), "=f"(tmp[45]), "=f"(tmp[46]), "=f"(tmp[47]),
+        "=f"(tmp[48]), "=f"(tmp[49]), "=f"(tmp[50]), "=f"(tmp[51]),
+        "=f"(tmp[52]), "=f"(tmp[53]), "=f"(tmp[54]), "=f"(tmp[55]),
+        "=f"(tmp[56]), "=f"(tmp[57]), "=f"(tmp[58]), "=f"(tmp[59]),
+        "=f"(tmp[60]), "=f"(tmp[61]), "=f"(tmp[62]), "=f"(tmp[63])
+      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
+}
+
+template <const char *SHAPE_NAME, const char *NUM_NAME>
+__device__ __forceinline__ void
+tcgen05_ld_128regs(float *tmp, int row, int col) {
+  asm volatile(
+      "tcgen05.ld.sync.aligned%129%130.b32 "
+      "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+      "  %8,  %9, %10, %11, %12, %13, %14, %15, "
+      " %16, %17, %18, %19, %20, %21, %22, %23, "
+      " %24, %25, %26, %27, %28, %29, %30, %31, "
+      " %32, %33, %34, %35, %36, %37, %38, %39, "
+      " %40, %41, %42, %43, %44, %45, %46, %47, "
+      " %48, %49, %50, %51, %52, %53, %54, %55, "
+      " %56, %57, %58, %59, %60, %61, %62, %63, "
+      " %64, %65, %66, %67, %68, %69, %70, %71, "
+      " %72, %73, %74, %75, %76, %77, %78, %79, "
+      " %80, %81, %82, %83, %84, %85, %86, %87, "
+      " %88, %89, %90, %91, %92, %93, %94, %95, "
+      " %96, %97, %98, %99,%100,%101,%102,%103, "
+      "%104,%105,%106,%107,%108,%109,%110,%111, "
+      "%112,%113,%114,%115,%116,%117,%118,%119, "
+      "%120,%121,%122,%123,%124,%125,%126,%127}, [%128];"
+      : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
+        "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7]),
+        "=f"(tmp[8]), "=f"(tmp[9]), "=f"(tmp[10]), "=f"(tmp[11]),
+        "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]),
+        "=f"(tmp[16]), "=f"(tmp[17]), "=f"(tmp[18]), "=f"(tmp[19]),
+        "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
+        "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]),
+        "=f"(tmp[28]), "=f"(tmp[29]), "=f"(tmp[30]), "=f"(tmp[31]),
+        "=f"(tmp[32]), "=f"(tmp[33]), "=f"(tmp[34]), "=f"(tmp[35]),
+        "=f"(tmp[36]), "=f"(tmp[37]), "=f"(tmp[38]), "=f"(tmp[39]),
+        "=f"(tmp[40]), "=f"(tmp[41]), "=f"(tmp[42]), "=f"(tmp[43]),
+        "=f"(tmp[44]), "=f"(tmp[45]), "=f"(tmp[46]), "=f"(tmp[47]),
+        "=f"(tmp[48]), "=f"(tmp[49]), "=f"(tmp[50]), "=f"(tmp[51]),
+        "=f"(tmp[52]), "=f"(tmp[53]), "=f"(tmp[54]), "=f"(tmp[55]),
+        "=f"(tmp[56]), "=f"(tmp[57]), "=f"(tmp[58]), "=f"(tmp[59]),
+        "=f"(tmp[60]), "=f"(tmp[61]), "=f"(tmp[62]), "=f"(tmp[63]),
+        "=f"(tmp[64]), "=f"(tmp[65]), "=f"(tmp[66]), "=f"(tmp[67]),
+        "=f"(tmp[68]), "=f"(tmp[69]), "=f"(tmp[70]), "=f"(tmp[71]),
+        "=f"(tmp[72]), "=f"(tmp[73]), "=f"(tmp[74]), "=f"(tmp[75]),
+        "=f"(tmp[76]), "=f"(tmp[77]), "=f"(tmp[78]), "=f"(tmp[79]),
+        "=f"(tmp[80]), "=f"(tmp[81]), "=f"(tmp[82]), "=f"(tmp[83]),
+        "=f"(tmp[84]), "=f"(tmp[85]), "=f"(tmp[86]), "=f"(tmp[87]),
+        "=f"(tmp[88]), "=f"(tmp[89]), "=f"(tmp[90]), "=f"(tmp[91]),
+        "=f"(tmp[92]), "=f"(tmp[93]), "=f"(tmp[94]), "=f"(tmp[95]),
+        "=f"(tmp[96]), "=f"(tmp[97]), "=f"(tmp[98]), "=f"(tmp[99]),
+        "=f"(tmp[100]), "=f"(tmp[101]), "=f"(tmp[102]), "=f"(tmp[103]),
+        "=f"(tmp[104]), "=f"(tmp[105]), "=f"(tmp[106]), "=f"(tmp[107]),
+        "=f"(tmp[108]), "=f"(tmp[109]), "=f"(tmp[110]), "=f"(tmp[111]),
+        "=f"(tmp[112]), "=f"(tmp[113]), "=f"(tmp[114]), "=f"(tmp[115]),
+        "=f"(tmp[116]), "=f"(tmp[117]), "=f"(tmp[118]), "=f"(tmp[119]),
+        "=f"(tmp[120]), "=f"(tmp[121]), "=f"(tmp[122]), "=f"(tmp[123]),
+        "=f"(tmp[124]), "=f"(tmp[125]), "=f"(tmp[126]), "=f"(tmp[127])
+      : "r"((row << 16) | col), "C"(SHAPE_NAME), "C"(NUM_NAME));
+}
+
+__device__ __forceinline__ void
+tcgen05_ld_32x32bx32(float *tmp, int row, int col) {
+  tcgen05_ld_32regs<LD_SHAPE::_32x32b, LD_NUM::x32>(tmp, row, col);
+}
+__device__ __forceinline__ void
+tcgen05_ld_32x32bx64(float *tmp, int row, int col) {
+  tcgen05_ld_64regs<LD_SHAPE::_32x32b, LD_NUM::x64>(tmp, row, col);
+}
+__device__ __forceinline__ void
+tcgen05_ld_32x32bx128(float *tmp, int row, int col) {
+  tcgen05_ld_128regs<LD_SHAPE::_32x32b, LD_NUM::x128>(tmp, row, col);
+}
+
+// 16x256b LD shape — MXFP4 uses this for the strided-N epilogue path.
+__device__ __forceinline__ void
+tcgen05_ld_16x256bx4(float *tmp, int row, int col) {
+  tcgen05_ld_16regs<LD_SHAPE::_16x256b, LD_NUM::x4>(tmp, row, col);
+}
+__device__ __forceinline__ void
+tcgen05_ld_16x256bx8(float *tmp, int row, int col) {
+  tcgen05_ld_32regs<LD_SHAPE::_16x256b, LD_NUM::x8>(tmp, row, col);
+}
+__device__ __forceinline__ void
+tcgen05_ld_16x256bx16(float *tmp, int row, int col) {
+  tcgen05_ld_64regs<LD_SHAPE::_16x256b, LD_NUM::x16>(tmp, row, col);
+}
+
 } // namespace sm100_ptx
 } // namespace kernel

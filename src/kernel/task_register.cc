@@ -2469,7 +2469,7 @@ int TaskRegister::register_mhc_post_sm100_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::mHC_mul_sum_add_with_outer_task_impl<bfloat16, $, $, $, $>(",
+  code.e("kernel::mHC_post_task_impl<bfloat16, $, $, $, $>(",
          bs_tile,
          output_size,
          num_topk,

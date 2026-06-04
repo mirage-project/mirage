@@ -236,12 +236,9 @@ void launch_linear_sm100_mpk(void *input_ptr,
   cudaMalloc(&desc_w_ptr, sizeof(CUtensorMap));
   cudaMalloc(&desc_o_ptr, sizeof(CUtensorMap));
 
-  cudaMemcpy(
-      desc_i_ptr, &host_i_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-  cudaMemcpy(
-      desc_w_ptr, &host_w_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-  cudaMemcpy(
-      desc_o_ptr, &host_o_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+  cudaMemcpy(desc_i_ptr, &host_i_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+  cudaMemcpy(desc_w_ptr, &host_w_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+  cudaMemcpy(desc_o_ptr, &host_o_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
 
   void *tma_desc_input;
   void *tma_desc_weight;

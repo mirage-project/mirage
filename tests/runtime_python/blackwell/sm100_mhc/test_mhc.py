@@ -7,9 +7,9 @@ import pytest
 import torch
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROFILE_DIR = os.path.join(THIS_DIR, "profile")
-if PROFILE_DIR not in sys.path:
-    sys.path.insert(0, PROFILE_DIR)
+VLLM_DIR = os.path.join(THIS_DIR, "vllm")
+if VLLM_DIR not in sys.path:
+    sys.path.insert(0, VLLM_DIR)
 
 from utils import (
     hc_post_reference,
@@ -78,7 +78,7 @@ def test_k3_sinkhorn(num_tokens):
     (3, 2, 1024),
     (2, 8, 128),
 ])
-def test_k5_mul_sum_add_with_outer(num_tokens, n, c):
+def test_mhc_post(num_tokens, n, c):
     gen = torch.Generator(device="cuda").manual_seed(400 + num_tokens + n + c)
     residual = torch.randn(num_tokens, n, c, device="cuda", dtype=torch.bfloat16, generator=gen)
     x = torch.randn(num_tokens, c, device="cuda", dtype=torch.bfloat16, generator=gen)
@@ -87,7 +87,7 @@ def test_k5_mul_sum_add_with_outer(num_tokens, n, c):
     post = torch.rand(num_tokens, n, device="cuda", dtype=torch.float32, generator=gen)
     out = torch.empty(num_tokens, n, c, device="cuda", dtype=torch.bfloat16)
 
-    rt.mHC_mul_sum_add_with_outer(residual, x, comb, post, out, n)
+    rt.mhc_post(residual, x, comb, post, out, n)
 
     ref = k5_reference(residual, x, comb, post)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
@@ -95,14 +95,14 @@ def test_k5_mul_sum_add_with_outer(num_tokens, n, c):
 
 
 # -----------------------------------------------------------------------------
-# End-to-end hc_post pipeline (uses K5/mHC_mul_sum_add_with_outer)
+# End-to-end hc_post pipeline (uses mhc_post)
 # -----------------------------------------------------------------------------
 
 def _run_hc_post_with_kernel(x, residual, post, comb, n):
     b, s, C = x.shape
     bs = b * s
     out = torch.empty(bs, n, C, device=x.device, dtype=torch.bfloat16)
-    rt.mHC_mul_sum_add_with_outer(
+    rt.mhc_post(
         residual.reshape(bs, n, C).contiguous(),
         x.reshape(bs, C).contiguous(),
         comb.reshape(bs, n, n).contiguous(),
