@@ -108,3 +108,15 @@ what is intentionally unfinished, ordered by priority.
     details were load-bearing during the 2026-05/06 hang debugging
     (suspend hints, forceinline reinit path, .release-vs-plain arrive).
     Own PR; do not mix with functional changes.
+
+16. **(P1) Attention-batch scaling regression at bs=16.** Measured (Qwen3-8B,
+    B200, 1-token prompt, 512 decode): v2 beats v1 up to bs=8 (1.06x at bs=1)
+    but loses at bs=16 (5.444 vs 5.257 ms/tok, 0.97x). Isolated to the
+    attention-request dimension, NOT the linear: with linear M=16 but 1
+    request, v2 still wins 1.05x; raising requests 1->16 at fixed M costs v2
+    +0.61 ms vs v1's +0.20 ms. Suspects: (a) the consumer-warps-only
+    monolithic attention task (see #3 — no loader/launcher KV pipelining),
+    (b) static round-robin imbalance as the long attention tasks multiply
+    (see #1/#6). Next step: per-SM task-type distribution analysis of the
+    bs=16 plan, then v2 profiler instrumentation. Figure:
+    docs/mpk/figures/bs_sweep_v1_v2.png (referenced from the README).

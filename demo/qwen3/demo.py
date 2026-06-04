@@ -118,6 +118,9 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--no-chat-template", action="store_true",
+        help="Tokenize --prompt directly without the chat template "
+             "(benchmarking: enables exact prompt lengths, e.g. 1 token)")
     parser.add_argument("--use-v2", action="store_true", help="Use v2 runtime (static per-SM task plan, no scheduler)")
 
     # -------- Args for CI tests ----------
@@ -230,16 +233,19 @@ if __name__ == "__main__":
                 """
     #question = "Can you please change x axis to start from 0"
     #prompt = code_text + "\n" + question
-    messages = [
-        {
-            "role": "system",
-            "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
-        },
-        {"role": "user", "content": prompt},
-    ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    if args.no_chat_template:
+        text = prompt
+    else:
+        messages = [
+            {
+                "role": "system",
+                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
