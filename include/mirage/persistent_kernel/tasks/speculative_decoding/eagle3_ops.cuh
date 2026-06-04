@@ -22,9 +22,9 @@ namespace kernel {
 //
 // Kernels supporting Eagle3 speculative decoding:
 //   1. copy_layer_kernel        — capture target's aux hidden states (memcpy)
-//   2. eagle3_aux_concat_kernel — concat 3 H-dim tensors → 3H (for fc / eh_proj)
-//   3. eagle3_input_concat_kernel — concat(embed, hidden) → 2H (for draft QKV)
-//   4. eagle3_d2t_remap_kernel  — hot vocab id → target vocab id via d2t table
+//   2. concat_kernel            — concat N H-dim tensors → N*H along dim 1
+//                                 (N=3 for fc/eh_proj, N=2 for draft QKV input)
+//   3. eagle3_d2t_remap_kernel  — hot vocab id → target vocab id via d2t table
 // ============================================================================
 
 // --- Generic Memcpy ---
@@ -47,25 +47,20 @@ __device__ __forceinline__ void
   }
 }
 
-// --- Aux Hidden State Concatenation ---
-// Concatenates 3 (BATCH_SIZE, HIDDEN_DIM) bf16 tensors along dim 1, producing
-// (BATCH_SIZE, 3 * HIDDEN_DIM).
+// --- Tensor Concatenation along dim 1 ---
+// Concatenates N (BATCH_SIZE, HIDDEN_DIM) tensors along dim 1, producing
+// (BATCH_SIZE, N * HIDDEN_DIM).
 //
-// Layout: output[b, 0..H)        = h0[b, :]
-//         output[b, H..2H)       = h1[b, :]
-//         output[b, 2H..3H)      = h2[b, :]
+// Layout: output[b, k*H .. (k+1)*H) = inputs[k][b, :]   for k in [0, N)
 //
-// Used at Eagle3 draft step 0 to combine h_low / h_mid / h_high before the
-// `eh_proj` (fc) linear (3H → H).
-template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
+// Generic helper (not Eagle3-specific). Current Eagle3 uses:
+//   - N=3: combine aux h_low / h_mid / h_high before `eh_proj` (fc) (3H → H).
+//   - N=2: concat(embed, hidden) for the draft attention QKV input (2H),
+//          matching sglang's torch.cat([embeds, hidden_states], dim=-1).
+template <typename T, int BATCH_SIZE, int HIDDEN_DIM, int N>
 __device__ __forceinline__ void
-    eagle3_aux_concat_kernel(void const *__restrict__ h0_ptr,
-                             void const *__restrict__ h1_ptr,
-                             void const *__restrict__ h2_ptr,
-                             void *__restrict__ output_ptr) {
-  T const *__restrict__ h0 = static_cast<T const *>(h0_ptr);
-  T const *__restrict__ h1 = static_cast<T const *>(h1_ptr);
-  T const *__restrict__ h2 = static_cast<T const *>(h2_ptr);
+    concat_kernel(void const *const *__restrict__ input_ptrs,
+                  void *__restrict__ output_ptr) {
   T *__restrict__ output = static_cast<T *>(output_ptr);
 
   int const total = BATCH_SIZE * HIDDEN_DIM;
@@ -75,41 +70,12 @@ __device__ __forceinline__ void
   for (int i = tid; i < total; i += stride) {
     int b = i / HIDDEN_DIM;
     int d = i % HIDDEN_DIM;
-    int out_base = b * 3 * HIDDEN_DIM;
-    output[out_base + d] = h0[i];
-    output[out_base + HIDDEN_DIM + d] = h1[i];
-    output[out_base + 2 * HIDDEN_DIM + d] = h2[i];
-  }
-}
-
-// --- Eagle3 Attention Input Concatenation ---
-// Concatenates token embedding and per-step hidden into the Llama-style draft
-// attention QKV input of shape (BATCH_SIZE, 2 * HIDDEN_DIM).
-//
-// Layout: output[b, 0..H)  = embed[b, :]
-//         output[b, H..2H) = hidden[b, :]
-//
-// The Eagle3 draft model's qkv_proj weight is (out_dim, 2H), so this matches
-// sglang's `torch.cat([embeds, hidden_states], dim=-1)` before attention.
-template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
-__device__ __forceinline__ void
-    eagle3_input_concat_kernel(void const *__restrict__ embed_ptr,
-                               void const *__restrict__ hidden_ptr,
-                               void *__restrict__ output_ptr) {
-  T const *__restrict__ embed = static_cast<T const *>(embed_ptr);
-  T const *__restrict__ hidden = static_cast<T const *>(hidden_ptr);
-  T *__restrict__ output = static_cast<T *>(output_ptr);
-
-  int const total = BATCH_SIZE * HIDDEN_DIM;
-  int const tid = threadIdx.x;
-  int const stride = blockDim.x;
-
-  for (int i = tid; i < total; i += stride) {
-    int b = i / HIDDEN_DIM;
-    int d = i % HIDDEN_DIM;
-    int out_base = b * 2 * HIDDEN_DIM;
-    output[out_base + d] = embed[i];
-    output[out_base + HIDDEN_DIM + d] = hidden[i];
+    int out_base = b * N * HIDDEN_DIM;
+#pragma unroll
+    for (int k = 0; k < N; k++) {
+      T const *__restrict__ in = static_cast<T const *>(input_ptrs[k]);
+      output[out_base + k * HIDDEN_DIM + d] = in[i];
+    }
   }
 }
 
