@@ -395,12 +395,8 @@ __device__ __noinline__ void linear_loader_task(
     }
   }
 
-  // ── DRAIN ────────────────────────────────────────────────────────────────
-  // Wait the launcher's final tcgen05.commit(mma_mbar) arrivals so they LAND
-  // before this task arrives instruction_finished and the ring slot recycles.
-  // Empty is shared, so draining via pW suffices (pA's cursor mirrors pW's).
-  //
-  // NO drain. The end-of-loader pW.drain() was REMOVED 2026-05-30: it caused
+  // ── NO DRAIN ─────────────────────────────────────────────────────────────
+  // The end-of-loader pW.drain() was REMOVED 2026-05-30: it caused
   // an intermittent cross-op deadlock (the loader blocking on the launcher's
   // final mma_mbar — the SHARED W/A empty edge — commits at task end tangles
   // with cross-op ring-slot reuse). The load-bearing stale-arrival defense is
@@ -424,6 +420,11 @@ __device__ __noinline__ void linear_launcher_task(
   const int smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
 
   const TaskCtx c = ctx_from<SPLIT_K, TILES_PER_TASK>(N_real, K, tile_idx);
+  // NOTE page protocol: this early return skips the blanket page-free below,
+  // so a task that actually bounds-fails would desync page_finished parity
+  // and deadlock the next task on this slot. Unreachable at tiles_per_task=1
+  // (task count == tile count, see header USAGE note); must be revisited if
+  // tiles_per_task>1 is ever fixed.
   if (c.bounds_fail(tile_idx)) return;
 
   // Launcher re-init from CHANNELS/ONESHOT reinit_*_by policy (table-driven, Phase 2b).
@@ -502,6 +503,17 @@ __device__ __noinline__ void linear_launcher_task(
         Wr.release(s, runtime_smem, mirage::runtime_v2::runtime_finish_page);
     }
   }
+
+  // RECONVERGE before freeing pages. The MMA loop above runs only on the
+  // elected lane; on Volta+ independent thread scheduling the non-elected lanes
+  // are NOT reconverged at the end of the if-block, so without this __syncwarp
+  // they arrive page_finished for their pages while the elected lane's MMA is
+  // still reading W/A from those pages — the next tasks' loaders then race far
+  // ahead on the page pipeline (and can TMA into pages mid-MMA). THE verified
+  // fix for the intermittent page-parity deadlock: baseline hangs ~1/12 runs;
+  // this __syncwarp alone is 40/40 clean (the controller-side proxy fence
+  // alone was NOT sufficient — still hung).
+  __syncwarp();
 
   // Task-end page free, PARALLEL across lanes: each lane frees its own page
   // unless the W ring already freed it per-stage. When cross-task is off, the W

@@ -990,7 +990,6 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   code.e("TMA_OUT "
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
-  // code.e("printf(\"linear_kernel_hopper start\");");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
          "TMA_OUT, $, $>(",
@@ -1989,7 +1988,6 @@ int TaskRegister::register_linear_sm100_v2_task(
   // codegen page-protocol prefix — it does both inline (dep wait once
   // before A TMAs, page wait per-page before each TMA), enabling weight
   // prefetch. Launcher and consumer still use the codegen dep prefix.
-  // Storer (Phase 5a) does per-stage page release.
   mirage::transpiler::CodeKeeper init_code;
   init_code.inc_indent();
   emit_linear_init_semaphores(init_code);
@@ -2031,8 +2029,9 @@ int TaskRegister::register_linear_sm100_v2_task(
 
 // ─── v3 linear ───────────────────────────────────────────────────────────────
 // Same arg shape as v2 (N_real, K, m_real, split_k, tiles_per_task), but emits
-// role bodies that call kernel::linear_v3:: functions. The hang fix is now
-// structural via Producer::drain() in the loader — no role-warp re-init.
+// role bodies that call kernel::linear_v3:: functions. Stale-arrival defense
+// is the start-of-task re-inits (reinit_for_role in loader/launcher) — the
+// end-of-loader drain was removed (see linear_sm100_v3.cuh header).
 int TaskRegister::register_linear_sm100_v3_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,

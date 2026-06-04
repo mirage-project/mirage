@@ -121,7 +121,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       NUM_THREADS, /*bar-id*/ CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
   int const wg_id = threadIdx.x / 128;
   if (wg_id == 0) {
-    // asm volatile("setmaxnreg placeholder");
     constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
     // NOTE(Jinchen): The input is a packed QKV tensor, which may contain
@@ -274,8 +273,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
       if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
         // load from KV Cache
-        // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
-        // PAGE_SIZE];
         int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
         int src_row = page_idx_0 * PAGE_SIZE + page_offset;
         load_smem(k_buffer_smem(dst_row, col),
@@ -327,8 +324,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
           int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
           if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
             // load from KV Cache
-            // int page_idx =
-            //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
             int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
             int src_row = page_idx * PAGE_SIZE + page_offset;
             load_smem(k_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
@@ -459,8 +454,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
              elem_idx += NUM_THREADS) {
           int token_idx = elem_idx / HEAD_DIM;
           int col = elem_idx % HEAD_DIM;
-          // int page_idx = page_indices[(token_idx + first_kv_token_to_process)
-          // / PAGE_SIZE];
           int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
           int src_row = (token_idx + first_kv_token_to_process) % KV_TILE_SIZE;
           int dst_row = page_idx * PAGE_SIZE + page_offset;
@@ -700,7 +693,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
     }
   } else {
-    // asm volatile("setmaxnreg placeholder");
   }
 }
 

@@ -423,7 +423,8 @@ __device__ __noinline__ void linear_launcher_task(
         }
     }
 
-    // BISECT: temporarily restore Phase 4.3 launcher all-pages release.
+    // Task-end blanket page release, lane-parallel (launcher owns page
+    // release for linear; auto_consumer_finish=false).
     if (lane_id < MAX_SMEM_PAGES_PER_TASK) {
         mirage::runtime_v2::runtime_finish_page(runtime_smem, lane_id, 1);
     }

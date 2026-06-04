@@ -6,9 +6,10 @@
 // MPK linear task — device PTX helpers (namespace kernel::linear).
 //
 // These are the single-thread / warp PTX wrappers the linear role functions
-// use. Copied VERBATIM from the retired linear_sm100_v2 path so behavior is
-// byte-identical to the validated kernel; this header is now the authority and
-// linear_sm100_v2.cuh is no longer a dependency of v3.
+// use. Copied VERBATIM from the linear_sm100_v2 path so behavior is
+// byte-identical to the validated kernel; this header is the authority for
+// v3, and linear_sm100_v2.cuh (still shipped as the v2 task) no longer
+// feeds it.
 //
 // Device-only (contains __device__ PTX) — NOT host-includable. The host-safe
 // constants live in linear_spec.h, which this header includes.

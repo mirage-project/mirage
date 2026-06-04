@@ -185,23 +185,13 @@ struct Consumer {
 };
 
 // ────────────────────────────────────────────────────────────────────────────
-// SmemRing — STORAGE primitive. Owns the per-stage SMEM offsets and (optionally)
-// the physical page IDs backing each stage, plus the page-release action.
-// Pairs with a Channel: the Channel synchronizes, the SmemRing addresses.
+// SmemRing — STORAGE primitive. Owns the per-stage SMEM offsets and
+// (optionally) the physical page IDs backing each stage. Pairs with a Channel:
+// the Channel synchronizes, the SmemRing addresses. slot_offsets / pages are
+// caller-populated (from the planner via task_desc->smem_region_offset / page
+// metadata) — no contiguous layout is assumed.
 //
-// PAGES_PER_SLOT:
-//   > 0  → this ring's stages own dedicated pages; release_pages(s, rt) frees
-//          stage s's pages at the consumer's release point (Phase E per-page
-//          release → cross-task overlap).
-//   == 0 → pages are managed elsewhere (e.g. sub-page-packed regions whose
-//          page lifetime spans multiple stages, freed by a task-end blanket
-//          release). release_pages() is a no-op.
-//
-// slot_offsets / pages are caller-populated (the task reads them from the
-// planner via task_desc->smem_region_offset / page metadata). We do NOT assume
-// contiguous layout.
-// ────────────────────────────────────────────────────────────────────────────
-// SmemRing — per-stage SMEM storage + the cross-task PAGE lifecycle for the
+// SmemRing also owns the cross-task PAGE lifecycle for the
 // pages this ring owns. Beyond the in-task full/empty edges (data-ready /
 // slot-free), a physical page has an owner that spans tasks: task N+1 may not
 // write it until task N frees it. The ring owns that edge for ITS pages:

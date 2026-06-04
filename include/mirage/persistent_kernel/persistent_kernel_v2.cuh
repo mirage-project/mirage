@@ -36,6 +36,13 @@ using ::mirage::runtime::TaskId;
 // range to workers. Matches v1 scheduler semantics closely enough to preserve
 // task ordering within events.
 //
+// MUST stay in lockstep with the Python twin build_v2_worker_task_queues
+// (python/mirage/mpk/v2_task_schedule.py): the kernel executes THIS plan,
+// while the Python queues drive the SMEM page planner. Same algorithm on
+// both sides (task-pushing event types, continuous round-robin cursor,
+// task 1 prepended to worker 0) — divergence silently desyncs the page plan
+// from the actual execution order.
+//
 // Reads all_events (device) by cudaMemcpying to host scratch.
 // Allocates v2_per_sm_task_positions / v2_per_sm_task_offsets on device and
 // fills config.v2_* fields.
@@ -126,20 +133,6 @@ inline void build_v2_plan(RuntimeConfig &config) {
     printf("[v2] static plan built: %d workers, %zu total tasks/iter "
            "(avg %zu/SM, max %zu/SM, pushed_events=%d)\n",
            num_workers, total, total / num_workers, max_per_sm, pushed_events);
-    // Debug: show SM 0's first few task positions
-    printf("[v2] SM 0 first 10 tasks:");
-    for (int i = 0; i < 10 && i < (int)(h_offsets[1] - h_offsets[0]); i++) {
-        printf(" %zu", h_positions[i]);
-    }
-    printf("\n");
-    // Pull all_tasks[1] to host to show what begin_task_graph's task_type is
-    FullTaskDesc t0;
-    cudaMemcpy(&t0, config.all_tasks + 0, sizeof(TaskDesc), cudaMemcpyDeviceToHost);
-    printf("[v2] all_tasks[0].task_type=%d (expect TASK_TERMINATE=%d)\n",
-           (int)t0.task_type, (int)::mirage::runtime::TASK_TERMINATE);
-    FullTaskDesc t1;
-    cudaMemcpy(&t1, config.all_tasks + 1, sizeof(TaskDesc), cudaMemcpyDeviceToHost);
-    printf("[v2] all_tasks[1].task_type=%d\n", (int)t1.task_type);
 }
 
 // ── Device kernel: advance per-iter state ──────────────────────────────────

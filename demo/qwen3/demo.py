@@ -809,6 +809,16 @@ if __name__ == "__main__":
             task_graph["v2_worker_task_queues"] = build_v2_worker_task_queues(
                 task_graph, mpk.num_workers)
             task_graph_json = add_v2_region_smem_plan(json.dumps(task_graph))
+            if args.profiling:
+                # --profiling also emits a per-SM SMEM page-usage figure:
+                # rows = SM 0's tasks in execution order, columns = physical
+                # pages — shows which pages each task occupies.
+                from mirage.mpk.page_plan_viz import save_page_plan_figure
+                save_page_plan_figure(
+                    task_graph_json,
+                    out_path=os.path.join(args.output_dir or ".",
+                                          f"page_plan_sm0_rank{rank}.png"),
+                    worker=0)
         with open(f"task_graph_{rank}.json", "w") as f:
             f.write(task_graph_json)
         with open(f"kernel_{rank}.cu", "w") as f:

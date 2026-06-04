@@ -43,11 +43,6 @@ std::string const &role_body(rt::TaskRoleVariantCode const &code,
   return code.consumer;
 }
 
-// Phase 3.5: page-lifecycle prefix that runs at the start of every loader
-// body. Each lane of warp 4 handles one physical page: wait for the prior
-// task to release it; for pages this task doesn't use, finish them right
-// away (the "claim+release ASAP" pattern from MegaKernels' NoOp/matvec).
-// Pages this task does use are left for the consumer suffix to finish.
 // Phase 3.5: page-lifecycle prefix at start of every loader body
 // (MegaKernels NoOp/matvec pattern, lane-parallel). For each physical page:
 //   - lane K waits for the previous task's release of page K
@@ -68,21 +63,17 @@ char const *kLoaderPagePrefix =
     "  __syncwarp();\n"
     "}\n";
 
-// Phase 3.5: page-lifecycle suffix that runs at the end of every consumer
-// body. Releases the pages this task uses (the ones the loader prefix did
-// NOT release). Tasks that do their own per-stage release (e.g. linear in
-// 3.5b) opt out via auto_consumer_finish=false.
-//
-// Single-threaded: consumer has up to 4 warps × 32 = 128 threads, but
-// page_finished mbarriers have count=1 so we want exactly one arrive per
-// task per page. Thread 0 issues all arrives.
+// Phase 3.5: page-lifecycle suffix at the end of every consumer body.
+// Releases the pages this task uses (the ones the loader prefix did NOT
+// release). Tasks that do their own release (e.g. linear's launcher
+// blanket) opt out via auto_consumer_finish=false.
 //
 // Iterates physical pages — NOT regions — because the planner packs
 // multiple sub-page regions into the same physical page (e.g. linear's
 // six 4-KB A regions land on two pages, four+two). A region-based loop
 // would arrive page X once per packed region, multi-flipping parity.
-// Phase 3.5: page-lifecycle suffix at end of every consumer body. Lane-
-// parallel match for the loader prefix: lane K of consumer warp 0 arrives
+//
+// Lane-parallel match for the loader prefix: lane K of consumer warp 0 arrives
 // page K iff this task uses page K (the loader prefix already arrived
 // pages this task doesn't use). Together they guarantee one arrive per
 // page per task without the single-thread serialization that blocked

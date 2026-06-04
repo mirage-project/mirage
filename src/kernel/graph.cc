@@ -759,7 +759,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   }
 
   else {
-    printf("Unsupported task name: %s\n", name);
+    printf("Unsupported task name: %s\n", name.c_str());
     assert(false && "Unsupported task type");
   }
 }

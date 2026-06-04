@@ -82,6 +82,9 @@ __device__ __forceinline__ void mbar_init(uint64_t *mbar, int count) {
 }
 
 __device__ __forceinline__ void mbar_arrive(uint64_t *mbar) {
+  // NOTE: plain mbarrier.arrive defaults to .release.cta (verified: ptxas emits
+  // byte-identical SASS for the explicit .release form on sm_100a/CUDA 12.8),
+  // so role warps' .acquire waits already synchronize-with this arrive.
   asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
                :: "r"(smem_addr(mbar)) : "memory");
 }
@@ -499,7 +502,7 @@ __device__ __noinline__ void controller_warp_loop(
   // Phase 2: cross-SM dependency wait moved out of the controller. Each
   // task's consumer prefix now calls wait_task_dependency_noinline before
   // running its body. Controller becomes pure fetch+publish; only
-  // wait_finished_and_trigger_through (above) is kept, both for slot reuse
+  // wait_slot_finished_eager (above) is kept, both for slot reuse
   // and for promptly publishing intra-stream producer events that the
   // consumer's spin needs to terminate.
   for (int iter_num = 0; iter_num < config.v2_max_iters; iter_num++) {
@@ -575,6 +578,15 @@ __device__ __noinline__ void controller_warp_loop(
         }
         ::kernel::cp_async_fence();
         ::kernel::cp_async_wait<0>();
+        // The TaskDesc was copied via cp.async; role warps read it with normal
+        // loads after the INSTRUCTION_ARRIVED mbar. Publish the cp.async
+        // writes to the generic proxy before the arrive (v1 got this implicitly
+        // from its __syncthreads after cp_async_wait; v2's warp-specialized
+        // handshake does not). Defensive hardening: isolation testing of the
+        // 2026-05 page-parity hang showed this fence ALONE does not fix it
+        // (the launcher __syncwarp in linear_v3 does), but the proxy-ordering
+        // gap is real per the PTX memory model, so it stays.
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
       }
       __syncwarp();
 
@@ -610,7 +622,7 @@ __device__ __noinline__ void controller_warp_loop(
       //
       // Intra-stream producer events (sequence S-1, S-2 in this same ring
       // stream feeding this same SM's consumer) get triggered at slot reuse
-      // via wait_finished_and_trigger_through(sequence - INSTRUCTION_RING_SIZE)
+      // via wait_slot_finished_eager(sequence - INSTRUCTION_RING_SIZE)
       // above. That introduces up to RING-1 instructions of latency for
       // intra-stream consumer-producer chains; in Qwen3 these are rare
       // because the worker queues round-robin tasks across SMs. If

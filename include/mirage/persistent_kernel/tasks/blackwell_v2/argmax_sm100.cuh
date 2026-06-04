@@ -149,8 +149,6 @@ __device__ __forceinline__ void
 		                               mirage::runtime::TaskDesc const *task_desc,
 		                               int num_active_tokens,
 		                               void *runtime_smem) {
-	  // int step,
-	  // long long *tokens) {
 	  T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
   long long const *__restrict__ partial_idxs =
       static_cast<long long const *>(input_idx_ptr);
@@ -185,11 +183,8 @@ __device__ __forceinline__ void
           long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
           final_output[batch_idx] =
               winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
-          // tokens[step + 1] = winning_chunk_idx * CHUNK_SIZE +
-          // winning_relative_idx;
         } else {
           final_output[batch_idx] = -1;
-          // tokens[step + 1] = -1;
 	        }
 	      }
 	    }

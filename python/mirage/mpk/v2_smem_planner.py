@@ -154,6 +154,13 @@ def _validate_contiguous_regions(plan: dict) -> None:
 def _find_physical_run(page_count: int,
                        used_physical_pages: set[int],
                        preferred_order: list[int]) -> list[int] | None:
+    # NOTE: preferred_order (the prior task's release order) is currently NOT
+    # consulted — multi-page contiguous regions always take the lowest free
+    # run. Harmless while cross-task page overlap is disabled on the device
+    # (CROSS_TASK_PAGES=false: page lifetimes are task-scoped, so assignment
+    # order has no effect). When Phase E turns overlap on, this must prefer
+    # runs of earliest-released pages or the W regions (the main overlap
+    # beneficiaries) won't follow the fill-fresh-then-earliest-released rule.
     for first_page in range(0, NUM_PAGES - page_count + 1):
         physical_pages = list(range(first_page, first_page + page_count))
         if any(page in used_physical_pages for page in physical_pages):

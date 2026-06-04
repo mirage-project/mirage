@@ -144,12 +144,13 @@ inline ::mirage::runtime::TaskSmemInfo make_smem_info() {
 // The linear op's producer→consumer pipeline, declared as DATA the planner /
 // codegen can read — instead of being wired only in device code (make_wa).
 //
-// Phase 1 (now): declared + consistency-checked, but NOT yet consumed. The
-// device .cuh still wires channels by hand; this table just mirrors it and is
-// asserted to match. Phase 2 will generate init_semaphores + the per-async-edge
-// re-init FROM this table (removing the hand-written ordinals in task_register
-// and the hand-placed reinit_* in the .cuh). Phase 4 will derive cross-task
-// page-release timing from `release_edge`.
+// CONSUMED by three places (the table is live, not documentation):
+//   * linear_device.cuh linear_init()      — controller's structural mbar init
+//   * linear_device.cuh reinit_for_role()  — per-role start-of-task re-init of
+//     async edges (clears prior-slot strays; placement per reinit_*_by)
+//   * linear_sm100_v3.cuh make_wa()        — wires the Channel cursors' full/
+//     empty addresses (incl. A sharing W's mma empty edge)
+// Future: derive cross-task page-release timing from the release edge.
 //
 // `Arrival` mirrors mpk::ch::By (Warp = sync warp arrival; Tma/Mma = async
 // engine arrival, i.e. the edges that need a start-of-task re-init).
@@ -242,6 +243,12 @@ static_assert(CHANNELS[0].full_sem_base == SEM_W_TMA_BASE &&
                   CHANNELS[2].full_sem_base == SEM_MAINLOOP_BASE &&
                   CHANNELS[2].empty_sem_base == SEM_EPILOGUE_BASE,
               "channel ordinals must match the SEM_* constants");
+// storage_region_base is descriptive only — make_wa() addresses storage via
+// the REGION_* ordinals directly. Assert the table can't drift from them.
+static_assert(CHANNELS[0].storage_region_base == REGION_W_0 &&
+                  CHANNELS[1].storage_region_base == REGION_A_0 &&
+                  CHANNELS[2].storage_region_base == -1,
+              "channel storage bases must match the REGION_* constants");
 
 }  // namespace linear
 }  // namespace kernel
