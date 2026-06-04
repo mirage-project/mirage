@@ -40,9 +40,14 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
-          int MAX_TOKENS = 3,
           int Q_LEN_OVERRIDE = 0,
-          int TAIL_OFFSET = 0>
+          int TAIL_OFFSET = 0,
+          // MAX_TOKENS = per-call query rows (= mbt). Must be >= mbt yet small
+          // enough that the per-row smem buffers fit MAX_DYNAMIC_SHARED_MEMORY.
+          // The default 8 does NOT fit smem (MMA_ITERS_M 3->4, S_O_BUFFER
+          // +32KB); to run Eagle3 (K<=5, mbt<=6) override it to 6. See the demo
+          // header.
+          int MAX_TOKENS = 8>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,

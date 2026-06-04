@@ -8,8 +8,9 @@ import os
 
 # ! Caveat
 # If you want to run this script, you should do this manual modification:
-# Change `include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh` line 43
-# from `int MAX_TOKENS = 8` to `int MAX_TOKENS = 1`.
+# Change `include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh` line 49
+# from `int MAX_TOKENS = 8` to `int MAX_TOKENS = 6`.
+# (MAX_TOKENS must be >= mbt = K+1; the default 8 overflows smem, 6 covers K<=5.)
 # And this demo currently cannot run with multigpu.
 
 # print limitation

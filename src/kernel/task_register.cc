@@ -1947,10 +1947,11 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // MAX_TOKENS=3 supports Eagle3 K=2 (mbt=3 target attention).
+  // MAX_TOKENS is left to the kernel template default; only Q_LEN_OVERRIDE /
+  // TAIL_OFFSET are passed (the trailing template args before MAX_TOKENS).
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $, 6, $, $>(",
+         "$, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
