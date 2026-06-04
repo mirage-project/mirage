@@ -73,7 +73,7 @@ class MPKMetadata:
     spec_decode_config: Optional[object] = None
     # use cutlass kernel
     use_cutlass_kernel: bool = True
-    
+
     def check_valid(self):
         if self.weight_from_model:
             assert (self.model_name is not None) or (self.model_path is not None), "model_name or model_path is required when weight_from_model is True"
@@ -219,7 +219,7 @@ class MPK:
         
         self.model_config = args.model_config
         self.with_lm_head = self.model_config.with_lm_head
-            
+
         if self.num_workers <= 0 or self.num_schedulers <= 0:
             self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
         else:

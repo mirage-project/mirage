@@ -48,8 +48,14 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #endif
 #else
-#if MPK_TARGET_CC >= 90
-// B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
+#if defined(MIRAGE_GRACE_BLACKWELL)
+// B200: ~227KB opt-in smem. Mixed planned attention compiles both prefill and
+// decode paths into worker_kernel; ptxas reports ~36KB static smem for that
+// worker, so keep the dynamic budget below the device total.
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    190 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 90
+// H100/GH200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
 // (la_smem[MAX_SK*128]). Reduce dynamic budget to stay under total limit.
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     207 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -76,7 +82,7 @@ unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
 unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
-int const MAX_INPUTS_PER_TASK = 7;
+int const MAX_INPUTS_PER_TASK = 9;
 int const MAX_OUTPUTS_PER_TASK = 3;
 // B200 has 148 SMs — need more workers than the default 128
 int const MAX_NUM_WORKERS = 160;
@@ -181,17 +187,25 @@ enum TaskType {
   TASK_MTP_BUILD_EMBED_INPUT = 294,
   // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
-  TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
+  // Reserved id (no longer emitted as a task): the attention planner now runs
+  // inside the scheduler's per-iteration prepare step via
+  // mpk_run_attention_planner(), not as a standalone worker task. Kept for
+  // profiler/debug name mapping and to avoid reusing the id.
+  TASK_ATTENTION_PLANNER_SM100 = 297,
+  // Fused dual consumer: one CTA per bucket processes BOTH prefill and decode
+  // works for that bucket. Halves the consumer CTA count vs the split form.
+  TASK_PLANNED_DUAL_ATTENTION_SM100 = 300,
+  TASK_SM100_TASK_END = 302, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
   TASK_GET_NEXT_TASK = 203,
   TASK_SCHD_PREPARE_BATCH = 204,
   // Multi-GPU tasks
-  TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
-  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
-  TASK_NVSHMEM_TILE_ALLREDUCE = 302,
-  TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
+  TASK_MULTIGPU_TASK_BEGIN = 350, // begin placeholder, not a real task
+  TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 351,
+  TASK_NVSHMEM_TILE_ALLREDUCE = 352,
+  TASK_MULTIGPU_TASK_END = 399, // end placeholder, not a real task
 };
 
 enum EventType {
@@ -331,6 +345,12 @@ struct RuntimeConfig {
   int *paged_kv_indices_buffer;   // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_snapshot; // Scheduler snapshot for in-place compaction
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
+  // SM100 planned attention: when the planner is merged into the scheduler
+  // (MPK_SCHED_PLANNER), this points at the shared flat plan buffer that the
+  // scheduler fills each iteration via attention_planner_sm100_core(). nullptr
+  // when the model has no planned-attention layer (MPK_SCHED_PLANNER undefined,
+  // so mpk_run_attention_planner() is a no-op).
+  int *attn_plan_buffer = nullptr;
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN) || defined(MODE_ONLINE_TEST) ||               \
     defined(MODE_ONLINE_PINNED)

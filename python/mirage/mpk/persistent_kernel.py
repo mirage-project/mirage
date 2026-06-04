@@ -230,6 +230,10 @@ def get_compile_command(
         "-lcudart",
         "-lstdc++fs",
         "-Xcompiler=-fPIC",
+        # Generated MPK extensions are often compiled and loaded many times in
+        # one Python process. Hide all non-PyInit symbols so ELF interposition
+        # cannot route one generated module's runtime calls into another.
+        "-Xcompiler=-fvisibility=hidden",
         "--expt-relaxed-constexpr",
         "-o",
         py_so_path,
@@ -263,6 +267,25 @@ def get_compile_command(
     spec_cfg = getattr(mpk, 'spec_decode_config', None)
     if spec_cfg is not None and getattr(spec_cfg, 'method', None) == 'eagle3':
         flags = flags + ["-DMPK_SPEC_DECODE"]
+    # Attention planner (SM100): planning_paged_attention_layer runs the planner
+    # inside the scheduler (never as a task) and records its template params on
+    # the kernel so they can be baked in here as macros (the scheduler-side call
+    # site in persistent_kernel.cuh is compiled generically and reads them).
+    sched_planner = getattr(mpk, "_sched_planner", None)
+    if sched_planner is not None and target_cc == 100:
+        sp = sched_planner
+        flags = flags + [
+            "-DMPK_SCHED_PLANNER=1",
+            f"-DMPK_SCHED_PLANNER_NUM_KV_HEADS={sp['num_kv_heads']}",
+            f"-DMPK_SCHED_PLANNER_GQA_GROUP={sp['gqa_group']}",
+            f"-DMPK_SCHED_PLANNER_NUM_BUCKETS={sp['num_buckets']}",
+            f"-DMPK_SCHED_PLANNER_MAX_WORKS={sp['max_works']}",
+            f"-DMPK_SCHED_PLANNER_P_Q_TILE={sp['prefill_packed_q_tile']}",
+            f"-DMPK_SCHED_PLANNER_D_Q_TILE={sp['decode_packed_q_tile']}",
+            f"-DMPK_SCHED_PLANNER_PREFILL_THRESHOLD={sp['prefill_threshold']}",
+            f"-DMPK_SCHED_PLANNER_KV_SPLIT_SIZE={sp['kv_split_size']}",
+            f'-DMPK_SCHED_PLANNER_BUFFER_NAME="{sp["buffer_name"]}"',
+        ]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -584,6 +607,35 @@ class PersistentKernel:
         else:
             raise RuntimeError(f"Invalid io_category: {io_category}")
         return t
+
+    def _register_sched_planner(self, **cfg):
+        """Record the (single) scheduler-run attention planner config.
+
+        get_compile_command() bakes these into -D macros so the scheduler-side
+        mpk_run_attention_planner() can instantiate the planner template. Only
+        one config is supported because the scheduler runs exactly one planner
+        per iteration; all planned-attention layers in a model must therefore
+        share the same planner shape (the common case — same head dims/tiling
+        across layers).
+        """
+        existing = getattr(self, "_sched_planner", None)
+        if existing is not None:
+            assert existing == cfg, (
+                "The scheduler runs a single attention planner per kernel, so "
+                "all planned-attention layers must share one planner config; "
+                f"got {cfg} but already have {existing}."
+            )
+            return
+        self._sched_planner = cfg
+
+    def get_attention_plan_storage(self):
+        """Return the shared attention plan torch tensors the scheduler fills.
+
+        Maps ``buffer_name -> torch.Tensor`` for each distinct planner shape.
+        Useful for tests/profiling that inspect the planner output after
+        ``run_test_mode()``; empty if the model has no planned-attention layer.
+        """
+        return getattr(self, "_sched_plan_storage", {})
 
     def fuse_tensors(
         self, inputs: list[DTensor], fused_dim: int, num_groups: int, name: str = None
@@ -911,7 +963,394 @@ class PersistentKernel:
         else:
             self.kn_graph.register_task(tb_graph, "paged_attention", params)
 
-    
+    def resolve_attention_plan_shape(
+        self,
+        num_kv_heads: int,
+        gqa_group: int,
+        num_buckets: int = None,
+        max_works: int = 1024,
+        max_prefill_tokens_per_work: int = 32,
+        max_decode_tokens_per_work: int = 8,
+        consumer: str = "both",
+        kv_split_size: int = None,
+        prefill_threshold: int = 16,
+    ):
+        if kv_split_size == "auto":
+            kv_split_size = self.resolve_attention_kv_split_size(
+                num_kv_heads=num_kv_heads,
+                gqa_group=gqa_group,
+                max_prefill_tokens_per_work=max_prefill_tokens_per_work,
+            )
+        assert max_prefill_tokens_per_work > 0
+        assert max_decode_tokens_per_work > 0
+        # Cap num_buckets at the workload's natural max parallelism so we don't
+        # launch idle consumer CTAs that just early-exit.
+        active_reqs_upper = max(
+            1, min(self.max_num_batched_requests, self.max_num_batched_tokens))
+        # Bound the total number of Q tiles over the whole batch, not per
+        # request. The old R * ceil(T/tile) bound treated every request as if
+        # it could contain all T batched tokens and made split-KV instantiate
+        # thousands of impossible work slots. That extra planner shared memory
+        # can exceed the worker launch shared-memory budget.
+        remaining_tokens = max(0, self.max_num_batched_tokens - active_reqs_upper)
+        max_prefill_q_tiles_per_batch = (
+            active_reqs_upper +
+            remaining_tokens // max_prefill_tokens_per_work
+        )
+        decode_tokens_per_req_upper = max(1, prefill_threshold // gqa_group)
+        max_decode_q_tiles_per_req = (
+            min(self.max_num_batched_tokens, decode_tokens_per_req_upper) +
+            max_decode_tokens_per_work - 1
+        ) // max_decode_tokens_per_work
+        max_decode_q_tiles_per_batch = (
+            active_reqs_upper * max(1, max_decode_q_tiles_per_req)
+        )
+        # MAX_WORKS is a template parameter in the planner and backs several
+        # shared-memory staging arrays. Keep it no larger than the graph can
+        # actually produce to avoid excessive static smem on high-batch decode.
+        max_kv_tiles_per_req = 1
+        if kv_split_size is not None:
+            max_kv_tiles_per_req = max(
+                1, (self.max_seq_length + kv_split_size - 1) // kv_split_size)
+        if kv_split_size is not None:
+            max_prefill_q_tiles = max(1, max_prefill_q_tiles_per_batch)
+            max_decode_tiles = max_decode_q_tiles_per_batch
+            # Decode split-KV lets each decode q-tile expand into up to
+            # max_kv_tiles_per_req chunk works, same as prefill.
+            prefill_works = num_kv_heads * max_prefill_q_tiles * max_kv_tiles_per_req
+            decode_works = num_kv_heads * max_decode_tiles * max_kv_tiles_per_req
+            # The occupancy gate only splits decode when the unsplit decode work
+            # count is < num_buckets (<=128), so split decode works are bounded by
+            # 128 * max_kv_tiles_per_req regardless of batch size. Capping here
+            # keeps MAX_WORKS within the planner's ~48 KB static-shared budget
+            # even for large batch x long context.
+            decode_works = min(decode_works, 128 * max_kv_tiles_per_req)
+            max_possible_works = max(1, prefill_works + decode_works)
+        else:
+            max_possible_works = max(
+                1,
+                num_kv_heads *
+                (max_prefill_q_tiles_per_batch + max_decode_q_tiles_per_batch),
+            )
+        if kv_split_size is not None:
+            # Split-KV correctness requires space for every chunked work item.
+            # Otherwise missing partials leave the merge reading unwritten LSE.
+            max_works = max(max_works, max_possible_works)
+        max_works = min(max_works, max_possible_works)
+        natural_num_buckets = min(128, max_possible_works)
+        if num_buckets is None:
+            num_buckets = natural_num_buckets
+        else:
+            num_buckets = min(num_buckets, natural_num_buckets)
+
+        # MPK prelaunches all tasks in the same graph phase. Keep planner plus
+        # planned consumers inside the worker pool; the current worker prefetch
+        # path is not safe for queuing an extra planned attention CTA behind
+        # another task in the same dependency phase.
+        consumer_task_groups = 2 if consumer == "both" else 1
+        max_consumer_tasks = max(consumer_task_groups, self.num_workers - 1)
+        num_buckets = min(num_buckets,
+                          max_consumer_tasks // consumer_task_groups)
+
+        # +2 legacy counters, +64 per-layer split-KV merge work-claim counters
+        # (each layer's merge gets its own slot; see planner zeroing loop).
+        # +2 legacy counters, +64 per-layer merge counters, +1 split-flags slot.
+        plan_size = 2 * (num_buckets + 1) + 4 * max_works + 2 + 64 + 1
+        return num_buckets, max_works, plan_size
+
+    def resolve_attention_kv_split_size(
+        self,
+        num_kv_heads: int,
+        gqa_group: int,
+        max_prefill_tokens_per_work: int = 32,
+    ):
+        """Choose a compile-time split-KV chunk size.
+
+        FlashInfer chooses a runtime KV chunk size so split prefill creates no
+        more tile work than the available producer CTA budget. Mirage's SM100
+        split kernels currently template the chunk size, so pick from a small
+        stable set that follows the same budget pressure: small batches keep
+        256-token chunks for parallelism; larger/high-context batches move to
+        512 to avoid planner and merge overhead from excessive chunks.
+        """
+        del gqa_group  # The packed prefill tile is fixed by the caller assert.
+        # Split-KV is only useful once a prefill work item is large enough to
+        # need more KV parallelism. For the default Qwen demo
+        # (max_num_batched_tokens=8, max_seq_length=512), enabling split-KV adds
+        # merge work and changes the numerical path without creating useful
+        # producer parallelism.
+        if (self.max_num_batched_tokens < max_prefill_tokens_per_work or
+                self.max_seq_length <= 512):
+            return None
+        active_prefill_reqs = max(
+            1,
+            min(
+                self.max_num_batched_requests,
+                max(1, self.max_num_batched_tokens // max_prefill_tokens_per_work),
+            ),
+        )
+        per_head_work_budget = max(
+            1, max(1, self.num_workers - 1) // max(1, num_kv_heads)
+        )
+        chunks_per_request = max(1, per_head_work_budget // active_prefill_reqs)
+        target = (self.max_seq_length + chunks_per_request - 1) // chunks_per_request
+        for candidate in (256, 512):
+            if target <= candidate:
+                return candidate
+        return 512
+
+
+    def planning_paged_attention_layer(
+        self,
+        input: DTensor,
+        k_cache: DTensor,
+        v_cache: DTensor,
+        q_norm: DTensor,
+        k_norm: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        output: DTensor,
+        num_buckets: int = None,
+        max_works: int = 1024,
+        max_prefill_tokens_per_work: int = 32,
+        max_decode_tokens_per_work: int = 8,
+        consumer: str = "dual",  # only "dual" is supported
+        prefill_threshold: int = 16,  # packed_qo > threshold → prefill
+        kv_split_size: int | str = None,  # int or "auto" enables split-KV + merge
+    ):
+        """Issue #627 — FlashInfer-style attention planner + planned consumers.
+
+        Emits the fused dual consumer task ``planned_dual_attention_sm100``
+        (num_buckets CTAs), which processes both prefill and decode works.
+
+        The planner itself is NOT a task — it runs on the scheduler's single
+        thread each iteration via ``mpk_run_attention_planner`` (registered
+        through ``_register_sched_planner`` / the ``MPK_SCHED_PLANNER_*`` compile
+        macros). It reads ``qo_indptr_buffer`` / ``paged_kv_indptr_buffer`` from
+        ``runtime_config``, classifies each request into prefill (packed_qo>16)
+        or decode, and produces per-bucket work lists into a shared plan buffer
+        the consumers read.
+
+        SM100-only. Causal hard-wired.
+        """
+        assert self.target_cc == 100
+        assert input.num_dims == 2 and output.num_dims == 2
+        assert k_cache.num_dims == 4 and v_cache.num_dims == 4
+        head_dim = k_cache.dim(3)
+        num_kv_heads = k_cache.dim(2)
+        num_q_heads = output.dim(1) // head_dim
+        gqa_group = num_q_heads // num_kv_heads
+        if kv_split_size == "auto":
+            kv_split_size = self.resolve_attention_kv_split_size(
+                num_kv_heads=num_kv_heads,
+                gqa_group=gqa_group,
+                max_prefill_tokens_per_work=max_prefill_tokens_per_work,
+            )
+        split_kv_enabled = kv_split_size is not None
+        num_kv_chunks = 1
+
+        if split_kv_enabled:
+            assert isinstance(kv_split_size, int) and kv_split_size > 0, (
+                "planned split-KV requires a positive integer kv_split_size"
+            )
+            assert kv_split_size % 16 == 0, (
+                "planned split-KV requires kv_split_size to align with the "
+                "16-token MMA tile"
+            )
+            assert kv_split_size <= 512, (
+                "planned split-KV currently supports kv_split_size up to 512"
+            )
+            if consumer == "both":
+                consumer = "dual"
+            assert self.page_size % 16 == 0, (
+                "planned split-KV requires page_size to align "
+                "with the 16-token MMA tile"
+            )
+            num_kv_chunks = (self.max_seq_length + kv_split_size - 1) // kv_split_size
+
+        num_buckets, max_works, plan_size = self.resolve_attention_plan_shape(
+            num_kv_heads=num_kv_heads,
+            gqa_group=gqa_group,
+            num_buckets=num_buckets,
+            max_works=max_works,
+            max_prefill_tokens_per_work=max_prefill_tokens_per_work,
+            max_decode_tokens_per_work=max_decode_tokens_per_work,
+            consumer=consumer,
+            kv_split_size=kv_split_size,
+            prefill_threshold=prefill_threshold,
+        )
+        assert max_prefill_tokens_per_work * gqa_group == 128, (
+            "planner currently uses a packed prefill Q tile of 128 rows; "
+            f"got max_prefill_tokens_per_work({max_prefill_tokens_per_work}) "
+            f"* gqa({gqa_group})"
+        )
+        assert max_decode_tokens_per_work * gqa_group >= 16, (
+            "planned decode requires at least a 16-row packed Q tile; "
+            f"got max_decode_tokens_per_work({max_decode_tokens_per_work}) "
+            f"* gqa({gqa_group})"
+        )
+        prefill_packed_q_tile = max_prefill_tokens_per_work * gqa_group
+        decode_packed_q_tile = max_decode_tokens_per_work * gqa_group
+
+        rotary_embed = 0
+        if cos_pos_embed is not None or sin_pos_embed is not None:
+            assert cos_pos_embed.dim(1) == head_dim
+            assert sin_pos_embed.dim(1) == head_dim
+            rotary_embed = 1
+        qk_norm = 0
+        if q_norm is not None or k_norm is not None:
+            assert q_norm.dim(0) == head_dim
+            assert k_norm.dim(0) == head_dim
+            qk_norm = 1
+
+        # --- allocate single flat plan buffer ---------------------------------
+        # The planner output depends only on per-iteration runtime state
+        # (qo_indptr_buffer / paged_kv_indptr_buffer), not on layer index, so
+        # every layer with a matching planner shape shares the *same* plan
+        # buffer. The planner runs inside the scheduler's per-iteration prepare
+        # step (mpk_run_attention_planner) rather than as a graph task, so no
+        # planner CTA or event dependency is emitted here. The buffer is backed
+        # by an attached torch tensor so the runtime can resolve its device
+        # pointer by name in init_persistent_kernel (internal cuda_tensor
+        # buffers are not exposed in the model-tensor map).
+        plan_cache_key = (
+            num_kv_heads, gqa_group,
+            prefill_packed_q_tile, decode_packed_q_tile,
+            prefill_threshold, (kv_split_size or 0),
+            num_buckets, max_works, consumer,
+        )
+        if not hasattr(self, "_shared_attn_plans"):
+            self._shared_attn_plans = {}
+        plan_buffer = self._shared_attn_plans.get(plan_cache_key)
+        if plan_buffer is None:
+            if not hasattr(self, "_attn_plan_buffer_counter"):
+                self._attn_plan_buffer_counter = 0
+            buffer_name = f"mpk_sched_attn_plan_{self._attn_plan_buffer_counter}"
+            self._attn_plan_buffer_counter += 1
+            plan_storage = torch.zeros(plan_size, dtype=torch.int32, device="cuda")
+            if not hasattr(self, "_sched_plan_storage"):
+                self._sched_plan_storage = {}
+            self._sched_plan_storage[buffer_name] = plan_storage
+            plan_buffer = self.attach_input(plan_storage, name=buffer_name)
+            self._shared_attn_plans[plan_cache_key] = plan_buffer
+            self._register_sched_planner(
+                num_kv_heads=num_kv_heads, gqa_group=gqa_group,
+                num_buckets=num_buckets, max_works=max_works,
+                prefill_packed_q_tile=prefill_packed_q_tile,
+                decode_packed_q_tile=decode_packed_q_tile,
+                prefill_threshold=prefill_threshold,
+                kv_split_size=(kv_split_size or 0),
+                buffer_name=buffer_name)
+
+        lse = None
+        consumer_output = output
+        if split_kv_enabled:
+            if not hasattr(self, "_attn_split_kv_buffer_counter"):
+                self._attn_split_kv_buffer_counter = 0
+            split_idx = self._attn_split_kv_buffer_counter
+            self._attn_split_kv_buffer_counter += 1
+            lse = self.new_tensor(
+                dims=(self.max_num_batched_tokens,
+                      num_kv_chunks * num_q_heads),
+                dtype=float32,
+                name=f"attn_split_lse_{split_idx}",
+                io_category="cuda_tensor",
+            )
+            consumer_output = self.new_tensor(
+                dims=(self.max_num_batched_tokens,
+                      num_kv_chunks * num_q_heads * head_dim),
+                dtype=bfloat16,
+                name=f"attn_split_output_{split_idx}",
+                io_category="cuda_tensor",
+            )
+
+        # --- consumer tasks (num_buckets CTAs each) -------------------------
+        consumer_params_prefill = [
+            num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+            self.max_seq_length, self.page_size, max_prefill_tokens_per_work,
+            num_buckets, max_works,
+        ]
+        consumer_params_decode = [
+            num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+            self.max_seq_length, self.page_size, max_decode_tokens_per_work,
+            num_buckets, max_works,
+        ]
+        if split_kv_enabled:
+            consumer_params_prefill += [kv_split_size, num_kv_chunks]
+            # Split-enabled decode now routes normal decode requests directly
+            # to the final output. The template token width is still kept
+            # aligned with prefill for the shared planned-dual registration.
+            consumer_params_decode[6] = max_prefill_tokens_per_work
+            consumer_params_decode += [kv_split_size, num_kv_chunks]
+        consumer_grid = (num_buckets, 1, 1)
+        consumer_block = (128, 1, 1)
+
+        def _emit_consumer(task_name: str, params):
+            tb = TBGraph(CyTBGraph(consumer_grid, consumer_block, 1, 64))
+            tb.new_input(input, (-1, -1, -1), -1, True)
+            tb.new_input(k_cache, (-1, -1, -1), -1, True)
+            tb.new_input(v_cache, (-1, -1, -1), -1, True)
+            tb.new_input(q_norm, (-1, -1, -1), -1, True)
+            tb.new_input(k_norm, (-1, -1, -1), -1, True)
+            tb.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+            tb.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+            tb.new_input(plan_buffer, (-1, -1, -1), -1, True)
+            customized_inputs = [
+                input, k_cache, v_cache, q_norm, k_norm,
+                cos_pos_embed, sin_pos_embed, plan_buffer,
+            ]
+            if split_kv_enabled:
+                tb.new_input(lse, (-1, -1, -1), -1, True)
+                customized_inputs.append(lse)
+            tb.new_input(consumer_output, (-1, -1, -1), -1, True)
+            customized_inputs.append(consumer_output)
+            if split_kv_enabled and task_name == "planned_dual_attention_sm100":
+                tb.new_input(output, (-1, -1, -1), -1, True)
+                customized_inputs.append(output)
+            self.kn_graph.customized(customized_inputs, tb)
+            self.kn_graph.register_task(tb, task_name, params)
+
+        # Only the fused dual consumer is supported on SM100.
+        _emit_consumer("planned_dual_attention_sm100", consumer_params_prefill)
+
+        if split_kv_enabled:
+            direct_unsplit_prefill = 1 if consumer == "dual" else 0
+            planned_merge_workers = max(1, self.num_workers - 1)
+            planned_merge_workers = max(1, min(planned_merge_workers,
+                                               max(1, self.num_workers - 1)))
+            # Each layer's merge claims rows via atomicAdd on its OWN counter
+            # slot. The plan buffer (shared across layers) reserves 64 slots
+            # after the two legacy counters; the planner zeroes them all each
+            # iteration. A single shared counter is exhausted by the first
+            # layer's merge and never reset, leaving layers 2..N unmerged.
+            if not hasattr(self, "_attn_plan_merge_slots"):
+                self._attn_plan_merge_slots = {}
+            _merge_slot = self._attn_plan_merge_slots.get(plan_cache_key, 0)
+            assert _merge_slot < 64, (
+                "more planned split-KV merge layers than per-layer merge "
+                "counter slots (64) in the shared plan buffer"
+            )
+            self._attn_plan_merge_slots[plan_cache_key] = _merge_slot + 1
+            self.paged_attention_split_kv_merge_layer(
+                lse=lse,
+                output_tmp=consumer_output,
+                plan_buffer=plan_buffer,
+                output=output,
+                attention_params=(num_q_heads, head_dim, num_kv_heads),
+                grid_dim=(planned_merge_workers, 1, 1),
+                block_dim=(128, 1, 1),
+                prefill_threshold=prefill_threshold,
+                direct_unsplit_prefill=direct_unsplit_prefill,
+                persistent_merge=False,
+                planned_merge=True,
+                merge_counter_offset=(2 * (num_buckets + 1) + 4 * max_works
+                                      + 2 + _merge_slot),
+                kv_chunk_size=kv_split_size,
+                split_flags_offset=(2 * (num_buckets + 1) + 4 * max_works
+                                    + 2 + 64),
+            )
+
+
     def paged_attention_split_kv_layer(
         self,
         input: DTensor,
@@ -935,8 +1374,8 @@ class PersistentKernel:
         assert v_cache.dim(0) == self.max_num_pages
         assert k_cache.dim(1) == self.page_size
         assert v_cache.dim(1) == self.page_size
-        assert output.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv * head_dim / world_size, num_kv_heads)
-        assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
+        assert output.num_dims == 2  # (num_tokens, num_kv_chunks * num_q_heads * head_dim / world_size)
+        assert lse.num_dims == 2  # (num_tokens, num_kv_chunks * num_q_heads / world_size)
 
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
@@ -970,15 +1409,15 @@ class PersistentKernel:
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
         assert grid_dim[1] == num_kv_heads
-        tb_graph.new_input(input, (-1, 1, -1), -1, True)
-        tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
-        tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_cache, (-1, -1, -1), 1, True)
+        tb_graph.new_input(v_cache, (-1, -1, -1), 1, True)
         tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
         tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
         tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
-        tb_graph.new_input(lse, (-1, 2, 1), -1, True)
-        tb_graph.new_input(output, (-1, 2, 1), -1, True)
+        tb_graph.new_input(lse, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
             [
                 input,
@@ -1008,36 +1447,70 @@ class PersistentKernel:
         attention_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
+        plan_buffer: DTensor = None,
+        prefill_threshold: int = None,
+        direct_unsplit_prefill: int = 0,
+        persistent_merge: bool = False,
+        planned_merge: bool = False,
+        merge_counter_offset: int = 0,
+        kv_chunk_size: int = None,
+        split_flags_offset: int = 0,
     ):
-        assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
-        assert output_tmp.num_dims == 3  # (num_tokens, num_chunks, hidden_size / world_size)
+        assert lse.num_dims == 2  # (num_tokens, num_kv_chunks * num_q_heads / world_size)
+        assert output_tmp.num_dims == 2  # (num_tokens, num_chunks * hidden_size / world_size)
         assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
 
         num_q_heads = attention_params[0]
         head_dim = attention_params[1]
-        num_qo_heads_per_kv = num_q_heads / grid_dim[1]
-        num_kv_heads = grid_dim[1]
+        num_kv_heads = (
+            attention_params[2] if len(attention_params) > 2 else grid_dim[1]
+        )
+        num_qo_heads_per_kv = num_q_heads // num_kv_heads
         # params[0]: num_qo_heads_per_kv
         # params[1]: head_dim
         # params[2]: max_seq_len
         # params[3]: page_size
         # params[4]: num_kv_heads
         params = [num_qo_heads_per_kv, head_dim, self.max_seq_length, self.page_size, num_kv_heads]
+        if prefill_threshold is not None or direct_unsplit_prefill or persistent_merge or planned_merge:
+            params.append(prefill_threshold if prefill_threshold is not None else -1)
+            params.append(int(direct_unsplit_prefill))
+            if planned_merge:
+                params.append(2)
+                params.append(int(merge_counter_offset))
+                # params[9]: KV chunk size the PRODUCERS used (kv_split_size).
+                # The merge must mirror it; the codegen previously hardcoded
+                # 256 (the legacy --split-kv-cache chunk), giving the planned
+                # merge a 2x per-token lse/tmp stride and phantom chunk slots
+                # -> OOB reads (IMA) and corrupted merges.
+                params.append(int(kv_chunk_size or 256))
+                # params[10]: plan-buffer slot with the planner's runtime split
+                # gate flags (bit0 prefill, bit1 decode). 0 = legacy/both-on.
+                params.append(int(split_flags_offset))
+            elif persistent_merge:
+                params.append(1)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(lse, (-1, 2, -1), -1, True)
-        tb_graph.new_input(output_tmp, (-1, 2, -1), -1, True)
-        tb_graph.new_input(output, (-1, 1, -1), -1, True)
+        tb_graph.new_input(lse, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_tmp, (-1, -1, -1), -1, True)
+        customized_inputs = [lse, output_tmp]
+        if planned_merge:
+            assert plan_buffer is not None
+            tb_graph.new_input(plan_buffer, (-1, -1, -1), -1, True)
+            customized_inputs.append(plan_buffer)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        customized_inputs.append(output)
         self.kn_graph.customized(
-            [
-                lse,
-                output_tmp,
-                output,
-            ],
+            customized_inputs,
             tb_graph,
         )
         if self.target_cc == 100 or self.target_cc == 90:
-            self.kn_graph.register_task(tb_graph, "paged_attention_split_kv_merge_sm100", params)
+            task_name = (
+                "paged_attention_split_kv_merge_planned_sm100"
+                if planned_merge else
+                "paged_attention_split_kv_merge_sm100"
+            )
+            self.kn_graph.register_task(tb_graph, task_name, params)
         else:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
@@ -2620,7 +3093,15 @@ class PersistentKernel:
         )
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)
-        subprocess.check_call(cc_cmd)
+        _proc = subprocess.run(cc_cmd, capture_output=True, text=True)
+        if _proc.returncode != 0:
+            # Print captured nvcc stderr/stdout so the actual error message is
+            # visible (default check_call discards them on failure).
+            print("---- nvcc stdout ----")
+            print(_proc.stdout)
+            print("---- nvcc stderr ----")
+            print(_proc.stderr)
+            raise subprocess.CalledProcessError(_proc.returncode, cc_cmd)
         
         # Copy .so to output_dir if specified
         if output_dir is not None:
@@ -2679,7 +3160,7 @@ class PersistentKernel:
                   raise ValueError(f"Missing meta tensor: {key}")
             else:
               meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
-        if self.mode=="online_pinned":
+        if self.mode == "online_pinned":
             for key in pinned_extra_order:
                 meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
         profiler_buffer_ptr = (

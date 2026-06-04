@@ -23,10 +23,9 @@ def get_shared_memory_capacity(target_cc):
 
 
 def get_scheduler(sm_cnt, worker):
-    scheduler = 4 * (sm_cnt - worker)
-    assert scheduler > 0, "worker count is not compatible with sm count on"
-    "the GPU"
-    return 4 * (sm_cnt - worker)
+    scheduler = sm_cnt - worker
+    assert scheduler > 0, "worker count is not compatible with sm count on the GPU"
+    return scheduler
 
 # This method auto probe GPUs and return the worker and scheduler count for
 # them.
