@@ -108,8 +108,7 @@ __device__ __forceinline__ void
       static_cast<long long const *>(hot_token_ptr);
   long long const *__restrict__ d2t =
       static_cast<long long const *>(d2t_table_ptr);
-  long long *__restrict__ target =
-      static_cast<long long *>(target_token_ptr);
+  long long *__restrict__ target = static_cast<long long *>(target_token_ptr);
 
   int b = threadIdx.x;
   if (b < BATCH_SIZE) {
@@ -146,15 +145,15 @@ __device__ __forceinline__ void
 // so it lies in [1, K+1].
 //
 // Inputs:
-//   tokens_buffer       [MAX_REQUESTS, MAX_SEQ_LEN] int64 — full seq buffer
-//   argmax_out          [BATCH_SIZE]                int64 — target argmax (K+1)
-//   draft_tokens_new    [BATCH_SIZE, K]             int64 — this iter's draft (next iter input)
-//   accepted_count      [BATCH_SIZE]                int32 — from verify_strict
-//   step                [MAX_REQUESTS]              int32 — current step
-//   prompt_length       [MAX_REQUESTS]              int32 — req's prompt length
+//   tokens_buffer    [MAX_REQ, MAX_SEQ_LEN] int64 — full seq buffer
+//   argmax_out       [BATCH_SIZE]           int64 — target argmax (K+1)
+//   draft_tokens_new [BATCH_SIZE, K]        int64 — this iter's draft (next in)
+//   accepted_count   [BATCH_SIZE]           int32 — from verify_strict
+//   step             [MAX_REQ]              int32 — current step
+//   prompt_length    [MAX_REQ]              int32 — req's prompt length
 // Outputs:
-//   new_token_nums      [MAX_REQUESTS]              int32 — accepted_count (for runtime)
-//   drafts_prev         [MAX_REQUESTS, K]           int64 — attach_input snapshot
+//   new_token_nums   [MAX_REQ]              int32 — accepted_count for runtime
+//   drafts_prev      [MAX_REQ, K]           int64 — attach_input snapshot
 template <int K, int BATCH_SIZE, int MAX_SEQ_LEN>
 __device__ __forceinline__ void
     eagle3_commit_kernel(void *__restrict__ tokens_buffer_ptr,
@@ -172,8 +171,7 @@ __device__ __forceinline__ void
   //   draft_tokens_new (from mtp_token_scatter)   : 1 edge
   //   accepted_count (from mtp_verify_strict)     : 1 edge
   //   tokens_buffer / new_token_nums / drafts_prev: attach_input (no edges)
-  long long *__restrict__ tokens =
-      static_cast<long long *>(tokens_buffer_ptr);
+  long long *__restrict__ tokens = static_cast<long long *>(tokens_buffer_ptr);
   long long const *__restrict__ argmax =
       static_cast<long long const *>(argmax_out_ptr);
   long long const *__restrict__ drafts =
@@ -183,8 +181,7 @@ __device__ __forceinline__ void
   int const *__restrict__ step = static_cast<int const *>(step_ptr);
   int const *__restrict__ prompt_length =
       static_cast<int const *>(prompt_length_ptr);
-  int *__restrict__ new_token_nums =
-      static_cast<int *>(new_token_nums_ptr);
+  int *__restrict__ new_token_nums = static_cast<int *>(new_token_nums_ptr);
   long long *__restrict__ drafts_prev =
       static_cast<long long *>(drafts_prev_ptr);
 
@@ -222,8 +219,12 @@ __device__ __forceinline__ void
   // chain at positions misaligned by (ac-1), but slot 0's chain is at least
   // a valid prediction.
   int src_slot = (K > 1) ? 0 : (ac - 1);
-  if (src_slot < 0) src_slot = 0;
-  if (src_slot >= BATCH_SIZE) src_slot = BATCH_SIZE - 1;
+  if (src_slot < 0) {
+    src_slot = 0;
+  }
+  if (src_slot >= BATCH_SIZE) {
+    src_slot = BATCH_SIZE - 1;
+  }
 
   // Write K new drafts at step+ac+1 .. step+ac+K (only past prompt), drawn
   // from the slot ac-1 chain.
@@ -240,7 +241,7 @@ __device__ __forceinline__ void
   // BUT FIRST: record the OLD drafts_prev (what THIS iter's verify just
   // compared against argmax) into the trace, so we can byte-compare what was
   // verified vs what the target predicted.
-  long long old_drafts_prev[8];  // K <= 8 (well bounded for spec decode)
+  long long old_drafts_prev[8]; // K <= 8 (well bounded for spec decode)
   if (t_id == 0) {
     for (int i = 0; i < K; i++) {
       old_drafts_prev[i] = drafts_prev[i];
@@ -288,8 +289,9 @@ __device__ __forceinline__ void
     int *hist = static_cast<int *>(accept_hist_ptr);
     atomicAdd(&hist[ac], 1);
     // Tail trace: layout = [hist 0..K+1, trace_counter at K+2,
-    // then per-iter records of 2K+2 ints: (ac, argmax[0..K], drafts_prev[0..K-1])].
-    // Capacity is host-allocated; we cap captured iters at 16 here.
+    // then per-iter records of 2K+2 ints: (ac, argmax[0..K],
+    // drafts_prev[0..K-1])]. Capacity is host-allocated; we cap captured iters
+    // at 16 here.
     int const TRACE_COUNTER_OFFSET = K + 2;
     int const RECORD_SIZE = 2 * K + 2;
     int const MAX_TRACE_ITERS = 16;

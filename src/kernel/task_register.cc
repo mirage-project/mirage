@@ -4427,9 +4427,7 @@ int TaskRegister::register_eagle3_aux_concat_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // N=3: concat h0/h1/h2 (input_ptrs[0..2]) → 3H
-  code.e("kernel::concat_kernel<bfloat16, $, $, 3>(",
-         batch_size,
-         hidden_dim);
+  code.e("kernel::concat_kernel<bfloat16, $, $, 3>(", batch_size, hidden_dim);
   code.e("    task_desc->input_ptrs,");      // h0, h1, h2
   code.e("    task_desc->output_ptrs[0]);"); // output (3H)
   return register_task_variant(TASK_EAGLE3_AUX_CONCAT, code.to_string());
@@ -4445,9 +4443,7 @@ int TaskRegister::register_eagle3_input_concat_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // N=2: concat embed/hidden (input_ptrs[0..1]) → 2H
-  code.e("kernel::concat_kernel<bfloat16, $, $, 2>(",
-         batch_size,
-         hidden_dim);
+  code.e("kernel::concat_kernel<bfloat16, $, $, 2>(", batch_size, hidden_dim);
   code.e("    task_desc->input_ptrs,");      // embed, hidden
   code.e("    task_desc->output_ptrs[0]);"); // output (2H)
   return register_task_variant(TASK_EAGLE3_INPUT_CONCAT, code.to_string());
