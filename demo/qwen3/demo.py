@@ -296,6 +296,21 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        # The LM-head LINEAR_SM100 kernel stores its output column-tiles via TMA,
+        # which requires each per-worker tile to begin at a 16-byte-aligned
+        # address. The padded vocab (vocab_size) is column-split across this many
+        # tiles, so the tile width (vocab_size // lm_head_workers) must be a
+        # multiple of 8 bf16 elements (16 B). A raw num_workers that does not
+        # divide vocab_size into aligned tiles (e.g. 153600/136 = 1129, odd ->
+        # non-16B base -> failed TMA store descriptor -> cudaErrorIllegalInstruction)
+        # silently corrupts the LM head. Pick the largest worker count
+        # <= num_workers that yields aligned (mult-of-8) tiles.
+        def _aligned_lm_head_workers(out_width, max_workers, align=8):
+            for g in range(max_workers, 0, -1):
+                if out_width % g == 0 and (out_width // g) % align == 0:
+                    return g
+            return 1
+        lm_head_workers = _aligned_lm_head_workers(vocab_size, num_workers)
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
         paged_kv_indptr_buffer = torch.empty(
@@ -441,13 +456,13 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         argmax_part_value = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
@@ -721,7 +736,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(mpk.num_workers, 1, 1),
+            grid_dim=(lm_head_workers, 1, 1),
             block_dim=(128, 1, 1),
         )
         #mpk.rmsnorm_linear_layer(
@@ -739,7 +754,7 @@ if __name__ == "__main__":
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
+            argmax_partial_grid_dim = (lm_head_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,
