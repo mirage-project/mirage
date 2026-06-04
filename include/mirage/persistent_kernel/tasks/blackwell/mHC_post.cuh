@@ -92,7 +92,8 @@ __device__ __forceinline__ void
       uint4 r_raw[NUM_TOPK];
 #pragma unroll
       for (int t = 0; t < NUM_TOPK; ++t) {
-        r_raw[t] = reinterpret_cast<uint4 const *>(res_row + t * OUTPUT_STRIDE)[v];
+        r_raw[t] =
+            reinterpret_cast<uint4 const *>(res_row + t * OUTPUT_STRIDE)[v];
       }
       uint4 x_raw = reinterpret_cast<uint4 const *>(x_row)[v];
 

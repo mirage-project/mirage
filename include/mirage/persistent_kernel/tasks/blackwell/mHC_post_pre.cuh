@@ -19,11 +19,12 @@
 //   mHC_post_pre_k1 : hc_post of the current layer + the next layer's prenorm
 //                     GEMM + sqrsum, fused so the post output never round-trips
 //                     through gmem. Mirrors vLLM's mhc_fused_tilelang.
-//                       new_r[j,h]        = post[j]*x[h] + sum_k comb[k,j]*res[k,h]
-//                       residual_out[j,h] = new_r[j,h]            (next residual)
-//                       sqrsum[t]        += sum new_r^2           (RMS denom)
+//                       new_r[j,h]        = post[j]*x[h] + sum_k
+//                       comb[k,j]*res[k,h] residual_out[j,h] = new_r[j,h] (next
+//                       residual) sqrsum[t]        += sum new_r^2 (RMS denom)
 //                       mixes[t,o]       += sum_jh fn[o,j,h]*new_r (= y @ fn.T)
-//                     plus a split-k reduce folding partials -> mixes_pad+sqrsum.
+//                     plus a split-k reduce folding partials ->
+//                     mixes_pad+sqrsum.
 //
 //   mHC_post_pre_k2 : the pre tail (RMS-fold + pre/post sigmoid affines +
 //                     sinkhorn(4x4) + pre_mix-weighted residual sum) ->
@@ -32,9 +33,10 @@
 //
 // k1's GEMM is a thread-level FMA loop: each thread owns a contiguous hidden
 // slice (h in [0,C)) for one token, computes new_r for all N heads in registers
-// and contracts against fn. mix_hc (=24) is too narrow for tensor cores, so this
-// matches vLLM's CUDA-core choice, avoids the pad-to-128 waste, keeps smem tiny,
-// and uses split-k over the hidden dim to fill the grid at low token counts.
+// and contracts against fn. mix_hc (=24) is too narrow for tensor cores, so
+// this matches vLLM's CUDA-core choice, avoids the pad-to-128 waste, keeps smem
+// tiny, and uses split-k over the hidden dim to fill the grid at low token
+// counts.
 //
 // These are two separate kernel launches (k1 writes mixes_pad+sqrsum to gmem;
 // k2 consumes them), since the GEMM and the sinkhorn tail have different grid /
@@ -219,26 +221,41 @@ template <typename T_in,
           int TOKENS_PER_CTA = 32,
           int BLOCK_THREADS = 256,
           int MIX_STRIDE = 0>
-__device__ __forceinline__ void mHC_post_pre_k2_task_impl(
-    void const *mixes_ptr,
-    void const *sqrsum_ptr,
-    void const *scale_ptr,
-    void const *base_ptr,
-    void const *x_ptr,
-    void *f_pre_ptr,
-    void *h_post_out_ptr,
-    void *comb_out_ptr,
-    int sinkhorn_repeat,
-    float sinkhorn_eps,
-    float rms_eps,
-    int num_tokens,
-    char *dyn_smem,
-    int token_base_override = -1) {
-  mHC_pre_k2_task_impl<T_in, N, C, RMS_HIDDEN, TOKENS_PER_CTA, BLOCK_THREADS,
-                       MIX_STRIDE>(
-      mixes_ptr, sqrsum_ptr, scale_ptr, base_ptr, x_ptr, f_pre_ptr,
-      h_post_out_ptr, comb_out_ptr, sinkhorn_repeat, sinkhorn_eps, rms_eps,
-      num_tokens, dyn_smem, token_base_override);
+__device__ __forceinline__ void
+    mHC_post_pre_k2_task_impl(void const *mixes_ptr,
+                              void const *sqrsum_ptr,
+                              void const *scale_ptr,
+                              void const *base_ptr,
+                              void const *x_ptr,
+                              void *f_pre_ptr,
+                              void *h_post_out_ptr,
+                              void *comb_out_ptr,
+                              int sinkhorn_repeat,
+                              float sinkhorn_eps,
+                              float rms_eps,
+                              int num_tokens,
+                              char *dyn_smem,
+                              int token_base_override = -1) {
+  mHC_pre_k2_task_impl<T_in,
+                       N,
+                       C,
+                       RMS_HIDDEN,
+                       TOKENS_PER_CTA,
+                       BLOCK_THREADS,
+                       MIX_STRIDE>(mixes_ptr,
+                                   sqrsum_ptr,
+                                   scale_ptr,
+                                   base_ptr,
+                                   x_ptr,
+                                   f_pre_ptr,
+                                   h_post_out_ptr,
+                                   comb_out_ptr,
+                                   sinkhorn_repeat,
+                                   sinkhorn_eps,
+                                   rms_eps,
+                                   num_tokens,
+                                   dyn_smem,
+                                   token_base_override);
 }
 
 } // namespace kernel

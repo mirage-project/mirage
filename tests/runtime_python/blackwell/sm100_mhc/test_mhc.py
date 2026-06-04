@@ -14,7 +14,6 @@ if VLLM_DIR not in sys.path:
 from utils import (
     hc_post_reference,
     hc_pre_reference,
-    k1_reference,
     k2_reference,
     k4_reference,
     k5_reference,
@@ -26,29 +25,6 @@ import runtime_kernel_blackwell_mhc as rt
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is required"
 )
-
-
-# -----------------------------------------------------------------------------
-# K1 (rmsnorm half): per-token RMSNorm with implicit unit weight
-# -----------------------------------------------------------------------------
-
-@pytest.mark.parametrize("num_tokens,hidden", [
-    (1, 256), (16, 1024), (1024, 4096), (32, 16384),
-])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_k1_rmsnorm(num_tokens, hidden, dtype):
-    gen = torch.Generator(device="cuda").manual_seed(50 + num_tokens + hidden)
-    x = torch.randn(num_tokens, hidden, device="cuda", dtype=dtype, generator=gen)
-    y = torch.empty_like(x)
-    eps = 1e-6
-    rt.mHC_rmsnorm(x, y, eps=eps)
-
-    rsqrt = torch.rsqrt(x.float().square().mean(-1, keepdim=True) + eps)
-    ref = (x.float() * rsqrt).to(dtype)
-    rtol = 1e-2 if dtype == torch.bfloat16 else 1e-5
-    atol = 1e-2 if dtype == torch.bfloat16 else 1e-6
-    torch.testing.assert_close(y, ref, rtol=rtol, atol=atol)
-
 
 
 # -----------------------------------------------------------------------------

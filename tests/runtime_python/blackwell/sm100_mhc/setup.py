@@ -37,18 +37,6 @@ setup(
                 ),
                 os.path.join(
                     this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_linear.cuh",
-                ),
-                os.path.join(
-                    this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_rmsnorm.cuh",
-                ),
-                os.path.join(
-                    this_dir,
-                    "../../../../include/mirage/persistent_kernel/tasks/blackwell/mHC_hc_pre_post_fused.cuh",
-                ),
-                os.path.join(
-                    this_dir,
                     "../../../../include/mirage/persistent_kernel/tasks/blackwell/mul_sum_add_sm100.cuh",
                 ),
                 os.path.join(
