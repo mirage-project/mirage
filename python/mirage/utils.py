@@ -39,9 +39,6 @@ def get_configurations_from_gpu(rank):
     if sm_cnt >= 160:
         worker = 144
     elif sm_cnt >= 144:
-        # B200 has 148 SMs. Empirically -83 μs/tok (n=3, σ=15μs) at TP=4
-        # DSv3 EP=2 19l mbt=128 by going 128→136 workers (with 48 schedulers
-        # = 12 scheduler-SMs to keep the 136 + 12 = 148 launch total).
         worker = 136
     elif sm_cnt >= 132:
         worker = 128
