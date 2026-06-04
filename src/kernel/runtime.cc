@@ -361,6 +361,14 @@ void register_mugraph(
               task.task_metadata.request_id = bid.x;
               task.task_metadata.kv_idx = bid.y;
             }
+            // assemble_q_decode: grid.x = token index (dim_map (0,-1,-1)
+            // offsets each CTA's ptr to its token). request_id = bid.x lets
+            // the task_register gate inactive-token CTAs at decode — with
+            // active_rows=1 only token 0 survives, freeing the other 127
+            // workers for the concurrent attention-branch GEMMs.
+            if (task_type == TASK_ASSEMBLE_Q_DECODE_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // transpose_scale_sm100 (B13): grid_x CTAs stripe M.
             // request_id = bid.x = the CTA's chunk index.
             if (task_type == TASK_TRANSPOSE_SCALE_SM100) {
@@ -496,8 +504,11 @@ void register_mugraph(
             if (task_type == TASK_FP8_GEMM_DENSE_SMALLM_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
-                task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {
+                task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100 ||
+                task_type == TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100) {
               task.task_metadata.request_id = bid.x;
             }
             // SiLU + Mul (NEW MoE 2D path): grid=(num_workers, 1, 1).
@@ -1286,15 +1297,22 @@ TaskGraphResult print_task_graph(
     // FP8 linear tasks need TMA (outside SM100_TMA range)
     code.e("if (task.at(\"task_type\") == TASK_LINEAR_FP8_SM100 || "
            "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 || "
-           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100) {");
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100 || "
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_DENSE_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 || "
            "task.at(\"task_type\") == "
            "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
-           "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {");
+           "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1958,15 +1976,23 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100] =
       "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100] =
+      "TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100] =
+      "TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100";
   task_type_to_name[TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100] =
       "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
       "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_BMM_DENSE_SM100] =
+      "TASK_LINEAR_FP8_BMM_DENSE_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_SMALLM_SM100] =
       "TASK_FP8_GROUP_GEMM_SMALLM_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_SM100] =
       "TASK_FP8_GROUP_GEMM_LARGEM_SM100";
+  task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100] =
+      "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100";
   task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";
   task_type_to_name[TASK_MOE_UNPERMUTE_SM100] = "TASK_MOE_UNPERMUTE_SM100";
   task_type_to_name[TASK_TRANSPOSE_SCALE_SM100] = "TASK_TRANSPOSE_SCALE_SM100";

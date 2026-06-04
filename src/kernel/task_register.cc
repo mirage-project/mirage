@@ -2430,13 +2430,18 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
 
 int TaskRegister::register_moe_topk_sigmoid_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 3 || params.size() == 5);
+  assert(params.size() == 3 || params.size() == 5 || params.size() == 6);
   int num_groups = params[0];
   int topk_group = params[1];
   float scaling_factor;
   memcpy(&scaling_factor, &params[2], sizeof(float));
-  int local_expert_start = params.size() == 5 ? params[3] : 0;
-  int local_expert_end = params.size() == 5 ? params[4] : -1;
+  int local_expert_start = params.size() >= 5 ? params[3] : 0;
+  int local_expert_end = params.size() >= 5 ? params[4] : -1;
+  // PR696: fuse_compaction template arg. 1 (default) = single-CTA path
+  // (inline marker-init + ballot compaction; the decode / current behavior).
+  // 0 = multi-CTA prefill path (caller pre-inits markers via the marker-init
+  // task and runs the compaction task afterward).
+  int fuse_compaction = params.size() >= 6 ? params[5] : 1;
 
   int batch_size = 0, num_experts = 0, num_local_experts = 0,
       num_experts_per_tok = 0;
@@ -2483,7 +2488,7 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
-         "$, $, $>(",
+         "$, $, $, $>(",
          /*VPT=*/8,
          /*EXPERTS=*/num_experts,
          /*LOCAL_EXPERTS=*/num_local_experts,
@@ -2492,7 +2497,8 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
          /*NUM_GROUPS=*/num_groups,
          /*TOPK_GROUP=*/topk_group,
          /*EXPERTS_PER_GROUP=*/experts_per_group,
-         /*TOPK_EXPERTS=*/num_experts_per_tok);
+         /*TOPK_EXPERTS=*/num_experts_per_tok,
+         /*FUSE_COMPACTION=*/fuse_compaction);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    nullptr,");
@@ -5812,6 +5818,159 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   return register_task_variant(TASK_LINEAR_FP8_BMM_SM100, code.to_string());
 }
 
+int TaskRegister::register_linear_fp8_bmm_dense_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Per-head FP8 batched matmul wrapping the DENSE block-scaled GEMM body
+  // (float32 scales) instead of swapAB (UE8M0). Each CTA handles one head's
+  //     output[n, h, :] = input[n, h, :] @ weight[h, :, :]^T
+  // chosen by (grid.x = M-shard within a head — first cut requires grid.x=1
+  // since per-head D_out=128=BN, grid.y = head index).
+  //
+  // Inputs (Python-layer order, 3D):
+  //   [0] input_fp8     [N, H, D_in]
+  //   [1] input_scale   [N, H, nk]          float32, row-major (nk = D_in/128)
+  //   [2] weight_fp8    [H, D_out, D_in]
+  //   [3] weight_scale  [H, D_out/128, nk]  float32, 128x128-block (D_out=128
+  //                                          -> dim1 = 1)
+  // Output:
+  //   [0] output_bf16   [N, H, D_out]
+  //
+  // Dense body A/B assignment is the OPPOSITE of swapAB: A = input (param 0,
+  // TMA desc slot 0), B = weight (param 2, TMA desc slot 2). The float32
+  // scales are raw pointers (sa = input_ptrs[1], sb = input_ptrs[3]). The
+  // bf16 output is a raw pointer (output_ptrs[0]).
+  assert(params.size() == 0);
+
+  int num_inputs = 4;
+  int num_outputs = 1;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  // Weight is 3D [H, D_out, D_in].
+  assert(input_ops[2]->dtensor.num_dims == 3);
+  int num_heads = input_ops[2]->dtensor.dim[0];
+  int D_out_full = input_ops[2]->dtensor.dim[1];
+  int reduction_size = input_ops[2]->dtensor.dim[2];
+
+  // Input is 3D [N, H, D_in]; output is 2D [N, H*D_out] or 3D [N, H, D_out].
+  assert(input_ops[0]->dtensor.num_dims == 3 &&
+         "linear_fp8_bmm_dense requires 3D input [N, H, D_in] so the per-head "
+         "TMA descriptor can read M=dim0, K=dim2, row_stride=stride0.");
+  int batch_size = input_ops[0]->dtensor.dim[0];
+  assert(input_ops[0]->dtensor.dim[1] == num_heads);
+  assert(input_ops[0]->dtensor.dim[2] == reduction_size);
+
+  int const out_dims = output_ops[0]->dtensor.num_dims;
+  assert(out_dims == 2 || out_dims == 3);
+  assert(output_ops[0]->dtensor.dim[0] == batch_size);
+  if (out_dims == 3) {
+    assert(output_ops[0]->dtensor.dim[1] == num_heads);
+    assert(output_ops[0]->dtensor.dim[2] == D_out_full);
+  } else {
+    assert(output_ops[0]->dtensor.dim[1] == num_heads * D_out_full);
+  }
+
+  // Scales are float32 3D: input_scale [N, H, nk], weight_scale [H, 1, nk].
+  int const nk = (reduction_size + 127) / 128;
+  assert(input_ops[1]->dtensor.num_dims == 3);
+  assert(input_ops[1]->dtensor.dim[0] == batch_size);
+  assert(input_ops[1]->dtensor.dim[1] == num_heads);
+  assert(input_ops[1]->dtensor.dim[2] == nk &&
+         "linear_fp8_bmm_dense: input_scale last dim must be D_in/128 "
+         "(float32 1x128-group activation scale)");
+  assert(input_ops[3]->dtensor.num_dims == 3);
+  assert(input_ops[3]->dtensor.dim[0] == num_heads);
+  assert(input_ops[3]->dtensor.dim[2] == nk &&
+         "linear_fp8_bmm_dense: weight_scale last dim must be D_in/128 "
+         "(float32 128x128-block weight scale)");
+
+  // Grid: grid.x = M-shard within a head (must be 1 for D_out=128=BN),
+  // grid.y = head index (must equal H — one head per CTA).
+  int grid_x = bgraph.grid_dim.x;
+  int grid_y = bgraph.grid_dim.y;
+  assert(grid_x == 1 &&
+         "linear_fp8_bmm_dense: grid.x must be 1 (per-head D_out=128=BN, the "
+         "dense body computes the whole per-head N-tile in one CTA).");
+  assert(num_heads % grid_y == 0 &&
+         "linear_fp8_bmm_dense: H must be divisible by grid_dim.y");
+  int heads_per_task = num_heads / grid_y;
+  assert(heads_per_task == 1 &&
+         "linear_fp8_bmm_dense currently supports only H_PER_TASK=1; "
+         "set grid_dim.y == H to give each CTA exactly one head.");
+
+  // Dense body constraints: BK=128, BN=128. D_out (=N per head) must be a
+  // multiple of 128; D_in (=K) must be a multiple of 128. Decode-only M small.
+  assert(D_out_full % 128 == 0 &&
+         "linear_fp8_bmm_dense requires per-head D_out divisible by 128");
+  assert(reduction_size % 128 == 0 &&
+         "linear_fp8_bmm_dense requires D_in divisible by 128");
+
+  // Per-head activation-scale row stride: scale is [N, H, nk] row-major, so
+  // consecutive M-rows of one head stride by H*nk floats. The per-head base
+  // (head h -> +h*nk) is applied by the runtime via the partition map; we
+  // only need the row stride here.
+  int const sa_row_stride = num_heads * nk;
+  // Per-head bf16-output row stride: output is [N, H, D_out] so a row strides
+  // by H*D_out. (For 2D [N, H*D_out] the stride is identical.)
+  int const C_row_stride = num_heads * D_out_full;
+
+  // BN=128, NS=3, NE=1 (BMM-specific, decode-only). Diagnostic memcheck
+  // showed the megakernel-context tcgen05.alloc returns taddr=0 with NE=2
+  // (TCA=256 contends with concurrent tcgen05 tasks' TMEM on the same SM,
+  // 2×256 = the 512-col SM limit). NE=1 halves the BMM's TMEM ask (TCA=128)
+  // so the alloc fits. BMM is M=1 decode-only so NE=1 (no TMEM pipeline)
+  // costs no perf — only one MMA call per CTA. SMALLM/MEDIUMM keep NE=2.
+  constexpr int BN = 128;
+  constexpr int NS = 3;
+  constexpr int NE = 1;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Decode-only active-rows cap, mirroring the dense GEMM variants: the
+  // BMM only runs on decode iters, and we clip M to the active token count
+  // so non-active output rows keep their prior content.
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;",
+         batch_size,
+         batch_size);
+  code.e("if (runtime_m_ <= 0) return;");
+  // Kernel call: <BN, NS, NE>(ta=A(input), tb=B(weight), sa, sb, C, M, N, K,
+  //                           sa_row_stride, C_row_stride).
+  code.e("kernel::linear_fp8_bmm_dense::linear_fp8_bmm_dense_sm100_task_impl<"
+         "$, $, $>(",
+         BN,
+         NS,
+         NE);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A = input
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // B = weight
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");    // sa
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");    // sb
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // C
+  code.e("    runtime_m_,");
+  code.e("    $,", D_out_full);     // N = per-head D_out
+  code.e("    $,", reduction_size); // K = D_in
+  code.e("    $,", sa_row_stride);
+  code.e("    $);", C_row_stride);
+  code.e("}");
+
+  return register_task_variant(TASK_LINEAR_FP8_BMM_DENSE_SM100,
+                               code.to_string());
+}
+
 static int register_fp8_gemm_dense_variant(TaskRegister *self,
                                            std::vector<int> const &params,
                                            char const *namespace_name,
@@ -5920,6 +6079,104 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
       "fp8_gemm_dense_mediumm",
       "fp8_gemm_dense_mediumm_sm100_task_impl",
       TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
+}
+
+// D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but
+// the kernel call emits FP8 + packed UE8M0 scale outputs. Task tuple is
+// (4 inputs, 2 outputs): output_ptrs[0] = FP8 buffer, output_ptrs[1] =
+// packed-scale uint32 buffer. params layout unchanged (M, N, K,
+// num_workers, optional runtime_m_mode); `scale_outer_stride` is derived
+// from N at codegen time (= N/128 = number of K-groups per row, since
+// BN=128 and we statically restrict the fused path to BN=128).
+static int register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
+                                                  std::vector<int> const &params,
+                                                  char const *namespace_name,
+                                                  char const *fn_name,
+                                                  TaskType task_type) {
+  assert(params.size() == 4 || params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
+  assert(runtime_m_mode >= 0 && runtime_m_mode <= 3);
+  // BN=128 fixed (per task_impl_tpl<BN=128, NS=3, NE=...>); each consumer
+  // thread owns exactly one K-group → scale_outer_stride is the per-row
+  // number of K-groups = N / 128.
+  assert(N % 128 == 0 &&
+         "fp8_gemm_dense_fp8out requires N divisible by 128 (one K-group "
+         "per BN tile, per-row scale layout)");
+  int scale_outer_stride = N / 128;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  if (runtime_m_mode == 1) {
+    code.e("int req_id_ = runtime_config.request_ids[0];");
+    code.e("if (req_id_ < 0) return;");
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
+           "runtime_config.prompt_length[req_id_] && q_len_ > 8;");
+    code.e("if (!prompt_prefill_) return;");
+    code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[0];");
+    code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
+    code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
+           "runtime_config.paged_kv_last_page_len_buffer[0];");
+  } else if (runtime_m_mode == 2 || runtime_m_mode == 3) {
+    code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+           "runtime_config.qo_indptr_buffer[0];");
+    if (runtime_m_mode == 2) {
+      code.e("if (q_len_ <= 8) return;");
+    } else {
+      code.e("if (q_len_ > 8) return;");
+    }
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
+  } else {
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
+  }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_fp8_e4m3*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<uint32_t*>(task_desc->output_ptrs[1]),");
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $,", num_workers);
+  code.e("    $);", scale_outer_stride);
+  code.e("}");
+  return self->register_task_variant(task_type, code.to_string());
+}
+
+int TaskRegister::register_fp8_gemm_dense_smallm_fp8out_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_fp8out_variant(
+      this,
+      params,
+      "fp8_gemm_dense_smallm",
+      "fp8_gemm_dense_smallm_fp8out_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100);
+}
+
+int TaskRegister::register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_fp8out_variant(
+      this,
+      params,
+      "fp8_gemm_dense_mediumm",
+      "fp8_gemm_dense_mediumm_fp8out_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100);
 }
 
 // SplitK decode variant. params: [M, N, K, num_workers, SPLIT_K]. Always
@@ -6048,6 +6305,21 @@ int TaskRegister::register_fp8_group_gemm_largem_sm100_task(
       TASK_FP8_GROUP_GEMM_LARGEM_SM100);
 }
 
+// Compact-dispatch large-M group GEMM (PR #707 review split): same runtime
+// contract + TMA layout as the largem task, but the device impl loops only
+// active experts. Lives in its own task type so the fine-tuned largem kernel
+// (fp8_group_gemm_largem_sm100.cuh) stays byte-identical to baseline.
+int TaskRegister::register_fp8_group_gemm_largem_compact_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_group_gemm_variant(
+      this,
+      params,
+      "fp8_group_gemm_largem_compact",
+      "fp8_group_gemm_largem_compact_task_impl",
+      TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100);
+}
+
 // moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.
 // Params (compile-time): [K, K_PACKED, MBT, TOPK, E_LOCAL, BM_PADDING]
 // Inputs (4): input_fp8 (mbt, K) u8, input_scale (mbt, K_PACKED) u32 UE8M0,
@@ -6061,13 +6333,19 @@ int TaskRegister::register_fp8_group_gemm_largem_sm100_task(
 // Static m_indices is set up by the builder via attach_input (constant
 // pattern m_indices[r] = r / BM_PADDING) and consumed directly by the
 // grouped GEMM — NOT emitted by this task.
-// Grid: (E_LOCAL, 1, 1). expert_offset = bid.x (runtime.cc).
+// Grid: (E_LOCAL / E_PER_CTA, 1, 1). expert_offset = bid.x = CTA index
+// (runtime.cc). The kernel owns experts [bid.x*E_PER_CTA,
+// (bid.x+1)*E_PER_CTA). E_PER_CTA = params[6] (default 1; builder gates it
+// via MPK_DSV3_PERMUTE_EPC). Passed as a runtime scalar (not a template
+// arg) so raising it doesn't trigger a template-instantiation rebuild.
 int TaskRegister::register_moe_permute_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
-  assert(params.size() == 6);
+  assert(params.size() == 6 || params.size() == 7);
   int K = params[0], K_PACKED = params[1], MBT = params[2];
   int TOPK = params[3], E_LOCAL = params[4], BM_PADDING = params[5];
+  int E_PER_CTA = (params.size() == 7) ? params[6] : 1;
+  assert(E_PER_CTA >= 1 && E_LOCAL % E_PER_CTA == 0);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6085,8 +6363,9 @@ int TaskRegister::register_moe_permute_sm100_task(
   code.e("    task_desc->output_ptrs[0],"); // permuted_fp8
   code.e("    task_desc->output_ptrs[1],"); // permuted_scale (transposed)
   code.e("    task_desc->output_ptrs[2],"); // meta (packed weights+tok2perm)
-  code.e("    task_desc->task_metadata.expert_offset,");
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  code.e("    task_desc->task_metadata.expert_offset,"); // CTA index
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  code.e("    $);", E_PER_CTA); // experts owned by this CTA
   return register_task_variant(TASK_MOE_PERMUTE_SM100, code.to_string());
 }
 
@@ -6239,6 +6518,16 @@ int TaskRegister::register_assemble_q_decode_sm100_task(
   assert(D_NOPE + D_PE == D_TOTAL);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // Active-row gate: request_id = bid.x = this CTA's token index (set in
+  // runtime.cc register_mugraph). The dim_map (0,-1,-1) already offset each
+  // CTA's ptr to its token. At decode active_rows=1, only token 0 survives;
+  // tokens 1..mbt-1 are padding (their q_nope_pe slots are never read by MLA
+  // decode), so early-exiting their CTAs is safe and frees ~127 workers for
+  // the concurrent attention-branch GEMMs. Correct for prefill too (keeps
+  // CTAs 0..active_rows-1).
+  code.e("int active_rows_aq_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("if (task_desc->task_metadata.request_id >= active_rows_aq_) return;");
   code.e("kernel::assemble_q_decode_sm100_task_impl<$, $, $, $>(",
          H,
          D_NOPE,
@@ -6814,8 +7103,12 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
     code.e("      $f,", _sm);
   }
   code.e("      kv_len_,");
-  // See generic MTP decode: task metadata is laid out for static num_splits.
-  code.e("      $,", num_splits);
+  // Use the runtime number of active KV tiles (sk_rt_) so the main writes
+  // the partial buffer in a compact layout matching what the reduce reads.
+  // Matches TP=4 pattern; passing compile-time num_splits made the kernel
+  // index past the active si range and read stale partial slots in the
+  // reduce — works for kv_len = num_splits * 128 but not for short context.
+  code.e("      sk_rt_,");
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);
   code.e("      $,",
@@ -6860,8 +7153,10 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  // See generic MTP reduce: partial layout is static-num_splits based.
-  code.e("      $,", num_splits);
+  // Match the main task's runtime compact split layout (sk_rt_). Passing
+  // compile-time num_splits read stale partial slots beyond sk_rt_; the
+  // main now also passes sk_rt_, so the two stay in sync for short context.
+  code.e("      sk_rt_,");
   code.e("      $,", num_groups);
   code.e("      q_len_rt_,");
   code.e("      $,", qpg);

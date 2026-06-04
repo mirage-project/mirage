@@ -72,6 +72,43 @@ __device__ __forceinline__ void
   }
 }
 
+// Warp-ballot prefix compaction of the active-expert marker array, factored
+// so it can run (a) inline at the end of the single-CTA topk kernel
+// (FUSE_COMPACTION=true) or (b) as a standalone kernel after a multi-CTA topk
+// pass (FUSE_COMPACTION=false) — in the latter case the kernel-launch boundary
+// is the global barrier that orders all marker writes before this read.
+//
+// Contract: mpk_active_expert_ids[0..LOCAL_EXPERTS) holds a marker per local
+// expert (>=0 if active, -1 otherwise); slot [LOCAL_EXPERTS] receives the
+// active count. Only warp 0 participates. Race-free even when nearly all
+// experts are active (prefill): after processing chunk k the compacted write
+// cursor `count` is <= 32*(k+1) = the first index chunk (k+1) will read, so
+// writes never clobber a not-yet-read marker.
+template <int LOCAL_EXPERTS>
+__device__ __forceinline__ void
+    compact_active_experts_ballot(int *mpk_active_expert_ids) {
+  if (threadIdx.x < WARP_SIZE_SIGMOID) {
+    int const lane = threadIdx.x;
+    int count = 0;
+    for (int chunk_base = 0; chunk_base < LOCAL_EXPERTS;
+         chunk_base += WARP_SIZE_SIGMOID) {
+      int const local_expert = chunk_base + lane;
+      int const mark = (local_expert < LOCAL_EXPERTS)
+                           ? mpk_active_expert_ids[local_expert]
+                           : -1;
+      unsigned const ballot = __ballot_sync(0xffffffff, mark >= 0);
+      int const my_offset = __popc(ballot & ((1u << lane) - 1));
+      if (mark >= 0) {
+        mpk_active_expert_ids[count + my_offset] = local_expert;
+      }
+      count += __popc(ballot);
+    }
+    if (lane == 0) {
+      mpk_active_expert_ids[LOCAL_EXPERTS] = count;
+    }
+  }
+}
+
 template <typename T,
           int VPT,
           int NUM_EXPERTS,
@@ -81,7 +118,8 @@ template <typename T,
           int NUM_GROUPS,
           int TOPK_GROUP,
           int EXPERTS_PER_GROUP,
-          int TOPK_EXPERTS>
+          int TOPK_EXPERTS,
+          bool FUSE_COMPACTION = true>
 __device__ __forceinline__ void topk_sigmoid_task_impl(
     void *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
     void *__restrict__ bias_ptr,  // [NUM_EXPERTS] float
@@ -118,22 +156,34 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // zero-stores to 128*1=128. The mpk_active_expert_ids vector still
   // gets the full LOCAL_EXPERTS reset because Phase 7's compaction
   // reads `mark[local_expert]` for every local expert.
-  int const init_rows =
-      (num_active_rows < num_rows) ? num_active_rows : num_rows;
-  for (int expert = start_expert + threadIdx.x; expert < end_expert;
-       expert += blockDim.x) {
-    int const local_expert = expert - start_expert;
-    if (mpk_routing_indices != nullptr) {
-      for (int row = 0; row < init_rows; ++row) {
-        mpk_routing_indices[local_expert * num_rows + row] = 0;
+  //
+  // FUSE_COMPACTION=true (single-CTA, the decode / default path): the one CTA
+  // owns the entire marker array + routing buffer, so it does the upfront
+  // init here exactly as before.
+  // FUSE_COMPACTION=false (multi-CTA prefill path): the marker array is
+  // pre-init'd to -1 (counter 0) by the caller BEFORE launch — doing it here
+  // in every CTA would race the Phase-5 marker SETs of peer CTAs (no global
+  // barrier between CTAs), silently dropping active experts. Each CTA instead
+  // zeroes only its own row-chunk's slice of the routing buffer inside the
+  // loop below, so CTAs never touch each other's rows.
+  if (FUSE_COMPACTION) {
+    int const init_rows =
+        (num_active_rows < num_rows) ? num_active_rows : num_rows;
+    for (int expert = start_expert + threadIdx.x; expert < end_expert;
+         expert += blockDim.x) {
+      int const local_expert = expert - start_expert;
+      if (mpk_routing_indices != nullptr) {
+        for (int row = 0; row < init_rows; ++row) {
+          mpk_routing_indices[local_expert * num_rows + row] = 0;
+        }
+      }
+      if (mpk_active_expert_ids != nullptr) {
+        mpk_active_expert_ids[local_expert] = -1;
       }
     }
-    if (mpk_active_expert_ids != nullptr) {
-      mpk_active_expert_ids[local_expert] = -1;
+    if (threadIdx.x == 0 && mpk_active_expert_ids != nullptr) {
+      mpk_active_expert_ids[LOCAL_EXPERTS] = 0;
     }
-  }
-  if (threadIdx.x == 0 && mpk_active_expert_ids != nullptr) {
-    mpk_active_expert_ids[LOCAL_EXPERTS] = 0;
   }
   __syncthreads();
 
@@ -189,7 +239,29 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // [num_active_rows, num_rows) keep the zero-init from Phase 0 — that
   // makes downstream moe_permute's `slot_1idx > 0` check correctly
   // treat them as "no routing".
-  for (int row_base = 0; row_base < num_active_rows; row_base += ROWS_PER_CTA) {
+  //
+  // Grid-stride over row-chunks. FUSE_COMPACTION=true + grid=(1,1,1) (the
+  // decode / default path) reduces exactly to the original single-CTA loop
+  // (blockIdx.x=0, gridDim.x=1 ⇒ row_base=0; +=ROWS_PER_CTA). The multi-CTA
+  // prefill path (FUSE_COMPACTION=false, grid of N CTAs) distributes the
+  // chunks across CTAs so the ~0.7 μs/row serial cost parallelizes.
+  for (int row_base = blockIdx.x * ROWS_PER_CTA; row_base < num_active_rows;
+       row_base += gridDim.x * ROWS_PER_CTA) {
+    // Multi-CTA path only: zero THIS chunk's slice of the routing buffer
+    // (rows [row_base, row_hi) across all local experts) before computing it.
+    // Single-CTA path did this upfront in Phase 0; here it must be per-chunk
+    // so peer CTAs never race on rows they don't own. Compiled out when
+    // FUSE_COMPACTION (the upfront Phase-0 zero already covered every row).
+    if (!FUSE_COMPACTION && mpk_routing_indices != nullptr) {
+      int const row_hi = min(row_base + ROWS_PER_CTA, num_active_rows);
+      for (int le = 0; le < LOCAL_EXPERTS; ++le) {
+        for (int row = row_base + threadIdx.x; row < row_hi;
+             row += blockDim.x) {
+          mpk_routing_indices[le * num_rows + row] = 0;
+        }
+      }
+      __syncthreads();
+    }
     int const thread_row = row_base + warp_base_row + thread_row_in_warp;
     // Warp mask: special case is for the THREADS_PER_ROW=16 / 2-rows-per-
     // warp config where the last (odd) row's upper half-warp needs masking.
@@ -392,16 +464,14 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   __syncthreads();
 
   // ---- Phase 7: Compact active expert IDs ----
-  if (mpk_active_expert_ids != nullptr) {
-    for (int expert = start_expert + threadIdx.x; expert < end_expert;
-         expert += blockDim.x) {
-      int const local_expert = expert - start_expert;
-      int const mark = mpk_active_expert_ids[local_expert];
-      if (mark >= 0) {
-        int const pos = atomicAdd(mpk_active_expert_ids + LOCAL_EXPERTS, 1);
-        mpk_active_expert_ids[pos] = local_expert;
-      }
-    }
+  // FUSE_COMPACTION=true (single-CTA): run the warp-ballot compaction inline
+  // now — the preceding __syncthreads guarantees every Phase-5 marker SET is
+  // visible. FUSE_COMPACTION=false (multi-CTA): skipped here; the caller runs
+  // compact_active_experts_ballot in a SEPARATE kernel after this one returns,
+  // because compaction must observe markers written by ALL CTAs and only the
+  // kernel-launch boundary provides that global barrier.
+  if (FUSE_COMPACTION && mpk_active_expert_ids != nullptr) {
+    compact_active_experts_ballot<LOCAL_EXPERTS>(mpk_active_expert_ids);
   }
 }
 

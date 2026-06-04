@@ -822,6 +822,22 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"] = (
                         bmm_v_scale_packed)
 
+                    # Dense-BMM repack of kv_b_v for MPK_DSV3_BMM_DENSE=1: the
+                    # DENSE block-scaled GEMM body wants float32 128x128-block
+                    # scales (one scale per [128-row-block, 128-K-group]), NOT
+                    # the per-row UE8M0 scale above. kv_b_v_fp8 / kv_b_v_scale
+                    # (computed by _quantize_f32_to_checkpoint_fp8 just above)
+                    # are ALREADY 128x128-block-quantized: kv_b_v_fp8 is
+                    # [H*128, 512], kv_b_v_scale is [bM=H, bK=512/128=4].
+                    # Reshape per-head: weight [H, D_out=128, D_in=512],
+                    # scale [H, D_out/128=1, D_in/128=4] (float32, row-major).
+                    kv_lora_blk = kv_lora_rank // 128  # = 4 for K=512
+                    state_dict[f"{attn}kv_b_v_bmm_dense.weight"] = (
+                        kv_b_v_fp8.reshape(H_, v_dim, kv_lora_rank).contiguous())
+                    state_dict[f"{attn}kv_b_v_bmm_dense.weight_scale_inv"] = (
+                        kv_b_v_scale.reshape(H_, 1, kv_lora_blk).to(
+                            torch.float32).contiguous())
+
                     # DEBUG 2026-05-10: also store bf16 versions of the
                     # split kv_b weights for the BF16 ablation in
                     # _fp8_dense_kv_b_proj. Used to verify whether the FP8
@@ -1054,6 +1070,10 @@ if __name__ == "__main__":
                     # head dim (dim=0). Same sharding as kv_b_k_bmm.
                     (r"self_attn\.kv_b_v_bmm\.weight",                       0),
                     (r"self_attn\.kv_b_v_bmm\.weight_scale_ue8m0",           0),
+                    # Dense-BMM repack of kv_b_v: weight (H, 128, 512) FP8 +
+                    # float32 block scale (H, 1, 4). Shard head dim (dim=0).
+                    (r"self_attn\.kv_b_v_bmm_dense\.weight",                 0),
+                    (r"self_attn\.kv_b_v_bmm_dense\.weight_scale_inv",       0),
                     (r"self_attn\.kv_b_k_bf16\.weight",                      0),
                     (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
@@ -1383,8 +1403,13 @@ if __name__ == "__main__":
             print(f"Saved {len(mpk.dump_hidden_tensors)} per-layer residual dumps to {args.dump_hidden_dir}")
 
         print("tokens.shape = ", tokens.shape)
+        # See note below: keep step on the host side after the megakernel
+        # runs to avoid sporadic `cudaErrorInvalidValue` from device-side
+        # tensor ops.
+        _step_cpu_pre = step.detach().cpu().tolist()
         for r in range(total_num_requests):
-            generated_ids = tokens[r, : step[r] + 1]
+            step_r = int(_step_cpu_pre[r])
+            generated_ids = tokens[r, : step_r + 1]
             response = safe_tokenizer_decode(
                 tokenizer, generated_ids, context=f"request {r}"
             )
@@ -1392,19 +1417,26 @@ if __name__ == "__main__":
                 print(f"[request {r}]")
             print(response)
 
+        # Convert step from GPU tensor to CPU values up-front. After the
+        # persistent kernel runs, doing new device-side reductions (`step.max()`,
+        # `step.min()`) intermittently triggers `cudaErrorInvalidValue` even
+        # though `step.cpu()` itself works. Stay on the host side from here on.
+        step_cpu = step.detach().cpu().tolist()
+        step_max = max(step_cpu)
+        step_min = min(step_cpu)
         if total_num_requests > 1:
-            print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
+            print(f"Output length of each batch is same: {step_max == step_min}")
 
         print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
-            prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0],
-            run_time / (step.max().item() + 1)
+            prompt_lengths[0].item(), step_max + 1 - int(prompt_lengths[0].item()),
+            run_time / (step_max + 1)
         ))
 
         # Dump outputs to json
         if save_path and rank == 0:
             out = []
             for r in range(total_num_requests):
-                end_idx = step[r].item() + 1
+                end_idx = int(step_cpu[r]) + 1
                 prompt_len = prompt_lengths[r].item()
                 tokens_generated = max(0, end_idx - prompt_len)
                 per_tok_ms = run_time / max(tokens_generated, 1)

@@ -227,7 +227,33 @@ enum TaskType {
   // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
   // (N, H, 576) that the MLA decode TMA expects.
   TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
-  TASK_SM100_TASK_END = 320, // SM100 end placeholder, not a real task
+  // Compact-dispatch variant of the large-M FP8 group GEMM: loops only ACTIVE
+  // experts (decode skips ~97% idle tiles). Same TMA layout / runtime signature
+  // as TASK_FP8_GROUP_GEMM_LARGEM_SM100 (shares its TMA-desc dispatch); the
+  // fine-tuned largem kernel stays byte-identical (PR #707 review split).
+  TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100 = 317,
+  // D1 (2026-05-17): dense FP8 GEMM with epilogue UE8M0 quantize. Output is
+  // FP8 + packed UE8M0 scale (instead of bf16), eliminating the standalone
+  // per_token_group_quantize_fp8 task that follows q_b_nope in the
+  // MPK_DSV3_BMM=1 Q-up chain. Saves one dispatch + one BF16 HBM round-trip.
+  // Behind `MPK_DSV3_FUSED_QB_QUANTIZE=1`.
+  TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 = 318,
+  TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 = 319,
+  // PR696 multi-CTA topk prefill path (default-OFF via MPK_DSV3_TOPK_MULTICTA).
+  // The single-CTA topk does marker-init + compaction inline; the multi-CTA
+  // variant cannot (cross-CTA marker-init race), so they become separate
+  // tasks: marker-init (active_expert_ids[0..LE)=-1, [LE]=0) BEFORE the
+  // multi-CTA topk (FUSE_COMPACTION=false), and a warp-ballot compaction
+  // AFTER. Slot 310 was the only free SM100 id; the init reuses the old END
+  // placeholder value 320 (END bumped to 321 — END is only a profiler name,
+  // never a range-check boundary, so this is safe).
+  TASK_MOE_TOPK_COMPACT_SM100 = 310,
+  TASK_MOE_TOPK_MARKER_INIT_SM100 = 320,
+  // Per-head FP8 BMM wrapping the DENSE block-scaled GEMM body (float32
+  // scales). Forward-compatible alternative to TASK_LINEAR_FP8_BMM_SM100
+  // (swapAB / UE8M0) for DSv3 decode BMM2. Behind MPK_DSV3_BMM_DENSE=1.
+  TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
+  TASK_SM100_TASK_END = 323, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

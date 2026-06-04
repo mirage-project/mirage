@@ -1616,7 +1616,9 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
     case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
-    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100: {
+    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100:
+    case TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100:
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100: {
       // Dense FP8 GEMM TMA for A [M,K] and B [N,K], both row-major raw
       // e4m3 bytes. Scales are loaded directly, not through TMA. SplitK
       // variant uses the same descriptor — per-CTA K offset is encoded in
@@ -1657,8 +1659,62 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       assert(err == CUDA_SUCCESS);
       break;
     }
+    case TASK_LINEAR_FP8_BMM_DENSE_SM100: {
+      // Per-head dense FP8 BMM: 2 TMA descriptors (A=input param 0, B=weight
+      // param 2). Same 2D [K, outer] raw-e4m3 descriptor as the dense GEMM,
+      // but the per-task tensors are 3D per-head slices, so K and the gmem
+      // row stride live at different dims:
+      //   A (input  [N_batch, H, D_in])  per head -> STensor [N_batch, 1, D_in]
+      //       outer = dim[0] (= N_batch), K = dim[2] (= D_in),
+      //       row_stride = stride[0] (= H * D_in).
+      //   B (weight [H, D_out, D_in])     per head -> STensor [1, D_out, D_in]
+      //       outer = dim[1] (= D_out),  K = dim[2] (= D_in),
+      //       row_stride = stride[1] (= D_in).
+      // Scales (float32) and the bf16 output are raw pointers, not TMA.
+      constexpr int BK_BOX = 128;
+      constexpr int OUTER_BOX = 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+      int outer, K_local;
+      uint64_t row_stride_bytes;
+      if (param_id == 0) {
+        // A = input: outer = M (dim0), K = D_in (dim2), stride = stride[0].
+        outer = tensor_desc.dim[0];
+        K_local = tensor_desc.dim[2];
+        row_stride_bytes = (uint64_t)tensor_desc.stride[0];
+      } else {
+        // B = weight (param 2): outer = D_out (dim1), K = D_in (dim2),
+        // stride = stride[1].
+        outer = tensor_desc.dim[1];
+        K_local = tensor_desc.dim[2];
+        row_stride_bytes = (uint64_t)tensor_desc.stride[1];
+      }
+      uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
+      uint64_t gs[1] = {row_stride_bytes};
+      uint32_t bd[2] = {BK_BOX, OUTER_BOX};
+      uint32_t es[2] = {1, 1};
+      CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                            fmt,
+                                            2,
+                                            tensor_desc.base_ptr,
+                                            gd,
+                                            gs,
+                                            bd,
+                                            es,
+                                            interleave,
+                                            swizzle,
+                                            l2,
+                                            oob);
+      assert(err == CUDA_SUCCESS);
+      break;
+    }
     case TASK_FP8_GROUP_GEMM_SMALLM_SM100:
-    case TASK_FP8_GROUP_GEMM_LARGEM_SM100: {
+    case TASK_FP8_GROUP_GEMM_LARGEM_SM100:
+    case TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100: {
       // 5 TMA descriptors: A (param 0), B (param 1), SFA (param 2),
       // SFB (param 3), D output (output param 0). param_id 4 (m_indices) is
       // direct LDG, not TMA. B/SFB box dim depends on BN: smallm uses BN=64
@@ -1816,9 +1872,14 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         }
       }
       if (param_id == 0) {
-        // Q: may be flat [mbt, num_heads*D_K]; reinterpret as [B*Q*heads, D_K]
+        // Q: may be flat [mbt, num_heads*D_K] (2D) or per-head [mbt, num_heads,
+        // D_K] (3D — produced when the upstream q_b GEMM emits the BMM
+        // layout). Reinterpret either form as [B*Q*heads, D_K].
         constexpr int D_K = 576;
         int total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
+        if (tensor_desc.num_dims == 3) {
+          total_elements *= tensor_desc.dim[2];
+        }
         int total_rows = total_elements / D_K;
         int k_iters = D_K / BK;
         uint64_t gd[3] = {
@@ -2156,6 +2217,15 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
           task_desc, task_desc.outputs[0], task_desc.num_inputs, 0);
       break;
     }
+    case TASK_LINEAR_FP8_BMM_DENSE_SM100: {
+      // Per-head dense FP8 BMM: TMA only for A=input (param 0) and B=weight
+      // (param 2). Float32 scales (params 1, 3) and the bf16 output are raw
+      // global pointers read directly by the kernel. The per-head slice is
+      // encoded by TBGraph partitioning advancing each tensor's base_ptr.
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[2], 2, 0); // B
+      break;
+    }
     case TASK_PAGED_ATTENTION_HOPPER: {
       constexpr int TMA_TENSOR_NUM =
           4; // 3 input tensors and 1 output tensor that need TMA
@@ -2286,10 +2356,15 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
     case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
-    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100: {
+    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100:
+    case TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100:
+    case TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100: {
       // A_fp8 and B_fp8 use TMA; scale tensors are plain LDG inputs.
       // SplitK uses the same TMA layout (full K extent in descriptor;
-      // per-CTA K offset baked into runtime tile indexing).
+      // per-CTA K offset baked into runtime tile indexing). FP8OUT
+      // variants have the same input TMA layout as the bf16 variants —
+      // the only difference is the epilogue store path (FP8 + packed
+      // scale instead of bf16), which doesn't use TMA.
       for (size_t param_id = 0; param_id < 2; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
@@ -2306,7 +2381,8 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       break;
     }
     case TASK_FP8_GROUP_GEMM_SMALLM_SM100:
-    case TASK_FP8_GROUP_GEMM_LARGEM_SM100: {
+    case TASK_FP8_GROUP_GEMM_LARGEM_SM100:
+    case TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100: {
       // 4 TMA inputs (A, B, SFA, SFB) + 1 TMA output (D for TMA store).
       // m_indices (input param 4) is direct LDG.
       for (size_t param_id = 0; param_id < 4; param_id++) {
