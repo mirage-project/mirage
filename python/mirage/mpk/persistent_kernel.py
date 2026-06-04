@@ -2357,53 +2357,31 @@ class PersistentKernel:
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "copy", params)
 
-    def eagle3_aux_concat_layer(
+    def concat_layer(
         self,
-        h0: DTensor,
-        h1: DTensor,
-        h2: DTensor,
-        output: DTensor,  # (batch, 3 * hidden_dim)
+        inputs: list,      # list of N (batch, hidden_dim) DTensors
+        output: DTensor,   # (batch, N * hidden_dim)
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        assert h0.num_dims == 2 and h1.num_dims == 2 and h2.num_dims == 2
+        """Concatenate N (B,H) tensors along dim 1 into (B, N*H)."""
+        n = len(inputs)
+        assert n >= 1
+        assert all(t.num_dims == 2 for t in inputs)
         assert output.num_dims == 2
-        assert h0.dim(0) == h1.dim(0) == h2.dim(0) == output.dim(0)
-        assert h0.dim(1) == h1.dim(1) == h2.dim(1)
-        assert output.dim(1) == 3 * h0.dim(1)
-        batch_size = h0.dim(0)
-        hidden_dim = h0.dim(1)
-        params = [batch_size, hidden_dim]
+        batch_size = inputs[0].dim(0)
+        hidden_dim = inputs[0].dim(1)
+        assert all(t.dim(0) == batch_size and t.dim(1) == hidden_dim
+                   for t in inputs)
+        assert output.dim(0) == batch_size
+        assert output.dim(1) == n * hidden_dim
+        params = [batch_size, hidden_dim, n]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(h0, (-1, -1, -1), -1, True)
-        tb_graph.new_input(h1, (-1, -1, -1), -1, True)
-        tb_graph.new_input(h2, (-1, -1, -1), -1, True)
+        for t in inputs:
+            tb_graph.new_input(t, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([h0, h1, h2, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "eagle3_aux_concat", params)
-
-    def eagle3_input_concat_layer(
-        self,
-        embed: DTensor,    # (batch, hidden_dim)
-        hidden: DTensor,   # (batch, hidden_dim)
-        output: DTensor,   # (batch, 2 * hidden_dim)
-        grid_dim: tuple,
-        block_dim: tuple,
-    ):
-        assert embed.num_dims == 2 and hidden.num_dims == 2
-        assert output.num_dims == 2
-        assert embed.dim(0) == hidden.dim(0) == output.dim(0)
-        assert embed.dim(1) == hidden.dim(1)
-        assert output.dim(1) == 2 * embed.dim(1)
-        batch_size = embed.dim(0)
-        hidden_dim = embed.dim(1)
-        params = [batch_size, hidden_dim]
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(embed, (-1, -1, -1), -1, True)
-        tb_graph.new_input(hidden, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([embed, hidden, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "eagle3_input_concat", params)
+        self.kn_graph.customized([*inputs, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "concat", params)
 
     def eagle3_commit_layer(
         self,

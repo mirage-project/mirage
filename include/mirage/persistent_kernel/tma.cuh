@@ -1262,8 +1262,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       int total_rows = tensor_desc.dim[0]; // S
       int d_last = tensor_desc.dim[1];     // 192 for K, 128 for V
       int k_iters = d_last / BK;
-      uint64_t gd[3] = {
-          (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
+      uint64_t gd[3] = {(uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
       uint64_t gs[2] = {(uint64_t)d_last * 2, (uint64_t)BK * 2};
       uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BN_BOX, 1};
       uint32_t es[3] = {1, 1, 1};
@@ -1620,10 +1619,9 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
-    // Eagle3 kernels don't need TMA. 
+    // Eagle3 kernels don't need TMA.
     case TASK_COPY:
-    case TASK_EAGLE3_AUX_CONCAT:
-    case TASK_EAGLE3_INPUT_CONCAT:
+    case TASK_CONCAT:
     case TASK_EAGLE3_D2T_REMAP:
     case TASK_EAGLE3_COMMIT: {
       break;

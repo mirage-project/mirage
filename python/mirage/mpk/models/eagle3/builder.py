@@ -316,8 +316,8 @@ class Eagle3Builder:
             )
 
             if step == 0:
-                self.mpk.eagle3_aux_concat_layer(
-                    h0=aux_h0, h1=aux_h1, h2=aux_h2,
+                self.mpk.concat_layer(
+                    inputs=[aux_h0, aux_h1, aux_h2],
                     output=self.aux_concat_out,
                     grid_dim=(1, 1, 1), block_dim=bd_compute,
                 )
@@ -341,8 +341,8 @@ class Eagle3Builder:
                 output=self.hidden_normed,
                 grid_dim=(mbt, 1, 1), block_dim=bd_small,
             )
-            self.mpk.eagle3_input_concat_layer(
-                embed=self.embed_normed, hidden=self.hidden_normed,
+            self.mpk.concat_layer(
+                inputs=[self.embed_normed, self.hidden_normed],
                 output=self.qkv_in_2H,
                 grid_dim=(1, 1, 1), block_dim=bd_compute,
             )

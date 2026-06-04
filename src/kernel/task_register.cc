@@ -4417,36 +4417,22 @@ int TaskRegister::register_copy_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_COPY, code.to_string());
 }
 
-int TaskRegister::register_eagle3_aux_concat_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params[0]: batch_size, params[1]: hidden_dim
-  assert(params.size() == 2);
+int TaskRegister::register_concat_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params) {
+  // params[0]: batch_size, params[1]: hidden_dim, params[2]: N (num inputs)
+  assert(params.size() == 3);
   int batch_size = params[0];
   int hidden_dim = params[1];
+  int n = params[2];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // N=3: concat h0/h1/h2 (input_ptrs[0..2]) → 3H
-  code.e("kernel::concat_kernel<bfloat16, $, $, 3>(", batch_size, hidden_dim);
-  code.e("    task_desc->input_ptrs,");      // h0, h1, h2
-  code.e("    task_desc->output_ptrs[0]);"); // output (3H)
-  return register_task_variant(TASK_EAGLE3_AUX_CONCAT, code.to_string());
-}
-
-int TaskRegister::register_eagle3_input_concat_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params[0]: batch_size, params[1]: hidden_dim
-  assert(params.size() == 2);
-  int batch_size = params[0];
-  int hidden_dim = params[1];
-
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  // N=2: concat embed/hidden (input_ptrs[0..1]) → 2H
-  code.e("kernel::concat_kernel<bfloat16, $, $, 2>(", batch_size, hidden_dim);
-  code.e("    task_desc->input_ptrs,");      // embed, hidden
-  code.e("    task_desc->output_ptrs[0]);"); // output (2H)
-  return register_task_variant(TASK_EAGLE3_INPUT_CONCAT, code.to_string());
+  // Concat N (B,H) inputs (input_ptrs[0..N-1]) along dim 1 → (B, N*H).
+  code.e(
+      "kernel::concat_kernel<bfloat16, $, $, $>(", batch_size, hidden_dim, n);
+  code.e("    task_desc->input_ptrs,");      // input_ptrs[0..N-1]
+  code.e("    task_desc->output_ptrs[0]);"); // output (N*H)
+  return register_task_variant(TASK_CONCAT, code.to_string());
 }
 
 int TaskRegister::register_eagle3_d2t_remap_task(

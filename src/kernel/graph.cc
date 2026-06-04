@@ -838,15 +838,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_copy_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_COPY, variant_id);
-  } else if (name == "eagle3_aux_concat") {
-    int variant_id = task_register->register_eagle3_aux_concat_task(
-        customized->bgraph, params);
-    task_config[op] = std::make_tuple(3, 1, TASK_EAGLE3_AUX_CONCAT, variant_id);
-  } else if (name == "eagle3_input_concat") {
-    int variant_id = task_register->register_eagle3_input_concat_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_EAGLE3_INPUT_CONCAT, variant_id);
+  } else if (name == "concat") {
+    // params[2] = N (number of (B,H) inputs concatenated along dim 1).
+    int n = params[2];
+    int variant_id =
+        task_register->register_concat_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(n, 1, TASK_CONCAT, variant_id);
   } else if (name == "eagle3_d2t_remap") {
     int variant_id = task_register->register_eagle3_d2t_remap_task(
         customized->bgraph, params);
