@@ -52,6 +52,32 @@ jobs:
           conda activate mirage-ci-${{ github.run_id }}
           bash tests/ci-tests/run_ci_tests_qwen3.sh
 
+      - name: Run MPK batch size performance test
+        timeout-minutes: 30
+        env:
+          MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
+        run: |
+          conda activate mirage-ci-${{ github.run_id }}
+          for r in 1 2 4 8; do
+            echo "::group::batch size $r"
+            python tests/ci-tests/run_batch_perf.py \
+              --max-num-batched-requests "$r" --ignore-eos
+            echo "::endgroup::"
+          done
+          python - <<'EOF'
+          import glob, json
+          print(f"{'requests':>9} {'tokens':>7} {'total_ms':>9} "
+                f"{'ms/token':>9} {'tokens/s':>9}")
+          for path in sorted(glob.glob("outputs/qwen3/batch_perf_*.json")):
+              with open(path) as f:
+                  m = json.load(f)
+              print(f"{m['max_num_batched_requests']:>9} "
+                    f"{m['max_num_batched_tokens']:>7} "
+                    f"{m['total_time_ms']:>9.1f} "
+                    f"{m['latency_ms_per_token']:>9.3f} "
+                    f"{m['throughput_tokens_per_s']:>9.1f}")
+          EOF
+
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
