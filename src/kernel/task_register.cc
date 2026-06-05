@@ -2517,7 +2517,14 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   // baseline noise. The kernel-side skip is safe: Phase 0 init zeroes
   // the full [0, num_rows) routing range, downstream moe_permute's
   // `slot_1idx > 0` filter treats padded slots as "no routing".
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  // cta_idx / num_ctas: the row-chunk loop must NOT key off blockIdx (= worker
+  // id under MPK). The logical task-instance index comes from
+  // task_metadata.request_id (set to bid.x in runtime.cc), and the instance
+  // count is the logical grid_dim.x. Single-CTA (decode) ⇒ request_id=0,
+  // grid_dim.x=1.
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", (int)bgraph.grid_dim.x);
   return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
 }
 

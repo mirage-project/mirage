@@ -79,6 +79,26 @@ def _grid_for_linear(size: int, use_cutlass: bool = True) -> int:
     raise ValueError(f"linear out-dim {size} not divisible by 96 or 64")
 
 
+def _aligned_lm_head_tasks(width: int, max_tasks: int, align: int = 8) -> int:
+    """Largest task count ``g <= max_tasks`` that column-splits ``width``
+    into ``g`` aligned chunks. Guarantees both:
+
+      * ``width % g == 0``           — ArgmaxPartial requires exact chunks.
+      * ``(width // g) % align == 0`` — the SM100 LINEAR stores its output
+        column-tile via TMA, whose base must be 16B-aligned ⇒ each tile is
+        a multiple of ``align`` (=8) bf16 elements.
+
+    Raw ``num_workers`` (e.g. 136) satisfies neither for the padded vocab
+    153600 (``153600 / 136 = 1129``: not integer, odd ⇒ misaligned), which
+    crashes the lm_head with ``cudaErrorIllegalInstruction``. Mirrors
+    ``demo/qwen3/demo.py:_aligned_lm_head_workers``.
+    """
+    for g in range(max_tasks, 0, -1):
+        if width % g == 0 and (width // g) % align == 0:
+            return g
+    return 1
+
+
 # ---------------------------------------------------------------------------
 # Qwen3MLP
 # ---------------------------------------------------------------------------
@@ -660,6 +680,10 @@ class Qwen3ForCausalLM(MPKModule):
             num_partial_tasks=1,
             prefix=f"{prefix}argmax_reduce_",
         )
+        # Bound to an alignment-safe task count in process_weights (the live
+        # num_workers isn't known until then). Used by compile() for the
+        # lm_head linear + argmax_partial grids.
+        self._lm_head_tasks: Optional[int] = None
 
     def forward(self, input_tokens):
         h = self.model(input_tokens)
@@ -690,23 +714,37 @@ class Qwen3ForCausalLM(MPKModule):
                 f"({self.lm_head.out_features}) exceeds LM_HEAD_PADDED_VOCAB "
                 f"({padded}); raise the class attribute.",
             )
-        self.argmax_partial.num_partial_tasks = pk.num_workers
-        self.argmax_reduce.num_partial_tasks = pk.num_workers
+        # The lm_head linear column-splits the padded vocab across this many
+        # tasks and ArgmaxPartial chunks it the same way. Raw num_workers does
+        # NOT divide 153600 into 16B-aligned tiles (crashes the lm_head TMA on
+        # B200), so pick the largest alignment-safe count <= num_workers.
+        self._lm_head_tasks = _aligned_lm_head_tasks(
+            self.lm_head.out_features, pk.num_workers
+        )
+        self.argmax_partial.num_partial_tasks = self._lm_head_tasks
+        self.argmax_reduce.num_partial_tasks = self._lm_head_tasks
 
     def auto_grid_dim(self, *args, **kwargs):
         raise NotImplementedError("composite module — see child compile()s")
 
     def compile(self, input_tokens_dt, *, output_tokens=None):
         pk = current_pk()
+        # process_weights sets this to an alignment-safe split of the padded
+        # vocab; using raw pk.num_workers here misaligns the lm_head TMA store.
+        lm_head_tasks = self._lm_head_tasks
+        if lm_head_tasks is None:
+            lm_head_tasks = _aligned_lm_head_tasks(
+                self.lm_head.out_features, pk.num_workers
+            )
         h_dt = self.model.compile(input_tokens_dt)
         logits_dt = self.lm_head.compile(
             h_dt,
-            grid_dim=(pk.num_workers, 1, 1),
+            grid_dim=(lm_head_tasks, 1, 1),
             block_dim=(128, 1, 1),
         )
         part_val_dt, part_idx_dt = self.argmax_partial.compile(
             logits_dt,
-            grid_dim=(pk.num_workers, 1, 1),
+            grid_dim=(lm_head_tasks, 1, 1),
             block_dim=(128, 1, 1),
         )
         return self.argmax_reduce.compile(
