@@ -674,6 +674,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_ELEMENTWISE_ADD_SM100, variant_id);
+  } else if (name == "dsv3_router_gemm_sm100") {
+    int variant_id = task_register->register_dsv3_router_gemm_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_DSV3_ROUTER_GEMM_SM100, variant_id);
   } else if (name == "softmax_gather_sm100") {
     int variant_id = task_register->register_softmax_gather_sm100_task(
         customized->bgraph, params);
@@ -866,6 +871,14 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_LINEAR_FP8_BMM_DENSE_SM100, variant_id);
+  } else if (name == "linear_fp8_bmm_dense_fp8out_sm100") {
+    // D3 (2026-06-03): fp8out flavor — 4 inputs + 2 outputs (FP8 buffer +
+    // float32 scale). Fuses the post-BMM2 float32 quantize into the epilogue.
+    int variant_id =
+        task_register->register_linear_fp8_bmm_dense_fp8out_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 2, TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_smallm_sm100") {
     int variant_id = task_register->register_fp8_gemm_dense_smallm_sm100_task(
         customized->bgraph, params);
@@ -876,12 +889,78 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_MEDIUMM_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_finen_bn32_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_finen_bn32_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 1, TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_finen_bn64_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_finen_bn64_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 1, TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_decode_splitk_sm100") {
     int variant_id =
         task_register->register_fp8_gemm_dense_decode_splitk_sm100_task(
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         4, 1, TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_qkva_splitk_sm100") {
+    // 6 inputs (A_fp8, B_fp8, sfa, sfb, C_partial[fp32], arrive_cnt[u64])
+    // + 1 output (C_bf16). A/B carry TMA descriptors (input_tma_desc_ptrs
+    // [0]/[1]); sa/sb + C_partial + arrive_cnt are direct input_ptrs[2..5];
+    // C is output_ptrs[0] (written directly, no output TMA descriptor).
+    int variant_id =
+        task_register->register_fp8_gemm_dense_qkva_splitk_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        6, 1, TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_qkva_splitk_extred_sm100") {
+    // External-reduce split-K GEMM: 4 inputs (A_fp8, B_fp8 with TMA descs,
+    // sfa, sfb) + 1 output (C_partial FP32). The K-slice CTAs write ONLY their
+    // exclusive FP32 partials; a separate reduce task consumes C_partial. No
+    // arrive_cnt and no bf16 C on this task (the reduce writes C).
+    int variant_id =
+        task_register->register_fp8_gemm_dense_qkva_splitk_extred_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 1, TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_splitk_reduce_sm100") {
+    // Reduce companion: 1 input (C_partial FP32) + 1 output (C bf16). Sums the
+    // SPLIT_K partials in FP32 and casts to BF16. Event-gated by the task DAG
+    // to run after all split-K GEMM CTAs of a tile complete (race-free).
+    int variant_id =
+        task_register->register_fp8_gemm_dense_splitk_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        1, 1, TASK_FP8_GEMM_DENSE_SPLITK_REDUCE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_splitk_tma_reduce_sm100") {
+    // ferret FP8 split-K GEMM with TMA reduce-add epilogue: 4 inputs (A_fp8,
+    // B_fp8 with TMA descs, sa, sb) + 1 output (C bf16 with a TMA reduce-add
+    // descriptor). C must be tensor_init-zeroed upstream; the kernel
+    // accumulates each K-slice partial into it via cp.reduce.async.bulk.
+    int variant_id =
+        task_register->register_fp8_gemm_dense_splitk_tma_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        4, 1, TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_splitk_tma_reduce_gflag_sm100") {
+    // gflag variant (2026-06-05): same enum/kernel/TMA infra as above, but with
+    // 5 inputs (A_fp8, B_fp8 TMA + sa, sb + gflag int* scratch at input[4]) and
+    // NO upstream tensor_init — the kernel's k0-store/k>0-reduce-add fork
+    // (gated by gflag/epoch) initializes the output itself, eliminating the
+    // pre-zero task. gflag has NO TMA desc (create_tma_desc_by_task only touches
+    // inputs 0/1 + output 0; the C output's fill case is the param!=0,1 else
+    // branch so output param_id=num_inputs=5 still resolves). Same enum so
+    // request_id=bid.x + TMA-create + name lookup are all unchanged.
+    int variant_id =
+        task_register
+            ->register_fp8_gemm_dense_splitk_tma_reduce_gflag_sm100_task(
+                customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        5, 1, TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_smallm_fp8out_sm100") {
     // D1 (2026-05-17): fp8out variant — 4 inputs + 2 outputs (FP8 C and
     // packed UE8M0 scale). Fuses what was a downstream

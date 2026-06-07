@@ -301,6 +301,12 @@ def get_compile_command(
         common_cmd.append("-DMPK_AR_PRINT_MC=1")
     if os.environ.get("MPK_DEBUG_SKIP_FP8_GEMM_DENSE", "0") == "1":
         common_cmd.append("-DMPK_DEBUG_SKIP_FP8_GEMM_DENSE=1")
+    # Enable prepare_next_batch [BATCH ...] prints (active_reqs / active_tokens
+    # / per-slot q_len). Useful to confirm the execution-time qo_indptr a
+    # decode-gated kernel sees in test_mode (the post-run qo readback only shows
+    # the terminal reset, not the iteration-1 batch).
+    if os.environ.get("MPK_DEBUG_BATCH", "0") == "1":
+        common_cmd.append("-DMPK_DEBUG_BATCH=1")
     fp8_dense_skip_n_ge = os.environ.get("MPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE")
     if fp8_dense_skip_n_ge:
         common_cmd.append(
@@ -327,6 +333,12 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
+    # Debug escape hatch: append arbitrary extra nvcc flags (e.g. -D defines for
+    # kernel printf instrumentation) via a space-separated env var. Used to
+    # localize device-side deadlocks without touching the build wiring.
+    _extra_nvcc = os.environ.get("MPK_EXTRA_NVCC_DEFINES", "").strip()
+    if _extra_nvcc:
+        flags = flags + _extra_nvcc.split()
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -2128,6 +2140,7 @@ class PersistentKernel:
         block_dim: tuple,
         dummy_input_map: tuple,
         target_input_map: tuple,
+        prefill_gate: bool = False,
     ):
         """Zero-fill `target` using a custom kernel.
 
@@ -2161,7 +2174,8 @@ class PersistentKernel:
         tb_graph.new_input(dummy, dummy_input_map, -1, True)
         self.kn_graph.customized([dummy, target, dummy], tb_graph)
 
-        self.kn_graph.register_task(tb_graph, "tensor_init")
+        self.kn_graph.register_task(tb_graph, "tensor_init",
+                                    [1] if prefill_gate else [])
     
     def moe_topk_softmax_routing_layer(
         self,
@@ -2948,6 +2962,33 @@ class PersistentKernel:
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_swapAB_sm100", params)
 
+    def dsv3_router_gemm_sm100_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        decode_gate: bool = False,
+    ):
+        # DSv3 router-gate CUDA-core GEMV (decode, M<=16). Skinny GEMM
+        #   output[M, N_TOTAL] = input[M, K] @ weight[N_TOTAL, K]^T
+        # with N_TOTAL = NUM_EXPERTS (256), K = HIDDEN (7168). Ported from the
+        # TRT-LLM/vLLM dsv3_router_gemm CUDA-core kernel (no tensor core / TMA /
+        # tcgen05 / cross-CTA reduce -> crash-free).
+        # Parallelism: each task instance (CTA) owns N_PER_CTA = N_TOTAL/grid.x
+        # expert columns and reduces the full K in-CTA. dim_maps mirror swapAB:
+        #   input  replicated (-1); weight dim0(N) -> grid.x; output dim1(N) -> grid.x.
+        assert weight.dim(0) % grid_dim[0] == 0, (
+            "NUM_EXPERTS must be divisible by grid_dim.x")
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dsv3_router_gemm_sm100",
+                                    [1] if decode_gate else [])
+
     def linear_fp8_swapAB_with_residual_layer(
         self,
         input_fp8: DTensor,
@@ -3154,6 +3195,61 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_bmm_dense_sm100", params)
 
+    def linear_fp8_bmm_dense_fp8out_sm100_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,    # (1, h_shards, 1)  (grid.x must be 1: D_out=128=BN)
+        block_dim: tuple,   # (256, 1, 1) on SM100
+    ):
+        # D3 (2026-06-03): fp8-out flavor of linear_fp8_bmm_dense_sm100_layer.
+        # Identical per-head BMM math, but the epilogue fuses the downstream
+        # float32-scale per-token-group quantize (TASK_PER_TOKEN_GROUP_QUANTIZE)
+        # that previously ran as a standalone task after BMM2, feeding the
+        # o_proj dense GEMM. Each CTA computes one head's (N, 128) output, which
+        # is exactly one 128-K-group of the o_proj input row [N, H*128], so the
+        # per-row max IS that head's o_proj-group max — no cross-thread sync.
+        #
+        # Output layouts (per-head, split on the head axis by grid.y):
+        #   output_fp8    [N, H*D_out] (2D) or [N, H, D_out] (3D) raw e4m3
+        #   output_scale  [N, H] (2D) or [N, H, 1] (3D) float32 (one group/head)
+        # The o_proj dense GEMM then reads output_fp8 as [N, H*128] with
+        # K/128 = H groups, scale [N, H] float32 — exactly the layout
+        # quantize_fp8_layer(scale_ue8m0=False) produces. Tuple (4 in, 2 out).
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert input_fp8.num_dims == 3, (
+            "linear_fp8_bmm_dense_fp8out requires 3D input [N, H, D_in]")
+        assert input_scale.num_dims == 3, (
+            "linear_fp8_bmm_dense_fp8out requires 3D float32 input_scale")
+        assert output_fp8.num_dims in (2, 3)
+        assert output_scale.num_dims in (2, 3)
+        assert grid_dim[0] == 1, (
+            "linear_fp8_bmm_dense_fp8out requires grid.x == 1 (D_out=128=BN)")
+        params = []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # input_fp8 / input_scale: grid.y splits the head axis (dim 1).
+        tb_graph.new_input(input_fp8,   (-1, 1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, 1, -1), -1, True)
+        # weight_fp8 / weight_scale [H, ...]: grid.y splits dim 0 (H).
+        tb_graph.new_input(weight_fp8,   (-1, 0, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, 0, -1), -1, True)
+        # Outputs: dim 1 (head axis) split by grid.y. For the 2D FP8 buffer
+        # [N, H*128] each grid.y chunk is 128 wide (= one head); for the 2D
+        # scale [N, H] each chunk is 1 wide. grid.x == 1 so D_out unsharded.
+        tb_graph.new_input(output_fp8,   (-1, 1, -1), -1, True)
+        tb_graph.new_input(output_scale, (-1, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale,
+             output_fp8, output_scale],
+            tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "linear_fp8_bmm_dense_fp8out_sm100", params)
+
     def _fp8_gemm_dense_layer_impl(
         self,
         task_name: str,
@@ -3212,6 +3308,28 @@ class PersistentKernel:
                                      runtime_m_mode: int = 0):
         self._fp8_gemm_dense_layer_impl(
             "fp8_gemm_dense_mediumm_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers, runtime_m_mode=runtime_m_mode)
+
+    # fine-N variants (Gate-1, 2026-06-05): identical ABI to smallm/mediumm
+    # (4 in, 1 bf16 out, runtime_m active-rows cap) but BN<128 + deeper NS, so
+    # the M=1 decode GEMM dispatches more, cheaper-per-CTA N-tiles (NO split-K
+    # reduce → no crash). BN32/NS8 for qkv_a/gate_up; BN64/NS4 for o_proj.
+    # Caller MUST pass num_workers = ceil(N / BN) (BN=32 or 64) so the GEMM is
+    # one wave; the tma.cuh BN-box case is selected by the task type.
+    def fp8_gemm_dense_finen_bn32_layer(self, input_fp8, weight_fp8,
+                                        input_scale, weight_scale, output,
+                                        num_workers, runtime_m_mode: int = 0):
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_finen_bn32_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers, runtime_m_mode=runtime_m_mode)
+
+    def fp8_gemm_dense_finen_bn64_layer(self, input_fp8, weight_fp8,
+                                        input_scale, weight_scale, output,
+                                        num_workers, runtime_m_mode: int = 0):
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_finen_bn64_sm100",
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
@@ -3364,6 +3482,356 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(
             tb_graph, "fp8_gemm_dense_decode_splitk_sm100", params)
+
+    def fp8_gemm_dense_splitk_tma_reduce_layer(
+            self, input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers, split_k: int = 4):
+        """ferret FP8 split-K dense GEMM with a TMA reduce-add epilogue.
+
+        Race-free alternative to `fp8_gemm_dense_decode_splitk_layer`: instead
+        of per-element red.global.add.bf16x2 atomics (which crash at TP>=2 under
+        NVSHMEM), each K-slice CTA stages its dequantized bf16 partial tile to
+        SMEM and issues one cp.reduce.async.bulk.tensor.2d (TMA-engine
+        reduce-add) into the PRE-ZEROED bf16 output. The kernel bakes in a
+        decode-phase gate (Q_LEN<=8 + active_rows cap) so prefill iters
+        early-exit.
+
+        IMPORTANT: the kernel accumulates into `output`, so it MUST be zeroed
+        each iteration. This wrapper prepends a `tensor_init_layer` that zeroes
+        `output` before the GEMM (accumulate=False); the dep-tracker chains
+        them via the `output` RAW edge.
+
+        ABI: 4 inputs (A_fp8 TMA, B_fp8 TMA, sa float*, sb float*) + 1 output
+        (C bf16 TMA reduce-add). Matches the (4, 1) tuple in graph.cc.
+
+        Args
+        ----
+        input_fp8:    (M, K) FP8 e4m3, row-major.
+        weight_fp8:   (N, K) FP8 e4m3, row-major.
+        input_scale:  (M, K/128) float32 per-128-K group scale for A.
+        weight_scale: (N/128, K/128) float32 per-128x128-block scale for B.
+        output:       (M, N) BF16. Pre-zeroed by the prepended tensor_init.
+        num_workers:  persistent worker count (= grid_dim.x for this task).
+        split_k:      K-split factor. K / (128 * split_k) must be integer.
+        """
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims in (2, 3)
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N
+        assert split_k >= 1 and split_k <= 8
+        # Kernel-side BK=128; K must split evenly across split_k slices at the
+        # 128-K boundary so scale-tile boundaries align with K slices. The TMA
+        # reduce-add output descriptor uses BN=BM=128 box tiles, so N must be a
+        # multiple of 128 (true for qkv_a N=2176 and shared gate_up N=1024).
+        assert K % (128 * split_k) == 0, (
+            f"fp8_gemm_dense_splitk_tma_reduce: K={K} must be divisible by "
+            f"128 * split_k={128 * split_k}")
+        assert N % 128 == 0, (
+            f"fp8_gemm_dense_splitk_tma_reduce: N={N} must be divisible by 128")
+        params = [M, N, K, num_workers, split_k]
+        # Prepend tensor_init to zero `output` before each GEMM iter (the
+        # reduce-add accumulates into a zero base). `input_fp8` carries the
+        # read-dep edge so the tensor_init is gated on the upstream quantize; the
+        # GEMM is then gated on the tensor_init via the output RAW edge.
+        self.tensor_init_layer(
+            target=output,
+            dummy=input_fp8,
+            grid_dim=(num_workers, 1, 1),
+            block_dim=(128, 1, 1),
+            dummy_input_map=(-1, -1, -1),
+            target_input_map=(-1, -1, -1),
+        )
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        # new_input ORDER MUST match the (4,1) tuple in graph.cc and the
+        # input_ptrs[...]/output_ptrs[0] reads in
+        # register_fp8_gemm_dense_splitk_tma_reduce_sm100_task:
+        #   input_ptrs[0]=A, [1]=B, [2]=sa, [3]=sb ; output_ptrs[0]=C.
+        # A and B carry TMA descriptors (input_tma_desc_ptrs[0]/[1]); the C
+        # output carries a TMA reduce-add descriptor (output_tma_desc_ptrs[0]).
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_splitk_tma_reduce_sm100", params)
+
+    def fp8_gemm_dense_splitk_tma_reduce_gflag_layer(
+            self, input_fp8, weight_fp8, input_scale, weight_scale, output,
+            gflag, num_workers, split_k: int = 4):
+        """gflag variant of fp8_gemm_dense_splitk_tma_reduce: eliminates the
+        pre-zero tensor_init via the kernel's k0-store / k>0-reduce-add fork.
+
+        Identical math + decode gate to fp8_gemm_dense_splitk_tma_reduce_layer,
+        but NO tensor_init is prepended — instead `gflag` (an int32 scratch of
+        ceil(N/128) entries, ZERO-INITIALIZED ONCE at allocation) carries the
+        per-output-tile epoch handshake: k_slice==0 CTAs tma_store (overwrite)
+        the base then publish gflag[tile]=epoch; k_slice>0 CTAs spin until the
+        epoch lands then reduce-add. The kernel reads epoch=runtime_config.step[0]
+        +1 (monotone per decode iter, uniform across CTAs). HANG-SAFE only at
+        nn*split_k<=num_workers (asserted in the register fn) — the decode regime.
+
+        ABI: 5 inputs (A_fp8 TMA, B_fp8 TMA, sa, sb, gflag int*) + 1 output
+        (C bf16 TMA reduce-add). Matches the (5, 1) tuple in graph.cc.
+        """
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims in (2, 3)
+        assert gflag.num_dims == 1, "gflag must be a 1D int32 scratch buffer"
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N
+        assert split_k >= 1 and split_k <= 8
+        assert K % (128 * split_k) == 0, (
+            f"fp8_gemm_dense_splitk_tma_reduce_gflag: K={K} must be divisible "
+            f"by 128 * split_k={128 * split_k}")
+        assert N % 128 == 0, (
+            f"fp8_gemm_dense_splitk_tma_reduce_gflag: N={N} not mult of 128")
+        nn = (N + 127) // 128
+        assert gflag.dim(0) >= nn, (
+            f"gflag must have >= ceil(N/128)={nn} entries, got {gflag.dim(0)}")
+        params = [M, N, K, num_workers, split_k]
+        # NO tensor_init prepend — the kernel self-initializes via the k0 store.
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        # new_input ORDER MUST match the (5,1) tuple in graph.cc and the
+        # input_ptrs[...] reads in the gflag register fn:
+        #   input_ptrs[0]=A, [1]=B, [2]=sa, [3]=sb, [4]=gflag ; output_ptrs[0]=C.
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(gflag, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, gflag, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_splitk_tma_reduce_gflag_sm100", params)
+
+    def fp8_gemm_dense_qkva_splitk_layer(self, input_fp8, weight_fp8,
+                                         input_scale, weight_scale, output,
+                                         c_partial, arrive_cnt,
+                                         num_workers, split_k: int = 4):
+        """Race-free decode-only internal split-K FP8 dense GEMM (qkv_a).
+
+        Replaces the CRASHED `fp8_gemm_dense_decode_splitk_layer` (which used
+        red.global.add.bf16x2 and raced on the qkv_a N=2176 shape). This
+        kernel decomposes the K axis across `split_k` CTAs per (m_tile,
+        n_tile); each K-slice writes an EXCLUSIVE FP32 partial slot in
+        `c_partial`, then a gen-tagged atomicAdd last-arriver (tracked in
+        `arrive_cnt`) reduces in FP32 and casts once to BF16 into `output`.
+        A device-scope fence.sc.gpu orders the inter-CTA partial writes.
+
+        The kernel bakes runtime_m_mode=3 (decode-phase gate Q_LEN<=8 +
+        active_rows cap), so prefill iters early-exit before the wave starts.
+
+        IMPORTANT: `arrive_cnt` must hold a clean per-tile counter (lower 32
+        bits = 0) at the start of each GEMM. Since MPK cuda_tensors are NOT
+        zeroed at allocation, this wrapper prepends a `tensor_init` that
+        zeroes `arrive_cnt` before the GEMM; the dep-tracker chains them and
+        the kernel's tail gen-bump is then redundant but harmless. `c_partial`
+        needs no zero-init — each iter overwrites its exclusive slots before
+        reading them.
+
+        Args
+        ----
+        input_fp8:    (M, K) FP8 e4m3, row-major.
+        weight_fp8:   (N, K) FP8 e4m3, row-major.
+        input_scale:  (M, K/128) float32 per-128-K group scale for A.
+        weight_scale: (N/128, K/128) float32 per-128x128-block scale for B.
+        output:       (M, N) BF16. Written directly by the last-arriver.
+        c_partial:    (SPLIT_K * ceil(M/128) * ceil(N/128) * 128 * 128,)
+                      float32 reduction scratch (exclusive partial slots).
+        arrive_cnt:   (ceil(N/128),) uint64 per-(m,n)-tile arrival counter.
+                      Pre-zeroed each iter by the prepended tensor_init.
+        num_workers:  persistent worker count (= grid_dim.x for this task).
+        split_k:      K-split factor. K / (128 * split_k) must be integer.
+        """
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims in (2, 3)
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N
+        assert split_k >= 1 and split_k <= 8
+        # Kernel-side BK=128; K must split evenly across split_k slices at
+        # the 128-K boundary so scale-tile boundaries align with K slices.
+        assert K % (128 * split_k) == 0, (
+            f"fp8_gemm_dense_qkva_splitk: K={K} must be divisible by "
+            f"128 * split_k={128 * split_k}")
+        params = [M, N, K, num_workers, split_k]
+        # Prepend tensor_init to zero `arrive_cnt` before each GEMM iter.
+        # `input_fp8` carries the read-dep edge so the tensor_init is gated on
+        # the upstream quantize; the GEMM is then gated on the tensor_init via
+        # the arrive_cnt RAW edge. Collapse redundant grid axes (target map
+        # all -1 -> 1 logical tile).
+        self.tensor_init_layer(
+            target=arrive_cnt,
+            dummy=input_fp8,
+            grid_dim=(num_workers, 1, 1),
+            block_dim=(128, 1, 1),
+            dummy_input_map=(-1, -1, -1),
+            target_input_map=(-1, -1, -1),
+        )
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        # new_input ORDER MUST match the (6,1) tuple in graph.cc and the
+        # input_ptrs[...] reads in register_fp8_gemm_dense_qkva_splitk_sm100_task:
+        #   input_ptrs[0]=A, [1]=B, [2]=sa, [3]=sb, [4]=C_partial, [5]=arrive_cnt
+        #   output_ptrs[0]=C
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(c_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(arrive_cnt, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale,
+             c_partial, arrive_cnt, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_qkva_splitk_sm100", params)
+
+    def fp8_gemm_dense_qkva_splitk_extred_layer(
+            self, input_fp8, weight_fp8, input_scale, weight_scale,
+            c_partial, num_workers, split_k: int = 4):
+        """External-reduce split-K FP8 dense GEMM — partial-write stage.
+
+        RACE-FREE BY CONSTRUCTION. The K-slice CTAs write ONLY their exclusive
+        FP32 partials into `c_partial` (the task OUTPUT) — NO in-kernel
+        last-arriver, NO arrive_cnt, NO inter-CTA atomics. A SEPARATE
+        event-gated reduce task (`fp8_gemm_dense_splitk_reduce_layer`) sums the
+        SPLIT_K partials in FP32 → bf16. MPK's event system gates the reduce to
+        run only AFTER every split-K GEMM CTA of a tile completes (correct
+        ordering via the task DAG), so there is no data race possible — unlike
+        the in-kernel `fp8_gemm_dense_qkva_splitk_layer` last-arriver that raced
+        ~1024 decode iters.
+
+        Bakes runtime_m_mode=3 (decode gate Q_LEN<=8 + active_rows cap) so
+        prefill iters early-exit.
+
+        Args
+        ----
+        input_fp8:    (M, K) FP8 e4m3, row-major.
+        weight_fp8:   (N, K) FP8 e4m3, row-major.
+        input_scale:  (M, K/128) float32 per-128-K group scale for A.
+        weight_scale: (N/128, K/128) float32 per-128x128-block scale for B.
+        c_partial:    (SPLIT_K * ceil(M/128) * ceil(N/128) * 128 * 128,)
+                      float32 reduction scratch (exclusive partial slots). This
+                      is the OUTPUT of this task and the INPUT of the reduce.
+        num_workers:  persistent worker count (= grid_dim.x for this task).
+        split_k:      K-split factor. K / (128 * split_k) must be integer.
+        """
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert split_k >= 1 and split_k <= 8
+        assert K % (128 * split_k) == 0, (
+            f"fp8_gemm_dense_qkva_splitk_extred: K={K} must be divisible by "
+            f"128 * split_k={128 * split_k}")
+        params = [M, N, K, num_workers, split_k]
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
+        # new_input ORDER MUST match the (4,1) tuple in graph.cc and the
+        # input_ptrs[...]/output_ptrs[0] reads in
+        # register_fp8_gemm_dense_qkva_splitk_extred_sm100_task. MPK convention:
+        # outputs are also passed via new_input(store_in_dmem=True); the
+        # (num_inputs=4, num_outputs=1) tuple splits the list so the first 4 go
+        # to input_ptrs and c_partial becomes output_ptrs[0]:
+        #   input_ptrs[0]=A, [1]=B, [2]=sa, [3]=sb ; output_ptrs[0]=C_partial.
+        # A and B carry TMA descriptors (input 0/1); C_partial is a plain
+        # float* output written directly. As output_ptrs[0] the dep-tracker
+        # chains its write to the reduce task's read (RAW edge => event gate).
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(c_partial, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, c_partial],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_qkva_splitk_extred_sm100", params)
+
+    def fp8_gemm_dense_splitk_reduce_layer(
+            self, c_partial, output, M, N, split_k, num_workers, ncol: int = 1):
+        """Event-gated reduce companion for the external-reduce split-K GEMM.
+
+        Reads `c_partial` (SPLIT_K exclusive FP32 partials per output tile,
+        produced by `fp8_gemm_dense_qkva_splitk_extred_layer`), sums over
+        split_k in FP32, and casts to BF16 into `output`. The MPK dep-tracker
+        sees c_partial as a RAW edge (this task reads what the GEMM wrote), so
+        the event system gates this task to run AFTER all split-K GEMM CTAs
+        complete — making the reduction race-free.
+
+        Bakes runtime_m_mode=3 (decode gate) to match the GEMM's row set.
+
+        Args
+        ----
+        c_partial:   (SPLIT_K * ceil(M/128) * ceil(N/128) * 128 * 128,) float32.
+        output:      (M, N) BF16. Written directly by the reduce.
+        M, N:        GEMM output dims (compile-time M == mbt).
+        split_k:     K-split factor (must match the GEMM's split_k).
+        num_workers: persistent worker count (= grid_dim.x for this task).
+        """
+        assert output.num_dims in (2, 3)
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N
+        assert split_k >= 1 and split_k <= 8
+        # ncol: per-tile column-split factor. work-units = ceil(M/128)*
+        # ceil(N/128)*ncol -> more active CTAs (fills idle SMs at decode M=1).
+        assert 128 % ncol == 0 and (128 // ncol) % 16 == 0, (
+            f"fp8_gemm_dense_splitk_reduce: ncol={ncol} must divide 128 with "
+            f"(128//ncol)%16==0")
+        params = [M, N, split_k, num_workers, ncol]
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (128, 1, 1), 1, 64))
+        # new_input ORDER MUST match the (1,1) tuple in graph.cc:
+        #   input_ptrs[0]=C_partial ; output_ptrs[0]=output (bf16).
+        tb_graph.new_input(c_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([c_partial, output], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_splitk_reduce_sm100", params)
 
     def linear_splitk_swapAB_fp8_layer(
         self,
@@ -3626,6 +4094,7 @@ class PersistentKernel:
         block_dim: tuple,
         *,
         accumulate: bool,
+        prefill_gate: bool = False,
     ):
         # The BF16 splitk kernel uses tma_reduce_add_async and unconditionally
         # adds onto whatever `output` already contains. The `accumulate` flag
@@ -3652,6 +4121,11 @@ class PersistentKernel:
                 block_dim=block_dim,
                 dummy_input_map=(-1, 1, -1),
                 target_input_map=(1, 0, -1),
+                # When this splitk is the prefill companion of the router GEMV
+                # dual-dispatch, gate the zero-fill prefill-only too: at decode
+                # the GEMV is the sole writer of `output`, so a decode-time
+                # zero-fill would race/clobber it (Codex r2/r3).
+                prefill_gate=prefill_gate,
             )
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, 1, -1), 1, True)
@@ -3659,9 +4133,12 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
 
+        _sk_params = [1] if prefill_gate else []
         if self.target_cc == 100:
-            self.kn_graph.register_task(tb_graph, "splitk_linear_sm100")
+            self.kn_graph.register_task(tb_graph, "splitk_linear_sm100",
+                                        _sk_params)
         elif self.target_cc == 90:
+            assert not prefill_gate, "prefill_gate only wired for sm100"
             self.kn_graph.register_task(tb_graph, "splitk_linear_swapAB_hopper")
         else:
             assert False

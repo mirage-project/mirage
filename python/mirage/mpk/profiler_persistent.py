@@ -115,14 +115,60 @@ event_name_list = {
     307: "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100",
     308: "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100",
     309: "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100",
+    310: "TASK_MOE_TOPK_COMPACT_SM100",
     311: "TASK_FP8_GROUP_GEMM_SMALLM_SM100",
     312: "TASK_FP8_GROUP_GEMM_LARGEM_SM100",
     313: "TASK_MOE_PERMUTE_SM100",
     314: "TASK_MOE_UNPERMUTE_SM100",
     315: "TASK_TRANSPOSE_SCALE_SM100",
     316: "TASK_ASSEMBLE_Q_DECODE_SM100",
-    320: "TASK_SM100_TASK_END",
+    317: "TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100",
+    318: "TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100",
+    319: "TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100",
+    320: "TASK_MOE_TOPK_MARKER_INIT_SM100",
+    321: "TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100",
+    322: "TASK_LINEAR_FP8_BMM_DENSE_SM100",
+    323: "TASK_FP8_GEMM_DENSE_SPLITK_REDUCE_SM100",
+    324: "TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100",
+    325: "TASK_DSV3_ROUTER_GEMM_SM100",
+    326: "TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100",
+    327: "TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100",
+    328: "TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100",
+    329: "TASK_SM100_TASK_END",
 }
+
+
+def _sync_task_names_from_enum():
+    """Override event_name_list from the authoritative C++ enum (runtime_header.h
+    TaskType) so this id->name map can NEVER silently drift when task enums are
+    added/renumbered. Root cause of the 2026-06-06 perfetto trace mislabel: this
+    dict was hand-maintained, so the FINEN-BN32/BN64 additions (ids 327/328) and
+    the TASK_SM100_TASK_END bump (329) left ids 327-329 mapped to stale/placeholder
+    names ("TASK_SM100_TASK_END" etc.). The enum is the source of truth
+    (runtime.cc task_type_to_name and the kernel use it). Falls back to the
+    hardcoded dict above if the header is not found (e.g. a wheel install
+    without include/)."""
+    import os
+    import re
+
+    hdr = os.path.join(
+        os.path.dirname(__file__), "..", "..", "..",
+        "include", "mirage", "persistent_kernel", "runtime_header.h")
+    try:
+        with open(hdr) as f:
+            src = f.read()
+    except OSError:
+        return 0  # keep the hardcoded fallback
+    m = re.search(r"enum\s+TaskType\s*\{(.*?)\}\s*;", src, re.S)
+    body = m.group(1) if m else src
+    n = 0
+    for mm in re.finditer(r"\b(TASK_[A-Z0-9_]+)\s*=\s*(\d+)\b", body):
+        event_name_list[int(mm.group(2))] = mm.group(1)
+        n += 1
+    return n
+
+
+_sync_task_names_from_enum()
 
 
 class EventType(Enum):

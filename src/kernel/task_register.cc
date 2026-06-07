@@ -1918,7 +1918,15 @@ int TaskRegister::register_splitk_linear_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool with_residual) {
-  assert(params.size() == 0);
+  // params: [] (no gate) OR [prefill_gate] (when prefill_gate==1, emit a
+  // runtime
+  //   Q_LEN gate that returns immediately if request-0's Q_LEN <= 8 — i.e. this
+  //   splitk linear runs on PREFILL iters only. Used by the DSv3 router
+  //   dual-dispatch: splitk router (prefill) + dsv3_router_gemm GEMV (decode).
+  //   Mirrors identity's gate_decode_q_len; default-off => byte-identical for
+  //   all other splitk_linear callers (incl. the MTP router gate).
+  assert(params.size() <= 1);
+  bool prefill_gate = (params.size() >= 1 && params[0] == 1);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0,
       reduction_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -2037,6 +2045,24 @@ int TaskRegister::register_splitk_linear_sm100_task(
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
          with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
+  if (prefill_gate) {
+    // Prefill-only gate: skip on DECODE iters (step >= prompt_length for all
+    // active requests). The dsv3_router_gemm GEMV companion serves decode; this
+    // splitk serves prefill (incl. small final chunks, which step<prompt_length
+    // keeps here). step-based (NOT q_len) — chunk-size-independent. Returns
+    // before the GEMM work (cheap local TMA objects already constructed are
+    // harmless). Mirrors the GEMV's rg_decode_ flag, inverted.
+    code.e("bool sk_decode_ = true;");
+    code.e("for (int bi_sk_ = 0; bi_sk_ < MPK_MAX_NUM_BATCHED_REQUESTS; "
+           "++bi_sk_) {");
+    code.e("  int req_sk_ = runtime_config.request_ids[bi_sk_];");
+    code.e("  if (req_sk_ < 0) continue;");
+    code.e("  if (runtime_config.step[req_sk_] < "
+           "runtime_config.prompt_length[req_sk_]) { sk_decode_ = false; "
+           "break; }");
+    code.e("}");
+    code.e("if (sk_decode_) return;");
+  }
   code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
          "decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, $, $, "
@@ -2242,7 +2268,14 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   //   input_ops[0]  = linear_input  (dummy dep, not read)
   //   output_ops[0] = linear_output (the tile zeroed by the kernel)
   //   output_ops[1] = linear_input  (dummy dep edge, not written)
-  assert(params.size() == 0);
+  // params: [] (always zero) OR [prefill_gate] (when 1, skip the zero-fill on
+  //   DECODE iters: step>=prompt_length for all active reqs). Used by the DSv3
+  //   router dual-dispatch so the decode-only GEMV is the SOLE writer of
+  //   router_logits at decode (no init-vs-GEMV write race; Codex r2/r3). The
+  //   task still dispatches (dep edges intact); only the kernel body returns
+  //   early. Default-off => byte-identical for all other tensor_init callers.
+  assert(params.size() <= 1);
+  bool prefill_gate = (params.size() >= 1 && params[0] == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -2264,6 +2297,21 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  if (prefill_gate) {
+    // Prefill-only: skip the zero-fill on DECODE (step>=prompt_length for all
+    // active reqs), mirroring the splitk router's prefill_gate. Lets the decode
+    // GEMV own router_logits without an init-vs-GEMV race.
+    code.e("bool ti_decode_ = true;");
+    code.e("for (int bi_ti_ = 0; bi_ti_ < MPK_MAX_NUM_BATCHED_REQUESTS; "
+           "++bi_ti_) {");
+    code.e("  int req_ti_ = runtime_config.request_ids[bi_ti_];");
+    code.e("  if (req_ti_ < 0) continue;");
+    code.e("  if (runtime_config.step[req_ti_] < "
+           "runtime_config.prompt_length[req_ti_]) { ti_decode_ = false; "
+           "break; }");
+    code.e("}");
+    code.e("if (ti_decode_) return;");
+  }
   code.e("kernel::tensor_init_zero_sm100_task_impl<$, $, $>(",
          /*BATCH_SIZE=*/batch_size,
          /*OUTPUT_SIZE=*/output_size,
@@ -2312,6 +2360,85 @@ int TaskRegister::register_elementwise_add_sm100_task(
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_ELEMENTWISE_ADD_SM100, code.to_string());
+}
+
+int TaskRegister::register_dsv3_router_gemm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // DSv3 router-gate CUDA-core GEMV. inputs: [act, weight]; output:
+  // router_logits.
+  //   act    [M, K]          replicated to every instance (dim_map -1).
+  //   weight [N_TOTAL, K]    split dim0 -> grid.x, so the per-task tile is
+  //                          [N_PER_CTA, K] and the ptr is pre-sliced.
+  //   output [M, N_TOTAL]    split dim1 -> grid.x, tile [M, N_PER_CTA]; the
+  //                          kernel writes out[m * N_TOTAL + e] (N_TOTAL
+  //                          stride).
+  // params: [] (no gate) OR [decode_gate] (when decode_gate==1, emit a runtime
+  //   Q_LEN gate that returns immediately if request-0's Q_LEN > 8 — i.e. the
+  //   GEMV runs on DECODE iters only, the INVERSE of identity's
+  //   gate_decode_q_len. Used by the router dual-dispatch: GEMV (decode) +
+  //   splitk router (prefill).
+  assert(params.size() <= 1);
+  bool decode_gate = (params.size() >= 1 && params[0] == 1);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  // M = active rows, read from the (possibly narrowed) INPUT — small at decode.
+  // The OUTPUT may be the FULL router_logits [mbt, N_TOTAL] (non-virtual, so
+  // the AnnotatedGraph adds the tensor_init->GEMV WAW edge — avoids the
+  // virtual-view ordering race Codex r2 flagged); the kernel writes only rows
+  // [0, M).
+  int M = input_ops[0]->output_tensors[0].dim[0];
+  int K = input_ops[0]->output_tensors[0].dim[1];
+  int n_per_cta = input_ops[1]->output_tensors[0].dim[0];
+  int n_total = output_ops[0]->dtensor.dim[1];
+  assert(input_ops[1]->output_tensors[0].dim[1] == K);
+  assert(M <= output_ops[0]->output_tensors[0].dim[0]);
+  assert(output_ops[0]->output_tensors[0].dim[1] == n_per_cta);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (decode_gate) {
+    // Decode-only gate. A request is DECODING iff step >= prompt_length (it has
+    // finished consuming its prompt). This is the chunk-size-independent
+    // discriminator (verified persistent_kernel.cuh:291-303: num_new_tokens =
+    // prompt_length - step; >0 => prefill chunk of any size 1..mbt). Using
+    // step (NOT q_len>8) keeps a small final prefill chunk (q_len<=8,
+    // step<prompt_length) on the splitk companion instead of misrouting it into
+    // this M=small GEMV. (The dense decode GEMM tolerates a q_len gate because
+    // it is M-robust via runtime active_rows; this GEMV bakes M, so it must use
+    // the exact phase.) Skip unless ALL active requests are decoding.
+    code.e("bool rg_decode_ = true;");
+    code.e("for (int bi_rg_ = 0; bi_rg_ < MPK_MAX_NUM_BATCHED_REQUESTS; "
+           "++bi_rg_) {");
+    code.e("  int req_rg_ = runtime_config.request_ids[bi_rg_];");
+    code.e("  if (req_rg_ < 0) continue;");
+    code.e("  if (runtime_config.step[req_rg_] < "
+           "runtime_config.prompt_length[req_rg_]) { rg_decode_ = false; "
+           "break; }");
+    code.e("}");
+    code.e("if (!rg_decode_) return;");
+  }
+  code.e("kernel::dsv3_router_gemm_task_impl<cute::bfloat16_t, $, $, $, $>(",
+         M,
+         n_per_cta,
+         K,
+         n_total);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_DSV3_ROUTER_GEMM_SM100, code.to_string());
 }
 
 int TaskRegister::register_softmax_gather_sm100_task(
@@ -5978,6 +6105,88 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   int const packed_scale_k = (reduction_size + 511) / 512;
   int const input_scale_row_stride = num_heads * packed_scale_k;
 
+  // -------------------------------------------------------------------------
+  // MPK_DSV3_BMM1_CUDA_CORE: env-gated ZERO-TMEM CUDA-core GEMV variant.
+  // Same task type / same per-task inputs — just a different codegen body that
+  // calls the no-tcgen05/no-TMA/no-mbarrier kernel with RAW per-task pointers.
+  // The runtime already offsets every input_ptrs[i] / output_ptrs[0] to this
+  // task's (head h = grid.y, shard s = grid.x) box via input_map/output_map
+  // (see runtime.cc per-task base_ptr computation), so we pass them DIRECTLY
+  // with NO additional h/s offset arithmetic.
+  //
+  // The cuda_core kernel templates:
+  //   OUTPUT_SIZE_PER_TASK = N = output_size_per_task (= 128 for kv-up BMM1)
+  //   REDUCTION_SIZE       = K = reduction_size       (= 128)
+  //   BATCH_SIZE           = decode active-row tile, capped to <=16 (decode
+  //                          active_rows<=8; rows beyond are correctness-dead,
+  //                          and a smaller B keeps smem/compute bounded — the
+  //                          backing tensor's full mbt is NOT used here).
+  //   INPUT_ROW_STRIDE     = input_row_stride (= H*K, batch stride of input)
+  //   INPUT_SCALE_STRIDE   = input_scale_row_stride (= H*packed_K, batch stride
+  //                          of the per-(batch,head) UE8M0 scale)
+  // weight_scale is read with implicit row-stride 1 (= packed_scale_k for
+  // K<=512); the runtime already offset weight_scale_ptr to row 0 of this box.
+  // output_row_stride = the bf16-element batch row stride of the output view
+  // (= H*N_PER_HEAD; for q_nope_abs = q_nope_pe[:,:, :512] parent stride 18432).
+  // Gate on VALUE == "1" (not mere presence): the A/B harness passes
+  // MPK_DSV3_BMM1_CUDA_CORE=0 for the baseline arm, so `getenv != null` would
+  // wrongly fire the gate for the "0" arm too. Match builder.py's == "1".
+  // ===========================================================================
+  // MPK_BMM1_NOOP framework-floor probe (Codex discriminator #3). When the
+  // megakernel is JIT-compiled with -DMPK_BMM1_NOOP (set via
+  // MPK_EXTRA_NVCC_DEFINES="-DMPK_BMM1_NOOP"), the LINEAR_FP8_BMM device body
+  // does NOTHING except write zeros to its output box and return — skipping all
+  // TMA loads / tcgen05 / MMA / scale-decode / output TMA-store. This isolates
+  // the per-task dispatch+framework FLOOR (scheduler dispatch + worker
+  // task-entry) from the kernel's own load+compute time. The zero-write keeps
+  // downstream FP8-quantize from NaN-cascading. The block is gated by the nvcc
+  // preprocessor define, NOT a runtime getenv, so the SAME compiled library
+  // serves both A/B arms (real vs no-op) selected at megakernel JIT time.
+  //
+  // Emitted in BOTH the cuda_core and swapAB codegen strings so the gate fires
+  // regardless of which device body is otherwise selected. Uses the RAW output
+  // pointer task_desc->output_ptrs[0] + batch_size/output_size_per_task/
+  // output_row_stride (all the runtime per-task box info), exactly like the
+  // cuda_core variant's real output write — so the zero-write box is exact.
+  auto emit_bmm1_noop_block = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("#ifdef MPK_BMM1_NOOP");
+    c.e("  {");
+    c.e("    __nv_bfloat16 *noop_out = "
+        "static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]);");
+    c.e("    int noop_b = $, noop_n = $, noop_stride = $;",
+        batch_size,
+        output_size_per_task,
+        output_row_stride);
+    c.e("    for (int o = threadIdx.x; o < noop_b * noop_n; o += blockDim.x) {");
+    c.e("      int bb = o / noop_n, nn = o - bb * noop_n;");
+    c.e("      noop_out[(size_t)bb * noop_stride + nn] = __nv_bfloat16(0.0f);");
+    c.e("    }");
+    c.e("    return;");
+    c.e("  }");
+    c.e("#endif");
+  };
+
+  char const *bmm1_cc_env = std::getenv("MPK_DSV3_BMM1_CUDA_CORE");
+  if (bmm1_cc_env != nullptr && std::atoi(bmm1_cc_env) == 1) {
+    int const cuda_core_batch = batch_size < 16 ? batch_size : 16;
+    emit_bmm1_noop_block(code);
+    code.e("kernel::linear_fp8_bmm_cuda_core_sm100_task_impl<$, $, $, $, $>(",
+           output_size_per_task, /*OUTPUT_SIZE_PER_TASK=N*/
+           reduction_size,       /*REDUCTION_SIZE=K*/
+           cuda_core_batch,      /*BATCH_SIZE*/
+           input_row_stride,     /*INPUT_ROW_STRIDE=H*K*/
+           input_scale_row_stride /*INPUT_SCALE_STRIDE=H*packed_K*/);
+    code.e("    static_cast<const __nv_fp8_e4m3*>(task_desc->input_ptrs[2]),");
+    code.e("    static_cast<const __nv_fp8_e4m3*>(task_desc->input_ptrs[0]),");
+    code.e("    weight_scale_ptr,");
+    code.e("    input_scale_ptr,");
+    code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+    code.e("    /*output_row_stride=*/$);", output_row_stride);
+    return register_task_variant(TASK_LINEAR_FP8_BMM_SM100, code.to_string());
+  }
+
+  emit_bmm1_noop_block(code);
+
   code.e("kernel::linear_fp8_bmm_sm100_task_impl<cutlass::float_e4m3_t, "
          "TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, /*NOBIAS=*/true, $, $, $>(",
@@ -6154,11 +6363,148 @@ int TaskRegister::register_linear_fp8_bmm_dense_sm100_task(
                                code.to_string());
 }
 
+// D3 (2026-06-03): fp8-out flavor of the per-head dense BMM. Same A/B/scale
+// input plumbing as the bf16 variant, but the epilogue fuses the downstream
+// float32-scale per-token-group quantize. Tuple is (4 inputs, 2 outputs):
+//   output_ptrs[0] = FP8 buffer  [N, H*D_out] row-major
+//   output_ptrs[1] = float32 scale [N, H] row-major (one K-group per head)
+// Behind MPK_DSV3_FUSE_EPILOGUE_QUANT (builder wires it only when also under
+// MPK_DSV3_BMM_DENSE). The fused FP8 row stride (H*D_out) and scale row stride
+// (H) are passed to the kernel; the per-head base pointer comes from the
+// runtime partition map (output split on H), same as the bf16 variant.
+int TaskRegister::register_linear_fp8_bmm_dense_fp8out_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+
+  int num_inputs = 4;
+  int num_outputs = 2;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  // Weight is 3D [H, D_out, D_in].
+  assert(input_ops[2]->dtensor.num_dims == 3);
+  int num_heads = input_ops[2]->dtensor.dim[0];
+  int D_out_full = input_ops[2]->dtensor.dim[1];
+  int reduction_size = input_ops[2]->dtensor.dim[2];
+
+  // Input is 3D [N, H, D_in].
+  assert(input_ops[0]->dtensor.num_dims == 3 &&
+         "linear_fp8_bmm_dense_fp8out requires 3D input [N, H, D_in].");
+  int batch_size = input_ops[0]->dtensor.dim[0];
+  assert(input_ops[0]->dtensor.dim[1] == num_heads);
+  assert(input_ops[0]->dtensor.dim[2] == reduction_size);
+
+  // Output[0] = FP8, 2D [N, H*D_out] or 3D [N, H, D_out].
+  int const out_dims = output_ops[0]->dtensor.num_dims;
+  assert(out_dims == 2 || out_dims == 3);
+  assert(output_ops[0]->dtensor.dim[0] == batch_size);
+  if (out_dims == 3) {
+    assert(output_ops[0]->dtensor.dim[1] == num_heads);
+    assert(output_ops[0]->dtensor.dim[2] == D_out_full);
+  } else {
+    assert(output_ops[0]->dtensor.dim[1] == num_heads * D_out_full);
+  }
+  // Output[1] = float32 scale. One K-group per head (D_out=128=BN), so the
+  // scale row holds exactly num_heads floats: 2D [N, H] or 3D [N, H, 1].
+  int const sc_dims = output_ops[1]->dtensor.num_dims;
+  assert(sc_dims == 2 || sc_dims == 3);
+  assert(output_ops[1]->dtensor.dim[0] == batch_size);
+  if (sc_dims == 2) {
+    assert(output_ops[1]->dtensor.dim[1] == num_heads);
+  } else {
+    assert(output_ops[1]->dtensor.dim[1] == num_heads &&
+           output_ops[1]->dtensor.dim[2] == 1);
+  }
+
+  // Scales (inputs) are float32 3D: input_scale [N, H, nk], weight_scale
+  // [H, 1, nk]. Same layout as the bf16 variant.
+  int const nk = (reduction_size + 127) / 128;
+  assert(input_ops[1]->dtensor.num_dims == 3);
+  assert(input_ops[1]->dtensor.dim[0] == batch_size);
+  assert(input_ops[1]->dtensor.dim[1] == num_heads);
+  assert(input_ops[1]->dtensor.dim[2] == nk);
+  assert(input_ops[3]->dtensor.num_dims == 3);
+  assert(input_ops[3]->dtensor.dim[0] == num_heads);
+  assert(input_ops[3]->dtensor.dim[2] == nk);
+
+  int grid_x = bgraph.grid_dim.x;
+  int grid_y = bgraph.grid_dim.y;
+  assert(grid_x == 1 &&
+         "linear_fp8_bmm_dense_fp8out: grid.x must be 1 (per-head D_out=128).");
+  assert(num_heads % grid_y == 0 &&
+         "linear_fp8_bmm_dense_fp8out: H must be divisible by grid_dim.y");
+  int heads_per_task = num_heads / grid_y;
+  assert(heads_per_task == 1 &&
+         "linear_fp8_bmm_dense_fp8out currently supports only H_PER_TASK=1.");
+
+  // Fused epilogue requires the per-head output width to be exactly one
+  // K-group (D_out == BN == 128) so each consumer thread owns one group.
+  assert(D_out_full == 128 &&
+         "linear_fp8_bmm_dense_fp8out requires per-head D_out == 128 (one "
+         "K-group per head for the fused float32-scale epilogue).");
+  assert(reduction_size % 128 == 0 &&
+         "linear_fp8_bmm_dense_fp8out requires D_in divisible by 128");
+
+  // Per-head activation-scale row stride: scale is [N, H, nk] row-major.
+  int const sa_row_stride = num_heads * nk;
+
+  constexpr int BN = 128;
+  constexpr int NS = 3;
+  constexpr int NE = 1;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Decode-only active-rows cap, mirroring the bf16 variant.
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;",
+         batch_size,
+         batch_size);
+  code.e("if (runtime_m_ <= 0) return;");
+  // Kernel call: <BN, NS, NE>(ta=A(input), tb=B(weight), sa, sb, C_fp8,
+  //                           C_scale_f32, M, N, K, sa_row_stride, gemm_h).
+  code.e("kernel::linear_fp8_bmm_dense::"
+         "linear_fp8_bmm_dense_fp8out_sm100_task_impl<$, $, $>(",
+         BN,
+         NS,
+         NE);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A = input
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // B = weight
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");    // sa
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");    // sb
+  code.e("    static_cast<__nv_fp8_e4m3*>(task_desc->output_ptrs[0]),"); // FP8
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");         // sc
+  code.e("    runtime_m_,");
+  code.e("    $,", D_out_full);     // N = per-head D_out
+  code.e("    $,", reduction_size); // K = D_in
+  code.e("    $,", sa_row_stride);
+  code.e("    $);", num_heads); // gemm_h => FP8 row stride H*N, scale stride H
+  code.e("}");
+
+  return register_task_variant(TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100,
+                               code.to_string());
+}
+
 static int register_fp8_gemm_dense_variant(TaskRegister *self,
                                            std::vector<int> const &params,
                                            char const *namespace_name,
                                            char const *fn_name,
-                                           TaskType task_type) {
+                                           TaskType task_type,
+                                           int BN = 128,
+                                           int NS = 3) {
   // params: [M, N, K, num_workers, optional runtime_m_mode]
   // runtime_m_mode=0 (default): use min(compile-time M, active_rows) as
   //   runtime M, where active_rows = qo_indptr_buffer[MAX_NUM_BATCHED_REQUESTS]
@@ -6225,7 +6571,7 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   }
-  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, BN, NS);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
   code.e("    static_cast<const "
@@ -6245,12 +6591,21 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
 int TaskRegister::register_fp8_gemm_dense_smallm_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
+  // NS-depth lever (2026-06-06): deepen the async K-pipeline NS=3->6 to hide the
+  // unhidden weight-TMA latency that dominates these single-wave M=1 decode GEMMs
+  // (L6 ledger + reviewer+Codex). NS = pipeline depth ONLY -> numerically IDENTICAL
+  // output; same single-CTA-per-tile -> no crash; BN=128/NS=6 SMEM ~198KB < 216KB
+  // cap (NS=8@BN128=263KB does NOT fit). Env-gated for a default-off A/B.
+  // See experiment_history/NS_depth_lever_plan_20260606.md.
+  int const ns = std::getenv("MPK_DSV3_SMALLM_NS6") ? 6 : 3;
   return register_fp8_gemm_dense_variant(
       this,
       params,
       "fp8_gemm_dense_smallm",
       "fp8_gemm_dense_smallm_sm100_task_impl",
-      TASK_FP8_GEMM_DENSE_SMALLM_SM100);
+      TASK_FP8_GEMM_DENSE_SMALLM_SM100,
+      /*BN=*/128,
+      /*NS=*/ns);
 }
 
 int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
@@ -6262,6 +6617,38 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
       "fp8_gemm_dense_mediumm",
       "fp8_gemm_dense_mediumm_sm100_task_impl",
       TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
+}
+
+// fine-N variants (Gate-1, 2026-06-05): same dense bf16-out body as
+// smallm/mediumm (4 inputs, 1 output, runtime_m_ active-rows cap) but emitted
+// with BN<128 + a deeper NS pipeline, and the matching tma.cuh B-box=BN case.
+// BN32/NS8 for qkv_a/gate_up (N<=4352 → ceil(N/32)<=136, 1 wave); BN64/NS4 for
+// o_proj (N=7168 → BN32 would 2-wave). Caller must pass num_workers=ceil(N/BN)
+// (see builder _fp8_dense_num_workers) or the GEMM silently multi-waves.
+int TaskRegister::register_fp8_gemm_dense_finen_bn32_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_variant(
+      this,
+      params,
+      "fp8_gemm_dense_finen",
+      "fp8_gemm_dense_finen_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100,
+      /*BN=*/32,
+      /*NS=*/8);
+}
+
+int TaskRegister::register_fp8_gemm_dense_finen_bn64_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  return register_fp8_gemm_dense_variant(
+      this,
+      params,
+      "fp8_gemm_dense_finen",
+      "fp8_gemm_dense_finen_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100,
+      /*BN=*/64,
+      /*NS=*/4);
 }
 
 // D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but
@@ -6417,6 +6804,325 @@ int TaskRegister::register_fp8_gemm_dense_decode_splitk_sm100_task(
   code.e("    $);", num_workers);
   code.e("}");
   return register_task_variant(TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100,
+                               code.to_string());
+}
+
+// Race-free internal split-K dense FP8 GEMM (2026-06-02), targeting the
+// qkv_a shape (N=2176, K=7168). Distinct from the decode_splitk variant
+// above: instead of the CRASHED red.global.add accumulate, this kernel
+// writes exclusive FP32 partial slots, then a gen-tagged atomicAdd
+// last-arriver reduces in FP32 + casts once to BF16 (fence.sc.gpu orders
+// inter-CTA visibility). Two EXTRA input buffers are threaded in beyond the
+// A/B/sa/sb of the base dense variant:
+//   input_ptrs[4] = C_partial  (FP32 scratch, SPLIT_K*mm*nn*128*128 floats)
+//   input_ptrs[5] = arrive_cnt (uint64, nn = ceil(N/128) entries)
+//   output_ptrs[0] = C (BF16 output)
+// arrive_cnt is zeroed each iter by a prepended tensor_init (see the Python
+// wrapper); the gen-tag bump at the kernel tail is then redundant but
+// harmless. params: [M, N, K, num_workers, SPLIT_K]. Kernel template
+// <BN=128, NS=3, NE=2, SPLIT_K>. Decode-only gate (runtime_m_mode=3) inline.
+int TaskRegister::register_fp8_gemm_dense_qkva_splitk_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int split_k = params[4];
+  // BK=128 in the kernel; nk = K / 128 must be divisible by split_k so the K
+  // slice boundaries align with the per-128 scale rows.
+  assert(K % (128 * split_k) == 0 &&
+         "fp8_gemm_dense_qkva_splitk requires K divisible by 128 * SPLIT_K");
+  assert(split_k >= 1 && split_k <= 8 &&
+         "fp8_gemm_dense_qkva_splitk: SPLIT_K in [1, 8]");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // runtime_m_mode=3 (decode-phase gate + active_rows cap) inline.
+  code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+         "runtime_config.qo_indptr_buffer[0];");
+  code.e("if (q_len_ > 8) return;");
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+  code.e("if (runtime_m_ <= 0) return;");
+  // <BN, NS, NE, SPLIT_K> = <128, 3, 2, split_k>.
+  code.e("kernel::fp8_gemm_dense_qkva_splitk::fp8_gemm_dense_qkva_splitk_"
+         "sm100_task_impl<$, $, $, $>(",
+         128,
+         3,
+         2,
+         split_k);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<float*>(task_desc->input_ptrs[4]),");
+  code.e("    static_cast<uint64_t*>(task_desc->input_ptrs[5]),");
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", num_workers);
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100,
+                               code.to_string());
+}
+
+// External-reduce split-K GEMM. Same compute as the qkva_splitk kernel but
+// EXT_REDUCE path: each K-slice CTA writes ONLY its exclusive FP32 partial into
+// C_partial (the task OUTPUT) and returns — no arrive_cnt, no in-kernel
+// last-arriver. A separate event-gated reduce task (registered below) sums the
+// SPLIT_K partials into the BF16 output. ABI: 4 inputs (A,B TMA descriptors +
+// sa,sb scales) + 1 output (C_partial FP32). The bf16 C pointer is unused on
+// this path (passed nullptr).
+int TaskRegister::register_fp8_gemm_dense_qkva_splitk_extred_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int split_k = params[4];
+  assert(
+      K % (128 * split_k) == 0 &&
+      "fp8_gemm_dense_qkva_splitk_extred requires K divisible by 128*SPLIT_K");
+  assert(split_k >= 1 && split_k <= 8 &&
+         "fp8_gemm_dense_qkva_splitk_extred: SPLIT_K in [1, 8]");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // runtime_m_mode=3 (decode-phase gate + active_rows cap) inline — identical
+  // to the in-kernel-reduce variant so prefill iters early-exit.
+  code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+         "runtime_config.qo_indptr_buffer[0];");
+  code.e("if (q_len_ > 8) return;");
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+  code.e("if (runtime_m_ <= 0) return;");
+  // <BN, NS, NE, SPLIT_K> = <128, 3, 2, split_k>.
+  code.e("kernel::fp8_gemm_dense_qkva_splitk::fp8_gemm_dense_qkva_splitk_"
+         "extred_sm100_task_impl<$, $, $, $>(",
+         128,
+         3,
+         2,
+         split_k);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");     // B
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),"); // sa
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),"); // sb
+  code.e("    nullptr,");                                        // C (unused)
+  code.e("    static_cast<float*>(task_desc->output_ptrs[0]),"); // C_partial
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", num_workers);
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100,
+                               code.to_string());
+}
+
+// Event-gated reduce companion for the external-reduce split-K GEMM. Reads the
+// SPLIT_K FP32 partials in C_partial (input_ptrs[0]) and writes the reduced
+// BF16 output (output_ptrs[0]). ABI: 1 input (C_partial) + 1 output (C bf16).
+// params: [M, N, split_k, num_workers]. Persistent worker loop over output
+// tiles (request_id = worker_idx).
+int TaskRegister::register_fp8_gemm_dense_splitk_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  // params: [M, N, split_k, num_workers] or [..., ncol]. ncol (default 1) is
+  // the per-tile column-split factor: work-unit count = ceil(M/128)*ceil(N/128)
+  // *ncol, so more CTAs go active (fills idle SMs at decode M=1) and each does
+  // less strided-partial-read work. BN=128 must be divisible by ncol and
+  // (128/ncol) a multiple of 16.
+  assert(params.size() == 4 || params.size() == 5);
+  int M = params[0], N = params[1], split_k = params[2];
+  int num_workers = params[3];
+  int ncol = (params.size() == 5) ? params[4] : 1;
+  assert(split_k >= 1 && split_k <= 8 &&
+         "fp8_gemm_dense_splitk_reduce: SPLIT_K in [1, 8]");
+  assert(128 % ncol == 0 && (128 / ncol) % 16 == 0 &&
+         "fp8_gemm_dense_splitk_reduce: ncol must divide 128 with 128/ncol "
+         "%16==0");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Decode-phase gate + active_rows cap mirror the GEMM so the reduce runs on
+  // exactly the rows the GEMM wrote (and prefill iters early-exit together).
+  code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+         "runtime_config.qo_indptr_buffer[0];");
+  code.e("if (q_len_ > 8) return;");
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+  code.e("if (runtime_m_ <= 0) return;");
+  // <BN, SPLIT_K, NCOL> = <128, split_k, ncol>.
+  code.e("kernel::fp8_gemm_dense_splitk_reduce::fp8_gemm_dense_splitk_reduce_"
+         "sm100_task_impl<$, $, $>(",
+         128,
+         split_k,
+         ncol);
+  code.e(
+      "    static_cast<const float*>(task_desc->input_ptrs[0]),"); // C_partial
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // C
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", num_workers);
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_SPLITK_REDUCE_SM100,
+                               code.to_string());
+}
+
+// ferret-produced FP8 split-K dense GEMM with a TMA reduce-add epilogue
+// (cp.reduce.async.bulk.tensor.2d into a PRE-ZEROED bf16 output) instead of the
+// per-element red.global.add atomics of the crashed decode_splitk variant.
+// ABI: 4 inputs (A_fp8 TMA, B_fp8 TMA, sa float*, sb float*) + 1 output (C bf16
+// TMA reduce-add). C MUST be tensor_init-zeroed before launch — the kernel
+// accumulates into the zero base. The three TMA descriptors (A,B FP8 + C bf16
+// reduce-add) are built host-side in create_tma_desc_by_task /
+// fill_tma_desc_by_task; here we only pass the raw CUtensorMap* through.
+// params: [M, N, K, num_workers, split_k] (mirrors the qkva_splitk task).
+int TaskRegister::register_fp8_gemm_dense_splitk_tma_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int split_k = params[4];
+  // BK=128 in the kernel; nk = K / 128 must be divisible by split_k so the K
+  // slice boundaries align with the per-128 scale rows.
+  assert(
+      K % (128 * split_k) == 0 &&
+      "fp8_gemm_dense_splitk_tma_reduce requires K divisible by 128*SPLIT_K");
+  assert(split_k >= 1 && split_k <= 8 &&
+         "fp8_gemm_dense_splitk_tma_reduce: SPLIT_K in [1, 8]");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Decode-phase gate + active_rows cap, mirroring the qkva_splitk task so
+  // prefill iters early-exit (the prefill path stays on the mediumm GEMM). The
+  // pre-zero tensor_init runs unconditionally upstream; this gate skips only
+  // the GEMM work on prefill iters (the dual-dispatch companion serves
+  // prefill).
+  code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+         "runtime_config.qo_indptr_buffer[0];");
+  code.e("if (q_len_ > 8) return;");
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+  code.e("if (runtime_m_ <= 0) return;");
+  // <BN, NS, NE, SPLIT_K> = <128, 3, 2, split_k>.
+  // NE MUST stay 2 (2026-06-05): NE=4 (TCA=NE*MMA_N=64 TMEM cols) IMA-CRASHES at
+  // TP=4 under MoE co-residency — empirically confirmed (Test D: backup .cuh @
+  // NE=4 also rc=255; NE=2 @ TCA=32 is crash-free). The co-resident MLA-TP4 512-
+  // col hold leaves a window where 32 cols fit but 64 don't (NE=3 also rounds to
+  // TCA=64 -> same crash). NE=4's MMA<->epilogue overlap is sacrificed for crash-
+  // safety; the big win (occupancy + the gflag pre-zero elimination) is NE-indep.
+  code.e("kernel::fp8_gemm_dense_splitk_tma_reduce::fp8_gemm_dense_splitk_tma_"
+         "reduce_sm100_task_impl<$, $, $, $>(",
+         128,
+         3,
+         2,
+         split_k);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");        // B
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");    // sa
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");    // sb
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // C
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,"); // worker_idx
+  code.e("    $,", num_workers);
+  code.e(
+      "    static_cast<const "
+      "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]));"); // tc (C TMA)
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100,
+                               code.to_string());
+}
+
+// gflag variant (2026-06-05): same kernel/enum/TMA infra as above, but the
+// epilogue eliminates the separate pre-zero tensor_init task via the OPT#1
+// store/reduce-add fork — k_slice==0 CTAs tma_store (overwrite) then publish
+// gflag[tile]=epoch; k_slice>0 CTAs spin until the epoch lands then reduce-add.
+// 5 inputs (A, B, sa, sb, gflag) + 1 output (C); the gflag scratch is input[4]
+// (a plain int* with no TMA desc — create_tma_desc_by_task only touches
+// inputs 0/1 + output 0). epoch = runtime_config.step[0]+1 (bs=1 slot 0; step
+// is mutated only at the iteration boundary by prepare_next_batch, so it is a
+// uniform, monotone-per-decode-iter value across all CTAs of one instance — NOT
+// step[request_id], which is hijacked to worker_idx=bid.x). HANG-SAFETY: at
+// decode mm=ceil(runtime_m/128)=1, so total=nn*split_k; we ASSERT
+// total<=num_workers so each worker owns exactly one tile-slice (k0 stores +
+// publishes, never spins -> guaranteed progress -> no B36-style multi-tile
+// deadlock). Reuses TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100 so request_id /
+// create_tma_desc / fill_tma all key on the unchanged enum.
+int TaskRegister::register_fp8_gemm_dense_splitk_tma_reduce_gflag_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 5);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  int split_k = params[4];
+  assert(K % (128 * split_k) == 0 &&
+         "fp8_gemm_dense_splitk_tma_reduce_gflag requires K div by 128*SPLIT_K");
+  assert(split_k >= 1 && split_k <= 8 &&
+         "fp8_gemm_dense_splitk_tma_reduce_gflag: SPLIT_K in [1, 8]");
+  // HANG-SAFETY contract (audited 2026-06-05): decode mm=1 => total=nn*split_k
+  // must be <= num_workers so each worker owns one tile-slice. A worker count
+  // below this pushes qkv_a into the (deadlock-fragile) multi-tile regime.
+  int nn_ = (N + 127) / 128;
+  int total_ = nn_ * split_k;
+  assert(total_ <= num_workers &&
+         "fp8_gemm_dense_splitk_tma_reduce_gflag: nn*split_k must be <= "
+         "num_workers (gflag spin-wait is hang-safe only at total<=num_workers)");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
+         "runtime_config.qo_indptr_buffer[0];");
+  code.e("if (q_len_ > 8) return;");
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+  code.e("if (runtime_m_ <= 0) return;");
+  // Call the 12-arg internal tpl directly (the public 11-arg wrapper hardcodes
+  // gflag=nullptr). gflag=input_ptrs[4]; epoch=step[0]+1.
+  // NE=2 (NOT 4): NE=4's TCA=64 TMEM cols IMA-crash at MoE co-residency (see the
+  // base register fn note); NE=2 (TCA=32) is the crash-free footprint.
+  code.e("kernel::fp8_gemm_dense_splitk_tma_reduce::task_impl_low_tmem_tpl<$, "
+         "$, $, $>(",
+         128,
+         3,
+         2,
+         split_k);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");        // B
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");    // sa
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");    // sb
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // C
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,"); // worker_idx
+  code.e("    $,", num_workers);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]),"); // tc (C TMA)
+  code.e("    static_cast<int*>(task_desc->input_ptrs[4]),");      // gflag
+  code.e("    runtime_config.step[0] + 1);");                      // epoch
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100,
                                code.to_string());
 }
 

@@ -106,3 +106,8 @@ scripts/
 /uv.lock
 /ONBOARDING.md
 /1
+
+# Experiment history — local-only durable log of perf-optimization runs.
+# Maintained by main agent + read by mpk-perf-analyzer subagent.
+# Includes per-run μs, GPU IDs, sub-agent transcripts — not for shared repo.
+/experiment_history/

@@ -282,7 +282,53 @@ enum TaskType {
   // scales). Forward-compatible alternative to TASK_LINEAR_FP8_BMM_SM100
   // (swapAB / UE8M0) for DSv3 decode BMM2. Behind MPK_DSV3_BMM_DENSE=1.
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
-  TASK_SM100_TASK_END = 323, // SM100 end placeholder, not a real task
+  // 2026-06-02: race-free internal split-K dense FP8 GEMM for the qkv_a shape
+  // (N=2176, K=7168). Distinct from TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100
+  // (308), which uses the CRASHED red.global.add accumulate. This kernel uses
+  // exclusive FP32 partial slots + gen-tagged atomicAdd last-arriver +
+  // fence.sc.gpu (race-free). Two extra input buffers: input_ptrs[4]=C_partial
+  // (FP32 scratch), input_ptrs[5]=arrive_cnt (per-(m,n)-tile uint64 counter).
+  // Behind MPK_DSV3_QKVA_SPLITK_V2=1.
+  TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100 = 321,
+  // 2026-06-02: race-free EXTERNAL-reduce split-K dense FP8 GEMM. The split-K
+  // GEMM CTAs write ONLY their exclusive FP32 partials (no in-kernel
+  // last-arriver, no arrive_cnt, no inter-CTA atomics) into C_partial; this
+  // companion reduce task — event-gated by the task DAG to run AFTER all
+  // split-K GEMM CTAs of a tile complete — sums the SPLIT_K partials in FP32
+  // and casts to BF16. The GEMM reuses TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100's
+  // kernel via its EXT_REDUCE entry point (5 inputs: A,B,sa,sb,C_partial; the
+  // bf16 C is the reduce task's output). Behind
+  // MPK_DSV3_DENSE_SPLITK_EXTREDUCE.
+  TASK_FP8_GEMM_DENSE_SPLITK_REDUCE_SM100 = 323,
+  // D3 (2026-06-03): fp8-out flavor of TASK_LINEAR_FP8_BMM_DENSE_SM100. The
+  // per-head BMM epilogue fuses the float32-scale per-token-group quantize that
+  // previously ran as a standalone task right after BMM2, feeding the o_proj
+  // dense GEMM. Outputs FP8 [N, H*D_out] + float32 scale [N, H] (one K-group
+  // per head). Behind MPK_DSV3_FUSE_EPILOGUE_QUANT=1 (with MPK_DSV3_BMM_DENSE).
+  TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100 = 324,
+  // DSv3 router-gate CUDA-core GEMV (decode, M<=16). Skinny GEMM
+  // out[M, NUM_EXPERTS] = act[M, hidden] @ gate_w[NUM_EXPERTS, hidden]^T.
+  // Crash-free (no tensor core / tcgen05 / TMA / cross-CTA reduce). Ported from
+  // TRT-LLM/vLLM dsv3_router_gemm. Behind MPK_DSV3_ROUTER_GEMV.
+  TASK_DSV3_ROUTER_GEMM_SM100 = 325,
+  // 2026-06-04: ferret-produced FP8 split-K dense GEMM with a TMA reduce-add
+  // epilogue (cp.reduce.async.bulk.tensor.2d into a PRE-ZEROED bf16 output)
+  // instead of the per-element red.global.add atomics used by the crashed
+  // TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100. ABI: 4 inputs (A_fp8 TMA, B_fp8
+  // TMA, sa float*, sb float*) + 1 output (C bf16 TMA reduce-add). C must be
+  // tensor_init-zeroed before launch. Behind MPK_DSV3_FP8_SPLITK_TMAREDUCE=1.
+  TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100 = 326,
+  // fine-N (Gate-1, 2026-06-05): the dense FP8 GEMM body (= mediumm
+  // task_impl_tpl<BN,NS,4>) re-tiled with BN<128 so the M=1 decode GEMM
+  // dispatches more, cheaper-per-CTA tiles (subdivides N; NO split-K reduce →
+  // no crash). qkv_a/gate_up route to BN32/NS8 (68/32 CTAs, 1 wave); o_proj
+  // routes to BN64/NS4 (112 CTAs, 1 wave — BN32 would 2-wave at N=7168). The
+  // ONLY delta vs mediumm is host-side: the B TMA descriptor box_outer=BN
+  // (tma.cuh), kept statically coupled to the kernel BN via separate task
+  // types. Gated behind MPK_DSV3_FINEN=1, default OFF.
+  TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100 = 327,
+  TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100 = 328,
+  TASK_SM100_TASK_END = 329, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

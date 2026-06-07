@@ -195,6 +195,26 @@ if __name__ == "__main__":
         world_size = 1
         rank = 0
 
+    # DEBUG single-card "pretend TP=N" mode: force the BUILD world_size (kernel
+    # selection: mla_mtp_decode_tpN + N-way sharding => rank 0 loads only 1/N of
+    # the weights, so a TP=N decode graph fits on ONE GPU) while only this single
+    # rank actually runs. The cross-rank AllReduce MUST be bypassed
+    # (MPK_AR_SKIP_REDUCE=1 MPK_AR_SKIP_BARRIER=1) since the other N-1 ranks don't
+    # exist -- output is numerically wrong but this isolates whether the tpN
+    # compute kernels (e.g. FP8 SplitK co-resident with mla_mtp_decode_tp4) CRASH
+    # without needing N physical cards. No effect unless MPK_FORCE_BUILD_WS is set.
+    _force_build_ws = os.environ.get("MPK_FORCE_BUILD_WS")
+    if _force_build_ws:
+        world_size = int(_force_build_ws)
+        rank = 0
+        os.environ["WORLD_SIZE"] = str(world_size)
+        os.environ["RANK"] = "0"
+        # NOTE: cannot use print() here -- it is declared `global` further down,
+        # so referencing it before that declaration is a SyntaxError.
+        sys.stderr.write(
+            f"[MPK_FORCE_BUILD_WS] single-rank sim: build world_size={world_size}, "
+            f"rank=0; AllReduce MUST be skipped (MPK_AR_SKIP_REDUCE/BARRIER).\n")
+
     if args.save_tokens:
         if args.save_tokens == "auto":
             filename = "mpk_output.json" if args.use_mirage else "torch_output.json"
@@ -205,7 +225,7 @@ if __name__ == "__main__":
     else:
         save_path = None
 
-    if world_size > 1:
+    if world_size > 1 and not _force_build_ws:
         dist.init_process_group(backend="nccl", init_method="env://")
     global print
     if rank != 0:

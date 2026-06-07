@@ -116,6 +116,8 @@ public:
                                 std::vector<int> const &params);
   int register_elementwise_add_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
+  int register_dsv3_router_gemm_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
   int register_softmax_gather_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_mtp_verify_probabilistic_task(threadblock::Graph const &bgraph,
@@ -198,11 +200,27 @@ public:
                                          std::vector<int> const &params);
   int register_linear_fp8_bmm_dense_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params);
+  int register_linear_fp8_bmm_dense_fp8out_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_smallm_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_mediumm_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_finen_bn32_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_finen_bn64_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_decode_splitk_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_qkva_splitk_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_qkva_splitk_extred_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_splitk_reduce_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_splitk_tma_reduce_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_splitk_tma_reduce_gflag_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_smallm_fp8out_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);

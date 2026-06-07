@@ -112,7 +112,29 @@ __device__ __forceinline__ uint64_t mkdesc(int a) {
 //             that per_token_group_quantize_fp8_task_impl produces (with
 //             packed_k=1 for BN=128 single-group rows) — downstream FP8 BMM /
 //             linear consumers see the same bit layout.
-template <int BN, int NS, int NE, bool EPILOGUE_QUANTIZE_FP8 = false>
+// D3 (2026-06-03): `EPILOGUE_SCALE_F32` selects the float32-scale flavor of
+// the fused epilogue (vs D1's default UE8M0 packed-uint32 flavor). The dense
+// smallm/mediumm GEMM family consumes a row-major float32 1x128-group
+// activation scale `[M, K/128]` (== quantize_fp8_layer(scale_ue8m0=False)),
+// whereas the per-head BMM (linear_fp8_bmm_sm100, swapAB) consumes UE8M0.
+// When EPILOGUE_SCALE_F32 is true the epilogue writes `y_scale = local_max/448`
+// directly as a float (no UE8M0 rounding — the division uses the exact y_scale,
+// bit-matching the standalone float32 quantize) into `C_scale_f32`, and the
+// uint32 `C_scale` is ignored. This lets a producing GEMM/BMM fuse the
+// downstream quantize that feeds *another dense GEMM* (e.g. the o-side BMM2 →
+// quantize → o_proj hop), which the UE8M0 epilogue could not (format mismatch).
+//
+// `C_fp8_row_stride` / `C_scale_row_stride`: when the fused FP8/scale outputs
+// land in a wider shared buffer at a per-head offset (the BMM case — output is
+// [M, H*N] row-major, scale is [M, H] row-major, with the runtime supplying a
+// per-head base pointer), pass the parent row strides (H*N and H). Negative
+// (default) means the legacy contiguous layout the dense q_b_nope path uses
+// (FP8 row stride = N, scale row stride = scale_outer_stride).
+template <int BN,
+          int NS,
+          int NE,
+          bool EPILOGUE_QUANTIZE_FP8 = false,
+          bool EPILOGUE_SCALE_F32 = false>
 __device__ __forceinline__ void
     task_impl_tpl(CUtensorMap const *ta_ptr,
                   CUtensorMap const *tb_ptr,
@@ -135,10 +157,19 @@ __device__ __forceinline__ void
                   // Likewise the bf16 output C is [M, H, N] row-major for the
                   // per-head BMM, so a row strides by H*N, not N. Negative
                   // (default) means the legacy contiguous stride = N.
-                  int C_row_stride = -1) {
+                  int C_row_stride = -1,
+                  // D3: float32-scale fused output (only read when
+                  // EPILOGUE_QUANTIZE_FP8 && EPILOGUE_SCALE_F32).
+                  float *__restrict__ C_scale_f32 = nullptr,
+                  // D3: per-head row strides for the fused FP8 / scale output
+                  // (BMM case). Negative => legacy contiguous (N / outer).
+                  int C_fp8_row_stride = -1,
+                  int C_scale_row_stride = -1) {
   static_assert(!EPILOGUE_QUANTIZE_FP8 || BN == 128,
                 "EPILOGUE_QUANTIZE_FP8 requires BN==128 (one K-group per "
                 "consumer thread for per-row scale).");
+  static_assert(!EPILOGUE_SCALE_F32 || EPILOGUE_QUANTIZE_FP8,
+                "EPILOGUE_SCALE_F32 only meaningful with EPILOGUE_QUANTIZE_FP8");
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 #ifdef MPK_DEBUG_SKIP_FP8_GEMM_DENSE
   // Debug knob: skip the entire dense GEMM kernel body (return immediately).
@@ -369,24 +400,41 @@ __device__ __forceinline__ void
           // instruction the bf16 path uses (size-match: 16 bf16 = 32 bytes
           // = .v4.b32 ×2, whereas 16 fp8 = 16 bytes = .v4.b32 ×1).
           int group_idx = on / 128; // one group per BN=128 CTA tile
-          __nv_fp8_e4m3 *row_fp8 = C_fp8 + (long long)mi * N + on;
+          // FP8 output row stride: legacy contiguous (= N) unless a per-head
+          // BMM passes the wider parent stride (output is [M, H*N] row-major).
+          int const C_fp8_rs = (C_fp8_row_stride > 0) ? C_fp8_row_stride : N;
+          __nv_fp8_e4m3 *row_fp8 = C_fp8 + (long long)mi * C_fp8_rs + on;
           float local_max = 1e-30f;
 #pragma unroll
           for (int n = 0; n < BN; n++) {
             local_max = fmaxf(local_max, fabsf(acc[n]));
           }
           float y_scale = local_max / 448.0f; // E4M3 saturating range
-          uint8_t scale_byte = encode_ue8m0(y_scale);
-          float inv_scale = exp2f(127.0f - static_cast<float>(scale_byte));
+          // D3: the float32-scale flavor matches the standalone float32
+          // quantize (per_token_group_quantize_fp8 SCALE_UE8M0=false)
+          // BIT-FOR-BIT — it stores the exact y_scale and quantizes by
+          // DIVIDING orig_val / y_scale (not multiplying by a reciprocal). The
+          // D1 UE8M0 flavor rounds the exponent and multiplies by inv_scale.
+          uint8_t scale_byte =
+              EPILOGUE_SCALE_F32 ? 0 : encode_ue8m0(y_scale);
+          float inv_scale =
+              EPILOGUE_SCALE_F32
+                  ? fmaxf(y_scale, 1e-30f) // float32: DIVIDE by this (the scale)
+                  : exp2f(127.0f - static_cast<float>(scale_byte)); // UE8M0:
+                                                                    // MULTIPLY
+          auto quant_one = [&](float a) -> float {
+            // float32 path divides by the scale; UE8M0 path multiplies by the
+            // reciprocal (D1). Both then saturate to E4M3 range.
+            float qv = EPILOGUE_SCALE_F32 ? (a / inv_scale) : (a * inv_scale);
+            return fminf(fmaxf(qv, -448.0f), 448.0f);
+          };
 #pragma unroll
           for (int n = 0; n < BN; n += 16) {
             if (on + n + 15 < N) {
               __nv_fp8_e4m3 packed[16];
 #pragma unroll
               for (int j = 0; j < 16; j++) {
-                float qv = acc[n + j] * inv_scale;
-                qv = fminf(fmaxf(qv, -448.0f), 448.0f);
-                packed[j] = __nv_fp8_e4m3(qv);
+                packed[j] = __nv_fp8_e4m3(quant_one(acc[n + j]));
               }
               uint32_t r0 = *reinterpret_cast<uint32_t *>(&packed[0]);
               uint32_t r1 = *reinterpret_cast<uint32_t *>(&packed[4]);
@@ -401,18 +449,27 @@ __device__ __forceinline__ void
                            : "memory");
             } else {
               for (int j = 0; j < 16 && on + n + j < N; j++) {
-                float qv = acc[n + j] * inv_scale;
-                qv = fminf(fmaxf(qv, -448.0f), 448.0f);
-                row_fp8[n + j] = __nv_fp8_e4m3(qv);
+                row_fp8[n + j] = __nv_fp8_e4m3(quant_one(acc[n + j]));
               }
             }
           }
-          // Scale write: column-major [packed_k=1, scale_outer_stride] flat.
-          // For BN=128 single-group rows, packed_uint32's lower 8 bits hold
-          // scale_byte; upper 24 bits are zero. Matches what
-          // per_token_group_quantize_fp8 with NUM_GROUPS_PER_ROW=1 writes.
-          uint32_t packed_scale = static_cast<uint32_t>(scale_byte);
-          C_scale[mi * scale_outer_stride + group_idx] = packed_scale;
+          if constexpr (EPILOGUE_SCALE_F32) {
+            // D3: float32 scale, row-major [M, num_groups]. For the per-head
+            // BMM the parent buffer is [M, H] and the runtime supplies a
+            // per-head base pointer, so row stride = H (passed via
+            // C_scale_row_stride) and group_idx = on/128 = 0. For a full-row
+            // dense GEMM, row stride defaults to scale_outer_stride (= N/128).
+            int const C_scale_rs =
+                (C_scale_row_stride > 0) ? C_scale_row_stride : scale_outer_stride;
+            C_scale_f32[mi * C_scale_rs + group_idx] = y_scale;
+          } else {
+            // Scale write: column-major [packed_k=1, scale_outer_stride] flat.
+            // For BN=128 single-group rows, packed_uint32's lower 8 bits hold
+            // scale_byte; upper 24 bits are zero. Matches what
+            // per_token_group_quantize_fp8 with NUM_GROUPS_PER_ROW=1 writes.
+            uint32_t packed_scale = static_cast<uint32_t>(scale_byte);
+            C_scale[mi * scale_outer_stride + group_idx] = packed_scale;
+          }
         } else {
           __nv_bfloat16 *row = C + (long long)mi * C_rs + on;
 #pragma unroll

@@ -43,6 +43,17 @@ __device__ __noinline__ void
 // the consumer epilogue. Output is FP8 + packed UE8M0 scale instead of bf16.
 // Eliminates the standalone per_token_group_quantize_fp8 task that today
 // runs immediately downstream on the q_b_nope BMM-decode path.
+//
+// NE=1 (2026-06-05, NOT 2): this fp8out GEMM (q_b_nope, M=1 decode) is the
+// SAME TMEM-contention-fragile shape as the BMM (see task_register.cc:6237) —
+// at NE=2, TCA=NE*BN=256 cols and two concurrent tcgen05 tasks on one SM hit
+// the 512-col limit, so tcgen05.alloc can return taddr=0 → "out-of-range"
+// in tcgen05.mma. It survived at NE=2 only by schedule luck; enabling fine-N
+// (MPK_DSV3_FINEN=1) shifts the wave timing and pushes q_b into the bad
+// contention window (compute-sanitizer pinned the crash here, common.cuh:315).
+// NE=1 (TCA=128) halves the ask so the alloc always fits, and is NUMERICALLY
+// IDENTICAL (NE is only the MMA↔epilogue pipeline depth) + free at M=1
+// decode (one MMA/CTA, no pipeline to fill) — exactly the BMM's resolution.
 template <int BN, int NS>
 __device__ __noinline__ void fp8_gemm_dense_smallm_fp8out_sm100_task_impl(
     CUtensorMap const *ta_ptr,
@@ -59,7 +70,7 @@ __device__ __noinline__ void fp8_gemm_dense_smallm_fp8out_sm100_task_impl(
     int const scale_outer_stride) {
   fp8_gemm_dense_common::task_impl_tpl<BN,
                                        NS,
-                                       /*NE=*/2,
+                                       /*NE=*/1,
                                        /*EPILOGUE_QUANTIZE_FP8=*/true>(
       ta_ptr,
       tb_ptr,

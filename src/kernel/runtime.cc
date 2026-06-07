@@ -508,7 +508,12 @@ void register_mugraph(
             // shape; m_indices selects the active expert per output tile.
             if (task_type == TASK_FP8_GEMM_DENSE_SMALLM_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_SPLITK_REDUCE_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
@@ -1302,13 +1307,21 @@ TaskGraphResult print_task_graph(
     code.e("if (task.at(\"task_type\") == TASK_LINEAR_FP8_SM100 || "
            "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 || "
            "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100 || "
-           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_DENSE_SM100) {");
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_DENSE_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100 || "
            "task.at(\"task_type\") == "
            "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100 || "
+           "task.at(\"task_type\") == "
+           "TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100 || "
            "task.at(\"task_type\") == "
            "TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 || "
            "task.at(\"task_type\") == "
@@ -1976,8 +1989,18 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GEMM_DENSE_SMALLM_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_SM100] =
       "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100] =
+      "TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100] =
+      "TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100] =
       "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100] =
+      "TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_SPLITK_REDUCE_SM100] =
+      "TASK_FP8_GEMM_DENSE_SPLITK_REDUCE_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100] =
+      "TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100] =
       "TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100] =
@@ -1989,6 +2012,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BMM_DENSE_SM100] =
       "TASK_LINEAR_FP8_BMM_DENSE_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100] =
+      "TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_SMALLM_SM100] =
       "TASK_FP8_GROUP_GEMM_SMALLM_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_SM100] =
@@ -2011,6 +2036,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MOE_W2_FP8_SM100] = "TASK_MOE_W2_FP8_SM100";
   task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
   task_type_to_name[TASK_ELEMENTWISE_ADD_SM100] = "TASK_ELEMENTWISE_ADD_SM100";
+  task_type_to_name[TASK_DSV3_ROUTER_GEMM_SM100] =
+      "TASK_DSV3_ROUTER_GEMM_SM100";
   task_type_to_name[TASK_SOFTMAX_GATHER_SM100] = "TASK_SOFTMAX_GATHER_SM100";
   task_type_to_name[TASK_MTP_VERIFY_PROBABILISTIC] =
       "TASK_MTP_VERIFY_PROBABILISTIC";
@@ -2037,6 +2064,21 @@ TaskGraphResult print_task_graph(
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");
   code.e("                   RuntimeConfig const &runtime_config) {");
+  // Step-1 quiesce discriminator (feasibility probe, timing-only, NOT
+  // correctness-preserving): when MPK_QUIESCE_OTHERS is defined at nvcc time
+  // (via MPK_EXTRA_NVCC_DEFINES) every task body except MPK_QUIESCE_KEEP_TASK
+  // (default 279 = TASK_LINEAR_FP8_BMM_SM100, the decode kv-up BMM1)
+  // early-returns. The worker's event-trigger still fires afterwards so the
+  // megakernel completes (output garbage, irrelevant) — this leaves only the
+  // kept task running its real body so its in-MPK wall-span can be measured
+  // with all other ~110 workers idle. Discriminates per-launch context cost
+  // vs concurrent residual contention.
+  code.e("#ifdef MPK_QUIESCE_OTHERS");
+  code.e("#ifndef MPK_QUIESCE_KEEP_TASK");
+  code.e("#define MPK_QUIESCE_KEEP_TASK 279");
+  code.e("#endif");
+  code.e("  if (task_desc->task_type != MPK_QUIESCE_KEEP_TASK) { return; }");
+  code.e("#endif");
   TaskRegister *task_register = TaskRegister::get_instance();
   std::map<TaskType, std::set<int>> used_task_variants;
   for (FullTaskDesc const &task_desc : all_tasks) {

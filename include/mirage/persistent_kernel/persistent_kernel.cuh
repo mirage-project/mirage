@@ -20,6 +20,20 @@
 #endif
 #include "mpk_atoms.cuh"
 #include "runtime_header.h"
+
+// Poll/spin backoff interval (ns) for the worker task-fetch loop, the
+// dependency-wait spin, and the scheduler poll. Default 10 (byte-identical to
+// the historical hardcode). Env-gated probe (set via
+// MPK_EXTRA_NVCC_DEFINES="-DMPK_POLL_NANOSLEEP_NS=100") for the crux 4.5x
+// in-MPK skinny-GEMM degradation hypothesis: when many workers are idle-
+// spinning during an under-occupied GEMM window, their ld_acquire poll traffic
+// on the queue/event counters may contend with the active GEMM's memory
+// pipeline. A longer backoff cuts the poll traffic (tradeoff: slower
+// dependency-handoff wakeup on the ~98%-serial bs=1 critical path → measure
+// net per-MoE-layer e2e). See experiment_history/crux_4p5x_degradation_probes.
+#ifndef MPK_POLL_NANOSLEEP_NS
+#define MPK_POLL_NANOSLEEP_NS 10
+#endif
 #ifdef USE_NVSHMEM
 #include <mpi.h>
 #if defined(MIRAGE_GRACE_BLACKWELL)
@@ -664,7 +678,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                 (queue_idx == num_worker_queues - 1) ? 0 : queue_idx + 1;
           }
           // nanosleep to avoid overwhelming I/O
-          __nanosleep(10);
+          __nanosleep(MPK_POLL_NANOSLEEP_NS);
         }
         assert(next_task_pos[queue_idx] + config.per_worker_queue_len >
                last_task_pos[queue_idx]);
@@ -745,14 +759,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
           // NVSHMEM_NO_DEVICE_LIB: spin-wait equivalent
           while (ld_acquire_sys_u64(&config.all_event_counters[event_index]) <
                  needed_counts) {
-            __nanosleep(10);
+            __nanosleep(MPK_POLL_NANOSLEEP_NS);
           }
 #endif
         } else {
           while (actual_counts < needed_counts) {
             actual_counts =
                 ld_acquire_sys_u64(&config.all_event_counters[event_index]);
-            __nanosleep(10);
+            __nanosleep(MPK_POLL_NANOSLEEP_NS);
           }
         }
       }
@@ -977,7 +991,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           queue_idx = (queue_idx == num_sched_queues - 1) ? 0 : queue_idx + 1;
         }
         // nanosleep to avoid overwhelming I/O
-        __nanosleep(10);
+        __nanosleep(MPK_POLL_NANOSLEEP_NS);
       }
       // Make sure the schedule queue is not overflow
       assert(cur_event_pos[queue_idx] + config.per_sched_queue_len >

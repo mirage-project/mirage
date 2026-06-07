@@ -32,8 +32,12 @@
 #include "attention_sm100.cuh"
 #include "deepseek_mla_rope_sm100.cuh"
 #include "fp8_gemm_dense_decode_splitk_sm100.cuh"
+#include "fp8_gemm_dense_finen_sm100.cuh"
 #include "fp8_gemm_dense_mediumm_sm100.cuh"
+#include "fp8_gemm_dense_qkva_splitk_sm100.cuh"
 #include "fp8_gemm_dense_smallm_sm100.cuh"
+#include "fp8_gemm_dense_splitk_reduce_sm100.cuh"
+#include "fp8_gemm_dense_splitk_tma_reduce_sm100.cuh"
 #include "fp8_group_gemm_largem_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
 #include "fp8_group_gemm_smallm_sm100.cuh"
@@ -49,6 +53,7 @@
 // sm100_ptx.cuh must be included BEFORE mla_mtp_decode_sm100.cuh at top level
 // so kernel::sm100_ptx is defined in the correct namespace
 #include "assemble_q_decode_sm100.cuh"
+#include "dsv3_router_gemm_sm100.cuh"
 #include "elementwise_add_sm100.cuh"
 #include "mla_mtp_decode_sm100.cuh"
 #include "mla_mtp_decode_tp2_sm100.cuh"

@@ -44,13 +44,20 @@ class CollectiveCapabilities:
 
         # Query peer access support
         full_peer_access_supported = True
-        for target_id in range(self.num_devices):
-            if target_id == self.device_id:
-                continue
-            supported = cuda_utils.queryPeerAccessSupported(self.device_id, target_id)
-            if not supported:
-                full_peer_access_supported = False
-                break
+        if os.environ.get("MPK_FORCE_BUILD_WS"):
+            # Single-rank "pretend TP=N" debug sim: only this one device is
+            # visible, so peer-access queries to the absent N-1 devices fail with
+            # CUDA_ERROR_INVALID_DEVICE. There is no real peer here (the cross-rank
+            # AllReduce is skipped via MPK_AR_SKIP_REDUCE), so report no peer access.
+            full_peer_access_supported = False
+        else:
+            for target_id in range(self.num_devices):
+                if target_id == self.device_id:
+                    continue
+                supported = cuda_utils.queryPeerAccessSupported(self.device_id, target_id)
+                if not supported:
+                    full_peer_access_supported = False
+                    break
         self.peer_access_supported = full_peer_access_supported
 
         # Query virtual memory management
@@ -258,6 +265,14 @@ def auto_select_allreduce_implementation(
     if os.environ.get("MPK_FORCE_ALLGATHER_AR", "0") == "1":
         print("MPK: forcing AllgatherReduce AR (MPK_FORCE_ALLGATHER_AR=1).")
         return AllReduceStrategy_AllgatherReduce()
+
+    if os.environ.get("MPK_FORCE_BUILD_WS"):
+        # Single-rank "pretend TP=N" debug sim: force the SAME NvshmemTile
+        # allreduce that real TP=N (NVLink) selects. peer_access is faked-False
+        # to avoid querying the absent N-1 devices, which would otherwise route
+        # here to AllgatherReduce and trip the gated-allreduce guard. The tile
+        # reduce itself is bypassed at runtime via MPK_AR_SKIP_REDUCE.
+        return AllReduceStrategy_NvshmemTile()
 
     capabilities = get_collective_capabilities(num_gpus, device_id)
 

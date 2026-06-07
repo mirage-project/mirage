@@ -19,7 +19,8 @@ from ..utils import grid_for_rmsnorm_linear_layer
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
-from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64
+from ....core import (bfloat16, float8_e4m3, float32, uint32, int32, int64,
+                       uint64)
 
 
 # DeepSeek V3 architecture constants
@@ -354,6 +355,26 @@ class DeepSeekV3Builder(GraphBuilder):
         self._fused_post_attn_rmsnorm_quantize = (
             os.environ.get("MPK_DSV3_FUSED_POST_ATTN_RMSNORM_QUANTIZE",
                            "0") == "1")
+        # D3 (2026-06-03): generalized FP8 epilogue-quantize fusion across the
+        # decode dense-GEMM chain. The proven D1 pattern (q_b_nope GEMM emits
+        # FP8 + UE8M0 scale in its epilogue, feeding the swapAB BMM) only
+        # covers the ONE decode hop whose downstream consumer wants UE8M0. The
+        # other genuinely-fusable decode hop — the o-side BMM2
+        # (attn_out_reduced) → standalone float32-scale quantize → o_proj dense
+        # GEMM — needed a NEW kernel flavor because the dense GEMM consumes a
+        # float32 1x128-group scale, not UE8M0 (the F6/N10 "format mismatch").
+        # D3 adds EPILOGUE_SCALE_F32 to the shared dense-GEMM epilogue
+        # (fp8_gemm_dense_sm100_common.cuh) and an fp8out flavor of the per-head
+        # dense BMM (linear_fp8_bmm_dense_fp8out_sm100), so BMM2 emits FP8 +
+        # float32 scale directly into the o_proj input buffer, eliminating the
+        # standalone quantize dispatch wave + a bf16 HBM round-trip of
+        # attn_out_reduced (mbt × H × 128 × 2 bytes) per decode MoE layer.
+        # Requires the DENSE BMM2 path (MPK_DSV3_BMM_DENSE=1) — the swapAB BMM
+        # has no float32-scale epilogue. Default OFF; default path stays
+        # byte-identical. Flip via MPK_DSV3_FUSE_EPILOGUE_QUANT=1. PENDING GPU
+        # validation (designed CPU-side under a no-GPU constraint).
+        self._fuse_epilogue_quant = (
+            os.environ.get("MPK_DSV3_FUSE_EPILOGUE_QUANT", "0") == "1")
         # 2026-05-28: fuse the INNER q_a_layernorm + downstream q_b_GEMM
         # input-quantize into one task. The depgraph chain shows a
         # +1.4μs gap before q_a RMSnorm + 1.6μs gap before its QUANTIZE_FP8
@@ -364,6 +385,46 @@ class DeepSeekV3Builder(GraphBuilder):
         # buffers). Estimated saving 2-3μs/layer.
         self._fused_q_a_quantize = (
             os.environ.get("MPK_DSV3_FUSED_Q_A_QUANTIZE", "0") == "1")
+        # 2026-06-03: INTER-TASK OVERLAP for the decode Q-up projections.
+        #
+        # In the BMM decode Q path (_bmm_decode_q_path) the two independent
+        # projections off q_a — q_b_pe (K=1536→H*64) and q_b_nope
+        # (K=1536→H*128) — have NO mutual data dependency: both read the same
+        # normed q_a slice and write disjoint outputs (q_pe_3d / q_nope_*).
+        # They SHOULD be a 2-way fork off q_a and dispatch concurrently onto
+        # the idle workers the analyzer observed (24-56 of 136 busy; 80-112
+        # idle). But today, when neither q_a fusion nor dual-dispatch quantize
+        # sharing supplies an input_fp8 override, BOTH GEMMs pull the SAME
+        # cached FP8 input buffer keyed by reduction_size=1536
+        # (`fp8_input_v2_1536_shared`, see _fp8_mbt_buffers_for_reduction_f32scale)
+        # and BOTH emit a quantize that WRITES it. Two writers of one buffer =
+        # a WAW edge in build_annotated_graph → the q_b_pe quantize/GEMM and
+        # the q_b_nope quantize/GEMM are forced onto serial event chains
+        # instead of one fork. That is the "false serialization between
+        # projection pairs" the true-DAG analyzer flagged (physically-idle
+        # workers between back-to-back ~38μs + ~29μs steps).
+        #
+        # The fix is purely in the dependency graph, not the kernels: give
+        # q_b_pe its OWN per-layer FP8 input buffer + its own quantize reading
+        # q_a, distinct from q_b_nope's. The two quantize tasks then write
+        # disjoint buffers — no WAW — so both become independent forks off the
+        # q_a producer event and the scheduler dispatches them concurrently
+        # across free workers (sanity-checked: EVENT_LAUNCH_* distributes a
+        # fired event's whole task range round-robin to workers with no
+        # inter-task barrier; see persistent_kernel.cuh::execute_scheduler).
+        #
+        # No real data dependency is dropped: q_b_pe and q_b_nope read the
+        # same q_a INPUT (a read, never a write), so duplicating the quantize
+        # (each reads q_a, writes its own buffer) is bit-identical math — just
+        # one extra small quantize task in exchange for removing the serial
+        # edge. Default OFF → default path byte-identical; flip via
+        # MPK_DSV3_OVERLAP_PROJ=1. Only active on the BMM decode Q path
+        # (_dsv3_bmm, the default) and only when no input_fp8 override is
+        # already threading the projections together (fused-q_a / dual-dispatch
+        # shared-quantize paths already fork correctly off the single shared
+        # quantize and are left untouched).
+        self._overlap_proj = (
+            os.environ.get("MPK_DSV3_OVERLAP_PROJ", "0") == "1")
         # C18 (2026-05-17): fuse NEW MoE moe_silu_mul + quantize_fp8 into
         # one task. Eliminates BF16 silu_out HBM round-trip + one task
         # launch. Default OFF; flip via MPK_DSV3_FUSED_SILU_QUANTIZE=1.
@@ -566,7 +627,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_mbt_f32_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_mbt_f32_bufs[cache_key]
 
-    def _fp8_dense_num_workers(self):
+    def _fp8_dense_num_workers(self, output_size=None):
         """Number of persistent workers each fp8_gemm_dense_{smallm,mediumm} call
         is allowed to occupy.
 
@@ -578,6 +639,27 @@ class DeepSeekV3Builder(GraphBuilder):
         worker slots per dense wave to overlap with concurrent ROPE /
         rmsnorm / KV gather tasks. Measured: 412 → 402 us/MoE-layer
         (−2.4%) on the 19-layer TP=4 EP=2 mbt=128 decode iter.
+
+        Per-call-site wave-collapse (2026-06-02): a blanket 80 still over-
+        provisions every dense GEMM — each only needs
+        `ceil(M_max/BN) * ceil(N/BN)` output tiles (BN=128 fixed in the
+        kernel; the kernel strides `bidx = iter*num_workers + worker_idx`
+        and idle CTAs `worker_idx >= total` early-return, so dropping
+        num_workers to the exact single-wave tile count is BYTE-IDENTICAL —
+        the tile→value mapping doesn't depend on num_workers). qkv_a
+        (N=2176) needs ceil(2176/128)=17, others larger. Caller passes the
+        GEMM's output dim via `output_size`; we return
+        `min(80, max(ceil(M_max/128)*ceil(N/128), FLOOR))`. The ~63 idle
+        CTAs at 80 wasted dispatch + mbarrier framing on the dispatch-bound
+        decode chain and held SMs that could overlap concurrent
+        ROPE/rmsnorm/KV-gather. Direct analog of the landed MOE_PERMUTE
+        EPC=4 wave-collapse (128→32 CTAs, byte-identical).
+
+        FLOOR=24: experiment_history B26 found num_workers < 16 crashes
+        the NVSHMEM barrier; 24 is a safe margin and still collapses qkv_a
+        (17→24 is below the old 80). Set env
+        `MPK_DSV3_DENSE_NW_WAVECOLLAPSE=0` to restore the blanket-80
+        behavior for regression isolation.
 
         Override via env `MPK_FP8_DENSE_NUM_WORKERS` for experiments
         (sweep showed 64 crashes nvshmem barrier, 80/96 both work but
@@ -593,9 +675,27 @@ class DeepSeekV3Builder(GraphBuilder):
         override = os.environ.get("MPK_FP8_DENSE_NUM_WORKERS")
         if override:
             return int(override)
-        if self._use_prefill:
-            return min(80, self.num_workers)
-        return self.num_workers
+        if not self._use_prefill:
+            return self.num_workers
+        base = min(80, self.num_workers)
+        if output_size is None or os.environ.get(
+                "MPK_DSV3_DENSE_NW_WAVECOLLAPSE", "1") != "1":
+            return base
+        # BN=128 fixed in fp8_gemm_dense_{smallm,mediumm}; single wave needs
+        # ceil(M_max/128) * ceil(N/128) tiles. M_max = compile-time mbt
+        # (runtime_m_ is capped to active_rows at exec, never larger).
+        FLOOR = 24
+        bn = 128
+        m_tiles = (self.max_num_batched_tokens + bn - 1) // bn
+        n_tiles = (output_size + bn - 1) // bn
+        single_wave = m_tiles * n_tiles
+        result = min(base, max(single_wave, FLOOR))
+        if os.environ.get("MPK_DSV3_DENSE_NW_DEBUG") == "1":
+            import sys as _sys
+            print(f"[DENSE_NW] N={output_size} n_tiles={n_tiles} "
+                  f"single_wave={single_wave} before={base} after={result}",
+                  file=_sys.stderr, flush=True)
+        return result
 
     def _fp8_linear_v2(self, input_bf16, weight_fp8_raw, weight_scale_raw,
                        output, residual=None, gate_mode: int = 0,
@@ -603,7 +703,8 @@ class DeepSeekV3Builder(GraphBuilder):
                        input_col_offset: int = 0,
                        share_quantize_tag: str = None,
                        input_fp8_override=None,
-                       input_scale_override=None):
+                       input_scale_override=None,
+                       no_wave_collapse: bool = False):
         """FP8 linear via the NEW dense-GEMM kernel (smallm/mediumm).
 
         Replaces the old `linear_fp8_sm100` path which has a row-coverage
@@ -640,6 +741,13 @@ class DeepSeekV3Builder(GraphBuilder):
             single quantize with active_mode=0 (always run) and subsequent
             calls skip the quantize. Saves one ~5 us wave dispatch per
             shared input per layer.
+        no_wave_collapse: when True, force the dense GEMM to keep the
+            ORIGINAL (blanket-80 / full) num_workers instead of the
+            per-call-site `ceil(N/128)` wave-collapse. Set by call sites
+            whose output feeds a downstream `linear_fp8_bmm_*` GEMM — the
+            BMM is templated on the per-head N-tile shape and the producing
+            GEMM's grid/num_workers must stay at the value that path was
+            validated against (the q_b_nope -> q_nope_fp8 -> BMM chain).
         """
         if weight_scale_raw is None:
             raise ValueError("FP8 linear v2 requires FP8 weight scale.")
@@ -653,6 +761,14 @@ class DeepSeekV3Builder(GraphBuilder):
             raise ValueError("FP8 linear v2 expects 2D or 3D output.")
         if weight_fp8_raw.num_dims != 2 or weight_scale_raw.num_dims != 2:
             raise ValueError("FP8 linear v2 expects 2D weight + scale.")
+
+        # Per-call-site dense GEMM worker count. Normally wave-collapsed to
+        # `ceil(N/128)` (see `_fp8_dense_num_workers`); BMM-feeding sites pass
+        # `no_wave_collapse=True` to keep the original (blanket-80 / full)
+        # count their downstream BMM template was validated against.
+        dense_nw = (self._fp8_dense_num_workers()
+                    if no_wave_collapse
+                    else self._fp8_dense_num_workers(weight_fp8_raw.dim(0)))
 
         reduction_size = weight_fp8_raw.dim(1)
         # B37 (2026-05-15): caller may pre-allocate the FP8 + scale buffers
@@ -717,6 +833,45 @@ class DeepSeekV3Builder(GraphBuilder):
             if self.mpk.max_seq_length <= 512
             else self.mpk.fp8_gemm_dense_mediumm_layer
         )
+        # fine-N (Gate-1, 2026-06-05; env MPK_DSV3_FINEN=1, default OFF). At
+        # bs=1 decode the dense projection GEMMs are single-wave latency-bound
+        # at BN=128 (qkv_a 17 CTAs, gate_up 8). Re-tiling N to BN<128 gives
+        # more, cheaper-per-CTA tiles (subdivides N → shorter single-CTA wall;
+        # NO split-K reduce → no crash). Gate-1 standalone @ active_rows=1:
+        # qkv_a 17.6→12.0μs (BN32/NS8), gate_up 17.6→12.0, o_proj 6.1→4.9
+        # (BN64/NS4). Rule: pick the smallest BN that stays single-wave
+        # (ceil(N/BN) <= physical workers); BN16 dropped (no shipping box
+        # precedent). EXCLUDE no_wave_collapse sites (q_b→BMM producers whose
+        # downstream BMM template is grid-locked) and the fp8out path (BN==128
+        # assert; routed elsewhere). Wraps gemm_layer so every residual/prefill
+        # branch inherits it; recomputes num_workers = ceil(N/BN).
+        # Debug sub-gate (MPK_DSV3_FINEN_ONLY_N=2176,7168): restrict fine-N to
+        # specific output-N shapes to localize which GEMM triggers the in-MPK
+        # IMA (qkv_a N=2176 / gate_up N=1024 / o_proj N=7168). Empty = all.
+        _finen_only_n = set(
+            int(x) for x in os.environ.get("MPK_DSV3_FINEN_ONLY_N", "").split(",")
+            if x.strip())
+        if (os.environ.get("MPK_DSV3_FINEN") == "1"
+                and not no_wave_collapse
+                and weight_fp8_raw.dim(0) % 32 == 0
+                and (not _finen_only_n or weight_fp8_raw.dim(0) in _finen_only_n)):
+            _N_out = weight_fp8_raw.dim(0)
+            _nw_phys = self.num_workers
+            if (_N_out + 31) // 32 <= _nw_phys:
+                _finen_bn = 32
+                _finen_layer = self.mpk.fp8_gemm_dense_finen_bn32_layer
+            else:
+                _finen_bn = 64
+                _finen_layer = self.mpk.fp8_gemm_dense_finen_bn64_layer
+            _finen_nw = (_N_out + _finen_bn - 1) // _finen_bn
+
+            def gemm_layer(input_fp8, weight_fp8, input_scale, weight_scale,
+                           output, num_workers, runtime_m_mode=0,
+                           _fl=_finen_layer, _fnw=_finen_nw):
+                # num_workers overridden to ceil(N/BN): one CTA per N-tile, as
+                # the kernel's worker-stride loop expects.
+                _fl(input_fp8, weight_fp8, input_scale, weight_scale, output,
+                    _fnw, runtime_m_mode=runtime_m_mode)
         # B20 (2026-05-15): mirror gate_mode into the GEMM kernel itself so
         # the dual-dispatch O_proj branches early-exit the wave for the
         # wrong phase. Otherwise both prefill and decode O_proj GEMMs run
@@ -740,19 +895,62 @@ class DeepSeekV3Builder(GraphBuilder):
         # kernel was never tested against and crashes with "illegal
         # memory access". The kernel is tuned for the M=128 N=7168
         # K=16384 O_proj shape (and similar TP=1/TP=2 variants).
-        use_decode_splitk = (
+        use_oproj_splitk = (
             gate_mode == 2
             and residual is not None
             and os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK") == "1"
         )
-        decode_split_k = int(
-            os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK_FACTOR", "4"))
-        # Hard-stop if the shape's K can't be split evenly: a static
-        # split_k that doesn't divide K/128 corrupts scale indexing.
-        if use_decode_splitk:
-            K_ = weight_fp8_raw.dim(1)
-            if K_ % (128 * decode_split_k) != 0:
-                use_decode_splitk = False
+        # qkv_a/gate_up internal decode split-K — RETIRED 2026-06-01. Two
+        # independent, decisive reasons:
+        #  (1) PERF-DEAD: decode dense GEMMs are M=1 HBM-bound; internal split-K
+        #      ADDS red.global.add atomic-reduce overhead with no throughput gain
+        #      (analyzer + reviewer + calib all agree) -> won't move the metric.
+        #  (2) CRASHES: the decode-split-K kernel has a race in its red.global.add
+        #      accumulate for the qkv_a N=2176 shape that aborts the TP=4
+        #      megakernel at the FIRST decode step (rc=255; surfaces async at the
+        #      NVSHMEM barrier; memcheck-HIDDEN). Root-caused via reviewer+E0+
+        #      verify: NOT the prefill-write gap (a dual-dispatch prefill
+        #      companion did not fix it), NOT multi-tile-iter (1-tile/CTA still
+        #      crashes), NOT a missing fence -- the atomic-accumulate path itself.
+        # Negative-EV to fix (zero perf upside + a hard kernel race), so the gate
+        # is force-disabled: MPK_DSV3_QKVA_GATEUP_SPLITK is now a no-op and the
+        # crashing path cannot be selected. The downstream split-K emit blocks
+        # below are consequently inert for qkv_a/gate_up. See
+        # experiment_history/INDEX.md (2026-06-01 split-K rows).
+        use_qkva_gateup_splitk = False
+        use_decode_splitk = use_oproj_splitk or use_qkva_gateup_splitk
+        splitk_num_workers = self._fp8_dense_num_workers()
+        if use_qkva_gateup_splitk:
+            # NO-MULTI-TILE-ITER fix (2026-05-29): the split-K kernel crashes the
+            # TP=4 megakernel as a HEISENBUG — rc=255 without compute-sanitizer,
+            # but completes WITH it (memcheck serializes + hides it). That's a
+            # race in the multi-tile-iteration mbarrier phase-carry (the B36 path)
+            # which only triggers when total tiles (n_tiles*split_k) EXCEED the
+            # task's worker count (it ran on 80 workers with 136-144 tiles). Fix:
+            # run on the FULL num_workers and pick split_k so total <= workers ->
+            # each CTA owns exactly ONE (n_tile,k_slice), no inter-tile mbarrier
+            # carry, so the race cannot occur. qkv_a (17 n-tiles) fits; gate_up
+            # (72 n-tiles) can't reach split_k>=2 under <=~140 workers -> it
+            # auto-disables here and stays on mediumm.
+            splitk_num_workers = self.num_workers
+            n_tiles_ = (weight_fp8_raw.dim(0) + 127) // 128
+            env_f = os.environ.get("MPK_DSV3_QKVA_GATEUP_SPLITK_FACTOR")
+            decode_split_k = (int(env_f) if env_f
+                              else max(1, splitk_num_workers // max(1, n_tiles_)))
+            if (decode_split_k < 2
+                    or weight_fp8_raw.dim(1) % (128 * decode_split_k) != 0
+                    or n_tiles_ * decode_split_k > splitk_num_workers):
+                use_qkva_gateup_splitk = False
+                use_decode_splitk = use_oproj_splitk
+                splitk_num_workers = self._fp8_dense_num_workers()
+        if not use_qkva_gateup_splitk:
+            decode_split_k = int(
+                os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK_FACTOR", "4"))
+            # Hard-stop if the o_proj shape's K can't be split evenly.
+            if use_decode_splitk:
+                K_ = weight_fp8_raw.dim(1)
+                if K_ % (128 * decode_split_k) != 0:
+                    use_decode_splitk = False
 
         def _emit_decode_splitk(out_tensor):
             self.mpk.fp8_gemm_dense_decode_splitk_layer(
@@ -761,13 +959,522 @@ class DeepSeekV3Builder(GraphBuilder):
                 input_scale=input_scale,
                 weight_scale=weight_scale_raw,
                 output=out_tensor,
-                num_workers=self._fp8_dense_num_workers(),
+                num_workers=splitk_num_workers,
                 split_k=decode_split_k,
             )
 
+        # 2026-06-02: NEW race-free internal split-K for the qkv_a GEMM
+        # (N=2176, K=7168). This is a SEPARATE gate from the retired
+        # MPK_DSV3_QKVA_GATEUP_SPLITK (which selected the CRASHED
+        # red.global.add decode_splitk kernel). The new kernel
+        # (fp8_gemm_dense_qkva_splitk_sm100.cuh, ferret workspace3) replaces
+        # the racy accumulate with exclusive FP32 partial slots + a gen-tagged
+        # atomicAdd last-arriver + fence.sc.gpu. It bakes the decode-only gate
+        # (runtime_m_mode=3: `if (q_len_ > 8) return;`), so prefill iters
+        # early-exit. The qkv_a GEMM is always-run (gate_mode=0, residual=None)
+        # and is NOT dual-dispatched, so for a prefill-capable build we MUST
+        # emit a prefill companion (mediumm, runtime_m_mode=2) AFTER the
+        # split-K — otherwise qkv_a_out is never filled during prefill and a
+        # downstream consumer reads uninitialized memory (the exact crash that
+        # killed the old internal-split-K path; see experiment_history
+        # 2026-06-01 split-K rows). WAW order: split-K -> mediumm; in prefill
+        # the mediumm writes last, in decode it early-returns.
+        K_v2 = weight_fp8_raw.dim(1)
+        N_v2 = weight_fp8_raw.dim(0)
+        use_qkva_splitk_v2 = (
+            os.environ.get("MPK_DSV3_QKVA_SPLITK_V2") == "1"
+            and residual is None
+            and gate_mode == 0
+            and K_v2 == 7168
+            and N_v2 == QKV_A_FUSED_N  # 2176
+        )
+        if use_qkva_splitk_v2:
+            v2_split_k = int(
+                os.environ.get("MPK_DSV3_QKVA_SPLITK_V2_FACTOR", "4"))
+            # K must split evenly at the 128-K boundary.
+            if K_v2 % (128 * v2_split_k) != 0:
+                use_qkva_splitk_v2 = False
+
+        # 2026-06-02: RACE-FREE EXTERNAL-reduce split-K (default OFF, env gate
+        # MPK_DSV3_DENSE_SPLITK_EXTREDUCE=1). Same idle-SM-filling K-split as
+        # _v2, but the K-slice CTAs write ONLY their exclusive FP32 partials and
+        # a SEPARATE event-gated reduce task sums them (race-free by
+        # construction — the task DAG enforces ordering, no inter-CTA atomics).
+        # Starts with the qkv_a shape (N=2176, K=7168) to prove the design.
+        # Takes priority over the in-kernel _v2 path when both are set.
+        #
+        # 2026-06-03 GENERALIZE (sub-gate MPK_DSV3_DENSE_SPLITK_EXTREDUCE_
+        # GENERALIZE=1): extend the SAME ext-reduce mechanism to the OTHER
+        # on-chain DECODE dense GEMMs. The split-K GEMM + reduce both bake the
+        # decode gate (`if q_len_ > 8 return`), so they only apply to
+        # decode-phase GEMMs (gate_mode 0 = always-run-but-decode-gated qkv_a,
+        # or gate_mode 2 = decode-only q_b/o_proj). Eligible shapes need
+        # K % (128*split_k)==0. Three on-chain cases:
+        #   - qkv_a   : gate_mode 0, residual None (the proven default; always on
+        #               with the base gate, no GENERALIZE needed).
+        #   - q_b_pe  : gate_mode 2, residual None (decode-only; prefill q_b is a
+        #               SEPARATE gate_mode=1 dispatch, so NO prefill companion).
+        #   - o_proj  : gate_mode 2, residual not None (RowParallel→AllReduce;
+        #               ext-reduce writes the partial, then _allreduce_residual).
+        # The q_b_nope-fp8out GEMM never reaches _fp8_linear_v2 (it calls
+        # fp8_gemm_dense_*_fp8out_layer directly to feed linear_fp8_bmm), so it
+        # is structurally excluded — its BMM-template grid is untouched.
+        er_generalize = (
+            os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE_GENERALIZE") == "1")
+        # Base (always-available) case: the proven qkv_a shape. RETIRED
+        # 2026-06-03: the in-kernel last-arriver split-K (MPK_DSV3_QKVA_SPLITK_V2
+        # -> _emit_qkva_splitk_v2) raced at multi-rank decode and has been
+        # removed. Design-A (external event-DAG-ordered reduce, enum-323) is now
+        # the ONLY split-K path, so the legacy MPK_DSV3_QKVA_SPLITK_V2 gate is
+        # folded into the ext-reduce base case here: setting EITHER env var on
+        # the qkv_a shape selects the race-free external-reduce wiring.
+        _er_base = (
+            (os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE") == "1"
+             or use_qkva_splitk_v2)
+            and residual is None
+            and gate_mode == 0
+            and K_v2 == 7168
+            and N_v2 == QKV_A_FUSED_N  # 2176
+        )
+        # Generalized cases: decode-only (gate_mode 2) GEMMs, residual-None
+        # (q_b_pe) or residual-not-None RowParallel (o_proj). N must be
+        # 128-aligned (BN tiling) and K 128-aligned (split boundary).
+        # EXCLUDE `no_wave_collapse=True` call sites: those feed a downstream
+        # linear_fp8_bmm whose OUTPUT_SIZE_PER_TASK template was validated
+        # against the producing GEMM's exact grid/num_workers (the q_b_nope ->
+        # quantize -> linear_fp8_bmm chain). Ext-reduce changes the GEMM's grid,
+        # so it must not touch a BMM-feeding producer. (With the default
+        # MPK_DSV3_FUSED_QB_QUANTIZE=1, q_b_nope goes through the fp8out path
+        # and never reaches here anyway; this guard covers the FUSED_QB=0 case.)
+        _er_gen = (
+            os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE") == "1"
+            and er_generalize
+            and gate_mode == 2
+            and not no_wave_collapse
+            and N_v2 % 128 == 0
+            and K_v2 % 128 == 0
+        )
+        # o_proj (residual not None) only generalizes under TP (world_size>1);
+        # the TP=1 path has no AllReduce and goes through a different epilogue.
+        if _er_gen and residual is not None and self.world_size <= 1:
+            _er_gen = False
+        use_extreduce = _er_base or _er_gen
+        if use_extreduce:
+            er_split_k = int(
+                os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE_FACTOR", "4"))
+            # K must split evenly at the (128*split_k) boundary. If the default
+            # factor doesn't divide this shape's K, step down to the largest
+            # divisor of K/128 that is <= the requested factor (>=1).
+            if K_v2 % (128 * er_split_k) != 0:
+                kt = K_v2 // 128
+                cand = [s for s in range(er_split_k, 0, -1) if kt % s == 0]
+                er_split_k = cand[0] if cand else 1
+            if er_split_k < 1 or K_v2 % (128 * er_split_k) != 0:
+                use_extreduce = False
+            else:
+                use_qkva_splitk_v2 = False  # extreduce wins the tie
+
+        # ====================================================================
+        # HARD-DISABLED 2026-06-03 (user directive). The multi-CTA-per-tile
+        # KERNEL split-K (qkv_a / ext-reduce, fp8_gemm_dense_qkva_splitk_sm100)
+        # is conclusively crash-blocked at multi-rank decode: a deep race that
+        # IMAs under BOTH rdc=true and MPK_RDC_FALSE, at ANY factor (test-mode /
+        # coredump / compute-sanitizer / factor-sweep all exhausted — see
+        # experiment_history/INDEX.md). At TP=4 it HANGS (rc=137) → unkillable
+        # D-state zombies that brick GPUs until reboot. Force OFF so no env var
+        # (MPK_DSV3_QKVA_SPLITK_V2 / MPK_DSV3_DENSE_SPLITK_EXTREDUCE[_GENERALIZE])
+        # can ever select it. Default behavior is unchanged (these gates default
+        # to False with no env set). This is the KERNEL split-K ONLY — the
+        # working builder-side MPK_DSV3_BUILDER_SPLITK (lever L1) is a separate
+        # path and is NOT affected. Remove this block only if the race is fixed.
+        if use_qkva_splitk_v2 or use_extreduce:
+            print("[split-K] kernel split-K requested via env but HARD-DISABLED "
+                  "(crash-blocked at multi-rank decode; see experiment_history/"
+                  "INDEX.md) — using the standard dense GEMM instead.")
+        use_qkva_splitk_v2 = False
+        use_extreduce = False
+        # ====================================================================
+
+        # 2026-06-04: ferret FP8 split-K dense GEMM with a TMA reduce-add
+        # epilogue (TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100). Distinct from
+        # the HARD-DISABLED kernel split-K above: instead of red.global.add
+        # atomics / in-kernel inter-CTA last-arriver, each K-slice CTA stages a
+        # bf16 partial to SMEM and issues one cp.reduce.async.bulk.tensor.2d
+        # (TMA-engine reduce-add) into a PRE-ZEROED bf16 output — the path
+        # ferret built specifically to avoid the IMA/crash at TP>=2 under
+        # NVSHMEM. The kernel bakes the decode-only gate (`if q_len_>8 return`),
+        # so this is a DECODE companion; prefill stays on the mediumm GEMM.
+        # DEFAULT-OFF (MPK_DSV3_FP8_SPLITK_TMAREDUCE unset) => byte-identical.
+        # The MAIN AGENT owns the multi-rank crash verdict; this is wired +
+        # test-mode-validated here. Two ferret-validated shapes:
+        #   qkv_a       : gate_mode 0, residual None, K=7168, N=2176 -> SK=8
+        #   shared GU   : gate_mode 0, residual None, K=7168, N=1024 -> SK=4
+        # (both are gate_mode==0, residual==None always-run GEMMs; the prefill
+        # companion below fills the output during prefill so a downstream
+        # consumer never reads only-zeroed memory.)
+        _tmar_on = (
+            os.environ.get("MPK_DSV3_FP8_SPLITK_TMAREDUCE") == "1")
+        # ✅ 2026-06-04: the TP=4-MoE co-residency CRASH was ROOT-CAUSED + FIXED.
+        # It was a named-barrier-ID HAZARD (the hypothesis below), NOT a TMEM drain:
+        # the split-K epilogue issued `bar.sync 1, 128`, and ID 1 is CUTLASS/CuTe-
+        # RESERVED — it collided with the MoE-phase tcgen05 task mix's internal use of
+        # named barrier 1, corrupting the sync and faulting (illegal-mem). Fix: move
+        # the epilogue barrier to an unreserved ID (`bar.sync 1 -> 13`) in
+        # fp8_gemm_dense_splitk_tma_reduce_sm100.cuh (a .cuh = JIT-recompiled, no lib
+        # rebuild). EVIDENCE: single-card "pretend TP=4" (MPK_FORCE_BUILD_WS=4 + skip
+        # AllReduce, all MoE tasks co-resident, layers 0-4) went rc=255(crash) ->
+        # rc=0(clean) DETERMINISTICALLY n=3; test-mode correctness preserved
+        # (qkv_a SK8 / gate_up SK4 cos=0.999994 / 1.0000 — the bar-13 move is math-
+        # neutral). STILL DEFAULT-OFF: the single-card test reproduces the exact per-
+        # GPU co-residency (the crash was never in NVSHMEM/AllReduce), but the
+        # real-4-card per-MoE-layer PERF win + a final live multi-rank crash-clean
+        # are card-gated and not yet measured — flip the default only after that quad
+        # run confirms both. (The barrier fix is the gating prerequisite, now cleared.)
+        use_tmareduce = (
+            _tmar_on
+            and residual is None
+            and gate_mode == 0
+            and K_v2 == 7168
+            and N_v2 % 128 == 0
+            and N_v2 in (QKV_A_FUSED_N, 1024)  # 2176 (qkv_a) / 1024 (shared GU)
+        )
+        if use_tmareduce:
+            # ferret-validated split-K factors: qkv_a SK=8, shared gate_up SK=4.
+            _tmar_default_sk = 8 if N_v2 == QKV_A_FUSED_N else 4
+            tmar_split_k = int(
+                os.environ.get(
+                    "MPK_DSV3_FP8_SPLITK_TMAREDUCE_FACTOR",
+                    str(_tmar_default_sk)))
+            # K must split evenly at the (128*split_k) boundary. Step down to
+            # the largest divisor of K/128 <= the requested factor if not.
+            if K_v2 % (128 * tmar_split_k) != 0:
+                kt = K_v2 // 128
+                cand = [s for s in range(tmar_split_k, 0, -1) if kt % s == 0]
+                tmar_split_k = cand[0] if cand else 1
+            if tmar_split_k < 1 or K_v2 % (128 * tmar_split_k) != 0:
+                use_tmareduce = False
+
+        # Stage B (2026-06-05, opt-in MPK_DSV3_FP8_SPLITK_TMAREDUCE_GFLAG=1):
+        # eliminate the pre-zero tensor_init via the kernel's k0-store/k>0-
+        # reduce-add fork. Default OFF => the byte-identical pre-zero path.
+        # AUDITED hang-safe at decode (nn*split_k<=num_workers); the register fn
+        # asserts it. epoch=runtime_config.step[0]+1 (kernel-side).
+        _tmar_gflag = (
+            os.environ.get("MPK_DSV3_FP8_SPLITK_TMAREDUCE_GFLAG") == "1")
+
+        # o_proj decode split-K via the SAME gflag tma-reduce kernel, on the
+        # RowParallel path (gate_mode==2, residual not None, K=16384, N=7168,
+        # absorbed o_proj at TP>1). The kernel's k0-store/k>0-reduce-add fork
+        # does the WITHIN-rank K-slice reduce into the bf16 `partial`; the
+        # existing RowParallel AllReduce (_allreduce_residual) does the CROSS-
+        # rank sum + residual unchanged (no AllReduce-fold needed — the cp.reduce
+        # IS the K-reduce, NVSHMEM sums across ranks not slices). The kernel
+        # bakes the decode gate (`if q_len_>8 return`), so prefill o_proj stays
+        # on its SEPARATE gate_mode==1 mediumm dispatch (no companion needed
+        # here). SK=2 ONLY: nn=N/128=56 tiles, 56*2=112 <= num_workers (single
+        # wave, hang-safe per the register-fn assert); SK=4 (224>136) forces the
+        # multi-tile-iter mbarrier deadlock regime. DEFAULT-OFF
+        # (MPK_DSV3_OPROJ_TMAREDUCE unset) => byte-identical. The o_proj-shape
+        # multi-rank crash is UNVERIFIED (TP=2 sanitizer passed at the qkv_a
+        # shape only) — the main agent owns the o_proj-np4 crash verdict.
+        _oproj_tmar_on = (
+            os.environ.get("MPK_DSV3_OPROJ_TMAREDUCE") == "1")
+        use_oproj_tmareduce = (
+            _oproj_tmar_on
+            and residual is not None
+            and gate_mode == 2
+            and self.world_size > 1
+            and N_v2 % 128 == 0
+            and K_v2 % 128 == 0
+        )
+        if use_oproj_tmareduce:
+            oproj_tmar_split_k = int(
+                os.environ.get("MPK_DSV3_OPROJ_TMAREDUCE_FACTOR", "2"))
+            nn_op = (N_v2 + 127) // 128
+            # Step down to the largest crash/hang-safe factor: K divisible by
+            # 128*SK AND nn*SK <= num_workers (single-wave, the assert contract).
+            while oproj_tmar_split_k > 1 and (
+                    K_v2 % (128 * oproj_tmar_split_k) != 0
+                    or nn_op * oproj_tmar_split_k > self.num_workers):
+                oproj_tmar_split_k -= 1
+            if (oproj_tmar_split_k < 1
+                    or K_v2 % (128 * oproj_tmar_split_k) != 0
+                    or nn_op * oproj_tmar_split_k > self.num_workers):
+                use_oproj_tmareduce = False
+
+        def _emit_oproj_tmareduce(out_tensor):
+            # gflag tma-reduce split-K into the bf16 RowParallel partial. Always
+            # the gflag path (pre-zero-elimination); per-weight int32 scratch of
+            # ceil(N/128) entries, zero-initialized once at allocation (shared
+            # with _emit_tmareduce's cache).
+            nn = (N_v2 + 127) // 128
+            wid = id(weight_fp8_raw)
+            if not hasattr(self, "_tmar_gflag_torch"):
+                self._tmar_gflag_torch = {}
+                self._tmar_gflag_dt = {}
+            if wid not in self._tmar_gflag_dt:
+                gf_torch = torch.zeros(nn, dtype=torch.int32, device="cuda")
+                self._tmar_gflag_torch[wid] = gf_torch
+                self._tmar_gflag_dt[wid] = self.mpk.attach_input(
+                    torch_tensor=gf_torch, name=f"tmar_gflag_{wid}")
+            gflag_dt = self._tmar_gflag_dt[wid]
+            self.mpk.fp8_gemm_dense_splitk_tma_reduce_gflag_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=out_tensor,
+                gflag=gflag_dt,
+                num_workers=self.num_workers,
+                split_k=oproj_tmar_split_k,
+            )
+
+        def _emit_tmareduce(out_tensor):
+            if not _tmar_gflag:
+                # FP8 split-K GEMM with TMA reduce-add into the PRE-ZEROED bf16
+                # out_tensor (the layer prepends a tensor_init zero-fill).
+                self.mpk.fp8_gemm_dense_splitk_tma_reduce_layer(
+                    input_fp8=input_fp8,
+                    weight_fp8=weight_fp8_raw,
+                    input_scale=input_scale,
+                    weight_scale=weight_scale_raw,
+                    output=out_tensor,
+                    num_workers=self.num_workers,
+                    split_k=tmar_split_k,
+                )
+                return
+            # gflag path: per-weight int32 scratch of ceil(N/128) entries, ZERO-
+            # INITIALIZED ONCE at allocation (MPK cuda_tensors are not zeroed at
+            # alloc and tensor_init can't reliably zero a 1D int buffer, so use an
+            # attached torch.zeros held by the builder — the qkva_splitk_v2
+            # arrive_cnt pattern). The kernel self-maintains the monotone-epoch
+            # invariant after each clean use, so a one-time zero suffices.
+            nn = (N_v2 + 127) // 128
+            wid = id(weight_fp8_raw)
+            if not hasattr(self, "_tmar_gflag_torch"):
+                self._tmar_gflag_torch = {}
+                self._tmar_gflag_dt = {}
+            if wid not in self._tmar_gflag_dt:
+                gf_torch = torch.zeros(nn, dtype=torch.int32, device="cuda")
+                self._tmar_gflag_torch[wid] = gf_torch
+                self._tmar_gflag_dt[wid] = self.mpk.attach_input(
+                    torch_tensor=gf_torch, name=f"tmar_gflag_{wid}")
+            gflag_dt = self._tmar_gflag_dt[wid]
+            self.mpk.fp8_gemm_dense_splitk_tma_reduce_gflag_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=out_tensor,
+                gflag=gflag_dt,
+                num_workers=self.num_workers,
+                split_k=tmar_split_k,
+            )
+
+        def _emit_qkva_splitk_v2(out_tensor):
+            # RETIRED 2026-06-03: the in-kernel last-arriver split-K reduction
+            # this emitted (fp8_gemm_dense_qkva_splitk_layer, EXT_REDUCE=false)
+            # raced at multi-rank decode and has been removed. Design-A
+            # (external event-gated reduce, _emit_extreduce) is now the only
+            # split-K path; the MPK_DSV3_QKVA_SPLITK_V2 gate is redirected into
+            # _er_base above so this helper is never reached. Kept as a tripwire:
+            # the kernel's non-extred entry now writes ONLY partials (no in-kernel
+            # reduce), so emitting it WITHOUT a companion reduce task would leave
+            # the output unfilled — fail loudly instead of producing garbage.
+            raise RuntimeError(
+                "_emit_qkva_splitk_v2 is retired: the in-kernel last-arriver "
+                "split-K reduction raced at multi-rank decode and was removed. "
+                "MPK_DSV3_QKVA_SPLITK_V2 now selects the race-free external-"
+                "reduce path (_emit_extreduce); this helper must not be called.")
+            # (dead) Per-output-tensor C_partial + arrive_cnt scratch (cached by
+            # the weight id so each layer's qkv_a GEMM gets its own buffers —
+            # they are written+reduced within a single GEMM invocation, no cross-
+            # layer reuse hazard, but distinct buffers avoid a false multi-
+            # writer dep across layers). Sizes (compile-time M=mbt, BM=BN=128):
+            #   C_partial: SPLIT_K * ceil(M/128) * ceil(N/128) * 128 * 128 fp32
+            #   arrive_cnt: ceil(N/128) uint64
+            mbt = self.max_num_batched_tokens
+            mm = (mbt + 127) // 128
+            nn = (N_v2 + 127) // 128
+            cp_elems = v2_split_k * mm * nn * 128 * 128
+            wid = id(weight_fp8_raw)
+            if not hasattr(self, "_qkva_splitk_v2_bufs"):
+                self._qkva_splitk_v2_bufs = {}
+            if wid not in self._qkva_splitk_v2_bufs:
+                c_partial = self.mpk.new_tensor(
+                    dims=(cp_elems,), dtype=float32,
+                    name=f"qkva_splitk_v2_cpartial_{wid}",
+                    io_category="cuda_tensor")
+                # arrive_cnt MUST start with lower-32-bits == 0 (clean per-tile
+                # gen-tagged counter). MPK cuda_tensors are NOT zeroed at alloc
+                # and the wrapper's prepended tensor_init does NOT effectively
+                # zero a 1D uint64 buffer (tensor_init zeros BATCH*OUT*2 bytes
+                # via a bf16 view; a 1D target silently under-zeros). The kernel
+                # self-maintains count==0 after every clean use (the tail
+                # gen-bump leaves the low 32 bits zero), so a reliable ONE-TIME
+                # zero at allocation is sufficient — provide it via an attached
+                # torch.zeros buffer held by the builder (mirrors the passing
+                # test driver, which also torch.zeros-es arrive_cnt at alloc).
+                if not hasattr(self, "_qkva_splitk_v2_arrivecnt_torch"):
+                    self._qkva_splitk_v2_arrivecnt_torch = {}
+                ac_torch = torch.zeros(nn, dtype=torch.int64, device="cuda")
+                self._qkva_splitk_v2_arrivecnt_torch[wid] = ac_torch
+                arrive_cnt = self.mpk.attach_input(
+                    torch_tensor=ac_torch,
+                    name=f"qkva_splitk_v2_arrivecnt_{wid}")
+                self._qkva_splitk_v2_bufs[wid] = (c_partial, arrive_cnt)
+            c_partial, arrive_cnt = self._qkva_splitk_v2_bufs[wid]
+            self.mpk.fp8_gemm_dense_qkva_splitk_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=out_tensor,
+                c_partial=c_partial,
+                arrive_cnt=arrive_cnt,
+                num_workers=self.num_workers,
+                split_k=v2_split_k,
+            )
+
+        def _emit_extreduce(out_tensor):
+            # External-reduce split-K: GEMM writes exclusive FP32 partials ->
+            # event-gated reduce task sums -> bf16 out_tensor. Per-weight
+            # C_partial scratch (cached by weight id; no arrive_cnt needed —
+            # the reduce reads full-precision partials, no in-kernel reuse).
+            #   C_partial: SPLIT_K * ceil(M/128) * ceil(N/128) * 128 * 128 fp32
+            mbt = self.max_num_batched_tokens
+            mm = (mbt + 127) // 128
+            nn = (N_v2 + 127) // 128
+            cp_elems = er_split_k * mm * nn * 128 * 128
+            wid = id(weight_fp8_raw)
+            if not hasattr(self, "_extreduce_bufs"):
+                self._extreduce_bufs = {}
+            if wid not in self._extreduce_bufs:
+                c_partial = self.mpk.new_tensor(
+                    dims=(cp_elems,), dtype=float32,
+                    name=f"extreduce_cpartial_{wid}",
+                    io_category="cuda_tensor")
+                self._extreduce_bufs[wid] = c_partial
+            c_partial = self._extreduce_bufs[wid]
+            self.mpk.fp8_gemm_dense_qkva_splitk_extred_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                c_partial=c_partial,
+                num_workers=self.num_workers,
+                split_k=er_split_k,
+            )
+            # ncol fans each output tile's columns across more CTAs so the
+            # reduce fills idle SMs at decode M=1 (default 4 -> ~68 active CTAs
+            # at qkv_a N=2176, matching the split-K GEMM's occupancy). Tunable
+            # via MPK_DSV3_DENSE_SPLITK_EXTREDUCE_NCOL.
+            er_ncol = int(
+                os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE_NCOL", "4"))
+            self.mpk.fp8_gemm_dense_splitk_reduce_layer(
+                c_partial=c_partial,
+                output=out_tensor,
+                M=mbt,
+                N=N_v2,
+                split_k=er_split_k,
+                num_workers=self.num_workers,
+                ncol=er_ncol,
+            )
+
         if residual is None:
+            if use_tmareduce:
+                _emit_tmareduce(output)
+                # qkv_a / shared gate_up are always-run (gate_mode==0) and not
+                # dual-dispatched elsewhere; the TMA-reduce kernel bakes the
+                # decode gate (`if q_len_>8 return`), so for a prefill-capable
+                # build we MUST emit a prefill companion (mediumm,
+                # runtime_m_mode=2) AFTER the split-K. WAW order:
+                # tensor_init -> split-K -> mediumm. In prefill (q_len>8) the
+                # mediumm writes last; in decode (q_len<=8) it early-returns and
+                # the TMA-reduce result stands. (Mirrors the extreduce companion
+                # logic above.)
+                if self._use_prefill:
+                    gemm_layer(
+                        input_fp8=input_fp8,
+                        weight_fp8=weight_fp8_raw,
+                        input_scale=input_scale,
+                        weight_scale=weight_scale_raw,
+                        output=output,
+                        num_workers=dense_nw,
+                        runtime_m_mode=2,
+                    )
+                return
+            if use_extreduce:
+                _emit_extreduce(output)
+                # Prefill companion is ONLY needed for the always-run qkv_a
+                # (gate_mode==0): its output buffer must be filled during
+                # prefill too, since nothing else writes it. A gate_mode==2
+                # decode-only GEMM (q_b_pe) has a SEPARATE gate_mode==1 prefill
+                # dispatch that fills the prefill buffers — emitting a mediumm
+                # companion here would be a redundant (and wrong-buffer) write.
+                # DIAGNOSTIC (2026-06-03): MPK_DSV3_EXTREDUCE_NO_COMPANION=1
+                # drops the companion to test whether the dual-writer on
+                # qkv_a_out is the TP=2-decode illegal-memory-access source.
+                _no_companion = (
+                    os.environ.get("MPK_DSV3_EXTREDUCE_NO_COMPANION") == "1")
+                if self._use_prefill and gate_mode == 0 and not _no_companion:
+                    # Prefill companion: mediumm with runtime_m_mode=2 writes
+                    # output last in prefill (q_len>8); in decode it early-
+                    # returns and the (split-K GEMM -> reduce) result stands.
+                    # WAW order: (split-K GEMM, reduce) -> mediumm.
+                    gemm_layer(
+                        input_fp8=input_fp8,
+                        weight_fp8=weight_fp8_raw,
+                        input_scale=input_scale,
+                        weight_scale=weight_scale_raw,
+                        output=output,
+                        num_workers=dense_nw,
+                        runtime_m_mode=2,
+                    )
+                return
+            if use_qkva_splitk_v2:
+                _emit_qkva_splitk_v2(output)
+                if self._use_prefill:
+                    # Prefill companion: mediumm with runtime_m_mode=2
+                    # (prefill-only). WAW order split-K -> mediumm means in
+                    # prefill the mediumm overwrites output last; in decode it
+                    # early-returns and the split-K result stands.
+                    gemm_layer(
+                        input_fp8=input_fp8,
+                        weight_fp8=weight_fp8_raw,
+                        input_scale=input_scale,
+                        weight_scale=weight_scale_raw,
+                        output=output,
+                        num_workers=dense_nw,
+                        runtime_m_mode=2,
+                    )
+                return
             if use_decode_splitk:
                 _emit_decode_splitk(output)
+                # The split-K kernel bakes runtime_m_mode=3 (DECODE-ONLY:
+                # `if (q_len_ > 8) return;`). qkv_a/gate_up are always-run
+                # (gate_mode=0) and are NOT dual-dispatched elsewhere (unlike
+                # o_proj's gate_mode=2 prefill path), so for a prefill-capable
+                # build we MUST emit a prefill companion — otherwise qkv_a_out
+                # is left only tensor_init-zeroed during prefill and a
+                # downstream consumer (q_b GEMM / kv_a-LN / MLA gather) reads
+                # the uninitialized buffer -> "illegal memory access" (root-
+                # caused 2026-06-01 from the generated megakernel source; the
+                # crash surfaced late at the host NVSHMEM barrier). Emit the
+                # mediumm AFTER the split-K so the WAW order is
+                # tensor_init -> split-K -> mediumm: in prefill (q_len>8) the
+                # mediumm (runtime_m_mode=2) writes last, after the pre-zero;
+                # in decode (q_len<=8) it early-returns and split-K's result stands.
+                if use_qkva_gateup_splitk and self._use_prefill:
+                    gemm_layer(
+                        input_fp8=input_fp8,
+                        weight_fp8=weight_fp8_raw,
+                        input_scale=input_scale,
+                        weight_scale=weight_scale_raw,
+                        output=output,
+                        num_workers=dense_nw,
+                        runtime_m_mode=2,
+                    )
             else:
                 gemm_layer(
                     input_fp8=input_fp8,
@@ -775,7 +1482,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     input_scale=input_scale,
                     weight_scale=weight_scale_raw,
                     output=output,
-                    num_workers=self._fp8_dense_num_workers(),
+                    num_workers=dense_nw,
                     runtime_m_mode=gemm_runtime_m_mode,
                 )
             return
@@ -784,7 +1491,28 @@ class DeepSeekV3Builder(GraphBuilder):
             idx = getattr(self, "_tp_residual_linear_idx", 0)
             self._tp_residual_linear_idx = idx + 1
             partial = self._new_tp_partial(output, f"tp_v2_residual_partial_{idx}")
-            if use_decode_splitk:
+            if use_oproj_tmareduce:
+                # o_proj decode (gate_mode==2, RowParallel) via the gflag
+                # tma-reduce split-K: the decode-gated kernel does the within-
+                # rank K-slice reduce (k0-store/k>0-reduce-add fork, no pre-zero)
+                # into the BF16 `partial`; the decode-gated AllReduce below sums
+                # across TP ranks + adds residual (unchanged — the cp.reduce is
+                # the K-reduce, NVSHMEM is the cross-rank reduce). Prefill o_proj
+                # is a SEPARATE gate_mode==1 dispatch into its OWN partial/AR, so
+                # NO companion is needed here (same as the ext-reduce path).
+                _emit_oproj_tmareduce(partial)
+            elif use_extreduce:
+                # o_proj decode (gate_mode==2, RowParallel): the ext-reduce
+                # split-K GEMM writes the BF16 partial (decode-gated), then the
+                # decode-gated AllReduce sums across TP ranks and adds residual.
+                # The prefill o_proj is a SEPARATE gate_mode==1 dispatch into its
+                # OWN partial/AR, so no companion is needed here. This is the
+                # SAME race-free design that replaces the old racy red.add
+                # o_proj split-K — the reduce is a distinct event-gated task,
+                # not an in-kernel inter-CTA atomic, and the AR is ordered after
+                # it by the RAW edge on `partial`.
+                _emit_extreduce(partial)
+            elif use_decode_splitk:
                 _emit_decode_splitk(partial)
             else:
                 gemm_layer(
@@ -793,7 +1521,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     input_scale=input_scale,
                     weight_scale=weight_scale_raw,
                     output=partial,
-                    num_workers=self._fp8_dense_num_workers(),
+                    num_workers=dense_nw,
                     runtime_m_mode=gemm_runtime_m_mode,
                 )
             self._allreduce_residual(partial, output, residual,
@@ -815,7 +1543,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 input_scale=input_scale,
                 weight_scale=weight_scale_raw,
                 output=partial,
-                num_workers=self._fp8_dense_num_workers(),
+                num_workers=dense_nw,
                 runtime_m_mode=gemm_runtime_m_mode,
             )
         self.mpk.elementwise_add_layer(
@@ -926,7 +1654,8 @@ class DeepSeekV3Builder(GraphBuilder):
                      input_col_offset: int = 0,
                      share_quantize_tag: str = None,
                      input_fp8_override=None,
-                     input_scale_override=None):
+                     input_scale_override=None,
+                     no_wave_collapse: bool = False):
         """Quantize BF16 input → FP8, then run FP8 GEMM.
 
         Now routes through the new `fp8_gemm_dense_smallm/mediumm_sm100`
@@ -973,6 +1702,7 @@ class DeepSeekV3Builder(GraphBuilder):
             share_quantize_tag=share_quantize_tag,
             input_fp8_override=input_fp8_override,
             input_scale_override=input_scale_override,
+            no_wave_collapse=no_wave_collapse,
         )
 
     def _fused_rmsnorm_quantize_qkv_a_tag(self, layer_idx: int) -> str:
@@ -1325,6 +2055,36 @@ class DeepSeekV3Builder(GraphBuilder):
         w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
             state_dict, f"{attn}q_b_pe.weight",
             f"layer_{layer_idx}_q_b_pe_decode")
+        # INTER-TASK OVERLAP (MPK_DSV3_OVERLAP_PROJ): when neither q_a fusion
+        # nor dual-dispatch quantize-sharing already supplied an input_fp8
+        # override, q_b_pe and q_b_nope would both pull the SAME cached FP8
+        # input buffer (`fp8_input_v2_1536_shared`) and both write it via their
+        # own quantize → a WAW edge that serializes the two projections.
+        # Hand q_b_pe its OWN per-layer FP8 input buffer (+ its own quantize
+        # reading the same q_a) so the two quantize tasks write disjoint
+        # buffers and become independent forks off q_a → concurrent dispatch.
+        # Bit-identical: q_b_pe's quantize reads the same q_a slice and writes
+        # the same bytes, just to a dedicated buffer instead of the shared one.
+        pe_fp8_ovr, pe_scale_ovr = qb_input_fp8_ovr, qb_input_scale_ovr
+        if (self._overlap_proj
+                and qb_input_fp8_ovr is None
+                and qb_input_scale_ovr is None):
+            mbt_ = self.max_num_batched_tokens
+            red_ = w_q_b_pe.dim(1)  # K = q_lora_rank = 1536
+            num_groups_ = (red_ + 127) // 128
+            if not hasattr(self, "_overlap_qb_pe_bufs"):
+                self._overlap_qb_pe_bufs = {}
+            if layer_idx not in self._overlap_qb_pe_bufs:
+                pe_fp8 = self.mpk.new_tensor(
+                    dims=(mbt_, red_), dtype=float8_e4m3,
+                    name=f"overlap_qb_pe_fp8_layer_{layer_idx}",
+                    io_category="cuda_tensor")
+                pe_scale = self.mpk.new_tensor(
+                    dims=(mbt_, num_groups_), dtype=float32,
+                    name=f"overlap_qb_pe_scale_layer_{layer_idx}",
+                    io_category="cuda_tensor")
+                self._overlap_qb_pe_bufs[layer_idx] = (pe_fp8, pe_scale)
+            pe_fp8_ovr, pe_scale_ovr = self._overlap_qb_pe_bufs[layer_idx]
         # 1) q_b_pe FIRST so its _fp8_linear emits the q_a input-side
         # quantize task (shared via qb_share_tag with q_b_nope's downstream
         # consumer). When _fused_qb_quantize is OFF (legacy path), the
@@ -1337,9 +2097,13 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
             gate_mode=2 if self._use_prefill else 0,
-            share_quantize_tag=qb_share_tag,
-            input_fp8_override=qb_input_fp8_ovr,
-            input_scale_override=qb_input_scale_ovr,
+            # When the overlap dedicated buffer is active, drop the share tag
+            # so q_b_pe emits its OWN quantize into its OWN buffer (no shared
+            # write to dedup against — that's the whole point).
+            share_quantize_tag=(
+                None if pe_fp8_ovr is not qb_input_fp8_ovr else qb_share_tag),
+            input_fp8_override=pe_fp8_ovr,
+            input_scale_override=pe_scale_ovr,
             **qb_slice_kwargs)
         if self._fused_qb_quantize:
             # 2 fused) q_b_nope FP8 dense GEMM with epilogue UE8M0 quantize
@@ -1359,6 +2123,35 @@ class DeepSeekV3Builder(GraphBuilder):
             else:
                 input_fp8_buf, input_scale_buf = (
                     self._fp8_mbt_buffers_for_reduction_f32scale(reduction_size))
+                # INTER-TASK OVERLAP correctness: the fused fp8out q_b_nope GEMM
+                # does NOT emit its own input quantize — it relies on q_b_pe's
+                # _fp8_linear having already written `fp8_input_v2_1536_shared`.
+                # But under MPK_DSV3_OVERLAP_PROJ, q_b_pe writes its OWN
+                # dedicated buffer instead, leaving the shared buffer unfilled.
+                # So emit q_b_nope's quantize here (reading the same q_a slice,
+                # matching _fp8_linear_v2's float32-scale quantize parameters).
+                # This is the second independent fork off q_a — bit-identical
+                # bytes, now parallel with q_b_pe's quantize/GEMM chain.
+                if (self._overlap_proj
+                        and pe_fp8_ovr is not qb_input_fp8_ovr):
+                    nope_q_kwargs = {}
+                    irs = qb_slice_kwargs.get("input_row_stride")
+                    ico = qb_slice_kwargs.get("input_col_offset", 0)
+                    if irs is not None or ico != 0:
+                        nope_q_kwargs["hidden_size_override"] = reduction_size
+                        nope_q_kwargs["input_stride_override"] = (
+                            irs if irs is not None else self.q_a_out.dim(1))
+                        nope_q_kwargs["in_offset_elems"] = ico
+                    self.mpk.quantize_fp8_layer(
+                        input=self.q_a_out,
+                        output_fp8=input_fp8_buf,
+                        output_scale=input_scale_buf,
+                        grid_dim=(self.max_num_batched_tokens, 1, 1),
+                        block_dim=(128, 1, 1),
+                        scale_ue8m0=False,
+                        active_mode=(3 if self._use_prefill else 0),
+                        **nope_q_kwargs,
+                    )
             gemm_fp8out_layer = (
                 self.mpk.fp8_gemm_dense_smallm_fp8out_layer
                 if self.mpk.max_seq_length <= 512
@@ -1372,11 +2165,16 @@ class DeepSeekV3Builder(GraphBuilder):
                 weight_scale=s_q_b_nope,
                 output_fp8=q_nope_fp8,
                 output_scale=q_nope_scale,
+                # BMM-feeding GEMM: q_nope_fp8 -> linear_fp8_bmm (kv_b_k). Keep
+                # the ORIGINAL num_workers (no per-call-site wave-collapse) so
+                # the downstream BMM template's validated grid is preserved.
                 num_workers=self._fp8_dense_num_workers(),
                 runtime_m_mode=gemm_runtime_m_mode,
             )
         else:
-            # 2) q_b_nope FP8 dense GEMM → q_nope_3d (mbt, H, 128) bf16
+            # 2) q_b_nope FP8 dense GEMM → q_nope_3d (mbt, H, 128) bf16.
+            # BMM-feeding (q_nope_3d -> quantize -> q_nope_fp8 -> BMM): keep the
+            # original dense GEMM num_workers (no wave-collapse).
             self._fp8_linear(
                 self.q_a_out, w_q_b_nope, s_q_b_nope, q_nope_3d,
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)), 1, 1),
@@ -1385,6 +2183,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 share_quantize_tag=qb_share_tag,
                 input_fp8_override=qb_input_fp8_ovr,
                 input_scale_override=qb_input_scale_ovr,
+                no_wave_collapse=True,
                 **qb_slice_kwargs)
             # 3) Quantize q_nope BF16 → FP8 + UE8M0 packed scale.
             # Each row's K=128, so packed_K=1. row_count = mbt * H rows.
@@ -1480,7 +2279,78 @@ class DeepSeekV3Builder(GraphBuilder):
 
         active_mode_o = 3 if self._use_prefill else 0  # decode-only on dual-dispatch
 
-        if self._dsv3_bmm_dense:
+        # D3 (2026-06-03): fuse BMM2's float32-scale quantize into the BMM
+        # epilogue (FP8-out flavor) when MPK_DSV3_FUSE_EPILOGUE_QUANT=1. Only
+        # valid on the dense BMM2 path (the swapAB BMM has no float32 epilogue).
+        # The o_proj input width K = H_local*128; the per-head BMM writes one
+        # 128-K-group per head, so the fused FP8 [mbt, H*128] + float32 scale
+        # [mbt, H] land exactly in the layout the o_proj dense GEMM reads.
+        fuse_o_epilogue = self._fuse_epilogue_quant and self._dsv3_bmm_dense
+        o_fused_fp8_ovr = None
+        o_fused_scale_ovr = None
+        o_fused_tag = None
+        if fuse_o_epilogue:
+            o_reduction_size = H_local * V_HEAD_DIM  # = K of the o_proj GEMM
+            o_num_groups = (o_reduction_size + 127) // 128  # == H_local
+            if not hasattr(self, "_fused_o_bufs"):
+                self._fused_o_bufs = {}
+            if layer_idx not in self._fused_o_bufs:
+                # Per-layer-unique FP8 + float32-scale buffers (case-3 safety,
+                # mirroring the L9 q_a fusion): the fp8out BMM is the sole
+                # writer, the o_proj GEMM the sole reader, per layer.
+                o_fp8 = self.mpk.new_tensor(
+                    dims=(mbt, o_reduction_size), dtype=float8_e4m3,
+                    name=f"fused_o_in_fp8_layer_{layer_idx}",
+                    io_category="cuda_tensor")
+                o_scale = self.mpk.new_tensor(
+                    dims=(mbt, o_num_groups), dtype=float32,
+                    name=f"fused_o_in_scale_layer_{layer_idx}",
+                    io_category="cuda_tensor")
+                self._fused_o_bufs[layer_idx] = (o_fp8, o_scale)
+            o_fused_fp8_ovr, o_fused_scale_ovr = self._fused_o_bufs[layer_idx]
+            # Pre-populate the emitted-set so the o_proj _fp8_linear_v2 skips
+            # its internal quantize (which would clobber the fused bytes).
+            o_fused_tag = f"layer_{layer_idx}_o_proj_fused_epilogue_quant"
+            already = getattr(self, "_fp8_quantize_emitted", set())
+            already.add(o_fused_tag)
+            self._fp8_quantize_emitted = already
+
+        if fuse_o_epilogue:
+            # Step 1+2 fused: per-head BMM-dense with FP8-out epilogue. Writes
+            # attn_out_reduced as FP8 [mbt, H*128] + float32 scale [mbt, H]
+            # directly (no bf16 attn_out_reduced, no standalone quantize task).
+            w_kvv_bmm = self.mpk.attach_input(
+                torch_tensor=state_dict[f"{attn}kv_b_v_bmm_dense.weight"],
+                name=f"layer_{layer_idx}_kv_b_v_bmm_dense")
+            s_kvv_bmm = self.mpk.attach_input(
+                torch_tensor=state_dict[
+                    f"{attn}kv_b_v_bmm_dense.weight_scale_inv"],
+                name=f"layer_{layer_idx}_kv_b_v_bmm_dense_scale")
+            # Step 1 (input quantize of attn_out → attn_out_fp8 / scale_f32):
+            # still required — the BMM consumes the *quantized* attention
+            # output. This is a quantize on attention output, not a fusable
+            # GEMM→quantize hop. (The fusion eliminates the OUTPUT-side quantize
+            # of BMM2, not the input-side quantize of BMM2.)
+            self.mpk.quantize_fp8_layer(
+                input=self.attn_out,
+                output_fp8=attn_out_fp8,
+                output_scale=attn_out_scale_f32,
+                grid_dim=(1, mbt * H_local, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=False,
+                active_mode=active_mode_o,
+            )
+            self.mpk.linear_fp8_bmm_dense_fp8out_sm100_layer(
+                input_fp8=attn_out_fp8,
+                input_scale=attn_out_scale_f32,
+                weight_fp8=w_kvv_bmm,
+                weight_scale=s_kvv_bmm,
+                output_fp8=o_fused_fp8_ovr,
+                output_scale=o_fused_scale_ovr,
+                grid_dim=(1, H_local, 1),
+                block_dim=(256, 1, 1),
+            )
+        elif self._dsv3_bmm_dense:
             # Step 1 (dense): quantize attn_out BF16 → FP8 + float32 1x128-group
             # scale [mbt, H, nk]. Input self.attn_out is (mbt, H*KV_LORA) 2D;
             # output FP8 is 3D (mbt, H, KV_LORA), same byte layout; the float32
@@ -1556,6 +2426,12 @@ class DeepSeekV3Builder(GraphBuilder):
         w_o_orig, s_o_orig = self._attach_fp8_weight(
             state_dict, f"{attn}o_proj_original.weight",
             f"layer_{layer_idx}_o_proj_original_bmm")
+        # D3: when BMM2's epilogue already emitted o_proj's FP8 input + float32
+        # scale (fuse_o_epilogue), point o_proj at those buffers and skip its
+        # internal quantize (the share tag was pre-added to _fp8_quantize_emitted
+        # above so _fp8_linear_v2's emit_quantize is False). attn_out_reduced is
+        # still passed as input_bf16 to satisfy the shape asserts; the kernel
+        # reads the override FP8/scale instead.
         self._fp8_linear(
             attn_out_reduced,
             w_o_orig,
@@ -1565,6 +2441,9 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             residual=residual,
             gate_mode=2 if self._use_prefill else 0,
+            share_quantize_tag=o_fused_tag,
+            input_fp8_override=o_fused_fp8_ovr,
+            input_scale_override=o_fused_scale_ovr,
         )
 
     def _fp8_dense_kv_b_proj(
@@ -1995,6 +2874,24 @@ class DeepSeekV3Builder(GraphBuilder):
         # the graph. Prompt tails with q_len > 8 still use the prefill path
         # when MBT is a real chunk size; q_len <= 8 tails use decode kernels.
         self._use_prefill = mbt > 8
+        # MPK_DSV3_DECODE_LEAN (2026-06-06, footprint probe): when set, SKIP
+        # registering the prefill-EXCLUSIVE task variants (mla_prefill_tp8_chunked,
+        # the unabsorbed q_b gate_mode=1 GEMMs, the kv_b_k/v dense prefill GEMMs,
+        # the split unabsorbed ROPE-Q, the gate_mode=1 prefill o_proj, and the
+        # router splitk prefill companion) into the megakernel graph. Those
+        # task_impls are inlined into the monolithic `_execute_task` worker
+        # dispatch (runtime.cc:print_task_graph) only if they appear in the graph;
+        # dropping them slims the register-maxed worker_kernel/persistent_kernel
+        # (REG:254) and its SASS/I-cache footprint. The DECODE GEMMs keep their
+        # full config (gate_mode/num_workers still keyed on `_use_prefill`) so the
+        # A/B isolates "prefill bodies removed" from any decode-grid change. NOTE:
+        # a lean build CANNOT correctly serve a real prompt-prefill (the decode
+        # GEMMs early-exit at q_len>8 and nothing fills their buffers) — it is a
+        # footprint/decode-only probe, not a correctness-preserving config.
+        self._decode_lean = (
+            os.environ.get("MPK_DSV3_DECODE_LEAN", "0") == "1"
+        )
+        self._register_prefill_tasks = self._use_prefill and not self._decode_lean
         # Direct-paged decode skips the dense KV gather copy. TP decode kernels
         # consume the runtime page table directly; TP1 still relies on physical
         # page order, so only enable that legacy shortcut for the single-request
@@ -2020,6 +2917,9 @@ class DeepSeekV3Builder(GraphBuilder):
             print(f"  [MLA path] MBT={mbt} → MLA prefill + runtime-gated decode")
         else:
             print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
+        if self._decode_lean:
+            print("  [DECODE-LEAN] MPK_DSV3_DECODE_LEAN=1 → prefill-exclusive "
+                  "tasks SKIPPED (footprint probe; prefill NOT correct)")
 
         # RMSNorm output
         # 2026-05-13 DEBUG: optionally attach rmsnorm_out as a torch tensor
@@ -2715,7 +3615,7 @@ class DeepSeekV3Builder(GraphBuilder):
                              input_fp8_override=qb_input_fp8_ovr,
                              input_scale_override=qb_input_scale_ovr,
                              **qb_slice_kwargs)
-        if self._use_prefill:
+        if self._register_prefill_tasks:  # prefill-exclusive unabsorbed q_b GEMMs
             if self._qb_fused:
                 # FuseTensor path (2026-05-12 user #2): single FP8 GEMM
                 # emitting q_b_prefill_fused (mbt, H*192). chunked_prefill
@@ -2782,7 +3682,7 @@ class DeepSeekV3Builder(GraphBuilder):
             q_tile_size=self.max_num_batched_tokens,
             phase_gate=2 if self._use_prefill else 0,
         )
-        if self._use_prefill:
+        if self._register_prefill_tasks:  # prefill-exclusive split (unabsorbed) ROPE-Q
             # 2026-05-12 (user #2 FuseTensor row-swap): when q_b_prefill_fused
             # aliases q_pe, the ROPE kernel must use the row-swap addressing
             # (row stride = H*192, pe block at H*128 within each row). The
@@ -2855,7 +3755,11 @@ class DeepSeekV3Builder(GraphBuilder):
             c_latent_offset_elems=self._qkv_a_c_latent_offset,
             k_pe_row_stride=self._qkv_a_row_stride,
             k_pe_offset_elems=self._qkv_a_k_pe_offset)
-        if self._use_prefill:
+        # Decode-lean uses the decode-only `mla_kv_gather_layer` (else branch):
+        # the unified gather's prefill outputs (ckv_sep/kpe_sep) + the identity
+        # phantom-bridge would be orphaned once chunked_prefill/kv_b GEMMs are
+        # dropped, and the unified task body is itself a prefill-carrying variant.
+        if self._register_prefill_tasks:
             self.mpk.mla_kv_gather_unified_layer(
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
@@ -2950,53 +3854,58 @@ class DeepSeekV3Builder(GraphBuilder):
                 **kv_gather_slice_kwargs,
             )
         if self._use_prefill:
-            w_kv_b_k, s_kv_b_k = self._attach_raw_fp8_weight(
-                state_dict, f"{attn}kv_b_k.weight",
-                f"layer_{layer_idx}_kv_b_k")
-            w_kv_b_v, s_kv_b_v = self._attach_raw_fp8_weight(
-                state_dict, f"{attn}kv_b_v.weight",
-                f"layer_{layer_idx}_kv_b_v")
-            # B23 (2026-05-15): share the FP8 quantize of ckv_sep between
-            # kv_b_k and kv_b_v — both operate on the same input with the
-            # same group_size, so emitting two quantize tasks duplicates
-            # the bytes (and one extra ~5 μs dispatch wave on decode iters
-            # where both early-exit). One quantize, two GEMM consumers.
-            kv_b_shared_tag = f"layer_{layer_idx}_kv_b_shared"
-            self._fp8_dense_kv_b_proj(
-                self.ckv_sep, w_kv_b_k, s_kv_b_k, self.prefill_k_nope,
-                tag=f"layer_{layer_idx}_kv_b_k",
-                shared_quantize_tag=kv_b_shared_tag)
-            self._fp8_dense_kv_b_proj(
-                self.ckv_sep, w_kv_b_v, s_kv_b_v, self.prefill_v,
-                tag=f"layer_{layer_idx}_kv_b_v",
-                shared_quantize_tag=kv_b_shared_tag)
-            self.mpk.mla_prefill_tp8_chunked_layer(
-                q_nope=self.q_nope,
-                q_pe=self.q_pe,
-                k_nope=self.prefill_k_nope,
-                # k_rope comes from `kpe_sep_v2`, the phantom-bridged copy
-                # of kpe_sep produced by the identity_layer above. This
-                # breaks the gather→chunked_prefill direct edge that
-                # would otherwise make gather a fork+join layer (case 3).
-                k_rope=self.kpe_sep_v2,
-                v=self.prefill_v,
-                output=self.attn_unabsorbed,
-                mla_params=(
-                    self.num_local_q_heads,
-                    q_len_mla,
-                    kv_len_max,
-                    0,
-                ),
-                grid_dim=(
-                    self.num_local_q_heads,
-                    (q_len_mla + 63) // 64,
-                    self.mpk.max_num_batched_requests,
-                ),
-                block_dim=(128, 1, 1),
-                # FuseTensor (2026-05-12 user #2): q_nope and q_pe are the
-                # same fused [mbt, H*192] tensor when MPK_DSV3_QB_FUSED=1.
-                qfused_mode=1 if self._qb_fused else 0,
-            )
+            # Prefill-EXCLUSIVE attention work (kv_b_k/v dense GEMMs +
+            # chunked_prefill). Gated separately so MPK_DSV3_DECODE_LEAN can drop
+            # these (the heaviest task_impls: mla_prefill_tp8_chunked maxR=251)
+            # while the decode MLA tasks below still register.
+            if self._register_prefill_tasks:
+                w_kv_b_k, s_kv_b_k = self._attach_raw_fp8_weight(
+                    state_dict, f"{attn}kv_b_k.weight",
+                    f"layer_{layer_idx}_kv_b_k")
+                w_kv_b_v, s_kv_b_v = self._attach_raw_fp8_weight(
+                    state_dict, f"{attn}kv_b_v.weight",
+                    f"layer_{layer_idx}_kv_b_v")
+                # B23 (2026-05-15): share the FP8 quantize of ckv_sep between
+                # kv_b_k and kv_b_v — both operate on the same input with the
+                # same group_size, so emitting two quantize tasks duplicates
+                # the bytes (and one extra ~5 μs dispatch wave on decode iters
+                # where both early-exit). One quantize, two GEMM consumers.
+                kv_b_shared_tag = f"layer_{layer_idx}_kv_b_shared"
+                self._fp8_dense_kv_b_proj(
+                    self.ckv_sep, w_kv_b_k, s_kv_b_k, self.prefill_k_nope,
+                    tag=f"layer_{layer_idx}_kv_b_k",
+                    shared_quantize_tag=kv_b_shared_tag)
+                self._fp8_dense_kv_b_proj(
+                    self.ckv_sep, w_kv_b_v, s_kv_b_v, self.prefill_v,
+                    tag=f"layer_{layer_idx}_kv_b_v",
+                    shared_quantize_tag=kv_b_shared_tag)
+                self.mpk.mla_prefill_tp8_chunked_layer(
+                    q_nope=self.q_nope,
+                    q_pe=self.q_pe,
+                    k_nope=self.prefill_k_nope,
+                    # k_rope comes from `kpe_sep_v2`, the phantom-bridged copy
+                    # of kpe_sep produced by the identity_layer above. This
+                    # breaks the gather→chunked_prefill direct edge that
+                    # would otherwise make gather a fork+join layer (case 3).
+                    k_rope=self.kpe_sep_v2,
+                    v=self.prefill_v,
+                    output=self.attn_unabsorbed,
+                    mla_params=(
+                        self.num_local_q_heads,
+                        q_len_mla,
+                        kv_len_max,
+                        0,
+                    ),
+                    grid_dim=(
+                        self.num_local_q_heads,
+                        (q_len_mla + 63) // 64,
+                        self.mpk.max_num_batched_requests,
+                    ),
+                    block_dim=(128, 1, 1),
+                    # FuseTensor (2026-05-12 user #2): q_nope and q_pe are the
+                    # same fused [mbt, H*192] tensor when MPK_DSV3_QB_FUSED=1.
+                    qfused_mode=1 if self._qb_fused else 0,
+                )
             if self.world_size == 2:
                 self.mpk.mla_mtp_decode_tp2_layer(
                     self.q_nope_pe, mla_decode_kv,
@@ -3091,19 +4000,21 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         if self._use_prefill:
-            w_o_prefill, s_o_prefill = self._attach_fp8_weight(
-                state_dict, f"{attn}o_proj_original.weight",
-                f"layer_{layer_idx}_o_proj_original")
-            self._fp8_linear(
-                self.attn_unabsorbed,
-                w_o_prefill,
-                s_o_prefill,
-                self.attn_proj_out,
-                grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
-                block_dim=(128, 1, 1),
-                residual=self.x,
-                gate_mode=1,
-            )
+            if self._register_prefill_tasks:
+                # Prefill-EXCLUSIVE unabsorbed o_proj (gate_mode=1).
+                w_o_prefill, s_o_prefill = self._attach_fp8_weight(
+                    state_dict, f"{attn}o_proj_original.weight",
+                    f"layer_{layer_idx}_o_proj_original")
+                self._fp8_linear(
+                    self.attn_unabsorbed,
+                    w_o_prefill,
+                    s_o_prefill,
+                    self.attn_proj_out,
+                    grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+                    block_dim=(128, 1, 1),
+                    residual=self.x,
+                    gate_mode=1,
+                )
             # C9: BMM post-attn path replaces the fused decode o_proj
             # (absorbed with W_UV) with: quantize(attn_out) → BMM(kv_b_v_bmm)
             # → smaller o_proj_original linear. Eliminates the H*512 fused
@@ -3613,7 +4524,24 @@ class DeepSeekV3Builder(GraphBuilder):
                 _gemm_input = _rmsnorm_out_defer
         shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
         _bsk = int(os.environ.get("MPK_DSV3_BUILDER_SPLITK", "0"))
-        if (_bsk >= 2 and has_shared_scale
+        # 2026-06-04: ferret FP8 split-K TMA-reduce decode companion for the
+        # shared-expert gate_up (K=7168, N=1024 at TP=4 -> SK=4). Routes through
+        # _fp8_linear -> _fp8_linear_v2, which selects the use_tmareduce path
+        # (gate_mode 0, residual None) when MPK_DSV3_FP8_SPLITK_TMAREDUCE=1.
+        # DEFAULT-OFF => byte-identical (falls through to the existing dispatch).
+        _tmar_shared = (
+            os.environ.get("MPK_DSV3_FP8_SPLITK_TMAREDUCE") == "1"
+            and has_shared_scale
+            and w_shared_gate_up.dim(1) == 7168
+            and w_shared_gate_up.dim(0) % 128 == 0
+            and w_shared_gate_up.dim(0) in (QKV_A_FUSED_N, 1024))
+        if _tmar_shared:
+            self._fp8_linear(
+                _gemm_input, w_shared_gate_up, s_shared_gate_up, shared_mid,
+                grid_dim=(grid_for_rmsnorm_linear_layer(
+                    w_shared_gate_up.dim(0)), 1, 1),
+                block_dim=(128, 1, 1))
+        elif (_bsk >= 2 and has_shared_scale
                 and w_shared_gate_up.dim(1) % (128 * _bsk) == 0):
             # Builder-side split-K (decode 1-CTA-GEMM parallelization, the
             # −45μs system lever; the existing decode_splitk kernel crashes
@@ -3728,14 +4656,122 @@ class DeepSeekV3Builder(GraphBuilder):
             # SMs on B200). accumulate=False so the prepended tensor_init
             # zeroes router_logits before reduce-add.
             gate_split_k = self._pick_bf16_splitk_factor(w_gate)
-            self.mpk.splitk_linear_layer(
-                input=self.rmsnorm_out,
-                weight=w_gate,
-                output=router_logits,
-                grid_dim=(w_gate.dim(0) // 128, gate_split_k, 1),
-                block_dim=(256, 1, 1),
-                accumulate=False,
-            )
+            # ferret ws5 (2026-05-28): the default picker maximizes wave-fill
+            # → split_k≈56 = 112 CTAs, but the HBM-saturation optimum for this
+            # N=256/K=7168 skinny GEMM is ~14 (28 CTAs); beyond that is pure
+            # over-dispatch (more reduce overhead, no extra MLP). Distinct from
+            # the 2026-05-26 router NULL which went 112→~1 (overshot the other
+            # way, over-serialized the K=7168 reduction, +104μs). Env-gated;
+            # default 0 = unchanged. K/(128*sk) must stay integer (sk|56).
+            _router_sk_ovr = int(os.environ.get("MPK_DSV3_ROUTER_SPLITK", "0"))
+            if _router_sk_ovr > 0:
+                gate_split_k = _router_sk_ovr
+            # Lever #3 (2026-06-04): MPK_DSV3_ROUTER_GEMV — replace the M=1 decode
+            # router (tensor-core split-K, ~12.6μs in-decode) with a crash-free
+            # CUDA-core GEMV (TRT-LLM/vLLM dsv3_router_gemm, ~4.5μs test-mode).
+            # The GEMV is decode-only (bakes compile-time M; prefill M=mbt would
+            # explode regs + act-reread), so in a prefill build it dual-dispatches
+            # with the splitk router (prefill companion, Q_LEN-gated). Default OFF
+            # ⇒ byte-identical. See scratch/router_gemv_dualdispatch_design.md.
+            _router_gemv = os.environ.get("MPK_DSV3_ROUTER_GEMV", "0") == "1"
+            # GEMV bakes a compile-time M and (in the dual-dispatch path) narrows
+            # the decode active rows from row 0 — only valid for a SINGLE request
+            # (bs>1 interleaves requests' rows; no multi-request row layout).
+            # Guard bs==1; bs>1 stays on splitk. (Codex r1 objection #1/bs.)
+            _router_gemv = _router_gemv and (self.mpk.max_num_batched_requests == 1)
+            _n_experts = w_gate.dim(0)
+            _dec_rows = self._decode_q_len()  # decode active rows: 1 (mtp=0), spec+1 (MTP), <=8
+            # Gate coordination (2026-06-06): DECODE_LEAN and ROUTER_GEMV both
+            # touch the router path. The "GEMV fully replaces splitk" branch bakes
+            # M = input.dim[0] (the FULL rmsnorm_out, M=mbt) into the GEMV's
+            # per-thread register arrays acc[M][N_PER_CTA]. That is only safe in a
+            # GENUINE decode-only build (mbt<=8). DECODE_LEAN sets
+            # _register_prefill_tasks=False even on a prefill-sized build (mbt=128)
+            # — taking this branch there bakes M=128 -> register explosion ->
+            # cudaErrorInvalidValue at launch (the all-levers lean+gemv crash).
+            # So the full-M GEMV branch is keyed on the REAL prefill-sized check
+            # (not self._use_prefill) instead of _register_prefill_tasks (which
+            # lean zeroes). A prefill-sized lean build therefore keeps the
+            # dual-dispatch (splitk prefill companion + narrowed-M decode GEMV) —
+            # i.e. lean does NOT touch the router path when ROUTER_GEMV is set.
+            # Lean's other (non-router) prefill-task exclusions are untouched, and
+            # lean-without-gemv / gemv-without-lean both behave exactly as before.
+            _router_gemv_full = _router_gemv and not self._use_prefill
+            if _router_gemv_full:
+                # Decode-only build (mbt<=8): GEMV fully replaces the splitk
+                # prefill companion. M=mbt baked covers every iter (all
+                # q_len<=mbt<=8) — small prefill chunks AND decode; no
+                # companion/gate/narrow needed.
+                self.mpk.dsv3_router_gemm_sm100_layer(
+                    input=self.rmsnorm_out,
+                    weight=w_gate,
+                    output=router_logits,
+                    grid_dim=(_n_experts // 2, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+            else:
+                # DECODE-LEAN extension (2026-06-06): the splitk router here is a
+                # PREFILL-ONLY companion (prefill_gate) that fills router_logits
+                # during prefill; at decode it (and its prepended tensor_init)
+                # early-return, so the narrowed decode GEMV below is the SOLE
+                # writer. It is therefore a decode-DEAD dispatched task — traced
+                # as 1456 instances all <1.1μs (uniform early-return) under
+                # all-levers+LEAN+ROUTER_GEMV. When MPK_DSV3_DECODE_LEAN=1 (a
+                # decode-only-correctness build that explicitly does NOT serve
+                # real prefill — see _decode_lean contract) AND the decode GEMV
+                # is active AND single-request, we can DROP the splitk companion
+                # entirely: the narrowed GEMV (rows[0:_dec_rows], all N columns)
+                # still produces a valid GEMV→topk barrier edge (MPK's
+                # annotated_graph cover-tracker subtracts only COLUMN fragments;
+                # rows are overlap-reject only — annotated_graph.cc:283-307,316),
+                # and topk is bounded by num_active_rows (<= _dec_rows;
+                # topk_sigmoid_sm100.cuh:135) so it never reads the
+                # uninitialized rows[_dec_rows:128]. This is ORTHOGONAL to the
+                # already-fixed full-M-GEMV register-explosion crash (that bug
+                # came from baking M=128 into the GEMV; the GEMV here keeps
+                # rg_in=narrow(_dec_rows) so M stays tiny). Verified safe by
+                # Codex (019e9f3c) + first-principles read of both cited files.
+                # Escape hatch MPK_DSV3_KEEP_ROUTER_SPLITK=1 forces the companion
+                # back on for regression isolation. Default-following-lean.
+                _drop_router_splitk = (
+                    self._decode_lean
+                    and _router_gemv
+                    and self._use_prefill
+                    and self.mpk.max_num_batched_requests == 1
+                    and os.environ.get("MPK_DSV3_KEEP_ROUTER_SPLITK", "0") != "1"
+                )
+                if not _drop_router_splitk:
+                    self.mpk.splitk_linear_layer(
+                        input=self.rmsnorm_out,
+                        weight=w_gate,
+                        output=router_logits,
+                        grid_dim=(w_gate.dim(0) // 128, gate_split_k, 1),
+                        block_dim=(256, 1, 1),
+                        accumulate=False,
+                        # Prefill-only when the decode GEMV companion is active.
+                        prefill_gate=(_router_gemv and self._use_prefill),
+                    )
+                if _router_gemv:  # self._use_prefill is True here
+                    # Decode router GEMV. step-based decode_gate makes it run only
+                    # at decode. BOTH input and output are NARROWED to the decode
+                    # active rows [0:_dec_rows] (mtp+1, <=8): M (baked) = _dec_rows
+                    # from the input; the narrow OUTPUT is a virtual partial-writer
+                    # so topk's cover depends on BOTH the splitk (full) AND the
+                    # GEMV (rows[0:M]) — a FULL output would shadow splitk and let
+                    # topk read before splitk finishes at prefill (Codex r3 Q2).
+                    # The decode WAW race (zero-init vs GEMV) is removed by
+                    # prefill-gating the splitk's tensor_init above, so at decode
+                    # the GEMV is the SOLE writer of router_logits (Codex r2/r3).
+                    rg_in = self.mpk.narrow(self.rmsnorm_out, 0, 0, _dec_rows)
+                    rg_out = self.mpk.narrow(router_logits, 0, 0, _dec_rows)
+                    self.mpk.dsv3_router_gemm_sm100_layer(
+                        input=rg_in,
+                        weight=w_gate,
+                        output=rg_out,
+                        grid_dim=(_n_experts // 2, 1, 1),
+                        block_dim=(128, 1, 1),
+                        decode_gate=True,
+                    )
         else:
             router_grid = min(grid_for_rmsnorm_linear_layer(w_gate.dim(0)),
                               w_gate.dim(0) // 8)
@@ -4249,6 +5285,50 @@ class DeepSeekV3Builder(GraphBuilder):
         """Build MLA attention using a custom weight prefix (FP8, for MTP reuse)."""
         attn = f"{prefix}self_attn."
 
+        # --- qkv_a slot buffers (MTP standalone-projection fix) -------------
+        # The main decode layer emits q_a / c_latent / k_pe via ONE fused
+        # qkv_a GEMM into `qkv_a_out` (mbt, 2176), so `self.q_a_out`,
+        # `self.c_latent_out`, `self.k_pe_out` are `mpk.narrow` *views* of
+        # that buffer (parent row stride = 2176). The MTP decoder predates
+        # the qkv_a fusion (PR #667, 2026-04-24) and still projects the three
+        # slots with SEPARATE dense GEMMs. The strict-width dense GEMM
+        # (`fp8_gemm_dense_smallm/mediumm`) writes its output ROW-MAJOR
+        # CONTIGUOUS with row stride == N (no view-stride support on the bf16
+        # path) and asserts `out_flat_n == N`. Writing a narrow view of
+        # `qkv_a_out` through it therefore (a) trips `out_flat_n == N` on the
+        # 64-wide k_pe view vs the 128-row padded weight (the reported build
+        # crash) and (b) silently corrupts neighbouring slots for rows >= 1
+        # on q_a (1536) and c_latent (512) because the kernel strides rows by
+        # N instead of 2176.
+        #
+        # Fix: bind the three slots to dedicated STANDALONE contiguous buffers
+        # for the MTP attention build so every separate GEMM writes a clean
+        # (mbt, N) tensor (stride == N == kernel assumption) and every reader
+        # uses the natural contiguous stride. This matches the layout the MTP
+        # code was originally authored against (pre-narrow-view migration):
+        #   - q_a:     (mbt, q_lora_rank=1536)
+        #   - c_latent:(mbt, kv_lora_rank=512)  → gather default stride d_v=512
+        #   - k_pe:    (mbt, 128) padded         → GEMM N=128 (out_flat_n==N ✓);
+        #              real rope cols [0:64), pad [64:128). gather / rope-K
+        #              default k_pe_row_stride=128, real data at offset 0 — the
+        #              exact padded layout those kernels already expect.
+        # Restored at the end so the main-layer views are untouched.
+        mbt = self.max_num_batched_tokens
+        _saved_q_a_out = self.q_a_out
+        _saved_c_latent_out = self.c_latent_out
+        _saved_k_pe_out = self.k_pe_out
+        self.q_a_out = self._cached_new_tensor(
+            dims=(mbt, self.q_lora_rank), dtype=bfloat16,
+            name=f"mtp_{attn}q_a_out_standalone", io_category="cuda_tensor")
+        self.c_latent_out = self._cached_new_tensor(
+            dims=(mbt, self.kv_lora_rank), dtype=bfloat16,
+            name=f"mtp_{attn}c_latent_out_standalone", io_category="cuda_tensor")
+        # k_pe padded to 128 cols so the strict-width dense GEMM N=128 sees
+        # out_flat_n == N; rope real dim is QK_ROPE_HEAD_DIM=64 at offset 0.
+        self.k_pe_out = self._cached_new_tensor(
+            dims=(mbt, 128), dtype=bfloat16,
+            name=f"mtp_{attn}k_pe_out_standalone", io_category="cuda_tensor")
+
         # q_a_proj (FP8)
         w_q_a, s_q_a = self._attach_fp8_weight(
             state_dict, f"{attn}q_a_proj.weight", f"mtp_{attn}q_a_proj")
@@ -4570,6 +5650,12 @@ class DeepSeekV3Builder(GraphBuilder):
                              grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
                              block_dim=(128, 1, 1),
                              residual=self.x)
+
+        # Restore the main decode layer's qkv_a narrow-view slot handles
+        # (see the standalone-buffer rebinding at the top of this method).
+        self.q_a_out = _saved_q_a_out
+        self.c_latent_out = _saved_c_latent_out
+        self.k_pe_out = _saved_k_pe_out
 
     def _build_dense_mlp_with_prefix(self, prefix: str, state_dict: dict):
         """Build dense MLP using a custom weight prefix (FP8, for MTP reuse)."""
