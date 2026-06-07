@@ -25,74 +25,9 @@
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
 
-// MXFP4 1SM kernel — structurally identical to linear_nvfp4_1d2d_sm100.cuh.
-// Deltas vs NVFP4 (all flagged inline with `// MXFP4 delta:`):
-//   * tcgen05.mma uses scale_vec::2X (NVFP4 used scale_vec::4X) because the
-//     MXFP4 group size is 32, halving scales-per-K relative to NVFP4 (group 16).
-//   * Per-tile SF gmem block is 256 bytes (= 128 rows * 64 K / 32 group) vs
-//     NVFP4's 512 bytes; SFA_size / SFB_size shrink by 2x.
-//   * tcgen05.cp source-descriptor k-stride is 256 bytes (was 512) and TMEM SF
-//     stride per MMA-K is 2 columns (was 4) — only the first 2 of the 4 fan-out
-//     columns the .warpx4 cp writes are consumed by scale_vec::2X.
-//   * Scale bytes are e8m0 (interpreted by the MMA); the kernel itself sees
-//     plain bytes and the TMA path is unchanged.
-
-inline void check_cu_mx(CUresult err) {
-  if (err == CUDA_SUCCESS) {
-    return;
-  }
-  const char *error_msg_ptr = nullptr;
-  if (cuGetErrorString(err, &error_msg_ptr) != CUDA_SUCCESS) {
-    error_msg_ptr = "unable to get error string";
-  }
-  TORCH_CHECK(false, "cuTensorMapEncodeTiled error: ", error_msg_ptr);
-}
-
-inline void check_cuda_mx(cudaError_t err) {
-  if (err == cudaSuccess) {
-    return;
-  }
-  TORCH_CHECK(false, cudaGetErrorString(err));
-}
-
-inline void init_AB_tmap_mx(CUtensorMap *tmap,
-                            const char *ptr,
-                            uint64_t global_height,
-                            uint64_t global_width,
-                            uint32_t shared_height,
-                            uint32_t shared_width) {
-  constexpr uint32_t rank = 3;
-  uint64_t globalDim[rank] = {256, global_height, global_width / 256};
-  uint64_t globalStrides[rank - 1] = {global_width / 2, 128};
-  uint32_t boxDim[rank] = {256, shared_height, shared_width / 256};
-  uint32_t elementStrides[rank] = {1, 1, 1};
-
-  CUresult err = cuTensorMapEncodeTiled(
-      tmap,
-      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
-      rank,
-      const_cast<char *>(ptr),
-      globalDim,
-      globalStrides,
-      boxDim,
-      elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  check_cu_mx(err);
-}
-
 namespace kernel {
 
 using namespace ::kernel::sm100_ptx;
-
-// MXFP4-specific SF constants. Per-tile SF gmem block is 512 bytes (NVFP4
-// uses the same atom size; MXFP4's smaller scale count is absorbed by
-// zero-padding). SF TMEM stride per MMA-K is 4 cols (the .warpx4 cp writes
-// 4 cols; only the first 2 are consumed by scale_vec::2X for MXFP4).
-constexpr int SF_BYTES_PER_K_TILE = 32 * 4 * 4;  // 512 B
-constexpr int SF_TMEM_COLS_PER_MMA_K = 4;
 
 template <int BATCH_SIZE,
           int OUTPUT_SIZE,
@@ -116,6 +51,12 @@ linear_mxfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K must be divisible by MMA_K");
   static_assert(REDUCTION_SIZE % BLOCK_K == 0, "K must be divisible by BLOCK_K");
   static_assert(BLOCK_N == 32 || BLOCK_N == 64 || BLOCK_N == 128, "BLOCK_N must be 32, 64, or 128");
+
+  // SF gmem atom = 128 rows × 64 K-elements = 512 B (same atom as NVFP4). TMEM
+  // uses 4 cols per MMA-K; MXFP4 scale_vec::2X consumes only the first 2 but the
+  // addressing stride stays 4.
+  constexpr int SF_BYTES_PER_K_TILE = 32 * 4 * 4;  // 512 B
+  constexpr int SF_TMEM_COLS_PER_MMA_K = 4;
 
   const int tid = threadIdx.x;
   const int lane_id = tid % WARP_SIZE;

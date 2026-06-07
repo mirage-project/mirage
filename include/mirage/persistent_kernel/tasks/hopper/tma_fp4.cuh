@@ -15,9 +15,104 @@
 #pragma once
 // #include "../common/utils.h"
 #include "barrier.cuh"
+#include "common/bfloat16.h"
+#include <c10/util/Exception.h>
+#include <cstdint>
 #include <cuda.h>
+#include <iostream>
 namespace kernel {
 namespace tma {
+
+inline void check_cu_tma(CUresult err) {
+  if (err == CUDA_SUCCESS) {
+    return;
+  }
+  char const *error_msg_ptr = nullptr;
+  if (cuGetErrorString(err, &error_msg_ptr) != CUDA_SUCCESS) {
+    error_msg_ptr = "unable to get error string";
+  }
+  TORCH_CHECK(false, "cuTensorMapEncodeTiled error: ", error_msg_ptr);
+}
+
+inline void init_AB_tmap_fp4(CUtensorMap *tmap,
+                             char const *ptr,
+                             uint64_t global_height,
+                             uint64_t global_width,
+                             uint32_t shared_height,
+                             uint32_t shared_width) {
+  constexpr uint32_t rank = 3;
+  uint64_t globalDim[rank] = {256, global_height, global_width / 256};
+  uint64_t globalStrides[rank - 1] = {global_width / 2, 128};
+  uint32_t boxDim[rank] = {256, shared_height, shared_width / 256};
+  uint32_t elementStrides[rank] = {1, 1, 1};
+
+  check_cu_tma(cuTensorMapEncodeTiled(
+      tmap,
+      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+      rank,
+      const_cast<char *>(ptr),
+      globalDim,
+      globalStrides,
+      boxDim,
+      elementStrides,
+      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+}
+
+inline void init_SF_tmap_fp4(CUtensorMap *tmap,
+                             char const *ptr,
+                             uint64_t rows,
+                             uint64_t reduction_size,
+                             uint32_t shared_k_blocks) {
+  constexpr uint32_t rank = 3;
+  uint64_t globalDim[rank] = {256, 2 * (reduction_size / 64), rows / 128};
+  uint64_t globalStrides[rank - 1] = {256, 512 * (reduction_size / 64)};
+  uint32_t boxDim[rank] = {256, 2 * shared_k_blocks, 1};
+  uint32_t elementStrides[rank] = {1, 1, 1};
+
+  check_cu_tma(cuTensorMapEncodeTiled(
+      tmap,
+      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8,
+      rank,
+      const_cast<char *>(ptr),
+      globalDim,
+      globalStrides,
+      boxDim,
+      elementStrides,
+      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+}
+
+inline void init_C_tmap_fp4(CUtensorMap *tmap,
+                            void *ptr,
+                            uint64_t batch_size,
+                            uint64_t output_size,
+                            uint32_t tile_rows,
+                            uint32_t tile_cols) {
+  constexpr uint32_t rank = 2;
+  uint64_t globalDim[rank] = {output_size, batch_size};
+  uint64_t globalStrides[rank - 1] = {output_size * sizeof(type::bfloat16_t)};
+  uint32_t boxDim[rank] = {tile_cols, tile_rows};
+  uint32_t elementStrides[rank] = {1, 1};
+
+  check_cu_tma(cuTensorMapEncodeTiled(
+      tmap,
+      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+      rank,
+      ptr,
+      globalDim,
+      globalStrides,
+      boxDim,
+      elementStrides,
+      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+}
 
 template <typename T,
           int B,
@@ -33,7 +128,7 @@ template <typename T,
           size_t SMEM_REPEAT_COL_ = 1,
           size_t SMEM_STRIDE_ = 1,
           bool ROW_MAJOR = true>
-struct tma_2d_nvfp4 {
+struct tma_fp4 {
 
   CUtensorMap *desc_ptr;
 
@@ -45,11 +140,11 @@ struct tma_2d_nvfp4 {
   static constexpr size_t SMEM_REPEAT_COL = SMEM_REPEAT_COL_;
   static constexpr size_t SMEM_REPEAT_ROW = SMEM_REPEAT_ROW_;
 
-  __device__ inline tma_2d_nvfp4(CUtensorMap *desc_ptr) {
+  __device__ inline tma_fp4(CUtensorMap *desc_ptr) {
     this->desc_ptr = desc_ptr;
   }
 
-  __host__ inline tma_2d_nvfp4(void *src) {
+  __host__ inline tma_fp4(void *src) {
     CUtensorMap host_desc;
     create_tma_desc_nvfp4(&host_desc, src); // host-only function
     cudaMalloc(&desc_ptr, sizeof(CUtensorMap));

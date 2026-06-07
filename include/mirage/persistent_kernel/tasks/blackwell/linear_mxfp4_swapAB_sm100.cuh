@@ -14,15 +14,14 @@
  */
 
 // Raw-CUDA rewrite of the small-batch (M<128) MXFP4 swapAB GEMM. Port of the
-// NVFP4 swapAB kernel; the MXFP4 deltas (marked `// MXFP4 delta:`) are the same
-// ones as the 1d2d 1SM port: scale_vec::2X tcgen05.mma, half-sized per-tile SF
-// blocks (256 vs 512 bytes), and TMEM SF stride of 2 cols per MMA-K.
+// NVFP4 swapAB kernel. The only runtime deltas vs NVFP4 are scale_vec::2X
+// (tcgen05_mma_mxfp4) and the UE8M0 scale-format bit (i_desc bit 23); the SF
+// gmem atom and TMEM layout are identical (SF_BYTES_PER_K_TILE=512,
+// SF_TMEM_COLS_PER_MMA_K=4, defined locally in the kernel below).
 
 #pragma once
 
 #include "blackwell/sm100_ptx.cuh"           // shared templated PTX primitives
-#include "linear_mxfp4_1d2d_sm100.cuh"       // SF_BYTES_PER_K_TILE, SF_TMEM_COLS_PER_MMA_K
-#include "linear_mxfp4_1d2d_2sm_sm100.cuh"   // init_C_tmap_mx_2sm
 
 namespace kernel {
 
@@ -30,12 +29,7 @@ using namespace ::kernel::sm100_ptx;
 
 namespace mxfp4_swapAB_detail {
 
-__device__ __forceinline__ void swapab_arrive_local(int mbar_addr) {
-  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
-               :
-               : "r"(mbar_addr)
-               : "memory");
-}
+// swapab_arrive_local lives in sm100_ptx.cuh (in scope via the using-directive).
 
 template <int MMA_N,
           int OUTPUT_SIZE,
@@ -87,8 +81,13 @@ linear_mxfp4_swapAB_sm100_kernel(
                          : (MMA_N <= 64)  ? 64
                          : (MMA_N <= 128) ? 128
                                           : 256;
+  // SF gmem atom = 128 rows × 64 K-elements = 512 B (same atom as NVFP4). TMEM
+  // uses 4 cols per MMA-K; MXFP4 scale_vec::2X consumes only the first 2 but the
+  // addressing stride stays 4.
+  constexpr int SF_BYTES_PER_K_TILE = 32 * 4 * 4;  // 512 B
+  constexpr int SF_TMEM_COLS_PER_MMA_K = 4;
+
   constexpr int MMA_PER_TILE = BLOCK_K / MMA_K;
-  // MXFP4 delta: SF stage stride uses SF_TMEM_COLS_PER_MMA_K (=2) cols per mma_k.
   constexpr int SF_STAGE_STRIDE = SF_TMEM_COLS_PER_MMA_K * MMA_PER_TILE;
   constexpr int SF_TOTAL = 2 * SF_STAGE_STRIDE * NUM_STAGES;
   constexpr int NUM_ACC_BUF = (2 * ACC_COLS + SF_TOTAL <= 512) ? 2 : 1;

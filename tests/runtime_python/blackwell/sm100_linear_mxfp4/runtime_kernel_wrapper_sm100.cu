@@ -21,6 +21,7 @@
 #include "blackwell/linear_mxfp4_1d2d_2sm_sm100.cuh"
 #include "blackwell/linear_mxfp4_swapAB_sm100.cuh"
 #include "blackwell/quantize_mxfp4_sm100.cuh"
+#include "hopper/tma_fp4.cuh"  // kernel::tma::init_*_tmap_fp4
 #include "runtime_header.h"
 #include "tma.cuh"
 #include <ATen/cuda/CUDAContext.h>
@@ -144,10 +145,10 @@ void launch_linear_mxfp4_1d2d_sm100_config(void *input_ptr,
   CUtensorMap A_tmap{};
   CUtensorMap B_tmap{};
   // Swap-AB: A = weight [output, K], B = input [batch, K].
-  init_AB_tmap_mx(&A_tmap, reinterpret_cast<const char *>(weight_ptr),
+  kernel::tma::init_AB_tmap_fp4(&A_tmap, reinterpret_cast<const char *>(weight_ptr),
                   static_cast<uint64_t>(output_size),
                   static_cast<uint64_t>(REDUCTION_SIZE), BLOCK_M, BLOCK_K);
-  init_AB_tmap_mx(&B_tmap, reinterpret_cast<const char *>(input_ptr),
+  kernel::tma::init_AB_tmap_fp4(&B_tmap, reinterpret_cast<const char *>(input_ptr),
                   static_cast<uint64_t>(batch_size),
                   static_cast<uint64_t>(REDUCTION_SIZE), BLOCK_N, BLOCK_K);
 
@@ -236,16 +237,16 @@ void launch_linear_mxfp4_1d2d_2sm_sm100_config(void *input_ptr, void *input_sf_p
               "MXFP4 2SM 1d2d requires output_size divisible by 2*BLOCK_M=", 2 * BLOCK_M);
 
   CUtensorMap A_tmap{}, B_tmap{}, C_tmap{}, SFA_tmap{}, SFB_tmap{};
-  init_AB_tmap_mx_2sm(&A_tmap, reinterpret_cast<const char *>(weight_ptr),
-                      output_size, REDUCTION_SIZE, BLOCK_M, BLOCK_K);
-  init_AB_tmap_mx_2sm(&B_tmap, reinterpret_cast<const char *>(input_ptr),
-                      batch_size, REDUCTION_SIZE, BLOCK_N / 2, BLOCK_K);
-  init_SF_tmap_mx_2sm(&SFA_tmap, reinterpret_cast<const char *>(weight_sf_ptr),
-                      output_size, REDUCTION_SIZE, BLOCK_K / 64);
-  init_SF_tmap_mx_2sm(&SFB_tmap, reinterpret_cast<const char *>(input_sf_ptr),
-                      batch_size, REDUCTION_SIZE, BLOCK_K / 64);
-  init_C_tmap_mx_2sm(&C_tmap, output_ptr, batch_size, output_size,
-                     EPI_TILE_N, BLOCK_M);
+  kernel::tma::init_AB_tmap_fp4(&A_tmap, reinterpret_cast<const char *>(weight_ptr),
+                   output_size, REDUCTION_SIZE, BLOCK_M, BLOCK_K);
+  kernel::tma::init_AB_tmap_fp4(&B_tmap, reinterpret_cast<const char *>(input_ptr),
+                   batch_size, REDUCTION_SIZE, BLOCK_N / 2, BLOCK_K);
+  kernel::tma::init_SF_tmap_fp4(&SFA_tmap, reinterpret_cast<const char *>(weight_sf_ptr),
+                   output_size, REDUCTION_SIZE, BLOCK_K / 64);
+  kernel::tma::init_SF_tmap_fp4(&SFB_tmap, reinterpret_cast<const char *>(input_sf_ptr),
+                   batch_size, REDUCTION_SIZE, BLOCK_K / 64);
+  kernel::tma::init_C_tmap_fp4(&C_tmap, output_ptr, batch_size, output_size,
+                  EPI_TILE_N, BLOCK_M);
 
   constexpr int A_size = BLOCK_M * BLOCK_K / 2;
   constexpr int B_size = (BLOCK_N / 2) * BLOCK_K / 2;

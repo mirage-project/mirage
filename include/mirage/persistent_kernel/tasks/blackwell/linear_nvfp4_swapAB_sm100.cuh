@@ -23,7 +23,6 @@
 
 #include "blackwell/sm100_ptx.cuh"          // templated PTX primitives shared
                                               // across 1d2d 1SM / 2SM / swapAB
-#include "linear_nvfp4_1d2d_sm100.cuh"        // init_AB_tmap + 1d2d 1SM kernel
 
 namespace kernel {
 
@@ -31,12 +30,7 @@ using namespace ::kernel::sm100_ptx;
 
 namespace nvfp4_swapAB_detail {
 
-__device__ __forceinline__ void swapab_arrive_local(int mbar_addr) {
-  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
-               :
-               : "r"(mbar_addr)
-               : "memory");
-}
+// swapab_arrive_local lives in sm100_ptx.cuh (in scope via the using-directive).
 
 template <int MMA_N,
           int OUTPUT_SIZE,

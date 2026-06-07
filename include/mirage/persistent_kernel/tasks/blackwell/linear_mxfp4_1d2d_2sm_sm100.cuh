@@ -19,127 +19,11 @@
 
 #include "common/bfloat16.h"
 #include "blackwell/sm100_ptx.cuh"
-#include "blackwell/linear_mxfp4_1d2d_sm100.cuh"  // SF_BYTES_PER_K_TILE, SF_TMEM_COLS_PER_MMA_K
 
 #include <c10/util/Exception.h>
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
-
-// MXFP4 2SM (cluster_dim=(2,1,1)) kernel — port of linear_nvfp4_1d2d_2sm_sm100.cuh.
-// Same warp-specialized + cluster-multicast structure; the format-specific
-// deltas (all marked `// MXFP4 delta:`) are:
-//   * tcgen05.mma uses scale_vec::2X (NVFP4 used scale_vec::4X) — MXFP4 group=32.
-//   * SF gmem tile is 256 bytes per (128-row, 64-K) block (NVFP4: 512). This
-//     exactly equals one TMA "half-tile" in the NVFP4 SF descriptor, so we
-//     simplify: the MXFP4 SF tmap is a true 3D `{256B, K/64, rows/128}` tensor
-//     with no inner-dim splitting (NVFP4 had to split to satisfy the 256-byte
-//     SWIZZLE_NONE boxDim cap).
-//   * SMEM SF region & TMA bytes halve: SFA_size = 128*BLOCK_K/32, etc.
-//   * TMEM SF strides halve: each MMA-K consumes 2 columns (was 4).
-
-inline void check_cu_mx_2sm(CUresult err) {
-  if (err == CUDA_SUCCESS) {
-    return;
-  }
-  const char *error_msg_ptr = nullptr;
-  if (cuGetErrorString(err, &error_msg_ptr) != CUDA_SUCCESS) {
-    error_msg_ptr = "unable to get error string";
-  }
-  TORCH_CHECK(false, "cuTensorMapEncodeTiled error: ", error_msg_ptr);
-}
-
-inline void check_cuda_mx_2sm(cudaError_t err) {
-  if (err == cudaSuccess) {
-    return;
-  }
-  TORCH_CHECK(false, cudaGetErrorString(err));
-}
-
-inline void init_AB_tmap_mx_2sm(CUtensorMap *tmap,
-                                const char *ptr,
-                                uint64_t global_height,
-                                uint64_t global_width,
-                                uint32_t shared_height,
-                                uint32_t shared_width) {
-  constexpr uint32_t rank = 3;
-  uint64_t globalDim[rank]          = {256, global_height, global_width / 256};
-  uint64_t globalStrides[rank - 1]  = {global_width / 2, 128};
-  uint32_t boxDim[rank]             = {256, shared_height, shared_width / 256};
-  uint32_t elementStrides[rank]     = {1, 1, 1};
-
-  CUresult err = cuTensorMapEncodeTiled(
-      tmap,
-      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
-      rank,
-      const_cast<char *>(ptr),
-      globalDim,
-      globalStrides,
-      boxDim,
-      elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  check_cu_mx_2sm(err);
-}
-
-// MXFP4 SF tmap (identical to NVFP4 SF tmap: atom = 512 B per (128 rows, 64 K),
-// split into two 256-B half-tiles for SWIZZLE_NONE compatibility).
-inline void init_SF_tmap_mx_2sm(CUtensorMap *tmap,
-                                const char *ptr,
-                                uint64_t rows,
-                                uint64_t reduction_size,
-                                uint32_t shared_k_blocks) {
-  constexpr uint32_t rank = 3;
-  uint64_t globalDim[rank]         = {256, 2 * (reduction_size / 64), rows / 128};
-  uint64_t globalStrides[rank - 1] = {256, 512 * (reduction_size / 64)};
-  uint32_t boxDim[rank]            = {256, 2 * shared_k_blocks, 1};
-  uint32_t elementStrides[rank]    = {1, 1, 1};
-
-  CUresult err = cuTensorMapEncodeTiled(
-      tmap,
-      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8,
-      rank,
-      const_cast<char *>(ptr),
-      globalDim,
-      globalStrides,
-      boxDim,
-      elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  check_cu_mx_2sm(err);
-}
-
-inline void init_C_tmap_mx_2sm(CUtensorMap *tmap,
-                               void *ptr,
-                               uint64_t batch_size,
-                               uint64_t output_size,
-                               uint32_t tile_rows,
-                               uint32_t tile_cols) {
-  constexpr uint32_t rank = 2;
-  uint64_t globalDim[rank] = {output_size, batch_size};
-  uint64_t globalStrides[rank - 1] = {output_size * sizeof(type::bfloat16_t)};
-  uint32_t boxDim[rank] = {tile_cols, tile_rows};
-  uint32_t elementStrides[rank] = {1, 1};
-
-  CUresult err = cuTensorMapEncodeTiled(
-      tmap,
-      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-      rank,
-      ptr,
-      globalDim,
-      globalStrides,
-      boxDim,
-      elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  check_cu_mx_2sm(err);
-}
 
 namespace kernel {
 
@@ -215,9 +99,13 @@ linear_mxfp4_1d2d_2sm_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
   const int mainloop_mbar_addr = mma_mbar_addr + NUM_STAGES * 8;
   const int output_mbar_addr = mainloop_mbar_addr + 8;
 
+  // SF gmem atom = 128 rows × 64 K-elements = 512 B (same atom as NVFP4). TMEM
+  // uses 4 cols per MMA-K; MXFP4 scale_vec::2X consumes only the first 2 but the
+  // addressing stride stays 4.
+  constexpr int SF_BYTES_PER_K_TILE = 32 * 4 * 4;  // 512 B
+  constexpr int SF_TMEM_COLS_PER_MMA_K = 4;
+
   constexpr int MMA_PER_TILE = BLOCK_K / MMA_K;
-  // 4 TMEM cols per MMA-K (NVFP4-style; MXFP4 vec::2X uses only the first 2 of
-  // them but addressing stride stays 4).
   constexpr int SFA_STAGE_STRIDE  = SF_TMEM_COLS_PER_MMA_K * MMA_PER_TILE;
   constexpr int SFB_STAGE_STRIDE  = SF_TMEM_COLS_PER_MMA_K * MMA_PER_TILE * SFB_SCALE_TILES;
   constexpr int SFA_K_STRIDE      = SF_TMEM_COLS_PER_MMA_K;

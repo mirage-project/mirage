@@ -330,6 +330,16 @@ mbarrier_arrive_expect_tx_local(int mbar_addr, int expected_tx) {
                : "memory");
 }
 
+// CTA-local plain arrive (no tx-bytes expectation). Used by the swapAB epilogue
+// to hand an accumulator buffer's output mbar back to the producer once the
+// store has drained. Pure PTX wrapper.
+__device__ __forceinline__ void swapab_arrive_local(int mbar_addr) {
+  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
+               :
+               : "r"(mbar_addr)
+               : "memory");
+}
+
 // Tcgen05 scale-tile copy (gmem-desc -> tmem). PTX is format-agnostic (NVFP4
 // and MXFP4 use the same instruction); the source descriptor encoding /
 // SMEM stride differ but that's set up by the caller. cta_group selects

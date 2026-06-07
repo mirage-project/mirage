@@ -17,7 +17,7 @@
 #include "blackwell/linear_nvfp4_1d2d_2sm_sm100.cuh"
 #include "blackwell/linear_nvfp4_swapAB_sm100.cuh"
 #include "blackwell/quantize_nvfp4_sm100.cuh"
-#include "hopper/tma_2d_nvfp4.cuh"
+#include "hopper/tma_fp4.cuh"
 #include "hopper/tma_3d.cuh"
 #include "runtime_header.h"
 #include "tma.cuh"
@@ -83,13 +83,13 @@ void launch_linear_nvfp4_1d2d_sm100_config(void *input_ptr,
   CUtensorMap A_tmap{};
   CUtensorMap B_tmap{};
   // Always SWAP_AB: A is weight [output, K], B is input [batch, K].
-  init_AB_tmap(&A_tmap,
+  kernel::tma::init_AB_tmap_fp4(&A_tmap,
                reinterpret_cast<const char *>(weight_ptr),
                static_cast<uint64_t>(output_size),
                static_cast<uint64_t>(REDUCTION_SIZE),
                BLOCK_M,
                BLOCK_K);
-  init_AB_tmap(&B_tmap,
+  kernel::tma::init_AB_tmap_fp4(&B_tmap,
                reinterpret_cast<const char *>(input_ptr),
                static_cast<uint64_t>(batch_size),
                static_cast<uint64_t>(REDUCTION_SIZE),
@@ -331,13 +331,13 @@ void launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
   CUtensorMap SFA_tmap{};
   CUtensorMap SFB_tmap{};
   // Always SWAP_AB: A is weight [output, K], B is input [batch, K].
-  init_AB_tmap_2sm(&A_tmap,
+  kernel::tma::init_AB_tmap_fp4(&A_tmap,
                    reinterpret_cast<const char *>(weight_ptr),
                    static_cast<uint64_t>(output_size),
                    static_cast<uint64_t>(REDUCTION_SIZE),
                    BLOCK_M,
                    BLOCK_K);
-  init_AB_tmap_2sm(&B_tmap,
+  kernel::tma::init_AB_tmap_fp4(&B_tmap,
                    reinterpret_cast<const char *>(input_ptr),
                    static_cast<uint64_t>(batch_size),
                    static_cast<uint64_t>(REDUCTION_SIZE),
@@ -347,12 +347,12 @@ void launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
   // bulk TMA + scale_ready_flags spin. Both CTAs issue the same logical TMA
   // and report to CTA0's scale mbarrier. Each TMA fetches BLOCK_K/64 k_blocks
   // (= 128 * BLOCK_K / 16 bytes) for one 128-row block.
-  init_SF_tmap_2sm(&SFA_tmap,
+  kernel::tma::init_SF_tmap_fp4(&SFA_tmap,
                    reinterpret_cast<const char *>(weight_sf_ptr),
                    static_cast<uint64_t>(output_size),
                    static_cast<uint64_t>(REDUCTION_SIZE),
                    BLOCK_K / 64);
-  init_SF_tmap_2sm(&SFB_tmap,
+  kernel::tma::init_SF_tmap_fp4(&SFB_tmap,
                    reinterpret_cast<const char *>(input_sf_ptr),
                    static_cast<uint64_t>(batch_size),
                    static_cast<uint64_t>(REDUCTION_SIZE),
@@ -366,7 +366,7 @@ void launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
                 "EPI_BATCH_LA must be in [1, EPI_PIPE_DEPTH]");
   static_assert((BLOCK_N / EPI_TILE_N) % EPI_BATCH_LA == 0,
                 "EPI_PIPE_DEPTH must be divisible by EPI_BATCH_LA");
-  init_C_tmap_2sm(&C_tmap,
+  kernel::tma::init_C_tmap_fp4(&C_tmap,
                   output_ptr,
                   static_cast<uint64_t>(batch_size),
                   static_cast<uint64_t>(output_size),
@@ -731,8 +731,8 @@ inline int swapab_mma_n(int batch_size, int output_size) {
 }
 
 // Raw-CUDA swapAB launcher (no CUTLASS). Builds A (weight) and B (activation)
-// 3D fp4 TMA descriptors via init_AB_tmap and an output TMA descriptor via
-// init_C_tmap_2sm; passes raw SF byte pointers (loaded with cp.async.bulk in
+// 3D fp4 TMA descriptors via init_AB_tmap_fp4 and an output TMA descriptor via
+// init_C_tmap_fp4; passes raw SF byte pointers (loaded with cp.async.bulk in
 // the kernel). Descriptors are rebuilt per call (graph-capture friendly: no
 // device-side mutation, all on the kernel's stream).
 template <typename T, int MMA_N, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -765,17 +765,17 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
 
   CUtensorMap A_tmap{};  // weight [OUTPUT_SIZE, K], 128-wide tile
   CUtensorMap B_tmap{};  // activation [M, K], MMA_N-wide tile
-  init_AB_tmap(&A_tmap, reinterpret_cast<const char *>(weight_ptr),
+  kernel::tma::init_AB_tmap_fp4(&A_tmap, reinterpret_cast<const char *>(weight_ptr),
                static_cast<uint64_t>(OUTPUT_SIZE),
                static_cast<uint64_t>(REDUCTION_SIZE), BLOCK_M, BLOCK_K);
-  init_AB_tmap(&B_tmap, reinterpret_cast<const char *>(input_ptr),
+  kernel::tma::init_AB_tmap_fp4(&B_tmap, reinterpret_cast<const char *>(input_ptr),
                static_cast<uint64_t>(logical_batch_size),
                static_cast<uint64_t>(REDUCTION_SIZE), MMA_N, BLOCK_K);
 
   // Output C [M, N] bf16, stored in [output, batch] tile orientation:
   // boxDim {output=BLOCK_M, batch=MMA_N}.
   CUtensorMap C_tmap{};
-  init_C_tmap_2sm(&C_tmap, output_ptr,
+  kernel::tma::init_C_tmap_fp4(&C_tmap, output_ptr,
                   /*batch_size=*/static_cast<uint64_t>(logical_batch_size),
                   /*output_size=*/static_cast<uint64_t>(OUTPUT_SIZE),
                   /*tile_rows=batch*/ MMA_N,

@@ -25,52 +25,6 @@
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
 
-inline void check_cu(CUresult err) {
-  if (err == CUDA_SUCCESS) {
-    return;
-  }
-  const char *error_msg_ptr = nullptr;
-  if (cuGetErrorString(err, &error_msg_ptr) != CUDA_SUCCESS) {
-    error_msg_ptr = "unable to get error string";
-  }
-  TORCH_CHECK(false, "cuTensorMapEncodeTiled error: ", error_msg_ptr);
-}
-
-inline void check_cuda(cudaError_t err) {
-  if (err == cudaSuccess) {
-    return;
-  }
-  TORCH_CHECK(false, cudaGetErrorString(err));
-}
-
-inline void init_AB_tmap(CUtensorMap *tmap, 
-                         const char *ptr,
-                         uint64_t global_height,
-                         uint64_t global_width,
-                         uint32_t shared_height,
-                         uint32_t shared_width) {
-  constexpr uint32_t rank = 3;
-  uint64_t globalDim[rank] = {256, global_height, global_width / 256};
-  uint64_t globalStrides[rank - 1] = {global_width / 2, 128};
-  uint32_t boxDim[rank] = {256, shared_height, shared_width / 256};
-  uint32_t elementStrides[rank] = {1, 1, 1};
-
-  CUresult err = cuTensorMapEncodeTiled(
-      tmap,
-      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
-      rank,
-      const_cast<char *>(ptr),
-      globalDim,
-      globalStrides,
-      boxDim,
-      elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  check_cu(err);
-}
-
 namespace kernel {
 
 using namespace ::kernel::sm100_ptx;
