@@ -506,15 +506,14 @@ template <typename T,
           bool OVERLAP_OUTPUT_MBAR,
           bool HAS_BIAS_DEPRECATED> // ignored; HAS_BIAS chosen at launch from
                                     // residual_ptr
-                                    void
-    launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
-                                              void *input_sf_ptr,
-                                              void *weight_ptr,
-                                              void *weight_sf_ptr,
-                                              void *output_ptr,
-                                              void *residual_ptr,
-                                              int batch_size,
-                                              int output_size) {
+void launch_linear_nvfp4_1d2d_2sm_sm100_config(void *input_ptr,
+                                               void *input_sf_ptr,
+                                               void *weight_ptr,
+                                               void *weight_sf_ptr,
+                                               void *output_ptr,
+                                               void *residual_ptr,
+                                               int batch_size,
+                                               int output_size) {
   static_assert(BLOCK_M == 128, "2SM 1d2d NVFP4 uses a 128-row per-CTA A tile");
   static_assert(BLOCK_K == 256,
                 "2SM 1d2d NVFP4 dispatch table uses BLOCK_K=256");

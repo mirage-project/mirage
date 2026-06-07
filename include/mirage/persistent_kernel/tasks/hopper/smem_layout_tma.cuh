@@ -40,17 +40,8 @@ struct smem_tma {
 
   __device__ __forceinline__ smem_tma(T *ptr) : base_ptr(ptr) {}
 
-  // TODO: For sub-byte pointers
-  __device__ __forceinline__ smem_tma(void *ptr)
-      : base_ptr(reinterpret_cast<T *>(ptr)) {}
-
   __device__ __forceinline__ void set_ptr(T *ptr) {
     base_ptr = ptr;
-  }
-
-  // TODO: For sub-byte pointers
-  __device__ __forceinline__ void set_ptr(void *ptr) {
-    base_ptr = reinterpret_cast<T *>(ptr);
   }
 
   static constexpr size_t size() {

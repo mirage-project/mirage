@@ -64,46 +64,9 @@ struct tma_2d {
   }
 
 public:
-  __host__ __device__ inline CUtensorMap *get_tma_descriptor() const {
-    return desc_ptr;
-  }
-
-  template <int NDIM>
-  __device__ inline void prefetch(int const (&tma_coords)[NDIM]) const {
-#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
-    uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
-
-    int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
-    if constexpr (NDIM > 0) {
-      c0 = tma_coords[0];
-    }
-    if constexpr (NDIM > 1) {
-      c1 = tma_coords[1];
-    }
-    if constexpr (NDIM > 2) {
-      c2 = tma_coords[2];
-    }
-    if constexpr (NDIM > 3) {
-      c3 = tma_coords[3];
-    }
-    if constexpr (NDIM > 4) {
-      c4 = tma_coords[4];
-    }
-
-    asm volatile(
-        "cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
-        "[%0, {%1, %2, %3, %4, %5}];"
-        :
-        : "l"(gmem_int_desc), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4)
-        : "memory");
-#elif defined(__CUDA_ARCH__)
-    asm volatile("brkpt;\n" ::);
-#endif
-  }
-
   template <int NDIM, typename Barrier>
   __device__ inline void tma_cp_async(Barrier &mbar,
-                                      void *smem_ptr,
+                                      T *smem_ptr,
                                       int const (&tma_coords)[NDIM]) const {
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
@@ -121,8 +84,7 @@ public:
         printf("smem_ptr: %p\n", smem_ptr);
         printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
 #endif
-        launch_tma_cp_async(
-            mbar, static_cast<T *>(smem_ptr) + smem_offset, tma_coords_local);
+        launch_tma_cp_async(mbar, smem_ptr + smem_offset, tma_coords_local);
       }
     }
   }
@@ -293,6 +255,8 @@ private:
     void *global_addr = src;
 
     constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+    //  (std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
+    //                                       : CUtensorMapDataType(-1));
     constexpr CUtensorMapInterleave tma_interleave =
         CU_TENSOR_MAP_INTERLEAVE_NONE;
     constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -376,31 +340,31 @@ private:
     uint32_t const *smem_box_shape_ptr = &smem_box_shape[0];
     uint32_t const *smem_box_stride_ptr = &smem_box_stride[0];
 
-#if 1
+#if 0
     printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
-           gmem_prob_shape[0],
-           gmem_prob_shape[1],
-           gmem_prob_shape[2],
-           gmem_prob_shape[3],
-           gmem_prob_shape[4]);
+          gmem_prob_shape[0],
+          gmem_prob_shape[1],
+          gmem_prob_shape[2],
+          gmem_prob_shape[3],
+          gmem_prob_shape[4]);
     printf("gmem_prob_stride: %lu, %lu, %lu, %lu, %lu\n",
-           gmem_prob_stride[0],
-           gmem_prob_stride[1],
-           gmem_prob_stride[2],
-           gmem_prob_stride[3],
-           gmem_prob_stride[4]);
+          gmem_prob_stride[0],
+          gmem_prob_stride[1],
+          gmem_prob_stride[2],
+          gmem_prob_stride[3],
+          gmem_prob_stride[4]);
     printf("smem_box_shape: %d, %d, %d, %d, %d\n",
-           smem_box_shape[0],
-           smem_box_shape[1],
-           smem_box_shape[2],
-           smem_box_shape[3],
-           smem_box_shape[4]);
+          smem_box_shape[0],
+          smem_box_shape[1],
+          smem_box_shape[2],
+          smem_box_shape[3],
+          smem_box_shape[4]);
     printf("smem_box_stride: %d, %d, %d, %d, %d\n",
-           smem_box_stride[0],
-           smem_box_stride[1],
-           smem_box_stride[2],
-           smem_box_stride[3],
-           smem_box_stride[4]);
+          smem_box_stride[0],
+          smem_box_stride[1],
+          smem_box_stride[2],
+          smem_box_stride[3],
+          smem_box_stride[4]);
 #endif
 
     CUresult result = cuTensorMapEncodeTiled(tma_desc,
