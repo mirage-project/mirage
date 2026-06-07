@@ -75,8 +75,6 @@ struct PipedSharedStorageWithSF {
 
   alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
-  alignas(16) cute::uint64_t sf_full_mbar_ptr[Num_AB_Stage];
-  alignas(16) cute::uint64_t sf_empty_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
   alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
 
