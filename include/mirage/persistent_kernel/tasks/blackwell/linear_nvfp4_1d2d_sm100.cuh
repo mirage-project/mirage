@@ -17,8 +17,8 @@
 
 #include <cstdint>
 
-#include "common/bfloat16.h"
 #include "blackwell/sm100_ptx.cuh"
+#include "common/bfloat16.h"
 
 #include <c10/util/Exception.h>
 #include <cuda.h>
@@ -35,32 +35,35 @@ template <int REDUCTION_SIZE,
           int BLOCK_K,
           int NUM_STAGES,
           int EPI_BATCH_LA = 1>
-__global__ __launch_bounds__(BLOCK_M + 2 * 32) void
-linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
-                               const __grid_constant__ CUtensorMap B_tmap,
-                               const char *SFA_ptr,
-                               const char *SFB_ptr,
-                               type::bfloat16_t *C_ptr,
-                               const type::bfloat16_t *bias_ptr,
-                               int M,
-                               int N) {
+__global__
+    __launch_bounds__(BLOCK_M + 2 * 32) void linear_nvfp4_1d2d_sm100_kernel(
+        const __grid_constant__ CUtensorMap A_tmap,
+        const __grid_constant__ CUtensorMap B_tmap,
+        char const *SFA_ptr,
+        char const *SFB_ptr,
+        type::bfloat16_t *C_ptr,
+        type::bfloat16_t const *bias_ptr,
+        int M,
+        int N) {
   static_assert(BLOCK_M == 128, "SM100 NVFP4 tcgen05 MMA uses BLOCK_M == 128");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K must be divisible by MMA_K");
-  static_assert(REDUCTION_SIZE % BLOCK_K == 0, "K must be divisible by BLOCK_K");
-  static_assert(BLOCK_N == 32 || BLOCK_N == 64 || BLOCK_N == 128, "BLOCK_N must be 32, 64, or 128");
+  static_assert(REDUCTION_SIZE % BLOCK_K == 0,
+                "K must be divisible by BLOCK_K");
+  static_assert(BLOCK_N == 32 || BLOCK_N == 64 || BLOCK_N == 128,
+                "BLOCK_N must be 32, 64, or 128");
 
-  const int tid = threadIdx.x;
-  const int warp_id = tid / WARP_SIZE;
+  int const tid = threadIdx.x;
+  int const warp_id = tid / WARP_SIZE;
 
-  const int bid_m = blockIdx.x;
-  const int bid_n = blockIdx.y;
-  const int off_m = bid_m * BLOCK_M;
-  const int off_n = bid_n * BLOCK_N;
+  int const bid_m = blockIdx.x;
+  int const bid_n = blockIdx.y;
+  int const off_m = bid_m * BLOCK_M;
+  int const off_n = bid_n * BLOCK_N;
 
   constexpr int NUM_WARPS = BLOCK_M / WARP_SIZE + 2;
 
   extern __shared__ __align__(1024) char smem_ptr[];
-  const int smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
+  int const smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
   constexpr int A_size = BLOCK_M * BLOCK_K / 2;
   constexpr int B_size = BLOCK_N * BLOCK_K / 2;
   constexpr int SFA_size = 128 * BLOCK_K / 16;
@@ -69,9 +72,9 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
 
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ int64_t mbars[NUM_STAGES * 2 + 1];
-  const int tma_mbar_addr = static_cast<int>(__cvta_generic_to_shared(mbars));
-  const int mma_mbar_addr = tma_mbar_addr + NUM_STAGES * 8;
-  const int mainloop_mbar_addr = mma_mbar_addr + NUM_STAGES * 8;
+  int const tma_mbar_addr = static_cast<int>(__cvta_generic_to_shared(mbars));
+  int const mma_mbar_addr = tma_mbar_addr + NUM_STAGES * 8;
+  int const mainloop_mbar_addr = mma_mbar_addr + NUM_STAGES * 8;
 
   constexpr int SFA_tmem = BLOCK_N;
   constexpr int SFB_tmem = SFA_tmem + 4 * (BLOCK_K / MMA_K);
@@ -90,9 +93,10 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
 
   auto make_desc_AB = [](int addr) -> uint64_t {
     const int SBO = 8 * 128;
-    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
+    return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) |
+           (2ULL << 61ULL);
   };
-  
+
   auto make_desc_SF = [](int addr) -> uint64_t {
     const int SBO = 8 * 16;
     return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
@@ -123,15 +127,16 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
   };
 
   if (warp_id == NUM_WARPS - 2 && elect_sync()) {
-    constexpr int PREFETCH_ITERS = (NUM_ITERS < NUM_STAGES) ? NUM_ITERS : NUM_STAGES;
-    
+    constexpr int PREFETCH_ITERS =
+        (NUM_ITERS < NUM_STAGES) ? NUM_ITERS : NUM_STAGES;
+
     for (int iter_k = 0; iter_k < PREFETCH_ITERS; iter_k++) {
       issue_tma(iter_k, iter_k);
     }
-    
+
     for (int iter_k = NUM_STAGES; iter_k < NUM_ITERS; iter_k++) {
-      const int stage_id = iter_k % NUM_STAGES;
-      const int mma_phase = (iter_k / NUM_STAGES - 1) % 2;
+      int const stage_id = iter_k % NUM_STAGES;
+      int const mma_phase = (iter_k / NUM_STAGES - 1) % 2;
       mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
       issue_tma(iter_k, stage_id);
     }
@@ -139,41 +144,50 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
   } else if (warp_id == NUM_WARPS - 1 && elect_sync()) {
     constexpr int MMA_N = BLOCK_N;
     constexpr int MMA_M = 128;
-    constexpr uint32_t i_desc = (1U << 7U) | (1U << 10U) | ((uint32_t)MMA_N >> 3U << 17U) | ((uint32_t)MMA_M >> 7U << 27U);
+    constexpr uint32_t i_desc = (1U << 7U) | (1U << 10U) |
+                                ((uint32_t)MMA_N >> 3U << 17U) |
+                                ((uint32_t)MMA_M >> 7U << 27U);
 
     for (int iter_k = 0; iter_k < NUM_ITERS; iter_k++) {
-      const int stage_id = iter_k % NUM_STAGES;
-      const int tma_phase = (iter_k / NUM_STAGES) % 2;
+      int const stage_id = iter_k % NUM_STAGES;
+      int const tma_phase = (iter_k / NUM_STAGES) % 2;
 
-      const int A_smem = smem + stage_id * STAGE_SIZE;
-      const int B_smem = A_smem + A_size;
-      const int SFA_smem = B_smem + B_size;
-      const int SFB_smem = SFA_smem + SFA_size;
+      int const A_smem = smem + stage_id * STAGE_SIZE;
+      int const B_smem = A_smem + A_size;
+      int const SFA_smem = B_smem + B_size;
+      int const SFB_smem = SFA_smem + SFA_size;
 
       const uint64_t SF_desc = make_desc_SF(0);
-      const uint64_t SFA_desc = SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
-      const uint64_t SFB_desc = SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
+      const uint64_t SFA_desc =
+          SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
+      const uint64_t SFB_desc =
+          SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
 
       mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
 
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
-        uint64_t sfa_desc = SFA_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
-        uint64_t sfb_desc = SFB_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
+        uint64_t sfa_desc =
+            SFA_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
+        uint64_t sfb_desc =
+            SFB_desc + static_cast<uint64_t>(k) * (512ULL >> 4ULL);
         tcgen05_cp_fp4<1>(SFA_tmem + k * 4, sfa_desc);
         tcgen05_cp_fp4<1>(SFB_tmem + k * 4, sfb_desc);
       }
 
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
-        const int k1 = k / 4;
-        const int k2 = k % 4;
+        int const k1 = k / 4;
+        int const k2 = k % 4;
 
         uint64_t a_desc = make_desc_AB(A_smem + k1 * BLOCK_M * 128 + k2 * 32);
         uint64_t b_desc = make_desc_AB(B_smem + k1 * BLOCK_N * 128 + k2 * 32);
-        const int scale_A_tmem = SFA_tmem + k * 4 + (bid_m % (128 / BLOCK_M)) * (BLOCK_M / 32);
-        const int scale_B_tmem = SFB_tmem + k * 4 + (bid_n % (128 / BLOCK_N)) * (BLOCK_N / 32);
-        const int enable_input_d = (k == 0) ? iter_k : 1;
+        int const scale_A_tmem =
+            SFA_tmem + k * 4 + (bid_m % (128 / BLOCK_M)) * (BLOCK_M / 32);
+        int const scale_B_tmem =
+            SFB_tmem + k * 4 + (bid_n % (128 / BLOCK_N)) * (BLOCK_N / 32);
+        int const enable_input_d = (k == 0) ? iter_k : 1;
 
-        tcgen05_mma_nvfp4<1>(a_desc, b_desc, i_desc, scale_A_tmem, scale_B_tmem, enable_input_d);
+        tcgen05_mma_nvfp4<1>(
+            a_desc, b_desc, i_desc, scale_A_tmem, scale_B_tmem, enable_input_d);
       }
       tcgen05_commit_arrive<1>(mma_mbar_addr + stage_id * 8);
     }
@@ -185,9 +199,10 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
     auto epilogue_M_major = [&]() {
       constexpr int WIDTH = (BLOCK_N < 64) ? BLOCK_N : 64;
       constexpr int NUM_SUBTILES = BLOCK_N / WIDTH;
-      constexpr int BATCH = (EPI_BATCH_LA <= NUM_SUBTILES && NUM_SUBTILES % EPI_BATCH_LA == 0)
-                           ? EPI_BATCH_LA
-                           : 1;
+      constexpr int BATCH =
+          (EPI_BATCH_LA <= NUM_SUBTILES && NUM_SUBTILES % EPI_BATCH_LA == 0)
+              ? EPI_BATCH_LA
+              : 1;
 
       auto load_subtile = [&](float *dst, int n) {
         if constexpr (WIDTH == 128) {
@@ -217,12 +232,12 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
 
       for (int g = 0; g < NUM_SUBTILES; g += BATCH) {
         float tmp_batch[BATCH][WIDTH];
-        #pragma unroll
+#pragma unroll
         for (int b = 0; b < BATCH; b++) {
           load_subtile(tmp_batch[b], g + b);
         }
         asm volatile("tcgen05.wait::ld.sync.aligned;");
-        #pragma unroll
+#pragma unroll
         for (int b = 0; b < BATCH; b++) {
           store_subtile(tmp_batch[b], g + b);
         }
@@ -238,4 +253,4 @@ linear_nvfp4_1d2d_sm100_kernel(const __grid_constant__ CUtensorMap A_tmap,
   }
 }
 
-}  // namespace kernel
+} // namespace kernel

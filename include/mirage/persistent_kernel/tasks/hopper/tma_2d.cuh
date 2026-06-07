@@ -90,16 +90,12 @@ public:
       c4 = tma_coords[4];
     }
 
-    asm volatile("cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
-                 "[%0, {%1, %2, %3, %4, %5}];"
-                 :
-                 : "l"(gmem_int_desc),
-                   "r"(c0),
-                   "r"(c1),
-                   "r"(c2),
-                   "r"(c3),
-                   "r"(c4)
-                 : "memory");
+    asm volatile(
+        "cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
+        "[%0, {%1, %2, %3, %4, %5}];"
+        :
+        : "l"(gmem_int_desc), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4)
+        : "memory");
 #elif defined(__CUDA_ARCH__)
     asm volatile("brkpt;\n" ::);
 #endif
@@ -125,7 +121,8 @@ public:
         printf("smem_ptr: %p\n", smem_ptr);
         printf("smem_ptr + smem_offset: %p\n", smem_ptr + smem_offset);
 #endif
-        launch_tma_cp_async(mbar, static_cast<T*>(smem_ptr) + smem_offset, tma_coords_local);
+        launch_tma_cp_async(
+            mbar, static_cast<T *>(smem_ptr) + smem_offset, tma_coords_local);
       }
     }
   }
@@ -135,8 +132,10 @@ public:
       Barrier &mbar, T *smem_ptr, int const (&tma_coords)[NDIM]) const {
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
-    uint32_t smem_int_mbar = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
-    uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    uint32_t smem_int_mbar =
+        static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
+    uint32_t smem_int_ptr =
+        static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
 
     int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
     if constexpr (NDIM > 0) {
@@ -293,8 +292,7 @@ private:
     constexpr uint32_t tma_dim = 5;
     void *global_addr = src;
 
-    constexpr CUtensorMapDataType tma_format = 
-        CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+    constexpr CUtensorMapDataType tma_format = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
     constexpr CUtensorMapInterleave tma_interleave =
         CU_TENSOR_MAP_INTERLEAVE_NONE;
     constexpr CUtensorMapL2promotion tma_l2Promotion =
@@ -302,10 +300,10 @@ private:
     constexpr CUtensorMapFloatOOBfill tma_oobFill =
         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
     constexpr CUtensorMapSwizzle tma_swizzle =
-        (B == 1 ? CU_TENSOR_MAP_SWIZZLE_32B
-       : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
-       : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
-       :          CU_TENSOR_MAP_SWIZZLE_NONE);
+        (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
+         : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
+         : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
+                  : CU_TENSOR_MAP_SWIZZLE_NONE);
 
     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
     uint64_t gmem_prob_stride[5] = {
@@ -380,29 +378,29 @@ private:
 
 #if 1
     printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
-          gmem_prob_shape[0],
-          gmem_prob_shape[1],
-          gmem_prob_shape[2],
-          gmem_prob_shape[3],
-          gmem_prob_shape[4]);
+           gmem_prob_shape[0],
+           gmem_prob_shape[1],
+           gmem_prob_shape[2],
+           gmem_prob_shape[3],
+           gmem_prob_shape[4]);
     printf("gmem_prob_stride: %lu, %lu, %lu, %lu, %lu\n",
-          gmem_prob_stride[0],
-          gmem_prob_stride[1],
-          gmem_prob_stride[2],
-          gmem_prob_stride[3],
-          gmem_prob_stride[4]);
+           gmem_prob_stride[0],
+           gmem_prob_stride[1],
+           gmem_prob_stride[2],
+           gmem_prob_stride[3],
+           gmem_prob_stride[4]);
     printf("smem_box_shape: %d, %d, %d, %d, %d\n",
-          smem_box_shape[0],
-          smem_box_shape[1],
-          smem_box_shape[2],
-          smem_box_shape[3],
-          smem_box_shape[4]);
+           smem_box_shape[0],
+           smem_box_shape[1],
+           smem_box_shape[2],
+           smem_box_shape[3],
+           smem_box_shape[4]);
     printf("smem_box_stride: %d, %d, %d, %d, %d\n",
-          smem_box_stride[0],
-          smem_box_stride[1],
-          smem_box_stride[2],
-          smem_box_stride[3],
-          smem_box_stride[4]);
+           smem_box_stride[0],
+           smem_box_stride[1],
+           smem_box_stride[2],
+           smem_box_stride[3],
+           smem_box_stride[4]);
 #endif
 
     CUresult result = cuTensorMapEncodeTiled(tma_desc,

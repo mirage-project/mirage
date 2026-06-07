@@ -157,8 +157,8 @@ struct tma_fp4 {
     std::cout << "Memory type: " << attr.type << std::endl;
 #endif
   }
-  
-public: 
+
+public:
   __host__ __device__ inline CUtensorMap *get_tma_descriptor() const {
     return desc_ptr;
   }
@@ -185,16 +185,12 @@ public:
       c4 = tma_coords[4];
     }
 
-    asm volatile("cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
-                 "[%0, {%1, %2, %3, %4, %5}];"
-                 :
-                 : "l"(gmem_int_desc),
-                   "r"(c0),
-                   "r"(c1),
-                   "r"(c2),
-                   "r"(c3),
-                   "r"(c4)
-                 : "memory");
+    asm volatile(
+        "cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
+        "[%0, {%1, %2, %3, %4, %5}];"
+        :
+        : "l"(gmem_int_desc), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4)
+        : "memory");
 #elif defined(__CUDA_ARCH__)
     asm volatile("brkpt;\n" ::);
 #endif
@@ -213,7 +209,8 @@ public:
             tma_coords[1] + static_cast<int>(i * SMEM_ROW)};
 #if 1
 #endif
-        launch_tma_cp_async(mbar, static_cast<T*>(smem_ptr) + smem_offset, tma_coords_local);
+        launch_tma_cp_async(
+            mbar, static_cast<T *>(smem_ptr) + smem_offset, tma_coords_local);
       }
     }
   }
@@ -391,10 +388,10 @@ private:
     constexpr CUtensorMapFloatOOBfill tma_oobFill =
         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
     constexpr CUtensorMapSwizzle tma_swizzle =
-        (B == 1 ? CU_TENSOR_MAP_SWIZZLE_32B
-       : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
-       : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
-       :          CU_TENSOR_MAP_SWIZZLE_NONE);
+        (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
+         : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
+         : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
+                  : CU_TENSOR_MAP_SWIZZLE_NONE);
 
     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
     uint64_t gmem_prob_stride[5] = {
@@ -504,24 +501,23 @@ private:
     constexpr uint32_t tma_dim = 5;
     void *global_addr = src;
 
-    constexpr CUtensorMapDataType tma_format = 
-      CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B;
-    constexpr CUtensorMapInterleave tma_interleave = 
-      CU_TENSOR_MAP_INTERLEAVE_NONE;
-    constexpr CUtensorMapL2promotion tma_l2Promotion = 
-      CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
-    constexpr CUtensorMapFloatOOBfill tma_oobFill = 
-      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+    constexpr CUtensorMapDataType tma_format =
+        CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B;
+    constexpr CUtensorMapInterleave tma_interleave =
+        CU_TENSOR_MAP_INTERLEAVE_NONE;
+    constexpr CUtensorMapL2promotion tma_l2Promotion =
+        CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
+    constexpr CUtensorMapFloatOOBfill tma_oobFill =
+        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
     constexpr CUtensorMapSwizzle tma_swizzle =
-        (B == 1 ? CU_TENSOR_MAP_SWIZZLE_32B
-       : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
-       : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
-       :          CU_TENSOR_MAP_SWIZZLE_NONE);
+        (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
+         : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
+         : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
+                  : CU_TENSOR_MAP_SWIZZLE_NONE);
 
     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
     uint64_t gmem_prob_stride[5] = {
-        sizeof(T), GMEM_STRIDE_ROW_ * sizeof(T), 0, 0, 0
-    };
+        sizeof(T), GMEM_STRIDE_ROW_ * sizeof(T), 0, 0, 0};
 
     assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
            0); // Address must be 16B-aligned

@@ -16,8 +16,12 @@ bound for those shapes (it computes a full 128-row tile regardless).
 """
 
 import argparse
+import os, sys
 
-import _runtime_path  # noqa: F401
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
 import torch
 import runtime_kernel_blackwell_linear_mxfp4 as runtime_kernel_blackwell
 

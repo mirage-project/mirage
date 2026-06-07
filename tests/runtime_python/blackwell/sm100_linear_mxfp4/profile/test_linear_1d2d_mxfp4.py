@@ -1,6 +1,11 @@
 """Basic correctness test for the MXFP4 1d2d kernels (1SM and 2SM)."""
 
-import _runtime_path  # noqa: F401
+import os, sys
+
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
 import torch
 import runtime_kernel_blackwell_linear_mxfp4 as runtime_kernel_blackwell
 from mxfp4_util import mxfp4_reference_matmul

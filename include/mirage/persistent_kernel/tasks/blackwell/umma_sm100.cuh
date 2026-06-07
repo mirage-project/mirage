@@ -48,11 +48,11 @@ namespace umma {
 // ---------------------------------------------------------------------------
 
 enum class Swizzle : uint8_t {
-  None       = 0,
+  None = 0,
   SW128_B32B = 1,
-  SW128      = 2,
-  SW64       = 4,
-  SW32       = 6,
+  SW128 = 2,
+  SW64 = 4,
+  SW32 = 6,
 };
 
 __device__ static inline uint64_t encode14(uint64_t x) {
@@ -60,18 +60,19 @@ __device__ static inline uint64_t encode14(uint64_t x) {
 }
 
 // LBO/SBO are byte counts; PTX expects them already shifted right by 4.
-__device__ static inline uint64_t make_smem_desc(void const *smem_ptr,
-                                                 uint32_t leading_byte_offset,
-                                                 uint32_t stride_byte_offset,
-                                                 Swizzle swizzle = Swizzle::SW128,
-                                                 uint8_t base_offset = 0,
-                                                 uint8_t lbo_mode = 0) {
+__device__ static inline uint64_t
+    make_smem_desc(void const *smem_ptr,
+                   uint32_t leading_byte_offset,
+                   uint32_t stride_byte_offset,
+                   Swizzle swizzle = Swizzle::SW128,
+                   uint8_t base_offset = 0,
+                   uint8_t lbo_mode = 0) {
   uint32_t start = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   uint64_t desc = 0;
   desc |= encode14(static_cast<uint64_t>(start));
   desc |= encode14(static_cast<uint64_t>(leading_byte_offset)) << 16;
   desc |= encode14(static_cast<uint64_t>(stride_byte_offset)) << 32;
-  desc |= (uint64_t{1} & 0x3ull) << 46;                 // version = 1
+  desc |= (uint64_t{1} & 0x3ull) << 46; // version = 1
   desc |= (uint64_t{base_offset} & 0x7ull) << 49;
   desc |= (uint64_t{lbo_mode} & 0x1ull) << 52;
   desc |= (uint64_t{static_cast<uint8_t>(swizzle)} & 0x7ull) << 61;
@@ -108,33 +109,35 @@ __device__ static inline uint64_t set_smem_desc_addr(uint64_t desc,
 //   bits [29,31)  a_sf_id   (top 2 bits of TMEM SFA column)
 //   bit  [31,32)  k_size    (MXF4: 0 = K64, 1 = K96; for nvfp4-vec16 use 0)
 //
-// CuTe wraps the 32-bit instruction descriptor in a uint64_t with the descriptor
-// in the upper 32 bits (lower 32 bits are the sparse-metadata TMEM addr, =0 here).
-// We mirror that convention so the PTX issuer can use the same 64-bit operand.
+// CuTe wraps the 32-bit instruction descriptor in a uint64_t with the
+// descriptor in the upper 32 bits (lower 32 bits are the sparse-metadata TMEM
+// addr, =0 here). We mirror that convention so the PTX issuer can use the same
+// 64-bit operand.
 // ---------------------------------------------------------------------------
 
 enum class CFormat : uint8_t { F16 = 0, F32 = 1, S32 = 2 };
 enum class ScaleFormat : uint8_t { UE4M3 = 0, UE8M0 = 1 };
 enum class Major : uint8_t { K = 0, MN = 1 };
 
-__device__ static inline uint64_t make_inst_desc_mxf4(int M,
-                                                      int N,
-                                                      ScaleFormat sf,
-                                                      Major a_major = Major::K,
-                                                      Major b_major = Major::K,
-                                                      uint32_t tmem_sfa_addr = 0,
-                                                      uint32_t tmem_sfb_addr = 0) {
+__device__ static inline uint64_t
+    make_inst_desc_mxf4(int M,
+                        int N,
+                        ScaleFormat sf,
+                        Major a_major = Major::K,
+                        Major b_major = Major::K,
+                        uint32_t tmem_sfa_addr = 0,
+                        uint32_t tmem_sfb_addr = 0) {
   // a/b format = E2M1 (5)
   constexpr uint32_t a_fmt = 5;
   constexpr uint32_t b_fmt = 5;
   uint32_t desc = 0;
-  desc |= (a_fmt   & 0x7u)    << 7;
-  desc |= (b_fmt   & 0x7u)    << 10;
+  desc |= (a_fmt & 0x7u) << 7;
+  desc |= (b_fmt & 0x7u) << 10;
   desc |= ((static_cast<uint32_t>(a_major) & 0x1u)) << 15;
   desc |= ((static_cast<uint32_t>(b_major) & 0x1u)) << 16;
-  desc |= ((static_cast<uint32_t>(N >> 3)  & 0x3Fu)) << 17;
-  desc |= ((static_cast<uint32_t>(sf)      & 0x1u)) << 23;
-  desc |= ((static_cast<uint32_t>(M >> 4)  & 0x1Fu)) << 24;
+  desc |= ((static_cast<uint32_t>(N >> 3) & 0x3Fu)) << 17;
+  desc |= ((static_cast<uint32_t>(sf) & 0x1u)) << 23;
+  desc |= ((static_cast<uint32_t>(M >> 4) & 0x1Fu)) << 24;
   // a_sf_id / b_sf_id: top 2 bits of the TMEM column address.
   desc |= ((tmem_sfa_addr & 0xC0000000u) >> 30) << 29;
   desc |= ((tmem_sfb_addr & 0xC0000000u) >> 30) << 4;
@@ -172,33 +175,47 @@ __device__ static inline void mma_mxf4_ss(uint32_t tmem_d,
                 "SCALE_VEC_SIZE must be 16 (NVFP4) or 32 (MXFP4)");
   uint32_t idesc_hi = static_cast<uint32_t>(inst_desc >> 32);
   if constexpr (SCALE_VEC_SIZE == 16) {
-    asm volatile(
-        "{\n\t"
-        ".reg .pred p;\n\t"
-        "setp.ne.b32 p, %4, 0;\n\t"
-#if (__CUDACC_VER_MAJOR__ > 12) || (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
-        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 [%0], %1, %2, %3, [%5], [%6], p; \n\t"
+    asm volatile("{\n\t"
+                 ".reg .pred p;\n\t"
+                 "setp.ne.b32 p, %4, 0;\n\t"
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+                 "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                 "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
 #else
-        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X [%0], %1, %2, %3, [%5], [%6], p; \n\t"
+                  "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_"
+                  "vec::4X [%0], %1, %2, %3, [%5], [%6], p; \n\t"
 #endif
-        "}\n"
-        :
-        : "r"(tmem_d), "l"(desc_a), "l"(desc_b), "r"(idesc_hi), "r"(scale_d),
-          "r"(sfa_addr), "r"(sfb_addr));
+                 "}\n"
+                 :
+                 : "r"(tmem_d),
+                   "l"(desc_a),
+                   "l"(desc_b),
+                   "r"(idesc_hi),
+                   "r"(scale_d),
+                   "r"(sfa_addr),
+                   "r"(sfb_addr));
   } else {
-    asm volatile(
-        "{\n\t"
-        ".reg .pred p;\n\t"
-        "setp.ne.b32 p, %4, 0;\n\t"
-#if (__CUDACC_VER_MAJOR__ > 12) || (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
-        "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.block32 [%0], %1, %2, %3, [%5], [%6], p; \n\t"
+    asm volatile("{\n\t"
+                 ".reg .pred p;\n\t"
+                 "setp.ne.b32 p, %4, 0;\n\t"
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+                 "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.block32 "
+                 "[%0], %1, %2, %3, [%5], [%6], p; \n\t"
 #else
-        "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.scale_vec::2X [%0], %1, %2, %3, [%5], [%6], p; \n\t"
+                  "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.scale_vec::"
+                  "2X [%0], %1, %2, %3, [%5], [%6], p; \n\t"
 #endif
-        "}\n"
-        :
-        : "r"(tmem_d), "l"(desc_a), "l"(desc_b), "r"(idesc_hi), "r"(scale_d),
-          "r"(sfa_addr), "r"(sfb_addr));
+                 "}\n"
+                 :
+                 : "r"(tmem_d),
+                   "l"(desc_a),
+                   "l"(desc_b),
+                   "r"(idesc_hi),
+                   "r"(scale_d),
+                   "r"(sfa_addr),
+                   "r"(sfb_addr));
   }
 }
 
@@ -211,10 +228,9 @@ __device__ static inline void mma_mxf4_ss(uint32_t tmem_d,
 
 __device__ static inline void utccp_4x32x128b(uint32_t tmem_dst,
                                               uint64_t smem_src_desc) {
-  asm volatile(
-      "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;"
-      :
-      : "r"(tmem_dst), "l"(smem_src_desc));
+  asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;"
+               :
+               : "r"(tmem_dst), "l"(smem_src_desc));
 }
 
 // ---------------------------------------------------------------------------
@@ -223,13 +239,11 @@ __device__ static inline void utccp_4x32x128b(uint32_t tmem_dst,
 // dst[0] receives column tmem_addr, dst[1] receives the next column.
 // ---------------------------------------------------------------------------
 
-__device__ static inline void tmem_ld_32dp32b2x(uint32_t tmem_addr,
-                                                uint32_t &dst0,
-                                                uint32_t &dst1) {
-  asm volatile(
-      "tcgen05.ld.sync.aligned.32x32b.x2.b32 {%0, %1}, [%2];\n"
-      : "=r"(dst0), "=r"(dst1)
-      : "r"(tmem_addr));
+__device__ static inline void
+    tmem_ld_32dp32b2x(uint32_t tmem_addr, uint32_t &dst0, uint32_t &dst1) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x2.b32 {%0, %1}, [%2];\n"
+               : "=r"(dst0), "=r"(dst1)
+               : "r"(tmem_addr));
 }
 
 // Wait for outstanding tcgen05.ld to complete (reg is now live).
@@ -248,7 +262,7 @@ __device__ static inline void tmem_st_wait() {
 // ---------------------------------------------------------------------------
 
 static constexpr int kTmemColumnsPerSlice = 32;
-static constexpr int kTmemTotalColumns    = 512;
+static constexpr int kTmemTotalColumns = 512;
 
 __device__ static inline void tmem_alloc(int num_columns,
                                          uint32_t *dst_smem_u32) {
@@ -261,10 +275,9 @@ __device__ static inline void tmem_alloc(int num_columns,
 }
 
 __device__ static inline void tmem_dealloc(uint32_t tmem_ptr, int num_columns) {
-  asm volatile(
-      "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
-      :
-      : "r"(tmem_ptr), "r"(num_columns));
+  asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
+               :
+               : "r"(tmem_ptr), "r"(num_columns));
 }
 
 __device__ static inline void tmem_relinquish_alloc_permit() {
@@ -282,10 +295,10 @@ __device__ static inline void umma_arrive(uint64_t *smem_mbar_ptr) {
       static_cast<uint32_t>(__cvta_generic_to_shared(smem_mbar_ptr));
   // Caller is expected to be inside an elect_one_sync() guard, matching the
   // CuTe convention.
-  asm volatile(
-      "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
-      :
-      : "r"(bar_intptr));
+  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+               "cluster.b64 [%0];"
+               :
+               : "r"(bar_intptr));
 }
 
 // ---------------------------------------------------------------------------
@@ -296,16 +309,15 @@ __device__ static inline void umma_arrive(uint64_t *smem_mbar_ptr) {
 __device__ static inline bool elect_one_sync() {
   uint32_t pred = 0;
   uint32_t laneid = 0;
-  asm volatile(
-      "{\n\t"
-      ".reg .b32 rx;\n\t"
-      ".reg .pred px;\n\t"
-      "    elect.sync rx|px, %2;\n\t"
-      "@px mov.s32 %1, 1;\n\t"
-      "    mov.s32 %0, rx;\n\t"
-      "}"
-      : "+r"(laneid), "+r"(pred)
-      : "r"(0xFFFFFFFFu));
+  asm volatile("{\n\t"
+               ".reg .b32 rx;\n\t"
+               ".reg .pred px;\n\t"
+               "    elect.sync rx|px, %2;\n\t"
+               "@px mov.s32 %1, 1;\n\t"
+               "    mov.s32 %0, rx;\n\t"
+               "}"
+               : "+r"(laneid), "+r"(pred)
+               : "r"(0xFFFFFFFFu));
   return pred != 0;
 }
 
@@ -375,13 +387,12 @@ __device__ static inline void arrive_barrier(uint64_t &bar,
                : "memory");
 }
 
-__device__ static inline void
-set_barrier_transaction_bytes(uint64_t &bar, uint32_t bytes) {
+__device__ static inline void set_barrier_transaction_bytes(uint64_t &bar,
+                                                            uint32_t bytes) {
   uint32_t intptr = static_cast<uint32_t>(__cvta_generic_to_shared(&bar));
-  asm volatile(
-      "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
-      :
-      : "r"(intptr), "r"(bytes));
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
+               :
+               : "r"(intptr), "r"(bytes));
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +422,7 @@ private:
 // Reserved named-barrier IDs we use, picked to avoid clashing with the
 // hard-wired Cutlass reserved range (0..7 are reserved-ish; we use 8 and 9).
 static constexpr int kTmemAllocBarrierId = 8;
-static constexpr int kEpilogueBarrierId  = 9;
+static constexpr int kEpilogueBarrierId = 9;
 
 } // namespace umma
 } // namespace kernel

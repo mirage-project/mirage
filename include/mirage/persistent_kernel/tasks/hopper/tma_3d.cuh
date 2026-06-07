@@ -94,16 +94,12 @@ public:
       c4 = tma_coords[4];
     }
 
-    asm volatile("cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
-                 "[%0, {%1, %2, %3, %4, %5}];"
-                 :
-                 : "l"(gmem_int_desc),
-                   "r"(c0),
-                   "r"(c1),
-                   "r"(c2),
-                   "r"(c3),
-                   "r"(c4)
-                 : "memory");
+    asm volatile(
+        "cp.async.bulk.prefetch.tensor.5d.L2.global.tile "
+        "[%0, {%1, %2, %3, %4, %5}];"
+        :
+        : "l"(gmem_int_desc), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4)
+        : "memory");
 #elif defined(__CUDA_ARCH__)
     asm volatile("brkpt;\n" ::);
 #endif
