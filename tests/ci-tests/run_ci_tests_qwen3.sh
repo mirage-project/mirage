@@ -13,3 +13,6 @@ python "$ROOT/demo/qwen3/demo.py" --use-mirage --save-tokens
 
 echo "Comparing outputs..."
 pytest -q "$ROOT/tests/ci-tests/test_inference_output.py"
+
+echo "Performance comparison..."
+python "$ROOT/tests/ci-tests/perf_comparison.py"

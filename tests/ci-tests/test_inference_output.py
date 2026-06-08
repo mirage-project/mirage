@@ -40,4 +40,3 @@ def test_qwen3_torch_vs_mpk_tokens():
             f"torch_generate_len={torch_meta.get('generate_length')}, "
             f"mpk_generate_len={mpk_meta.get('generate_length')}"
         )
-

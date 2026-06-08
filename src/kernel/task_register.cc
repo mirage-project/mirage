@@ -1929,6 +1929,7 @@ int TaskRegister::register_paged_attention_sm100_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int max_tokens = input_ops[0]->dtensor.dim[0];
   int qkv_stride = input_ops[0]->dtensor.dim[1];
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
@@ -1947,11 +1948,10 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // MAX_TOKENS is left to the kernel template default; only Q_LEN_OVERRIDE /
-  // TAIL_OFFSET are passed (the trailing template args before MAX_TOKENS).
+  // Pass Q_LEN_OVERRIDE, TAIL_OFFSET, and MAX_TOKENS explicitly.
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -1961,7 +1961,8 @@ int TaskRegister::register_paged_attention_sm100_task(
          max_seq_len,
          page_size,
          q_len_override,
-         tail_offset);
+         tail_offset,
+         max_tokens);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
