@@ -1998,6 +1998,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
+  // params[6]: max_tokens
   assert(params.size() == 6);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -2014,6 +2015,7 @@ int TaskRegister::register_paged_attention_sm100_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int max_tokens = input_ops[0]->dtensor.dim[0];
   int qkv_stride = row_stride(input_ops[0]->dtensor);
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
@@ -2032,7 +2034,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   code.inc_indent();
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $>(",
+         "$, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -2040,7 +2042,8 @@ int TaskRegister::register_paged_attention_sm100_task(
          output_size,
          head_dim,
          max_seq_len,
-         page_size);
+         page_size,
+         max_tokens);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
