@@ -150,9 +150,8 @@ public:
   // `operators`; downstream layers see them as ordinary DTensors.
   DTensor view(DTensor const &input, std::vector<int> const &new_shape);
   DTensor *view(DTensor const *input, std::vector<int> const &new_shape);
-  std::vector<DTensor> split(DTensor const &input,
-                             std::vector<int> const &sizes,
-                             int dim);
+  std::vector<DTensor>
+      split(DTensor const &input, std::vector<int> const &sizes, int dim);
   std::vector<DTensor> split(DTensor const &input, int chunk_size, int dim);
   int split(DTensor const *input,
             std::vector<int> const &sizes,

@@ -118,8 +118,9 @@ KNElementBinaryOp::KNElementBinaryOp(Graph *_kgraph,
   // pattern copied from input1 above is no longer valid. The output is
   // freshly allocated and row-major over the broadcast shape.
   for (int i = output.num_dims - 1; i >= 0; i--) {
-    output.stride[i] =
-        (i == output.num_dims - 1) ? 1 : output.stride[i + 1] * output.dim[i + 1];
+    output.stride[i] = (i == output.num_dims - 1)
+                           ? 1
+                           : output.stride[i + 1] * output.dim[i + 1];
   }
   output.owner_op = this;
   output.owner_ts_idx = 0;

@@ -1577,20 +1577,17 @@ TaskGraphResult print_task_graph(
                 if (input_map.x >= 0) {
                   size_t block_size =
                       in_dt.dim[input_map.x] / bgraph.grid_dim.x;
-                  offset +=
-                      block_size * bid.x * in_dt.stride[input_map.x];
+                  offset += block_size * bid.x * in_dt.stride[input_map.x];
                 }
                 if (input_map.y >= 0) {
                   size_t block_size =
                       in_dt.dim[input_map.y] / bgraph.grid_dim.y;
-                  offset +=
-                      block_size * bid.y * in_dt.stride[input_map.y];
+                  offset += block_size * bid.y * in_dt.stride[input_map.y];
                 }
                 if (input_map.z >= 0) {
                   size_t block_size =
                       in_dt.dim[input_map.z] / bgraph.grid_dim.z;
-                  offset +=
-                      block_size * bid.z * in_dt.stride[input_map.z];
+                  offset += block_size * bid.z * in_dt.stride[input_map.z];
                 }
                 // Byte offset within the root storage's allocation. For
                 // non-views, view_offset == 0 and this term is a no-op.
@@ -1620,16 +1617,16 @@ TaskGraphResult print_task_graph(
                   json_strides.push_back(task_desc.inputs[i].stride[d]);
                 }
                 tgbody.e("task_desc.inputs[$] = input$;", i, i);
-                json_task["inputs"].push_back(json{
-                    {"base_ptr", io_desc.name},
-                    {"offset",
-                     offset *
-                             type::get_datatype_size(static_cast<type::DataType>(
-                                 io_desc.tensor.data_type)) +
-                         in_view_bytes},
-                    {"data_type", task_desc.inputs[i].data_type},
-                    {"dims", json_dims},
-                    {"strides", json_strides}});
+                json_task["inputs"].push_back(
+                    json{{"base_ptr", io_desc.name},
+                         {"offset",
+                          offset * type::get_datatype_size(
+                                       static_cast<type::DataType>(
+                                           io_desc.tensor.data_type)) +
+                              in_view_bytes},
+                         {"data_type", task_desc.inputs[i].data_type},
+                         {"dims", json_dims},
+                         {"strides", json_strides}});
               }
             }
 
@@ -1651,32 +1648,28 @@ TaskGraphResult print_task_graph(
               if (output_map.x >= 0) {
                 size_t block_size =
                     out_dt.dim[output_map.x] / bgraph.grid_dim.x;
-                offset +=
-                    block_size * bid.x * out_dt.stride[output_map.x];
+                offset += block_size * bid.x * out_dt.stride[output_map.x];
               }
               if (output_map.y >= 0) {
                 size_t block_size =
                     out_dt.dim[output_map.y] / bgraph.grid_dim.y;
-                offset +=
-                    block_size * bid.y * out_dt.stride[output_map.y];
+                offset += block_size * bid.y * out_dt.stride[output_map.y];
               }
               if (output_map.z >= 0) {
                 size_t block_size =
                     out_dt.dim[output_map.z] / bgraph.grid_dim.z;
-                offset +=
-                    block_size * bid.z * out_dt.stride[output_map.z];
+                offset += block_size * bid.z * out_dt.stride[output_map.z];
               }
               int64_t out_view_bytes = out_dt.view_offset;
 
               tgbody.e("TensorDesc output$;", i);
-              tgbody.e("output$.base_ptr = static_cast<char*>($) + $;",
-                       i,
-                       io_desc.name,
-                       offset *
-                               type::get_datatype_size(
-                                   static_cast<type::DataType>(
-                                       io_desc.tensor.data_type)) +
-                           out_view_bytes);
+              tgbody.e(
+                  "output$.base_ptr = static_cast<char*>($) + $;",
+                  i,
+                  io_desc.name,
+                  offset * type::get_datatype_size(static_cast<type::DataType>(
+                               io_desc.tensor.data_type)) +
+                      out_view_bytes);
               tgbody.e(
                   "output$.num_dims = $;", i, task_desc.outputs[i].num_dims);
               tgbody.e(

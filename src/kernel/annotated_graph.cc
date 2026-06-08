@@ -156,8 +156,8 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
   // Map KNCustomizedOp* -> layer index so downstream passes can locate by op.
   std::unordered_map<KNCustomizedOp const *, int> op_to_layer;
 
-  auto window_overlaps = [](int64_t a_off, int64_t a_size,
-                            int64_t b_off, int64_t b_size) -> bool {
+  auto window_overlaps =
+      [](int64_t a_off, int64_t a_size, int64_t b_off, int64_t b_size) -> bool {
     return (a_off < b_off + b_size) && (b_off < a_off + a_size);
   };
 
@@ -307,8 +307,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
                                ag.layers[we.layer].num_inputs,
                                prod_inputs,
                                prod_outputs);
-              if (we.out_slot < 0 ||
-                  we.out_slot >= (int)prod_outputs.size()) {
+              if (we.out_slot < 0 || we.out_slot >= (int)prod_outputs.size()) {
                 throw std::runtime_error(
                     "build_annotated_graph: invalid out_slot for WAW producer");
               }
