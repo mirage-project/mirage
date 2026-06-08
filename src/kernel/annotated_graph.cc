@@ -96,6 +96,24 @@ void split_bgraph_ops(tb::Graph const &bgraph,
   }
 }
 
+bool same_view_window(DTensor const &a, DTensor const &b) {
+  if (a.base_guid != b.base_guid) {
+    return false;
+  }
+  if (a.view_offset != b.view_offset) {
+    return false;
+  }
+  if (a.num_dims != b.num_dims) {
+    return false;
+  }
+  for (int i = 0; i < a.num_dims; i++) {
+    if (a.dim[i] != b.dim[i] || a.stride[i] != b.stride[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
@@ -208,7 +226,6 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         e.in_slot = in_slot;
         e.tensor_guid = cdt.guid;
         e.input_map = ip->input_map;
-        e.is_barrier_edge = c_is_virtual || we.is_virtual_writer;
 
         auto const *prod_op = ag.layers[we.layer].op;
         std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
@@ -221,6 +238,17 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
               "build_annotated_graph: invalid out_slot for producer");
         }
         e.output_map = prod_outputs[we.out_slot]->input_map;
+
+        // View-induced barrier: collapse this edge to a single coarse event
+        // ONLY when producer and consumer touch DIFFERENT windows of the
+        // shared storage (partial overlap, view-vs-base, or mismatched shape)
+        // — there per-tile correspondence between producer and consumer tiles
+        // is not valid. When both sides reference the SAME view window, the
+        // normal GCD per-tile event analysis synchronizes the edge correctly,
+        // so keep it fine-grained.
+        DTensor const &pdt = prod_outputs[we.out_slot]->dtensor;
+        bool view_edge = c_is_virtual || we.is_virtual_writer;
+        e.is_barrier_edge = view_edge && !same_view_window(cdt, pdt);
 
         int edge_idx = (int)ag.edges.size();
         ag.edges.push_back(e);

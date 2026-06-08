@@ -511,6 +511,56 @@ def test_inner_dim_split_overlap_conservativeness():
 
 
 # ---------------------------------------------------------------------------
+# Test 9. Producer writes a view; consumer reads the SAME view window.
+#
+#    A writes V_write = T.narrow(0, 0, half)
+#    B reads  V_read  = T.narrow(0, 0, half)   (distinct DTensor, identical
+#                                               base_guid / offset / shape / stride)
+#
+# Even though make_view() gives V_write and V_read different guids, they are
+# the SAME view window, so producer and consumer tile it identically. The
+# GCD per-tile events synchronize the A→B edge correctly, so it must be a
+# fine-grained (NON-barrier) edge — NOT a coarse single-event barrier. This
+# is the "write into a slice, then read that same slice" pattern.
+# ---------------------------------------------------------------------------
+def test_same_view_write_read():
+    print("[test_same_view_write_read]")
+    device = "cuda"
+    dtype = torch.bfloat16
+    B, H = 16, 2048
+    half = B // 2
+
+    x = torch.randn(half, H, dtype=dtype, device=device)
+    wa = torch.randn(H, dtype=dtype, device=device)
+    wb = torch.randn(H, dtype=dtype, device=device)
+    T = torch.zeros(B, H, dtype=dtype, device=device)
+    out = torch.zeros(half, H, dtype=dtype, device=device)
+
+    pk = _build_pk()
+    x_dt = pk.attach_input(x, name="x")
+    wa_dt = pk.attach_input(wa, name="wa")
+    wb_dt = pk.attach_input(wb, name="wb")
+    T_dt = pk.attach_input(T, name="T")
+    out_dt = pk.attach_input(out, name="out")
+
+    V_write = pk.narrow(T_dt, 0, 0, half)
+    V_read = pk.narrow(T_dt, 0, 0, half)  # distinct object, identical window
+    pk.rmsnorm_layer(input=x_dt, weight=wa_dt, output=V_write,
+                     grid_dim=(half, 1, 1), block_dim=_block_dim_for(pk))
+    pk.rmsnorm_layer(input=V_read, weight=wb_dt, output=out_dt,
+                     grid_dim=(half, 1, 1), block_dim=_block_dim_for(pk))
+
+    folder = os.path.dirname(__file__)
+    pk.compile(output_dir=folder)
+    pk()
+    torch.cuda.synchronize()
+
+    ref = torch_rmsnorm(torch_rmsnorm(x, wa), wb)
+    _assert_close(out, ref, 0.07, "same_view_write_read")
+    pk.finalize()
+
+
+# ---------------------------------------------------------------------------
 # Subprocess wrappers for AnnotatedGraph-dump assertions.
 # ---------------------------------------------------------------------------
 def _read_annotated_dump(stderr_text):
@@ -578,13 +628,16 @@ def test_dep_analysis_corner_cases():
         print("  FAIL: expected edges=2 barrier=1 fork_groups=1")
         print(d); sys.exit(1)
 
-    # 3. Disjoint writers/readers: A→C, B→D (2 edges, 2 BARRIER). No
-    #    spurious cross edges (A→D or B→C).
+    # 3. Disjoint writers/readers: A→C, B→D (2 edges). Each (writer, reader)
+    #    pair touches the SAME view window, so both edges are fine-grained
+    #    (0 BARRIER). No spurious cross edges (A→D or B→C) from the window
+    #    overlap pruner.
     d = _run_subprocess("test_disjoint_writers_disjoint_readers")
     nb = _count_barrier(d); ne = _count_edges(d)
     print(f"  disjoint: edges={ne} barrier={nb}")
-    if ne != 2 or nb != 2:
-        print("  FAIL: expected edges=2 barrier=2 (window overlap pruning)")
+    if ne != 2 or nb != 0:
+        print("  FAIL: expected edges=2 barrier=0 (same-view fine-grained; "
+              "window overlap pruning keeps cross edges out)")
         print(d); sys.exit(1)
 
     # 4. Cascade A→B→C with views at each step: 2 chain edges, both
@@ -635,6 +688,16 @@ def test_dep_analysis_corner_cases():
         print("  FAIL: expected 1 conservative barrier edge for inner split")
         print(d); sys.exit(1)
 
+    # 9. Same-view write→read: A writes view V, B reads the IDENTICAL view
+    #    window (distinct narrow() call; same base_guid/offset/shape/stride).
+    #    Per-tile correspondence is valid → fine-grained: 1 edge, 0 BARRIER.
+    d = _run_subprocess("test_same_view_write_read")
+    ne = _count_edges(d); nb = _count_barrier(d)
+    print(f"  same_view: edges={ne} barrier={nb}")
+    if ne != 1 or nb != 0:
+        print("  FAIL: expected edges=1 barrier=0 (same view → fine-grained)")
+        print(d); sys.exit(1)
+
     print("  OK")
 
 
@@ -654,6 +717,7 @@ def main():
     test_overlapping_write_views_compile()
     test_disjoint_sibling_write_and_read()
     test_inner_dim_split_overlap_conservativeness()
+    test_same_view_write_read()
     test_dep_analysis_corner_cases()
     print("ALL VIEW CORNER-CASE TESTS PASSED")
 
