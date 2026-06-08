@@ -1777,6 +1777,15 @@ class PersistentKernel:
             task_graph["v2_worker_task_queues"] = build_v2_worker_task_queues(
                 task_graph, self.num_workers)
             task_graph_json = add_v2_region_smem_plan(json.dumps(task_graph))
+            if self.profiler_tensor is not None:
+                # kept for the trace exporter: lets it label slices with the
+                # global task index (t<pos>) by joining trace order with the
+                # per-SM queues.
+                self._v2_task_graph_for_prof = {
+                    "queues": task_graph["v2_worker_task_queues"],
+                    "task_types": [t.get("task_type", -1)
+                                   for t in task_graph.get("all_tasks", [])],
+                }
         with open(json_file_path, "w") as f:
             f.write(task_graph_json)
         v2_include = '#include "persistent_kernel_v2.cuh"\n' if self.use_v2_runtime else ""
@@ -2001,8 +2010,13 @@ class PersistentKernel:
                 trace_name = f"mirage_{self.mpi_rank}.perfetto-trace"
 
             export_to_perfetto_trace(
-                self.profiler_tensor, trace_name
+                self.profiler_tensor, trace_name,
+                task_graph=getattr(self, "_v2_task_graph_for_prof", None),
             )
+
+            if self.use_v2_runtime:
+                from .prof import print_run_summary
+                print_run_summary(self.profiler_tensor)
 
     def __del__(self):
         if not self.__finalized__:

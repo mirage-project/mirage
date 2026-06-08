@@ -30,6 +30,40 @@ __device__ __forceinline__ void
   T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);
   T *__restrict__ output = static_cast<T *>(output_ptr);
 
+  // 16B-vectorized row copy: the consumer owns only 128 threads (4 warps),
+  // half of v1's 256-thread worker, so per-thread efficiency must carry the
+  // difference — 8 bf16 per access instead of 1 (V2_TODO.md #16/#18).
+  // Vector path requires 16B-aligned bases; row strides preserve alignment
+  // because OUTPUT_DIM_SIZE elements are a multiple of 16B. Falls back to
+  // the scalar copy otherwise.
+  constexpr int VEC = 16 / sizeof(T);
+  bool const aligned =
+      ((reinterpret_cast<uintptr_t>(embedding) |
+        reinterpret_cast<uintptr_t>(output)) & 15) == 0;
+  if constexpr (CHUNK_SIZE % VEC == 0 && OUTPUT_DIM_SIZE % VEC == 0) {
+    if (aligned) {
+      constexpr int NVEC = CHUNK_SIZE / VEC;
+#pragma unroll
+      for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
+        int64_t wordIdx = input_ids[batch_idx];
+        uint4 *__restrict__ out_v =
+            reinterpret_cast<uint4 *>(output + batch_idx * OUTPUT_DIM_SIZE);
+        if (wordIdx >= 0) {
+          uint4 const *__restrict__ emb_v = reinterpret_cast<uint4 const *>(
+              embedding + wordIdx * OUTPUT_DIM_SIZE);
+#pragma unroll
+          for (int i = threadIdx.x; i < NVEC; i += CONSUMER_NUM_THREADS) {
+            out_v[i] = emb_v[i];
+          }
+        } else {
+          for (int i = threadIdx.x; i < NVEC; i += CONSUMER_NUM_THREADS) {
+            out_v[i] = make_uint4(0, 0, 0, 0);
+          }
+        }
+      }
+      return;
+    }
+  }
 #pragma unroll
   for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
     int64_t wordIdx = input_ids[batch_idx];

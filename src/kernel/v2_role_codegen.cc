@@ -54,6 +54,16 @@ std::string const &role_body(rt::TaskRoleVariantCode const &code,
 char const *kLoaderPagePrefix =
     "{\n"
     "  int const _lane = threadIdx.x & 31;\n"
+    "#ifdef MPK_ENABLE_PROFILING\n"
+    "  bool const _pg_prof = _lane == 0 &&\n"
+    "      runtime_config.profiler_buffer != nullptr &&\n"
+    "      iter_num + V2_PROF_WINDOW_ITERS >= runtime_config.v2_max_iters;\n"
+    "  if (_pg_prof) {\n"
+    "    v2_prof_emit(runtime_config.profiler_buffer,\n"
+    "                 V2_PROF_GROUP_LOADER_PHASE, V2_PROF_PAGE_WAIT,\n"
+    "                 tb::EVENT_BEGIN);\n"
+    "  }\n"
+    "#endif\n"
     "  if (_lane < MAX_SMEM_PAGES_PER_TASK) {\n"
     "    runtime_wait_page_ready(runtime_smem, _lane, instruction_index);\n"
     "    if (!task_uses_page(task_desc, _lane)) {\n"
@@ -61,6 +71,13 @@ char const *kLoaderPagePrefix =
     "    }\n"
     "  }\n"
     "  __syncwarp();\n"
+    "#ifdef MPK_ENABLE_PROFILING\n"
+    "  if (_pg_prof) {\n"
+    "    v2_prof_emit(runtime_config.profiler_buffer,\n"
+    "                 V2_PROF_GROUP_LOADER_PHASE, V2_PROF_PAGE_WAIT,\n"
+    "                 tb::EVENT_END);\n"
+    "  }\n"
+    "#endif\n"
     "}\n";
 
 // Phase 3.5: page-lifecycle suffix at the end of every consumer body.
@@ -80,11 +97,26 @@ char const *kLoaderPagePrefix =
 // consumer warp 0 in the original implementation.
 char const *kConsumerPageSuffix =
     "{\n"
+    "#ifdef MPK_ENABLE_PROFILING\n"
+    "  unsigned long long _sfx_t0 = 0;\n"
+    "  if (threadIdx.x == 0 &&\n"
+    "      iter_num + V2_PROF_WINDOW_ITERS >= runtime_config.v2_max_iters) {\n"
+    "    _sfx_t0 = v2_prof_now_ns();\n"
+    "  }\n"
+    "#endif\n"
     "  if (threadIdx.x < MAX_SMEM_PAGES_PER_TASK &&\n"
     "      task_uses_page(task_desc, threadIdx.x)) {\n"
     "    runtime_finish_page(runtime_smem, threadIdx.x, 1);\n"
     "  }\n"
     "  __syncwarp();\n"
+    "#ifdef MPK_ENABLE_PROFILING\n"
+    "  if (_sfx_t0 != 0 && runtime_config.profiler_buffer != nullptr) {\n"
+    "    unsigned long long *_sfx =\n"
+    "        static_cast<unsigned long long *>(runtime_config.profiler_buffer);\n"
+    "    _sfx[V2_PROF_SUFFIX_BASE + blockIdx.x] += v2_prof_now_ns() - _sfx_t0;\n"
+    "    _sfx[V2_PROF_SUFFIX_BASE + 128 + blockIdx.x] += 1;\n"
+    "  }\n"
+    "#endif\n"
     "}\n";
 
 bool has_role_body(std::vector<rt::TaskRoleVariantCode> const &variants,

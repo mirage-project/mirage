@@ -121,6 +121,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-chat-template", action="store_true",
         help="Tokenize --prompt directly without the chat template "
              "(benchmarking: enables exact prompt lengths, e.g. 1 token)")
+    parser.add_argument("--prof-dump", type=str, default=None,
+        help="With --profiling: also dump the raw profiler buffer to this "
+             ".npy path for offline analysis")
     parser.add_argument("--use-v2", action="store_true", help="Use v2 runtime (static per-SM task plan, no scheduler)")
 
     # -------- Args for CI tests ----------
@@ -292,8 +295,12 @@ if __name__ == "__main__":
         num_kv_cache_chunks = max(1, args.max_seq_length // 256)
 
         if args.profiling:
+            # MUST match V2_PROF_BUF_ENTRIES in runtime_v2.cuh. Sized for v2
+            # traces: 8 tracks/SM (5 roles + 3 phase tracks) over 25 windowed
+            # decode steps; the consumer-phase track alone can write ~12-17k
+            # entries (dep + tmem + mainloop waits) + the accumulator tail.
             profiler_tensor = torch.zeros(
-                3000 * 128, dtype=torch.uint64, device="cuda"
+                120000 * 128, dtype=torch.uint64, device="cuda"
             ).contiguous()
         else:
             profiler_tensor = None
@@ -915,6 +922,11 @@ if __name__ == "__main__":
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
+
+        if args.prof_dump and profiler_tensor is not None:
+            import numpy as np
+            np.save(args.prof_dump, profiler_tensor.cpu().numpy())
+            print(f"[prof] dumped raw profiler buffer to {args.prof_dump}")
 
         # -------- CI dumps outputs to json files ----------
         if save_path and rank == 0:

@@ -1,11 +1,285 @@
 #pragma once
 
 #include "mirage/persistent_kernel/mpk_atoms.cuh"
+#include "mirage/persistent_kernel/profiler.h"
 #include "mirage/persistent_kernel/runtime_header.h"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/task_interface.cuh"
 #include "mirage/persistent_kernel/tasks/common/copy_sm80.cuh"
 #include <cuda_runtime.h>
 #include <stdint.h>
+
+// ── Optional per-task profiling (MPK_ENABLE_PROFILING builds only) ──────────
+// Reuses v1's FlashInfer-style profiler format so profiler_persistent.py
+// renders v2 traces unchanged. FIVE tracks per SM (num_groups = 5) — the SM
+// is a pipeline in v2, so each warp role gets its own Perfetto row and the
+// task-level overlap between roles is directly visible:
+//   group 0 consumer  (warp 0 lane 0): BEGIN/END per task body — includes
+//           the dep-wait spin; gaps = waiting on instruction publish
+//   group 1 loader    (lane 0): page-prefix + loader body per task
+//   group 2 launcher  (lane 0): launcher body (linear: TMEM/MMA driving)
+//   group 3 storer    (lane 0): storer body (idle for Qwen3 tasks)
+//   group 4 controller(lane 0): V2_PROF_PREPARE_BATCH (worker 0),
+//           V2_PROF_ITER_SYNC (end-of-iter barrier), V2_PROF_GO_WAIT
+// Only the LAST V2_PROF_WINDOW_ITERS decode steps are recorded: that's the
+// interesting regime (full KV length), and it bounds the event count so the
+// fixed-size profiler buffer can't overflow on long runs.
+// Non-profiling builds: all macros expand to nothing — zero impact.
+static constexpr int V2_PROF_NUM_GROUPS = 8;
+static constexpr int V2_PROF_GROUP_CONSUMER = 0;
+static constexpr int V2_PROF_GROUP_LOADER = 1;
+static constexpr int V2_PROF_GROUP_LAUNCHER = 2;
+static constexpr int V2_PROF_GROUP_STORER = 3;
+static constexpr int V2_PROF_GROUP_CONTROLLER = 4;
+// Phase tracks: sub-slices WITHIN a role's task window, so a bar
+// self-explains (wait vs work). Written by the closure-free emitter
+// (v2_prof_emit*) because their call sites can't see the role-loop closure.
+static constexpr int V2_PROF_GROUP_CONSUMER_PHASE = 5;
+static constexpr int V2_PROF_GROUP_LOADER_PHASE = 6;
+static constexpr int V2_PROF_GROUP_LAUNCHER_PHASE = 7;
+static constexpr int V2_PROF_PREPARE_BATCH = 204;
+static constexpr int V2_PROF_ITER_SYNC = 205;
+static constexpr int V2_PROF_GO_WAIT = 206;
+static constexpr int V2_PROF_DEP_WAIT = 207;   // consumer-phase: dep spin
+static constexpr int V2_PROF_PAGE_WAIT = 208;  // loader-phase: page prefix
+// Timed-wait ids (emitted by MPK_V2_TIMED_WAIT at synchronization points;
+// only waits > V2_PROF_WAIT_THRESHOLD_NS produce slices):
+static constexpr int V2_PROF_W_TMA_WAIT = 209;        // launcher: TMA landed?
+static constexpr int V2_PROF_MMA_EMPTY_WAIT = 210;    // loader: stage free?
+static constexpr int V2_PROF_TMEM_READY_WAIT = 211;   // consumer: tmem addr
+static constexpr int V2_PROF_MAINLOOP_WAIT = 212;     // consumer: MMA result
+static constexpr int V2_PROF_EPILOGUE_WAIT = 213;     // launcher: tmem slot
+static constexpr int V2_PROF_CONSUMER_DONE_WAIT = 214;// launcher tail
+static constexpr unsigned long long V2_PROF_WAIT_THRESHOLD_NS = 2000;
+// Total profiler-buffer entries — MUST match demo.py's profiler_tensor size.
+// Sized for 8 tracks x 128 SMs x 25 windowed iters; the busiest track
+// (consumer-phase: dep + tmem + mainloop slices) can write ~12-17k entries,
+// so per-track capacity = (ENTRIES - tail) / (128*8) ≈ 15k. The emitter
+// counts (never silently drops) overflow in the MISC region.
+static constexpr size_t V2_PROF_BUF_ENTRIES = 120000ull * 128;
+// Tail of the profiler buffer reserved for accumulators (all in NANOSECONDS
+// via %globaltimer — same timebase as the trace events, no clock-rate
+// conversion). CONVENTION with demo.py's profiler_tensor; debug-only.
+// Layout, growing back from the end:
+//   [SPIN_BASE + bucket*256 + sm]        dep-wait ns,   per task-type bucket
+//   [SPIN_BASE + bucket*256 + 128 + sm]  dep-wait count
+//   [SUFFIX_BASE + sm]                   page-suffix ns, per SM (aggregate)
+//   [SUFFIX_BASE + 128 + sm]             page-suffix count
+// Type buckets: 0=linear(244/245) 1=attn(284) 2=rmsnorm(281) 3=silu(282)
+//               4=argmax(285/286) 5=embed(283) 6=other
+static constexpr int V2_PROF_NUM_BUCKETS = 7;
+static constexpr size_t V2_PROF_SPIN_BASE =
+    V2_PROF_BUF_ENTRIES - 256ull * V2_PROF_NUM_BUCKETS - 256;
+static constexpr size_t V2_PROF_SUFFIX_BASE = V2_PROF_BUF_ENTRIES - 256;
+// Per-track write cursors for the closure-free emitter (1024 slots covers
+// 128 SMs x 8 groups), then a misc region: [MISC_BASE + sm] counts events
+// DROPPED by the capacity guard (must be 0 in a healthy run — the checker
+// reports it). Everything from MISC_BASE on is reserved tail — the exporter
+// skips it (V2_PROF_TAIL_ENTRIES in profiler_persistent.py must match).
+static constexpr size_t V2_PROF_CURSOR_BASE =
+    V2_PROF_SPIN_BASE - 1024;
+static constexpr size_t V2_PROF_MISC_BASE = V2_PROF_CURSOR_BASE - 256;
+// Event-trigger log: a single global ring recording every
+// trigger_task_event() fired inside the profiling window, packed as
+// [63:32]=globaltimer_lo  [31:8]=event_index  [7:0]=sm. One atomic cursor.
+// Diagnoses trigger latency (when did event E actually fire, and from
+// which SM's controller).
+static constexpr size_t V2_PROF_TRIG_RING_LEN = 1048576;
+static constexpr size_t V2_PROF_TRIG_BASE =
+    V2_PROF_MISC_BASE - V2_PROF_TRIG_RING_LEN;
+static constexpr size_t V2_PROF_TRIG_CURSOR = V2_PROF_TRIG_BASE - 1;
+static constexpr size_t V2_PROF_TAIL_ENTRIES =
+    V2_PROF_BUF_ENTRIES - V2_PROF_TRIG_CURSOR;
+static constexpr int V2_PROF_WINDOW_ITERS = 25;
+
+__device__ __forceinline__ unsigned long long v2_prof_now_ns() {
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t));
+  return t;
+}
+
+__device__ __forceinline__ int v2_prof_bucket(int task_type) {
+  switch (task_type) {
+    case 244: case 245: return 0;   // linear v3 (+residual)
+    case 284: return 1;             // attention
+    case 281: return 2;             // rmsnorm
+    case 282: return 3;             // silu_mul
+    case 285: case 286: return 4;   // argmax
+    case 283: return 5;             // embedding
+    default:  return 6;
+  }
+}
+
+#ifdef MPK_ENABLE_PROFILING
+// Closure-free trace-event emitter for sites that cannot see the role-loop
+// profiler closure (runtime helpers like consumer_dep_prefix, codegen-emitted
+// prefixes). Maintains per-track cursors in the reserved tail; the entry
+// layout matches PROFILER_INIT's interleaving exactly, so the exporter needs
+// no changes. Single writer per phase track (a designated lane), so the
+// cursor bump needs no atomics. NEVER write a role group (0-4) through this
+// — those tracks are owned by the role-loop closures.
+__device__ __forceinline__ void v2_prof_emit(void *prof_buf,
+                                             int group,
+                                             uint32_t event_idx,
+                                             uint32_t event_type) {
+  uint64_t *buf = static_cast<uint64_t *>(prof_buf);
+  unsigned int const track = blockIdx.x * V2_PROF_NUM_GROUPS + group;
+  unsigned long long const k = buf[V2_PROF_CURSOR_BASE + track]++;
+  unsigned int const stride = gridDim.x * V2_PROF_NUM_GROUPS;
+  size_t const slot = 1 + (size_t)k * stride + track;
+  if (slot >= V2_PROF_MISC_BASE) {
+    // capacity guard: never bleed into the reserved tail — but COUNT the
+    // drop so the checker can flag a truncated trace.
+    atomicAdd(reinterpret_cast<unsigned long long *>(
+                  &buf[V2_PROF_MISC_BASE + blockIdx.x]), 1ULL);
+    return;
+  }
+  uint32_t const event_no = (uint32_t)(k >> 1) & 0x3FF;  // pair counter
+  tb::ProfilerEntry e;
+  e.tag = tb::encode_tag(track, 0, 0) | (event_idx << tb::EVENT_IDX_SHIFT) |
+          (event_no << tb::EVENT_NO_SHIFT) | event_type;
+  e.delta_time = tb::get_timestamp();
+  buf[slot] = e.raw;
+}
+
+// Retro-emit a BEGIN/END pair with explicit timestamps — used by
+// MPK_V2_TIMED_WAIT after a wait completes, so a slice is written only when
+// the wait was long enough to matter and pairs can never dangle.
+__device__ __forceinline__ void v2_prof_emit_pair(void *prof_buf,
+                                                  int group,
+                                                  uint32_t event_idx,
+                                                  unsigned long long t0_ns,
+                                                  unsigned long long t1_ns) {
+  uint64_t *buf = static_cast<uint64_t *>(prof_buf);
+  unsigned int const track = blockIdx.x * V2_PROF_NUM_GROUPS + group;
+  unsigned long long const k = buf[V2_PROF_CURSOR_BASE + track];
+  buf[V2_PROF_CURSOR_BASE + track] = k + 2;
+  unsigned int const stride = gridDim.x * V2_PROF_NUM_GROUPS;
+  size_t const slot0 = 1 + (size_t)k * stride + track;
+  size_t const slot1 = slot0 + stride;
+  if (slot1 >= V2_PROF_MISC_BASE) {
+    atomicAdd(reinterpret_cast<unsigned long long *>(
+                  &buf[V2_PROF_MISC_BASE + blockIdx.x]), 2ULL);
+    return;
+  }
+  uint32_t const event_no = (uint32_t)(k >> 1) & 0x3FF;
+  uint32_t const base = tb::encode_tag(track, 0, 0) |
+                        (event_idx << tb::EVENT_IDX_SHIFT) |
+                        (event_no << tb::EVENT_NO_SHIFT);
+  tb::ProfilerEntry e;
+  e.tag = base | tb::EVENT_BEGIN;
+  e.delta_time = (uint32_t)t0_ns;
+  buf[slot0] = e.raw;
+  e.tag = base | tb::EVENT_END;
+  e.delta_time = (uint32_t)t1_ns;
+  buf[slot1] = e.raw;
+}
+
+// Ambient profiling context, so synchronization sites inside task bodies can
+// emit without threading (config, iter_num) through every signature:
+//   g_v2_prof_buf    — the profiler buffer (same for all SMs); set once in
+//                      the kernel prologue.
+//   g_v2_prof_window — 1 while the current decode step is inside the traced
+//                      window; flipped by worker 0's controller at the
+//                      iteration boundary (all SMs are barrier-synced per
+//                      iter, so at most one task of fuzz at the edges).
+__device__ void *g_v2_prof_buf = nullptr;
+__device__ volatile int g_v2_prof_window = 0;
+
+// Snapshot the ambient window flag ONCE per task body (a volatile global
+// read per wait would put L2 traffic in hot loops for the whole run).
+// Required in scope before any MPK_V2_TIMED_WAIT.
+#define MPK_V2_PROF_SNAPSHOT()                                                \
+  bool const _mpk_prof_on =                                                   \
+      (g_v2_prof_window != 0) && (g_v2_prof_buf != nullptr);
+
+// Time `expr` (a wait) and emit a phase slice if it exceeded the threshold.
+// Call from a SINGLE thread per (SM, group) — the designated writer of that
+// phase track.
+// Diagnostic: log each role warp's FINISHED-arrival moment for EMBEDDING
+// slots into the trigger ring (event ids 900000+warp_id) — finds which of
+// the 7 arrivals delays the slot's completion.
+#define MPK_V2_PROF_EMB_MARK(task, base)                                      \
+  if ((task)->task_type == 283 && (threadIdx.x % 32) == 0 &&                  \
+      g_v2_prof_window != 0 && g_v2_prof_buf != nullptr) {                    \
+    uint64_t *_b = static_cast<uint64_t *>(g_v2_prof_buf);                    \
+    unsigned long long const _k = atomicAdd(                                  \
+        reinterpret_cast<unsigned long long *>(&_b[V2_PROF_TRIG_CURSOR]),     \
+        1ULL);                                                                \
+    if (_k < V2_PROF_TRIG_RING_LEN) {                                         \
+      _b[V2_PROF_TRIG_BASE + _k] =                                            \
+          (v2_prof_now_ns() << 32) |                                          \
+          ((unsigned long long)((base) + threadIdx.x / 32) << 8) |            \
+          (blockIdx.x & 0xFF);                                                \
+    }                                                                         \
+  }
+#define MPK_V2_PROF_EMB_ARRIVAL(task) MPK_V2_PROF_EMB_MARK(task, 900000)
+
+#define MPK_V2_TIMED_WAIT(group, ev, expr)                                    \
+  do {                                                                        \
+    if (_mpk_prof_on) {                                                       \
+      unsigned long long const _w0 = v2_prof_now_ns();                        \
+      expr;                                                                   \
+      unsigned long long const _w1 = v2_prof_now_ns();                        \
+      if (_w1 - _w0 > V2_PROF_WAIT_THRESHOLD_NS) {                            \
+        v2_prof_emit_pair(g_v2_prof_buf, (group), (ev), _w0, _w1);            \
+      }                                                                       \
+    } else {                                                                  \
+      expr;                                                                   \
+    }                                                                         \
+  } while (0)
+#endif
+#ifdef MPK_ENABLE_PROFILING
+#define MPK_V2_PROF_DECL(grp, pred)                                           \
+  PROFILER_CLOSURE_PARAMS_DECL;                                               \
+  uint32_t _prof_ctr = 0;                                                     \
+  PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer), (grp),       \
+                V2_PROF_NUM_GROUPS, (pred));
+#define MPK_V2_PROF_IN_WINDOW(it)                                             \
+  ((it) + V2_PROF_WINDOW_ITERS >= config.v2_max_iters)
+#define MPK_V2_PROF_START(ev)                                                 \
+  if (MPK_V2_PROF_IN_WINDOW(iter_num)) {                                      \
+    PROFILER_EVENT_START((ev), _prof_ctr);                                    \
+  }
+#define MPK_V2_PROF_END(ev)                                                   \
+  if (MPK_V2_PROF_IN_WINDOW(iter_num)) {                                      \
+    PROFILER_EVENT_END((ev), _prof_ctr);                                      \
+    _prof_ctr++;                                                              \
+  }
+#else
+#define MPK_V2_PROF_DECL(grp, pred)
+#define MPK_V2_PROF_START(ev)
+#define MPK_V2_PROF_END(ev)
+#define MPK_V2_PROF_IN_WINDOW(it) (false)
+#define MPK_V2_PROF_SNAPSHOT()
+#define MPK_V2_TIMED_WAIT(group, ev, expr) expr
+#define MPK_V2_PROF_EMB_ARRIVAL(task)
+#define MPK_V2_PROF_EMB_MARK(task, base)
+#endif
+
+// TODO #17 diagnostic: always-compilable replica of the probe code that
+// suppresses the 82us iteration-head stall (entry + dep-prefix marks for
+// embedding slots). MODE: 0=off (build textually identical to baseline),
+// 1=both sites, 2=entry only, 3=dep only. The A/B runner seds the digit and
+// compares UNPROFILED per-token latency.
+#define MPK_V2_DBG_KICK_MODE 0
+#if MPK_V2_DBG_KICK_MODE > 0
+__device__ unsigned long long g_v2_dbg_scratch[1024];
+#define MPK_V2_DBG_MARK(task)                                                 \
+  if ((task)->task_type == 283 && (threadIdx.x % 32) == 0) {                  \
+    unsigned long long const _k = atomicAdd(&g_v2_dbg_scratch[0], 1ULL);      \
+    g_v2_dbg_scratch[1 + (_k % 1023ULL)] = (unsigned long long)clock64();     \
+  }
+#endif
+#if MPK_V2_DBG_KICK_MODE == 1 || MPK_V2_DBG_KICK_MODE == 2
+#define MPK_V2_DBG_MARK_ENTRY(task) MPK_V2_DBG_MARK(task)
+#else
+#define MPK_V2_DBG_MARK_ENTRY(task)
+#endif
+#if MPK_V2_DBG_KICK_MODE == 1 || MPK_V2_DBG_KICK_MODE == 3
+#define MPK_V2_DBG_MARK_DEP(task) MPK_V2_DBG_MARK(task)
+#else
+#define MPK_V2_DBG_MARK_DEP(task)
+#endif
 
 namespace mirage {
 namespace runtime_v2 {
@@ -297,13 +571,41 @@ __device__ __noinline__ void consumer_dep_prefix(
   int const slot = ring_slot(instruction_index);
   int const phase = ring_phase(instruction_index);
   if (threadIdx.x == 0) {
+#ifdef MPK_ENABLE_PROFILING
+    bool const _in_win =
+        config.profiler_buffer != nullptr && MPK_V2_PROF_IN_WINDOW(iter_num);
+    unsigned long long const _t0 = v2_prof_now_ns();
+    if (_in_win) {
+      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_CONSUMER_PHASE,
+                   V2_PROF_DEP_WAIT, tb::EVENT_BEGIN);
+    }
+#endif
     wait_task_dependency(config, task_desc, iter_num);
+#ifdef MPK_ENABLE_PROFILING
+    if (_in_win) {
+      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_CONSUMER_PHASE,
+                   V2_PROF_DEP_WAIT, tb::EVENT_END);
+      // aggregate accumulators (ns, bucketed by task type) — kept alongside
+      // the trace events for table-style analysis without trace parsing.
+      unsigned long long *_spin =
+          static_cast<unsigned long long *>(config.profiler_buffer);
+      size_t const _b =
+          V2_PROF_SPIN_BASE + 256ull * v2_prof_bucket(task_desc->task_type);
+      _spin[_b + blockIdx.x] += v2_prof_now_ns() - _t0;
+      _spin[_b + 128 + blockIdx.x] += 1;
+    }
+#endif
     mbar_arrive(&rt->dynamic_semaphores[slot][SEM_DEP_READY]);
   }
-  if ((threadIdx.x % 32) == 0) {
-    mbar_wait(&rt->dynamic_semaphores[slot][SEM_DEP_READY], phase);
-  }
-  __syncwarp();
+  // All lanes wait the dependency semaphore directly. Do NOT gate this on
+  // lane 0 with a trailing __syncwarp(): on sm_100a that construct compiles
+  // to a WARPSYNC.COLLECTIVE region around the try-wait whose wake crawls
+  // ~5us per templated token at the quiet iteration head, delaying the
+  // FINISHED arrival of warps 1-3 and the task's event with it
+  // (~300us/step at bs16 after cascade; V2_TODO.md #17 has the full
+  // evidence chain).
+  mbar_wait(&rt->dynamic_semaphores[slot][SEM_DEP_READY], phase);
+  MPK_V2_DBG_MARK_DEP(task_desc)
 }
 
 __device__ __forceinline__ bool task_dependency_ready(
@@ -329,6 +631,20 @@ __device__ __forceinline__ void trigger_task_event(
 
   size_t const event_index = get_event_position_index(event_id);
   atom_add_release_gpu_u64(&config.all_event_counters[event_index], 1);
+#ifdef MPK_ENABLE_PROFILING
+  if (g_v2_prof_window != 0 && g_v2_prof_buf != nullptr) {
+    uint64_t *buf = static_cast<uint64_t *>(g_v2_prof_buf);
+    unsigned long long const k = atomicAdd(
+        reinterpret_cast<unsigned long long *>(&buf[V2_PROF_TRIG_CURSOR]),
+        1ULL);
+    if (k < V2_PROF_TRIG_RING_LEN) {
+      buf[V2_PROF_TRIG_BASE + k] =
+          (v2_prof_now_ns() << 32) |
+          ((unsigned long long)(event_index & 0xFFFFFF) << 8) |
+          (blockIdx.x & 0xFF);
+    }
+  }
+#endif
 }
 
 // Implemented by the generated v2 role dispatch code after this runtime header
@@ -368,7 +684,8 @@ __device__ __forceinline__ void _execute_storer_task_v2(
     int instruction_index,
     int iter_num);
 
-#define MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(loop_name, execute_task)              \
+#define MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(loop_name, execute_task,              \
+                                        prof_group, prof_pred)               \
   __device__ __noinline__ void loop_name(                                    \
       RuntimeSMEM *rt, RuntimeConfig const &config, int lane_id) {           \
     int const worker_id = blockIdx.x;                                        \
@@ -378,6 +695,10 @@ __device__ __forceinline__ void _execute_storer_task_v2(
     int sequence = 0;                                                        \
     int iter_num = 0;                                                        \
     int sequence_in_iter = 0;                                                \
+    /* profiling: one track per role. The consumer loop runs on 4 warps,  */ \
+    /* so its predicate must select warp 0 lane 0 (threadIdx.x == 0);     */ \
+    /* single-warp roles use lane_id == 0.                                */ \
+    MPK_V2_PROF_DECL(prof_group, prof_pred)                                  \
     while (true) {                                                           \
       int const slot = ring_slot(sequence);                                  \
       int const phase = ring_phase(sequence);                                \
@@ -387,12 +708,16 @@ __device__ __forceinline__ void _execute_storer_task_v2(
       }                                                                      \
       __syncwarp();                                                          \
       TaskDesc *task = rt->task_slot(slot);                                  \
+      MPK_V2_DBG_MARK_ENTRY(task)                                         \
       if (task->task_type == TASK_TERMINATE) {                               \
         return;                                                              \
       }                                                                      \
       if (task->task_type != TASK_BEGIN_TASK_GRAPH) {                        \
+        MPK_V2_PROF_START(task->task_type);                                  \
         execute_task(task, config, rt, sequence, iter_num);                  \
+        MPK_V2_PROF_END(task->task_type);                                    \
       }                                                                      \
+      MPK_V2_PROF_EMB_ARRIVAL(task)                                          \
       if (lane_id == 0) {                                                    \
         mbar_arrive(                                                         \
             &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED][slot]);    \
@@ -406,10 +731,22 @@ __device__ __forceinline__ void _execute_storer_task_v2(
     }                                                                        \
   }
 
-MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(loader_warp_loop, _execute_loader_task_v2)
-MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(launcher_warp_loop, _execute_launcher_task_v2)
-MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(consumer_warp_loop, _execute_consumer_task_v2)
-MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(storer_warp_loop, _execute_storer_task_v2)
+MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(loader_warp_loop,
+                                _execute_loader_task_v2,
+                                V2_PROF_GROUP_LOADER,
+                                (lane_id == 0))
+MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(launcher_warp_loop,
+                                _execute_launcher_task_v2,
+                                V2_PROF_GROUP_LAUNCHER,
+                                (lane_id == 0))
+MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(consumer_warp_loop,
+                                _execute_consumer_task_v2,
+                                V2_PROF_GROUP_CONSUMER,
+                                (threadIdx.x == 0))
+MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(storer_warp_loop,
+                                _execute_storer_task_v2,
+                                V2_PROF_GROUP_STORER,
+                                (lane_id == 0))
 
 #undef MIRAGE_V2_DEFINE_ROLE_WARP_LOOP
 
@@ -442,6 +779,9 @@ __device__ __noinline__ void controller_warp_loop(
   size_t const my_end = config.v2_per_sm_task_offsets[worker_id + 1];
   size_t const my_count = my_end - my_offset;
   int sequence = 0;
+
+  // profiling track (controller group): prepare/iter-barrier timing.
+  MPK_V2_PROF_DECL(V2_PROF_GROUP_CONTROLLER, (lane_id == 0))
 
   // Per-slot dedup: the last absolute sequence whose graph event we already
   // triggered for this ring slot. This lets the controller trigger events
@@ -511,12 +851,19 @@ __device__ __noinline__ void controller_warp_loop(
     // system-scope counter before issuing this iteration's task stream.
     if (worker_id == 0) {
       if (lane_id == 0) {
+#ifdef MPK_ENABLE_PROFILING
+        // arm/disarm the ambient timed-wait window for ALL SMs; they read it
+        // only after their go-counter acquire below, so it is coherent.
+        g_v2_prof_window = MPK_V2_PROF_IN_WINDOW(iter_num) ? 1 : 0;
+#endif
         bool _cont = true;
+        MPK_V2_PROF_START(V2_PROF_PREPARE_BATCH);
 #if defined(MODE_OFFLINE)
         _cont = ::prepare_next_batch(config);
 #elif defined(MODE_ONLINE_NOTOKEN)
         _cont = ::prepare_next_batch(config, iter_num);
 #endif
+        MPK_V2_PROF_END(V2_PROF_PREPARE_BATCH);
 #ifdef MPK_ENABLE_PROFILING
         _cont = true;  // profiling: run all iters, don't early-exit
 #endif
@@ -529,11 +876,13 @@ __device__ __noinline__ void controller_warp_loop(
       }
     } else {
       if (lane_id == 0) {
+        MPK_V2_PROF_START(V2_PROF_GO_WAIT);
         unsigned long long const needed =
             static_cast<unsigned long long>(iter_num + 1);
         while (ld_acquire_sys_u64(config.v2_iter_go_counter) < needed) {
           __nanosleep(50);
         }
+        MPK_V2_PROF_END(V2_PROF_GO_WAIT);
       }
     }
     __syncwarp();
@@ -670,6 +1019,7 @@ __device__ __noinline__ void controller_warp_loop(
     // updates before it increments the cross-worker iteration counter.
     __threadfence_system();
     if (lane_id == 0) {
+      MPK_V2_PROF_START(V2_PROF_ITER_SYNC);
       atomicAdd_system(config.v2_iter_sync_counter, 1ULL);
       unsigned long long const needed =
           static_cast<unsigned long long>(num_workers) *
@@ -677,6 +1027,7 @@ __device__ __noinline__ void controller_warp_loop(
       while (ld_acquire_sys_u64(config.v2_iter_sync_counter) < needed) {
         __nanosleep(50);
       }
+      MPK_V2_PROF_END(V2_PROF_ITER_SYNC);
     }
     __syncwarp();
 
@@ -713,6 +1064,13 @@ void worker_v2_kernel(RuntimeConfig config) {
 
   int const warp_id = threadIdx.x / 32;
   int const lane_id = threadIdx.x % 32;
+
+#ifdef MPK_ENABLE_PROFILING
+  if (threadIdx.x == 0) {
+    // same value from every block — benign race, long before first use.
+    g_v2_prof_buf = config.profiler_buffer;
+  }
+#endif
 
   if (threadIdx.x == 0) {
     for (int slot = 0; slot < INSTRUCTION_RING_SIZE; slot++) {

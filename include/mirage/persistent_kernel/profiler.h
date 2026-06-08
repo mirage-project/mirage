@@ -32,14 +32,19 @@ __device__ __forceinline__ uint32_t get_thread_idx() {
 }
 
 /*
-     13 bits      8 bits        9 bits         2 bits
-    [31-19]      [18-11]       [10-2]         [1-0]
+     10 bits      11 bits       9 bits         2 bits
+    [31-22]      [21-11]       [10-2]         [1-0]
    [event no] [block group] [event type] [begin/end/instant]
+
+   block group widened 8 -> 11 bits (event no narrowed 13 -> 10) so the v2
+   runtime can emit one track per (SM, warp role): 128 SMs x 5 roles = 640
+   tracks > the old 256 limit. event_no is only a per-slice label suffix;
+   it wraps at 1024 harmlessly. v1 traces (<= 128 tracks) are unaffected.
 */
 constexpr uint32_t EVENT_IDX_SHIFT = 2;
 constexpr uint32_t BLOCK_GROUP_IDX_SHIFT = 11;
-// top 8 bits of the tag represents the nth event of the same type
-constexpr uint32_t EVENT_NO_SHIFT = 19;
+// top 10 bits of the tag represent the nth event of the same type
+constexpr uint32_t EVENT_NO_SHIFT = 22;
 
 constexpr uint32_t EVENT_BEGIN = 0x0;
 constexpr uint32_t EVENT_END = 0x1;

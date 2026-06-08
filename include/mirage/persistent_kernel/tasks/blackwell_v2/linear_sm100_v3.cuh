@@ -328,6 +328,8 @@ __device__ __noinline__ void linear_loader_task(
   const TaskCtx c = ctx_from<SPLIT_K, TILES_PER_TASK>(N_real, K, tile_idx);
   if (c.bounds_fail(tile_idx)) return;
 
+  MPK_V2_PROF_SNAPSHOT()
+
   constexpr uint64_t W_HINT =
       (W_L2_HINT == 0) ? L2_EVICT_FIRST : L2_EVICT_NORMAL;
 
@@ -367,7 +369,18 @@ __device__ __noinline__ void linear_loader_task(
       }
 
       // Wait shared empty (mma_mbar[stage]) — one wait per iter, covers both.
+      // (timed-wait on the FIRST ring lap only: that is where the cold-start
+      // exposure lives; timing every K-iter measurably slowed the kernel.)
+#ifdef MPK_ENABLE_PROFILING
+      if (t * c.iters + i < NUM_STAGES) {
+        MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LOADER_PHASE, V2_PROF_MMA_EMPTY_WAIT,
+                          pW.wait_free());
+      } else {
+        pW.wait_free();
+      }
+#else
       pW.wait_free();
+#endif
       const int W_smem = Wr.slot_addr(pW.st);   // storage addr from the ring
 
       // W TMA — v2 order: cp.async.bulk first, expect_tx after.
@@ -427,6 +440,8 @@ __device__ __noinline__ void linear_launcher_task(
   // tiles_per_task>1 is ever fixed.
   if (c.bounds_fail(tile_idx)) return;
 
+  MPK_V2_PROF_SNAPSHOT()
+
   // Launcher re-init from CHANNELS/ONESHOT reinit_*_by policy (table-driven, Phase 2b).
   if (lane_id == 0) {
     ::kernel::linear::reinit_for_role(::kernel::linear::Role::Launcher,
@@ -462,11 +477,33 @@ __device__ __noinline__ void linear_launcher_task(
   if (elect_sync()) {
     for (int t = 0; t < c.tiles; t++) {
       // Wait epilogue_mbar (TMEM column free); returns column for tile t.
+      // (timed-waits below: elected lane == the launcher-phase track writer.)
+#ifdef MPK_ENABLE_PROFILING
+      int tmem;
+      MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LAUNCHER_PHASE, V2_PROF_EPILOGUE_WAIT,
+                        tmem = pAcc.wait_free());
+#else
       const int tmem = pAcc.wait_free();
+#endif
 
       for (int i = 0; i < c.iters; i++) {
+#ifdef MPK_ENABLE_PROFILING
+        // timed-wait on the first ring lap only (see loader note above).
+        // NOTE: this construct must NOT exist in unprofiled builds — an
+        // if/else with identical arms here produced an illegal memory
+        // access on sm_100a (codegen sensitivity around branch +
+        // mbarrier-wait + tcgen05; bisected 2026-06-06).
+        if (t * c.iters + i < NUM_STAGES) {
+          MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LAUNCHER_PHASE, V2_PROF_W_TMA_WAIT,
+                            (cW.wait_full(), cA.wait_full()));
+        } else {
+          cW.wait_full();
+          cA.wait_full();
+        }
+#else
         cW.wait_full();                       // W_tma_mbar[stage]
         cA.wait_full();                       // A_tma_mbar[stage]
+#endif
         const int W_smem = Wr.slot_addr(cW.st);
         const int A_smem = Ar.slot_addr(cA.st);
 
@@ -527,7 +564,13 @@ __device__ __noinline__ void linear_launcher_task(
 
   // Wait consumer_done — one-shot, kept raw (matches v2).
   if (lane_id == 0) {
+#ifdef MPK_ENABLE_PROFILING
+    MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LAUNCHER_PHASE,
+                      V2_PROF_CONSUMER_DONE_WAIT,
+                      mbarrier_wait(dyn_sem_base + SEM_CONSUMER_DONE * 8, 0));
+#else
     mbarrier_wait(dyn_sem_base + SEM_CONSUMER_DONE * 8, 0);
+#endif
   }
   __syncwarp();
 
@@ -556,9 +599,23 @@ __device__ __noinline__ void linear_consumer_task(
   const TaskCtx c = ctx_from<SPLIT_K, TILES_PER_TASK>(N_real, K, tile_idx);
   if (c.bounds_fail(tile_idx)) return;
 
+  MPK_V2_PROF_SNAPSHOT()
+
   // Wait launcher's TMEM-addr publish — one-shot, kept raw (matches v2).
+  // (timed-wait on thread 0 only — all four consumer warps' lane 0 wait,
+  // but the consumer-phase track has a single designated writer.)
   if (lane_id == 0) {
+#ifdef MPK_ENABLE_PROFILING
+    if (threadIdx.x == 0) {
+      MPK_V2_TIMED_WAIT(V2_PROF_GROUP_CONSUMER_PHASE,
+                        V2_PROF_TMEM_READY_WAIT,
+                        mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0));
+    } else {
+      mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0);
+    }
+#else
     mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0);
+#endif
   }
   __syncwarp();
   const int taddr = *reinterpret_cast<int *>(
@@ -576,8 +633,23 @@ __device__ __noinline__ void linear_consumer_task(
     const int cur_k_slice     = cur_tile_idx / c.num_spatial_tiles;
     const int bid_m           = cur_spatial_idx;
 
-    // Wait MMA done for this tile; cursor gives the TMEM column.
+    // Wait MMA done for this tile; cursor gives the TMEM column. All 128
+    // threads wait; only thread 0 (the consumer-phase writer) times it.
+#ifdef MPK_ENABLE_PROFILING
+    // All 128 threads wait; thread 0 (the consumer-phase writer) times it.
+    int t_col;
+    if (threadIdx.x == 0) {
+      MPK_V2_TIMED_WAIT(V2_PROF_GROUP_CONSUMER_PHASE, V2_PROF_MAINLOOP_WAIT,
+                        t_col = cAcc.wait_full());
+    } else {
+      t_col = cAcc.wait_full();
+    }
+    // RECONVERGE: the branch diverges warp 0 (Volta+ ITS does not rejoin at
+    // the merge) and tcgen05.ld.sync.aligned below needs a converged warp.
+    __syncwarp();
+#else
     const int t_col = cAcc.wait_full();
+#endif
 
     tcgen05_fence_after_thread_sync();
 
