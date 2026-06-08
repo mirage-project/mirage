@@ -9,7 +9,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export MIRAGE_HOME="${MIRAGE_HOME:-$ROOT}"
 
-PORT="${PORT:-8000}"
+# Pick a free ephemeral port unless one is provided, so we never clash with a
+# service already bound to 8000 on the shared self-hosted runner (which would
+# both block our bind and fool a /docs readiness probe against the wrong app).
+if [[ -z "${PORT:-}" ]]; then
+    PORT="$(python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); port=s.getsockname()[1]; s.close(); print(port)')"
+fi
 MODEL="${MODEL:-Qwen/Qwen3-8B}"
 MAX_NUM_BATCHED_REQUESTS="${MAX_NUM_BATCHED_REQUESTS:-4}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8}"
@@ -36,10 +41,11 @@ wait_for_ready() {
             return 1
         fi
         if python -c "
-import sys, urllib.request
+import sys, json, urllib.request
 try:
-    with urllib.request.urlopen('http://127.0.0.1:${PORT}/docs', timeout=5) as r:
-        sys.exit(0 if r.status == 200 else 1)
+    with urllib.request.urlopen('http://127.0.0.1:${PORT}/openapi.json', timeout=5) as r:
+        spec = json.load(r)
+    sys.exit(0 if '/v1/chat/completions' in spec.get('paths', {}) else 1)
 except Exception:
     sys.exit(1)
 " >/dev/null 2>&1; then
