@@ -235,6 +235,29 @@ __device__ __forceinline__ bool
       int qo_indptr = config.qo_indptr_buffer[i];
       int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
       int prompt_len = config.prompt_length[request_id];
+#ifdef MPK_SPEC_DECODE
+      // Eagle3 / spec-decode path
+      int step_advance;
+      if (step >= prompt_len) {
+        // Decode: step += accepted_count (eagle3_commit writes this; 0 means
+        // commit hasn't run yet at first iter, fall back to 1 to make progress)
+        step_advance = config.new_token_nums[request_id];
+        if (step_advance < 1) {
+          step_advance = 1;
+        }
+      } else {
+        // Prefill: fall back to original semantics
+        for (int j = 0; j < num_tokens; j++) {
+          if (step + j + 1 >= prompt_len &&
+              step + j + 1 < config.max_seq_length) {
+            config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
+                config.output_tokens[qo_indptr + j];
+          }
+        }
+        step_advance = num_tokens;
+      }
+      config.step[request_id] = step + step_advance;
+#else
       for (int j = 0; j < num_tokens; j++) {
         if (step + j + 1 >= prompt_len &&
             step + j + 1 < config.max_seq_length) {
@@ -243,13 +266,15 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
+      int step_advance = num_tokens;
+#endif
 #ifdef MPK_ENABLE_PROFILING
       if (true)
 #else
-      if ((step + num_tokens + 1 >= config.max_seq_length) ||
+      if ((step + step_advance + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
-                          num_tokens] == config.eos_token_id) &&
-           (step + num_tokens >= prompt_len)))
+                          step_advance] == config.eos_token_id) &&
+           (step + step_advance >= prompt_len)))
 #endif
       {
         // Request is done
@@ -292,7 +317,15 @@ __device__ __forceinline__ bool
             min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       } else {
         // Decode requests
+#ifdef MPK_SPEC_DECODE
+        // Eagle3 / spec-decode: feed K+1 candidate tokens (1 bonus + K drafts)
+        // per decode iter. mbt is compile-time set to K+1.
+        num_new_tokens =
+            min(MPK_MAX_NUM_BATCHED_TOKENS,
+                MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+#else
         num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+#endif
       }
       // Move tokens to input_tokens
       for (int j = 0; j < num_new_tokens; j++) {

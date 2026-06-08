@@ -1619,6 +1619,13 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
+    // Eagle3 kernels don't need TMA.
+    case TASK_COPY:
+    case TASK_CONCAT:
+    case TASK_EAGLE3_D2T_REMAP:
+    case TASK_EAGLE3_COMMIT: {
+      break;
+    }
     default:
       assert(false);
   }

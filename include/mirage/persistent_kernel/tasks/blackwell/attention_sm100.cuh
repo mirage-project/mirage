@@ -40,6 +40,13 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
+          int Q_LEN_OVERRIDE = 0,
+          int TAIL_OFFSET = 0,
+          // MAX_TOKENS = per-call query rows (= mbt). Must be >= mbt yet small
+          // enough that the per-row smem buffers fit MAX_DYNAMIC_SHARED_MEMORY.
+          // The default 8 does NOT fit smem (MMA_ITERS_M 3->4, S_O_BUFFER
+          // +32KB); to run Eagle3 (K<=5, mbt<=6) override it to 6. See the demo
+          // header.
           int MAX_TOKENS = 8>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
@@ -90,7 +97,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     if (first_token_pos == last_token_pos) {
       return;
     }
-    int const num_tokens = last_token_pos - first_token_pos;
+    int const num_tokens = (Q_LEN_OVERRIDE > 0)
+                               ? Q_LEN_OVERRIDE
+                               : (last_token_pos - first_token_pos);
 
     // NOTE(Jinchen): to simplify the implementation, we assume that the
     // metadata of the paged KV cache includes the new tokens, i.e., spaces are
@@ -100,7 +109,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
     int const num_pages = last_page_pos - first_page_pos;
     int const seq_len = (num_pages - 1) * PAGE_SIZE +
-                        paged_kv_last_page_len_buffer_ptr[request_id];
+                        paged_kv_last_page_len_buffer_ptr[request_id] -
+                        TAIL_OFFSET;
     // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
 
     // Page indices are read directly from global memory (L2-cached)
@@ -282,9 +292,14 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                               : 0;
       if (next_iter_len > 0) {
         int page_idx = page_indices[cp_finished_seq_len / PAGE_SIZE];
+        // FIX: loop bound was `curr_iter_len` (stale first-iter value); should
+        // be `next_iter_len` (the tile being loaded). The original OOB-read
+        // QKV input for `dst_row >= next_iter_len`, which lands in
+        // unmapped memory at higher mbt values → illegal access. See plan
+        // /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
 #pragma unroll
         for (int chunk_idx = threadIdx.x;
-             chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
+             chunk_idx < next_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
              chunk_idx += NUM_THREADS) {
           int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
           int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
@@ -445,6 +460,17 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       int kt_col = (warp_idx << 4) + ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
 #pragma unroll
       for (int m = 0; m < MMA_ITERS_M; m++) {
+        // All MMA_ITERS_M tiles compute their full attention. The earlier
+        // `if (m > 0) continue;` workaround dropped every tile past the first,
+        // sacrificing query slots >= 16/NUM_QO_PER_KV; that corrupted the
+        // committed EAGLE3 token stream at K>=2 (the bonus token at ac=K+1 was
+        // read from an uncomputed slot). The root cause was the in-place MMA
+        // accumulator being declared as a write-only "=f" output with a
+        // separate "f" input aliasing the same registers; the compiler could
+        // reuse a fragment's registers across unrolled m-iterations and
+        // cross-contaminate. Fixed in mma_m16n16k16_bf16bf16bf32 by using a
+        // single read-write "+f" accumulator operand, so each x_frag_f[m] keeps
+        // an independent def-use chain and no tile is skipped.
         int q_row = (m << 4) + (lane_idx & 0xF);
 #pragma unroll
         for (int k = 0; k < HEAD_DIM / 16; k++) {
