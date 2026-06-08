@@ -1,7 +1,13 @@
 import argparse
+import os
+import sys
 import warnings
 
-import _runtime_path  # noqa: F401
+# Make the compiled runtime extension (one directory up) importable.
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
 import torch
 
 # Import flashinfer BEFORE the Mirage runtime extension. Reverse order has
@@ -77,7 +83,8 @@ def benchmark_graph_us(fn, warmup: int, reps: int) -> float:
 
 
 def output_dtype(m: int) -> torch.dtype:
-    return torch.bfloat16 if m <= SMALL_M_MAX else torch.float32
+    # All SM100 NVFP4 dispatch paths (swapAB and 1d2d) produce bfloat16 output.
+    return torch.bfloat16
 
 
 def flashinfer_runner(x: torch.Tensor, weight: torch.Tensor, backend: str):
