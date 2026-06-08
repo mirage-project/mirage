@@ -1,0 +1,68 @@
+name: mpk-online-ci
+on:
+  push:
+    branches: [mpk]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: mpk-online-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  online-serving:
+    runs-on: [self-hosted, gpu, b200]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash -l {0}
+
+    env:
+      CUBLAS_WORKSPACE_CONFIG: ":16:8"
+      PYTHONUNBUFFERED: "1"
+      HF_HOME: "/raid/catalyst/models"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup conda environment
+        run: |
+          conda create -n mirage-ci-${{ github.run_id }} python=3.11 -y
+
+      - name: Install mirage
+        run: |
+          conda activate mirage-ci-${{ github.run_id }}
+          pip install -e . -v
+          pip install pytest
+
+      - name: Set Envs
+        run: |
+          echo "MIRAGE_HOME=$PWD" >> $GITHUB_ENV
+          CUDA_VISIBLE_DEVICES=$(bash scripts/find_idle_gpus.sh --num-gpus 1)
+          echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >> $GITHUB_ENV
+
+      - name: Run online serving test
+        timeout-minutes: 40
+        env:
+          MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
+        run: |
+          conda activate mirage-ci-${{ github.run_id }}
+          bash tests/ci-tests/run_ci_tests_online.sh
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpk-online-outputs
+          path: |
+            outputs/
+            logs/
+
+      - name: Clean up workspace
+        if: always()
+        run: |
+          conda env remove -n mirage-ci-${{ github.run_id }} -y
+          rm -rf "${{ github.workspace }}/*"

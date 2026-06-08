@@ -94,7 +94,7 @@ async def _stream_bridge(
         text, is_final, error = await queue.get()
 
         if error:
-            yield f"data: {{\"error\": \"{error}\"}}\n\n"
+            yield "data: " + json.dumps({"error": error}) + "\n\n"
             break
 
         chunk = json.dumps({
