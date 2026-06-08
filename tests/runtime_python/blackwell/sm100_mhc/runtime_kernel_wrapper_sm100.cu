@@ -72,16 +72,12 @@ int resolve_num_ctas(int num_ctas, int device) {
 }
 
 // ============================================================================
-// mhc_post: HC post + residual fusion with outer-product residual
+// mHC_post: HC post + residual fusion with outer-product residual
 //   y[k, c] = post[k] * x[c] + sum_i comb[i, k] * residual[i, c]
 // ============================================================================
 
-// Each block owns TOKENS_PER_BLK tokens; the block's threads are partitioned
-// into TOKENS_PER_BLK contiguous sub-groups (THREADS_PER_TOKEN each), one per
-// token. This keeps all threads busy at small C (e.g. C=128 -> 16 channel-vecs
-// per token; one token per block would idle most of a 128-thread block) and
-// raises occupancy. The per-token work is the vectorized task impl, run by the
-// sub-group via a remapped (lane, group-size) thread index.
+// Each block owns TOKENS_PER_BLK tokens, its threads split into that many
+// contiguous sub-groups (one per token) so all threads stay busy at small C.
 template <typename T, int N, int C, int TOKENS_PER_BLK>
 __global__ __launch_bounds__(256) void mHC_post_kernel(void const *residual_ptr,
                                                        void const *x_ptr,
@@ -123,8 +119,6 @@ void launch_mHC_post(T const *residual,
                      int num_ctas,
                      cudaStream_t stream) {
   // Vectorized by 8 (uint4): work unit is a channel-vec, c_vec = C/8.
-  // Pack TOKENS_PER_BLK tokens per block so all threads stay busy at small C.
-  // threads_per_token = c_vec (cap 256/TOKENS_PER_BLK); block = the product.
   (void)num_ctas;
   constexpr int VEC = 8;
   int const c_vec = c / VEC;
@@ -252,7 +246,7 @@ void mHC_post(torch::Tensor residual,
 
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(
-      err == cudaSuccess, "mhc_post launch error: ", cudaGetErrorString(err));
+      err == cudaSuccess, "mHC_post launch error: ", cudaGetErrorString(err));
 }
 
 // ============================================================================
@@ -887,7 +881,6 @@ void mHC_pre_k1_tensor_core(torch::Tensor residual,
                             int cfg) {
   TORCH_CHECK(n == 4, "pre_k1_tensor_core hardcoded to n=4");
   constexpr int OUT_PAD = 128;
-  int const mix_hc = n * n + 2 * n;
   int const batch = static_cast<int>(residual.size(0));
   int const K = static_cast<int>(residual.size(1));
   TORCH_CHECK(residual.is_cuda() && residual.is_contiguous() &&
@@ -1016,8 +1009,6 @@ void mHC_pre_k1_tensor_core(torch::Tensor residual,
               "mHC_pre_k1_tensor_core launch error: ",
               cudaGetErrorString(err));
 }
-
-#undef DISPATCH_PRE_K1_BS_K
 
 template <int N, int C, int RMS_HIDDEN, int TOKENS_PER_CTA>
 __global__ __launch_bounds__(256) void mHC_pre_k2_kernel(
@@ -1291,17 +1282,9 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
 // The threshold ~256 is where the sweep showed the crossover across c.
 // ============================================================================
 static int pick_cuda_split_k(int K, int num_tokens) {
-  // split_k must satisfy two things at low t, and the old heuristic only did
-  // the first: (1) fill the grid -- tokens*split_k >= ~SM count; and (2) keep
-  // each CTA's serial reduction short -- K/split_k around a sweet spot. At
-  // large K (e.g. 28672) the second dominates: even with the grid filled, a CTA
-  // reducing K/2 elements is slow, so more split_k keeps helping. The B200
-  // sweep (t=16-128, c=4096/7168) showed split_k=16 wins where the old code
-  // picked 2-8. Target the max of the two needs, capped at 32; clamp to a
-  // divisor of K.
-  // Empirically (B200 sweep) the optimum lands at ~512-1024 total CTAs
-  // (tokens*split_k) with a floor of K/split_k >= ~1024 reduction elems/CTA.
-  // So target ~1024/tokens, but never over-split below 1024 elems/CTA.
+  // Two competing needs: fill the grid (tokens*split_k >= ~SM count) and keep
+  // each CTA's serial reduction long enough (K/split_k >= ~1024 elems). B200
+  // sweep optimum: ~512-1024 total CTAs, never below 1024 elems/CTA, cap 32.
   int grid_target =
       (num_tokens >= 1024) ? 1 : (1024 + num_tokens - 1) / num_tokens;
   int const work_cap = (K >= 1024) ? (K / 1024) : 1; // don't go below ~1024/CTA
@@ -1537,7 +1520,7 @@ void mHC_pre(torch::Tensor residual,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // num_ctas=0 means "use device SM count". Caller can pin to 128 / 148 / etc.
-  m.def("mhc_post",
+  m.def("mHC_post",
         &mHC_post,
         py::arg("residual"),
         py::arg("x"),

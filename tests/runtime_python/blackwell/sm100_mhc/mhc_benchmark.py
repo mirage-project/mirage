@@ -1,16 +1,15 @@
-"""Unified mHC test: correctness (vs torch) + benchmark (vs vLLM), at the
-DeepSeek-V4 shapes. One script replaces the scattered bench/test/sweep files.
+"""mHC correctness (vs torch) + benchmark (vs vLLM) at DeepSeek-V4 shapes.
 
 Ops (n=4 fixed):
-  pre           ours mHC_pre (fused k1+k2)          vs vLLM pre (gemm + big_fuse)
-  post          ours mhc_post                        vs vLLM mhc_post_tilelang
-  post_pre      ours mHC_post_pre_v2 (fused)          vs vLLM fused (mhc_fused+tail)
-  post_then_pre ours mhc_post THEN mHC_pre (separate) vs vLLM fused post_pre
+  pre           ours mHC_pre (fused k1+k2)            vs vLLM pre
+  post          ours mHC_post                         vs vLLM mHC_post
+  post_pre      ours mHC_post_pre_v2 (fused)          vs vLLM fused
+  post_then_pre ours mHC_post THEN mHC_pre (separate) vs vLLM fused post_pre
 
-Configs: c=4096 (V4-Flash), c=7168 (V4-Pro);  t in {1,2,4,8,16,32,1024,2k,4k,8k,16k}.
+Configs: c=4096 (V4-Flash), c=7168 (V4-Pro);  t in {1..16384}.
 
 vLLM timings come from a .pt bundle produced by vllm/run_tilelang.py in the
-mhc_cmp env. This script auto-(re)generates it if missing/stale.
+mhc_cmp env; this script auto-(re)generates it if missing.
 
     python mhc_benchmark.py                 # correctness + benchmark, all ops
     python mhc_benchmark.py --no-vllm       # correctness + ours-only timing
@@ -33,9 +32,7 @@ BUNDLE = "/tmp/mhc_v4_sweep.pt"
 MHC_CMP_PY = os.environ.get(
     "MHC_TILELANG_PYTHON", "/home/adityar2/miniconda3/envs/mhc_cmp/bin/python")
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
+
 def time_ms(fn, warmup=20, iters=80):
     for _ in range(warmup):
         fn()
@@ -65,9 +62,6 @@ def split_k_for(K, nt, max_sk=32):
     return sk
 
 
-# ---------------------------------------------------------------------------
-# torch references (inline; no dependency on vllm/torch_ref)
-# ---------------------------------------------------------------------------
 def ref_pre(residual_2d, fn2d, scale, base, c, sk=20, he=1e-9, re_=1e-6):
     t = residual_2d.shape[0]
     nC = N * c
@@ -90,9 +84,6 @@ def ref_post(residual, x, comb, post):
     return (mixed + post.float().unsqueeze(-1) * x.float().unsqueeze(1)).to(torch.bfloat16)
 
 
-# ---------------------------------------------------------------------------
-# ops: each returns (ours_time_ms, max_relerr) for a given (nt, c)
-# ---------------------------------------------------------------------------
 def op_pre(nt, c, check):
     K = N * c
     mh = N * N + 2 * N
@@ -122,7 +113,7 @@ def op_post(nt, c, check):
     p = torch.rand(nt, N, device=DEV); cb = torch.rand(nt, N, N, device=DEV)
     cb = cb / cb.sum(-1, keepdim=True)
     out = torch.empty(nt, N, c, device=DEV, dtype=torch.bfloat16)
-    call = lambda: rt.mhc_post(res, x, cb, p, out, N)
+    call = lambda: rt.mHC_post(res, x, cb, p, out, N)
     err = float("nan")
     if check:
         call(); torch.cuda.synchronize()
@@ -166,7 +157,6 @@ def op_post_pre(nt, c, check):
 
 
 def op_post_then_pre(nt, c, check):
-    # our post (-> next residual) THEN our fused pre, as two separate launches.
     K = N * c; mh = N * N + 2 * N
     torch.manual_seed(0)
     res = torch.randn(nt, N, c, device=DEV, dtype=torch.bfloat16)
@@ -183,7 +173,7 @@ def op_post_then_pre(nt, c, check):
     hp = torch.empty(nt, N, device=DEV); cb = torch.empty(nt, N, N, device=DEV)
 
     def call():
-        rt.mhc_post(res, x, cin, p, rn, N)
+        rt.mHC_post(res, x, cin, p, rn, N)
         rt.mHC_pre(rn_flat, w, rn, sc, ba, f, hp, cb, mp, ss, N, c,
                    sinkhorn_repeat=20, sinkhorn_eps=1e-9, rms_eps=1e-6)
     err = float("nan")
@@ -199,13 +189,10 @@ OPS = {
     "pre": (op_pre, "pre"),
     "post": (op_post, "post"),
     "post_pre": (op_post_pre, "post_pre"),
-    "post_then_pre": (op_post_then_pre, "post_pre"),  # vs vLLM's fused post_pre
+    "post_then_pre": (op_post_then_pre, "post_pre"),
 }
 
 
-# ---------------------------------------------------------------------------
-# vLLM bundle
-# ---------------------------------------------------------------------------
 def ensure_bundle():
     if os.path.exists(BUNDLE):
         return load_bundle()
@@ -230,9 +217,6 @@ def load_bundle():
     return v
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ops", nargs="+", default=list(OPS), choices=list(OPS))
