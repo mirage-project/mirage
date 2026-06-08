@@ -320,9 +320,8 @@ __device__ __forceinline__ bool
 #ifdef MPK_SPEC_DECODE
         // Eagle3 / spec-decode: feed K+1 candidate tokens (1 bonus + K drafts)
         // per decode iter. mbt is compile-time set to K+1.
-        num_new_tokens =
-            min(MPK_MAX_NUM_BATCHED_TOKENS,
-                MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        num_new_tokens = min(MPK_MAX_NUM_BATCHED_TOKENS,
+                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
 #else
         num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
 #endif
