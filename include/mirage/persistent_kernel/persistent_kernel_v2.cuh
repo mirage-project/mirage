@@ -15,7 +15,7 @@
 // prepare_kernel, and prepare_next_batch being defined there. We do NOT
 // re-include persistent_kernel.cuh because it lacks include guards.
 #include "mirage/persistent_kernel/runtime_v2.cuh"
-#include "mirage/persistent_kernel/dispatch_v2.cuh"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/task_header.cuh"
 
 #include <cuda_runtime.h>
 #include <vector>

@@ -1,32 +1,23 @@
-// Ampere task impls
-#include "tasks/ampere/embedding.cuh"
-#include "tasks/ampere/merge_splitkv.cuh"
-#include "tasks/ampere/multitoken_paged_attention_split_kv.cuh"
-#include "tasks/ampere/silu_mul.cuh"
-#ifdef USE_NVSHMEM
-#include "tasks/ampere/allreduce.cuh"
-#endif // USE_NVSHMEM
-// Hopper task impls
-#include "tasks/cute/hopper/gemm_ws.cuh"
-#include "tasks/cute/hopper/gemm_ws_cooperative.cuh"
-#include "tasks/cute/hopper/gemm_ws_mpk.cuh"
-#include "tasks/hopper/linear_hopper.cuh"
-#include "tasks/hopper/linear_swapAB_hopper.cuh"
-#include "tasks/hopper/multitoken_paged_attention_hopper.cuh"
-#include "tasks/hopper/rmsnorm_hopper.cuh"
-#include "tasks/hopper/rotary_embedding_hopper.cuh"
-#include "tasks/hopper/silu_mul_hopper.cuh"
-#ifdef USE_NVSHMEM
-#include "tasks/hopper/allreduce.cuh"
-#endif // USE_NVSHMEM
-// Blackwell task impls
-#include "argmax_sm100.cuh"
-#include "attention_sm100.cuh"
-#include "fp8_group_gemm_sm100.cuh"
-#include "linear_sm100_mpk.cuh"
-#include "moe_linear_sm100.cuh"
-#include "mul_sum_add_sm100.cuh"
-#include "tasks/common/sampling.cuh"
-#include "tensor_init.cuh"
-#include "topk_sigmoid_sm100.cuh"
-#include "topk_softmax_sm100.cuh"
+/* Copyright 2026 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ */
+#pragma once
+
+// blackwell_v2 task implementations, bundled so the v2 megakernel's
+// codegen-emitted role dispatch calls resolve. Each task uses its own
+// namespace to avoid collision with the v1 (kernel::) versions.
+#include "mirage/persistent_kernel/runtime_header.h"
+#include "linear_sm100_v2.cuh"        // kernel::linear_v2
+#include "linear_sm100_v3.cuh"        // kernel::linear_v3
+#include "rmsnorm_v2.cuh"             // kernel::rmsnorm_v2
+#include "rotary_embedding_v2.cuh"    // kernel::v2
+#include "norm_sm100.cuh"             // kernel::v2
+#include "attention_sm100.cuh"        // kernel::v2
+#include "argmax_sm100.cuh"           // kernel::v2
+#include "silu_mul_v2.cuh"            // kernel::v2
+#include "embedding_v2.cuh"           // kernel::v2
