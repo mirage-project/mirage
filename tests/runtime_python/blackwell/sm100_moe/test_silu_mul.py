@@ -2,6 +2,7 @@ import torch
 import runtime_kernel_blackwell
 
 from torch.nn import functional as F
+from pytorch_reference import moe_silu_mul_ref
 
 torch.set_printoptions(sci_mode=False, profile="full")
 # torch.set_printoptions(sci_mode=False)
@@ -24,10 +25,8 @@ for output_size in output_sizes:
         # MPK impl
         runtime_kernel_blackwell.silu_mul(input, output)
 
-        # Reference impl 
-        w1_output = F.silu(input[:, :, :output_size].to(torch.float))
-        torch_output = w1_output * input[:, :, output_size:].to(torch.float)
-        torch_output = torch_output.to(torch.bfloat16)
+        # Reference impl
+        torch_output = moe_silu_mul_ref(input, output_size)
         
         torch.testing.assert_close(
             output,

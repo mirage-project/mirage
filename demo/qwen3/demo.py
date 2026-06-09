@@ -440,14 +440,21 @@ if __name__ == "__main__":
             name="argmax_in",
             io_category="cuda_tensor",
         )
+        
+        def _aligned_lm_head_workers(out_width, max_workers, align=8):
+            for g in range(max_workers, 0, -1):
+                if out_width % g == 0 and (out_width // g) % align == 0:
+                    return g
+            return 1
+        lm_head_workers = _aligned_lm_head_workers(vocab_size, num_workers)
         argmax_part_value = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
@@ -610,6 +617,7 @@ if __name__ == "__main__":
                     output=attn_proj_out,
                     grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -690,6 +698,7 @@ if __name__ == "__main__":
                     output=mlp_out,
                     grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -728,7 +737,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(mpk.num_workers, 1, 1),
+            grid_dim=(lm_head_workers, 1, 1),
             block_dim=(128, 1, 1),
         )
         #mpk.rmsnorm_linear_layer(
@@ -746,7 +755,7 @@ if __name__ == "__main__":
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
+            argmax_partial_grid_dim = (lm_head_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,

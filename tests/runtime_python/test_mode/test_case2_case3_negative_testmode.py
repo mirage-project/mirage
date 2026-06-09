@@ -155,7 +155,12 @@ def _run_child(source, case_name):
         [sys.executable, "-c", source],
         capture_output=True,
         text=True,
-        env=dict(os.environ, CUDA_VISIBLE_DEVICES="0"),
+        # Honour outer CUDA_VISIBLE_DEVICES so this test does not steal GPU 0
+        # from a sibling pytest worker. Falls back to "0" only if unset.
+        env=dict(
+            os.environ,
+            CUDA_VISIBLE_DEVICES=os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+        ),
         timeout=120,
     )
     combined = (result.stdout or "") + (result.stderr or "")

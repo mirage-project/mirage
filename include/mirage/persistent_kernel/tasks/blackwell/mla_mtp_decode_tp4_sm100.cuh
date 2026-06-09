@@ -34,6 +34,24 @@ static constexpr int BK = 64;      // 128B swizzle tile width
 static constexpr int MMA_K = 16;
 static constexpr int K_ITERS = D_K / BK;  // 9 for QK
 static constexpr int V_CHUNKS = D_V / BK; // 8
+#ifndef MIRAGE_MLA_TP4_V_SPLITS
+#define MIRAGE_MLA_TP4_V_SPLITS 8
+#endif
+static constexpr int V_SPLITS = MIRAGE_MLA_TP4_V_SPLITS;
+static_assert(V_SPLITS == 1 || V_SPLITS == 2 || V_SPLITS == 4 || V_SPLITS == 8,
+              "MIRAGE_MLA_TP4_V_SPLITS must be one of 1, 2, 4, 8");
+static_assert(V_CHUNKS % V_SPLITS == 0,
+              "TP4 MLA V splits must divide D_V / BK");
+#ifndef MIRAGE_MLA_TP4_HEAD_GROUPS
+#define MIRAGE_MLA_TP4_HEAD_GROUPS 1
+#endif
+static constexpr int HEAD_GROUPS = MIRAGE_MLA_TP4_HEAD_GROUPS;
+static_assert(HEAD_GROUPS == 1 || HEAD_GROUPS == 2 || HEAD_GROUPS == 4 ||
+                  HEAD_GROUPS == 8,
+              "MIRAGE_MLA_TP4_HEAD_GROUPS must be one of 1, 2, 4, 8");
+static_assert(NUM_HEADS % HEAD_GROUPS == 0,
+              "TP4 MLA head groups must divide NUM_HEADS");
+static constexpr int HEADS_PER_GROUP = NUM_HEADS / HEAD_GROUPS;
 static constexpr int TB = 128;
 
 // Pipeline stages
@@ -44,11 +62,24 @@ static constexpr int MAX_STAGES = 5;
 // SMEM tile: 128 rows × BK cols × 2 bytes = 16384
 static constexpr int TILE_BYTES = 128 * BK * 2;
 
-static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES;
+// +1024 because the runtime rounds the extern shared-memory base up to a
+// 1024-byte boundary before issuing 128B-swizzle TMA copies.
+static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES + 1024;
 
-// Reduce kernel
-static constexpr int RD_DV = 2;
+// Reduce kernel. Each reduce CTA covers RD_DV value columns. Keeping this as a
+// compile-time knob lets us ablate the tradeoff between many tiny CTAs
+// (RD_DV=2) and more serial work inside each CTA (RD_DV>2).
+// C19 (2026-05-17): default 2 → 4 collapses the reduce grid from 256 CTAs
+// to 128 CTAs, fitting in exactly one wave on the 128-worker persistent
+// runtime. Saves the second-wave latency on the MLA decode critical path.
+#ifndef MIRAGE_MLA_TP4_RD_DV
+#define MIRAGE_MLA_TP4_RD_DV 4
+#endif
+static constexpr int RD_DV = MIRAGE_MLA_TP4_RD_DV;
+static_assert(RD_DV == 2 || RD_DV == 4 || RD_DV == 8,
+              "MIRAGE_MLA_TP4_RD_DV must be one of 2, 4, 8");
 static constexpr int RD_TB = 256;
+static constexpr int RD_LANES = RD_TB / 128;
 
 // ============ PTX Helpers ============
 namespace ptx {
@@ -117,18 +148,21 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
 } // namespace ptx
 
 // ============ Main MLA Kernel ============
-template <bool SINGLE_TILE>
-__device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
-                                              CUtensorMap const *KV_tm_ptr,
-                                              nv_bfloat16 *__restrict__ Oa,
-                                              float *__restrict__ La,
-                                              float ss,
-                                              int kv_len,
-                                              int sk,
-                                              int Q_LEN,
-                                              int qpg,
-                                              int block_x_packed,
-                                              int block_y) {
+template <bool SINGLE_TILE, bool WRITE_FINAL>
+__device__ __noinline__ void
+    mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
+                     CUtensorMap const *KV_tm_ptr,
+                     nv_bfloat16 *__restrict__ Oa,
+                     float *__restrict__ La,
+                     float ss,
+                     int kv_len,
+                     int sk,
+                     int Q_LEN,
+                     int qpg,
+                     int const *__restrict__ page_indices,
+                     int first_page_pos,
+                     int block_x_packed,
+                     int block_y) {
   if (threadIdx.x >= TB) {
     return;
   }
@@ -139,14 +173,17 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
   int const tid = threadIdx.x;
   int const wid = tid / 32;
 
-  // V-split is folded into block_x: low bit = v_half, rest = original block_x.
+  // V-split and optional head split are folded into block_x. V remains the
+  // lowest-order field so existing default metadata layout is unchanged.
   // Mirage MPK has only a flat task index, no z-dim launch.
-  int const block_x = block_x_packed >> 1;
-  int const v_half = block_x_packed & 1;
+  int const v_part = block_x_packed % V_SPLITS;
+  int const block_x_no_v = block_x_packed / V_SPLITS;
+  int const head_group = block_x_no_v % HEAD_GROUPS;
+  int const block_x = block_x_no_v / HEAD_GROUPS;
   int const gi = block_x / sk;
   int const si = block_x % sk;
   int const bi = block_y;
-  constexpr int PV_CHUNKS = V_CHUNKS / 2; // 4 chunks per half
+  constexpr int PV_CHUNKS = V_CHUNKS / V_SPLITS;
 
   int const num_groups = (Q_LEN + qpg - 1) / qpg;
   if (gi >= num_groups) {
@@ -165,12 +202,13 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
     return;
   }
 
-  int const hpb = NUM_HEADS;
+  int const hpb = HEADS_PER_GROUP;
+  int const head_start = head_group * hpb;
   int const actual_qpg = min(qpg, Q_LEN - gi * qpg);
 
   extern __shared__ __align__(1024) char smem_buf[];
-  int const smem_base = __cvta_generic_to_shared(smem_buf);
-  int const work_smem = smem_base;
+  int const smem_base_raw = __cvta_generic_to_shared(smem_buf);
+  int const work_smem = (smem_base_raw + 1023) & ~1023;
 
   __shared__ uint64_t mbar_buf[12];
   __shared__ int tmem_addr_buf[1];
@@ -219,6 +257,9 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
   for (int tile = t0; tile < t1; tile++) {
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
+    int const kv_row = page_indices == nullptr
+                           ? bi * kv_len + kvs
+                           : page_indices[first_page_pos + tile] * TILE_S;
 
     if (!SINGLE_TILE && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
@@ -276,13 +317,14 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(k_stage),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(ki),
                      "r"(tma_bar + stage * 8)
                      : "memory");
         for (int q = 0; q < actual_qpg; q++) {
           int actual_q_idx = gi * qpg + q;
-          int global_row = bi * Q_LEN * NUM_HEADS + actual_q_idx * NUM_HEADS;
+          int global_row =
+              bi * Q_LEN * NUM_HEADS + actual_q_idx * NUM_HEADS + head_start;
           asm volatile(
               "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_"
               "tx::bytes "
@@ -332,7 +374,7 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
       ptx::mbar_init(mainloop_bar, 1);
       asm volatile("fence.mbarrier_init.release.cluster;");
       int V_buf_base_pre = work_smem + 2 * TILE_BYTES;
-      int vc_base = v_half * PV_CHUNKS;
+      int vc_base = v_part * PV_CHUNKS;
       for (int vi = 0; vi < min(NUM_PV_STAGES, PV_CHUNKS); vi++) {
         int v_smem = V_buf_base_pre + vi * TILE_BYTES;
         ptx::mbar_tx(tma_bar + vi * 8, TILE_BYTES);
@@ -341,7 +383,7 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc_base + vi),
                      "r"(tma_bar + vi * 8)
                      : "memory");
@@ -544,7 +586,7 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
 
     int V_buf_base = work_smem + 2 * TILE_BYTES;
     int pv_acc_base = (!SINGLE_TILE && tile > t0) ? 1 : 0;
-    int vc_base = v_half * PV_CHUNKS;
+    int vc_base = v_part * PV_CHUNKS;
 
     MLA_TP_SYNC_ACTIVE();
 
@@ -570,7 +612,7 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
                      "[%0], [%1, {%2, %3, %4}], [%5];" ::"r"(v_smem),
                      "l"(KV_tm_ptr),
                      "r"(0),
-                     "r"(bi * kv_len + kvs),
+                     "r"(kv_row),
                      "r"(vc_base + vi),
                      "r"(tma_bar + stage * 8)
                      : "memory");
@@ -665,10 +707,20 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
   }
 
   asm volatile("tcgen05.fence::after_thread_sync;");
-  int const vc_base_epi = v_half * PV_CHUNKS;
+  int const vc_base_epi = v_part * PV_CHUNKS;
   int const valid_rows = actual_qpg * hpb;
-  if (tid < valid_rows) {
-    float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
+  // tcgen05.ld.sync.aligned must be issued by complete warps. With TP4 head
+  // split enabled, Q1 can have only 16 valid rows per CTA, so guarding the
+  // TMEM load with tid < valid_rows would leave half a warp stuck. Let full
+  // warps perform the aligned TMEM loads and only commit valid rows to global.
+  int const epilogue_rows = ((valid_rows + 31) / 32) * 32;
+  bool const valid_epilogue_row = tid < valid_rows;
+  if (tid < epilogue_rows) {
+    float inv = (valid_epilogue_row && row_sum > 0) ? 1.0f / row_sum : 0.0f;
+    constexpr bool write_final = WRITE_FINAL;
+    int const q_final = gi * qpg + tid / hpb;
+    int const h_final = head_start + tid % hpb;
+    int const partial_row = (tid / hpb) * NUM_HEADS + h_final;
     for (int vi = 0; vi < PV_CHUNKS; vi++) {
       int vc = vc_base_epi + vi;
       int out_taddr_vc = taddr + vc * BK;
@@ -696,20 +748,32 @@ __device__ __noinline__ void mla_mtp_tp4_main(CUtensorMap const *Q_tm_ptr,
               "=f"(t16[15])
             : "r"(addr));
         asm volatile("tcgen05.wait::ld.sync.aligned;");
-        int base_d = (vc * BK + c) * 128 + tid;
+        int base_d = (vc * BK + c) * 128 + partial_row;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
-          nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
-          asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
-                           (nv_bfloat16 *)(Oout + base_d + i * 128)),
-                       "h"(*(uint16_t *)&val)
-                       : "memory");
+          if (valid_epilogue_row) {
+            nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
+            if (write_final) {
+              int const o_base =
+                  (bi * Q_LEN + q_final) * NUM_HEADS * D_V + h_final * D_V;
+              asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                               (nv_bfloat16 *)(Oa + o_base + vc * BK + c + i)),
+                           "h"(*(uint16_t *)&val)
+                           : "memory");
+            } else {
+              asm volatile("st.global.cs.b16 [%0], %1;" ::"l"(
+                               (nv_bfloat16 *)(Oout + base_d + i * 128)),
+                           "h"(*(uint16_t *)&val)
+                           : "memory");
+            }
+          }
         }
       }
     }
-    // Only v_half==0 writes La (shared across V halves)
-    if (v_half == 0) {
-      La[block_linear * 128 + tid] = log2f(fmaxf(row_sum, 1e-30f)) + row_max;
+    // Only one V split writes La; it is shared by all V splits.
+    if (valid_epilogue_row && !write_final && v_part == 0) {
+      La[block_linear * 128 + partial_row] =
+          log2f(fmaxf(row_sum, 1e-30f)) + row_max;
     }
   }
 
@@ -747,40 +811,51 @@ __device__ __noinline__ void
 
   int const row = tid & 127;
   int const lane = tid >> 7;
-  int const d = dv_base + lane;
+  int const q_in_group = row / NUM_HEADS;
+  int const h = row % NUM_HEADS;
+  int const actual_q = gi * qpg + q_in_group;
 
-  int q_in_group = row / NUM_HEADS;
-  int h = row % NUM_HEADS;
-  int actual_q = gi * qpg + q_in_group;
-
-  if (actual_q >= Q_LEN || d >= D_V) {
+  if (actual_q >= Q_LEN) {
     return;
   }
 
   float const *la_ptr = La + (bi * num_groups * sk + gi * sk) * 128 + row;
-  nv_bfloat16 const *oa_ptr =
-      Oa + (bi * num_groups * sk + gi * sk) * D_V * 128 + d * 128 + row;
+  for (int lane_iter = lane; lane_iter < RD_DV; lane_iter += RD_LANES) {
+    int const d = dv_base + lane_iter;
+    if (d >= D_V) {
+      continue;
+    }
+    nv_bfloat16 const *oa_ptr =
+        Oa + (bi * num_groups * sk + gi * sk) * D_V * 128 + d * 128 + row;
 
-  float maxVal = -1e30f, oldMaxVal = -1e30f;
-  float sumVal = 0.0f;
-  float acc = 0.0f;
+    if (sk == 1) {
+      int const o_base_single =
+          (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
+      O[o_base_single + d] = oa_ptr[0];
+      continue;
+    }
 
-  for (int s = 0; s < sk; s++) {
-    float localMax = la_ptr[s * 128];
-    float oa_val = __bfloat162float(oa_ptr[(size_t)s * D_V * 128]);
+    float maxVal = -1e30f, oldMaxVal = -1e30f;
+    float sumVal = 0.0f;
+    float acc = 0.0f;
 
-    maxVal = fmaxf(maxVal, localMax);
-    float corr0 = exp2f(oldMaxVal - maxVal);
-    float corr1 = exp2f(localMax - maxVal);
-    oldMaxVal = maxVal;
+    for (int s = 0; s < sk; s++) {
+      float localMax = la_ptr[s * 128];
+      float oa_val = __bfloat162float(oa_ptr[(size_t)s * D_V * 128]);
 
-    sumVal = sumVal * corr0 + corr1;
-    acc = acc * corr0 + oa_val * corr1;
+      maxVal = fmaxf(maxVal, localMax);
+      float corr0 = exp2f(oldMaxVal - maxVal);
+      float corr1 = exp2f(localMax - maxVal);
+      oldMaxVal = maxVal;
+
+      sumVal = sumVal * corr0 + corr1;
+      acc = acc * corr0 + oa_val * corr1;
+    }
+
+    float inv_sum = (sumVal > 0.0f) ? __frcp_rn(sumVal) : 0.0f;
+    int const o_base = (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
+    O[o_base + d] = __float2bfloat16(acc * inv_sum);
   }
-
-  float inv_sum = (sumVal > 0.0f) ? __frcp_rn(sumVal) : 0.0f;
-  int o_base = (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
-  O[o_base + d] = __float2bfloat16(acc * inv_sum);
 }
 
 } // namespace mla_mtp_tp4

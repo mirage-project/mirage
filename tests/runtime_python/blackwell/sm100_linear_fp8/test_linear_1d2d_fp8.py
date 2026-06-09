@@ -16,6 +16,7 @@ from sm100_fp8_scale_layout import (
     quantize_to_fp8_deepgemm_style,
     quantize_to_fp8_packed_ue8m0,
 )
+from pytorch_reference import linear_fp8_ref, linear_fp8_with_residual_ref
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
@@ -64,12 +65,12 @@ for batch_size, output_size, reduction_size in supported_shapes:
             x_q, x_scale, w_q, w_scale, residual, output
         )
 
-        x_ref = dequant_from_packed_ue8m0(x_q, x_scale)
-        w_ref = dequant_from_packed_ue8m0(w_q, w_scale)
-        torch_out = torch.matmul(x_ref, torch.transpose(w_ref, 0, 1))
         if has_residual:
-            torch_out = torch_out + residual.float()
-        torch_out = torch_out.to(torch.bfloat16)
+            torch_out = linear_fp8_with_residual_ref(
+                x_q, x_scale, w_q, w_scale, residual
+            )
+        else:
+            torch_out = linear_fp8_ref(x_q, x_scale, w_q, w_scale)
 
         torch.testing.assert_close(output, torch_out, rtol=1e-2, atol=1e-2)
         print("Random-input test passed!")

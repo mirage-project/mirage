@@ -374,6 +374,18 @@ static __device__ __forceinline__ void *mpkar_mc_ptr(nvshmemi_team_t *team,
   return nullptr;
 }
 
+static __device__ __forceinline__ void *mpkar_peer_ptr(void const *ptr,
+                                                       int pe) {
+  char const *base =
+      static_cast<char const *>(nvshmemi_device_state_d.heap_base);
+  char const *addr = static_cast<char const *>(ptr);
+  ptrdiff_t offset = addr - base;
+  void const *peer_base_addr = (void *)__ldg(
+      (long long unsigned const *)nvshmemi_device_state_d.peer_heap_base_p2p +
+      pe);
+  return (void *)(static_cast<char const *>(peer_base_addr) + offset);
+}
+
 // ========================= NVLS ld_reduce PTX ===============================
 // bf16: multimem.ld_reduce.global.add.acc::f32.v4.bf16x2
 // Loads 16 bytes (8 bf16 values) from multicast address, reduces across GPUs.
@@ -449,23 +461,182 @@ static __device__ __forceinline__ void mpkar_nvls_reduce_v4_block(
   }
 }
 
+static __device__ __forceinline__ uint32_t
+    mpkar_add_bf16x2(uint32_t reduced_bits, uint32_t residual_bits) {
+  union PackedBf16x2 {
+    uint32_t bits;
+    __nv_bfloat162 value;
+  };
+
+  PackedBf16x2 reduced{.bits = reduced_bits};
+  PackedBf16x2 residual{.bits = residual_bits};
+  float2 const reduced_vals = __bfloat1622float2(reduced.value);
+  float2 const residual_vals = __bfloat1622float2(residual.value);
+  PackedBf16x2 out;
+  out.value = __float22bfloat162_rn(make_float2(
+      reduced_vals.x + residual_vals.x, reduced_vals.y + residual_vals.y));
+  return out.bits;
+}
+
+// ========================= P2P fallback reduce (no NVLS) =====================
+// Used when the team has no NVLS multicast resource — observed on NVSHMEM
+// 3.6.5 under MPK's team_split_strided setup where every team has
+// `nvls_rsc_base_ptr == NULL` on the device side (see TP=2 debug session
+// 2026-05-18). Reads this PE's local copy + every peer's heap mirror via
+// `peer_heap_base_p2p`, sums in bf16, stores. bf16 only (matches DSv3 AR
+// instantiation).
+template <typename T>
+static __device__ __forceinline__ void mpkar_p2p_reduce_v4_block(
+    int4 *__restrict__ dst,
+    void const *local_input_ptr,
+    nvshmemi_team_t *teami,
+    int nelems_v4) {
+  static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
+                "P2P AR fallback currently bf16 only.");
+  int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
+  int const npes = teami->size;
+  for (int j = threadIdx.x; j < nelems_v4; j += blockDim.x) {
+    int4 acc = local_v4[j];
+    for (int p = 0; p < npes; p++) {
+      int peer_world_pe = teami->pe_mapping[p];
+      if (peer_world_pe == nvshmemi_device_state_d.mype) {
+        continue;
+      }
+      int4 *peer_v4 = reinterpret_cast<int4 *>(
+          mpkar_peer_ptr(local_input_ptr, peer_world_pe));
+      int4 const peer_val = peer_v4[j];
+      acc.x = mpkar_add_bf16x2(static_cast<uint32_t>(acc.x),
+                               static_cast<uint32_t>(peer_val.x));
+      acc.y = mpkar_add_bf16x2(static_cast<uint32_t>(acc.y),
+                               static_cast<uint32_t>(peer_val.y));
+      acc.z = mpkar_add_bf16x2(static_cast<uint32_t>(acc.z),
+                               static_cast<uint32_t>(peer_val.z));
+      acc.w = mpkar_add_bf16x2(static_cast<uint32_t>(acc.w),
+                               static_cast<uint32_t>(peer_val.w));
+    }
+    dst[j] = acc;
+  }
+}
+
+template <typename T>
+static __device__ __forceinline__ void mpkar_p2p_reduce_add_residual_v4_block(
+    int4 *__restrict__ dst,
+    void const *local_input_ptr,
+    int4 const *__restrict__ residual,
+    nvshmemi_team_t *teami,
+    int nelems_v4) {
+  static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
+                "P2P AR fallback currently bf16 only.");
+  int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
+  int const npes = teami->size;
+  for (int j = threadIdx.x; j < nelems_v4; j += blockDim.x) {
+    int4 acc = local_v4[j];
+    for (int p = 0; p < npes; p++) {
+      int peer_world_pe = teami->pe_mapping[p];
+      if (peer_world_pe == nvshmemi_device_state_d.mype) {
+        continue;
+      }
+      int4 *peer_v4 = reinterpret_cast<int4 *>(
+          mpkar_peer_ptr(local_input_ptr, peer_world_pe));
+      int4 const peer_val = peer_v4[j];
+      acc.x = mpkar_add_bf16x2(static_cast<uint32_t>(acc.x),
+                               static_cast<uint32_t>(peer_val.x));
+      acc.y = mpkar_add_bf16x2(static_cast<uint32_t>(acc.y),
+                               static_cast<uint32_t>(peer_val.y));
+      acc.z = mpkar_add_bf16x2(static_cast<uint32_t>(acc.z),
+                               static_cast<uint32_t>(peer_val.z));
+      acc.w = mpkar_add_bf16x2(static_cast<uint32_t>(acc.w),
+                               static_cast<uint32_t>(peer_val.w));
+    }
+    int4 const r4 = residual[j];
+    acc.x = mpkar_add_bf16x2(static_cast<uint32_t>(acc.x),
+                             static_cast<uint32_t>(r4.x));
+    acc.y = mpkar_add_bf16x2(static_cast<uint32_t>(acc.y),
+                             static_cast<uint32_t>(r4.y));
+    acc.z = mpkar_add_bf16x2(static_cast<uint32_t>(acc.z),
+                             static_cast<uint32_t>(r4.z));
+    acc.w = mpkar_add_bf16x2(static_cast<uint32_t>(acc.w),
+                             static_cast<uint32_t>(r4.w));
+    dst[j] = acc;
+  }
+}
+
+// Same NVLS reduce as above, but adds a local residual before the final store.
+// This is the safe fusion point for tensor-parallel MoE residuals: every rank
+// contributes only its partial MLP output to NVLS, and residual is added once
+// after the cross-rank reduction has completed.
+template <typename T>
+static __device__ __forceinline__ void
+    mpkar_nvls_reduce_add_residual_v4_block(int4 *__restrict__ dst,
+                                            int4 const *__restrict__ mc_src,
+                                            int4 const *__restrict__ residual,
+                                            int nelems_v4) {
+  for (int j = threadIdx.x; j < nelems_v4; j += blockDim.x) {
+    if constexpr (sizeof(T) == 2) {
+      if constexpr (cuda::std::is_same<T, __nv_bfloat16>::value) {
+        uint32_t u4[4];
+        mpkar_nvls_ld_reduce_bf16_v4(u4[0], u4[1], u4[2], u4[3], mc_src + j);
+        int4 const r4 = residual[j];
+        u4[0] = mpkar_add_bf16x2(u4[0], static_cast<uint32_t>(r4.x));
+        u4[1] = mpkar_add_bf16x2(u4[1], static_cast<uint32_t>(r4.y));
+        u4[2] = mpkar_add_bf16x2(u4[2], static_cast<uint32_t>(r4.z));
+        u4[3] = mpkar_add_bf16x2(u4[3], static_cast<uint32_t>(r4.w));
+        asm("st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(dst + j),
+            "r"(u4[0]),
+            "r"(u4[1]),
+            "r"(u4[2]),
+            "r"(u4[3]));
+      } else {
+        // The persistent DeepSeek path instantiates bf16 only. Keep the
+        // non-bf16 path unfused instead of silently doing the wrong conversion.
+        uint32_t u4[4];
+        mpkar_nvls_ld_reduce_f16_v4(u4[0], u4[1], u4[2], u4[3], mc_src + j);
+        asm("st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(dst + j),
+            "r"(u4[0]),
+            "r"(u4[1]),
+            "r"(u4[2]),
+            "r"(u4[3]));
+      }
+    } else {
+      float f4[4];
+      mpkar_nvls_ld_reduce_f32_v4(f4[0], f4[1], f4[2], f4[3], mc_src + j);
+      int4 const r4 = residual[j];
+      f4[0] += __uint_as_float(static_cast<uint32_t>(r4.x));
+      f4[1] += __uint_as_float(static_cast<uint32_t>(r4.y));
+      f4[2] += __uint_as_float(static_cast<uint32_t>(r4.z));
+      f4[3] += __uint_as_float(static_cast<uint32_t>(r4.w));
+      asm("st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(dst + j),
+          "r"(__float_as_uint(f4[0])),
+          "r"(__float_as_uint(f4[1])),
+          "r"(__float_as_uint(f4[2])),
+          "r"(__float_as_uint(f4[3])));
+    }
+  }
+}
+
 // ========================= public API =======================================
-// Drop-in replacement for the old nvshmem_tile_allreduce.
-// Same template interface so callers do not need to change.
+// Drop-in replacement for the old nvshmem_tile_allreduce, plus a residual
+// variant used to fuse MoE allreduce + residual add.
 //
 // Template params:
 //   T            - element type (__nv_bfloat16, half, float)
 //   BATCH_SIZE   - unused (kept for API compat)
 //   OUTPUT_SIZE  - contiguous dimension in elements
 //   OUTPUT_STRIDE - stride of minor dimension in elements
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
-__device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
-                                                       void *output_ptr,
-                                                       void *_teams,
-                                                       int task_offset,
-                                                       int active_tokens) {
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int OUTPUT_STRIDE,
+          bool ADD_RESIDUAL>
+__device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
+                                                            void *residual_ptr,
+                                                            void *output_ptr,
+                                                            void *_teams,
+                                                            int task_offset,
+                                                            int active_tokens) {
   nvshmem_team_t *teams = reinterpret_cast<nvshmem_team_t *>(_teams);
   nvshmem_team_t team = teams[task_offset];
+  int const num_active_rows = max(0, min(active_tokens, BATCH_SIZE));
 
   // --- Phase 1: ensure local data is visible, then cross-GPU barrier ---
   __threadfence();
@@ -493,16 +664,59 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
 
   int4 *dst_v4 = reinterpret_cast<int4 *>(output_ptr);
   int4 const *src_mc_v4 = reinterpret_cast<int4 const *>(mc_src);
+  int4 const *residual_v4 = reinterpret_cast<int4 const *>(residual_ptr);
 
+  // Pick NVLS path when the team has a multicast resource bound, otherwise
+  // fall back to the P2P reduce that reads each peer's heap mirror directly.
+  // mc_src is NULL whenever the team has no NVLS rsc (observed on NVSHMEM
+  // 3.6.5 under MPK's team_split_strided setup — see TP=2 debug session
+  // 2026-05-18). The fallback uses peer_heap_base_p2p, which is populated by
+  // NVSHMEM for any p2p-connected GPU pair (no NVLS dependency).
+  bool const use_nvls = (mc_src != nullptr);
   if constexpr (OUTPUT_SIZE == OUTPUT_STRIDE) {
-    // Contiguous: one pass over all rows
-    int total_v4 = V4_PER_ROW * active_tokens;
-    mpkar_nvls_reduce_v4_block<T>(dst_v4, src_mc_v4, total_v4);
+    int total_v4 = V4_PER_ROW * num_active_rows;
+    if constexpr (ADD_RESIDUAL) {
+      if (use_nvls) {
+        mpkar_nvls_reduce_add_residual_v4_block<T>(
+            dst_v4, src_mc_v4, residual_v4, total_v4);
+      } else {
+        mpkar_p2p_reduce_add_residual_v4_block<T>(
+            dst_v4, input_ptr, residual_v4, teami, total_v4);
+      }
+    } else {
+      if (use_nvls) {
+        mpkar_nvls_reduce_v4_block<T>(dst_v4, src_mc_v4, total_v4);
+      } else {
+        mpkar_p2p_reduce_v4_block<T>(dst_v4, input_ptr, teami, total_v4);
+      }
+    }
   } else {
-    // Strided: per-row
-    for (int row = 0; row < active_tokens; row++) {
-      mpkar_nvls_reduce_v4_block<T>(
-          dst_v4 + row * STRIDE_V4, src_mc_v4 + row * STRIDE_V4, V4_PER_ROW);
+    for (int row = 0; row < num_active_rows; row++) {
+      void const *row_input =
+          static_cast<char const *>(input_ptr) +
+          row * STRIDE_V4 * (int)sizeof(int4);
+      if constexpr (ADD_RESIDUAL) {
+        if (use_nvls) {
+          mpkar_nvls_reduce_add_residual_v4_block<T>(
+              dst_v4 + row * STRIDE_V4,
+              src_mc_v4 + row * STRIDE_V4,
+              residual_v4 + row * STRIDE_V4,
+              V4_PER_ROW);
+        } else {
+          mpkar_p2p_reduce_add_residual_v4_block<T>(
+              dst_v4 + row * STRIDE_V4, row_input,
+              residual_v4 + row * STRIDE_V4, teami, V4_PER_ROW);
+        }
+      } else {
+        if (use_nvls) {
+          mpkar_nvls_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4,
+                                         src_mc_v4 + row * STRIDE_V4,
+                                         V4_PER_ROW);
+        } else {
+          mpkar_p2p_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4, row_input,
+                                       teami, V4_PER_ROW);
+        }
+      }
     }
   }
 
@@ -511,6 +725,28 @@ __device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
   // __threadfence_system()) is sufficient.
   __threadfence();
   __syncthreads();
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
+__device__ __forceinline__ void nvshmem_tile_allreduce(void *input_ptr,
+                                                       void *output_ptr,
+                                                       void *_teams,
+                                                       int task_offset,
+                                                       int active_tokens) {
+  nvshmem_tile_allreduce_impl<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, false>(
+      input_ptr, nullptr, output_ptr, _teams, task_offset, active_tokens);
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
+__device__ __forceinline__ void
+    nvshmem_tile_allreduce_with_residual(void *input_ptr,
+                                         void *residual_ptr,
+                                         void *output_ptr,
+                                         void *_teams,
+                                         int task_offset,
+                                         int active_tokens) {
+  nvshmem_tile_allreduce_impl<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE, true>(
+      input_ptr, residual_ptr, output_ptr, _teams, task_offset, active_tokens);
 }
 
 } // namespace kernel

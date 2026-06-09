@@ -33,12 +33,20 @@
 
 namespace kernel {
 
+// 2026-05-12 (user #2 part-a) FuseTensor support: C_LATENT_ROW_STRIDE controls
+// the per-token stride of the c_latent input. Defaults to D_V (legacy
+// contiguous (mbt, D_V) buffer). For the QKV-a fused path c_latent lives at
+// cols [1536:2048) of a wider (mbt, 2176) qkv_a_out buffer, so pass
+// C_LATENT_ROW_STRIDE=2176 and pre-offset c_latent_new_ptr by 1536 elements.
+// K_PE_ROW_STRIDE already supports the same idea for k_pe.
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
           int PAGE_SIZE, // Page size (e.g., 128)
-          int K_PE_ROW_STRIDE = D_K - D_V>
+          int K_PE_ROW_STRIDE = D_K - D_V,
+          int C_LATENT_ROW_STRIDE = D_V>
 __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
-    void const *c_latent_new_ptr, // [num_tokens, D_V] new c_latent (normed)
+    void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new
+                                  // c_latent (normed)
     void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] new k_pe
     void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged KV cache
     void *contiguous_kv_ptr,      // [max_seq_len, D_K] output: contiguous KV
@@ -87,7 +95,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
     int const page_idx = page_indices[seq_pos / PAGE_SIZE];
     int const pos_in_page = seq_pos % PAGE_SIZE;
     T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
-    T const *src_lat = c_latent_new + tok * D_V;
+    T const *src_lat = c_latent_new + tok * C_LATENT_ROW_STRIDE;
     T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
 
     // Copy c_latent (512 dims) — vectorized uint4 loads (8 bf16 per load)
@@ -107,6 +115,10 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   }
   __syncthreads();
 
+  if (contiguous_kv_ptr == paged_cache_ptr) {
+    return;
+  }
+
   // Step 2: Gather all pages into contiguous buffer
   // For each sequence position, copy D_K elements from the paged cache
   // to the contiguous buffer
@@ -121,6 +133,134 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
       if (d + 8 <= D_K) {
         *reinterpret_cast<uint4 *>(dst + d) =
             *reinterpret_cast<uint4 const *>(src + d);
+      }
+    }
+  }
+}
+
+// 2026-05-16 (C1): NUM_GATHER_SPLITS parameter parallelizes the sequential
+// seq_pos loop in both phases across multiple CTAs. Each CTA handles a
+// strided subset of seq_pos values (seq_pos % NUM_GATHER_SPLITS == split_idx).
+// The partition is consistent between append (step 1) and gather (step 2):
+// CTA i only writes paged_cache[seq_pos] where seq_pos is in its slice, and
+// only reads paged_cache[seq_pos] where seq_pos is in its slice. No
+// cross-CTA RAW dependency, so no inter-CTA fence is needed. Legacy callers
+// pass NUM_GATHER_SPLITS=1 and split_idx=0 for unchanged behavior.
+template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
+          int D_V,       // Latent dim (512)
+          int PAGE_SIZE, // Page size (e.g., 128)
+          int K_PE_ROW_STRIDE = D_K - D_V,
+          int C_LATENT_ROW_STRIDE = D_V,
+          int NUM_GATHER_SPLITS = 1>
+__device__ __forceinline__ void mla_kv_cache_gather_unified_sm100_task_impl(
+    void const *c_latent_new_ptr, // [num_tokens, C_LATENT_ROW_STRIDE] new
+                                  // c_latent (normed)
+    void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] new k_pe
+    void *paged_cache_ptr,        // [num_pages, PAGE_SIZE, D_K] paged KV cache
+    void *contiguous_kv_ptr,      // [max_seq_len, D_K] decode-layout output
+    void *ckv_sep_ptr,            // [max_seq_len, D_V] prefill CKV output
+    void *kpe_sep_ptr,            // [max_seq_len, D_K-D_V] prefill KPE output
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_indices_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
+    bool prompt_prefill,
+    int request_id,
+    int split_idx = 0) {
+  using T = __nv_bfloat16;
+  int const tid = threadIdx.x;
+  int const NUM_THREADS = 128;
+  int const ROPE_DIM = D_K - D_V;
+
+  int const first_token_pos = qo_indptr_buffer_ptr[request_id];
+  int const last_token_pos = qo_indptr_buffer_ptr[request_id + 1];
+  int const num_new_tokens = last_token_pos - first_token_pos;
+
+  int const first_page_pos = paged_kv_indptr_buffer_ptr[request_id];
+  int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
+  int const num_pages = last_page_pos - first_page_pos;
+  int const last_page_len = paged_kv_last_page_len_buffer_ptr[request_id];
+  int const seq_len = (num_pages - 1) * PAGE_SIZE + last_page_len;
+
+  bool valid = (num_pages > 0 && num_new_tokens > 0 && seq_len > 0);
+
+  T *paged_cache = reinterpret_cast<T *>(paged_cache_ptr);
+  T *contiguous_kv = reinterpret_cast<T *>(contiguous_kv_ptr);
+  T *ckv_sep = reinterpret_cast<T *>(ckv_sep_ptr);
+  T *kpe_sep = reinterpret_cast<T *>(kpe_sep_ptr);
+  T const *c_latent_new = reinterpret_cast<T const *>(c_latent_new_ptr);
+  T const *k_pe_new = reinterpret_cast<T const *>(k_pe_new_ptr);
+
+  int const *page_indices = paged_kv_indices_buffer_ptr + first_page_pos;
+  __syncthreads();
+  if (!valid) {
+    return;
+  }
+
+  // Step 1: Append. Iterate over new tokens; CTA processes only the tokens
+  // whose absolute seq_pos falls in this CTA's stride slice.
+  int const kv_start_pos = seq_len - num_new_tokens;
+  for (int tok = 0; tok < num_new_tokens; tok++) {
+    int const seq_pos = kv_start_pos + tok;
+    if ((seq_pos % NUM_GATHER_SPLITS) != split_idx) {
+      continue;
+    }
+    int const page_idx = page_indices[seq_pos / PAGE_SIZE];
+    int const pos_in_page = seq_pos % PAGE_SIZE;
+    T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
+    T const *src_lat = c_latent_new + tok * C_LATENT_ROW_STRIDE;
+    T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
+
+    for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
+      if (d + 8 <= D_V) {
+        *reinterpret_cast<uint4 *>(dst + d) =
+            *reinterpret_cast<uint4 const *>(src_lat + d);
+      }
+    }
+    for (int d = tid * 8; d < ROPE_DIM; d += NUM_THREADS * 8) {
+      if (d + 8 <= ROPE_DIM) {
+        *reinterpret_cast<uint4 *>(dst + D_V + d) =
+            *reinterpret_cast<uint4 const *>(src_pe + d);
+      }
+    }
+  }
+  __syncthreads();
+
+  if (!prompt_prefill && contiguous_kv_ptr == paged_cache_ptr) {
+    return;
+  }
+  // Step 2: Gather. Read positions in the CTA's stride slice. Pos outside
+  // [kv_start_pos, seq_len) were written by THIS CTA on a prior iteration
+  // (consistent partition). Pos in [kv_start_pos, seq_len) ∩ slice were
+  // written by THIS CTA in step 1 above; __syncthreads protects that RAW.
+  for (int seq_pos = split_idx; seq_pos < seq_len;
+       seq_pos += NUM_GATHER_SPLITS) {
+    int const page_idx = page_indices[seq_pos / PAGE_SIZE];
+    int const pos_in_page = seq_pos % PAGE_SIZE;
+    T const *src = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
+
+    if (prompt_prefill) {
+      T *ckv_dst = ckv_sep + seq_pos * D_V;
+      T *kpe_dst = kpe_sep + seq_pos * ROPE_DIM;
+      for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
+        if (d + 8 <= D_V) {
+          *reinterpret_cast<uint4 *>(ckv_dst + d) =
+              *reinterpret_cast<uint4 const *>(src + d);
+        }
+      }
+      for (int d = tid * 8; d < ROPE_DIM; d += NUM_THREADS * 8) {
+        if (d + 8 <= ROPE_DIM) {
+          *reinterpret_cast<uint4 *>(kpe_dst + d) =
+              *reinterpret_cast<uint4 const *>(src + D_V + d);
+        }
+      }
+    } else {
+      T *dst = contiguous_kv + seq_pos * D_K;
+      for (int d = tid * 8; d < D_K; d += NUM_THREADS * 8) {
+        if (d + 8 <= D_K) {
+          *reinterpret_cast<uint4 *>(dst + d) =
+              *reinterpret_cast<uint4 const *>(src + d);
+        }
       }
     }
   }

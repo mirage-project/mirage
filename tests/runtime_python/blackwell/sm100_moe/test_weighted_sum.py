@@ -2,6 +2,7 @@ import torch
 import runtime_kernel_blackwell
 
 from torch.nn import functional as F
+from pytorch_reference import moe_mul_sum_add_ref
 
 torch.set_printoptions(sci_mode=False, profile="full")
 # torch.set_printoptions(sci_mode=False)
@@ -28,9 +29,7 @@ for output_size in output_sizes:
     # mpk impl
     runtime_kernel_blackwell.mul_sum_add_sm100(x, residual, torch_topk_weights, output)
     # reference impl
-    torch_out = x.to(torch.float) * torch_topk_weights.unsqueeze(-1)
-    torch_out = torch_out.sum(dim=1).to(torch.bfloat16)
-    torch_out += residual
+    torch_out = moe_mul_sum_add_ref(x, torch_topk_weights, residual)
 
     torch.testing.assert_close(
         output,
