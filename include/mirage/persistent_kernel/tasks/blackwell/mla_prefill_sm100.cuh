@@ -218,7 +218,9 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     int q_nope_head_stride = mla_prefill::PF_D_CKV,
     int q_pe_row_stride = 0,
     int q_pe_head_stride = mla_prefill::PF_D_KPE,
-    int ckv_row_stride = mla_prefill::PF_D_CKV) {
+    int ckv_row_stride = mla_prefill::PF_D_CKV,
+    int kpe_row_stride = mla_prefill::PF_D_KPE,
+    int kpe_offset = 0) {
   using namespace mla_prefill;
 
   // The caller decides whether the current runtime batch is prompt prefill or
@@ -374,7 +376,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int addr =
             kpe_smem(stage) + mla_prefill::swizzle<STRIDE_KPE_B>(row, col);
         bf16 const *ptr =
-            KPE + (long long)kv_idx * mla_prefill::PF_D_KPE + col * 8;
+            KPE + (long long)kv_idx * kpe_row_stride + kpe_offset + col * 8;
         cp_async_128b(addr, ptr);
       }
     } else {
@@ -393,7 +395,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int addr =
             kpe_smem(stage) + mla_prefill::swizzle<STRIDE_KPE_B>(row, col);
         bf16 const *ptr =
-            KPE + (long long)kv_idx * mla_prefill::PF_D_KPE + col * 8;
+            KPE + (long long)kv_idx * kpe_row_stride + kpe_offset + col * 8;
         cp_async_128b_pred(addr, ptr, kv_idx < S);
       }
     }
@@ -781,7 +783,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       float q = __bfloat162float(Q_pe[(long long)q_start * q_pe_row_stride +
                                       (long long)head * q_pe_head_stride + d]);
       float k = __bfloat162float(
-          KPE[(long long)diag_idx * mla_prefill::PF_D_KPE + d]);
+          KPE[(long long)diag_idx * kpe_row_stride + kpe_offset + d]);
       local_score += q * k;
     }
     tmp[tid] = local_score;

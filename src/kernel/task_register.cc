@@ -3888,6 +3888,10 @@ int TaskRegister::register_mla_prefill_absorbed_sm100_task(
   code.e("  auto *q_ptr_ = static_cast<const nv_bfloat16 *>("
          "task_desc->input_ptrs[0]) + qo_fp_ * $;",
          num_heads * (d_ckv + d_kpe));
+  // Fused Q layout is [Q_LEN, H, d_ckv|d_kpe]: the rope (pe) sub-block of each
+  // head starts at +d_ckv within the per-head (d_ckv+d_kpe) span, so the Q_pe
+  // base pointer is offset by d_ckv (mirrors kpe_offset for the fused KV).
+  code.e("  auto *q_pe_ptr_ = q_ptr_ + $;", d_ckv);
   code.e("  auto *kv_ptr_ = static_cast<const nv_bfloat16 *>("
          "task_desc->input_ptrs[1]) + bi_ * MPK_MAX_SEQ_LENGTH * $;",
          d_ckv + d_kpe);
@@ -3896,7 +3900,7 @@ int TaskRegister::register_mla_prefill_absorbed_sm100_task(
          num_heads * d_v);
   code.e("  kernel::mla_prefill_sm100_task_impl(");
   code.e("      q_ptr_,");
-  code.e("      q_ptr_,");
+  code.e("      q_pe_ptr_,");
   code.e("      kv_ptr_,");
   code.e("      kv_ptr_,");
   code.e("      out_ptr_,");
