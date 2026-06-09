@@ -132,8 +132,12 @@ struct alignas(16) DTensor {
   inline type::GuidType resolve_base_guid() const {
     return is_virtual() ? base_guid : guid;
   }
-  // Byte size of this tensor's logical window. For views in Phase 1
-  // (row-major contiguous), this equals data_size().
+  // Logical byte footprint = num_elements() * dtype_size. For a strided
+  // view (e.g., 2D inner-dim narrow), this UNDER-COUNTS the parent span:
+  // a (M, N_slot) view of a (M, N_parent) parent occupies
+  // M * stride[0] * dtype_size parent bytes, not M * N_slot * dtype_size.
+  // Use this when you need the kernel-visible logical size; use
+  // stride[0] * dim[0] * dtype_size for parent footprint.
   inline size_t bytes_size() const {
     return data_size();
   }
