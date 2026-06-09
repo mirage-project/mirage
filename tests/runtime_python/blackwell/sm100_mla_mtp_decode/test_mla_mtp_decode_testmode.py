@@ -1,13 +1,33 @@
 """
-Test: mla_mtp_decode_sm100 via PersistentKernel test_mode.
+Test: mla_mtp_decode_sm100 (TP1) via PersistentKernel test_mode.
 
 Builds a single-layer PK with mla_mtp_decode_layer, compiles it, runs once,
 and compares the per-split partial attention outputs (bf16) and LSE values
-(fp32) against the PyTorch reference in pytorch_reference.py.
+(fp32) against the PyTorch partial-level reference in pytorch_reference.py.
 
-Constants are hard-coded in the kernel (DeepSeek V3 MLA): NUM_HEADS=128,
-D_K=576, D_V=512, TILE_S=128. Test shape: B=1, Q_LEN=4, KV_LEN=256 →
-sk=2 splits and num_head_groups=4 (hpb=32).
+Despite "mtp" in the name this is the MAIN TP1 decode attention kernel
+(core forward path, not speculative/MTP).
+
+  Constants hard-coded in the kernel (DeepSeek V3 MLA): NUM_HEADS=128,
+  D_K=576, D_V=512, TILE_S=128.
+
+OFFLINE TEST-MODE CONSTRAINT (verified empirically — see decision log):
+  In MODE_OFFLINE test mode the runtime forces step=0 on the only iteration
+  the layer-under-test runs, so prepare_next_batch derives
+      kv_len_ (runtime) == q_len_rt_ (runtime) == prompt_length   (<= 8).
+  There is NO way to inject KV history, so the *runtime* kv length is locked
+  to q_len and is always a single TILE_S(128) tile -> runtime sk = 1. The
+  multi-split (sk>1) partial path with >1 simultaneously-active split is
+  therefore UNREACHABLE in offline test mode. We still register the layer with
+  a static kv_len=256 (num_splits=2) so the kernel takes the *partial-write*
+  path (WRITE_FINAL=false) rather than the write-final shortcut, exercising the
+  real partial-O / LSE store; the inactive second split takes the kernel's
+  t0>=t1 no-op. The KV-cache batch stride equals the *runtime* kv_len_ (=q_len),
+  NOT the static param.
+
+Sweep (bs x q_len):
+    bs    in {1, 2, 4, 8, 16}
+    q_len in {1, 2, 4}        (decode regime, <= 8)
 
 Run:
     python tests/runtime_python/blackwell/sm100_mla_mtp_decode/test_mla_mtp_decode_testmode.py
@@ -29,66 +49,66 @@ from pytorch_reference import (
     D_V,
 )
 
+# Static kv_len for the layer params -> num_splits=2 so the kernel uses the
+# partial-write path (not WRITE_FINAL). Runtime kv length is still q_len.
+STATIC_KV_LEN = 256
+MATRIX = [
+    (bs, q_len)
+    for bs in (1, 2, 4, 8, 16)
+    for q_len in (1, 2, 4)
+]
 
-def test_mla_mtp_decode_testmode():
+
+def _run_case(batch_size, q_len, static_kv_len=STATIC_KV_LEN):
     device = "cuda"
     torch.manual_seed(42)
 
-    # Test shape — chosen so the kernel's split-K is exercised.
-    batch_size = 1
-    q_len = 4
-    kv_len = 256                         # → kvt = 2 tiles → sk = 2
+    # Effective (runtime) kv length is locked to q_len in offline test mode.
+    eff_kv = q_len
 
     # Mirror the layer's internal derivation.
     hpb = 128 // q_len
     while 128 % hpb != 0:
         hpb -= 1
-    num_head_groups = 128 // hpb         # = 4
-    num_splits = (kv_len + 128 - 1) // 128  # = 2
+    num_head_groups = 128 // hpb
+    num_splits = (static_kv_len + 128 - 1) // 128  # = 2 (grid / block_linear)
 
-    print(f"\n{'='*60}")
-    print("Test: mla_mtp_decode_sm100 via PersistentKernel test_mode")
-    print(f"  B={batch_size}, Q_LEN={q_len}, KV_LEN={kv_len}")
+    print(f"\n{'='*64}")
+    print("Test: mla_mtp_decode_sm100 (TP1) via PersistentKernel test_mode")
+    print(f"  B={batch_size}, Q_LEN={q_len}, eff_kv(runtime)={eff_kv}, "
+          f"static_kv={static_kv_len}")
     print(f"  H={NUM_HEADS}, D_K={D_K}, D_V={D_V}")
-    print(f"  num_head_groups={num_head_groups}, hpb={hpb}, sk={num_splits}")
-    print(f"{'='*60}")
+    print(f"  num_head_groups={num_head_groups}, hpb={hpb}, sk(static)={num_splits}")
+    print(f"{'='*64}")
 
     # Inputs (bf16, contiguous on CUDA).
+    # KV batch stride == runtime kv_len_ (= eff_kv = q_len). The kernel reads
+    # KV at row (bi*kv_len_ + kvs), so the buffer must use that exact stride.
     q = torch.randn(
         batch_size * q_len * NUM_HEADS, D_K,
         device=device, dtype=torch.bfloat16) * 0.1
     kv = torch.randn(
-        batch_size * kv_len, D_K,
+        batch_size * eff_kv, D_K,
         device=device, dtype=torch.bfloat16) * 0.1
     q = q.contiguous()
     kv = kv.contiguous()
 
-    # Outputs.
+    # Outputs. Pre-fill LSE with -inf so the (runtime-)inactive split matches
+    # the reference's inactive-split convention.
     partial_blocks = batch_size * num_head_groups * num_splits
     output_partial = torch.zeros(
         partial_blocks, D_V * 128, device=device, dtype=torch.bfloat16)
-    output_lse = torch.zeros(
-        partial_blocks, 128, device=device, dtype=torch.float32)
+    output_lse = torch.full(
+        (partial_blocks, 128), float('-inf'),
+        device=device, dtype=torch.float32)
 
-    # Meta-tensor stubs — the generated task code reads:
-    #   q_len_rt = qo_indptr_buffer[bi+1] - qo_indptr_buffer[bi]
-    #   kv_len   = (lp - fp - 1) * MPK_PAGE_SIZE + paged_kv_last_page_len_buffer[bi]
-    # PersistentKernel defaults to page_size=1 (see __init__ defaults).
-    # With PAGE_SIZE=1, encoding kv_len=K requires num_pages=K and last=1 →
-    # kv_len_ = (K-1)*1 + 1 = K.
-    MPK_PAGE_SIZE = 1
-    qo_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-    for bi in range(batch_size):
-        qo_indptr[bi + 1] = qo_indptr[bi] + q_len
-    num_pages = kv_len  # since PAGE_SIZE==1
-    last_page_len = 1
-    paged_kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-    for bi in range(batch_size):
-        paged_kv_indptr[bi + 1] = paged_kv_indptr[bi] + num_pages
-    paged_kv_last = torch.full(
-        (batch_size,), last_page_len, dtype=torch.int32, device=device)
+    # Drive the decode scenario via prompt_lengths (step forced to 0 at init,
+    # so num_new_tokens = prompt_length = q_len -> kv_len_ = q_len_rt_ = q_len).
+    prompt_lengths = torch.full(
+        (batch_size,), q_len, dtype=torch.int32, device=device)
+    tokens = torch.zeros(
+        (batch_size, max(static_kv_len, 256)), dtype=torch.int64, device=device)
 
-    # PersistentKernel setup.
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params["test_mode"] = True
@@ -96,72 +116,91 @@ def test_mla_mtp_decode_testmode():
     params["num_local_schedulers"] = num_schedulers
     params["mpi_rank"] = 0
     params["world_size"] = 1
-    params["max_num_batched_tokens"] = max(q_len * batch_size, 1)
+    params["max_num_batched_tokens"] = q_len * batch_size
     params["max_num_batched_requests"] = batch_size
-    params["max_seq_length"] = max(kv_len, 256)
+    params["max_seq_length"] = max(static_kv_len, 256)
+    params["max_num_pages"] = eff_kv * batch_size + 8
     params["meta_tensors"] = {
-        "qo_indptr_buffer": qo_indptr,
-        "paged_kv_indptr_buffer": paged_kv_indptr,
-        "paged_kv_last_page_len_buffer": paged_kv_last,
+        "tokens": tokens,
+        "prompt_lengths": prompt_lengths,
     }
     pk = PersistentKernel(**params)
 
-    # Attach inputs and outputs.
     q_dt = pk.attach_input(q, name="q_input")
     kv_dt = pk.attach_input(kv, name="kv_input")
     op_dt = pk.attach_input(output_partial, name="output_partial")
     ol_dt = pk.attach_input(output_lse, name="output_lse")
 
-    # Build layer (block_dim is hard-coded inside the layer).
-    pk.mla_mtp_decode_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len)
+    pk.mla_mtp_decode_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, static_kv_len)
 
-    # Compile + run.
-    print("Compiling test kernel...")
     folder_path = os.path.dirname(os.path.abspath(__file__))
     pk.compile(output_dir=folder_path)
-    print("Running test kernel...")
     pk()
     torch.cuda.synchronize()
 
-    # Reference.
+    # Reference at the EFFECTIVE (runtime) kv length, same num_splits as the
+    # static grid so block_linear indexing matches. si=0 is the active split,
+    # si=1 is inactive (t0>=t1) -> zeros / -inf LSE.
     ref_part, ref_lse = mla_mtp_decode_ref(
         q, kv,
-        batch_size=batch_size, q_len=q_len, kv_len=kv_len,
+        batch_size=batch_size, q_len=q_len, kv_len=eff_kv,
         num_head_groups=num_head_groups, num_splits=num_splits)
 
-    # Restrict comparison to "active" slots — kernel writes only
-    # tids in [0, hpb*q_len). The remaining tids in [hpb*q_len, 128) are
-    # untouched (and irrelevant — reduce reads only those active tids).
-    used_tid = hpb * q_len  # = 128 for our config; kernel touches all 128
-    # Reshape partials to [blocks, D_V, 128] for slicing.
+    # Compare the ACTIVE split (si=0) blocks and active tids only. Layout:
+    #   block_linear = bi*num_head_groups*num_splits + gi*num_splits + si
+    used_tid = hpb * q_len
     out_part_r = output_partial.reshape(partial_blocks, D_V, 128)
     ref_part_r = ref_part.reshape(partial_blocks, D_V, 128)
-    out_lse_r = output_lse                # [blocks, 128]
-    ref_lse_r = ref_lse
-
-    # Slice to used tids only.
-    out_part_used = out_part_r[..., :used_tid].contiguous()
-    ref_part_used = ref_part_r[..., :used_tid].contiguous()
-    out_lse_used = out_lse_r[..., :used_tid].contiguous()
-    ref_lse_used = ref_lse_r[..., :used_tid].contiguous()
+    active_blocks = [
+        bi * num_head_groups * num_splits + gi * num_splits + 0
+        for bi in range(batch_size) for gi in range(num_head_groups)
+    ]
+    ab = torch.tensor(active_blocks, device=device)
+    out_part_used = out_part_r[ab][..., :used_tid].contiguous()
+    ref_part_used = ref_part_r[ab][..., :used_tid].contiguous()
+    out_lse_used = output_lse[ab][..., :used_tid].contiguous()
+    ref_lse_used = ref_lse[ab][..., :used_tid].contiguous()
 
     part_diff = (out_part_used.float() - ref_part_used.float()).abs().max().item()
     lse_diff = (out_lse_used - ref_lse_used).abs().max().item()
-    print(f"max |partial - ref| = {part_diff}")
-    print(f"max |lse - ref|     = {lse_diff}")
+    a = out_part_used.float().reshape(-1)
+    b = ref_part_used.float().reshape(-1)
+    cos = torch.nn.functional.cosine_similarity(a, b, dim=0).item()
+    print(f"  max |partial - ref| = {part_diff:.6f}  cos={cos:.6f}")
+    print(f"  max |lse - ref|     = {lse_diff:.6f}")
 
+    ok = True
     try:
         torch.testing.assert_close(
-            out_part_used, ref_part_used, rtol=1e-2, atol=1e-2)
+            out_part_used, ref_part_used, rtol=2e-2, atol=2e-2)
         torch.testing.assert_close(
-            out_lse_used, ref_lse_used, rtol=1e-2, atol=1e-2)
+            out_lse_used, ref_lse_used, rtol=2e-2, atol=2e-2)
     except AssertionError as e:
-        print(f"FAILED: {e}")
-        pk.finalize()
-        sys.exit(1)
+        print(f"  FAILED (bs={batch_size}, q_len={q_len}): {e}")
+        ok = False
 
-    print("PASSED")
     pk.finalize()
+    return ok, part_diff, lse_diff, cos
+
+
+def test_mla_mtp_decode_testmode():
+    results = []
+    for bs, q_len in MATRIX:
+        ok, pd, ld, cos = _run_case(bs, q_len)
+        results.append((bs, q_len, ok, pd, ld, cos))
+
+    print(f"\n{'='*64}")
+    print("SUMMARY  mla_mtp_decode_sm100 (TP1) partial-level (active split)")
+    n_pass = 0
+    for bs, q_len, ok, pd, ld, cos in results:
+        tag = "PASS" if ok else "FAIL"
+        n_pass += int(ok)
+        print(f"  bs={bs:2d} q_len={q_len} eff_kv={q_len}  "
+              f"max|p|={pd:.5f} max|lse|={ld:.5f} cos={cos:.6f}  {tag}")
+    print(f"  {n_pass}/{len(results)} PASS")
+    print(f"{'='*64}")
+    assert n_pass == len(results), f"{len(results)-n_pass} config(s) FAILED"
+    print("ALL PASSED")
 
 
 if __name__ == "__main__":

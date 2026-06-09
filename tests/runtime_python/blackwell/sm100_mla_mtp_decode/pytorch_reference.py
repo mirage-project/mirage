@@ -209,3 +209,61 @@ def mla_mtp_reduce_ref(output_partial, output_lse, batch_size, q_len,
                     acc = (weights.unsqueeze(-1) * pv).sum(dim=0)    # [D_V]
                     out[bi, qi, h_global, :] = acc.to(torch.bfloat16)
     return out
+
+
+def mla_full_ref(q, kv, batch_size, q_len, kv_len, num_heads=NUM_HEADS,
+                 dtype=torch.bfloat16):
+    """TP-agnostic full causal MLA reference (single, un-split softmax).
+
+    This is the end-to-end attention the fused ``decode -> reduce`` pipeline
+    computes: a single causal softmax over the full KV history, NOT a per-split
+    partial. It is the ground truth for the fused decode->reduce final-output
+    check and is shared by the TP1/TP2/TP4/TP8 tests (parametric over
+    ``num_heads`` = the per-rank head count = 128 / world_size).
+
+    Args:
+        q:  bf16 [batch_size * q_len * num_heads, D_K]   (D_K = 576)
+        kv: bf16 [batch_size * kv_len, D_K]
+        batch_size, q_len, kv_len: int
+        num_heads: per-rank head count (128/64/32/16 for TP=1/2/4/8).
+
+    Returns:
+        out: bf16 [batch_size, q_len, num_heads, D_V]   (D_V = 512)
+
+    Math (matches the kernel exactly):
+      - K = kv[..., :D_K] (full 576);  V = kv[..., :D_V] (first 512).
+      - scores = (q . K) * ss,  ss = (1/sqrt(192)) * mscale^2  (YARN).
+      - Causal mask: query q_idx (the q_idx-th of the q_len decode tokens) sits
+        at absolute sequence position ``kv_len - q_len + q_idx`` and attends to
+        all kv positions ``k < kv_len - q_len + q_idx + 1`` (k <= its own pos).
+        For q_len == 1 the single query attends to all kv_len positions.
+      - softmax over the unmasked scores, out = softmax . V.
+    """
+    ss = _deepseek_softmax_scale()
+
+    Q = q.reshape(batch_size, q_len, num_heads, D_K).float()
+    KV = kv.reshape(batch_size, kv_len, D_K).float()
+    K = KV                       # full D_K
+    V = KV[..., :D_V]            # first D_V
+
+    abs_idx = torch.arange(kv_len, device=q.device)                  # [KL]
+    if q_len == 1:
+        causal_limit = torch.full((q_len,), kv_len, device=q.device)
+    else:
+        causal_limit = torch.tensor(
+            [kv_len - q_len + qi + 1 for qi in range(q_len)],
+            device=q.device)
+    # mask[q_idx, k] = True if k < causal_limit[q_idx]
+    mask = abs_idx.unsqueeze(0) < causal_limit.unsqueeze(1)          # [Q, KL]
+
+    out = torch.zeros(
+        (batch_size, q_len, num_heads, D_V), dtype=dtype, device=q.device)
+    neg_inf = torch.tensor(-1e30, device=q.device, dtype=torch.float32)
+    for bi in range(batch_size):
+        # scores: [Q, H, KL]
+        scores = torch.einsum("qhd,kd->qhk", Q[bi], K[bi]) * ss
+        scores = torch.where(mask.unsqueeze(1), scores, neg_inf)
+        probs = torch.softmax(scores, dim=-1)                        # [Q, H, KL]
+        o = torch.einsum("qhk,kv->qhv", probs, V[bi])                # [Q, H, D_V]
+        out[bi] = o.to(dtype)
+    return out

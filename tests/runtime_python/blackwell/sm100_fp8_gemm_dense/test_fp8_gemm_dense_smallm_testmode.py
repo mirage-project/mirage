@@ -26,111 +26,16 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 COMMON_DIR = os.path.abspath(os.path.join(THIS_DIR, "../common"))
 if COMMON_DIR not in sys.path:
     sys.path.insert(0, COMMON_DIR)
+if THIS_DIR not in sys.path:
+    sys.path.insert(0, THIS_DIR)
 
-from sm100_fp8_scale_layout import FP8_MAX  # noqa: E402
-
-
-# ---------------------------------------------------------------------------
-# Quantize helpers for the fp8_gemm_dense scale layout
-# (plain float32, NOT packed UE8M0 used by linear_fp8_sm100)
-# ---------------------------------------------------------------------------
-
-def quantize_a(a_bf16: torch.Tensor):
-    """Quantize A [M, K] to FP8 e4m3 + float32 scale [M, K/128].
-    Each scale covers one 1x128 group (per-row, per-128-columns).
-    """
-    M, K = a_bf16.shape
-    assert K % 128 == 0, "K must be multiple of 128"
-    nk = K // 128
-
-    a_fp8 = torch.empty_like(a_bf16, dtype=torch.float8_e4m3fn)
-    sa = torch.zeros((M, nk), dtype=torch.float32, device=a_bf16.device)
-
-    a_f32 = a_bf16.float()
-    for m in range(M):
-        for ki in range(nk):
-            block = a_f32[m, ki * 128:(ki + 1) * 128]
-            abs_max = block.abs().max().item()
-            if abs_max == 0.0:
-                scale = 1.0
-            else:
-                scale = abs_max / FP8_MAX
-            sa[m, ki] = scale
-            a_fp8[m, ki * 128:(ki + 1) * 128] = (block / scale).clamp(
-                -FP8_MAX, FP8_MAX
-            ).to(torch.float8_e4m3fn)
-
-    return a_fp8, sa
-
-
-def quantize_b(b_bf16: torch.Tensor):
-    """Quantize B [N, K] to FP8 e4m3 + float32 scale [N/128, K/128].
-    Each scale covers one 128x128 block.
-    """
-    N, K = b_bf16.shape
-    assert K % 128 == 0 and N % 128 == 0, "N and K must be multiples of 128"
-    nb = N // 128
-    nk = K // 128
-
-    b_fp8 = torch.empty_like(b_bf16, dtype=torch.float8_e4m3fn)
-    sb = torch.zeros((nb, nk), dtype=torch.float32, device=b_bf16.device)
-
-    b_f32 = b_bf16.float()
-    for bi in range(nb):
-        for ki in range(nk):
-            block = b_f32[bi * 128:(bi + 1) * 128,
-                          ki * 128:(ki + 1) * 128]
-            abs_max = block.abs().max().item()
-            if abs_max == 0.0:
-                scale = 1.0
-            else:
-                scale = abs_max / FP8_MAX
-            sb[bi, ki] = scale
-            b_fp8[bi * 128:(bi + 1) * 128,
-                  ki * 128:(ki + 1) * 128] = (block / scale).clamp(
-                -FP8_MAX, FP8_MAX
-            ).to(torch.float8_e4m3fn)
-
-    return b_fp8, sb
-
-
-def reference_gemm(a_fp8, sa, b_fp8, sb):
-    """Dequant A and B then compute C = A @ B.T in float32, return bf16."""
-    M, K = a_fp8.shape
-    N    = b_fp8.shape[0]
-    nk   = K // 128
-
-    a_f32 = a_fp8.float()
-    b_f32 = b_fp8.float()
-
-    # Dequant A: per-row-128-column group
-    a_dq = torch.empty(M, K, dtype=torch.float32, device=a_fp8.device)
-    for m in range(M):
-        for ki in range(nk):
-            a_dq[m, ki * 128:(ki + 1) * 128] = (
-                a_f32[m, ki * 128:(ki + 1) * 128] * sa[m, ki]
-            )
-
-    # Dequant B: per-128x128-block
-    b_dq = torch.empty(N, K, dtype=torch.float32, device=b_fp8.device)
-    nb   = N // 128
-    for bi in range(nb):
-        for ki in range(nk):
-            b_dq[bi * 128:(bi + 1) * 128,
-                 ki * 128:(ki + 1) * 128] = (
-                b_f32[bi * 128:(bi + 1) * 128,
-                      ki * 128:(ki + 1) * 128] * sb[bi, ki]
-            )
-
-    c = torch.matmul(a_dq, b_dq.t())
-    return c.to(torch.bfloat16)
-
-
-def cosine_similarity_2d(a: torch.Tensor, b: torch.Tensor) -> float:
-    a_f = a.float().flatten()
-    b_f = b.float().flatten()
-    cos = torch.dot(a_f, b_f) / (a_f.norm() * b_f.norm() + 1e-12)
-    return cos.item()
+# Canonical references live in pytorch_reference.py (skill convention).
+from pytorch_reference import (  # noqa: E402
+    quantize_a_f32scale as quantize_a,
+    quantize_b_f32scale as quantize_b,
+    reference_gemm,
+    cosine_sim as cosine_similarity_2d,
+)
 
 
 # ---------------------------------------------------------------------------

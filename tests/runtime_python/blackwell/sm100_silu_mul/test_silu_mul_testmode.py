@@ -1,7 +1,18 @@
-"""
-Test: SiLU-Mul layer via PersistentKernel test_mode (qwen3-style, non-MoE).
+"""Test: silu_mul_layer via PersistentKernel test_mode (DSV3 shapes).
 
-Op:  out = silu(input[..., :I]) * input[..., I:]   with I = intermediate.
+Op:  out = silu(gate) * up,  where input has gate||up layout per task chunk.
+     Input shape: (bs, 2*I), output shape: (bs, I).
+
+DSV3 intermediate sizes (TP=1):
+  - Dense MLP:        I=18432, num_tasks=48   (dense layers 0-2)
+  - Shared MoE expert: I=2048,  num_tasks=32  (MoE shared expert path)
+
+Grid/block follow the DSV3 builder (both use block_dim=(128,1,1)):
+  - Dense:  silu_mul_grid = grid_for_rmsnorm_linear_layer(2*18432) // 2 = 48
+  - Shared: silu_mul_grid = grid_for_rmsnorm_linear_layer(2*2048)  // 2 = 32
+
+Tolerance: bf16 atol/rtol=1e-2.
+DSV3 sweep: bs ∈ {1,2,4,8,16}.
 
 Run:
     python tests/runtime_python/blackwell/sm100_silu_mul/test_silu_mul_testmode.py
@@ -18,38 +29,21 @@ from mirage.mpk.persistent_kernel import PersistentKernel
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pytorch_reference import silu_mul_ref
 
-
-def grid_for_linear(output_dim):
-    """Match demo/qwen3/demo.py grid policy used to size the upstream gate+up linear."""
-    if output_dim % 96 == 0:
-        return output_dim // 96
-    elif output_dim % 64 == 0:
-        return output_dim // 64
-    else:
-        raise AssertionError(f"Unsupported linear output_dim={output_dim}")
+# DSV3 shapes (TP=1): (intermediate, num_tasks)
+DSV3_CONFIGS = [
+    ("dense_mlp",     18432, 48),  # layers 0-2 dense MLP
+    ("shared_expert",  2048, 32),  # routed/shared MoE expert
+]
+BS_SWEEP = [1, 2, 4, 8, 16]
 
 
-def test_silu_mul_testmode():
+def _run_case(bs: int, intermediate: int, num_tasks: int, label: str):
     device = "cuda"
-    dtype = torch.bfloat16
-    torch.manual_seed(42)
+    torch.manual_seed(42 + bs + intermediate)
 
-    batch_size = 16
-    intermediate = 4096
     fused_outdim = 2 * intermediate
-
-    print(f"\n{'='*60}")
-    print(f"Test: silu_mul_layer (qwen3-style)")
-    print(f"  B={batch_size}, intermediate={intermediate}, fused_in={fused_outdim}")
-
-    # Inputs: gate||up concatenated along last dim.
-    x = torch.randn(batch_size, fused_outdim, dtype=dtype, device=device)
-    out = torch.zeros(batch_size, intermediate, dtype=dtype, device=device)
-
-    # qo_indptr_buffer feeds num_active_tokens to the silu_mul kernel.
-    # Layout: qo_indptr[0..B-1]=0, qo_indptr[MAX_BATCHED_REQUESTS]=B (== batch_size here).
-    qo_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-    qo_indptr[batch_size] = batch_size
+    x = torch.randn(bs, fused_outdim, dtype=torch.bfloat16, device=device)
+    out = torch.zeros(bs, intermediate, dtype=torch.bfloat16, device=device)
 
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
@@ -58,48 +52,43 @@ def test_silu_mul_testmode():
     params["num_local_schedulers"] = num_schedulers
     params["mpi_rank"] = 0
     params["world_size"] = 1
-    params["max_num_batched_tokens"] = batch_size
-    params["max_num_batched_requests"] = batch_size
-    params["meta_tensors"] = {"qo_indptr_buffer": qo_indptr}
-    pk = PersistentKernel(**params)
+    params["max_num_batched_tokens"] = bs
+    params["max_num_batched_requests"] = bs
 
+    pk = PersistentKernel(**params)
     x_dt = pk.attach_input(x, name="x")
     out_dt = pk.attach_input(out, name="out")
 
-    block_dim = (256, 1, 1) if pk.target_cc >= 90 else (128, 1, 1)
-
-    # Mirror qwen3 MLP pipeline: silu_mul grid is half of the upstream gate+up linear grid.
-    num_tasks_gatedup = grid_for_linear(fused_outdim)
-    num_tasks_silu = num_tasks_gatedup // 2
-    print(f"  grid_dim=({num_tasks_silu},1,1)  block_dim={block_dim}")
-
+    # Mirror DSV3 builder: block_dim=(128,1,1).
     pk.silu_mul_layer(
         input=x_dt,
         output=out_dt,
-        grid_dim=(num_tasks_silu, 1, 1),
-        block_dim=block_dim,
+        grid_dim=(num_tasks, 1, 1),
+        block_dim=(128, 1, 1),
     )
 
-    print("Compiling...")
     folder_path = os.path.dirname(os.path.abspath(__file__))
     pk.compile(output_dir=folder_path)
-
-    print("Running...")
     pk()
     torch.cuda.synchronize()
 
-    ref = silu_mul_ref(x, num_tasks=num_tasks_silu)
-
-    print(f"\nout[0, :8]: {out[0, :8]}")
-    print(f"ref[0, :8]: {ref[0, :8]}")
-
+    ref = silu_mul_ref(x, num_tasks=num_tasks)
     max_diff = (out.float() - ref.float()).abs().max().item()
-    print(f"\nMax absolute diff: {max_diff:.6f}")
+    print(f"  [{label}] bs={bs:2d}  I={intermediate}  num_tasks={num_tasks}"
+          f"  max_diff={max_diff:.6f}", end="")
 
-    torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
-    print("PASSED")
-
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+    print("  PASS")
     pk.finalize()
+
+
+def test_silu_mul_testmode():
+    print(f"\n{'='*60}")
+    print(f"silu_mul_layer  DSV3 configs  bs sweep={BS_SWEEP}")
+    for bs in BS_SWEEP:
+        for label, intermediate, num_tasks in DSV3_CONFIGS:
+            _run_case(bs, intermediate, num_tasks, label)
+    print("ALL PASS")
 
 
 if __name__ == "__main__":

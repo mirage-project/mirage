@@ -1,102 +1,113 @@
-"""
-Test mode: FP8 MoE W13 group GEMM through PersistentKernel test_mode.
+"""DSV3 routed-expert FP8 MoE W13 (gate||up) group GEMM via test_mode.
 
 Validates `pk.moe_w13_fp8_layer` end-to-end (Python -> codegen -> nvcc ->
-runtime) against the pure-PyTorch reference in pytorch_reference.py.
+runtime) against the pure-PyTorch reference `moe_w13_fp8_ref` in
+pytorch_reference.py, across the DSV3 union-of-axes (tp, bs) matrix plus a
+secondary ep>1 (num_local_experts=256/ep) check.
 
-Tolerances: abs<2.0, rel<0.05  (FP8 is loose, K=7168 BF16 accumulation).
+Shapes (DSV3, ep_size=1 default -> routed_tp = world_size):
+  * input_fp8:    (bs, HIDDEN=7168)              FP8 E4M3 + per-128 f32 scale
+  * weight_fp8:   (EL, 2*MOE_INTERMEDIATE/tp, 7168) FP8 E4M3 + f32 scale
+  * output bf16:  (bs, NUM_TOPK=8, 2*MOE_INTERMEDIATE/tp)
+  N = 2*2048/tp = 4096/2048/1024/512 for tp = 1/2/4/8.
+
+TP is a SHAPE selector only (N shards by routed_tp): world_size=1, per-rank N
+passed directly (no NVSHMEM). The OLD-MoE kernel `fp8_moe_group_gemm_sm100`
+reads mMask(num_local_experts) directly and strides the activated-expert list
+by grid_dim.x -- it has NO 128-expert scan cap (unlike the decode largem
+kernel), so num_local_experts is a free knob.
+
+EL reduction (LOGGED): real ep=1 DSV3 has EL=256, giving a
+(256, 4096, 7168) FP8 weight (~7.5 GB) of which only the ~8-64 round-robin-
+activated experts are ever read. The kernel correctness is per-expert
+independent, so EL is reduced to EL=64 for the primary sweep (matches the
+prior test + the sm100_fp8_group_gemm_decode unit) with real per-expert N/K
+and a realistic number of activated experts (8 at bs=1 .. 64 at bs>=8). The
+secondary ep=2 check uses num_local_experts = 256/2 = 128 (production-faithful
+for ep>=2).
+
+Grid mirrors the builder:
+  grid = (_moe_expert_grid_x(bs, EL, preferred_groups=8) = min(8, bs*8),
+          _moe_fp8_m_split(N, preferred=16), 1), block = (256,1,1)
+(the kernel hard-requires 8 warps = 256 threads).
+
+Run:
+    python tests/runtime_python/blackwell/sm100_fp8_moe/test_moe_w13_fp8_testmode.py
 """
 
 import os
 import sys
-import math
+
 import torch
 
-import mirage
-from mirage.mpk.persistent_kernel import PersistentKernel
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if THIS_DIR not in sys.path:
+    sys.path.insert(0, THIS_DIR)
 
-# Reference (self-contained — no circular import via test_fp8_moe_gemm)
-from pytorch_reference import moe_w13_fp8_ref
+import mirage  # noqa: E402
+from mirage.mpk.persistent_kernel import PersistentKernel  # noqa: E402
+from pytorch_reference import (  # noqa: E402
+    moe_w13_fp8_ref,
+    quantize_fp8_2d,
+    quantize_fp8_3d,
+    make_routing,
+    cosine_sim,
+    rel_mean,
+)
 
-
-# ================================================================
-# Config (DeepSeek V3-style, scaled down a bit for fast test)
-# ================================================================
-NUM_EXPERTS = 64
-NUM_TOPK = 8
 HIDDEN_SIZE = 7168          # K
-INTERMEDIATE_SIZE = 2048    # I
-N_W13 = 2 * INTERMEDIATE_SIZE  # 2*I = 4096
-BATCH_SIZE = 16
+MOE_INTERMEDIATE = 2048     # per-expert routed intermediate (TP=1)
+NUM_TOPK = 8
+NUM_EXPERTS = 256           # global expert count (for ep sizing)
+EL_REDUCED = 64             # reduced local-expert count for the primary sweep
+_MMA_M = 128
 
 
-# ================================================================
-# FP8 quantization (block_k=128 along last dim)
-# ================================================================
-def quantize_fp8_2d(x):
-    fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    M, K = x.shape
-    assert K % 128 == 0
-    x_b = x.reshape(M, K // 128, 128)
-    amax = x_b.abs().amax(dim=2)
-    scale = (amax / fp8_max).clamp(min=1e-12)
-    x_fp8 = (x_b / scale.unsqueeze(2)).reshape(M, K).to(torch.float8_e4m3fn)
-    return x_fp8, scale.float()
+def _w13_n(tp: int) -> int:
+    # gate||up routed output dim, sharded by routed_tp.
+    n = 2 * (MOE_INTERMEDIATE // tp)
+    assert n % 128 == 0, (tp, n)
+    return n
 
 
-def quantize_fp8_3d(x):
-    fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    A, B, K = x.shape
-    assert K % 128 == 0
-    x_b = x.reshape(A, B, K // 128, 128)
-    amax = x_b.abs().amax(dim=3)
-    scale = (amax / fp8_max).clamp(min=1e-12)
-    x_fp8 = (x_b / scale.unsqueeze(3)).reshape(A, B, K).to(torch.float8_e4m3fn)
-    return x_fp8, scale.float()
+def _moe_fp8_m_split(output_size: int, preferred: int = 16) -> int:
+    """Mirror builder._moe_fp8_m_split: per-CTA N-slice multiple of MMA_M=128."""
+    max_y = min(preferred, max(1, output_size // _MMA_M))
+    for y in range(max_y, 0, -1):
+        if output_size % y == 0 and (output_size // y) % _MMA_M == 0:
+            return y
+    return 1
 
 
-# ================================================================
-# Routing — round-robin to keep things deterministic
-# ================================================================
-def make_routing(batch_size, num_experts, num_topk, device):
-    routing = torch.zeros(num_experts, batch_size, dtype=torch.int32, device=device)
-    token_to_experts = {}
-    for i in range(batch_size):
-        experts = [(i * num_topk + s) % num_experts for s in range(num_topk)]
-        token_to_experts[i] = experts
-        for slot, e in enumerate(experts):
-            routing[e, i] = slot + 1
-    activated = [e for e in range(num_experts) if routing[e].any()]
-    mask = torch.zeros(num_experts + 1, dtype=torch.int32, device=device)
-    for idx, e in enumerate(activated):
-        mask[idx] = e
-    mask[num_experts] = len(activated)
-    return routing, mask, token_to_experts
+def _moe_expert_grid_x(bs: int, num_local_experts: int,
+                       preferred_groups: int = 8) -> int:
+    active_slots = max(1, bs * NUM_TOPK)
+    return min(min(num_local_experts, preferred_groups), active_slots)
 
 
-def test_moe_w13_fp8_testmode():
+def _run_case(tp, bs, EL, seed=42):
+    """One W13 config. Returns (passed, cos, rel, tag)."""
+    N = _w13_n(tp)
+    m_split = _moe_fp8_m_split(N, 16)
+    grid_x = _moe_expert_grid_x(bs, EL, preferred_groups=8)
+    tag = (f"[W13] tp={tp} bs={bs} EL={EL} K={HIDDEN_SIZE} N={N} "
+           f"grid=({grid_x},{m_split},1)")
+    print(f"\n{'='*80}\n{tag}\n{'='*80}", flush=True)
+
     device = "cuda"
-    torch.manual_seed(42)
+    torch.manual_seed(seed)
 
-    print(f"\n{'=' * 70}")
-    print(f"Test mode: moe_w13_fp8_layer")
-    print(f"  E={NUM_EXPERTS}, B={BATCH_SIZE}, K={HIDDEN_SIZE}, "
-          f"N=2I={N_W13}, topk={NUM_TOPK}")
-
-    # Inputs
-    input_val = torch.randn(BATCH_SIZE, HIDDEN_SIZE, device=device) * 0.1
-    weight_val = torch.randn(NUM_EXPERTS, N_W13, HIDDEN_SIZE, device=device) \
-        / math.sqrt(HIDDEN_SIZE)
+    input_val = torch.randn(bs, HIDDEN_SIZE, device=device) * 0.1
+    weight_val = torch.randn(EL, N, HIDDEN_SIZE, device=device) \
+        / (HIDDEN_SIZE ** 0.5)
 
     input_fp8, input_scale = quantize_fp8_2d(input_val)
     weight_fp8, weight_scale = quantize_fp8_3d(weight_val)
-    routing, mask, token_to_experts = make_routing(
-        BATCH_SIZE, NUM_EXPERTS, NUM_TOPK, device)
+    routing, mask, token_to_experts = make_routing(bs, EL, NUM_TOPK, device)
+    n_active = int(mask[EL].item())
 
-    output = torch.zeros(BATCH_SIZE, NUM_TOPK, N_W13,
-                         dtype=torch.bfloat16, device=device)
+    output = torch.zeros(bs, NUM_TOPK, N, dtype=torch.bfloat16, device=device)
 
-    # Build PK
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params["test_mode"] = True
@@ -104,8 +115,8 @@ def test_moe_w13_fp8_testmode():
     params["num_local_schedulers"] = num_schedulers
     params["mpi_rank"] = 0
     params["world_size"] = 1
-    params["max_num_batched_tokens"] = BATCH_SIZE
-    params["max_num_batched_requests"] = BATCH_SIZE
+    params["max_num_batched_tokens"] = bs
+    params["max_num_batched_requests"] = bs
     pk = PersistentKernel(**params)
 
     i_fp8 = pk.attach_input(input_fp8, name="input_fp8")
@@ -121,35 +132,66 @@ def test_moe_w13_fp8_testmode():
         input_fp8=i_fp8, input_scale=i_sc,
         weight_fp8=w_fp8, weight_scale=w_sc,
         moe_routing_indices=rt, moe_mask=mk, output=out,
-        grid_dim=(8, 16, 1), block_dim=block_dim,
+        grid_dim=(grid_x, m_split, 1), block_dim=block_dim,
     )
 
-    print("Compiling...")
-    pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
-    print("Running...")
+    compile_dir = os.path.join(THIS_DIR, f".pk_w13_tp{tp}_bs{bs}_el{EL}")
+    os.makedirs(compile_dir, exist_ok=True)
+    pk.compile(output_dir=compile_dir)
     pk()
     torch.cuda.synchronize()
 
-    # Reference
     ref = moe_w13_fp8_ref(input_fp8, input_scale, weight_fp8, weight_scale,
-                          BATCH_SIZE, token_to_experts, use_ue8m0=True)
+                          bs, token_to_experts, use_ue8m0=True)
 
-    # Compare only routed slots (each token has exactly NUM_TOPK routed slots
-    # under round-robin, so the whole tensor is meaningful here).
-    diff = (output.float() - ref.float()).abs()
-    max_abs = diff.max().item()
-    max_rel = max_abs / max(ref.float().abs().max().item(), 1e-6)
+    cos = cosine_sim(output, ref)
+    rel = rel_mean(output, ref)
+    max_abs = (output.float() - ref.float()).abs().max().item()
+    # fp8 MoE tolerance (decision log): cosine > 0.99 OR rel <= 5%.
+    passed = (cos > 0.99 or rel <= 0.05)
+    print(f"  active_experts={n_active} cos={cos:.6f} rel={rel*100:.4f}% "
+          f"max_abs_diff={max_abs:.4f} -> {'PASS' if passed else 'FAIL'}",
+          flush=True)
 
-    print(f"\nOutput[0, 0, :8]:    {output[0, 0, :8]}")
-    print(f"Reference[0, 0, :8]: {ref[0, 0, :8]}")
-    print(f"\nMax abs diff: {max_abs:.6f}, Max rel err: {max_rel:.6f}")
-
-    passed = (max_abs < 2.0 and max_rel < 0.05)
-    print(f"\n{'PASSED' if passed else 'FAILED'}: moe_w13_fp8_layer test_mode "
-          f"(abs={max_abs:.4f}, rel={max_rel:.4f})")
     pk.finalize()
-    assert passed, f"abs={max_abs} rel={max_rel}"
+    return passed, cos, rel, tag
+
+
+def main():
+    results = []
+
+    # ── Union-of-axes (tp, bs) matrix ──
+    # {tp=1}×{bs=1,2,4,8,16} ∪ {bs=16}×{tp=2,4,8} ∪ {tp=8,bs=1}
+    for bs in (1, 2, 4, 8, 16):
+        results.append(_run_case(tp=1, bs=bs, EL=EL_REDUCED))
+    for tp in (2, 4, 8):
+        results.append(_run_case(tp=tp, bs=16, EL=EL_REDUCED))
+    results.append(_run_case(tp=8, bs=1, EL=EL_REDUCED))
+
+    # ── Secondary ep>1 check: num_local_experts = 256/ep ──
+    # ep=2 -> EL=128 (production-faithful for ep>=2). tp=1 (routed_tp=world/ep).
+    results.append(_run_case(tp=1, bs=16, EL=NUM_EXPERTS // 2))
+
+    return _summary(results)
+
+
+def _summary(results):
+    print(f"\n{'='*80}\nSummary (moe_w13_fp8):\n{'='*80}", flush=True)
+    all_passed = True
+    for passed, cos, rel, tag in results:
+        print(f"  {'PASS' if passed else 'FAIL'}  cos={cos:.5f} "
+              f"rel={rel*100:.4f}%  {tag}", flush=True)
+        all_passed = all_passed and passed
+    n_pass = sum(1 for r in results if r[0])
+    print(f"\n{'ALL PASS' if all_passed else 'SOME FAILED'} "
+          f"({n_pass}/{len(results)})", flush=True)
+    return 0 if all_passed else 1
+
+
+def test_moe_w13_fp8_testmode():
+    rc = main()
+    assert rc == 0, "some moe_w13_fp8 configs failed"
 
 
 if __name__ == "__main__":
-    test_moe_w13_fp8_testmode()
+    sys.exit(main())

@@ -3,10 +3,23 @@
 Each of the 5 tests in this directory wants the same .so available before
 import. Centralise the rebuild check so changes to the wrapper or sm100
 headers only have to invalidate the cached .so in one place.
+
+The dense f32-block quantizers + reference GEMM now live in
+`pytorch_reference.py` (the canonical home). They are re-exported here for
+back-compat so any caller doing `from _build_helper import reference_gemm`
+keeps working.
 """
 import os
 import subprocess
 import sys
+
+# Re-export the canonical references for back-compat.
+from pytorch_reference import (  # noqa: F401,E402
+    quantize_a_f32scale,
+    quantize_b_f32scale,
+    reference_gemm,
+    cosine_sim,
+)
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_SO = "runtime_kernel_blackwell_fp8_gemm_dense"

@@ -1,6 +1,20 @@
-import torch
-import sys
+"""Test: tensor_init_layer via PersistentKernel test_mode (DSV3 shapes).
+
+Op:  zero-fill target (bs, HIDDEN=7168), bf16.
+DSV3 use: zero-fills new_moe_meta before moe_permute. Builder uses
+    grid_dim=(1,1,1), block_dim=(128,1,1),
+    dummy_input_map=(-1,-1,-1), target_input_map=(-1,-1,-1).
+
+DSV3 sweep: bs ∈ {1,2,4,8,16}.
+
+Run:
+    python tests/runtime_python/blackwell/sm100_tensor_init/test_tensor_init_testmode.py
+"""
+
 import os
+import sys
+
+import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
@@ -8,29 +22,19 @@ from mirage.mpk.persistent_kernel import PersistentKernel
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pytorch_reference import tensor_init_ref
 
+HIDDEN = 7168
+BS_SWEEP = [1, 2, 4, 8, 16]
 
-def test_tensor_init_testmode():
-    """Smoke / correctness test for ``tensor_init_layer``.
 
-    The kernel zero-fills ``linear_output`` via vectorized 16-byte stores.
-    ``linear_input`` is a graph-wiring placeholder; the kernel does not
-    touch its data, so we just point it at a separate scratch buffer.
-    """
+def _run_case(bs: int):
     device = "cuda"
-    torch.manual_seed(0)
+    torch.manual_seed(bs)
 
-    batch_size = 16
-    hidden = 512  # multiple of 8 (16B vec) and small for fast compile
-
-    # Pre-fill ``linear_output`` with non-zero values so we can detect that
-    # the kernel actually writes zeros.
-    linear_output = torch.randn(
-        batch_size, hidden, dtype=torch.bfloat16, device=device
-    )
+    # Pre-fill with non-zero values to detect the zero-fill.
+    linear_output = torch.randn(bs, HIDDEN, dtype=torch.bfloat16, device=device)
     pre_kernel_snapshot = linear_output.clone()
-    linear_input = torch.randn(
-        batch_size, hidden, dtype=torch.bfloat16, device=device
-    )
+    # dummy is a dependency-edge placeholder; kernel never reads/writes it.
+    linear_input = torch.randn(bs, HIDDEN, dtype=torch.bfloat16, device=device)
 
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
@@ -39,42 +43,43 @@ def test_tensor_init_testmode():
     params["num_local_schedulers"] = num_schedulers
     params["mpi_rank"] = 0
     params["world_size"] = 1
-    params["max_num_batched_tokens"] = batch_size
-    params["max_num_batched_requests"] = batch_size
+    params["max_num_batched_tokens"] = bs
+    params["max_num_batched_requests"] = bs
 
     pk = PersistentKernel(**params)
-
     in_dt = pk.attach_input(linear_input, name="linear_input")
     out_dt = pk.attach_input(linear_output, name="linear_output")
 
-    block_dim = (256, 1, 1) if pk.target_cc >= 90 else (128, 1, 1)
-
-    # Mirror the splitk linear's grid/input_map convention so the test
-    # exercises the same path used by linear_splitk_swapAB_fp8_layer:
-    # grid.x splits the output (target) dim, grid.y splits the dummy's K dim.
+    # Mirror DSV3 builder: grid=(1,1,1), maps both (-1,-1,-1).
     pk.tensor_init_layer(
         target=out_dt,
         dummy=in_dt,
-        grid_dim=(2, 1, 1),
-        block_dim=block_dim,
-        dummy_input_map=(-1, 1, -1),
-        target_input_map=(1, -1, -1),
+        grid_dim=(1, 1, 1),
+        block_dim=(128, 1, 1),
+        dummy_input_map=(-1, -1, -1),
+        target_input_map=(-1, -1, -1),
     )
 
-    pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
+    folder_path = os.path.dirname(os.path.abspath(__file__))
+    pk.compile(output_dir=folder_path)
     pk()
     torch.cuda.synchronize()
 
     ref = tensor_init_ref(pre_kernel_snapshot, init_val=0.0)
-    max_diff = (linear_output - ref).abs().max().item()
-    print(f"Max diff (linear_output vs zeros): {max_diff}")
-
-    nonzero = linear_output.abs().sum().item()
-    print(f"Sum of |linear_output| after kernel: {nonzero}")
+    max_diff = (linear_output.float() - ref.float()).abs().max().item()
+    print(f"  bs={bs:2d}  max_diff={max_diff:.6f}", end="")
 
     torch.testing.assert_close(linear_output, ref, rtol=0.0, atol=0.0)
-    print("PASSED")
+    print("  PASS")
     pk.finalize()
+
+
+def test_tensor_init_testmode():
+    print(f"\n{'='*60}")
+    print(f"tensor_init_layer  HIDDEN={HIDDEN}  bs sweep={BS_SWEEP}")
+    for bs in BS_SWEEP:
+        _run_case(bs)
+    print("ALL PASS")
 
 
 if __name__ == "__main__":

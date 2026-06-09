@@ -1,27 +1,24 @@
-"""End-to-end test_mode coverage for the MPK FP8 BMM kernel
-(`linear_fp8_bmm_sm100_layer`, UE8M0 swapAB scales).
+"""End-to-end test_mode coverage for the DENSE-scale FP8 BMM kernel
+(`linear_fp8_bmm_dense_sm100_layer`, float32 block scales).
 
-Drives the full MPK compilation pipeline (Python layer -> register_task ->
-codegen -> nvcc -> persistent runtime) at real DSV3 decode-path shapes.
-
-DSV3 has two real uses of this per-head batched matmul (builder.py
-`_bmm_decode_q_path` L1300 and `_bmm_decode_o_path` L1433):
-  * Q-up / kv_b_k absorption: input (bs, Hl, 128) -> output (bs, Hl, 512),
-    weight (Hl, 512, 128).  Din=128, Dout=512, grid=(512//128=4, Hl, 1).
-  * BMM2 / o-unabsorb (kv_b_v):  input (bs, Hl, 512) -> output (bs, Hl, 128),
-    weight (Hl, 128, 512).  Din=512, Dout=128, grid=(1, Hl, 1).
+This is the dense (float32-block-scale) variant of the per-head FP8 batched
+matmul. DSV3 uses it for the decode BMM2 / o-unabsorption when
+MPK_DSV3_BMM_DENSE=1 (builder.py `_bmm_decode_o_path` L1400):
+    input (bs, Hl, 512) fp8 + f32 scale [bs, Hl, nk=4]
+    weight (Hl, 128, 512) fp8 + f32 block scale [Hl, 1, nk=4]
+    output (bs, Hl, 128) bf16
+  -> output[n, h, :] = input[n, h, :] @ weight[h, :, :]^T  (per head)
+  grid = (1, Hl, 1)  (grid.x must be 1: per-head D_out=128=BN); block=(256,1,1).
 Hl = num_local_q_heads = 128 // world_size (128/64/32/16 for tp=1/2/4/8).
 
-BMM contract (kernel + register at src/kernel/task_register.cc:5591):
-  - input  [N, H, D_in] fp8 + UE8M0 packed scale [N, H, packed_K]
-  - weight [H, D_out, D_in] fp8 + scale [H, D_out, packed_K]
-  - output [N, H, D_out] = input @ weight^T per head
-  - grid = (D_out / 128, H, 1) — one head per CTA; block = (256, 1, 1)
-  - N <= 16; D_in % 128 == 0; D_out % 128 == 0
+Scale layout (confirmed from src/kernel/task_register.cc:5831 +
+fp8_gemm_dense_qout_sm100_common.cuh L301-302):
+  input_scale  [N, Hl, nk] float32 row-major; per-head row stride = Hl*nk
+  weight_scale [Hl, D_out/128=1, nk] float32 128x128-block
 
 Run:
   CUDA_VISIBLE_DEVICES=<idle-gpu> \
-    python tests/runtime_python/blackwell/sm100_linear_fp8_bmm/test_linear_fp8_bmm_testmode.py
+    python tests/runtime_python/blackwell/sm100_linear_fp8_bmm/test_linear_fp8_bmm_dense_testmode.py
 """
 import os
 import sys
@@ -33,14 +30,12 @@ from mirage.mpk.persistent_kernel import PersistentKernel  # noqa: E402
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 from pytorch_reference import (  # noqa: E402
-    quantize_bmm_input,
-    quantize_bmm_weight,
-    dequant_bmm_input,
-    dequant_bmm_weight,
-    bmm_reference_from_dequant,
+    quantize_bmm_input_f32,
+    quantize_bmm_weight_f32,
+    bmm_reference_dense_f32,
 )
 
-FOLDER = os.environ.get("MPK_TEST_OUTPUT_DIR", "/tmp/mpk_test_bmm")
+FOLDER = os.environ.get("MPK_TEST_OUTPUT_DIR", "/tmp/mpk_test_bmm_dense")
 os.makedirs(FOLDER, exist_ok=True)
 
 
@@ -59,19 +54,19 @@ def _make_pk(batch_size: int) -> PersistentKernel:
     return PersistentKernel(**params)
 
 
-def _run_case(label: str, batch: int, num_heads: int, d_in: int,
-              d_out: int, tol: float = 0.05) -> bool:
-    """Compile + run linear_fp8_bmm_sm100_layer end-to-end and compare to the
-    FP8-dequant per-head reference."""
+def _run_case(label: str, batch: int, num_heads: int, d_in: int = 512,
+              d_out: int = 128, tol: float = 0.05) -> bool:
+    """Compile + run linear_fp8_bmm_dense_sm100_layer end-to-end and compare to
+    the dense-f32-scale per-head reference."""
     assert batch <= 16, f"BMM kernel caps batch <= 16, got {batch}"
-    assert d_in % 128 == 0, f"d_in={d_in} must be % 128"
-    assert d_out % 128 == 0, f"d_out={d_out} must be % 128"
-    grid_x = d_out // 128
+    assert d_in % 128 == 0 and d_out % 128 == 0
+    grid_x = 1                       # required: per-head D_out=128=BN
     grid_y = num_heads
+    nk = d_in // 128
 
     print(f"\n{'='*72}")
     print(f"Test: {label}")
-    print(f"  N={batch}  H={num_heads}  D_in={d_in}  D_out={d_out}  "
+    print(f"  N={batch}  H={num_heads}  D_in={d_in}  D_out={d_out}  nk={nk}  "
           f"grid=({grid_x}, {grid_y}, 1)")
 
     device = "cuda"
@@ -83,15 +78,13 @@ def _run_case(label: str, batch: int, num_heads: int, d_in: int,
                                dtype=torch.bfloat16, device=device)
                    / (d_in ** 0.5)).contiguous()
 
-    input_fp8, input_scale = quantize_bmm_input(input_bf16)
-    weight_fp8, weight_scale = quantize_bmm_weight(weight_bf16)
+    input_fp8, input_scale = quantize_bmm_input_f32(input_bf16)     # [N,H,nk]
+    weight_fp8, weight_scale = quantize_bmm_weight_f32(weight_bf16)  # [H,1,nk]
     output = torch.zeros(batch, num_heads, d_out, dtype=torch.bfloat16,
                          device=device)
 
-    # FP8-dequant reference: kernel computes on the quantized operands.
-    input_dq = dequant_bmm_input(input_fp8, input_scale)
-    weight_dq = dequant_bmm_weight(weight_fp8, weight_scale)
-    ref = bmm_reference_from_dequant(input_dq, weight_dq)
+    ref = bmm_reference_dense_f32(input_fp8, input_scale,
+                                  weight_fp8, weight_scale)
 
     pk = _make_pk(batch)
     i_fp8 = pk.attach_input(input_fp8, name="bmm_input_fp8")
@@ -100,7 +93,7 @@ def _run_case(label: str, batch: int, num_heads: int, d_in: int,
     w_sc = pk.attach_input(weight_scale, name="bmm_weight_scale")
     o = pk.attach_input(output, name="bmm_output")
 
-    pk.linear_fp8_bmm_sm100_layer(
+    pk.linear_fp8_bmm_dense_sm100_layer(
         input_fp8=i_fp8, input_scale=i_sc,
         weight_fp8=w_fp8, weight_scale=w_sc,
         output=o,
@@ -130,54 +123,35 @@ def _run_case(label: str, batch: int, num_heads: int, d_in: int,
     print(f"  cos-sim:  {cos:.6f}")
 
     pk.finalize()
-    # fp8 tolerance: cosine > 0.99 OR relative <= 5% (decision log).
     ok = cos >= 0.99 and (max_abs <= tol or rel <= 0.05)
     print(f"  {'PASS' if ok else 'FAIL'}: {label}")
     return ok
 
 
 # ===========================================================================
-# DSV3 union-of-axes matrix (decision log "Test-matrix size policy"):
-#   {tp=1} x {bs=1,2,4,8,16}  U  {bs=16} x {tp=2,4,8}  U  {tp=8, bs=1}
-# = 9 configs, hitting every tp in {1,2,4,8} and every bs in {1,2,4,8,16}.
-# Hl = 128 // tp. bs capped <= 16 (decode-only swapAB kernel).
-# Run for BOTH real DSV3 uses: Q-up (Din=128, Dout=512) and BMM2 (Din=512,
-# Dout=128).
+# DSV3 union-of-axes matrix — dense BMM is used only for BMM2 (Din=512,
+# Dout=128). Same union as the UE8M0 BMM: every tp in {1,2,4,8} x every bs.
 # ===========================================================================
 _UNION = (
     [(1, bs) for bs in (1, 2, 4, 8, 16)]
     + [(tp, 16) for tp in (2, 4, 8)]
     + [(8, 1)]
 )
-# (label_suffix, d_in, d_out)
-_SHAPES = (
-    ("qup", 128, 512),   # kv_b_k Q-up absorption
-    ("bmm2", 512, 128),  # kv_b_v o-unabsorption
-)
-
-
-def _matrix():
-    cases = []
-    for tag, d_in, d_out in _SHAPES:
-        for tp, bs in _UNION:
-            hl = 128 // tp
-            cases.append((f"{tag} tp{tp} bs{bs} (H={hl}, "
-                          f"Din={d_in}, Dout={d_out})", bs, hl, d_in, d_out))
-    return cases
 
 
 if __name__ == "__main__":
     results = {}
-    for label, bs, hl, d_in, d_out in _matrix():
+    for tp, bs in _UNION:
+        hl = 128 // tp
+        label = f"dense bmm2 tp{tp} bs{bs} (H={hl}, Din=512, Dout=128)"
         try:
-            results[label] = _run_case(label, batch=bs, num_heads=hl,
-                                       d_in=d_in, d_out=d_out)
+            results[label] = _run_case(label, batch=bs, num_heads=hl)
         except Exception as e:
             import traceback
             traceback.print_exc()
             results[label] = False
     print("\n" + "=" * 72)
-    print("Summary (linear_fp8_bmm_sm100 UE8M0):")
+    print("Summary (linear_fp8_bmm_dense_sm100 f32-scale):")
     for k, v in results.items():
         print(f"  {'PASS' if v else 'FAIL'}: {k}")
     fail = sum(1 for v in results.values() if not v)

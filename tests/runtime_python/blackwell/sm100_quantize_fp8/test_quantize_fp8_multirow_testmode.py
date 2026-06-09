@@ -30,7 +30,7 @@ from sm100_fp8_scale_layout import (  # noqa: E402
 from pytorch_reference import quantize_fp8_ref  # noqa: E402
 
 
-def _run_at(batch_size: int, hidden_dim: int = 4096, seed: int = None):
+def _run_at(batch_size: int, hidden_dim: int = 7168, seed: int = None):
     device = "cuda"
     torch.manual_seed(42 if seed is None else seed)
     assert hidden_dim % BLOCK_K == 0

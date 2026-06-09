@@ -13,6 +13,82 @@ import torch
 
 
 # ----------------------------------------------------------------
+# Comparison metrics (shared by W13 / W2 test_mode files)
+# ----------------------------------------------------------------
+
+def cosine_sim(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Cosine similarity of two tensors flattened to 1D (float32)."""
+    af = a.float().reshape(-1)
+    bf = b.float().reshape(-1)
+    denom = af.norm() * bf.norm()
+    if denom.item() == 0.0:
+        return 1.0 if af.norm().item() == bf.norm().item() else 0.0
+    return (af @ bf / denom).item()
+
+
+def rel_mean(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Mean relative error: mean(|a-b|) / mean(|b|)."""
+    af = a.float()
+    bf = b.float()
+    denom = bf.abs().mean().item()
+    return (af - bf).abs().mean().item() / max(denom, 1e-12)
+
+
+# ----------------------------------------------------------------
+# FP8 quantization (per-128-block float32 scale along last dim) — the
+# layer's input/weight contract (kernel does the UE8M0 floor internally).
+# ----------------------------------------------------------------
+
+def quantize_fp8_2d(x: torch.Tensor):
+    """Quantize a 2D tensor [M, K] to FP8 E4M3 + per-128-block float32 scale."""
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    M, K = x.shape
+    assert K % 128 == 0
+    x_b = x.reshape(M, K // 128, 128)
+    amax = x_b.abs().amax(dim=2)
+    scale = (amax / fp8_max).clamp(min=1e-12)
+    x_fp8 = (x_b / scale.unsqueeze(2)).reshape(M, K).to(torch.float8_e4m3fn)
+    return x_fp8, scale.float()
+
+
+def quantize_fp8_3d(x: torch.Tensor):
+    """Quantize a 3D tensor [A, B, K] to FP8 E4M3 + per-128-block float32 scale."""
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    A, B, K = x.shape
+    assert K % 128 == 0
+    x_b = x.reshape(A, B, K // 128, 128)
+    amax = x_b.abs().amax(dim=3)
+    scale = (amax / fp8_max).clamp(min=1e-12)
+    x_fp8 = (x_b / scale.unsqueeze(3)).reshape(A, B, K).to(torch.float8_e4m3fn)
+    return x_fp8, scale.float()
+
+
+# ----------------------------------------------------------------
+# Routing — round-robin so each token routes to NUM_TOPK distinct experts.
+# Mirrors the kernel's contract: routing_indices[e, token] = topk_slot
+# (1-indexed) if token routed to local expert e else 0; mask[0..count-1] are
+# the activated local expert IDs and mask[num_local_experts] = count.
+# ----------------------------------------------------------------
+
+def make_routing(batch_size, num_local_experts, num_topk, device):
+    routing = torch.zeros(num_local_experts, batch_size,
+                          dtype=torch.int32, device=device)
+    token_to_experts = {}
+    for i in range(batch_size):
+        experts = [(i * num_topk + s) % num_local_experts
+                   for s in range(num_topk)]
+        token_to_experts[i] = experts
+        for slot, e in enumerate(experts):
+            routing[e, i] = slot + 1
+    activated = [e for e in range(num_local_experts) if routing[e].any()]
+    mask = torch.zeros(num_local_experts + 1, dtype=torch.int32, device=device)
+    for idx, e in enumerate(activated):
+        mask[idx] = e
+    mask[num_local_experts] = len(activated)
+    return routing, mask, token_to_experts
+
+
+# ----------------------------------------------------------------
 # FP8 dequantization helpers (lifted from test_fp8_moe_gemm.py)
 # ----------------------------------------------------------------
 
