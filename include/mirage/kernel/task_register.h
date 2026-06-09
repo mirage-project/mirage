@@ -238,6 +238,16 @@ public:
                                        std::vector<int> const &params);
   int register_mtp_build_embed_input_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
+  // Eagle3 tasks
+  int register_copy_task(threadblock::Graph const &bgraph,
+                         std::vector<int> const &params);
+  int register_concat_task(threadblock::Graph const &bgraph,
+                           std::vector<int> const &params);
+  int register_eagle3_d2t_remap_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_eagle3_commit_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params);
+  // Eagle3 tasks end
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

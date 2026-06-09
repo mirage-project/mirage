@@ -14,15 +14,15 @@
  */
 
 #pragma once
-#include "common.h"
-#include "copy_sm80.cuh"
-#include "dmem_layout.cuh"
-#include "element_binary.cuh"
-#include "element_unary.cuh"
-#include "mma.cuh"
-#include "reduction.cuh"
-#include "smem_layout.cuh"
-#include "utils.cuh"
+#include "tasks/common/common_header.cuh"
+#include "tasks/common/copy_sm80.cuh"
+#include "tasks/common/dmem_layout.cuh"
+#include "tasks/ampere/element_binary.cuh"
+#include "tasks/ampere/element_unary.cuh"
+#include "tasks/ampere/mma.cuh"
+#include "tasks/ampere/reduction.cuh"
+#include "tasks/ampere/smem_layout.cuh"
+#include "tasks/common/utils.cuh"
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
