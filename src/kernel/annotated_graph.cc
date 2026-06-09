@@ -328,19 +328,12 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
       auto rbox = compute_bbox(cdt);
       bool c_is_virtual = cdt.is_virtual();
 
-      // C20 (2026-05-17): shadow-aware edge selection. Walk writers in
+      // Shadow-aware edge selection. Walk writers in the
       // REVERSE layer order, tracking the still-uncovered region of the
       // reader's bbox as a union of N-dim hyperrectangles. Each writer
       // only contributes an edge for the sub-region it most-recently
       // wrote — later writers shadow earlier ones over the bytes they
       // overwrote.
-      //
-      // Without this, a full qkv_a_proj producer (cols [0, 2176)) stays
-      // as a stale producer of every narrow-view consumer downstream
-      // even after rmsnorm and other view-writes have fully overwritten
-      // the slot they read; downstream MLA kv_gather then sees two
-      // distinct producers per slot and trips case-2/case-3 fork/join
-      // checks.
       std::vector<BBox> uncovered;
       uncovered.push_back(rbox);
       auto const &writers = wit->second;
