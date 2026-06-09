@@ -2451,10 +2451,12 @@ std::vector<torch::Tensor>
       return launch_quantize_nvfp4_sm100<6144>(input, mma_n);
     case 7168:
       return launch_quantize_nvfp4_sm100<7168>(input, mma_n);
+    case 8192:
+      return launch_quantize_nvfp4_sm100<8192>(input, mma_n);
     default:
       TORCH_CHECK(false,
                   "quantize_nvfp4_sm100 supports K in {128, 256, 384, 512, "
-                  "768, 1024, 1536, 2048, 3072, 4096, 6144, 7168}. Got K=",
+                  "768, 1024, 1536, 2048, 3072, 4096, 6144, 7168, 8192}. Got K=",
                   hidden_size);
   }
 }

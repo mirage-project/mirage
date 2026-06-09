@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import time
 import warnings
 
 # Make the compiled runtime extension (one directory up) importable.
@@ -34,8 +35,8 @@ from nvfp4_util import (
 DEVICE = "cuda"
 DTYPE_OUT = torch.float32
 DEFAULT_M_VALUES = list(range(1, 129)) + [4096]
-DEFAULT_N_VALUES = [128, 256, 384, 512, 768, 1024, 1536, 2048, 4096, 7168]
-DEFAULT_K_VALUES = [256, 512, 768, 1024, 1536, 2048, 4096, 7168]
+DEFAULT_N_VALUES = [128, 256, 384, 512, 768, 1024, 1536, 2048, 4096, 7168, 8192]
+DEFAULT_K_VALUES = [256, 512, 768, 1024, 1536, 2048, 4096, 7168, 8192]
 SUPPORTED_N_VALUES = set(DEFAULT_N_VALUES)
 SUPPORTED_K_VALUES = set(DEFAULT_K_VALUES)
 SMALL_M_MAX = 128
@@ -80,6 +81,16 @@ def benchmark_graph_us(fn, warmup: int, reps: int) -> float:
     end.record()
     torch.cuda.synchronize()
     return start.elapsed_time(end) * 1000.0 / reps
+
+
+def settle(settle_ms: float) -> None:
+    """Quiesce the device for settle_ms so the previous implementation's heat/
+    clocks do not bias the next benchmark. No-op when settle_ms <= 0."""
+    if settle_ms <= 0:
+        return
+    torch.cuda.synchronize()
+    time.sleep(settle_ms / 1000.0)
+    torch.cuda.synchronize()
 
 
 def output_dtype(m: int) -> torch.dtype:
@@ -192,6 +203,14 @@ def main() -> None:
     parser.add_argument("--reps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--settle-ms",
+        type=float,
+        default=0.0,
+        help="Idle gap (ms) inserted before each implementation's benchmark so a "
+        "hot kernel does not bleed into the next one's timing. Syncs the device, "
+        "sleeps, then syncs again.",
+    )
+    parser.add_argument(
         "--no-flashinfer",
         action="store_true",
         help="Skip flashinfer baselines even if the package is available",
@@ -229,7 +248,14 @@ def main() -> None:
         )
 
         # Pre-quantize activations once into swapAB per-tile layout — timing measures GEMM only.
-        mma_n = (8 if m <= 8 else 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128) if m <= SMALL_M_MAX else 0
+        # The swapAB tile width is N-dependent (occupancy formula), so it must come from the
+        # kernel's own swapab_mma_n() — deriving it from M alone mismatches the per-tile SF
+        # layout the GEMM indexes and causes an illegal memory access.
+        mma_n = (
+            runtime_kernel_blackwell.swapab_mma_n(x, weight)
+            if m <= SMALL_M_MAX
+            else 0
+        )
         x_q_list = runtime_kernel_blackwell.quantize_nvfp4_sm100(x, mma_n)
         x_q, x_sf = x_q_list[0], x_q_list[1]
 
@@ -237,6 +263,7 @@ def main() -> None:
         if use_scaled_mm and _FLASHINFER_AVAILABLE:
             w_smm = torch.randn((n, k), device=DEVICE, dtype=torch.bfloat16)
             try:
+                settle(args.settle_ms)
                 smm_us = benchmark_us(
                     scaled_mm_runner(x, w_smm),
                     args.warmup,
@@ -245,6 +272,7 @@ def main() -> None:
             except Exception as e:
                 warnings.warn(f"scaled_mm M={m} N={n} K={k}: {e}")
 
+        settle(args.settle_ms)
         custom_us = benchmark_us(
             lambda: runtime_kernel_blackwell.linear_nvfp4_sm100_no_quantization(
                 x_q, x_sf, weight, weight_scale_interleaved, residual, output
@@ -261,6 +289,7 @@ def main() -> None:
             w_fi = torch.randn((n, k), device=DEVICE, dtype=torch.bfloat16)
 
             try:
+                settle(args.settle_ms)
                 fi_cutlass_us = benchmark_graph_us(
                     flashinfer_runner(x, w_fi, "cutlass"),
                     args.warmup,
@@ -271,6 +300,7 @@ def main() -> None:
                 fi_cutlass_us = float("nan")
 
             try:
+                settle(args.settle_ms)
                 fi_trtllm_us = benchmark_graph_us(
                     flashinfer_runner(x, w_fi, "trtllm"),
                     args.warmup,
