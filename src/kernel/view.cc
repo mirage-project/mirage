@@ -114,7 +114,8 @@ DTensor Graph::view(DTensor const &input, std::vector<int> const &new_shape) {
 
 DTensor *Graph::view(DTensor const *input, std::vector<int> const &new_shape) {
   DTensor v = view(*input, new_shape);
-  return new DTensor(v);
+  view_storage.emplace_back(std::make_unique<DTensor>(v));
+  return view_storage.back().get();
 }
 
 DTensor Graph::narrow(DTensor const &input, int dim, int start, int length) {
@@ -134,7 +135,8 @@ DTensor Graph::narrow(DTensor const &input, int dim, int start, int length) {
 
 DTensor *Graph::narrow(DTensor const *input, int dim, int start, int length) {
   DTensor v = narrow(*input, dim, start, length);
-  return new DTensor(v);
+  view_storage.emplace_back(std::make_unique<DTensor>(v));
+  return view_storage.back().get();
 }
 
 std::vector<DTensor>
@@ -188,7 +190,8 @@ int Graph::split(DTensor const *input,
                  DTensor **outputs) {
   std::vector<DTensor> views = split(*input, sizes, dim);
   for (size_t i = 0; i < views.size(); i++) {
-    outputs[i] = new DTensor(views[i]);
+    view_storage.emplace_back(std::make_unique<DTensor>(views[i]));
+    outputs[i] = view_storage.back().get();
   }
   return static_cast<int>(views.size());
 }
