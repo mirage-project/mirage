@@ -156,6 +156,11 @@ enum TaskType {
   TASK_PAGED_ATTENTION_SPLIT_KV_SM100 = 263,
   TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SAMPLING_SM100 = 265,
+  TASK_MLA_DECODE_SM100 = 266,
+  TASK_MLA_REDUCE_SM100 = 267,
+  TASK_MLA_PREFILL_SM100 = 268,
+  TASK_MLA_MTP_DECODE_SM100 = 269,
+  TASK_MLA_MTP_REDUCE_SM100 = 270,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
   // v2 dispatch enums for non-linear Qwen3 tasks. Emit the same kernel calls
   // as v1 (the blackwell_v2/ variants are near-identical), just through the
