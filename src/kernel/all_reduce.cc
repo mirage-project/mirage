@@ -50,6 +50,10 @@ KNAllReduceOp::KNAllReduceOp(Graph *_kgraph,
                              bool _inplace)
     : KNOperator(_kgraph, mirage::type::KN_ALLREDUCE_OP, input),
       inplace(_inplace) {
+  // Shape-preserving op: dim[] and stride[] both carry over from `input`
+  // verbatim via the DTensor copy; no need to recompute strides (true for
+  // both inplace and out-of-place — the out-of-place allocation matches
+  // the input's shape).
   DTensor output;
   output = input;
   output.owner_op = this;
@@ -61,6 +65,11 @@ KNAllReduceOp::KNAllReduceOp(Graph *_kgraph,
     assert(output.data_offset == input.data_offset);
     assert(output.fp_offset == input.fp_offset);
   } else {
+    // Out-of-place output gets its own allocation; clear base_guid/view_offset
+    // so codegen doesn't route writes through input's parent IODesc when input
+    // is a view.
+    output.base_guid = 0;
+    output.view_offset = 0;
     kgraph->allocate(output);
   }
   output_tensors.push_back(output);

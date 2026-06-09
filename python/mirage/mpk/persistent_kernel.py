@@ -593,6 +593,29 @@ class PersistentKernel:
         t = self.kn_graph.shuffle_tensors(inputs, shuffled_dim, num_groups, name)
         return t
 
+    # ---- Virtual tensor (view) APIs ----------------------------------------
+    # These operators return DTensors that share memory with `input`. The
+    # returned view has its own GUID plus base_guid + view_offset metadata.
+    # The dependency analyzer treats any edge involving a view as a coarse
+    # barrier edge (one event per layer instead of GCD-based per-tile
+    # events); see docs / annotated_graph.cc for details.
+
+    def view(self, input: DTensor, new_shape: list) -> DTensor:
+        """Reshape into a new shape that has the same total element count.
+        Returns a single virtual DTensor."""
+        return self.kn_graph.view(input, list(new_shape))
+
+    def narrow(self, input: DTensor, dim: int, start: int, length: int) -> DTensor:
+        """Take a contiguous-window virtual DTensor of `input` along `dim`."""
+        return self.kn_graph.narrow(input, dim, start, length)
+
+    def split(self, input: DTensor, sizes_or_chunks, dim: int) -> list:
+        """Split `input` into multiple virtual DTensors along `dim`.
+
+        sizes_or_chunks may be an int (equal-size chunk count) or a list of
+        explicit sizes summing to `input.dim[dim]`."""
+        return self.kn_graph.split(input, sizes_or_chunks, dim)
+
     def embed_layer(
         self,
         input: DTensor, # [batch_size, num_spec_tokens]

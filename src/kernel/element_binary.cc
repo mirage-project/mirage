@@ -114,9 +114,21 @@ KNElementBinaryOp::KNElementBinaryOp(Graph *_kgraph,
   for (int i = 0; i < output.num_dims; i++) {
     output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
   }
+  // Broadcasting may grow output.dim beyond input1.dim, so the stride
+  // pattern copied from input1 above is no longer valid. The output is
+  // freshly allocated and row-major over the broadcast shape.
+  for (int i = output.num_dims - 1; i >= 0; i--) {
+    output.stride[i] = (i == output.num_dims - 1)
+                           ? 1
+                           : output.stride[i + 1] * output.dim[i + 1];
+  }
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
+  // Output gets its own allocation; clear base_guid/view_offset so codegen
+  // does not route writes through input1's parent IODesc when input1 is a view.
+  output.base_guid = 0;
+  output.view_offset = 0;
   kgraph->allocate(output);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);

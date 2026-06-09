@@ -29,24 +29,16 @@ __device__ static __forceinline__ void
   // could reuse a "dead" accumulator's registers in a later iteration and
   // cross-contaminate distinct fragments (the K>=2 / MMA_ITERS_M>=2 bug).
   (void)D; // helper is always in-place (C == D)
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-               "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
-               : "r"(A[0]),
-                 "r"(A[1]),
-                 "r"(A[2]),
-                 "r"(A[3]),
-                 "r"(B[0]),
-                 "r"(B[1]));
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+      : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
+      : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]));
 
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-               "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+f"(C[4]), "+f"(C[5]), "+f"(C[6]), "+f"(C[7])
-               : "r"(A[0]),
-                 "r"(A[1]),
-                 "r"(A[2]),
-                 "r"(A[3]),
-                 "r"(B[2]),
-                 "r"(B[3]));
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+      : "+f"(C[4]), "+f"(C[5]), "+f"(C[6]), "+f"(C[7])
+      : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[2]), "r"(B[3]));
 }
 } // namespace kernel
