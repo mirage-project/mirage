@@ -1,3 +1,17 @@
+/* Copyright 2026 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
 
 #include "mirage/persistent_kernel/mpk_atoms.cuh"
@@ -279,9 +293,9 @@ static constexpr int NUM_THREADS = NUM_WARPS * 32;
 // 8 warps = 2 warpgroups: WG0 = warps 0-3 (consumers), WG1 = warps 4-7
 // (loader/launcher/storer/controller). setmaxnreg.sync.aligned operates at
 // warpgroup granularity, so the inc/dec must be issued by every warp of a
-// warpgroup uniformly, at the top of its branch (setmaxnreg_findings.md).
-// MPK_SETMAXNREG=0 disables (byte-identical to baseline). Values: multiples
-// of 8, consumer >= launch baseline (inc), helper <= baseline (dec).
+// warpgroup uniformly, at the top of its branch.
+// MPK_SETMAXNREG=0 turns it off. Values: multiples of 8, consumer >= launch
+// baseline (inc), helper <= baseline (dec).
 #ifndef MPK_SETMAXNREG
 #define MPK_SETMAXNREG 0
 #endif
@@ -341,7 +355,7 @@ static constexpr int MAX_DYNAMIC_SEMAPHORES = 32;
 //   so they enter the compute body in lockstep with the dep being cleared.
 //   SEM_OP_BASE..MAX_DYNAMIC_SEMAPHORES-1 — op-private slots. Any task
 //   type that needs intra-task cross-warp coordination (e.g. linear's
-//   per-stage TMA→MMA→epilogue handshakes after Phase 3) uses these.
+//   per-stage TMA→MMA→epilogue handshakes) uses these.
 static constexpr int SEM_DEP_READY = 0;
 static constexpr int SEM_OP_BASE   = 1;
 
@@ -368,9 +382,8 @@ __device__ __forceinline__ void mbar_init(uint64_t *mbar, int count) {
 }
 
 __device__ __forceinline__ void mbar_arrive(uint64_t *mbar) {
-  // NOTE: plain mbarrier.arrive defaults to .release.cta (verified: ptxas emits
-  // byte-identical SASS for the explicit .release form on sm_100a/CUDA 12.8),
-  // so role warps' .acquire waits already synchronize-with this arrive.
+  // plain mbarrier.arrive defaults to .release.cta, so role warps' .acquire
+  // waits already synchronize-with this arrive.
   asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
                :: "r"(smem_addr(mbar)) : "memory");
 }
@@ -458,7 +471,7 @@ __device__ __forceinline__ void runtime_finish_page(
   }
 }
 
-// Phase 3.5: returns true if `physical_page` falls inside any of the task's
+// Returns true if `physical_page` falls inside any of the task's
 // declared SMEM regions. Used by the codegen-emitted loader prefix to decide
 // which pages to "claim+release ASAP" vs which to leave for the consumer/last
 // user to release after they're done with the data.
@@ -557,7 +570,7 @@ __device__ __noinline__ void wait_task_dependency_noinline(
   wait_task_dependency(config, task, iter_num);
 }
 
-// Phase 2 consumer-side dep-wait prefix, run by every task's consumer body
+// Consumer-side dep-wait prefix, run by every task's consumer body
 // (and by linear's loader/launcher bodies too, since they share the body
 // string). Single-thread spin + per-slot SEM_DEP_READY mbarrier sync.
 //   - thread 0 globally spins on the cross-SM event counter, then arrives
@@ -848,9 +861,9 @@ __device__ __noinline__ void controller_warp_loop(
     __syncwarp();
   };
 
-  // Phase 2: cross-SM dependency wait moved out of the controller. Each
-  // task's consumer prefix now calls wait_task_dependency_noinline before
-  // running its body. Controller becomes pure fetch+publish; only
+  // The cross-SM dependency wait lives in each task's consumer prefix, which
+  // calls wait_task_dependency_noinline before running its body, so the
+  // controller stays pure fetch+publish; only
   // wait_slot_finished_eager (above) is kept, both for slot reuse
   // and for promptly publishing intra-stream producer events that the
   // consumer's spin needs to terminate.
@@ -937,13 +950,10 @@ __device__ __noinline__ void controller_warp_loop(
         ::kernel::cp_async_fence();
         ::kernel::cp_async_wait<0>();
         // The TaskDesc was copied via cp.async; role warps read it with normal
-        // loads after the INSTRUCTION_ARRIVED mbar. Publish the cp.async
-        // writes to the generic proxy before the arrive (v1 got this implicitly
-        // from its __syncthreads after cp_async_wait; v2's warp-specialized
-        // handshake does not). Defensive hardening: isolation testing of the
-        // 2026-05 page-parity hang showed this fence ALONE does not fix it
-        // (the launcher __syncwarp in linear_v2 does), but the proxy-ordering
-        // gap is real per the PTX memory model, so it stays.
+        // loads after the INSTRUCTION_ARRIVED mbar. Publish those async writes to
+        // the generic proxy before the arrive. v1 got this implicitly from the
+        // __syncthreads after cp_async_wait; v2's warp-specialized handshake
+        // doesn't, and the PTX memory model requires the fence here.
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
       }
       __syncwarp();
@@ -951,14 +961,14 @@ __device__ __noinline__ void controller_warp_loop(
       // Op-declared per-instruction semaphore initialization. The body is
       // emitted by codegen and runs single-threaded (lane 0) once per
       // published instruction, before role warps wake. Empty for ops that
-      // don't declare any dynamic semaphores; Phase 3+ will populate it.
+      // don't declare any dynamic semaphores.
       //
       // ALSO: BEGIN_TASK_GRAPH skips the role-warp consumer body entirely
       // (the role-warp-loop macro early-returns from execute_task), so its
       // slot's SEM_DEP_READY would never be arrived. To keep the
       // ring_phase parity in sync for the next task at this slot,
-      // controller arrives SEM_DEP_READY here on its behalf. Phase 3.5:
-      // the per-page parity needs the same protection — every task in the
+      // controller arrives SEM_DEP_READY here on its behalf. The per-page
+      // parity needs the same protection — every task in the
       // pipeline must arrive each page exactly once, otherwise consecutive
       // tasks deadlock on page_finished. Controller arrives all pages on
       // BEGIN_TASK_GRAPH's behalf.
@@ -983,9 +993,9 @@ __device__ __noinline__ void controller_warp_loop(
       // via wait_slot_finished_eager(sequence - INSTRUCTION_RING_SIZE)
       // above. That introduces up to RING-1 instructions of latency for
       // intra-stream consumer-producer chains; in Qwen3 these are rare
-      // because the worker queues round-robin tasks across SMs. If
-      // measurement shows this is hot, Phase 4 can move event triggering
-      // into the storer warp and cut this latency.
+      // because the worker queues round-robin tasks across SMs. If this turns
+      // out hot, event triggering could move into the storer warp to cut the
+      // latency.
       if (lane_id == 0) {
         // Do not release role warps until the copied TaskDesc is visible in
         // shared memory. The block fence must happen before mbar_arrive

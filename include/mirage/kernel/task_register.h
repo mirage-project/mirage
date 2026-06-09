@@ -50,7 +50,7 @@ struct TaskRoleVariantCode {
   std::string consumer;
   std::string storer;
 
-  // Phase 3.5: page-lifecycle hooks. Defaults wire every task into the
+  // Page-lifecycle hooks. Defaults wire every task into the
   // generic page protocol (every task arrives every page exactly once).
   //   - auto_loader_page_lifecycle: codegen prepends every loader body
   //     with a lane-parallel "wait every page; for pages this task does

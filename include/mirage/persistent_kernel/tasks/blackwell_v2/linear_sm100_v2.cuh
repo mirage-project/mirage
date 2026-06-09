@@ -1,34 +1,38 @@
 /* Copyright 2026 CMU
  *
- * Licensed under the Apache License, Version 2.0 (the "License").
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-// MPK v2 — linear (Qwen3 decode), Channel-based.
+// v2 linear for Qwen3 decode, built on the Channel primitives in channel.cuh.
 //
-// Design: synchronization and storage are separate primitives (channel.cuh).
-//   * Channel  — mbarriers only (full/empty). Producer/Consumer cursors own
-//     the stage index, the single source that keeps the four role functions
-//     in sync. Carries no storage.
-//   * SmemRing — per-stage SMEM offsets (+ optional page IDs for Phase-E
-//     cross-task page release). A role indexes it at the cursor's stage:
-//     `Wr.slot_addr(pW.st)`.
-// Shape, SMEM/SEM ordinals, and PTX wrappers all come from the shared
-// `kernel::linear` namespace (linear_spec.h + linear_device.cuh) — one source
-// of truth, no dependency on linear_v2.
+// Synchronization and storage are separate:
+//   Channel  - mbarriers only (full/empty edges). Its producer/consumer cursors
+//              own the stage index, which keeps the four role functions in step.
+//   SmemRing - per-stage SMEM offsets, and optionally the page ids for
+//              cross-task page release.
+// Shapes, SMEM/SEM ordinals, and PTX wrappers all live in kernel::linear
+// (linear_spec.h + linear_device.cuh).
 //
 // W and A share one empty edge (mma_mbar): the launcher's single tcgen05.commit
-// per K-iter frees both. So both channels point `empty` at mma_mbar; only pW
-// waits it (once/iter), pA just tracks the cursor; on release cW.release_mma
-// emits the commit and cA.advance() keeps A's cursor in lockstep.
+// per K-iteration frees both, so only the W cursor waits on it and A just tracks
+// the stage alongside it.
 //
-// Correctness: each role re-inits its async edges at task start (loader:
-// mma/W_tma/A_tma; launcher: mainloop/epilogue/consumer_done) to clear stray
-// arrivals left on a reused ring slot by a prior occupant. This — not a
-// task-end drain — is what prevents the cross-task stale-arrival deadlock.
+// Each role re-inits its async edges at the start of a task to drop stray
+// arrivals left on a reused ring slot by the previous occupant. Without that the
+// kernel deadlocks once slots are recycled across tasks.
 //
-// USAGE: tiles_per_task must be 1. tpt>1 produces a partial last task
-// (num_tiles % tpt != 0) whose barrier accounting differs from full tasks and
-// deadlocks on slot reuse; it's also slower (worse SM occupancy).
+// tiles_per_task must be 1: a partial last task (num_tiles % tpt != 0) has
+// different barrier accounting and deadlocks on slot reuse.
 
 #pragma once
 
@@ -43,8 +47,7 @@
 namespace kernel {
 namespace linear_v2 {
 
-// ── Single source of truth: kernel::linear (linear_spec.h + linear_device.cuh).
-// Constants, SMEM/SEM ordinals, and PTX wrappers all come from kernel::linear.
+// Constants, SMEM/SEM ordinals, and PTX wrappers come from kernel::linear.
 using ::kernel::linear::WARP_SIZE;
 using ::kernel::linear::BLOCK_M;
 using ::kernel::linear::BLOCK_N;
@@ -79,35 +82,23 @@ using ::kernel::linear::L2_EVICT_NORMAL;
 
 using mpk::ch::By;
 
-// ── Channel + ring type aliases (original design: sync ≠ storage) ───────────
-// Channels carry ONLY mbarriers:
-//   WChan/AChan: full = per-stream TMA-arrived; empty = SHARED mma_mbar.
-//   AccChan: TMEM-backed, SLOTS=2 — DOUBLE-BUFFERED. mainloop_stage cycles %2,
-//            alternating TMEM columns taddr+0 / taddr+BLOCK_N so tile t+1's MMA
-//            overlaps the consumer's read of tile t. mainloop_mbar/epilogue_mbar
-//            each have 2 slots (controller init + launcher re-init touch both).
-//            cols_per_slot=BLOCK_N → 2*16=32 cols = the alloc.
-// SmemRings carry storage (per-stage SMEM offsets). PAGES_PER_SLOT=0 for now:
-//   page release stays a task-end blanket (byte-identical to v2). Flip to the
-//   real page counts + call ring.release_pages() in the consumer to enable
-//   Phase-E per-stage cross-task overlap.
+// Channels carry only mbarriers:
+//   WChan/AChan: full = TMA-arrived for that stage; empty = the shared mma_mbar.
+//   AccChan: TMEM-backed and double-buffered (2 slots). mainloop_stage cycles
+//            mod 2, alternating TMEM columns taddr+0 / taddr+BLOCK_N so tile
+//            t+1's MMA overlaps the consumer reading tile t.
 using WChan   = mpk::ch::Channel    <NUM_STAGES, By::Tma, By::Mma>;
 using AChan   = mpk::ch::Channel    <NUM_STAGES, By::Tma, By::Mma>;
 using AccChan = mpk::ch::TmemChannel<2,          By::Mma, By::Warp>;
 
-// W stage = W_SIZE/PAGE = 2 dedicated contiguous pages. When CROSS_TASK_PAGES
-// is on, the W ring owns the per-stage cross-task page lifecycle (loader
-// acquires / launcher releases page-by-page, so task N+1's loader TMAs into
-// pages task N frees while N still computes its later stages). A stages are
-// sub-page and packed (multiple A regions per physical page), so per-stage page
-// control is unsafe for A — ARing stays 0 (its pages ride the task-end blanket).
+// A W stage is 2 dedicated contiguous pages. With CROSS_TASK_PAGES on, the W
+// ring runs the per-stage page lifecycle (loader acquires, launcher releases
+// page by page) so the next task's loader can TMA into pages this task has
+// already finished with. A stages are sub-page and packed, so per-stage page
+// control isn't safe for them: the A ring carries no pages, and A's pages (plus
+// scratch, which shares one) are freed in a parallel end-of-task sweep over the
+// pages no ring owns. PAGES_PER_SLOT=0 compiles the page methods away.
 using ::kernel::linear::CROSS_TASK_PAGES;
-// W owns its 2 dedicated pages/stage and runs the cross-task page lifecycle
-// (release per stage for overlap, acquire on first touch). A is storage-only:
-// its pages — and scratch's, which shares one — are freed at task end by a
-// PARALLEL sweep over the pages NO ring owns (each lane its own page). That
-// keeps the frees parallel (not serialized on one lane) and needs no per-task
-// counter. PAGES_PER_SLOT=0 when cross-task is off → the page methods vanish.
 using WRing = mpk::ch::SmemRing<NUM_STAGES, CROSS_TASK_PAGES ? 2 : 0>;
 using ARing = mpk::ch::SmemRing<NUM_STAGES>;
 
@@ -116,9 +107,8 @@ __device__ __forceinline__ void
 make_wa(int smem, int dyn_sem_base,
         mirage::runtime::TaskDesc const *task_desc,
         WChan &Wc, AChan &Ac, WRing &Wr, ARing &Ar) {
-  // Phase 3: edge wiring synthesized from CHANNELS (constexpr-folded; the
-  // static_asserts in linear_spec.h guarantee these equal the old SEM_*_BASE
-  // literals, so this is byte-identical to the hardcoded version).
+  // Edge wiring is read from CHANNELS (constexpr-folded). The static_asserts in
+  // linear_spec.h pin these to the SEM_*_BASE ordinals.
   constexpr int w_full  = CHANNELS[CH_W].full_sem_base;
   constexpr int w_empty = CHANNELS[CH_W].empty_sem_base;
   constexpr int a_full  = CHANNELS[CH_A].full_sem_base;
@@ -309,7 +299,7 @@ __device__ __noinline__ void linear_loader_task(
   WChan Wc; AChan Ac; WRing Wr; ARing Ar;
   make_wa(smem, dyn_sem_base, task_desc, Wc, Ac, Wr, Ar);
 
-  // Loader re-init from CHANNELS reinit_*_by policy (table-driven, Phase 2b).
+  // Re-init the loader's async edges per each channel's reinit_*_by policy.
   ::kernel::linear::reinit_for_role(::kernel::linear::Role::Loader, dyn_sem_base);
 
   mpk::ch::Producer<WChan> pW{Wc};
@@ -372,9 +362,9 @@ __device__ __noinline__ void linear_loader_task(
       pA.commit_tma();
     }
   }
-  // No end-of-loader drain: blocking on the launcher's final mma_mbar (the
-  // shared W/A empty edge) at task end deadlocks against cross-task slot reuse.
-  // Stale arrivals are handled by the start-of-task re-init instead.
+  // The loader doesn't wait out its in-flight TMAs at task end: blocking on the
+  // final mma_mbar there would deadlock against the next task reusing the slot.
+  // Stale arrivals are cleared by the start-of-task re-init instead.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -400,7 +390,7 @@ __device__ __noinline__ void linear_launcher_task(
 
   MPK_V2_PROF_SNAPSHOT()
 
-  // Launcher re-init from CHANNELS/ONESHOT reinit_*_by policy (table-driven, Phase 2b).
+  // Re-init the launcher's async edges per the CHANNELS/ONESHOT reinit policy.
   if (lane_id == 0) {
     ::kernel::linear::reinit_for_role(::kernel::linear::Role::Launcher,
                                       dyn_sem_base);

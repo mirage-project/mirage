@@ -1,29 +1,38 @@
 /* Copyright 2026 CMU
  *
- * Licensed under the Apache License, Version 2.0 (the "License").
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-// MPK v3 — typed producer/consumer rings between warps. Synchronization and
-// storage are SEPARATE primitives that compose:
+// Typed producer/consumer rings between warps. Synchronization and storage are
+// separate primitives that compose:
 //
-//   * Channel     — SYNC ONLY. DEPTH stages of full[]/empty[] mbarriers.
-//   * SmemRing    — STORAGE. Per-stage SMEM offsets (+ optional page IDs and
-//                   per-stage page release for Phase-E cross-task overlap).
-//   * TmemChannel — TMEM-backed accumulator: storage is trivially linear in
-//                   stage (taddr + st*cols), so it keeps addressing inline
-//                   rather than needing a separate ring.
+//   Channel     - sync only: DEPTH stages of full[]/empty[] mbarriers.
+//   SmemRing    - storage: per-stage SMEM offsets, and optionally page ids and
+//                 per-stage page release for cross-task overlap.
+//   TmemChannel - TMEM-backed accumulator. Its storage is linear in the stage
+//                 (taddr + st*cols), so it keeps addressing inline instead of
+//                 pairing with a ring.
 //
-// The producer/consumer cursors (Producer/Consumer/Tmem*) hold the per-warp
-// stage+phase+commit count. The cursor is the SINGLE owner of the stage index
-// `st` — that's what keeps the four role functions from desyncing (the class
-// of bug behind the stale-arrival hang). A Channel cursor carries no storage; the
-// role gets the SMEM address from the paired SmemRing: `ring.slot_addr(c.st)`.
+// The producer/consumer cursors hold the per-warp stage, phase, and commit
+// count. The cursor is the sole owner of the stage index `st`, which is what
+// keeps the four role functions in step. A Channel cursor carries no storage;
+// the role gets the SMEM address from the paired ring: ring.slot_addr(c.st).
 //
-//   * each side is tagged sync (By::Warp) or async (By::Tma / By::Mma). The
-//     async tag documents who arrives the barrier.
-//   * Producer::drain() — optional utility that waits any outstanding async
-//     empty arrivals before teardown. Not used by linear (which clears stale
-//     arrivals with a start-of-task re-init); kept for channels that need it.
+//   - Each side is tagged sync (By::Warp) or async (By::Tma / By::Mma); the tag
+//     records who arrives the barrier.
+//   - Producer::drain() waits out any outstanding async empty arrivals before
+//     teardown. linear doesn't use it (it re-inits at task start instead); it's
+//     here for channels that do.
 //
 // mbarriers are addressed as SMEM byte addresses (int), stride 8, exactly like
 // the existing v2 dynamic_semaphores convention (dyn_sem_base + ordinal*8).
@@ -163,7 +172,7 @@ struct Producer {
 
 // ---- Consumer cursor (held by the warp(s) that drain the channel) ----------
 // Like Producer: owns `st`, carries no storage. Role gets the SMEM read
-// address via ring.slot_addr(c.st), and frees the stage's pages (Phase E)
+// address via ring.slot_addr(c.st), and frees the stage's pages
 // via ring.release_pages(c.st, rt) at the release point.
 template <class Ch>
 struct Consumer {

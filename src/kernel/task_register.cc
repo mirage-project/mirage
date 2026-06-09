@@ -47,7 +47,7 @@ namespace {
 //
 // Per-slot SEM_DEP_READY is initialized once at kernel start in
 // worker_v2_kernel; ring_phase parity tracks slot reuse. Works because
-// EVERY v2 task type runs this prefix (Phase 2.5 propagation).
+// EVERY v2 task type runs this prefix.
 inline void emit_dep_wait_consumer_prefix(
     mirage::transpiler::CodeKeeper &code) {
   code.e("consumer_dep_prefix(runtime_config, task_desc, runtime_smem, "
@@ -1886,7 +1886,7 @@ int TaskRegister::register_linear_sm100_v2_task(
                   : "nullptr";
   // Drop the SPLIT_K=1 restriction (workspace arg).
 
-  // Phase 2a: structural init synthesized from the CHANNELS table. op_sem_base_addr
+  // Structural init synthesized from the CHANNELS table. op_sem_base_addr
   // returns the shared int addr of this slot's SEM_OP_BASE (ordinal k at +k*8) —
   // exactly the dyn_sem_base linear_init() expects. Byte-identical mbar set to the
   // old inlined loops (verified against CHANNELS/ONESHOT_SEMS counts).
@@ -3816,7 +3816,7 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
   emit_dep_wait_consumer_prefix(consumer_code);
   emit_rmsnorm_consumer_body(consumer_code);
   int variant = register_task_variant(TASK_RMS_NORM_HOPPER_V2, code.to_string());
-  // Phase 2: only consumer needs the dep-wait (other roles are no-ops).
+  // Only the consumer needs the dep-wait (other roles are no-ops).
   // Drop the empty role bodies — they were calling empty `run` methods.
   register_v2_task_role_variant(
       TASK_RMS_NORM_HOPPER_V2,
@@ -4065,7 +4065,7 @@ int TaskRegister::register_argmax_partial_sm100_v2_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   emit_argmax_partial_body(code);
-  // Phase 2 pilot: argmax_partial does the cross-SM dep wait in its
+  // argmax_partial does the cross-SM dep wait in its
   // consumer prefix via SEM_DEP_READY (init-once + ring_phase parity, same
   // pattern as instruction_arrived). Controller's satisfy_task_dependency
   // is still active in parallel; output is unchanged but the consumer-side

@@ -43,7 +43,7 @@ std::string const &role_body(rt::TaskRoleVariantCode const &code,
   return code.consumer;
 }
 
-// Phase 3.5: page-lifecycle prefix at start of every loader body
+// Page-lifecycle prefix at the start of every loader body
 // (MegaKernels NoOp/matvec pattern, lane-parallel). For each physical page:
 //   - lane K waits for the previous task's release of page K
 //   - if THIS task does not use page K, lane K arrives page K right away
@@ -80,7 +80,7 @@ char const *kLoaderPagePrefix =
     "#endif\n"
     "}\n";
 
-// Phase 3.5: page-lifecycle suffix at the end of every consumer body.
+// Page-lifecycle suffix at the end of every consumer body.
 // Releases the pages this task uses (the ones the loader prefix did NOT
 // release). Tasks that do their own release (e.g. linear's launcher
 // blanket) opt out via auto_consumer_finish=false.
@@ -125,7 +125,7 @@ bool has_role_body(std::vector<rt::TaskRoleVariantCode> const &variants,
     if (!role_body(variant, role).empty()) {
       return true;
     }
-    // Phase 3.5: even an empty user body means we will emit a synthetic
+    // Even an empty user body means we emit a synthetic
     // loader (just the page-lifecycle prefix) for any task that opted in.
     if (role == V2Role::Loader && variant.auto_loader_page_lifecycle) {
       return true;
@@ -151,7 +151,7 @@ void emit_role_cases(
          variant_id++) {
       rt::TaskRoleVariantCode const &variant = task.second[variant_id];
       std::string const &body = role_body(variant, role);
-      // Phase 3.5: the loader case may need to emit a body even when the
+      // The loader case may need to emit a body even when the
       // user-provided body is empty, to carry the auto page-lifecycle
       // prefix. Other roles only emit if they have user content (or, for
       // consumer, if they have user content; the auto suffix piggybacks

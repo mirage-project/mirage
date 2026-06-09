@@ -1,19 +1,24 @@
 /* Copyright 2026 CMU
  *
- * Licensed under the Apache License, Version 2.0 (the "License").
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-// MPK linear task — THE SHAPE SPEC (single source of truth).
-//
-// This is the one place the linear task's shape lives: tile constants, SMEM
-// region ordinals, op-private semaphore ordinals, the host-safe MMA descriptor
-// constants, and the planner feed (make_smem_info). It is HOST-INCLUDABLE
-// (no __device__ PTX) so task_register.cc can call make_smem_info(), and it is
-// included by the device side (linear_device.cuh / linear_sm100_v2.cuh) so the
-// device code uses the SAME constants — never a second copy.
-//
-// Values are copied verbatim from the validated linear_sm100_v2 path; this header
-// is now the authority. Do not re-declare any of these in the .cuh.
+// The linear task's shape spec: tile constants, SMEM region ordinals,
+// op-private semaphore ordinals, host-safe MMA descriptor constants, and the
+// planner feed (make_smem_info). It is host-includable (no __device__ PTX) so
+// task_register.cc can call make_smem_info(), and the device side
+// (linear_device.cuh / linear_sm100_v2.cuh) includes it too, so host and device
+// share one set of constants. Declare these here, not in the .cuh.
 
 #pragma once
 
