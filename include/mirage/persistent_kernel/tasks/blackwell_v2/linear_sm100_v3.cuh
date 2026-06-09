@@ -5,57 +5,30 @@
 
 // MPK v3 — linear (Qwen3 decode), Channel-based.
 //
-// Constants, SMEM region ordinals, SEM ordinals, and PTX wrappers all come
-// from the shared `kernel::linear` namespace (linear_spec.h + linear_device.cuh)
-// — the single source of truth. This file has NO dependency on linear_v2.
-//
-// Operational-sequence invariants (kept so behavior is well-defined and was
-// validated byte-for-byte against the original v2 baseline during bring-up):
-//     * SMEM layout: REGION_W_0..5 / REGION_A_0..5 / REGION_SCRATCH from
-//       kernel::linear (linear_spec.h).
-//     * Semaphore ordinals: SEM_W_TMA_BASE / SEM_A_TMA_BASE / SEM_MMA_BASE /
-//       SEM_MAINLOOP_BASE / SEM_EPILOGUE_BASE / SEM_TMEM_READY /
-//       SEM_CONSUMER_DONE from kernel::linear. mma_mbar is a single SHARED
-//       empty edge for W and A (not split).
-//     * PTX wrappers (tma_3d_load_l2, tcgen05_mma/commit, mbarrier_wait/
-//       arrive/expect_tx) from kernel::linear (linear_device.cuh).
-//     * mbar order: cp.async.bulk first, then expect_tx.
-//     * LOAD-BEARING re-init at task start (mma/W_tma/A_tma in loader;
-//       mainloop/epilogue/consumer_done in launcher) clears stray async
-//       arrivals on reused ring slots. The end-of-loader drain was tried and
-//       REMOVED 2026-05-30 (it caused an intermittent cross-op hang).
-//
-// What Channel buys here:
-//   * Typed barrier addressing — pW.full_mbar() vs W_tma_mbar_base + s*8.
-//   * Centralized phase tracking inside cursors — pW.ph (mma_phase, init 1,
-//     flip on stage wrap); cW.ph (tma_phase, init 0); pAcc.ph (epilogue_phase,
-//     init 1); cAcc.ph (mainloop_phase, init 0).
-//
-// Design (original "sync ≠ storage" split):
-//   * Channel  = mbarriers only (full/empty).  Cursors (Producer/Consumer)
-//     own the stage index `st` — the single source that keeps the four role
-//     functions from desyncing. Cursors carry NO storage.
-//   * SmemRing = per-stage SMEM offsets (+ optional page IDs for Phase-E
-//     per-stage page release). The role indexes it with the cursor's stage:
+// Design: synchronization and storage are separate primitives (channel.cuh).
+//   * Channel  — mbarriers only (full/empty). Producer/Consumer cursors own
+//     the stage index, the single source that keeps the four role functions
+//     in sync. Carries no storage.
+//   * SmemRing — per-stage SMEM offsets (+ optional page IDs for Phase-E
+//     cross-task page release). A role indexes it at the cursor's stage:
 //     `Wr.slot_addr(pW.st)`.
+// Shape, SMEM/SEM ordinals, and PTX wrappers all come from the shared
+// `kernel::linear` namespace (linear_spec.h + linear_device.cuh) — one source
+// of truth, no dependency on linear_v2.
 //
-// What we hand-manage (doesn't fit a clean 1 Channel : 1 ring):
-//   * W and A SHARE one empty edge (v2's mma_mbar). The launcher emits ONE
-//     tcgen05.commit per K-iter that frees both. We model that by giving both
-//     W and A channels the same `empty` mbar; only pW calls wait_free (one
-//     wait/iter); A's storage addr comes from Ar.slot_addr(pA.st); pA advances
-//     via commit_tma. Launcher: cW.release_mma emits the single commit;
-//     cA.advance() (release-less) keeps the A cursor in lockstep.
+// W and A share one empty edge (mma_mbar): the launcher's single tcgen05.commit
+// per K-iter frees both. So both channels point `empty` at mma_mbar; only pW
+// waits it (once/iter), pA just tracks the cursor; on release cW.release_mma
+// emits the commit and cA.advance() keeps A's cursor in lockstep.
 //
-// This file is now behaviorally v2-equivalent (re-inits + same op sequence),
-// expressed via the Channel/SmemRing abstraction. No drain. Page release is a
-// task-end blanket (byte-identical to v2); SmemRing's PAGES_PER_SLOT=0 keeps
-// release_pages() a no-op. Phase E flips that on.
+// Correctness: each role re-inits its async edges at task start (loader:
+// mma/W_tma/A_tma; launcher: mainloop/epilogue/consumer_done) to clear stray
+// arrivals left on a reused ring slot by a prior occupant. This — not a
+// task-end drain — is what prevents the cross-task stale-arrival deadlock.
 //
-// USAGE: call with tiles_per_task=1. tiles_per_task>1 is a latent bug —
-// partial-tile tasks (num_tiles % tpt != 0) leave inconsistent barrier state
-// that deadlocks on cross-op slot reuse (the 2026-05-30 lm_head hang). tpt=1
-// is also faster for decode shapes (better SM occupancy).
+// USAGE: tiles_per_task must be 1. tpt>1 produces a partial last task
+// (num_tiles % tpt != 0) whose barrier accounting differs from full tasks and
+// deadlocks on slot reuse; it's also slower (worse SM occupancy).
 
 #pragma once
 
@@ -371,16 +344,9 @@ __device__ __noinline__ void linear_loader_task(
       // Wait shared empty (mma_mbar[stage]) — one wait per iter, covers both.
       // (timed-wait on the FIRST ring lap only: that is where the cold-start
       // exposure lives; timing every K-iter measurably slowed the kernel.)
-#ifdef MPK_ENABLE_PROFILING
-      if (t * c.iters + i < NUM_STAGES) {
-        MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LOADER_PHASE, V2_PROF_MMA_EMPTY_WAIT,
-                          pW.wait_free());
-      } else {
-        pW.wait_free();
-      }
-#else
-      pW.wait_free();
-#endif
+      MPK_V2_TIMED_WAIT_IF(t * c.iters + i < NUM_STAGES,
+                           V2_PROF_GROUP_LOADER_PHASE, V2_PROF_MMA_EMPTY_WAIT,
+                           pW.wait_free());
       const int W_smem = Wr.slot_addr(pW.st);   // storage addr from the ring
 
       // W TMA — v2 order: cp.async.bulk first, expect_tx after.
@@ -402,21 +368,14 @@ __device__ __noinline__ void linear_loader_task(
                      pA.full_mbar(), L2_EVICT_LAST);
       mbarrier_arrive_expect_tx(pA.full_mbar(), A_SIZE);
 
-      // Advance both cursors in lockstep; track commit count for drain.
-      pW.commit_tma();   // advance() + ++n_commits
+      // Advance both cursors in lockstep.
+      pW.commit_tma();
       pA.commit_tma();
     }
   }
-
-  // ── NO DRAIN ─────────────────────────────────────────────────────────────
-  // The end-of-loader pW.drain() was REMOVED 2026-05-30: it caused
-  // an intermittent cross-op deadlock (the loader blocking on the launcher's
-  // final mma_mbar — the SHARED W/A empty edge — commits at task end tangles
-  // with cross-op ring-slot reuse). The load-bearing stale-arrival defense is
-  // the start-of-task re-init of mma/W_tma/A_tma (loader) + mainloop/epilogue/
-  // consumer_done (launcher), NOT the drain. Removing it: 14/14 demo runs
-  // clean (was ~1/3 hang), tokens correct, latency unchanged. The earlier
-  // belief that the drain was the structural fix was wrong; the re-inits are.
+  // No end-of-loader drain: blocking on the launcher's final mma_mbar (the
+  // shared W/A empty edge) at task end deadlocks against cross-task slot reuse.
+  // Stale arrivals are handled by the start-of-task re-init instead.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -478,32 +437,20 @@ __device__ __noinline__ void linear_launcher_task(
     for (int t = 0; t < c.tiles; t++) {
       // Wait epilogue_mbar (TMEM column free); returns column for tile t.
       // (timed-waits below: elected lane == the launcher-phase track writer.)
-#ifdef MPK_ENABLE_PROFILING
       int tmem;
-      MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LAUNCHER_PHASE, V2_PROF_EPILOGUE_WAIT,
-                        tmem = pAcc.wait_free());
-#else
-      const int tmem = pAcc.wait_free();
-#endif
+      MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_LAUNCHER_PHASE,
+                           V2_PROF_EPILOGUE_WAIT, tmem = pAcc.wait_free());
 
       for (int i = 0; i < c.iters; i++) {
-#ifdef MPK_ENABLE_PROFILING
-        // timed-wait on the first ring lap only (see loader note above).
-        // NOTE: this construct must NOT exist in unprofiled builds — an
-        // if/else with identical arms here produced an illegal memory
-        // access on sm_100a (codegen sensitivity around branch +
-        // mbarrier-wait + tcgen05; bisected 2026-06-06).
-        if (t * c.iters + i < NUM_STAGES) {
-          MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LAUNCHER_PHASE, V2_PROF_W_TMA_WAIT,
-                            (cW.wait_full(), cA.wait_full()));
-        } else {
-          cW.wait_full();
-          cA.wait_full();
-        }
-#else
-        cW.wait_full();                       // W_tma_mbar[stage]
-        cA.wait_full();                       // A_tma_mbar[stage]
-#endif
+        // Time only the W wait (representative; A shares the edge). Plain cA
+        // wait stays a separate statement so the unprofiled expansion is
+        // exactly `cW.wait_full(); cA.wait_full();` — textually identical to
+        // baseline (sm100 is sensitive to branches around tcgen05 waits;
+        // see sm100_branch_ima).
+        MPK_V2_TIMED_WAIT_IF(t * c.iters + i < NUM_STAGES,
+                             V2_PROF_GROUP_LAUNCHER_PHASE, V2_PROF_W_TMA_WAIT,
+                             cW.wait_full());   // W_tma_mbar[stage]
+        cA.wait_full();                         // A_tma_mbar[stage]
         const int W_smem = Wr.slot_addr(cW.st);
         const int A_smem = Ar.slot_addr(cA.st);
 
@@ -541,15 +488,11 @@ __device__ __noinline__ void linear_launcher_task(
     }
   }
 
-  // RECONVERGE before freeing pages. The MMA loop above runs only on the
-  // elected lane; on Volta+ independent thread scheduling the non-elected lanes
-  // are NOT reconverged at the end of the if-block, so without this __syncwarp
-  // they arrive page_finished for their pages while the elected lane's MMA is
-  // still reading W/A from those pages — the next tasks' loaders then race far
-  // ahead on the page pipeline (and can TMA into pages mid-MMA). THE verified
-  // fix for the intermittent page-parity deadlock: baseline hangs ~1/12 runs;
-  // this __syncwarp alone is 40/40 clean (the controller-side proxy fence
-  // alone was NOT sufficient — still hung).
+  // Reconverge before freeing pages. The MMA loop ran only on the elected
+  // lane; under Volta+ ITS the other lanes are not rejoined at the if-block
+  // exit, so without this they could arrive page_finished while the elected
+  // lane's MMA is still reading those pages — letting the next task's loader
+  // TMA into them mid-MMA.
   __syncwarp();
 
   // Task-end page free, PARALLEL across lanes: each lane frees its own page
@@ -564,13 +507,9 @@ __device__ __noinline__ void linear_launcher_task(
 
   // Wait consumer_done — one-shot, kept raw (matches v2).
   if (lane_id == 0) {
-#ifdef MPK_ENABLE_PROFILING
-    MPK_V2_TIMED_WAIT(V2_PROF_GROUP_LAUNCHER_PHASE,
-                      V2_PROF_CONSUMER_DONE_WAIT,
-                      mbarrier_wait(dyn_sem_base + SEM_CONSUMER_DONE * 8, 0));
-#else
-    mbarrier_wait(dyn_sem_base + SEM_CONSUMER_DONE * 8, 0);
-#endif
+    MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_LAUNCHER_PHASE,
+                         V2_PROF_CONSUMER_DONE_WAIT,
+                         mbarrier_wait(dyn_sem_base + SEM_CONSUMER_DONE * 8, 0));
   }
   __syncwarp();
 
@@ -605,17 +544,9 @@ __device__ __noinline__ void linear_consumer_task(
   // (timed-wait on thread 0 only — all four consumer warps' lane 0 wait,
   // but the consumer-phase track has a single designated writer.)
   if (lane_id == 0) {
-#ifdef MPK_ENABLE_PROFILING
-    if (threadIdx.x == 0) {
-      MPK_V2_TIMED_WAIT(V2_PROF_GROUP_CONSUMER_PHASE,
-                        V2_PROF_TMEM_READY_WAIT,
-                        mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0));
-    } else {
-      mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0);
-    }
-#else
-    mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0);
-#endif
+    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_CONSUMER_PHASE,
+                         V2_PROF_TMEM_READY_WAIT,
+                         mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0));
   }
   __syncwarp();
   const int taddr = *reinterpret_cast<int *>(
@@ -635,20 +566,15 @@ __device__ __noinline__ void linear_consumer_task(
 
     // Wait MMA done for this tile; cursor gives the TMEM column. All 128
     // threads wait; only thread 0 (the consumer-phase writer) times it.
-#ifdef MPK_ENABLE_PROFILING
-    // All 128 threads wait; thread 0 (the consumer-phase writer) times it.
     int t_col;
-    if (threadIdx.x == 0) {
-      MPK_V2_TIMED_WAIT(V2_PROF_GROUP_CONSUMER_PHASE, V2_PROF_MAINLOOP_WAIT,
-                        t_col = cAcc.wait_full());
-    } else {
-      t_col = cAcc.wait_full();
-    }
-    // RECONVERGE: the branch diverges warp 0 (Volta+ ITS does not rejoin at
-    // the merge) and tcgen05.ld.sync.aligned below needs a converged warp.
+    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_CONSUMER_PHASE,
+                         V2_PROF_MAINLOOP_WAIT, t_col = cAcc.wait_full());
+#ifdef MPK_ENABLE_PROFILING
+    // RECONVERGE: in profiling builds the thread-0 timing branch diverges
+    // warp 0 (Volta+ ITS doesn't rejoin at the merge) and the tcgen05.ld
+    // below needs a converged warp. Unprofiled builds have no branch (the
+    // macro is a bare wait), so no reconverge is needed.
     __syncwarp();
-#else
-    const int t_col = cAcc.wait_full();
 #endif
 
     tcgen05_fence_after_thread_sync();

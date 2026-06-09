@@ -211,21 +211,20 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
-#ifdef MPK_ENABLE_PROFILING
-      // v1 profiling traces exactly one decode step: force every request
-      // done after the first iteration. v2 profiling traces the LAST
-      // V2_PROF_WINDOW_ITERS steps (runtime_v2.cuh gates the events), so
-      // generation must proceed normally or every traced step runs on a
-      // frozen ~1-token batch.
-      bool const profiling_force_done = !config.v2_enabled;
-#else
-      bool const profiling_force_done = false;
-#endif
-      if (profiling_force_done ||
+      // Production completion: max sequence length, or EOS after the prompt.
+      bool request_done =
           (step + num_tokens + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
-           (step + num_tokens >= prompt_len)))
+           (step + num_tokens >= prompt_len));
+#ifdef MPK_ENABLE_PROFILING
+      // Profiling-only override: the v1 profiler traces exactly one decode
+      // step, so it forces every request done after the first iteration. The
+      // v2 profiler traces a trailing window (runtime_v2.cuh gates the events),
+      // so v2 must let generation proceed normally. No effect on normal builds.
+      request_done = request_done || !config.v2_enabled;
+#endif
+      if (request_done)
       {
         // Request is done
         config.request_ids[i] = -1;

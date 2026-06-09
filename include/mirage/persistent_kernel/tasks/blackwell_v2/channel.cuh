@@ -16,15 +16,14 @@
 // The producer/consumer cursors (Producer/Consumer/Tmem*) hold the per-warp
 // stage+phase+commit count. The cursor is the SINGLE owner of the stage index
 // `st` — that's what keeps the four role functions from desyncing (the class
-// of bug behind the 2026-05 hang). A Channel cursor carries no storage; the
+// of bug behind the stale-arrival hang). A Channel cursor carries no storage; the
 // role gets the SMEM address from the paired SmemRing: `ring.slot_addr(c.st)`.
 //
 //   * each side is tagged sync (By::Warp) or async (By::Tma / By::Mma). The
-//     async tag documents who arrives the barrier; drain() uses n_commits to
-//     wait exactly min(n_commits, depth) outstanding empty arrivals — never
-//     blocks on releases that never happened (the c.tiles < depth case).
-//   * Producer::drain() — after it returns, no async arrival is in flight on
-//     this channel's empty[] barriers. THAT is the hang fix.
+//     async tag documents who arrives the barrier.
+//   * Producer::drain() — optional utility that waits any outstanding async
+//     empty arrivals before teardown. Not used by linear (which clears stale
+//     arrivals with a start-of-task re-init); kept for channels that need it.
 //
 // mbarriers are addressed as SMEM byte addresses (int), stride 8, exactly like
 // the existing v2 dynamic_semaphores convention (dyn_sem_base + ordinal*8).
@@ -150,7 +149,7 @@ struct Producer {
   //
   // Works for both async and sync consumer releases:
   //   * cons_async: confirms async arrivals LANDED before the ring slot
-  //     recycles — this is the 2026-05 hang fix.
+  //     recycles — this is the stale-arrival hang fix.
   //   * cons_sync : ensures all consumer reads completed (e.g. TMEM dealloc
   //     is safe after this point).
   __device__ void drain() {

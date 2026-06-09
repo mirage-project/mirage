@@ -24,23 +24,3 @@
 #include "mirage/persistent_kernel/tasks/blackwell_v2/argmax_sm100.cuh"        // kernel::v2
 #include "mirage/persistent_kernel/tasks/blackwell_v2/silu_mul_v2.cuh"         // kernel::v2
 #include "mirage/persistent_kernel/tasks/blackwell_v2/embedding_v2.cuh"        // kernel::v2
-
-// Legacy wrapper kept for non-role v2 call sites during the transition. The new
-// runtime path uses generated _execute_{loader,launcher,consumer,storer}_task_v2.
-__device__ __forceinline__ void
-_execute_task(mirage::runtime::TaskDesc const *task_desc,
-              mirage::runtime::RuntimeConfig const &config);
-
-namespace mirage {
-namespace runtime_v2 {
-
-using namespace mirage::runtime;
-
-__device__ __forceinline__ void
-_execute_task_v2(TaskDesc const *task_desc,
-                 RuntimeConfig const &config) {
-    ::_execute_task(task_desc, config);
-}
-
-} // namespace runtime_v2
-} // namespace mirage

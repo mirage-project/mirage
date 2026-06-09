@@ -195,25 +195,6 @@ __device__ volatile int g_v2_prof_window = 0;
 // Time `expr` (a wait) and emit a phase slice if it exceeded the threshold.
 // Call from a SINGLE thread per (SM, group) — the designated writer of that
 // phase track.
-// Diagnostic: log each role warp's FINISHED-arrival moment for EMBEDDING
-// slots into the trigger ring (event ids 900000+warp_id) — finds which of
-// the 7 arrivals delays the slot's completion.
-#define MPK_V2_PROF_EMB_MARK(task, base)                                      \
-  if ((task)->task_type == 283 && (threadIdx.x % 32) == 0 &&                  \
-      g_v2_prof_window != 0 && g_v2_prof_buf != nullptr) {                    \
-    uint64_t *_b = static_cast<uint64_t *>(g_v2_prof_buf);                    \
-    unsigned long long const _k = atomicAdd(                                  \
-        reinterpret_cast<unsigned long long *>(&_b[V2_PROF_TRIG_CURSOR]),     \
-        1ULL);                                                                \
-    if (_k < V2_PROF_TRIG_RING_LEN) {                                         \
-      _b[V2_PROF_TRIG_BASE + _k] =                                            \
-          (v2_prof_now_ns() << 32) |                                          \
-          ((unsigned long long)((base) + threadIdx.x / 32) << 8) |            \
-          (blockIdx.x & 0xFF);                                                \
-    }                                                                         \
-  }
-#define MPK_V2_PROF_EMB_ARRIVAL(task) MPK_V2_PROF_EMB_MARK(task, 900000)
-
 #define MPK_V2_TIMED_WAIT(group, ev, expr)                                    \
   do {                                                                        \
     if (_mpk_prof_on) {                                                       \
@@ -245,40 +226,27 @@ __device__ volatile int g_v2_prof_window = 0;
     PROFILER_EVENT_END((ev), _prof_ctr);                                      \
     _prof_ctr++;                                                              \
   }
+// Conditionally-timed wait: time `expr` only when `cond` (e.g. cold-start lap),
+// else run it plain. The cond/branch exists ONLY in profiling builds; the
+// non-profiling form (below) is a bare `expr`, textually identical to baseline
+// (sm100 codegen is sensitive to if/else around tcgen05 waits — see
+// sm100_branch_ima). Keeps the production hot loop free of #ifdef blocks.
+#define MPK_V2_TIMED_WAIT_IF(cond, group, ev, expr)                           \
+  do {                                                                        \
+    if (cond) {                                                               \
+      MPK_V2_TIMED_WAIT(group, ev, expr);                                     \
+    } else {                                                                  \
+      expr;                                                                   \
+    }                                                                         \
+  } while (0)
 #else
 #define MPK_V2_PROF_DECL(grp, pred)
 #define MPK_V2_PROF_START(ev)
 #define MPK_V2_PROF_END(ev)
 #define MPK_V2_PROF_IN_WINDOW(it) (false)
 #define MPK_V2_PROF_SNAPSHOT()
+#define MPK_V2_TIMED_WAIT_IF(cond, group, ev, expr) expr
 #define MPK_V2_TIMED_WAIT(group, ev, expr) expr
-#define MPK_V2_PROF_EMB_ARRIVAL(task)
-#define MPK_V2_PROF_EMB_MARK(task, base)
-#endif
-
-// TODO #17 diagnostic: always-compilable replica of the probe code that
-// suppresses the 82us iteration-head stall (entry + dep-prefix marks for
-// embedding slots). MODE: 0=off (build textually identical to baseline),
-// 1=both sites, 2=entry only, 3=dep only. The A/B runner seds the digit and
-// compares UNPROFILED per-token latency.
-#define MPK_V2_DBG_KICK_MODE 0
-#if MPK_V2_DBG_KICK_MODE > 0
-__device__ unsigned long long g_v2_dbg_scratch[1024];
-#define MPK_V2_DBG_MARK(task)                                                 \
-  if ((task)->task_type == 283 && (threadIdx.x % 32) == 0) {                  \
-    unsigned long long const _k = atomicAdd(&g_v2_dbg_scratch[0], 1ULL);      \
-    g_v2_dbg_scratch[1 + (_k % 1023ULL)] = (unsigned long long)clock64();     \
-  }
-#endif
-#if MPK_V2_DBG_KICK_MODE == 1 || MPK_V2_DBG_KICK_MODE == 2
-#define MPK_V2_DBG_MARK_ENTRY(task) MPK_V2_DBG_MARK(task)
-#else
-#define MPK_V2_DBG_MARK_ENTRY(task)
-#endif
-#if MPK_V2_DBG_KICK_MODE == 1 || MPK_V2_DBG_KICK_MODE == 3
-#define MPK_V2_DBG_MARK_DEP(task) MPK_V2_DBG_MARK(task)
-#else
-#define MPK_V2_DBG_MARK_DEP(task)
 #endif
 
 namespace mirage {
@@ -306,6 +274,50 @@ static constexpr int CONTROLLER_WARP = 7;
 static constexpr int NUM_ROLE_WARPS = 7;
 static constexpr int NUM_WARPS = 8;
 static constexpr int NUM_THREADS = NUM_WARPS * 32;
+
+// --- setmaxnreg experiment (TODO #18 / MegaKernels register-split) ---------
+// 8 warps = 2 warpgroups: WG0 = warps 0-3 (consumers), WG1 = warps 4-7
+// (loader/launcher/storer/controller). setmaxnreg.sync.aligned operates at
+// warpgroup granularity, so the inc/dec must be issued by every warp of a
+// warpgroup uniformly, at the top of its branch (setmaxnreg_findings.md).
+// MPK_SETMAXNREG=0 disables (byte-identical to baseline). Values: multiples
+// of 8, consumer >= launch baseline (inc), helper <= baseline (dec).
+#ifndef MPK_SETMAXNREG
+#define MPK_SETMAXNREG 0
+#endif
+#ifndef MPK_CONSUMER_REGS
+#define MPK_CONSUMER_REGS 256
+#endif
+#ifndef MPK_HELPER_REGS
+#define MPK_HELPER_REGS 64
+#endif
+// MPK_CONSUMER_REGS 0 => skip the consumer inc entirely (dec-only test: helper
+// warps release registers, consumers keep the launch baseline). Otherwise the
+// launch baseline must be < the inc target, which requires raising the
+// launch_bounds thread count (MPK_LB_THREADS) to lower the per-thread baseline.
+#ifndef MPK_LB_THREADS
+#define MPK_LB_THREADS NUM_THREADS
+#endif
+// Pad the launched block with extra (idle) warps to force the kernel past the
+// register-file ceiling, so setmaxnreg becomes REQUIRED to fit (the MegaKernels
+// regime). Extra warps (warp_id >= NUM_WARPS) just dec their registers and
+// return. Default = no padding.
+#ifndef MPK_LAUNCH_WARPS
+#define MPK_LAUNCH_WARPS NUM_WARPS
+#endif
+static constexpr int MPK_LAUNCH_THREADS = MPK_LAUNCH_WARPS * 32;
+#if MPK_SETMAXNREG && MPK_CONSUMER_REGS > 0
+#define MPK_SETMAXNREG_INC(N)                                                 \
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(N))
+#else
+#define MPK_SETMAXNREG_INC(N)
+#endif
+#if MPK_SETMAXNREG
+#define MPK_SETMAXNREG_DEC(N)                                                 \
+  asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;" ::"n"(N))
+#else
+#define MPK_SETMAXNREG_DEC(N)
+#endif
 static constexpr int INSTRUCTION_RING_SIZE = 3;
 // Match Megakernel's page protocol: page availability is tracked by parity
 // semaphores keyed by the instruction index, not by runtime page ownership.
@@ -605,7 +617,6 @@ __device__ __noinline__ void consumer_dep_prefix(
   // (~300us/step at bs16 after cascade; V2_TODO.md #17 has the full
   // evidence chain).
   mbar_wait(&rt->dynamic_semaphores[slot][SEM_DEP_READY], phase);
-  MPK_V2_DBG_MARK_DEP(task_desc)
 }
 
 __device__ __forceinline__ bool task_dependency_ready(
@@ -708,7 +719,6 @@ __device__ __forceinline__ void _execute_storer_task_v2(
       }                                                                      \
       __syncwarp();                                                          \
       TaskDesc *task = rt->task_slot(slot);                                  \
-      MPK_V2_DBG_MARK_ENTRY(task)                                         \
       if (task->task_type == TASK_TERMINATE) {                               \
         return;                                                              \
       }                                                                      \
@@ -717,7 +727,6 @@ __device__ __forceinline__ void _execute_storer_task_v2(
         execute_task(task, config, rt, sequence, iter_num);                  \
         MPK_V2_PROF_END(task->task_type);                                    \
       }                                                                      \
-      MPK_V2_PROF_EMB_ARRIVAL(task)                                          \
       if (lane_id == 0) {                                                    \
         mbar_arrive(                                                         \
             &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED][slot]);    \
@@ -1057,13 +1066,24 @@ __device__ __noinline__ void controller_warp_loop(
   }
 }
 
-__global__ __launch_bounds__(NUM_THREADS, 1)
+__global__ __launch_bounds__(MPK_LAUNCH_THREADS, 1)
 void worker_v2_kernel(RuntimeConfig config) {
   __shared__ __align__(16) char rt_buf[sizeof(RuntimeSMEM)];
   RuntimeSMEM *rt = reinterpret_cast<RuntimeSMEM *>(rt_buf);
 
   int const warp_id = threadIdx.x / 32;
   int const lane_id = threadIdx.x % 32;
+
+#if defined(MPK_SETMAXNREG_EARLY) && MPK_SETMAXNREG
+  // CUTLASS convention: redistribute registers as the FIRST thing in the
+  // kernel, before any shared-memory ops or __syncthreads. Warpgroup-aligned:
+  // WG0 (consumers) inc, all other warpgroups dec.
+  if (warp_id < NUM_CONSUMER_WARPS) {
+    MPK_SETMAXNREG_INC(MPK_CONSUMER_REGS);
+  } else {
+    MPK_SETMAXNREG_DEC(MPK_HELPER_REGS);
+  }
+#endif
 
 #ifdef MPK_ENABLE_PROFILING
   if (threadIdx.x == 0) {
@@ -1091,16 +1111,39 @@ void worker_v2_kernel(RuntimeConfig config) {
   }
   __syncthreads();
 
+#if defined(MPK_MEASURE_ROLE)
+  // Diagnostic: route ALL warps through one role so worker_v2_kernel's
+  // reported register count == that single role's footprint (per-role
+  // register measurement; the dispatch is otherwise fused into one blob).
+  if (MPK_MEASURE_ROLE == 0) consumer_warp_loop(rt, config, lane_id);
+  else if (MPK_MEASURE_ROLE == 1) loader_warp_loop(rt, config, lane_id);
+  else if (MPK_MEASURE_ROLE == 2) launcher_warp_loop(rt, config, lane_id);
+  else if (MPK_MEASURE_ROLE == 3) storer_warp_loop(rt, config, lane_id);
+  else if (MPK_MEASURE_ROLE == 4) controller_warp_loop(rt, config, lane_id);
+  return;
+#endif
   if (warp_id < NUM_CONSUMER_WARPS) {
+    // WG0 (warps 0-3): all consumers. Claim registers for the task bodies.
+#ifndef MPK_SETMAXNREG_EARLY
+    MPK_SETMAXNREG_INC(MPK_CONSUMER_REGS);
+#endif
     consumer_warp_loop(rt, config, lane_id);
-  } else if (warp_id == LOADER_WARP) {
-    loader_warp_loop(rt, config, lane_id);
-  } else if (warp_id == LAUNCHER_WARP) {
-    launcher_warp_loop(rt, config, lane_id);
-  } else if (warp_id == STORER_WARP) {
-    storer_warp_loop(rt, config, lane_id);
-  } else if (warp_id == CONTROLLER_WARP) {
-    controller_warp_loop(rt, config, lane_id);
+  } else {
+    // WG1 (warps 4-7): loader/launcher/storer/controller. Release registers
+    // back to the pool BEFORE splitting into per-role branches, so the
+    // setmaxnreg.dec is warpgroup-aligned across all four helper warps.
+#ifndef MPK_SETMAXNREG_EARLY
+    MPK_SETMAXNREG_DEC(MPK_HELPER_REGS);
+#endif
+    if (warp_id == LOADER_WARP) {
+      loader_warp_loop(rt, config, lane_id);
+    } else if (warp_id == LAUNCHER_WARP) {
+      launcher_warp_loop(rt, config, lane_id);
+    } else if (warp_id == STORER_WARP) {
+      storer_warp_loop(rt, config, lane_id);
+    } else if (warp_id == CONTROLLER_WARP) {
+      controller_warp_loop(rt, config, lane_id);
+    }
   }
 }
 
@@ -1112,7 +1155,7 @@ inline void launch_worker_v2(RuntimeConfig const &config,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem);
   worker_v2_kernel<<<dim3(num_workers, 1, 1),
-                     dim3(NUM_THREADS, 1, 1),
+                     dim3(MPK_LAUNCH_THREADS, 1, 1),
                      smem,
                      stream>>>(config);
 }

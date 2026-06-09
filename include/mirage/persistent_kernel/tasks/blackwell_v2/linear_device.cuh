@@ -134,11 +134,9 @@ __device__ __forceinline__ void linear_init(int dyn_sem_base) {
 // reinit_for_role: re-init only the edges this role owns at task start (per
 // reinit_*_by / OneShotSem.reinit_by), clearing prior-slot async strays. Called
 // single-threaded by the owning role (loader's elected lane; launcher lane 0).
-// LOAD-BEARING + TIMING-SENSITIVE: this must be __forceinline__. A plain
-// `__device__ inline` lets nvcc emit it as a real call, which reorders the
-// load-bearing fence relative to the surrounding TMA/MMA issue and unmasks the
-// prior-slot async-stray race (~16% intermittent deadlock). Forcing inline makes
-// codegen match the hand-written inline form. See docs/mpk/v3_pr_review.md.
+// MUST be __forceinline__: as a real call, nvcc reorders the mbarrier-init
+// fence relative to the surrounding TMA/MMA issue, re-exposing the stale-arrival
+// race. Inlining keeps the fence ordered as written.
 #define LIN_REINIT_FULL(dyn, K, r)                                             \
   do {                                                                         \
     if (CHANNELS[K].reinit_full_by == (r)) LIN_INIT_FULL(dyn, K);              \

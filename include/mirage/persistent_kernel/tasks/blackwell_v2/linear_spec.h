@@ -171,7 +171,7 @@ struct ChannelSpec {
   bool tmem;                // storage in TMEM (not an SMEM ring)
   // Start-of-task re-init owner per edge (the role that touches the edge FIRST,
   // clearing prior-slot async strays). Role::None = no role re-init (controller
-  // init suffices). This encodes the proven 2026-05 placement, now data.
+  // init suffices). Encodes the proven re-init placement as data.
   Role reinit_full_by;
   Role reinit_empty_by;
 };
