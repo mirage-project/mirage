@@ -26,22 +26,6 @@ HARD_CODE = """
 
 extern std::string g_task_graph_json_path;
 
-// Stubs for host symbols from libnvshmem_device.a that collective_launch.cpp.o
-// references. We don't link the full device archive (it forces -rdc=true), so
-// Host-side stubs for symbols normally in libnvshmem_device.a.
-// We don't link the .a (it forces rdc=true → 255 regs on SM100a).
-// Init is done via nvshmemid_hostlib_init_attr + our callback.
-#ifdef NVSHMEM_NO_DEVICE_LIB
-// Stubs for host-side symbols from libnvshmem_device.a needed by collective_launch.cpp.o
-struct nvshmemi_device_only_state_stub { char data[1024]; };
-nvshmemi_device_only_state_stub nvshmemi_device_only_state;
-extern "C" {
-  void nvshmemi_finalize() {}
-  void _Z31nvshmemi_check_state_and_init_dv() {}
-  void* nvshmemi_get_device_state_ptrs() { return nullptr; }
-}
-#endif
-
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path;
   std::vector<void*> meta_tensors;
@@ -237,19 +221,10 @@ def get_compile_command(
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
-
-    # rdc=true is the default on every NVSHMEM build. The old Blackwell
-    # rdc=false + self-contained-allreduce workaround (hand-rolled
-    # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
-    # because rdc=true previously inflated registers 166→255 on sm_100a) is
-    # kept behind MPK_RDC_FALSE=1 as a safety escape hatch — on CUDA 13.2 +
-    # NVSHMEM 3.6.5 the register-spill issue is gone (verified 2026-04-22 at
-    # TP=2 and TP=4 across mbt∈{1,64} and MTP spec∈{0,1,3}).
-    _rdc_false = os.environ.get("MPK_RDC_FALSE", "0") == "1" and target_cc >= 100
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if (not use_nvshmem or _rdc_false) else "-rdc=true",
+        "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -260,11 +235,6 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # Uncomment to enable verbose scheduler/worker/event debug prints from
-    # persistent_kernel.cuh (all gated on MPK_ENABLE_VERBOSE). Noisy; meant for
-    # local debugging only.
-    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -301,31 +271,11 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        if _rdc_false:
-            # Blackwell MPK_RDC_FALSE=1 escape hatch: self-contained allreduce,
-            # no libnvshmem_device.a (kept for regression isolation; see the
-            # block above for when this path is needed).
-            _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
-            _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
-            os.makedirs(_host_obj_dir, exist_ok=True)
-            _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
-            if not os.path.exists(_coll_obj):
-                import subprocess as _sp
-                _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
-            nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
-                             _coll_obj,
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
-        else:
-            # Default path: standard NVSHMEM link with device library +
-            # rdc=true. Used everywhere unless MPK_RDC_FALSE=1 on Blackwell.
-            nvshmem_flags = ["-DUSE_NVSHMEM",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        nvshmem_flags = ["-DUSE_NVSHMEM",
+                         "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
+                         "-Xlinker", "--disable-new-dtags",
+                         "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                         "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -581,8 +531,17 @@ class PersistentKernel:
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
         strides = tuple([s for s in torch_tensor.stride()])
-        # Check layout: row-major or column-major (for FP8 scale tensors)
-        is_row_major = all(strides[d] == strides[d + 1] * dims[d + 1] for d in range(len(dims) - 1))
+        # Check layout: row-major (possibly with padded outer strides — supports
+        # slice views like q_nope_pe[:, :, :512] of a (mbt, H, 576) parent for
+        # the MPK_DSV3_BMM TMA-stride fuse) or column-major (FP8 scale tensors).
+        # Padded row-major: each outer stride covers AT LEAST a contiguous
+        # row at the next level (== for contig, > for slice view of a wider
+        # parent). Innermost stride must still be 1.
+        is_row_major = (
+            all(strides[d] >= strides[d + 1] * dims[d + 1]
+                for d in range(len(dims) - 1))
+            and strides[-1] == 1
+        )
         is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
         assert is_row_major or is_col_major, \
             f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
@@ -2674,10 +2633,6 @@ class PersistentKernel:
             self._save_kernel_metadata(metadata_path)
 
         import importlib.util
-
-        # Set MPK_SO_PATH so init_persistent_kernel() can load the module via
-        # cuLibraryLoadFromFile for nvshmemx_culibrary_init (NVSHMEM_NO_DEVICE_LIB mode).
-        os.environ["MPK_SO_PATH"] = so_path
 
         spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
         mod = importlib.util.module_from_spec(spec)
