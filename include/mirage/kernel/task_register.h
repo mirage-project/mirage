@@ -139,16 +139,10 @@ public:
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params,
                                  bool with_residual);
-  // v2 linear: hand-written swapAB kernel in blackwell_v2/linear_sm100_v2.cuh.
-  // Uses one TMA descriptor per op (full W & A), runtime tile_idx from
-  // task_metadata.task_offset. Requires grid_dim[0] = N / BLOCK_M(=128).
+  // v2 linear: typed Channel + TmemChannel primitives
+  // (blackwell_v2/linear_sm100_v2.cuh + channel.cuh). Each role re-inits its
+  // async edges at task start to clear stray arrivals on a reused ring slot.
   int register_linear_sm100_v2_task(threadblock::Graph const &bgraph,
-                                    std::vector<int> const &params,
-                                    bool with_residual);
-  // v3 linear: same math as v2 but driven by typed Channel + TmemChannel
-  // primitives (blackwell_v2/linear_sm100_v3.cuh + channel.cuh). Encapsulated
-  // drain replaces the v2 role-warp re-init workaround.
-  int register_linear_sm100_v3_task(threadblock::Graph const &bgraph,
                                     std::vector<int> const &params,
                                     bool with_residual);
   // v2 dispatch variants for non-linear tasks. Emit same kernel calls as the

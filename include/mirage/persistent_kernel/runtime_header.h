@@ -131,16 +131,11 @@ enum TaskType {
   TASK_SM100_TMA_START_TASK = 231,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
-  // v2 hand-written linear (blackwell_v2/linear_sm100_v2.cuh).
-  // Uses rank=3 TMA descriptors and runtime tile_idx from task_metadata.
-  // Values placed inside TASK_SM100_TMA range (231..256) so
-  // create_tma_desc_by_task fires via the range check in the generated .cu.
-  TASK_LINEAR_SM100_V2 = 246,
-  TASK_LINEAR_WITH_RESIDUAL_SM100_V2 = 247,
-  // v3 linear (blackwell_v2/linear_sm100_v3.cuh): Channel+drain primitives.
-  // Same TMA-range trigger as v2 (231..256).
-  TASK_LINEAR_SM100_V3 = 244,
-  TASK_LINEAR_WITH_RESIDUAL_SM100_V3 = 245,
+  // v2 linear (blackwell_v2/linear_sm100_v2.cuh): Channel-based primitives.
+  // Values inside the TASK_SM100_TMA range (231..256) so create_tma_desc_by_task
+  // fires via the range check in the generated .cu.
+  TASK_LINEAR_SM100_V2 = 244,
+  TASK_LINEAR_WITH_RESIDUAL_SM100_V2 = 245,
   TASK_SPLITK_LINEAR_SM100 = 251,
   TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
   TASK_LINEAR_SM100 = 253,

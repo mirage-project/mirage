@@ -9,10 +9,10 @@
 // region ordinals, op-private semaphore ordinals, the host-safe MMA descriptor
 // constants, and the planner feed (make_smem_info). It is HOST-INCLUDABLE
 // (no __device__ PTX) so task_register.cc can call make_smem_info(), and it is
-// included by the device side (linear_device.cuh / linear_sm100_v3.cuh) so the
+// included by the device side (linear_device.cuh / linear_sm100_v2.cuh) so the
 // device code uses the SAME constants — never a second copy.
 //
-// Values are copied verbatim from the retired linear_sm100_v2 path; this header
+// Values are copied verbatim from the validated linear_sm100_v2 path; this header
 // is now the authority. Do not re-declare any of these in the .cuh.
 
 #pragma once
@@ -148,7 +148,7 @@ inline ::mirage::runtime::TaskSmemInfo make_smem_info() {
 //   * linear_device.cuh linear_init()      — controller's structural mbar init
 //   * linear_device.cuh reinit_for_role()  — per-role start-of-task re-init of
 //     async edges (clears prior-slot strays; placement per reinit_*_by)
-//   * linear_sm100_v3.cuh make_wa()        — wires the Channel cursors' full/
+//   * linear_sm100_v2.cuh make_wa()        — wires the Channel cursors' full/
 //     empty addresses (incl. A sharing W's mma empty edge)
 // Future: derive cross-task page-release timing from the release edge.
 //

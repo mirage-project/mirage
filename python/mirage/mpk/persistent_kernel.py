@@ -1241,85 +1241,23 @@ class PersistentKernel:
         block_dim: tuple = (192, 1, 1),
         tiles_per_task: int = 1,
     ):
-        """v2 linear: BLOCK_M=128. With tiles_per_task=1, one tile per task.
-        With tiles_per_task>1, each task processes that many contiguous tiles
-        (reducing dispatch overhead). grid_dim derived from N/128/tiles_per_task."""
+        """v2 linear: Channel/TmemChannel-based kernel (linear_sm100_v2.cuh).
+        BLOCK_M=128. tiles_per_task=1 is one tile per task; >1 packs that many
+        contiguous tiles per task. grid_dim = ceil(N/128/tiles_per_task)."""
         assert input.num_dims == 2
         assert weight.num_dims == 2
         assert output.num_dims == 2
         N = weight.dim(0)
         assert N % 128 == 0, f"linear_layer_v2 requires N divisible by 128, got {N}"
         num_tiles = N // 128
-        # ceil(num_tiles / tiles_per_task) — last task clamps if not divisible
         num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
         grid_dim = (num_tasks, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        # No partitioning — each task sees the full weight and output
         tb_graph.new_input(input,  (-1, -1, -1), 1, True)
         tb_graph.new_input(weight, (-1, -1, -1), 1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        # params: [M_real, SPLIT_K, TILES_PER_TASK] — defaults -1, 1, 1
-        # M_real = -1 means task_register uses batch_size from bgraph
         self.kn_graph.register_task(tb_graph, "linear_sm100_v2",
-                                     [-1, 1, tiles_per_task])
-
-    def linear_layer_v3(
-        self,
-        input: DTensor,
-        weight: DTensor,
-        output: DTensor,
-        block_dim: tuple = (192, 1, 1),
-        tiles_per_task: int = 1,
-    ):
-        """v3 linear: same shape contract as linear_layer_v2 but emits the
-        Channel/TmemChannel-based kernel in linear_sm100_v3.cuh."""
-        assert input.num_dims == 2
-        assert weight.num_dims == 2
-        assert output.num_dims == 2
-        N = weight.dim(0)
-        assert N % 128 == 0, f"linear_layer_v3 requires N divisible by 128, got {N}"
-        num_tiles = N // 128
-        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
-        grid_dim = (num_tasks, 1, 1)
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input,  (-1, -1, -1), 1, True)
-        tb_graph.new_input(weight, (-1, -1, -1), 1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_sm100_v3",
-                                     [-1, 1, tiles_per_task])
-
-    def linear_with_residual_layer_v3(
-        self,
-        input: DTensor,
-        weight: DTensor,
-        residual: DTensor,
-        output: DTensor,
-        block_dim: tuple = (192, 1, 1),
-        tiles_per_task: int = 1,
-    ):
-        """v3 linear + residual: Channel/TmemChannel kernel
-        (linear_sm100_v3.cuh) with the HAS_RESIDUAL consumer path. Same shape
-        contract as linear_with_residual_layer_v2. Inputs are ordered
-        (input, weight, residual) so the consumer reads residual from
-        input_ptrs[2]; grid is sized exactly like linear_layer_v3."""
-        assert input.num_dims == 2
-        assert weight.num_dims == 2
-        assert residual.num_dims == 2
-        assert output.num_dims == 2
-        N = weight.dim(0)
-        assert N % 128 == 0, f"linear_with_residual_layer_v3 requires N divisible by 128, got {N}"
-        num_tiles = N // 128
-        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
-        grid_dim = (num_tasks, 1, 1)
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input,    (-1, -1, -1), 1, True)
-        tb_graph.new_input(weight,   (-1, -1, -1), 1, True)
-        tb_graph.new_input(residual, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output,   (-1, -1, -1), -1, True)
-        self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100_v3",
                                      [-1, 1, tiles_per_task])
 
     def linear_with_residual_layer_v2(
@@ -1329,22 +1267,29 @@ class PersistentKernel:
         residual: DTensor,
         output: DTensor,
         block_dim: tuple = (192, 1, 1),
+        tiles_per_task: int = 1,
     ):
-        """v2 linear with residual."""
+        """v2 linear + residual: Channel/TmemChannel kernel
+        (linear_sm100_v2.cuh) with the HAS_RESIDUAL consumer path. Inputs are
+        ordered (input, weight, residual) so the consumer reads residual from
+        input_ptrs[2]; grid is sized exactly like linear_layer_v2."""
         assert input.num_dims == 2
         assert weight.num_dims == 2
         assert residual.num_dims == 2
         assert output.num_dims == 2
         N = weight.dim(0)
         assert N % 128 == 0, f"linear_with_residual_layer_v2 requires N divisible by 128, got {N}"
-        grid_dim = (N // 128, 1, 1)
+        num_tiles = N // 128
+        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
+        grid_dim = (num_tasks, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input,    (-1, -1, -1), 1, True)
         tb_graph.new_input(weight,   (-1, -1, -1), 1, True)
         tb_graph.new_input(residual, (-1, -1, -1), -1, True)
         tb_graph.new_input(output,   (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100_v2", [])
+        self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100_v2",
+                                     [-1, 1, tiles_per_task])
 
     def linear_with_residual_layer(
         self,

@@ -1,159 +1,281 @@
-// Qwen3-8B decode-phase linear for v2 runtime
-// Adapted from tests/runtime_python/blackwell/linear_c.cu (CTA_GROUP=1 swapab)
+/* Copyright 2026 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License").
+ */
+
+// MPK v2 — linear (Qwen3 decode), Channel-based.
 //
-// Changes from source:
-//   - __global__ → __device__ __noinline__
-//   - blockIdx.x, gridDim.x → bid, num_bids parameters
-//   - Phase 3.4: split into role-specific functions (loader/launcher/consumer);
-//     cross-warp sync is via op-private mbarriers in dynamic_semaphores
-//     (no bar.sync), and SMEM is addressed through planner per-stage regions.
+// Design: synchronization and storage are separate primitives (channel.cuh).
+//   * Channel  — mbarriers only (full/empty). Producer/Consumer cursors own
+//     the stage index, the single source that keeps the four role functions
+//     in sync. Carries no storage.
+//   * SmemRing — per-stage SMEM offsets (+ optional page IDs for Phase-E
+//     cross-task page release). A role indexes it at the cursor's stage:
+//     `Wr.slot_addr(pW.st)`.
+// Shape, SMEM/SEM ordinals, and PTX wrappers all come from the shared
+// `kernel::linear` namespace (linear_spec.h + linear_device.cuh) — one source
+// of truth, no dependency on linear_v2.
+//
+// W and A share one empty edge (mma_mbar): the launcher's single tcgen05.commit
+// per K-iter frees both. So both channels point `empty` at mma_mbar; only pW
+// waits it (once/iter), pA just tracks the cursor; on release cW.release_mma
+// emits the commit and cA.advance() keeps A's cursor in lockstep.
+//
+// Correctness: each role re-inits its async edges at task start (loader:
+// mma/W_tma/A_tma; launcher: mainloop/epilogue/consumer_done) to clear stray
+// arrivals left on a reused ring slot by a prior occupant. This — not a
+// task-end drain — is what prevents the cross-task stale-arrival deadlock.
+//
+// USAGE: tiles_per_task must be 1. tpt>1 produces a partial last task
+// (num_tiles % tpt != 0) whose barrier accounting differs from full tasks and
+// deadlocks on slot reuse; it's also slower (worse SM occupancy).
 
 #pragma once
 
 #include <cuda.h>
 #include <cuda_bf16.h>
-#include <cuda_runtime.h>
 #include <cstdint>
 
 #include "mirage/persistent_kernel/runtime_header.h"
-#include "mirage/persistent_kernel/tasks/blackwell_v2/linear_sm100_v2_spec.h"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/channel.cuh"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/linear_device.cuh"
 
 namespace kernel {
 namespace linear_v2 {
 
+// ── Single source of truth: kernel::linear (linear_spec.h + linear_device.cuh).
+// Constants, SMEM/SEM ordinals, and PTX wrappers all come from kernel::linear.
+using ::kernel::linear::WARP_SIZE;
+using ::kernel::linear::BLOCK_M;
+using ::kernel::linear::BLOCK_N;
+using ::kernel::linear::BLOCK_K;
+using ::kernel::linear::MMA_K;
+using ::kernel::linear::NUM_STAGES;
+using ::kernel::linear::W_SIZE;
+using ::kernel::linear::A_SIZE;
+using ::kernel::linear::SEM_W_TMA_BASE;
+using ::kernel::linear::SEM_A_TMA_BASE;
+using ::kernel::linear::SEM_MMA_BASE;
+using ::kernel::linear::SEM_MAINLOOP_BASE;
+using ::kernel::linear::SEM_EPILOGUE_BASE;
+using ::kernel::linear::SEM_TMEM_READY;
+using ::kernel::linear::SEM_CONSUMER_DONE;
+using ::kernel::linear::CHANNELS;
+using ::kernel::linear::CH_W;
+using ::kernel::linear::CH_A;
+using ::kernel::linear::elect_sync;
+using ::kernel::linear::warp_uniform;
+using ::kernel::linear::mbarrier_wait;
+using ::kernel::linear::mbarrier_arrive_expect_tx;
+using ::kernel::linear::mbarrier_arrive;
+using ::kernel::linear::tcgen05_commit;
+using ::kernel::linear::tcgen05_mma;
+using ::kernel::linear::tma_3d_load_l2;
+using ::kernel::linear::SMEM_DESC;
+using ::kernel::linear::I_DESC;
+using ::kernel::linear::L2_EVICT_FIRST;
+using ::kernel::linear::L2_EVICT_LAST;
+using ::kernel::linear::L2_EVICT_NORMAL;
 
-// ── Kernel Constants ──
-constexpr int WARP_SIZE = 32;
-constexpr int BLOCK_M = 128;
-constexpr int BLOCK_N = 16;
-constexpr int BLOCK_K = 128;
-constexpr int MMA_K = 16;
-constexpr int NUM_STAGES = 6;
+using mpk::ch::By;
 
-constexpr int W_SIZE = BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);  // 32768
-constexpr int A_SIZE = BLOCK_N * BLOCK_K * sizeof(nv_bfloat16);  // 4096
+// ── Channel + ring type aliases (original design: sync ≠ storage) ───────────
+// Channels carry ONLY mbarriers:
+//   WChan/AChan: full = per-stream TMA-arrived; empty = SHARED mma_mbar.
+//   AccChan: TMEM-backed, SLOTS=2 — DOUBLE-BUFFERED. mainloop_stage cycles %2,
+//            alternating TMEM columns taddr+0 / taddr+BLOCK_N so tile t+1's MMA
+//            overlaps the consumer's read of tile t. mainloop_mbar/epilogue_mbar
+//            each have 2 slots (controller init + launcher re-init touch both).
+//            cols_per_slot=BLOCK_N → 2*16=32 cols = the alloc.
+// SmemRings carry storage (per-stage SMEM offsets). PAGES_PER_SLOT=0 for now:
+//   page release stays a task-end blanket (byte-identical to v2). Flip to the
+//   real page counts + call ring.release_pages() in the consumer to enable
+//   Phase-E per-stage cross-task overlap.
+using WChan   = mpk::ch::Channel    <NUM_STAGES, By::Tma, By::Mma>;
+using AChan   = mpk::ch::Channel    <NUM_STAGES, By::Tma, By::Mma>;
+using AccChan = mpk::ch::TmemChannel<2,          By::Mma, By::Warp>;
 
-// SMEM layout (Phase 3.2): one region per pipeline stage holding W (32 KB)
-// and A (4 KB) in separate planner regions, plus a tiny scratch region for
-// cross-role publishing of the TMEM address. Region bases are fetched at
-// runtime via task_desc->smem_region_offset(REGION_*). The 24 mbarriers
-// live in RuntimeSMEM::dynamic_semaphores at SEM_OP_BASE.. — addressed via
-// the `dyn_sem_base` arg the runtime passes in.
-//
-// Phase 4.1: tma_mbar is split into per-stage W and A mbarriers so weight
-// TMAs can complete independently of activation TMAs (which require the
-// cross-SM dependency wait).
-//
-// Per-task SEM ordinals (relative to dyn_sem_base):
-//   [+0  ..+5 ]  W_tma_mbar      (count=1,  loader→launcher, W only)
-//   [+6  ..+11]  A_tma_mbar      (count=1,  loader→launcher, A only)
-//   [+12 ..+17]  mma_mbar        (count=1,  launcher→loader, "stage K MMA done")
-//   [+18 ..+19]  mainloop_mbar   (count=1,  launcher→consumer)
-//   [+20 ..+21]  epilogue_mbar   (count=4*WARP_SIZE, consumer→launcher)
-//   [+22      ]  tmem_ready      (count=1,  launcher→consumer)
-//   [+23      ]  consumer_done   (count=4*WARP_SIZE, consumer→launcher)
-constexpr int SEM_W_TMA_BASE     = 0;
-constexpr int SEM_A_TMA_BASE     = NUM_STAGES;          // 6
-constexpr int SEM_MMA_BASE       = 2 * NUM_STAGES;      // 12
-constexpr int SEM_MAINLOOP_BASE  = 3 * NUM_STAGES;      // 18
-constexpr int SEM_EPILOGUE_BASE  = 3 * NUM_STAGES + 2;  // 20
-constexpr int SEM_TMEM_READY     = 3 * NUM_STAGES + 4;  // 22
-constexpr int SEM_CONSUMER_DONE  = 3 * NUM_STAGES + 5;  // 23
-constexpr int NUM_OP_SEMS        = 3 * NUM_STAGES + 6;  // 24
+// W stage = W_SIZE/PAGE = 2 dedicated contiguous pages. When CROSS_TASK_PAGES
+// is on, the W ring owns the per-stage cross-task page lifecycle (loader
+// acquires / launcher releases page-by-page, so task N+1's loader TMAs into
+// pages task N frees while N still computes its later stages). A stages are
+// sub-page and packed (multiple A regions per physical page), so per-stage page
+// control is unsafe for A — ARing stays 0 (its pages ride the task-end blanket).
+using ::kernel::linear::CROSS_TASK_PAGES;
+// W owns its 2 dedicated pages/stage and runs the cross-task page lifecycle
+// (release per stage for overlap, acquire on first touch). A is storage-only:
+// its pages — and scratch's, which shares one — are freed at task end by a
+// PARALLEL sweep over the pages NO ring owns (each lane its own page). That
+// keeps the frees parallel (not serialized on one lane) and needs no per-task
+// counter. PAGES_PER_SLOT=0 when cross-task is off → the page methods vanish.
+using WRing = mpk::ch::SmemRing<NUM_STAGES, CROSS_TASK_PAGES ? 2 : 0>;
+using ARing = mpk::ch::SmemRing<NUM_STAGES>;
 
-// ── Helpers ──
-template <typename T>
-__device__ inline T warp_uniform(T x) { return __shfl_sync(0xFFFFFFFF, x, 0); }
+// ── Build channels (mbars) + rings (storage) from kernel::linear addresses ──
+__device__ __forceinline__ void
+make_wa(int smem, int dyn_sem_base,
+        mirage::runtime::TaskDesc const *task_desc,
+        WChan &Wc, AChan &Ac, WRing &Wr, ARing &Ar) {
+  // Phase 3: edge wiring synthesized from CHANNELS (constexpr-folded; the
+  // static_asserts in linear_spec.h guarantee these equal the old SEM_*_BASE
+  // literals, so this is byte-identical to the hardcoded version).
+  constexpr int w_full  = CHANNELS[CH_W].full_sem_base;
+  constexpr int w_empty = CHANNELS[CH_W].empty_sem_base;
+  constexpr int a_full  = CHANNELS[CH_A].full_sem_base;
+  constexpr int a_sh    = CHANNELS[CH_A].shares_empty_with;  // 0 -> share W empty
+  Wc.full  = dyn_sem_base + w_full  * 8;
+  Wc.empty = dyn_sem_base + w_empty * 8;
+  Ac.full  = dyn_sem_base + a_full  * 8;
+  Ac.empty = (a_sh >= 0) ? Wc.empty                                  // SHARED
+                         : dyn_sem_base + CHANNELS[CH_A].empty_sem_base * 8;
 
-__device__ inline uint32_t elect_sync() {
-    uint32_t pred = 0;
-    asm volatile(
-        "{\n\t.reg .pred %%px;\n\t"
-        "elect.sync _|%%px, %1;\n\t"
-        "@%%px mov.s32 %0, 1;\n\t}"
-        : "+r"(pred) : "r"(0xFFFFFFFF));
-    return pred;
+  // Per-stage SMEM offsets. W also records its 2 physical page ids so the ring
+  // owns their cross-task lifecycle. A is storage-only.
+  for (int s = 0; s < NUM_STAGES; s++) {
+    Wr.slot_offsets[s] = smem + task_desc->smem_region_offset(
+                                  ::kernel::linear::REGION_W_0 + s);
+    Ar.slot_offsets[s] = smem + task_desc->smem_region_offset(
+                                  ::kernel::linear::REGION_A_0 + s);
+    if constexpr (CROSS_TASK_PAGES) {
+      const int w_page0 = task_desc->smem_region_page(
+                                    ::kernel::linear::REGION_W_0 + s);
+      Wr.pages[s][0] = w_page0;
+      Wr.pages[s][1] = w_page0 + 1;   // W_SIZE spans 2 contiguous pages
+    }
+  }
 }
 
-__device__ inline void mbarrier_init(int mbar_addr, int count) {
-    asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(mbar_addr), "r"(count));
+// TmemChannel stores only barrier addresses + cols_per_slot. taddr lives on
+// the cursor (set via TmemProducer::set_taddr / TmemConsumer::set_taddr after
+// the launcher's tcgen05.alloc publishes it).
+__device__ __forceinline__ AccChan
+make_acc_channel(int dyn_sem_base) {
+  return AccChan{
+      /*cols_per_slot =*/ BLOCK_N,
+      /*full          =*/ dyn_sem_base + SEM_MAINLOOP_BASE * 8,
+      /*empty         =*/ dyn_sem_base + SEM_EPILOGUE_BASE * 8,
+  };
 }
 
-__device__ inline void mbarrier_wait(int mbar_addr, int phase) {
-    asm volatile(
-        "{\n\t.reg .pred P1;\n\t"
-        "LAB_WAIT:\n\t"
-        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, 0x989680;\n\t"
-        "@P1 bra.uni DONE;\n\t"
-        "bra.uni LAB_WAIT;\n\t"
-        "DONE:\n\t}"
-        :: "r"(mbar_addr), "r"(phase));
+// ── Derived shape, computed once per role from identical inputs ────────────
+// Every role used to recompute these — easy to drift if one diverges. One
+// function, called the same way from all three roles, makes drift impossible.
+struct TaskCtx {
+  int num_spatial_tiles;   // grid_m (= N_real / BLOCK_M)
+  int num_tiles;           // num_spatial_tiles * SPLIT_K
+  int tiles;               // tiles_to_process this task (≤ TILES_PER_TASK)
+  int iters;               // iters_per_slice (= K / BLOCK_K / SPLIT_K)
+
+  __device__ bool bounds_fail(int tile_idx) const {
+    return tile_idx >= num_tiles;
+  }
+};
+
+template <int SPLIT_K, int TILES_PER_TASK>
+__device__ __forceinline__ TaskCtx
+ctx_from(int N_real, int K, int tile_idx) {
+  TaskCtx c;
+  c.num_spatial_tiles = N_real / BLOCK_M;
+  c.num_tiles         = c.num_spatial_tiles * SPLIT_K;
+  int left            = c.num_tiles - tile_idx;
+  c.tiles             = (TILES_PER_TASK < left) ? TILES_PER_TASK : left;
+  c.iters             = (K / BLOCK_K) / SPLIT_K;
+  return c;
 }
 
-__device__ inline void mbarrier_arrive_expect_tx(int mbar_addr, int size) {
-    asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
-                 :: "r"(mbar_addr), "r"(size) : "memory");
+// ── PTX wrappers (same emitted instructions as the inline forms in v2) ─────
+
+// MMA inner loop over BLOCK_K. Emits exactly the same tcgen05.mma sequence as
+// v2's hand-rolled k2/k1 nested loops. The `accumulate` flag controls only the
+// FIRST tcgen05_mma's enable_d predicate; all subsequent inner MMAs always
+// accumulate (matching v2). `i != 0` is equivalent to v2's pass-through of `i`
+// because tcgen05_mma's wrapper does `setp.ne.b32 p, %4, 0` — any nonzero value
+// produces the same predicate.
+__device__ __forceinline__ void
+mma_k_block(int tmem, int W_smem, int A_smem, bool accumulate) {
+  uint64_t a_desc = SMEM_DESC | (uint64_t)((uint32_t)W_smem >> 4);
+  uint64_t b_desc = SMEM_DESC | (uint64_t)((uint32_t)A_smem >> 4);
+
+  // First 64-byte K chunk, first MMA — enable_d picks zero-vs-accumulate.
+  tcgen05_mma(tmem, a_desc, b_desc, I_DESC, accumulate ? 1 : 0);
+
+  // Rest of the first 64-byte K chunk — always accumulate.
+  for (int k2 = 1; k2 < 64 / MMA_K; k2++) {
+    a_desc += (32 >> 4);
+    b_desc += (32 >> 4);
+    tcgen05_mma(tmem, a_desc, b_desc, I_DESC, 1);
+  }
+
+  // Remaining 64-byte K chunks.
+  for (int k1 = 1; k1 < BLOCK_K / 64; k1++) {
+    uint64_t a2 = SMEM_DESC |
+                  (uint64_t)(((uint32_t)W_smem + k1 * BLOCK_M * 128) >> 4);
+    uint64_t b2 = SMEM_DESC |
+                  (uint64_t)(((uint32_t)A_smem + k1 * BLOCK_N * 128) >> 4);
+    for (int k2 = 0; k2 < 64 / MMA_K; k2++) {
+      tcgen05_mma(tmem, a2, b2, I_DESC, 1);
+      a2 += (32 >> 4);
+      b2 += (32 >> 4);
+    }
+  }
 }
 
-__device__ inline void mbarrier_arrive(int mbar_addr) {
-    asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" :: "r"(mbar_addr) : "memory");
+// 16-register TMEM read (the giant inline asm). The `t_addr` layout is
+// `(warp_id * 32 << 16) | t_col` — caller computes this, same as v2.
+__device__ __forceinline__ void
+tcgen05_ld_16(float (&out)[16], int t_addr) {
+  asm volatile(
+      "tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+      : "=f"(out[0]),  "=f"(out[1]),  "=f"(out[2]),  "=f"(out[3]),
+        "=f"(out[4]),  "=f"(out[5]),  "=f"(out[6]),  "=f"(out[7]),
+        "=f"(out[8]),  "=f"(out[9]),  "=f"(out[10]), "=f"(out[11]),
+        "=f"(out[12]), "=f"(out[13]), "=f"(out[14]), "=f"(out[15])
+      : "r"(t_addr));
 }
 
-__device__ inline void tma_3d_load_l2(int dst, const void *tmap_ptr, int x, int y, int z, int mbar_addr, uint64_t hint) {
-    asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint "
-                 "[%0], [%1, {%2, %3, %4}], [%5], %6;"
-                 :: "r"(dst), "l"(tmap_ptr), "r"(x), "r"(y), "r"(z), "r"(mbar_addr), "l"(hint)
-                 : "memory");
+__device__ __forceinline__ void tcgen05_wait_ld() {
+  asm volatile("tcgen05.wait::ld.sync.aligned;");
 }
 
-constexpr uint64_t L2_EVICT_FIRST  = 0x12F0000000000000ULL;
-constexpr uint64_t L2_EVICT_LAST   = 0x14F0000000000000ULL;
-constexpr uint64_t L2_EVICT_NORMAL = 0x16F0000000000000ULL;
-
-__device__ inline void tcgen05_commit(int mbar_addr) {
-    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
-                 :: "r"(mbar_addr) : "memory");
+// Global stores with L1::no_allocate hint (matches v2's epilogue stores).
+__device__ __forceinline__ void
+st_bf16(nv_bfloat16 *dst, nv_bfloat16 v) {
+  asm volatile("st.global.L1::no_allocate.b16 [%0], %1;"
+               :: "l"(dst), "h"(*(uint16_t *)&v)
+               : "memory");
 }
 
-__device__ inline void tcgen05_mma(int taddr, uint64_t a_desc, uint64_t b_desc, uint32_t idesc, int enable_d) {
-    asm volatile(
-        "{\n\t.reg .pred p;\n\t"
-        "setp.ne.b32 p, %4, 0;\n\t"
-        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p;\n\t}"
-        :: "r"(taddr), "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(enable_d));
+__device__ __forceinline__ void
+st_f32(float *dst, float v) {
+  asm volatile("st.global.L1::no_allocate.b32 [%0], %1;"
+               :: "l"(dst), "f"(v)
+               : "memory");
 }
 
-__device__ inline constexpr uint64_t desc_encode(uint64_t x) { return (x & 0x3'FFFFULL) >> 4ULL; }
+// Prefetch a CUtensorMap descriptor into L1 (so the first TMA on it doesn't
+// stall on descriptor fetch). Same instruction as v2's inline asm.
+__device__ __forceinline__ void
+prefetch_tensormap(void const *tmap) {
+  asm volatile("prefetch.tensormap [%0];" :: "l"(tmap));
+}
 
-constexpr uint64_t SMEM_DESC = (desc_encode(8 * 128) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
+// Acquire fence following a batch of mbarrier.init writes. Matches v2.
+__device__ __forceinline__ void
+mbar_init_fence() {
+  asm volatile("fence.mbarrier_init.release.cluster;");
+}
 
-constexpr uint32_t I_DESC = (1U << 4U)
-                          | (1U << 7U)
-                          | (1U << 10U)
-                          | ((uint32_t)BLOCK_N >> 3U << 17U)
-                          | ((uint32_t)BLOCK_M >> 4U << 24U);
+// Per-thread fence required between thread-local register reads and tcgen05
+// operations that consume them. Same instruction v2 uses.
+__device__ __forceinline__ void
+tcgen05_fence_after_thread_sync() {
+  asm volatile("tcgen05.fence::after_thread_sync;");
+}
 
-// ── Role-Split Task Functions (Phase 3.4) ──
-// linear_task is split into three __noinline__ functions, one per role warp.
-// All three are dispatched independently by the v2 runtime; cross-role sync
-// is via the 18 op-private mbarriers in dynamic_semaphores[slot][SEM_OP_BASE..]
-// (init'd by the controller's init_semaphores body). The math is unchanged
-// from the pre-split linear_task — only the warp-branching glue went away.
-//
-// One TaskDesc = one output tile. tile_idx encodes both spatial_idx and k_slice:
-//   spatial_idx = tile_idx % num_spatial_tiles
-//   k_slice     = tile_idx / num_spatial_tiles
-//
-// NOTE: pass CUtensorMap BY POINTER so runtime dispatch can forward GMEM
-// tensormap pointers directly. cp.async.bulk.tensor requires the descriptor
-// in .const / .param / .global — not stack.
-
-// ── Loader role (warp 4) ── prefetch tensormaps + TMA loop.
-//
-// Phase 4.2 + 5b: dep wait inline before A TMAs; per-page cross-task
-// waits inline before each W and A TMA on the FIRST iter using each
-// stage. Combined with codegen page-protocol prefix (still active),
-// the per-page waits are redundant but idempotent.
+// ═══════════════════════════════════════════════════════════════════════════
+// Loader role (warp 4, elected lane only) — TMA loop + start-of-task re-init.
+// ═══════════════════════════════════════════════════════════════════════════
 template <int SPLIT_K = 1, int W_L2_HINT = 0, int TILES_PER_TASK = 1>
 __device__ __noinline__ void linear_loader_task(
     mirage::runtime::TaskDesc const *task_desc,
@@ -165,560 +287,336 @@ __device__ __noinline__ void linear_loader_task(
     int tile_idx,
     int instruction_index,
     int iter_num,
-    int dyn_sem_base
-) {
-    // 32 threads of warp 4 enter; the original kernel only ever did
-    // single-thread issuance from warp 4, so elect one and let the rest exit.
-    if (!elect_sync()) return;
+    int dyn_sem_base) {
+  if (!elect_sync()) return;
 
-    // Prefetch TMA descriptors.
-    asm volatile("prefetch.tensormap [%0];" :: "l"(W_tmap_ptr));
-    asm volatile("prefetch.tensormap [%0];" :: "l"(A_tmap_ptr));
+  prefetch_tensormap(W_tmap_ptr);
+  prefetch_tensormap(A_tmap_ptr);
 
-    extern __shared__ __align__(1024) char smem_ptr[];
-    const int smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
+  extern __shared__ __align__(1024) char smem_ptr[];
+  const int smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
 
-    const int W_tma_mbar_base = dyn_sem_base + SEM_W_TMA_BASE * 8;
-    const int A_tma_mbar_base = dyn_sem_base + SEM_A_TMA_BASE * 8;
-    const int mma_mbar_addr   = dyn_sem_base + SEM_MMA_BASE * 8;
+  // Shape — one place, used by all three roles.
+  const TaskCtx c = ctx_from<SPLIT_K, TILES_PER_TASK>(N_real, K, tile_idx);
+  if (c.bounds_fail(tile_idx)) return;
 
-    const int M_mma = N_real;
-    const int grid_m = M_mma / BLOCK_M;
-    const int num_spatial_tiles = grid_m;
-    const int total_k_iters = K / BLOCK_K;
-    const int iters_per_slice = total_k_iters / SPLIT_K;
-    const int num_tiles = num_spatial_tiles * SPLIT_K;
+  MPK_V2_PROF_SNAPSHOT()
 
-    if (tile_idx >= num_tiles) return;
+  constexpr uint64_t W_HINT =
+      (W_L2_HINT == 0) ? L2_EVICT_FIRST : L2_EVICT_NORMAL;
 
-    const int tiles_left = num_tiles - tile_idx;
-    const int tiles_to_process = (TILES_PER_TASK < tiles_left) ? TILES_PER_TASK : tiles_left;
+  // ── Channels (sync) + rings (storage) + cursors ─────────────────────────
+  WChan Wc; AChan Ac; WRing Wr; ARing Ar;
+  make_wa(smem, dyn_sem_base, task_desc, Wc, Ac, Wr, Ar);
 
-    constexpr uint64_t W_HINT = (W_L2_HINT == 0) ? L2_EVICT_FIRST : L2_EVICT_NORMAL;
+  // Loader re-init from CHANNELS reinit_*_by policy (table-driven, Phase 2b).
+  ::kernel::linear::reinit_for_role(::kernel::linear::Role::Loader, dyn_sem_base);
 
-    // Re-initialize the intra-task mma_mbar pipeline barriers HERE in the loader,
-    // after the page-wait. Root-cause fix: a stray asynchronous
-    // tcgen05.commit(mma_mbar[s]) issued by a PRIOR occupant of this ring slot
-    // can land AFTER the controller's init_semaphores re-init (the hardware
-    // commit targets the mbar address regardless of re-init), flipping the
-    // freshly-zeroed phase back to 1. That defeats this task's loader round-0
-    // pipeline-fill pass-through (mma_phase=1 expects fresh phase 0) -> the
-    // loader blocks forever at that stage -> launcher waits W -> consumers wait
-    // MAINLOOP -> deadlock (observed: ~24/64 gate_up tasks, mma_mbar[5] stale).
-    // By the time the loader reaches here (after the cross-task page-wait), all
-    // such stray commits have already landed, and this re-init is strictly
-    // ordered before the launcher's first commit (which needs this task's W),
-    // so it permanently clears the stale phase with no race.
-    for (int s = 0; s < NUM_STAGES; s++) {
-        asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;"
-                     :: "r"(mma_mbar_addr + s * 8));
-        // W_tma/A_tma mbars are async-arrived too (TMA hardware delivers bytes
-        // via mbarrier_arrive_expect_tx), so a prior occupant's late TMA
-        // completion can stray onto them after init — same hazard as mma_mbar.
-        // The loader is their arriver, so re-initing here (before its first TMA
-        // and before the launcher's first W/A wait) clears any stale phase.
-        asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;"
-                     :: "r"(W_tma_mbar_base + s * 8));
-        asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;"
-                     :: "r"(A_tma_mbar_base + s * 8));
+  mpk::ch::Producer<WChan> pW{Wc};
+  mpk::ch::Producer<AChan> pA{Ac};
+  // Both ph start at 1 (pre-empty). pW.ph mirrors v2's `mma_phase`.
+
+  bool dep_done = false;
+
+  for (int t = 0; t < c.tiles; t++) {
+    const int cur_tile_idx    = tile_idx + t;
+    const int cur_spatial_idx = cur_tile_idx % c.num_spatial_tiles;
+    const int cur_k_slice     = cur_tile_idx / c.num_spatial_tiles;
+    const int cur_k_start     = cur_k_slice * c.iters;
+    const int cur_off_m       = cur_spatial_idx * BLOCK_M;
+
+    for (int i = 0; i < c.iters; i++) {
+      const int iter_k  = cur_k_start + i;
+      const int z_coord = iter_k * (BLOCK_K / 64);
+
+      // Cross-task page acquire on FIRST touch of each W stage (first NUM_STAGES
+      // global iters each visit a distinct stage once): wait the prior task's
+      // release of this stage's W pages before TMA-ing into them — this overlaps
+      // THIS task's W loads with the PRIOR task's compute. Steady-state reuse
+      // after that rides the in-task empty edge below.
+      if constexpr (CROSS_TASK_PAGES) {
+        if (t * c.iters + i < NUM_STAGES)
+          Wr.acquire(pW.st, runtime_smem, instruction_index,
+                     mirage::runtime_v2::runtime_wait_page_ready);
+      }
+
+      // Wait shared empty (mma_mbar[stage]) — one wait per iter, covers both.
+      // (timed-wait on the FIRST ring lap only: that is where the cold-start
+      // exposure lives; timing every K-iter measurably slowed the kernel.)
+      MPK_V2_TIMED_WAIT_IF(t * c.iters + i < NUM_STAGES,
+                           V2_PROF_GROUP_LOADER_PHASE, V2_PROF_MMA_EMPTY_WAIT,
+                           pW.wait_free());
+      const int W_smem = Wr.slot_addr(pW.st);   // storage addr from the ring
+
+      // W TMA — v2 order: cp.async.bulk first, expect_tx after.
+      tma_3d_load_l2(W_smem, W_tmap_ptr, 0, cur_off_m, z_coord,
+                     pW.full_mbar(), W_HINT);
+      mbarrier_arrive_expect_tx(pW.full_mbar(), W_SIZE);
+
+      // Cross-SM dep wait once (gates A — matches v2's prefetch pattern).
+      if (!dep_done) {
+        mirage::runtime_v2::wait_task_dependency(
+            runtime_config, task_desc, iter_num);
+        dep_done = true;
+      }
+
+      // A TMA — A shares the empty edge (already waited via pW), so no separate
+      // wait. Storage addr comes from A's ring at A's cursor stage.
+      const int A_smem = Ar.slot_addr(pA.st);
+      tma_3d_load_l2(A_smem, A_tmap_ptr, 0, 0, z_coord,
+                     pA.full_mbar(), L2_EVICT_LAST);
+      mbarrier_arrive_expect_tx(pA.full_mbar(), A_SIZE);
+
+      // Advance both cursors in lockstep.
+      pW.commit_tma();
+      pA.commit_tma();
     }
-    asm volatile("fence.mbarrier_init.release.cluster;");
-
-    int tma_stage = 0;
-    int mma_phase = 1;
-    bool dep_done = false;
-
-    for (int t = 0; t < tiles_to_process; t++) {
-        const int cur_tile_idx = tile_idx + t;
-        const int cur_spatial_idx = cur_tile_idx % num_spatial_tiles;
-        const int cur_k_slice = cur_tile_idx / num_spatial_tiles;
-        const int cur_k_start = cur_k_slice * iters_per_slice;
-        const int cur_off_m = cur_spatial_idx * BLOCK_M;
-
-        for (int i = 0; i < iters_per_slice; i++) {
-            const int iter_k = cur_k_start + i;
-
-            // Intra-task gate: launcher signals "stage K MMA done; you can
-            // refill". For the first NUM_STAGES iters this passes immediately
-            // (init parity), so weight TMAs run as soon as their pages are
-            // ready cross-task.
-            mbarrier_wait(mma_mbar_addr + tma_stage * 8, mma_phase);
-
-            const int W_mbar = W_tma_mbar_base + tma_stage * 8;
-            const int A_mbar = A_tma_mbar_base + tma_stage * 8;
-            const int W_smem = smem + task_desc->smem_region_offset(
-                ::kernel::linear_sm100_v2::REGION_W_0 + tma_stage);
-            const int A_smem = smem + task_desc->smem_region_offset(
-                ::kernel::linear_sm100_v2::REGION_A_0 + tma_stage);
-            const int z_coord = iter_k * (BLOCK_K / 64);
-
-            // Weight TMA.
-            tma_3d_load_l2(W_smem, W_tmap_ptr, 0, cur_off_m, z_coord, W_mbar, W_HINT);
-            mbarrier_arrive_expect_tx(W_mbar, W_SIZE);
-
-            // Activation TMA: gated by producer event.
-            if (!dep_done) {
-                mirage::runtime_v2::wait_task_dependency(
-                    runtime_config, task_desc, iter_num);
-                dep_done = true;
-            }
-
-            tma_3d_load_l2(A_smem, A_tmap_ptr, 0, 0, z_coord, A_mbar, L2_EVICT_LAST);
-            mbarrier_arrive_expect_tx(A_mbar, A_SIZE);
-
-            tma_stage = (tma_stage + 1) % NUM_STAGES;
-            if (tma_stage == 0) mma_phase ^= 1;
-        }
-    }
-
+  }
+  // No end-of-loader drain: blocking on the launcher's final mma_mbar (the
+  // shared W/A empty edge) at task end deadlocks against cross-task slot reuse.
+  // Stale arrivals are handled by the start-of-task re-init instead.
 }
 
-// ── Launcher role (warp 5) ── tcgen05.alloc + publish tmem_addr + MMA loop
-// + wait consumer_done + tcgen05.dealloc.
-//
-// Phase 4.3: launcher releases all 14 pages lane-parallel right after the
-// MMA loop ends — earlier than the codegen consumer-suffix would (which
-// runs at end of consumer body). Loader of the next task can therefore
-// start its weight-prefetch TMAs during this task's wait-consumer_done +
-// dealloc tail. Linear uses all 14 pages, so no `task_uses_page` check
-// is needed; lane K just arrives page K once.
+// ═══════════════════════════════════════════════════════════════════════════
+// Launcher role (warp 5, all 32 lanes — alloc/dealloc are sync.aligned).
+// ═══════════════════════════════════════════════════════════════════════════
 template <int SPLIT_K = 1, int TILES_PER_TASK = 1>
 __device__ __noinline__ void linear_launcher_task(
     mirage::runtime::TaskDesc const *task_desc,
     mirage::runtime_v2::RuntimeSMEM *runtime_smem,
-    int N_real, int K,
-    int tile_idx,
-    int dyn_sem_base
-) {
-    // 32 threads of warp 5 enter. tcgen05.alloc / dealloc are sync.aligned —
-    // all 32 lanes participate. The MMA loop itself is single-threaded
-    // (issued by an elected lane), matching the pre-split warp-5 branch.
-    const int lane_id = threadIdx.x & 31;
+    int N_real, int K, int tile_idx, int dyn_sem_base) {
+  const int lane_id = threadIdx.x & 31;
 
-    extern __shared__ __align__(1024) char smem_ptr[];
-    const int smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
+  extern __shared__ __align__(1024) char smem_ptr[];
+  const int smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
 
-    const int W_tma_mbar_base      = dyn_sem_base + SEM_W_TMA_BASE * 8;
-    const int A_tma_mbar_base      = dyn_sem_base + SEM_A_TMA_BASE * 8;
-    const int mma_mbar_addr        = dyn_sem_base + SEM_MMA_BASE * 8;
-    const int mainloop_mbar_addr   = dyn_sem_base + SEM_MAINLOOP_BASE * 8;
-    const int epilogue_mbar_addr   = dyn_sem_base + SEM_EPILOGUE_BASE * 8;
-    const int tmem_ready_mbar_addr = dyn_sem_base + SEM_TMEM_READY * 8;
-    const int consumer_done_mbar_addr = dyn_sem_base + SEM_CONSUMER_DONE * 8;
+  const TaskCtx c = ctx_from<SPLIT_K, TILES_PER_TASK>(N_real, K, tile_idx);
+  // NOTE page protocol: this early return skips the blanket page-free below,
+  // so a task that actually bounds-fails would desync page_finished parity
+  // and deadlock the next task on this slot. Unreachable at tiles_per_task=1
+  // (task count == tile count, see header USAGE note); must be revisited if
+  // tiles_per_task>1 is ever fixed.
+  if (c.bounds_fail(tile_idx)) return;
 
-    // Bounds check first: skip alloc/dealloc churn for invalid tiles.
-    const int M_mma = N_real;
-    const int grid_m = M_mma / BLOCK_M;
-    const int num_spatial_tiles = grid_m;
-    const int total_k_iters = K / BLOCK_K;
-    const int iters_per_slice = total_k_iters / SPLIT_K;
-    const int num_tiles = num_spatial_tiles * SPLIT_K;
-    if (tile_idx >= num_tiles) {
-        // Bounds-fail (padding task): the launcher is the sole role that
-        // arrives page_finished. If we just `return`, the declared SMEM pages
-        // are never released and the NEXT task on this slot deadlocks waiting
-        // for page_ready. Release all declared pages exactly as the normal
-        // path does (one arrival per page) before bailing out.
-        if (lane_id < MAX_SMEM_PAGES_PER_TASK) {
-            mirage::runtime_v2::runtime_finish_page(runtime_smem, lane_id, 1);
+  MPK_V2_PROF_SNAPSHOT()
+
+  // Launcher re-init from CHANNELS/ONESHOT reinit_*_by policy (table-driven, Phase 2b).
+  if (lane_id == 0) {
+    ::kernel::linear::reinit_for_role(::kernel::linear::Role::Launcher,
+                                      dyn_sem_base);
+  }
+  __syncwarp();
+
+  // ── TMEM alloc + publish (v2-identical) ─────────────────────────────────
+  const int scratch_smem_addr = smem + task_desc->smem_region_offset(
+                                  ::kernel::linear::REGION_SCRATCH);
+  asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
+               :: "r"(scratch_smem_addr), "r"(BLOCK_N * 2));
+  const int taddr = *reinterpret_cast<int *>(
+      smem_ptr + task_desc->smem_region_offset(
+          ::kernel::linear::REGION_SCRATCH));
+  if (lane_id == 0) {
+    mbarrier_arrive(dyn_sem_base + SEM_TMEM_READY * 8);
+  }
+
+  // ── Channels (sync) + rings (storage) + cursors ─────────────────────────
+  WChan Wc; AChan Ac; WRing Wr; ARing Ar;
+  make_wa(smem, dyn_sem_base, task_desc, Wc, Ac, Wr, Ar);
+  mpk::ch::Consumer<WChan> cW{Wc};
+  mpk::ch::Consumer<AChan> cA{Ac};
+  // Both ph start at 0 — mirrors v2's `tma_phase = 0`.
+
+  AccChan Acc = make_acc_channel(dyn_sem_base);
+  mpk::ch::TmemProducer<AccChan> pAcc{Acc};
+  pAcc.set_taddr(taddr);
+  // pAcc.ph starts at 1 — mirrors v2's `epilogue_phase = 1` (pre-empty).
+
+  const int total_g = c.tiles * c.iters;
+  if (elect_sync()) {
+    for (int t = 0; t < c.tiles; t++) {
+      // Wait epilogue_mbar (TMEM column free); returns column for tile t.
+      // (timed-waits below: elected lane == the launcher-phase track writer.)
+      int tmem;
+      MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_LAUNCHER_PHASE,
+                           V2_PROF_EPILOGUE_WAIT, tmem = pAcc.wait_free());
+
+      for (int i = 0; i < c.iters; i++) {
+        // Time only the W wait (representative; A shares the edge). Plain cA
+        // wait stays a separate statement so the unprofiled expansion is
+        // exactly `cW.wait_full(); cA.wait_full();` — textually identical to
+        // baseline (sm100 is sensitive to branches around tcgen05 waits;
+        // see sm100_branch_ima).
+        MPK_V2_TIMED_WAIT_IF(t * c.iters + i < NUM_STAGES,
+                             V2_PROF_GROUP_LAUNCHER_PHASE, V2_PROF_W_TMA_WAIT,
+                             cW.wait_full());   // W_tma_mbar[stage]
+        cA.wait_full();                         // A_tma_mbar[stage]
+        const int W_smem = Wr.slot_addr(cW.st);
+        const int A_smem = Ar.slot_addr(cA.st);
+
+        tcgen05_fence_after_thread_sync();
+
+        // Same descriptor math + tcgen05_mma sequence as v2. `i != 0` produces
+        // identical PTX to v2's pass-through of `i` (setp.ne treats any nonzero
+        // as accumulate).
+        mma_k_block(tmem, W_smem, A_smem, /*accumulate=*/ i != 0);
+
+        const int stg = cW.st;                // stage consumed this iter
+        // Release SHARED mma_mbar ONCE per iter — matches v2's single commit.
+        cW.release_mma();
+        cA.advance();
+
+        // Free this W stage's (dedicated) pages at its LAST use → the next
+        // task's loader can TMA its weights into them while we finish later
+        // stages. The last NUM_STAGES global iters visit each stage once.
+        if constexpr (CROSS_TASK_PAGES) {
+          if (t * c.iters + i >= total_g - NUM_STAGES)
+            Wr.release(stg, runtime_smem, mirage::runtime_v2::runtime_finish_page);
         }
-        return;
+      }
+
+      // Signal mainloop_mbar — async tcgen05.commit; consumer waits this.
+      pAcc.commit_mma();
     }
-
-    const int tiles_left = num_tiles - tile_idx;
-    const int tiles_to_process = (TILES_PER_TASK < tiles_left) ? TILES_PER_TASK : tiles_left;
-
-    // Allocate TMEM into the planner's scratch region. tcgen05.alloc writes
-    // the allocated address as a b32 to [%0] (SMEM scratch).
-    // The codegen-emitted loader page-lifecycle prefix already waited
-    // the scratch page across-task; no explicit wait needed here.
-    const int scratch_smem_addr = smem + task_desc->smem_region_offset(
-        ::kernel::linear_sm100_v2::REGION_SCRATCH);
-    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
-                 :: "r"(scratch_smem_addr), "r"(BLOCK_N * 2));
-
-    // Publish: lane 0 arrives SEM_TMEM_READY. The mbar_arrive carries
-    // release-cluster semantics so the scratch write becomes visible to
-    // consumer warps after their matching wait. All 32 lanes also cache
-    // the tmem address into a register here, so the dealloc below does
-    // not have to re-read scratch — the codegen-emitted consumer page
-    // suffix may have freed the scratch page by that point.
-    const int taddr = *reinterpret_cast<int *>(
-        smem_ptr + task_desc->smem_region_offset(
-            ::kernel::linear_sm100_v2::REGION_SCRATCH));
-    if (lane_id == 0) {
-        // Re-init mainloop_mbar here (before publishing tmem_ready, which gates
-        // the consumer's first mainloop wait, and before the launcher's first
-        // mainloop commit). Same root-cause fix as the loader's mma_mbar re-init:
-        // mainloop_mbar is tcgen05-committed (async) by the launcher and waited
-        // by the consumer, so a stray commit from a prior slot occupant can land
-        // after the controller's init_semaphores re-init and corrupt the phase,
-        // hanging the consumer -> it never arrives consumer_done -> launcher
-        // hangs on consumer_done. Clearing it here removes the stale phase.
-        for (int s = 0; s < 2; s++) {
-            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;"
-                         :: "r"(mainloop_mbar_addr + s * 8));
-            // epilogue_mbar is waited by the launcher (here) and arrived by the
-            // consumer after tmem_ready; re-init it too so a stale phase left by
-            // a prior slot occupant (e.g. a 1-tile linear leaves epilogue[0] at
-            // phase 1) doesn't block this task's fill-wait. count = 4*WARP_SIZE.
-            asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;"
-                         :: "r"(epilogue_mbar_addr + s * 8),
-                            "r"(4 * WARP_SIZE));
-        }
-        asm volatile("fence.mbarrier_init.release.cluster;");
-        mbarrier_arrive(tmem_ready_mbar_addr);
+    // W stages never visited (only when total_g < NUM_STAGES) are freed here so
+    // every W page is released exactly once. Empty (zero cost) when
+    // total_g >= NUM_STAGES, which holds for every real linear; disjoint from
+    // the in-loop releases above, so no double-free.
+    if constexpr (CROSS_TASK_PAGES) {
+      for (int s = total_g; s < NUM_STAGES; s++)
+        Wr.release(s, runtime_smem, mirage::runtime_v2::runtime_finish_page);
     }
+  }
 
-    if (elect_sync()) {
-        int tma_stage = 0;
-        int tma_phase = 0;
-        int mainloop_stage = 0;
-        int epilogue_phase = 1;
+  // Reconverge before freeing pages. The MMA loop ran only on the elected
+  // lane; under Volta+ ITS the other lanes are not rejoined at the if-block
+  // exit, so without this they could arrive page_finished while the elected
+  // lane's MMA is still reading those pages — letting the next task's loader
+  // TMA into them mid-MMA.
+  __syncwarp();
 
-        for (int t = 0; t < tiles_to_process; t++) {
-            mbarrier_wait(epilogue_mbar_addr + mainloop_stage * 8, epilogue_phase);
+  // Task-end page free, PARALLEL across lanes: each lane frees its own page
+  // unless the W ring already freed it per-stage. When cross-task is off, the W
+  // ring owns nothing (owns()==false) → this frees all 14 = baseline. A's pages
+  // and scratch's (which shares one) are freed here at task end, which is safe
+  // for scratch's whole-task lifetime.
+  if (lane_id < MAX_SMEM_PAGES_PER_TASK && !Wr.owns(lane_id)) {
+    mirage::runtime_v2::runtime_finish_page(runtime_smem, lane_id, 1);
+  }
+  __syncwarp();
 
-            for (int i = 0; i < iters_per_slice; i++) {
-                const int W_smem = smem + task_desc->smem_region_offset(
-                    ::kernel::linear_sm100_v2::REGION_W_0 + tma_stage);
-                const int A_smem = smem + task_desc->smem_region_offset(
-                    ::kernel::linear_sm100_v2::REGION_A_0 + tma_stage);
-                const int tmem = taddr + mainloop_stage * BLOCK_N;
+  // Wait consumer_done — one-shot, kept raw (matches v2).
+  if (lane_id == 0) {
+    MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_LAUNCHER_PHASE,
+                         V2_PROF_CONSUMER_DONE_WAIT,
+                         mbarrier_wait(dyn_sem_base + SEM_CONSUMER_DONE * 8, 0));
+  }
+  __syncwarp();
 
-                uint64_t a_desc = SMEM_DESC | (W_smem >> 4);
-                uint64_t b_desc = SMEM_DESC | (A_smem >> 4);
-
-                // Phase 4.1: wait both W and A mbars (split from tma_mbar).
-                mbarrier_wait(W_tma_mbar_base + tma_stage * 8, tma_phase);
-                mbarrier_wait(A_tma_mbar_base + tma_stage * 8, tma_phase);
-                asm volatile("tcgen05.fence::after_thread_sync;");
-
-                tcgen05_mma(tmem, a_desc, b_desc, I_DESC, i);
-                for (int k2 = 1; k2 < 64 / MMA_K; k2++) {
-                    a_desc += (32 >> 4);
-                    b_desc += (32 >> 4);
-                    tcgen05_mma(tmem, a_desc, b_desc, I_DESC, 1);
-                }
-
-                for (int k1 = 1; k1 < BLOCK_K / 64; k1++) {
-                    uint64_t a2 = SMEM_DESC | ((W_smem + k1 * BLOCK_M * 128) >> 4);
-                    uint64_t b2 = SMEM_DESC | ((A_smem + k1 * BLOCK_N * 128) >> 4);
-                    for (int k2 = 0; k2 < 64 / MMA_K; k2++) {
-                        tcgen05_mma(tmem, a2, b2, I_DESC, 1);
-                        a2 += (32 >> 4);
-                        b2 += (32 >> 4);
-                    }
-                }
-
-                tcgen05_commit(mma_mbar_addr + tma_stage * 8);
-
-                tma_stage = (tma_stage + 1) % NUM_STAGES;
-                if (tma_stage == 0) tma_phase ^= 1;
-            }
-
-            tcgen05_commit(mainloop_mbar_addr + mainloop_stage * 8);
-            mainloop_stage = (mainloop_stage + 1) % 2;
-            if (mainloop_stage == 0) epilogue_phase ^= 1;
-        }
-    }
-
-    // Task-end blanket page release, lane-parallel (launcher owns page
-    // release for linear; auto_consumer_finish=false).
-    if (lane_id < MAX_SMEM_PAGES_PER_TASK) {
-        mirage::runtime_v2::runtime_finish_page(runtime_smem, lane_id, 1);
-    }
-    __syncwarp();
-
-    // Wait for all 4 consumer warps to finish their last tcgen05.wait, so
-    // TMEM is no longer in use. Init parity = 0; after 128 arrives, parity
-    // flips to 1; lane 0's wait(phase=0) returns when parity != 0.
-    if (lane_id == 0) {
-        mbarrier_wait(consumer_done_mbar_addr, 0);
-    }
-    __syncwarp();
-
-    // Dealloc — sync.aligned, all 32 lanes of warp 5. Uses the cached
-    // taddr (read above before consumer body could have released the
-    // scratch page) so we do not race with the next task's loader.
-    asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
-                 :: "r"(taddr), "r"(BLOCK_N * 2));
-
+  asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
+               :: "r"(taddr), "r"(BLOCK_N * 2));
 }
 
-// ── Consumer role (warps 0-3) ── wait tmem_ready + epilogue + consumer_done.
-template <bool HAS_RESIDUAL, int M_REAL = 16, int SPLIT_K = 1, int TILES_PER_TASK = 1>
+// ═══════════════════════════════════════════════════════════════════════════
+// Consumer role (warps 0–3, 128 threads).
+// ═══════════════════════════════════════════════════════════════════════════
+template <bool HAS_RESIDUAL, int M_REAL = 16,
+          int SPLIT_K = 1, int TILES_PER_TASK = 1>
 __device__ __noinline__ void linear_consumer_task(
     mirage::runtime::TaskDesc const *task_desc,
-    nv_bfloat16 *C_ptr,
+    nv_bfloat16       *C_ptr,
     nv_bfloat16 const *res_ptr,
     int N_real, int K,
     int tile_idx,
     float *workspace,
-    int dyn_sem_base
-) {
-    // 128 threads of warps 0-3 enter. Each does its own epilogue store; all
-    // 128 arrive consumer_done at the end so launcher can dealloc.
-    const int warp_id = warp_uniform(threadIdx.x / WARP_SIZE);
-    const int lane_id = threadIdx.x & 31;
+    int dyn_sem_base) {
+  const int warp_id = warp_uniform(threadIdx.x / WARP_SIZE);
+  const int lane_id = threadIdx.x & 31;
 
-    const int M_mma = N_real;
-    const int grid_m = M_mma / BLOCK_M;
-    const int num_spatial_tiles = grid_m;
-    const int total_k_iters = K / BLOCK_K;
-    const int iters_per_slice = total_k_iters / SPLIT_K;
-    const int num_tiles = num_spatial_tiles * SPLIT_K;
+  extern __shared__ __align__(1024) char smem_ptr[];
 
-    if (tile_idx >= num_tiles) return;
+  const TaskCtx c = ctx_from<SPLIT_K, TILES_PER_TASK>(N_real, K, tile_idx);
+  if (c.bounds_fail(tile_idx)) return;
 
-    const int tiles_left = num_tiles - tile_idx;
-    const int tiles_to_process = (TILES_PER_TASK < tiles_left) ? TILES_PER_TASK : tiles_left;
+  MPK_V2_PROF_SNAPSHOT()
 
-    extern __shared__ __align__(1024) char smem_ptr[];
+  // Wait launcher's TMEM-addr publish — one-shot, kept raw (matches v2).
+  // (timed-wait on thread 0 only — all four consumer warps' lane 0 wait,
+  // but the consumer-phase track has a single designated writer.)
+  if (lane_id == 0) {
+    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_CONSUMER_PHASE,
+                         V2_PROF_TMEM_READY_WAIT,
+                         mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0));
+  }
+  __syncwarp();
+  const int taddr = *reinterpret_cast<int *>(
+      smem_ptr + task_desc->smem_region_offset(
+          ::kernel::linear::REGION_SCRATCH));
 
-    const int mainloop_mbar_addr     = dyn_sem_base + SEM_MAINLOOP_BASE * 8;
-    const int epilogue_mbar_addr     = dyn_sem_base + SEM_EPILOGUE_BASE * 8;
-    const int tmem_ready_mbar_addr   = dyn_sem_base + SEM_TMEM_READY * 8;
-    const int consumer_done_mbar_addr = dyn_sem_base + SEM_CONSUMER_DONE * 8;
+  AccChan Acc = make_acc_channel(dyn_sem_base);
+  mpk::ch::TmemConsumer<AccChan> cAcc{Acc};
+  cAcc.set_taddr(taddr);
+  // cAcc.ph starts at 0 — mirrors v2's `mainloop_phase = 0`.
 
-    // Wait for launcher to publish tmem_addr. Init parity 0 + arrive flips
-    // to 1 → wait(phase=0) returns. mbar_wait carries acquire-cluster, so
-    // the scratch write made by launcher's alloc is visible after wait.
-    if (lane_id == 0) {
-        mbarrier_wait(tmem_ready_mbar_addr, 0);
-    }
+  for (int t = 0; t < c.tiles; t++) {
+    const int cur_tile_idx    = tile_idx + t;
+    const int cur_spatial_idx = cur_tile_idx % c.num_spatial_tiles;
+    const int cur_k_slice     = cur_tile_idx / c.num_spatial_tiles;
+    const int bid_m           = cur_spatial_idx;
+
+    // Wait MMA done for this tile; cursor gives the TMEM column. All 128
+    // threads wait; only thread 0 (the consumer-phase writer) times it.
+    int t_col;
+    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_CONSUMER_PHASE,
+                         V2_PROF_MAINLOOP_WAIT, t_col = cAcc.wait_full());
+#ifdef MPK_ENABLE_PROFILING
+    // RECONVERGE: in profiling builds the thread-0 timing branch diverges
+    // warp 0 (Volta+ ITS doesn't rejoin at the merge) and the tcgen05.ld
+    // below needs a converged warp. Unprofiled builds have no branch (the
+    // macro is a bare wait), so no reconverge is needed.
     __syncwarp();
-    const int taddr = *reinterpret_cast<int *>(
-        smem_ptr + task_desc->smem_region_offset(
-            ::kernel::linear_sm100_v2::REGION_SCRATCH));
+#endif
 
-    int mainloop_stage = 0;
-    int mainloop_phase = 0;
+    tcgen05_fence_after_thread_sync();
 
-    for (int t = 0; t < tiles_to_process; t++) {
-        const int cur_tile_idx = tile_idx + t;
-        const int cur_spatial_idx = cur_tile_idx % num_spatial_tiles;
-        const int cur_k_slice = cur_tile_idx / num_spatial_tiles;
-        const int bid_m = cur_spatial_idx;
+    const int n_real = bid_m * BLOCK_M + warp_id * 32 + lane_id;
+    if (n_real < N_real) {
+      const int t_addr = (warp_id * 32 << 16) + t_col;
 
-        mbarrier_wait(mainloop_mbar_addr + mainloop_stage * 8, mainloop_phase);
-        asm volatile("tcgen05.fence::after_thread_sync;");
+      float f[16];
+      tcgen05_ld_16(f, t_addr);
+      tcgen05_wait_ld();
 
-        const int n_real = bid_m * BLOCK_M + warp_id * 32 + lane_id;
-
-        if (n_real < N_real) {
-            const int t_col = taddr + mainloop_stage * BLOCK_N;
-            const int t_addr = (warp_id * 32 << 16) + t_col;
-
-            float f[16];
-            asm volatile(
-                "tcgen05.ld.sync.aligned.32x32b.x16.b32\n"
-                "  {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
-                : "=f"(f[0]), "=f"(f[1]), "=f"(f[2]), "=f"(f[3]),
-                  "=f"(f[4]), "=f"(f[5]), "=f"(f[6]), "=f"(f[7]),
-                  "=f"(f[8]), "=f"(f[9]), "=f"(f[10]), "=f"(f[11]),
-                  "=f"(f[12]), "=f"(f[13]), "=f"(f[14]), "=f"(f[15])
-                : "r"(t_addr));
-            asm volatile("tcgen05.wait::ld.sync.aligned;");
-
-            if constexpr (SPLIT_K == 1) {
-                if constexpr (HAS_RESIDUAL) {
-                    #pragma unroll
-                    for (int m = 0; m < M_REAL; m++) {
-                        nv_bfloat16 gemm_bf16 = __float2bfloat16(f[m]);
-                        f[m] = __bfloat162float(gemm_bf16) + __bfloat162float(res_ptr[m * N_real + n_real]);
-                    }
-                }
-                #pragma unroll
-                for (int m = 0; m < M_REAL; m++) {
-                    nv_bfloat16 val = __float2bfloat16(f[m]);
-                    asm volatile("st.global.L1::no_allocate.b16 [%0], %1;"
-                        :: "l"(C_ptr + m * N_real + n_real), "h"(*(uint16_t*)&val) : "memory");
-                }
-            } else {
-                float *ws_base = workspace + cur_k_slice * M_REAL * N_real;
-                #pragma unroll
-                for (int m = 0; m < M_REAL; m++) {
-                    asm volatile("st.global.L1::no_allocate.b32 [%0], %1;"
-                        :: "l"(ws_base + m * N_real + n_real), "f"(f[m]) : "memory");
-                }
-            }
-        }
-
-        mbarrier_arrive(epilogue_mbar_addr + mainloop_stage * 8);
-        mainloop_stage = (mainloop_stage + 1) % 2;
-        if (mainloop_stage == 0) mainloop_phase ^= 1;
-    }
-
-    // Signal launcher that all 4 consumer warps are done with TMEM.
-    // count = 4 * WARP_SIZE = 128; every consumer thread arrives once.
-    mbarrier_arrive(consumer_done_mbar_addr);
-}
-
-// ── Storer role (warp 6) ── per-stage page release.
-//
-// Phase 5: storer is the role that arrives page_finished[page] on behalf of
-// linear, freeing the launcher of that work (launcher is at the 255-reg
-// cliff). Storer is otherwise idle for linear, so we use it as a passive
-// release engine.
-//
-// Mechanism: storer iterates the launcher's stage cycle in lockstep,
-// waiting on mma_mbar[stage] each iter (same parity flips that loader
-// waits, so adding storer as an additional waiter is free). It counts
-// fires per stage; on the last fire of stage K, the W_K pages are no
-// longer read by anyone and can be released. A pages are sub-page packed
-// across multiple stages — they release when the last contributing stage
-// has had its last fire (tracked via per-page remaining counters).
-template <int SPLIT_K = 1, int TILES_PER_TASK = 1>
-__device__ __noinline__ void linear_storer_task(
-    mirage::runtime::TaskDesc const *task_desc,
-    mirage::runtime_v2::RuntimeSMEM *runtime_smem,
-    int N_real, int K_param,
-    int tile_idx,
-    int dyn_sem_base
-) {
-    if (!elect_sync()) return;
-
-    const int M_mma = N_real;
-    const int grid_m = M_mma / BLOCK_M;
-    const int num_spatial_tiles = grid_m;
-    const int total_k_iters = K_param / BLOCK_K;
-    const int iters_per_slice = total_k_iters / SPLIT_K;
-    const int num_tiles = num_spatial_tiles * SPLIT_K;
-
-    if (tile_idx >= num_tiles) {
-        // Bounds-fail: still arrive every page once so parity tracking
-        // doesn't drift. Loader of next task expects exactly one arrive
-        // per page per task.
-        for (int p = 0; p < MAX_SMEM_PAGES_PER_TASK; p++) {
-            mirage::runtime_v2::runtime_finish_page(runtime_smem, p, 1);
-        }
-        return;
-    }
-
-    const int tiles_left = num_tiles - tile_idx;
-    const int tiles_to_process = (TILES_PER_TASK < tiles_left) ? TILES_PER_TASK : tiles_left;
-    const int total_iters = tiles_to_process * iters_per_slice;
-
-    const int mma_mbar_addr = dyn_sem_base + SEM_MMA_BASE * 8;
-
-    // Per-stage tracking: how many fires before stage K is "done forever"
-    // in this task. last_use[K] = floor((total_iters - 1 - K) / NS) + 1.
-    int last_use[NUM_STAGES];
-    int phase_per_stage[NUM_STAGES];
-    int fires_per_stage[NUM_STAGES];
-    #pragma unroll
-    for (int s = 0; s < NUM_STAGES; s++) {
-        last_use[s] = (total_iters - 1 - s) / NUM_STAGES + 1;
-        phase_per_stage[s] = 0;
-        fires_per_stage[s] = 0;
-    }
-
-    // Per-page remaining counter for sub-page-packed pages. Each stage K's
-    // A region contributes 1 to its physical page's count. When the count
-    // hits 0 (all stages on that page have had their last fire), the page
-    // can release. W pages get +1 each from their owning stage.
-    int page_remaining[MAX_SMEM_PAGES_PER_TASK] = {0};
-    #pragma unroll
-    for (int s = 0; s < NUM_STAGES; s++) {
-        auto const &W = task_desc->smem_regions[
-            ::kernel::linear_sm100_v2::REGION_W_0 + s];
-        for (int p = 0; p < W.page_count; p++) {
-            page_remaining[W.physical_page_start + p]++;
-        }
-        auto const &A = task_desc->smem_regions[
-            ::kernel::linear_sm100_v2::REGION_A_0 + s];
-        for (int p = 0; p < A.page_count; p++) {
-            page_remaining[A.physical_page_start + p]++;
-        }
-    }
-    // Scratch page also needs an arrive. It piggybacks on whichever page
-    // it shares (or its own page if standalone). Bump the count.
-    {
-        auto const &SC = task_desc->smem_regions[
-            ::kernel::linear_sm100_v2::REGION_SCRATCH];
-        for (int p = 0; p < SC.page_count; p++) {
-            page_remaining[SC.physical_page_start + p]++;
-        }
-    }
-
-    // Iterate launcher's stage cycle. Each fire decrements the relevant
-    // per-page counter; when a counter hits 0, release that page.
-    int stage = 0;
-    for (int it = 0; it < total_iters; it++) {
-        mbarrier_wait(mma_mbar_addr + stage * 8, phase_per_stage[stage]);
-        phase_per_stage[stage] ^= 1;
-        fires_per_stage[stage]++;
-
-        if (fires_per_stage[stage] == last_use[stage]) {
-            // Stage `stage` has had its last MMA in this task. The W and
-            // A regions for this stage are no longer read by launcher.
-            auto const &W = task_desc->smem_regions[
-                ::kernel::linear_sm100_v2::REGION_W_0 + stage];
-            for (int p = 0; p < W.page_count; p++) {
-                int phys = W.physical_page_start + p;
-                if (--page_remaining[phys] == 0) {
-                    mirage::runtime_v2::runtime_finish_page(
-                        runtime_smem, phys, 1);
-                }
-            }
-            auto const &A = task_desc->smem_regions[
-                ::kernel::linear_sm100_v2::REGION_A_0 + stage];
-            for (int p = 0; p < A.page_count; p++) {
-                int phys = A.physical_page_start + p;
-                if (--page_remaining[phys] == 0) {
-                    mirage::runtime_v2::runtime_finish_page(
-                        runtime_smem, phys, 1);
-                }
-            }
-        }
-
-        stage = (stage + 1) % NUM_STAGES;
-    }
-
-    // Scratch's region count was bumped above. Decrement once here, since
-    // scratch is already done with by the time MMA loop finishes (launcher
-    // and consumer both cached taddr from scratch at task start).
-    {
-        auto const &SC = task_desc->smem_regions[
-            ::kernel::linear_sm100_v2::REGION_SCRATCH];
-        for (int p = 0; p < SC.page_count; p++) {
-            int phys = SC.physical_page_start + p;
-            if (--page_remaining[phys] == 0) {
-                mirage::runtime_v2::runtime_finish_page(
-                    runtime_smem, phys, 1);
-            }
-        }
-    }
-}
-
-// Split-K reduction task (used when SPLIT_K > 1)
-// Uses the v2 compute pool (NUM_COMPUTE_WARPS*32=256 threads), NOT blockDim.x.
-// Non-compute warps skip this function via the dispatch path.
-template <int M_REAL, bool HAS_RESIDUAL, int SPLIT_K>
-__device__ __forceinline__ void splitk_reduce_task(
-    float *workspace,
-    nv_bfloat16 *C_ptr,
-    nv_bfloat16 const *res_ptr,
-    int N_real,
-    int bid, int num_bids
-) {
-    constexpr int EFF_THREADS = 8 * 32;  // NUM_COMPUTE_WARPS * 32
-    if (threadIdx.x >= EFF_THREADS) return;
-    const int total = M_REAL * N_real;
-    for (int idx = bid * EFF_THREADS + threadIdx.x;
-         idx < total;
-         idx += num_bids * EFF_THREADS) {
-        float sum = 0.0f;
-        #pragma unroll
-        for (int s = 0; s < SPLIT_K; s++) {
-            sum += workspace[s * total + idx];
-        }
+      if constexpr (SPLIT_K == 1) {
+        // Precision-clamp round-trip: bf16-quantize GEMM output before adding
+        // residual (in float), then bf16-quantize again at store. v2 does this
+        // exactly; do NOT collapse the round-trip — semantics change.
         if constexpr (HAS_RESIDUAL) {
-            sum += __bfloat162float(res_ptr[idx]);
+          #pragma unroll
+          for (int m = 0; m < M_REAL; m++) {
+            nv_bfloat16 gemm_bf16 = __float2bfloat16(f[m]);
+            f[m] = __bfloat162float(gemm_bf16) +
+                   __bfloat162float(res_ptr[m * N_real + n_real]);
+          }
         }
-        C_ptr[idx] = __float2bfloat16(sum);
+        #pragma unroll
+        for (int m = 0; m < M_REAL; m++) {
+          st_bf16(C_ptr + m * N_real + n_real, __float2bfloat16(f[m]));
+        }
+      } else {
+        float *ws_base = workspace + cur_k_slice * M_REAL * N_real;
+        #pragma unroll
+        for (int m = 0; m < M_REAL; m++) {
+          st_f32(ws_base + m * N_real + n_real, f[m]);
+        }
+      }
     }
+
+    // Release epilogue_mbar (128-thread sync arrival).
+    cAcc.release_warp();
+  }
+
+  // Signal consumer_done (128 threads, sync) — one-shot, kept raw.
+  mbarrier_arrive(dyn_sem_base + SEM_CONSUMER_DONE * 8);
 }
 
 } // namespace linear_v2

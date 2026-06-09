@@ -532,7 +532,7 @@ if __name__ == "__main__":
                 block_dim=(128, 1, 1),
             )
             if args.use_v2:
-                mpk.linear_layer_v3(
+                mpk.linear_layer_v2(
                     input=rmsnorm_out,
                     weight=w_qkv,
                     output=attn_in,
@@ -625,7 +625,7 @@ if __name__ == "__main__":
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
             if args.use_v2:
-                mpk.linear_with_residual_layer_v3(
+                mpk.linear_with_residual_layer_v2(
                     input=attn_out,
                     weight=w,
                     residual=x,
@@ -689,7 +689,7 @@ if __name__ == "__main__":
             # )
 
             if args.use_v2:
-                mpk.linear_layer_v3(
+                mpk.linear_layer_v2(
                     input=rmsnorm_out,
                     weight=w_gatedup,
                     output=mlp_mid,
@@ -722,7 +722,7 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
             if args.use_v2:
-                mpk.linear_with_residual_layer_v3(
+                mpk.linear_with_residual_layer_v2(
                     input=silu_mul_out,
                     weight=w,
                     residual=x,
@@ -763,7 +763,7 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
         if args.use_v2:
-            mpk.linear_layer_v3(
+            mpk.linear_layer_v2(
                 input=rmsnorm_out,
                 weight=w_proj,
                 output=argmax_in,

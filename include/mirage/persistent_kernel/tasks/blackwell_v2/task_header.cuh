@@ -12,8 +12,7 @@
 // codegen-emitted role dispatch calls resolve. Each task uses its own
 // namespace to avoid collision with the v1 (kernel::) versions.
 #include "mirage/persistent_kernel/runtime_header.h"
-#include "linear_sm100_v2.cuh"        // kernel::linear_v2
-#include "linear_sm100_v3.cuh"        // kernel::linear_v3
+#include "linear_sm100_v2.cuh"        // kernel::linear_v2 (Channel-based)
 #include "rmsnorm_v2.cuh"             // kernel::rmsnorm_v2
 #include "rotary_embedding_v2.cuh"    // kernel::v2
 #include "norm_sm100.cuh"             // kernel::v2

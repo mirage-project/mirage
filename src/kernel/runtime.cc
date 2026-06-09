@@ -428,11 +428,9 @@ void register_mugraph(
                   bid.x + bid.y * bgraph.grid_dim.x +
                   bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
             }
-            // v2/v3 linear reads tile_idx from task_offset (= spatial_idx).
+            // v2 linear reads tile_idx from task_offset (= spatial_idx).
             if (task_type == TASK_LINEAR_SM100_V2 ||
-                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100_V2 ||
-                task_type == TASK_LINEAR_SM100_V3 ||
-                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100_V3) {
+                task_type == TASK_LINEAR_WITH_RESIDUAL_SM100_V2) {
               task.task_metadata.task_offset = bid.x;
             }
             // Initialize input tensors to the task
@@ -1329,9 +1327,6 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_SM100_V2] = "TASK_LINEAR_SM100_V2";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100_V2] =
       "TASK_LINEAR_WITH_RESIDUAL_SM100_V2";
-  task_type_to_name[TASK_LINEAR_SM100_V3] = "TASK_LINEAR_SM100_V3";
-  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100_V3] =
-      "TASK_LINEAR_WITH_RESIDUAL_SM100_V3";
   task_type_to_name[TASK_RMS_NORM_HOPPER_V2] = "TASK_RMS_NORM_HOPPER_V2";
   task_type_to_name[TASK_SILU_MUL_V2] = "TASK_SILU_MUL_V2";
   task_type_to_name[TASK_EMBEDDING_V2] = "TASK_EMBEDDING_V2";

@@ -18,12 +18,9 @@
 
 #include "mirage/persistent_kernel/tasks/blackwell_v2/argmax_v2_spec.h"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/embedding_v2_spec.h"
-#include "mirage/persistent_kernel/tasks/blackwell_v2/linear_sm100_v2_spec.h"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/linear_spec.h"
-// linear_sm100_v3 reuses linear_sm100_v2's SMEM layout + SEM ordinals
-// verbatim (see HARD CONSTRAINT comment at the top of linear_sm100_v3.cuh).
-// No separate v3 spec is needed — pulling v2's spec for both is the single
-// source of truth.
+// linear_sm100_v2 derives its SMEM layout, SEM ordinals, and MMA descriptors
+// from the kernel::linear single source of truth (linear_spec.h).
 #include "mirage/persistent_kernel/tasks/blackwell_v2/paged_attention_sm100_v2_spec.h"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/rmsnorm_v2_spec.h"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/silu_mul_v2_spec.h"
@@ -1833,206 +1830,11 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   }
 }
 
-// v2 linear: emits role-split calls into kernel::linear_v2::linear_{loader,
-// launcher, consumer}_task (the hand-written swapAB kernel split per-role
-// in Phase 3.4) plus a controller-side init_semaphores body that mbar_init's
-// the 18 op-private mbarriers used for cross-role coordination.
-// Each task handles ONE BLOCK_M=128 output tile determined at runtime from
-// task_metadata.task_offset. The TMA descriptors describe the FULL W and A
-// tensors (shared across tiles of the same op).
-// params: [M_real, SPLIT_K]
-// If M_real or SPLIT_K absent in params, defaults apply (M_real=16, SPLIT_K=1).
+// ─── v2 linear ───────────────────────────────────────────────────────────────
+// Args: (N_real, K, m_real, split_k, tiles_per_task). Emits role bodies that
+// call kernel::linear_v2:: functions. Stale-arrival defense is the
+// start-of-task re-inits (reinit_for_role in loader/launcher).
 int TaskRegister::register_linear_sm100_v2_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params,
-    bool with_residual) {
-  // M_REAL defaults to batch_size from bgraph (NOT the MMA_N=16 pad). Writing
-  // beyond batch_size would OOB the output tensor because Qwen3 allocates
-  // output with `max_num_batched_tokens` rows, not padded to 16. If caller
-  // passes params[0], trust it (allows override for e.g. specialized tests).
-  int m_real_override = -1;
-  int split_k = 1;
-  int tiles_per_task = 1;
-  bool rank_with_residual = with_residual;
-  if (params.size() >= 1) m_real_override = params[0];
-  if (params.size() >= 2) split_k = params[1];
-  if (params.size() >= 3) tiles_per_task = params[2];
-
-  int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
-  std::vector<tb::TBInputOp *> input_ops;
-  std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = with_residual ? 3 : 2;
-  int num_outputs = 1;
-  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
-  for (auto const &op : bgraph.operators) {
-    assert(op->op_type == mirage::type::TB_INPUT_OP);
-    if (input_ops.size() < (size_t)num_inputs) {
-      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
-    } else {
-      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
-    }
-  }
-  assert(output_ops[0]->output_tensors[0].num_dims == 2);
-  batch_size = output_ops[0]->output_tensors[0].dim[0];
-  output_size = output_ops[0]->output_tensors[0].dim[1];
-  assert(input_ops[0]->dtensor.num_dims == 2);
-  reduction_size = input_ops[0]->dtensor.dim[1];
-  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
-
-  // For v2, each task sees the FULL output (no tile partition in TBGraph).
-  // So output_size == output_stride and bgraph per-task dims == full dims.
-  // Validate this to catch misconfigurations early.
-  assert(output_size == output_stride &&
-         "linear_sm100_v2 requires unpartitioned output "
-         "(tb_graph.new_input(output, (-1,-1,-1), ...)).");
-  int const N_real = output_size;
-  int const K = reduction_size;
-  // M_REAL = actual batch_size from bgraph by default. Overrideable via params[0].
-  // Must not exceed batch_size, or the epilogue would OOB write the output
-  // (linear_v2 unconditionally writes M_REAL rows).
-  int const m_real = (m_real_override > 0) ? m_real_override : batch_size;
-  assert(m_real <= batch_size &&
-         "m_real override must not exceed output tensor's dim[0] (OOB write).");
-
-  std::string const true_or_false = rank_with_residual ? "true" : "false";
-  std::string const residual_arg =
-      rank_with_residual ? "task_desc->input_ptrs[2]" : "nullptr";
-  std::string const split_k_arg =
-      split_k > 1 ? "static_cast<float*>(task_desc->output_ptrs[1])"
-                  : "nullptr";
-
-  // Phase 3.4 + 4.1: linear is split into three role-specific functions.
-  // Cross-role sync via 24 op-private mbarriers in dynamic_semaphores[slot]
-  // [SEM_OP_BASE..]. tma_mbar is split into W_tma + A_tma (4.1) so launcher
-  // can wait W and A independently — enables weight prefetch since W TMAs
-  // don't have a cross-SM dependency.
-  auto emit_linear_init_semaphores = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("{");
-    c.e("  namespace _lv = ::kernel::linear_v2;");
-    c.e("  int const _slot = ring_slot(instruction_index);");
-    c.e("  uint64_t (*_sem)[MAX_DYNAMIC_SEMAPHORES] = "
-        "runtime_smem->dynamic_semaphores;");
-    c.e("  for (int i = 0; i < _lv::NUM_STAGES; i++) {");
-    c.e("    mbar_init(&_sem[_slot][SEM_OP_BASE + _lv::SEM_W_TMA_BASE + i], 1);");
-    c.e("    mbar_init(&_sem[_slot][SEM_OP_BASE + _lv::SEM_A_TMA_BASE + i], 1);");
-    c.e("    mbar_init(&_sem[_slot][SEM_OP_BASE + _lv::SEM_MMA_BASE + i], 1);");
-    c.e("  }");
-    c.e("  for (int i = 0; i < 2; i++) {");
-    c.e("    mbar_init(&_sem[_slot][SEM_OP_BASE + _lv::SEM_MAINLOOP_BASE + i], 1);");
-    c.e("    mbar_init(&_sem[_slot][SEM_OP_BASE + _lv::SEM_EPILOGUE_BASE + i], "
-        "4 * _lv::WARP_SIZE);");
-    c.e("  }");
-    c.e("  mbar_init(&_sem[_slot][SEM_OP_BASE + _lv::SEM_TMEM_READY], 1);");
-    c.e("  mbar_init(&_sem[_slot][SEM_OP_BASE + _lv::SEM_CONSUMER_DONE], "
-        "4 * _lv::WARP_SIZE);");
-    c.e("  asm volatile(\"fence.mbarrier_init.release.cluster;\");");
-    c.e("}");
-  };
-
-  auto emit_linear_loader_body = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v2::linear_loader_task<$, 0, $>(",
-        split_k, tiles_per_task);
-    c.e("    task_desc,");
-    c.e("    runtime_smem,");
-    c.e("    runtime_config,");
-    c.e("    static_cast<const CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
-    c.e("    static_cast<const CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
-    c.e("    $, $,", N_real, K);
-    c.e("    static_cast<int>(task_desc->task_metadata.task_offset) * $,",
-        tiles_per_task);
-    c.e("    instruction_index,");
-    c.e("    iter_num,");
-    c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
-  };
-
-  auto emit_linear_launcher_body = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v2::linear_launcher_task<$, $>(",
-        split_k, tiles_per_task);
-    c.e("    task_desc,");
-    c.e("    runtime_smem,");
-    c.e("    $, $,", N_real, K);
-    c.e("    static_cast<int>(task_desc->task_metadata.task_offset) * $,",
-        tiles_per_task);
-    c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
-  };
-
-  auto emit_linear_consumer_body = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v2::linear_consumer_task<$, $, $, $>(",
-        true_or_false, m_real, split_k, tiles_per_task);
-    c.e("    task_desc,");
-    c.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-    c.e("    static_cast<const nv_bfloat16*>($),", residual_arg);
-    c.e("    $, $,", N_real, K);
-    c.e("    static_cast<int>(task_desc->task_metadata.task_offset) * $,",
-        tiles_per_task);
-    c.e("    $,", split_k_arg);
-    c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
-  };
-
-  // Variant string fed to register_task_variant — keep wired to consumer
-  // body so existing v1-style identification (which hashes the task body
-  // string) still distinguishes residual/non-residual variants.
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  emit_linear_consumer_body(code);
-
-  TaskType const tt = with_residual ? TASK_LINEAR_WITH_RESIDUAL_SM100_V2
-                                    : TASK_LINEAR_SM100_V2;
-  int variant = register_task_variant(tt, code.to_string());
-
-  // Per-role bodies.
-  // Phase 4.2 + 5b: loader does NOT get the cross-SM dep prefix or the
-  // codegen page-protocol prefix — it does both inline (dep wait once
-  // before A TMAs, page wait per-page before each TMA), enabling weight
-  // prefetch. Launcher and consumer still use the codegen dep prefix.
-  mirage::transpiler::CodeKeeper init_code;
-  init_code.inc_indent();
-  emit_linear_init_semaphores(init_code);
-
-  mirage::transpiler::CodeKeeper loader_code;
-  loader_code.inc_indent();
-  emit_linear_loader_body(loader_code);
-
-  mirage::transpiler::CodeKeeper launcher_code;
-  launcher_code.inc_indent();
-  emit_dep_wait_consumer_prefix(launcher_code);
-  emit_linear_launcher_body(launcher_code);
-
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_linear_consumer_body(consumer_code);
-
-  // Phase 4 final state: launcher releases all pages lane-parallel after
-  // MMA loop (auto_consumer_finish=false to avoid double arrives). Loader
-  // has codegen-emitted page lifecycle prefix (default).
-  TaskRoleVariantCode role_code{
-      /*init_semaphores=*/init_code.to_string(),
-      /*loader=*/loader_code.to_string(),
-      /*launcher=*/launcher_code.to_string(),
-      /*consumer=*/consumer_code.to_string(),
-      /*storer=*/""};
-  role_code.auto_consumer_finish = false;
-  register_v2_task_role_variant(tt, variant, role_code);
-
-  // SMEM layout owned by linear_sm100_v2_spec.h. Phase 3.3 reconciled the
-  // device side with the planner: linear's role functions now address SMEM
-  // through task_desc->smem_region_offset(REGION_*) instead of hand-rolled
-  // offsets, so the per-region planning is real (not just accounting).
-  TaskSmemInfo smem_info = ::kernel::linear_sm100_v2::make_smem_info();
-  register_variant_smem_info(tt, variant, smem_info);
-  return variant;
-}
-
-// ─── v3 linear ───────────────────────────────────────────────────────────────
-// Same arg shape as v2 (N_real, K, m_real, split_k, tiles_per_task), but emits
-// role bodies that call kernel::linear_v3:: functions. Stale-arrival defense
-// is the start-of-task re-inits (reinit_for_role in loader/launcher) — the
-// end-of-loader drain was removed (see linear_sm100_v3.cuh header).
-int TaskRegister::register_linear_sm100_v3_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool with_residual) {
@@ -2068,7 +1870,7 @@ int TaskRegister::register_linear_sm100_v3_task(
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
 
   assert(output_size == output_stride &&
-         "linear_sm100_v3 requires unpartitioned output "
+         "linear_sm100_v2 requires unpartitioned output "
          "(tb_graph.new_input(output, (-1,-1,-1), ...)).");
   int const N_real = output_size;
   int const K      = reduction_size;
@@ -2082,19 +1884,19 @@ int TaskRegister::register_linear_sm100_v3_task(
   std::string const split_k_arg =
       split_k > 1 ? "static_cast<float*>(task_desc->output_ptrs[1])"
                   : "nullptr";
-  // Drop the SPLIT_K=1 restriction (v3 now mirrors v2 exactly, workspace arg).
+  // Drop the SPLIT_K=1 restriction (workspace arg).
 
   // Phase 2a: structural init synthesized from the CHANNELS table. op_sem_base_addr
   // returns the shared int addr of this slot's SEM_OP_BASE (ordinal k at +k*8) —
   // exactly the dyn_sem_base linear_init() expects. Byte-identical mbar set to the
   // old inlined loops (verified against CHANNELS/ONESHOT_SEMS counts).
-  auto emit_v3_init = [&](mirage::transpiler::CodeKeeper &c) {
+  auto emit_v2_init = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("::kernel::linear::linear_init("
         "op_sem_base_addr(runtime_smem, instruction_index));");
   };
 
-  auto emit_v3_loader = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v3::linear_loader_task<$, 0, $>(",
+  auto emit_v2_loader = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("::kernel::linear_v2::linear_loader_task<$, 0, $>(",
         split_k, tiles_per_task);
     c.e("    task_desc,");
     c.e("    runtime_smem,");
@@ -2109,8 +1911,8 @@ int TaskRegister::register_linear_sm100_v3_task(
     c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
   };
 
-  auto emit_v3_launcher = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v3::linear_launcher_task<$, $>(",
+  auto emit_v2_launcher = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("::kernel::linear_v2::linear_launcher_task<$, $>(",
         split_k, tiles_per_task);
     c.e("    task_desc,");
     c.e("    runtime_smem,");
@@ -2120,8 +1922,8 @@ int TaskRegister::register_linear_sm100_v3_task(
     c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
   };
 
-  auto emit_v3_consumer = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v3::linear_consumer_task<$, $, $, $>(",
+  auto emit_v2_consumer = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("::kernel::linear_v2::linear_consumer_task<$, $, $, $>(",
         true_or_false, m_real, split_k, tiles_per_task);
     c.e("    task_desc,");
     c.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
@@ -2136,29 +1938,29 @@ int TaskRegister::register_linear_sm100_v3_task(
   // Variant key = consumer body (residual / non-residual / dim distinct).
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  emit_v3_consumer(code);
+  emit_v2_consumer(code);
 
-  TaskType const tt = with_residual ? TASK_LINEAR_WITH_RESIDUAL_SM100_V3
-                                    : TASK_LINEAR_SM100_V3;
+  TaskType const tt = with_residual ? TASK_LINEAR_WITH_RESIDUAL_SM100_V2
+                                    : TASK_LINEAR_SM100_V2;
   int variant = register_task_variant(tt, code.to_string());
 
   mirage::transpiler::CodeKeeper init_code;
   init_code.inc_indent();
-  emit_v3_init(init_code);
+  emit_v2_init(init_code);
 
   mirage::transpiler::CodeKeeper loader_code;
   loader_code.inc_indent();
-  emit_v3_loader(loader_code);
+  emit_v2_loader(loader_code);
 
   mirage::transpiler::CodeKeeper launcher_code;
   launcher_code.inc_indent();
   emit_dep_wait_consumer_prefix(launcher_code);
-  emit_v3_launcher(launcher_code);
+  emit_v2_launcher(launcher_code);
 
   mirage::transpiler::CodeKeeper consumer_code;
   consumer_code.inc_indent();
   emit_dep_wait_consumer_prefix(consumer_code);
-  emit_v3_consumer(consumer_code);
+  emit_v2_consumer(consumer_code);
 
   // launcher releases pages (auto_consumer_finish=false). Loader keeps the
   // codegen page-lifecycle prefix (default) for cross-task page_ready waits.
@@ -2171,8 +1973,8 @@ int TaskRegister::register_linear_sm100_v3_task(
   role_code.auto_consumer_finish = false;
   register_v2_task_role_variant(tt, variant, role_code);
 
-  // SMEM layout: v3's own spec (kernel::linear, linear_spec.h) is now the
-  // single source of the region table. The v3 .cuh addresses regions via
+  // SMEM layout: v2's own spec (kernel::linear, linear_spec.h) is now the
+  // single source of the region table. The v2 .cuh addresses regions via
   // ::kernel::linear::REGION_W_0/A_0/SCRATCH, so the planner gets the matching
   // table. No dependency on the retiring linear_sm100_v2 spec.
   TaskSmemInfo smem_info = ::kernel::linear::make_smem_info();

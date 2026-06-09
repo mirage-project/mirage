@@ -25,10 +25,10 @@ WINDOW_ITERS = 25
 GROUP_NAMES = ["consumer", "loader", "launcher", "storer", "controller",
                "consumer-phase", "loader-phase", "launcher-phase"]
 
-LINEAR_TYPES = {244, 245, 246, 247}
+LINEAR_TYPES = {244, 245}
 EVENT_NAMES = {
-    244: "LINEAR_V3", 245: "LINEAR_RES_V3", 246: "LINEAR_V2",
-    247: "LINEAR_RES_V2", 281: "RMSNORM", 282: "SILU_MUL", 283: "EMBEDDING",
+    244: "LINEAR_V2", 245: "LINEAR_RES_V2",
+    281: "RMSNORM", 282: "SILU_MUL", 283: "EMBEDDING",
     284: "ATTENTION", 285: "ARGMAX_P", 286: "ARGMAX_R",
     204: "PREPARE_BATCH", 205: "ITER_SYNC", 206: "GO_WAIT",
     207: "DEP_WAIT", 208: "PAGE_WAIT",

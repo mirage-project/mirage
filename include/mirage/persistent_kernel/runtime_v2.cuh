@@ -99,7 +99,7 @@ __device__ __forceinline__ unsigned long long v2_prof_now_ns() {
 
 __device__ __forceinline__ int v2_prof_bucket(int task_type) {
   switch (task_type) {
-    case 244: case 245: return 0;   // linear v3 (+residual)
+    case 244: case 245: return 0;   // linear v2 (+residual)
     case 284: return 1;             // attention
     case 281: return 2;             // rmsnorm
     case 282: return 3;             // silu_mul
@@ -942,7 +942,7 @@ __device__ __noinline__ void controller_warp_loop(
         // from its __syncthreads after cp_async_wait; v2's warp-specialized
         // handshake does not). Defensive hardening: isolation testing of the
         // 2026-05 page-parity hang showed this fence ALONE does not fix it
-        // (the launcher __syncwarp in linear_v3 does), but the proxy-ordering
+        // (the launcher __syncwarp in linear_v2 does), but the proxy-ordering
         // gap is real per the PTX memory model, so it stays.
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
       }
