@@ -12,8 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Mirror sm100_linear's include order so MPK/CuTe machinery is set up before
-// standard CUDA + Torch headers (avoids cute::prefetch / UMMA clashes).
+// MPK/CuTe headers before CUDA/Torch (avoids cute::prefetch / UMMA clashes).
 #include "blackwell/task_header.cuh"
 #include "hopper/tma_2d.cuh"
 #include "runtime_header.h"
@@ -53,11 +52,10 @@ constexpr int ceil_div(int a, int b) {
   return (a + b - 1) / b;
 }
 
-// Default to B200's SM count. Caller can override per-call.
-constexpr int kDefaultNumCTAs = 148;
+constexpr int kDefaultNumCTAs = 148; // B200 SM count fallback
 constexpr int kBlockThreads = 256;
 
-// `num_ctas == 0` means "use the device SM count". Cached after first query.
+// num_ctas == 0 means "use the device SM count" (cached after first query).
 int resolve_num_ctas(int num_ctas, int device) {
   if (num_ctas > 0) {
     return num_ctas;
@@ -137,21 +135,18 @@ void launch_mHC_post(T const *residual,
         residual, x, comb, post, output, num_tokens);                          \
   } while (0)
 
+  // LAUNCH_POST(C, tokens_per_block) -- tokens/block picked to fill ~256 threads.
   switch (c) {
     case 128:
-      // 16 vecs/token; 8 tokens/block -> 128 threads, fully utilized.
       LAUNCH_POST(128, 8);
       break;
     case 1024:
-      // 128 vecs/token; 2 tokens/block -> 256 threads.
       LAUNCH_POST(1024, 2);
       break;
     case 4096:
-      // 512 vecs/token; 1 token/block -> 256 threads.
       LAUNCH_POST(4096, 1);
       break;
     case 7168:
-      // 896 vecs/token; 1 token/block -> 256 threads (DeepSeek V4 pro).
       LAUNCH_POST(7168, 1);
       break;
     default:
@@ -305,20 +300,15 @@ void sinkhorn_sm100(torch::Tensor comb_res_mix,
 }
 
 // ============================================================================
-// mHC_post_pre_v2: CUDA-core fused post + prenorm-GEMM (vLLM mhc_fused style)
-// followed by the split-k reduction and the existing k2 tail.
-//
-//   [fused] post + GEMM + sqrsum  (register new_r, no round-trip, split-k)
+// mHC_post_pre_v2: CUDA-core fused post + prenorm-GEMM, then split-k reduce +
+// k2 tail. 3 stages:
+//   [k1]     post + GEMM + sqrsum  (register new_r, no round-trip, split-k)
 //   [reduce] fold SPLIT_K partials -> mixes_pad (bf16) + sqrsum
-//   [k2]    RMS-fold + affines + sinkhorn + weighted sum -> f_pre/h_post/comb
-//
-// Unlike the tcgen05 cooperative kernel (mHC_post_pre), the GEMM is a
-// thread-level FMA loop, so smem stays tiny (full occupancy) and split-k over
-// the hidden dim fills the grid at low token counts -- the structure vLLM uses
-// to avoid both the pad-to-128 waste and the occupancy cliff.
+//   [k2]     RMS-fold + affines + sinkhorn + weighted sum -> f_pre/h_post/comb
+// FMA GEMM (tiny smem -> full occupancy); split-k fills the grid at low t.
 // ============================================================================
 
-// Forward decl: the k2 tail kernel is defined later (shared with mHC_pre_k2).
+// k2 tail kernel is defined later (shared with mHC_pre_k2).
 template <int N, int C, int RMS_HIDDEN, int TOKENS_PER_CTA>
 __global__ void mHC_pre_k2_kernel(void const *__restrict__ mixes_pad,
                                   void const *__restrict__ sqrsum,
@@ -607,11 +597,9 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
 }
 
 // ============================================================================
-// mHC_pre_k1_cuda_core: CUDA-core variant of pre_k1 (prenorm GEMM + sqrsum), no
-// tensor cores. Same outputs as the tcgen05 mHC_pre_k1 (mixes_pad bf16 +
-// sqrsum) so it drop-in feeds the k2 tail. Wins over tcgen05 at low token
-// count, where the MMA/TMA fixed setup cost dominates; tcgen05 wins at high T.
-// split_k over the reduction fills the grid when tokens are few.
+// mHC_pre_k1_decode: CUDA-core pre_k1 (prenorm GEMM + sqrsum), no tensor cores.
+// Same outputs as the tcgen05 path, so it drop-in feeds the k2 tail. Wins at
+// low token count (no MMA/TMA setup cost); split_k fills the grid when t is few.
 // ============================================================================
 
 template <int MIX_HC,
@@ -666,17 +654,16 @@ __global__ void
       out_partial, sqr_partial, mixes_pad, sqrsum, num_tokens, token);
 }
 
-// residual [tokens, K] bf16, fn [MIX_HC, K] fp32 -> mixes_pad [tokens,128] bf16
-// + sqrsum [tokens] fp32. out_partial/sqr_partial are [split_k, tokens, *]
-// scratch. n is hc_mult (4 -> MIX_HC=24).
-void mHC_pre_k1_cuda_core(torch::Tensor residual,
-                          torch::Tensor fn,
-                          torch::Tensor out_partial,
-                          torch::Tensor sqr_partial,
-                          torch::Tensor mixes_pad,
-                          torch::Tensor sqrsum,
-                          int n,
-                          int split_k) {
+// residual [tokens,K] bf16, fn [MIX_HC,K] fp32 -> mixes_pad [tokens,128] bf16
+// + sqrsum [tokens] fp32. out_partial/sqr_partial: [split_k,tokens,*] scratch.
+void mHC_pre_k1_decode(torch::Tensor residual,
+                       torch::Tensor fn,
+                       torch::Tensor out_partial,
+                       torch::Tensor sqr_partial,
+                       torch::Tensor mixes_pad,
+                       torch::Tensor sqrsum,
+                       int n,
+                       int split_k) {
   TORCH_CHECK(n == 4, "pre_k1_cuda_core hardcoded to n=4");
   constexpr int MIX_PAD = 128;
   int const mix_hc = n * n + 2 * n; // 24
@@ -722,10 +709,8 @@ void mHC_pre_k1_cuda_core(torch::Tensor residual,
   float *sqrsum_p = sqrsum.data_ptr<float>();
 
   dim3 block(BT, 1, 1);
-  // TPB amortizes the fn weight reload across tokens (the L1 bottleneck at high
-  // T); pick it only when there are plenty of token-groups to still fill the
-  // grid. split_k fills the grid at low T. They're opposed, so use TPB>1 only
-  // when split_k==1 and tokens are abundant.
+  // TPB amortizes the fn weight reload (L1 bottleneck at high T) but shrinks the
+  // grid; split_k fills the grid at low T. Opposed, so TPB>1 only at split_k==1.
   int tpb = 1;
   if (split_k == 1) {
     if (num_tokens >= 4096) {
@@ -811,14 +796,14 @@ void mHC_pre_k1_cuda_core(torch::Tensor residual,
 
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
-              "mHC_pre_k1_cuda_core launch error: ",
+              "mHC_pre_k1_decode launch error: ",
               cudaGetErrorString(err));
 }
 
 // ============================================================================
-// mHC_pre_k1_tensor_core: raw-PTX tcgen05 pre_k1 (no CUTLASS/CuTe). Same
-// outputs as the cutlass mHC_pre_k1 (mixes_pad bf16 [tokens,128] + sqrsum).
-// bf16 operands, kind::f16 MMA, hand-written TMA/TMEM/mbarrier.
+// mHC_pre_k1_prefill: raw-PTX tcgen05 pre_k1. Wins at high token count (MMA
+// setup amortizes). Same outputs as the decode path; bf16 kind::f16 MMA,
+// hand-written TMA/TMEM/mbarrier.
 // ============================================================================
 
 template <int K,
@@ -835,8 +820,7 @@ void launch_pre_k1_tensor_core(void *residual_ptr,
                                cudaStream_t stream) {
   CUtensorMap A_tmap{}, B_tmap{};
   // A = weight fn [OUT_PAD, K]; B = residual [batch, K]. 128B swizzle pins the
-  // TMA box's contiguous-K dim to 64 bf16; the kernel issues BLOCK_K/64 such
-  // loads per stage, so the descriptor box-K is always 64 (NOT BLOCK_K).
+  // TMA box-K to 64 bf16, so the kernel issues BLOCK_K/64 loads/stage.
   ::init_2d_bf16_tmap(&A_tmap, weight_ptr, OUT_PAD, K, 64, OUT_PAD);
   ::init_2d_bf16_tmap(&B_tmap, residual_ptr, batch, K, 64, BLOCK_N);
 
@@ -851,8 +835,8 @@ void launch_pre_k1_tensor_core(void *residual_ptr,
                                                                  BLOCK_K,
                                                                  MIX_HC,
                                                                  NUM_STAGES>;
-  // Opt in to >48KB dynamic smem. Use >= : at exactly 48KB the default cap is
-  // already saturated by driver reserve, so the launch needs the opt-in too.
+  // Opt in to >=48KB dynamic smem (the 48KB default is saturated by the driver
+  // reserve, so the boundary case needs the opt-in too).
   if (smem_bytes >= 48 * 1024) {
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(
         kp, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
@@ -873,13 +857,13 @@ void launch_pre_k1_tensor_core(void *residual_ptr,
 //   0: 16/64/4   1: 32/64/4   2: 32/128/3  3: 64/64/4
 //   4: 64/128/3  5: 128/64/3  6: 128/128/2 7: 16/128/4
 //   8: 32/256/2  9: 64/256/2
-void mHC_pre_k1_tensor_core(torch::Tensor residual,
-                            torch::Tensor weight_padded,
-                            torch::Tensor mixes_pad,
-                            torch::Tensor sqrsum,
-                            int n,
-                            int cfg) {
-  TORCH_CHECK(n == 4, "pre_k1_tensor_core hardcoded to n=4");
+void mHC_pre_k1_prefill(torch::Tensor residual,
+                        torch::Tensor weight_padded,
+                        torch::Tensor mixes_pad,
+                        torch::Tensor sqrsum,
+                        int n,
+                        int cfg) {
+  TORCH_CHECK(n == 4, "pre_k1_prefill hardcoded to n=4");
   constexpr int OUT_PAD = 128;
   int const batch = static_cast<int>(residual.size(0));
   int const K = static_cast<int>(residual.size(1));
@@ -906,32 +890,25 @@ void mHC_pre_k1_tensor_core(torch::Tensor residual,
   void *mx_p = const_cast<void *>(mixes_pad.data_ptr());
   void *sq_p = const_cast<float *>(sqrsum.data_ptr<float>());
 
-  // NUM_STAGES and OUTPUT_PAD are FIXED (NS=2, OUT_PAD=128). The sweep grid is
-  // BLOCK_N x BLOCK_K = {16,32,64,128} x {64,128,256}; cfg = bn_idx*3 + bk_idx.
-  // BN=128/BK=256 (cfg 11) exceeds the 224 KB smem cap at NS=2, so it's elided.
+  // Sweep is BLOCK_N x BLOCK_K = {16,32,64,128} x {64,128,256} at NS=2.
   constexpr int SWEEP_NS = 2;
   int sel = cfg;
   if (sel < 0) {
-    // Tuned default (full BN x BK sweep, B200): small N tile fills the GPU and
-    // large BLOCK_K cuts pipeline iterations. cfg 2 = BN16/BK256 wins for
-    // t<=1024 across all c. At t>=4096 the larger K-tile's smem pressure starts
-    // to bite, so drop to BK=128 (cfg 1 = BN16/BK128).
-    sel = (batch >= 4096) ? 1 /*BN16/BK128*/ : 2 /*BN16/BK256*/;
+    // B200 tuned default: BN16/BK256 (cfg 2); at t>=4096 the K-tile's smem
+    // pressure bites, so drop to BK=128 (cfg 1).
+    sel = (batch >= 4096) ? 1 : 2;
   }
 
-  // (K_, BN, BK, NS) instantiations. cfg 0..10 use SWEEP_NS=2; cfg 11+ probe
-  // LARGER tiles that only fit by trading stages: BK=512 needs NS=1 (the A
-  // weight tile dominates smem), and BK=256/NS=3 spends the extra budget on a
-  // deeper pipeline instead.
+  // cfg 0..10 use SWEEP_NS=2; cfg 11+ trade stages for larger BK (BK=512 needs
+  // NS=1; BK=256/NS=3 spends the budget on a deeper pipeline).
 #define LAUNCH_CFG(K_, BN, BK)                                                 \
   launch_pre_k1_tensor_core<K_, OUT_PAD, BN, BK, 24, SWEEP_NS>(                \
       res_p, w_p, mx_p, sq_p, batch, stream)
 #define LAUNCH_CFG_NS(K_, BN, BK, NS)                                          \
   launch_pre_k1_tensor_core<K_, OUT_PAD, BN, BK, 24, NS>(                      \
       res_p, w_p, mx_p, sq_p, batch, stream)
-  // Configs 0..10 (BK<=256) are valid for every supported K. The large-BK
-  // probes (BK in {512,1024}) require K divisible by that BK, so they're only
-  // instantiated in the LARGE_K branch (K>=4096); LARGE=0 omits them.
+  // cfg 0..10 (BK<=256) valid for any K; large-BK probes need K%BK==0, so only
+  // the LARGE_K branch (K>=4096) instantiates them (LARGE=0 omits them).
 #define DISPATCH_CFG(K_, LARGE)                                                \
   switch (sel) {                                                               \
     case 0:                                                                    \
@@ -971,8 +948,7 @@ void mHC_pre_k1_tensor_core(torch::Tensor residual,
           : TORCH_CHECK(false, "Unsupported cfg=", sel, " for K=", K);         \
   }
 #define DISPATCH_LARGE_0(K_)
-// BK=512 fits only at NS=1 (A weight tile dominates); BK=1024 is over the
-// 224KB cap even at NS=1, so 512 is the largest BK we can run.
+// BK=512 fits only at NS=1; BK=1024 is over the 224KB cap, so 512 is the max.
 #define DISPATCH_LARGE_1(K_)                                                   \
   case 11:                                                                     \
     LAUNCH_CFG_NS(K_, 16, 512, 1);                                             \
@@ -1006,7 +982,7 @@ void mHC_pre_k1_tensor_core(torch::Tensor residual,
 #undef LAUNCH_CFG_NS
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
-              "mHC_pre_k1_tensor_core launch error: ",
+              "mHC_pre_k1_prefill launch error: ",
               cudaGetErrorString(err));
 }
 
@@ -1047,7 +1023,7 @@ __global__ __launch_bounds__(256) void mHC_pre_k2_kernel(
 }
 
 // Low-t k2: one CTA per token (grid = num_tokens) to fill the SMs at small
-// batch, where the 32-tokens/CTA default leaves only ceil(t/32) blocks idle.
+// batch (the 32-tokens/CTA default leaves only ceil(t/32) blocks).
 template <int N, int C, int RMS_HIDDEN>
 __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_kernel(
     void const *__restrict__ mixes_pad,
@@ -1081,9 +1057,9 @@ __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_kernel(
                                                         num_tokens);
 }
 
-// Fused low-t k2: reduces the k1 GEMM's split-k partials INLINE then runs the
-// tail, folding the separate reduce launch into k2 (3 launches -> 2 at low t).
-// mixes_ptr/sqrsum_ptr point at out_partial / sqr_partial.
+// Fused low-t k2: reduces the k1 split-k partials inline then runs the tail,
+// folding the reduce launch into k2 (3 launches -> 2). mixes_ptr/sqrsum_ptr
+// point at out_partial / sqr_partial.
 template <int N, int C, int RMS_HIDDEN, int SPLIT_K>
 __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_fused_kernel(
     void const *__restrict__ out_partial,
@@ -1154,7 +1130,7 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(mixes_pad.get_device());
 
   // smem: TOKENS_PER_CTA * (4*N + N*N + N*N + N) floats for the tail buffers,
-  // plus the small rms_scale[] array. 128 covers the largest tile.
+  // plus the rms_scale[] array (+1024).
   size_t const smemBytes =
       tokens_per_cta * (4 * n + n * n + n * n + n) * sizeof(float) + 1024;
 
@@ -1206,10 +1182,8 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
       break;                                                                   \
   }
 
-  // Low-t path: the default packs 32 tokens/CTA, so a batch under ~32*SMs
-  // leaves the GPU under-filled. Below the threshold, route to the one-CTA-per-
-  // token kernel (grid = num_tokens) which fills the SMs. Threshold = 32 * a
-  // typical SM count, so we only switch when the default grid is clearly small.
+  // Below 32*SMs tokens the 32-tokens/CTA default under-fills the GPU; route to
+  // the one-CTA-per-token kernel (grid = num_tokens) instead.
   int const k2_lowt_thresh = 32 * resolve_num_ctas(0, mixes_pad.get_device());
   bool const use_lowt = (num_tokens < k2_lowt_thresh);
 
@@ -1270,16 +1244,11 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
 }
 
 // ============================================================================
-// mHC_pre_k1: heuristic dispatch between the CUDA-core and raw-PTX tcgen05
-// implementations. Takes the raw-PTX-style inputs (residual [tokens,K] bf16 +
-// weight_padded [128,K] bf16); when it routes to the CUDA-core path it derives
-// the fp32 fn[mix_hc,K] + split-k scratch internally.
-//
-// Heuristic (from the B200 sweep): tensor cores have a large fixed MMA/TMA/TMEM
-// setup cost, so they only win once there are enough tokens to amortize it.
-//   * tokens < CUDA_T_THRESH -> CUDA-core (FFMA + split-k): wins at decode.
-//   * otherwise              -> raw-PTX tcgen05: wins at prefill.
-// The threshold ~256 is where the sweep showed the crossover across c.
+// mHC_pre_k1: dispatch decode (CUDA-core) vs prefill (tcgen05) on token count.
+// Inputs: residual [tokens,K] bf16 + weight_padded [128,K] bf16; the decode
+// path derives the fp32 fn[mix_hc,K] + split-k scratch internally.
+//   tokens < CUDA_T_THRESH (~256) -> decode (FFMA + split-k)
+//   otherwise                     -> prefill (tcgen05); MMA setup cost amortizes
 // ============================================================================
 static int pick_cuda_split_k(int K, int num_tokens) {
   // Two competing needs: fill the grid (tokens*split_k >= ~SM count) and keep
@@ -1313,10 +1282,9 @@ void mHC_pre_k1(torch::Tensor residual,
   int const num_tokens = static_cast<int>(residual.size(0));
   int const K = static_cast<int>(residual.size(1));
 
-  // Crossover threshold: below it, CUDA-core; at/above it, tcgen05 raw-PTX.
   constexpr int CUDA_T_THRESH = 256;
   if (num_tokens < CUDA_T_THRESH) {
-    // CUDA-core path: needs fp32 fn[mix_hc,K] + split-k scratch.
+    // decode: derive fp32 fn[mix_hc,K] + split-k scratch.
     auto fn =
         weight_padded.slice(0, 0, mix_hc).to(torch::kFloat32).contiguous();
     int const split_k = pick_cuda_split_k(K, num_tokens);
@@ -1324,20 +1292,18 @@ void mHC_pre_k1(torch::Tensor residual,
         torch::TensorOptions().dtype(torch::kFloat32).device(residual.device());
     auto out_partial = torch::empty({split_k, num_tokens, mix_hc}, opts_f);
     auto sqr_partial = torch::empty({split_k, num_tokens}, opts_f);
-    mHC_pre_k1_cuda_core(
+    mHC_pre_k1_decode(
         residual, fn, out_partial, sqr_partial, mixes_pad, sqrsum, n, split_k);
   } else {
-    mHC_pre_k1_tensor_core(
+    mHC_pre_k1_prefill(
         residual, weight_padded, mixes_pad, sqrsum, n, /*cfg=*/-1);
   }
 }
 
 // ============================================================================
-// mHC_pre: the full prenorm pipeline (k1 GEMM + k2 tail) in as few launches as
-// possible. For the low-t cuda_core path this fuses the GEMM's split-k reduce
-// into the k2 tail -> 2 launches (GEMM + fused-k2) instead of 3 (GEMM + reduce
-// + k2), removing the per-launch overhead that dominates at decode. For the
-// high-t tensor_core path it's the standard k1 + k2.
+// mHC_pre: full prenorm pipeline (k1 GEMM + k2 tail), min launches. Decode (low
+// t) fuses the GEMM's split-k reduce into k2 -> 2 launches instead of 3; prefill
+// (high t) is the standard k1 + k2.
 // ============================================================================
 template <int N, int C, int RMS_HIDDEN, int SPLIT_K>
 static void launch_pre_fused_k2(void *outp,
@@ -1398,7 +1364,7 @@ void mHC_pre(torch::Tensor residual,
   bool const fused = (num_tokens < CUDA_T_THRESH);
 
   if (fused) {
-    // --- low-t: cuda_core GEMM (writes partials) + fused-reduce-k2 ---
+    // --- decode: GEMM (writes partials) + fused-reduce-k2 ---
     auto fn =
         weight_padded.slice(0, 0, mix_hc).to(torch::kFloat32).contiguous();
     int const split_k = pick_cuda_split_k(K, num_tokens);
@@ -1406,9 +1372,7 @@ void mHC_pre(torch::Tensor residual,
         torch::TensorOptions().dtype(torch::kFloat32).device(residual.device());
     auto out_partial = torch::empty({split_k, num_tokens, mix_hc}, opts_f);
     auto sqr_partial = torch::empty({split_k, num_tokens}, opts_f);
-    // GEMM only -- write partials (split_k>=1 always writes partials here so
-    // the fused k2 can reduce them; we never call the standalone reduce
-    // kernel).
+    // GEMM always writes partials (even split_k==1) for the fused k2 to reduce.
     void *res_p = const_cast<void *>(residual.data_ptr());
     float *fn_p = fn.data_ptr<float>();
     float *outp_p = out_partial.data_ptr<float>();
@@ -1487,13 +1451,13 @@ void mHC_pre(torch::Tensor residual,
 #undef PRE_FUSEDK2
 #undef PRE_GEMM
   } else {
-    // --- high-t: standard tensor_core k1 + k2 ---
-    mHC_pre_k1_tensor_core(residual,
-                           weight_padded,
-                           mixes_pad,
-                           sqrsum,
-                           n,
-                           /*cfg=*/-1);
+    // --- prefill: standard k1 + k2 ---
+    mHC_pre_k1_prefill(residual,
+                       weight_padded,
+                       mixes_pad,
+                       sqrsum,
+                       n,
+                       /*cfg=*/-1);
     mHC_pre_k2(mixes_pad,
                sqrsum,
                scale,
@@ -1533,20 +1497,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "(comb NOT transposed; matches torch hc_post)");
 
   m.def(
-      "mHC_pre_k1_tensor_core",
-      &mHC_pre_k1_tensor_core,
+      "mHC_pre_k1_prefill",
+      &mHC_pre_k1_prefill,
       py::arg("residual"),
       py::arg("weight_padded"),
       py::arg("mixes_pad"),
       py::arg("sqrsum"),
       py::arg("n"),
       py::arg("cfg") = -1,
-      "Raw-PTX tcgen05 pre_k1 (no CUTLASS/CuTe): mixes = residual @ fn.T + "
-      "sqrsum, bf16 kind::f16 MMA. Same outputs as mHC_pre_k1. cfg=-1 uses "
-      "the tuned tile config; 0..9 force a specific (BLOCK_N,BLOCK_K,STAGES).");
+      "Prefill pre_k1 (raw-PTX tcgen05, no CUTLASS/CuTe): mixes = residual @ "
+      "fn.T + sqrsum, bf16 kind::f16 MMA. Same outputs as mHC_pre_k1. cfg=-1 "
+      "uses the tuned tile config; 0..9 force a (BLOCK_N,BLOCK_K,STAGES).");
 
-  m.def("mHC_pre_k1_cuda_core",
-        &mHC_pre_k1_cuda_core,
+  m.def("mHC_pre_k1_decode",
+        &mHC_pre_k1_decode,
         py::arg("residual"),
         py::arg("fn"),
         py::arg("out_partial"),
@@ -1555,9 +1519,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sqrsum"),
         py::arg("n"),
         py::arg("split_k") = 1,
-        "CUDA-core pre_k1: mixes = residual @ fn.T + per-token sqrsum (no "
-        "tensor cores, split-k). Same outputs as the tcgen05 mHC_pre_k1; wins "
-        "at low token count.");
+        "Decode pre_k1 (CUDA-core): mixes = residual @ fn.T + per-token sqrsum "
+        "(no tensor cores, split-k). Same outputs as the tcgen05 mHC_pre_k1; "
+        "wins at low token count.");
 
   m.def("mHC_post_pre_v2",
         &mHC_post_pre_v2,

@@ -670,6 +670,26 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_mhc_post_sm100_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(4, 1, TASK_MHC_POST_SM100, variant_id);
+  } else if (name == "mhc_pre_k1_sm100") {
+    int variant_id = task_register->register_mhc_pre_k1_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MHC_PRE_K1_SM100, variant_id);
+  } else if (name == "mhc_pre_k2_sm100") {
+    int variant_id = task_register->register_mhc_pre_k2_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(5, 3, TASK_MHC_PRE_K2_SM100, variant_id);
+  } else if (name == "mhc_post_pre_k1_sm100") {
+    int variant_id = task_register->register_mhc_post_pre_k1_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(5, 3, TASK_MHC_POST_PRE_K1_SM100, variant_id);
+  } else if (name == "mhc_post_pre_k2_sm100") {
+    int variant_id = task_register->register_mhc_post_pre_k2_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(5, 3, TASK_MHC_POST_PRE_K2_SM100, variant_id);
   } else if (name == "mtp_verify_probabilistic") {
     int variant_id = task_register->register_mtp_verify_probabilistic_task(
         customized->bgraph, params);

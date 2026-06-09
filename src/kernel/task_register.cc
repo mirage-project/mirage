@@ -2238,6 +2238,228 @@ int TaskRegister::register_mhc_post_sm100_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_MHC_POST_SM100, code.to_string());
 }
 
+// mHC pre stage k1 (CUDA-core prenorm GEMM): mixes = residual @ fn.T +
+// per-token sqrsum. One CTA per token, split_k=1 (DIRECT epilogue writes the
+// final bf16 mixes_pad + fp32 sqrsum, no separate reduce launch).
+//   residual:  [bs, K]        bf16   (K = n*C)
+//   fn:        [MIX_HC, K]    fp32    (weight)
+//   mixes_pad: [bs, MIX_PAD]  bf16    (output, MIX_PAD=128)
+//   sqrsum:    [bs]           fp32    (output)
+int TaskRegister::register_mhc_pre_k1_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 2;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // residual: [bs, K]
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int K = input_ops[0]->output_tensors[0].dim[1];
+  // fn: [MIX_HC, K]
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  int mix_hc = input_ops[1]->output_tensors[0].dim[0];
+  assert(input_ops[1]->output_tensors[0].dim[1] == K);
+  // mixes_pad: [bs, MIX_PAD]
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int mix_pad = output_ops[0]->output_tensors[0].dim[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // <T, MIX_HC, K, BLOCK_THREADS, SPLIT_K, MIX_PAD, TPB>; split_k=1, TPB=1.
+  code.e("kernel::mHC_pre_k1_cuda_core_task_impl<bfloat16, $, $, 128, 1, $, 1>(",
+         mix_hc,
+         K,
+         mix_pad);
+  code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[0]),"); // res
+  code.e("    static_cast<float const *>(task_desc->input_ptrs[1]),"); // fn
+  code.e("    nullptr,"); // out_partial (unused at split_k=1)
+  code.e("    nullptr,"); // sqr_partial (unused at split_k=1)
+  code.e("    task_desc->output_ptrs[0],"); // mixes_pad (void*)
+  code.e("    static_cast<float *>(task_desc->output_ptrs[1]),"); // sqrsum
+  code.e("    gridDim.x,"); // num_tokens (one CTA per token)
+  code.e("    static_cast<int>(blockIdx.x),"); // token0
+  code.e("    0);");                            // i_ks
+  return register_task_variant(TASK_MHC_PRE_K1_SM100, code.to_string());
+}
+
+// mHC pre stage k2 (sinkhorn tail): RMS-scale the k1 GEMM output, apply the
+// pre/post/comb affines + sinkhorn, weighted residual sum.
+//   mixes_pad: [bs, MIX_PAD]  bf16    (from k1)
+//   sqrsum:    [bs]           fp32    (from k1)
+//   scale:     [3]            fp32
+//   base:      [MIX_HC]       fp32
+//   x_orig:    [bs, n, C]     bf16    (residual streams)
+//   f_pre:     [bs, C]        bf16    (output)
+//   h_post:    [bs, n]        fp32    (output)
+//   comb:      [bs, n, n]     fp32    (output)
+// params = [sinkhorn_repeat]; eps/rms_eps fixed to the DeepSeek-V4 constants.
+int TaskRegister::register_mhc_pre_k2_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 1);
+  int sinkhorn_repeat = params[0];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 5;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // x_orig: [bs, n, C]
+  assert(input_ops[4]->output_tensors[0].num_dims == 3);
+  int num_topk = input_ops[4]->output_tensors[0].dim[1];
+  int output_size = input_ops[4]->output_tensors[0].dim[2];
+  assert(num_topk == 4 && "mHC pre k2 hardcoded to n=4");
+  int rms_hidden = num_topk * output_size;
+  int mix_pad = input_ops[0]->output_tensors[0].dim[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // One CTA per token (grid = num_tokens), reading the pre-reduced mixes_pad +
+  // sqrsum (RDSPLIT_K=0). <T_in, N, C, RMS_HIDDEN, BLOCK_THREADS, MIX_STRIDE,
+  // RDSPLIT_K>.
+  code.e("kernel::mHC_pre_k2_lowt_task_impl<bfloat16, $, $, $, 256, $, 0>(",
+         num_topk,
+         output_size,
+         rms_hidden,
+         mix_pad);
+  code.e("    task_desc->input_ptrs[0],");  // mixes_pad
+  code.e("    task_desc->input_ptrs[1],");  // sqrsum
+  code.e("    task_desc->input_ptrs[2],");  // scale
+  code.e("    task_desc->input_ptrs[3],");  // base
+  code.e("    task_desc->input_ptrs[4],");  // x_orig
+  code.e("    task_desc->output_ptrs[0],"); // f_pre
+  code.e("    task_desc->output_ptrs[1],"); // h_post
+  code.e("    task_desc->output_ptrs[2],"); // comb
+  code.e("    $,", sinkhorn_repeat);
+  code.e("    1e-9f,"); // sinkhorn_eps
+  code.e("    1e-6f,"); // rms_eps
+  code.e("    gridDim.x);"); // num_tokens
+  return register_task_variant(TASK_MHC_PRE_K2_SM100, code.to_string());
+}
+
+// mHC fused post+pre stage k1: this layer's post mix feeds next layer's
+// prenorm GEMM in registers (no residual round-trip). One CTA per token,
+// split_k=1.
+//   residual: [bs, n, C]      bf16
+//   x:        [bs, C]         bf16
+//   comb:     [bs, n, n]      fp32
+//   post:     [bs, n]         fp32
+//   fn:       [MIX_HC, n, C]  fp32
+//   res_next:    [bs, n, C]      bf16  (output: mixed residual)
+//   out_partial: [1, bs, MIX_HC] fp32  (output, folded by k2)
+//   sqr_partial: [1, bs]         fp32  (output, folded by k2)
+int TaskRegister::register_mhc_post_pre_k1_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 5;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // residual: [bs, n, C]
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  int num_topk = input_ops[0]->output_tensors[0].dim[1];
+  int output_size = input_ops[0]->output_tensors[0].dim[2];
+  // fn: [MIX_HC, n, C]
+  int mix_hc = input_ops[4]->output_tensors[0].dim[0];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // <T, N, C, MIX_HC, BLOCK_THREADS, SPLIT_K>; one CTA/token, split_k=1.
+  // This impl always writes fp32 out_partial/sqr_partial (shape [1, bs, *] at
+  // split_k=1); the k2 stage folds + RMS-scales them, so no separate reduce.
+  code.e("kernel::mHC_post_pre_k1_task_impl<bfloat16, $, $, $, 128, 1>(",
+         num_topk,
+         output_size,
+         mix_hc);
+  code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[0]),"); // res
+  code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[1]),"); // x
+  code.e("    static_cast<float const *>(task_desc->input_ptrs[2]),"); // comb
+  code.e("    static_cast<float const *>(task_desc->input_ptrs[3]),"); // post
+  code.e("    static_cast<float const *>(task_desc->input_ptrs[4]),"); // fn
+  code.e("    static_cast<bfloat16 *>(task_desc->output_ptrs[0]),"); // res_next
+  code.e("    static_cast<float *>(task_desc->output_ptrs[1]),"); // out_partial
+  code.e("    static_cast<float *>(task_desc->output_ptrs[2]),"); // sqr_partial
+  code.e("    gridDim.x,"); // num_tokens
+  code.e("    static_cast<int>(blockIdx.x),"); // token
+  code.e("    0);");                           // i_ks
+  return register_task_variant(TASK_MHC_POST_PRE_K1_SM100, code.to_string());
+}
+
+// mHC fused post+pre stage k2: the sinkhorn tail with the k1 split-k partials
+// reduced inline (mHC_pre_k2_lowt_task_impl with RDSPLIT_K). Consumes k1's
+// out_partial/sqr_partial + the next-layer residual, producing f_pre/h_post/
+// comb. One CTA per token (grid = num_tokens). params = [sinkhorn_repeat].
+int TaskRegister::register_mhc_post_pre_k2_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 1);
+  int sinkhorn_repeat = params[0];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 5;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // x_orig (next residual): [bs, n, C]
+  assert(input_ops[4]->output_tensors[0].num_dims == 3);
+  int num_topk = input_ops[4]->output_tensors[0].dim[1];
+  int output_size = input_ops[4]->output_tensors[0].dim[2];
+  assert(num_topk == 4 && "mHC post_pre k2 hardcoded to n=4");
+  int rms_hidden = num_topk * output_size;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // <T_in, N, C, RMS_HIDDEN, BLOCK_THREADS, MIX_STRIDE, RDSPLIT_K=1>; the lowt
+  // form reduces the (split_k=1) partials inline before the tail.
+  code.e("kernel::mHC_pre_k2_lowt_task_impl<bfloat16, $, $, $, 256, 128, 1>(",
+         num_topk,
+         output_size,
+         rms_hidden);
+  code.e("    task_desc->input_ptrs[0],");  // out_partial
+  code.e("    task_desc->input_ptrs[1],");  // sqr_partial
+  code.e("    task_desc->input_ptrs[2],");  // scale
+  code.e("    task_desc->input_ptrs[3],");  // base
+  code.e("    task_desc->input_ptrs[4],");  // x_orig (next residual)
+  code.e("    task_desc->output_ptrs[0],"); // f_pre
+  code.e("    task_desc->output_ptrs[1],"); // h_post
+  code.e("    task_desc->output_ptrs[2],"); // comb
+  code.e("    $,", sinkhorn_repeat);
+  code.e("    1e-9f,"); // sinkhorn_eps
+  code.e("    1e-6f,"); // rms_eps
+  code.e("    gridDim.x);"); // num_tokens
+  return register_task_variant(TASK_MHC_POST_PRE_K2_SM100, code.to_string());
+}
+
 int TaskRegister::register_mtp_verify_probabilistic_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 1);

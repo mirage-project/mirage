@@ -2251,6 +2251,125 @@ class PersistentKernel:
         self.kn_graph.customized([residual, x, comb, post, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "mhc_post_sm100", [])
 
+    def mhc_pre_k1_layer(
+        self,
+        residual: DTensor,   # [bs, K]        bf16  (K = n*C)
+        fn: DTensor,         # [MIX_HC, K]    fp32  (weight)
+        mixes_pad: DTensor,  # [bs, MIX_PAD]  bf16  (output)
+        sqrsum: DTensor,     # [bs]           fp32  (output)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """mHC pre stage k1: mixes = residual @ fn.T + per-token sqrsum.
+
+        CUDA-core prenorm GEMM, one CTA per token (split_k=1, direct epilogue
+        writes the final bf16 mixes_pad + fp32 sqrsum). Feeds mhc_pre_k2_layer.
+        """
+        assert self.target_cc == 100
+        assert residual.num_dims == 2
+        assert fn.num_dims == 2
+        assert mixes_pad.num_dims == 2
+        assert sqrsum.num_dims == 1
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(residual, (0, -1, -1), -1, True)
+        tb_graph.new_input(fn, (0, -1, -1), -1, True)
+        tb_graph.new_input(mixes_pad, (0, -1, -1), -1, True)
+        tb_graph.new_input(sqrsum, (0, -1, -1), -1, True)
+        self.kn_graph.customized([residual, fn, mixes_pad, sqrsum], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mhc_pre_k1_sm100", [])
+
+    def mhc_pre_k2_layer(
+        self,
+        mixes_pad: DTensor,  # [bs, MIX_PAD]  bf16  (from k1)
+        sqrsum: DTensor,     # [bs]           fp32  (from k1)
+        scale: DTensor,      # [3]            fp32
+        base: DTensor,       # [MIX_HC]       fp32
+        x_orig: DTensor,     # [bs, n, C]     bf16  (residual streams)
+        f_pre: DTensor,      # [bs, C]        bf16  (output)
+        h_post: DTensor,     # [bs, n]        fp32  (output)
+        comb: DTensor,       # [bs, n, n]     fp32  (output)
+        grid_dim: tuple,
+        block_dim: tuple,
+        sinkhorn_repeat: int = 20,
+    ):
+        """mHC pre stage k2: RMS-scale the k1 GEMM output, apply the
+        pre/post/comb affines + sinkhorn, weighted residual sum.
+        """
+        assert self.target_cc == 100
+        assert x_orig.num_dims == 3
+        assert f_pre.num_dims == 2
+        assert h_post.num_dims == 2
+        assert comb.num_dims == 3
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        for t in (mixes_pad, sqrsum, scale, base, x_orig, f_pre, h_post, comb):
+            tb_graph.new_input(t, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [mixes_pad, sqrsum, scale, base, x_orig, f_pre, h_post, comb],
+            tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "mhc_pre_k2_sm100", [sinkhorn_repeat])
+
+    def mhc_post_pre_k1_layer(
+        self,
+        residual: DTensor,    # [bs, n, C]      bf16
+        x: DTensor,           # [bs, C]         bf16
+        comb_in: DTensor,     # [bs, n, n]      fp32
+        post: DTensor,        # [bs, n]         fp32
+        fn: DTensor,          # [MIX_HC, n, C]  fp32
+        residual_next: DTensor,  # [bs, n, C]   bf16  (output: mixed residual)
+        out_partial: DTensor,    # [1, bs, MIX_HC] fp32 (output)
+        sqr_partial: DTensor,    # [1, bs]      fp32  (output)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """mHC fused post+pre stage k1: this layer's post mix feeds next
+        layer's prenorm GEMM in registers (no residual round-trip). One CTA
+        per token, split_k=1. Feeds mhc_post_pre_k2_layer.
+        """
+        assert self.target_cc == 100
+        assert residual.num_dims == 3
+        assert fn.num_dims == 3
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        ins = [residual, x, comb_in, post, fn,
+               residual_next, out_partial, sqr_partial]
+        for t in ins:
+            tb_graph.new_input(t, (0, -1, -1), -1, True)
+        self.kn_graph.customized(ins, tb_graph)
+        self.kn_graph.register_task(tb_graph, "mhc_post_pre_k1_sm100", [])
+
+    def mhc_post_pre_k2_layer(
+        self,
+        out_partial: DTensor,    # [1, bs, MIX_HC] fp32 (from k1)
+        sqr_partial: DTensor,    # [1, bs]      fp32  (from k1)
+        scale: DTensor,          # [3]          fp32
+        base: DTensor,           # [MIX_HC]     fp32
+        residual_next: DTensor,  # [bs, n, C]   bf16  (next residual, from k1)
+        f_pre: DTensor,          # [bs, C]      bf16  (output)
+        h_post: DTensor,         # [bs, n]      fp32  (output)
+        comb: DTensor,           # [bs, n, n]   fp32  (output)
+        grid_dim: tuple,
+        block_dim: tuple,
+        sinkhorn_repeat: int = 20,
+    ):
+        """mHC fused post+pre stage k2: sinkhorn tail with the k1 split-k
+        partials reduced inline. Same math as mhc_pre_k2.
+        """
+        assert self.target_cc == 100
+        assert residual_next.num_dims == 3
+        assert f_pre.num_dims == 2
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        ins = [out_partial, sqr_partial, scale, base, residual_next,
+               f_pre, h_post, comb]
+        for t in ins:
+            tb_graph.new_input(t, (0, -1, -1), -1, True)
+        self.kn_graph.customized(ins, tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "mhc_post_pre_k2_sm100", [sinkhorn_repeat])
+
     def mtp_float_scatter_layer(
         self,
         src: DTensor,       # [batch, 1] float32
