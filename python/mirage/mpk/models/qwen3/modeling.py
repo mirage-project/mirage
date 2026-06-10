@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional, Set, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -51,6 +51,19 @@ def _aligned_lm_head_tasks(width: int, max_tasks: int, align: int = 8) -> int:
         if width % g == 0 and (width // g) % align == 0:
             return g
     return 1
+
+
+def _remap_qwen3_hf_key(name: str) -> str:
+    """Map an HF Qwen3 state_dict key to its MPK catalog named_parameters() path.
+
+    HF stores q_norm/k_norm as RMSNorm modules ('...self_attn.q_norm.weight');
+    the catalog stores them as raw params on PagedAttention ('...self_attn.attn.q_norm').
+    """
+    if name.endswith(".self_attn.q_norm.weight"):
+        return name[: -len(".self_attn.q_norm.weight")] + ".self_attn.attn.q_norm"
+    if name.endswith(".self_attn.k_norm.weight"):
+        return name[: -len(".self_attn.k_norm.weight")] + ".self_attn.attn.k_norm"
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -229,34 +242,6 @@ class Qwen3Attention(MPKModule):
         )
         if self.tp_size > 1:
             self.allreduce = AllReduce(prefix=f"{prefix}attn_allreduce_")
-
-    def load_weights(
-        self, weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> Set[str]:
-        """Two HF-vs-catalog name idiosyncrasies on this module:
-
-          * HF ``q_norm.weight`` / ``k_norm.weight`` (a Qwen3RMSNorm module
-            with a ``weight`` Parameter inside) → the catalog's
-            ``PagedAttention.q_norm`` / ``.k_norm`` (raw nn.Parameter, no
-            ``.weight`` suffix). Strip the suffix before delegating so
-            default routing finds the right Parameter.
-        """
-        weights_list = list(weights)
-        remapped = []
-        name_map = {}  # remapped → original (for accurate consumed reporting)
-        for name, tensor in weights_list:
-            if name == "q_norm.weight":
-                new = "attn.q_norm"
-                remapped.append((new, tensor))
-                name_map[new] = name
-            elif name == "k_norm.weight":
-                new = "attn.k_norm"
-                remapped.append((new, tensor))
-                name_map[new] = name
-            else:
-                remapped.append((name, tensor))
-        consumed = super().load_weights(remapped)
-        return {name_map.get(n, n) for n in consumed}
 
     def forward(self, x, cos, sin, positions, residual):
         bsz, tlen, _ = x.shape
@@ -638,6 +623,9 @@ class Qwen3ForCausalLM(MPKModule):
         # num_workers isn't known until then). Used by compile() for the
         # lm_head linear + argmax_partial grids.
         self._lm_head_tasks: Optional[int] = None
+
+    def resolve_weight(self, name, params):
+        return super().resolve_weight(_remap_qwen3_hf_key(name), params)
 
     def forward(self, input_tokens):
         h = self.model(input_tokens)
