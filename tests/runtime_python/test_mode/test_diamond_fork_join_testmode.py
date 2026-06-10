@@ -117,7 +117,7 @@ def test_diamond_fork_join_testmode():
     pk.compile(output_dir=folder_path)
 
     print("Running diamond fork+join test kernel...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref_a = torch_rmsnorm(x_input, w_a)
