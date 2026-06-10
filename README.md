@@ -7,7 +7,6 @@
 </div>
 
 *Latest News* 🔥
-* [2026/06] **MPK 2.0 (experimental)**: a new warp-specialized runtime that replaces the dynamic scheduler with a single statically-planned persistent kernel — see [MPK 2.0](#mpk-20-experimental) below.
 * [2025/06] We released [Mirage Persistent Kernel (MPK)](https://github.com/mirage-project/mirage/tree/mpk), a compiler and runtime that automatically transforms multi-GPU LLM inference into a high-performance megakernel.
 
 ## About

@@ -9,8 +9,6 @@
 *.dylib
 *.dll
 
-*.md
-
 # Compiled executables
 *.exe
 
@@ -38,6 +36,7 @@ __pycache__/
 *.egg-info
 dist/
 wheelhouse/
+.venv/
 
 # Cython
 /python/mirage/_cython/core.cpp
@@ -80,10 +79,10 @@ ncu_tmp
 #nsys
 *.nsys-rep
 *.sqlite
+.claude/
+.humanize/
 
-# MPK v3 docs/figures/scratch — kept local, not in PR
-docs/mpk/figures/
-docs/mpk/V2_CODEBASE.md
-docs/mpk/V2_TODO.md
-demo/linear_v3_unittest.py
-*.perfetto-trace*
+# Local-only Claude docs / scratch PR description — never push
+/CLAUDE.md
+/pr.md
+*.log
