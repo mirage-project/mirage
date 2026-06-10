@@ -85,18 +85,6 @@ __device__ __noinline__ void
                                                    C_row_stride);
 }
 
-// D3 (2026-06-03): fp8-out flavor of the per-head dense BMM. Identical math,
-// but the epilogue fuses the downstream float32-scale per-token-group quantize
-// that previously ran as a standalone TASK_PER_TOKEN_GROUP_QUANTIZE_FP8 right
-// after BMM2 (feeding the o_proj dense GEMM). Each CTA computes one head's
-// (M, N=128) output = exactly one K-group of the o_proj input row [M, H*128],
-// so the per-row max over acc[BN=128] is the o_proj-group max for that head:
-//   C_fp8   : [M, H*N] row-major raw __nv_fp8_e4m3 (per-head base + stride H*N)
-//   C_scale : [M, H]   row-major float32 (per-head base + stride H, one group)
-// The per-head base pointers come from the runtime partition map (output split
-// on H), same as the bf16 BMM. gemm_h is the number of heads = N-group count
-// in the o_proj row, threaded as the FP8/scale row strides.
-template <int BN, int NS, int NE>
 template <int BN, int NS, int NE>
 __host__ __device__ inline constexpr int linear_fp8_bmm_dense_smem_size() {
   return fp8_gemm_dense_common::smem_size_tpl<BN, NS, NE>();
