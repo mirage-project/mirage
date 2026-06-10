@@ -116,17 +116,17 @@ def main() -> None:
         print = lambda *_, **__: None
 
     cfg = MPKConfig(
-        hf=HFConfig.from_pretrained(
+        hf_config=HFConfig.from_pretrained(
             args.model,
             num_hidden_layers_override=args.num_hidden_layers_override,
         ),
-        parallel=ParallelConfig(
+        parallel_config=ParallelConfig(
             world_size=world_size, rank=rank, tp_size=world_size,
         ),
-        kv_cache=KVCacheConfig(
+        kv_cache_config=KVCacheConfig(
             max_num_pages=args.max_num_pages, page_size=args.page_size,
         ),
-        runtime=RuntimeConfig(
+        runtime_config=RuntimeConfig(
             max_seq_length=args.max_seq_length,
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_num_batched_requests=args.max_num_batched_requests,
