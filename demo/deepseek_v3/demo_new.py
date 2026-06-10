@@ -19,14 +19,12 @@ Scope (v1):
   * BF16 weights only — HF FP8 weights are dequantized to BF16 at load.
   * Decode-only (max_num_batched_tokens <= 8). No prefill chunking.
   * Greedy decode (no spec-decode, no sampling, no MTP).
-  * KV absorption + W_UV→o_proj fusion done in Python at load time.
+  * KV absorption + W_UV→o_proj fusion done inline during streaming load.
 
-Weight loading: ``_load_hf_weights_with_absorption`` loads only the
-requested layer indices from the sharded HF safetensors, dequantizes
-FP8 → BF16 via the shared :func:`demo.deepseek_v3.models.convert.dequantize_fp8`
-helper, absorbs ``kv_b_proj`` into ``q_b_proj``, fuses ``W_UV`` into
-``o_proj``, and (for MoE layers) stacks per-expert weights into
-``experts.w13.weight`` / ``experts.w2.weight``.
+Weight loading: uses ``DeepseekV3ForCausalLM.load_weights`` which streams
+from the sharded HF safetensors, dequantizes FP8 → BF16, absorbs
+``kv_b_proj`` into ``q_b_proj``, fuses ``W_UV`` into ``o_proj``, stacks
+per-expert weights, and calls ``process_weights()`` at the end.
 """
 
 from __future__ import annotations
@@ -34,20 +32,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
-from typing import Dict, List, Optional
+from typing import List
 
 import torch
 from transformers import AutoConfig, AutoTokenizer
 
 import mirage as mi
 from mirage.mpk.models.deepseek_v3.modeling import DeepseekV3ForCausalLM
-
-
-# Make the existing demo's convert.py importable for FP8 dequant + absorb.
-_DEMO_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_DEMO_DIR, "models"))
-from convert import dequantize_fp8, absorb_kv_into_q, get_model_params, is_fp8  # noqa: E402
+from mirage.mpk.weight_loader import find_safetensors_files, safetensors_weights_iterator
 
 
 DEFAULT_SAVE_DIR = os.path.join("outputs", "deepseek_v3")
@@ -102,260 +94,6 @@ def _parse_layers(spec: str) -> List[int]:
         else:
             out.append(int(part))
     return sorted(set(out))
-
-
-# ---------------------------------------------------------------------------
-# Weight loading
-# ---------------------------------------------------------------------------
-
-
-def _selectively_load_layers(
-    model_path: str,
-    layer_indices: List[int],
-) -> Dict[str, torch.Tensor]:
-    """Load only the requested layers + global (embed/norm/lm_head) tensors.
-
-    Returns a state_dict keyed by the original HF names, on CPU.
-    """
-    from safetensors import safe_open
-
-    index_path = os.path.join(model_path, "model.safetensors.index.json")
-    if not os.path.exists(index_path):
-        raise FileNotFoundError(
-            f"No model.safetensors.index.json under {model_path}. The new "
-            "driver expects a sharded HF DeepSeek V3 checkpoint."
-        )
-    with open(index_path) as f:
-        index = json.load(f)
-
-    needed_prefixes = [
-        "model.embed_tokens.",
-        "model.norm.",
-        "lm_head.",
-    ]
-    for li in layer_indices:
-        needed_prefixes.append(f"model.layers.{li}.")
-
-    shard_to_keys: Dict[str, List[str]] = {}
-    for key, shard in index["weight_map"].items():
-        if any(key.startswith(p) for p in needed_prefixes):
-            shard_to_keys.setdefault(shard, []).append(key)
-
-    state_dict: Dict[str, torch.Tensor] = {}
-    for shard, keys in sorted(shard_to_keys.items()):
-        shard_path = os.path.join(model_path, shard)
-        print(f"  Loading {len(keys)} keys from {shard}")
-        with safe_open(shard_path, framework="pt", device="cpu") as f:
-            for key in keys:
-                state_dict[key] = f.get_tensor(key)
-    print(f"  Loaded {len(state_dict)} keys total (CPU).")
-    return state_dict
-
-
-def _maybe_dequant(name: str, w: torch.Tensor,
-                   state_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-    """If w is FP8 and a ``<name>_scale_inv`` companion is present,
-    dequantize to BF16. Otherwise return w unchanged."""
-    if not is_fp8(w):
-        return w
-    s_key = name + "_scale_inv"
-    if s_key in state_dict:
-        return dequantize_fp8(w, state_dict[s_key], target_dtype=torch.bfloat16)
-    # No scale found — best-effort cast.
-    return w.to(torch.bfloat16)
-
-
-def _load_hf_weights_with_absorption(
-    model_path: str,
-    config,
-    layer_indices: List[int],
-) -> Dict[str, torch.Tensor]:
-    """Load + convert HF DeepSeek V3 weights into the modeling.py's
-    parameter names.
-
-    Conversions performed:
-      1. FP8 → BF16 (via demo.deepseek_v3.models.convert.dequantize_fp8).
-      2. ``kv_b_proj`` absorbed into ``q_b_proj`` so the resulting
-         ``q_b_proj`` has shape ``(H*(kv_lora_rank+qk_rope_head_dim),
-         q_lora_rank)``.
-      3. ``W_UV`` (the V half of kv_b_proj) fused into ``o_proj`` so the
-         resulting ``o_proj`` has shape ``(hidden, H*kv_lora_rank)``.
-      4. Per-MoE-layer: stack all ``experts.{e}.{gate,up,down}_proj.weight``
-         into single ``experts.w13.weight`` and ``experts.w2.weight``
-         tensors with the MoEW13 / MoEW2 layouts.
-      5. Build modeling.py-shaped keys
-         (``model.layers.{i}.self_attn.q_a_proj_weight`` etc.).
-    """
-    state_dict = _selectively_load_layers(model_path, layer_indices)
-
-    config_dict = config.to_dict()
-    mp = get_model_params(config_dict)
-    num_heads = mp["num_heads"]
-    qk_nope = mp["qk_nope_head_dim"]
-    qk_rope = mp["qk_rope_head_dim"]
-    kv_lora_rank = mp["kv_lora_rank"]
-    v_dim = mp["v_head_dim"]
-    first_moe = mp["first_moe_layer"]
-    num_experts = mp["num_experts"]
-
-    out: Dict[str, torch.Tensor] = {}
-
-    # ---- 1. Global tensors: embed, final norm, lm_head ----
-    for key in ("model.embed_tokens.weight", "model.norm.weight",
-                "lm_head.weight"):
-        if key in state_dict:
-            out[key] = _maybe_dequant(key, state_dict[key], state_dict).to(
-                torch.bfloat16
-            ).contiguous()
-
-    # ---- 2. Per-layer conversions ----
-    for li in layer_indices:
-        layer_prefix = f"model.layers.{li}."
-        attn = f"{layer_prefix}self_attn."
-
-        # ---- Layernorms ----
-        for hf_name, modeling_name in [
-            (f"{layer_prefix}input_layernorm.weight",
-             f"{layer_prefix}input_layernorm.weight"),
-            (f"{layer_prefix}post_attention_layernorm.weight",
-             f"{layer_prefix}post_attention_layernorm.weight"),
-            (f"{attn}q_a_layernorm.weight",
-             f"{attn}q_a_layernorm.weight"),
-            (f"{attn}kv_a_layernorm.weight",
-             f"{attn}kv_a_layernorm.weight"),
-        ]:
-            if hf_name in state_dict:
-                out[modeling_name] = _maybe_dequant(
-                    hf_name, state_dict[hf_name], state_dict
-                ).to(torch.bfloat16).contiguous()
-
-        # ---- MLA absorption: q_b absorbs W_UK ----
-        q_key = f"{attn}q_b_proj.weight"
-        kv_key = f"{attn}kv_b_proj.weight"
-        o_key = f"{attn}o_proj.weight"
-        if q_key in state_dict and kv_key in state_dict:
-            q_w = _maybe_dequant(
-                q_key, state_dict[q_key], state_dict
-            ).float()
-            kv_w = _maybe_dequant(
-                kv_key, state_dict[kv_key], state_dict
-            ).float()
-
-            # Absorb kv_b into q_b: result shape
-            # (H * (kv_lora_rank + qk_rope_head_dim), q_lora_rank)
-            absorbed = absorb_kv_into_q(q_w, kv_w, mp).to(torch.bfloat16)
-            out[q_key] = absorbed.contiguous()
-
-            # Fuse W_UV (the v half of kv_b_proj) into o_proj. Final
-            # o_proj shape: (hidden, H * kv_lora_rank).
-            kv_b_reshaped = kv_w.reshape(num_heads, qk_nope + v_dim, kv_lora_rank)
-            W_UV = kv_b_reshaped[:, qk_nope:, :]  # (H, v_dim, kv_lora_rank)
-            if o_key in state_dict:
-                o_w_bf16 = _maybe_dequant(
-                    o_key, state_dict[o_key], state_dict
-                ).to(torch.bfloat16)
-                hidden_dim = o_w_bf16.shape[0]
-                # Original o_proj: (hidden, H * v_dim) — reshape to per-head.
-                o_reshaped = o_w_bf16.reshape(
-                    hidden_dim, num_heads, v_dim
-                ).float()
-                # Fused o_proj: (hidden, H, kv_lora_rank)
-                o_fused = torch.einsum("dhn,hnk->dhk", o_reshaped, W_UV.float())
-                o_flat = o_fused.reshape(
-                    hidden_dim, num_heads * kv_lora_rank
-                ).to(torch.bfloat16)
-                out[o_key] = o_flat.contiguous()
-
-        # ---- q_a_proj, kv_a_proj_with_mqa ----
-        for hf_name in [
-            f"{attn}q_a_proj.weight",
-            f"{attn}kv_a_proj_with_mqa.weight",
-        ]:
-            if hf_name in state_dict:
-                out[hf_name] = _maybe_dequant(
-                    hf_name, state_dict[hf_name], state_dict
-                ).to(torch.bfloat16).contiguous()
-
-        # ---- MLP: dense vs MoE ----
-        if li < first_moe:
-            # Dense MLP: gate / up / down (BF16, no Python-level fusion;
-            # pk.shuffle_tensors fuses gate+up at compile time).
-            for hf_name in [
-                f"{layer_prefix}mlp.gate_proj.weight",
-                f"{layer_prefix}mlp.up_proj.weight",
-                f"{layer_prefix}mlp.down_proj.weight",
-            ]:
-                if hf_name in state_dict:
-                    out[hf_name] = _maybe_dequant(
-                        hf_name, state_dict[hf_name], state_dict
-                    ).to(torch.bfloat16).contiguous()
-        else:
-            # MoE layer.
-            # Router gate.weight + e_score_correction_bias.
-            for hf_name in [
-                f"{layer_prefix}mlp.gate.weight",
-                f"{layer_prefix}mlp.gate.e_score_correction_bias",
-            ]:
-                if hf_name in state_dict:
-                    raw = _maybe_dequant(
-                        hf_name, state_dict[hf_name], state_dict
-                    )
-                    # Router gate matrix in BF16; bias kept in FP32
-                    # (MoETopkRouting.bias dtype).
-                    if hf_name.endswith("e_score_correction_bias"):
-                        out[hf_name] = raw.to(torch.float32).contiguous()
-                    else:
-                        out[hf_name] = raw.to(torch.bfloat16).contiguous()
-
-            # Shared experts.
-            for hf_name in [
-                f"{layer_prefix}mlp.shared_experts.gate_proj.weight",
-                f"{layer_prefix}mlp.shared_experts.up_proj.weight",
-                f"{layer_prefix}mlp.shared_experts.down_proj.weight",
-            ]:
-                if hf_name in state_dict:
-                    out[hf_name] = _maybe_dequant(
-                        hf_name, state_dict[hf_name], state_dict
-                    ).to(torch.bfloat16).contiguous()
-
-            # Routed experts: stack into experts.w13 / experts.w2.
-            inter = config.moe_intermediate_size
-            hidden = config.hidden_size
-            w13_stack = torch.empty(
-                num_experts, 2 * inter, hidden, dtype=torch.bfloat16
-            )
-            w2_stack = torch.empty(
-                num_experts, hidden, inter, dtype=torch.bfloat16
-            )
-            for e in range(num_experts):
-                ep = f"{layer_prefix}mlp.experts.{e}."
-                g_key = f"{ep}gate_proj.weight"
-                u_key = f"{ep}up_proj.weight"
-                d_key = f"{ep}down_proj.weight"
-                if g_key in state_dict:
-                    g = _maybe_dequant(
-                        g_key, state_dict[g_key], state_dict
-                    ).to(torch.bfloat16)
-                    u = _maybe_dequant(
-                        u_key, state_dict[u_key], state_dict
-                    ).to(torch.bfloat16)
-                    d = _maybe_dequant(
-                        d_key, state_dict[d_key], state_dict
-                    ).to(torch.bfloat16)
-                    # W13 layout: [gate | up] concatenated along dim 0.
-                    w13_stack[e, :inter] = g
-                    w13_stack[e, inter:] = u
-                    w2_stack[e] = d
-            out[f"{layer_prefix}mlp.experts.w13.weight"] = (
-                w13_stack.contiguous()
-            )
-            out[f"{layer_prefix}mlp.experts.w2.weight"] = (
-                w2_stack.contiguous()
-            )
-
-    # Move to CUDA for the load_state_dict step (Parameter device).
-    cuda_out = {k: v.to("cuda") for k, v in out.items()}
-    return cuda_out
 
 
 # ---------------------------------------------------------------------------
@@ -506,17 +244,9 @@ def main() -> None:
         model = DeepseekV3ForCausalLM(config).to("cuda", dtype=torch.bfloat16)
 
     if not args.skip_weight_load:
-        print("Loading HF weights with KV absorption + W_UV fusion...")
-        state_dict = _load_hf_weights_with_absorption(
-            args.model_path, config, layer_indices
-        )
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if missing:
-            print(f"[warn] {len(missing)} missing keys (first 10): "
-                  f"{missing[:10]}")
-        if unexpected:
-            print(f"[warn] {len(unexpected)} unexpected keys (first 10): "
-                  f"{unexpected[:10]}")
+        print("Loading HF weights (streaming: FP8 dequant + MLA absorption)...")
+        files = find_safetensors_files(args.model_path)
+        model.load_weights(safetensors_weights_iterator(files))
     else:
         print("[v1] --skip-weight-load set; using random-initialized weights.")
 
