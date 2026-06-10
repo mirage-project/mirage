@@ -291,6 +291,20 @@ __device__ __noinline__ void fp8_group_gemm_largem_compact_task_impl(
 
   const int num_active = s_num_active;
 
+#ifdef MPK_GG_DUMP_NUMACTIVE
+  // DIAGNOSTIC (env-gated via MPK_EXTRA_NVCC_DEFINES="-DMPK_GG_DUMP_NUMACTIVE"):
+  // settle the "group-GEMM 2us is too fast" suspicion. Prints, once per
+  // group-GEMM task instance that worker 0 participates in, the runtime active-
+  // expert count read from active_expert_mask (popcount). K distinguishes
+  // W13 (K=7168) from W2 (K=1024). num_active≈4 at bs=1 decode + slowCTA≈FLOP
+  // floor => the kernel does REAL whole-expert work (2us was a P50 artifact);
+  // num_active==0 => null-output bug (garbage active-mask binding).
+  if (worker_idx == 0 && tid == 0) {
+    printf("[GG_DUMP] N=%d K=%d E=%d M_total=%d num_active=%d total_tiles=%d\n",
+           N, K, E, M_total, num_active, total);
+  }
+#endif
+
   if (wid < 4) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 64;");
   } else {

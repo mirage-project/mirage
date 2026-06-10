@@ -2655,11 +2655,27 @@ class PersistentKernel:
         tb_graph.new_input(sfa_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output]
+        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices]
+        # CRITICAL ORDERING (2026-06-07 bugfix): the codegen reads
+        # input_ptrs[5] as the meta/active-expert-mask buffer
+        # (register_fp8_group_gemm_variant: "active_mask_offset >= 0 means
+        # input_ptrs[5] is the meta buffer") and output_ptrs[0] as the D
+        # output; graph.cc sets the tuple to (num_inputs = 6 if meta else 5,
+        # 1 output). meta MUST therefore be registered BEFORE output so the
+        # positional split gives input[5]=meta, output[0]=D.
+        # The earlier order [..., m_indices, output, meta] put `output` at
+        # input[5] (read as the active mask -> garbage -> num_active=0 -> the
+        # kernel exits writing NOTHING) and `meta` in the output slot (the D
+        # TMA-store goes to the tiny meta buffer, dropped) -> the entire
+        # active-skip (MPK_DSV3_ACTIVE_SKIP=1) MoE W13/W2 GEMM produced NULL
+        # output. Same bug class as the moe_silu_mul "CRITICAL ORDERING
+        # (2026-05-14)" fix; the grouped-GEMM path never got the analog.
+        # meta=None path (non-active-skip) is unchanged (5 inputs + output).
         if meta is not None:
             tb_graph.new_input(meta, (-1, -1, -1), -1, True)
             operators.append(meta)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        operators.append(output)
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 

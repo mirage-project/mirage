@@ -112,6 +112,19 @@ __device__ __forceinline__ void
   int const tid = threadIdx.x;
   int const nthreads = blockDim.x;
 
+#ifdef MPK_GG_DUMP_NUMACTIVE
+  // DIAGNOSTIC (paired with the GG_DUMP in fp8_group_gemm_largem_compact): the
+  // active_expert_mask this task writes is bounded by num_active_rows
+  // (scan_end = min(num_active_rows, MBT)). If num_active_rows==0 the mask is
+  // all-zero => the downstream group-GEMM reads num_active=0 (null MoE). Print
+  // num_active_rows once per call so we can tell "permute saw 0 rows" (upstream
+  // qo_indptr bug) from "permute wrote a mask but the GEMM read 0" (aliasing).
+  if (cta_idx == 0 && tid == 0) {
+    printf("[PERMUTE_DUMP] num_active_rows=%d MBT=%d E_LOCAL=%d e_per_cta=%d\n",
+           num_active_rows, MBT, E_LOCAL, e_per_cta);
+  }
+#endif
+
   // Per-expert scratch reused across the E_PER_CTA loop iterations below.
   // Declared once outside the loop; safe to reuse because every iteration
   // is bracketed by __syncthreads() (one before the warp-0 scan resets
