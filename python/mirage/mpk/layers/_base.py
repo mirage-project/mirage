@@ -46,6 +46,19 @@ GridDim = Tuple[int, int, int]
 BlockDim = Tuple[int, int, int]
 
 
+def _nearest_mpk_descendants(module):
+    """Yield the nearest MPKModule descendants of `module`, descending through
+    plain nn.Module containers (nn.ModuleList / nn.ModuleDict / nn.Sequential)
+    that are not themselves MPKModules. Recursion stops at the first MPKModule
+    on each path — that module's own process_weights() then recurses further
+    via the same logic, so every MPKModule is processed exactly once."""
+    for child in module.children():
+        if isinstance(child, MPKModule):
+            yield child
+        else:
+            yield from _nearest_mpk_descendants(child)
+
+
 class MPKModule(nn.Module):
     """Base class for every layer in ``mirage.mpk.layers``.
 
@@ -225,6 +238,5 @@ class MPKModule(nn.Module):
         natural order (a composite that consumes children's loaded params
         wants those leaves already in their post-load state).
         """
-        for child in self.children():
-            if isinstance(child, MPKModule):
-                child.process_weights()
+        for child in _nearest_mpk_descendants(self):
+            child.process_weights()
