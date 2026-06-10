@@ -101,53 +101,8 @@ def bench(B, q_len, kv_len, q_start, H, n_iters=100, warmup=20):
     print(f"  C{q_len}_KV{kv_len:5d}: {ms*1000:7.1f} us  {tf:6.2f} TFLOPS_raw")
 
 
-def run_splitk_case(B, q_len, kv_len, q_start, H, num_splits, atol=3e-2):
-    sm_scale = 1.0 / math.sqrt(D_QK)
-    qn, qp, kn, kr, v = make_inputs(B, q_len, kv_len, H)
-    o = torch.zeros(B, q_len, H, D_V, dtype=qn.dtype, device=qn.device)
-    nqb = (q_len + 63) // 64
-    partial = torch.zeros(num_splits, B, nqb, H, 64, D_V + 4,
-                          dtype=torch.float32, device=qn.device)
-    ext.mla_prefill_tp8_chunked_splitk_test(
-        qn, qp, kn, kr, v, o, partial, q_start, num_splits, sm_scale)
-    o_ref = torch_reference(qn, qp, kn, kr, v, q_start, sm_scale)
-    err = (o.float() - o_ref.float()).abs()
-    max_err, mean_err = err.max().item(), err.mean().item()
-    status = "OK" if max_err < atol else "FAIL"
-    print(f"  splits={num_splits} B={B} q={q_len:4d} kv={kv_len:5d} "
-          f"qs={q_start:5d} H={H} max_err={max_err:.5f} [{status}]")
-    return max_err < atol
 
 
-def bench_splitk(B, q_len, kv_len, q_start, H, num_splits,
-                 n_iters=100, warmup=20):
-    sm_scale = 1.0 / math.sqrt(D_QK)
-    qn, qp, kn, kr, v = make_inputs(B, q_len, kv_len, H)
-    o = torch.zeros(B, q_len, H, D_V, dtype=qn.dtype, device=qn.device)
-    nqb = (q_len + 63) // 64
-    partial = torch.zeros(num_splits, B, nqb, H, 64, D_V + 4,
-                          dtype=torch.float32, device=qn.device)
-    flush = torch.zeros(128 * 1024 * 1024 // 4, dtype=torch.int32, device=qn.device)
-    fn = lambda: ext.mla_prefill_tp8_chunked_splitk_test(
-        qn, qp, kn, kr, v, o, partial, q_start, num_splits, sm_scale)
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    times = []
-    for _ in range(5):
-        flush.zero_()
-        s = torch.cuda.Event(enable_timing=True)
-        e = torch.cuda.Event(enable_timing=True)
-        s.record()
-        for _ in range(n_iters):
-            fn()
-        e.record()
-        torch.cuda.synchronize()
-        times.append(s.elapsed_time(e) / n_iters)
-    times.sort()
-    ms = times[2]
-    print(f"  C{q_len}_KV{kv_len:5d} splits={num_splits}: "
-          f"{ms*1000:7.1f} us")
 
 
 if __name__ == "__main__":

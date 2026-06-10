@@ -280,37 +280,6 @@ def get_compile_command(
     smem_kb_override = os.environ.get("MPK_SMEM_KB_OVERRIDE")
     if smem_kb_override:
         common_cmd.append(f"-DMPK_SMEM_KB_OVERRIDE={int(smem_kb_override)}")
-    # MPK_AR_SKIP_REDUCE / MPK_AR_SKIP_BARRIER: bypass parts of the NVSHMEM
-    # tile allreduce kernel for crash bisection. AR_SKIP_REDUCE replaces the
-    # multimem.ld_reduce with a plain per-PE memcpy (output is wrong but the
-    # kernel doesn't touch the NVLS multicast pointer). AR_SKIP_BARRIER skips
-    # the dissemination barrier before the reduce.
-    if os.environ.get("MPK_AR_SKIP_REDUCE", "0") == "1":
-        common_cmd.append("-DMPK_AR_SKIP_REDUCE=1")
-    if os.environ.get("MPK_AR_SKIP_BARRIER", "0") == "1":
-        common_cmd.append("-DMPK_AR_SKIP_BARRIER=1")
-    # Debug knobs for TP=2 crash bisection: turn an MLA-TP2 kernel into a no-op
-    # at the very start (after the Q_LEN>8 dual-dispatch gate). If the
-    # megakernel runs to completion with one of these set, the crash root cause
-    # lives in that kernel.
-    if os.environ.get("MPK_DEBUG_SKIP_MLA_TP2_MAIN", "0") == "1":
-        common_cmd.append("-DMPK_DEBUG_SKIP_MLA_TP2_MAIN=1")
-    if os.environ.get("MPK_DEBUG_SKIP_MLA_TP2_REDUCE", "0") == "1":
-        common_cmd.append("-DMPK_DEBUG_SKIP_MLA_TP2_REDUCE=1")
-    if os.environ.get("MPK_AR_PRINT_MC", "0") == "1":
-        common_cmd.append("-DMPK_AR_PRINT_MC=1")
-    if os.environ.get("MPK_DEBUG_SKIP_FP8_GEMM_DENSE", "0") == "1":
-        common_cmd.append("-DMPK_DEBUG_SKIP_FP8_GEMM_DENSE=1")
-    # Enable prepare_next_batch [BATCH ...] prints (active_reqs / active_tokens
-    # / per-slot q_len). Useful to confirm the execution-time qo_indptr a
-    # decode-gated kernel sees in test_mode (the post-run qo readback only shows
-    # the terminal reset, not the iteration-1 batch).
-    if os.environ.get("MPK_DEBUG_BATCH", "0") == "1":
-        common_cmd.append("-DMPK_DEBUG_BATCH=1")
-    fp8_dense_skip_n_ge = os.environ.get("MPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE")
-    if fp8_dense_skip_n_ge:
-        common_cmd.append(
-            f"-DMPK_DEBUG_FP8_GEMM_DENSE_SKIP_N_GE={int(fp8_dense_skip_n_ge)}")
     # rdc=true is the default on every NVSHMEM build. The old Blackwell
     # rdc=false + self-contained-allreduce workaround (hand-rolled
     # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
@@ -3490,77 +3459,6 @@ class PersistentKernel:
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, "moe_silu_mul", params)
 
-    def moe_silu_mul_quantize_fp8_sm100_layer(
-        self,
-        input: DTensor,
-        output_fp8: DTensor,
-        output_scale: DTensor,
-        grid_dim: tuple,
-        block_dim: tuple,
-        rows_per_task: int = 1,
-        meta: DTensor = None,
-        bm_padding: int = 0,
-    ):
-        """C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
-
-        Replaces the (moe_silu_mul → bf16 silu_out → quantize_fp8) chain for
-        the NEW MoE path. Writes silu_fp8 + UE8M0 K-outer packed scale in one
-        kernel, eliminating one task launch and one BF16 HBM round-trip of
-        silu_out (~4 MB at DSv3 m_total=2048 / K_INTER=2048).
-
-        Arguments:
-          input:        w13_out [m_total, 2*K_INTER] bf16 (gate || up halves).
-          output_fp8:   silu_fp8 [m_total, K_INTER] FP8 e4m3 (store_in_dmem).
-          output_scale: silu_scale K-outer UE8M0 packed uint32. Declare as
-                        (K_PACKED, m_total) for K-outer (preferred; matches
-                        the C8 pattern) — the kernel writes
-                        `output_s[packed_idx * aligned_batch + batch_idx]`
-                        regardless of declared shape.
-          rows_per_task: ROWS_PER_TASK template arg; default 1 (one CTA per
-                         row), matching the standalone quantize_fp8 grid
-                         shape (m_total, 1, 1).
-        """
-        assert input.num_dims == 2
-        assert output_fp8.num_dims == 2
-        assert output_scale.num_dims == 2
-        assert input.dim(0) == output_fp8.dim(0)
-        assert input.dim(1) == 2 * output_fp8.dim(1), (
-            f"input must be 2× output_fp8 along K axis "
-            f"(gate||up halves): in={input.dim(1)}, out={output_fp8.dim(1)}")
-        k_inter = output_fp8.dim(1)
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        # input_map: per-CTA base pointer pre-offset on row dim (= grid.x).
-        # Kernel walks ROWS_PER_TASK rows from there.
-        tb_graph.new_input(input, (0, -1, -1), 1, True)
-        # ACTIVE_SKIP path: pass meta as a real input (dim_maps -1 = full
-        # base pointer); kernel reads active_mask + actual_count_per_expert
-        # starting at the supplied offset.
-        operators = [input]
-        active_mask_offset = 0
-        e_local = 0
-        if meta is not None:
-            assert bm_padding > 0
-            assert meta.num_dims == 2
-            tb_graph.new_input(meta, (-1, -1, -1), -1, True)
-            operators.append(meta)
-            active_mask_offset = meta.dim(1)
-            e_local = max(1, input.dim(0) // bm_padding)
-        tb_graph.new_input(output_fp8, (0, -1, -1), 1, True)
-        # output_scale: 2D but K-outer (or M-outer "shape lie"); kernel
-        # reconstructs global row from task_metadata.request_id, so the
-        # buffer base pointer is what matters. dim_maps = (-1, -1, -1).
-        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
-        operators.extend([output_fp8, output_scale])
-        self.kn_graph.customized(operators, tb_graph)
-        if meta is not None:
-            params = [k_inter, rows_per_task, active_mask_offset, e_local,
-                      bm_padding]
-        else:
-            params = [k_inter, rows_per_task]
-        self.kn_graph.register_task(
-            tb_graph, "moe_silu_mul_quantize_fp8_sm100", params)
-
     def moe_w2_linear_layer(
         self,
         input: DTensor,
@@ -3825,11 +3723,9 @@ class PersistentKernel:
         # ``output`` and never reads the extra tensor, but AnnotatedGraph
         # records an additional producer→consumer edge from the writer of
         # ``extra_dep_input`` to this task. Use this to insert a fake-dep
-        # edge that defers a downstream task behind an unrelated producer
-        # (e.g. defer shared_expert gate_up behind routed-MoE W13 in the
-        # MPK_DSV3_DEFER_SHARED_EXPERT decode lever). The extra dep handle
-        # may be any DTensor; its layout/shape are irrelevant since the
-        # kernel never dereferences it.
+        # edge that defers a downstream task behind an unrelated producer.
+        # The extra dep handle may be any DTensor; its layout/shape are
+        # irrelevant since the kernel never dereferences it.
         # TODO: Add support from kn_graph
         last_dim = 0
         assert input.num_dims == output.num_dims

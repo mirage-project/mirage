@@ -674,11 +674,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_ELEMENTWISE_ADD_SM100, variant_id);
-  } else if (name == "dsv3_router_gemm_sm100") {
-    int variant_id = task_register->register_dsv3_router_gemm_sm100_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_DSV3_ROUTER_GEMM_SM100, variant_id);
   } else if (name == "softmax_gather_sm100") {
     int variant_id = task_register->register_softmax_gather_sm100_task(
         customized->bgraph, params);
@@ -742,18 +737,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // Per-head unabsorbed: 5 inputs (Qn, Qp, K_nope, K_rope, V) + 1 output.
     task_config[op] =
         std::make_tuple(5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SM100, variant_id);
-  } else if (name == "mla_prefill_tp8_chunked_splitk_sm100") {
-    int variant_id =
-        task_register->register_mla_prefill_tp8_chunked_splitk_sm100_task(
-            customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100, variant_id);
-  } else if (name == "mla_prefill_tp8_chunked_reduce_sm100") {
-    int variant_id =
-        task_register->register_mla_prefill_tp8_chunked_reduce_sm100_task(
-            customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        1, 1, TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100, variant_id);
   } else if (name == "mla_decode_sm100") {
     int variant_id = task_register->register_mla_decode_sm100_task(
         customized->bgraph, params);
@@ -876,31 +859,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     TaskType const tt = (variant == 1) ? TASK_FP8_GEMM_DENSE_MEDIUMM_SM100
                                        : TASK_FP8_GEMM_DENSE_SMALLM_SM100;
     task_config[op] = std::make_tuple(4, 1, tt, variant_id);
-  } else if (name == "fp8_gemm_dense_splitk_tma_reduce_sm100") {
-    // ferret FP8 split-K GEMM with TMA reduce-add epilogue: 4 inputs (A_fp8,
-    // B_fp8 with TMA descs, sa, sb) + 1 output (C bf16 with a TMA reduce-add
-    // descriptor). C must be tensor_init-zeroed upstream; the kernel
-    // accumulates each K-slice partial into it via cp.reduce.async.bulk.
-    int variant_id =
-        task_register->register_fp8_gemm_dense_splitk_tma_reduce_sm100_task(
-            customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        4, 1, TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100, variant_id);
-  } else if (name == "fp8_gemm_dense_splitk_tma_reduce_gflag_sm100") {
-    // gflag variant (2026-06-05): same enum/kernel/TMA infra as above, but with
-    // 5 inputs (A_fp8, B_fp8 TMA + sa, sb + gflag int* scratch at input[4]) and
-    // NO upstream tensor_init — the kernel's k0-store/k>0-reduce-add fork
-    // (gated by gflag/epoch) initializes the output itself, eliminating the
-    // pre-zero task. gflag has NO TMA desc (create_tma_desc_by_task only
-    // touches inputs 0/1 + output 0; the C output's fill case is the param!=0,1
-    // else branch so output param_id=num_inputs=5 still resolves). Same enum so
-    // request_id=bid.x + TMA-create + name lookup are all unchanged.
-    int variant_id =
-        task_register
-            ->register_fp8_gemm_dense_splitk_tma_reduce_gflag_sm100_task(
-                customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        5, 1, TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_smallm_fp8out_sm100") {
     // D1 (2026-05-17): fp8out variant — 4 inputs + 2 outputs (FP8 C and
     // packed UE8M0 scale). Fuses what was a downstream
@@ -916,19 +874,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         4, 2, TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100, variant_id);
-  } else if (name == "moe_silu_mul_quantize_fp8_sm100") {
-    // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
-    // Either 1 input (w13_out) or 2 inputs (w13_out + meta when ACTIVE_SKIP).
-    // Always 2 outputs (silu_fp8, silu_scale, both via store_in_dmem).
-    // params layout: [K_INTER, ROWS_PER_TASK] (legacy 1 input) OR
-    //                [K_INTER, ROWS_PER_TASK, active_mask_offset, e_local,
-    //                 bm_padding] (5 params, meta supplied → 2 inputs).
-    int variant_id =
-        task_register->register_moe_silu_mul_quantize_fp8_sm100_task(
-            customized->bgraph, params);
-    int const num_inputs_silu_q = (params.size() == 5) ? 2 : 1;
-    task_config[op] = std::make_tuple(
-        num_inputs_silu_q, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
     // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
     // 2 real inputs (input, weight) + 3 outputs

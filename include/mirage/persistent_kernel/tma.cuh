@@ -1392,7 +1392,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
-    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
     case TASK_MLA_PREFILL_TP8_CHUNKED_SM100: {
       // Per-head unabsorbed MLA chunked prefill (TP=8), 3 TMA inputs:
       //   param_id=2: K_nope [S,H,128] viewed as [S,H*2,64], 3D
@@ -1507,71 +1506,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             l2,
                                             oob);
       assert(err == CUDA_SUCCESS);
-      break;
-    }
-    case TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100: {
-      // A_fp8 (param 0) + B_fp8 (param 1): same raw-e4m3 [K, outer] descriptor
-      // as the dense GEMM above (128B swizzle, BK=128, OUTER=128 box). The C
-      // output (param 2 == num_inputs) is a bf16 reduce-add descriptor: no
-      // swizzle, box={BN=128 cols (N), BM=128 rows (M)}. The kernel stages a
-      // row-major [BM][BN] bf16 tile to SMEM and issues
-      // cp.reduce.async.bulk.tensor.2d with coords {c0=on (N), c1=om (M)},
-      // which matches gd={N, M} (innermost=N).
-      constexpr CUtensorMapInterleave interleave =
-          CU_TENSOR_MAP_INTERLEAVE_NONE;
-      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
-      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
-      if (param_id == 0 || param_id == 1) {
-        // A/B FP8 e4m3 raw bytes, 128B swizzle, box [BK=128, OUTER=128].
-        constexpr int BK_BOX = 128;
-        constexpr int OUTER_BOX = 128;
-        int outer = tensor_desc.dim[0];
-        int K_local = tensor_desc.dim[1];
-        uint64_t row_stride_bytes =
-            (uint64_t)tensor_desc.stride[0]; // FP8: 1 byte per element
-        uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
-        uint64_t gs[1] = {row_stride_bytes};
-        uint32_t bd[2] = {BK_BOX, OUTER_BOX};
-        uint32_t es[2] = {1, 1};
-        CUresult err = cuTensorMapEncodeTiled(tma_desc,
-                                              CU_TENSOR_MAP_DATA_TYPE_UINT8,
-                                              2,
-                                              tensor_desc.base_ptr,
-                                              gd,
-                                              gs,
-                                              bd,
-                                              es,
-                                              interleave,
-                                              CU_TENSOR_MAP_SWIZZLE_128B,
-                                              l2,
-                                              oob);
-        assert(err == CUDA_SUCCESS);
-      } else {
-        // C bf16 reduce-add output: [M, N] row-major. innermost=N, outer=M.
-        constexpr int BN_BOX = 128;
-        constexpr int BM_BOX = 128;
-        int M_out = tensor_desc.dim[0];
-        int N_out = tensor_desc.dim[1];
-        uint64_t row_stride_bytes =
-            (uint64_t)tensor_desc.stride[0] * sizeof(__nv_bfloat16);
-        uint64_t gd[2] = {(uint64_t)N_out, (uint64_t)M_out};
-        uint64_t gs[1] = {row_stride_bytes};
-        uint32_t bd[2] = {BN_BOX, BM_BOX};
-        uint32_t es[2] = {1, 1};
-        CUresult err = cuTensorMapEncodeTiled(tma_desc,
-                                              CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-                                              2,
-                                              tensor_desc.base_ptr,
-                                              gd,
-                                              gs,
-                                              bd,
-                                              es,
-                                              interleave,
-                                              CU_TENSOR_MAP_SWIZZLE_NONE,
-                                              l2,
-                                              oob);
-        assert(err == CUDA_SUCCESS);
-      }
       break;
     }
     // D3: fp8out flavor reuses the IDENTICAL A/B input TMA layout (outputs are
@@ -2255,7 +2189,6 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // no TMA needed
       break;
     }
-    case TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100:
     case TASK_MLA_PREFILL_TP8_CHUNKED_SM100: {
       // Per-head unabsorbed: [0]Qn, [1]Qp, [2]K_nope, [3]K_rope, [4]V.
       for (size_t param_id = 2; param_id < 5; param_id++) {
@@ -2278,17 +2211,6 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
-      break;
-    }
-    case TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100: {
-      // A_fp8 (input 0) + B_fp8 (input 1) use TMA loads. sa/sb (inputs 2,3) are
-      // plain LDG float* (no TMA). The C bf16 output (output 0) gets a TMA
-      // reduce-add descriptor (cp.reduce.async.bulk.tensor.2d, no swizzle,
-      // box={BN cols, BM=128 rows}).
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
-      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
-      create_tma_desc_for_tensor(
-          task_desc, task_desc.outputs[0], task_desc.num_inputs, 0); // C
       break;
     }
     case TASK_FP8_GROUP_GEMM_SMALLM_SM100:

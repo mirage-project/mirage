@@ -116,8 +116,6 @@ public:
                                 std::vector<int> const &params);
   int register_elementwise_add_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
-  int register_dsv3_router_gemm_sm100_task(threadblock::Graph const &bgraph,
-                                           std::vector<int> const &params);
   int register_softmax_gather_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_mtp_verify_probabilistic_task(threadblock::Graph const &bgraph,
@@ -154,10 +152,6 @@ public:
                                                std::vector<int> const &params);
   int register_mla_prefill_tp8_chunked_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_prefill_tp8_chunked_splitk_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_prefill_tp8_chunked_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_mla_decode_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
   int register_mla_mtp_decode_sm100_task(threadblock::Graph const &bgraph,
@@ -182,8 +176,6 @@ public:
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
                                        bool scale_ue8m0);
-  int register_moe_silu_mul_quantize_fp8_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_linear_fp8_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params,
                                      bool with_residual);
@@ -203,10 +195,6 @@ public:
   int register_fp8_gemm_dense_bn128_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params,
                                                int variant);
-  int register_fp8_gemm_dense_splitk_tma_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_splitk_tma_reduce_gflag_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_smallm_fp8out_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_mediumm_fp8out_sm100_task(

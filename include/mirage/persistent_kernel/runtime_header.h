@@ -215,9 +215,7 @@ enum TaskType {
   // selected by runtime Q_LEN.
   TASK_MLA_KV_GATHER_UNIFIED_SM100 = 297,
   TASK_MLA_PREFILL_TP8_CHUNKED_SM100 = 298,
-  TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 299,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
-  TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
   TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 306,
   TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 307,
   // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize. Replaces
@@ -244,12 +242,6 @@ enum TaskType {
   // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
   // (N, H, 576) that the MLA decode TMA expects.
   TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
-  // C18 (2026-05-17): fused MoE silu·mul + per-token-group FP8 quantize.
-  // Replaces the (moe_silu_mul bf16 -> quantize_fp8 fp8+scale) two-task
-  // chain feeding the W2 FP8 group GEMM. Saves one dispatch wave + one
-  // BF16 HBM round-trip of silu_out per layer. Behind
-  // `MPK_DSV3_FUSED_SILU_QUANTIZE=1`.
-  TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100 = 317,
   // D1 (2026-05-17): dense FP8 GEMM with epilogue UE8M0 quantize. Output is
   // FP8 + packed UE8M0 scale (instead of bf16), eliminating the standalone
   // per_token_group_quantize_fp8 task that follows q_b_nope in the
@@ -277,18 +269,6 @@ enum TaskType {
   // dense GEMM. Outputs FP8 [N, H*D_out] + float32 scale [N, H] (one K-group
   // per head). Behind MPK_DSV3_FUSE_EPILOGUE_QUANT=1 (with MPK_DSV3_BMM_DENSE).
   TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100 = 324,
-  // DSv3 router-gate CUDA-core GEMV (decode, M<=16). Skinny GEMM
-  // out[M, NUM_EXPERTS] = act[M, hidden] @ gate_w[NUM_EXPERTS, hidden]^T.
-  // Crash-free (no tensor core / tcgen05 / TMA / cross-CTA reduce). Ported from
-  // TRT-LLM/vLLM dsv3_router_gemm. Behind MPK_DSV3_ROUTER_GEMV.
-  TASK_DSV3_ROUTER_GEMM_SM100 = 325,
-  // 2026-06-04: ferret-produced FP8 split-K dense GEMM with a TMA reduce-add
-  // epilogue (cp.reduce.async.bulk.tensor.2d into a PRE-ZEROED bf16 output)
-  // instead of the per-element red.global.add atomics used by the retired
-  // in-kernel split-K (removed 2026-06-10). ABI: 4 inputs (A_fp8 TMA, B_fp8
-  // TMA, sa float*, sb float*) + 1 output (C bf16 TMA reduce-add). C must be
-  // tensor_init-zeroed before launch. Behind MPK_DSV3_FP8_SPLITK_TMAREDUCE=1.
-  TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100 = 326,
   TASK_SM100_TASK_END = 329, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
