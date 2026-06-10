@@ -1367,4 +1367,4 @@ def nvshmem_global_argmax_layer(
             partial_chunk_size,
         ],
     )
-    allocate_nvshmem_teams(self, grid_dim[0] * grid_dim[1] * grid_dim[2])
+    allocate_nvshmem_teams(pk, grid_dim[0] * grid_dim[1] * grid_dim[2])
