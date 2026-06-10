@@ -51,10 +51,14 @@ def relerr(a, b):
     return ((a - b).abs().max() / (b.abs().max() + 1e-9)).item()
 
 
-def split_k_for(K, nt, max_sk=32):
+def split_k_for(K, nt, max_sk=None):
+    # max_sk: c>4096 can go to 64 (min slice=112 elems still useful);
+    # c<=4096 caps at 16 (slice=256 elems; 32 gives 128 which hurts).
+    if max_sk is None:
+        max_sk = 64 if K > 4096 else 16
     target = 1 if nt >= 148 else (148 + nt - 1) // nt
     sk = 1
-    for cand in (1, 2, 4, 8, 16, 32):
+    for cand in (1, 2, 4, 8, 16, 32, 64, 128):
         if cand > max_sk:
             break
         if K % cand == 0 and cand <= target:
@@ -128,7 +132,7 @@ def _postpre_inputs(nt, c, sk):
     x = (torch.randn(nt, c, device=DEV) * 0.5).to(torch.bfloat16)
     post = torch.rand(nt, N, device=DEV)
     cin = torch.rand(nt, N, N, device=DEV); cin = cin / cin.sum(-1, keepdim=True)
-    fn = torch.randn(mh, N, c, device=DEV) * 0.02
+    fn = (torch.randn(mh, N, c, device=DEV) * 0.02).to(torch.bfloat16)
     sc = torch.tensor([0.7, 0.9, 1.1], device=DEV); ba = torch.randn(mh, device=DEV) * 0.1
     rn = torch.empty(nt, N, c, device=DEV, dtype=torch.bfloat16)
     op = torch.empty(sk, nt, mh, device=DEV); sp = torch.empty(sk, nt, device=DEV)
@@ -138,13 +142,14 @@ def _postpre_inputs(nt, c, sk):
     return locals()
 
 
-def op_post_pre(nt, c, check):
-    sk = split_k_for(c, nt, max_sk=16)
+def op_post_pre(nt, c, check, k1_tpb=-1, k1_sk=-1):
+    sk = k1_sk if k1_sk > 0 else split_k_for(c, nt)
     d = _postpre_inputs(nt, c, sk)
     call = lambda: rt.mHC_post_pre_v2(
         d["res"], d["x"], d["cin"], d["post"], d["fn"], d["rn"], d["op"], d["sp"],
         d["mp"], d["ss"], d["sc"], d["ba"], d["f"], d["hp"], d["cb"], N, c,
-        split_k=sk, sinkhorn_repeat=20, sinkhorn_eps=1e-9, rms_eps=1e-6)
+        split_k=sk, sinkhorn_repeat=20, sinkhorn_eps=1e-9, rms_eps=1e-6,
+        k1_tpb=k1_tpb)
     err = float("nan")
     if check:
         call(); torch.cuda.synchronize()

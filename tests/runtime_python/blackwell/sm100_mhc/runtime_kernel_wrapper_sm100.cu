@@ -21,7 +21,6 @@
 #include <torch/extension.h>
 
 #include <cstdio>
-#include <iostream>
 
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cluster_launch.hpp>
@@ -323,7 +322,7 @@ __global__ void mHC_pre_k2_kernel(void const *__restrict__ mixes_pad,
                                   float sinkhorn_eps,
                                   float rms_eps);
 
-template <int N, int C, int MIX_HC, int BLOCK_THREADS, int SPLIT_K>
+template <int N, int C, int MIX_HC, int BLOCK_THREADS, int SPLIT_K, int TPB = 1>
 __global__ __launch_bounds__(BLOCK_THREADS) void mHC_post_pre_k1_kernel(
     void const *__restrict__ residual,
     void const *__restrict__ x,
@@ -333,25 +332,35 @@ __global__ __launch_bounds__(BLOCK_THREADS) void mHC_post_pre_k1_kernel(
     void *__restrict__ residual_out,
     float *__restrict__ out_partial,
     float *__restrict__ sqr_partial,
+    void *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
     int num_tokens) {
-  int const token = blockIdx.x;
+  int const token0 = blockIdx.x * TPB;
   int const i_ks = blockIdx.y;
-  if (token >= num_tokens) {
+  if (token0 >= num_tokens) {
     return;
   }
-  kernel::
-      mHC_post_pre_k1_task_impl<mpk_bf16, N, C, MIX_HC, BLOCK_THREADS, SPLIT_K>(
-          static_cast<mpk_bf16 const *>(residual),
-          static_cast<mpk_bf16 const *>(x),
-          static_cast<float const *>(comb),
-          static_cast<float const *>(post),
-          static_cast<float const *>(fn),
-          static_cast<mpk_bf16 *>(residual_out),
-          out_partial,
-          sqr_partial,
-          num_tokens,
-          token,
-          i_ks);
+  kernel::mHC_post_pre_k1_task_impl<mpk_bf16,
+                                    N,
+                                    C,
+                                    MIX_HC,
+                                    BLOCK_THREADS,
+                                    SPLIT_K,
+                                    128,
+                                    TPB>(
+      static_cast<mpk_bf16 const *>(residual),
+      static_cast<mpk_bf16 const *>(x),
+      static_cast<float const *>(comb),
+      static_cast<float const *>(post),
+      static_cast<__nv_bfloat16 const *>(fn),
+      static_cast<mpk_bf16 *>(residual_out),
+      out_partial,
+      sqr_partial,
+      mixes_pad,
+      sqrsum,
+      num_tokens,
+      token0,
+      i_ks);
 }
 
 template <int N, int MIX_HC, int MIX_PAD, int SPLIT_K>
@@ -367,6 +376,82 @@ __global__ void
   }
   kernel::mHC_post_pre_k1_reduce_impl<N, MIX_HC, MIX_PAD, SPLIT_K>(
       out_partial, sqr_partial, mixes_pad, sqrsum, num_tokens, token);
+}
+
+// Low-t k2 kernels defined here (before mHC_post_pre_v2) so NVCC can emit
+// the template instantiations referenced inside that function.
+
+// Low-t k2: one CTA per token (grid = num_tokens) to fill the SMs at small
+// batch, where the 32-tokens/CTA default leaves only ceil(t/32) blocks idle.
+template <int N, int C, int RMS_HIDDEN>
+__global__ __launch_bounds__(256) void mHC_pre_k2_lowt_kernel(
+    void const *__restrict__ mixes_pad,
+    void const *__restrict__ sqrsum,
+    void const *__restrict__ scale_ptr,
+    void const *__restrict__ base_ptr,
+    void const *__restrict__ x_orig_bf16,
+    void *__restrict__ f_pre,
+    void *__restrict__ h_post_out,
+    void *__restrict__ comb_out,
+    int num_tokens,
+    int sinkhorn_repeat,
+    float sinkhorn_eps,
+    float rms_eps) {
+  kernel::mHC_pre_k2_lowt_task_impl<mpk_bf16,
+                                    N,
+                                    C,
+                                    RMS_HIDDEN,
+                                    /*BLOCK_THREADS=*/256,
+                                    /*MIX_STRIDE=*/128,
+                                    /*RDSPLIT_K=*/0>(mixes_pad,
+                                                     sqrsum,
+                                                     scale_ptr,
+                                                     base_ptr,
+                                                     x_orig_bf16,
+                                                     f_pre,
+                                                     h_post_out,
+                                                     comb_out,
+                                                     sinkhorn_repeat,
+                                                     sinkhorn_eps,
+                                                     rms_eps,
+                                                     num_tokens);
+}
+
+// Fused low-t k2: reduces the k1 GEMM's split-k partials INLINE then runs the
+// tail, folding the separate reduce launch into k2 (3 launches -> 2 at low t).
+// mixes_ptr/sqrsum_ptr point at out_partial / sqr_partial.
+template <int N, int C, int RMS_HIDDEN, int SPLIT_K>
+__global__ __launch_bounds__(256) void mHC_pre_k2_lowt_fused_kernel(
+    void const *__restrict__ out_partial,
+    void const *__restrict__ sqr_partial,
+    void const *__restrict__ scale_ptr,
+    void const *__restrict__ base_ptr,
+    void const *__restrict__ x_orig_bf16,
+    void *__restrict__ f_pre,
+    void *__restrict__ h_post_out,
+    void *__restrict__ comb_out,
+    int num_tokens,
+    int sinkhorn_repeat,
+    float sinkhorn_eps,
+    float rms_eps) {
+  kernel::mHC_pre_k2_lowt_task_impl<mpk_bf16,
+                                    N,
+                                    C,
+                                    RMS_HIDDEN,
+                                    /*BLOCK_THREADS=*/256,
+                                    /*MIX_STRIDE=*/128,
+                                    /*RDSPLIT_K=*/SPLIT_K>(out_partial,
+                                                           sqr_partial,
+                                                           scale_ptr,
+                                                           base_ptr,
+                                                           x_orig_bf16,
+                                                           f_pre,
+                                                           h_post_out,
+                                                           comb_out,
+                                                           sinkhorn_repeat,
+                                                           sinkhorn_eps,
+                                                           rms_eps,
+                                                           num_tokens);
 }
 
 void mHC_post_pre_v2(torch::Tensor residual_in,
@@ -390,7 +475,8 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
                      int sinkhorn_repeat,
                      double sinkhorn_eps,
                      double rms_eps,
-                     int tokens_per_cta) {
+                     int tokens_per_cta,
+                     int k1_tpb = -1) {
   TORCH_CHECK(n == 4, "post_pre_v2 hardcoded to n=4");
   constexpr int MIX_PAD = 128;
   int const num_tokens = static_cast<int>(residual_in.size(0));
@@ -413,9 +499,9 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
                   post_in.sizes() == torch::IntArrayRef({num_tokens, n}),
               "post_in must be float32 [tokens, n]");
   TORCH_CHECK(fn.is_cuda() && fn.is_contiguous() &&
-                  fn.scalar_type() == at::kFloat &&
+                  fn.scalar_type() == at::kBFloat16 &&
                   fn.sizes() == torch::IntArrayRef({mix_hc, n, c}),
-              "fn must be float32 [mix_hc, n, c]");
+              "fn must be bfloat16 [mix_hc, n, c]");
   TORCH_CHECK(residual_next.is_cuda() && residual_next.is_contiguous() &&
                   residual_next.scalar_type() == at::kBFloat16 &&
                   residual_next.dim() == 3 && residual_next.size(1) == n &&
@@ -447,53 +533,102 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
 
   cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(residual_in.get_device());
-  constexpr int BT = 128;
-
   void *res_p = const_cast<void *>(residual_in.data_ptr());
   void *x_p = const_cast<void *>(x_in.data_ptr());
   void *comb_p = const_cast<float *>(comb_in.data_ptr<float>());
   void *post_p = const_cast<float *>(post_in.data_ptr<float>());
-  void *fn_p = const_cast<float *>(fn.data_ptr<float>());
+  void *fn_p = const_cast<void *>(fn.data_ptr());
   void *res_next_p = const_cast<void *>(residual_next.data_ptr());
   float *outp_p = out_partial.data_ptr<float>();
   float *sqrp_p = sqr_partial.data_ptr<float>();
   void *mixes_p = const_cast<void *>(mixes_pad.data_ptr());
   float *sqrsum_p = sqrsum.data_ptr<float>();
+  // BLOCK_THREADS is baked into the kernel template. BT=256 for SK<=8 (gives
+  // 16 warps covering C/SK elems, matching vLLM's GEMM throughput). BT=128
+  // for SK=16 (C/16=448 elems, 4 warps is sufficient). BT=64 for SK>=32
+  // (thin slices, 128 threads would waste occupancy).
 
-  dim3 fused_grid(num_tokens, split_k, 1);
-  dim3 fused_block(BT, 1, 1);
+  // TPB: amortize fn weight reload across tokens; effective only when split_k==1
+  // (split_k expands the grid independently). Sweep results (B200, c=4096/7168):
+  //   t<512:  all TPBs identical (latency-bound, fn traffic not the bottleneck)
+  //   t>=512 c=4096: TPB=2 wins at all prefill sizes (TPB=4 reduces parallelism)
+  //   t>=512 c=7168: TPB=4 wins at most sizes (~10% over TPB=2); c scales fn
+  //                  traffic more, making larger reuse worth the parallelism cost
+  int tpb;
+  if (k1_tpb > 0) {
+    tpb = k1_tpb; // caller-specified override (for tuning sweeps)
+  } else if (split_k == 1 && num_tokens >= 512) {
+    tpb = (c > 4096) ? 4 : 2;
+  } else {
+    tpb = 1;
+  }
 
-#define LAUNCH_FUSED(C_, SK_)                                                  \
-  mHC_post_pre_k1_kernel<4, C_, 24, BT, SK_>                                   \
-      <<<fused_grid, fused_block, 0, stream>>>(res_p,                          \
-                                               x_p,                            \
-                                               comb_p,                         \
-                                               post_p,                         \
-                                               fn_p,                           \
-                                               res_next_p,                     \
-                                               outp_p,                         \
-                                               sqrp_p,                         \
-                                               num_tokens);                    \
-  mHC_post_pre_k1_reduce_kernel<4, 24, MIX_PAD, SK_>                           \
-      <<<dim3(num_tokens, 1, 1), dim3(32, 1, 1), 0, stream>>>(                 \
-          outp_p, sqrp_p, mixes_p, sqrsum_p, num_tokens)
+#define LAUNCH_FUSED(C_, SK_, TPB_, BT_)                                        \
+  do {                                                                         \
+    dim3 _fg((num_tokens + (TPB_)-1) / (TPB_), (SK_), 1);                      \
+    dim3 _fb((BT_), 1, 1);                                                     \
+    mHC_post_pre_k1_kernel<4, C_, 24, BT_, SK_, TPB_>                           \
+        <<<_fg, _fb, 0, stream>>>(res_p,                                       \
+                                  x_p,                                         \
+                                  comb_p,                                      \
+                                  post_p,                                      \
+                                  fn_p,                                        \
+                                  res_next_p,                                  \
+                                  outp_p,                                      \
+                                  sqrp_p,                                      \
+                                  mixes_p,                                     \
+                                  sqrsum_p,                                    \
+                                  num_tokens);                                 \
+    if ((SK_) > 1) {                                                           \
+      mHC_post_pre_k1_reduce_kernel<4, 24, MIX_PAD, SK_>                       \
+          <<<dim3(num_tokens, 1, 1), dim3(32, 1, 1), 0, stream>>>(             \
+              outp_p, sqrp_p, mixes_p, sqrsum_p, num_tokens);                  \
+    }                                                                          \
+  } while (0)
+
+#define LAUNCH_FUSED_TPB(C_, SK_)                                              \
+  switch (tpb) {                                                               \
+    case 1:                                                                    \
+      LAUNCH_FUSED(C_, SK_, 1, 256);                                           \
+      break;                                                                   \
+    case 2:                                                                    \
+      LAUNCH_FUSED(C_, SK_, 2, 256);                                           \
+      break;                                                                   \
+    case 4:                                                                    \
+      LAUNCH_FUSED(C_, SK_, 4, 256);                                           \
+      break;                                                                   \
+    case 8:                                                                    \
+      LAUNCH_FUSED(C_, SK_, 8, 256);                                           \
+      break;                                                                   \
+    default:                                                                   \
+      TORCH_CHECK(false, "bad tpb");                                           \
+  }
 
 #define DISPATCH_FUSED_SK(C_)                                                  \
   switch (split_k) {                                                           \
     case 1:                                                                    \
-      LAUNCH_FUSED(C_, 1);                                                     \
+      LAUNCH_FUSED_TPB(C_, 1);                                                 \
       break;                                                                   \
     case 2:                                                                    \
-      LAUNCH_FUSED(C_, 2);                                                     \
+      LAUNCH_FUSED(C_, 2, 1, 256);                                             \
       break;                                                                   \
     case 4:                                                                    \
-      LAUNCH_FUSED(C_, 4);                                                     \
+      LAUNCH_FUSED(C_, 4, 1, 256);                                             \
       break;                                                                   \
     case 8:                                                                    \
-      LAUNCH_FUSED(C_, 8);                                                     \
+      LAUNCH_FUSED(C_, 8, 1, 256);                                             \
       break;                                                                   \
     case 16:                                                                   \
-      LAUNCH_FUSED(C_, 16);                                                    \
+      LAUNCH_FUSED(C_, 16, 1, 128);                                            \
+      break;                                                                   \
+    case 32:                                                                   \
+      LAUNCH_FUSED(C_, 32, 1, 64);                                             \
+      break;                                                                   \
+    case 64:                                                                   \
+      LAUNCH_FUSED(C_, 64, 1, 64);                                             \
+      break;                                                                   \
+    case 128:                                                                  \
+      LAUNCH_FUSED(C_, 128, 1, 64);                                            \
       break;                                                                   \
     default:                                                                   \
       TORCH_CHECK(false, "Unsupported split_k=", split_k);                     \
@@ -516,6 +651,7 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
       TORCH_CHECK(false, "Unsupported c=", c);
   }
 #undef DISPATCH_FUSED_SK
+#undef LAUNCH_FUSED_TPB
 #undef LAUNCH_FUSED
 
   cudaError_t err = cudaGetLastError();
@@ -523,7 +659,13 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
               "mHC_post_pre_v2 fused launch error: ",
               cudaGetErrorString(err));
 
-  // ---- k2 tail (existing kernel) ----
+  // ---- k2 tail ----
+  // Low-t path: one block per token (grid=num_tokens) fills SMs at decode
+  // and folds the split-k reduce inline (RDSPLIT_K). Falls back to the batched
+  // path at high token counts where one-block-per-token is wasteful.
+  int const k2_lowt_thresh = 32 * kDefaultNumCTAs;
+  bool const use_lowt_k2 = (num_tokens < k2_lowt_thresh);
+
   size_t const k2_smem =
       tokens_per_cta * (4 * n + n * n + n * n + n) * sizeof(float) + 1024;
   int const tiles = ceil_div(num_tokens, tokens_per_cta);
@@ -538,6 +680,59 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
   void *comb_p2 = const_cast<float *>(comb.data_ptr<float>());
   float sk_eps_f = static_cast<float>(sinkhorn_eps);
   float rms_eps_f = static_cast<float>(rms_eps);
+
+  // lowt fused: reduces split-k partials inline (RDSPLIT_K), saving the separate
+  // reduce launch. Only used when SK<=8: above that the 24*SK-wide register
+  // accumulation in warp 0 hurts occupancy more than it saves a kernel launch.
+  // For SK>8, the separate reduce (cheap at small t) + standard lowt k2 wins.
+#define LAUNCH_V2_K2_LOWT(C_, RH_, SK_)                                        \
+  do {                                                                         \
+    dim3 _lg(num_tokens, 1, 1);                                                \
+    if ((SK_) <= 1) {                                                          \
+      mHC_pre_k2_lowt_kernel<4, C_, RH_>                                       \
+          <<<_lg, k2_block, 0, stream>>>(mixes_p,                              \
+                                         sqrsum_p,                             \
+                                         scale_p,                              \
+                                         base_p,                               \
+                                         x_orig_p,                             \
+                                         f_pre_p,                              \
+                                         h_post_p,                             \
+                                         comb_p2,                              \
+                                         num_tokens,                           \
+                                         sinkhorn_repeat,                      \
+                                         sk_eps_f,                             \
+                                         rms_eps_f);                           \
+    } else if ((SK_) <= 8) {                                                   \
+      mHC_pre_k2_lowt_fused_kernel<4, C_, RH_, SK_>                            \
+          <<<_lg, k2_block, 0, stream>>>(outp_p,                               \
+                                         sqrp_p,                               \
+                                         scale_p,                              \
+                                         base_p,                               \
+                                         x_orig_p,                             \
+                                         f_pre_p,                              \
+                                         h_post_p,                             \
+                                         comb_p2,                              \
+                                         num_tokens,                           \
+                                         sinkhorn_repeat,                      \
+                                         sk_eps_f,                             \
+                                         rms_eps_f);                           \
+    } else {                                                                   \
+      /* SK>8: separate reduce already launched by LAUNCH_FUSED; read mixes */ \
+      mHC_pre_k2_lowt_kernel<4, C_, RH_>                                       \
+          <<<_lg, k2_block, 0, stream>>>(mixes_p,                              \
+                                         sqrsum_p,                             \
+                                         scale_p,                              \
+                                         base_p,                               \
+                                         x_orig_p,                             \
+                                         f_pre_p,                              \
+                                         h_post_p,                             \
+                                         comb_p2,                              \
+                                         num_tokens,                           \
+                                         sinkhorn_repeat,                      \
+                                         sk_eps_f,                             \
+                                         rms_eps_f);                           \
+    }                                                                          \
+  } while (0)
 
 #define LAUNCH_V2_K2(C_, RH_, TPC_)                                            \
   do {                                                                         \
@@ -571,24 +766,45 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
       break;                                                                   \
   }
 
+#define DISPATCH_V2_K2(C_, RH_)                                                \
+  do {                                                                         \
+    if (use_lowt_k2) {                                                         \
+      switch (split_k) {                                                       \
+        case 1:  LAUNCH_V2_K2_LOWT(C_, RH_, 1);  break;                       \
+        case 2:  LAUNCH_V2_K2_LOWT(C_, RH_, 2);  break;                       \
+        case 4:  LAUNCH_V2_K2_LOWT(C_, RH_, 4);  break;                       \
+        case 8:  LAUNCH_V2_K2_LOWT(C_, RH_, 8);  break;                       \
+        case 16: LAUNCH_V2_K2_LOWT(C_, RH_, 16); break;                       \
+        case 32: LAUNCH_V2_K2_LOWT(C_, RH_, 32); break;                       \
+        case 64: LAUNCH_V2_K2_LOWT(C_, RH_, 64); break;                       \
+        case 128: LAUNCH_V2_K2_LOWT(C_, RH_, 128); break;                     \
+        default: TORCH_CHECK(false, "Unsupported split_k=", split_k);         \
+      }                                                                        \
+    } else {                                                                   \
+      DISPATCH_V2_K2_TPC(C_, RH_);                                             \
+    }                                                                          \
+  } while (0)
+
   switch (c) {
     case 128:
-      DISPATCH_V2_K2_TPC(128, 4 * 128);
+      DISPATCH_V2_K2(128, 4 * 128);
       break;
     case 1024:
-      DISPATCH_V2_K2_TPC(1024, 4 * 1024);
+      DISPATCH_V2_K2(1024, 4 * 1024);
       break;
     case 4096:
-      DISPATCH_V2_K2_TPC(4096, 4 * 4096);
+      DISPATCH_V2_K2(4096, 4 * 4096);
       break;
     case 7168:
-      DISPATCH_V2_K2_TPC(7168, 4 * 7168);
+      DISPATCH_V2_K2(7168, 4 * 7168);
       break;
     default:
       TORCH_CHECK(false, "Unsupported c=", c);
   }
+#undef DISPATCH_V2_K2
 #undef DISPATCH_V2_K2_TPC
 #undef LAUNCH_V2_K2
+#undef LAUNCH_V2_K2_LOWT
 
   err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
@@ -610,7 +826,7 @@ template <int MIX_HC,
           int TPB = 1>
 __global__ __launch_bounds__(BLOCK_THREADS) void mHC_pre_k1_cuda_core_kernel(
     void const *__restrict__ residual,
-    float const *__restrict__ fn,
+    __nv_bfloat16 const *__restrict__ fn,
     float *__restrict__ out_partial, // used when SPLIT_K>1
     float *__restrict__ sqr_partial, // used when SPLIT_K>1
     void *__restrict__ mixes_pad,    // used when SPLIT_K==1 (direct write)
@@ -629,7 +845,7 @@ __global__ __launch_bounds__(BLOCK_THREADS) void mHC_pre_k1_cuda_core_kernel(
                                          MIX_PAD,
                                          TPB>(
       static_cast<mpk_bf16 const *>(residual),
-      static_cast<float const *>(fn),
+      fn,
       out_partial,
       sqr_partial,
       mixes_pad,
@@ -674,9 +890,9 @@ void mHC_pre_k1_decode(torch::Tensor residual,
                   residual.dim() == 2,
               "residual must be bf16 [tokens, K]");
   TORCH_CHECK(fn.is_cuda() && fn.is_contiguous() &&
-                  fn.scalar_type() == at::kFloat && fn.dim() == 2 &&
+                  fn.scalar_type() == at::kBFloat16 && fn.dim() == 2 &&
                   fn.size(0) == mix_hc && fn.size(1) == K,
-              "fn must be float32 [mix_hc, K]");
+              "fn must be bfloat16 [mix_hc, K]");
   TORCH_CHECK(out_partial.is_cuda() && out_partial.is_contiguous() &&
                   out_partial.scalar_type() == at::kFloat &&
                   out_partial.sizes() ==
@@ -702,7 +918,7 @@ void mHC_pre_k1_decode(torch::Tensor residual,
   constexpr int BT = 128;
 
   void *res_p = const_cast<void *>(residual.data_ptr());
-  float *fn_p = const_cast<float *>(fn.data_ptr<float>());
+  __nv_bfloat16 *fn_p = reinterpret_cast<__nv_bfloat16 *>(fn.data_ptr());
   float *outp_p = out_partial.data_ptr<float>();
   float *sqrp_p = sqr_partial.data_ptr<float>();
   void *mixes_p = const_cast<void *>(mixes_pad.data_ptr());
@@ -1284,9 +1500,9 @@ void mHC_pre_k1(torch::Tensor residual,
 
   constexpr int CUDA_T_THRESH = 256;
   if (num_tokens < CUDA_T_THRESH) {
-    // decode: derive fp32 fn[mix_hc,K] + split-k scratch.
+    // CUDA-core path: needs bf16 fn[mix_hc,K] + split-k scratch.
     auto fn =
-        weight_padded.slice(0, 0, mix_hc).to(torch::kFloat32).contiguous();
+        weight_padded.slice(0, 0, mix_hc).to(torch::kBFloat16).contiguous();
     int const split_k = pick_cuda_split_k(K, num_tokens);
     auto opts_f =
         torch::TensorOptions().dtype(torch::kFloat32).device(residual.device());
@@ -1366,7 +1582,7 @@ void mHC_pre(torch::Tensor residual,
   if (fused) {
     // --- decode: GEMM (writes partials) + fused-reduce-k2 ---
     auto fn =
-        weight_padded.slice(0, 0, mix_hc).to(torch::kFloat32).contiguous();
+        weight_padded.slice(0, 0, mix_hc).to(torch::kBFloat16).contiguous();
     int const split_k = pick_cuda_split_k(K, num_tokens);
     auto opts_f =
         torch::TensorOptions().dtype(torch::kFloat32).device(residual.device());
@@ -1374,7 +1590,7 @@ void mHC_pre(torch::Tensor residual,
     auto sqr_partial = torch::empty({split_k, num_tokens}, opts_f);
     // GEMM always writes partials (even split_k==1) for the fused k2 to reduce.
     void *res_p = const_cast<void *>(residual.data_ptr());
-    float *fn_p = fn.data_ptr<float>();
+    __nv_bfloat16 *fn_p = reinterpret_cast<__nv_bfloat16 *>(fn.data_ptr());
     float *outp_p = out_partial.data_ptr<float>();
     float *sqrp_p = sqr_partial.data_ptr<float>();
     void *mx_p = const_cast<void *>(mixes_pad.data_ptr()); // unused when SK>1
@@ -1547,8 +1763,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sinkhorn_eps") = 1e-9,
         py::arg("rms_eps") = 1e-6,
         py::arg("tokens_per_cta") = 32,
+        py::arg("k1_tpb") = -1,
         "CUDA-core fused post + prenorm-GEMM (vLLM mhc_fused style) + split-k "
-        "reduce + k2 tail. Outputs next layer f_pre / h_post / comb.");
+        "reduce + k2 tail. Outputs next layer f_pre / h_post / comb. "
+        "k1_tpb: tokens-per-block for k1 GEMM (-1 = heuristic).");
 
   m.def("sinkhorn_sm100",
         &sinkhorn_sm100,

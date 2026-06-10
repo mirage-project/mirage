@@ -66,7 +66,7 @@ template <typename T,
           int TPB = 1> // tokens processed per CTA (amortizes the fn reload)
 __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
     T const *__restrict__ residual,  // [tokens, K]
-    float const *__restrict__ fn,    // [MIX_HC, K]  (weight, fp32)
+    __nv_bfloat16 const *__restrict__ fn, // [MIX_HC, K]  (weight, bf16)
     float *__restrict__ out_partial, // [SPLIT_K, tokens, MIX_HC] (SPLIT_K>1)
     float *__restrict__ sqr_partial, // [SPLIT_K, tokens]         (SPLIT_K>1)
     void *__restrict__ mixes_pad,    // [tokens, MIX_PAD] bf16    (SPLIT_K==1)
@@ -135,15 +135,24 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
       }
 #pragma unroll
       for (int o = 0; o < MIX_HC; ++o) {
-        float const *fn_o = fn + (int64_t)o * K + k;
-        float4 w0 = reinterpret_cast<float4 const *>(fn_o)[0];
-        float4 w1 = reinterpret_cast<float4 const *>(fn_o)[1];
+        __nv_bfloat16 const *fn_o = fn + (int64_t)o * K + k;
+        uint4 fw0 = reinterpret_cast<uint4 const *>(fn_o)[0];
+        uint4 fw1 = reinterpret_cast<uint4 const *>(fn_o)[1];
+        __nv_bfloat162 const *fb0 = reinterpret_cast<__nv_bfloat162 const *>(&fw0);
+        __nv_bfloat162 const *fb1 = reinterpret_cast<__nv_bfloat162 const *>(&fw1);
+        float wf[VEC];
+#pragma unroll
+        for (int e2 = 0; e2 < VEC / 2; ++e2) {
+          float2 f = __bfloat1622float2(e2 < 2 ? fb0[e2] : fb1[e2 - 2]);
+          wf[2 * e2 + 0] = f.x;
+          wf[2 * e2 + 1] = f.y;
+        }
 #pragma unroll
         for (int t = 0; t < TPB; ++t) {
           if (t < ntok) {
-            acc[t][o] += w0.x * rv[t][0] + w0.y * rv[t][1] + w0.z * rv[t][2] +
-                         w0.w * rv[t][3] + w1.x * rv[t][4] + w1.y * rv[t][5] +
-                         w1.z * rv[t][6] + w1.w * rv[t][7];
+            acc[t][o] += wf[0] * rv[t][0] + wf[1] * rv[t][1] + wf[2] * rv[t][2] +
+                         wf[3] * rv[t][3] + wf[4] * rv[t][4] + wf[5] * rv[t][5] +
+                         wf[6] * rv[t][6] + wf[7] * rv[t][7];
           }
         }
       }
@@ -158,7 +167,7 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
           sqr[t] += rv * rv;
 #pragma unroll
           for (int o = 0; o < MIX_HC; ++o) {
-            acc[t][o] += fn[(int64_t)o * K + k] * rv;
+            acc[t][o] += __bfloat162float(fn[(int64_t)o * K + k]) * rv;
           }
         }
       }
@@ -724,6 +733,7 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
       m33 = m33 * ri3 + sinkhorn_eps;
 
       int const steps = sinkhorn_repeat > 0 ? sinkhorn_repeat : 1;
+      int const dyn_steps = steps; // alias so the loop-exit check compiles in both paths
 #pragma unroll 1
       for (int it = 0; it < steps; ++it) {
         float const cs0 = m00 + m10 + m20 + m30 + sinkhorn_eps;
@@ -750,7 +760,7 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
         m13 *= ci3;
         m23 *= ci3;
         m33 *= ci3;
-        if (it == steps - 1) {
+        if (it == dyn_steps - 1) {
           break;
         }
         float const rs0i = m00 + m01 + m02 + m03 + sinkhorn_eps;
@@ -900,7 +910,8 @@ template <typename T_in,
           int RMS_HIDDEN,
           int BLOCK_THREADS = 256,
           int MIX_STRIDE = 0,
-          int RDSPLIT_K = 0>
+          int RDSPLIT_K = 0,
+          int SINKHORN_REPEAT = 0>
 __device__ __forceinline__ void
     mHC_pre_k2_lowt_task_impl(void const *mixes_ptr,
                               void const *sqrsum_ptr,
@@ -940,9 +951,8 @@ __device__ __forceinline__ void
   float const alpha_post = scale[1];
   float const alpha_res = scale[2];
 
-  // Per-token shared state: pre_mix weights (4) + comb (16) computed by warp 0.
+  // Per-token shared state: pre_mix weights (4) broadcast from warp 0 to K4.
   __shared__ float s_pre[N];
-  __shared__ float s_comb[N * N];
 
   if (warp == 0) {
     // sqrsum: pre-reduced read, or inline reduce of the k1 sqr_partial.
@@ -1045,9 +1055,11 @@ __device__ __forceinline__ void
       m31 = m31 * ri3 + sinkhorn_eps;
       m32 = m32 * ri3 + sinkhorn_eps;
       m33 = m33 * ri3 + sinkhorn_eps;
-      int const steps = sinkhorn_repeat > 0 ? sinkhorn_repeat : 1;
+      // SINKHORN_REPEAT>0: compile-time unroll; 0: runtime count from arg.
+      int const dyn_steps = (SINKHORN_REPEAT > 0) ? SINKHORN_REPEAT
+                            : (sinkhorn_repeat > 0 ? sinkhorn_repeat : 1);
 #pragma unroll 1
-      for (int it = 0; it < steps; ++it) {
+      for (int it = 0; it < dyn_steps; ++it) {
         float const ci0 = __frcp_rn(m00 + m10 + m20 + m30 + sinkhorn_eps);
         float const ci1 = __frcp_rn(m01 + m11 + m21 + m31 + sinkhorn_eps);
         float const ci2 = __frcp_rn(m02 + m12 + m22 + m32 + sinkhorn_eps);
@@ -1068,7 +1080,7 @@ __device__ __forceinline__ void
         m13 *= ci3;
         m23 *= ci3;
         m33 *= ci3;
-        if (it == steps - 1) {
+        if (it == dyn_steps - 1) {
           break;
         }
         float const ri0i = __frcp_rn(m00 + m01 + m02 + m03 + sinkhorn_eps);
@@ -1110,7 +1122,6 @@ __device__ __forceinline__ void
                          m33};
 #pragma unroll
       for (int e = 0; e < N * N; ++e) {
-        s_comb[e] = cf[e];
         comb_out[token * N * N + e] = cf[e];
       }
     }

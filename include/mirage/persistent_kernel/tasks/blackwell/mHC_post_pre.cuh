@@ -48,133 +48,192 @@
 namespace kernel {
 
 // ---- Stage k1: post + prenorm GEMM + sqrsum ----
+// TPB tokens share one block; fn[o,j,h] is loaded once and reused across all
+// TPB tokens, dividing the dominant fn L2->SM traffic by TPB. Mirrors the
+// pre_k1_cuda_core TPB design.
 template <typename T,
           int N,      // hc_mult (4)
           int C,      // hidden_size per head
           int MIX_HC, // N*N + 2*N (24 for N=4)
           int BLOCK_THREADS,
-          int SPLIT_K>
+          int SPLIT_K,
+          int MIX_PAD = 128,
+          int TPB = 1> // tokens processed per CTA
 __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
-    T const *__restrict__ residual,  // [tokens, N, C]
-    T const *__restrict__ x,         // [tokens, C]
-    float const *__restrict__ comb,  // [tokens, N, N]
-    float const *__restrict__ post,  // [tokens, N]
-    float const *__restrict__ fn,    // [MIX_HC, N, C]  (weight_t, fp32)
-    T *__restrict__ residual_out,    // [tokens, N, C]
-    float *__restrict__ out_partial, // [SPLIT_K, tokens, MIX_HC]
-    float *__restrict__ sqr_partial, // [SPLIT_K, tokens]
+    T const *__restrict__ residual,       // [tokens, N, C]
+    T const *__restrict__ x,              // [tokens, C]
+    float const *__restrict__ comb,       // [tokens, N, N]
+    float const *__restrict__ post,       // [tokens, N]
+    __nv_bfloat16 const *__restrict__ fn, // [MIX_HC, N, C]  (weight_t, bf16)
+    T *__restrict__ residual_out,         // [tokens, N, C]
+    float *__restrict__ out_partial,      // [SPLIT_K, tokens, MIX_HC] (SK>1)
+    float *__restrict__ sqr_partial,      // [SPLIT_K, tokens]         (SK>1)
+    void *__restrict__ mixes_pad,         // [tokens, MIX_PAD] bf16    (SK==1)
+    float *__restrict__ sqrsum,           // [tokens]                  (SK==1)
     int num_tokens,
-    int token,
+    int token0, // first token of this CTA's TPB-group
     int i_ks) {
-  constexpr int C_PER_SPLIT = C / SPLIT_K; // this split's hidden slice
+  constexpr bool DIRECT = (SPLIT_K == 1);
+  constexpr int C_PER_SPLIT = C / SPLIT_K;
   static_assert(C % SPLIT_K == 0, "C must be divisible by SPLIT_K");
   int const tid = threadIdx.x;
   int const lane = tid & 31;
   int const warp_id = tid >> 5;
   constexpr int NUM_WARPS = BLOCK_THREADS / 32;
 
-  // Hoist post / comb for this token into registers.
-  float pm[N];
-  float cm[N][N];
+  int const ntok = (num_tokens - token0) < TPB ? (num_tokens - token0) : TPB;
+
+  // Hoist post / comb for all TPB tokens into registers.
+  float pm[TPB][N];
+  float cm[TPB][N][N];
 #pragma unroll
-  for (int j = 0; j < N; ++j) {
-    pm[j] = post[token * N + j];
-  }
+  for (int t = 0; t < TPB; ++t) {
+    if (t < ntok) {
+      int const tok = token0 + t;
 #pragma unroll
-  for (int kk = 0; kk < N; ++kk) {
+      for (int j = 0; j < N; ++j) {
+        pm[t][j] = post[tok * N + j];
+      }
 #pragma unroll
-    for (int j = 0; j < N; ++j) {
-      cm[kk][j] = comb[token * N * N + kk * N + j];
+      for (int kk = 0; kk < N; ++kk) {
+#pragma unroll
+        for (int j = 0; j < N; ++j) {
+          cm[t][kk][j] = comb[tok * N * N + kk * N + j];
+        }
+      }
     }
   }
 
-  float acc[MIX_HC];
+  // Per-token accumulators. fn loaded once per h, reused across all TPB tokens.
+  float acc[TPB][MIX_HC];
+  float sqr[TPB];
 #pragma unroll
-  for (int o = 0; o < MIX_HC; ++o) {
-    acc[o] = 0.0f;
+  for (int t = 0; t < TPB; ++t) {
+    sqr[t] = 0.0f;
+#pragma unroll
+    for (int o = 0; o < MIX_HC; ++o) {
+      acc[t][o] = 0.0f;
+    }
   }
-  float sqr = 0.0f;
 
-  T const *res_t = residual + (int64_t)token * N * C; // [N, C]
-  T const *x_t = x + (int64_t)token * C;              // [C]
-  T *res_out_t = residual_out + (int64_t)token * N * C;
-  // fn[o, j, h] flattened: stride (N*C, C, 1).
   int const h_base = i_ks * C_PER_SPLIT;
 
   for (int it = tid; it < C_PER_SPLIT; it += BLOCK_THREADS) {
-    int const h = h_base + it; // hidden index in [0, C)
-    float const xv = static_cast<float>(x_t[h]);
-    // residual[token, k, h] across the N heads -> stride C in res_t.
-    float rk[N];
-#pragma unroll
-    for (int kk = 0; kk < N; ++kk) {
-      rk[kk] = static_cast<float>(res_t[kk * C + h]);
-    }
-    // new_r[j] = post[j]*x[h] + sum_k comb[k,j]*residual[k,h]
-    float new_r[N];
-#pragma unroll
-    for (int j = 0; j < N; ++j) {
-      float v = pm[j] * xv;
-#pragma unroll
-      for (int kk = 0; kk < N; ++kk) {
-        v += cm[kk][j] * rk[kk];
-      }
-      new_r[j] = v;
-      res_out_t[j * C + h] = static_cast<T>(v);
-      sqr += v * v;
-    }
-    // mixes[o] += sum_j fn[o, j, h] * new_r[j]
+    int const h = h_base + it;
+
+    // Load fn[o,j,h] once for this h; will be reused by all TPB tokens.
+    // fn layout: [MIX_HC, N, C] flattened -> fn[o*N*C + j*C + h].
+    float fn_oj[MIX_HC][N];
 #pragma unroll
     for (int o = 0; o < MIX_HC; ++o) {
-      float s = 0.0f;
 #pragma unroll
       for (int j = 0; j < N; ++j) {
-        s += fn[((int64_t)o * N + j) * C + h] * new_r[j];
+        fn_oj[o][j] = __bfloat162float(fn[((int64_t)o * N + j) * C + h]);
       }
-      acc[o] += s;
+    }
+
+    // Per-token: compute new_r, write residual_out, accumulate sqr and mixes.
+#pragma unroll
+    for (int t = 0; t < TPB; ++t) {
+      if (t < ntok) {
+        int const tok = token0 + t;
+        T const *res_t = residual + (int64_t)tok * N * C;
+        T const *x_t = x + (int64_t)tok * C;
+        T *res_out_t = residual_out + (int64_t)tok * N * C;
+
+        float const xv = static_cast<float>(x_t[h]);
+        float rk[N];
+#pragma unroll
+        for (int kk = 0; kk < N; ++kk) {
+          rk[kk] = static_cast<float>(res_t[kk * C + h]);
+        }
+        float new_r[N];
+#pragma unroll
+        for (int j = 0; j < N; ++j) {
+          float v = pm[t][j] * xv;
+#pragma unroll
+          for (int kk = 0; kk < N; ++kk) {
+            v += cm[t][kk][j] * rk[kk];
+          }
+          new_r[j] = v;
+          res_out_t[j * C + h] = static_cast<T>(v);
+          sqr[t] += v * v;
+        }
+#pragma unroll
+        for (int o = 0; o < MIX_HC; ++o) {
+          float s = 0.0f;
+#pragma unroll
+          for (int j = 0; j < N; ++j) {
+            s += fn_oj[o][j] * new_r[j];
+          }
+          acc[t][o] += s;
+        }
+      }
     }
   }
 
-  // Warp reduce, then cross-warp reduce via smem.
+  // Warp-reduce each token's accumulators.
 #pragma unroll
-  for (int o = 0; o < MIX_HC; ++o) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-      acc[o] += __shfl_xor_sync(0xffffffff, acc[o], off);
-    }
-  }
-#pragma unroll
-  for (int off = 16; off > 0; off >>= 1) {
-    sqr += __shfl_xor_sync(0xffffffff, sqr, off);
-  }
-
-  __shared__ float s_acc[NUM_WARPS][MIX_HC];
-  __shared__ float s_sqr[NUM_WARPS];
-  if (lane == 0) {
+  for (int t = 0; t < TPB; ++t) {
 #pragma unroll
     for (int o = 0; o < MIX_HC; ++o) {
-      s_acc[warp_id][o] = acc[o];
+#pragma unroll
+      for (int off = 16; off > 0; off >>= 1) {
+        acc[t][o] += __shfl_xor_sync(0xffffffff, acc[t][o], off);
+      }
     }
-    s_sqr[warp_id] = sqr;
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+      sqr[t] += __shfl_xor_sync(0xffffffff, sqr[t], off);
+    }
+  }
+
+  __shared__ float s_acc[TPB][NUM_WARPS][MIX_HC];
+  __shared__ float s_sqr[TPB][NUM_WARPS];
+  if (lane == 0) {
+#pragma unroll
+    for (int t = 0; t < TPB; ++t) {
+#pragma unroll
+      for (int o = 0; o < MIX_HC; ++o) {
+        s_acc[t][warp_id][o] = acc[t][o];
+      }
+      s_sqr[t][warp_id] = sqr[t];
+    }
   }
   __syncthreads();
 
   if (warp_id == 0) {
-    if (lane < MIX_HC) {
-      float v = 0.0f;
+    __nv_bfloat16 *mixes = static_cast<__nv_bfloat16 *>(mixes_pad);
 #pragma unroll
-      for (int w = 0; w < NUM_WARPS; ++w) {
-        v += s_acc[w][lane];
+    for (int t = 0; t < TPB; ++t) {
+      if (t >= ntok) {
+        continue;
       }
-      out_partial[((int64_t)i_ks * num_tokens + token) * MIX_HC + lane] = v;
-    }
-    if (lane == 0) {
-      float v2 = 0.0f;
+      int const token = token0 + t;
+      if (lane < MIX_HC) {
+        float v = 0.0f;
 #pragma unroll
-      for (int w = 0; w < NUM_WARPS; ++w) {
-        v2 += s_sqr[w];
+        for (int w = 0; w < NUM_WARPS; ++w) {
+          v += s_acc[t][w][lane];
+        }
+        if (DIRECT) {
+          mixes[(int64_t)token * MIX_PAD + lane] = __float2bfloat16(v);
+        } else {
+          out_partial[((int64_t)i_ks * num_tokens + token) * MIX_HC + lane] = v;
+        }
       }
-      sqr_partial[(int64_t)i_ks * num_tokens + token] = v2;
+      if (lane == 0) {
+        float v2 = 0.0f;
+#pragma unroll
+        for (int w = 0; w < NUM_WARPS; ++w) {
+          v2 += s_sqr[t][w];
+        }
+        if (DIRECT) {
+          sqrsum[token] = v2;
+        } else {
+          sqr_partial[(int64_t)i_ks * num_tokens + token] = v2;
+        }
+      }
     }
   }
 }
