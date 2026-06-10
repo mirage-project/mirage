@@ -169,6 +169,13 @@ class MPKModule(nn.Module):
             None          — key not recognized (unexpected, fatal).
             SKIP_WEIGHT   — recognized but intentionally skipped (counts as consumed).
             (param, loader_or_None, kwargs) — apply loader or param.data.copy_().
+
+        ``kwargs`` contract: the ``_path`` entry MUST equal this module's
+        ``named_parameters()`` key for the loaded parameter (the path used by
+        ``_assert_fully_loaded``). When ``_path`` is omitted, the loader falls
+        back to the HF checkpoint ``name``, which is only correct when the two
+        keys are identical. Overrides that remap HF names MUST set ``_path`` to
+        the ``named_parameters()`` key.
         """
         routing = [(self, "")]
         for mod_name, mod in self.named_modules():

@@ -35,17 +35,37 @@ def test_streaming_releases_each_tensor():
     assert max(alive) <= 1, f"held {max(alive)} tensors live (expected streaming)"
 
 
-def test_missing_key_raises():
+def test_missing_required_weight_raises():
     m = _Model()
-    with pytest.raises(ValueError, match="a.weight"):
+    with pytest.raises(ValueError, match=r"a\.weight"):
         m.load_weights(iter([("b.weight", torch.ones(4, 4))]))
 
 
 def test_unexpected_key_raises():
     m = _Model()
-    with pytest.raises(ValueError, match="zzz.weight"):
+    with pytest.raises(ValueError, match=r"zzz\.weight"):
         m.load_weights(iter([
             ("a.weight", torch.ones(4, 4)),
             ("b.weight", torch.ones(4, 4)),
             ("zzz.weight", torch.ones(4, 4)),
         ]))
+
+
+def test_skip_weight_is_consumed_and_not_required():
+    from mirage.mpk.layers._base import SKIP_WEIGHT
+
+    class _Skipper(MPKModule):
+        def __init__(self, prefix=""):
+            super().__init__(prefix=prefix)
+            self.weight = nn.Parameter(torch.empty(4, 4))
+            # weight is filled elsewhere, so don't require it to be loaded here.
+            self._optional_param_paths = frozenset({"weight"})
+
+        def resolve_weight(self, name, params):
+            if name == "weight":
+                return SKIP_WEIGHT
+            return super().resolve_weight(name, params)
+
+    m = _Skipper()
+    consumed = m.load_weights(iter([("weight", torch.ones(4, 4))]))
+    assert consumed == {"weight"}        # skipped keys still count as consumed
