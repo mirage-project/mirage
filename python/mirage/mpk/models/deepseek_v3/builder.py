@@ -253,12 +253,15 @@ class DeepSeekV3Builder(GraphBuilder):
 
         # Fuse residual into linear kernels (with_residual). Always on.
         self._fuse_residual = True
-        # NEW MoE path: route MoE W13/W2 through the PR-674 fp8_group_gemm
+        # MoE path: route MoE W13/W2 through the PR-674 fp8_group_gemm
         # via two peripheral tasks (moe_permute → fp8_group_gemm →
-        # silu_mul → quantize → fp8_group_gemm → moe_unpermute). Default
-        # OFF; A/B test under MPK_DSV3_NEW_MOE=1 then flip default after
-        # correctness + perf are validated. See scratch/pr674_moe_kernel_wiring_plan.md.
-        self._new_moe = os.environ.get("MPK_DSV3_NEW_MOE", "0") == "1"
+        # silu_mul → quantize → fp8_group_gemm → moe_unpermute).
+        # DEFAULT ON (2026-06-10 cleanup): ~2.7× the per-expert legacy MoE
+        # chain at decode; TP4 EP2 perf-validated + TP8 EP2 61L run-validated.
+        # MPK_DSV3_NEW_MOE=0 opts back into the legacy per-expert path (which
+        # the MTP layer still uses unconditionally; known L8+ numeric issue
+        # tracked in the per-kernel correctness campaign).
+        self._new_moe = os.environ.get("MPK_DSV3_NEW_MOE", "1") == "1"
         # MPK_DSV3_ACTIVE_SKIP=0 disables the per-expert active-mask
         # short-circuit in fp8_group_gemm (commit ecf1f8e5) — useful for
         # A/B correctness checks. Default ON when NEW MoE is on.
@@ -291,8 +294,10 @@ class DeepSeekV3Builder(GraphBuilder):
         # byte-identical to the legacy 1-CTA-per-expert path. E_LOCAL
         # (= num_local_experts) must be divisible by EPC — asserted at the
         # moe_permute call site once num_local_experts is known.
+        # DEFAULT 4 (2026-06-10 cleanup): collapses the decode permute to one
+        # SM wave (analyzer-found ~40 μs/layer valley); TP4+TP8 validated.
         self._moe_permute_epc = int(
-            os.environ.get("MPK_DSV3_PERMUTE_EPC", "1"))
+            os.environ.get("MPK_DSV3_PERMUTE_EPC", "4"))
         assert self._moe_permute_epc >= 1, "MPK_DSV3_PERMUTE_EPC must be >= 1"
         # MPK_DSV3_BMM=1: switch the decode Q path from the load-time absorbed
         # q_b_proj (single fused (H*576, q_lora) FP8 GEMM) to a per-head BMM
@@ -319,9 +324,11 @@ class DeepSeekV3Builder(GraphBuilder):
         # body (UE8M0, 512-K-packed). Same math; the dense float32 scale
         # layout is split-K-friendly (when the kernel team lands dense
         # split-K, BMM2's per-head K=512 can be split), whereas swapAB's
-        # 512-K UE8M0 cannot. Default OFF — no immediate perf gain (dense
-        # split-K not landed), correctness-equivalent forward-compat path.
-        self._dsv3_bmm_dense = os.environ.get("MPK_DSV3_BMM_DENSE", "0") == "1"
+        # 512-K UE8M0 cannot. DEFAULT ON (2026-06-10 cleanup): part of the
+        # validated decode lever stack (be145abc triple-stack, token-identical
+        # at TP4; TP8 EP2 61L run-validated). MPK_DSV3_BMM_DENSE=0 falls back
+        # to the swapAB body for regression isolation.
+        self._dsv3_bmm_dense = os.environ.get("MPK_DSV3_BMM_DENSE", "1") == "1"
         # D1 (2026-05-17): fuse the q_b_nope FP8 GEMM with its downstream
         # per_token_group_quantize_fp8 task. The new
         # fp8_gemm_dense_*_fp8out kernel computes a per-row UE8M0 scale in
@@ -380,11 +387,12 @@ class DeepSeekV3Builder(GraphBuilder):
         # +1.4μs gap before q_a RMSnorm + 1.6μs gap before its QUANTIZE_FP8
         # + 5.2μs gap before q_b GEMM = ~8μs of stacked dispatch/wave-spread
         # latency. Fusion collapses 2 hops + their gap into 1 fused task.
-        # Default OFF; flip via MPK_DSV3_FUSED_Q_A_QUANTIZE=1. Same pattern
+        # DEFAULT ON (2026-06-10 cleanup): −5μs/layer measured (8ab5389f),
+        # token-identical at TP4; TP8 EP2 61L run-validated. Same pattern
         # as B37 qkv_a fusion (case-3 safe via per-layer-unique FP8/scale
-        # buffers). Estimated saving 2-3μs/layer.
+        # buffers). MPK_DSV3_FUSED_Q_A_QUANTIZE=0 reverts for isolation.
         self._fused_q_a_quantize = (
-            os.environ.get("MPK_DSV3_FUSED_Q_A_QUANTIZE", "0") == "1")
+            os.environ.get("MPK_DSV3_FUSED_Q_A_QUANTIZE", "1") == "1")
         # 2026-06-03: INTER-TASK OVERLAP for the decode Q-up projections.
         #
         # In the BMM decode Q path (_bmm_decode_q_path) the two independent
@@ -4523,7 +4531,11 @@ class DeepSeekV3Builder(GraphBuilder):
                 )
                 _gemm_input = _rmsnorm_out_defer
         shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
-        _bsk = int(os.environ.get("MPK_DSV3_BUILDER_SPLITK", "0"))
+        # DEFAULT 2 (2026-06-10 cleanup): builder-side split-K on the decode
+        # gate_up GEMM via the WORKING dense kernel + bf16 reduce (−8.2μs/layer,
+        # 347.4→339.2, token-identical at TP4; TP8 EP2 61L run-validated).
+        # MPK_DSV3_BUILDER_SPLITK=0 reverts to the single-call dispatch.
+        _bsk = int(os.environ.get("MPK_DSV3_BUILDER_SPLITK", "2"))
         # 2026-06-04: ferret FP8 split-K TMA-reduce decode companion for the
         # shared-expert gate_up (K=7168, N=1024 at TP=4 -> SK=4). Routes through
         # _fp8_linear -> _fp8_linear_v2, which selects the use_tmareduce path
@@ -4673,6 +4685,11 @@ class DeepSeekV3Builder(GraphBuilder):
             # explode regs + act-reread), so in a prefill build it dual-dispatches
             # with the splitk router (prefill companion, Q_LEN-gated). Default OFF
             # ⇒ byte-identical. See scratch/router_gemv_dualdispatch_design.md.
+            # STAYS OFF in the 2026-06-10 default-flip: at TP8 EP2 61L,
+            # ROUTER_GEMV=1 crashes megakernel launch with
+            # cudaErrorMisalignedAddress (bisect: the 5 other levers ON +
+            # GEMV OFF runs clean; +GEMV crashes). Root-cause pending —
+            # future optimization once fixed (~−8μs/layer at decode).
             _router_gemv = os.environ.get("MPK_DSV3_ROUTER_GEMV", "0") == "1"
             # GEMV bakes a compile-time M and (in the dual-dispatch path) narrows
             # the decode active rows from row 0 — only valid for a SINGLE request
