@@ -210,6 +210,60 @@ def dequantize_fp8(
     return result.to(target_dtype)
 
 
+def _absorb_kv_into_q(
+    q_b_proj_weight: torch.Tensor,
+    kv_b_proj_weight: torch.Tensor,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    kv_lora_rank: int,
+    v_head_dim: int,
+    q_lora_rank: int,
+) -> torch.Tensor:
+    """Absorb ``kv_b_proj`` into ``q_b_proj`` for MLA decode.
+
+    Transcribed verbatim (math only) from
+    ``demo/deepseek_v3/models/convert.absorb_kv_into_q``, with the model-arch
+    dims passed in explicitly (read off the owning ``DeepseekV3MLA`` instance)
+    rather than via a ``params`` dict / ``get_model_params`` — so the package
+    has no dependency on the demo directory.
+
+    Input shapes (HF-native):
+        q_b_proj_weight:  ``(num_heads * (qk_nope_head_dim + qk_rope_head_dim), q_lora_rank)``
+        kv_b_proj_weight: ``(num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank)``
+
+    Output shape:
+        ``(num_heads * (kv_lora_rank + qk_rope_head_dim), q_lora_rank)``
+
+    The math (float32 for precision; caller casts back to bf16):
+        - reshape q_b per head, split into nope / rope halves;
+        - reshape kv_b per head, take the k_nope half;
+        - q_absorbed_nope = bmm(k_nope^T, q_nope) -> (H, kv_lora_rank, q_lora_rank);
+        - concat the unchanged q_rope back on -> (H, kv_lora_rank+qk_rope_head_dim, q_lora_rank);
+        - flatten heads.
+    """
+    q_head_dim = qk_nope_head_dim + qk_rope_head_dim
+    kv_head_dim = qk_nope_head_dim + v_head_dim
+
+    # q_b_proj_weight: [num_heads * q_head_dim, q_lora_rank]
+    q_b = q_b_proj_weight.float().reshape(num_heads, q_head_dim, q_lora_rank)
+    q_nope = q_b[:, :qk_nope_head_dim, :]  # [H, qk_nope_head_dim, q_lora_rank]
+    q_rope = q_b[:, qk_nope_head_dim:, :]  # [H, qk_rope_head_dim, q_lora_rank]
+
+    # kv_b_proj_weight: [num_heads * kv_head_dim, kv_lora_rank]
+    kv_b = kv_b_proj_weight.float().reshape(num_heads, kv_head_dim, kv_lora_rank)
+    k_nope = kv_b[:, :qk_nope_head_dim, :]  # [H, qk_nope_head_dim, kv_lora_rank]
+
+    # q_absorbed_nope_h = k_nope_h^T @ q_nope_h -> [H, kv_lora_rank, q_lora_rank]
+    q_absorbed_nope = torch.bmm(k_nope.transpose(1, 2), q_nope)
+
+    # Concat absorbed nope with unchanged rope per head.
+    q_absorbed = torch.cat([q_absorbed_nope, q_rope], dim=1)
+
+    out_dim = kv_lora_rank + qk_rope_head_dim
+    return q_absorbed.reshape(num_heads * out_dim, q_lora_rank)
+
+
 def _remap_dsv3_key(name: str) -> str:
     """Map an HF DeepSeek V3 state_dict key to its catalog ``named_parameters()`` path.
 
@@ -273,8 +327,9 @@ class DeepseekV3MLA(MPKModule):
         1. ``q_a_proj``  : Linear ``(hidden -> q_lora_rank)``, BF16.
         2. ``q_a_layernorm`` : RMSNorm over ``q_a_proj`` output.
         3. ``q_b_proj``  : Linear ``(q_lora_rank -> H * (kv_lora_rank +
-           qk_rope_head_dim))`` — KV-absorbed; the driver MUST apply
-           absorption via ``absorb_kv_into_q`` before ``load_state_dict()``.
+           qk_rope_head_dim))`` — KV-absorbed; the absorption (kv_b -> q_b)
+           is applied by :meth:`process_weights` from the raw HF weights
+           stashed at load time, not directly during weight loading.
         4. ``kv_a_proj_with_mqa`` : Linear ``(hidden -> kv_lora_rank +
            qk_rope_head_dim)``, BF16. Output split into ``c_latent`` and
            ``k_pe``.
@@ -287,9 +342,10 @@ class DeepseekV3MLA(MPKModule):
            KV length fits a single 128-token tile; otherwise the catalog
            default split-K applies).
         9. ``o_proj`` : Linear ``(H * kv_lora_rank -> hidden)`` with residual
-           — the W_UV absorption into o_proj is performed by the driver at
-           load time (the resulting fused weight is ``(hidden,
-           H * kv_lora_rank)``, NOT the HF-native ``(hidden, H * v_head_dim)``).
+           — the W_UV fusion into o_proj is performed by
+           :meth:`process_weights` from the raw HF weights stashed at load
+           time (the resulting fused weight is ``(hidden, H * kv_lora_rank)``,
+           NOT the HF-native ``(hidden, H * v_head_dim)``).
     """
 
     def __init__(self, config, layer_idx: int, *, prefix: str = ""):
@@ -327,12 +383,13 @@ class DeepseekV3MLA(MPKModule):
             )
         )
         # q_b_proj (KV-absorbed): (H * (kv_lora_rank + qk_rope_head_dim),
-        # q_lora_rank) — driver applies absorption before load_state_dict.
+        # q_lora_rank) — filled by process_weights from the stashed raw weights.
         self.q_b_proj_weight = nn.Parameter(
             torch.empty(self.num_heads * self.qk_head_dim, self.q_lora_rank)
         )
         # o_proj (W_UV-fused): (hidden, H * kv_lora_rank). HF native is
-        # (hidden, H * v_head_dim); the driver fuses W_UV in at load time.
+        # (hidden, H * v_head_dim); process_weights fuses W_UV in from the
+        # stashed raw weights.
         self.o_proj_weight = nn.Parameter(
             torch.empty(self.hidden_size, self.num_heads * self.kv_lora_rank)
         )
@@ -613,6 +670,92 @@ class DeepseekV3MLA(MPKModule):
             block_dim=(128, 1, 1),
         )
         return output
+
+    # ------------------------------------------------------------------
+    def process_weights(self) -> None:
+        """Perform MLA weight absorption from the raw HF weights stashed by
+        ``DeepseekV3ForCausalLM.load_weights`` (Task C2).
+
+        ``load_weights`` stashes the raw bf16 HF MLA weights as
+        ``self._raw_q_b`` / ``self._raw_kv_b`` / ``self._raw_o`` and does NOT
+        write ``q_b_proj_weight`` / ``o_proj_weight`` directly. This hook:
+
+          1. Absorbs ``kv_b`` into ``q_b`` -> ``q_b_proj_weight`` of shape
+             ``(num_heads * (kv_lora_rank + qk_rope_head_dim), q_lora_rank)``.
+          2. Fuses ``W_UV`` (the V half of ``kv_b``) into ``o_proj`` ->
+             ``o_proj_weight`` of shape ``(hidden, num_heads * kv_lora_rank)``.
+
+        Math (float32 internally, cast back to bf16) is transcribed from
+        ``demo/deepseek_v3/demo_new.py`` (the absorption block) and
+        ``demo/deepseek_v3/models/convert.absorb_kv_into_q``.
+
+        Requires ``load_weights`` to have run first; if no raw weights are
+        stashed (process_weights called without a prior load) this is a no-op
+        for the MLA transform (after recursing into children).
+        """
+        # Recurse into catalog-leaf children (rope_q / rope_k / kv_gather /
+        # decode / reduce) first per the base-class contract. They carry no
+        # parameters, so this is a harmless no-op, but it keeps the override
+        # consistent with MPKModule.process_weights.
+        super().process_weights()
+
+        if not hasattr(self, "_raw_q_b"):
+            # No prior load_weights (or already processed); nothing to absorb.
+            return
+
+        # HF-native dims. NOTE: ``self.v_head_dim`` was overwritten in
+        # __init__ to ``kv_lora_rank`` (the ABSORBED output width); the
+        # absorption math needs the HF-native v_head_dim, read from config.
+        num_heads = self.num_heads
+        qk_nope_head_dim = self.qk_nope_head_dim
+        qk_rope_head_dim = self.qk_rope_head_dim
+        kv_lora_rank = self.kv_lora_rank
+        q_lora_rank = self.q_lora_rank
+        v_head_dim = self.config.v_head_dim  # HF-native (e.g. 128), NOT self.v_head_dim
+
+        q_w = self._raw_q_b   # bf16, (num_heads * (qk_nope+qk_rope), q_lora_rank)
+        kv_w = self._raw_kv_b  # bf16, (num_heads * (qk_nope+v_head_dim), kv_lora_rank)
+        o_w = self._raw_o      # bf16, (hidden, num_heads * v_head_dim)
+
+        # ---- 1. Absorb kv_b into q_b. ----
+        absorbed = _absorb_kv_into_q(
+            q_w,
+            kv_w,
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            kv_lora_rank=kv_lora_rank,
+            v_head_dim=v_head_dim,
+            q_lora_rank=q_lora_rank,
+        )
+        assert absorbed.shape == self.q_b_proj_weight.shape, (
+            f"absorbed q_b shape {tuple(absorbed.shape)} != "
+            f"q_b_proj_weight {tuple(self.q_b_proj_weight.shape)}"
+        )
+        self.q_b_proj_weight.data.copy_(absorbed.to(torch.bfloat16).contiguous())
+
+        # ---- 2. Fuse W_UV (the V half of kv_b) into o_proj. ----
+        # hidden comes from o_proj's own dim-0 (matches demo_new.py).
+        hidden = o_w.shape[0]
+        W_UV = kv_w.reshape(
+            num_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank
+        )[:, qk_nope_head_dim:, :]  # (H, v_head_dim, kv_lora_rank)
+        o_fused = torch.einsum(
+            "dhn,hnk->dhk",
+            o_w.reshape(hidden, num_heads, v_head_dim).float(),
+            W_UV.float(),
+        )  # (hidden, H, kv_lora_rank)
+        o_fused_flat = o_fused.reshape(hidden, num_heads * kv_lora_rank)
+        assert o_fused_flat.shape == self.o_proj_weight.shape, (
+            f"fused o_proj shape {tuple(o_fused_flat.shape)} != "
+            f"o_proj_weight {tuple(self.o_proj_weight.shape)}"
+        )
+        self.o_proj_weight.data.copy_(
+            o_fused_flat.to(torch.bfloat16).contiguous()
+        )
+
+        # ---- Free the stashes. ----
+        del self._raw_q_b, self._raw_kv_b, self._raw_o
 
 
 # ---------------------------------------------------------------------------
@@ -1191,8 +1334,10 @@ class DeepseekV3ForCausalLM(MPKModule):
         ``PersistentKernel(kv_cache=...)``.
       * Pre-pad ``lm_head.weight`` to a 256-multiple vocab.
       * Pass ``output_tokens`` torch tensor through ``model.compile()``.
-      * Perform KV absorption + W_UV→o_proj fusion + expert stacking BEFORE
-        ``load_state_dict()``.
+      * Stream raw HF weights through :meth:`load_weights`; the KV absorption
+        + W_UV→o_proj fusion run in :meth:`DeepseekV3MLA.process_weights`
+        (invoked at the end of ``load_weights``) from the stashed raw weights,
+        and routed experts are stacked via their per-expert ``weight_loader``.
     """
 
     def __init__(self, config, *, prefix: str = ""):
@@ -1379,10 +1524,14 @@ class DeepseekV3ForCausalLM(MPKModule):
                 f"{sorted(scale_pending)}"
             )
 
-        # MLA absorption (q_b/kv_b -> q_b, W_UV -> o_proj) is deferred to
-        # process_weights (Task C3). Until C3 lands this is the inherited
-        # recursive no-op.
+        # MLA absorption (q_b/kv_b -> q_b, W_UV -> o_proj) runs in
+        # process_weights (Task C3): it consumes the raw weights stashed above
+        # (_raw_q_b / _raw_kv_b / _raw_o) and fills q_b_proj_weight /
+        # o_proj_weight.
         self.process_weights()
+        # q_b_proj_weight and o_proj_weight are filled by process_weights (MLA
+        # absorption), not directly here, so the base completeness check
+        # (_assert_fully_loaded) is intentionally skipped.
         return consumed
 
     # ------------------------------------------------------------------

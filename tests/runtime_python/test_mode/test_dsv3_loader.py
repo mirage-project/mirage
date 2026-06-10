@@ -14,6 +14,7 @@ import os
 import sys
 
 import pytest
+import torch
 
 # Make ``import mirage`` resolve to the in-repo package.
 _REPO_ROOT = os.path.abspath(
@@ -24,6 +25,7 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 from mirage.mpk.models.deepseek_v3.modeling import (  # noqa: E402
+    _absorb_kv_into_q,
     _is_out_of_range_layer_key,
     _parse_expert_key,
     _remap_dsv3_key,
@@ -185,3 +187,71 @@ def test_is_out_of_range_layer_key_skip(key):
 )
 def test_is_out_of_range_layer_key_keep(key):
     assert _is_out_of_range_layer_key(key, built_layers=4) is False
+
+
+# ---------------------------------------------------------------------------
+# _absorb_kv_into_q (MLA absorption math, Task C3)
+# ---------------------------------------------------------------------------
+
+
+def test_absorb_kv_into_q_shape_and_equivalence():
+    """Verify the absorbed q_b math matches the unabsorbed nope-score path.
+
+    Uses small toy dims (not DeepSeek's real 128/128/64/512/128/1536) so the
+    test is fast and CPU-only. The invariant: for any q_a_out latent and any
+    compressed KV latent c_KV, the nope attention contribution computed via
+    the *absorbed* q_b equals the contribution computed via the *original*
+    q_b/kv_b split. The rope half must pass through unchanged.
+    """
+    torch.manual_seed(0)
+    H = 3            # num_heads
+    qk_nope = 4      # qk_nope_head_dim
+    qk_rope = 2      # qk_rope_head_dim
+    kv_lora = 5      # kv_lora_rank
+    v_dim = 6        # v_head_dim
+    q_lora = 7       # q_lora_rank
+
+    q_head_dim = qk_nope + qk_rope
+    kv_head_dim = qk_nope + v_dim
+
+    q_w = torch.randn(H * q_head_dim, q_lora, dtype=torch.float32)
+    kv_w = torch.randn(H * kv_head_dim, kv_lora, dtype=torch.float32)
+
+    absorbed = _absorb_kv_into_q(
+        q_w, kv_w,
+        num_heads=H, qk_nope_head_dim=qk_nope, qk_rope_head_dim=qk_rope,
+        kv_lora_rank=kv_lora, v_head_dim=v_dim, q_lora_rank=q_lora,
+    )
+
+    # Shape: (H * (kv_lora + qk_rope), q_lora).
+    assert absorbed.shape == (H * (kv_lora + qk_rope), q_lora)
+
+    # --- Equivalence check ---
+    q_a_out = torch.randn(q_lora, dtype=torch.float32)   # q latent
+    c_kv = torch.randn(kv_lora, dtype=torch.float32)     # compressed KV latent
+
+    q_b = q_w.reshape(H, q_head_dim, q_lora)
+    q_nope = q_b[:, :qk_nope, :]                          # (H, qk_nope, q_lora)
+    kv_b = kv_w.reshape(H, kv_head_dim, kv_lora)
+    k_nope = kv_b[:, :qk_nope, :]                         # (H, qk_nope, kv_lora)
+
+    # Original path: q_nope_h = q_nope @ q_a_out; k_nope_h = k_nope @ c_kv;
+    # score_nope_h = q_nope_h . k_nope_h
+    q_nope_vec = torch.einsum("hdq,q->hd", q_nope, q_a_out)   # (H, qk_nope)
+    k_nope_vec = torch.einsum("hdk,k->hd", k_nope, c_kv)      # (H, qk_nope)
+    score_orig = (q_nope_vec * k_nope_vec).sum(dim=1)         # (H,)
+
+    # Absorbed path: q_absorbed_h = q_a_out @ q_absorbed_nope_h (in kv_lora
+    # space); score = q_absorbed_h . c_kv
+    out_dim = kv_lora + qk_rope
+    absorbed_h = absorbed.reshape(H, out_dim, q_lora)
+    q_abs_nope = absorbed_h[:, :kv_lora, :]                   # (H, kv_lora, q_lora)
+    q_abs_vec = torch.einsum("hkq,q->hk", q_abs_nope, q_a_out)  # (H, kv_lora)
+    score_abs = torch.einsum("hk,k->h", q_abs_vec, c_kv)     # (H,)
+
+    torch.testing.assert_close(score_abs, score_orig, rtol=1e-5, atol=1e-5)
+
+    # The rope half of q_b must be carried through unchanged.
+    q_rope = q_b[:, qk_nope:, :]                             # (H, qk_rope, q_lora)
+    absorbed_rope = absorbed_h[:, kv_lora:, :]               # (H, qk_rope, q_lora)
+    torch.testing.assert_close(absorbed_rope, q_rope)
