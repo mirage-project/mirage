@@ -19,6 +19,17 @@ def test_loader_writes_local_skips_remote():
     assert w.weight_loader(w.weight, src, expert_id=5, slot="gate") is False   # non-local
     assert w.weight_loader(w.weight, src, expert_id=2, slot="gate") is True     # local
     assert torch.equal(w.weight[2, :inter], src)
+    assert w.weight_loader(w.weight, src, expert_id=2, slot="up") is True
+    assert torch.equal(w.weight[2, inter:], src)
+
+
+def test_w13_bad_slot_raises():
+    import pytest
+    w = MoEW13BF16(num_experts=8, num_experts_per_tok=2, hidden_size=8,
+                   intermediate_size=4, ep_size=1, ep_rank=0)
+    with pytest.raises(ValueError, match="slot"):
+        w.weight_loader(w.weight, torch.zeros(4, 8, dtype=torch.bfloat16),
+                        expert_id=0, slot="bogus")
 
 
 def test_w2_local_loader():
