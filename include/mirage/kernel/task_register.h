@@ -40,27 +40,22 @@ struct TaskSmemInfo {
 };
 
 struct TaskRoleVariantCode {
-  // Optional: op-declared body that the controller runs (single-thread)
-  // once per published instruction, before role warps wake. Use to
-  // mbar_init slots in runtime_smem->dynamic_semaphores[slot][i] that
-  // the role bodies will arrive/wait on.
+  // Optional setup the controller runs (single-thread) once per task, before
+  // the role warps start: mbar_init the task's dynamic_semaphores[] slots that
+  // the role bodies arrive/wait on. Empty for tasks that declare none.
   std::string init_semaphores;
   std::string loader;
   std::string launcher;
   std::string consumer;
   std::string storer;
 
-  // Page-lifecycle hooks. Defaults wire every task into the
-  // generic page protocol (every task arrives every page exactly once).
-  //   - auto_loader_page_lifecycle: codegen prepends every loader body
-  //     with a lane-parallel "wait every page; for pages this task does
-  //     not use, finish them immediately." If the user has no loader
-  //     body, codegen emits one anyway with just this prefix.
-  //   - auto_consumer_finish: codegen appends every consumer body with
-  //     a runtime_finish_region_range_pages over the task's regions
-  //     (i.e. the pages this task uses get released here). Set false
-  //     for tasks that release pages incrementally inside their body
-  //     (e.g. linear's per-stage release in 3.5b).
+  // Page-lifecycle hooks (defaults: every task arrives every page once).
+  //   - auto_loader_page_lifecycle: codegen prepends each loader with
+  //     "wait every page; immediately finish the ones this task doesn't use"
+  //     (emitted even if the task has no loader body of its own).
+  //   - auto_consumer_finish: codegen appends each consumer with a call that
+  //     releases the pages this task used. Set false for tasks that release
+  //     pages incrementally inside their body (e.g. linear, per pipeline stage).
   bool auto_loader_page_lifecycle = true;
   bool auto_consumer_finish = true;
 };

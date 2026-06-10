@@ -10,7 +10,7 @@ them via smem_region_offset(); release_step orders page freeing.
 
 It walks the per-SM v2_worker_task_queues in execution order, threading each
 task's release order into the next as that task's preferred page-id order --
-kept for cross-task overlap (Phase E), a no-op while CROSS_TASK_PAGES is off.
+kept for cross-task page overlap, a no-op while CROSS_TASK_PAGES is off.
 """
 
 import json
@@ -199,7 +199,7 @@ def _find_physical_run(page_count: int,
     # consulted — multi-page contiguous regions always take the lowest free
     # run. Harmless while cross-task page overlap is disabled on the device
     # (CROSS_TASK_PAGES=false: page lifetimes are task-scoped, so assignment
-    # order has no effect). When Phase E turns overlap on, this must prefer
+    # order has no effect). Once cross-task overlap is enabled, this must prefer
     # runs of earliest-released pages or the W regions (the main overlap
     # beneficiaries) won't follow the fill-fresh-then-earliest-released rule.
     for first_page in range(0, NUM_PAGES - page_count + 1):
