@@ -30,9 +30,6 @@
 //
 //   - Each side is tagged sync (By::Warp) or async (By::Tma / By::Mma); the tag
 //     records who arrives the barrier.
-//   - Producer::drain() waits out any outstanding async empty arrivals before
-//     teardown. linear doesn't use it (it re-inits at task start instead); it's
-//     here for channels that do.
 //
 // mbarriers are addressed as SMEM byte addresses (int), stride 8, exactly like
 // the existing v2 dynamic_semaphores convention (dyn_sem_base + ordinal*8).
@@ -132,7 +129,6 @@ struct Producer {
   Ch  ch;
   int st = 0;
   int ph = 1;          // pre-empty: slots start free; first DEPTH wait_frees pass
-  int n_commits = 0;   // total commits since init; drain() uses this
 
   __device__ int full_mbar() const { return ch.full_mbar(st); }
 
@@ -143,31 +139,11 @@ struct Producer {
   __device__ void advance() { if (++st == Ch::depth) { st = 0; ph ^= 1; } }
 
   // commit variants — pick by how the producer fills the slot.
-  __device__ void commit_warp() { mbar_arrive   (ch.full_mbar(st)); advance(); ++n_commits; }
-  __device__ void commit_mma()  { tcgen05_commit(ch.full_mbar(st)); advance(); ++n_commits; }
+  __device__ void commit_warp() { mbar_arrive   (ch.full_mbar(st)); advance(); }
+  __device__ void commit_mma()  { tcgen05_commit(ch.full_mbar(st)); advance(); }
   // commit_tma(): the cp.async.bulk the role issued already carries full_mbar,
   // so the TMA engine arrives it asynchronously; we only advance the cursor.
-  __device__ void commit_tma()  { advance(); ++n_commits; }
-
-  // DRAIN: wait every outstanding empty arrival that this producer's loop did
-  // not consume. Pre-empty consumes the first `depth` wait_frees, the loop
-  // consumes (n_commits - depth) real releases when n_commits ≥ depth, leaving
-  // exactly `depth` un-acquired releases at the end. When n_commits < depth
-  // (small task), only `n_commits` releases ever happen — drain waits exactly
-  // that many. Auto-correct for both cases.
-  //
-  // Works for both async and sync consumer releases:
-  //   * cons_async: confirms async arrivals LANDED before the ring slot
-  //     recycles — this is the stale-arrival hang fix.
-  //   * cons_sync : ensures all consumer reads completed (e.g. TMEM dealloc
-  //     is safe after this point).
-  __device__ void drain() {
-    int n = n_commits < Ch::depth ? n_commits : Ch::depth;
-    for (int d = 0; d < n; d++) {
-      mbar_wait(ch.empty_mbar(st), ph);
-      advance();
-    }
-  }
+  __device__ void commit_tma()  { advance(); }
 };
 
 // ---- Consumer cursor (held by the warp(s) that drain the channel) ----------
@@ -300,7 +276,6 @@ struct TmemProducer {
   int taddr = 0;       // TMEM base column — set after tcgen05.alloc
   int st = 0;
   int ph = 1;
-  int n_commits = 0;
 
   __device__ void set_taddr(int t) { taddr = t; }
 
@@ -311,16 +286,8 @@ struct TmemProducer {
   __device__ int full_mbar() const { return ch.full_mbar(st); }
   __device__ void advance() { if (++st == TCh::slots) { st = 0; ph ^= 1; } }
 
-  __device__ void commit_mma()  { tcgen05_commit(ch.full_mbar(st)); advance(); ++n_commits; }
-  __device__ void commit_warp() { mbar_arrive   (ch.full_mbar(st)); advance(); ++n_commits; }
-
-  __device__ void drain() {
-    int n = n_commits < TCh::slots ? n_commits : TCh::slots;
-    for (int d = 0; d < n; d++) {
-      mbar_wait(ch.empty_mbar(st), ph);
-      advance();
-    }
-  }
+  __device__ void commit_mma()  { tcgen05_commit(ch.full_mbar(st)); advance(); }
+  __device__ void commit_warp() { mbar_arrive   (ch.full_mbar(st)); advance(); }
 };
 
 template <class TCh>
