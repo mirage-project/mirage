@@ -48,8 +48,8 @@ __device__ __noinline__ void
 // SAME TMEM-contention-fragile shape as the BMM (see task_register.cc:6237) —
 // at NE=2, TCA=NE*BN=256 cols and two concurrent tcgen05 tasks on one SM hit
 // the 512-col limit, so tcgen05.alloc can return taddr=0 → "out-of-range"
-// in tcgen05.mma. It survived at NE=2 only by schedule luck; enabling fine-N
-// (MPK_DSV3_FINEN=1) shifts the wave timing and pushes q_b into the bad
+// in tcgen05.mma. It survived at NE=2 only by schedule luck; shifted wave
+// timing (e.g. the retired fine-N experiment) pushed q_b into the bad
 // contention window (compute-sanitizer pinned the crash here, common.cuh:315).
 // NE=1 (TCA=128) halves the ask so the alloc always fits, and is NUMERICALLY
 // IDENTICAL (NE is only the MMA↔epilogue pipeline depth) + free at M=1

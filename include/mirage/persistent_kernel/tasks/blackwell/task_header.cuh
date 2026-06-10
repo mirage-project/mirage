@@ -31,12 +31,8 @@
 #endif
 #include "attention_sm100.cuh"
 #include "deepseek_mla_rope_sm100.cuh"
-#include "fp8_gemm_dense_decode_splitk_sm100.cuh"
-#include "fp8_gemm_dense_finen_sm100.cuh"
 #include "fp8_gemm_dense_mediumm_sm100.cuh"
-#include "fp8_gemm_dense_qkva_splitk_sm100.cuh"
 #include "fp8_gemm_dense_smallm_sm100.cuh"
-#include "fp8_gemm_dense_splitk_reduce_sm100.cuh"
 #include "fp8_gemm_dense_splitk_tma_reduce_sm100.cuh"
 #include "fp8_group_gemm_largem_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"

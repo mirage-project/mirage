@@ -1467,8 +1467,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
     case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
-    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100:
-    case TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100:
     case TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100:
     case TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100: {
       // Dense FP8 GEMM TMA for A [M,K] and B [N,K], both row-major raw
@@ -1495,53 +1493,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
       uint64_t gs[1] = {row_stride_bytes};
       uint32_t bd[2] = {BK_BOX, OUTER_BOX};
-      uint32_t es[2] = {1, 1};
-      CUresult err = cuTensorMapEncodeTiled(tma_desc,
-                                            fmt,
-                                            2,
-                                            tensor_desc.base_ptr,
-                                            gd,
-                                            gs,
-                                            bd,
-                                            es,
-                                            interleave,
-                                            swizzle,
-                                            l2,
-                                            oob);
-      assert(err == CUDA_SUCCESS);
-      break;
-    }
-    case TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100:
-    case TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100: {
-      // fine-N dense FP8 GEMM (Gate-1, 2026-06-05). Same A[M,K]/B[N,K] raw
-      // e4m3 layout + 128B swizzle as the mediumm dense case above; the ONLY
-      // delta is the B descriptor's outer box = BN (< 128) so each CTA stages
-      // its own BN-row weight slice (matches SMEM SB=BN*BK). A keeps box
-      // outer=BM=128. Precedent: the group-GEMM smallm case ships bd={128,64}
-      // for B with 128B swizzle (the swizzle atom = the inner 128B K dim, so
-      // the outer row count is BN-free to vary). BN is statically coupled to
-      // the kernel template via the task type (BN32 vs BN64), so there is no
-      // BN-vs-box mismatch risk.
-      constexpr int BK_BOX = 128;
-      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-      constexpr CUtensorMapInterleave interleave =
-          CU_TENSOR_MAP_INTERLEAVE_NONE;
-      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
-      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
-      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
-      int const VARIANT_BN =
-          (task_desc.task_type == TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100) ? 32
-                                                                        : 64;
-      // param 0 = A (activation, box outer = BM = 128); param 1 = B (weight,
-      // box outer = BN). Any other param falls back to BM=128 (no scale TMA).
-      int const OUTER_BOX = (param_id == 1) ? VARIANT_BN : 128;
-      int outer = tensor_desc.dim[0];
-      int K_local = tensor_desc.dim[1];
-      uint64_t row_stride_bytes =
-          (uint64_t)tensor_desc.stride[0]; // FP8: 1 byte per element
-      uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
-      uint64_t gs[1] = {row_stride_bytes};
-      uint32_t bd[2] = {(uint32_t)BK_BOX, (uint32_t)OUTER_BOX};
       uint32_t es[2] = {1, 1};
       CUresult err = cuTensorMapEncodeTiled(tma_desc,
                                             fmt,
@@ -2315,22 +2266,9 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
     case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
-    case TASK_FP8_GEMM_DENSE_FINEN_BN32_SM100:
-    case TASK_FP8_GEMM_DENSE_FINEN_BN64_SM100:
-    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100:
-    case TASK_FP8_GEMM_DENSE_QKVA_SPLITK_SM100:
     case TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100:
     case TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100: {
       // A_fp8 and B_fp8 use TMA; scale tensors are plain LDG inputs.
-      // FINEN (fine-N) shares the A=input0/B=input1 TMA layout; only the B
-      // box_outer=BN differs (handled in create_tma_desc_for_tensor).
-      // The QKVA_SPLITK variant additionally carries C_partial (input 4)
-      // and arrive_cnt (input 5) as raw-pointer (non-TMA) reduction
-      // scratch, so the `param_id < 2` loop below already excludes them.
-      // The EXTERNAL-reduce split-K GEMM reuses this same enum but with a
-      // 4-input/1-output layout (A,B,sa,sb -> C_partial); the `param_id < 2`
-      // loop creates descs only for A,B, and C_partial (output 0) gets no TMA
-      // descriptor — the kernel reads output_ptrs[0] as a plain float*.
       // SplitK uses the same TMA layout (full K extent in descriptor;
       // per-CTA K offset baked into runtime tile indexing). FP8OUT
       // variants have the same input TMA layout as the bf16 variants —

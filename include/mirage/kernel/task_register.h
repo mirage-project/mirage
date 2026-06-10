@@ -203,18 +203,6 @@ public:
   int register_fp8_gemm_dense_bn128_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params,
                                                int variant);
-  int register_fp8_gemm_dense_finen_bn32_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_finen_bn64_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_decode_splitk_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_qkva_splitk_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_qkva_splitk_extred_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_splitk_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_splitk_tma_reduce_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_splitk_tma_reduce_gflag_sm100_task(

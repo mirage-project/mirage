@@ -841,45 +841,6 @@ class DeepSeekV3Builder(GraphBuilder):
             if self.mpk.max_seq_length <= 512
             else self.mpk.fp8_gemm_dense_mediumm_layer
         )
-        # fine-N (Gate-1, 2026-06-05; env MPK_DSV3_FINEN=1, default OFF). At
-        # bs=1 decode the dense projection GEMMs are single-wave latency-bound
-        # at BN=128 (qkv_a 17 CTAs, gate_up 8). Re-tiling N to BN<128 gives
-        # more, cheaper-per-CTA tiles (subdivides N → shorter single-CTA wall;
-        # NO split-K reduce → no crash). Gate-1 standalone @ active_rows=1:
-        # qkv_a 17.6→12.0μs (BN32/NS8), gate_up 17.6→12.0, o_proj 6.1→4.9
-        # (BN64/NS4). Rule: pick the smallest BN that stays single-wave
-        # (ceil(N/BN) <= physical workers); BN16 dropped (no shipping box
-        # precedent). EXCLUDE no_wave_collapse sites (q_b→BMM producers whose
-        # downstream BMM template is grid-locked) and the fp8out path (BN==128
-        # assert; routed elsewhere). Wraps gemm_layer so every residual/prefill
-        # branch inherits it; recomputes num_workers = ceil(N/BN).
-        # Debug sub-gate (MPK_DSV3_FINEN_ONLY_N=2176,7168): restrict fine-N to
-        # specific output-N shapes to localize which GEMM triggers the in-MPK
-        # IMA (qkv_a N=2176 / gate_up N=1024 / o_proj N=7168). Empty = all.
-        _finen_only_n = set(
-            int(x) for x in os.environ.get("MPK_DSV3_FINEN_ONLY_N", "").split(",")
-            if x.strip())
-        if (os.environ.get("MPK_DSV3_FINEN") == "1"
-                and not no_wave_collapse
-                and weight_fp8_raw.dim(0) % 32 == 0
-                and (not _finen_only_n or weight_fp8_raw.dim(0) in _finen_only_n)):
-            _N_out = weight_fp8_raw.dim(0)
-            _nw_phys = self.num_workers
-            if (_N_out + 31) // 32 <= _nw_phys:
-                _finen_bn = 32
-                _finen_layer = self.mpk.fp8_gemm_dense_finen_bn32_layer
-            else:
-                _finen_bn = 64
-                _finen_layer = self.mpk.fp8_gemm_dense_finen_bn64_layer
-            _finen_nw = (_N_out + _finen_bn - 1) // _finen_bn
-
-            def gemm_layer(input_fp8, weight_fp8, input_scale, weight_scale,
-                           output, num_workers, runtime_m_mode=0,
-                           _fl=_finen_layer, _fnw=_finen_nw):
-                # num_workers overridden to ceil(N/BN): one CTA per N-tile, as
-                # the kernel's worker-stride loop expects.
-                _fl(input_fp8, weight_fp8, input_scale, weight_scale, output,
-                    _fnw, runtime_m_mode=runtime_m_mode)
         # B20 (2026-05-15): mirror gate_mode into the GEMM kernel itself so
         # the dual-dispatch O_proj branches early-exit the wave for the
         # wrong phase. Otherwise both prefill and decode O_proj GEMMs run
@@ -890,223 +851,14 @@ class DeepSeekV3Builder(GraphBuilder):
                                else 3 if gate_mode == 2
                                else 0)
 
-        # B36 (2026-05-15): env-gated decode-only SplitK kernel for the
-        # decode O_proj. Stock mediumm runs 56 tiles in 1 underutilized
-        # 80-worker wave for the M=128, N=7168, K=16384 (TP=4) shape;
-        # splitk=4 gives 224 tiles in 3 better-utilized waves with K/4
-        # work per tile.
-        #
-        # Gating: gate_mode=2 (decode-only) AND residual is not None.
-        # The residual-not-None check restricts to the O_proj path —
-        # otherwise q_b decode (also gate_mode=2 but residual=None,
-        # K=1536 N=18432) hits the kernel with a shape the SplitK
-        # kernel was never tested against and crashes with "illegal
-        # memory access". The kernel is tuned for the M=128 N=7168
-        # K=16384 O_proj shape (and similar TP=1/TP=2 variants).
-        use_oproj_splitk = (
-            gate_mode == 2
-            and residual is not None
-            and os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK") == "1"
-        )
-        # qkv_a/gate_up internal decode split-K — RETIRED 2026-06-01. Two
-        # independent, decisive reasons:
-        #  (1) PERF-DEAD: decode dense GEMMs are M=1 HBM-bound; internal split-K
-        #      ADDS red.global.add atomic-reduce overhead with no throughput gain
-        #      (analyzer + reviewer + calib all agree) -> won't move the metric.
-        #  (2) CRASHES: the decode-split-K kernel has a race in its red.global.add
-        #      accumulate for the qkv_a N=2176 shape that aborts the TP=4
-        #      megakernel at the FIRST decode step (rc=255; surfaces async at the
-        #      NVSHMEM barrier; memcheck-HIDDEN). Root-caused via reviewer+E0+
-        #      verify: NOT the prefill-write gap (a dual-dispatch prefill
-        #      companion did not fix it), NOT multi-tile-iter (1-tile/CTA still
-        #      crashes), NOT a missing fence -- the atomic-accumulate path itself.
-        # Negative-EV to fix (zero perf upside + a hard kernel race), so the gate
-        # is force-disabled: MPK_DSV3_QKVA_GATEUP_SPLITK is now a no-op and the
-        # crashing path cannot be selected. The downstream split-K emit blocks
-        # below are consequently inert for qkv_a/gate_up. See
-        # experiment_history/INDEX.md (2026-06-01 split-K rows).
-        use_qkva_gateup_splitk = False
-        use_decode_splitk = use_oproj_splitk or use_qkva_gateup_splitk
-        splitk_num_workers = self._fp8_dense_num_workers()
-        if use_qkva_gateup_splitk:
-            # NO-MULTI-TILE-ITER fix (2026-05-29): the split-K kernel crashes the
-            # TP=4 megakernel as a HEISENBUG — rc=255 without compute-sanitizer,
-            # but completes WITH it (memcheck serializes + hides it). That's a
-            # race in the multi-tile-iteration mbarrier phase-carry (the B36 path)
-            # which only triggers when total tiles (n_tiles*split_k) EXCEED the
-            # task's worker count (it ran on 80 workers with 136-144 tiles). Fix:
-            # run on the FULL num_workers and pick split_k so total <= workers ->
-            # each CTA owns exactly ONE (n_tile,k_slice), no inter-tile mbarrier
-            # carry, so the race cannot occur. qkv_a (17 n-tiles) fits; gate_up
-            # (72 n-tiles) can't reach split_k>=2 under <=~140 workers -> it
-            # auto-disables here and stays on mediumm.
-            splitk_num_workers = self.num_workers
-            n_tiles_ = (weight_fp8_raw.dim(0) + 127) // 128
-            env_f = os.environ.get("MPK_DSV3_QKVA_GATEUP_SPLITK_FACTOR")
-            decode_split_k = (int(env_f) if env_f
-                              else max(1, splitk_num_workers // max(1, n_tiles_)))
-            if (decode_split_k < 2
-                    or weight_fp8_raw.dim(1) % (128 * decode_split_k) != 0
-                    or n_tiles_ * decode_split_k > splitk_num_workers):
-                use_qkva_gateup_splitk = False
-                use_decode_splitk = use_oproj_splitk
-                splitk_num_workers = self._fp8_dense_num_workers()
-        if not use_qkva_gateup_splitk:
-            decode_split_k = int(
-                os.environ.get("MPK_DSV3_DECODE_OPROJ_SPLITK_FACTOR", "4"))
-            # Hard-stop if the o_proj shape's K can't be split evenly.
-            if use_decode_splitk:
-                K_ = weight_fp8_raw.dim(1)
-                if K_ % (128 * decode_split_k) != 0:
-                    use_decode_splitk = False
-
-        def _emit_decode_splitk(out_tensor):
-            self.mpk.fp8_gemm_dense_decode_splitk_layer(
-                input_fp8=input_fp8,
-                weight_fp8=weight_fp8_raw,
-                input_scale=input_scale,
-                weight_scale=weight_scale_raw,
-                output=out_tensor,
-                num_workers=splitk_num_workers,
-                split_k=decode_split_k,
-            )
-
-        # 2026-06-02: NEW race-free internal split-K for the qkv_a GEMM
-        # (N=2176, K=7168). This is a SEPARATE gate from the retired
-        # MPK_DSV3_QKVA_GATEUP_SPLITK (which selected the CRASHED
-        # red.global.add decode_splitk kernel). The new kernel
-        # (fp8_gemm_dense_qkva_splitk_sm100.cuh, ferret workspace3) replaces
-        # the racy accumulate with exclusive FP32 partial slots + a gen-tagged
-        # atomicAdd last-arriver + fence.sc.gpu. It bakes the decode-only gate
-        # (runtime_m_mode=3: `if (q_len_ > 8) return;`), so prefill iters
-        # early-exit. The qkv_a GEMM is always-run (gate_mode=0, residual=None)
-        # and is NOT dual-dispatched, so for a prefill-capable build we MUST
-        # emit a prefill companion (mediumm, runtime_m_mode=2) AFTER the
-        # split-K — otherwise qkv_a_out is never filled during prefill and a
-        # downstream consumer reads uninitialized memory (the exact crash that
-        # killed the old internal-split-K path; see experiment_history
-        # 2026-06-01 split-K rows). WAW order: split-K -> mediumm; in prefill
-        # the mediumm writes last, in decode it early-returns.
         K_v2 = weight_fp8_raw.dim(1)
         N_v2 = weight_fp8_raw.dim(0)
-        use_qkva_splitk_v2 = (
-            os.environ.get("MPK_DSV3_QKVA_SPLITK_V2") == "1"
-            and residual is None
-            and gate_mode == 0
-            and K_v2 == 7168
-            and N_v2 == QKV_A_FUSED_N  # 2176
-        )
-        if use_qkva_splitk_v2:
-            v2_split_k = int(
-                os.environ.get("MPK_DSV3_QKVA_SPLITK_V2_FACTOR", "4"))
-            # K must split evenly at the 128-K boundary.
-            if K_v2 % (128 * v2_split_k) != 0:
-                use_qkva_splitk_v2 = False
-
-        # 2026-06-02: RACE-FREE EXTERNAL-reduce split-K (default OFF, env gate
-        # MPK_DSV3_DENSE_SPLITK_EXTREDUCE=1). Same idle-SM-filling K-split as
-        # _v2, but the K-slice CTAs write ONLY their exclusive FP32 partials and
-        # a SEPARATE event-gated reduce task sums them (race-free by
-        # construction — the task DAG enforces ordering, no inter-CTA atomics).
-        # Starts with the qkv_a shape (N=2176, K=7168) to prove the design.
-        # Takes priority over the in-kernel _v2 path when both are set.
-        #
-        # 2026-06-03 GENERALIZE (sub-gate MPK_DSV3_DENSE_SPLITK_EXTREDUCE_
-        # GENERALIZE=1): extend the SAME ext-reduce mechanism to the OTHER
-        # on-chain DECODE dense GEMMs. The split-K GEMM + reduce both bake the
-        # decode gate (`if q_len_ > 8 return`), so they only apply to
-        # decode-phase GEMMs (gate_mode 0 = always-run-but-decode-gated qkv_a,
-        # or gate_mode 2 = decode-only q_b/o_proj). Eligible shapes need
-        # K % (128*split_k)==0. Three on-chain cases:
-        #   - qkv_a   : gate_mode 0, residual None (the proven default; always on
-        #               with the base gate, no GENERALIZE needed).
-        #   - q_b_pe  : gate_mode 2, residual None (decode-only; prefill q_b is a
-        #               SEPARATE gate_mode=1 dispatch, so NO prefill companion).
-        #   - o_proj  : gate_mode 2, residual not None (RowParallel→AllReduce;
-        #               ext-reduce writes the partial, then _allreduce_residual).
-        # The q_b_nope-fp8out GEMM never reaches _fp8_linear_v2 (it calls
-        # fp8_gemm_dense_*_fp8out_layer directly to feed linear_fp8_bmm), so it
-        # is structurally excluded — its BMM-template grid is untouched.
-        er_generalize = (
-            os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE_GENERALIZE") == "1")
-        # Base (always-available) case: the proven qkv_a shape. RETIRED
-        # 2026-06-03: the in-kernel last-arriver split-K (MPK_DSV3_QKVA_SPLITK_V2
-        # -> _emit_qkva_splitk_v2) raced at multi-rank decode and has been
-        # removed. Design-A (external event-DAG-ordered reduce, enum-323) is now
-        # the ONLY split-K path, so the legacy MPK_DSV3_QKVA_SPLITK_V2 gate is
-        # folded into the ext-reduce base case here: setting EITHER env var on
-        # the qkv_a shape selects the race-free external-reduce wiring.
-        _er_base = (
-            (os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE") == "1"
-             or use_qkva_splitk_v2)
-            and residual is None
-            and gate_mode == 0
-            and K_v2 == 7168
-            and N_v2 == QKV_A_FUSED_N  # 2176
-        )
-        # Generalized cases: decode-only (gate_mode 2) GEMMs, residual-None
-        # (q_b_pe) or residual-not-None RowParallel (o_proj). N must be
-        # 128-aligned (BN tiling) and K 128-aligned (split boundary).
-        # EXCLUDE `no_wave_collapse=True` call sites: those feed a downstream
-        # linear_fp8_bmm whose OUTPUT_SIZE_PER_TASK template was validated
-        # against the producing GEMM's exact grid/num_workers (the q_b_nope ->
-        # quantize -> linear_fp8_bmm chain). Ext-reduce changes the GEMM's grid,
-        # so it must not touch a BMM-feeding producer. (With the default
-        # MPK_DSV3_FUSED_QB_QUANTIZE=1, q_b_nope goes through the fp8out path
-        # and never reaches here anyway; this guard covers the FUSED_QB=0 case.)
-        _er_gen = (
-            os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE") == "1"
-            and er_generalize
-            and gate_mode == 2
-            and not no_wave_collapse
-            and N_v2 % 128 == 0
-            and K_v2 % 128 == 0
-        )
-        # o_proj (residual not None) only generalizes under TP (world_size>1);
-        # the TP=1 path has no AllReduce and goes through a different epilogue.
-        if _er_gen and residual is not None and self.world_size <= 1:
-            _er_gen = False
-        use_extreduce = _er_base or _er_gen
-        if use_extreduce:
-            er_split_k = int(
-                os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE_FACTOR", "4"))
-            # K must split evenly at the (128*split_k) boundary. If the default
-            # factor doesn't divide this shape's K, step down to the largest
-            # divisor of K/128 that is <= the requested factor (>=1).
-            if K_v2 % (128 * er_split_k) != 0:
-                kt = K_v2 // 128
-                cand = [s for s in range(er_split_k, 0, -1) if kt % s == 0]
-                er_split_k = cand[0] if cand else 1
-            if er_split_k < 1 or K_v2 % (128 * er_split_k) != 0:
-                use_extreduce = False
-            else:
-                use_qkva_splitk_v2 = False  # extreduce wins the tie
-
-        # ====================================================================
-        # HARD-DISABLED 2026-06-03 (user directive). The multi-CTA-per-tile
-        # KERNEL split-K (qkv_a / ext-reduce, fp8_gemm_dense_qkva_splitk_sm100)
-        # is conclusively crash-blocked at multi-rank decode: a deep race that
-        # IMAs under BOTH rdc=true and MPK_RDC_FALSE, at ANY factor (test-mode /
-        # coredump / compute-sanitizer / factor-sweep all exhausted — see
-        # experiment_history/INDEX.md). At TP=4 it HANGS (rc=137) → unkillable
-        # D-state zombies that brick GPUs until reboot. Force OFF so no env var
-        # (MPK_DSV3_QKVA_SPLITK_V2 / MPK_DSV3_DENSE_SPLITK_EXTREDUCE[_GENERALIZE])
-        # can ever select it. Default behavior is unchanged (these gates default
-        # to False with no env set). This is the KERNEL split-K ONLY — the
-        # working builder-side MPK_DSV3_BUILDER_SPLITK (lever L1) is a separate
-        # path and is NOT affected. Remove this block only if the race is fixed.
-        if use_qkva_splitk_v2 or use_extreduce:
-            print("[split-K] kernel split-K requested via env but HARD-DISABLED "
-                  "(crash-blocked at multi-rank decode; see experiment_history/"
-                  "INDEX.md) — using the standard dense GEMM instead.")
-        use_qkva_splitk_v2 = False
-        use_extreduce = False
-        # ====================================================================
 
         # 2026-06-04: ferret FP8 split-K dense GEMM with a TMA reduce-add
         # epilogue (TASK_FP8_GEMM_DENSE_SPLITK_TMAREDUCE_SM100). Distinct from
-        # the HARD-DISABLED kernel split-K above: instead of red.global.add
-        # atomics / in-kernel inter-CTA last-arriver, each K-slice CTA stages a
+        # the retired in-kernel split-K (removed 2026-06-10): instead of
+        # red.global.add atomics / in-kernel inter-CTA last-arriver, each
+        # K-slice CTA stages a
         # bf16 partial to SMEM and issues one cp.reduce.async.bulk.tensor.2d
         # (TMA-engine reduce-add) into a PRE-ZEROED bf16 output — the path
         # ferret built specifically to avoid the IMA/crash at TP>=2 under
@@ -1254,9 +1006,9 @@ class DeepSeekV3Builder(GraphBuilder):
             # gflag path: per-weight int32 scratch of ceil(N/128) entries, ZERO-
             # INITIALIZED ONCE at allocation (MPK cuda_tensors are not zeroed at
             # alloc and tensor_init can't reliably zero a 1D int buffer, so use an
-            # attached torch.zeros held by the builder — the qkva_splitk_v2
-            # arrive_cnt pattern). The kernel self-maintains the monotone-epoch
-            # invariant after each clean use, so a one-time zero suffices.
+            # attached torch.zeros held by the builder). The kernel self-maintains
+            # the monotone-epoch invariant after each clean use, so a one-time
+            # zero suffices.
             nn = (N_v2 + 127) // 128
             wid = id(weight_fp8_raw)
             if not hasattr(self, "_tmar_gflag_torch"):
@@ -1279,116 +1031,6 @@ class DeepSeekV3Builder(GraphBuilder):
                 split_k=tmar_split_k,
             )
 
-        def _emit_qkva_splitk_v2(out_tensor):
-            # RETIRED 2026-06-03: the in-kernel last-arriver split-K reduction
-            # this emitted (fp8_gemm_dense_qkva_splitk_layer, EXT_REDUCE=false)
-            # raced at multi-rank decode and has been removed. Design-A
-            # (external event-gated reduce, _emit_extreduce) is now the only
-            # split-K path; the MPK_DSV3_QKVA_SPLITK_V2 gate is redirected into
-            # _er_base above so this helper is never reached. Kept as a tripwire:
-            # the kernel's non-extred entry now writes ONLY partials (no in-kernel
-            # reduce), so emitting it WITHOUT a companion reduce task would leave
-            # the output unfilled — fail loudly instead of producing garbage.
-            raise RuntimeError(
-                "_emit_qkva_splitk_v2 is retired: the in-kernel last-arriver "
-                "split-K reduction raced at multi-rank decode and was removed. "
-                "MPK_DSV3_QKVA_SPLITK_V2 now selects the race-free external-"
-                "reduce path (_emit_extreduce); this helper must not be called.")
-            # (dead) Per-output-tensor C_partial + arrive_cnt scratch (cached by
-            # the weight id so each layer's qkv_a GEMM gets its own buffers —
-            # they are written+reduced within a single GEMM invocation, no cross-
-            # layer reuse hazard, but distinct buffers avoid a false multi-
-            # writer dep across layers). Sizes (compile-time M=mbt, BM=BN=128):
-            #   C_partial: SPLIT_K * ceil(M/128) * ceil(N/128) * 128 * 128 fp32
-            #   arrive_cnt: ceil(N/128) uint64
-            mbt = self.max_num_batched_tokens
-            mm = (mbt + 127) // 128
-            nn = (N_v2 + 127) // 128
-            cp_elems = v2_split_k * mm * nn * 128 * 128
-            wid = id(weight_fp8_raw)
-            if not hasattr(self, "_qkva_splitk_v2_bufs"):
-                self._qkva_splitk_v2_bufs = {}
-            if wid not in self._qkva_splitk_v2_bufs:
-                c_partial = self.mpk.new_tensor(
-                    dims=(cp_elems,), dtype=float32,
-                    name=f"qkva_splitk_v2_cpartial_{wid}",
-                    io_category="cuda_tensor")
-                # arrive_cnt MUST start with lower-32-bits == 0 (clean per-tile
-                # gen-tagged counter). MPK cuda_tensors are NOT zeroed at alloc
-                # and the wrapper's prepended tensor_init does NOT effectively
-                # zero a 1D uint64 buffer (tensor_init zeros BATCH*OUT*2 bytes
-                # via a bf16 view; a 1D target silently under-zeros). The kernel
-                # self-maintains count==0 after every clean use (the tail
-                # gen-bump leaves the low 32 bits zero), so a reliable ONE-TIME
-                # zero at allocation is sufficient — provide it via an attached
-                # torch.zeros buffer held by the builder (mirrors the passing
-                # test driver, which also torch.zeros-es arrive_cnt at alloc).
-                if not hasattr(self, "_qkva_splitk_v2_arrivecnt_torch"):
-                    self._qkva_splitk_v2_arrivecnt_torch = {}
-                ac_torch = torch.zeros(nn, dtype=torch.int64, device="cuda")
-                self._qkva_splitk_v2_arrivecnt_torch[wid] = ac_torch
-                arrive_cnt = self.mpk.attach_input(
-                    torch_tensor=ac_torch,
-                    name=f"qkva_splitk_v2_arrivecnt_{wid}")
-                self._qkva_splitk_v2_bufs[wid] = (c_partial, arrive_cnt)
-            c_partial, arrive_cnt = self._qkva_splitk_v2_bufs[wid]
-            self.mpk.fp8_gemm_dense_qkva_splitk_layer(
-                input_fp8=input_fp8,
-                weight_fp8=weight_fp8_raw,
-                input_scale=input_scale,
-                weight_scale=weight_scale_raw,
-                output=out_tensor,
-                c_partial=c_partial,
-                arrive_cnt=arrive_cnt,
-                num_workers=self.num_workers,
-                split_k=v2_split_k,
-            )
-
-        def _emit_extreduce(out_tensor):
-            # External-reduce split-K: GEMM writes exclusive FP32 partials ->
-            # event-gated reduce task sums -> bf16 out_tensor. Per-weight
-            # C_partial scratch (cached by weight id; no arrive_cnt needed —
-            # the reduce reads full-precision partials, no in-kernel reuse).
-            #   C_partial: SPLIT_K * ceil(M/128) * ceil(N/128) * 128 * 128 fp32
-            mbt = self.max_num_batched_tokens
-            mm = (mbt + 127) // 128
-            nn = (N_v2 + 127) // 128
-            cp_elems = er_split_k * mm * nn * 128 * 128
-            wid = id(weight_fp8_raw)
-            if not hasattr(self, "_extreduce_bufs"):
-                self._extreduce_bufs = {}
-            if wid not in self._extreduce_bufs:
-                c_partial = self.mpk.new_tensor(
-                    dims=(cp_elems,), dtype=float32,
-                    name=f"extreduce_cpartial_{wid}",
-                    io_category="cuda_tensor")
-                self._extreduce_bufs[wid] = c_partial
-            c_partial = self._extreduce_bufs[wid]
-            self.mpk.fp8_gemm_dense_qkva_splitk_extred_layer(
-                input_fp8=input_fp8,
-                weight_fp8=weight_fp8_raw,
-                input_scale=input_scale,
-                weight_scale=weight_scale_raw,
-                c_partial=c_partial,
-                num_workers=self.num_workers,
-                split_k=er_split_k,
-            )
-            # ncol fans each output tile's columns across more CTAs so the
-            # reduce fills idle SMs at decode M=1 (default 4 -> ~68 active CTAs
-            # at qkv_a N=2176, matching the split-K GEMM's occupancy). Tunable
-            # via MPK_DSV3_DENSE_SPLITK_EXTREDUCE_NCOL.
-            er_ncol = int(
-                os.environ.get("MPK_DSV3_DENSE_SPLITK_EXTREDUCE_NCOL", "4"))
-            self.mpk.fp8_gemm_dense_splitk_reduce_layer(
-                c_partial=c_partial,
-                output=out_tensor,
-                M=mbt,
-                N=N_v2,
-                split_k=er_split_k,
-                num_workers=self.num_workers,
-                ncol=er_ncol,
-            )
-
         if residual is None:
             if use_tmareduce:
                 _emit_tmareduce(output)
@@ -1399,8 +1041,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 # runtime_m_mode=2) AFTER the split-K. WAW order:
                 # tensor_init -> split-K -> mediumm. In prefill (q_len>8) the
                 # mediumm writes last; in decode (q_len<=8) it early-returns and
-                # the TMA-reduce result stands. (Mirrors the extreduce companion
-                # logic above.)
+                # the TMA-reduce result stands.
                 if self._use_prefill:
                     gemm_layer(
                         input_fp8=input_fp8,
@@ -1412,87 +1053,15 @@ class DeepSeekV3Builder(GraphBuilder):
                         runtime_m_mode=2,
                     )
                 return
-            if use_extreduce:
-                _emit_extreduce(output)
-                # Prefill companion is ONLY needed for the always-run qkv_a
-                # (gate_mode==0): its output buffer must be filled during
-                # prefill too, since nothing else writes it. A gate_mode==2
-                # decode-only GEMM (q_b_pe) has a SEPARATE gate_mode==1 prefill
-                # dispatch that fills the prefill buffers — emitting a mediumm
-                # companion here would be a redundant (and wrong-buffer) write.
-                # DIAGNOSTIC (2026-06-03): MPK_DSV3_EXTREDUCE_NO_COMPANION=1
-                # drops the companion to test whether the dual-writer on
-                # qkv_a_out is the TP=2-decode illegal-memory-access source.
-                _no_companion = (
-                    os.environ.get("MPK_DSV3_EXTREDUCE_NO_COMPANION") == "1")
-                if self._use_prefill and gate_mode == 0 and not _no_companion:
-                    # Prefill companion: mediumm with runtime_m_mode=2 writes
-                    # output last in prefill (q_len>8); in decode it early-
-                    # returns and the (split-K GEMM -> reduce) result stands.
-                    # WAW order: (split-K GEMM, reduce) -> mediumm.
-                    gemm_layer(
-                        input_fp8=input_fp8,
-                        weight_fp8=weight_fp8_raw,
-                        input_scale=input_scale,
-                        weight_scale=weight_scale_raw,
-                        output=output,
-                        num_workers=dense_nw,
-                        runtime_m_mode=2,
-                    )
-                return
-            if use_qkva_splitk_v2:
-                _emit_qkva_splitk_v2(output)
-                if self._use_prefill:
-                    # Prefill companion: mediumm with runtime_m_mode=2
-                    # (prefill-only). WAW order split-K -> mediumm means in
-                    # prefill the mediumm overwrites output last; in decode it
-                    # early-returns and the split-K result stands.
-                    gemm_layer(
-                        input_fp8=input_fp8,
-                        weight_fp8=weight_fp8_raw,
-                        input_scale=input_scale,
-                        weight_scale=weight_scale_raw,
-                        output=output,
-                        num_workers=dense_nw,
-                        runtime_m_mode=2,
-                    )
-                return
-            if use_decode_splitk:
-                _emit_decode_splitk(output)
-                # The split-K kernel bakes runtime_m_mode=3 (DECODE-ONLY:
-                # `if (q_len_ > 8) return;`). qkv_a/gate_up are always-run
-                # (gate_mode=0) and are NOT dual-dispatched elsewhere (unlike
-                # o_proj's gate_mode=2 prefill path), so for a prefill-capable
-                # build we MUST emit a prefill companion — otherwise qkv_a_out
-                # is left only tensor_init-zeroed during prefill and a
-                # downstream consumer (q_b GEMM / kv_a-LN / MLA gather) reads
-                # the uninitialized buffer -> "illegal memory access" (root-
-                # caused 2026-06-01 from the generated megakernel source; the
-                # crash surfaced late at the host NVSHMEM barrier). Emit the
-                # mediumm AFTER the split-K so the WAW order is
-                # tensor_init -> split-K -> mediumm: in prefill (q_len>8) the
-                # mediumm (runtime_m_mode=2) writes last, after the pre-zero;
-                # in decode (q_len<=8) it early-returns and split-K's result stands.
-                if use_qkva_gateup_splitk and self._use_prefill:
-                    gemm_layer(
-                        input_fp8=input_fp8,
-                        weight_fp8=weight_fp8_raw,
-                        input_scale=input_scale,
-                        weight_scale=weight_scale_raw,
-                        output=output,
-                        num_workers=dense_nw,
-                        runtime_m_mode=2,
-                    )
-            else:
-                gemm_layer(
-                    input_fp8=input_fp8,
-                    weight_fp8=weight_fp8_raw,
-                    input_scale=input_scale,
-                    weight_scale=weight_scale_raw,
-                    output=output,
-                    num_workers=dense_nw,
-                    runtime_m_mode=gemm_runtime_m_mode,
-                )
+            gemm_layer(
+                input_fp8=input_fp8,
+                weight_fp8=weight_fp8_raw,
+                input_scale=input_scale,
+                weight_scale=weight_scale_raw,
+                output=output,
+                num_workers=dense_nw,
+                runtime_m_mode=gemm_runtime_m_mode,
+            )
             return
 
         if self.world_size > 1:
@@ -1507,21 +1076,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 # across TP ranks + adds residual (unchanged — the cp.reduce is
                 # the K-reduce, NVSHMEM is the cross-rank reduce). Prefill o_proj
                 # is a SEPARATE gate_mode==1 dispatch into its OWN partial/AR, so
-                # NO companion is needed here (same as the ext-reduce path).
+                # NO companion is needed here.
                 _emit_oproj_tmareduce(partial)
-            elif use_extreduce:
-                # o_proj decode (gate_mode==2, RowParallel): the ext-reduce
-                # split-K GEMM writes the BF16 partial (decode-gated), then the
-                # decode-gated AllReduce sums across TP ranks and adds residual.
-                # The prefill o_proj is a SEPARATE gate_mode==1 dispatch into its
-                # OWN partial/AR, so no companion is needed here. This is the
-                # SAME race-free design that replaces the old racy red.add
-                # o_proj split-K — the reduce is a distinct event-gated task,
-                # not an in-kernel inter-CTA atomic, and the AR is ordered after
-                # it by the RAW edge on `partial`.
-                _emit_extreduce(partial)
-            elif use_decode_splitk:
-                _emit_decode_splitk(partial)
             else:
                 gemm_layer(
                     input_fp8=input_fp8,
@@ -1542,18 +1098,15 @@ class DeepSeekV3Builder(GraphBuilder):
             dtype=bfloat16, name=f"fp8_v2_partial_{id(weight_fp8_raw)}",
             io_category="cuda_tensor",
         )
-        if use_decode_splitk:
-            _emit_decode_splitk(partial)
-        else:
-            gemm_layer(
-                input_fp8=input_fp8,
-                weight_fp8=weight_fp8_raw,
-                input_scale=input_scale,
-                weight_scale=weight_scale_raw,
-                output=partial,
-                num_workers=dense_nw,
-                runtime_m_mode=gemm_runtime_m_mode,
-            )
+        gemm_layer(
+            input_fp8=input_fp8,
+            weight_fp8=weight_fp8_raw,
+            input_scale=input_scale,
+            weight_scale=weight_scale_raw,
+            output=partial,
+            num_workers=dense_nw,
+            runtime_m_mode=gemm_runtime_m_mode,
+        )
         self.mpk.elementwise_add_layer(
             input_a=partial,
             input_b=residual,
@@ -1801,16 +1354,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # Float32 scale path (matches _fp8_mbt_buffers_for_reduction_f32scale
         # layout; dense GEMM consumes (M, K/128) f32 row-major scales).
         # `output_bf16` uses the per-layer-unique buffer (case-3 fix).
-        # emit_bf16 is normally False because nothing downstream reads the
-        # bf16 in fused mode (qkv_a GEMM reads fp8/scale directly). BUT when
-        # builder-side qkv_a split-K is active, the split-K partials need a
-        # real bf16 normalized embedding to re-quantize per K-slice, and the
-        # split-K identity bridge reads THIS per-layer buffer (not the stale
-        # cross-layer-shared self.rmsnorm_out). Emit the bf16 in that case so
-        # the data is materialized AND the input-layernorm task stays on the
-        # qkv_a->attention->o_proj chain (otherwise the embedding->o_proj
-        # residual edges can't be residual-stripped -> case-3 fork+join).
-        _emit_bf16 = self._qkva_splitk_active()
+        # emit_bf16=False because nothing downstream reads the bf16 in fused
+        # mode (qkv_a GEMM reads fp8/scale directly).
         self.mpk.fused_rmsnorm_quantize_fp8_layer(
             input=input_x,
             weight=w_norm,
@@ -1820,7 +1365,7 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
             scale_ue8m0=False,
-            emit_bf16=_emit_bf16,
+            emit_bf16=False,
         )
         return tag
 
@@ -1913,13 +1458,6 @@ class DeepSeekV3Builder(GraphBuilder):
             emit_bf16=False,
         )
         return input_fp8, input_scale, tag
-
-    def _qkva_splitk_active(self) -> bool:
-        """True when builder-side qkv_a split-K is env-enabled (MPK_DSV3_QKVA_SPLITK
-        >= 2). The actual per-layer guard also checks K divisibility at the call
-        site; this helper only governs whether the fused input-layernorm task
-        must materialize its bf16 output for the split-K identity bridge."""
-        return int(os.environ.get("MPK_DSV3_QKVA_SPLITK", "0")) >= 2
 
     def _fp8_experts_available(self, state_dict: dict, layer_idx: int) -> bool:
         """C17: check if layer `layer_idx`'s experts.w13.weight_scale_inv
@@ -2604,9 +2142,9 @@ class DeepSeekV3Builder(GraphBuilder):
         Splits K into `split_k` CONTIGUOUS slices, runs split_k separate
         `_fp8_linear` calls (each fills ceil(N/128) CTAs → split_k× parallel
         working CTAs, filling idle SMs at decode M=1), then reduces the bf16
-        partials. Uses the WORKING dense kernel — orthogonal to the broken
-        decode_splitk/swapAB split-K kernels (which crash / can't compile at
-        BATCH=128). Verified facts this enables correctness:
+        partials. Uses the WORKING dense kernel — orthogonal to the retired
+        in-kernel split-K paths (removed 2026-06-10; they crashed / couldn't
+        compile at BATCH=128). Verified facts this enables correctness:
         - weight_scale (`.weight_scale_inv`) layout = [N/128, K/128] row-major
           (the dense GEMM `sb`, indexed sb[(on/128)*nk + ki], nk=K/128), so a
           K-slice = a contiguous slice on dim 1 → row-stride matches the
@@ -3461,72 +2999,13 @@ class DeepSeekV3Builder(GraphBuilder):
         qkv_a_fp8_ovr, qkv_a_scale_ovr = None, None
         if self._fused_rmsnorm_quantize:
             qkv_a_fp8_ovr, qkv_a_scale_ovr = self._fused_qkv_a_bufs[layer_idx]
-        # Builder-side split-K for the qkv_a GEMM (K=hidden=7168, N=2176): the
-        # biggest on-chain decode compute block (~30μs MEDIUMM, ~17/80 CTAs
-        # working → ~63 idle), analyzer-ranked #2 system lever. Splitting K via
-        # the WORKING dense kernel + bf16 partial reduce fills the idle SMs.
-        # The split_k partials re-quantize a bf16 normalized embedding per
-        # K-slice (the B37 fused qkv_a FP8 `qkv_a_fp8_ovr` is unused on this
-        # path — a minor wasted write; net win). An identity_layer phantom
-        # bridge copies that bf16 so the split-K subtree has a single producer.
-        # The bridge MUST read the buffer the input-layernorm task actually
-        # writes (`_rms_src` below), not the cross-layer-shared
-        # `self.rmsnorm_out`: keeping the input-layernorm on the
-        # qkv_a->attention->o_proj chain lets `build_annotated_graph` residual-
-        # strip the embedding->o_proj-residual edges, otherwise the embedding
-        # is flagged as a case-3 fork+join producer (two dependent_events).
-        # Gated MPK_DSV3_QKVA_SPLITK (int >=2); K must be divisible by 128*sk.
-        _qkv_sk = int(os.environ.get("MPK_DSV3_QKVA_SPLITK", "0"))
-        if _qkv_sk >= 2 and w_qkv_a.dim(1) % (128 * _qkv_sk) == 0:
-            # Source the bf16 normalized embedding that the split-K partials
-            # re-quantize. CRITICAL: when `_fused_rmsnorm_quantize` is ON (the
-            # default), the input-layernorm fused task writes a *per-layer*
-            # bf16 buffer (`_fused_rmsnorm_out_per_layer[layer_idx]`) and
-            # leaves the cross-layer-shared `self.rmsnorm_out` untouched (it
-            # also runs with emit_bf16=False because the non-split-K qkv_a GEMM
-            # reads the FP8 override directly). Reading `self.rmsnorm_out` here
-            # would (a) feed the split-K stale/garbage data, and (b) orphan the
-            # input-layernorm task from the qkv_a->attention->o_proj chain so
-            # `build_annotated_graph`'s residual strip can no longer remove the
-            # embedding->o_proj-residual edges — making the embedding a
-            # fork+join (case 3) producer. Bind to the buffer the fused task
-            # actually writes, and force that write on (emit_bf16) below.
-            _rms_src = self.rmsnorm_out
-            if (self._fused_rmsnorm_quantize
-                    and layer_idx in getattr(
-                        self, "_fused_rmsnorm_out_per_layer", {})):
-                # The fused input-layernorm task wrote its bf16 output into
-                # this per-layer buffer (with emit_bf16 forced on because
-                # `_qkva_splitk_active()` is true — see
-                # `_emit_fused_rmsnorm_qkv_a_quantize`).
-                _rms_src = self._fused_rmsnorm_out_per_layer[layer_idx]
-            if not hasattr(self, "_qkva_sk_bridge"):
-                self._qkva_sk_bridge = {}
-            if layer_idx not in self._qkva_sk_bridge:
-                self._qkva_sk_bridge[layer_idx] = self.mpk.new_tensor(
-                    dims=(_rms_src.dim(0), _rms_src.dim(1)),
-                    dtype=bfloat16,
-                    name=f"layer_{layer_idx}_rmsnorm_out_qkv_sk",
-                    io_category="cuda_tensor")
-            _bridge = self._qkva_sk_bridge[layer_idx]
-            # identity dim_map splits the LAST (hidden) dim across grid.x;
-            # grid.x must divide hidden. 7168 = 56*128.
-            _hid = _rms_src.dim(1)
-            _gx = 56 if (_hid % 56 == 0) else (8 if (_hid % 8 == 0) else 1)
-            self.mpk.identity_layer(
-                input=_rms_src, output=_bridge,
-                grid_dim=(_gx, 1, 1), block_dim=(128, 1, 1))
-            self._fp8_linear_builder_splitk(
-                _bridge, f"{attn}qkv_a_proj", state_dict, self.qkv_a_out,
-                _qkv_sk, f"layer_{layer_idx}_qkv_a")
-        else:
-            self._fp8_linear(
-                self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
-                share_quantize_tag=qkv_a_quantize_tag,
-                input_fp8_override=qkv_a_fp8_ovr,
-                input_scale_override=qkv_a_scale_ovr)
+        self._fp8_linear(
+            self.rmsnorm_out, w_qkv_a, s_qkv_a, self.qkv_a_out,
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv_a.dim(0)), 1, 1),
+            block_dim=(128, 1, 1),
+            share_quantize_tag=qkv_a_quantize_tag,
+            input_fp8_override=qkv_a_fp8_ovr,
+            input_scale_override=qkv_a_scale_ovr)
 
         # Diagnostic (PRE-RMSnorm dump 2026-05-13): captures RAW qkv_a_out
         # immediately after the fused GEMM, before any consumer touches it.
@@ -4518,8 +3997,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     io_category="cuda_tensor",
                 )
                 # grid.x must divide the inner dim. rmsnorm_out's inner dim
-                # is hidden_size (7168 = 56*128). Use the same pattern as
-                # the qkv_a phantom-bridge identity above.
+                # is hidden_size (7168 = 56*128).
                 _hid = _rms_src.dim(1)
                 _gx = 56 if (_hid % 56 == 0) else (8 if (_hid % 8 == 0) else 1)
                 self.mpk.identity_layer(
@@ -4556,8 +4034,8 @@ class DeepSeekV3Builder(GraphBuilder):
         elif (_bsk >= 2 and has_shared_scale
                 and w_shared_gate_up.dim(1) % (128 * _bsk) == 0):
             # Builder-side split-K (decode 1-CTA-GEMM parallelization, the
-            # −45μs system lever; the existing decode_splitk kernel crashes
-            # at TP=4 so we split-K via the working dense kernel + reduce).
+            # −45μs system lever; the retired in-kernel split-K crashed at
+            # TP=4 so we split-K via the working dense kernel + reduce).
             self._fp8_linear_builder_splitk(
                 _gemm_input, fused_key, state_dict, shared_mid, _bsk,
                 f"layer_{layer_idx}_shared_gate_up")

@@ -57,9 +57,10 @@
 //        include/mirage/persistent_kernel/tasks/blackwell/
 //          fp8_gemm_dense_sm100_common.cuh::task_impl_tpl
 //      The smallm/mediumm wrappers are thin trampolines around it.
-//   3. You should also use the companion bench `bench_decode_splitk.cu` to
-//      validate your new SplitK kernel against this baseline. Speedup
-//      target: ≥2× over this bench's p50 (so ≤30 μs).
+//   3. Validate any new SplitK kernel against this baseline. Speedup
+//      target: ≥2× over this bench's p50 (so ≤30 μs). (The old companion
+//      bench_decode_splitk.cu was removed 2026-06-10 with the retired
+//      in-kernel split-K machinery.)
 //   4. The full megakernel test path is `demo/deepseek_v3/demo.py` with
 //      `MPK_DSV3_NEW_MOE=1 --layers 0-19 --max-num-batched-tokens 128
 //      --ep-size 2` on 4× B200. End-to-end win is bounded by per-MoE-layer
@@ -74,12 +75,11 @@
 //   - Theoretical 1.5-2× speedup; brings us close to roofline.
 //
 // CROSS-REF
-//   - Companion bench: bench_decode_splitk.cu (broken SplitK kernel, target
-//     for rewrite).
-//   - Builder integration: python/mirage/mpk/models/deepseek_v3/builder.py:
-//     633-637 (selects mediumm/smallm based on max_seq_length) and 661-737
-//     (env-gated MPK_DSV3_DECODE_OPROJ_SPLITK path — currently default off
-//     because the splitk kernel crashes).
+//   - Builder integration: python/mirage/mpk/models/deepseek_v3/builder.py
+//     `_fp8_linear_v2` (selects mediumm/smallm based on max_seq_length).
+//     The env-gated in-kernel split-K path it once benchmarked against was
+//     removed 2026-06-10 (crashed at multi-rank decode); the live split-K
+//     levers are MPK_DSV3_BUILDER_SPLITK and the TMAREDUCE family.
 //
 // =============================================================================
 
