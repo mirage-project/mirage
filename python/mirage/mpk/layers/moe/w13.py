@@ -398,6 +398,8 @@ def MoEW13(
     intermediate_size: int,
     *,
     dtype: str = "bf16",
+    ep_size: int = 1,
+    ep_rank: int = 0,
     scale_ue8m0: bool = False,
     prefix: str = "",
 ):
@@ -411,6 +413,7 @@ def MoEW13(
       output: (B, num_experts_per_tok, 2*intermediate_size) bf16, [gate|up] trailing.
 
     Notes: ``dtype='bf16'`` runs on SM90/100; ``dtype='fp8'`` requires SM100.
+    ``ep_size``/``ep_rank`` are forwarded to :class:`MoEW13BF16` only (FP8 is not EP-aware yet).
     """
     if dtype == "bf16":
         return MoEW13BF16(
@@ -418,6 +421,8 @@ def MoEW13(
             num_experts_per_tok=num_experts_per_tok,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
             prefix=prefix,
         )
     if dtype == "fp8":

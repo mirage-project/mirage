@@ -622,6 +622,16 @@ class DeepseekV3MoEMLP(MPKModule):
         self.hidden_size = config.hidden_size
         self.moe_intermediate_size = config.moe_intermediate_size
         self.num_experts = config.n_routed_experts
+        pc = current_pk().parallel_config
+        self.ep_size = pc.ep_size
+        self.ep_rank = pc.ep_rank
+        if self.num_experts % self.ep_size != 0:
+            raise ValueError(
+                f"DeepseekV3MoEMLP: n_routed_experts ({self.num_experts}) % "
+                f"ep_size ({self.ep_size}) != 0"
+            )
+        self.num_local_experts = self.num_experts // self.ep_size
+        self.local_expert_start = self.ep_rank * self.num_local_experts
         self.num_experts_per_tok = config.num_experts_per_tok
         self.num_shared_experts = getattr(config, "n_shared_experts", 1)
         self.num_groups = getattr(config, "n_group", 8)
@@ -644,8 +654,8 @@ class DeepseekV3MoEMLP(MPKModule):
             num_groups=self.num_groups,
             topk_group=self.topk_group,
             routed_scaling_factor=self.routed_scaling_factor,
-            local_num_experts=self.num_experts,
-            local_expert_start=0,
+            local_num_experts=self.num_local_experts,
+            local_expert_start=self.local_expert_start,
             prefix=f"{prefix}routing_",
         )
 
@@ -656,6 +666,8 @@ class DeepseekV3MoEMLP(MPKModule):
             hidden_size=self.hidden_size,
             intermediate_size=self.moe_intermediate_size,
             dtype="bf16",
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
             prefix=f"{prefix}experts_w13_",
         )
         self.silu_mul = MoESiluMul(
@@ -668,6 +680,8 @@ class DeepseekV3MoEMLP(MPKModule):
             hidden_size=self.hidden_size,
             intermediate_size=self.moe_intermediate_size,
             dtype="bf16",
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
             prefix=f"{prefix}experts_w2_",
         )
         self.combine = MoeMulSumAdd(
