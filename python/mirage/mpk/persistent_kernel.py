@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from .configs.runtime import RuntimeConfig
 
 
-def _allocate_meta_tensors(rt: "RuntimeConfig", max_num_pages: int) -> dict:
+def _allocate_meta_tensors(runtime_config: "RuntimeConfig", max_num_pages: int) -> dict:
     """Allocate the 10 meta tensors that PersistentKernel expects, with
     shapes / dtypes matching the legacy demo's live (non-test) path.
 
@@ -32,15 +32,15 @@ def _allocate_meta_tensors(rt: "RuntimeConfig", max_num_pages: int) -> dict:
     zero-initialized; :meth:`PersistentKernel.run` fills them per call.
     """
     device = "cuda"
-    n_req = rt.max_num_batched_requests
+    n_req = runtime_config.max_num_batched_requests
     return {
-        "tokens": torch.zeros((n_req, rt.max_seq_length),
+        "tokens": torch.zeros((n_req, runtime_config.max_seq_length),
                               dtype=torch.long, device=device),
         "step": torch.zeros((n_req,), dtype=torch.int32, device=device),
         "prompt_lengths": torch.zeros((n_req,), dtype=torch.int32, device=device),
-        "input_tokens": torch.zeros((rt.max_num_batched_tokens, 1),
+        "input_tokens": torch.zeros((runtime_config.max_num_batched_tokens, 1),
                                     dtype=torch.long, device=device),
-        "output_tokens": torch.zeros((rt.max_num_batched_tokens, 1),
+        "output_tokens": torch.zeros((runtime_config.max_num_batched_tokens, 1),
                                      dtype=torch.long, device=device),
         "num_new_tokens": torch.full((n_req,), 1,
                                      dtype=torch.int32, device=device),
@@ -593,7 +593,7 @@ class PersistentKernel:
           4. Auto-resolve ``num_workers`` / ``num_local_schedulers`` from
              :func:`mirage.get_configurations_from_gpu` if unset.
           5. Construct the PK via the back-compat ``__init__``.
-          6. Resolve the model class via the registry (`hf.architectures[0]`).
+          6. Resolve the model class via the registry (`hf_config.architectures[0]`).
           7. Inside ``compile_scope``: instantiate model, ``load_weights`` from
              safetensors, ``process_weights`` (post-load transforms), attach
              input tokens DTensor, ``model.compile(...)``.
@@ -611,70 +611,70 @@ class PersistentKernel:
             f"build_from_config: expected MPKConfig, got {type(cfg)}"
         )
         cfg.validate()
-        hf = cfg.hf
-        rt = cfg.runtime
-        pc = cfg.parallel
-        kvc = cfg.kv_cache
+        hf_config = cfg.hf_config
+        runtime_config = cfg.runtime_config
+        parallel_config = cfg.parallel_config
+        kv_cache_config = cfg.kv_cache_config
 
         # ---- 1. KV cache pool (per-rank) ----------------------------------
-        num_kv_per_rank = hf.num_key_value_heads // pc.tp_size
+        num_kv_per_rank = hf_config.num_key_value_heads // parallel_config.tp_size
         kv_shape = (
-            hf.num_hidden_layers, kvc.max_num_pages, kvc.page_size,
-            num_kv_per_rank, hf.head_dim,
+            hf_config.num_hidden_layers, kv_cache_config.max_num_pages, kv_cache_config.page_size,
+            num_kv_per_rank, hf_config.head_dim,
         )
-        k_pool = torch.zeros(kv_shape, dtype=kvc.dtype, device="cuda")
-        v_pool = torch.zeros(kv_shape, dtype=kvc.dtype, device="cuda")
+        k_pool = torch.zeros(kv_shape, dtype=kv_cache_config.dtype, device="cuda")
+        v_pool = torch.zeros(kv_shape, dtype=kv_cache_config.dtype, device="cuda")
 
         # ---- 2. Meta tensors ----------------------------------------------
-        meta = _allocate_meta_tensors(rt, kvc.max_num_pages)
+        meta = _allocate_meta_tensors(runtime_config, kv_cache_config.max_num_pages)
 
         # ---- 3. Scheduler resolution from GPU if unset --------------------
-        nw, ns = rt.num_workers, rt.num_local_schedulers
+        nw, ns = runtime_config.num_workers, runtime_config.num_local_schedulers
         if nw is None or ns is None:
             gnw, gns = mi.get_configurations_from_gpu(0)
             nw = nw if nw is not None else gnw
             ns = ns if ns is not None else gns
 
         # ---- 4. Spec-decode passthrough ----------------------------------
-        if cfg.spec_decode is not None:
-            spec = cfg.spec_decode
+        if cfg.spec_decode_config is not None:
+            spec_decode_config = cfg.spec_decode_config
         else:
-            spec = mi.mpk.spec_decode_class(None, 3, 5)
+            spec_decode_config = mi.mpk.spec_decode_class(None, 3, 5)
 
         # ---- 5. eos resolution -------------------------------------------
         # None  = auto-fill from HF;  -1 = ignore_eos;  N = explicit.
-        if rt.eos_token_id is None:
-            tc_eos = getattr(hf.transformers_config, "eos_token_id", -1)
+        if runtime_config.eos_token_id is None:
+            tc_eos = getattr(hf_config.transformers_config, "eos_token_id", -1)
             eos = tc_eos if isinstance(tc_eos, int) else -1
         else:
-            eos = rt.eos_token_id
+            eos = runtime_config.eos_token_id
 
         # ---- 6. Construct PK via back-compat __init__ --------------------
         pk = cls(
-            mode=rt.mode,
-            world_size=pc.world_size, mpi_rank=pc.rank,
+            mode=runtime_config.mode,
+            world_size=parallel_config.world_size, mpi_rank=parallel_config.rank,
             num_workers=nw, num_local_schedulers=ns,
-            num_remote_schedulers=rt.num_remote_schedulers,
-            max_seq_length=rt.max_seq_length,
-            max_num_batched_requests=rt.max_num_batched_requests,
-            max_num_batched_tokens=rt.max_num_batched_tokens,
-            max_num_pages=kvc.max_num_pages,
-            page_size=kvc.page_size,
+            num_remote_schedulers=runtime_config.num_remote_schedulers,
+            max_seq_length=runtime_config.max_seq_length,
+            max_num_batched_requests=runtime_config.max_num_batched_requests,
+            max_num_batched_tokens=runtime_config.max_num_batched_tokens,
+            max_num_pages=kv_cache_config.max_num_pages,
+            page_size=kv_cache_config.page_size,
             meta_tensors=meta,
-            profiler_tensor=rt.profiler_tensor,
-            trace_name=rt.trace_name,
-            spec_decode_config=spec,
-            use_cutlass_kernel=rt.use_cutlass_kernel,
+            profiler_tensor=runtime_config.profiler_tensor,
+            trace_name=runtime_config.trace_name,
+            spec_decode_config=spec_decode_config,
+            use_cutlass_kernel=runtime_config.use_cutlass_kernel,
             eos_token_id=eos,
-            test_mode=rt.test_mode,
+            test_mode=runtime_config.test_mode,
             kv_cache={"k_cache": k_pool, "v_cache": v_pool},
-            parallel_config=pc,
+            parallel_config=parallel_config,
         )
         pk._mpk_config = cfg
 
         # ---- 7. Resolve the model class via the registry -----------------
         from .models._registry import resolve_model_class
-        archs = getattr(hf.transformers_config, "architectures", None) or []
+        archs = getattr(hf_config.transformers_config, "architectures", None) or []
         if not archs:
             raise ValueError(
                 "build_from_config: HF config has no 'architectures' field; "
@@ -688,10 +688,10 @@ class PersistentKernel:
         )
         with pk.compile_scope():
             with torch.device("cuda"):
-                model = ModelCls(hf.transformers_config).to(
+                model = ModelCls(hf_config.transformers_config).to(
                     "cuda", dtype=torch.bfloat16,
                 )
-            files = find_safetensors_files(hf.model_path)
+            files = find_safetensors_files(hf_config.model_path)
             model.load_weights(safetensors_weights_iterator(files))
             model.process_weights()
             input_tokens_dt = pk.attach_input(
@@ -702,9 +702,9 @@ class PersistentKernel:
             model.compile(input_tokens_dt, output_tokens=meta["output_tokens"])
 
         # ---- 9. nvcc compile --------------------------------------------
-        out_dir = rt.output_dir
-        if out_dir is not None and pc.world_size > 1:
-            out_dir = os.path.join(out_dir, f"rank{pc.rank}")
+        out_dir = runtime_config.output_dir
+        if out_dir is not None and parallel_config.world_size > 1:
+            out_dir = os.path.join(out_dir, f"rank{parallel_config.rank}")
             os.makedirs(out_dir, exist_ok=True)
         pk.compile(output_dir=out_dir)
 
@@ -713,7 +713,7 @@ class PersistentKernel:
 
     @property
     def tokenizer(self):
-        """Lazy ``AutoTokenizer.from_pretrained(hf.model_path)``.
+        """Lazy ``AutoTokenizer.from_pretrained(hf_config.model_path)``.
 
         Available only on PKs built via :meth:`build_from_config` (the
         legacy ``__init__`` path doesn't know the model path).
@@ -728,7 +728,7 @@ class PersistentKernel:
                 )
             from transformers import AutoTokenizer
             self._tokenizer = AutoTokenizer.from_pretrained(
-                cfg.hf.model_path, trust_remote_code=cfg.hf.trust_remote_code,
+                cfg.hf_config.model_path, trust_remote_code=cfg.hf_config.trust_remote_code,
             )
         return self._tokenizer
 
@@ -755,15 +755,15 @@ class PersistentKernel:
                 "PersistentKernel.run requires a PK built via "
                 "build_from_config(mpk_config)."
             )
-        rt = cfg.runtime
+        runtime_config = cfg.runtime_config
         is_batch = isinstance(prompt, list)
         prompts = list(prompt) if is_batch else [prompt]
         n = len(prompts)
-        if n > rt.max_num_batched_requests:
+        if n > runtime_config.max_num_batched_requests:
             raise ValueError(
                 f"PersistentKernel.run: got {n} prompts but "
                 f"RuntimeConfig.max_num_batched_requests = "
-                f"{rt.max_num_batched_requests}. Either batch in chunks or "
+                f"{runtime_config.max_num_batched_requests}. Either batch in chunks or "
                 f"rebuild with a higher max_num_batched_requests."
             )
 
@@ -787,11 +787,11 @@ class PersistentKernel:
         for i, ids in enumerate(input_ids_list):
             plen = ids.shape[0]
             tail = max_new_tokens if max_new_tokens is not None else 0
-            if plen + tail > rt.max_seq_length:
+            if plen + tail > runtime_config.max_seq_length:
                 raise ValueError(
                     f"PersistentKernel.run: prompt {i} length ({plen}) + "
                     f"max_new_tokens ({tail}) exceeds "
-                    f"RuntimeConfig.max_seq_length ({rt.max_seq_length}). "
+                    f"RuntimeConfig.max_seq_length ({runtime_config.max_seq_length}). "
                     f"Either trim the prompt or rebuild with a higher "
                     f"max_seq_length."
                 )

@@ -12,8 +12,8 @@ Typical usage::
     from mirage.mpk import PersistentKernel
 
     cfg = MPKConfig(
-        hf       = HFConfig.from_pretrained('/raid/.../Qwen3-8B/'),
-        parallel = ParallelConfig(world_size=2, rank=rank, tp_size=2),
+        hf_config       = HFConfig.from_pretrained('/raid/.../Qwen3-8B/'),
+        parallel_config = ParallelConfig(world_size=2, rank=rank, tp_size=2),
     )
     mpk = PersistentKernel.build_from_config(cfg)
     text = mpk.run('Give me a short intro to LLMs.')

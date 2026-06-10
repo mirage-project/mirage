@@ -1,36 +1,3 @@
-"""Qwen3 model defined against the new ``mirage.mpk.layers`` catalog.
-
-TP-aware: when constructed inside ``with pk.compile_scope():`` and
-``pk.parallel_config.tp_size > 1``, every projection allocates a sharded
-weight at ``__init__`` time and an explicit ``AllReduce`` is inserted
-after ``o_proj`` (attention) and ``down_proj`` (MLP) to reduce the
-row-parallel partial sums. With ``tp_size == 1`` the AllReduce is a
-no-op (the call is conditional) and the entire model is unsharded —
-identical token stream to ``demo/qwen3/demo.py`` is the v1 verification
-oracle.
-
-Weight loading: ``model.load_weights(safetensors_iter)`` walks the
-HF-state-dict iterator and dispatches each ``(name, mmap-view)`` tuple to
-the deepest matching submodule by dotted path (the routing built from
-``named_modules()`` inside ``MPKModule.load_weights``). TP-aware leaves
-(``ColumnParallelLinear``, ``RowParallelLinearWithResidual``) attach a
-``weight_loader`` callback to their ``nn.Parameter`` that narrows the
-unsharded source to this rank's slice before ``copy_``.
-
-Two HF state_dict idiosyncrasies are handled by ``Qwen3Attention``:
-
-  * ``q_norm`` / ``k_norm`` live as ``Qwen3RMSNorm`` modules in HF (so
-    HF key ``...self_attn.q_norm.weight``). The catalog ``PagedAttention``
-    leaf exposes them as raw ``nn.Parameter`` named ``q_norm`` / ``k_norm``
-    (no ``.weight`` suffix). ``Qwen3Attention.load_weights`` rewrites the
-    suffix before delegating to ``super().load_weights``.
-
-KV cache: per-rank cache only contains this rank's KV heads.
-``Qwen3Model.__init__`` does NOT allocate KV cache; the driver does and
-passes the pool to PK via ``kv_cache=``. Per-layer KV cache is fetched
-via ``current_pk().get_kv_cache(layer_idx)`` at compile time.
-"""
-
 from __future__ import annotations
 
 from typing import Iterable, Optional, Set, Tuple
@@ -80,19 +47,6 @@ def _grid_for_linear(size: int, use_cutlass: bool = True) -> int:
 
 
 def _aligned_lm_head_tasks(width: int, max_tasks: int, align: int = 8) -> int:
-    """Largest task count ``g <= max_tasks`` that column-splits ``width``
-    into ``g`` aligned chunks. Guarantees both:
-
-      * ``width % g == 0``           — ArgmaxPartial requires exact chunks.
-      * ``(width // g) % align == 0`` — the SM100 LINEAR stores its output
-        column-tile via TMA, whose base must be 16B-aligned ⇒ each tile is
-        a multiple of ``align`` (=8) bf16 elements.
-
-    Raw ``num_workers`` (e.g. 136) satisfies neither for the padded vocab
-    153600 (``153600 / 136 = 1129``: not integer, odd ⇒ misaligned), which
-    crashes the lm_head with ``cudaErrorIllegalInstruction``. Mirrors
-    ``demo/qwen3/demo.py:_aligned_lm_head_workers``.
-    """
     for g in range(max_tasks, 0, -1):
         if width % g == 0 and (width // g) % align == 0:
             return g
@@ -740,16 +694,13 @@ class Qwen3ForCausalLM(MPKModule):
         logits_dt = self.lm_head.compile(
             h_dt,
             grid_dim=(lm_head_tasks, 1, 1),
-            block_dim=(128, 1, 1),
         )
         part_val_dt, part_idx_dt = self.argmax_partial.compile(
             logits_dt,
             grid_dim=(lm_head_tasks, 1, 1),
-            block_dim=(128, 1, 1),
         )
         return self.argmax_reduce.compile(
             part_val_dt, part_idx_dt,
             output=output_tokens,
             grid_dim=(1, 1, 1),
-            block_dim=(128, 1, 1),
         )
