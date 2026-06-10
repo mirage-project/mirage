@@ -26,8 +26,10 @@ namespace kernel {
 // scratch arrays (one per warp, max 32 warps): idx i64 + val T.
 template <typename T>
 struct ArgmaxBuffers {
-    using IdxBuf = mirage::runtime_v2::SmemBuffer<sizeof(long long) * 32, 128>;
-    using ValBuf = mirage::runtime_v2::SmemBuffer<sizeof(T) * 32, 16>;
+    using IdxBuf = mirage::runtime_v2::SmemBuffer<::kernel::argmax_v2::raw_idx_bytes(),
+                                                  ::kernel::argmax_v2::IDX_ALIGN>;
+    using ValBuf = mirage::runtime_v2::SmemBuffer<::kernel::argmax_v2::raw_val_bytes(sizeof(T)),
+                                                  ::kernel::argmax_v2::VAL_ALIGN>;
 
     IdxBuf idxs;
     ValBuf vals;

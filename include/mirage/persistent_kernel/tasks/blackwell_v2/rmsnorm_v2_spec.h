@@ -27,55 +27,42 @@
 namespace kernel {
 namespace rmsnorm_v2 {
 
-// Region ordinals. Must match the push_back order in make_smem_info() and
-// the smem_region_offset(...) calls in RmsNormBuffers.
+// Region ordinals — index into the regions[] make_smem_info() builds and the
+// smem_region_offset(...) calls in RmsNormBuffers.
 inline constexpr int REGION_INPUT  = 0;
 inline constexpr int REGION_WEIGHT = 1;
 inline constexpr int REGION_OUTPUT = 2;
 inline constexpr int REGION_REDUCE = 3;
 inline constexpr int NUM_REGIONS   = 4;
 
-// SmemBuffer pads each buffer to ALIGN=1024 to keep TMA-swizzle safe; this
-// helper mirrors that rounding so the planner reserves the same byte count
-// the device-side typed view will consume.
-inline constexpr int round_up_1024(int n) {
-  return (n + 1023) & ~1023;
+inline constexpr int ALIGN = 1024;  // keeps TMA-swizzle (128B) safe
+
+// Raw (unpadded) per-region byte sizes. These are the single source for the
+// region sizes: the device SmemBuffer<> views in RmsNormBuffers compute from
+// the same two functions, so there's no second copy of the formula to drift.
+inline constexpr int raw_buffer_bytes(int t_size_bytes, int hidden_dim) {
+  return t_size_bytes * hidden_dim;  // input / weight / output
+}
+inline constexpr int raw_reduce_bytes(int num_threads) {
+  return (int)sizeof(float) * num_threads;
 }
 
-inline constexpr int input_region_bytes(int t_size_bytes, int hidden_dim) {
-  return round_up_1024(t_size_bytes * hidden_dim);
+inline constexpr int round_up(int n, int align) {
+  return (n + align - 1) & ~(align - 1);
 }
 
-inline constexpr int reduce_region_bytes(int num_threads) {
-  // sizeof(float) * num_threads, padded to ALIGN=1024.
-  return round_up_1024(4 * num_threads);
-}
-
-inline constexpr int total_smem_bytes(int t_size_bytes,
-                                      int hidden_dim,
-                                      int num_threads) {
-  return 3 * input_region_bytes(t_size_bytes, hidden_dim) +
-         reduce_region_bytes(num_threads);
-}
-
-// Build the planner-facing TaskSmemInfo. release_step is uniform across all
-// four regions because the rmsnorm task body holds every buffer until the
-// final store; a finer-grained breakdown would require splitting the kernel.
+// release_step is uniform across all four regions: the task holds every buffer
+// until the final store. Finer granularity would need splitting the kernel.
 inline ::mirage::runtime::TaskSmemInfo
 make_smem_info(int t_size_bytes, int hidden_dim, int num_threads) {
-  int const buf_bytes    = input_region_bytes(t_size_bytes, hidden_dim);
-  int const reduce_bytes = reduce_region_bytes(num_threads);
-  int const total_bytes  = 3 * buf_bytes + reduce_bytes;
+  int const buf    = round_up(raw_buffer_bytes(t_size_bytes, hidden_dim), ALIGN);
+  int const reduce = round_up(raw_reduce_bytes(num_threads), ALIGN);
 
-  ::mirage::runtime::TaskSmemInfo info{total_bytes, /*alignment=*/1024, {}};
-  info.regions.push_back(
-      {"input",  buf_bytes,    1024, -1, /*can_pack=*/true,  /*release_step=*/2, /*contiguous=*/true});
-  info.regions.push_back(
-      {"weight", buf_bytes,    1024, -1, true, 2, true});
-  info.regions.push_back(
-      {"output", buf_bytes,    1024, -1, true, 2, true});
-  info.regions.push_back(
-      {"reduce", reduce_bytes, 1024, -1, true, 2, true});
+  ::mirage::runtime::TaskSmemInfo info{3 * buf + reduce, ALIGN, {}};
+  info.regions.push_back({"input",  buf,    ALIGN, -1, /*can_pack=*/true, /*release_step=*/2, /*contiguous=*/true});
+  info.regions.push_back({"weight", buf,    ALIGN, -1, true, 2, true});
+  info.regions.push_back({"output", buf,    ALIGN, -1, true, 2, true});
+  info.regions.push_back({"reduce", reduce, ALIGN, -1, true, 2, true});
   return info;
 }
 

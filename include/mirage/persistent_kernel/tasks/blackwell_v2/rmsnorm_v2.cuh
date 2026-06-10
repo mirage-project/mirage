@@ -45,8 +45,8 @@ __device__ inline void task_sync() {
 //   2 = store (read output)
 template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
 struct RmsNormBuffers {
-    using B = mirage::runtime_v2::SmemBuffer<sizeof(T) * HIDDEN_DIM>;
-    using BReduce = mirage::runtime_v2::SmemBuffer<sizeof(float) * NUM_THREADS>;
+    using B = mirage::runtime_v2::SmemBuffer<raw_buffer_bytes(sizeof(T), HIDDEN_DIM), ALIGN>;
+    using BReduce = mirage::runtime_v2::SmemBuffer<raw_reduce_bytes(NUM_THREADS), ALIGN>;
 
     B input;
     B weight;
