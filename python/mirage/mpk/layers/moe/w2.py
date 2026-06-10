@@ -58,17 +58,27 @@ class _MoEW2Base(MPKModule):
         hidden_size: int,
         intermediate_size: int,
         *,
+        ep_size: int = 1,
+        ep_rank: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__(prefix=prefix)
+        if num_experts % ep_size != 0:
+            raise ValueError(
+                f"MoEW2: num_experts ({num_experts}) % ep_size ({ep_size}) != 0"
+            )
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.num_local_experts = num_experts // ep_size
+        self.local_expert_start = ep_rank * self.num_local_experts
 
     def auto_grid_dim(self, *_: DTensor) -> GridDim:
         """Expert split (grid.x<=10) + hidden tile split (grid.y<=14)."""
-        return _w2_auto_grid(self.num_experts, self.hidden_size)
+        return _w2_auto_grid(self.num_local_experts, self.hidden_size)
 
     def default_block_dim(self) -> BlockDim:
         return (128, 1, 1)
@@ -77,8 +87,9 @@ class _MoEW2Base(MPKModule):
 class MoEW2BF16(_MoEW2Base):
     """bf16 per-expert down projection.
 
-    Weight: ``(num_experts, hidden, intermediate)`` bf16, stacked along
-    dim 0. Computes ``out[t, k] = x[t, k] @ W[e].T`` for each
+    Weight: ``(num_local_experts, hidden, intermediate)`` bf16, stacked along
+    dim 0. Under EP, only the local expert slice is allocated.
+    Computes ``out[t, k] = x[t, k] @ W[e].T`` for each
     (token, slot) the routing tensor assigns to expert ``e``.
     """
 
@@ -89,17 +100,33 @@ class MoEW2BF16(_MoEW2Base):
         hidden_size: int,
         intermediate_size: int,
         *,
+        ep_size: int = 1,
+        ep_rank: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__(
             num_experts, num_experts_per_tok, hidden_size, intermediate_size,
-            prefix=prefix,
+            ep_size=ep_size, ep_rank=ep_rank, prefix=prefix,
         )
         self.weight = nn.Parameter(
             torch.empty(
-                num_experts, hidden_size, intermediate_size, dtype=torch.bfloat16
+                self.num_local_experts, hidden_size, intermediate_size,
+                dtype=torch.bfloat16,
             )
         )
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+                      *, expert_id: int) -> bool:
+        """Write one expert's down-proj slab into the local w2 slot.
+
+        Returns False (writes nothing) if expert_id is not local to this rank.
+        loaded_weight is (hidden, intermediate).
+        """
+        local = expert_id - self.local_expert_start
+        if not (0 <= local < self.num_local_experts):
+            return False
+        param.data[local].copy_(loaded_weight)
+        return True
 
     def forward(self, x: torch.Tensor, routing_indices: torch.Tensor) -> torch.Tensor:
         """Expert-wise ``x[t, k] @ W[e].T`` in fp32, cast to bf16."""
