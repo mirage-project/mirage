@@ -129,7 +129,7 @@ def _tensor_parallel_allreduce_grid(output_size: int) -> tuple[int, int, int]:
     column-tile granularity.
 
     All current producers of an allreduce input — FP8 swapAB linear, BF16
-    and splitk linear — partition the hidden dim
+    — partition the hidden dim
     into 128-wide column tiles (linear.grid.x = output_size // 128, or
     128-wide split). The legacy default of 1024-wide allreduce tiles
     therefore generated ~8x fewer tasks than the producing layer (7 vs 56
@@ -203,18 +203,6 @@ class DeepSeekV3Builder(GraphBuilder):
         # Kept for legacy shared-expert helper paths.
         self.moe_intermediate_size = self.shared_moe_intermediate_size
 
-        # Fuse residual into linear kernels (with_residual). Always on.
-        self._fuse_residual = True
-        # MoE path: MoE W13/W2 go through the PR-674 fp8_group_gemm via two
-        # peripheral tasks (moe_permute → fp8_group_gemm → silu_mul →
-        # quantize → fp8_group_gemm → moe_unpermute). ~2.7× the per-expert
-        # legacy MoE chain at decode; TP4 EP2 perf-validated + TP8 EP2 61L
-        # run-validated. (The removed MTP block was the last legacy per-expert
-        # MoE user; that path returns with the MTP rebuild branch.)
-        self._new_moe = True
-        # Per-expert active-mask short-circuit in fp8_group_gemm (commit
-        # ecf1f8e5): inactive experts exit before their MMA wave.
-        self._new_moe_active_skip = True
         # M_TOTAL for the new GEMM = NUM_LOCAL_EXPERTS * BM_PADDING. Both
         # are compile-time-ish (NUM_LOCAL_EXPERTS depends on ep_size at
         # __init__ time; BM_PADDING matches the new GEMM's largest BM tile
@@ -228,44 +216,6 @@ class DeepSeekV3Builder(GraphBuilder):
         # (= num_local_experts) must be divisible by EPC — asserted at the
         # moe_permute call site once num_local_experts is known.
         self._moe_permute_epc = 4
-        # Decode Q path: per-head BMM chain instead of the load-time absorbed
-        # q_b_proj (single fused (H*576, q_lora) FP8 GEMM):
-        # rmsnorm_linear(q_b_nope, 128) + rmsnorm_linear(q_b_pe, 64)
-        # + quantize_fp8(q_nope) + linear_fp8_bmm(q_nope, kv_b_k_bmm) →
-        # q_nope_abs (mbt, H, 512) + assemble_q_decode → q_nope_pe.
-        # Win: smaller weight loads per task (per-head (512, 128) vs absorbed
-        # (576, q_lora=1536) monolith) → less TMA traffic, room to overlap;
-        # the absorbed weight buffer (~6.8 GB across DSv3 layers) also goes
-        # away. Default since 2026-05-17 (token-bit-identical vs absorbed).
-        self._dsv3_bmm = True
-        # Decode BMM2 (post-attn kv_b_v un-absorption, _bmm_decode_o_path)
-        # goes through the DENSE block-scaled GEMM body (float32 128-K-aligned
-        # scales). Same math as the swapAB body (UE8M0, 512-K-packed) but the
-        # float32 scale layout is split-K-friendly. Part of the validated
-        # decode lever stack (be145abc triple-stack, token-identical at TP4;
-        # TP8 EP2 61L run-validated).
-        self._dsv3_bmm_dense = True
-        # D1 (2026-05-17): fuse the q_b_nope FP8 GEMM with its downstream
-        # per_token_group_quantize_fp8 task. The fp8_gemm_dense_*_fp8out
-        # kernel computes a per-row UE8M0 scale in registers (each consumer
-        # thread already holds the full BN=128 K-group) and writes FP8 +
-        # packed scale directly, eliminating the bf16 HBM round-trip +
-        # standalone quantize dispatch wave on the BMM Q-up critical path.
-        # 5-run validated: text bit-identical to unfused, −43 μs/iter.
-        self._fused_qb_quantize = True
-        # B37 (2026-05-15): one fused kernel replaces the (input_layernorm
-        # RMSNorm + qkv_a quantize) two-task chain, writing BF16 rmsnorm_out
-        # and FP8 + scale in one pass. Saves ~30 μs/layer (−5.7% per decode
-        # iter on TP=4 EP=2 mbt=128) by eliminating one dispatch wave plus a
-        # bf16 HBM round-trip. (Case-3 fix at commit 27dd8771.)
-        self._fused_rmsnorm_quantize = True
-        # 2026-05-28: fuse the INNER q_a_layernorm + downstream q_b_GEMM
-        # input-quantize into one task, collapsing 2 hops + their dispatch
-        # gaps (~8μs stacked) into 1 fused task. −5μs/layer measured
-        # (8ab5389f), token-identical at TP4; TP8 EP2 61L run-validated.
-        # Same pattern as B37 qkv_a fusion (case-3 safe via per-layer-unique
-        # FP8/scale buffers).
-        self._fused_q_a_quantize = True
         # C1 (2026-05-16): fan the MLA KV-gather unified task across 8 CTAs
         # by striding seq_pos. The legacy 1-CTA gather was 121 μs/layer
         # (15% of layer wallclock) with 127 workers idle; with 8 splits each
@@ -330,7 +280,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
     def _fp8_linear_grid_dim(self, weight, grid_dim):
-        """Pick grid_x for the FP8 swapAB non-splitk kernel.
+        """Pick grid_x for the FP8 swapAB kernel.
 
         The kernel asserts `output_size_per_task % MMA_M=128 == 0` and
         iterates m_tile internally, so a single task can cover *any positive
@@ -714,72 +664,6 @@ class DeepSeekV3Builder(GraphBuilder):
             self._fp8_seq_bufs[cache_key] = (fp8_buf, scale_buf)
         return self._fp8_seq_bufs[cache_key]
 
-    def _fp8_linear_prequantized(self, input_fp8, input_scale, weight,
-                                 weight_scale, output, grid_dim, block_dim,
-                                 residual=None, gate_mode: int = 0):
-        if weight_scale is None:
-            raise ValueError("Prequantized FP8 linear requires FP8 weight scale.")
-        if input_fp8.num_dims != 2 or output.num_dims != 2:
-            raise ValueError("FP8 linear expects 2D input and output tensors.")
-        if weight.num_dims != 2:
-            raise ValueError("FP8 linear expects a 2D weight tensor.")
-        if weight_scale.num_dims != 2:
-            raise ValueError("FP8 linear expects a 2D packed UE8M0 scale tensor.")
-
-        grid_dim = self._fp8_linear_grid_dim(weight, grid_dim)
-        use_decode_kernel = self._can_use_decode_fp8_linear(
-            input_fp8, weight, output, grid_dim)
-        linear_layer = (
-            self.mpk.linear_fp8_swapAB_layer
-            if use_decode_kernel
-            else self.mpk.linear_fp8_layer
-        )
-        linear_with_residual_layer = (
-            self.mpk.linear_fp8_swapAB_with_residual_layer
-            if use_decode_kernel
-            else self.mpk.linear_fp8_with_residual_layer
-        )
-
-        if residual is not None:
-            if self.world_size > 1:
-                idx = getattr(self, "_tp_residual_linear_idx", 0)
-                self._tp_residual_linear_idx = idx + 1
-                partial = self._new_tp_partial(output, f"tp_fp8_residual_partial_{idx}")
-                linear_layer(
-                    input_fp8=input_fp8,
-                    input_scale=input_scale,
-                    weight_fp8=weight,
-                    weight_scale=weight_scale,
-                    output=partial,
-                    grid_dim=grid_dim,
-                    block_dim=block_dim,
-                    gate_mode=gate_mode,
-                )
-                self._allreduce_residual(partial, output, residual,
-                                         gate_mode=gate_mode)
-            else:
-                linear_with_residual_layer(
-                    input_fp8=input_fp8,
-                    input_scale=input_scale,
-                    weight_fp8=weight,
-                    weight_scale=weight_scale,
-                    residual=residual,
-                    output=output,
-                    grid_dim=grid_dim,
-                    block_dim=block_dim,
-                    gate_mode=gate_mode,
-                )
-        else:
-            linear_layer(
-                input_fp8=input_fp8,
-                input_scale=input_scale,
-                weight_fp8=weight,
-                weight_scale=weight_scale,
-                output=output,
-                grid_dim=grid_dim,
-                block_dim=block_dim,
-                gate_mode=gate_mode,
-            )
 
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                      grid_dim, block_dim, residual=None, gate_mode: int = 0,
@@ -1325,284 +1209,22 @@ class DeepSeekV3Builder(GraphBuilder):
             runtime_m_mode=1,
         )
 
-    # FP8 splitk replacements verified end-to-end on TP=1 layers 0-8.
-    _FP8_SPLITK_ENABLED = True
-    # BF16 splitk_linear_layer hangs the MPK runtime in the DSv3 gate
-    # configuration (batch=1, N=256, K=7168). The standalone regression
-    # matrix at tests/runtime_python/blackwell/sm100_splitk_linear_bf16/
-    # times out for every BATCH_SIZE < 16. A "fix" that replaced the
-    # `kClampedBN = min(BATCH_SIZE, MMA_N)` clamp with MMA_N would let TMA
-    # over-read past the in-bounds gmem rows (out-of-bounds access into
-    # whatever follows the buffer), which is why qwen3/DSv3 still hang
-    # even though the standalone matrix turns green. The original clamp
-    # is the correct semantic; the kernel needs a deeper rework to
-    # support batch < MMA_N=16 cleanly. Until then, keep the gate on the
-    # original linear_layer kernel.
-    _BF16_GATE_SPLITK_ENABLED = True
 
     @staticmethod
-    def _pick_splitk_factor(n_tiles, K, num_workers, k_align):
-        """Pick the split_k that maximizes total tasks (= n_tiles * split_k)
-        subject to a single-wave-on-the-persistent-runtime cap.
 
-        The splitk linear kernel produces `grid = (n_tiles, split_k, 1)` tasks
-        where `n_tiles = output_size // MMA_M=128`. We want as many of those
-        tasks as possible without spilling past `num_workers` (otherwise the
-        layer pays for a partial second wave, which on B200's 128-worker
-        config is up to 2x slower than the single-wave optimum).
 
-        Constraints:
-          - K must be divisible by `k_align` (kernel prereq; FP8 needs 512 for
-            UE8M0 packing, BF16 only needs the 64-byte TILE_SIZE).
-          - K // split_k must remain a multiple of `k_align` (per-task K
-            still satisfies the kernel prereq).
-          - n_tiles * split_k <= num_workers (single wave).
 
-        Returns the best split_k, or None if K is not k_align-aligned.
-        """
-        if K % k_align != 0:
-            return None
-        if n_tiles > num_workers:
-            # Even split_k=1 already overflows a single wave; splitk only adds
-            # tasks (more grid.y), never removes them. Signal "splitk can't
-            # help" so the caller can fall back to a non-splitk path that may
-            # use a coarser N-tile (e.g. grid_for_rmsnorm_linear_layer).
-            return None
-        # split_k must divide quotient = K // k_align so that K/s is still a
-        # multiple of k_align. Iterate divisors in ascending s; tasks = n*s
-        # is monotonically increasing, so we can stop once it exceeds the cap.
-        quotient = K // k_align
-        best_s = None
-        for s in range(1, quotient + 1):
-            if quotient % s != 0:
-                continue
-            if n_tiles * s > num_workers:
-                break
-            best_s = s
-        return best_s
 
-    def _pick_fp8_splitk_factor(self, weight):
-        """FP8 splitk picker for a `weight` tensor of shape [output, K].
-
-        Returns None when splitk is disabled or K isn't 512-aligned, so the
-        caller can fall back to the non-splitk path.
-
-        IMPORTANT: `splitk_linear_fp8_swapAB_sm100` is decode-only — the
-        kernel asserts `BATCH_SIZE <= 16` at registration. When the builder
-        is configured for prefill (`_use_prefill = mbt > 8`, i.e.
-        max_num_batched_tokens >= 9), the per-task batch shape can exceed
-        16 and the kernel produces wrong (mostly-zero) output. Force the
-        non-splitk path in that case so prefill correctness is preserved.
-        Decoding-only deployments (mbt <= 8) keep the splitk fast-path.
-        """
-        if not self._FP8_SPLITK_ENABLED:
-            return None
-        if self._use_prefill:
-            return None
-        return self._pick_splitk_factor(
-            n_tiles=weight.dim(0) // 128,
-            K=weight.dim(1),
-            num_workers=self.num_workers,
-            k_align=512,
-        )
-
-    def _fp8_linear_builder_splitk(self, input_bf16, weight_key, state_dict,
-                                   output, split_k, name_prefix):
-        """Builder-side split-K for a decode M=1 starved K-bound GEMM.
-
-        Splits K into `split_k` CONTIGUOUS slices, runs split_k separate
-        `_fp8_linear` calls (each fills ceil(N/128) CTAs → split_k× parallel
-        working CTAs, filling idle SMs at decode M=1), then reduces the bf16
-        partials. Uses the WORKING dense kernel — orthogonal to the retired
-        in-kernel split-K paths (removed 2026-06-10; they crashed / couldn't
-        compile at BATCH=128). Verified facts this enables correctness:
-        - weight_scale (`.weight_scale_inv`) layout = [N/128, K/128] row-major
-          (the dense GEMM `sb`, indexed sb[(on/128)*nk + ki], nk=K/128), so a
-          K-slice = a contiguous slice on dim 1 → row-stride matches the
-          slice's own nk=Ks/128. (A narrow VIEW would NOT work: its row-stride
-          stays K/128.)
-        - `_attach_fp8_weight` is a passthrough (raw fp8 weight + f32 scale),
-          so slicing the state_dict tensors directly is valid.
-        - `_fp8_linear`'s input_col_offset/input_row_stride slice the bf16
-          input in-place (no input copy).
-        Precision: bf16 partial-sum vs the kernel's FP32 accumulate —
-        token-identical validated at TP4 + TP8 EP2 61L.
-        """
-        import torch
-        wt = state_dict[f"{weight_key}.weight"]
-        st = state_dict[f"{weight_key}.weight_scale_inv"]
-        N, K_full = int(wt.shape[0]), int(wt.shape[1])
-        assert K_full % (128 * split_k) == 0, (K_full, split_k)
-        Ks = K_full // split_k
-        Ksg = Ks // 128
-        if not hasattr(self, "_builder_splitk_chunks"):
-            self._builder_splitk_chunks = []
-        partials = []
-        for i in range(split_k):
-            wc_t = wt[:, i * Ks:(i + 1) * Ks].contiguous()
-            sc_t = st[:, i * Ksg:(i + 1) * Ksg].to(torch.float32).contiguous()
-            # keep python refs alive — attach binds by pointer
-            self._builder_splitk_chunks += [wc_t, sc_t]
-            wc = self._safe_attach(wc_t, f"{name_prefix}_skw{i}")
-            sc = self._safe_attach(sc_t, f"{name_prefix}_sks{i}")
-            pi = self.mpk.new_tensor(
-                dims=(output.dim(0), N), dtype=bfloat16,
-                name=f"{name_prefix}_skp{i}", io_category="cuda_tensor")
-            # D2 (2026-05-28, analyzer #2): per-shard FP8 + float32 scale
-            # buffers so both shards' quantize tasks can run in PARALLEL.
-            # Pre-D2: all shards shared `fp8_input_v2_{Ks}_shared` keyed by
-            # reduction_size=Ks; shard 1's quantize would overwrite shard 0's
-            # bytes before shard 0's GEMM had read them → forced serial
-            # execution + lost K-parallelism win (sk=2's −9.65μs alone became
-            # only −1.8μs marginal in stack).
-            sk_fp8 = self.mpk.new_tensor(
-                dims=(output.dim(0), Ks), dtype=float8_e4m3,
-                name=f"{name_prefix}_sk{i}_fp8", io_category="cuda_tensor")
-            sk_scale = self.mpk.new_tensor(
-                dims=(output.dim(0), Ksg), dtype=float32,
-                name=f"{name_prefix}_sk{i}_scale", io_category="cuda_tensor")
-            self._fp8_linear(
-                input_bf16, wc, sc, pi,
-                grid_dim=(grid_for_rmsnorm_linear_layer(N), 1, 1),
-                block_dim=(128, 1, 1),
-                input_col_offset=i * Ks, input_row_stride=K_full,
-                input_fp8_override=sk_fp8,
-                input_scale_override=sk_scale)
-            partials.append(pi)
-        acc = partials[0]
-        for i in range(1, split_k):
-            out = output if i == split_k - 1 else self.mpk.new_tensor(
-                dims=(output.dim(0), N), dtype=bfloat16,
-                name=f"{name_prefix}_skacc{i}", io_category="cuda_tensor")
-            self.mpk.elementwise_add_layer(
-                input_a=acc, input_b=partials[i], output=out,
-                grid_dim=(grid_for_rmsnorm_linear_layer(N), 1, 1),
-                block_dim=(128, 1, 1))
-            acc = out
-
-    def _pick_bf16_splitk_factor(self, weight):
-        """BF16 splitk picker for a `weight` tensor of shape [output, K].
-
-        2026-05-14 (P5): the `_use_prefill → return 1` bypass was paranoia
-        about the BF16-splitk small-batch hang, but the hang reproduces
-        only for *compile-time* BATCH_SIZE < 16 — our prefill-enabled
-        config has compile-time BATCH_SIZE = mbt = 128, well above the
-        clamp threshold. Drop the bypass so the DSv3 router gate
-        dispatches grid=(n_tiles, split_k, 1) instead of (n_tiles, 1, 1)
-        (was 2 CTAs → 90 μs on the user-flagged perfetto ID 64861).
-        Earlier attempts thought this broke correctness but baseline
-        decode-from-step-100 already outputs all-zero tokens regardless
-        of this knob (the 19-layer DSv3 model is structurally degenerate
-        at that step), so the regression was misdiagnosed.
-        """
-        return self._pick_splitk_factor(
-            n_tiles=weight.dim(0) // 128,
-            K=weight.dim(1),
-            num_workers=self.num_workers,
-            k_align=64,
-        ) or 1
-
-    def _fp8_linear_splitk(self, input_bf16, weight, weight_scale, output,
-                           split_k, residual=None,
-                           input_fp8=None, input_scale=None):
-        """Same residual semantics as `_fp8_linear`, via the FP8 splitk swapAB
-        kernel. The kernel uses tma_reduce_add_async; both with-residual and
-        no-residual paths share that fact.
-
-        residual=None: prepends tensor_init that zeroes `output`, then splitk
-            writes the matmul into it (accumulate=False).
-        residual + TP=1: caller must alias `output is residual` so the kernel
-            can reduce-add the matmul on top of the residual in place
-            (accumulate=True, no tensor_init).
-        residual + TP>1: produces a partial in a fresh buffer, then runs the
-            allreduce + add-residual sequence into `output`.
-
-        `input_fp8`/`input_scale`: skip quantization and use these directly;
-        otherwise quantize `input_bf16` first.
-        """
-        if weight_scale is None:
-            raise ValueError("FP8 splitk requires an FP8 weight scale.")
-        if input_bf16 is not None and input_bf16.num_dims != 2:
-            raise ValueError("FP8 splitk expects 2D bf16 input.")
-        if weight.num_dims != 2 or weight_scale.num_dims != 2:
-            raise ValueError("FP8 splitk expects 2D weight + scale.")
-        if output.num_dims != 2:
-            raise ValueError("FP8 splitk expects 2D output.")
-
-        output_size = weight.dim(0)
-        if output_size % 128 != 0:
-            raise ValueError(
-                f"FP8 splitk requires output divisible by 128, got {output_size}")
-        grid = (output_size // 128, split_k, 1)
-        block = (256, 1, 1)
-
-        if input_fp8 is None:
-            reduction_size = weight.dim(1)
-            input_fp8, input_scale = self._fp8_buffers_for_reduction(reduction_size)
-            self.mpk.quantize_fp8_layer(
-                input=input_bf16,
-                output_fp8=input_fp8,
-                output_scale=input_scale,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-
-        if residual is None:
-            self.mpk.linear_splitk_swapAB_fp8_layer(
-                input_fp8=input_fp8, input_scale=input_scale,
-                weight_fp8=weight, weight_scale=weight_scale,
-                output=output, grid_dim=grid, block_dim=block,
-                accumulate=False,
-            )
-            return
-
-        if self.world_size > 1:
-            idx = getattr(self, "_tp_residual_linear_idx", 0)
-            self._tp_residual_linear_idx = idx + 1
-            partial = self._new_tp_partial(
-                output, f"tp_fp8_splitk_residual_partial_{idx}")
-            self.mpk.linear_splitk_swapAB_fp8_layer(
-                input_fp8=input_fp8, input_scale=input_scale,
-                weight_fp8=weight, weight_scale=weight_scale,
-                output=partial, grid_dim=grid, block_dim=block,
-                accumulate=False,
-            )
-            self._allreduce_residual(partial, output, residual)
-            return
-
-        if output is not residual:
-            raise ValueError(
-                "FP8 splitk with residual on TP=1 requires `output` to be the "
-                "same DTensor as `residual` (alias the residual buffer to the "
-                "output before calling).")
-        self.mpk.linear_splitk_swapAB_fp8_layer(
-            input_fp8=input_fp8, input_scale=input_scale,
-            weight_fp8=weight, weight_scale=weight_scale,
-            output=output, grid_dim=grid, block_dim=block,
-            accumulate=True,
-        )
 
     def _silu_mul_fp8_linear(self, silu_input, silu_bf16_output, weight,
                              weight_scale, output, silu_grid_dim,
-                             linear_grid_dim, block_dim, residual=None,
-                             use_splitk=False, splitk_split_k=None):
+                             linear_grid_dim, block_dim, residual=None):
         self.mpk.silu_mul_layer(
             input=silu_input,
             output=silu_bf16_output,
             grid_dim=silu_grid_dim,
             block_dim=(128, 1, 1),
         )
-        if use_splitk:
-            split_k = (splitk_split_k
-                       if splitk_split_k is not None
-                       else self._pick_fp8_splitk_factor(weight))
-            if split_k is not None:
-                self._fp8_linear_splitk(
-                    silu_bf16_output, weight, weight_scale, output,
-                    split_k=split_k, residual=residual,
-                )
-                return
-            # Fall through to non-splitk if K isn't splitk-able.
         self._fp8_linear(
             silu_bf16_output,
             weight,
@@ -2004,78 +1626,8 @@ class DeepSeekV3Builder(GraphBuilder):
         return dtensor
 
     @staticmethod
-    def _requantize_fp8_for_ue8m0(weight_fp8, scale_inv):
-        """Re-quantize FP8 weight so that scales are exact powers of 2 (UE8M0).
-
-        SM100 block-scaled UMMA uses UE8M0 (8-bit exponent-only) scale factors.
-        Checkpoint float32 scales are NOT powers of 2, so directly converting
-        them to UE8M0 introduces up to 2x error per block.
-
-        Fix (same as SGLang/vLLM): dequant → re-quantize with power-of-2 scales.
-
-        Input:
-            weight_fp8: [M, K] float8_e4m3fn — original checkpoint FP8 weight
-            scale_inv: [ceil(M/128), ceil(K/128)] float32 — original block scale_inv
-
-        Output:
-            new_fp8: [M, K] float8_e4m3fn — re-quantized weight
-            packed_ue8m0: [M, padded_scale_k] int32 — packed UE8M0 per-row scale
-        """
-        M, K = weight_fp8.shape
-        group_size = 128
-        scale_k = K // group_size
-        padded_scale_k = ((scale_k + 3) // 4) * 4
-
-        # Step 1: Dequant to float32
-        # Expand block scale_inv [ceil(M/128), ceil(K/128)] to per-element [M, K]
-        scale_inv_expanded = scale_inv.float().repeat_interleave(
-            group_size, dim=0)[:M].repeat_interleave(
-            group_size, dim=1)[:, :K]
-        w_float = weight_fp8.float() * scale_inv_expanded
-
-        # Step 2: Compute new UE8M0 scales (per 128-element block)
-        # Reshape to blocks, find max per block
-        w_blocks = w_float.reshape(M, scale_k, group_size)
-        block_amax = w_blocks.abs().amax(dim=2).clamp(min=1e-12)  # [M, scale_k]
-        # New scale = ceil_to_ue8m0(amax / 448)
-        raw_scale = block_amax / 448.0
-        ue8m0_exp = torch.ceil(torch.log2(raw_scale.clamp(min=1e-30)))
-        new_scale = torch.pow(2.0, ue8m0_exp)  # exact power of 2
-        ue8m0_byte = (ue8m0_exp + 127).clamp(0, 254).to(torch.int32)
-
-        # Step 3: Re-quantize to FP8
-        new_scale_expanded = new_scale.unsqueeze(2).expand_as(w_blocks)
-        w_rescaled = (w_blocks / new_scale_expanded).clamp(-448, 448)
-        new_fp8 = w_rescaled.reshape(M, K).to(torch.float8_e4m3fn)
-
-        # Step 4: Pack 4 consecutive UE8M0 bytes into uint32, column-major
-        # stored as transposed row-major [packed_k, aligned_M]
-        packed_k = padded_scale_k // 4
-        aligned_M = ((M + 3) // 4) * 4
-        # Pad ue8m0_byte to padded_scale_k columns if needed
-        if padded_scale_k > scale_k:
-            padding = torch.zeros(M, padded_scale_k - scale_k,
-                                  dtype=torch.int32, device=ue8m0_byte.device)
-            ue8m0_byte = torch.cat([ue8m0_byte, padding], dim=1)
-        # ue8m0_byte is [M, padded_scale_k] — reshape to [M, packed_k, 4]
-        ue8m0_groups = ue8m0_byte.reshape(M, packed_k, 4)
-        packed_per_row = (ue8m0_groups[:, :, 0]
-                          | (ue8m0_groups[:, :, 1] << 8)
-                          | (ue8m0_groups[:, :, 2] << 16)
-                          | (ue8m0_groups[:, :, 3] << 24))  # [M, packed_k]
-        # Create column-major [M, packed_k] scale: physical layout has M contiguous
-        # allocate_packed_ue8m0_scale equivalent: strided (M, packed_k) stride (1, aligned_M)
-        packed_colmajor = torch.empty_strided(
-            (M, packed_k), (1, aligned_M),
-            dtype=torch.int32, device=packed_per_row.device)
-        packed_colmajor.copy_(packed_per_row)  # copy [M, packed_k] row-major into col-major storage
-
-        return new_fp8.contiguous(), packed_colmajor.view(torch.uint32)
 
     @property
-    def _weights_are_fp8(self):
-        """Check if we're working with FP8 weights (vs BF16 post-dequant)."""
-        return hasattr(self, '_is_fp8_mode') and self._is_fp8_mode
 
     def _attach_fp8_weight(self, state_dict, key, name):
         """Attach FP8 weight + raw float32 scale_inv (NEW kernel format),
@@ -2580,7 +2132,6 @@ class DeepSeekV3Builder(GraphBuilder):
         w_gate_up, s_gate_up = self._attach_fp8_weight(
             state_dict, f"{prefix}mlp.gate_up_proj.weight",
             f"layer_{layer_idx}_gate_up_proj")
-        gate_up_split_k = self._pick_fp8_splitk_factor(w_gate_up)
         # TP=2 workaround (2026-05-18): the fp8_gemm_dense_mediumm kernel
         # faults with cudaErrorLaunchFailure (719) at `mb_arrive_tx` when
         # invoked with the TP=2 gate_up shape (M=8, N=18432, K=7168). Other
@@ -2594,14 +2145,9 @@ class DeepSeekV3Builder(GraphBuilder):
         # preserved. See [[project-tp2-debug-session-20260518]].
         split_tp2_gate_up = (
             self.world_size == 2
-            and gate_up_split_k is None
             and w_gate_up.dim(0) % 2 == 0
         )
-        if gate_up_split_k is not None:
-            self._fp8_linear_splitk(
-                self.rmsnorm_out, w_gate_up, s_gate_up, self.mlp_mid,
-                split_k=gate_up_split_k)
-        elif split_tp2_gate_up:
+        if split_tp2_gate_up:
             N_full = w_gate_up.dim(0)
             N_half = N_full // 2
             # Each half-weight is [N_half, K]; scale half is [N_half/128, K/128].
@@ -2641,19 +2187,13 @@ class DeepSeekV3Builder(GraphBuilder):
         w_down, s_down = self._attach_fp8_weight(
             state_dict, f"{prefix}mlp.down_proj.weight",
             f"layer_{layer_idx}_down_proj")
-        down_split_k = self._pick_fp8_splitk_factor(w_down)
-        if down_split_k is not None and self.world_size == 1:
-            # TP=1 splitk path: alias mlp_out to self.x for in-place residual
-            # accumulation via tma_reduce_add.
-            self.mlp_out = self.x
-        else:
-            # Per-layer output to avoid aliasing self.x ↔ self.mlp_out.
-            self.mlp_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_mlp_fused",
-                io_category="cuda_tensor",
-            )
+        # Per-layer output to avoid aliasing self.x ↔ self.mlp_out.
+        self.mlp_out = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_mlp_fused",
+            io_category="cuda_tensor",
+        )
         self._silu_mul_fp8_linear(
             self.mlp_mid,
             self.silu_mul_out,
@@ -2664,8 +2204,6 @@ class DeepSeekV3Builder(GraphBuilder):
             linear_grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
             block_dim=(128, 1, 1),
             residual=self.x,
-            use_splitk=(down_split_k is not None),
-            splitk_split_k=down_split_k,
         )
 
     def _setup_new_moe_buffers(self):
@@ -2923,29 +2461,11 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_shared_mid",
             io_category="cuda_tensor",
         )
-        shared_gu_split_k = self._pick_fp8_splitk_factor(w_shared_gate_up)
-        # Builder-side split-K=2 on the decode gate_up GEMM via the WORKING
-        # dense kernel + bf16 reduce (−8.2μs/layer, 347.4→339.2,
-        # token-identical at TP4; TP8 EP2 61L run-validated).
-        _bsk = 2
-        if (has_shared_scale
-                and w_shared_gate_up.dim(1) % (128 * _bsk) == 0):
-            # Builder-side split-K (decode 1-CTA-GEMM parallelization, the
-            # −45μs system lever; the retired in-kernel split-K crashed at
-            # TP=4 so we split-K via the working dense kernel + reduce).
-            self._fp8_linear_builder_splitk(
-                self.rmsnorm_out, fused_key, state_dict, shared_mid, _bsk,
-                f"layer_{layer_idx}_shared_gate_up")
-        elif shared_gu_split_k is not None:
-            self._fp8_linear_splitk(
-                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
-                shared_mid, split_k=shared_gu_split_k)
-        else:
-            self._fp8_linear(self.rmsnorm_out, w_shared_gate_up,
-                             s_shared_gate_up, shared_mid,
-                             grid_dim=(grid_for_rmsnorm_linear_layer(
-                                 w_shared_gate_up.dim(0)), 1, 1),
-                             block_dim=(128, 1, 1))
+        self._fp8_linear(self.rmsnorm_out, w_shared_gate_up,
+                         s_shared_gate_up, shared_mid,
+                         grid_dim=(grid_for_rmsnorm_linear_layer(
+                             w_shared_gate_up.dim(0)), 1, 1),
+                         block_dim=(128, 1, 1))
 
         # silu_mul + down_proj
         shared_silu_out = self.mpk.new_tensor(
@@ -3016,31 +2536,15 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_router_logits",
             io_category="cuda_tensor",
         )
-        if self._BF16_GATE_SPLITK_ENABLED:
-            # Router gate via BF16 splitk swapAB: output=NUM_EXPERTS, K=hidden.
-            # grid.x splits N into 128-wide tiles; grid.y is split_k chosen to
-            # pack as many tasks as possible into a single worker wave (~128
-            # SMs on B200). accumulate=False so the prepended tensor_init
-            # zeroes router_logits before reduce-add.
-            gate_split_k = self._pick_bf16_splitk_factor(w_gate)
-            self.mpk.splitk_linear_layer(
-                input=self.rmsnorm_out,
-                weight=w_gate,
-                output=router_logits,
-                grid_dim=(w_gate.dim(0) // 128, gate_split_k, 1),
-                block_dim=(256, 1, 1),
-                accumulate=False,
-            )
-        else:
-            router_grid = min(grid_for_rmsnorm_linear_layer(w_gate.dim(0)),
-                              w_gate.dim(0) // 8)
-            self.mpk.linear_layer(
-                input=self.rmsnorm_out,
-                weight=w_gate,
-                output=router_logits,
-                grid_dim=(router_grid, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+        router_grid = min(grid_for_rmsnorm_linear_layer(w_gate.dim(0)),
+                          w_gate.dim(0) // 8)
+        self.mpk.linear_layer(
+            input=self.rmsnorm_out,
+            weight=w_gate,
+            output=router_logits,
+            grid_dim=(router_grid, 1, 1),
+            block_dim=(128, 1, 1),
+        )
 
         _moe_io = "nvshmem_tensor" if self._use_nvshmem else "cuda_tensor"
         moe_output = self.mpk.new_tensor(
@@ -3220,16 +2724,6 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mlp_out = moe_output
 
 
-    def _cached_new_tensor(self, dims, dtype, name, io_category="cuda_tensor"):
-        """new_tensor with caching — reuses tensor from first call with same name.
-        Needed for MTP draft loop where intermediate tensors are shared across steps."""
-        safe_name = name.replace('.', '_')
-        if safe_name in self._attach_cache:
-            return self._attach_cache[safe_name]
-        dtensor = self.mpk.new_tensor(dims=dims, dtype=dtype, name=safe_name,
-                                       io_category=io_category)
-        self._attach_cache[safe_name] = dtensor
-        return dtensor
 
 
 
