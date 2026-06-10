@@ -1,3 +1,18 @@
+"""v2 SMEM page planner.
+
+A CTA's dynamic SMEM is NUM_PAGES (14) x PAGE_SIZE (16 KB). Each task declares
+its SMEM regions via make_smem_info (carried in the task-graph JSON);
+add_v2_region_smem_plan() places every region onto physical page(s) -- small
+can_pack regions share a page by byte offset, larger ones take a contiguous run
+-- and writes "planned_smem_page_regions" (physical pages + byte offset) back
+per task. The device reads those into task_desc.smem_regions[] and addresses
+them via smem_region_offset(); release_step orders page freeing.
+
+It walks the per-SM v2_worker_task_queues in execution order, threading each
+task's release order into the next as that task's preferred page-id order --
+kept for cross-task overlap (Phase E), a no-op while CROSS_TASK_PAGES is off.
+"""
+
 import json
 
 
