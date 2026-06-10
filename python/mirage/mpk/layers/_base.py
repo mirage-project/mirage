@@ -118,11 +118,13 @@ class MPKModule(nn.Module):
         naming and may contain underscore separators distinct from HF's
         dotted keys.
 
-        Override on composite modules that need fused-key handling (e.g.,
-        ``Qwen3Attention`` mapping HF ``q_proj.weight`` →
-        ``qkv_proj.weight`` with ``shard_id="q"``); the override applies a
-        name-remap table, then delegates the rest to
-        ``super().load_weights``.
+        To customize routing (HF-key remaps, fused/expert keys), a model
+        overrides :meth:`resolve_weight` on its TOP-LEVEL module (the object
+        ``load_weights`` is called on) — the streaming loop only consults the
+        top-level resolver, not submodules'. The override remaps the key and
+        delegates the default path to ``super().resolve_weight`` (see
+        ``Qwen3ForCausalLM.resolve_weight``). Models that need stateful loading
+        (e.g. fp8 weight↔scale pairing) override ``load_weights`` itself.
 
         Returns the set of names (relative to ``self``) that were consumed;
         the top-level caller compares against the iterator's full set to
