@@ -882,9 +882,19 @@ class DeepseekV3MoEMLP(MPKModule):
         self.hidden_size = config.hidden_size
         self.moe_intermediate_size = config.moe_intermediate_size
         self.num_experts = config.n_routed_experts
-        pc = current_pk().parallel_config
-        self.ep_size = pc.ep_size
-        self.ep_rank = pc.ep_rank
+        # EP topology comes from the active PersistentKernel when the model is
+        # built inside a compile scope (e.g. via build_from_config). The
+        # single-GPU demo constructs the model BEFORE any compile scope exists,
+        # so current_pk() is unavailable there — fall back to ep_size=1 (no
+        # expert parallelism), which is the correct single-GPU behavior. Matches
+        # the catalog convention that __init__ does not require a compile scope.
+        try:
+            pc = current_pk().parallel_config
+            self.ep_size = pc.ep_size
+            self.ep_rank = pc.ep_rank
+        except RuntimeError:
+            self.ep_size = 1
+            self.ep_rank = 0
         if self.num_experts % self.ep_size != 0:
             raise ValueError(
                 f"DeepseekV3MoEMLP: n_routed_experts ({self.num_experts}) % "
