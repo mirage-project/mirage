@@ -16,9 +16,35 @@ kept for cross-task overlap (Phase E), a no-op while CROSS_TASK_PAGES is off.
 import json
 
 
+# PAGE_SIZE and NUM_PAGES are the single-sourced page geometry: the C++ runtime
+# (runtime_header.h: TASK_SMEM_PAGE_SIZE / MAX_SMEM_PAGES_PER_TASK) emits them
+# into the task graph as "v2_smem_config", and _apply_smem_config() overrides
+# the values below at planning time. The literals here are fallbacks (e.g. for a
+# standalone test with no config block).
 PAGE_SIZE = 16 * 1024
 NUM_PAGES = 14
+
+# CAPACITY_BYTES is the target's usable dynamic-SMEM budget -- the value the
+# megakernel passes to cudaFuncAttributeMaxDynamicSharedMemorySize, i.e. C++
+# MAX_DYNAMIC_SHARED_MEMORY_SIZE. That constant is #ifdef'd on arch/mode and
+# core.so is compiled arch-agnostic, so it CANNOT be emitted from there (it
+# would carry the wrong arch's value). It stays here; update it if the target's
+# SMEM budget changes. 225 KB Blackwell dynamic SMEM minus the 6 KB static
+# reserve (WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE).
 CAPACITY_BYTES = 225 * 1024 - 6 * 1024
+
+
+def _apply_smem_config(graph: dict) -> None:
+    """Override the page geometry with the C++-emitted v2_smem_config so the
+    planner uses the exact page size / count the runtime does (single source).
+    Runs once per planned graph, before any task is placed. CAPACITY_BYTES is
+    not part of the config -- see its comment above."""
+    cfg = graph.get("v2_smem_config")
+    if not cfg:
+        return
+    global PAGE_SIZE, NUM_PAGES
+    PAGE_SIZE = int(cfg["page_size"])
+    NUM_PAGES = int(cfg["num_pages"])
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -331,6 +357,7 @@ def _validate_worker_task_queues(queues: list, num_tasks: int) -> None:
 
 def add_v2_region_smem_plan(task_graph_json: str) -> str:
     graph = json.loads(task_graph_json)
+    _apply_smem_config(graph)
     tasks = graph.get("all_tasks", [])
     queues = graph.get("v2_worker_task_queues")
     if queues is None:
@@ -342,7 +369,7 @@ def add_v2_region_smem_plan(task_graph_json: str) -> str:
         "version": 1,
         "page_size": PAGE_SIZE,
         "num_pages": NUM_PAGES,
-        "capacity_bytes": PAGE_SIZE * NUM_PAGES,
+        "capacity_bytes": CAPACITY_BYTES,
         "num_workers": num_workers,
     }
 

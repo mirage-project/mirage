@@ -1451,6 +1451,17 @@ TaskGraphResult print_task_graph(
 
   generate_v2_role_dispatch_code(code, task_type_to_name, *task_register);
 
+  // Single source of the v2 SMEM page geometry: emit the unconditional
+  // runtime_header.h constants so the Python SMEM planner reads them instead of
+  // re-hardcoding page size / count. (MAX_DYNAMIC_SHARED_MEMORY_SIZE is NOT
+  // emitted here: it is #ifdef'd on arch/mode, and core.so is compiled
+  // arch-agnostic, so its value here would not match the megakernel's. The
+  // planner keeps the SMEM byte budget itself.)
+  json_task_graph["v2_smem_config"] = {
+      {"page_size", TASK_SMEM_PAGE_SIZE},
+      {"num_pages", MAX_SMEM_PAGES_PER_TASK},
+  };
+
   // Write json to output file
   // std::ofstream out("task_graph.json");
   // out << json_task_graph.dump(2);
