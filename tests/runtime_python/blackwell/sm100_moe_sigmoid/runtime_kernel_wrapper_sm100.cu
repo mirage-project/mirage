@@ -227,8 +227,7 @@ void topk_sigmoid_sm100_multicta(torch::Tensor gating_output,
                                      mpk_active_expert_ids_ptr,
                                      BATCH_SIZE,
                                      routed_scaling_factor);
-    compact_active_markers_kernel<EXP>
-        <<<1, 32>>>(mpk_active_expert_ids_ptr);
+    compact_active_markers_kernel<EXP><<<1, 32>>>(mpk_active_expert_ids_ptr);
   } else {
     printf("Unsupported configuration: num_experts=%d num_groups=%d "
            "topk_group=%d\n",

@@ -68,21 +68,22 @@ __device__ __noinline__ void
   // One head per CTA: the per-task TMA descriptors and per-head scale base
   // pointers already encode the head offset, so this CTA computes the entire
   // per-head tile by itself (worker_idx=0, num_workers=1).
-  fp8_gemm_dense_qout_common::task_impl_tpl<BN, NS, NE>(ta_ptr,
-                                                   tb_ptr,
-                                                   sa,
-                                                   sb,
-                                                   C,
-                                                   M,
-                                                   N,
-                                                   K,
-                                                   /*worker_idx=*/0,
-                                                   /*num_workers=*/1,
-                                                   /*C_fp8=*/nullptr,
-                                                   /*C_scale=*/nullptr,
-                                                   /*scale_outer_stride=*/0,
-                                                   sa_row_stride,
-                                                   C_row_stride);
+  fp8_gemm_dense_qout_common::task_impl_tpl<BN, NS, NE>(
+      ta_ptr,
+      tb_ptr,
+      sa,
+      sb,
+      C,
+      M,
+      N,
+      K,
+      /*worker_idx=*/0,
+      /*num_workers=*/1,
+      /*C_fp8=*/nullptr,
+      /*C_scale=*/nullptr,
+      /*scale_outer_stride=*/0,
+      sa_row_stride,
+      C_row_stride);
 }
 
 template <int BN, int NS, int NE>

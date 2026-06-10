@@ -1158,11 +1158,11 @@ TaskGraphResult print_task_graph(
   code.e("using namespace mirage::runtime;");
   // Global variable for runtime JSON path (for kernel reuse across directories)
   if (use_json_format) {
-  code.e("");
-  code.e("// Global variable for runtime JSON path (referenced by Python for "
-         "kernel reuse)");
-  code.e("std::string g_task_graph_json_path;");
-  code.e("");
+    code.e("");
+    code.e("// Global variable for runtime JSON path (referenced by Python for "
+           "kernel reuse)");
+    code.e("std::string g_task_graph_json_path;");
+    code.e("");
   }
   code.e("size_t get_event_id(int my_gpu_id, size_t event_pos, bool "
          "nvshmem_event) {");

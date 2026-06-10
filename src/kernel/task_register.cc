@@ -6092,11 +6092,12 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
 // num_workers, optional runtime_m_mode); `scale_outer_stride` is derived
 // from N at codegen time (= N/128 = number of K-groups per row, since
 // BN=128 and we statically restrict the fused path to BN=128).
-static int register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
-                                                  std::vector<int> const &params,
-                                                  char const *namespace_name,
-                                                  char const *fn_name,
-                                                  TaskType task_type) {
+static int
+    register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
+                                           std::vector<int> const &params,
+                                           char const *namespace_name,
+                                           char const *fn_name,
+                                           TaskType task_type) {
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
