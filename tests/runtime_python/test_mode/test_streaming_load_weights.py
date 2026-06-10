@@ -69,3 +69,15 @@ def test_skip_weight_is_consumed_and_not_required():
     m = _Skipper()
     consumed = m.load_weights(iter([("weight", torch.ones(4, 4))]))
     assert consumed == {"weight"}        # skipped keys still count as consumed
+
+
+def test_qwen3_qnorm_knorm_remap():
+    from mirage.mpk.models.qwen3.modeling import _remap_qwen3_hf_key
+    assert _remap_qwen3_hf_key("model.layers.3.self_attn.q_norm.weight") == \
+        "model.layers.3.self_attn.attn.q_norm"
+    assert _remap_qwen3_hf_key("model.layers.3.self_attn.k_norm.weight") == \
+        "model.layers.3.self_attn.attn.k_norm"
+    # non-matching keys pass through unchanged
+    assert _remap_qwen3_hf_key("model.layers.3.self_attn.q_proj.weight") == \
+        "model.layers.3.self_attn.q_proj.weight"
+    assert _remap_qwen3_hf_key("lm_head.weight") == "lm_head.weight"
