@@ -14,18 +14,25 @@ direct-pk path). It mirrors the structure of
     counterpart; the official HF reference at
     ``transformers/models/deepseek_v3/modeling_deepseek_v3.py`` is the
     correctness oracle.
-  * HF state_dict loading goes through a custom ``_load_from_state_dict``
-    on each block that maps HF keys to the un-fused ``nn.Parameter`` names
-    used here. The driver
-    (``demo/deepseek_v3/demo_new.py``) is responsible for KV-absorption and
-    W_UV→o_proj fusion **before** ``load_state_dict()``.
+  * HF checkpoint loading goes through a streaming ``load_weights`` on
+    :class:`DeepseekV3ForCausalLM` (vLLM-style): it consumes raw
+    ``(name, tensor)`` pairs, **dequantizes FP8 weights inline** by pairing
+    each weight with its ``<name>_scale_inv`` partner, **filters routed
+    experts by EP** (non-local experts are skipped, never stored) and stacks
+    local experts via the per-expert ``weight_loader``, **stashes the raw
+    MLA ``q_b`` / ``kv_b`` / ``o_proj`` weights** on the owning MLA module
+    for the later ``process_weights`` absorption step (KV-absorption +
+    W_UV→o_proj fusion), and copies the router ``e_score_correction_bias``
+    straight to FP32. All other (directly-mappable) keys are remapped to the
+    catalog ``named_parameters()`` path and copied in BF16.
 
 Scope (deliberately reduced for v1)
 -----------------------------------
 
-* **BF16 only.** No FP8 paths — the catalog ``Linear`` /
-  ``LinearWithResidual`` / ``MoEW13(bf16)`` / ``MoEW2(bf16)`` modules are
-  used. FP8 catalog modules (``LinearFP8`` etc.) are deferred.
+* **FP8 dequantized inline at load.** The catalog ``Linear`` /
+  ``LinearWithResidual`` / ``MoEW13(bf16)`` / ``MoEW2(bf16)`` modules hold
+  BF16 weights; ``load_weights`` dequantizes any FP8 checkpoint tensors to
+  BF16 on the fly. The FP8 catalog modules (``LinearFP8`` etc.) are deferred.
 * **Single GPU only.** ``world_size=1``, ``ep_size=1``, no NVShmem.
 * **Decode-only.** ``max_num_batched_tokens<=8``. Uses ``MLADecode`` +
   ``MLAReduce`` (with ``num_splits=1`` when ``max_seq_length/page_size<=1``).
@@ -129,6 +136,29 @@ def _parse_expert_key(name: str) -> Optional[Tuple[int, int, str]]:
     if m is None:
         return None
     return int(m.group(1)), int(m.group(2)), m.group(3)
+
+
+# Matches any per-layer key, e.g. ``model.layers.61.eh_proj.weight`` ->
+# layer_idx=61. Used to skip keys for layers the model did NOT build
+# (reduced-layer runs via --num-hidden-layers-override) and MTP keys
+# (``model.layers.<num_hidden_layers>.*``: eh_proj, enorm, hnorm,
+# shared_head.*) that have no catalog counterpart.
+_LAYER_KEY_RE = re.compile(r"^model\.layers\.(\d+)\.")
+
+
+def _is_out_of_range_layer_key(name: str, built_layers: int) -> bool:
+    """Whether ``name`` is a ``model.layers.{i}.*`` key for a layer the model
+    did NOT build (``i >= built_layers``).
+
+    Such keys arise from MTP weights (at ``model.layers.<num_hidden_layers>.*``)
+    and from reduced-layer runs (``--num-hidden-layers-override`` builds fewer
+    layers than the checkpoint contains). They have no catalog parameter and
+    must be skipped rather than treated as unrecognized.
+    """
+    m = _LAYER_KEY_RE.match(name)
+    if m is None:
+        return False
+    return int(m.group(1)) >= built_layers
 
 
 # FP8 dequant helpers, transcribed verbatim from
@@ -1237,6 +1267,10 @@ class DeepseekV3ForCausalLM(MPKModule):
         """Stream raw HF safetensors ``(name, tensor)`` into catalog params.
 
         Stateful single-pass loop that:
+          * SKIPS keys for layers the model did NOT build
+            (``model.layers.{i}.*`` with ``i >= len(self.model.layers)`` —
+            MTP weights + reduced-layer runs); done early so out-of-range fp8
+            weights/scales are never left dangling,
           * dequantizes fp8 weights inline by pairing each weight with its
             ``<name>_scale_inv`` partner (either order of arrival),
           * routes routed-expert weights through the EP-aware per-expert
@@ -1245,15 +1279,17 @@ class DeepseekV3ForCausalLM(MPKModule):
             the owning MLA module for the later MLA-absorption step
             (``process_weights``; Task C3) — they are NOT written into params
             here,
+          * copies the router ``e_score_correction_bias`` straight from its
+            raw (native fp32) tensor to ``routing.bias`` (no bf16 round-trip),
           * writes every other (directly-mappable) param via
-            :meth:`resolve_weight` + ``param.data.copy_``, with the router
-            ``e_score_correction_bias`` cast to fp32.
+            :meth:`resolve_weight` + ``param.data.copy_`` in bf16.
 
         Returns the set of HF keys consumed (including skipped non-local
         expert weights and their scales).
         """
         params = dict(self.named_parameters())
         consumed: Set[str] = set()
+        built_layers = len(self.model.layers)
 
         # fp8 pairing buffers: a weight and its '<name>_scale_inv' partner may
         # arrive in either order. ``fp8_pending`` holds weights awaiting a
@@ -1267,6 +1303,16 @@ class DeepseekV3ForCausalLM(MPKModule):
             self._route_weight(wname, w, params, consumed)
 
         for name, tensor in weights:
+            # Skip keys for layers the model did NOT build (MTP layer
+            # ``model.layers.<num_hidden_layers>.*`` + reduced-layer runs).
+            # Done EARLY — before fp8 buffering and expert/MLA routing — so
+            # an out-of-range fp8 weight/scale is never left dangling in the
+            # pairing buffers. Covers both weight keys and their
+            # ``_scale_inv`` companions (same ``model.layers.{i}.`` prefix).
+            if _is_out_of_range_layer_key(name, built_layers):
+                consumed.add(name)
+                continue
+
             if name.endswith("_scale_inv"):
                 base = name[: -len("_scale_inv")]
                 # If the scale belongs to a NON-LOCAL routed expert, the weight
@@ -1301,6 +1347,24 @@ class DeepseekV3ForCausalLM(MPKModule):
                     consumed.add(name)
                 else:
                     fp8_pending[name] = tensor
+                continue
+
+            # Router e_score_correction_bias: route the RAW (native fp32)
+            # tensor to fp32 BEFORE the bf16 cast below, avoiding a lossy
+            # F32->bf16->F32 round-trip. The checkpoint stores this bias as
+            # F32 and the routing.bias param is fp32; fp8 dequant (above)
+            # never applies to it, so ``tensor`` is its native fp32 here.
+            if name.endswith(".mlp.gate.e_score_correction_bias"):
+                layer_idx = self._layer_idx_from_key(name)
+                moe = self._layer_mlp(layer_idx)
+                if moe is None:
+                    raise ValueError(
+                        "DeepseekV3ForCausalLM.load_weights: "
+                        "e_score_correction_bias for non-MoE/oob layer in key "
+                        f"{name!r}"
+                    )
+                moe.routing.bias.data.copy_(tensor.to(torch.float32))
+                consumed.add(name)
                 continue
 
             # Already a normal float dtype — cast to bf16 and route now.
@@ -1376,18 +1440,8 @@ class DeepseekV3ForCausalLM(MPKModule):
             consumed.add(name)
             return
 
-        # ---- Router e_score_correction_bias -> routing.bias (fp32). ----
-        if name.endswith(".mlp.gate.e_score_correction_bias"):
-            layer_idx = self._layer_idx_from_key(name)
-            moe = self._layer_mlp(layer_idx)
-            if moe is None:
-                raise ValueError(
-                    "DeepseekV3ForCausalLM.load_weights: e_score_correction_bias "
-                    f"for non-MoE/oob layer in key {name!r}"
-                )
-            moe.routing.bias.data.copy_(w.to(torch.float32))
-            consumed.add(name)
-            return
+        # (Router e_score_correction_bias is routed directly from its raw fp32
+        # tensor in load_weights, before the bf16 cast — never reaches here.)
 
         # ---- Directly-mappable params: remap + default resolve + copy_. ----
         res = self.resolve_weight(name, params)

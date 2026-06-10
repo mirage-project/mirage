@@ -4,6 +4,7 @@ We only test the *pure* pieces that don't need a live PersistentKernel:
 
   * ``_remap_dsv3_key`` — the HF-key -> catalog ``named_parameters()`` path map.
   * ``_parse_expert_key`` — the routed-expert key regex parser.
+  * ``_is_out_of_range_layer_key`` — detect MTP / reduced-layer keys to skip.
 
 The full ``DeepseekV3ForCausalLM.load_weights`` needs a constructed model
 (live PK + CUDA), so it is exercised by the demo, not here.
@@ -23,6 +24,7 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 from mirage.mpk.models.deepseek_v3.modeling import (  # noqa: E402
+    _is_out_of_range_layer_key,
     _parse_expert_key,
     _remap_dsv3_key,
 )
@@ -139,3 +141,47 @@ def test_parse_expert_key_up_and_down():
 )
 def test_parse_expert_key_none(non_expert_key):
     assert _parse_expert_key(non_expert_key) is None
+
+
+# ---------------------------------------------------------------------------
+# _is_out_of_range_layer_key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # MTP keys live at model.layers.<num_hidden_layers>.* (here: 61);
+        # with built_layers=4 they are out of range.
+        "model.layers.61.eh_proj.weight",
+        "model.layers.61.enorm.weight",
+        "model.layers.61.hnorm.weight",
+        "model.layers.61.shared_head.norm.weight",
+        # Reduced-layer run: checkpoint has layer 5 but only 4 were built.
+        "model.layers.5.mlp.gate.weight",
+        "model.layers.4.self_attn.q_a_proj.weight",  # boundary: idx == built
+        # fp8 scale companion for an out-of-range layer.
+        "model.layers.61.eh_proj.weight_scale_inv",
+        "model.layers.5.mlp.experts.0.gate_proj.weight",
+    ],
+)
+def test_is_out_of_range_layer_key_skip(key):
+    assert _is_out_of_range_layer_key(key, built_layers=4) is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # In-range built layers (built_layers=4 -> valid indices 0..3).
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.2.self_attn.q_a_proj.weight",
+        "model.layers.3.mlp.gate.weight",
+        "model.layers.3.mlp.experts.255.down_proj.weight",
+        # Non-layer keys are never out-of-range (global tensors).
+        "model.embed_tokens.weight",
+        "model.norm.weight",
+        "lm_head.weight",
+    ],
+)
+def test_is_out_of_range_layer_key_keep(key):
+    assert _is_out_of_range_layer_key(key, built_layers=4) is False
