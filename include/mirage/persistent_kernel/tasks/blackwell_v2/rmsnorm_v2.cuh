@@ -223,28 +223,11 @@ struct RmsNormStorer {
       int) {}
 };
 
-struct RmsNormTask : public ::kernel::v2_task::TaskInterface<RmsNormTask> {
+struct RmsNormTask : public ::kernel::v2_task::TaskInterface {
   using loader = RmsNormLoader;
   using launcher = RmsNormLauncher;
   using consumer = RmsNormConsumer;
   using storer = RmsNormStorer;
-
-  static constexpr ::kernel::v2_task::TaskSpecView spec() {
-    return ::kernel::v2_task::TaskSpecView{
-        mirage::runtime::TASK_RMS_NORM_HOPPER_V2,
-        "rmsnorm",
-        0,
-        1024,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        0,
-    };
-  }
 };
 
 } // namespace rmsnorm_v2

@@ -233,28 +233,11 @@ struct ArgmaxStorer {
   }
 };
 
-struct ArgmaxTask : public ::kernel::v2_task::TaskInterface<ArgmaxTask> {
+struct ArgmaxTask : public ::kernel::v2_task::TaskInterface {
   using loader = ArgmaxLoader;
   using launcher = ArgmaxLauncher;
   using consumer = ArgmaxConsumer;
   using storer = ArgmaxStorer;
-
-  static constexpr ::kernel::v2_task::TaskSpecView spec() {
-    return ::kernel::v2_task::TaskSpecView{
-        mirage::runtime::TASK_ARGMAX_PARTIAL_SM100_V2,
-        "argmax",
-        0,
-        128,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        0,
-    };
-  }
 };
 
 } // namespace v2
