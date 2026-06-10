@@ -33,10 +33,13 @@ module's weight load from ``state_dict["model.layers.3.self_attn.q_proj.weight"]
 without any custom loader plumbing.
 """
 
-from typing import Iterable, Set, Tuple
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
+
+# Sentinel: key is recognized but intentionally not loaded (e.g. non-local expert).
+SKIP_WEIGHT: Any = object()
 
 
 GridDim = Tuple[int, int, int]
@@ -125,51 +128,76 @@ class MPKModule(nn.Module):
         the top-level caller compares against the iterator's full set to
         detect missing/extra keys.
         """
-        weights_list = list(weights)
+        params = dict(self.named_parameters())
         consumed: Set[str] = set()
+        loaded_paths: Set[str] = set()
 
-        # Build a routing table from named_modules(): the dotted path
-        # produced by named_modules is precisely the HF state_dict key
-        # prefix (sans trailing dot). Sort by descending prefix length so
-        # the first match is the deepest.
-        routing = [(self, "")]
-        for name, mod in self.named_modules():
-            if isinstance(mod, MPKModule) and mod is not self and name:
-                routing.append((mod, name + "."))
-        routing.sort(key=lambda mp: -len(mp[1]))
-
-        # Group weights by destination module.
-        # value layout: (module, hf_prefix, list-of-(name, tensor))
-        groups = {}
-        for name, tensor in weights_list:
-            for mod, prefix in routing:
-                if prefix == "" or name.startswith(prefix):
-                    if id(mod) not in groups:
-                        groups[id(mod)] = (mod, prefix, [])
-                    groups[id(mod)][2].append((name, tensor))
-                    break
-
-        for mod, prefix, group in groups.values():
-            if mod is self:
-                # Local parameters: looked up by relative name.
-                for name, tensor in group:
-                    if name in self._parameters and self._parameters[name] is not None:
-                        param = self._parameters[name]
-                        loader = getattr(param, "weight_loader", None)
-                        if loader is not None:
-                            loader(param, tensor)
-                        else:
-                            param.data.copy_(tensor)
-                        consumed.add(name)
+        for name, tensor in weights:           # STREAMING: one tensor at a time
+            res = self.resolve_weight(name, params)
+            if res is None:
+                raise ValueError(
+                    f"{type(self).__name__}.load_weights: unexpected checkpoint "
+                    f"key {name!r} (no matching parameter)."
+                )
+            if res is SKIP_WEIGHT:
+                consumed.add(name)
+                continue
+            param, loader, kwargs = res
+            call_kwargs = {k: v for k, v in kwargs.items() if not k.startswith("_")}
+            if loader is not None:
+                loader(param, tensor, **call_kwargs)
             else:
-                # Recurse with prefix stripped so the descendant sees names
-                # relative to itself.
-                stripped = [(n[len(prefix):], t) for n, t in group]
-                sub = mod.load_weights(stripped)
-                for s in sub:
-                    consumed.add(prefix + s)
+                param.data.copy_(tensor)
+            consumed.add(name)
+            loaded_paths.add(kwargs.get("_path", name))
+            del tensor
 
+        self._assert_fully_loaded(params, loaded_paths)
         return consumed
+
+    def resolve_weight(
+        self,
+        name: str,
+        params: Dict[str, torch.nn.Parameter],
+    ) -> Optional[Tuple]:
+        """Map an HF key to (param, loader_or_None, kwargs), None, or SKIP_WEIGHT.
+
+        Default: 1:1 by deepest named_modules prefix -> that leaf's parameter,
+        using the parameter's weight_loader callback if present.
+
+        Returns:
+            None          — key not recognized (unexpected, fatal).
+            SKIP_WEIGHT   — recognized but intentionally skipped (counts as consumed).
+            (param, loader_or_None, kwargs) — apply loader or param.data.copy_().
+        """
+        routing = [(self, "")]
+        for mod_name, mod in self.named_modules():
+            if isinstance(mod, MPKModule) and mod is not self and mod_name:
+                routing.append((mod, mod_name + "."))
+        routing.sort(key=lambda mp: -len(mp[1]))
+        for mod, prefix in routing:
+            if prefix and not name.startswith(prefix):
+                continue
+            local = name[len(prefix):]
+            if local in mod._parameters and mod._parameters[local] is not None:
+                param = mod._parameters[local]
+                loader = getattr(param, "weight_loader", None)
+                return (param, loader, {"_path": name})
+        return None
+
+    def _assert_fully_loaded(
+        self,
+        params: Dict[str, torch.nn.Parameter],
+        loaded_paths: Set[str],
+    ) -> None:
+        """Raise if any parameter expected by this module was never loaded."""
+        optional = getattr(self, "_optional_param_paths", frozenset())
+        missing = (set(params) - loaded_paths) - set(optional)
+        if missing:
+            raise ValueError(
+                f"{type(self).__name__}.load_weights: parameters never loaded: "
+                f"{sorted(missing)}"
+            )
 
     def process_weights(self) -> None:
         """Hook for post-load weight transforms.
