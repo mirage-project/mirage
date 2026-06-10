@@ -12,13 +12,13 @@ TASK_PUSHING_EVENT_TYPES = {
 def build_v2_worker_task_queues(task_graph: dict, num_workers: int) -> list[list[int]]:
     """Per-SM task queues, in the exact order the v2 kernel will run them.
 
-    MUST stay in lockstep with the C++ twin `build_v2_plan` in
-    persistent_kernel_v2.cuh: the kernel executes the C++ plan, while THESE
-    queues drive the SMEM page planner (add_v2_region_smem_plan). If the two
-    orderings ever diverge, the page plan no longer describes the actual
-    execution order (harmless today with cross-task page overlap disabled,
-    page-plan-corrupting once Phase E turns it on). Same algorithm on both
-    sides: walk all_events in order, keep the task-pushing event types,
+    This is the single source of the v2 task ordering. The result is stored in
+    the task graph as "v2_worker_task_queues": the SMEM page planner
+    (add_v2_region_smem_plan) consumes it here, and the C++ runtime reads the
+    same queues out of task_graph.json in build_v2_plan to drive kernel
+    execution — so the page plan and the kernel can't disagree on order.
+
+    Algorithm: walk all_events in order, keep the task-pushing event types,
     round-robin each event's [first, last) range with a CONTINUOUS worker
     cursor across events, then prepend task 1 to worker 0.
     """

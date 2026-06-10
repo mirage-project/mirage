@@ -614,6 +614,20 @@ TaskGraphResult print_task_graph(
            "json_file(file_path.parent_path().string()+\"/task_graph.json\");");
     code.e("nlohmann::json json_task_graph;");
     code.e("json_file >> json_task_graph;");
+    // v2: the Python scheduler (v2_task_schedule.py) wrote the per-SM task
+    // queues into the JSON. Parse them into the global build_v2_plan consumes,
+    // so the kernel and the SMEM page planner share one task ordering. Guarded
+    // by USE_RUNTIME_V2 since persistent_kernel_v2.cuh is v2-only.
+    code.e("#ifdef USE_RUNTIME_V2");
+    code.e("if (json_task_graph.contains(\"v2_worker_task_queues\")) {");
+    code.e("  ::mirage::runtime_v2::g_v2_worker_task_queues.clear();");
+    code.e("  for (json const &q : json_task_graph[\"v2_worker_task_queues\"]) {");
+    code.e("    std::vector<size_t> queue;");
+    code.e("    for (json const &t : q) queue.push_back(t.get<size_t>());");
+    code.e("    ::mirage::runtime_v2::g_v2_worker_task_queues.push_back(queue);");
+    code.e("  }");
+    code.e("}");
+    code.e("#endif");
     // load tasks
     code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
     code.e("FullTaskDesc "

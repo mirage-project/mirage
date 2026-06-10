@@ -38,6 +38,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cstdio>
+#include <cassert>
 
 namespace mirage {
 namespace runtime_v2 {
@@ -46,61 +47,27 @@ using ::mirage::runtime::RuntimeConfig;
 using ::mirage::runtime::EventDesc;
 using ::mirage::runtime::TaskId;
 
+// Per-SM task queues, in execution order, produced by the Python scheduler
+// (v2_task_schedule.py) and parsed out of task_graph.json by the generated
+// construct_task_graph. This is the single source of the v2 task ordering —
+// the SMEM page planner consumes the same queues, so the kernel's execution
+// order and the page plan can never drift. Populated once at init, before
+// build_v2_plan runs.
+inline std::vector<std::vector<size_t>> g_v2_worker_task_queues;
+
 // ── Host-side: build per-SM static task plan ────────────────────────────────
-// Algorithm: walk all events in order, round-robin assign each event's task
-// range to workers. Matches v1 scheduler semantics closely enough to preserve
-// task ordering within events.
-//
-// MUST stay in lockstep with the Python twin build_v2_worker_task_queues
-// (python/mirage/mpk/v2_task_schedule.py): the kernel executes THIS plan,
-// while the Python queues drive the SMEM page planner. Same algorithm on
-// both sides (task-pushing event types, continuous round-robin cursor,
-// task 1 prepended to worker 0) — divergence silently desyncs the page plan
-// from the actual execution order.
-//
-// Reads all_events (device) by cudaMemcpying to host scratch.
-// Allocates v2_per_sm_task_positions / v2_per_sm_task_offsets on device and
-// fills config.v2_* fields.
+// Consumes g_v2_worker_task_queues (the Python scheduler's output, already in
+// execution order and including task 1 on worker 0). The SMEM page planner uses
+// the same queues, so the kernel and the page plan share one ordering. Flattens
+// the queues into v2_per_sm_task_positions / v2_per_sm_task_offsets on device.
 inline void build_v2_plan(RuntimeConfig &config) {
     int const num_workers = config.num_workers;
-    int const num_events = config.num_events;
 
-    // Pull all_events to host
-    std::vector<EventDesc> h_events(num_events);
-    cudaMemcpy(h_events.data(), config.all_events,
-               num_events * sizeof(EventDesc),
-               cudaMemcpyDeviceToHost);
-
-    // Pull first_tasks (the begin-of-graph seed tasks) to host
-    // They're pushed to a specific worker when EVENT_END_OF_TASK_GRAPH fires.
-    // For v2, we include task_pos=1 (begin_task_graph) in SM 0's list.
-
-    // Per-SM task position lists (one iteration's worth)
-    std::vector<std::vector<size_t>> per_sm(num_workers);
-
-    // Round-robin assign each task-pushing event's [first, last) range.
-    // EVENT_LAUNCH_TASKS / _MASSIVE_TASKS / _DEPENDENT_TASKS push tasks;
-    // EVENT_END_OF_TASK_GRAPH / EVENT_TERMINATION / EVENT_EMPTY do not.
-    size_t next_worker = 0;
-    int pushed_events = 0;
-    for (int e = 0; e < num_events; e++) {
-        EventDesc const &ev = h_events[e];
-        if (ev.event_type != ::mirage::runtime::EVENT_LAUNCH_TASKS &&
-            ev.event_type != ::mirage::runtime::EVENT_LAUNCH_MASSIVE_TASKS &&
-            ev.event_type != ::mirage::runtime::EVENT_LAUNCH_DEPENDENT_TASKS) {
-            continue;
-        }
-        if (ev.first_task_id >= ev.last_task_id) continue;
-        pushed_events++;
-        for (size_t t = ev.first_task_id; t < ev.last_task_id; t++) {
-            per_sm[next_worker % num_workers].push_back(t);
-            next_worker++;
-        }
-    }
-    // SM 0 also runs the "begin_task_graph" task (task_pos=1) that v1's
-    // scheduler pushes at iter boundary via END_OF_TASK_GRAPH. We prepend
-    // it so SM 0 runs it first each iter.
-    per_sm[0].insert(per_sm[0].begin(), 1);
+    std::vector<std::vector<size_t>> const &per_sm = g_v2_worker_task_queues;
+    assert((int)per_sm.size() == num_workers &&
+           "g_v2_worker_task_queues must hold num_workers queues — "
+           "construct_task_graph must parse v2_worker_task_queues from "
+           "task_graph.json before build_v2_plan runs");
 
     // Flatten into offsets + positions
     std::vector<size_t> h_offsets(num_workers + 1);
@@ -146,8 +113,8 @@ inline void build_v2_plan(RuntimeConfig &config) {
         if (n > max_per_sm) max_per_sm = n;
     }
     printf("[v2] static plan built: %d workers, %zu total tasks/iter "
-           "(avg %zu/SM, max %zu/SM, pushed_events=%d)\n",
-           num_workers, total, total / num_workers, max_per_sm, pushed_events);
+           "(avg %zu/SM, max %zu/SM)\n",
+           num_workers, total, total / num_workers, max_per_sm);
 }
 
 // ── Device kernel: advance per-iter state ──────────────────────────────────
