@@ -44,50 +44,6 @@ To enable profiling (which visualizes the execution timeline of each task):
 python demo/qwen3/demo.py --use-mirage --profiling
 ```
 
-## MPK 2.0 (Experimental)
-
-MPK 2.0 is a redesign of the runtime around **warp specialization** and
-**static planning**. Where MPK 1.0 dedicates some SMs to schedulers that
-dispatch tasks to worker SMs at runtime, MPK 2.0 compiles the whole decode
-step into a fixed per-SM program executed by a single persistent kernel —
-no scheduler SMs, no runtime task queues.
-
-High-level design:
-
-* **Warp-specialized runtime** — each SM runs 8 warps with dedicated roles:
-  4 compute (consumer) warps, a loader warp (TMA), a launcher warp
-  (tensor-core MMA), a storer warp, and a controller warp that streams task
-  descriptors through an on-SM instruction ring.
-* **Static per-SM schedule** — the compiler assigns every task of a decode
-  step to a specific SM in a specific order; cross-task dependencies are
-  still enforced at runtime through lightweight event counters.
-* **Paged shared memory** — SMEM is managed as fixed-size pages; a
-  compile-time planner packs each task's memory regions onto pages and
-  chains page reuse between consecutive tasks on the same SM, laying the
-  groundwork for overlapping one task's weight loads with the previous
-  task's compute.
-* **Channel abstraction** — warp-specialized ops are built from typed
-  producer/consumer rings (synchronization separated from storage). On
-  Blackwell, the linear op runs as a fully pipelined
-  TMA → tcgen05 MMA → epilogue dataflow across the role warps.
-
-Run the demo with the 2.0 runtime by adding `--use-v2`:
-```bash
-python demo/qwen3/demo.py --use-mirage --use-v2
-```
-
-Decode latency vs. MPK 1.0 (Qwen3-8B, B200, 1-token prompt, 512 decode
-steps): 2.0 is ahead at small batch sizes; the gap at batch 16 comes from
-attention-batch scaling and is being worked on.
-
-<div align="center">
-<img src="docs/mpk/figures/bs_sweep_v1_v2.png" alt="MPK 1.0 vs 2.0 decode latency, batch 1-16" width="600"/>
-</div>
-
-For a code walkthrough see [docs/mpk/V2_CODEBASE.md](docs/mpk/V2_CODEBASE.md);
-status and known limitations are tracked in
-[docs/mpk/V2_TODO.md](docs/mpk/V2_TODO.md).
-
 ## How MPK Works
 Once you've imported the Mirage package, you can instantiate a persistent kernel using the following API:
 ```python
