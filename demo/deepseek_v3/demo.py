@@ -444,6 +444,7 @@ if __name__ == "__main__":
         mpk = mi.PersistentKernel(
             mode="offline",
             world_size=world_size,
+            spec_decode_config=None,
             # Cache-only build: a single process with a forced rank that may
             # exceed the visible device count → tell the kernel it's rank 0 (the
             # one visible GPU). mpk is unused in cache-only mode (we exit at the

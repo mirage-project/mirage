@@ -1221,12 +1221,6 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
 
-    @staticmethod
-
-
-
-
-
     def _silu_mul_fp8_linear(self, silu_input, silu_bf16_output, weight,
                              weight_scale, output, silu_grid_dim,
                              linear_grid_dim, block_dim, residual=None):
@@ -1635,10 +1629,6 @@ class DeepSeekV3Builder(GraphBuilder):
         dtensor = self.mpk.attach_input(torch_tensor=tensor, name=safe_name)
         self._attach_cache[safe_name] = dtensor
         return dtensor
-
-    @staticmethod
-
-    @property
 
     def _attach_fp8_weight(self, state_dict, key, name):
         """Attach FP8 weight + raw float32 scale_inv (NEW kernel format),
