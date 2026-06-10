@@ -70,7 +70,7 @@ class _MoEW13Base(MPKModule):
 
     Owns ``(num_experts, num_experts_per_tok, hidden_size,
     intermediate_size)``. Per-expert weights are stacked along dim 0:
-    ``self.weight`` is ``(num_experts, 2*intermediate, hidden)``; this is
+    ``self.weight`` is ``(num_local_experts, 2*intermediate, hidden)``; this is
     the layout the W13 kernel expects (gate and up are concatenated
     along the row axis, with gate as the first half).
     """
@@ -90,6 +90,10 @@ class _MoEW13Base(MPKModule):
         if num_experts % ep_size != 0:
             raise ValueError(
                 f"MoEW13: num_experts ({num_experts}) % ep_size ({ep_size}) != 0"
+            )
+        if not (0 <= ep_rank < ep_size):
+            raise ValueError(
+                f"MoEW13: ep_rank ({ep_rank}) must be in [0, ep_size={ep_size})"
             )
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -148,7 +152,15 @@ class MoEW13BF16(_MoEW13Base):
 
         Returns False (writes nothing) if expert_id is not local to this rank.
         slot is 'gate' or 'up'; loaded_weight is (intermediate, hidden).
+        Invoked directly by the owning model's load_weights with
+        (param, loaded_weight, expert_id[, slot]); it is NOT attached to the
+        parameter and is not reached via the default resolve_weight path
+        (which cannot supply expert_id/slot).
         """
+        if slot not in ("gate", "up"):
+            raise ValueError(
+                f"MoEW13BF16.weight_loader: slot must be 'gate' or 'up'; got {slot!r}"
+            )
         local = expert_id - self.local_expert_start
         if not (0 <= local < self.num_local_experts):
             return False
@@ -192,14 +204,14 @@ class MoEW13BF16(_MoEW13Base):
 
         Tensor contract:
           x: (B, hidden_size) bf16, the per-token activation.
-          weight (self.weight, ``{prefix}weight``): (num_experts, 2*intermediate_size, hidden_size) bf16,
+          weight (self.weight, ``{prefix}weight``): (num_local_experts, 2*intermediate_size, hidden_size) bf16,
             row layout = [gate(intermediate) | up(intermediate)] along dim 1.
           routing_indices: (num_experts, B) int32, EXPERT-MAJOR (slot+1 or 0).
           mask: (num_experts + 1,) int32 prefix counts (kernel skips inactive experts).
           output: (B, num_experts_per_tok, 2*intermediate_size) bf16, 3-D.
 
         Notes: grid.x splits experts (expert_offset via task_metadata), grid.y splits the
-        2*intermediate axis; MMA-M=128 hard-wired — grid.x must divide num_experts.
+        2*intermediate axis; MMA-M=128 hard-wired — grid.x must divide num_local_experts.
         """
         from ... import context as _ctx
         from ....core import CyTBGraph

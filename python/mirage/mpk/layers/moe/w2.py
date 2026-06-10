@@ -46,7 +46,7 @@ class _MoEW2Base(MPKModule):
     """Shared base for MoEW2BF16 / MoEW2FP8.
 
     Per-expert weights are stacked along dim 0: ``self.weight`` is
-    ``(num_experts, hidden, intermediate)``. Input is 3-D ``(B, K,
+    ``(num_local_experts, hidden, intermediate)``. Input is 3-D ``(B, K,
     intermediate)`` (produced by silu_mul on the W13 output), output is
     3-D ``(B, K, hidden)``.
     """
@@ -66,6 +66,10 @@ class _MoEW2Base(MPKModule):
         if num_experts % ep_size != 0:
             raise ValueError(
                 f"MoEW2: num_experts ({num_experts}) % ep_size ({ep_size}) != 0"
+            )
+        if not (0 <= ep_rank < ep_size):
+            raise ValueError(
+                f"MoEW2: ep_rank ({ep_rank}) must be in [0, ep_size={ep_size})"
             )
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -121,6 +125,10 @@ class MoEW2BF16(_MoEW2Base):
 
         Returns False (writes nothing) if expert_id is not local to this rank.
         loaded_weight is (hidden, intermediate).
+        Invoked directly by the owning model's load_weights with
+        (param, loaded_weight, expert_id[, slot]); it is NOT attached to the
+        parameter and is not reached via the default resolve_weight path
+        (which cannot supply expert_id/slot).
         """
         local = expert_id - self.local_expert_start
         if not (0 <= local < self.num_local_experts):
@@ -170,7 +178,7 @@ class MoEW2BF16(_MoEW2Base):
 
         Tensor contract:
           x: (B, num_experts_per_tok, intermediate_size) bf16 (3-D, output of silu_mul).
-          weight (``{prefix}weight``): (num_experts, hidden_size, intermediate_size) bf16, stacked dim 0.
+          weight (``{prefix}weight``): (num_local_experts, hidden_size, intermediate_size) bf16, stacked dim 0.
           routing_indices: (num_experts, B) int32, EXPERT-MAJOR (slot+1 or 0).
           mask: (num_experts + 1,) int32 prefix counts.
           output: (B, num_experts_per_tok, hidden_size) bf16, 3-D.
