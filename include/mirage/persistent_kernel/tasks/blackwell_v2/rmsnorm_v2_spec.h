@@ -58,11 +58,14 @@ make_smem_info(int t_size_bytes, int hidden_dim, int num_threads) {
   int const buf    = round_up(raw_buffer_bytes(t_size_bytes, hidden_dim), ALIGN);
   int const reduce = round_up(raw_reduce_bytes(num_threads), ALIGN);
 
+  // Index by REGION_* so the ordinals are the single source of order: the
+  // device addresses these same ordinals via smem_region_offset(REGION_*).
   ::mirage::runtime::TaskSmemInfo info{3 * buf + reduce, ALIGN, {}};
-  info.regions.push_back({"input",  buf,    ALIGN, -1, /*can_pack=*/true, /*release_step=*/2, /*contiguous=*/true});
-  info.regions.push_back({"weight", buf,    ALIGN, -1, true, 2, true});
-  info.regions.push_back({"output", buf,    ALIGN, -1, true, 2, true});
-  info.regions.push_back({"reduce", reduce, ALIGN, -1, true, 2, true});
+  info.regions.resize(NUM_REGIONS);
+  info.regions[REGION_INPUT]  = {"input",  buf,    ALIGN, -1, /*can_pack=*/true, /*release_step=*/2, /*contiguous=*/true};
+  info.regions[REGION_WEIGHT] = {"weight", buf,    ALIGN, -1, true, 2, true};
+  info.regions[REGION_OUTPUT] = {"output", buf,    ALIGN, -1, true, 2, true};
+  info.regions[REGION_REDUCE] = {"reduce", reduce, ALIGN, -1, true, 2, true};
   return info;
 }
 

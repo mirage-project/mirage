@@ -42,10 +42,13 @@ inline ::mirage::runtime::TaskSmemInfo
 make_smem_info(int t_size_bytes) {
   int const idx = round_up(raw_idx_bytes(), IDX_ALIGN);
   int const val = round_up(raw_val_bytes(t_size_bytes), VAL_ALIGN);
-  ::mirage::runtime::TaskSmemInfo info{idx + val, IDX_ALIGN, {}};
+  // Index by REGION_* so the ordinals are the single source of order: the
+  // device addresses these same ordinals via smem_region_offset(REGION_*).
   // Both buffers are scratch held for the whole reduce — same release_step.
-  info.regions.push_back({"idx", idx, IDX_ALIGN, -1, /*can_pack=*/true, /*release_step=*/1, /*contiguous=*/true});
-  info.regions.push_back({"val", val, VAL_ALIGN, -1, true, 1, true});
+  ::mirage::runtime::TaskSmemInfo info{idx + val, IDX_ALIGN, {}};
+  info.regions.resize(NUM_REGIONS);
+  info.regions[REGION_IDX] = {"idx", idx, IDX_ALIGN, -1, /*can_pack=*/true, /*release_step=*/1, /*contiguous=*/true};
+  info.regions[REGION_VAL] = {"val", val, VAL_ALIGN, -1, true, 1, true};
   return info;
 }
 
