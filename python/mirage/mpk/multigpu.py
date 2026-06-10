@@ -44,13 +44,21 @@ class CollectiveCapabilities:
 
         # Query peer access support
         full_peer_access_supported = True
-        for target_id in range(self.num_devices):
-            if target_id == self.device_id:
-                continue
-            supported = cuda_utils.queryPeerAccessSupported(self.device_id, target_id)
-            if not supported:
-                full_peer_access_supported = False
-                break
+        if os.environ.get("MPK_FORCE_BUILD_WS"):
+            # Single-rank "pretend TP=N" build (serial weight-cache pre-builder):
+            # only this one device is visible, so peer-access queries to the
+            # absent N-1 devices fail with CUDA_ERROR_INVALID_DEVICE. There is no
+            # real peer here (the build exits before any cross-rank AllReduce
+            # runs), so report no peer access.
+            full_peer_access_supported = False
+        else:
+            for target_id in range(self.num_devices):
+                if target_id == self.device_id:
+                    continue
+                supported = cuda_utils.queryPeerAccessSupported(self.device_id, target_id)
+                if not supported:
+                    full_peer_access_supported = False
+                    break
         self.peer_access_supported = full_peer_access_supported
 
         # Query virtual memory management
@@ -240,14 +248,34 @@ def auto_select_allreduce_implementation(
 ) -> AllReduceStrategy:
     """
     Automatically select the best AllReduce implementation.
-    
+
     Args:
         num_gpus: Number of GPUs involved in the collective
         device_id: GPU device ID to query capabilities
-        
+
     Returns:
         An AllReduceStrategy instance ready to register tasks
     """
+    # MPK_FORCE_ALLGATHER_AR=1 forces the AllgatherReduce fallback even when
+    # NVLS multicast is reported as supported. Used 2026-05-18 to work around
+    # a TP=2 NVSHMEM 3.6.5 issue where `team->nvls_rsc_base_ptr` is NULL on
+    # the device side for every team (including NVSHMEM_TEAM_WORLD) even
+    # though the host log claims `Setting up NVLS resources for team N`. The
+    # NvshmemTile kernel then dereferences NULL via `multimem.ld_reduce` and
+    # the persistent megakernel aborts with cudaErrorIllegalAddress (700).
+    if os.environ.get("MPK_FORCE_ALLGATHER_AR", "0") == "1":
+        print("MPK: forcing AllgatherReduce AR (MPK_FORCE_ALLGATHER_AR=1).")
+        return AllReduceStrategy_AllgatherReduce()
+
+    if os.environ.get("MPK_FORCE_BUILD_WS"):
+        # Single-rank "pretend TP=N" build (serial weight-cache pre-builder):
+        # force the SAME NvshmemTile allreduce that real TP=N (NVLink) selects.
+        # peer_access is faked-False to avoid querying the absent N-1 devices,
+        # which would otherwise route here to AllgatherReduce and trip the
+        # gated-allreduce guard. The build exits before the tile reduce ever
+        # runs (cache-only mode stops at cache-save).
+        return AllReduceStrategy_NvshmemTile()
+
     capabilities = get_collective_capabilities(num_gpus, device_id)
 
     # For SM >= 90, prefer tile-based allreduce if available

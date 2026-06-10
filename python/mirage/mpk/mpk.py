@@ -12,6 +12,19 @@ import torch.distributed as dist
 
 import os
 
+DEFAULT_PROFILER_BUFFER_ENTRIES = 6000 * 128
+
+
+def get_profiler_buffer_entries() -> int:
+    raw_value = os.environ.get("MPK_PROFILER_BUFFER_ENTRIES")
+    if raw_value is None:
+        return DEFAULT_PROFILER_BUFFER_ENTRIES
+    entries = int(raw_value)
+    if entries <= 0:
+        raise ValueError("MPK_PROFILER_BUFFER_ENTRIES must be positive")
+    return entries
+
+
 @dataclass
 class MPKMetadata:
     # ---------- MPK class external state bundled here ----------
@@ -347,7 +360,7 @@ class MPK:
         
         if args.profiling:
             self.profiler_tensor = torch.zeros(
-                6000 * 128, dtype=torch.uint64, device="cuda"
+                get_profiler_buffer_entries(), dtype=torch.uint64, device="cuda"
             ).contiguous()
         else:
             self.profiler_tensor = None
