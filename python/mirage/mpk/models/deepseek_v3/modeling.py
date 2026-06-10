@@ -38,13 +38,15 @@ Scope (deliberately reduced for v1)
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+import re
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ...context import current_pk
+from ...layers._base import SKIP_WEIGHT
 from ...layers import (
     ArgmaxPartial,
     ArgmaxReduce,
@@ -101,6 +103,132 @@ def _moe_hidden_split(hidden_size: int, preferred: int = 56) -> int:
         if hidden_size % y == 0 and (hidden_size // y) % 128 == 0:
             return y
     return 1
+
+
+# ---------------------------------------------------------------------------
+# Streaming weight-load helpers (pure; CPU-testable)
+# ---------------------------------------------------------------------------
+
+
+# Matches a routed-expert weight key, e.g.
+# ``model.layers.5.mlp.experts.37.gate_proj.weight`` ->
+# (layer_idx=5, expert_id=37, proj="gate").
+_EXPERT_KEY_RE = re.compile(
+    r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.weight$"
+)
+
+
+def _parse_expert_key(name: str) -> Optional[Tuple[int, int, str]]:
+    """Parse a routed-expert weight key.
+
+    Returns ``(layer_idx, expert_id, proj)`` where ``proj`` is one of
+    ``"gate"`` / ``"up"`` / ``"down"``, or ``None`` if ``name`` is not a
+    routed-expert weight key.
+    """
+    m = _EXPERT_KEY_RE.match(name)
+    if m is None:
+        return None
+    return int(m.group(1)), int(m.group(2)), m.group(3)
+
+
+# FP8 dequant helpers, transcribed verbatim from
+# demo/deepseek_v3/models/convert.py (kept inline so the package does not
+# depend on the demo directory being importable).
+
+
+def is_fp8(tensor: torch.Tensor) -> bool:
+    return tensor.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+
+
+def dequantize_fp8(
+    weight: torch.Tensor,
+    scale: Optional[torch.Tensor],
+    target_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Dequantize an FP8 (e4m3fn) weight to ``target_dtype`` using per-tensor,
+    per-output-channel, or block-wise scale factors. Verbatim copy of
+    ``convert.dequantize_fp8``.
+    """
+    if weight.dtype == torch.float8_e4m3fn or weight.dtype == torch.float8_e4m3fnuz:
+        weight_f = weight.to(torch.float32)
+    else:
+        # Already a normal float type, just cast.
+        return weight.to(target_dtype)
+
+    if scale is None:
+        return weight_f.to(target_dtype)
+
+    scale = scale.to(torch.float32)
+
+    if scale.numel() == 1:
+        # Per-tensor scale
+        result = weight_f * scale.item()
+    elif scale.dim() == 1 and scale.shape[0] == weight.shape[0]:
+        # Per-output-channel scale: scale shape [out_features]
+        result = weight_f * scale.unsqueeze(1)
+    elif scale.dim() == 2:
+        # Block-wise scale: scale shape [ceil(out/block_out), ceil(in/block_in)]
+        block_size = 128
+        out_features, in_features = weight.shape
+        expanded = scale.repeat_interleave(block_size, dim=0)[:out_features]
+        expanded = expanded.repeat_interleave(block_size, dim=1)[:, :in_features]
+        result = weight_f * expanded
+    else:
+        # Fallback: try broadcasting
+        result = weight_f * scale
+
+    return result.to(target_dtype)
+
+
+def _remap_dsv3_key(name: str) -> str:
+    """Map an HF DeepSeek V3 state_dict key to its catalog ``named_parameters()`` path.
+
+    Only handles the *directly-mappable* (non-expert, non-MLA-stash, non-router-bias)
+    keys; the streaming ``load_weights`` loop intercepts routed-expert keys, the raw
+    MLA ``q_b/kv_b/o_proj`` weights, and the router ``e_score_correction_bias`` before
+    this function is consulted.
+
+    The catalog stores the MLA projections / layernorms, the MoE router-gate and
+    shared-expert projections, AND the dense-MLP projections as raw ``nn.Parameter``
+    attributes (NOT child modules), so the trailing ``...module.weight`` HF segment
+    collapses to a single ``..._weight`` attribute name. Embedding, final norm,
+    lm_head, and the decoder-layer layernorms are child-module ``.weight`` leaves
+    (``Embed.weight`` / ``Linear.weight`` / ``RMSNorm.weight``), so those keys pass
+    through unchanged.
+    """
+    # --- MLA layernorms: HF '<attn>.q_a_layernorm.weight' -> catalog '<attn>.q_a_layernorm'
+    if name.endswith(".self_attn.q_a_layernorm.weight"):
+        return name[: -len(".weight")]
+    if name.endswith(".self_attn.kv_a_layernorm.weight"):
+        return name[: -len(".weight")]
+    # --- MLA linear projections written directly (q_a / kv_a). q_b/kv_b/o are
+    #     stashed separately and never reach this helper.
+    if name.endswith(".self_attn.q_a_proj.weight"):
+        return name[: -len(".self_attn.q_a_proj.weight")] + ".self_attn.q_a_proj_weight"
+    if name.endswith(".self_attn.kv_a_proj_with_mqa.weight"):
+        return (
+            name[: -len(".self_attn.kv_a_proj_with_mqa.weight")]
+            + ".self_attn.kv_a_proj_with_mqa_weight"
+        )
+    # --- MoE router gate matrix: '<mlp>.gate.weight' -> catalog '<mlp>.gate_weight'.
+    if name.endswith(".mlp.gate.weight"):
+        return name[: -len(".mlp.gate.weight")] + ".mlp.gate_weight"
+    # --- MoE shared experts: '<mlp>.shared_experts.{gate,up,down}_proj.weight'
+    #     -> catalog '<mlp>.shared_{gate,up,down}_proj_weight'.
+    for proj in ("gate", "up", "down"):
+        suffix = f".mlp.shared_experts.{proj}_proj.weight"
+        if name.endswith(suffix):
+            return name[: -len(suffix)] + f".mlp.shared_{proj}_proj_weight"
+    # --- Dense-MLP projections (layers < first_k_dense_replace):
+    #     '<mlp>.{gate,up,down}_proj.weight' -> catalog '<mlp>.{gate,up,down}_proj_weight'.
+    #     (DeepseekV3MLP stores these as raw nn.Parameter attributes.)
+    for proj in ("gate", "up", "down"):
+        suffix = f".mlp.{proj}_proj.weight"
+        if name.endswith(suffix):
+            return name[: -len(suffix)] + f".mlp.{proj}_proj_weight"
+    # --- Everything else (embed_tokens, norm, lm_head, the decoder-layer
+    #     input/post_attention layernorms) maps 1:1 by named_modules path.
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -192,30 +320,6 @@ class DeepseekV3MLA(MPKModule):
         # depend on pk.max_seq_length and pk.page_size at compile time).
         self._decode = None
         self._reduce = None
-
-    # ------------------------------------------------------------------
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
-                              strict, missing_keys, unexpected_keys,
-                              error_msgs):
-        # Map HF keys to our parameters. The driver is responsible for
-        # producing the absorbed q_b_proj and fused o_proj before calling
-        # load_state_dict (see demo_new.py::_load_hf_weights_with_absorption).
-        for hf_name, param in [
-            ("q_a_proj.weight", self.q_a_proj_weight),
-            ("q_b_proj.weight", self.q_b_proj_weight),
-            ("kv_a_proj_with_mqa.weight", self.kv_a_proj_with_mqa_weight),
-            ("o_proj.weight", self.o_proj_weight),
-            ("q_a_layernorm.weight", self.q_a_layernorm),
-            ("kv_a_layernorm.weight", self.kv_a_layernorm),
-        ]:
-            hf_key = prefix + hf_name
-            if hf_key in state_dict:
-                with torch.no_grad():
-                    param.copy_(state_dict.pop(hf_key))
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys,
-            unexpected_keys, error_msgs
-        )
 
     # ------------------------------------------------------------------
     def forward(self, *args, **kwargs):
@@ -508,23 +612,6 @@ class DeepseekV3MLP(MPKModule):
             torch.empty(self.hidden_size, self.intermediate_size)
         )
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
-                              strict, missing_keys, unexpected_keys,
-                              error_msgs):
-        for hf_name, param in [
-            ("gate_proj.weight", self.gate_proj_weight),
-            ("up_proj.weight", self.up_proj_weight),
-            ("down_proj.weight", self.down_proj_weight),
-        ]:
-            hf_key = prefix + hf_name
-            if hf_key in state_dict:
-                with torch.no_grad():
-                    param.copy_(state_dict.pop(hf_key))
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys,
-            unexpected_keys, error_msgs
-        )
-
     def forward(self, x, residual):
         gate = F.linear(x, self.gate_proj_weight)
         up = F.linear(x, self.up_proj_weight)
@@ -699,54 +786,6 @@ class DeepseekV3MoEMLP(MPKModule):
         )
         self.shared_down_proj_weight = nn.Parameter(
             torch.empty(self.hidden_size, self.moe_intermediate_size)
-        )
-
-    # ------------------------------------------------------------------
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
-                              strict, missing_keys, unexpected_keys,
-                              error_msgs):
-        # Router weight and bias. HF stores:
-        #   ``mlp.gate.weight``                   (num_experts, hidden)
-        #   ``mlp.gate.e_score_correction_bias``  (num_experts,)
-        gate_key = prefix + "gate.weight"
-        if gate_key in state_dict:
-            with torch.no_grad():
-                self.gate_weight.copy_(state_dict.pop(gate_key))
-        bias_key = prefix + "gate.e_score_correction_bias"
-        if bias_key in state_dict:
-            with torch.no_grad():
-                # MoETopkRouting stores its bias in fp32.
-                self.routing.bias.copy_(
-                    state_dict.pop(bias_key).to(torch.float32)
-                )
-
-        # Routed experts: caller is responsible for producing the stacked
-        # 3D weights ``experts.w13.weight`` (num_experts, 2*moe_inter, hidden)
-        # and ``experts.w2.weight`` (num_experts, hidden, moe_inter) before
-        # calling load_state_dict. demo_new.py's
-        # ``_load_hf_weights_with_absorption`` handles the stacking.
-        w13_key = prefix + "experts.w13.weight"
-        if w13_key in state_dict:
-            with torch.no_grad():
-                self.w13.weight.copy_(state_dict.pop(w13_key))
-        w2_key = prefix + "experts.w2.weight"
-        if w2_key in state_dict:
-            with torch.no_grad():
-                self.w2.weight.copy_(state_dict.pop(w2_key))
-
-        # Shared expert weights.
-        for hf_name, param in [
-            ("shared_experts.gate_proj.weight", self.shared_gate_proj_weight),
-            ("shared_experts.up_proj.weight", self.shared_up_proj_weight),
-            ("shared_experts.down_proj.weight", self.shared_down_proj_weight),
-        ]:
-            hf_key = prefix + hf_name
-            if hf_key in state_dict:
-                with torch.no_grad():
-                    param.copy_(state_dict.pop(hf_key))
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys,
-            unexpected_keys, error_msgs
         )
 
     def forward(self, *args, **kwargs):
@@ -1177,3 +1216,211 @@ class DeepseekV3ForCausalLM(MPKModule):
             grid_dim=(1, 1, 1),
             block_dim=(128, 1, 1),
         )
+
+    # ------------------------------------------------------------------
+    # Streaming weight loading (vLLM-style; replaces the per-block
+    # _load_from_state_dict path + the demo driver's bulk state_dict build).
+    # ------------------------------------------------------------------
+    def resolve_weight(self, name, params):
+        """Directly-mappable keys only: remap HF -> catalog path, then default.
+
+        Routed-expert keys, the raw MLA q_b/kv_b/o weights, and the router
+        ``e_score_correction_bias`` are intercepted by :meth:`load_weights`
+        and never reach this method.
+        """
+        return super().resolve_weight(_remap_dsv3_key(name), params)
+
+    def load_weights(
+        self,
+        weights: Iterable[Tuple[str, torch.Tensor]],
+    ) -> Set[str]:
+        """Stream raw HF safetensors ``(name, tensor)`` into catalog params.
+
+        Stateful single-pass loop that:
+          * dequantizes fp8 weights inline by pairing each weight with its
+            ``<name>_scale_inv`` partner (either order of arrival),
+          * routes routed-expert weights through the EP-aware per-expert
+            ``weight_loader`` (non-local experts are skipped, never stored),
+          * STASHES the raw ``q_b_proj`` / ``kv_b_proj`` / ``o_proj`` weights on
+            the owning MLA module for the later MLA-absorption step
+            (``process_weights``; Task C3) — they are NOT written into params
+            here,
+          * writes every other (directly-mappable) param via
+            :meth:`resolve_weight` + ``param.data.copy_``, with the router
+            ``e_score_correction_bias`` cast to fp32.
+
+        Returns the set of HF keys consumed (including skipped non-local
+        expert weights and their scales).
+        """
+        params = dict(self.named_parameters())
+        consumed: Set[str] = set()
+
+        # fp8 pairing buffers: a weight and its '<name>_scale_inv' partner may
+        # arrive in either order. ``fp8_pending`` holds weights awaiting a
+        # scale; ``scale_pending`` holds scales awaiting their weight (keyed by
+        # the BASE weight name, i.e. with the '_scale_inv' suffix stripped).
+        fp8_pending: dict = {}
+        scale_pending: dict = {}
+
+        def _finalize_and_route(wname: str, w: torch.Tensor) -> None:
+            """Cast/route a fully-dequantized (or already-bf16) tensor."""
+            self._route_weight(wname, w, params, consumed)
+
+        for name, tensor in weights:
+            if name.endswith("_scale_inv"):
+                base = name[: -len("_scale_inv")]
+                # If the scale belongs to a NON-LOCAL routed expert, the weight
+                # was never buffered — just consume the scale and move on.
+                ek = _parse_expert_key(base)
+                if ek is not None and not self._expert_is_local(ek[0], ek[1]):
+                    consumed.add(name)
+                    continue
+                if base in fp8_pending:
+                    w_fp8 = fp8_pending.pop(base)
+                    w = dequantize_fp8(w_fp8, tensor, target_dtype=torch.bfloat16)
+                    _finalize_and_route(base, w)
+                    consumed.add(name)
+                else:
+                    scale_pending[base] = tensor
+                    consumed.add(name)
+                continue
+
+            # A weight tensor (not a scale).
+            # Non-local routed experts: skip entirely (do not buffer fp8, do
+            # not store). Its scale (if any) is consumed in the branch above.
+            ek = _parse_expert_key(name)
+            if ek is not None and not self._expert_is_local(ek[0], ek[1]):
+                consumed.add(name)
+                continue
+
+            if is_fp8(tensor):
+                if name in scale_pending:
+                    scale = scale_pending.pop(name)
+                    w = dequantize_fp8(tensor, scale, target_dtype=torch.bfloat16)
+                    _finalize_and_route(name, w)
+                    consumed.add(name)
+                else:
+                    fp8_pending[name] = tensor
+                continue
+
+            # Already a normal float dtype — cast to bf16 and route now.
+            _finalize_and_route(name, tensor.to(torch.bfloat16))
+            consumed.add(name)
+
+        if fp8_pending or scale_pending:
+            raise ValueError(
+                "DeepseekV3ForCausalLM.load_weights: unpaired fp8 tensors at "
+                f"end of stream. weights awaiting scale: "
+                f"{sorted(fp8_pending)}; scales awaiting weight: "
+                f"{sorted(scale_pending)}"
+            )
+
+        # MLA absorption (q_b/kv_b -> q_b, W_UV -> o_proj) is deferred to
+        # process_weights (Task C3). Until C3 lands this is the inherited
+        # recursive no-op.
+        self.process_weights()
+        return consumed
+
+    # ------------------------------------------------------------------
+    def _layer_mlp(self, layer_idx: int):
+        """Return the (DeepseekV3MoEMLP) mlp for ``layer_idx``, or None if dense/OOB."""
+        layers = self.model.layers
+        if not (0 <= layer_idx < len(layers)):
+            return None
+        layer = layers[layer_idx]
+        if not getattr(layer, "is_moe", False):
+            return None
+        return layer.mlp
+
+    def _expert_is_local(self, layer_idx: int, expert_id: int) -> bool:
+        """Whether ``expert_id`` is owned by this rank for the given MoE layer.
+
+        A routed-expert key for a dense layer / out-of-range layer should not
+        occur, but if it does we treat it as non-local (skip) rather than crash.
+        """
+        moe = self._layer_mlp(layer_idx)
+        if moe is None:
+            return False
+        local = expert_id - moe.local_expert_start
+        return 0 <= local < moe.num_local_experts
+
+    def _route_weight(self, name, w, params, consumed) -> None:
+        """Route a finalized bf16 tensor ``w`` for HF key ``name``."""
+        # ---- Routed experts -> EP-aware per-expert weight_loader. ----
+        ek = _parse_expert_key(name)
+        if ek is not None:
+            layer_idx, expert_id, proj = ek
+            moe = self._layer_mlp(layer_idx)
+            # locality was already checked before we got here (non-local were
+            # skipped); moe is therefore not None.
+            if proj == "down":
+                moe.w2.weight_loader(moe.w2.weight, w, expert_id=expert_id)
+            else:
+                moe.w13.weight_loader(
+                    moe.w13.weight, w, expert_id=expert_id, slot=proj
+                )
+            consumed.add(name)
+            return
+
+        # ---- Raw MLA weights stashed for process_weights (C3). ----
+        if name.endswith(".self_attn.q_b_proj.weight"):
+            self._stash_mla(name, ".self_attn.q_b_proj.weight", "_raw_q_b", w)
+            consumed.add(name)
+            return
+        if name.endswith(".self_attn.kv_b_proj.weight"):
+            self._stash_mla(name, ".self_attn.kv_b_proj.weight", "_raw_kv_b", w)
+            consumed.add(name)
+            return
+        if name.endswith(".self_attn.o_proj.weight"):
+            self._stash_mla(name, ".self_attn.o_proj.weight", "_raw_o", w)
+            consumed.add(name)
+            return
+
+        # ---- Router e_score_correction_bias -> routing.bias (fp32). ----
+        if name.endswith(".mlp.gate.e_score_correction_bias"):
+            layer_idx = self._layer_idx_from_key(name)
+            moe = self._layer_mlp(layer_idx)
+            if moe is None:
+                raise ValueError(
+                    "DeepseekV3ForCausalLM.load_weights: e_score_correction_bias "
+                    f"for non-MoE/oob layer in key {name!r}"
+                )
+            moe.routing.bias.data.copy_(w.to(torch.float32))
+            consumed.add(name)
+            return
+
+        # ---- Directly-mappable params: remap + default resolve + copy_. ----
+        res = self.resolve_weight(name, params)
+        if res is None:
+            raise ValueError(
+                "DeepseekV3ForCausalLM.load_weights: unexpected checkpoint key "
+                f"{name!r} (no matching parameter)."
+            )
+        if res is SKIP_WEIGHT:
+            consumed.add(name)
+            return
+        param, loader, kwargs = res
+        call_kwargs = {k: v for k, v in kwargs.items() if not k.startswith("_")}
+        if loader is not None:
+            loader(param, w, **call_kwargs)
+        else:
+            param.data.copy_(w)
+        consumed.add(name)
+
+    @staticmethod
+    def _layer_idx_from_key(name: str) -> int:
+        m = re.match(r"^model\.layers\.(\d+)\.", name)
+        if m is None:
+            raise ValueError(f"cannot parse layer index from key {name!r}")
+        return int(m.group(1))
+
+    def _stash_mla(self, name, suffix, attr, w) -> None:
+        """Stash raw MLA weight ``w`` on the owning DeepseekV3MLA module."""
+        layer_idx = self._layer_idx_from_key(name)
+        layers = self.model.layers
+        if not (0 <= layer_idx < len(layers)):
+            raise ValueError(
+                f"DeepseekV3ForCausalLM.load_weights: MLA key {name!r} for "
+                f"out-of-range layer {layer_idx}"
+            )
+        setattr(layers[layer_idx].self_attn, attr, w)
