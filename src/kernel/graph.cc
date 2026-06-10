@@ -456,15 +456,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR, variant_id);
   } else if (name == "attention") {
     int variant_id =
-        task_register->register_attention_task(customized->bgraph, params);
+        task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::Base);
     task_config[op] = std::make_tuple(7, 1, TASK_ATTENTION_1, variant_id);
   } else if (name == "paged_attention") {
-    int variant_id = task_register->register_paged_attention_task(
-        customized->bgraph, params);
+    int variant_id = task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::Paged);
     task_config[op] = std::make_tuple(7, 1, TASK_PAGED_ATTENTION_1, variant_id);
   } else if (name == "single_batch_extend_attention") {
-    int variant_id = task_register->register_single_batch_extend_attention_task(
-        customized->bgraph, params);
+    int variant_id = task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::SingleBatchExtend);
     task_config[op] =
         std::make_tuple(7, 1, TASK_SINGLE_BATCH_EXTEND_ATTENTION, variant_id);
   } else if (name == "linear") {
@@ -537,8 +538,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_HOPPER, variant_id);
   } else if (name == "paged_attention_hopper") {
-    int variant_id = task_register->register_paged_attention_hopper_task(
-        customized->bgraph, params);
+    int variant_id = task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::PagedHopper);
     task_config[op] =
         std::make_tuple(7, 1, TASK_PAGED_ATTENTION_HOPPER, variant_id);
   } else if (name == "rmsnorm_hopper") {
@@ -590,8 +591,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SWAPAB_HOPPER, variant_id);
   } else if (name == "paged_attention_split_kv_hopper") {
     int variant_id =
-        task_register->register_paged_attention_split_kv_hopper_task(
-            customized->bgraph, params);
+        task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::PagedSplitKvHopper);
     task_config[op] =
         std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER, variant_id);
   }
@@ -611,8 +612,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100, variant_id);
   } else if (name == "paged_attention_sm100") {
-    int variant_id = task_register->register_paged_attention_sm100_task(
-        customized->bgraph, params);
+    int variant_id = task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::PagedSm100);
     task_config[op] = std::make_tuple(7, 1, TASK_ATTN_SM100, variant_id);
   } else if (name == "argmax_partial_sm100") {
     int variant_id = task_register->register_argmax_partial_sm100_task(
@@ -705,52 +706,52 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(3, 1, TASK_MOE_MUL_SUM_ADD_SM100, variant_id);
   } else if (name == "paged_attention_split_kv_sm100") {
     int variant_id =
-        task_register->register_paged_attention_split_kv_sm100_task(
-            customized->bgraph, params);
+        task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::PagedSplitKv);
     task_config[op] =
         std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_SM100, variant_id);
   } else if (name == "paged_attention_split_kv_merge_sm100") {
     int variant_id =
-        task_register->register_paged_attention_split_kv_merge_sm100_task(
-            customized->bgraph, params);
+        task_register->register_attention_task(
+        customized->bgraph, params, AttentionTaskKind::PagedSplitKvMerge);
     task_config[op] = std::make_tuple(
         2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
   } else if (name == "mla_reduce_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::Reduce);
+        customized->bgraph, params, MlaTaskKind::ReduceCompat);
     // 2 inputs (Oa, La), 1 output (O)
     task_config[op] = std::make_tuple(2, 1, TASK_MLA_REDUCE_SM100, variant_id);
   } else if (name == "mla_prefill_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::Prefill);
+        customized->bgraph, params, MlaTaskKind::Prefill, 0);
     // 5 inputs via Python new_input (Q_nope, Q_pe, CKV, KPE, O) — output is
     // attached with store_in_dmem=True, MPK convention (same as mla_decode).
     // Task register dispatches input_ptrs[4] as the O pointer.
     task_config[op] = std::make_tuple(5, 0, TASK_MLA_PREFILL_SM100, variant_id);
   } else if (name == "mla_prefill_absorbed_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::PrefillAbsorbed);
+        customized->bgraph, params, MlaTaskKind::Prefill, 1);
     task_config[op] = std::make_tuple(2, 1, TASK_MLA_PREFILL_SM100, variant_id);
   } else if (name == "mla_prefill_tp8_chunked_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::PrefillTp8Chunked);
+        customized->bgraph, params, MlaTaskKind::Prefill, 2);
     // Per-head unabsorbed: 5 inputs (Qn, Qp, K_nope, K_rope, V) + 1 output.
     task_config[op] =
         std::make_tuple(5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SM100, variant_id);
   } else if (name == "mla_decode_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::Decode);
+        customized->bgraph, params, MlaTaskKind::DecodeCompat);
     // 2 inputs (Q TMA, KV TMA), 2 outputs (Oa, La)
     task_config[op] = std::make_tuple(2, 2, TASK_MLA_DECODE_SM100, variant_id);
   } else if (name == "mla_mtp_decode_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpDecodeTp1);
+        customized->bgraph, params, MlaTaskKind::Decode, 1);
     // 2 inputs (Q TMA, KV TMA), 2 outputs (Oa, La)
     task_config[op] =
         std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_SM100, variant_id);
   } else if (name == "mla_mtp_reduce_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpReduceTp1);
+        customized->bgraph, params, MlaTaskKind::Reduce, 1);
     // 2 inputs (Oa, La), 1 output (O)
     task_config[op] =
         std::make_tuple(2, 1, TASK_MLA_MTP_REDUCE_SM100, variant_id);
@@ -758,35 +759,35 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   // MLA-MTP TP variants (ferret-derived, no-PDL)
   else if (name == "mla_mtp_decode_tp2_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpDecodeTp2);
+        customized->bgraph, params, MlaTaskKind::Decode, 2);
     task_config[op] =
         std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP2_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp2_reduce_sm100") {
     int variant_id =
         task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpReduceTp2);
+        customized->bgraph, params, MlaTaskKind::Reduce, 2);
     task_config[op] =
         std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp4_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpDecodeTp4);
+        customized->bgraph, params, MlaTaskKind::Decode, 4);
     task_config[op] =
         std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP4_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp4_reduce_sm100") {
     int variant_id =
         task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpReduceTp4);
+        customized->bgraph, params, MlaTaskKind::Reduce, 4);
     task_config[op] =
         std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp8_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpDecodeTp8);
+        customized->bgraph, params, MlaTaskKind::Decode, 8);
     task_config[op] =
         std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP8_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp8_reduce_sm100") {
     int variant_id =
         task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::MtpReduceTp8);
+        customized->bgraph, params, MlaTaskKind::Reduce, 8);
     task_config[op] =
         std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100, variant_id);
   }
@@ -856,14 +857,14 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // packed UE8M0 scale). Fuses what was a downstream
     // per_token_group_quantize_fp8 into the GEMM epilogue.
     int variant_id =
-        task_register->register_fp8_gemm_dense_fp8out_sm100_task(
-        customized->bgraph, params, 0);
+        task_register->register_fp8_gemm_dense_bn128_sm100_task(
+        customized->bgraph, params, 2);
     task_config[op] = std::make_tuple(
         4, 2, TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_mediumm_fp8out_sm100") {
     int variant_id =
-        task_register->register_fp8_gemm_dense_fp8out_sm100_task(
-        customized->bgraph, params, 1);
+        task_register->register_fp8_gemm_dense_bn128_sm100_task(
+        customized->bgraph, params, 3);
     task_config[op] = std::make_tuple(
         4, 2, TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100, variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
@@ -913,24 +914,24 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "assemble_q_decode_sm100") {
     // 2 inputs (q_nope_abs, q_pe) + 1 output (q_nope_pe).
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::AssembleQDecode);
+        customized->bgraph, params, MlaTaskKind::AssembleQ);
     task_config[op] =
         std::make_tuple(2, 1, TASK_ASSEMBLE_Q_DECODE_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::KvGather);
+        customized->bgraph, params, MlaTaskKind::KvGather, 0);
     task_config[op] =
         std::make_tuple(4, 0, TASK_MLA_KV_GATHER_SM100, variant_id);
   } else if (name == "mla_kv_gather_split_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::KvGatherSplit);
+        customized->bgraph, params, MlaTaskKind::KvGather, 1);
     task_config[op] =
         std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
   } else if (name == "mla_kv_gather_unified_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::KvGatherUnified);
+        customized->bgraph, params, MlaTaskKind::KvGather, 2);
     // 2 inputs (c_latent_new, k_pe_new) + 4 store_in_dmem slots; we track
     // ckv_sep and kpe_sep as outputs so downstream consumers
     // (quantize_kv_b_k / quantize_kv_b_v / identity copies) get dependency
@@ -941,24 +942,24 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(4, 2, TASK_MLA_KV_GATHER_UNIFIED_SM100, variant_id);
   } else if (name == "deepseek_mla_rope_q_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::RopeQ);
+        customized->bgraph, params, MlaTaskKind::Rope, 0);
     task_config[op] =
         std::make_tuple(4, 2, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
   } else if (name == "deepseek_mla_rope_q_fused_sm100") {
     int variant_id =
         task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::RopeQFused);
+        customized->bgraph, params, MlaTaskKind::Rope, 1);
     task_config[op] =
         std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
   } else if (name == "deepseek_mla_rope_q_split_sm100") {
     int variant_id =
         task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::RopeQSplit);
+        customized->bgraph, params, MlaTaskKind::Rope, 2);
     task_config[op] =
         std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
   } else if (name == "deepseek_mla_rope_k_sm100") {
     int variant_id = task_register->register_mla_task(
-        customized->bgraph, params, MlaTaskVariant::RopeK);
+        customized->bgraph, params, MlaTaskKind::Rope, 3);
     task_config[op] =
         std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
   }

@@ -220,7 +220,8 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_RMS_NORM_LINEAR, code.to_string());
 }
 
-int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
+static int register_attention_base_task(TaskRegister &reg,
+    threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
@@ -273,10 +274,11 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   code.e("    task_desc->input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
-  return register_task_variant(TASK_ATTENTION_1, code.to_string());
+  return reg.register_task_variant(TASK_ATTENTION_1, code.to_string());
 }
 
-int TaskRegister::register_paged_attention_task(
+static int register_paged_attention_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
@@ -345,10 +347,11 @@ int TaskRegister::register_paged_attention_task(
   code.e("    task_desc->input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
-  return register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
+  return reg.register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
 }
 
-int TaskRegister::register_single_batch_extend_attention_task(
+static int register_single_batch_extend_attention_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
@@ -406,7 +409,7 @@ int TaskRegister::register_single_batch_extend_attention_task(
   code.e("    task_desc->input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
-  return register_task_variant(TASK_SINGLE_BATCH_EXTEND_ATTENTION,
+  return reg.register_task_variant(TASK_SINGLE_BATCH_EXTEND_ATTENTION,
                                code.to_string());
 }
 
@@ -1063,7 +1066,8 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
     return register_task_variant(TASK_LINEAR_HOPPER, code.to_string());
   }
 }
-int TaskRegister::register_paged_attention_hopper_task(
+static int register_paged_attention_hopper_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
@@ -1258,7 +1262,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    nullptr,"); // lse, not used for non-split KV tasks
   code.e("    0);");      // kv_idx, not used for non-split KV tasks
 
-  return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
+  return reg.register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
 }
 
 int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
@@ -2078,7 +2082,8 @@ int TaskRegister::register_splitk_linear_sm100_task(
   return register_task_variant(TASK_SPLITK_LINEAR_SM100, code.to_string());
 }
 
-int TaskRegister::register_paged_attention_sm100_task(
+static int register_paged_attention_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
@@ -2146,7 +2151,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   code.e("    task_desc->input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
-  return register_task_variant(TASK_ATTN_SM100, code.to_string());
+  return reg.register_task_variant(TASK_ATTN_SM100, code.to_string());
 }
 
 int TaskRegister::register_argmax_partial_sm100_task(
@@ -3565,7 +3570,8 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(
                                code.to_string());
 }
 
-int TaskRegister::register_paged_attention_split_kv_sm100_task(
+static int register_paged_attention_split_kv_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
@@ -3646,11 +3652,12 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   code.e("    1e-6f,");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->task_metadata.kv_idx);");
-  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100,
+  return reg.register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100,
                                code.to_string());
 }
 
-int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
+static int register_paged_attention_split_kv_merge_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_qo_heads_per_kv
   // params[1]: head_dim
@@ -3706,7 +3713,7 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->task_metadata.merge_task_offset);");
-  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100,
+  return reg.register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100,
                                code.to_string());
 }
 
@@ -4307,7 +4314,8 @@ static int register_mla_mtp_reduce_sm100_task(TaskRegister &reg,
   code.e("}");
   return reg.register_task_variant(TASK_MLA_MTP_REDUCE_SM100, code.to_string());
 }
-int TaskRegister::register_paged_attention_split_kv_hopper_task(
+static int register_paged_attention_split_kv_hopper_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
@@ -4389,7 +4397,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   code.e("    task_desc->output_ptrs[1],"); // output_tmp
   code.e("    task_desc->output_ptrs[0],"); // lse
   code.e("    task_desc->task_metadata.kv_idx);");
-  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER,
+  return reg.register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER,
                                code.to_string());
 }
 
@@ -5884,6 +5892,15 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   return self->register_task_variant(task_type, code.to_string());
 }
 
+static int register_fp8_gemm_dense_smallm_fp8out_sm100_task(
+    TaskRegister &reg,
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params);
+static int register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
+    TaskRegister &reg,
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params);
+
 // decode-shaped M) and mediumm (NE4, prefill-shaped M) are the SAME dense FP8
 // GEMM core (register_fp8_gemm_dense_variant) with the SAME TMA box (128,
 // tma.cuh:1607); they differ ONLY in namespace/fn/enum/NS. ONE param-driven
@@ -5897,6 +5914,18 @@ int TaskRegister::register_fp8_gemm_dense_bn128_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     int variant) {
+  // variant: 0=smallm (bf16 out, NE2), 1=mediumm (bf16 out, NE4),
+  //          2=smallm fp8out (D1 epilogue-quantize), 3=mediumm fp8out.
+  switch (variant) {
+  case 0:
+  case 1:
+    break; // shared body below
+  case 2:
+    return register_fp8_gemm_dense_smallm_fp8out_sm100_task(*this, bgraph, params);
+  case 3:
+    return register_fp8_gemm_dense_mediumm_fp8out_sm100_task(*this, bgraph, params);
+  }
+
   (void)bgraph;
   bool const is_mediumm = (variant == 1);
   // numerically identical output); mediumm is fixed at the NS=3 default (the
@@ -7164,71 +7193,96 @@ static int register_mla_mtp_decode_tp8_reduce_sm100_task(TaskRegister &reg,
 }
 
 
-// Unified MLA-family registration entry. The per-variant codegen bodies are
-// file-static above; this is the only MLA symbol exposed to graph.cc.
+// Unified MLA-family registration entry. kind selects the sub-family;
+// variant disambiguates within it:
+//   Decode/Reduce: variant = tp_size (1/2/4/8)
+//   DecodeCompat/ReduceCompat: catalog-ABI decode/reduce (variant unused)
+//   KvGather: 0=dense gather, 1=split, 2=unified (decode+prefill layouts)
+//   Prefill: 0=plain, 1=absorbed, 2=tp8-chunked
+//   Rope: 0=q, 1=q_fused, 2=q_split, 3=k
+//   AssembleQ: variant unused
 int TaskRegister::register_mla_task(threadblock::Graph const &bgraph,
                                     std::vector<int> const &params,
-                                    MlaTaskVariant variant) {
-  switch (variant) {
-  case MlaTaskVariant::Decode:
+                                    MlaTaskKind kind,
+                                    int variant) {
+  switch (kind) {
+  case MlaTaskKind::Decode:
+    switch (variant) {
+    case 1: return register_mla_mtp_decode_sm100_task(*this, bgraph, params);
+    case 2: return register_mla_mtp_decode_tp2_sm100_task(*this, bgraph, params);
+    case 4: return register_mla_mtp_decode_tp4_sm100_task(*this, bgraph, params);
+    case 8: return register_mla_mtp_decode_tp8_sm100_task(*this, bgraph, params);
+    }
+    break;
+  case MlaTaskKind::Reduce:
+    switch (variant) {
+    case 1: return register_mla_mtp_reduce_sm100_task(*this, bgraph, params);
+    case 2: return register_mla_mtp_decode_tp2_reduce_sm100_task(*this, bgraph, params);
+    case 4: return register_mla_mtp_decode_tp4_reduce_sm100_task(*this, bgraph, params);
+    case 8: return register_mla_mtp_decode_tp8_reduce_sm100_task(*this, bgraph, params);
+    }
+    break;
+  case MlaTaskKind::DecodeCompat:
     return register_mla_decode_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::KvGather:
-    return register_mla_kv_gather_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::KvGatherSplit:
-    return register_mla_kv_gather_split_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::KvGatherUnified:
-    return register_mla_kv_gather_unified_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpDecodeTp1:
-    return register_mla_mtp_decode_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpDecodeTp2:
-    return register_mla_mtp_decode_tp2_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpDecodeTp4:
-    return register_mla_mtp_decode_tp4_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpDecodeTp8:
-    return register_mla_mtp_decode_tp8_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpReduceTp1:
-    return register_mla_mtp_reduce_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpReduceTp2:
-    return register_mla_mtp_decode_tp2_reduce_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpReduceTp4:
-    return register_mla_mtp_decode_tp4_reduce_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::MtpReduceTp8:
-    return register_mla_mtp_decode_tp8_reduce_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::Reduce:
+  case MlaTaskKind::ReduceCompat:
     return register_mla_reduce_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::Prefill:
-    return register_mla_prefill_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::PrefillAbsorbed:
-    return register_mla_prefill_absorbed_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::PrefillTp8Chunked:
-    return register_mla_prefill_tp8_chunked_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::RopeQ:
-    return register_deepseek_mla_rope_q_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::RopeQFused:
-    return register_deepseek_mla_rope_q_fused_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::RopeQSplit:
-    return register_deepseek_mla_rope_q_split_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::RopeK:
-    return register_deepseek_mla_rope_k_sm100_task(*this, bgraph, params);
-  case MlaTaskVariant::AssembleQDecode:
+  case MlaTaskKind::KvGather:
+    switch (variant) {
+    case 0: return register_mla_kv_gather_sm100_task(*this, bgraph, params);
+    case 1: return register_mla_kv_gather_split_sm100_task(*this, bgraph, params);
+    case 2: return register_mla_kv_gather_unified_sm100_task(*this, bgraph, params);
+    }
+    break;
+  case MlaTaskKind::Prefill:
+    switch (variant) {
+    case 0: return register_mla_prefill_sm100_task(*this, bgraph, params);
+    case 1: return register_mla_prefill_absorbed_sm100_task(*this, bgraph, params);
+    case 2: return register_mla_prefill_tp8_chunked_sm100_task(*this, bgraph, params);
+    }
+    break;
+  case MlaTaskKind::Rope:
+    switch (variant) {
+    case 0: return register_deepseek_mla_rope_q_sm100_task(*this, bgraph, params);
+    case 1: return register_deepseek_mla_rope_q_fused_sm100_task(*this, bgraph, params);
+    case 2: return register_deepseek_mla_rope_q_split_sm100_task(*this, bgraph, params);
+    case 3: return register_deepseek_mla_rope_k_sm100_task(*this, bgraph, params);
+    }
+    break;
+  case MlaTaskKind::AssembleQ:
     return register_assemble_q_decode_sm100_task(*this, bgraph, params);
   }
-  assert(false && "unknown MlaTaskVariant");
+  assert(false && "invalid MlaTaskKind/variant");
   return -1;
 }
 
-// Unified dense-GEMM fp8out pair (D1 epilogue-quantize flavors of the BN128
-// dense GEMM): variant 0 = smallm (NE2), 1 = mediumm (NE4).
-int TaskRegister::register_fp8_gemm_dense_fp8out_sm100_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params,
-    int variant) {
-  return variant == 0
-             ? register_fp8_gemm_dense_smallm_fp8out_sm100_task(*this, bgraph,
-                                                                params)
-             : register_fp8_gemm_dense_mediumm_fp8out_sm100_task(*this, bgraph,
-                                                                 params);
+// Unified attention-family entry: kind picks the implementation.
+//   Base / SingleBatchExtend / Paged / PagedHopper / PagedSm100 /
+//   PagedSplitKv / PagedSplitKvMerge / PagedSplitKvHopper
+int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params,
+                                          AttentionTaskKind kind) {
+  switch (kind) {
+  case AttentionTaskKind::Base:
+    return register_attention_base_task(*this, bgraph, params);
+  case AttentionTaskKind::Paged:
+    return register_paged_attention_task(*this, bgraph, params);
+  case AttentionTaskKind::PagedHopper:
+    return register_paged_attention_hopper_task(*this, bgraph, params);
+  case AttentionTaskKind::PagedSm100:
+    return register_paged_attention_sm100_task(*this, bgraph, params);
+  case AttentionTaskKind::PagedSplitKv:
+    return register_paged_attention_split_kv_sm100_task(*this, bgraph, params);
+  case AttentionTaskKind::PagedSplitKvMerge:
+    return register_paged_attention_split_kv_merge_sm100_task(*this, bgraph, params);
+  case AttentionTaskKind::PagedSplitKvHopper:
+    return register_paged_attention_split_kv_hopper_task(*this, bgraph, params);
+  case AttentionTaskKind::SingleBatchExtend:
+    return register_single_batch_extend_attention_task(*this, bgraph, params);
+  }
+  assert(false && "invalid AttentionTaskKind");
+  return -1;
 }
+
 
 // Unified per-head FP8 BMM entry: dense=false -> swapAB/UE8M0 body (BMM1
 // kv-up), dense=true -> dense block-scaled body (BMM2 o-side).

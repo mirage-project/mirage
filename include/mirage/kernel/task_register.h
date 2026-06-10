@@ -22,30 +22,29 @@ namespace mirage {
 namespace runtime {
 
 
-// Variant selector for the unified MLA-family registration entry
-// (TaskRegister::register_mla_task). Covers decode (tp1/2/4/8), the
-// per-TP reduces, KV gather (dense/split/unified), prefill
-// (plain/absorbed/tp8-chunked), DeepSeek RoPE (q/q_fused/q_split/k)
-// and the BMM-path assemble_q.
-enum class MlaTaskVariant {
-  Decode, KvGather, KvGatherSplit, KvGatherUnified,
-  MtpDecodeTp1, MtpDecodeTp2, MtpDecodeTp4, MtpDecodeTp8,
-  MtpReduceTp1, MtpReduceTp2, MtpReduceTp4, MtpReduceTp8,
-  Reduce, Prefill, PrefillAbsorbed, PrefillTp8Chunked,
-  RopeQ, RopeQFused, RopeQSplit, RopeK, AssembleQDecode,
+// Unified-entry selectors. Sub-variant ints are documented at each entry.
+enum class MlaTaskKind {
+  Decode,       // variant = tp_size (1/2/4/8)
+  Reduce,       // variant = tp_size (1/2/4/8)
+  DecodeCompat, // catalog-ABI decode (variant unused)
+  ReduceCompat, // catalog-ABI reduce (variant unused)
+  KvGather,     // 0=dense, 1=split, 2=unified
+  Prefill,      // 0=plain, 1=absorbed, 2=tp8-chunked
+  Rope,         // 0=q, 1=q_fused, 2=q_split, 3=k
+  AssembleQ,    // variant unused
+};
+enum class AttentionTaskKind {
+  Base, Paged, PagedHopper, PagedSm100,
+  PagedSplitKv, PagedSplitKvMerge, PagedSplitKvHopper, SingleBatchExtend,
 };
 
 class TaskRegister {
 public:
-  // Unified MLA-family entry — the only MLA registration symbol.
+  // Unified MLA-family entry (kind + variant; see enum).
   int register_mla_task(threadblock::Graph const &bgraph,
                         std::vector<int> const &params,
-                        MlaTaskVariant variant);
-  // Unified dense-GEMM fp8out entry: variant 0=smallm, 1=mediumm.
-  int register_fp8_gemm_dense_fp8out_sm100_task(
-      threadblock::Graph const &bgraph,
-      std::vector<int> const &params,
-      int variant);
+                        MlaTaskKind kind,
+                        int variant = 0);
   // Unified per-head FP8 BMM entry: dense selects swapAB vs dense body.
   int register_linear_fp8_bmm_unified_sm100_task(
       threadblock::Graph const &bgraph,
@@ -62,12 +61,11 @@ public:
                             std::vector<int> const &params);
   int register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
+  // Unified attention-family entry (kind: Base/Paged/PagedHopper/PagedSm100/
+  // PagedSplitKv/PagedSplitKvMerge/PagedSplitKvHopper/SingleBatchExtend).
   int register_attention_task(threadblock::Graph const &bgraph,
-                              std::vector<int> const &params);
-  int register_paged_attention_task(threadblock::Graph const &bgraph,
-                                    std::vector<int> const &params);
-  int register_single_batch_extend_attention_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+                              std::vector<int> const &params,
+                              AttentionTaskKind kind);
   int register_linear_task(threadblock::Graph const &bgraph,
                            std::vector<int> const &params,
                            bool with_residual);
@@ -75,13 +73,6 @@ public:
                              std::vector<int> const &params);
   int register_identity_task(threadblock::Graph const &bgraph,
                              std::vector<int> const &params);
-  // Same kernel body as register_identity_task, but the bgraph carries
-  // (2 inputs, 1 output) instead of (1 input, 1 output). The second input
-  // is a fake-dep handle (only used to force a producer→consumer edge in
-  // AnnotatedGraph); the codegen ignores input_ptrs[1] and copies
-  // input_ptrs[0] → output_ptrs[0]. Used by MPK_DSV3_DEFER_SHARED_EXPERT
-  // to chain the shared_expert gate_up GEMM behind the routed-MoE W13
-  // GEMM at TP=4 EP=2 decode (the −15μs system lever).
   int register_identity_2in_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params);
   int register_silu_mul_linear_with_residual_task(
@@ -102,8 +93,6 @@ public:
   int register_linear_hopper_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params,
                                   bool with_residual);
-  int register_paged_attention_hopper_task(threadblock::Graph const &bgraph,
-                                           std::vector<int> const &params);
   int register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
   int register_linear_swapAB_hopper_task(threadblock::Graph const &bgraph,
@@ -123,8 +112,6 @@ public:
       threadblock::Graph const &bgraph,
       std::vector<int> const &params,
       bool with_residual);
-  int register_paged_attention_split_kv_hopper_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   // SM100 tasks
   int register_splitk_linear_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params,
@@ -132,8 +119,6 @@ public:
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params,
                                  bool with_residual);
-  int register_paged_attention_sm100_task(threadblock::Graph const &bgraph,
-                                          std::vector<int> const &params);
   int register_argmax_partial_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
@@ -168,10 +153,6 @@ public:
                                  std::vector<int> const &params);
   int register_moe_mul_sum_add_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
-  int register_paged_attention_split_kv_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_paged_attention_split_kv_merge_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
                                        bool scale_ue8m0);
@@ -185,6 +166,8 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   // Unified dense BN128 entry (#201 L1): variant 0=smallm (NE2), 1=mediumm
   // (NE4). Byte-identical codegen to the prior two per-variant wrappers.
+  // Unified dense FP8 GEMM entry. variant: 0=smallm, 1=mediumm,
+  // 2=smallm fp8out, 3=mediumm fp8out.
   int register_fp8_gemm_dense_bn128_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params,
                                                int variant);
