@@ -21,8 +21,36 @@
 namespace mirage {
 namespace runtime {
 
+
+// Variant selector for the unified MLA-family registration entry
+// (TaskRegister::register_mla_task). Covers decode (tp1/2/4/8), the
+// per-TP reduces, KV gather (dense/split/unified), prefill
+// (plain/absorbed/tp8-chunked), DeepSeek RoPE (q/q_fused/q_split/k)
+// and the BMM-path assemble_q.
+enum class MlaTaskVariant {
+  Decode, KvGather, KvGatherSplit, KvGatherUnified,
+  MtpDecodeTp1, MtpDecodeTp2, MtpDecodeTp4, MtpDecodeTp8,
+  MtpReduceTp1, MtpReduceTp2, MtpReduceTp4, MtpReduceTp8,
+  Reduce, Prefill, PrefillAbsorbed, PrefillTp8Chunked,
+  RopeQ, RopeQFused, RopeQSplit, RopeK, AssembleQDecode,
+};
+
 class TaskRegister {
 public:
+  // Unified MLA-family entry — the only MLA registration symbol.
+  int register_mla_task(threadblock::Graph const &bgraph,
+                        std::vector<int> const &params,
+                        MlaTaskVariant variant);
+  // Unified dense-GEMM fp8out entry: variant 0=smallm, 1=mediumm.
+  int register_fp8_gemm_dense_fp8out_sm100_task(
+      threadblock::Graph const &bgraph,
+      std::vector<int> const &params,
+      int variant);
+  // Unified per-head FP8 BMM entry: dense selects swapAB vs dense body.
+  int register_linear_fp8_bmm_unified_sm100_task(
+      threadblock::Graph const &bgraph,
+      std::vector<int> const &params,
+      bool dense);
   static TaskRegister *singleton;
   TaskRegister();
 
@@ -144,35 +172,6 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_paged_attention_split_kv_merge_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_reduce_sm100_task(threadblock::Graph const &bgraph,
-                                     std::vector<int> const &params);
-  int register_mla_prefill_sm100_task(threadblock::Graph const &bgraph,
-                                      std::vector<int> const &params);
-  int register_mla_prefill_absorbed_sm100_task(threadblock::Graph const &bgraph,
-                                               std::vector<int> const &params);
-  int register_mla_prefill_tp8_chunked_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_decode_sm100_task(threadblock::Graph const &bgraph,
-                                     std::vector<int> const &params);
-  int register_mla_mtp_decode_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
-  int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
-  // MLA-MTP TP variants (ferret-derived, no-PDL). Each: TP=2/4/8, with paired
-  // reduce. Differ in NUM_HEADS (64/32/16); TP=4 also splits V across two
-  // CTAs (z=2); TP=8 takes Q_LEN_real (Q_LEN padded to even).
-  int register_mla_mtp_decode_tp2_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params);
-  int register_mla_mtp_decode_tp2_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_mtp_decode_tp4_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params);
-  int register_mla_mtp_decode_tp4_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_mtp_decode_tp8_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params);
-  int register_mla_mtp_decode_tp8_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
                                        bool scale_ue8m0);
@@ -184,19 +183,11 @@ public:
                                             bool with_residual);
   int register_splitk_linear_fp8_swapAB_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_linear_fp8_bmm_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
-  int register_linear_fp8_bmm_dense_sm100_task(threadblock::Graph const &bgraph,
-                                               std::vector<int> const &params);
   // Unified dense BN128 entry (#201 L1): variant 0=smallm (NE2), 1=mediumm
   // (NE4). Byte-identical codegen to the prior two per-variant wrappers.
   int register_fp8_gemm_dense_bn128_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params,
                                                int variant);
-  int register_fp8_gemm_dense_smallm_fp8out_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fused_rmsnorm_quantize_fp8_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   // Unified grouped-GEMM entry (#201 L1): variant 0=smallm, 1=largem.
@@ -208,22 +199,6 @@ public:
                                       std::vector<int> const &params);
   int register_moe_unpermute_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
-  int register_assemble_q_decode_sm100_task(threadblock::Graph const &bgraph,
-                                            std::vector<int> const &params);
-  int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
-                                        std::vector<int> const &params);
-  int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params);
-  int register_mla_kv_gather_unified_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_deepseek_mla_rope_q_sm100_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params);
-  int register_deepseek_mla_rope_q_fused_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_deepseek_mla_rope_q_split_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_deepseek_mla_rope_k_sm100_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params);
   // MTP tasks
   int register_mtp_verify_strict_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);

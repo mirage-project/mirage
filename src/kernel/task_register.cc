@@ -130,13 +130,10 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params) {
-  // params (optional, default = legacy contiguous):
   //   params[0] = process_dim  (elements per row to normalise; defaults to
-  //               the DTensor's last-dim size = contiguous).
   //   params[1] = in_offset_elems   (skip elements at the start of each row).
   //   params[2] = out_offset_elems  (skip elements at the start of each row
   //               in the output; equal to in_offset for in-place).
-  // Used by the QKV-a fused path (user #2 part-a, 2026-05-12): when q_a_out
   // and kv_a_out are aliases of a wider qkv_a_out buffer, the per-row offset
   // selects which slice to normalise.
   assert(params.size() == 0 || params.size() == 3);
@@ -465,7 +462,6 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
   //   emit a runtime Q_LEN gate at the top of the kernel that returns
   //   immediately if request 0's Q_LEN <= 8. This makes the kpe_sep_v2
   //   phantom-bridge identity a noop on decode iters while still doing the
-  //   real BF16 copy on chunked-prefill iters — saving ~16 μs per decode
   //   layer).
   assert(params.size() <= 2);
   bool is_noop = (params.size() >= 1 && params[0] == 1);
@@ -1267,7 +1263,6 @@ int TaskRegister::register_paged_attention_hopper_task(
 
 int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
-  // params (optional, default = legacy contiguous):
   //   params[0] = process_dim    (HIDDEN_DIM the kernel processes per row).
   //   params[1] = in_offset_elems  (skip elements at start of each row).
   //   params[2] = out_offset_elems (same, for output).
@@ -1291,7 +1286,6 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int hidden_dim_full = output_ops[0]->output_tensors[0].dim[1];
-  // C20 (2026-05-17): use stride[0] (in elements) instead of dim[1] for the
   // row-walk stride. For root tensors stride[0] == dim[1] (row-major
   // default), so non-view callers see no behavior change. For `mpk.narrow`
   // views, dim[1] = slot_width but stride[0] = parent_width — using stride
@@ -1314,7 +1308,6 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   int dtensor_batch = output_ops[0]->dtensor.dim[0];
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // B34 (2026-05-15): builder may shrink grid.x below mbt so each CTA
   // handles BATCH_SIZE > 1 rows. Skip CTAs whose first row is past the
   // active token count, and clamp the kernel's inner row-loop to the
   // remaining active rows so we don't normalize/overwrite stale bf16.
@@ -2271,7 +2264,6 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   // params: [] (always zero) OR [prefill_gate] (when 1, skip the zero-fill on
   //   DECODE iters: step>=prompt_length for all active reqs). Used by the DSv3
   //   router dual-dispatch so the decode-only GEMV is the SOLE writer of
-  //   router_logits at decode (no init-vs-GEMV write race; Codex r2/r3). The
   //   task still dispatches (dep edges intact); only the kernel body returns
   //   early. Default-off => byte-identical for all other tensor_init callers.
   assert(params.size() <= 1);
@@ -2608,9 +2600,6 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // C13 (2026-05-17, REVERTED): tried VPT 8 -> 16 to double ROWS_PER_WARP
-  // and halve outer-loop iters. Per-call TOPK_SIGMOID dropped 109 -> 83 μs
-  // (-24%), BUT the megakernel's per-token latency REGRESSED 86 -> 122 ms
   // (+42%) — likely register pressure from VPT=16 inflating per-thread
   // arrays (row_chunk[16] + biased_chunk[16]) and globally pinning the
   // megakernel to a lower occupancy via the shared __launch_bounds__.
@@ -2642,12 +2631,8 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   code.e("    $,", local_expert_start);
   code.e("    $,", local_expert_end);
   code.e("    $f,", scaling_factor);
-  // P6 (2026-05-14): bound compute loop to runtime active tokens. The
   // initial "broke correctness" reading was a misdiagnosis — the
-  // 19-layer DSv3 baseline already outputs all-zero tokens at
-  // profile_start_step=100 (verified by `git stash` baseline test:
   // same all-zero output), so the regression I attributed to P6 was
-  // baseline noise. The kernel-side skip is safe: Phase 0 init zeroes
   // the full [0, num_rows) routing range, downstream moe_permute's
   // `slot_1idx > 0` filter treats padded slots as "no routing".
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
@@ -2926,7 +2911,6 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   // (TP=4 mbt>=40 MoE hang). With 8 stages it passes at 26.9 ms/tok. Matches
   // BF16 moe_linear_sm100's existing pipeline depth. Total smem ≈ 148KB, fits
   // under the 205KB dynamic-smem budget. See project_tp4_moe_hang.md
-  // (2026-04-22).
   constexpr int num_ab_stages = 8;
   constexpr int num_acc_stages = 2;
   constexpr int num_c_stages = 4;
@@ -3167,7 +3151,6 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
   // (num_experts_per_tok * batch_size) as the row bound.
   bool has_active = (active_mask_offset >= 0 && ctas_per_expert > 0);
   if (has_active) {
-    // D3 + B11 (2026-05-15): per-CTA short-circuit when this CTA's
     // expert is inactive; otherwise read actual_count to cap the row
     // loop. For decode (active_token=1) each routed expert sees only
     // 1 real row, vs the BM_PADDING (=128) padded layout, so the
@@ -3727,7 +3710,8 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
                                code.to_string());
 }
 
-int TaskRegister::register_mla_reduce_sm100_task(
+static int register_mla_reduce_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_heads (e.g. 128)
   // params[1]: d_v (e.g. 512)
@@ -3793,10 +3777,11 @@ int TaskRegister::register_mla_reduce_sm100_task(
     code.e("    $);", num_heads); // local_num_heads (TP-aware)
     code.e("}");
   }
-  return register_task_variant(TASK_MLA_REDUCE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_REDUCE_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_prefill_sm100_task(
+static int register_mla_prefill_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_heads (e.g. 128)
   // params[1]: seq_len
@@ -3883,10 +3868,11 @@ int TaskRegister::register_mla_prefill_sm100_task(
   code.e("      head_,");
   code.e("      task_desc->task_metadata.kv_idx);"); // q_block
   code.e("}");
-  return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_prefill_absorbed_sm100_task(
+static int register_mla_prefill_absorbed_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   assert(params.size() == 5);
@@ -3947,10 +3933,11 @@ int TaskRegister::register_mla_prefill_absorbed_sm100_task(
   code.e("      $,", d_ckv + d_kpe);
   code.e("      $);", d_ckv);
   code.e("}");
-  return register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_PREFILL_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
+static int register_mla_prefill_tp8_chunked_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: num_heads, q_len, kv_len, q_start [, qfused_mode]
   //   qfused_mode (optional, default 0):
@@ -3970,7 +3957,6 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   int qfused_mode = (params.size() == 5) ? params[4] : 0;
   float sm_scale = 1.0f / sqrtf(192.0f);
   float sm_scale_log2 = sm_scale * 1.44269504089f;
-  // FuseTensor row-swap layout (2026-05-12 user #2 v2): when qfused_mode=1,
   // weight is rearranged at load time as [all_heads_nope; all_heads_pe]
   // per-rank, so the fused output buffer per row has layout
   //   [head0_nope(128), head1_nope(128), ..., head_{H-1}_nope(128),
@@ -4093,11 +4079,12 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("    $);", qp_row_stride);
   code.e("}");
   code.e("#endif");
-  return register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SM100,
+  return reg.register_task_variant(TASK_MLA_PREFILL_TP8_CHUNKED_SM100,
                                code.to_string());
 }
 
-int TaskRegister::register_mla_decode_sm100_task(
+static int register_mla_decode_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_heads (e.g. 128)
   // params[1]: d_k (e.g. 576)
@@ -4194,10 +4181,11 @@ int TaskRegister::register_mla_decode_sm100_task(
   code.e("      bi_,");                                  // bi (batch_idx)
   code.e("      $);", num_heads); // local_num_heads (TP-aware)
   code.e("}");
-  return register_task_variant(TASK_MLA_DECODE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_DECODE_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_sm100_task(
+static int register_mla_mtp_decode_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_head_groups
   // params[1]: q_len
@@ -4267,10 +4255,11 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
   code.e("    task_desc->task_metadata.kv_idx,");     // si (split_idx)
   code.e("    bi_);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_MTP_DECODE_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_reduce_sm100_task(
+static int register_mla_mtp_reduce_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_head_groups
   // params[1]: q_len
@@ -4316,7 +4305,7 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");        // gi
   code.e("    bi_);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_REDUCE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_MTP_REDUCE_SM100, code.to_string());
 }
 int TaskRegister::register_paged_attention_split_kv_hopper_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
@@ -4663,7 +4652,6 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     hidden_size = input_ops[0]->output_tensors[0].dim[1];
   }
   // GLOBAL_STRIDE = stride between rows in linearized layout. C20
-  // (2026-05-17): use stride[0] (in elements) instead of dim[1]; for non-view
   // tensors these are equal, but for an `mpk.narrow` view dim[1] is the
   // slot width while stride[0] is the parent's full row width — the
   // latter is what the kernel must walk by to avoid stepping into the
@@ -4749,7 +4737,6 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // buffer is sized for hidden_size per row, so writes must use hidden_size
   // as the row stride. Default (no slice) keeps OUTPUT_STRIDE == input_stride
   // for backward compat with legacy callers where the kernel previously
-  // assumed input_stride == output_stride. 2026-05-12 H8 fix.
   int output_stride = has_slice_override ? hidden_size : input_stride;
   // ROWS_PER_TASK: when caller passes grid.y < batch_size, the kernel
   // internally loops over multiple rows per CTA so total launched CTAs
@@ -4800,7 +4787,6 @@ int TaskRegister::register_quantize_fp8_sm100_task(
 
 int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
   //
   // tb_graph inputs (in order):
   //   [0] input bf16  [M, K_full]              (row-major, possibly wider
@@ -5094,7 +5080,6 @@ int TaskRegister::register_linear_fp8_swapAB_sm100_task(
   int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
   // Codegen mirrors register_linear_sm100_task (BF16 MPK) with the only
-  // additions being: (a) FP8 element type for A/B, (b) two raw uint32_t*
   // scale pointers passed through after BiasTensor, (c) FP8-tuned
   // BLOCK_K=128 (UMMA_K=32) instead of BLOCK_K=64 (UMMA_K=16).
   mirage::transpiler::CodeKeeper code;
@@ -5421,7 +5406,8 @@ int TaskRegister::register_splitk_linear_fp8_swapAB_sm100_task(
                                code.to_string());
 }
 
-int TaskRegister::register_linear_fp8_bmm_sm100_task(
+static int register_linear_fp8_bmm_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // Per-head FP8 batched matmul. Each CTA handles one head's slice of
   //     output[n, h, m_lo:m_hi] = input[n, h, :] @ weight[h, m_lo:m_hi, :]^T
@@ -5516,7 +5502,6 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   //   input  [N, H, D_in] -> stride[0] = H * D_in
   //   weight [H, D_out, D_in] -> stride between rows within a head is D_in
   //   output [N, H, D_out] -> stride[0] = H * D_out
-  // C20 (2026-05-17): read from dtensor.stride[0] instead of the owner_op's
   // input_strides[0] — view-safe (mpk.narrow inherits parent stride; root
   // tensors have stride populated by input.cc and fixup_legacy_strides).
   int input_row_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
@@ -5658,10 +5643,11 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   code.e("    mBias,");
   code.e("    tma_out);");
 
-  return register_task_variant(TASK_LINEAR_FP8_BMM_SM100, code.to_string());
+  return reg.register_task_variant(TASK_LINEAR_FP8_BMM_SM100, code.to_string());
 }
 
-int TaskRegister::register_linear_fp8_bmm_dense_sm100_task(
+static int register_linear_fp8_bmm_dense_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // Per-head FP8 batched matmul wrapping the DENSE block-scaled GEMM body
   // (float32 scales) instead of swapAB (UE8M0). Each CTA handles one head's
@@ -5678,7 +5664,6 @@ int TaskRegister::register_linear_fp8_bmm_dense_sm100_task(
   // Output:
   //   [0] output_bf16   [N, H, D_out]
   //
-  // Dense body A/B assignment is the OPPOSITE of swapAB: A = input (param 0,
   // TMA desc slot 0), B = weight (param 2, TMA desc slot 2). The float32
   // scales are raw pointers (sa = input_ptrs[1], sb = input_ptrs[3]). The
   // bf16 output is a raw pointer (output_ptrs[0]).
@@ -5810,7 +5795,7 @@ int TaskRegister::register_linear_fp8_bmm_dense_sm100_task(
   code.e("    $);", C_row_stride);
   code.e("}");
 
-  return register_task_variant(TASK_LINEAR_FP8_BMM_DENSE_SM100,
+  return reg.register_task_variant(TASK_LINEAR_FP8_BMM_DENSE_SM100,
                                code.to_string());
 }
 
@@ -5830,15 +5815,11 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   FP8-driven garbage when the upstream quantize early-exited for
   //   non-active rows. See scratch/qkva_fusion_bug_FIXED.md for the
   //   multi-iter buffer-poisoning chain that motivated this fix
-  //   (2026-05-13).
   // runtime_m_mode=1: gates to prompt-prefill and uses request 0's current
   //   kv_len as runtime M. This is used for ckv -> kv_b_proj decompression.
-  // runtime_m_mode=2 (B20, 2026-05-15): prefill-phase gate (Q_LEN > 8) but
   //   keep active_rows as runtime M. Used for the prefill-only branch of
   //   the dual-dispatch O_proj (prefill O_proj reads attn_unabsorbed which
   //   is only valid on prefill iters; decode iters early-exit so the GEMM
-  //   doesn't burn ~30 μs on a wasted wave).
-  // runtime_m_mode=3 (B20, 2026-05-15): decode-phase gate (Q_LEN <= 8) with
   //   active_rows as runtime M. Used for the decode-only branch of the
   //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
   //   valid on decode iters; prefill iters early-exit).
@@ -5876,7 +5857,6 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   } else {
-    // 2026-05-13 ROOT-CAUSE FIX: cap M at active_rows so decode iters
     // (active_rows=1) don't overwrite output rows 1..M-1 with garbage.
     // This makes the GEMM's early-exit semantics symmetric with the
     // upstream quantize task's `request_id >= active_rows` early-exit:
@@ -5904,7 +5884,6 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   return self->register_task_variant(task_type, code.to_string());
 }
 
-// Unified dense BN128 registration entry (#201 L1, 2026-06-08). smallm (NE2,
 // decode-shaped M) and mediumm (NE4, prefill-shaped M) are the SAME dense FP8
 // GEMM core (register_fp8_gemm_dense_variant) with the SAME TMA box (128,
 // tma.cuh:1607); they differ ONLY in namespace/fn/enum/NS. ONE param-driven
@@ -5914,14 +5893,12 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
 // name / profiler label are unchanged. The enum-COUNT merge (smallm+mediumm ->
 // one enum) is staged separately because it changes the profiler label and so
 // needs GPU+trace validation — see
-// experiment_history/REGISTRY_UNIFY_L2_PLAN_20260608.md.
 int TaskRegister::register_fp8_gemm_dense_bn128_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     int variant) {
   (void)bgraph;
   bool const is_mediumm = (variant == 1);
-  // smallm keeps the MPK_DSV3_SMALLM_NS6 pipeline-depth A/B knob (NS=3->6,
   // numerically identical output); mediumm is fixed at the NS=3 default (the
   // value the prior mediumm wrapper got from register_fp8_gemm_dense_variant's
   // default arg) -> byte-identical to before.
@@ -5938,7 +5915,6 @@ int TaskRegister::register_fp8_gemm_dense_bn128_sm100_task(
       /*NS=*/ns);
 }
 
-// D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but
 // the kernel call emits FP8 + packed UE8M0 scale outputs. Task tuple is
 // (4 inputs, 2 outputs): output_ptrs[0] = FP8 buffer, output_ptrs[1] =
 // packed-scale uint32 buffer. params layout unchanged (M, N, K,
@@ -6015,22 +5991,24 @@ static int
   return self->register_task_variant(task_type, code.to_string());
 }
 
-int TaskRegister::register_fp8_gemm_dense_smallm_fp8out_sm100_task(
+static int register_fp8_gemm_dense_smallm_fp8out_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   return register_fp8_gemm_dense_fp8out_variant(
-      this,
+      &reg,
       params,
       "fp8_gemm_dense_smallm",
       "fp8_gemm_dense_smallm_fp8out_sm100_task_impl",
       TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100);
 }
 
-int TaskRegister::register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
+static int register_fp8_gemm_dense_mediumm_fp8out_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   return register_fp8_gemm_dense_fp8out_variant(
-      this,
+      &reg,
       params,
       "fp8_gemm_dense_mediumm",
       "fp8_gemm_dense_mediumm_fp8out_sm100_task_impl",
@@ -6084,7 +6062,6 @@ static int register_fp8_group_gemm_variant(TaskRegister *self,
   return self->register_task_variant(task_type, code.to_string());
 }
 
-// Unified grouped-GEMM registration entry (#201 L1, 2026-06-08). smallm
 // (BN=64, NS=8) and largem (BN=128, NS=6) share register_fp8_group_gemm_variant
 // and differ ONLY in namespace/fn/enum. ONE param-driven entry dispatches by
 // `variant` (0=smallm, 1=largem). Codegen is BYTE-IDENTICAL to the prior two
@@ -6165,7 +6142,6 @@ int TaskRegister::register_moe_permute_sm100_task(
 //             residual (MBT, HIDDEN) bf16
 // Outputs (1): output (MBT, HIDDEN) bf16
 // Grid: (ceil(MBT / ROWS_PER_TASK), 1, 1). request_id = bid.x set by runtime.
-// B33 (2026-05-15): added ROWS_PER_TASK template — when the wrapper shrinks
 // grid_dim.x below MBT, the kernel loops ROWS_PER_TASK = ceil(MBT / grid.x)
 // tokens per CTA. Default grid.x == MBT keeps ROWS_PER_TASK == 1 and the
 // legacy 1-CTA-per-token shape unchanged.
@@ -6190,7 +6166,6 @@ int TaskRegister::register_moe_unpermute_sm100_task(
   int output_stride = HIDDEN;
   output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
-  // B33: rows_per_task = ceil(MBT / grid.x). When the wrapper passes
   // grid.x < MBT the kernel internally loops over multiple tokens per CTA
   // so the total launched CTAs stay ≤ num_workers. Default grid.x == MBT
   // gives rows_per_task == 1 (legacy 1-CTA-per-token contract).
@@ -6200,10 +6175,8 @@ int TaskRegister::register_moe_unpermute_sm100_task(
     rows_per_task = 1;
   }
 
-  // 2026-05-15 stragglers fix: HIDDEN_SPLIT = grid.y partitions the
   // HIDDEN axis across HIDDEN_SPLIT CTAs per token. Decode case
   // (1 active token) has only HIDDEN_SPLIT CTAs doing actual compute
-  // — bumping HIDDEN_SPLIT spreads the 32 μs straggler across more
   // SMs in parallel. Prefill grid balloons to MBT*HIDDEN_SPLIT CTAs
   // but per-CTA work shrinks proportionally.
   int hidden_split = bgraph.grid_dim.y > 0 ? (int)bgraph.grid_dim.y : 1;
@@ -6231,7 +6204,8 @@ int TaskRegister::register_moe_unpermute_sm100_task(
   return register_task_variant(TASK_MOE_UNPERMUTE_SM100, code.to_string());
 }
 
-int TaskRegister::register_assemble_q_decode_sm100_task(
+static int register_assemble_q_decode_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // Interleaves (N, H, D_NOPE) + (N, H, D_PE) → (N, H, D_NOPE+D_PE) per head.
   //
@@ -6304,10 +6278,11 @@ int TaskRegister::register_assemble_q_decode_sm100_task(
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    $);", n_per_task);
-  return register_task_variant(TASK_ASSEMBLE_Q_DECODE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_ASSEMBLE_Q_DECODE_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_kv_gather_sm100_task(
+static int register_mla_kv_gather_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params:
   //   size 3 (legacy): [d_k, d_v, page_size]
@@ -6370,10 +6345,11 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
-  return register_task_variant(TASK_MLA_KV_GATHER_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_KV_GATHER_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_kv_gather_split_sm100_task(
+static int register_mla_kv_gather_split_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // Split-output variant for the chunked-prefill MLA kernel. Same inputs as
   // the non-split variant plus TWO separate output pointers: ckv_sep and
@@ -6430,11 +6406,12 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
   code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
-  return register_task_variant(TASK_MLA_KV_GATHER_SPLIT_SM100,
+  return reg.register_task_variant(TASK_MLA_KV_GATHER_SPLIT_SM100,
                                code.to_string());
 }
 
-int TaskRegister::register_mla_kv_gather_unified_sm100_task(
+static int register_mla_kv_gather_unified_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // Unified variant for the chunked-prefill flow. It appends new KV to the
   // paged cache once. Decode gets a dense concatenated [CKV,KPE] view when
@@ -6444,7 +6421,6 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   //   size 3 (legacy): [d_k, d_v, page_size].
   //   size 7 (QKV-a fused): adds [c_latent_row_stride, c_latent_offset_elems,
   //                               k_pe_row_stride, k_pe_offset_elems].
-  //   size 8 (gather fan-out, 2026-05-16 C1): also append [num_gather_splits].
   //   When NUM_GATHER_SPLITS > 1, the builder passes grid_dim.y = N_SPLITS, and
   //   each CTA strides seq_pos by N_SPLITS so the formerly-serial gather/append
   //   loops run in parallel across N_SPLITS workers.
@@ -6529,11 +6505,12 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    task_desc->task_metadata.kv_idx);");
   code.e("}");
-  return register_task_variant(TASK_MLA_KV_GATHER_UNIFIED_SM100,
+  return reg.register_task_variant(TASK_MLA_KV_GATHER_UNIFIED_SM100,
                                code.to_string());
 }
 
-int TaskRegister::register_deepseek_mla_rope_q_sm100_task(
+static int register_deepseek_mla_rope_q_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   assert(params.size() == 3);
@@ -6561,10 +6538,11 @@ int TaskRegister::register_deepseek_mla_rope_q_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    task_desc->task_metadata.kv_idx,");
   code.e("    task_desc->task_metadata.merge_task_offset);");
-  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
 }
 
-int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
+static int register_deepseek_mla_rope_q_fused_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   // params: [num_heads, tile_q [, phase_gate]]
@@ -6605,10 +6583,11 @@ int TaskRegister::register_deepseek_mla_rope_q_fused_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    task_desc->task_metadata.kv_idx,");
   code.e("    task_desc->task_metadata.merge_task_offset);");
-  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
 }
 
-int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
+static int register_deepseek_mla_rope_q_split_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   // params: [num_heads, tile_q [, qfused_mode [, phase_gate]]]
@@ -6671,10 +6650,11 @@ int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    task_desc->task_metadata.kv_idx,");
   code.e("    task_desc->task_metadata.merge_task_offset);");
-  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
 }
 
-int TaskRegister::register_deepseek_mla_rope_k_sm100_task(
+static int register_deepseek_mla_rope_k_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   // params: [tile_q [, k_pe_row_stride [, k_pe_offset]]]
@@ -6713,7 +6693,7 @@ int TaskRegister::register_deepseek_mla_rope_k_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    task_desc->task_metadata.kv_idx,");
   code.e("    task_desc->task_metadata.merge_task_offset);");
-  return register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
+  return reg.register_task_variant(TASK_DEEPSEEK_MLA_ROPE_SM100, code.to_string());
 }
 
 int TaskRegister::register_mtp_verify_strict_task(
@@ -6813,7 +6793,6 @@ int TaskRegister::register_mtp_build_embed_input_task(
   return register_task_variant(TASK_MTP_BUILD_EMBED_INPUT, code.to_string());
 }
 
-// ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
 //
 // Three variants (TP=2/4/8) share structure but differ:
 //   - NUM_HEADS hardcoded inside namespace (64/32/16) → not a runtime param
@@ -6826,7 +6805,8 @@ int TaskRegister::register_mtp_build_embed_input_task(
 //   [num_groups, q_len_padded, kv_len, num_splits, q_len_real]  (TP=8)
 // reduce params: [num_groups, q_len, num_splits, rd_dv]
 
-int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
+static int register_mla_mtp_decode_tp2_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
   int num_groups = params[0];
@@ -6894,10 +6874,11 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP2_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_MTP_DECODE_TP2_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
+static int register_mla_mtp_decode_tp2_reduce_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
   int num_groups = params[0];
@@ -6940,11 +6921,12 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.e("      task_desc->task_metadata.request_id,");
   code.e("      bi_);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100,
+  return reg.register_task_variant(TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100,
                                code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
+static int register_mla_mtp_decode_tp4_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
   int num_groups = params[0];
@@ -7012,10 +6994,11 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   code.e("      task_desc->task_metadata.kv_idx,"); // packed block/V-split id
   code.e("      task_desc->task_metadata.request_id);"); // batch
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP4_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_MTP_DECODE_TP4_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
+static int register_mla_mtp_decode_tp4_reduce_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
   int num_groups = params[0];
@@ -7056,11 +7039,12 @@ int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
   code.e("      task_desc->task_metadata.request_id,");
   code.e("      bi_);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100,
+  return reg.register_task_variant(TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100,
                                code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
+static int register_mla_mtp_decode_tp8_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 5);
   int num_groups = params[0];
@@ -7127,10 +7111,11 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP8_SM100, code.to_string());
+  return reg.register_task_variant(TASK_MLA_MTP_DECODE_TP8_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
+static int register_mla_mtp_decode_tp8_reduce_sm100_task(TaskRegister &reg,
+    
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
   int num_groups = params[0];
@@ -7174,8 +7159,85 @@ int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
   code.e("      task_desc->task_metadata.request_id,");
   code.e("      bi_);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100,
+  return reg.register_task_variant(TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100,
                                code.to_string());
+}
+
+
+// Unified MLA-family registration entry. The per-variant codegen bodies are
+// file-static above; this is the only MLA symbol exposed to graph.cc.
+int TaskRegister::register_mla_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params,
+                                    MlaTaskVariant variant) {
+  switch (variant) {
+  case MlaTaskVariant::Decode:
+    return register_mla_decode_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::KvGather:
+    return register_mla_kv_gather_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::KvGatherSplit:
+    return register_mla_kv_gather_split_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::KvGatherUnified:
+    return register_mla_kv_gather_unified_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpDecodeTp1:
+    return register_mla_mtp_decode_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpDecodeTp2:
+    return register_mla_mtp_decode_tp2_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpDecodeTp4:
+    return register_mla_mtp_decode_tp4_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpDecodeTp8:
+    return register_mla_mtp_decode_tp8_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpReduceTp1:
+    return register_mla_mtp_reduce_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpReduceTp2:
+    return register_mla_mtp_decode_tp2_reduce_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpReduceTp4:
+    return register_mla_mtp_decode_tp4_reduce_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::MtpReduceTp8:
+    return register_mla_mtp_decode_tp8_reduce_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::Reduce:
+    return register_mla_reduce_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::Prefill:
+    return register_mla_prefill_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::PrefillAbsorbed:
+    return register_mla_prefill_absorbed_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::PrefillTp8Chunked:
+    return register_mla_prefill_tp8_chunked_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::RopeQ:
+    return register_deepseek_mla_rope_q_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::RopeQFused:
+    return register_deepseek_mla_rope_q_fused_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::RopeQSplit:
+    return register_deepseek_mla_rope_q_split_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::RopeK:
+    return register_deepseek_mla_rope_k_sm100_task(*this, bgraph, params);
+  case MlaTaskVariant::AssembleQDecode:
+    return register_assemble_q_decode_sm100_task(*this, bgraph, params);
+  }
+  assert(false && "unknown MlaTaskVariant");
+  return -1;
+}
+
+// Unified dense-GEMM fp8out pair (D1 epilogue-quantize flavors of the BN128
+// dense GEMM): variant 0 = smallm (NE2), 1 = mediumm (NE4).
+int TaskRegister::register_fp8_gemm_dense_fp8out_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    int variant) {
+  return variant == 0
+             ? register_fp8_gemm_dense_smallm_fp8out_sm100_task(*this, bgraph,
+                                                                params)
+             : register_fp8_gemm_dense_mediumm_fp8out_sm100_task(*this, bgraph,
+                                                                 params);
+}
+
+// Unified per-head FP8 BMM entry: dense=false -> swapAB/UE8M0 body (BMM1
+// kv-up), dense=true -> dense block-scaled body (BMM2 o-side).
+int TaskRegister::register_linear_fp8_bmm_unified_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool dense) {
+  return dense ? register_linear_fp8_bmm_dense_sm100_task(*this, bgraph, params)
+               : register_linear_fp8_bmm_sm100_task(*this, bgraph, params);
 }
 
 } // namespace runtime
