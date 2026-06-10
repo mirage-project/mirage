@@ -127,7 +127,7 @@ __device__ inline void tcgen05_mma(int taddr, uint64_t a_desc, uint64_t b_desc,
   } while (0)
 
 // linear_init: full structural init of all op-private mbars for one task; run
-// once by the controller (init_semaphores) before the task is published.
+// once by the dispatcher (init_semaphores) before the task is published.
 // dyn_sem_base = op_sem_base_addr(...) (SMEM addr of this slot's SEM_OP_BASE;
 // ordinal k at +k*8).
 __device__ __forceinline__ void linear_init(int dyn_sem_base) {
@@ -141,7 +141,7 @@ __device__ __forceinline__ void linear_init(int dyn_sem_base) {
 
 // reinit_for_role: re-init only the edges this role owns at task start (per
 // reinit_*_by / OneShotSem.reinit_by), clearing prior-slot async strays. Called
-// single-threaded by the owning role (loader's elected lane; launcher lane 0).
+// single-threaded by the owning role (loader's elected lane; mma lane 0).
 // MUST be __forceinline__: as a real call, nvcc reorders the mbarrier-init
 // fence relative to the surrounding TMA/MMA issue, re-exposing the stale-arrival
 // race. Inlining keeps the fence ordered as written.

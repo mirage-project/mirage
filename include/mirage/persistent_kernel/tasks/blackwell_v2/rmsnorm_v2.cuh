@@ -190,7 +190,7 @@ struct RmsNormLoader {
       int) {}
 };
 
-struct RmsNormLauncher {
+struct RmsNormMma {
   __device__ __forceinline__ static void
   run(mirage::runtime::TaskDesc const *,
       mirage::runtime::RuntimeConfig const &,
@@ -198,7 +198,7 @@ struct RmsNormLauncher {
       int) {}
 };
 
-struct RmsNormConsumer {
+struct RmsNormCompute {
   template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
   __device__ __forceinline__ static void
   run(mirage::runtime::TaskDesc const *task_desc,
@@ -225,8 +225,8 @@ struct RmsNormStorer {
 
 struct RmsNormTask : public ::kernel::v2_task::TaskInterface {
   using loader = RmsNormLoader;
-  using launcher = RmsNormLauncher;
-  using consumer = RmsNormConsumer;
+  using mma = RmsNormMma;
+  using compute = RmsNormCompute;
   using storer = RmsNormStorer;
 };
 

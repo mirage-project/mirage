@@ -114,11 +114,11 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *sin_ptr,
     float q_eps,
     float k_eps) {
-  constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 6;
+  constexpr int COMPUTE_WARPGROUP_SYNC_BARRIER_ID = 6;
   constexpr int ROTARY_SYNC_BARRIER_ID = 7;
   
   cutlass::arch::NamedBarrier wg_barrier(
-      NUM_THREADS, /*bar-id*/ CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
+      NUM_THREADS, /*bar-id*/ COMPUTE_WARPGROUP_SYNC_BARRIER_ID);
   int const wg_id = threadIdx.x / 128;
   if (wg_id == 0) {
     constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
@@ -369,7 +369,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                          QOSmem,
                          NUM_QO_PER_KV,
                          HEAD_DIM,
-                         CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                         COMPUTE_WARPGROUP_SYNC_BARRIER_ID,
                          ROTARY_SYNC_BARRIER_ID>(
               q_smem,
               static_cast<T const *>(q_norm_weight_ptr),
@@ -389,7 +389,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                          KVSmem,
                          1,
                          HEAD_DIM,
-                         CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                         COMPUTE_WARPGROUP_SYNC_BARRIER_ID,
                          ROTARY_SYNC_BARRIER_ID>(
               k_smem,
               static_cast<T const *>(k_norm_weight_ptr),
@@ -414,7 +414,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                                     1,
                                     HEAD_DIM,
                                     128,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                                    COMPUTE_WARPGROUP_SYNC_BARRIER_ID>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + seq_len - num_tokens) * HEAD_DIM,
@@ -433,7 +433,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                                     1,
                                     HEAD_DIM,
                                     128,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                                    COMPUTE_WARPGROUP_SYNC_BARRIER_ID>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + first_kv_token_to_process) * HEAD_DIM,

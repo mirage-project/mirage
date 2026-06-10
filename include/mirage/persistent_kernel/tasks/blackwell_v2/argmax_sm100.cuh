@@ -204,7 +204,7 @@ struct ArgmaxLoader {
   }
 };
 
-struct ArgmaxLauncher {
+struct ArgmaxMma {
   __device__ __forceinline__ static void
   run(mirage::runtime::TaskDesc const *,
       mirage::runtime::RuntimeConfig const &,
@@ -214,13 +214,13 @@ struct ArgmaxLauncher {
   }
 };
 
-struct ArgmaxConsumer {
+struct ArgmaxCompute {
   __device__ __forceinline__ static void
   run(mirage::runtime::TaskDesc const *,
       mirage::runtime::RuntimeConfig const &,
       void *,
       int) {
-    // Argmax consumer work is generated from TaskRegister variants because the
+    // Argmax compute work is generated from TaskRegister variants because the
     // concrete template parameters are model-specific.
   }
 };
@@ -231,14 +231,14 @@ struct ArgmaxStorer {
       mirage::runtime::RuntimeConfig const &,
       void *,
       int) {
-    // Current argmax kernels write their result from the consumer role.
+    // Current argmax kernels write their result from the compute role.
   }
 };
 
 struct ArgmaxTask : public ::kernel::v2_task::TaskInterface {
   using loader = ArgmaxLoader;
-  using launcher = ArgmaxLauncher;
-  using consumer = ArgmaxConsumer;
+  using mma = ArgmaxMma;
+  using compute = ArgmaxCompute;
   using storer = ArgmaxStorer;
 };
 

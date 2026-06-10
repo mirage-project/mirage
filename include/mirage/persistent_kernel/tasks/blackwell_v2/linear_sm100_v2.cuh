@@ -23,7 +23,7 @@
 // Shapes, SMEM/SEM ordinals, and PTX wrappers all live in kernel::linear
 // (linear_spec.h + linear_device.cuh).
 //
-// W and A share one empty edge (mma_mbar): the launcher's single tcgen05.commit
+// W and A share one empty edge (mma_mbar): the mma's single tcgen05.commit
 // per K-iteration frees both, so only the W cursor waits on it and A just tracks
 // the stage alongside it.
 //
@@ -62,7 +62,7 @@ using ::kernel::linear::SEM_MMA_BASE;
 using ::kernel::linear::SEM_MAINLOOP_BASE;
 using ::kernel::linear::SEM_EPILOGUE_BASE;
 using ::kernel::linear::SEM_TMEM_READY;
-using ::kernel::linear::SEM_CONSUMER_DONE;
+using ::kernel::linear::SEM_COMPUTE_DONE;
 using ::kernel::linear::CHANNELS;
 using ::kernel::linear::CH_W;
 using ::kernel::linear::CH_A;
@@ -86,13 +86,13 @@ using mpk::ch::By;
 //   WChan/AChan: full = TMA-arrived for that stage; empty = the shared mma_mbar.
 //   AccChan: TMEM-backed and double-buffered (2 slots). mainloop_stage cycles
 //            mod 2, alternating TMEM columns taddr+0 / taddr+BLOCK_N so tile
-//            t+1's MMA overlaps the consumer reading tile t.
+//            t+1's MMA overlaps the compute reading tile t.
 using WChan   = mpk::ch::Channel    <NUM_STAGES, By::Tma, By::Mma>;
 using AChan   = mpk::ch::Channel    <NUM_STAGES, By::Tma, By::Mma>;
 using AccChan = mpk::ch::TmemChannel<2,          By::Mma, By::Warp>;
 
 // A W stage is 2 dedicated contiguous pages. With CROSS_TASK_PAGES on, the W
-// ring runs the per-stage page lifecycle (loader acquires, launcher releases
+// ring runs the per-stage page lifecycle (loader acquires, mma releases
 // page by page) so the next task's loader can TMA into pages this task has
 // already finished with. A stages are sub-page and packed, so per-stage page
 // control isn't safe for them: the A ring carries no pages, and A's pages (plus
@@ -137,7 +137,7 @@ make_wa(int smem, int dyn_sem_base,
 
 // TmemChannel stores only barrier addresses + cols_per_slot. taddr lives on
 // the cursor (set via TmemProducer::set_taddr / TmemConsumer::set_taddr after
-// the launcher's tcgen05.alloc publishes it).
+// the mma's tcgen05.alloc publishes it).
 __device__ __forceinline__ AccChan
 make_acc_channel(int dyn_sem_base) {
   return AccChan{
@@ -334,7 +334,7 @@ __device__ __noinline__ void linear_loader_task(
       // (timed-wait on the FIRST ring lap only: that is where the cold-start
       // exposure lives; timing every K-iter measurably slowed the kernel.)
       MPK_V2_TIMED_WAIT_IF(t * c.iters + i < NUM_STAGES,
-                           V2_PROF_GROUP_LOADER_PHASE, V2_PROF_MMA_EMPTY_WAIT,
+                           V2_PROF_GROUP_LOADER_STALL, V2_PROF_MMA_EMPTY_WAIT,
                            pW.wait_free());
       const int W_smem = Wr.slot_addr(pW.st);   // storage addr from the ring
 
@@ -368,10 +368,10 @@ __device__ __noinline__ void linear_loader_task(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Launcher role (warp 5, all 32 lanes — alloc/dealloc are sync.aligned).
+// Mma role (warp 5, all 32 lanes — alloc/dealloc are sync.aligned).
 // ═══════════════════════════════════════════════════════════════════════════
 template <int SPLIT_K = 1, int TILES_PER_TASK = 1>
-__device__ __noinline__ void linear_launcher_task(
+__device__ __noinline__ void linear_mma_task(
     mirage::runtime::TaskDesc const *task_desc,
     mirage::runtime_v2::RuntimeSMEM *runtime_smem,
     int N_real, int K, int tile_idx, int dyn_sem_base) {
@@ -390,9 +390,9 @@ __device__ __noinline__ void linear_launcher_task(
 
   MPK_V2_PROF_SNAPSHOT()
 
-  // Re-init the launcher's async edges per the CHANNELS/ONESHOT reinit policy.
+  // Re-init the mma's async edges per the CHANNELS/ONESHOT reinit policy.
   if (lane_id == 0) {
-    ::kernel::linear::reinit_for_role(::kernel::linear::Role::Launcher,
+    ::kernel::linear::reinit_for_role(::kernel::linear::Role::Mma,
                                       dyn_sem_base);
   }
   __syncwarp();
@@ -425,9 +425,9 @@ __device__ __noinline__ void linear_launcher_task(
   if (elect_sync()) {
     for (int t = 0; t < c.tiles; t++) {
       // Wait epilogue_mbar (TMEM column free); returns column for tile t.
-      // (timed-waits below: elected lane == the launcher-phase track writer.)
+      // (timed-waits below: elected lane == the mma-stall track writer.)
       int tmem;
-      MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_LAUNCHER_PHASE,
+      MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_MMA_STALL,
                            V2_PROF_EPILOGUE_WAIT, tmem = pAcc.wait_free());
 
       for (int i = 0; i < c.iters; i++) {
@@ -437,7 +437,7 @@ __device__ __noinline__ void linear_launcher_task(
         // baseline (sm100 is sensitive to branches around tcgen05 waits;
         // see sm100_branch_ima).
         MPK_V2_TIMED_WAIT_IF(t * c.iters + i < NUM_STAGES,
-                             V2_PROF_GROUP_LAUNCHER_PHASE, V2_PROF_W_TMA_WAIT,
+                             V2_PROF_GROUP_MMA_STALL, V2_PROF_W_TMA_WAIT,
                              cW.wait_full());   // W_tma_mbar[stage]
         cA.wait_full();                         // A_tma_mbar[stage]
         const int W_smem = Wr.slot_addr(cW.st);
@@ -464,7 +464,7 @@ __device__ __noinline__ void linear_launcher_task(
         }
       }
 
-      // Signal mainloop_mbar — async tcgen05.commit; consumer waits this.
+      // Signal mainloop_mbar — async tcgen05.commit; compute waits this.
       pAcc.commit_mma();
     }
     // W stages never visited (only when total_g < NUM_STAGES) are freed here so
@@ -494,11 +494,11 @@ __device__ __noinline__ void linear_launcher_task(
   }
   __syncwarp();
 
-  // Wait consumer_done — one-shot, kept raw (matches v2).
+  // Wait compute_done — one-shot, kept raw (matches v2).
   if (lane_id == 0) {
-    MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_LAUNCHER_PHASE,
-                         V2_PROF_CONSUMER_DONE_WAIT,
-                         mbarrier_wait(dyn_sem_base + SEM_CONSUMER_DONE * 8, 0));
+    MPK_V2_TIMED_WAIT_IF(true, V2_PROF_GROUP_MMA_STALL,
+                         V2_PROF_COMPUTE_DONE_WAIT,
+                         mbarrier_wait(dyn_sem_base + SEM_COMPUTE_DONE * 8, 0));
   }
   __syncwarp();
 
@@ -511,7 +511,7 @@ __device__ __noinline__ void linear_launcher_task(
 // ═══════════════════════════════════════════════════════════════════════════
 template <bool HAS_RESIDUAL, int M_REAL = 16,
           int SPLIT_K = 1, int TILES_PER_TASK = 1>
-__device__ __noinline__ void linear_consumer_task(
+__device__ __noinline__ void linear_compute_task(
     mirage::runtime::TaskDesc const *task_desc,
     nv_bfloat16       *C_ptr,
     nv_bfloat16 const *res_ptr,
@@ -529,11 +529,11 @@ __device__ __noinline__ void linear_consumer_task(
 
   MPK_V2_PROF_SNAPSHOT()
 
-  // Wait launcher's TMEM-addr publish — one-shot, kept raw (matches v2).
-  // (timed-wait on thread 0 only — all four consumer warps' lane 0 wait,
-  // but the consumer-phase track has a single designated writer.)
+  // Wait mma's TMEM-addr publish — one-shot, kept raw (matches v2).
+  // (timed-wait on thread 0 only — all four compute warps' lane 0 wait,
+  // but the compute-stall track has a single designated writer.)
   if (lane_id == 0) {
-    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_CONSUMER_PHASE,
+    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_COMPUTE_STALL,
                          V2_PROF_TMEM_READY_WAIT,
                          mbarrier_wait(dyn_sem_base + SEM_TMEM_READY * 8, 0));
   }
@@ -554,9 +554,9 @@ __device__ __noinline__ void linear_consumer_task(
     const int bid_m           = cur_spatial_idx;
 
     // Wait MMA done for this tile; cursor gives the TMEM column. All 128
-    // threads wait; only thread 0 (the consumer-phase writer) times it.
+    // threads wait; only thread 0 (the compute-stall writer) times it.
     int t_col;
-    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_CONSUMER_PHASE,
+    MPK_V2_TIMED_WAIT_IF(threadIdx.x == 0, V2_PROF_GROUP_COMPUTE_STALL,
                          V2_PROF_MAINLOOP_WAIT, t_col = cAcc.wait_full());
 #ifdef MPK_ENABLE_PROFILING
     // RECONVERGE: in profiling builds the thread-0 timing branch diverges
@@ -605,8 +605,8 @@ __device__ __noinline__ void linear_consumer_task(
     cAcc.release_warp();
   }
 
-  // Signal consumer_done (128 threads, sync) — one-shot, kept raw.
-  mbarrier_arrive(dyn_sem_base + SEM_CONSUMER_DONE * 8);
+  // Signal compute_done (128 threads, sync) — one-shot, kept raw.
+  mbarrier_arrive(dyn_sem_base + SEM_COMPUTE_DONE * 8);
 }
 
 } // namespace linear_v2

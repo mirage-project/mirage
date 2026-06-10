@@ -27,46 +27,46 @@
 // renders v2 traces unchanged. FIVE tracks per SM (num_groups = 5) — the SM
 // is a pipeline in v2, so each warp role gets its own Perfetto row and the
 // task-level overlap between roles is directly visible:
-//   group 0 consumer  (warp 0 lane 0): BEGIN/END per task body — includes
+//   group 0 compute  (warp 0 lane 0): BEGIN/END per task body — includes
 //           the dep-wait spin; gaps = waiting on instruction publish
 //   group 1 loader    (lane 0): page-prefix + loader body per task
-//   group 2 launcher  (lane 0): launcher body (linear: TMEM/MMA driving)
+//   group 2 mma  (lane 0): mma body (linear: TMEM/MMA driving)
 //   group 3 storer    (lane 0): storer body (idle for Qwen3 tasks)
-//   group 4 controller(lane 0): V2_PROF_PREPARE_BATCH (worker 0),
+//   group 4 dispatcher(lane 0): V2_PROF_PREPARE_BATCH (worker 0),
 //           V2_PROF_ITER_SYNC (end-of-iter barrier), V2_PROF_GO_WAIT
 // Only the LAST V2_PROF_WINDOW_ITERS decode steps are recorded: that's the
 // interesting regime (full KV length), and it bounds the event count so the
 // fixed-size profiler buffer can't overflow on long runs.
 // Non-profiling builds: all macros expand to nothing — zero impact.
 static constexpr int V2_PROF_NUM_GROUPS = 8;
-static constexpr int V2_PROF_GROUP_CONSUMER = 0;
+static constexpr int V2_PROF_GROUP_COMPUTE = 0;
 static constexpr int V2_PROF_GROUP_LOADER = 1;
-static constexpr int V2_PROF_GROUP_LAUNCHER = 2;
+static constexpr int V2_PROF_GROUP_MMA = 2;
 static constexpr int V2_PROF_GROUP_STORER = 3;
-static constexpr int V2_PROF_GROUP_CONTROLLER = 4;
-// Phase tracks: sub-slices WITHIN a role's task window, so a bar
+static constexpr int V2_PROF_GROUP_DISPATCHER = 4;
+// Stall tracks: sub-slices WITHIN a role's task window, so a bar
 // self-explains (wait vs work). Written by the closure-free emitter
 // (v2_prof_emit*) because their call sites can't see the role-loop closure.
-static constexpr int V2_PROF_GROUP_CONSUMER_PHASE = 5;
-static constexpr int V2_PROF_GROUP_LOADER_PHASE = 6;
-static constexpr int V2_PROF_GROUP_LAUNCHER_PHASE = 7;
+static constexpr int V2_PROF_GROUP_COMPUTE_STALL = 5;
+static constexpr int V2_PROF_GROUP_LOADER_STALL = 6;
+static constexpr int V2_PROF_GROUP_MMA_STALL = 7;
 static constexpr int V2_PROF_PREPARE_BATCH = 204;
 static constexpr int V2_PROF_ITER_SYNC = 205;
 static constexpr int V2_PROF_GO_WAIT = 206;
-static constexpr int V2_PROF_DEP_WAIT = 207;   // consumer-phase: dep spin
-static constexpr int V2_PROF_PAGE_WAIT = 208;  // loader-phase: page prefix
+static constexpr int V2_PROF_DEP_WAIT = 207;   // compute-stall: dep spin
+static constexpr int V2_PROF_PAGE_WAIT = 208;  // loader-stall: page prefix
 // Timed-wait ids (emitted by MPK_V2_TIMED_WAIT at synchronization points;
 // only waits > V2_PROF_WAIT_THRESHOLD_NS produce slices):
-static constexpr int V2_PROF_W_TMA_WAIT = 209;        // launcher: TMA landed?
+static constexpr int V2_PROF_W_TMA_WAIT = 209;        // mma: TMA landed?
 static constexpr int V2_PROF_MMA_EMPTY_WAIT = 210;    // loader: stage free?
-static constexpr int V2_PROF_TMEM_READY_WAIT = 211;   // consumer: tmem addr
-static constexpr int V2_PROF_MAINLOOP_WAIT = 212;     // consumer: MMA result
-static constexpr int V2_PROF_EPILOGUE_WAIT = 213;     // launcher: tmem slot
-static constexpr int V2_PROF_CONSUMER_DONE_WAIT = 214;// launcher tail
+static constexpr int V2_PROF_TMEM_READY_WAIT = 211;   // compute: tmem addr
+static constexpr int V2_PROF_MAINLOOP_WAIT = 212;     // compute: MMA result
+static constexpr int V2_PROF_EPILOGUE_WAIT = 213;     // mma: tmem slot
+static constexpr int V2_PROF_COMPUTE_DONE_WAIT = 214;// mma tail
 static constexpr unsigned long long V2_PROF_WAIT_THRESHOLD_NS = 2000;
 // Total profiler-buffer entries — MUST match demo.py's profiler_tensor size.
 // Sized for 8 tracks x 128 SMs x 25 windowed iters; the busiest track
-// (consumer-phase: dep + tmem + mainloop slices) can write ~12-17k entries,
+// (compute-stall: dep + tmem + mainloop slices) can write ~12-17k entries,
 // so per-track capacity = (ENTRIES - tail) / (128*8) ≈ 15k. The emitter
 // counts (never silently drops) overflow in the MISC region.
 static constexpr size_t V2_PROF_BUF_ENTRIES = 120000ull * 128;
@@ -96,7 +96,7 @@ static constexpr size_t V2_PROF_MISC_BASE = V2_PROF_CURSOR_BASE - 256;
 // trigger_task_event() fired inside the profiling window, packed as
 // [63:32]=globaltimer_lo  [31:8]=event_index  [7:0]=sm. One atomic cursor.
 // Diagnoses trigger latency (when did event E actually fire, and from
-// which SM's controller).
+// which SM's dispatcher).
 static constexpr size_t V2_PROF_TRIG_RING_LEN = 1048576;
 static constexpr size_t V2_PROF_TRIG_BASE =
     V2_PROF_MISC_BASE - V2_PROF_TRIG_RING_LEN;
@@ -125,10 +125,10 @@ __device__ __forceinline__ int v2_prof_bucket(int task_type) {
 
 #ifdef MPK_ENABLE_PROFILING
 // Closure-free trace-event emitter for sites that cannot see the role-loop
-// profiler closure (runtime helpers like consumer_dep_prefix, codegen-emitted
+// profiler closure (runtime helpers like compute_dep_prefix, codegen-emitted
 // prefixes). Maintains per-track cursors in the reserved tail; the entry
 // layout matches PROFILER_INIT's interleaving exactly, so the exporter needs
-// no changes. Single writer per phase track (a designated lane), so the
+// no changes. Single writer per stall track (a designated lane), so the
 // cursor bump needs no atomics. NEVER write a role group (0-4) through this
 // — those tracks are owned by the role-loop closures.
 __device__ __forceinline__ void v2_prof_emit(void *prof_buf,
@@ -193,7 +193,7 @@ __device__ __forceinline__ void v2_prof_emit_pair(void *prof_buf,
 //   g_v2_prof_buf    — the profiler buffer (same for all SMs); set once in
 //                      the kernel prologue.
 //   g_v2_prof_window — 1 while the current decode step is inside the traced
-//                      window; flipped by worker 0's controller at the
+//                      window; flipped by worker 0's dispatcher at the
 //                      iteration boundary (all SMs are barrier-synced per
 //                      iter, so at most one task of fuzz at the edges).
 __device__ void *g_v2_prof_buf = nullptr;
@@ -206,9 +206,9 @@ __device__ volatile int g_v2_prof_window = 0;
   bool const _mpk_prof_on =                                                   \
       (g_v2_prof_window != 0) && (g_v2_prof_buf != nullptr);
 
-// Time `expr` (a wait) and emit a phase slice if it exceeded the threshold.
+// Time `expr` (a wait) and emit a stall slice if it exceeded the threshold.
 // Call from a SINGLE thread per (SM, group) — the designated writer of that
-// phase track.
+// stall track.
 #define MPK_V2_TIMED_WAIT(group, ev, expr)                                    \
   do {                                                                        \
     if (_mpk_prof_on) {                                                       \
@@ -271,42 +271,42 @@ using namespace mirage::runtime;
 // Clean v2 role runtime.
 //
 // Warp layout:
-//   W0-W3: consumer
+//   W0-W3: compute
 //   W4:    loader
-//   W5:    launcher
+//   W5:    mma
 //   W6:    storer
-//   W7:    controller
+//   W7:    dispatcher
 //
 // The runtime owns instruction-slot scheduling, graph dependency waiting,
 // event triggering, and generic SMEM page semaphores. Task-specific behavior
 // must live behind the generated role dispatcher.
-static constexpr int NUM_CONSUMER_WARPS = 4;
+static constexpr int NUM_COMPUTE_WARPS = 4;
 static constexpr int LOADER_WARP = 4;
-static constexpr int LAUNCHER_WARP = 5;
+static constexpr int MMA_WARP = 5;
 static constexpr int STORER_WARP = 6;
-static constexpr int CONTROLLER_WARP = 7;
+static constexpr int DISPATCHER_WARP = 7;
 static constexpr int NUM_ROLE_WARPS = 7;
 static constexpr int NUM_WARPS = 8;
 static constexpr int NUM_THREADS = NUM_WARPS * 32;
 
 // --- setmaxnreg experiment (TODO #18 / MegaKernels register-split) ---------
-// 8 warps = 2 warpgroups: WG0 = warps 0-3 (consumers), WG1 = warps 4-7
-// (loader/launcher/storer/controller). setmaxnreg.sync.aligned operates at
+// 8 warps = 2 warpgroups: WG0 = warps 0-3 (computes), WG1 = warps 4-7
+// (loader/mma/storer/dispatcher). setmaxnreg.sync.aligned operates at
 // warpgroup granularity, so the inc/dec must be issued by every warp of a
 // warpgroup uniformly, at the top of its branch.
-// MPK_SETMAXNREG=0 turns it off. Values: multiples of 8, consumer >= launch
+// MPK_SETMAXNREG=0 turns it off. Values: multiples of 8, compute >= launch
 // baseline (inc), helper <= baseline (dec).
 #ifndef MPK_SETMAXNREG
 #define MPK_SETMAXNREG 0
 #endif
-#ifndef MPK_CONSUMER_REGS
-#define MPK_CONSUMER_REGS 256
+#ifndef MPK_COMPUTE_REGS
+#define MPK_COMPUTE_REGS 256
 #endif
 #ifndef MPK_HELPER_REGS
 #define MPK_HELPER_REGS 64
 #endif
-// MPK_CONSUMER_REGS 0 => skip the consumer inc entirely (dec-only test: helper
-// warps release registers, consumers keep the launch baseline). Otherwise the
+// MPK_COMPUTE_REGS 0 => skip the compute inc entirely (dec-only test: helper
+// warps release registers, computes keep the launch baseline). Otherwise the
 // launch baseline must be < the inc target, which requires raising the
 // launch_bounds thread count (MPK_LB_THREADS) to lower the per-thread baseline.
 #ifndef MPK_LB_THREADS
@@ -320,7 +320,7 @@ static constexpr int NUM_THREADS = NUM_WARPS * 32;
 #define MPK_LAUNCH_WARPS NUM_WARPS
 #endif
 static constexpr int MPK_LAUNCH_THREADS = MPK_LAUNCH_WARPS * 32;
-#if MPK_SETMAXNREG && MPK_CONSUMER_REGS > 0
+#if MPK_SETMAXNREG && MPK_COMPUTE_REGS > 0
 #define MPK_SETMAXNREG_INC(N)                                                 \
   asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(N))
 #else
@@ -342,16 +342,16 @@ static constexpr int MBAR_INSTRUCTION_FINISHED = 1;
 static constexpr int NUM_INSTRUCTION_MBARS = 2;
 
 // Per-instruction dynamic semaphores. Each task type may declare an
-// op-specific init body that is run by the controller (single thread) once
+// op-specific init body that is run by the dispatcher (single thread) once
 // per published instruction; the body is free to mbar_init any of these
 // slots and any role body can mbar_arrive/mbar_wait on them. Drained
-// implicitly when the controller waits on instruction_finished[slot] before
+// implicitly when the dispatcher waits on instruction_finished[slot] before
 // recycling the slot.
 static constexpr int MAX_DYNAMIC_SEMAPHORES = 32;
 
 // Slot conventions for dynamic_semaphores[slot][i]:
-//   SEM_DEP_READY — consumer warp 0 lane 0 spins on the cross-SM event
-//   counter, then arrives this semaphore. Other consumer warps wait on it
+//   SEM_DEP_READY — compute warp 0 lane 0 spins on the cross-SM event
+//   counter, then arrives this semaphore. Other compute warps wait on it
 //   so they enter the compute body in lockstep with the dep being cleared.
 //   SEM_OP_BASE..MAX_DYNAMIC_SEMAPHORES-1 — op-private slots. Any task
 //   type that needs intra-task cross-warp coordination (e.g. linear's
@@ -364,7 +364,7 @@ __device__ __forceinline__ int smem_addr(void const *ptr) {
 }
 
 // Fast, near-non-suspending poll (minimal suspend-time hint). Used by the
-// controller's eager trigger sweep, which polls many slots per loop and must
+// dispatcher's eager trigger sweep, which polls many slots per loop and must
 // not suspend ~10M cycles on each not-ready slot.
 __device__ __forceinline__ bool mbar_poll(int addr, int phase) {
   int ok;
@@ -473,7 +473,7 @@ __device__ __forceinline__ void runtime_finish_page(
 
 // Returns true if `physical_page` falls inside any of the task's
 // declared SMEM regions. Used by the codegen-emitted loader prefix to decide
-// which pages to "claim+release ASAP" vs which to leave for the consumer/last
+// which pages to "claim+release ASAP" vs which to leave for the compute/last
 // user to release after they're done with the data.
 __device__ __forceinline__ bool task_uses_page(TaskDesc const *task_desc,
                                                int physical_page) {
@@ -563,15 +563,15 @@ __device__ __forceinline__ void wait_task_dependency(
 }
 
 // Same dep-wait as wait_task_dependency, but __noinline__ so when called
-// from a consumer task body it doesn't inflate the caller's register count.
+// from a compute task body it doesn't inflate the caller's register count.
 // Safe to call from any thread; each thread independently confirms the dep.
 __device__ __noinline__ void wait_task_dependency_noinline(
     RuntimeConfig const &config, TaskDesc const *task, int iter_num) {
   wait_task_dependency(config, task, iter_num);
 }
 
-// Consumer-side dep-wait prefix, run by every task's consumer body
-// (and by linear's loader/launcher bodies too, since they share the body
+// Compute-side dep-wait prefix, run by every task's compute body
+// (and by linear's loader/mma bodies too, since they share the body
 // string). Single-thread spin + per-slot SEM_DEP_READY mbarrier sync.
 //   - thread 0 globally spins on the cross-SM event counter, then arrives
 //     dynamic_semaphores[slot][SEM_DEP_READY].
@@ -579,15 +579,15 @@ __device__ __noinline__ void wait_task_dependency_noinline(
 //   - __syncwarp() reconverges each warp's 32 lanes after its lane-0 wait.
 //
 // Wrapped __noinline__ so the multi-line body and its locals don't inflate
-// consumer_warp_loop's register frame past the launch_bounds(256) ceiling
+// compute_warp_loop's register frame past the launch_bounds(256) ceiling
 // (same constraint that forced wait_task_dependency_noinline above).
 //
 // Phase: ring_phase(instruction_index) — same parity scheme as
 // instruction_arrived. SEM_DEP_READY is init-once at kernel start, then
-// arrived exactly once per slot use (either by the consumer prefix here,
-// or by the controller for tasks that skip the consumer body — see
-// BEGIN_TASK_GRAPH special case in controller_warp_loop).
-__device__ __noinline__ void consumer_dep_prefix(
+// arrived exactly once per slot use (either by the compute prefix here,
+// or by the dispatcher for tasks that skip the compute body — see
+// BEGIN_TASK_GRAPH special case in dispatcher_warp_loop).
+__device__ __noinline__ void compute_dep_prefix(
     RuntimeConfig const &config,
     TaskDesc const *task_desc,
     RuntimeSMEM *rt,
@@ -601,14 +601,14 @@ __device__ __noinline__ void consumer_dep_prefix(
         config.profiler_buffer != nullptr && MPK_V2_PROF_IN_WINDOW(iter_num);
     unsigned long long const _t0 = v2_prof_now_ns();
     if (_in_win) {
-      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_CONSUMER_PHASE,
+      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_COMPUTE_STALL,
                    V2_PROF_DEP_WAIT, tb::EVENT_BEGIN);
     }
 #endif
     wait_task_dependency(config, task_desc, iter_num);
 #ifdef MPK_ENABLE_PROFILING
     if (_in_win) {
-      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_CONSUMER_PHASE,
+      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_COMPUTE_STALL,
                    V2_PROF_DEP_WAIT, tb::EVENT_END);
       // aggregate accumulators (ns, bucketed by task type) — kept alongside
       // the trace events for table-style analysis without trace parsing.
@@ -687,14 +687,14 @@ __device__ __forceinline__ void _execute_loader_task_v2(
     int instruction_index,
     int iter_num);
 
-__device__ __forceinline__ void _execute_launcher_task_v2(
+__device__ __forceinline__ void _execute_mma_task_v2(
     TaskDesc const *task_desc,
     RuntimeConfig const &config,
     RuntimeSMEM *runtime_smem,
     int instruction_index,
     int iter_num);
 
-__device__ __forceinline__ void _execute_consumer_task_v2(
+__device__ __forceinline__ void _execute_compute_task_v2(
     TaskDesc const *task_desc,
     RuntimeConfig const &config,
     RuntimeSMEM *runtime_smem,
@@ -719,7 +719,7 @@ __device__ __forceinline__ void _execute_storer_task_v2(
     int sequence = 0;                                                        \
     int iter_num = 0;                                                        \
     int sequence_in_iter = 0;                                                \
-    /* profiling: one track per role. The consumer loop runs on 4 warps,  */ \
+    /* profiling: one track per role. The compute loop runs on 4 warps,  */ \
     /* so its predicate must select warp 0 lane 0 (threadIdx.x == 0);     */ \
     /* single-warp roles use lane_id == 0.                                */ \
     MPK_V2_PROF_DECL(prof_group, prof_pred)                                  \
@@ -757,13 +757,13 @@ MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(loader_warp_loop,
                                 _execute_loader_task_v2,
                                 V2_PROF_GROUP_LOADER,
                                 (lane_id == 0))
-MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(launcher_warp_loop,
-                                _execute_launcher_task_v2,
-                                V2_PROF_GROUP_LAUNCHER,
+MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(mma_warp_loop,
+                                _execute_mma_task_v2,
+                                V2_PROF_GROUP_MMA,
                                 (lane_id == 0))
-MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(consumer_warp_loop,
-                                _execute_consumer_task_v2,
-                                V2_PROF_GROUP_CONSUMER,
+MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(compute_warp_loop,
+                                _execute_compute_task_v2,
+                                V2_PROF_GROUP_COMPUTE,
                                 (threadIdx.x == 0))
 MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(storer_warp_loop,
                                 _execute_storer_task_v2,
@@ -793,7 +793,7 @@ namespace runtime_v2 {
 // per-token latency scaled with max_seq_length instead of actual output length.
 __device__ unsigned int g_v2_gen_done = 0;
 
-__device__ __noinline__ void controller_warp_loop(
+__device__ __noinline__ void dispatcher_warp_loop(
     RuntimeSMEM *rt, RuntimeConfig const &config, int lane_id) {
   int const worker_id = blockIdx.x;
   int const num_workers = config.num_workers;
@@ -802,14 +802,14 @@ __device__ __noinline__ void controller_warp_loop(
   size_t const my_count = my_end - my_offset;
   int sequence = 0;
 
-  // profiling track (controller group): prepare/iter-barrier timing.
-  MPK_V2_PROF_DECL(V2_PROF_GROUP_CONTROLLER, (lane_id == 0))
+  // profiling track (dispatcher group): prepare/iter-barrier timing.
+  MPK_V2_PROF_DECL(V2_PROF_GROUP_DISPATCHER, (lane_id == 0))
 
   // Per-slot dedup: the last absolute sequence whose graph event we already
-  // triggered for this ring slot. This lets the controller trigger events
+  // triggered for this ring slot. This lets the dispatcher trigger events
   // OUT OF ORDER — eagerly, as soon as a task's role warps finish — without
   // ever double-counting. Out-of-order triggering is REQUIRED to avoid a
-  // deferred-trigger deadlock: an earlier consumer task (next in this SM's
+  // deferred-trigger deadlock: an earlier compute task (next in this SM's
   // ring) can block on a graph event whose producer is a LATER, already
   // finished task on the same ring. The old in-order
   // wait_finished_and_trigger_through could never reach that later producer,
@@ -861,12 +861,12 @@ __device__ __noinline__ void controller_warp_loop(
     __syncwarp();
   };
 
-  // The cross-SM dependency wait lives in each task's consumer prefix, which
+  // The cross-SM dependency wait lives in each task's compute prefix, which
   // calls wait_task_dependency_noinline before running its body, so the
-  // controller stays pure fetch+publish; only
+  // dispatcher stays pure fetch+publish; only
   // wait_slot_finished_eager (above) is kept, both for slot reuse
   // and for promptly publishing intra-stream producer events that the
-  // consumer's spin needs to terminate.
+  // compute's spin needs to terminate.
   for (int iter_num = 0; iter_num < config.v2_max_iters; iter_num++) {
     // prepare_next_batch mutates per-iteration decode state used by every
     // worker. Worker 0 does the mutation once; all other workers wait for the
@@ -936,7 +936,7 @@ __device__ __noinline__ void controller_warp_loop(
       size_t const task_pos =
           config.v2_per_sm_task_positions[my_offset + i];
       {
-        // The controller warp cooperatively copies one TaskDesc from the
+        // The dispatcher warp cooperatively copies one TaskDesc from the
         // compiled global task table into the shared-memory ring slot. The
         // following __syncwarp makes lane 0 wait for every lane's copy chunks
         // before it publishes instruction_arrived to the role warps.
@@ -963,14 +963,14 @@ __device__ __noinline__ void controller_warp_loop(
       // published instruction, before role warps wake. Empty for ops that
       // don't declare any dynamic semaphores.
       //
-      // ALSO: BEGIN_TASK_GRAPH skips the role-warp consumer body entirely
+      // ALSO: BEGIN_TASK_GRAPH skips the role-warp compute body entirely
       // (the role-warp-loop macro early-returns from execute_task), so its
       // slot's SEM_DEP_READY would never be arrived. To keep the
       // ring_phase parity in sync for the next task at this slot,
-      // controller arrives SEM_DEP_READY here on its behalf. The per-page
+      // dispatcher arrives SEM_DEP_READY here on its behalf. The per-page
       // parity needs the same protection — every task in the
       // pipeline must arrive each page exactly once, otherwise consecutive
-      // tasks deadlock on page_finished. Controller arrives all pages on
+      // tasks deadlock on page_finished. Dispatcher arrives all pages on
       // BEGIN_TASK_GRAPH's behalf.
       if (lane_id == 0) {
         _execute_init_semaphores_v2(rt->task_slot(slot), config, rt,
@@ -984,15 +984,15 @@ __device__ __noinline__ void controller_warp_loop(
       }
       __syncwarp();
 
-      // No more controller-side dep wait — consumers handle it themselves
-      // via wait_task_dependency_noinline in their consumer prefix. The
-      // controller is now pure fetch+publish.
+      // No more dispatcher-side dep wait — computes handle it themselves
+      // via wait_task_dependency_noinline in their compute prefix. The
+      // dispatcher is now pure fetch+publish.
       //
       // Intra-stream producer events (sequence S-1, S-2 in this same ring
-      // stream feeding this same SM's consumer) get triggered at slot reuse
+      // stream feeding this same SM's compute) get triggered at slot reuse
       // via wait_slot_finished_eager(sequence - INSTRUCTION_RING_SIZE)
       // above. That introduces up to RING-1 instructions of latency for
-      // intra-stream consumer-producer chains; in Qwen3 these are rare
+      // intra-stream compute-producer chains; in Qwen3 these are rare
       // because the worker queues round-robin tasks across SMs. If this turns
       // out hot, event triggering could move into the storer warp to cut the
       // latency.
@@ -1051,7 +1051,7 @@ __device__ __noinline__ void controller_warp_loop(
     __syncwarp();
 
     // Step is updated by prepare_next_batch. Broadcast lane 0's read so the
-    // controller warp exits the loop uniformly.
+    // dispatcher warp exits the loop uniformly.
     int step0 = 0;
     if (lane_id == 0) {
       step0 = config.step[0];
@@ -1087,9 +1087,9 @@ void worker_v2_kernel(RuntimeConfig config) {
 #if defined(MPK_SETMAXNREG_EARLY) && MPK_SETMAXNREG
   // CUTLASS convention: redistribute registers as the FIRST thing in the
   // kernel, before any shared-memory ops or __syncthreads. Warpgroup-aligned:
-  // WG0 (consumers) inc, all other warpgroups dec.
-  if (warp_id < NUM_CONSUMER_WARPS) {
-    MPK_SETMAXNREG_INC(MPK_CONSUMER_REGS);
+  // WG0 (computes) inc, all other warpgroups dec.
+  if (warp_id < NUM_COMPUTE_WARPS) {
+    MPK_SETMAXNREG_INC(MPK_COMPUTE_REGS);
   } else {
     MPK_SETMAXNREG_DEC(MPK_HELPER_REGS);
   }
@@ -1107,11 +1107,11 @@ void worker_v2_kernel(RuntimeConfig config) {
       mbar_init(&rt->instruction_mbarriers[MBAR_INSTRUCTION_ARRIVED][slot], 1);
       mbar_init(&rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED][slot],
                 NUM_ROLE_WARPS);
-      // SEM_DEP_READY: per-slot semaphore signaled by consumer thread 0
-      // and waited on by lane 0 of every warp running the consumer body.
+      // SEM_DEP_READY: per-slot semaphore signaled by compute thread 0
+      // and waited on by lane 0 of every warp running the compute body.
       // Init-once + ring_phase parity (matches instruction_arrived). Each
       // slot must be arrived once per use to keep parity in sync — see the
-      // BEGIN_TASK_GRAPH special case in controller_warp_loop.
+      // BEGIN_TASK_GRAPH special case in dispatcher_warp_loop.
       mbar_init(&rt->dynamic_semaphores[slot][SEM_DEP_READY], 1);
     }
   }
@@ -1125,21 +1125,21 @@ void worker_v2_kernel(RuntimeConfig config) {
   // Diagnostic: route ALL warps through one role so worker_v2_kernel's
   // reported register count == that single role's footprint (per-role
   // register measurement; the dispatch is otherwise fused into one blob).
-  if (MPK_MEASURE_ROLE == 0) consumer_warp_loop(rt, config, lane_id);
+  if (MPK_MEASURE_ROLE == 0) compute_warp_loop(rt, config, lane_id);
   else if (MPK_MEASURE_ROLE == 1) loader_warp_loop(rt, config, lane_id);
-  else if (MPK_MEASURE_ROLE == 2) launcher_warp_loop(rt, config, lane_id);
+  else if (MPK_MEASURE_ROLE == 2) mma_warp_loop(rt, config, lane_id);
   else if (MPK_MEASURE_ROLE == 3) storer_warp_loop(rt, config, lane_id);
-  else if (MPK_MEASURE_ROLE == 4) controller_warp_loop(rt, config, lane_id);
+  else if (MPK_MEASURE_ROLE == 4) dispatcher_warp_loop(rt, config, lane_id);
   return;
 #endif
-  if (warp_id < NUM_CONSUMER_WARPS) {
-    // WG0 (warps 0-3): all consumers. Claim registers for the task bodies.
+  if (warp_id < NUM_COMPUTE_WARPS) {
+    // WG0 (warps 0-3): all computes. Claim registers for the task bodies.
 #ifndef MPK_SETMAXNREG_EARLY
-    MPK_SETMAXNREG_INC(MPK_CONSUMER_REGS);
+    MPK_SETMAXNREG_INC(MPK_COMPUTE_REGS);
 #endif
-    consumer_warp_loop(rt, config, lane_id);
+    compute_warp_loop(rt, config, lane_id);
   } else {
-    // WG1 (warps 4-7): loader/launcher/storer/controller. Release registers
+    // WG1 (warps 4-7): loader/mma/storer/dispatcher. Release registers
     // back to the pool BEFORE splitting into per-role branches, so the
     // setmaxnreg.dec is warpgroup-aligned across all four helper warps.
 #ifndef MPK_SETMAXNREG_EARLY
@@ -1147,12 +1147,12 @@ void worker_v2_kernel(RuntimeConfig config) {
 #endif
     if (warp_id == LOADER_WARP) {
       loader_warp_loop(rt, config, lane_id);
-    } else if (warp_id == LAUNCHER_WARP) {
-      launcher_warp_loop(rt, config, lane_id);
+    } else if (warp_id == MMA_WARP) {
+      mma_warp_loop(rt, config, lane_id);
     } else if (warp_id == STORER_WARP) {
       storer_warp_loop(rt, config, lane_id);
-    } else if (warp_id == CONTROLLER_WARP) {
-      controller_warp_loop(rt, config, lane_id);
+    } else if (warp_id == DISPATCHER_WARP) {
+      dispatcher_warp_loop(rt, config, lane_id);
     }
   }
 }

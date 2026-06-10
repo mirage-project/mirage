@@ -35,10 +35,10 @@ namespace tb = mirage::threadblock;
 
 namespace {
 
-// Emit consumer-prefix body that performs the cross-SM dependency wait.
+// Emit compute-prefix body that performs the cross-SM dependency wait.
 // Single-thread spin + per-slot SEM_DEP_READY mbarrier sync, all wrapped
-// in a __noinline__ helper (consumer_dep_prefix in runtime_v2.cuh) so the
-// extra locals don't inflate consumer_warp_loop's register frame.
+// in a __noinline__ helper (compute_dep_prefix in runtime_v2.cuh) so the
+// extra locals don't inflate compute_warp_loop's register frame.
 //
 // Replaces the earlier per-thread spin: thread 0 alone reads the GMEM
 // event counter, then arrives the per-slot semaphore; other warps' lane 0s
@@ -48,9 +48,9 @@ namespace {
 // Per-slot SEM_DEP_READY is initialized once at kernel start in
 // worker_v2_kernel; ring_phase parity tracks slot reuse. Works because
 // EVERY v2 task type runs this prefix.
-inline void emit_dep_wait_consumer_prefix(
+inline void emit_dep_wait_compute_prefix(
     mirage::transpiler::CodeKeeper &code) {
-  code.e("consumer_dep_prefix(runtime_config, task_desc, runtime_smem, "
+  code.e("compute_dep_prefix(runtime_config, task_desc, runtime_smem, "
          "instruction_index, iter_num);");
 }
 
@@ -1833,7 +1833,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
 // ─── v2 linear ───────────────────────────────────────────────────────────────
 // Args: (N_real, K, m_real, split_k, tiles_per_task). Emits role bodies that
 // call kernel::linear_v2:: functions. Stale-arrival defense is the
-// start-of-task re-inits (reinit_for_role in loader/launcher).
+// start-of-task re-inits (reinit_for_role in loader/mma).
 int TaskRegister::register_linear_sm100_v2_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
@@ -1911,8 +1911,8 @@ int TaskRegister::register_linear_sm100_v2_task(
     c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
   };
 
-  auto emit_v2_launcher = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v2::linear_launcher_task<$, $>(",
+  auto emit_v2_mma = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("::kernel::linear_v2::linear_mma_task<$, $>(",
         split_k, tiles_per_task);
     c.e("    task_desc,");
     c.e("    runtime_smem,");
@@ -1922,8 +1922,8 @@ int TaskRegister::register_linear_sm100_v2_task(
     c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
   };
 
-  auto emit_v2_consumer = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v2::linear_consumer_task<$, $, $, $>(",
+  auto emit_v2_compute = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("::kernel::linear_v2::linear_compute_task<$, $, $, $>(",
         true_or_false, m_real, split_k, tiles_per_task);
     c.e("    task_desc,");
     c.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
@@ -1935,10 +1935,10 @@ int TaskRegister::register_linear_sm100_v2_task(
     c.e("    op_sem_base_addr(runtime_smem, instruction_index));");
   };
 
-  // Variant key = consumer body (residual / non-residual / dim distinct).
+  // Variant key = compute body (residual / non-residual / dim distinct).
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  emit_v2_consumer(code);
+  emit_v2_compute(code);
 
   TaskType const tt = with_residual ? TASK_LINEAR_WITH_RESIDUAL_SM100_V2
                                     : TASK_LINEAR_SM100_V2;
@@ -1952,25 +1952,25 @@ int TaskRegister::register_linear_sm100_v2_task(
   loader_code.inc_indent();
   emit_v2_loader(loader_code);
 
-  mirage::transpiler::CodeKeeper launcher_code;
-  launcher_code.inc_indent();
-  emit_dep_wait_consumer_prefix(launcher_code);
-  emit_v2_launcher(launcher_code);
+  mirage::transpiler::CodeKeeper mma_code;
+  mma_code.inc_indent();
+  emit_dep_wait_compute_prefix(mma_code);
+  emit_v2_mma(mma_code);
 
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_v2_consumer(consumer_code);
+  mirage::transpiler::CodeKeeper compute_code;
+  compute_code.inc_indent();
+  emit_dep_wait_compute_prefix(compute_code);
+  emit_v2_compute(compute_code);
 
-  // launcher releases pages (auto_consumer_finish=false). Loader keeps the
+  // mma releases pages (auto_compute_finish=false). Loader keeps the
   // codegen page-lifecycle prefix (default) for cross-task page_ready waits.
   TaskRoleVariantCode role_code{
       /*init_semaphores=*/init_code.to_string(),
       /*loader=*/loader_code.to_string(),
-      /*launcher=*/launcher_code.to_string(),
-      /*consumer=*/consumer_code.to_string(),
+      /*mma=*/mma_code.to_string(),
+      /*compute=*/compute_code.to_string(),
       /*storer=*/""};
-  role_code.auto_consumer_finish = false;
+  role_code.auto_compute_finish = false;
   register_v2_task_role_variant(tt, variant, role_code);
 
   // SMEM layout: v2's own spec (kernel::linear, linear_spec.h) is now the
@@ -3799,9 +3799,9 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
-  auto emit_rmsnorm_consumer_body =
+  auto emit_rmsnorm_compute_body =
       [&](mirage::transpiler::CodeKeeper &c) {
-        c.e("kernel::rmsnorm_v2::RmsNormTask::consumer::run<bfloat16, $, $>(",
+        c.e("kernel::rmsnorm_v2::RmsNormTask::compute::run<bfloat16, $, $>(",
             batch_size, hidden_dim);
         c.e("    task_desc,");
         c.e("    runtime_config,");
@@ -3810,21 +3810,21 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
       };
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  emit_rmsnorm_consumer_body(code);
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_rmsnorm_consumer_body(consumer_code);
+  emit_rmsnorm_compute_body(code);
+  mirage::transpiler::CodeKeeper compute_code;
+  compute_code.inc_indent();
+  emit_dep_wait_compute_prefix(compute_code);
+  emit_rmsnorm_compute_body(compute_code);
   int variant = register_task_variant(TASK_RMS_NORM_HOPPER_V2, code.to_string());
-  // Only the consumer needs the dep-wait (other roles are no-ops).
+  // Only the compute needs the dep-wait (other roles are no-ops).
   // Drop the empty role bodies — they were calling empty `run` methods.
   register_v2_task_role_variant(
       TASK_RMS_NORM_HOPPER_V2,
       variant,
       TaskRoleVariantCode{/*init_semaphores=*/"",
                           /*loader=*/"",
-                          /*launcher=*/"",
-                          /*consumer=*/consumer_code.to_string(),
+                          /*mma=*/"",
+                          /*compute=*/compute_code.to_string(),
                           /*storer=*/""});
 
   // SMEM layout (region count, names, sizes, alignments, release_steps) is
@@ -3876,18 +3876,18 @@ int TaskRegister::register_silu_mul_v2_task(
   };
   code.inc_indent();
   emit_silu_body(code);
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_silu_body(consumer_code);
+  mirage::transpiler::CodeKeeper compute_code;
+  compute_code.inc_indent();
+  emit_dep_wait_compute_prefix(compute_code);
+  emit_silu_body(compute_code);
   int variant = register_task_variant(TASK_SILU_MUL_V2, code.to_string());
   register_v2_task_role_variant(
       TASK_SILU_MUL_V2,
       variant,
       TaskRoleVariantCode{/*init_semaphores=*/"",
                           /*loader=*/"",
-                          /*launcher=*/"",
-                          /*consumer=*/consumer_code.to_string(),
+                          /*mma=*/"",
+                          /*compute=*/compute_code.to_string(),
                           /*storer=*/""});
   // silu_mul kernel is GMEM-only (no shared memory).
   register_variant_smem_info(
@@ -3932,18 +3932,18 @@ int TaskRegister::register_embedding_v2_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   emit_embedding_body(code);
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_embedding_body(consumer_code);
+  mirage::transpiler::CodeKeeper compute_code;
+  compute_code.inc_indent();
+  emit_dep_wait_compute_prefix(compute_code);
+  emit_embedding_body(compute_code);
   int variant = register_task_variant(TASK_EMBEDDING_V2, code.to_string());
   register_v2_task_role_variant(
       TASK_EMBEDDING_V2,
       variant,
       TaskRoleVariantCode{/*init_semaphores=*/"",
                           /*loader=*/"",
-                          /*launcher=*/"",
-                          /*consumer=*/consumer_code.to_string(),
+                          /*mma=*/"",
+                          /*compute=*/compute_code.to_string(),
                           /*storer=*/""});
   // embedding kernel is GMEM-only (no shared memory).
   register_variant_smem_info(
@@ -4006,21 +4006,21 @@ int TaskRegister::register_paged_attention_sm100_v2_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   emit_attn_body(code);
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_attn_body(consumer_code);
+  mirage::transpiler::CodeKeeper compute_code;
+  compute_code.inc_indent();
+  emit_dep_wait_compute_prefix(compute_code);
+  emit_attn_body(compute_code);
   int variant = register_task_variant(TASK_ATTN_SM100_V2, code.to_string());
 
   // attention's body gates work via `if (wg_id == 0)` so threads 0..127
-  // (= 4 consumer warps) do everything; loader/launcher/storer aren't used.
+  // (= 4 compute warps) do everything; loader/mma/storer aren't used.
   register_v2_task_role_variant(
       TASK_ATTN_SM100_V2,
       variant,
       TaskRoleVariantCode{/*init_semaphores=*/"",
                           /*loader=*/"",
-                          /*launcher=*/"",
-                          /*consumer=*/consumer_code.to_string(),
+                          /*mma=*/"",
+                          /*compute=*/compute_code.to_string(),
                           /*storer=*/""});
 
   // SMEM layout owned by paged_attention_sm100_v2_spec.h. NOTE: attention's
@@ -4066,14 +4066,14 @@ int TaskRegister::register_argmax_partial_sm100_v2_task(
   code.inc_indent();
   emit_argmax_partial_body(code);
   // argmax_partial does the cross-SM dep wait in its
-  // consumer prefix via SEM_DEP_READY (init-once + ring_phase parity, same
-  // pattern as instruction_arrived). Controller's satisfy_task_dependency
-  // is still active in parallel; output is unchanged but the consumer-side
+  // compute prefix via SEM_DEP_READY (init-once + ring_phase parity, same
+  // pattern as instruction_arrived). Dispatcher's satisfy_task_dependency
+  // is still active in parallel; output is unchanged but the compute-side
   // wait is also exercised.
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_argmax_partial_body(consumer_code);
+  mirage::transpiler::CodeKeeper compute_code;
+  compute_code.inc_indent();
+  emit_dep_wait_compute_prefix(compute_code);
+  emit_argmax_partial_body(compute_code);
   int variant = register_task_variant(TASK_ARGMAX_PARTIAL_SM100_V2,
                                       code.to_string());
   register_v2_task_role_variant(
@@ -4081,8 +4081,8 @@ int TaskRegister::register_argmax_partial_sm100_v2_task(
       variant,
       TaskRoleVariantCode{/*init_semaphores=*/"",
                           /*loader=*/"",
-                          /*launcher=*/"",
-                          /*consumer=*/consumer_code.to_string(),
+                          /*mma=*/"",
+                          /*compute=*/compute_code.to_string(),
                           /*storer=*/""});
   // SMEM layout owned by argmax_v2_spec.h (shared with the reduce variant).
   TaskSmemInfo smem_info = ::kernel::argmax_v2::make_smem_info(
@@ -4122,10 +4122,10 @@ int TaskRegister::register_argmax_reduce_sm100_v2_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   emit_argmax_reduce_body(code);
-  mirage::transpiler::CodeKeeper consumer_code;
-  consumer_code.inc_indent();
-  emit_dep_wait_consumer_prefix(consumer_code);
-  emit_argmax_reduce_body(consumer_code);
+  mirage::transpiler::CodeKeeper compute_code;
+  compute_code.inc_indent();
+  emit_dep_wait_compute_prefix(compute_code);
+  emit_argmax_reduce_body(compute_code);
   int variant = register_task_variant(TASK_ARGMAX_REDUCE_SM100_V2,
                                       code.to_string());
   register_v2_task_role_variant(
@@ -4133,8 +4133,8 @@ int TaskRegister::register_argmax_reduce_sm100_v2_task(
       variant,
       TaskRoleVariantCode{/*init_semaphores=*/"",
                           /*loader=*/"",
-                          /*launcher=*/"",
-                          /*consumer=*/consumer_code.to_string(),
+                          /*mma=*/"",
+                          /*compute=*/compute_code.to_string(),
                           /*storer=*/""});
   // SMEM layout owned by argmax_v2_spec.h (shared with the partial variant).
   TaskSmemInfo smem_info = ::kernel::argmax_v2::make_smem_info(

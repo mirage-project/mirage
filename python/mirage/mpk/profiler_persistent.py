@@ -68,7 +68,7 @@ event_name_list = {
     298: "TASK_SM100_TASK_END",
     301: "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT",
     302: "TASK_NVSHMEM_TILE_ALLREDUCE",
-    # v2 runtime pseudo-events (controller/phase tracks, see runtime_v2.cuh)
+    # v2 runtime pseudo-events (dispatcher/stall tracks, see runtime_v2.cuh)
     204: "V2_PREPARE_BATCH",
     205: "V2_ITER_SYNC",
     206: "V2_GO_WAIT",
@@ -79,7 +79,7 @@ event_name_list = {
     211: "V2_TMEM_READY_WAIT",
     212: "V2_MAINLOOP_WAIT",
     213: "V2_EPILOGUE_WAIT",
-    214: "V2_CONSUMER_DONE_WAIT",
+    214: "V2_COMPUTE_DONE_WAIT",
     # v2 linear task types
     244: "TASK_LINEAR_SM100_V2",
     245: "TASK_LINEAR_WITH_RESIDUAL_SM100_V2",
@@ -141,10 +141,10 @@ def export_to_perfetto_trace(
 
     tgen = TraceGenerator(file_name)
 
-    # v2 emits one track per (SM, warp role) plus phase tracks (sub-slices
+    # v2 emits one track per (SM, warp role) plus stall tracks (sub-slices
     # inside a role's task window); name them accordingly.
-    V2_ROLE_NAMES = ["consumer", "loader", "launcher", "storer", "controller",
-                     "consumer-phase", "loader-phase", "launcher-phase"]
+    V2_ROLE_NAMES = ["compute", "loader", "mma", "storer", "dispatcher",
+                     "compute-stall", "loader-stall", "mma-stall"]
 
     tid_map = {}
     track_map = {}

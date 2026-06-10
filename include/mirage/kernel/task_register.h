@@ -40,24 +40,24 @@ struct TaskSmemInfo {
 };
 
 struct TaskRoleVariantCode {
-  // Optional setup the controller runs (single-thread) once per task, before
+  // Optional setup the dispatcher runs (single-thread) once per task, before
   // the role warps start: mbar_init the task's dynamic_semaphores[] slots that
   // the role bodies arrive/wait on. Empty for tasks that declare none.
   std::string init_semaphores;
   std::string loader;
-  std::string launcher;
-  std::string consumer;
+  std::string mma;
+  std::string compute;
   std::string storer;
 
   // Page-lifecycle hooks (defaults: every task arrives every page once).
   //   - auto_loader_page_lifecycle: codegen prepends each loader with
   //     "wait every page; immediately finish the ones this task doesn't use"
   //     (emitted even if the task has no loader body of its own).
-  //   - auto_consumer_finish: codegen appends each consumer with a call that
+  //   - auto_compute_finish: codegen appends each compute with a call that
   //     releases the pages this task used. Set false for tasks that release
   //     pages incrementally inside their body (e.g. linear, per pipeline stage).
   bool auto_loader_page_lifecycle = true;
-  bool auto_consumer_finish = true;
+  bool auto_compute_finish = true;
 };
 
 class TaskRegister {

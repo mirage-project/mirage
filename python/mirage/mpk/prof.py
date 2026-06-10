@@ -22,8 +22,8 @@ V2_PROF_TAIL = (1048576 + 1) + 256 + 1024 + 7 * 256 + 256
 V2_PROF_NUM_BUCKETS = 7
 WINDOW_ITERS = 25
 
-GROUP_NAMES = ["consumer", "loader", "launcher", "storer", "controller",
-               "consumer-phase", "loader-phase", "launcher-phase"]
+GROUP_NAMES = ["compute", "loader", "mma", "storer", "dispatcher",
+               "compute-stall", "loader-stall", "mma-stall"]
 
 LINEAR_TYPES = {244, 245}
 EVENT_NAMES = {
@@ -33,7 +33,7 @@ EVENT_NAMES = {
     204: "PREPARE_BATCH", 205: "ITER_SYNC", 206: "GO_WAIT",
     207: "DEP_WAIT", 208: "PAGE_WAIT",
     209: "W_TMA_WAIT", 210: "MMA_EMPTY_WAIT", 211: "TMEM_READY_WAIT",
-    212: "MAINLOOP_WAIT", 213: "EPILOGUE_WAIT", 214: "CONSUMER_DONE_WAIT",
+    212: "MAINLOOP_WAIT", 213: "EPILOGUE_WAIT", 214: "COMPUTE_DONE_WAIT",
 }
 BUCKET_NAMES = {0: "linear", 1: "attn", 2: "rmsnorm", 3: "silu",
                 4: "argmax", 5: "embed", 6: "other"}
@@ -120,8 +120,8 @@ def cmd_check(d: Dump) -> int:
         ok = False
     ntask = len(d.windows.get((0, 0), []))
     print(f"role windows/SM: {ntask}")
-    # phase containment: every phase slice must lie inside SOME window of its
-    # role track (interval check — phase tracks interleave wait kinds, so
+    # stall containment: every stall slice must lie inside SOME window of its
+    # role track (interval check — stall tracks interleave wait kinds, so
     # index pairing no longer applies).
     if d.ngroups >= 6:
         import bisect
@@ -145,9 +145,9 @@ def cmd_check(d: Dump) -> int:
                     i = bisect.bisect_right(starts, su) - 1
                     if i < 0 or eu > ivals[i][1] + 2000:  # 2us slop
                         viol += 1
-        print(f"phase containment: {checked} slices, {viol} violations")
+        print(f"stall containment: {checked} slices, {viol} violations")
         if viol > checked * 0.01 + d.nblocks:
-            print("FAIL: phase slices do not nest")
+            print("FAIL: stall slices do not nest")
             ok = False
     drops = d.dropped().sum()
     print(f"emitter dropped events: {int(drops)}")
@@ -181,7 +181,7 @@ def cmd_summary(d: Dump, iters=WINDOW_ITERS) -> int:
                w.mean() - dep - sfx, w.mean(), np.percentile(w, 50)))
     busy = np.array([sum(dur_us(s, e) for s, e, _ in d.windows.get((sm, 0), []))
                      for sm in range(d.nblocks)])
-    print(f"\nconsumer busy: {busy.mean()/iters/1e3:.2f} ms/SM/step "
+    print(f"\ncompute busy: {busy.mean()/iters/1e3:.2f} ms/SM/step "
           f"(min {busy.min()/iters/1e3:.2f}, max {busy.max()/iters/1e3:.2f})")
     return 0
 
@@ -192,7 +192,7 @@ def cmd_pagewait(d: Dump, iters=WINDOW_ITERS) -> int:
     n_b = n_l = 0
     for sm in range(d.nblocks):
         L = d.windows.get((sm, 1), [])
-        # loader-phase track interleaves wait kinds; the page prefix (208)
+        # loader-stall track interleaves wait kinds; the page prefix (208)
         # is one slice per task, so it index-aligns with loader windows.
         P = [w for w in d.windows.get((sm, 6), []) if w[2] == 208]
         C = d.windows.get((sm, 0), [])

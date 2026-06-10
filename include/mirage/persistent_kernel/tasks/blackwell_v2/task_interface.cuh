@@ -20,14 +20,14 @@ namespace kernel {
 namespace v2_task {
 
 // Per-role entry points for a v2 task. A task subclasses TaskInterface and
-// overrides the roles it implements (`using consumer = MyConsumer;` etc.);
+// overrides the roles it implements (`using compute = MyCompute;` etc.);
 // roles it omits fall back to a no-op. Codegen emits Task::<role>::run() calls.
 //
 // SMEM layout, semaphores, and the planner feed live in each task's host-safe
 // <task>_spec.h (make_smem_info), which is the single source the host-side
 // task registration reads.
 
-struct NoopControl {
+struct NoopDispatch {
   __device__ __forceinline__ static int release_lid(int query) { return query; }
 
   template <typename... Args>
@@ -42,10 +42,10 @@ struct NoopRole {
 };
 
 struct TaskInterface {
-  using control = NoopControl;
+  using dispatch = NoopDispatch;
   using loader = NoopRole;
-  using launcher = NoopRole;
-  using consumer = NoopRole;
+  using mma = NoopRole;
+  using compute = NoopRole;
   using storer = NoopRole;
 };
 

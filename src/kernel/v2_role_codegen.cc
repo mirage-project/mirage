@@ -21,8 +21,8 @@ namespace tr = mirage::transpiler;
 enum class V2Role {
   InitSemaphores,
   Loader,
-  Launcher,
-  Consumer,
+  Mma,
+  Compute,
   Storer,
 };
 
@@ -33,14 +33,14 @@ std::string const &role_body(rt::TaskRoleVariantCode const &code,
       return code.init_semaphores;
     case V2Role::Loader:
       return code.loader;
-    case V2Role::Launcher:
-      return code.launcher;
-    case V2Role::Consumer:
-      return code.consumer;
+    case V2Role::Mma:
+      return code.mma;
+    case V2Role::Compute:
+      return code.compute;
     case V2Role::Storer:
       return code.storer;
   }
-  return code.consumer;
+  return code.compute;
 }
 
 // Page-lifecycle prefix at the start of every loader body
@@ -49,7 +49,7 @@ std::string const &role_body(rt::TaskRoleVariantCode const &code,
 //   - if THIS task does not use page K, lane K arrives page K right away
 //     (the "claim+release ASAP" pattern — frees pages the task doesn't
 //     touch so the next task's loader can re-TMA into them sooner)
-// Pages this task uses are released later by the consumer suffix instead.
+// Pages this task uses are released later by the compute suffix instead.
 // Net: every page gets exactly one arrive per task.
 char const *kLoaderPagePrefix =
     "{\n"
@@ -60,7 +60,7 @@ char const *kLoaderPagePrefix =
     "      iter_num + V2_PROF_WINDOW_ITERS >= runtime_config.v2_max_iters;\n"
     "  if (_pg_prof) {\n"
     "    v2_prof_emit(runtime_config.profiler_buffer,\n"
-    "                 V2_PROF_GROUP_LOADER_PHASE, V2_PROF_PAGE_WAIT,\n"
+    "                 V2_PROF_GROUP_LOADER_STALL, V2_PROF_PAGE_WAIT,\n"
     "                 tb::EVENT_BEGIN);\n"
     "  }\n"
     "#endif\n"
@@ -74,28 +74,28 @@ char const *kLoaderPagePrefix =
     "#ifdef MPK_ENABLE_PROFILING\n"
     "  if (_pg_prof) {\n"
     "    v2_prof_emit(runtime_config.profiler_buffer,\n"
-    "                 V2_PROF_GROUP_LOADER_PHASE, V2_PROF_PAGE_WAIT,\n"
+    "                 V2_PROF_GROUP_LOADER_STALL, V2_PROF_PAGE_WAIT,\n"
     "                 tb::EVENT_END);\n"
     "  }\n"
     "#endif\n"
     "}\n";
 
-// Page-lifecycle suffix at the end of every consumer body.
+// Page-lifecycle suffix at the end of every compute body.
 // Releases the pages this task uses (the ones the loader prefix did NOT
-// release). Tasks that do their own release (e.g. linear's launcher
-// blanket) opt out via auto_consumer_finish=false.
+// release). Tasks that do their own release (e.g. linear's mma
+// blanket) opt out via auto_compute_finish=false.
 //
 // Iterates physical pages — NOT regions — because the planner packs
 // multiple sub-page regions into the same physical page (e.g. linear's
 // six 4-KB A regions land on two pages, four+two). A region-based loop
 // would arrive page X once per packed region, multi-flipping parity.
 //
-// Lane-parallel match for the loader prefix: lane K of consumer warp 0 arrives
+// Lane-parallel match for the loader prefix: lane K of compute warp 0 arrives
 // page K iff this task uses page K (the loader prefix already arrived
 // pages this task doesn't use). Together they guarantee one arrive per
 // page per task without the single-thread serialization that blocked
-// consumer warp 0 in the original implementation.
-char const *kConsumerPageSuffix =
+// compute warp 0 in the original implementation.
+char const *kComputePageSuffix =
     "{\n"
     "#ifdef MPK_ENABLE_PROFILING\n"
     "  unsigned long long _sfx_t0 = 0;\n"
@@ -154,12 +154,12 @@ void emit_role_cases(
       // The loader case may need to emit a body even when the
       // user-provided body is empty, to carry the auto page-lifecycle
       // prefix. Other roles only emit if they have user content (or, for
-      // consumer, if they have user content; the auto suffix piggybacks
+      // compute, if they have user content; the auto suffix piggybacks
       // on the user body, it does not synthesize one on its own).
       bool const auto_loader_prefix =
           (role == V2Role::Loader) && variant.auto_loader_page_lifecycle;
-      bool const auto_consumer_suffix =
-          (role == V2Role::Consumer) && variant.auto_consumer_finish &&
+      bool const auto_compute_suffix =
+          (role == V2Role::Compute) && variant.auto_compute_finish &&
           !body.empty();
       if (body.empty() && !auto_loader_prefix) {
         continue;
@@ -172,8 +172,8 @@ void emit_role_cases(
       if (!body.empty()) {
         code.e("$", body);
       }
-      if (auto_consumer_suffix) {
-        code.e("$", kConsumerPageSuffix);
+      if (auto_compute_suffix) {
+        code.e("$", kComputePageSuffix);
       }
       code.e("}");
       first_variant = false;
@@ -231,13 +231,13 @@ void generate_v2_role_dispatch_code(
   emit_role_dispatcher(code,
                        task_type_to_name,
                        task_register,
-                       "_execute_launcher_task_v2",
-                       V2Role::Launcher);
+                       "_execute_mma_task_v2",
+                       V2Role::Mma);
   emit_role_dispatcher(code,
                        task_type_to_name,
                        task_register,
-                       "_execute_consumer_task_v2",
-                       V2Role::Consumer);
+                       "_execute_compute_task_v2",
+                       V2Role::Compute);
   emit_role_dispatcher(code,
                        task_type_to_name,
                        task_register,

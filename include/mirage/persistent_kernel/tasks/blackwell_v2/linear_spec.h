@@ -38,7 +38,7 @@ inline constexpr int BLOCK_K     = 128;
 inline constexpr int MMA_K       = 16;
 inline constexpr int NUM_STAGES  = 6;
 
-// Cross-task page pipeline (loader acquires / launcher releases W pages per
+// Cross-task page pipeline (loader acquires / mma releases W pages per
 // stage so task N+1's loader can TMA into pages task N frees — see
 // channel.cuh SmemRing acquire_pages/release_pages). The MECHANISM is complete
 // and verified (correct, deadlock-free), but it only PAYS OFF with two
@@ -62,20 +62,20 @@ inline constexpr int NUM_REGIONS    = 2 * NUM_STAGES + 1;    // 13
 inline constexpr int SCRATCH_BYTES  = 16;
 
 // ── Op-private semaphore ordinals (relative to dyn_sem_base / SEM_OP_BASE) ──
-//   [+0  ..+5 ]  W_tma_mbar      (count=1,            loader→launcher)
-//   [+6  ..+11]  A_tma_mbar      (count=1,            loader→launcher)
-//   [+12 ..+17]  mma_mbar        (count=1,            launcher→loader, shared W/A empty)
-//   [+18 ..+19]  mainloop_mbar   (count=1,            launcher→consumer)
-//   [+20 ..+21]  epilogue_mbar   (count=4*WARP_SIZE,  consumer→launcher)
-//   [+22      ]  tmem_ready      (count=1,            launcher→consumer)
-//   [+23      ]  consumer_done   (count=4*WARP_SIZE,  consumer→launcher)
+//   [+0  ..+5 ]  W_tma_mbar      (count=1,            loader→mma)
+//   [+6  ..+11]  A_tma_mbar      (count=1,            loader→mma)
+//   [+12 ..+17]  mma_mbar        (count=1,            mma→loader, shared W/A empty)
+//   [+18 ..+19]  mainloop_mbar   (count=1,            mma→compute)
+//   [+20 ..+21]  epilogue_mbar   (count=4*WARP_SIZE,  compute→mma)
+//   [+22      ]  tmem_ready      (count=1,            mma→compute)
+//   [+23      ]  compute_done   (count=4*WARP_SIZE,  compute→mma)
 inline constexpr int SEM_W_TMA_BASE    = 0;
 inline constexpr int SEM_A_TMA_BASE    = NUM_STAGES;          // 6
 inline constexpr int SEM_MMA_BASE      = 2 * NUM_STAGES;      // 12
 inline constexpr int SEM_MAINLOOP_BASE = 3 * NUM_STAGES;      // 18
 inline constexpr int SEM_EPILOGUE_BASE = 3 * NUM_STAGES + 2;  // 20
 inline constexpr int SEM_TMEM_READY    = 3 * NUM_STAGES + 4;  // 22
-inline constexpr int SEM_CONSUMER_DONE = 3 * NUM_STAGES + 5;  // 23
+inline constexpr int SEM_COMPUTE_DONE = 3 * NUM_STAGES + 5;  // 23
 inline constexpr int NUM_OP_SEMS       = 3 * NUM_STAGES + 6;  // 24
 
 // ── MMA descriptors (host-safe constexpr; no PTX) ───────────────────────────
@@ -146,11 +146,11 @@ inline ::mirage::runtime::TaskSmemInfo make_smem_info() {
 }
 
 // ── Channel / dataflow declaration (host-readable) ──────────────────────────
-// The linear op's producer→consumer pipeline, declared as DATA the planner /
+// The linear op's producer→compute pipeline, declared as DATA the planner /
 // codegen can read — instead of being wired only in device code (make_wa).
 //
 // CONSUMED by three places (the table is live, not documentation):
-//   * linear_device.cuh linear_init()      — controller's structural mbar init
+//   * linear_device.cuh linear_init()      — dispatcher's structural mbar init
 //   * linear_device.cuh reinit_for_role()  — per-role start-of-task re-init of
 //     async edges (clears prior-slot strays; placement per reinit_*_by)
 //   * linear_sm100_v2.cuh make_wa()        — wires the Channel cursors' full/
@@ -160,13 +160,13 @@ inline ::mirage::runtime::TaskSmemInfo make_smem_info() {
 // `Arrival` mirrors mpk::ch::By (Warp = sync warp arrival; Tma/Mma = async
 // engine arrival, i.e. the edges that need a start-of-task re-init).
 enum class Arrival { Warp, Tma, Mma };
-enum class Role    { Loader, Launcher, Consumer, None };
+enum class Role    { Loader, Mma, Consumer, None };
 
 struct ChannelSpec {
   char const *name;
   int  depth;               // ring stages (SMEM) or TMEM slots
   Role producer;  Arrival producer_kind;   // fills full[] (how it arrives)
-  Role consumer;  Arrival consumer_kind;   // frees empty[] = the release edge
+  Role compute;  Arrival compute_kind;   // frees empty[] = the release edge
   int  full_sem_base;       // SEM ordinal of full[0]
   int  empty_sem_base;      // SEM ordinal of empty[0] (release edge)
   int  full_arrivals;       // mbar_init count for full[]
@@ -175,33 +175,33 @@ struct ChannelSpec {
   int  shares_empty_with;   // index of channel sharing this empty edge, or -1
   bool tmem;                // storage in TMEM (not an SMEM ring)
   // Start-of-task re-init owner per edge (the role that touches the edge FIRST,
-  // clearing prior-slot async strays). Role::None = no role re-init (controller
+  // clearing prior-slot async strays). Role::None = no role re-init (dispatcher
   // init suffices). Encodes the proven re-init placement as data.
   Role reinit_full_by;
   Role reinit_empty_by;
 };
 
 inline constexpr ChannelSpec CHANNELS[] = {
-    // W: loader TMA-fills full (W_tma); launcher MMA-frees the SHARED mma edge.
+    // W: loader TMA-fills full (W_tma); mma MMA-frees the SHARED mma edge.
     //   loader re-inits both W.full and the shared mma empty (it waits mma
     //   first via pre-empty).
-    {"W", NUM_STAGES, Role::Loader, Arrival::Tma, Role::Launcher, Arrival::Mma,
+    {"W", NUM_STAGES, Role::Loader, Arrival::Tma, Role::Mma, Arrival::Mma,
      SEM_W_TMA_BASE, SEM_MMA_BASE, /*full=*/1, /*empty=*/1, REGION_W_0,
      /*shares_empty_with=*/-1, /*tmem=*/false,
      /*reinit_full_by=*/Role::Loader, /*reinit_empty_by=*/Role::Loader},
-    // A: same producer/consumer; shares W's mma_mbar empty edge (index 0), so
+    // A: same producer/compute; shares W's mma_mbar empty edge (index 0), so
     //   its empty re-init is covered by W's loader re-init (reinit_empty=None).
-    {"A", NUM_STAGES, Role::Loader, Arrival::Tma, Role::Launcher, Arrival::Mma,
+    {"A", NUM_STAGES, Role::Loader, Arrival::Tma, Role::Mma, Arrival::Mma,
      SEM_A_TMA_BASE, SEM_MMA_BASE, 1, 1, REGION_A_0,
      /*shares_empty_with=*/0, false,
      /*reinit_full_by=*/Role::Loader, /*reinit_empty_by=*/Role::None},
-    // Acc: launcher MMA-commits full (mainloop); 128 consumer threads free
-    // empty (epilogue). TMEM-backed, double-buffered (2 slots). Launcher
+    // Acc: mma MMA-commits full (mainloop); 128 compute threads free
+    // empty (epilogue). TMEM-backed, double-buffered (2 slots). Mma
     // re-inits both (it produces full and waits epilogue).
-    {"Acc", 2, Role::Launcher, Arrival::Mma, Role::Consumer, Arrival::Warp,
+    {"Acc", 2, Role::Mma, Arrival::Mma, Role::Consumer, Arrival::Warp,
      SEM_MAINLOOP_BASE, SEM_EPILOGUE_BASE, 1, 4 * WARP_SIZE,
      /*storage_region_base=*/-1, /*shares_empty_with=*/-1, /*tmem=*/true,
-     /*reinit_full_by=*/Role::Launcher, /*reinit_empty_by=*/Role::Launcher},
+     /*reinit_full_by=*/Role::Mma, /*reinit_empty_by=*/Role::Mma},
 };
 inline constexpr int NUM_CHANNELS =
     sizeof(CHANNELS) / sizeof(CHANNELS[0]);
@@ -214,15 +214,15 @@ struct OneShotSem {
   char const *name;
   int sem;
   int arrivals;
-  Role reinit_by;  // role that re-inits at task start (None = controller only)
+  Role reinit_by;  // role that re-inits at task start (None = dispatcher only)
 };
 inline constexpr OneShotSem ONESHOT_SEMS[] = {
-    // tmem_ready: consumer waits it at task start (concurrent with launcher),
-    // so NO role re-init — re-initing it would race the consumer's wait.
-    {"tmem_ready", SEM_TMEM_READY, 1, Role::None},  // launcher→consumer
-    // consumer_done: launcher waits it; re-init by launcher before it publishes
-    // tmem_ready (ordered before any consumer arrival). LOAD-BEARING.
-    {"consumer_done", SEM_CONSUMER_DONE, 4 * WARP_SIZE, Role::Launcher},  // consumer→launcher
+    // tmem_ready: compute waits it at task start (concurrent with mma),
+    // so NO role re-init — re-initing it would race the compute's wait.
+    {"tmem_ready", SEM_TMEM_READY, 1, Role::None},  // mma→compute
+    // compute_done: mma waits it; re-init by mma before it publishes
+    // tmem_ready (ordered before any compute arrival). LOAD-BEARING.
+    {"compute_done", SEM_COMPUTE_DONE, 4 * WARP_SIZE, Role::Mma},  // compute→mma
 };
 inline constexpr int NUM_ONESHOT_SEMS =
     sizeof(ONESHOT_SEMS) / sizeof(ONESHOT_SEMS[0]);
