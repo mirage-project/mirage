@@ -369,11 +369,6 @@ void register_mugraph(
             if (task_type == TASK_ASSEMBLE_Q_DECODE_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            // transpose_scale_sm100 (B13): grid_x CTAs stripe M.
-            // request_id = bid.x = the CTA's chunk index.
-            if (task_type == TASK_TRANSPOSE_SCALE_SM100) {
-              task.task_metadata.request_id = bid.x;
-            }
             // C18 fused moe silu·mul + quantize: grid_x CTAs map 1:1 to
             // m_total rows. request_id = bid.x (= row_idx in the kernel).
             if (task_type == TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100) {
@@ -404,16 +399,6 @@ void register_mugraph(
               task.task_metadata.request_id = bid.z;        // batch_idx
               task.task_metadata.kv_idx = bid.y;            // q_block
               task.task_metadata.merge_task_offset = bid.x; // head
-            }
-            // MLA prefill TP8: grid=(H, num_q_blocks, B)
-            //   request_id        = head    (bid.x, fits in int16_t)
-            //   kv_idx            = q_block (bid.y, fits in uint16_t)
-            //   merge_task_offset = batch   (bid.z) — lives at union offset 4
-            //   so it doesn't alias request_id/kv_idx (unlike expert_offset).
-            if (task_type == TASK_MLA_PREFILL_TP8_SM100) {
-              task.task_metadata.request_id = bid.x;
-              task.task_metadata.kv_idx = bid.y;
-              task.task_metadata.merge_task_offset = bid.z;
             }
             // Chunked TP8 prefill: grid=(H, num_q_blocks, B).
             if (task_type == TASK_MLA_PREFILL_TP8_CHUNKED_SM100) {
@@ -454,14 +439,6 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.x;            // dv_block_idx
               task.task_metadata.request_id = bid.y;        // gi (head_group)
               task.task_metadata.merge_task_offset = bid.z; // batch
-            }
-            // Unified MLA grid:
-            //   prefill interprets (x,y,z) as (head, q_block, batch)
-            //   decode interprets (x,y,z) as (packed_decode_block, batch, 0)
-            if (task_type == TASK_MLA_UNIFIED_SM100) {
-              task.task_metadata.kv_idx = bid.x;
-              task.task_metadata.request_id = bid.y;
-              task.task_metadata.merge_task_offset = bid.z;
             }
             // MLA-MTP TP variants: Python layer packs decode metadata into
             // block_x. TP2 additionally packs a head-group id, TP4 packs
@@ -1296,11 +1273,9 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP2_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP4_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP8_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_CHUNKED_SM100 || "
            "task.at(\"task_type\") == "
-           "TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_UNIFIED_SM100) {");
+           "TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     // FP8 linear tasks need TMA (outside SM100_TMA range)
@@ -1940,17 +1915,15 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";
-  task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
   task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
   task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
-  task_type_to_name[TASK_MLA_PREFILL_TP8_SM100] = "TASK_MLA_PREFILL_TP8_SM100";
   task_type_to_name[TASK_MLA_PREFILL_TP8_CHUNKED_SM100] =
       "TASK_MLA_PREFILL_TP8_CHUNKED_SM100";
   task_type_to_name[TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100] =
       "TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100";
   task_type_to_name[TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100] =
       "TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100";
-  task_type_to_name[TASK_MLA_UNIFIED_SM100] = "TASK_MLA_UNIFIED_SM100";
+  task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
@@ -2020,7 +1993,6 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GROUP_GEMM_LARGEM_SM100";
   task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";
   task_type_to_name[TASK_MOE_UNPERMUTE_SM100] = "TASK_MOE_UNPERMUTE_SM100";
-  task_type_to_name[TASK_TRANSPOSE_SCALE_SM100] = "TASK_TRANSPOSE_SCALE_SM100";
   task_type_to_name[TASK_ASSEMBLE_Q_DECODE_SM100] =
       "TASK_ASSEMBLE_Q_DECODE_SM100";
   task_type_to_name[TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100] =

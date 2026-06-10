@@ -1603,37 +1603,6 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "deepseek_mla_rope_k_sm100", params)
 
-    def mla_decode_layer(
-        self,
-        q_input: DTensor,         # Q tensor (attached with TMA desc)
-        kv_input: DTensor,        # KV cache tensor (attached with TMA desc)
-        output_partial: DTensor,  # partial O: [B*Q_LEN*sk, D_V*NUM_HEADS] float32 (or bf16)
-        output_lse: DTensor,      # partial LSE: [B*Q_LEN*sk, NUM_HEADS] float32
-        mla_params: tuple,        # (num_heads, d_k, d_v, num_splits, kv_len) or (..., q_len)
-        grid_dim: tuple,
-        block_dim: tuple,
-        q_len: int = 1,
-    ):
-        # Allow q_len passed via mla_params 6-tuple as well as separate arg.
-        if len(mla_params) == 6:
-            num_heads, d_k, d_v, num_splits, kv_len, q_len = mla_params
-        else:
-            num_heads, d_k, d_v, num_splits, kv_len = mla_params
-        params = [num_heads, d_k, d_v, num_splits, kv_len, q_len]
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_input, (0, -1, -1), -1, True)
-        tb_graph.new_input(kv_input, (0, -1, -1), -1, True)
-        # When q_len > 1, grid is (num_splits, num_head_groups, 1). grid.y
-        # blocks read the full output buffer and offset internally via
-        # block_linear (bi*num_head_groups*sk + gi*sk + si). Don't partition.
-        partial_map = (-1, -1, -1) if q_len > 1 else (0, -1, -1)
-        tb_graph.new_input(output_partial, partial_map, -1, True)
-        tb_graph.new_input(output_lse, partial_map, -1, True)
-        self.kn_graph.customized(
-            [q_input, kv_input, output_partial, output_lse], tb_graph
-        )
-        self.kn_graph.register_task(tb_graph, "mla_decode_sm100", params)
 
     def mla_reduce_layer(
         self,
@@ -1713,34 +1682,6 @@ class PersistentKernel:
         self.kn_graph.customized([q_nope_pe, kv, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "mla_prefill_absorbed_sm100", params)
 
-    def mla_prefill_tp8_layer(
-        self,
-        q_nope: DTensor,   # [B, S, H, D_QK_NOPE=128]
-        q_pe: DTensor,     # [B, S, H, D_QK_ROPE=64]
-        k: DTensor,        # [B, S, D_QK=192] (nope+rope concat along last dim)
-        v: DTensor,        # [B, S, D_V=128]
-        output: DTensor,   # [B, S, H, D_V=128]
-        mla_params: tuple, # (num_heads, seq_len)
-        grid_dim: tuple,   # (H, num_q_blocks, B)
-        block_dim: tuple,  # (128, 1, 1)
-    ):
-        # MLA Prefill TP=8 (unabsorbed, TMA K/V). NUM_HEADS per rank = 16.
-        # Grid: (H, ceil(S/BM), B) where BM=64.
-        num_heads, seq_len = mla_params
-        params = [num_heads, seq_len]
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        # Kernel does its own per-block slicing (head, q_block, batch come via
-        # task metadata). Each input is presented as the full tensor.
-        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
-        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
-        tb_graph.new_input(k, (-1, -1, -1), -1, True)
-        tb_graph.new_input(v, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [q_nope, q_pe, k, v, output], tb_graph
-        )
-        self.kn_graph.register_task(tb_graph, "mla_prefill_tp8_sm100", params)
 
     def mla_prefill_tp8_chunked_layer(
         self,
@@ -1822,98 +1763,6 @@ class PersistentKernel:
             tb_graph, "mla_prefill_tp8_chunked_reduce_sm100", params
         )
 
-    def mla_unified_layer(
-        self,
-        q_nope: DTensor,          # [S, H, D_CKV] flattened
-        q_pe: DTensor,            # [S, H, D_KPE] flattened
-        ckv: DTensor,             # [B*S, D_CKV]
-        kpe: DTensor,             # [B*S, D_KPE]
-        output: DTensor,          # final O [S, H, D_V], prefill branch writes
-        q_input: DTensor,         # fused Q [S, H*(D_CKV+D_KPE)] with TMA desc
-        kv_input: DTensor,        # contiguous KV [B*S, D_K] with TMA desc
-        output_partial: DTensor,  # decode partial O
-        output_lse: DTensor,      # decode partial LSE
-        q_len: int,
-        kv_len: int,
-        num_heads: int,
-        tp_size: int,
-        d_ckv: int = 512,
-        d_kpe: int = 64,
-        d_v: int = 512,
-        decode_q_len: int | None = None,
-    ):
-        num_splits = (kv_len + 128 - 1) // 128
-        # q_len is the prompt-prefill chunk budget. Decode width is controlled
-        # by generation semantics (one token, or MTP verify width), not MBT.
-        decode_q_len = min(decode_q_len if decode_q_len is not None else q_len, 8)
-        if tp_size == 1:
-            hpb = num_heads // decode_q_len
-            if hpb < 1:
-                hpb = 1
-            while num_heads % hpb != 0:
-                hpb -= 1
-            num_groups = num_heads // hpb
-            x_mul = 1
-        elif tp_size == 2:
-            qpg = min(2, decode_q_len)
-            num_groups = (decode_q_len + qpg - 1) // qpg
-            x_mul = 1
-        elif tp_size == 4:
-            qpg = min(4, decode_q_len)
-            num_groups = (decode_q_len + qpg - 1) // qpg
-            x_mul = 2
-        elif tp_size == 8:
-            q_len_padded = (decode_q_len + 1) & ~1
-            qpg = 2
-            num_groups = (q_len_padded + qpg - 1) // qpg
-            x_mul = 1
-        else:
-            raise ValueError(f"Unsupported MLA unified tp_size={tp_size}")
-
-        num_q_blocks = (q_len + 64 - 1) // 64
-        decode_blocks_x = num_groups * num_splits * x_mul
-        grid_dim = (
-            max(num_heads, decode_blocks_x),
-            max(num_q_blocks, self.max_num_batched_requests),
-            self.max_num_batched_requests,
-        )
-        block_dim = (256, 1, 1)
-        params = [
-            num_heads,
-            decode_q_len,
-            kv_len,
-            num_splits,
-            tp_size,
-            d_ckv,
-            d_kpe,
-            d_v,
-        ]
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
-        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
-        tb_graph.new_input(ckv, (-1, -1, -1), -1, True)
-        tb_graph.new_input(kpe, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(kv_input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output_partial, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output_lse, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [
-                q_nope,
-                q_pe,
-                ckv,
-                kpe,
-                output,
-                q_input,
-                kv_input,
-                output_partial,
-                output_lse,
-            ],
-            tb_graph,
-        )
-        self.kn_graph.register_task(tb_graph, "mla_unified_sm100", params)
 
     def mla_mtp_decode_layer(
         self,
@@ -2887,43 +2736,6 @@ class PersistentKernel:
             [permuted_output, meta, residual, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "moe_unpermute_sm100", params)
 
-    def transpose_scale_sm100_layer(
-        self, scale_in: DTensor, scale_out: DTensor,
-    ):
-        """(M, K_PACKED) uint32 → (K_PACKED, M) uint32 via multi-CTA copy.
-
-        Bridges quantize_fp8_layer's M-outermost packed scale output to the
-        K-outermost layout the PR-674 fp8_group_gemm SFA/SFB TMA descriptors
-        require. See transpose_scale_sm100.cuh.
-
-        B13 (2026-05-15): stripe M across `min(num_workers, M//16)` CTAs.
-        Disjoint write ranges (M dimension), no cross-CTA sync needed.
-        For DSv3 NEW MoE silu_scale (M=16384, K_PACKED=2 → 128 KB),
-        single-CTA was 53 μs; multi-CTA expected to drop to a single
-        wave ~3-5 μs.
-        """
-        assert scale_in.num_dims == 2
-        assert scale_out.num_dims == 2
-        M = scale_in.dim(0)
-        K_PACKED = scale_in.dim(1)
-        assert scale_out.dim(0) == K_PACKED
-        assert scale_out.dim(1) == M
-        params = [M, K_PACKED]
-        # Pick grid_x = min(num_workers, M / 16) so each CTA handles
-        # >=16 rows. Avoids degenerate per-CTA work for tiny M.
-        # C2.7 attempted bumping rows_per_cta_min 16→256 (fewer CTAs, more
-        # work each) — REGRESSED +17 μs/layer because the per-CTA wallclock
-        # scales linearly with rows (kernel is BW-bound, not launch-bound).
-        # Leave at 16.
-        rows_per_cta_min = 16
-        num_ctas = max(1, min(self.num_workers, M // rows_per_cta_min))
-        grid_dim = (num_ctas, 1, 1)
-        block_dim = (128, 1, 1)
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(scale_in, (-1, -1, -1), -1, True)
-        tb_graph.new_input(scale_out, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([scale_in, scale_out], tb_graph)
-        self.kn_graph.register_task(tb_graph, "transpose_scale_sm100", params)
 
     def linear_fp8_with_residual_layer(
         self,

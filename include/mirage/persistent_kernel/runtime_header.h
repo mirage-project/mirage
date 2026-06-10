@@ -176,9 +176,9 @@ enum TaskType {
   TASK_PAGED_ATTENTION_SPLIT_KV_SM100 = 263,
   TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SAMPLING_SM100 = 265,
-  TASK_MLA_DECODE_SM100 = 266,
   TASK_MLA_REDUCE_SM100 = 267,
   TASK_MLA_PREFILL_SM100 = 268,
+  TASK_MLA_DECODE_SM100 = 266,
   TASK_MLA_MTP_DECODE_SM100 = 269,
   TASK_MLA_MTP_REDUCE_SM100 = 270,
   TASK_MTP_VERIFY_STRICT = 271,
@@ -210,9 +210,7 @@ enum TaskType {
   // input tokens = shifted ground-truth prompt + current iter's argmax tail.
   TASK_MTP_BUILD_EMBED_INPUT = 294,
   // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
-  TASK_MLA_PREFILL_TP8_SM100 = 295,
   // Unified DeepSeek MLA dispatcher: prefill or MTP decode by runtime Q_LEN.
-  TASK_MLA_UNIFIED_SM100 = 296,
   // Unified KV gather: appends once, then writes the prefill or decode layout
   // selected by runtime Q_LEN.
   TASK_MLA_KV_GATHER_UNIFIED_SM100 = 297,
@@ -250,7 +248,6 @@ enum TaskType {
   // Tiny helper to transpose packed UE8M0 scale (M, K_PACKED) →
   // (K_PACKED, M); needed for the silu→W2 path because quantize_fp8 emits
   // (M, K_PACKED) while the new fp8_group_gemm SFA expects (K_PACKED, M).
-  TASK_TRANSPOSE_SCALE_SM100 = 315,
   // Helper for the MPK_DSV3_BMM decode Q path: interleaves the BMM-absorbed
   // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
   // (N, H, 576) that the MLA decode TMA expects.

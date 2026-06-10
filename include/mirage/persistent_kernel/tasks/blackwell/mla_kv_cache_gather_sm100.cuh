@@ -20,7 +20,7 @@
 //   1. Appending new c_latent + k_pe to the paged cache
 //   2. Gathering the full KV sequence into a contiguous buffer
 //
-// The contiguous buffer layout matches what mla_decode_sm100 expects:
+// The contiguous buffer layout matches what mla_mtp_decode_sm100 expects:
 //   [kv_len, D_K] where D_K = 576 (stored as bf16)
 //
 // Grid:  (max_num_batched_requests, 1, 1)

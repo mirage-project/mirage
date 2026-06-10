@@ -35,7 +35,7 @@
 //   sfa      [num_sf_k, M_total]       packed UE8M0 uint32 (4 UE8M0/uint32);
 //                                      M_total innermost — transposed vs. the
 //                                      natural [M_total, num_sf_k] producer
-//                                      layout (see transpose_scale_sm100)
+//                                      layout (scale transpose handled in quantize epilogue since C8)
 //   sfb      [num_sf_k, E*N]           packed UE8M0 uint32 (4 UE8M0/uint32);
 //                                      E*N innermost — same transposition
 //   m_indices[M_total]                 int32, expert id per row (rows in

@@ -47,7 +47,6 @@
 #include "linear_fp8_sm100.cuh"
 #include "linear_fp8_swapAB_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
-#include "mla_dispatch_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"
 #include "mla_kv_cache_gather_split_sm100.cuh"
 // sm100_ptx.cuh must be included BEFORE mla_mtp_decode_sm100.cuh at top level
@@ -62,10 +61,7 @@
 #include "mla_prefill_sm100.cuh"
 #include "mla_prefill_tp8_chunked_sm100.cuh"
 #include "mla_prefill_tp8_chunked_splitk_sm100.cuh"
-#include "mla_prefill_tp8_sm100.cuh"
 #include "mla_reduce_sm100.cuh"
-#include "mla_sm100_2sm.cuh"
-#include "mla_unified_sm100.cuh"
 #include "moe_linear_sm100.cuh"
 #include "moe_permute_sm100.cuh"
 #include "moe_silu_mul_quantize_fp8_sm100.cuh"
@@ -83,4 +79,3 @@
 #include "tensor_init.cuh"
 #include "topk_sigmoid_sm100.cuh"
 #include "topk_softmax_sm100.cuh"
-#include "transpose_scale_sm100.cuh"

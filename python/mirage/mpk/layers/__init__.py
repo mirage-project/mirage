@@ -16,7 +16,6 @@ from ._base import MPKModule
 from .allreduce import AllReduce
 from .tensor_init import TensorInit
 from .quantize_fp8 import QuantizeFP8, QuantizeFP8UE8M0, QuantizeFP8F32Scale
-from .transpose_scale import TransposeScale
 from .assemble_q_decode import AssembleQDecode
 from .sampling import SamplingSM100
 
@@ -85,8 +84,6 @@ from .mla import (
     MLAReduce,
     MLAPrefillAbsorbed,
     MLAPrefillPlain,
-    MLAPrefillUnified,
-    MLAPrefillTP8,
     MLAPrefillTP8Chunked,
     MLAPrefillTP8ChunkedSplitK,
     MLAPrefillTP8ChunkedReduce,
@@ -136,7 +133,6 @@ __all__ = [
     "QuantizeFP8",
     "QuantizeFP8UE8M0",
     "QuantizeFP8F32Scale",
-    "TransposeScale",
     "AssembleQDecode",
     "SamplingSM100",
     # elementwise
@@ -190,8 +186,6 @@ __all__ = [
     "MLAReduce",
     "MLAPrefillAbsorbed",
     "MLAPrefillPlain",
-    "MLAPrefillUnified",
-    "MLAPrefillTP8",
     "MLAPrefillTP8Chunked",
     "MLAPrefillTP8ChunkedSplitK",
     "MLAPrefillTP8ChunkedReduce",

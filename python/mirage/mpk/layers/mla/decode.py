@@ -3,7 +3,7 @@
 Wraps two SM100 tasks (kernels under
 ``include/mirage/persistent_kernel/tasks/blackwell/``):
 
-* :class:`MLADecode`  -> ``mla_decode_sm100``  (``mla_decode_sm100.cuh``)
+* :class:`MLADecode`  -> ``mla_decode_sm100`` (codegen → ``mla_mtp_decode_sm100_task_impl``)
 * :class:`MLAReduce`  -> ``mla_reduce_sm100``  (``mla_reduce_sm100.cuh``)
 
 Both kernels bake in ``NUM_HEADS=128``, ``D_K=576``, ``D_V=512`` for
