@@ -176,9 +176,10 @@ def run_pk_testmode(M: int, N: int, K: int, seed: int = 42):
     sb_dt = pk.attach_input(sb,     name="sb")
     out_dt = pk.attach_input(output, name="output")
 
-    # fp8_gemm_dense_smallm_layer(input_fp8, weight_fp8, input_scale, weight_scale, output, num_workers)
+    # fp8_gemm_dense_layer(variant="smallm")(input_fp8, weight_fp8, input_scale, weight_scale, output, num_workers)
     # num_workers=1 for a single-CTA test.
-    pk.fp8_gemm_dense_smallm_layer(
+    pk.fp8_gemm_dense_layer(variant="smallm",
+        
         input_fp8=a_dt,
         weight_fp8=b_dt,
         input_scale=sa_dt,

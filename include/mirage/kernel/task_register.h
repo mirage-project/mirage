@@ -188,8 +188,6 @@ public:
                                          std::vector<int> const &params);
   int register_linear_fp8_bmm_dense_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params);
-  int register_linear_fp8_bmm_dense_fp8out_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   // Unified dense BN128 entry (#201 L1): variant 0=smallm (NE2), 1=mediumm
   // (NE4). Byte-identical codegen to the prior two per-variant wrappers.
   int register_fp8_gemm_dense_bn128_sm100_task(threadblock::Graph const &bgraph,

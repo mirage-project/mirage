@@ -112,8 +112,8 @@ def test_mla_decode_tp4_testmode():
     # TP=4 decode + reduce (the real production kernels). Do NOT override
     # MPK_MLA_TP4_V_SPLITS — the Python grid v_splits must match the kernel's
     # compile-time constexpr (both default to 8 for max_seq_length < 3072).
-    pk.mla_mtp_decode_tp4_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len)
-    pk.mla_mtp_decode_tp4_reduce_layer(op_dt, ol_dt, out_dt, q_len, kv_len)
+    pk.mla_mtp_decode_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len, tp_size=4)
+    pk.mla_mtp_reduce_layer(op_dt, ol_dt, out_dt, q_len, kv_len, tp_size=4)
 
     print("Compiling...")
     folder_path = os.path.dirname(os.path.abspath(__file__))

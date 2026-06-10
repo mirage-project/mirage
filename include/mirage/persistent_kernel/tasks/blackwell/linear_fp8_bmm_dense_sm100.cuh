@@ -97,47 +97,6 @@ __device__ __noinline__ void
 // on H), same as the bf16 BMM. gemm_h is the number of heads = N-group count
 // in the o_proj row, threaded as the FP8/scale row strides.
 template <int BN, int NS, int NE>
-__device__ __noinline__ void
-    linear_fp8_bmm_dense_fp8out_sm100_task_impl(CUtensorMap const *ta_ptr,
-                                                CUtensorMap const *tb_ptr,
-                                                float const *__restrict__ sa,
-                                                float const *__restrict__ sb,
-                                                __nv_fp8_e4m3 *__restrict__ C_fp8,
-                                                float *__restrict__ C_scale_f32,
-                                                int const M,
-                                                int const N,
-                                                int const K,
-                                                int const sa_row_stride,
-                                                int const gemm_h) {
-  // FP8 output is [M, H*N] row-major (row stride = H*N); float32 scale is
-  // [M, H] row-major (row stride = H). N=128 per head => one group per head,
-  // group_idx (= on/128) is 0, so the per-head base pointer + row stride place
-  // the write at [m, h]. The bf16 C pointer is unused in the fused path.
-  fp8_gemm_dense_common::task_impl_tpl<BN,
-                                       NS,
-                                       NE,
-                                       /*EPILOGUE_QUANTIZE_FP8=*/true,
-                                       /*EPILOGUE_SCALE_F32=*/true>(
-      ta_ptr,
-      tb_ptr,
-      sa,
-      sb,
-      /*C=*/nullptr,
-      M,
-      N,
-      K,
-      /*worker_idx=*/0,
-      /*num_workers=*/1,
-      C_fp8,
-      /*C_scale=*/nullptr,
-      /*scale_outer_stride=*/0,
-      sa_row_stride,
-      /*C_row_stride=*/-1,
-      C_scale_f32,
-      /*C_fp8_row_stride=*/gemm_h * N,
-      /*C_scale_row_stride=*/gemm_h);
-}
-
 template <int BN, int NS, int NE>
 __host__ __device__ inline constexpr int linear_fp8_bmm_dense_smem_size() {
   return fp8_gemm_dense_common::smem_size_tpl<BN, NS, NE>();

@@ -1613,19 +1613,6 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
   } else {
     printf("a single persistent kernel\n");
     int num_sms_to_use = global_runtime_config.num_workers + num_schedulers / 4;
-    {
-      char const *override = std::getenv("MPK_NUM_SMS_OVERRIDE");
-      if (override != nullptr && override[0] != '\0') {
-        int ov = atoi(override);
-        if (ov > 0 && ov < num_sms_to_use) {
-          printf("MPK: forcing num_sms_to_use %d -> %d "
-                 "(MPK_NUM_SMS_OVERRIDE)\n",
-                 num_sms_to_use,
-                 ov);
-          num_sms_to_use = ov;
-        }
-      }
-    }
 #if defined(USE_NVSHMEM) && !defined(NVSHMEM_NO_DEVICE_LIB)
     void *args[] = {&global_runtime_config};
     nvshmemx_collective_launch((void const *)persistent_kernel,

@@ -1510,7 +1510,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     // D3: fp8out flavor reuses the IDENTICAL A/B input TMA layout (outputs are
     // raw FP8 + float32-scale stores, no TMA).
-    case TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100:
     case TASK_LINEAR_FP8_BMM_DENSE_SM100: {
       // Per-head dense FP8 BMM: 2 TMA descriptors (A=input param 0, B=weight
       // param 2). Same 2D [K, outer] raw-e4m3 descriptor as the dense GEMM,
@@ -1712,16 +1711,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           (task_desc.task_type == TASK_MLA_MTP_DECODE_TP2_SM100)   ? 32
           : (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) ? 32
                                                                    : 16;
-      if (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) {
-        int head_groups = 1;
-        if (char const *env = std::getenv("MPK_MLA_TP4_HEAD_GROUPS")) {
-          head_groups = std::atoi(env);
-        }
-        if (head_groups == 1 || head_groups == 2 || head_groups == 4 ||
-            head_groups == 8) {
-          num_heads = 32 / head_groups;
-        }
-      }
       if (param_id == 0) {
         // Q: may be flat [mbt, num_heads*D_K] (2D) or per-head [mbt, num_heads,
         // D_K] (3D — produced when the upstream q_b GEMM emits the BMM
@@ -2069,7 +2058,6 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     // D3: fp8out flavor — same TMA-for-A/B-only as bf16 (FP8 + float32-scale
     // outputs are raw stores).
-    case TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100:
     case TASK_LINEAR_FP8_BMM_DENSE_SM100: {
       // Per-head dense FP8 BMM: TMA only for A=input (param 0) and B=weight
       // (param 2). Float32 scales (params 1, 3) and the bf16 output are raw

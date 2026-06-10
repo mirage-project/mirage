@@ -182,32 +182,22 @@ def _detect_cxx_standard():
         pass
     return "-std=c++17"
 
+# TP4 MLA decode compile-time constants (feed -DMIRAGE_MLA_TP4_* and the
+# matching wrapper grid math; the two MUST stay consistent).
+#   HEAD_GROUPS = 1: >1 multiplies redundant tensor-core work until the kernel
+#       uses packed row tiles.
+#   RD_DV = 4 for the TP4 reduce (other TP reduces stay at 2).
+#   V_SPLITS is seq-length dependent (standalone ablation on B200):
+#       KV <= 2048: 8 V splits is fastest for the current MPK single-split
+#       write-final path.
+#       KV >= 3072: 2 V splits matches the original TP4 MLA PR and avoids
+#       redoing the QK/softmax work eight times.
+_MLA_TP4_HEAD_GROUPS = 1
+_MLA_TP4_RD_DV = 4
+
+
 def _mla_tp4_v_splits(max_seq_length=None):
-    env_value = os.environ.get("MPK_MLA_TP4_V_SPLITS")
-    if env_value is not None:
-        value = int(env_value)
-    else:
-        # Standalone ablation on B200:
-        #   KV <= 2048: 8 V splits is fastest for the current MPK single-split
-        #   write-final path.
-        #   KV >= 3072: 2 V splits matches the original TP4 MLA PR and avoids
-        #   redoing the QK/softmax work eight times.
-        value = 2 if max_seq_length is not None and max_seq_length >= 3072 else 8
-    if value not in (1, 2, 4, 8):
-        raise ValueError("MPK_MLA_TP4_V_SPLITS must be one of 1, 2, 4, 8")
-    return value
-
-def _mla_tp4_head_groups():
-    value = int(os.environ.get("MPK_MLA_TP4_HEAD_GROUPS", "1"))
-    if value not in (1, 2, 4, 8):
-        raise ValueError("MPK_MLA_TP4_HEAD_GROUPS must be one of 1, 2, 4, 8")
-    return value
-
-def _mla_tp4_rd_dv():
-    value = int(os.environ.get("MPK_MLA_TP4_RD_DV", "4"))
-    if value not in (2, 4, 8):
-        raise ValueError("MPK_MLA_TP4_RD_DV must be one of 2, 4, 8")
-    return value
+    return 2 if max_seq_length is not None and max_seq_length >= 3072 else 8
 
 def get_compile_command(
     mpk,
@@ -265,33 +255,22 @@ def get_compile_command(
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
         f"-DMIRAGE_MLA_TP4_V_SPLITS={_mla_tp4_v_splits(mpk.max_seq_length)}",
-        f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_mla_tp4_head_groups()}",
-        f"-DMIRAGE_MLA_TP4_RD_DV={_mla_tp4_rd_dv()}",
+        f"-DMIRAGE_MLA_TP4_HEAD_GROUPS={_MLA_TP4_HEAD_GROUPS}",
+        f"-DMIRAGE_MLA_TP4_RD_DV={_MLA_TP4_RD_DV}",
     ]
     # MPK_PTXAS_VERBOSE=1 dumps register/spill info per kernel during JIT
     # compile. Useful to identify worst-offender kernels in the megakernel
     # (e.g., to debug cooperative-launch capacity issues on TP=2).
     if os.environ.get("MPK_PTXAS_VERBOSE", "0") == "1":
         common_cmd.append("--ptxas-options=-v")
-    # MPK_SMEM_KB_OVERRIDE: override MAX_DYNAMIC_SHARED_MEMORY_SIZE (in KB)
-    # before WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE subtraction. Default
-    # 222 KB on B200 leaves zero headroom against the 228 KB SM limit;
-    # reducing this provides margin for cooperative-launch capacity.
-    smem_kb_override = os.environ.get("MPK_SMEM_KB_OVERRIDE")
-    if smem_kb_override:
-        common_cmd.append(f"-DMPK_SMEM_KB_OVERRIDE={int(smem_kb_override)}")
-    # rdc=true is the default on every NVSHMEM build. The old Blackwell
-    # rdc=false + self-contained-allreduce workaround (hand-rolled
-    # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
-    # because rdc=true previously inflated registers 166→255 on sm_100a) is
-    # kept behind MPK_RDC_FALSE=1 as a safety escape hatch — on CUDA 13.2 +
-    # NVSHMEM 3.6.5 the register-spill issue is gone (verified 2026-04-22 at
-    # TP=2 and TP=4 across mbt∈{1,64} and MTP spec∈{0,1,3}).
-    _rdc_false = os.environ.get("MPK_RDC_FALSE", "0") == "1" and target_cc >= 100
+    # rdc=true on every NVSHMEM build (CUDA 13.2 + NVSHMEM 3.6.5; the old
+    # sm_100a register-spill that once motivated an rdc=false fallback is
+    # gone, verified 2026-04-22 at TP=2/TP=4 across mbt∈{1,64} and MTP
+    # spec∈{0,1,3}).
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if (not use_nvshmem or _rdc_false) else "-rdc=true",
+        "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -336,31 +315,12 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        if _rdc_false:
-            # Blackwell MPK_RDC_FALSE=1 escape hatch: self-contained allreduce,
-            # no libnvshmem_device.a (kept for regression isolation; see the
-            # block above for when this path is needed).
-            _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
-            _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
-            os.makedirs(_host_obj_dir, exist_ok=True)
-            _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
-            if not os.path.exists(_coll_obj):
-                import subprocess as _sp
-                _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
-            nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
-                             _coll_obj,
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
-        else:
-            # Default path: standard NVSHMEM link with device library +
-            # rdc=true. Used everywhere unless MPK_RDC_FALSE=1 on Blackwell.
-            nvshmem_flags = ["-DUSE_NVSHMEM",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        # Standard NVSHMEM link with device library + rdc=true.
+        nvshmem_flags = ["-DUSE_NVSHMEM",
+                         "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
+                         "-Xlinker", "--disable-new-dtags",
+                         "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                         "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -397,9 +357,7 @@ def get_compile_command(
 # group_tiles auto-adjusts down to keep grid_y * group_tiles ≤ num_workers.
 # At cap=128 the quantize task occupies all workers in 1 wave, but contention
 # with concurrent tasks is negligible in practice (verified empirically).
-# Env override: MPK_QUANTIZE_GRID_Y_CAP={8,16,32,64,128}.
-import os as _os_q
-_QUANTIZE_GRID_Y_CAP = int(_os_q.environ.get("MPK_QUANTIZE_GRID_Y_CAP", "128"))
+_QUANTIZE_GRID_Y_CAP = 128
 
 
 class PersistentKernel:
@@ -661,7 +619,7 @@ class PersistentKernel:
         strides = tuple([s for s in torch_tensor.stride()])
         # Check layout: row-major (possibly with padded outer strides — supports
         # slice views like q_nope_pe[:, :, :512] of a (mbt, H, 576) parent for
-        # the MPK_DSV3_BMM TMA-stride fuse) or column-major (FP8 scale tensors).
+        # the decode-BMM TMA-stride fuse) or column-major (FP8 scale tensors).
         # Padded row-major: each outer stride covers AT LEAST a contiguous
         # row at the next level (== for contig, > for slice view of a wider
         # parent). Innermost stride must still be 1.
@@ -1682,58 +1640,7 @@ class PersistentKernel:
             tb_graph, "mla_prefill_tp8_chunked_sm100", params
         )
 
-    def mla_prefill_tp8_chunked_splitk_layer(
-        self,
-        q_nope: DTensor,    # [B, q_len, H, 128]
-        q_pe: DTensor,      # [B, q_len, H, 64]
-        k_nope: DTensor,    # [B, kv_len, H, 128]
-        k_rope: DTensor,    # [B, kv_len, 1, 64]
-        v: DTensor,         # [B, kv_len, H, 128]
-        partial: DTensor,   # float, num_splits*B*nqb*H*BM*(D_V+4)
-        mla_params: tuple,  # (num_heads, q_len, kv_len, q_start, num_splits)
-        grid_dim: tuple,    # (H, nqb*num_splits, B)
-        block_dim: tuple,   # (128, 1, 1)
-    ):
-        num_heads, q_len, kv_len, q_start, num_splits = mla_params
-        nqb = (q_len + 63) // 64
-        params = [num_heads, q_len, kv_len, q_start, num_splits, nqb]
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
-        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
-        tb_graph.new_input(k_nope, (-1, -1, -1), -1, True)
-        tb_graph.new_input(k_rope, (-1, -1, -1), -1, True)
-        tb_graph.new_input(v, (-1, -1, -1), -1, True)
-        tb_graph.new_input(partial, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [q_nope, q_pe, k_nope, k_rope, v, partial], tb_graph
-        )
-        self.kn_graph.register_task(
-            tb_graph, "mla_prefill_tp8_chunked_splitk_sm100", params
-        )
-
-    def mla_prefill_tp8_chunked_reduce_layer(
-        self,
-        partial: DTensor,
-        output: DTensor,    # [B, q_len, H, 128]
-        mla_params: tuple,  # (num_heads, q_len, num_splits)
-        grid_dim: tuple,    # (H, nqb, B)
-        block_dim: tuple,   # (256, 1, 1)
-    ):
-        num_heads, q_len, num_splits = mla_params
-        nqb = (q_len + 63) // 64
-        params = [num_heads, q_len, num_splits, nqb]
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(partial, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([partial, output], tb_graph)
-        self.kn_graph.register_task(
-            tb_graph, "mla_prefill_tp8_chunked_reduce_sm100", params
-        )
-
-
-    def mla_mtp_decode_layer(
+    def _mla_mtp_decode_tp1_layer(
         self,
         q_input: DTensor,          # Q tensor [B*Q_LEN*H, D_K] (with TMA desc)
         kv_input: DTensor,         # KV tensor [B*KL, D_K] (with TMA desc)
@@ -1763,7 +1670,7 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "mla_mtp_decode_sm100", params)
 
-    def mla_mtp_reduce_layer(
+    def _mla_mtp_reduce_tp1_layer(
         self,
         input_partial: DTensor,    # Oa from decode tasks
         input_lse: DTensor,        # La from decode tasks
@@ -1864,10 +1771,9 @@ class PersistentKernel:
         num_groups = (q_len + qpg - 1) // qpg
         num_splits = (kv_len + 128 - 1) // 128
         d_v = 512
-        # TP4 can be compiled with a different RD_DV for ablation. Keep the
-        # grid matched to the compiled coverage; standalone tests currently
-        # show RD_DV=2 is fastest for KV=4096.
-        rd_dv = _mla_tp4_rd_dv() if task_name == "mla_mtp_decode_tp4_reduce_sm100" else 2
+        # TP4 reduce is compiled with RD_DV=4 (-DMIRAGE_MLA_TP4_RD_DV); keep
+        # the grid matched to the compiled coverage. Other TP reduces use 2.
+        rd_dv = _MLA_TP4_RD_DV if task_name == "mla_mtp_decode_tp4_reduce_sm100" else 2
 
         params = [num_groups, q_len, num_splits, rd_dv]
         grid_dim = ((d_v + rd_dv - 1) // rd_dv,
@@ -1884,7 +1790,7 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, task_name, params)
 
-    def mla_mtp_decode_tp2_layer(
+    def _mla_mtp_decode_tp2_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
         num_splits_override=None,
     ):
@@ -1896,7 +1802,7 @@ class PersistentKernel:
             num_splits_override=num_splits_override,
         )
 
-    def mla_mtp_decode_tp2_reduce_layer(
+    def _mla_mtp_decode_tp2_reduce_layer(
         self, input_partial, input_lse, output, q_len, kv_len,
     ):
         self._mla_mtp_reduce_tp_layer(
@@ -1904,22 +1810,22 @@ class PersistentKernel:
             task_name="mla_mtp_decode_tp2_reduce_sm100",
         )
 
-    def mla_mtp_decode_tp4_layer(
+    def _mla_mtp_decode_tp4_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
         num_splits_override=None,
     ):
-        # TP=4 V-split: each split writes a disjoint D_V chunk. Keep this
-        # configurable for ablation because each split repeats QK/softmax.
+        # TP=4 V-split: each split writes a disjoint D_V chunk (seq-length-
+        # dependent count; each split repeats QK/softmax).
         self._mla_mtp_decode_tp_layer(
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=32,
             task_name="mla_mtp_decode_tp4_sm100", has_v_split=True,
-            head_groups=_mla_tp4_head_groups(),
+            head_groups=_MLA_TP4_HEAD_GROUPS,
             v_splits=_mla_tp4_v_splits(self.max_seq_length),
             num_splits_override=num_splits_override,
         )
 
-    def mla_mtp_decode_tp4_reduce_layer(
+    def _mla_mtp_decode_tp4_reduce_layer(
         self, input_partial, input_lse, output, q_len, kv_len,
     ):
         self._mla_mtp_reduce_tp_layer(
@@ -1927,7 +1833,7 @@ class PersistentKernel:
             task_name="mla_mtp_decode_tp4_reduce_sm100",
         )
 
-    def mla_mtp_decode_tp8_layer(
+    def _mla_mtp_decode_tp8_layer(
         self, q_input, kv_input, output_partial, output_lse,
         q_len_real, kv_len, num_splits_override=None,
     ):
@@ -1940,7 +1846,7 @@ class PersistentKernel:
             num_splits_override=num_splits_override,
         )
 
-    def mla_mtp_decode_tp8_reduce_layer(
+    def _mla_mtp_decode_tp8_reduce_layer(
         self, input_partial, input_lse, output, q_len_real, kv_len,
     ):
         q_len = (q_len_real + 1) & ~1
@@ -1948,6 +1854,66 @@ class PersistentKernel:
             input_partial, input_lse, output, q_len, kv_len, num_heads=16,
             task_name="mla_mtp_decode_tp8_reduce_sm100",
         )
+
+    def mla_mtp_decode_layer(
+        self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+        tp_size: int, num_splits_override=None,
+    ):
+        """Unified MLA MTP decode entry — dispatches on tp_size to the
+        TP1/TP2/TP4/TP8 task variants (registered task names unchanged).
+
+        tp_size: the tensor-parallel world size (1/2/4/8). Selects the
+            per-rank head count (128/64/32/16) variant.
+        num_splits_override: KV-split override for the TP variants. The TP1
+            kernel derives its split count internally and has no override
+            plumbing (callers historically never passed one at TP1).
+        For tp_size == 8, q_len is the REAL (unpadded) Q_LEN; the TP8
+        variant pads it to even internally.
+        """
+        if tp_size == 1:
+            self._mla_mtp_decode_tp1_layer(
+                q_input, kv_input, output_partial, output_lse, q_len, kv_len)
+        elif tp_size == 2:
+            self._mla_mtp_decode_tp2_layer(
+                q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+                num_splits_override=num_splits_override)
+        elif tp_size == 4:
+            self._mla_mtp_decode_tp4_layer(
+                q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+                num_splits_override=num_splits_override)
+        elif tp_size == 8:
+            self._mla_mtp_decode_tp8_layer(
+                q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+                num_splits_override=num_splits_override)
+        else:
+            raise ValueError(
+                f"mla_mtp_decode_layer: unsupported tp_size {tp_size} "
+                "(expected 1, 2, 4, or 8)")
+
+    def mla_mtp_reduce_layer(
+        self, input_partial, input_lse, output, q_len, kv_len,
+        tp_size: int,
+    ):
+        """Unified MLA MTP decode-reduce entry — the tp_size-dispatching
+        companion of mla_mtp_decode_layer (registered task names unchanged).
+        For tp_size == 8, q_len is the REAL (unpadded) Q_LEN.
+        """
+        if tp_size == 1:
+            self._mla_mtp_reduce_tp1_layer(
+                input_partial, input_lse, output, q_len, kv_len)
+        elif tp_size == 2:
+            self._mla_mtp_decode_tp2_reduce_layer(
+                input_partial, input_lse, output, q_len, kv_len)
+        elif tp_size == 4:
+            self._mla_mtp_decode_tp4_reduce_layer(
+                input_partial, input_lse, output, q_len, kv_len)
+        elif tp_size == 8:
+            self._mla_mtp_decode_tp8_reduce_layer(
+                input_partial, input_lse, output, q_len, kv_len)
+        else:
+            raise ValueError(
+                f"mla_mtp_reduce_layer: unsupported tp_size {tp_size} "
+                "(expected 1, 2, 4, or 8)")
 
     # MoE Layers
     def tensor_init_layer(
@@ -2485,7 +2451,7 @@ class PersistentKernel:
         # input[5] (read as the active mask -> garbage -> num_active=0 -> the
         # kernel exits writing NOTHING) and `meta` in the output slot (the D
         # TMA-store goes to the tiny meta buffer, dropped) -> the entire
-        # active-skip (MPK_DSV3_ACTIVE_SKIP=1) MoE W13/W2 GEMM produced NULL
+        # active-skip MoE W13/W2 GEMM produced NULL
         # output. Same bug class as the moe_silu_mul "CRITICAL ORDERING
         # (2026-05-14)" fix; the grouped-GEMM path never got the analog.
         # meta=None path (non-active-skip) is unchanged (5 inputs + output).
@@ -2497,7 +2463,7 @@ class PersistentKernel:
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 
-    def fp8_group_gemm_smallm_layer(
+    def _fp8_group_gemm_smallm_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
         num_workers, meta=None,
     ):
@@ -2508,7 +2474,7 @@ class PersistentKernel:
             a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
             num_workers, meta=meta)
 
-    def fp8_group_gemm_largem_layer(
+    def _fp8_group_gemm_largem_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
         num_workers, meta=None,
     ):
@@ -2524,17 +2490,18 @@ class PersistentKernel:
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
         num_workers, meta=None,
     ):
-        # Auto-dispatcher: pick smallm/largem by (K, M_per_expert).
+        # Public family entry. Auto-dispatcher: pick the smallm/largem tile
+        # variant by (K, M_per_expert).
         K = a_fp8.dim(1)
         M_total = a_fp8.dim(0)
         E = b_fp8.dim(0)
         MPE = M_total // E
         if K > 4096 and MPE <= 8:
-            self.fp8_group_gemm_smallm_layer(
+            self._fp8_group_gemm_smallm_layer(
                 a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
                 num_workers, meta=meta)
         else:
-            self.fp8_group_gemm_largem_layer(
+            self._fp8_group_gemm_largem_layer(
                 a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
                 num_workers, meta=meta)
 
@@ -2554,8 +2521,8 @@ class PersistentKernel:
         grouped FP8 GEMM. See moe_permute_sm100.cuh for the exact contract.
 
         By default one CTA per local expert (grid_dim = (E_local, 1, 1)).
-        `e_per_cta` (gated by the builder via MPK_DSV3_PERMUTE_EPC, default
-        1) lets each CTA own E_PER_CTA consecutive experts, shrinking the
+        `e_per_cta` (the DSv3 builder passes 4) lets each CTA own
+        E_PER_CTA consecutive experts, shrinking the
         launch to (E_local / E_PER_CTA, 1, 1). This collapses the decode
         "permute valley" (128 CTAs vs ~8 active experts contending with the
         shared-expert GEMM). E_PER_CTA==1 is byte-identical to the legacy
@@ -2759,33 +2726,6 @@ class PersistentKernel:
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_swapAB_sm100", params)
 
-    def dsv3_router_gemm_sm100_layer(
-        self,
-        input: DTensor,
-        weight: DTensor,
-        output: DTensor,
-        grid_dim: tuple,
-        block_dim: tuple,
-        decode_gate: bool = False,
-    ):
-        # DSv3 router-gate CUDA-core GEMV (decode, M<=16). Skinny GEMM
-        #   output[M, N_TOTAL] = input[M, K] @ weight[N_TOTAL, K]^T
-        # with N_TOTAL = NUM_EXPERTS (256), K = HIDDEN (7168). Ported from the
-        # TRT-LLM/vLLM dsv3_router_gemm CUDA-core kernel (no tensor core / TMA /
-        # tcgen05 / cross-CTA reduce -> crash-free).
-        # Parallelism: each task instance (CTA) owns N_PER_CTA = N_TOTAL/grid.x
-        # expert columns and reduces the full K in-CTA. dim_maps mirror swapAB:
-        #   input  replicated (-1); weight dim0(N) -> grid.x; output dim1(N) -> grid.x.
-        assert weight.dim(0) % grid_dim[0] == 0, (
-            "NUM_EXPERTS must be divisible by grid_dim.x")
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (1, -1, -1), -1, True)
-        self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "dsv3_router_gemm_sm100",
-                                    [1] if decode_gate else [])
-
     def linear_fp8_swapAB_with_residual_layer(
         self,
         input_fp8: DTensor,
@@ -2824,7 +2764,7 @@ class PersistentKernel:
         """Interleave the BMM-absorbed q_nope (N, H, 512) with q_pe (N, H, 64)
         into per-head [nope|pe] layout (N, H, 576) for MLA decode.
 
-        Used by the MPK_DSV3_BMM=1 decode Q path:
+        Used by the DSv3 decode Q path:
           rmsnorm_linear(q_a, q_b_nope) → q_nope (N, H, 128)
           quantize_fp8(q_nope)         → q_nope_fp8 (N, H, 128)
           linear_fp8_bmm_sm100(q_nope_fp8, kv_b_k_bmm) → q_nope_abs (N, H, 512)
@@ -2862,7 +2802,7 @@ class PersistentKernel:
         params = [1] if pe_only else []
         self.kn_graph.register_task(tb_graph, "assemble_q_decode_sm100", params)
 
-    def linear_fp8_bmm_sm100_layer(
+    def _linear_fp8_bmm_sm100_layer(
         self,
         input_fp8: DTensor,
         input_scale: DTensor,
@@ -2931,7 +2871,7 @@ class PersistentKernel:
             [input_fp8, input_scale, weight_fp8, weight_scale, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_fp8_bmm_sm100", params)
 
-    def linear_fp8_bmm_dense_sm100_layer(
+    def _linear_fp8_bmm_dense_sm100_layer(
         self,
         input_fp8: DTensor,
         input_scale: DTensor,
@@ -2946,11 +2886,10 @@ class PersistentKernel:
         #     output[n, h, :] = input[n, h, :] @ weight[h, :, :]^T  (per head)
         # decode-only, batch_size <= 16, one head per CTA (grid.y == H).
         #
-        # Forward-compatible alternative to linear_fp8_bmm_sm100_layer for the
-        # DSv3 decode BMM2 (o-down un-absorption): the float32 128-K-aligned
-        # block scales are split-K-friendly (when the kernel team lands dense
-        # split-K), whereas swapAB's UE8M0 packs at 512-K and cannot split a
-        # per-head K=512. Same math, different scale encoding.
+        # Alternative to the swapAB BMM body for the DSv3 decode BMM2 (o-down
+        # un-absorption): the float32 128-K-aligned block scales are
+        # split-K-friendly, whereas swapAB's UE8M0 packs at 512-K and cannot
+        # split a per-head K=512. Same math, different scale encoding.
         #
         # Tensor layouts (all 3D; dim 1 is the head axis for activation):
         #   input_fp8     [N, H, D_in]
@@ -2992,60 +2931,36 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_bmm_dense_sm100", params)
 
-    def linear_fp8_bmm_dense_fp8out_sm100_layer(
+    def linear_fp8_bmm_layer(
         self,
         input_fp8: DTensor,
         input_scale: DTensor,
         weight_fp8: DTensor,
         weight_scale: DTensor,
-        output_fp8: DTensor,
-        output_scale: DTensor,
-        grid_dim: tuple,    # (1, h_shards, 1)  (grid.x must be 1: D_out=128=BN)
-        block_dim: tuple,   # (256, 1, 1) on SM100
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        dense: bool,
     ):
-        # D3 (2026-06-03): fp8-out flavor of linear_fp8_bmm_dense_sm100_layer.
-        # Identical per-head BMM math, but the epilogue fuses the downstream
-        # float32-scale per-token-group quantize (TASK_PER_TOKEN_GROUP_QUANTIZE)
-        # that previously ran as a standalone task after BMM2, feeding the
-        # o_proj dense GEMM. Each CTA computes one head's (N, 128) output, which
-        # is exactly one 128-K-group of the o_proj input row [N, H*128], so the
-        # per-row max IS that head's o_proj-group max — no cross-thread sync.
-        #
-        # Output layouts (per-head, split on the head axis by grid.y):
-        #   output_fp8    [N, H*D_out] (2D) or [N, H, D_out] (3D) raw e4m3
-        #   output_scale  [N, H] (2D) or [N, H, 1] (3D) float32 (one group/head)
-        # The o_proj dense GEMM then reads output_fp8 as [N, H*128] with
-        # K/128 = H groups, scale [N, H] float32 — exactly the layout
-        # quantize_fp8_layer(scale_ue8m0=False) produces. Tuple (4 in, 2 out).
-        assert weight_fp8.num_dims == 3
-        assert weight_scale.num_dims == 3
-        assert input_fp8.num_dims == 3, (
-            "linear_fp8_bmm_dense_fp8out requires 3D input [N, H, D_in]")
-        assert input_scale.num_dims == 3, (
-            "linear_fp8_bmm_dense_fp8out requires 3D float32 input_scale")
-        assert output_fp8.num_dims in (2, 3)
-        assert output_scale.num_dims in (2, 3)
-        assert grid_dim[0] == 1, (
-            "linear_fp8_bmm_dense_fp8out requires grid.x == 1 (D_out=128=BN)")
-        params = []
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        # input_fp8 / input_scale: grid.y splits the head axis (dim 1).
-        tb_graph.new_input(input_fp8,   (-1, 1, -1), -1, True)
-        tb_graph.new_input(input_scale, (-1, 1, -1), -1, True)
-        # weight_fp8 / weight_scale [H, ...]: grid.y splits dim 0 (H).
-        tb_graph.new_input(weight_fp8,   (-1, 0, -1), -1, True)
-        tb_graph.new_input(weight_scale, (-1, 0, -1), -1, True)
-        # Outputs: dim 1 (head axis) split by grid.y. For the 2D FP8 buffer
-        # [N, H*128] each grid.y chunk is 128 wide (= one head); for the 2D
-        # scale [N, H] each chunk is 1 wide. grid.x == 1 so D_out unsharded.
-        tb_graph.new_input(output_fp8,   (-1, 1, -1), -1, True)
-        tb_graph.new_input(output_scale, (-1, 1, -1), -1, True)
-        self.kn_graph.customized(
-            [input_fp8, input_scale, weight_fp8, weight_scale,
-             output_fp8, output_scale],
-            tb_graph)
-        self.kn_graph.register_task(
-            tb_graph, "linear_fp8_bmm_dense_fp8out_sm100", params)
+        """Unified per-head FP8 BMM entry — dispatches on the scale encoding
+        (registered task names unchanged).
+
+        dense=False: swapAB body, UE8M0-packed uint32 scales (DSv3 decode
+            BMM1, q_nope un-absorption; supports grid.x > 1 D_out shards).
+        dense=True:  DENSE block-scaled body, float32 128-K-group scales
+            (DSv3 decode BMM2, o-down un-absorption; requires grid.x == 1).
+        """
+        impl = (self._linear_fp8_bmm_dense_sm100_layer if dense
+                else self._linear_fp8_bmm_sm100_layer)
+        impl(
+            input_fp8=input_fp8,
+            input_scale=input_scale,
+            weight_fp8=weight_fp8,
+            weight_scale=weight_scale,
+            output=output,
+            grid_dim=grid_dim,
+            block_dim=block_dim,
+        )
 
     def _fp8_gemm_dense_layer_impl(
         self,
@@ -3092,17 +3007,17 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, task_name, params)
 
-    def fp8_gemm_dense_smallm_layer(self, input_fp8, weight_fp8, input_scale,
-                                    weight_scale, output, num_workers,
-                                    runtime_m_mode: int = 0):
+    def _fp8_gemm_dense_smallm_layer(self, input_fp8, weight_fp8, input_scale,
+                                     weight_scale, output, num_workers,
+                                     runtime_m_mode: int = 0):
         self._fp8_gemm_dense_layer_impl(
             "fp8_gemm_dense_smallm_sm100",
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
-    def fp8_gemm_dense_mediumm_layer(self, input_fp8, weight_fp8, input_scale,
-                                     weight_scale, output, num_workers,
-                                     runtime_m_mode: int = 0):
+    def _fp8_gemm_dense_mediumm_layer(self, input_fp8, weight_fp8, input_scale,
+                                      weight_scale, output, num_workers,
+                                      runtime_m_mode: int = 0):
         self._fp8_gemm_dense_layer_impl(
             "fp8_gemm_dense_mediumm_sm100",
             input_fp8, weight_fp8, input_scale, weight_scale, output,
@@ -3165,7 +3080,7 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, task_name, params)
 
-    def fp8_gemm_dense_smallm_fp8out_layer(
+    def _fp8_gemm_dense_smallm_fp8out_layer(
         self, input_fp8, weight_fp8, input_scale, weight_scale,
         output_fp8, output_scale, num_workers, runtime_m_mode: int = 0):
         self._fp8_gemm_dense_fp8out_layer_impl(
@@ -3174,7 +3089,7 @@ class PersistentKernel:
             output_fp8, output_scale, num_workers,
             runtime_m_mode=runtime_m_mode)
 
-    def fp8_gemm_dense_mediumm_fp8out_layer(
+    def _fp8_gemm_dense_mediumm_fp8out_layer(
         self, input_fp8, weight_fp8, input_scale, weight_scale,
         output_fp8, output_scale, num_workers, runtime_m_mode: int = 0):
         self._fp8_gemm_dense_fp8out_layer_impl(
@@ -3183,154 +3098,54 @@ class PersistentKernel:
             output_fp8, output_scale, num_workers,
             runtime_m_mode=runtime_m_mode)
 
-    def fp8_gemm_dense_splitk_tma_reduce_layer(
-            self, input_fp8, weight_fp8, input_scale, weight_scale, output,
-            num_workers, split_k: int = 4):
-        """ferret FP8 split-K dense GEMM with a TMA reduce-add epilogue.
+    def fp8_gemm_dense_layer(
+        self,
+        input_fp8,
+        weight_fp8,
+        input_scale,
+        weight_scale,
+        num_workers,
+        output=None,
+        runtime_m_mode: int = 0,
+        variant: str = None,
+        fp8out: bool = False,
+        output_fp8=None,
+        output_scale=None,
+    ):
+        """Unified dense FP8 GEMM entry — dispatches to the smallm/mediumm
+        tile variants (+ their *_fp8out epilogue-quantize flavors). The
+        registered task names are unchanged.
 
-        Race-free alternative to the retired in-kernel split-K (removed
-        2026-06-10): instead of per-element red.global.add.bf16x2 atomics
-        (which crash at TP>=2 under NVSHMEM), each K-slice CTA stages its
-        dequantized bf16 partial tile to
-        SMEM and issues one cp.reduce.async.bulk.tensor.2d (TMA-engine
-        reduce-add) into the PRE-ZEROED bf16 output. The kernel bakes in a
-        decode-phase gate (Q_LEN<=8 + active_rows cap) so prefill iters
-        early-exit.
-
-        IMPORTANT: the kernel accumulates into `output`, so it MUST be zeroed
-        each iteration. This wrapper prepends a `tensor_init_layer` that zeroes
-        `output` before the GEMM (accumulate=False); the dep-tracker chains
-        them via the `output` RAW edge.
-
-        ABI: 4 inputs (A_fp8 TMA, B_fp8 TMA, sa float*, sb float*) + 1 output
-        (C bf16 TMA reduce-add). Matches the (4, 1) tuple in graph.cc.
-
-        Args
-        ----
-        input_fp8:    (M, K) FP8 e4m3, row-major.
-        weight_fp8:   (N, K) FP8 e4m3, row-major.
-        input_scale:  (M, K/128) float32 per-128-K group scale for A.
-        weight_scale: (N/128, K/128) float32 per-128x128-block scale for B.
-        output:       (M, N) BF16. Pre-zeroed by the prepended tensor_init.
-        num_workers:  persistent worker count (= grid_dim.x for this task).
-        split_k:      K-split factor. K / (128 * split_k) must be integer.
+        variant: "smallm" | "mediumm" | None. None auto-picks by the rule
+            every DSv3 builder call site used: smallm when
+            self.max_seq_length <= 512, else mediumm.
+        fp8out: select the epilogue-UE8M0-quantize flavor — the GEMM emits
+            FP8 + packed uint32 scale directly (pass output_fp8 +
+            output_scale instead of output).
         """
-        assert input_fp8.num_dims in (2, 3)
-        assert weight_fp8.num_dims == 2
-        assert input_scale.num_dims == 2
-        assert weight_scale.num_dims == 2
-        assert output.num_dims in (2, 3)
-        M = input_fp8.dim(0)
-        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
-             else input_fp8.dim(1) * input_fp8.dim(2))
-        N = weight_fp8.dim(0)
-        assert weight_fp8.dim(1) == K
-        assert output.dim(0) == M
-        out_flat_n = (output.dim(1) if output.num_dims == 2
-                      else output.dim(1) * output.dim(2))
-        assert out_flat_n == N
-        assert split_k >= 1 and split_k <= 8
-        # Kernel-side BK=128; K must split evenly across split_k slices at the
-        # 128-K boundary so scale-tile boundaries align with K slices. The TMA
-        # reduce-add output descriptor uses BN=BM=128 box tiles, so N must be a
-        # multiple of 128 (true for qkv_a N=2176 and shared gate_up N=1024).
-        assert K % (128 * split_k) == 0, (
-            f"fp8_gemm_dense_splitk_tma_reduce: K={K} must be divisible by "
-            f"128 * split_k={128 * split_k}")
-        assert N % 128 == 0, (
-            f"fp8_gemm_dense_splitk_tma_reduce: N={N} must be divisible by 128")
-        params = [M, N, K, num_workers, split_k]
-        # Prepend tensor_init to zero `output` before each GEMM iter (the
-        # reduce-add accumulates into a zero base). `input_fp8` carries the
-        # read-dep edge so the tensor_init is gated on the upstream quantize; the
-        # GEMM is then gated on the tensor_init via the output RAW edge.
-        self.tensor_init_layer(
-            target=output,
-            dummy=input_fp8,
-            grid_dim=(num_workers, 1, 1),
-            block_dim=(128, 1, 1),
-            dummy_input_map=(-1, -1, -1),
-            target_input_map=(-1, -1, -1),
-        )
-        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
-        # new_input ORDER MUST match the (4,1) tuple in graph.cc and the
-        # input_ptrs[...]/output_ptrs[0] reads in
-        # register_fp8_gemm_dense_splitk_tma_reduce_sm100_task:
-        #   input_ptrs[0]=A, [1]=B, [2]=sa, [3]=sb ; output_ptrs[0]=C.
-        # A and B carry TMA descriptors (input_tma_desc_ptrs[0]/[1]); the C
-        # output carries a TMA reduce-add descriptor (output_tma_desc_ptrs[0]).
-        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
-        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [input_fp8, weight_fp8, input_scale, weight_scale, output],
-            tb_graph,
-        )
-        self.kn_graph.register_task(
-            tb_graph, "fp8_gemm_dense_splitk_tma_reduce_sm100", params)
-
-    def fp8_gemm_dense_splitk_tma_reduce_gflag_layer(
-            self, input_fp8, weight_fp8, input_scale, weight_scale, output,
-            gflag, num_workers, split_k: int = 4):
-        """gflag variant of fp8_gemm_dense_splitk_tma_reduce: eliminates the
-        pre-zero tensor_init via the kernel's k0-store / k>0-reduce-add fork.
-
-        Identical math + decode gate to fp8_gemm_dense_splitk_tma_reduce_layer,
-        but NO tensor_init is prepended — instead `gflag` (an int32 scratch of
-        ceil(N/128) entries, ZERO-INITIALIZED ONCE at allocation) carries the
-        per-output-tile epoch handshake: k_slice==0 CTAs tma_store (overwrite)
-        the base then publish gflag[tile]=epoch; k_slice>0 CTAs spin until the
-        epoch lands then reduce-add. The kernel reads epoch=runtime_config.step[0]
-        +1 (monotone per decode iter, uniform across CTAs). HANG-SAFE only at
-        nn*split_k<=num_workers (asserted in the register fn) — the decode regime.
-
-        ABI: 5 inputs (A_fp8 TMA, B_fp8 TMA, sa, sb, gflag int*) + 1 output
-        (C bf16 TMA reduce-add). Matches the (5, 1) tuple in graph.cc.
-        """
-        assert input_fp8.num_dims in (2, 3)
-        assert weight_fp8.num_dims == 2
-        assert input_scale.num_dims == 2
-        assert weight_scale.num_dims == 2
-        assert output.num_dims in (2, 3)
-        assert gflag.num_dims == 1, "gflag must be a 1D int32 scratch buffer"
-        M = input_fp8.dim(0)
-        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
-             else input_fp8.dim(1) * input_fp8.dim(2))
-        N = weight_fp8.dim(0)
-        assert weight_fp8.dim(1) == K
-        assert output.dim(0) == M
-        out_flat_n = (output.dim(1) if output.num_dims == 2
-                      else output.dim(1) * output.dim(2))
-        assert out_flat_n == N
-        assert split_k >= 1 and split_k <= 8
-        assert K % (128 * split_k) == 0, (
-            f"fp8_gemm_dense_splitk_tma_reduce_gflag: K={K} must be divisible "
-            f"by 128 * split_k={128 * split_k}")
-        assert N % 128 == 0, (
-            f"fp8_gemm_dense_splitk_tma_reduce_gflag: N={N} not mult of 128")
-        nn = (N + 127) // 128
-        assert gflag.dim(0) >= nn, (
-            f"gflag must have >= ceil(N/128)={nn} entries, got {gflag.dim(0)}")
-        params = [M, N, K, num_workers, split_k]
-        # NO tensor_init prepend — the kernel self-initializes via the k0 store.
-        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
-        # new_input ORDER MUST match the (5,1) tuple in graph.cc and the
-        # input_ptrs[...] reads in the gflag register fn:
-        #   input_ptrs[0]=A, [1]=B, [2]=sa, [3]=sb, [4]=gflag ; output_ptrs[0]=C.
-        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
-        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
-        tb_graph.new_input(gflag, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [input_fp8, weight_fp8, input_scale, weight_scale, gflag, output],
-            tb_graph,
-        )
-        self.kn_graph.register_task(
-            tb_graph, "fp8_gemm_dense_splitk_tma_reduce_gflag_sm100", params)
+        if variant is None:
+            variant = "smallm" if self.max_seq_length <= 512 else "mediumm"
+        assert variant in ("smallm", "mediumm"), variant
+        if fp8out:
+            assert output is None and output_fp8 is not None \
+                and output_scale is not None, (
+                "fp8_gemm_dense_layer(fp8out=True) takes output_fp8 + "
+                "output_scale, not output")
+            impl = (self._fp8_gemm_dense_smallm_fp8out_layer
+                    if variant == "smallm"
+                    else self._fp8_gemm_dense_mediumm_fp8out_layer)
+            impl(input_fp8, weight_fp8, input_scale, weight_scale,
+                 output_fp8, output_scale, num_workers,
+                 runtime_m_mode=runtime_m_mode)
+        else:
+            assert output is not None and output_fp8 is None \
+                and output_scale is None, (
+                "fp8_gemm_dense_layer takes output (bf16), not "
+                "output_fp8/output_scale, unless fp8out=True")
+            impl = (self._fp8_gemm_dense_smallm_layer if variant == "smallm"
+                    else self._fp8_gemm_dense_mediumm_layer)
+            impl(input_fp8, weight_fp8, input_scale, weight_scale,
+                 output, num_workers, runtime_m_mode=runtime_m_mode)
 
     def linear_splitk_swapAB_fp8_layer(
         self,

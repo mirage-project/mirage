@@ -113,7 +113,7 @@ def test_mla_mtp_decode_testmode():
     ol_dt = pk.attach_input(output_lse, name="output_lse")
 
     # Build layer (block_dim is hard-coded inside the layer).
-    pk.mla_mtp_decode_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len)
+    pk.mla_mtp_decode_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len, tp_size=1)
 
     # Compile + run.
     print("Compiling test kernel...")

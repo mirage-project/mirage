@@ -137,8 +137,6 @@ if __name__ == "__main__":
                         help="Rejection sampling method for speculative decoding")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
-    parser.add_argument("--dump-task-graph", action="store_true",
-                        help="Dump Mirage task graph JSON and generated CUDA code")
     parser.add_argument("--ignore-eos", action="store_true",
                         help="Ignore eos token during generation")
     parser.add_argument("--max-new-tokens", type=int, default=None,
@@ -151,14 +149,6 @@ if __name__ == "__main__":
                         help=(
                             "Optionally dump first N generated token_ids, text, and latency to JSON. "
                             "If path omitted, saves to outputs/deepseek_v3/{torch_output.json|mpk_output.json}."
-                        ))
-    parser.add_argument("--dump-hidden-dir", type=str, default=None,
-                        help=(
-                            "Diagnostic: dump per-layer residual stream after each "
-                            "decoder layer's MLP/MoE residual fusion to "
-                            "<dir>/layer_NN_residual.pt. Saved on rank 0 only. "
-                            "Used to localize the layer where MPK first diverges "
-                            "from the PyTorch reference."
                         ))
     parser.add_argument("--weight-cache-dir", type=str,
                         default=os.environ.get("MPK_DEEPSEEK_WEIGHT_CACHE_DIR"),
@@ -202,14 +192,12 @@ if __name__ == "__main__":
         world_size = 1
         rank = 0
 
-    # DEBUG single-card "pretend TP=N" mode: force the BUILD world_size (kernel
-    # selection: mla_mtp_decode_tpN + N-way sharding => rank 0 loads only 1/N of
-    # the weights, so a TP=N decode graph fits on ONE GPU) while only this single
-    # rank actually runs. The cross-rank AllReduce MUST be bypassed
-    # (MPK_AR_SKIP_REDUCE=1 MPK_AR_SKIP_BARRIER=1) since the other N-1 ranks don't
-    # exist -- output is numerically wrong but this isolates whether the tpN
-    # compute kernels (e.g. FP8 SplitK co-resident with mla_mtp_decode_tp4) CRASH
-    # without needing N physical cards. No effect unless MPK_FORCE_BUILD_WS is set.
+    # Single-process "pretend rank r of TP=N" mode: force the BUILD world_size
+    # (kernel selection: mla_mtp_decode_tpN + N-way sharding => this rank loads
+    # only 1/N of the weights) while only this single process runs. Used by the
+    # serial weight-cache pre-builder (MPK_BUILD_CACHE_ONLY exits at cache-save,
+    # before any AllReduce/kernel launch). No effect unless MPK_FORCE_BUILD_WS
+    # is set.
     _force_build_ws = os.environ.get("MPK_FORCE_BUILD_WS")
     if _force_build_ws:
         world_size = int(_force_build_ws)
@@ -230,8 +218,8 @@ if __name__ == "__main__":
         # so referencing it before that declaration is a SyntaxError.
         sys.stderr.write(
             f"[MPK_FORCE_BUILD_WS] single-rank sim: build world_size={world_size}, "
-            f"rank={rank}; AllReduce MUST be skipped (MPK_AR_SKIP_REDUCE/BARRIER) "
-            f"unless MPK_BUILD_CACHE_ONLY=1 (exits after cache save, no kernel build).\n")
+            f"rank={rank}; pair with MPK_BUILD_CACHE_ONLY=1 (exits after cache "
+            f"save, before any cross-rank AllReduce or kernel launch).\n")
 
     if args.save_tokens:
         if args.save_tokens == "auto":
@@ -276,11 +264,10 @@ if __name__ == "__main__":
         raise ValueError(f"--ep-size must divide 256 routed experts: {args.ep_size}")
     torch.set_default_dtype(torch.bfloat16)
     if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
-        # Cache pre-build: a single process with a FORCED rank (MPK_FORCE_BUILD_RANK)
-        # that may exceed the visible device count, or zero GPUs (CPU-only,
-        # MPK_CACHE_BUILD_CPU=1). Pin to device 0 if any GPU is visible, else skip.
-        if torch.cuda.is_available():
-            torch.cuda.set_device(0)
+        # Cache pre-build: a single process with a FORCED rank
+        # (MPK_FORCE_BUILD_RANK) that may exceed the visible device count.
+        # Pin to device 0 (the one visible GPU).
+        torch.cuda.set_device(0)
     else:
         torch.cuda.set_device(rank)
 
@@ -320,20 +307,15 @@ if __name__ == "__main__":
 
     total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
 
-    # Cache pre-build (MPK_CACHE_BUILD_CPU=1): place demo scaffolding buffers on
-    # CPU so the build needs ZERO GPU (cache-only mode exits at cache-save,
-    # before inference, so these buffers are never used). Normal runs keep
-    # "cuda" => byte-identical default behavior.
-    _DEMO_DEV = "cpu" if os.environ.get("MPK_CACHE_BUILD_CPU") == "1" else "cuda"
     # Allocate token buffers
     tokens = torch.full(
-        (total_num_requests, args.max_seq_length), 0, dtype=torch.long, device=_DEMO_DEV
+        (total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda"
     )
     input_tokens = torch.full(
-        (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device=_DEMO_DEV
+        (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda"
     )
     output_tokens = torch.full(
-        (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device=_DEMO_DEV
+        (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda"
     )
 
     # Tokenize prompt (or synthesize a fixed-length prompt for stress tests)
@@ -346,12 +328,12 @@ if __name__ == "__main__":
         # vocab. Excludes special IDs (pad, bos, eos, etc.) by staying in
         # [1024, 1024 + 4096) which is safely inside any tokenizer's main
         # text vocabulary for DeepSeek V3 (vocab_size = 129280).
-        synth = torch.arange(pl, dtype=torch.long, device=_DEMO_DEV) % 4096 + 1024
+        synth = torch.arange(pl, dtype=torch.long, device="cuda") % 4096 + 1024
         for r in range(total_num_requests):
             tokens[r, :pl] = synth
         prompt_lengths = torch.full(
             (total_num_requests,), pl,
-            dtype=torch.int, device=_DEMO_DEV
+            dtype=torch.int, device="cuda"
         )
         print(f"[stress] Using synthetic prompt of length {pl} "
               f"(max_seq_length={args.max_seq_length}).")
@@ -386,7 +368,7 @@ if __name__ == "__main__":
             tokens[r, :prompt_width] = model_inputs.input_ids[0, :prompt_width]
             prompt_lens.append(prompt_width)
         prompt_lengths = torch.tensor(
-            prompt_lens, dtype=torch.int, device=_DEMO_DEV
+            prompt_lens, dtype=torch.int, device="cuda"
         )
         print(f"[batch] Using {len(prompt_list)} distinct prompts; "
               f"prompt_lengths={prompt_lengths.tolist()}")
@@ -403,11 +385,11 @@ if __name__ == "__main__":
                 tokens[r, i] = model_inputs.input_ids[0, i]
         prompt_lengths = torch.full(
             (total_num_requests,), model_inputs.input_ids.shape[-1],
-            dtype=torch.int, device=_DEMO_DEV
+            dtype=torch.int, device="cuda"
         )
 
-    step = torch.full((total_num_requests,), 0, dtype=torch.int32, device=_DEMO_DEV)
-    num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device=_DEMO_DEV)
+    step = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
+    num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
 
     starter, ender = (
         torch.cuda.Event(enable_timing=True),
@@ -439,7 +421,7 @@ if __name__ == "__main__":
 
         if args.profiling:
             profiler_tensor = torch.zeros(
-                get_profiler_buffer_entries(), dtype=torch.uint64, device=_DEMO_DEV
+                get_profiler_buffer_entries(), dtype=torch.uint64, device="cuda"
             ).contiguous()
         else:
             profiler_tensor = None
@@ -455,27 +437,25 @@ if __name__ == "__main__":
             spec_decode_config = None
 
         # Cache pre-build exits at cache-save (before the megakernel build), so
-        # num_workers is unused. MPK_CACHE_BUILD_CPU=1 => ZERO GPU (dummy values);
-        # else (forced rank may exceed visible devices) query device 0.
-        if os.environ.get("MPK_CACHE_BUILD_CPU") == "1":
-            num_workers, num_schedulers = 128, 4
-        elif os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
+        # num_workers is unused; the forced rank may exceed the visible device
+        # count, so query device 0 there.
+        if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
             num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
         else:
             num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
 
         # Meta tensor buffers for paged attention
         qo_indptr_buffer = torch.empty(
-            args.max_num_batched_requests + 1, dtype=torch.int32, device=_DEMO_DEV
+            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"
         )
         paged_kv_indptr_buffer = torch.empty(
-            args.max_num_batched_requests + 1, dtype=torch.int32, device=_DEMO_DEV
+            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"
         )
         paged_kv_indices_buffer = torch.empty(
-            args.max_num_pages, dtype=torch.int32, device=_DEMO_DEV
+            args.max_num_pages, dtype=torch.int32, device="cuda"
         )
         paged_kv_last_page_len_buffer = torch.empty(
-            args.max_num_batched_requests, dtype=torch.int32, device=_DEMO_DEV
+            args.max_num_batched_requests, dtype=torch.int32, device="cuda"
         )
 
         # MLA uses a single combined ckv_kpe cache per layer
@@ -484,7 +464,7 @@ if __name__ == "__main__":
         ckv_kpe_cache = torch.zeros(
             (num_layers, args.max_num_pages, args.page_size, ckv_kpe_dim),
             dtype=torch.bfloat16,
-            device=_DEMO_DEV,
+            device="cuda",
         )
 
         eos_token_id = config.eos_token_id if not args.ignore_eos else -1
@@ -740,12 +720,6 @@ if __name__ == "__main__":
             # in the same FP8+scale format that the multi-GPU graph expects.
             print("\nConverting weights for MPK builder (FP8 preserved)...")
             convert_start_time = time.perf_counter()
-            # CPU cache-build (MPK_CACHE_BUILD_CPU=1): run the weight
-            # dequant/absorb/requantize on CPU so the serial cache pre-builder
-            # needs NO GPU compute (only a light CUDA context for the sm_cnt
-            # query) — lets it run during off-hours when GPUs belong to others.
-            # Default "cuda" keeps the fast GPU conversion for normal runs.
-            _conv_dev = "cpu" if os.environ.get("MPK_CACHE_BUILD_CPU") == "1" else "cuda"
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
             from convert import (
                 dequantize_fp8, absorb_kv_into_q, get_model_params, is_fp8,
@@ -782,13 +756,13 @@ if __name__ == "__main__":
                     q_s_key = f"{q_key}_scale_inv"
                     kv_s_key = f"{kv_key}_scale_inv"
                     if is_fp8(q_w) and q_s_key in state_dict:
-                        q_f32 = dequantize_fp8(q_w.to(_conv_dev), state_dict[q_s_key].to(_conv_dev))
+                        q_f32 = dequantize_fp8(q_w.to("cuda"), state_dict[q_s_key].to("cuda"))
                     else:
-                        q_f32 = q_w.to(_conv_dev).float()
+                        q_f32 = q_w.to("cuda").float()
                     if is_fp8(kv_w) and kv_s_key in state_dict:
-                        kv_f32 = dequantize_fp8(kv_w.to(_conv_dev), state_dict[kv_s_key].to(_conv_dev))
+                        kv_f32 = dequantize_fp8(kv_w.to("cuda"), state_dict[kv_s_key].to("cuda"))
                     else:
-                        kv_f32 = kv_w.to(_conv_dev).float()
+                        kv_f32 = kv_w.to("cuda").float()
                     absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)
                     q_fp8, q_scale = _quantize_f32_to_checkpoint_fp8(absorbed_f32)
                     state_dict[q_key] = q_fp8
@@ -869,7 +843,7 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
                     state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
 
-                    # BMM repack of kv_b_k for MPK_DSV3_BMM=1 decode path:
+                    # BMM repack of kv_b_k for the decode Q BMM path:
                     # transpose W_UK (H, 128, 512) → (H, 512, 128) and
                     # per-row quantize. BMM kernel expects weight layout
                     # (H, D_out=512, D_in=128) FP8 + (H, 512, 1) uint32
@@ -900,7 +874,9 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"] = (
                         bmm_scale_packed)
 
-                    # BMM repack of kv_b_v for MPK_DSV3_BMM=1 post-attn path.
+                    # BMM repack of kv_b_v (swapAB layout, kept for cache
+                    # compatibility; the decode post-attn BMM2 consumes the
+                    # dense repack below).
                     # W_UV is already (H, V_HEAD_DIM=128, KV_LORA=512). BMM
                     # kernel expects weight [H, D_out, D_in] = (H, 128, 512).
                     # NO transpose needed unlike kv_b_k_bmm. Per-row UE8M0
@@ -924,7 +900,7 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"] = (
                         bmm_v_scale_packed)
 
-                    # Dense-BMM repack of kv_b_v for MPK_DSV3_BMM_DENSE=1: the
+                    # Dense-BMM repack of kv_b_v for the decode BMM2: the
                     # DENSE block-scaled GEMM body wants float32 128x128-block
                     # scales (one scale per [128-row-block, 128-K-group]), NOT
                     # the per-row UE8M0 scale above. kv_b_v_fp8 / kv_b_v_scale
@@ -936,10 +912,9 @@ if __name__ == "__main__":
                     kv_lora_blk = kv_lora_rank // 128  # = 4 for K=512
                     # .clone() breaks storage aliasing with kv_b_v.weight /
                     # kv_b_v.weight_scale_inv (these are a reshape of the same
-                    # fp8/scale tensors). On GPU the cache-save .cpu() copy hid
-                    # this; on CPU (MPK_CACHE_BUILD_CPU) .cpu() is a no-op, so
-                    # safetensors save_file rejects the shared storage. Cloning
-                    # is byte-identical (same values, separate storage).
+                    # fp8/scale tensors) so the cache-save safetensors
+                    # save_file never sees shared storage. Cloning is
+                    # byte-identical (same values, separate storage).
                     state_dict[f"{attn}kv_b_v_bmm_dense.weight"] = (
                         kv_b_v_fp8.reshape(H_, v_dim, kv_lora_rank).contiguous().clone())
                     state_dict[f"{attn}kv_b_v_bmm_dense.weight_scale_inv"] = (
@@ -968,10 +943,10 @@ if __name__ == "__main__":
                             state_dict[f"{attn}o_proj_original.weight_scale_inv"] = (
                                 state_dict[o_s_key])
                         if is_fp8(o_w) and o_s_key in state_dict:
-                            o_bf16 = dequantize_fp8(o_w.to(_conv_dev), state_dict[o_s_key].to(_conv_dev)).to(torch.bfloat16)
+                            o_bf16 = dequantize_fp8(o_w.to("cuda"), state_dict[o_s_key].to("cuda")).to(torch.bfloat16)
                             del state_dict[o_s_key]
                         else:
-                            o_bf16 = o_w.to(_conv_dev).to(torch.bfloat16)
+                            o_bf16 = o_w.to("cuda").to(torch.bfloat16)
                         hidden_dim = o_bf16.shape[0]
                         o_reshaped = o_bf16.reshape(hidden_dim, num_heads_loc, v_dim)
                         o_fused_f32 = torch.einsum('dhn,hnk->dhk', o_reshaped.float(), W_UV.float())
@@ -1163,9 +1138,10 @@ if __name__ == "__main__":
                     # decompression, both column-parallel on local heads.
                     (r"self_attn\.q_b_nope\.weight",                         0),
                     (r"self_attn\.q_b_pe\.weight",                           0),
-                    # FuseTensor (user #2, 2026-05-12): unabsorbed q_b_proj
-                    # used by the fused prefill path (MPK_DSV3_QB_FUSED=1).
-                    # Same column-parallel sharding as q_b_proj.
+                    # FuseTensor (user #2, 2026-05-12): unabsorbed q_b_proj,
+                    # emitted by the converter for cache compatibility (the
+                    # fused prefill-Q experiment that consumed it was
+                    # removed). Same column-parallel sharding as q_b_proj.
                     (r"self_attn\.q_b_proj_unabsorbed\.weight",              0),
                     (r"self_attn\.kv_b_k\.weight",                           0),
                     (r"self_attn\.kv_b_v\.weight",                           0),
@@ -1406,72 +1382,11 @@ if __name__ == "__main__":
             with_lm_head=True,
         )
 
-        # Optional per-layer residual dump (diagnostic). Allocate one
-        # PyTorch tensor per built layer so the builder can wire a copy
-        # task at the end of each layer iteration. Saved on rank 0
-        # after mpk() returns.
-        if args.dump_hidden_dir is not None:
-            num_dump_layers = (
-                len(layer_indices_arg) if layer_indices_arg
-                else model_config.num_layers
-            )
-            mpk.dump_hidden_tensors = [
-                torch.zeros(
-                    (args.max_num_batched_tokens, model_config.hidden_size),
-                    dtype=torch.bfloat16, device=_DEMO_DEV,
-                )
-                for _ in range(num_dump_layers)
-            ]
-            # Also dump self.y (embed_layer output) so we can isolate
-            # whether MPK's hidden-state divergence from reference starts
-            # at the embedding step or later in attn/MLP.
-            mpk.dump_embed_tensor = torch.zeros(
-                (args.max_num_batched_tokens, model_config.hidden_size),
-                dtype=torch.bfloat16, device=_DEMO_DEV,
-            )
-            # Layer-0 intra-layer dumps: 4 slots, all bf16
-            # 0=input_norm    (mbt, hidden)
-            # 1=qkv_a_out     (mbt, 2176) — full fused QKV-a GEMM output;
-            #                  Python comparator slices to q_a/c_latent/k_pe.
-            # 2=attn_out      (mbt, hidden) — o_proj+residual
-            # 3=dense_mlp_out (mbt, hidden) — full layer 0 residual
-            slot1_cols = 2176  # = QKV_A_FUSED_N in builder.py
-            mpk.dump_layer0_intra_tensors = [
-                torch.zeros(
-                    (args.max_num_batched_tokens, model_config.hidden_size),
-                    dtype=torch.bfloat16, device=_DEMO_DEV,
-                ),
-                torch.zeros(
-                    (args.max_num_batched_tokens, slot1_cols),
-                    dtype=torch.bfloat16, device=_DEMO_DEV,
-                ),
-                torch.zeros(
-                    (args.max_num_batched_tokens, model_config.hidden_size),
-                    dtype=torch.bfloat16, device=_DEMO_DEV,
-                ),
-                torch.zeros(
-                    (args.max_num_batched_tokens, model_config.hidden_size),
-                    dtype=torch.bfloat16, device=_DEMO_DEV,
-                ),
-            ]
-        else:
-            mpk.dump_hidden_tensors = None
-            mpk.dump_embed_tensor = None
-            mpk.dump_layer0_intra_tensors = None
 
 
         # Build the computation graph using the DeepSeek V3 builder
         builder = DeepSeekV3Builder(mpk)
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
-
-        if args.dump_task_graph:
-            results = mpk.kn_graph.generate_task_graph(
-                num_gpus=world_size, my_gpu_id=rank
-            )
-            with open(f"task_graph_{rank}.json", "w") as f:
-                f.write(results["json_file"])
-            with open(f"kernel_{rank}.cu", "w") as f:
-                f.write(results["cuda_code"])
 
         mpk.compile(output_dir=args.output_dir)
         if args.profile_start_step is not None:
@@ -1499,63 +1414,6 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        if args.dump_hidden_dir is not None and rank == 0 and getattr(mpk, "dump_hidden_tensors", None) is not None:
-            os.makedirs(args.dump_hidden_dir, exist_ok=True)
-            ordered_layer_idx = layer_indices_arg or list(range(model_config.num_layers))
-            for slot, t in enumerate(mpk.dump_hidden_tensors):
-                idx = ordered_layer_idx[slot] if slot < len(ordered_layer_idx) else slot
-                path = os.path.join(args.dump_hidden_dir, f"layer_{idx:02d}_residual.pt")
-                torch.save(t.detach().cpu(), path)
-            if getattr(mpk, "dump_embed_tensor", None) is not None:
-                torch.save(mpk.dump_embed_tensor.detach().cpu(),
-                           os.path.join(args.dump_hidden_dir, "embed.pt"))
-                print(f"Saved embed.pt to {args.dump_hidden_dir}")
-            if getattr(mpk, "dump_layer0_intra_tensors", None) is not None:
-                names = ["layer0_input_norm.pt",
-                         "layer0_q_a_out.pt",
-                         "layer0_attn_out.pt",
-                         "layer0_dense_mlp_out.pt"]
-                for k, t in enumerate(mpk.dump_layer0_intra_tensors):
-                    torch.save(t.detach().cpu(),
-                               os.path.join(args.dump_hidden_dir, names[k]))
-                print(f"Saved layer-0 intra-layer dumps to {args.dump_hidden_dir}")
-            if getattr(mpk, "dump_attn_unabsorbed_tensor", None) is not None:
-                torch.save(
-                    mpk.dump_attn_unabsorbed_tensor.detach().cpu(),
-                    os.path.join(args.dump_hidden_dir, "attn_unabsorbed.pt"),
-                )
-                print(f"Saved attn_unabsorbed.pt to {args.dump_hidden_dir}")
-            # Debug-only: when MPK_DSV3_FP8_BUF_ATTACH=1, builder attaches the
-            # shared FP8 input/scale buffers as torch tensors so we can inspect
-            # their post-megakernel state here.
-            if getattr(mpk, "_fp8_input_torch", None) is not None:
-                for rsize, tensor in mpk._fp8_input_torch.items():
-                    name = f"fp8_input_v2_{rsize}.pt"
-                    torch.save(tensor.detach().view(torch.uint8).cpu(),
-                               os.path.join(args.dump_hidden_dir, name))
-                    print(f"Saved {name} to {args.dump_hidden_dir}")
-                for rsize, tensor in mpk._fp8_scale_torch.items():
-                    name = f"fp8_scale_v2_{rsize}.pt"
-                    torch.save(tensor.detach().cpu(),
-                               os.path.join(args.dump_hidden_dir, name))
-                    print(f"Saved {name} to {args.dump_hidden_dir}")
-            if getattr(mpk, "_rmsnorm_out_torch", None) is not None:
-                torch.save(mpk._rmsnorm_out_torch.detach().cpu(),
-                           os.path.join(args.dump_hidden_dir, "rmsnorm_out_attached.pt"))
-                print(f"Saved rmsnorm_out_attached.pt to {args.dump_hidden_dir}")
-
-            for _attr, _fname in [
-                ("dump_ckv_sep_tensor", "ckv_sep.pt"),
-                ("dump_kpe_sep_tensor", "kpe_sep.pt"),
-                ("dump_prefill_k_nope_tensor", "prefill_k_nope.pt"),
-                ("dump_prefill_v_tensor", "prefill_v.pt"),
-            ]:
-                _t = getattr(mpk, _attr, None)
-                if _t is not None:
-                    torch.save(_t.detach().cpu(),
-                               os.path.join(args.dump_hidden_dir, _fname))
-                    print(f"Saved {_fname} to {args.dump_hidden_dir}")
-            print(f"Saved {len(mpk.dump_hidden_tensors)} per-layer residual dumps to {args.dump_hidden_dir}")
 
         print("tokens.shape = ", tokens.shape)
         # See note below: keep step on the host side after the megakernel

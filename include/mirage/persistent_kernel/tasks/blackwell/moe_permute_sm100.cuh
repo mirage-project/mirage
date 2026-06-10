@@ -31,7 +31,7 @@ namespace kernel {
 // (set by the runtime — see runtime.cc near the other MoE-task
 // `expert_offset` assignments).
 //
-// MULTI-EXPERT-PER-CTA (MPK_DSV3_PERMUTE_EPC, default 1): each CTA can own
+// MULTI-EXPERT-PER-CTA (E_PER_CTA=4 since the one-path cleanup, default 1): each CTA can own
 // E_PER_CTA consecutive local experts so the launch shrinks to
 // (E_LOCAL / E_PER_CTA, 1, 1) CTAs. This collapses the decode "permute
 // valley": at batch=1 only ~8 of 128 experts have tokens, so 128 CTAs

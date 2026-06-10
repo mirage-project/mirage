@@ -147,7 +147,7 @@ def _dequant_weight(weight_fp8, weight_scale):
 
 def _run_case(label: str, batch: int, num_heads: int, d_in: int,
               d_out: int, tol: float = 0.05):
-    """Compile + run linear_fp8_bmm_sm100_layer end-to-end.
+    """Compile + run linear_fp8_bmm_layer (swapAB body) end-to-end.
 
     Verifies output[n, h, :] == input[n, h, :] @ weight[h, :, :]^T (per head)
     against the dequantized FP8 reference.
@@ -190,7 +190,8 @@ def _run_case(label: str, batch: int, num_heads: int, d_in: int,
     w_sc = pk.attach_input(weight_scale, name="bmm_weight_scale")
     o = pk.attach_input(output, name="bmm_output")
 
-    pk.linear_fp8_bmm_sm100_layer(
+    pk.linear_fp8_bmm_layer(dense=False,
+        
         input_fp8=i_fp8, input_scale=i_sc,
         weight_fp8=w_fp8, weight_scale=w_sc,
         output=o,

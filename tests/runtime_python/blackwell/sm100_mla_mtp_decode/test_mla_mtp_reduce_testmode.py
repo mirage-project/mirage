@@ -88,7 +88,7 @@ def test_mla_mtp_reduce_testmode():
     out_dt = pk.attach_input(output, name="output")
 
     # Layer.
-    pk.mla_mtp_reduce_layer(ip_dt, il_dt, out_dt, q_len, kv_len)
+    pk.mla_mtp_reduce_layer(ip_dt, il_dt, out_dt, q_len, kv_len, tp_size=1)
 
     print("Compiling test kernel...")
     folder_path = os.path.dirname(os.path.abspath(__file__))

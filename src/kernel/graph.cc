@@ -840,14 +840,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_LINEAR_FP8_BMM_DENSE_SM100, variant_id);
-  } else if (name == "linear_fp8_bmm_dense_fp8out_sm100") {
-    // D3 (2026-06-03): fp8out flavor — 4 inputs + 2 outputs (FP8 buffer +
-    // float32 scale). Fuses the post-BMM2 float32 quantize into the epilogue.
-    int variant_id =
-        task_register->register_linear_fp8_bmm_dense_fp8out_sm100_task(
-            customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        4, 2, TASK_LINEAR_FP8_BMM_DENSE_FP8OUT_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_smallm_sm100" ||
              name == "fp8_gemm_dense_mediumm_sm100") {
     // Unified dense BN128 entry (#201 L1): one variant-dispatched branch.

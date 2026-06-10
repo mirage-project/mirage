@@ -45,10 +45,11 @@ class CollectiveCapabilities:
         # Query peer access support
         full_peer_access_supported = True
         if os.environ.get("MPK_FORCE_BUILD_WS"):
-            # Single-rank "pretend TP=N" debug sim: only this one device is
-            # visible, so peer-access queries to the absent N-1 devices fail with
-            # CUDA_ERROR_INVALID_DEVICE. There is no real peer here (the cross-rank
-            # AllReduce is skipped via MPK_AR_SKIP_REDUCE), so report no peer access.
+            # Single-rank "pretend TP=N" build (serial weight-cache pre-builder):
+            # only this one device is visible, so peer-access queries to the
+            # absent N-1 devices fail with CUDA_ERROR_INVALID_DEVICE. There is no
+            # real peer here (the build exits before any cross-rank AllReduce
+            # runs), so report no peer access.
             full_peer_access_supported = False
         else:
             for target_id in range(self.num_devices):
@@ -267,11 +268,12 @@ def auto_select_allreduce_implementation(
         return AllReduceStrategy_AllgatherReduce()
 
     if os.environ.get("MPK_FORCE_BUILD_WS"):
-        # Single-rank "pretend TP=N" debug sim: force the SAME NvshmemTile
-        # allreduce that real TP=N (NVLink) selects. peer_access is faked-False
-        # to avoid querying the absent N-1 devices, which would otherwise route
-        # here to AllgatherReduce and trip the gated-allreduce guard. The tile
-        # reduce itself is bypassed at runtime via MPK_AR_SKIP_REDUCE.
+        # Single-rank "pretend TP=N" build (serial weight-cache pre-builder):
+        # force the SAME NvshmemTile allreduce that real TP=N (NVLink) selects.
+        # peer_access is faked-False to avoid querying the absent N-1 devices,
+        # which would otherwise route here to AllgatherReduce and trip the
+        # gated-allreduce guard. The build exits before the tile reduce ever
+        # runs (cache-only mode stops at cache-save).
         return AllReduceStrategy_NvshmemTile()
 
     capabilities = get_collective_capabilities(num_gpus, device_id)
