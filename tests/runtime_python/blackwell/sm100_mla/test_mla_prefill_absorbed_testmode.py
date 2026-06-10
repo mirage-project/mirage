@@ -19,6 +19,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pytorch_reference import mla_prefill_ref
@@ -101,7 +102,8 @@ def test_mla_prefill_absorbed_testmode():
     kv_dt = pk.attach_input(kv, name="kv_absorbed")
     out_dt = pk.attach_input(out, name="out")
 
-    pk.mla_prefill_absorbed_layer(
+    dsv3_tasks.mla_prefill_absorbed_layer(
+        pk,
         q_nope_pe=q_dt,
         kv=kv_dt,
         output=out_dt,

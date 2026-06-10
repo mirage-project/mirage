@@ -12,6 +12,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -105,7 +106,8 @@ def test_deepseek_mla_rope_testmode():
     cos_dt = pk.attach_input(cos, name="rope_cos")
     sin_dt = pk.attach_input(sin, name="rope_sin")
 
-    pk.deepseek_mla_rope_q_layer(
+    dsv3_tasks.deepseek_mla_rope_q_layer(
+        pk,
         q_nope_pe=q_fused_dt,
         q_pe=q_split_dt,
         cos_pos_embed=cos_dt,
@@ -116,7 +118,8 @@ def test_deepseek_mla_rope_testmode():
         block_dim=(128, 1, 1),
         q_tile_size=q_tile,
     )
-    pk.deepseek_mla_rope_k_layer(
+    dsv3_tasks.deepseek_mla_rope_k_layer(
+        pk,
         k_pe=k_pe_dt,
         cos_pos_embed=cos_dt,
         sin_pos_embed=sin_dt,

@@ -23,6 +23,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pytorch_reference import mla_decode_full_ref, NUM_HEADS, D_K, D_V
@@ -112,8 +113,8 @@ def test_mla_decode_tp4_testmode():
     # TP=4 decode + reduce (the real production kernels). Do NOT override
     # MPK_MLA_TP4_V_SPLITS — the Python grid v_splits must match the kernel's
     # compile-time constexpr (both default to 8 for max_seq_length < 3072).
-    pk.mla_mtp_decode_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len, tp_size=4)
-    pk.mla_mtp_reduce_layer(op_dt, ol_dt, out_dt, q_len, kv_len, tp_size=4)
+    dsv3_tasks.mla_mtp_decode_layer(pk, q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len, tp_size=4)
+    dsv3_tasks.mla_mtp_reduce_layer(pk, op_dt, ol_dt, out_dt, q_len, kv_len, tp_size=4)
 
     print("Compiling...")
     folder_path = os.path.dirname(os.path.abspath(__file__))

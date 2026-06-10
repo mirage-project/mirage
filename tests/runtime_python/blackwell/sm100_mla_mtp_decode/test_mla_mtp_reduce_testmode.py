@@ -17,6 +17,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pytorch_reference import (
@@ -88,7 +89,7 @@ def test_mla_mtp_reduce_testmode():
     out_dt = pk.attach_input(output, name="output")
 
     # Layer.
-    pk.mla_mtp_reduce_layer(ip_dt, il_dt, out_dt, q_len, kv_len, tp_size=1)
+    dsv3_tasks.mla_mtp_reduce_layer(pk, ip_dt, il_dt, out_dt, q_len, kv_len, tp_size=1)
 
     print("Compiling test kernel...")
     folder_path = os.path.dirname(os.path.abspath(__file__))

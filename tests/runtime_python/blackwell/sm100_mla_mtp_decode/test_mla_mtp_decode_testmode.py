@@ -19,6 +19,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 # Make sibling import work regardless of cwd.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -113,7 +114,7 @@ def test_mla_mtp_decode_testmode():
     ol_dt = pk.attach_input(output_lse, name="output_lse")
 
     # Build layer (block_dim is hard-coded inside the layer).
-    pk.mla_mtp_decode_layer(q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len, tp_size=1)
+    dsv3_tasks.mla_mtp_decode_layer(pk, q_dt, kv_dt, op_dt, ol_dt, q_len, kv_len, tp_size=1)
 
     # Compile + run.
     print("Compiling test kernel...")

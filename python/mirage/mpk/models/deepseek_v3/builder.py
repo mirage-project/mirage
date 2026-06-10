@@ -17,6 +17,7 @@ from ..utils import grid_for_rmsnorm_linear_layer
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
+from . import tasks as dsv3_tasks
 from ....core import (bfloat16, float8_e4m3, float32, uint32, int32, int64,
                        uint64)
 
@@ -586,7 +587,8 @@ class DeepSeekV3Builder(GraphBuilder):
                                else 0)
 
         if residual is None:
-            self.mpk.fp8_gemm_dense_layer(
+            dsv3_tasks.fp8_gemm_dense_layer(
+                self.mpk,
                 input_fp8=input_fp8,
                 weight_fp8=weight_fp8_raw,
                 input_scale=input_scale,
@@ -601,7 +603,8 @@ class DeepSeekV3Builder(GraphBuilder):
             idx = getattr(self, "_tp_residual_linear_idx", 0)
             self._tp_residual_linear_idx = idx + 1
             partial = self._new_tp_partial(output, f"tp_v2_residual_partial_{idx}")
-            self.mpk.fp8_gemm_dense_layer(
+            dsv3_tasks.fp8_gemm_dense_layer(
+                self.mpk,
                 input_fp8=input_fp8,
                 weight_fp8=weight_fp8_raw,
                 input_scale=input_scale,
@@ -620,7 +623,8 @@ class DeepSeekV3Builder(GraphBuilder):
             dtype=bfloat16, name=f"fp8_v2_partial_{id(weight_fp8_raw)}",
             io_category="cuda_tensor",
         )
-        self.mpk.fp8_gemm_dense_layer(
+        dsv3_tasks.fp8_gemm_dense_layer(
+            self.mpk,
             input_fp8=input_fp8,
             weight_fp8=weight_fp8_raw,
             input_scale=input_scale,
@@ -812,7 +816,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # `output_bf16` uses the per-layer-unique buffer (case-3 fix).
         # emit_bf16=False because nothing downstream reads the bf16 in fused
         # mode (qkv_a GEMM reads fp8/scale directly).
-        self.mpk.fused_rmsnorm_quantize_fp8_layer(
+        dsv3_tasks.fused_rmsnorm_quantize_fp8_layer(
+            self.mpk,
             input=input_x,
             weight=w_norm,
             output_bf16=rmsnorm_out_bf16,
@@ -899,7 +904,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # output_bf16: required argument but emit_bf16=False means the
         # kernel never writes to it (we still need to pass a valid tensor;
         # the input itself satisfies the dim assertions).
-        self.mpk.fused_rmsnorm_quantize_fp8_layer(
+        dsv3_tasks.fused_rmsnorm_quantize_fp8_layer(
+            self.mpk,
             input=input_x,
             weight=w_norm,
             output_bf16=input_x,   # placeholder; emit_bf16=False skips write
@@ -1006,7 +1012,8 @@ class DeepSeekV3Builder(GraphBuilder):
             input_fp8_buf, input_scale_buf = (
                 self._fp8_mbt_buffers_for_reduction_f32scale(reduction_size))
         gemm_runtime_m_mode = 3 if self._use_prefill else 0
-        self.mpk.fp8_gemm_dense_layer(
+        dsv3_tasks.fp8_gemm_dense_layer(
+            self.mpk,
             input_fp8=input_fp8_buf,
             weight_fp8=w_q_b_nope,
             input_scale=input_scale_buf,
@@ -1028,7 +1035,8 @@ class DeepSeekV3Builder(GraphBuilder):
         s_kvk_bmm = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"],
             name=f"layer_{layer_idx}_kv_b_k_bmm_scale")
-        self.mpk.linear_fp8_bmm_layer(
+        dsv3_tasks.linear_fp8_bmm_layer(
+            self.mpk,
             input_fp8=q_nope_fp8,
             input_scale=q_nope_scale,
             weight_fp8=w_kvk_bmm,
@@ -1041,7 +1049,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # 5) Assemble (PE-only): BMM already wrote nope into q_nope_pe[:, :, :512]
         # via the q_nope_abs slice-view fuse, so the assemble step only needs
         # to write q_pe into the tail [512:576]. Half the per-CTA traffic.
-        self.mpk.assemble_q_decode_sm100_layer(
+        dsv3_tasks.assemble_q_decode_sm100_layer(
+            self.mpk,
             q_nope_abs=q_nope_abs,
             q_pe=q_pe_3d,
             q_nope_pe=self.q_nope_pe,
@@ -1125,7 +1134,8 @@ class DeepSeekV3Builder(GraphBuilder):
             torch_tensor=state_dict[
                 f"{attn}kv_b_v_bmm_dense.weight_scale_inv"],
             name=f"layer_{layer_idx}_kv_b_v_bmm_dense_scale")
-        self.mpk.linear_fp8_bmm_layer(
+        dsv3_tasks.linear_fp8_bmm_layer(
+            self.mpk,
             input_fp8=attn_out_fp8,
             input_scale=attn_out_scale_f32,
             weight_fp8=w_kvv_bmm,
@@ -1199,7 +1209,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # wave-collapsed `_fp8_dense_num_workers`). The runtime_m_mode=1 +
         # larger M_total path has tighter constraints and crashes at low
         # num_workers (tested 48/64 both fail).
-        self.mpk.fp8_gemm_dense_layer(
+        dsv3_tasks.fp8_gemm_dense_layer(
+            self.mpk,
             input_fp8=input_fp8,
             weight_fp8=weight,
             input_scale=input_scale,
@@ -1855,7 +1866,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # only matters on decode iters and the split (unabsorbed) ROPE_Q
         # only matters on prefill iters. Add phase gates so the wrong-
         # phase ROPE returns immediately instead of rotating stale data.
-        self.mpk.deepseek_mla_rope_q_fused_layer(
+        dsv3_tasks.deepseek_mla_rope_q_fused_layer(
+            self.mpk,
             q_nope_pe=self.q_nope_pe,
             cos_pos_embed=self.cos_pos_embed,
             sin_pos_embed=self.sin_pos_embed,
@@ -1865,7 +1877,8 @@ class DeepSeekV3Builder(GraphBuilder):
             phase_gate=2 if self._use_prefill else 0,
         )
         if self._use_prefill:  # prefill-exclusive split (unabsorbed) ROPE-Q
-            self.mpk.deepseek_mla_rope_q_split_layer(
+            dsv3_tasks.deepseek_mla_rope_q_split_layer(
+                self.mpk,
                 q_pe=self.q_pe,
                 cos_pos_embed=self.cos_pos_embed,
                 sin_pos_embed=self.sin_pos_embed,
@@ -1877,7 +1890,8 @@ class DeepSeekV3Builder(GraphBuilder):
             )
         # k_pe lives at cols [2048:2112) inside the 2176-wide qkv_a_out;
         # pass row stride + offset so the ROPE kernel rotates the right slice.
-        self.mpk.deepseek_mla_rope_k_layer(
+        dsv3_tasks.deepseek_mla_rope_k_layer(
+            self.mpk,
             k_pe=self.k_pe_out,
             cos_pos_embed=self.cos_pos_embed,
             sin_pos_embed=self.sin_pos_embed,
@@ -1932,7 +1946,8 @@ class DeepSeekV3Builder(GraphBuilder):
             k_pe_row_stride=self._qkv_a_row_stride,
             k_pe_offset_elems=self._qkv_a_k_pe_offset)
         if self._use_prefill:
-            self.mpk.mla_kv_gather_unified_layer(
+            dsv3_tasks.mla_kv_gather_unified_layer(
+                self.mpk,
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
                 paged_cache=layer_cache,
@@ -2048,7 +2063,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 self.ckv_sep, w_kv_b_v, s_kv_b_v, self.prefill_v,
                 tag=f"layer_{layer_idx}_kv_b_v",
                 shared_quantize_tag=kv_b_shared_tag)
-            self.mpk.mla_prefill_tp8_chunked_layer(
+            dsv3_tasks.mla_prefill_tp8_chunked_layer(
+                self.mpk,
                 q_nope=self.q_nope,
                 q_pe=self.q_pe,
                 k_nope=self.prefill_k_nope,
@@ -2076,14 +2092,16 @@ class DeepSeekV3Builder(GraphBuilder):
         # Decode MLA main + reduce. Registered in BOTH prefill-capable and
         # decode-only builds — the decode kernels' runtime Q_LEN gates skip
         # prefill iters. tp_size picks the per-rank head-count variant.
-        self.mpk.mla_mtp_decode_layer(
+        dsv3_tasks.mla_mtp_decode_layer(
+            self.mpk,
             self.q_nope_pe, mla_decode_kv,
             mla_decode_out, self.mla_partial_lse,
             decode_q_len_mla, kv_len_max,
             tp_size=self.world_size,
             num_splits_override=mla_num_splits_override)
         if not single_split_mla:
-            self.mpk.mla_mtp_reduce_layer(
+            dsv3_tasks.mla_mtp_reduce_layer(
+                self.mpk,
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, decode_q_len_mla, kv_len_max,
                 tp_size=self.world_size)
@@ -2336,7 +2354,8 @@ class DeepSeekV3Builder(GraphBuilder):
         assert _e_local % _epc == 0, (
             f"moe_permute e_per_cta ({_epc}) must divide num_local_experts "
             f"({_e_local})")
-        self.mpk.moe_permute_sm100_layer(
+        dsv3_tasks.moe_permute_sm100_layer(
+            self.mpk,
             input_fp8=new_moe_input_fp8,
             input_scale=new_moe_input_scale,
             topk_weights=moe_topk_weights,
@@ -2348,7 +2367,8 @@ class DeepSeekV3Builder(GraphBuilder):
             e_per_cta=_epc,
         )
         # 4) Group GEMM W13.
-        self.mpk.fp8_group_gemm_layer(
+        dsv3_tasks.fp8_group_gemm_layer(
+            self.mpk,
             a_fp8=new_moe_permuted_in_fp8,
             b_fp8=w_experts_w13,
             sfa_packed=new_moe_permuted_in_scale,
@@ -2410,7 +2430,8 @@ class DeepSeekV3Builder(GraphBuilder):
         s_w2_packed = self._pack_and_attach_moe_weight_scale(
             state_dict, w2_scale_key_for_pack,
             f"layer_{layer_idx}_experts_w2_scale_ue8m0")
-        self.mpk.fp8_group_gemm_layer(
+        dsv3_tasks.fp8_group_gemm_layer(
+            self.mpk,
             a_fp8=new_moe_silu_fp8,
             b_fp8=w_experts_w2_new,
             sfa_packed=new_moe_silu_scale,
@@ -2709,7 +2730,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # 1/8 the per-token compute, so the longest CTA wallclock
         # also shrinks (overall MOE_UNPERMUTE wave bounded by the
         # slowest CTA, not total work).
-        self.mpk.moe_unpermute_sm100_layer(
+        dsv3_tasks.moe_unpermute_sm100_layer(
+            self.mpk,
             permuted_output=self._new_moe_layer_w2_out,
             meta=self._new_moe_layer_meta,
             residual=shared_residual,
@@ -3105,7 +3127,8 @@ class DeepSeekV3Builder(GraphBuilder):
                     name="lm_head_global_argmax_index",
                     io_category="nvshmem_tensor",
                 )
-                self.mpk.nvshmem_global_argmax_layer(
+                dsv3_tasks.nvshmem_global_argmax_layer(
+                    self.mpk,
                     partial_value=local_argmax_part_value,
                     partial_index=local_argmax_part_index,
                     scratch_value=global_argmax_value,

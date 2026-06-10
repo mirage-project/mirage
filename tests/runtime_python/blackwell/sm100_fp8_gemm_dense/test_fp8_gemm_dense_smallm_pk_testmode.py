@@ -26,6 +26,7 @@ if COMMON_DIR not in sys.path:
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 FP8_MAX = 448.0
 
@@ -178,7 +179,7 @@ def run_pk_testmode(M: int, N: int, K: int, seed: int = 42):
 
     # fp8_gemm_dense_layer(variant="smallm")(input_fp8, weight_fp8, input_scale, weight_scale, output, num_workers)
     # num_workers=1 for a single-CTA test.
-    pk.fp8_gemm_dense_layer(variant="smallm",
+    dsv3_tasks.fp8_gemm_dense_layer(pk, variant="smallm",
         
         input_fp8=a_dt,
         weight_fp8=b_dt,

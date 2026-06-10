@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(
 
 import mirage  # noqa: E402
 from mirage.mpk.persistent_kernel import PersistentKernel  # noqa: E402
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 from sm100_fp8_scale_layout import (  # noqa: E402
     quantize_to_fp8_packed_ue8m0,
     dequant_from_packed_ue8m0,
@@ -93,7 +94,8 @@ def _run_case(label, batch, full_n, full_k, grid_x, grid_y, tol=0.05):
     w_sc = pk.attach_input(weight_scale, name="weight_scale")
     o = pk.attach_input(output, name="output")
 
-    pk.linear_splitk_swapAB_fp8_layer(
+    dsv3_tasks.linear_splitk_swapAB_fp8_layer(
+        pk,
         input_fp8=i_fp8, input_scale=i_sc,
         weight_fp8=w_fp8, weight_scale=w_sc,
         output=o,

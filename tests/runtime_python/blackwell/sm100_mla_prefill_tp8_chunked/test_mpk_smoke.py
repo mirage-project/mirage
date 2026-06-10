@@ -11,6 +11,7 @@ import sys
 import torch
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 D_QK_NOPE = 128
 D_QK_ROPE = 64
@@ -71,7 +72,8 @@ def main():
     v_dt = pk.attach_input(v, name="v")
     o_dt = pk.attach_input(o, name="o")
 
-    pk.mla_prefill_tp8_chunked_layer(
+    dsv3_tasks.mla_prefill_tp8_chunked_layer(
+        pk,
         q_nope=q_nope_dt,
         q_pe=q_pe_dt,
         k_nope=k_nope_dt,

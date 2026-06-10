@@ -19,7 +19,7 @@ It verifies the compact dispatch computes EXACTLY the active-expert set:
 --------------------------------------------------------------------------
 IMPORTANT FINDING (operand-ordering bug in the public layer API)
 --------------------------------------------------------------------------
-PersistentKernel.fp8_group_gemm_layer(..., meta=...) registers its TB operators
+dsv3_tasks.fp8_group_gemm_layer(pk, ..., meta=...) registers its TB operators
 in the order [a, b, sfa, sfb, m_indices, output, meta] (meta appended LAST). But
 the codegen contract (src/kernel/task_register.cc register_fp8_group_gemm_variant
 + graph.cc tuple (num_inputs=6, num_outputs=1) + tma.cuh
@@ -56,6 +56,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel, TBGraph, CyTBGraph
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pytorch_reference import (  # noqa: E402
@@ -180,7 +181,8 @@ def _run_once(corrected_order):
 
     if not corrected_order:
         # Public API exactly as shipped (meta appended after output internally).
-        pk.fp8_group_gemm_layer(
+        dsv3_tasks.fp8_group_gemm_layer(
+            pk,
             a_fp8=a_dt, b_fp8=b_dt, sfa_packed=sfa_dt, sfb_packed=sfb_dt,
             m_indices=mi_dt, output=out_dt, num_workers=num_workers,
             meta=meta_dt,

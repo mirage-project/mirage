@@ -6,6 +6,7 @@ import sys
 import torch
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_wrapper import (make_inputs, torch_reference)  # noqa: E402
@@ -54,7 +55,8 @@ def main():
     mi_dt = pk.attach_input(m_indices, name="m_indices")
     D_dt = pk.attach_input(D, name="D_bf16")
 
-    pk.fp8_group_gemm_layer(
+    dsv3_tasks.fp8_group_gemm_layer(
+        pk,
         a_fp8=A_dt,
         b_fp8=B_dt,
         sfa_packed=sfa_dt,

@@ -19,6 +19,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 device = "cuda"
 
@@ -163,7 +164,8 @@ def test_moe_permute_unpermute_testmode():
     res_dt = pk.attach_input(residual, name="residual")
     out_dt = pk.attach_input(output, name="output")
 
-    pk.moe_permute_sm100_layer(
+    dsv3_tasks.moe_permute_sm100_layer(
+        pk,
         input_fp8=in_fp8_dt,
         input_scale=in_scale_dt,
         topk_weights=topk_w_dt,
@@ -174,7 +176,8 @@ def test_moe_permute_unpermute_testmode():
         bm_padding=BM_PADDING,
     )
 
-    pk.moe_unpermute_sm100_layer(
+    dsv3_tasks.moe_unpermute_sm100_layer(
+        pk,
         permuted_output=perm_out_dt,
         meta=meta_dt,
         residual=res_dt,

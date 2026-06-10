@@ -14,6 +14,7 @@ import torch
 
 import mirage  # noqa: E402
 from mirage.mpk.persistent_kernel import PersistentKernel  # noqa: E402
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 FOLDER = os.environ.get("MPK_TEST_OUTPUT_DIR", "/tmp/mpk_test_assemble_q")
 os.makedirs(FOLDER, exist_ok=True)
@@ -56,7 +57,8 @@ def _run_case(label: str, N: int, H: int, D_NOPE: int = 512, D_PE: int = 64):
     qn = pk.attach_input(q_nope_abs, name="q_nope_abs")
     qp = pk.attach_input(q_pe, name="q_pe")
     qo = pk.attach_input(q_nope_pe, name="q_nope_pe")
-    pk.assemble_q_decode_sm100_layer(
+    dsv3_tasks.assemble_q_decode_sm100_layer(
+        pk,
         q_nope_abs=qn, q_pe=qp, q_nope_pe=qo,
         grid_dim=(N, 1, 1), block_dim=(128, 1, 1))
 
