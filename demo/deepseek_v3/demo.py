@@ -122,19 +122,13 @@ if __name__ == "__main__":
                              "actual prompt text. The generated tokens are a "
                              "deterministic cycle over a small vocab subset so "
                              "numerical behavior is reproducible across runs.")
-    parser.add_argument("--mtp", type=int, default=0, choices=[0, 1, 2, 3],
-                        help="MTP speculative decoding. 0=disabled, 1-3=number of "
-                             "speculative tokens drafted per step.")
     parser.add_argument("--ep-size", type=int, default=1,
                         help="Expert-parallel group count for routed MoE experts. "
                              "Non-MoE layers and shared experts keep TP=world_size; "
                              "routed experts use TP=world_size/ep_size.")
     parser.add_argument("--disable-vocab-parallel-lm-head", action="store_true",
                         help="Disable the TP vocab-parallel LM head fast path. "
-                             "By default it is enabled for TP>1 when MTP is disabled.")
-    parser.add_argument("--rejection-sample-method", default="strict", type=str,
-                        choices=["strict", "probabilistic", "synthetic"],
-                        help="Rejection sampling method for speculative decoding")
+                             "By default it is enabled for TP>1.")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
     parser.add_argument("--ignore-eos", action="store_true",
@@ -237,21 +231,6 @@ if __name__ == "__main__":
     if rank != 0:
         print = lambda *_, **__: None
 
-    if args.use_mirage and args.mtp > 0:
-        min_decode_tokens = args.mtp + 1
-        supported_decode_token_caps = (1, 2, 4, 8, 16)
-        required_decode_tokens = next(
-            cap for cap in supported_decode_token_caps
-            if cap >= min_decode_tokens
-        )
-        if args.max_num_batched_tokens < required_decode_tokens:
-            print(
-                "[mtp] Raising max_num_batched_tokens from "
-                f"{args.max_num_batched_tokens} to {required_decode_tokens} "
-                "so one decode/verify iteration can hold the main token plus "
-                "MTP draft tokens on a supported FP8 runtime batch shape."
-            )
-            args.max_num_batched_tokens = required_decode_tokens
 
     print("Input arguments:", args)
     print(f"world_size({world_size}) rank({rank})")
@@ -403,7 +382,6 @@ if __name__ == "__main__":
         padded_vocab_size = ((vocab_size + 255) // 256) * 256
         vocab_parallel_lm_head = (
             world_size > 1
-            and args.mtp == 0
             and not args.disable_vocab_parallel_lm_head
         )
         lm_head_local_vocab_padded = None
@@ -426,15 +404,6 @@ if __name__ == "__main__":
         else:
             profiler_tensor = None
 
-        # MTP speculative decoding config
-        if args.mtp > 0:
-            spec_decode_config = mi.spec_decode_class(
-                "lookahead",
-                ngram_size=3,
-                spec_length=args.mtp,
-            )
-        else:
-            spec_decode_config = None
 
         # Cache pre-build exits at cache-save (before the megakernel build), so
         # num_workers is unused; the forced rank may exceed the visible device
@@ -505,7 +474,6 @@ if __name__ == "__main__":
             trace_name=(
                 f"{args.trace_name}_rank{rank}" if args.trace_name else ""
             ),
-            spec_decode_config=spec_decode_config,
             use_cutlass_kernel=True,
         )
         mpk.ep_size = args.ep_size
@@ -536,8 +504,6 @@ if __name__ == "__main__":
         # the same set plus the MTP layer (we still have to load its weights).
         layer_indices_arg = _parse_layers(args.layers) if args.layers else None
         layer_indices_for_load = list(layer_indices_arg) if layer_indices_arg else None
-        if layer_indices_for_load is not None and args.mtp > 0:
-            layer_indices_for_load.append(num_layers)
 
         num_routed_experts_for_load = getattr(
             config,
@@ -570,7 +536,7 @@ if __name__ == "__main__":
                 "layers_for_load": layer_indices_for_load,
                 "world_size": world_size,
                 "rank": rank,
-                "mtp": args.mtp,
+                "mtp": 0,  # MTP removed 2026-06-10; keep key field for cache compat
                 "ep_size": args.ep_size,
                 "vocab_parallel_lm_head": vocab_parallel_lm_head,
                 "lm_head_local_vocab_padded": lm_head_local_vocab_padded,
@@ -727,8 +693,6 @@ if __name__ == "__main__":
             config_dict = AutoConfig.from_pretrained(args.model_path).to_dict()
             mp = get_model_params(config_dict)
             absorb_layers = list(layer_indices_arg) if layer_indices_arg else list(range(num_layers))
-            if args.mtp > 0:
-                absorb_layers.append(num_layers)
 
             def _quantize_f32_to_checkpoint_fp8(w_f32, block_size=128):
                 """Quantize float32 weight to FP8 + per-2D-block scale_inv."""
