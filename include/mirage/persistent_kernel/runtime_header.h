@@ -181,7 +181,15 @@ enum TaskType {
   TASK_MTP_BUILD_EMBED_INPUT = 294,
   // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
-  TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
+  TASK_MHC_POST_SM100 = 297,
+  // mHC prenorm pipeline (per-stage tasks; chained via gmem scratch by the
+  // Python layer): k1 = CUDA-core prenorm GEMM + sqrsum, k2 = sinkhorn tail.
+  TASK_MHC_PRE_K1_SM100 = 296,
+  TASK_MHC_PRE_K2_SM100 = 298,
+  // mHC fused (this layer's post folded into next layer's pre-GEMM) pipeline.
+  TASK_MHC_POST_PRE_K1_SM100 = 299,
+  TASK_MHC_POST_PRE_K2_SM100 = 303,
+  TASK_SM100_TASK_END = 350, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
