@@ -197,6 +197,40 @@ def mla_kv_gather_unified_layer(
     pk.kn_graph.register_task(tb_graph, "mla_kv_gather_unified_sm100", params)
 
 
+def mla_kv_append_layer(
+    pk,
+    c_latent_new: DTensor,
+    k_pe_new: DTensor,
+    kv_buf: DTensor,
+    mla_params: tuple,
+    grid_dim: tuple,
+    block_dim: tuple,
+    c_latent_row_stride: int = None,
+    k_pe_row_stride: int = None,
+):
+    """bs=1 contiguous KV append (no page table).
+
+    Writes the new token rows' [c_latent(D_V) | k_pe(D_K-D_V)] into the
+    per-layer contiguous KV buffer at row = sequence position (single
+    sequence => logical position == physical row). Replaces the paged-cache
+    append + page gather; the MLA decode kernels read ``kv_buf`` directly via
+    their contiguous branch. ``kv_buf`` is tracked as the task output so the
+    decode task gets a same-iteration dependency edge.
+    """
+    d_k, d_v = mla_params
+    params = [
+        d_k, d_v,
+        c_latent_row_stride if c_latent_row_stride is not None else d_v,
+        k_pe_row_stride if k_pe_row_stride is not None else 128,
+    ]
+    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+    tb_graph.new_input(c_latent_new, (-1, -1, -1), -1, True)
+    tb_graph.new_input(k_pe_new, (-1, -1, -1), -1, True)
+    tb_graph.new_input(kv_buf, (-1, -1, -1), -1, True)
+    pk.kn_graph.customized([c_latent_new, k_pe_new, kv_buf], tb_graph)
+    pk.kn_graph.register_task(tb_graph, "mla_kv_append_sm100", params)
+
+
 def deepseek_mla_rope_q_layer(
     pk,
     q_nope_pe: DTensor,

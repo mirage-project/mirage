@@ -953,6 +953,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(2, 1, TASK_ASSEMBLE_Q_DECODE_SM100, variant_id);
   }
+  // bs=1 contiguous KV append (no page table). kv_buf is tracked as an
+  // output so the MLA decode task (which reads it the same iteration) gets a
+  // producer->consumer dependency edge.
+  else if (name == "mla_kv_append_sm100") {
+    int variant_id = task_register->register_mla_kv_append_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_KV_APPEND_SM100, variant_id);
+  }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {
     int variant_id = task_register->register_mla_kv_gather_sm100_task(

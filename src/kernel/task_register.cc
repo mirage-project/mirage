@@ -6600,6 +6600,58 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   return register_task_variant(TASK_MLA_KV_GATHER_SM100, code.to_string());
 }
 
+int TaskRegister::register_mla_kv_append_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // bs=1 contiguous KV append: writes the new token rows' [c_latent|k_pe]
+  // straight into the per-layer contiguous KV buffer at row = sequence
+  // position (single sequence => logical position == physical row). Replaces
+  // the paged-cache append + page gather on the decode path.
+  // params:
+  //   [0] d_k (576), [1] d_v (512),
+  //   [2] c_latent_row_stride, [3] k_pe_row_stride (parent row width when the
+  //       inputs are mpk.narrow views of qkv_a_out)
+  assert(params.size() == 4);
+
+  int d_k = params[0];
+  int d_v = params[1];
+  int c_latent_row_stride = params[2];
+  int k_pe_row_stride = params[3];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int q_len_ = runtime_config.qo_indptr_buffer[bi_ + 1] - qo_fp_;");
+  // prepare_next_batch advances step[] while FINALIZING the previous batch
+  // (Step 1) and only then admits this iteration's new tokens (Step 3), so at
+  // task-execution time step[rid] is the pre-append KV length — i.e. exactly
+  // the row where this iteration's first new token goes. step[] is indexed by
+  // request id; bi_ is the batch slot, so map through request_ids[].
+  code.e("  int rid_ = runtime_config.request_ids[bi_];");
+  code.e("  int row_start_ = (rid_ >= 0) ? runtime_config.step[rid_] : -1;");
+  code.e("  auto *c_latent_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         c_latent_row_stride);
+  code.e("  auto *k_pe_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         k_pe_row_stride);
+  code.e("kernel::mla_kv_append_sm100_task_impl<$, $, $, $>(",
+         d_k,
+         d_v,
+         k_pe_row_stride,
+         c_latent_row_stride);
+  code.e("    c_latent_new_ptr_,");
+  code.e("    k_pe_new_ptr_,");
+  code.e("    task_desc->output_ptrs[0],"); // kv_buf
+  code.e("    row_start_,");
+  code.e("    q_len_);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_KV_APPEND_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_kv_gather_split_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // Split-output variant for the chunked-prefill MLA kernel. Same inputs as

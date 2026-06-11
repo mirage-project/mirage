@@ -198,7 +198,9 @@ enum TaskType {
   TASK_MOE_TOPK_COMPACT_SM100 = 310,
   TASK_MOE_TOPK_MARKER_INIT_SM100 = 320,
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
-  TASK_SM100_TASK_END = 323, // SM100 end placeholder, not a real task
+  // bs=1 contiguous KV append (replaces paged-cache append + gather):
+  TASK_MLA_KV_APPEND_SM100 = 323,
+  TASK_SM100_TASK_END = 324, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

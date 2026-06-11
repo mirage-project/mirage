@@ -1624,9 +1624,6 @@ class DeepSeekV3Builder(GraphBuilder):
         # When `_use_prefill` is True, register one MLA main task that chooses
         # prefill vs decode from runtime Q_LEN. The decode reduce stays
         # separate and keeps its Q_LEN gate.
-        layer_cache = self.mpk.attach_input(
-            torch_tensor=self.ckv_kpe_cache[layer_idx],
-            name=f"layer_{layer_idx}_kv_cache")
         q_len_mla = self.max_num_batched_tokens
         decode_q_len_mla = self._decode_q_len()
         kv_len_max = self.mpk.max_seq_length
@@ -1636,9 +1633,27 @@ class DeepSeekV3Builder(GraphBuilder):
         single_split_mla = kv_tiles_max <= 1
         mla_num_splits_override = 1 if single_split_mla else None
         mla_decode_out = self.attn_out if single_split_mla else self.mla_partial_o
-        mla_decode_kv = (
-            layer_cache if self._direct_paged_decode_kv else self.contiguous_kv
-        )
+        if self._use_prefill:
+            layer_cache = self.mpk.attach_input(
+                torch_tensor=self.ckv_kpe_cache[layer_idx],
+                name=f"layer_{layer_idx}_kv_cache")
+            mla_decode_kv = (
+                layer_cache if self._direct_paged_decode_kv
+                else self.contiguous_kv
+            )
+        else:
+            # bs=1 contiguous KV: one persistent per-layer buffer the append
+            # task writes at row = sequence position and the decode kernels
+            # read via their contiguous branch (page_indices == nullptr). No
+            # paged cache, no gather.
+            mla_decode_kv = self.mpk.new_tensor(
+                dims=(self.mpk.max_num_batched_requests
+                      * self.mpk.max_seq_length,
+                      self.qk_head_dim),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_kv_contig",
+                io_category="cuda_tensor",
+            )
         # c_latent and k_pe live at offsets 1536 / 2048 of the 2176-wide
         # qkv_a_out row. Row strides communicate the parent width; the slice
         # offsets are carried by the mpk.narrow views themselves (the
@@ -1691,12 +1706,16 @@ class DeepSeekV3Builder(GraphBuilder):
                 gate_decode_q_len=True,
             )
         else:
-            self.mpk.mla_kv_gather_layer(
+            # bs=1 contiguous KV: append the new token's [c_latent|k_pe] at
+            # row = step (single sequence => logical position == physical
+            # row). Decode reads the same per-layer buffer via its contiguous
+            # branch — no page table, no gather copy.
+            dsv3_tasks.mla_kv_append_layer(
+                self.mpk,
                 c_latent_new=self.c_latent_out,
                 k_pe_new=self.k_pe_out,
-                paged_cache=layer_cache,
-                contiguous_kv=mla_decode_kv,
-                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                kv_buf=mla_decode_kv,
+                mla_params=(self.qk_head_dim, self.v_head_dim),
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
                 **kv_gather_slice_kwargs,

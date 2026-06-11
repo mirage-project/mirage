@@ -482,6 +482,10 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // bs=1 contiguous KV append: request_id = bid.x
+            if (task_type == TASK_MLA_KV_APPEND_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // Unified MLA KV gather: request_id = bid.x. When the builder
             // requests fan-out (grid_dim.y > 1), kv_idx carries the gather
             // split index so each CTA strides seq_pos by NUM_GATHER_SPLITS.
@@ -1949,6 +1953,7 @@ TaskGraphResult print_task_graph(
       "TASK_MLA_MTP_DECODE_TP4_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP8_SM100] =
       "TASK_MLA_MTP_DECODE_TP8_SM100";
+  task_type_to_name[TASK_MLA_KV_APPEND_SM100] = "TASK_MLA_KV_APPEND_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SPLIT_SM100] =
       "TASK_MLA_KV_GATHER_SPLIT_SM100";
