@@ -40,6 +40,10 @@ struct TaskSmemInfo {
 };
 
 struct TaskRoleVariantCode {
+  // Per-role body strings. Today only linear sets more than `compute`; the
+  // other v2 tasks are compute-only (loader/mma/storer stay empty and their
+  // warps no-op via the role dispatcher's default case).
+  //
   // Optional setup the dispatcher runs (single-thread) once per task, before
   // the role warps start: mbar_init the task's dynamic_semaphores[] slots that
   // the role bodies arrive/wait on. Empty for tasks that declare none.

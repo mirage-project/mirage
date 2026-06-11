@@ -23,7 +23,7 @@ template <typename T,
           int OUTPUT_SIZE,
           int I_STRIDE,
           int O_STRIDE>
-__device__ __forceinline__ void silu_mul_task_impl_hopper(
+__device__ __forceinline__ void silu_mul_task_impl(
     void const *input_ptr, void *output_ptr, int num_active_tokens) {
   if (threadIdx.x >= CONSUMER_NUM_THREADS) {
     return;

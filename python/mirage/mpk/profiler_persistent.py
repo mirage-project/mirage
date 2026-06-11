@@ -8,6 +8,8 @@ from typing import List
 import torch
 from tg4perfetto import TraceGenerator
 
+from mirage.mpk.v2_prof_layout import ROLE_NAMES, V2_PROF_TAIL_ENTRIES
+
 event_name_list = {
     10: "TASK_BEGIN_TASK_GRAPH",
     101: "TASK_EMBEDDING",
@@ -142,9 +144,8 @@ def export_to_perfetto_trace(
     tgen = TraceGenerator(file_name)
 
     # v2 emits one track per (SM, warp role) plus stall tracks (sub-slices
-    # inside a role's task window); name them accordingly.
-    V2_ROLE_NAMES = ["compute", "loader", "mma", "storer", "dispatcher",
-                     "compute-stall", "loader-stall", "mma-stall"]
+    # inside a role's task window); names come from the shared layout module.
+    V2_ROLE_NAMES = ROLE_NAMES
 
     tid_map = {}
     track_map = {}
@@ -167,9 +168,8 @@ def export_to_perfetto_trace(
         # v2 reserves the buffer tail for raw accumulators + emitter cursors
         # (see V2_PROF_CURSOR_BASE in runtime_v2.cuh). Those are counters,
         # not events — decoding them produces garbage slices at t~0 that
-        # stretch the whole timeline. Skip the tail (must match
-        # V2_PROF_TAIL_ENTRIES on the device side).
-        V2_PROF_TAIL_ENTRIES = (1048576 + 1) + 256 + 1024 + 256 * 7 + 256  # trig+misc+cursors+spin+suffix
+        # stretch the whole timeline. Skip the tail (V2_PROF_TAIL_ENTRIES,
+        # from the shared layout module, matches the device side).
         nz = nz[nz < len(buf_np) - V2_PROF_TAIL_ENTRIES]
     for i in nz:
         entry = int(buf_np[i])

@@ -17,16 +17,12 @@ import sys
 import numpy as np
 from collections import defaultdict
 
-# must match runtime_v2.cuh: misc(256) + cursors(1024) + spin(7*256) + suffix(256)
-V2_PROF_TAIL = (1048576 + 1) + 256 + 1024 + 7 * 256 + 256
-# offset of V2_PROF_MISC_BASE from the buffer end (misc sits below cursors,
-# spin and suffix): the per-SM drop counters live here.
-V2_PROF_MISC_FROM_END = 256 + 1024 + 7 * 256 + 256
-V2_PROF_NUM_BUCKETS = 7
-WINDOW_ITERS = 25
-
-GROUP_NAMES = ["compute", "loader", "mma", "storer", "dispatcher",
-               "compute-stall", "loader-stall", "mma-stall"]
+from mirage.mpk.v2_prof_layout import (  # noqa: E402
+    V2_PROF_TAIL_ENTRIES as V2_PROF_TAIL,
+    V2_PROF_MISC_FROM_END,
+    V2_PROF_NUM_BUCKETS,
+    WINDOW_ITERS,
+)
 
 LINEAR_TYPES = {244, 245}
 EVENT_NAMES = {

@@ -40,7 +40,7 @@ std::string const &role_body(rt::TaskRoleVariantCode const &code,
     case V2Role::Storer:
       return code.storer;
   }
-  return code.compute;
+  __builtin_unreachable();  // switch covers every V2Role
 }
 
 // Page-lifecycle prefix at the start of every loader body

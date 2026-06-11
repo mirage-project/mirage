@@ -376,7 +376,6 @@ def add_v2_region_smem_plan(task_graph_json: str) -> str:
     for task in tasks:
         task.update(_default_plan())
 
-    invalid_tasks = 0
     page_planned_tasks = 0
     zero_page_tasks = 0
     per_worker_peak_pages = [0 for _ in range(num_workers)]
@@ -403,7 +402,6 @@ def add_v2_region_smem_plan(task_graph_json: str) -> str:
     graph["v2_smem_planner"].update({
         "per_worker_peak_pages": per_worker_peak_pages,
         "global_peak_pages": global_peak_pages,
-        "invalid_plan_tasks": invalid_tasks,
         "page_planned_tasks": page_planned_tasks,
         "zero_page_tasks": zero_page_tasks,
     })

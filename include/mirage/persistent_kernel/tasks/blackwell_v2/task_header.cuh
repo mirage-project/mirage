@@ -9,8 +9,9 @@
 #pragma once
 
 // blackwell_v2 task implementations, bundled so the v2 megakernel's
-// codegen-emitted role dispatch calls resolve. Each task uses its own
-// namespace to avoid collision with the v1 (kernel::) versions.
+// codegen-emitted role dispatch calls resolve. linear and rmsnorm have their
+// own namespaces (kernel::linear_v2 / kernel::rmsnorm_v2); the rest share
+// kernel::v2 — all distinct from the v1 (kernel::) versions.
 #include "mirage/persistent_kernel/runtime_header.h"
 #include "linear_sm100_v2.cuh"        // kernel::linear_v2 (Channel-based)
 #include "rmsnorm_v2.cuh"             // kernel::rmsnorm_v2

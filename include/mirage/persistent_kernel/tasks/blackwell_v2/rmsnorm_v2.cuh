@@ -106,7 +106,7 @@ __device__ __noinline__ void rms_norm_task(
 	    T *shared_output_buffer = bufs.output.template ptr<T>();
 	    float *reduce_smem      = bufs.reduce.template ptr<float>();
 
-    // Warm up input tile for the first atoms
+    // Prefetch the first input chunk into shared memory
     {
         load_smem<T, BYTES_PER_CP>(shared_input_buffer + threadIdx.x * CHUNK_SIZE,
                                     d_input + threadIdx.x * CHUNK_SIZE);

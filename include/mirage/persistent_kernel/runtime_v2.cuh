@@ -23,9 +23,10 @@
 
 // ── Optional per-task profiling (MPK_ENABLE_PROFILING builds only) ──────────
 // Reuses v1's FlashInfer-style profiler format so profiler_persistent.py
-// renders v2 traces unchanged. FIVE tracks per SM (num_groups = 5) — the SM
-// is a pipeline in v2, so each warp role gets its own Perfetto row and the
-// task-level overlap between roles is directly visible:
+// renders v2 traces unchanged. EIGHT tracks per SM (num_groups = 8): five role
+// tracks (0-4 below) plus three stall tracks (5-7). The SM is a pipeline in v2,
+// so each warp role gets its own Perfetto row and the task-level overlap
+// between roles is directly visible:
 //   group 0 compute  (warp 0 lane 0): BEGIN/END per task body — includes
 //           the dep-wait spin; gaps = waiting on instruction publish
 //   group 1 loader    (lane 0): page-prefix + loader body per task
@@ -497,54 +498,6 @@ __device__ __forceinline__ int runtime_region_physical_page(
   return physical_page;
 }
 
-__device__ __forceinline__ void runtime_wait_region_pages(
-    RuntimeSMEM *rt,
-    TaskDesc const *task_desc,
-    int region_idx,
-    int instruction_index) {
-  SmemPageRegionDesc const &region = task_desc->smem_regions[region_idx];
-  for (int p = 0; p < region.page_count; p++) {
-    int const physical_page =
-        runtime_region_physical_page(task_desc, region_idx, p);
-    if (physical_page >= 0) {
-      runtime_wait_page_ready(rt, physical_page, instruction_index);
-    }
-  }
-}
-
-__device__ __forceinline__ void runtime_wait_region_range_pages(
-    RuntimeSMEM *rt,
-    TaskDesc const *task_desc,
-    int first_region,
-    int num_regions,
-    int instruction_index) {
-  for (int r = first_region; r < first_region + num_regions; r++) {
-    runtime_wait_region_pages(rt, task_desc, r, instruction_index);
-  }
-}
-
-__device__ __forceinline__ void runtime_finish_region_pages(
-    RuntimeSMEM *rt, TaskDesc const *task_desc, int region_idx) {
-  SmemPageRegionDesc const &region = task_desc->smem_regions[region_idx];
-  for (int p = 0; p < region.page_count; p++) {
-    int const physical_page =
-        runtime_region_physical_page(task_desc, region_idx, p);
-    if (physical_page >= 0) {
-      runtime_finish_page(rt, physical_page, 1);
-    }
-  }
-}
-
-__device__ __forceinline__ void runtime_finish_region_range_pages(
-    RuntimeSMEM *rt,
-    TaskDesc const *task_desc,
-    int first_region,
-    int num_regions) {
-  for (int r = first_region; r < first_region + num_regions; r++) {
-    runtime_finish_region_pages(rt, task_desc, r);
-  }
-}
-
 __device__ __forceinline__ void wait_task_dependency(
     RuntimeConfig const &config, TaskDesc const *task, int iter_num) {
   EventId dep = task->dependent_event;
@@ -629,20 +582,6 @@ __device__ __noinline__ void compute_dep_prefix(
   // (~300us/step at bs16 after cascade; V2_TODO.md #17 has the full
   // evidence chain).
   mbar_wait(&rt->dynamic_semaphores[slot][SEM_DEP_READY], phase);
-}
-
-__device__ __forceinline__ bool task_dependency_ready(
-    RuntimeConfig const &config, TaskDesc const *task, int iter_num) {
-  EventId dep = task->dependent_event;
-  if (dep == EVENT_INVALID_ID || is_nvshmem_event(dep)) {
-    return true;
-  }
-
-  size_t const event_index = get_event_position_index(dep);
-  EventCounter const needed =
-      static_cast<EventCounter>(config.all_event_num_triggers[event_index]) *
-      static_cast<EventCounter>(iter_num + 1);
-  return ld_acquire_sys_u64(&config.all_event_counters[event_index]) >= needed;
 }
 
 __device__ __forceinline__ void trigger_task_event(

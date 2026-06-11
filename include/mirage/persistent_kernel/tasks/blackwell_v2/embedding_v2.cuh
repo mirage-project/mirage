@@ -19,7 +19,7 @@ namespace v2 {
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>
 __device__ __forceinline__ void
-    embedding_kernel_hopper(void const *__restrict__ input_ptr,
+    embedding_kernel(void const *__restrict__ input_ptr,
                             void const *__restrict__ embedding_ptr,
                             void *__restrict__ output_ptr) {
   if (threadIdx.x >= CONSUMER_NUM_THREADS) {

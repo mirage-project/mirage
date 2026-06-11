@@ -1874,7 +1874,6 @@ int TaskRegister::register_linear_sm100_v2_task(
   std::string const split_k_arg =
       split_k > 1 ? "static_cast<float*>(task_desc->output_ptrs[1])"
                   : "nullptr";
-  // Drop the SPLIT_K=1 restriction (workspace arg).
 
   // Structural init synthesized from the CHANNELS table. op_sem_base_addr
   // returns the shared int addr of this slot's SEM_OP_BASE (ordinal k at +k*8) —
@@ -1966,7 +1965,7 @@ int TaskRegister::register_linear_sm100_v2_task(
   // SMEM layout: v2's own spec (kernel::linear, linear_spec.h) is now the
   // single source of the region table. The v2 .cuh addresses regions via
   // ::kernel::linear::REGION_W_0/A_0/SCRATCH, so the planner gets the matching
-  // table. No dependency on the retiring linear_sm100_v2 spec.
+  // table — linear_spec.h is the single source, no duplicate region table here.
   TaskSmemInfo smem_info = ::kernel::linear::make_smem_info();
   register_variant_smem_info(tt, variant, smem_info);
   return variant;
@@ -3861,7 +3860,7 @@ int TaskRegister::register_silu_mul_v2_task(
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   mirage::transpiler::CodeKeeper code;
   auto emit_silu_body = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("kernel::v2::silu_mul_task_impl_hopper<bfloat16, $, $, $, $>(",
+    c.e("kernel::v2::silu_mul_task_impl<bfloat16, $, $, $, $>(",
         batch_size, output_size, input_stride, output_stride);
     c.e("    task_desc->input_ptrs[0],");
     c.e("    task_desc->output_ptrs[0],");
@@ -3913,7 +3912,7 @@ int TaskRegister::register_embedding_v2_task(
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   int const params0 = params[0];
   auto emit_embedding_body = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("kernel::v2::embedding_kernel_hopper<bfloat16, $, $, $>(",
+    c.e("kernel::v2::embedding_kernel<bfloat16, $, $, $>(",
         batch_size, output_size, output_stride);
     if (params0 == 0) {
       c.e("    runtime_config.tokens + runtime_config.step[0], ");
