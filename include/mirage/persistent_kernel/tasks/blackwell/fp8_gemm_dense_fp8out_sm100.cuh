@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-// D1 (2026-05-17): EPILOGUE_QUANTIZE_FP8 ("fp8out") variants of the dense
+// EPILOGUE_QUANTIZE_FP8 ("fp8out") variants of the dense
 // block-scaled GEMM. Split out of fp8_gemm_dense_{smallm,mediumm}_sm100.cuh
 // (PR #707 review) so the proven bf16 kernels stay byte-identical to the
 // fine-tuned baseline. The experimental epilogue-quantize task_impl_tpl
@@ -31,7 +31,7 @@
 namespace kernel {
 namespace fp8_gemm_dense_smallm {
 
-// D1 (2026-05-17): variant that fuses per-128-col-group UE8M0 quantize into
+// Variant that fuses per-128-col-group UE8M0 quantize into
 // the consumer epilogue. Output is FP8 + packed UE8M0 scale instead of bf16.
 // Eliminates the standalone per_token_group_quantize_fp8 task that today
 // runs immediately downstream on the q_b_nope BMM-decode path.
@@ -72,7 +72,7 @@ __device__ __noinline__ void fp8_gemm_dense_smallm_fp8out_sm100_task_impl(
 
 namespace fp8_gemm_dense_mediumm {
 
-// D1 (2026-05-17): see smallm header — same epilogue-fused UE8M0 quantize
+// See smallm header — same epilogue-fused UE8M0 quantize
 // variant, NE=4 TMEM staging.
 template <int BN, int NS>
 __device__ __noinline__ void fp8_gemm_dense_mediumm_fp8out_sm100_task_impl(

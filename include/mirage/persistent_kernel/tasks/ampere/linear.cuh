@@ -21,17 +21,6 @@
 #include "smem_layout.cuh"
 #include "tasks/common/common_header.cuh"
 
-#define DEBUG 0
-
-#if DEBUG
-#define DCHECK(condition)                                                      \
-  if ((condition) == 0) {                                                      \
-    printf("Dcheck failed at %s:%d\n", __FILE__, __LINE__);                    \
-  }
-#else
-#define DCHECK(condition)
-#endif // DEBUG
-
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -268,7 +257,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       int warmup_n_col =
           (warp_col << 4) + ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
       T *warmup_input_ptr = input_smem(warmup_smem_row, warmup_m_col, 0);
-      DCHECK(warmup_n_col < OUTPUT_ATOM_SIZE);
       T *warmup_weight_ptr = weight_smem(warmup_n_row, warmup_n_col, 0);
 
       ldsm(warmup_input_ptr, a_frag[0]);
@@ -362,7 +350,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int m_row = (lane_idx & 0xF) + (m << 4);
           int n_col =
               (warp_col << 4) + ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
-          DCHECK(n_col < OUTPUT_ATOM_SIZE);
 
           int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k_next << 4) +
                       ((lane_idx >> 4) << 3);
@@ -394,7 +381,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         int col_within =
             (warp_col << 4) + ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
         int col = col_within;
-        DCHECK(col_within < OUTPUT_ATOM_SIZE);
         if (row_in_warp < num_active_tokens) {
           // TODO: try st.matrix here?
           output_smem.at(row_in_warp, col) += bfloat16(s_frag[(i << 1)]);

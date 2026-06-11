@@ -1,5 +1,5 @@
 """DeepSeek-V3 task-registration helpers operating on a PersistentKernel;
-moved out of the core file 2026-06-10. Every function takes the
+moved out of the core file. Every function takes the
 PersistentKernel as its first argument (``pk``) and registers one (or a
 small family of) megakernel task(s) on ``pk.kn_graph``, exactly as the
 former ``PersistentKernel`` methods of the same names did.
@@ -29,7 +29,7 @@ def fused_rmsnorm_quantize_fp8_layer(
     epsilon: float = None,  # alias for `eps` to match older call sites
     group_size: int = 128,  # kernel currently asserts GROUP_SIZE == 128
 ):
-    """B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+    """Fused RMSNorm + per-token-group FP8 quantize.
 
     Replaces the two-task chain `rmsnorm_layer` + `quantize_fp8_layer`
     when the BF16 rmsnorm output is consumed (only) by an FP8 dense
@@ -245,7 +245,7 @@ def deepseek_mla_rope_q_fused_layer(
     q_tile_size: int = 16,
     phase_gate: int = 0,
 ):
-    # phase_gate=2 (decode-only, B25 2026-05-15): codegen emits a
+    # phase_gate=2 (decode-only): codegen emits a
     # `if (Q_LEN > 8) return;` gate so the kernel skips the rotation
     # on prefill iters where q_nope_pe is stale (the absorbed q_b
     # decode GEMM early-exits via gate_mode=2 on prefill iters).
@@ -281,7 +281,7 @@ def deepseek_mla_rope_q_split_layer(
     # qfused_mode = 1: q_pe is the same DTensor as the fused q_b_prefill
     # buffer (mbt, num_heads*192) with row-swap layout. Kernel uses
     # row_stride = num_heads*192 and pe_base_in_row = num_heads*128.
-    # phase_gate=1 (prefill-only, B25 2026-05-15): codegen emits a
+    # phase_gate=1 (prefill-only): codegen emits a
     # `if (Q_LEN <= 8) return;` gate so the kernel skips the rotation
     # on decode iters where the q_b_prefill_fused buffer is stale
     # (the unabsorbed q_b prefill GEMM early-exits via gate_mode=1
@@ -568,7 +568,7 @@ def _fp8_group_gemm_layer_impl(
     tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
     tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
     operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices]
-    # CRITICAL ORDERING (2026-06-07 bugfix): the codegen reads
+    # CRITICAL ORDERING: the codegen reads
     # input_ptrs[5] as the meta/active-expert-mask buffer
     # (register_fp8_group_gemm_variant: "active_mask_offset >= 0 means
     # input_ptrs[5] is the meta buffer") and output_ptrs[0] as the D
@@ -579,9 +579,9 @@ def _fp8_group_gemm_layer_impl(
     # input[5] (read as the active mask -> garbage -> num_active=0 -> the
     # kernel exits writing NOTHING) and `meta` in the output slot (the D
     # TMA-store goes to the tiny meta buffer, dropped) -> the entire
-    # active-skip MoE W13/W2 GEMM produced NULL
-    # output. Same bug class as the moe_silu_mul "CRITICAL ORDERING
-    # (2026-05-14)" fix; the grouped-GEMM path never got the analog.
+    # active-skip MoE W13/W2 GEMM produced NULL output. Same bug class as
+    # the moe_silu_mul "CRITICAL ORDERING" fix; the grouped-GEMM path never
+    # got the analog.
     # meta=None path (non-active-skip) is unchanged (5 inputs + output).
     if meta is not None:
         tb_graph.new_input(meta, (-1, -1, -1), -1, True)
@@ -747,7 +747,7 @@ def moe_unpermute_sm100_layer(
                  sum_k(permuted_output[token_to_permuted[t,k]-1]
                         * permuted_weights[same row])`.
 
-    B33 (2026-05-15): grid_dim = (ceil(MBT / rows_per_cta), 1, 1). The
+    grid_dim = (ceil(MBT / rows_per_cta), 1, 1). The
     kernel's ROWS_PER_TASK template (moe_unpermute_sm100.cuh) loops
     `ceil(MBT / grid.x)` tokens per CTA, so each CTA handles
     rows_per_cta consecutive tokens. Default rows_per_cta=8 gives 16
@@ -781,7 +781,7 @@ def moe_unpermute_sm100_layer(
     params = [MBT, TOPK, HIDDEN, M_TOTAL]
     rows_per_cta_safe = max(1, int(rows_per_cta))
     grid_x = max(1, (MBT + rows_per_cta_safe - 1) // rows_per_cta_safe)
-    # 2026-05-15 stragglers fix: grid.y = hidden_split spreads each
+    # Stragglers fix: grid.y = hidden_split spreads each
     # token's HIDDEN work across hidden_split CTAs. For decode
     # (active_rows=1) only 1*hidden_split CTAs do work — bumping
     # hidden_split splits the 32 μs per-token straggler across
@@ -1140,7 +1140,7 @@ def _fp8_gemm_dense_mediumm_layer(pk, input_fp8, weight_fp8, input_scale,
         num_workers, runtime_m_mode=runtime_m_mode)
 
 
-# D1 (2026-05-17): variants that fuse per-128-col-group UE8M0 quantize
+# Variants that fuse per-128-col-group UE8M0 quantize
 # into the GEMM epilogue — output is FP8 + packed scale uint32 instead
 # of bf16. Eliminates the downstream per_token_group_quantize_fp8 task
 # in the BMM Q-up chain (q_b_nope_decode → quantize → BMM): we drop

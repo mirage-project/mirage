@@ -26,7 +26,7 @@
 
 namespace kernel {
 
-// 2026-05-12 (user #2 part-a) FuseTensor support: C_LATENT_ROW_STRIDE is the
+// (user #2 part-a) FuseTensor support: C_LATENT_ROW_STRIDE is the
 // per-token stride of c_latent. Defaults to D_V (legacy contiguous buffer);
 // pass a wider value when c_latent is sliced out of a fused qkv_a_out buffer.
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)

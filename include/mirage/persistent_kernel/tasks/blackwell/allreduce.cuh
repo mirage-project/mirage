@@ -482,7 +482,7 @@ static __device__ __forceinline__ uint32_t
 // Used when the team has no NVLS multicast resource — observed on NVSHMEM
 // 3.6.5 under MPK's team_split_strided setup where every team has
 // `nvls_rsc_base_ptr == NULL` on the device side (see TP=2 debug session
-// 2026-05-18). Reads this PE's local copy + every peer's heap mirror via
+// Reads this PE's local copy + every peer's heap mirror via
 // `peer_heap_base_p2p`, sums in bf16, stores. bf16 only (matches DSv3 AR
 // instantiation).
 template <typename T>
@@ -670,7 +670,7 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
   // fall back to the P2P reduce that reads each peer's heap mirror directly.
   // mc_src is NULL whenever the team has no NVLS rsc (observed on NVSHMEM
   // 3.6.5 under MPK's team_split_strided setup — see TP=2 debug session
-  // 2026-05-18). The fallback uses peer_heap_base_p2p, which is populated by
+  // The fallback uses peer_heap_base_p2p, which is populated by
   // NVSHMEM for any p2p-connected GPU pair (no NVLS dependency).
   bool const use_nvls = (mc_src != nullptr);
   if constexpr (OUTPUT_SIZE == OUTPUT_STRIDE) {

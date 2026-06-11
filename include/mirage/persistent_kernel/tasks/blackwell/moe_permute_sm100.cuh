@@ -118,7 +118,7 @@ __device__ __forceinline__ void
   // s_count, one after the scan publishes it, one after Phase 2 finishes
   // reading s_matched_* — so no iteration reads stale values from a
   // sibling expert).
-  // C16 (2026-05-17): Phase-1 scan is warp-parallel via __ballot_sync +
+  // Phase-1 scan is warp-parallel via __ballot_sync +
   // __popc, still deterministic. Each iter of the inner for loop processes
   // 32 consecutive positions; lane 0 accumulates the chunk count into
   // s_count, preserving chunk order (warp executes iterations

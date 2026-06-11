@@ -163,7 +163,7 @@ if __name__ == "__main__":
         if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
             # Cache-only builds never need MPI — and importing mpi4py installs
             # OpenMPI memory hooks that slow large CPU tensor ops ~6x (measured
-            # 2026-06-09: expert-fusion cat/stack 0.5s -> 3.0s/layer standalone;
+            # (expert-fusion cat/stack 0.5s -> 3.0s/layer standalone;
             # catastrophic in the full converter). Fall through to the
             # single-process branch; MPK_FORCE_BUILD_WS/RANK still apply.
             raise ImportError("MPK_BUILD_CACHE_ONLY: skipping mpi4py by design")
@@ -531,13 +531,15 @@ if __name__ == "__main__":
         state_dict_from_cache = False
         if args.weight_cache_dir:
             cache_payload = {
-                "format": "deepseek_v3_mpk_fp8_runtime_cache_v1",
+                # v2: dropped the dead kv_b_{k,v}_bf16 debug-ablation weights from the
+                # cached key set (cache contract: bump on any cached-key change).
+                "format": "deepseek_v3_mpk_fp8_runtime_cache_v2",
                 "model_path": os.path.realpath(args.model_path),
                 "layers": layer_indices_arg,
                 "layers_for_load": layer_indices_for_load,
                 "world_size": world_size,
                 "rank": rank,
-                "mtp": 0,  # MTP removed 2026-06-10; keep key field for cache compat
+                "mtp": 0,  # MTP removed; key field kept for cache compat
                 "ep_size": args.ep_size,
                 "vocab_parallel_lm_head": vocab_parallel_lm_head,
                 "lm_head_local_vocab_padded": lm_head_local_vocab_padded,
@@ -578,7 +580,7 @@ if __name__ == "__main__":
         # RAM (the TP8 cold-load OOM). K=4 gives two waves with the proven TP4
         # footprint (~1.3TB peak, ~20min/wave on the 8xB200 box). Slot = rank%K
         # (deterministic pairing; flock blocks until the slot-mate releases).
-        # Safe: the loader contains NO collectives (verified 2026-06-09), so a
+        # Safe: the loader contains NO collectives, so a
         # waiting rank cannot deadlock; NCCL/NVSHMEM comms init after the loader.
         _conv_sem_fh = None
         _conv_sem_k = int(os.environ.get("MPK_CONVERT_SEMAPHORE", "0") or "0")
@@ -756,7 +758,7 @@ if __name__ == "__main__":
                     state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
                     state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
                     state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
-                    # 2026-05-12 (user #2 FuseTensor v2 — row-swap layout):
+                    # FuseTensor v2 (row-swap layout):
                     # Build a single unabsorbed q_b weight so the prefill
                     # path can do ONE FP8 GEMM (instead of q_b_nope + q_b_pe).
                     # The per-rank layout is [rank_heads_nope_concat;
@@ -886,16 +888,6 @@ if __name__ == "__main__":
                         kv_b_v_scale.reshape(H_, 1, kv_lora_blk).to(
                             torch.float32).contiguous().clone())
 
-                    # DEBUG 2026-05-10: also store bf16 versions of the
-                    # split kv_b weights for the BF16 ablation in
-                    # _fp8_dense_kv_b_proj. Used to verify whether the FP8
-                    # GEMM path is the source of the layer-0 attn_proj
-                    # orthogonality. Toggle via builder._kv_b_use_bf16.
-                    state_dict[f"{attn}kv_b_k_bf16.weight"] = (
-                        kv_b_k_f32.bfloat16().contiguous())
-                    state_dict[f"{attn}kv_b_v_bf16.weight"] = (
-                        kv_b_v_f32.bfloat16().contiguous())
-
                     # Preserve original W_O for PR674 prefill output. The
                     # existing o_proj key is replaced by the decode-only fused
                     # W_UV→W_O path below.
@@ -959,7 +951,7 @@ if __name__ == "__main__":
                         state_dict[f"{prefix}gate_up_proj.weight_scale_inv"] = (
                             _shuffle_tensors([gs, us], split=split, dim=0))
 
-            # 2026-05-12 (user #2 part-a) — Fuse q_a_proj + kv_a_proj_with_mqa
+            # FuseTensor part-a — Fuse q_a_proj + kv_a_proj_with_mqa
             # into a single qkv_a_proj.weight of shape (2176, hidden). Layout:
             #   rows [0     : 1536) = q_a_proj.weight              (12 fp8 blocks)
             #   rows [1536  : 2048) = kv_a_proj_with_mqa[:512]     (4  blocks, c_latent)
@@ -1103,7 +1095,7 @@ if __name__ == "__main__":
                     # decompression, both column-parallel on local heads.
                     (r"self_attn\.q_b_nope\.weight",                         0),
                     (r"self_attn\.q_b_pe\.weight",                           0),
-                    # FuseTensor (user #2, 2026-05-12): unabsorbed q_b_proj,
+                    # FuseTensor: unabsorbed q_b_proj,
                     # emitted by the converter for cache compatibility (the
                     # fused prefill-Q experiment that consumed it was
                     # removed). Same column-parallel sharding as q_b_proj.
@@ -1123,11 +1115,9 @@ if __name__ == "__main__":
                     # float32 block scale (H, 1, 4). Shard head dim (dim=0).
                     (r"self_attn\.kv_b_v_bmm_dense\.weight",                 0),
                     (r"self_attn\.kv_b_v_bmm_dense\.weight_scale_inv",       0),
-                    (r"self_attn\.kv_b_k_bf16\.weight",                      0),
-                    (r"self_attn\.kv_b_v_bf16\.weight",                      0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
-                    # FuseTensor part-a (user #2 part-a, landed 2026-05-13):
+                    # FuseTensor part-a:
                     # fused q_a_proj + kv_a_proj_with_mqa weight, replicated
                     # like its constituents.
                     (r"self_attn\.qkv_a_proj\.weight",                       None),

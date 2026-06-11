@@ -95,7 +95,7 @@ __device__ __forceinline__ uint64_t mkdesc(int a) {
   return denc(a) | (denc(1024) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
 }
 
-// D1 (2026-05-17): optional epilogue fuses the per-128-col-group UE8M0
+// Optional epilogue fuses the per-128-col-group UE8M0
 // quantize that previously ran as a separate TASK_PER_TOKEN_GROUP_QUANTIZE_FP8
 // task immediately downstream. When EPILOGUE_QUANTIZE_FP8 is true the
 // consumer warps compute a per-row local max over their own acc[BN] floats
@@ -151,7 +151,7 @@ __device__ __forceinline__ void
   // a larger stride (per-head BMM where C is [M, H, N] row-major).
   int const C_rs = (C_row_stride > 0) ? C_row_stride : N;
 
-  // 2026-05-26 (Q1): skip the entire mb_init + tcgen05.alloc + __syncthreads +
+  // (Q1): skip the entire mb_init + tcgen05.alloc + __syncthreads +
   // membar.gl + tcgen05.dealloc sequence for CTAs that have no tile to
   // compute. Decode-time perfetto traces showed ~8% of MEDIUMM instances
   // sitting in a 3-4μs band that's pure dispatch overhead — these are CTAs
@@ -348,7 +348,7 @@ __device__ __forceinline__ void
 
       if (mi < M) {
         if constexpr (EPILOGUE_QUANTIZE_FP8) {
-          // D1 (2026-05-17): in-kernel UE8M0 quantize. Each consumer thread
+          // In-kernel UE8M0 quantize. Each consumer thread
           // already holds acc[BN=128] in registers — the per-row max over
           // those 128 floats IS the per-K-group max, no cross-thread sync
           // needed. Encode the UE8M0 scale once, divide and pack 16 FP8 at
@@ -447,7 +447,7 @@ __device__ __forceinline__ void
   }
 
   __syncthreads();
-  // 2026-05-13: the consumer-warp output writes use st.relaxed.cta.global
+  // The consumer-warp output writes use st.relaxed.cta.global
   // which has CTA-scope semantics — fine when this kernel is launched
   // standalone (cudaLaunch acts as implicit fence between successive
   // launches), but in the MPK persistent megakernel the next task on a

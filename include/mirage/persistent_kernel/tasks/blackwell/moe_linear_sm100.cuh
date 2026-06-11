@@ -106,60 +106,15 @@ __device__ __forceinline__ void
                         cute::E<0>{},
                         cute::E<1>{} * cute::Int<OUTPUT_SIZE>{})));
 
-  //   if (cute::thread0()) {
-  //     cute::print("mA:\t");
-  //     cute::print(mA);
-  //     cute::print("\n");
-  //     cute::print("mInput:\t");
-  //     cute::print(mInput);
-  //     cute::print("\n");
-  //     cute::print("mRoutingIndices:\t");
-  //     cute::print(mRoutingIndices);
-  //     cute::print("\n");
-  //     cute::print("mMask:\t");
-  //     cute::print(mMask);
-  //     cute::print("\n");
-  //     cute::print("mOutput:\t");
-  //     cute::print(mOutput);
-  //     cute::print("\n");
-  //   }
-  //   __syncthreads();
-
   cute::Tensor gA = cute::local_tile(
       mA,
       mma_tiler,
       mma_coord,
-      cute::Step<
-          cute::_1,
-          cute::X,
-          cute::_1>{}); // ArithTuple(_0,_0) o
-                        // (_128,_64,1,32,128):(_1@1,_1@0,_128@1,_64@0,_128@1)
+      cute::Step<cute::_1, cute::X, cute::_1>{}); // ArithTuple(_0,_0) o
   cute::Tensor gB = cute::local_tile(
-      mInput,
-      mma_tiler,
-      mma_coord,
-      cute::Step<cute::X,
-                 cute::_1,
-                 cute::_1>{}); // gmem_ptr[16b](0x792c0b000000) o
-                               // (_16,_64,1,32):(2048,_1,32768,_64)
+      mInput, mma_tiler, mma_coord, cute::Step<cute::X, cute::_1, cute::_1>{});
   cute::Tensor gBias = cute::local_tile(
       mBias, cd_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
-
-  //   if (cute::thread0()) {
-  //     cute::print("gA:\t");
-  //     cute::print(gA);
-  //     cute::print("\n"); // gA:     ArithTuple(_0,_0) o
-  //                        //
-  //                        (_128,_64,1,32,128):(_1@1,_1@0,_128@1,_64@0,_128@1)
-  //     cute::print("gB:\t");
-  //     cute::print(gB);
-  //     cute::print("\n"); // gB:     gmem_ptr[16b](0x792c0b000000) o
-  //                        // (_16,_64,1,32):(2048,_1,32768,_64)
-  //     cute::print("gBias:\t");
-  //     cute::print(gBias);
-  //     cute::print("\n");
-  //   }
-  //   __syncthreads();
 
   // Pre-partitioned Tile Shape (MmaTile_M, MmaTile_K) to post-partitioned
   // (MmaA, NumMma_M, NumMma_K)
@@ -182,20 +137,6 @@ __device__ __forceinline__ void
                        cute::Int<1>{},
                        cute::Int<1>{},
                        cute::Int<NUM_C_STAGE>{});
-
-  //   // Print and inspect mma_shape_A, and mma_shape_B for this example.
-  //   if (cute::thread0()) {
-  //     cute::print("mma_shape_A:\t");
-  //     cute::print(mma_shape_A);
-  //     cute::print("\n"); // mma_shape_A:  ((_128,_16),_1,_4,_8)
-  //     cute::print("mma_shape_B:\t");
-  //     cute::print(mma_shape_B);
-  //     cute::print("\n"); // mma_shape_B:  ((_32,_16),_1,_4,_8)
-  //     cute::print("mma_shape_C:\t");
-  //     cute::print(mma_shape_C);
-  //     cute::print("\n"); // mma_shape_C:  ((_32,_128),_1,_1,_4)
-  //   }
-  //   __syncthreads();
 
   auto sA_layout = cute::UMMA::tile_to_mma_shape(
       cute::UMMA::Layout_K_SW128_Atom<T_>{}, mma_shape_A);
@@ -228,22 +169,6 @@ __device__ __forceinline__ void
   auto sC_layout = cute::composition(sC_layout_fake.layout_a(),
                                      sC_layout_fake.offset(),
                                      cute::make_layout(sC_shape, sC_stride));
-
-  //   if (cute::thread0()) {
-  //     cute::print("sA_layout:\t");
-  //     cute::print(sA_layout);
-  //     cute::print("\n");
-  //     cute::print("sB_layout:\t");
-  //     cute::print(sB_layout);
-  //     cute::print("\n");
-  //     cute::print("sC_layout:\t");
-  //     cute::print(sC_layout);
-  //     cute::print("\n");
-  //     cute::print("sB_cp_layout:\t");
-  //     cute::print(sB_cp_layout);
-  //     cute::print("\n");
-  //   }
-  //   __syncthreads();
 
   using SharedStorage = MoESharedStorage<T_,
                                          T_,
@@ -318,33 +243,8 @@ __device__ __forceinline__ void
   cute::Tensor tCgB =
       cta_mma.partition_B(gB); // (MmaB, NumMma_N, NumMma_K, Tiles_K)
 
-  //   if (cute::thread0()) {
-  //     cute::print("tCgA:\t");
-  //     cute::print(tCgA);
-  //     cute::print("\n");
-  //     cute::print("tCgB:\t");
-  //     cute::print(tCgB);
-  //     cute::print("\n");
-  //     cute::print("tCsA:\t");
-  //     cute::print(tCsA);
-  //     cute::print("\n");
-  //     cute::print("tCsB:\t");
-  //     cute::print(tCsB);
-  //     cute::print("\n");
-  //     cute::print("sB:\t");
-  //     cute::print(sB);
-  //     cute::print("\n");
-  //     cute::print("\n");
-  //   }
-  //   __syncthreads();
-
   int tma_transaction_bytes_A =
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
-
-  //   if (cute::thread0()) {
-  //     printf("tma_transaction_bytes_A: %d\n", tma_transaction_bytes_A);
-  //   }
-  //   __syncthreads();
 
   constexpr int TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = 64;
@@ -375,21 +275,7 @@ __device__ __forceinline__ void
              Stride<Int<cp_async_group_size>, _1>>{}, // Thr layout
       Layout<Shape<_1, _8>>{});                       // Val layout
 
-  //   if (cute::thread0()) {
-  //     cute::print_latex(copyB);
-  //   } __syncthreads();
-
-  // // check tma descriptor:
-  // if(threadIdx.x == 0){
-  //     printf("smem start addr: %u\n",
-  //     cute::cast_smem_ptr_to_uint(shared_memory)); printf("shared_weight:
-  //     %u\n", cute::cast_smem_ptr_to_uint(shared_weight));
-  // } __syncthreads();
-
-  // // Fence acquire tensor map:
   // ptx::n32_t<128> size_bytes;
-  // // Since the tensor map was modified from the host using cudaMemcpy,
-  // // the scope should be .sys.
   // ptx::fence_proxy_tensormap_generic(
   //   ptx::sem_acquire, ptx::scope_sys, tma_a.desc_ptr, size_bytes
   // );
@@ -422,18 +308,6 @@ __device__ __forceinline__ void
   cutlass::arch::fence_barrier_init();
   __syncthreads();
 
-  //   if (cute::thread0()) {
-  //     cute::print("tCrA:\t");
-  //     cute::print(tCrA);
-  //     cute::print("\n"); // tCrA:   UMMA::DescriptorIterator o
-  //     (_1,_1,_4):(_0,_0,_2) cute::print("tCrB:\t"); cute::print(tCrB);
-  //     cute::print("\n"); // tCrB:   UMMA::DescriptorIterator o
-  //     (_1,_1,_4):(_0,_0,_2) cute::print("tCtAcc:\t"); cute::print(tCtAcc);
-  //     cute::print("\n"); // tCtAcc: tmem_[32b](TMEM_ADDR) o
-  //                        // ((_128,_256),_1,_1):((_65536,_1),_0,_0)
-  //   }
-  //   __syncthreads();
-
   int k_tile_count = cute::size<4>(tCgA);
   int num_activated_experts =
       mMask(NUM_EXPERTS); // last element stores num activated experts
@@ -441,26 +315,6 @@ __device__ __forceinline__ void
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
 
-  // // fetch expert mask and preprocessing
-  // int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) /
-  // EXPERT_STRIDE]; int32_t total_activated_experts = 0; int32_t
-  // num_activated_experts = 0;
-
-  // if(threadIdx.x < NUM_EXPERTS) {
-  //   shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
-  // }
-
-  // __syncthreads();
-
-  // for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-  //   int32_t expert_mask = shared_storage.expert_mask[expert_idx];
-  //   if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE ==
-  //   expert_offset) {
-  //     activated_expert_idx[num_activated_experts] = expert_idx;
-  //     num_activated_experts += 1;
-  //   }
-  //   total_activated_experts += expert_mask;
-  // }
   __syncthreads(); // Wait for preprocessing done
 
   if (warp_idx == 5) {
@@ -470,18 +324,6 @@ __device__ __forceinline__ void
     cute::ThrCopy thr_copy_b = copyB.get_slice(lane_idx);
     cute::Tensor tBgB = thr_copy_b.partition_S(gB); // (ThrB, ThrTile_N)
     cute::Tensor tBsB = thr_copy_b.partition_D(sB); // (ThrB, ThrTile_N)
-    // if (lane_idx == 0) {
-    //   cute::print("thr_copy_b:\t");
-    //   cute::print(thr_copy_b);
-    //   cute::print("\n");
-    //   cute::print("tBgB:\t");
-    //   cute::print(tBgB);
-    //   cute::print("\n");
-    //   cute::print("tBsB:\t");
-    //   cute::print(tBsB);
-    //   cute::print("\n");
-    // } __syncwarp();
-
     int total_k_tile_count = 0;
     for (int activated_expert_offset = expert_offset;
          activated_expert_offset < num_activated_experts;
@@ -689,25 +531,6 @@ __device__ __forceinline__ void
     cute::Tensor tTR_rAcc =
         cute::make_tensor<AccType>(cute::shape(tTR_rAcc_fake));
 
-    // if(threadIdx.x == 0) {
-    //   cute::print("tiled_copy_t2r:\t");
-    //   cute::print(tiled_copy_t2r);
-    //   cute::print("\n");
-    //   cute::print("thr_copy_t2r:\t");
-    //   cute::print(thr_copy_t2r);
-    //   cute::print("\n");
-    //   cute::print("tTR_tAcc:\t");
-    //   cute::print(tTR_tAcc);
-    //   cute::print("\n");
-    //   cute::print("tTR_rAcc:\t");
-    //   cute::print(tTR_rAcc);
-    //   cute::print("\n");
-    //   cute::print("tCtAcc:\t");
-    //   cute::print(tCtAcc);
-    //   cute::print("\n");
-    //   printf("tmem_base_ptr: %u\n", shared_storage.tmem_base_ptr);
-    // } epilogue_wg_barrier.arrive_and_wait();
-
     int num_tiles_executed = 0;
     for (int activated_expert_offset = expert_offset;
          activated_expert_offset < num_activated_experts;
@@ -728,21 +551,6 @@ __device__ __forceinline__ void
               cute::make_tensor<AccType>(cute::shape(tCrBiasTypeBias));
           cute::Tensor tCrC =
               cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
-
-          // if(threadIdx.x == 0 and m_tile == 0 and n_tile == 0) {
-          //   cute::print("tCgBias:\t");
-          //   cute::print(tCgBias);
-          //   cute::print("\n");
-          //   cute::print("tCrBiasTypeBias:\t");
-          //   cute::print(tCrBiasTypeBias);
-          //   cute::print("\n"); //
-          //   cute::print("tCrBiasTypeAcc:\t");
-          //   cute::print(tCrBiasTypeAcc);
-          //   cute::print("\n"); //
-          //   cute::print("tCrC:\t");
-          //   cute::print(tCrC);
-          //   cute::print("\n");
-          // } epilogue_wg_barrier.arrive_and_wait();
 
           // T2R and register operations
           if constexpr (!NOBIAS) {

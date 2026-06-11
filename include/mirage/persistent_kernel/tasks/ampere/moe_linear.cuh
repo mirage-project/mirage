@@ -11,7 +11,6 @@
 #include <type_traits>
 
 #define MOE_NUM_THREADS 128
-#define DEBUG_LOG 0
 
 #define PRINT(x)                                                               \
   do {                                                                         \
@@ -32,8 +31,6 @@
   } while (0)
 
 #define WARM_UP 0
-
-#define DEBUG_EXPERT_IDX 95
 
 constexpr int log2_constexpr(int n, int p = 0) {
   return (n <= 1) ? p : log2_constexpr(n >> 1, p + 1);
@@ -292,16 +289,6 @@ __device__ __forceinline__ void
                              make_shape(NUM_EXPERTS + 1),
                              make_stride(Int<1>{}));
 
-#if DEBUG_LOG
-  PRINT(A);
-  PRINT(B);
-  PRINT(D);
-  PRINT(R);
-
-  PRINT(mRoutingIndices);
-  PRINT(mMask);
-#endif // DEBUG_LOG
-
   // create identity tensors for predicate
   auto cA = make_identity_tensor(shape(A)); // (m,k) -> (m,k)
   auto cB =
@@ -329,12 +316,6 @@ __device__ __forceinline__ void
           cA,
           make_tile(Int<kTileM>{}, Int<kTileK>{}),
           make_coord(m_iter, _));
-#if DEBUG_LOG
-      if (activated_expert_offset == expert_offset && m_iter == 0) {
-        PRINT(gA);
-        PRINT(cta_cA);
-      }
-#endif // DEBUG_LOG
 #pragma unroll
       for (int n_iter = 0; n_iter < LoopN; ++n_iter) {
         Tensor gB =
@@ -356,14 +337,6 @@ __device__ __forceinline__ void
                        make_tile(Int<kTileM>{}, Int<kTileN>{}),
                        make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
                                                     // (_16,_64):(1536,_1)
-#if DEBUG_LOG
-        if (activated_expert_offset == expert_offset && m_iter == 0 &&
-            n_iter == 0) {
-          PRINT(gB);
-          PRINT(gD);
-          PRINT(gR);
-        }
-#endif
         // shared memory
         // ((_8,_2),(_64,_2),(_1,_3)):((_64,_512),(_1,_1024),(_0,_2048))
         auto sA = make_tensor(
@@ -386,15 +359,6 @@ __device__ __forceinline__ void
                                  make_tile(Int<kTileM>{}, Int<kTileN>{}),
                                  make_coord(m_iter, n_iter)); // same as gD
 
-#if DEBUG_LOG
-        if (activated_expert_offset == expert_offset && m_iter == 0 &&
-            n_iter == 0) {
-          PRINT(sA);
-          PRINT(sB);
-          PRINT(cta_cB);
-          PRINT(cta_cC);
-        }
-#endif
         int const idx = threadIdx.x;
 
         TiledMMA tiled_mma;
@@ -408,17 +372,6 @@ __device__ __forceinline__ void
         // ((_2,_2),_1,_2):((_1,_2),_0,_4)
         auto tCrD = thr_mma.partition_fragment_C(
             gD); // (MMA, MMA_M, MMA_N) ((_2,_2),_1,_2):((_1,_2),_0,_4)
-
-#if DEBUG_LOG
-        if (activated_expert_offset == expert_offset && m_iter == 0 &&
-            n_iter == 0) {
-          // PRINT(tiled_mma);
-          PRINT(thr_mma);
-          PRINT(tCrA);
-          PRINT(tCrB);
-          PRINT(tCrD);
-        }
-#endif
 
         auto r2s_tiled_copy_c = make_tiled_copy_C(R2SCopyAtomC{}, tiled_mma);
         auto r2s_thr_copy_c = r2s_tiled_copy_c.get_slice(idx);
@@ -442,25 +395,6 @@ __device__ __forceinline__ void
         //  (_8,_1):(_1,_0)
         auto tCpC = make_tensor<bool>(make_shape(size<0>(tCcC), Int<1>{}),
                                       make_stride(Int<1>{}, Int<0>{}));
-
-#if DEBUG_LOG
-        if (activated_expert_offset == expert_offset && m_iter == 0 &&
-            n_iter == 0) {
-          // PRINT(tiled_mma);
-          PRINT(R2SCopyAtomC{});
-          PRINT(r2s_tiled_copy_c);
-          PRINT(r2s_thr_copy_c);
-          PRINT(SmemLayoutAtomC{});
-          PRINT(sR_init);
-          PRINT(s2g_tiled_copy_c);
-          PRINT(s2g_thr_copy_c);
-          PRINT(g2s_tiled_copy_r);
-          PRINT(tCgR_s2g);
-          PRINT(tCsR_s2g);
-          PRINT(tCcC);
-          PRINT(tCpC);
-        }
-#endif
 
         CUTE_UNROLL
         for (int i = 0; i < size<0>(tCpC); ++i) {
@@ -512,20 +446,6 @@ __device__ __forceinline__ void
         // (((_4,_2),_1),_1,_8):(((_1,_32),_0),_0,_4)
         auto tCrB_view = s2r_thr_copy_b.retile_D(
             tCrB); // ? (CPY, CPY_N, CPY_K) (((_4,_2),_1),_1,_8)
-
-#if DEBUG_LOG
-        if (activated_expert_offset == expert_offset && m_iter == 0 &&
-            n_iter == 0) {
-          PRINT(s2r_tiled_copy_a);
-          PRINT(s2r_thr_copy_a);
-          PRINT(tAsA);
-          PRINT(tCrA_view);
-          PRINT(s2r_tiled_copy_b);
-          PRINT(s2r_thr_copy_b);
-          PRINT(tBsB);
-          PRINT(tCrB_view);
-        }
-#endif
 
         G2SCopyA g2s_tiled_copy_a;
         auto g2s_thr_copy_a = g2s_tiled_copy_a.get_slice(idx);
@@ -588,24 +508,6 @@ __device__ __forceinline__ void
           tBpB(in, 0) = elem_less(get<0>(tBcB(0, in, 0, 0)),
                                   shape<0>(B(0, _, _))); // n < N ?
         }
-
-#if DEBUG_LOG
-        if (activated_expert_offset == expert_offset && m_iter == 0 &&
-            n_iter == 0) {
-          PRINT(g2s_tiled_copy_a);
-          PRINT(g2s_thr_copy_a);
-          PRINT(tAgA_copy);
-          PRINT(tAsA_copy);
-          PRINT(tAcA);
-          PRINT(g2s_tiled_copy_b);
-          PRINT(g2s_thr_copy_b);
-          PRINT(tBgB_copy);
-          PRINT(tBsB_copy);
-          PRINT(tBcB);
-          PRINT(tApA);
-          PRINT(tBpB);
-        }
-#endif
 
         int itile_to_read = 0;
         int ismem_read_stage = 0;
@@ -729,19 +631,6 @@ __device__ __forceinline__ void
         // [16b] ((_2,_4),_1,_1):((_1,_2),_0,_0)
         auto tC_tmp =
             make_tensor_like<T>(tCrC_r2s); // ((_2,_8),_1,_1):((_1,_2),_0,_0)
-
-#if DEBUG_LOG
-        if (activated_expert_offset == expert_offset && m_iter == 0 &&
-            n_iter == 0) {
-          PRINT(sC);
-          PRINT(tCrC_r2s);
-          PRINT(tCsC_r2s);
-          PRINT(tCsC_s2g);
-          PRINT(tCgC_s2g);
-          PRINT(tCpC_ep);
-          PRINT(tC_tmp);
-        }
-#endif
 
         // NOTE: That's not a real copy, just convert data type from fp32 to
         // bf16 in registers.

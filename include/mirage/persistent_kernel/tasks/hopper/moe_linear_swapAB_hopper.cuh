@@ -282,29 +282,6 @@ __device__ __forceinline__ void
   cute::Tensor tCsB = thread_mma.partition_B(
       shared_storage.tensor_sB()); // (MMA,MMA_N,MMA_K,PIPE)
 
-#if 0
-    if (threadIdx.x == 0) {
-      cute::print("mma warp groups:\t");
-      cute::print(MmaWarpGroups);
-      printf("\n");
-      cute::print(warp_group_thread_layout(warp_group_idx));
-      cute::print("\n");
-      printf("sA: ");
-      cute::print(sA);
-      printf("\n");
-      printf("sB: ");
-      cute::print(sB);
-      printf("\n");
-      printf("tCsA: ");
-      cute::print(tCsA);
-      printf("\n");
-      printf("tCsB: ");
-      cute::print(tCsB);
-      printf("\n");
-    }
-    __syncthreads();
-#endif
-
   int tma_transaction_bytes_A =
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 

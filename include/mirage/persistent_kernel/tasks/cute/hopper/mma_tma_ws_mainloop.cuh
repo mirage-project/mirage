@@ -295,7 +295,6 @@ struct CollectiveMainloop {
             pipeline.producer_get_barrier(smem_pipe_write);
 
         int write_stage = smem_pipe_write.index();
-        // printf("producer really start\n");
         copy(mainloop_params.tma_load_a.with(*tma_barrier, mcast_mask_a),
              tAgA(_, _, _, *k_tile_iter),
              tAsA(_, _, _, write_stage));

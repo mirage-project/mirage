@@ -1354,7 +1354,7 @@ __device__ __forceinline__ void
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
             int smem_buf = (num_prev_k_blk + k_tile) % NUM_AB_STAGE;
 
-            // FIX 2026-04-22: wait ab_empty BEFORE overwriting sfa/sfb_smem.
+            // Wait ab_empty BEFORE overwriting sfa/sfb_smem.
             // Previously, scale warp wrote sfa/sfb_smem without waiting for
             // MMA to finish UTCCP. At TP=4 w2 with mbt=64 (k_tile_count==
             // NUM_AB_STAGE==8), scale warp could wrap back and overwrite
