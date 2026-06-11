@@ -445,16 +445,6 @@ __device__ __forceinline__ bool task_uses_page(TaskDesc const *task_desc,
   return false;
 }
 
-__device__ __forceinline__ int runtime_region_physical_page(
-    TaskDesc const *task_desc, int region_idx, int page_offset) {
-  SmemPageRegionDesc const &region = task_desc->smem_regions[region_idx];
-  int const physical_page = region.physical_page_start + page_offset;
-  if (physical_page < 0 || physical_page >= MAX_SMEM_PAGES_PER_TASK) {
-    return -1;
-  }
-  return physical_page;
-}
-
 __device__ __forceinline__ void wait_task_dependency(
     RuntimeConfig const &config, TaskDesc const *task, int iter_num) {
   EventId dep = task->dependent_event;
