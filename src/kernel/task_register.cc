@@ -3642,9 +3642,15 @@ int TaskRegister::register_mla_decode_sm100_task(
         "  int gi_ = task_desc->task_metadata.request_id;  // head group idx");
   }
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -4392,9 +4398,15 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.merge_task_offset & 0xffff;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -4460,9 +4472,15 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7201,9 +7219,15 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7278,9 +7302,15 @@ int TaskRegister::register_mla_mtp_decode_tp_reduce_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7342,9 +7372,15 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7414,9 +7450,15 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+         "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
