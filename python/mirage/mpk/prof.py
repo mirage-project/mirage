@@ -27,8 +27,8 @@ from mirage.mpk.v2_prof_layout import (  # noqa: E402
 LINEAR_TYPES = {244, 245}
 EVENT_NAMES = {
     244: "LINEAR_V2", 245: "LINEAR_RES_V2",
-    281: "RMSNORM", 282: "SILU_MUL", 283: "EMBEDDING",
-    284: "ATTENTION", 285: "ARGMAX_P", 286: "ARGMAX_R",
+    224: "RMSNORM", 225: "SILU_MUL", 226: "EMBEDDING",
+    227: "ATTENTION", 228: "ARGMAX_P", 229: "ARGMAX_R",
     204: "PREPARE_BATCH", 205: "ITER_SYNC", 206: "GO_WAIT",
     207: "DEP_WAIT", 208: "PAGE_WAIT",
     209: "W_TMA_WAIT", 210: "MMA_EMPTY_WAIT", 211: "TMEM_READY_WAIT",
@@ -162,8 +162,8 @@ def cmd_summary(d: Dump, iters=WINDOW_ITERS) -> int:
     suf_ns, suf_n = d.suffix()
     suf_per = suf_ns.sum() / max(suf_n.sum(), 1) / 1e3
     win_by_bucket = defaultdict(list)
-    b_of = {244: 0, 245: 0, 246: 0, 247: 0, 284: 1, 281: 2, 282: 3,
-            285: 4, 286: 4, 283: 5}
+    b_of = {244: 0, 245: 0, 227: 1, 224: 2, 225: 3,
+            228: 4, 229: 4, 226: 5}
     for sm in range(d.nblocks):
         for s, e, ev in d.windows.get((sm, 0), []):
             win_by_bucket[b_of.get(ev, 6)].append(dur_us(s, e))

@@ -155,19 +155,23 @@ enum TaskType {
   TASK_MLA_REDUCE_SM100 = 267,
   TASK_MLA_PREFILL_SM100 = 268,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
-  // v2 task-type IDs for the non-linear ops (linear v2 is 244/245). These are
-  // all compute-only: each registers a single compute body (a free-function
-  // call under kernel::v2:: / kernel::rmsnorm_v2::) and the loader/mma/storer
-  // warps no-op for them via the role dispatcher's default case. Only linear
-  // (and later attention) uses the multi-role split. attn(284) is reserved
-  // until the attention port. See the register_*_v2_task functions in
-  // task_register.cc.
-  TASK_RMS_NORM_HOPPER_V2 = 281,
-  TASK_SILU_MUL_V2 = 282,
-  TASK_EMBEDDING_V2 = 283,
-  TASK_ATTN_SM100_V2 = 284,
-  TASK_ARGMAX_PARTIAL_SM100_V2 = 285,
-  TASK_ARGMAX_REDUCE_SM100_V2 = 286,
+  // v2 task-type IDs for the non-linear ops. linear v2 (244/245) lives inside
+  // the SM100 TMA range (231-256) because it needs TMA; these tasks are
+  // NON-TMA, so they must stay OUTSIDE 231-256 or create_tma_desc_by_task
+  // mis-fires (the range check in the generated .cu calls it for 231<id<256).
+  // The post-256 SM100 space is fully used on the mpk branch (257-295), so
+  // they sit in the 224-229 gap below SM100_TASK_BEGIN — outside every TMA
+  // range, and dispatch is by exact task_type so the numeric position is fine.
+  // All compute-only: each registers a single compute body (a free-function
+  // call) and the loader/mma/storer warps no-op via the role dispatcher's
+  // default case. attn is reserved until the attention port. See the
+  // register_*_v2_task functions in task_register.cc.
+  TASK_RMS_NORM_HOPPER_V2 = 224,
+  TASK_SILU_MUL_V2 = 225,
+  TASK_EMBEDDING_V2 = 226,
+  TASK_ATTN_SM100_V2 = 227,
+  TASK_ARGMAX_PARTIAL_SM100_V2 = 228,
+  TASK_ARGMAX_REDUCE_SM100_V2 = 229,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

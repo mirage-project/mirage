@@ -78,8 +78,8 @@ static constexpr size_t V2_PROF_BUF_ENTRIES = 120000ull * 128;
 //   [SPIN_BASE + bucket*256 + 128 + sm]  dep-wait count
 //   [SUFFIX_BASE + sm]                   page-suffix ns, per SM (aggregate)
 //   [SUFFIX_BASE + 128 + sm]             page-suffix count
-// Type buckets: 0=linear(244/245) 1=attn(284) 2=rmsnorm(281) 3=silu(282)
-//               4=argmax(285/286) 5=embed(283) 6=other
+// Type buckets: 0=linear(244/245) 1=attn(227) 2=rmsnorm(224) 3=silu(225)
+//               4=argmax(228/229) 5=embed(226) 6=other
 static constexpr int V2_PROF_NUM_BUCKETS = 7;
 static constexpr size_t V2_PROF_SPIN_BASE =
     V2_PROF_BUF_ENTRIES - 256ull * V2_PROF_NUM_BUCKETS - 256;
@@ -114,11 +114,11 @@ __device__ __forceinline__ unsigned long long v2_prof_now_ns() {
 __device__ __forceinline__ int v2_prof_bucket(int task_type) {
   switch (task_type) {
     case 244: case 245: return 0;   // linear v2 (+residual)
-    case 284: return 1;             // attention
-    case 281: return 2;             // rmsnorm
-    case 282: return 3;             // silu_mul
-    case 285: case 286: return 4;   // argmax
-    case 283: return 5;             // embedding
+    case 227: return 1;             // attention
+    case 224: return 2;             // rmsnorm
+    case 225: return 3;             // silu_mul
+    case 228: case 229: return 4;   // argmax
+    case 226: return 5;             // embedding
     default:  return 6;
   }
 }
