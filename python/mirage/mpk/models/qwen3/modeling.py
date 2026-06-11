@@ -180,6 +180,23 @@ class Qwen3MLP(MPKModule):
         w_down_dt = pk.attach_input(
             self.down_proj.weight, name=f"{self.prefix}down_proj_weight",
         )
+        # On SM100 single-GPU, fuse the residual add into a split-K GEMM:
+        # ``splitk_linear_layer`` reduce-adds the matmul partials into
+        # ``output`` WITHOUT zeroing, so seeding ``output`` with the residual
+        # buffer yields ``residual + silu_out @ W_down`` in a single task.
+        # This is the ~3.9ms path and mirrors demo/qwen3/demo.py. TP keeps
+        # linear_with_residual because the residual must be added once,
+        # post-AllReduce (split-K has no per-rank residual gate).
+        if pk.target_cc == 100 and self.tp_size == 1:
+            pk.splitk_linear_layer(
+                input=per_layer_silu_mul_out,
+                weight=w_down_dt,
+                output=residual_dt,
+                grid_dim=(self.hidden_size // 128,
+                          128 * 128 // self.hidden_size, 1),
+                block_dim=(256, 1, 1),
+            )
+            return residual_dt
         pk.linear_with_residual_layer(
             input=per_layer_silu_mul_out,
             weight=w_down_dt,
@@ -354,6 +371,18 @@ class Qwen3Attention(MPKModule):
         w_o_dt = pk.attach_input(
             self.o_proj.weight, name=f"{self.prefix}o_proj_weight",
         )
+        # SM100 single-GPU: fuse the residual add into a split-K GEMM by
+        # seeding ``output`` with the residual buffer (see Qwen3MLP.compile).
+        if pk.target_cc == 100 and self.tp_size == 1:
+            pk.splitk_linear_layer(
+                input=per_layer_attn_out,
+                weight=w_o_dt,
+                output=residual_dt,
+                grid_dim=(self.hidden_size // 128,
+                          128 * 128 // self.hidden_size, 1),
+                block_dim=(256, 1, 1),
+            )
+            return residual_dt
         pk.linear_with_residual_layer(
             input=per_layer_attn_out,
             weight=w_o_dt,
@@ -406,21 +435,19 @@ class Qwen3DecoderLayer(MPKModule):
         from ....core import bfloat16 as _mi_bf16
         hidden = self.input_layernorm.hidden_size
 
+        # On SM100 single-GPU each residual add is fused into a split-K GEMM
+        # that writes in place into the residual buffer (the ~3.9ms path; see
+        # Qwen3MLP.compile). In that mode o_proj/down_proj produce the residual
+        # tensors directly, so the dedicated per-layer projection buffers are
+        # only allocated off that path. ``compile()`` returns the buffer that
+        # holds its result, which we thread downstream.
+        use_splitk = pk.target_cc == 100 and self.tp_size == 1
+
         # Per-layer intermediate buffers. Under TP the projection
         # outputs cross ranks via NVSHMEM, so those tensors get
         # io_category="nvshmem_tensor".
         nvshmem_kind = "nvshmem_tensor" if self.tp_size > 1 else "cuda_tensor"
 
-        per_layer_attn_proj_out = pk.new_tensor(
-            dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
-            name=f"{self.prefix}per_layer_attn_proj_out",
-            io_category=nvshmem_kind,
-        )
-        per_layer_mlp_out = pk.new_tensor(
-            dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
-            name=f"{self.prefix}per_layer_mlp_out",
-            io_category=nvshmem_kind,
-        )
         per_layer_rmsnorm_attn_out = pk.new_tensor(
             dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
             name=f"{self.prefix}per_layer_rmsnorm_attn_out",
@@ -437,7 +464,14 @@ class Qwen3DecoderLayer(MPKModule):
             grid_dim=(pk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
-        self.self_attn.compile(
+        per_layer_attn_proj_out = None
+        if not use_splitk:
+            per_layer_attn_proj_out = pk.new_tensor(
+                dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
+                name=f"{self.prefix}per_layer_attn_proj_out",
+                io_category=nvshmem_kind,
+            )
+        attn_out_buf = self.self_attn.compile(
             per_layer_rmsnorm_attn_out, cos_dt, sin_dt,
             residual_dt=x_dt,
             output=per_layer_attn_proj_out,
@@ -457,7 +491,7 @@ class Qwen3DecoderLayer(MPKModule):
                 io_category="nvshmem_tensor",
             )
             self.self_attn.allreduce.compile(
-                input=per_layer_attn_proj_out,
+                input=attn_out_buf,
                 buffer=allreduce_buf,
                 output=attn_allreduce_out,
                 grid_dim=(hidden // 64, 1, 1),
@@ -466,8 +500,8 @@ class Qwen3DecoderLayer(MPKModule):
             mlp_input = attn_allreduce_out
             mlp_residual = attn_allreduce_out
         else:
-            mlp_input = per_layer_attn_proj_out
-            mlp_residual = per_layer_attn_proj_out
+            mlp_input = attn_out_buf
+            mlp_residual = attn_out_buf
 
         # MLP sub-block: rmsnorm → gateup linear → silu_mul → down_proj+resid
         self.post_attention_layernorm.compile(
@@ -476,7 +510,14 @@ class Qwen3DecoderLayer(MPKModule):
             grid_dim=(pk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
-        self.mlp.compile(
+        per_layer_mlp_out = None
+        if not use_splitk:
+            per_layer_mlp_out = pk.new_tensor(
+                dims=(pk.max_num_batched_tokens, hidden), dtype=_mi_bf16,
+                name=f"{self.prefix}per_layer_mlp_out",
+                io_category=nvshmem_kind,
+            )
+        mlp_out_buf = self.mlp.compile(
             per_layer_rmsnorm_mlp_out,
             residual_dt=mlp_residual,
             output=per_layer_mlp_out,
@@ -496,14 +537,14 @@ class Qwen3DecoderLayer(MPKModule):
                 io_category="nvshmem_tensor",
             )
             self.mlp.allreduce.compile(
-                input=per_layer_mlp_out,
+                input=mlp_out_buf,
                 buffer=allreduce_buf_mlp,
                 output=mlp_allreduce_out,
                 grid_dim=(hidden // 64, 1, 1),
                 block_dim=(128, 1, 1),
             )
             return mlp_allreduce_out
-        return per_layer_mlp_out
+        return mlp_out_buf
 
 
 # ---------------------------------------------------------------------------
