@@ -319,9 +319,8 @@ def get_compile_command(
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     elif target_cc == 100:
         specific_cmd = [
-            # NOTE: do NOT also pass -arch=sm_100a. On CUDA 13.2 that combo
-            # silently downgrades the virtual target to compute_100 (no 'a'),
-            # breaking tcgen05.* and other sm_100a-only PTX.
+            # Don't also pass -arch=sm_100a: on CUDA 13.2 it downgrades the
+            # virtual target to compute_100, breaking tcgen05.* sm_100a PTX.
             "-gencode=arch=compute_100a,code=sm_100a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_BLACKWELL",

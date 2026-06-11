@@ -22,31 +22,27 @@
 #include <stdint.h>
 
 // ── Optional per-task profiling (MPK_ENABLE_PROFILING builds only) ──────────
-// Reuses v1's FlashInfer-style profiler format so profiler_persistent.py
-// renders v2 traces unchanged. EIGHT tracks per SM (num_groups = 8): five role
-// tracks (0-4 below) plus three stall tracks (5-7). The SM is a pipeline in v2,
-// so each warp role gets its own Perfetto row and the task-level overlap
-// between roles is directly visible:
-//   group 0 compute  (warp 0 lane 0): BEGIN/END per task body — includes
-//           the dep-wait spin; gaps = waiting on instruction publish
-//   group 1 loader    (lane 0): page-prefix + loader body per task
-//   group 2 mma  (lane 0): mma body (linear: TMEM/MMA driving)
-//   group 3 storer    (lane 0): storer body (idle for the current tasks)
-//   group 4 dispatcher(lane 0): V2_PROF_PREPARE_BATCH (worker 0),
-//           V2_PROF_ITER_SYNC (end-of-iter barrier), V2_PROF_GO_WAIT
-// Only the LAST V2_PROF_WINDOW_ITERS decode steps are recorded: that's the
-// interesting regime (full KV length), and it bounds the event count so the
-// fixed-size profiler buffer can't overflow on long runs.
-// Non-profiling builds: all macros expand to nothing — zero impact.
+// Reuses v1's profiler.h buffer/tag encoding (profiler_persistent.py adds the
+// v2 track names). EIGHT tracks/SM (num_groups = 8) = one Perfetto row per warp
+// role, so cross-role task overlap is directly visible:
+//   0 compute    : task body BEGIN/END (incl. dep-wait spin)
+//   1 loader     : page-prefix + loader body
+//   2 mma        : mma body (linear: TMEM/MMA driving)
+//   3 storer     : storer body
+//   4 dispatcher : PREPARE_BATCH / ITER_SYNC / GO_WAIT (worker 0)
+//   5-7          : stall sub-tracks (compute/loader/mma)
+// Records only the last V2_PROF_WINDOW_ITERS decode steps (full-KV regime;
+// bounds event count so the fixed buffer can't overflow). Non-profiling builds:
+// all macros expand to nothing.
 static constexpr int V2_PROF_NUM_GROUPS = 8;
 static constexpr int V2_PROF_GROUP_COMPUTE = 0;
 static constexpr int V2_PROF_GROUP_LOADER = 1;
 static constexpr int V2_PROF_GROUP_MMA = 2;
 static constexpr int V2_PROF_GROUP_STORER = 3;
 static constexpr int V2_PROF_GROUP_DISPATCHER = 4;
-// Stall tracks: sub-slices WITHIN a role's task window, so a bar
-// self-explains (wait vs work). Written by the closure-free emitter
-// (v2_prof_emit*) because their call sites can't see the role-loop closure.
+// Stall tracks: sub-slices WITHIN a role's task window (wait vs work). Written
+// by the closure-free emitter (v2_prof_emit*) — call sites lack the role-loop
+// closure.
 static constexpr int V2_PROF_GROUP_COMPUTE_STALL = 5;
 static constexpr int V2_PROF_GROUP_LOADER_STALL = 6;
 static constexpr int V2_PROF_GROUP_MMA_STALL = 7;
@@ -65,14 +61,12 @@ static constexpr int V2_PROF_EPILOGUE_WAIT = 213;     // mma: tmem slot
 static constexpr int V2_PROF_COMPUTE_DONE_WAIT = 214; // mma tail
 static constexpr unsigned long long V2_PROF_WAIT_THRESHOLD_NS = 2000;
 // Total profiler-buffer entries — MUST match demo.py's profiler_tensor size.
-// Sized for 8 tracks x 128 SMs x 25 windowed iters; the busiest track
-// (compute-stall: dep + tmem + mainloop slices) can write ~12-17k entries,
-// so per-track capacity = (ENTRIES - tail) / (128*8) ≈ 15k. The emitter
-// counts (never silently drops) overflow in the MISC region.
+// Sized for 8 tracks x 128 SMs x 25 iters; the busiest track (~12-17k entries)
+// gives per-track capacity (ENTRIES - tail)/(128*8) ≈ 15k. Overflow is counted
+// (never silently dropped) in the MISC region.
 static constexpr size_t V2_PROF_BUF_ENTRIES = 120000ull * 128;
-// Tail of the profiler buffer reserved for accumulators (all in NANOSECONDS
-// via %globaltimer — same timebase as the trace events, no clock-rate
-// conversion). CONVENTION with demo.py's profiler_tensor; debug-only.
+// Tail reserved for accumulators (NANOSECONDS via %globaltimer — same timebase
+// as trace events). Convention with demo.py's profiler_tensor; debug-only.
 // Layout, growing back from the end:
 //   [SPIN_BASE + bucket*256 + sm]        dep-wait ns,   per task-type bucket
 //   [SPIN_BASE + bucket*256 + 128 + sm]  dep-wait count
@@ -84,18 +78,16 @@ static constexpr int V2_PROF_NUM_BUCKETS = 7;
 static constexpr size_t V2_PROF_SPIN_BASE =
     V2_PROF_BUF_ENTRIES - 256ull * V2_PROF_NUM_BUCKETS - 256;
 static constexpr size_t V2_PROF_SUFFIX_BASE = V2_PROF_BUF_ENTRIES - 256;
-// Per-track write cursors for the closure-free emitter (1024 slots covers
-// 128 SMs x 8 groups), then a misc region: [MISC_BASE + sm] counts events
-// DROPPED by the capacity guard (must be 0 in a healthy run — the checker
-// reports it). Everything from MISC_BASE on is reserved tail — the exporter
-// skips it (V2_PROF_TAIL_ENTRIES in profiler_persistent.py must match).
+// Per-track write cursors for the closure-free emitter (1024 = 128 SMs x 8),
+// then a misc region: [MISC_BASE + sm] counts events DROPPED by the capacity
+// guard (must be 0 in a healthy run). MISC_BASE on is reserved tail — the
+// exporter skips it (V2_PROF_TAIL_ENTRIES in profiler_persistent.py must
+// match).
 static constexpr size_t V2_PROF_CURSOR_BASE = V2_PROF_SPIN_BASE - 1024;
 static constexpr size_t V2_PROF_MISC_BASE = V2_PROF_CURSOR_BASE - 256;
-// Event-trigger log: a single global ring recording every
-// trigger_task_event() fired inside the profiling window, packed as
-// [63:32]=globaltimer_lo  [31:8]=event_index  [7:0]=sm. One atomic cursor.
-// Diagnoses trigger latency (when did event E actually fire, and from
-// which SM's dispatcher).
+// Event-trigger log: one global ring of every trigger_task_event() in the
+// window, packed [63:32]=globaltimer_lo [31:8]=event_index [7:0]=sm (one atomic
+// cursor). Diagnoses trigger latency (when/which-SM did event E fire).
 static constexpr size_t V2_PROF_TRIG_RING_LEN = 1048576;
 static constexpr size_t V2_PROF_TRIG_BASE =
     V2_PROF_MISC_BASE - V2_PROF_TRIG_RING_LEN;
@@ -132,13 +124,11 @@ __device__ __forceinline__ int v2_prof_bucket(int task_type) {
 }
 
 #ifdef MPK_ENABLE_PROFILING
-// Closure-free trace-event emitter for sites that cannot see the role-loop
-// profiler closure (runtime helpers like compute_dep_prefix, codegen-emitted
-// prefixes). Maintains per-track cursors in the reserved tail; the entry
-// layout matches PROFILER_INIT's interleaving exactly, so the exporter needs
-// no changes. Single writer per stall track (a designated lane), so the
-// cursor bump needs no atomics. NEVER write a role group (0-4) through this
-// — those tracks are owned by the role-loop closures.
+// Closure-free trace-event emitter for sites that can't see the role-loop
+// profiler closure (compute_dep_prefix, codegen-emitted prefixes). Per-track
+// cursors in the reserved tail; entry layout matches PROFILER_INIT, so the
+// exporter is unchanged. One writer per stall track, so the cursor bump needs
+// no atomics. NEVER write a role group (0-4) — those are owned by the closures.
 __device__ __forceinline__ void v2_prof_emit(void *prof_buf,
                                              int group,
                                              uint32_t event_idx,
@@ -198,14 +188,14 @@ __device__ __forceinline__ void v2_prof_emit_pair(void *prof_buf,
   buf[slot1] = e.raw;
 }
 
-// Ambient profiling context, so synchronization sites inside task bodies can
-// emit without threading (config, iter_num) through every signature:
-//   g_v2_prof_buf    — the profiler buffer (same for all SMs); set once in
-//                      the kernel prologue.
-//   g_v2_prof_window — 1 while the current decode step is inside the traced
-//                      window; flipped by worker 0's dispatcher at the
-//                      iteration boundary (all SMs are barrier-synced per
-//                      iter, so at most one task of fuzz at the edges).
+// Ambient profiling context, so sync sites in task bodies can emit without
+// threading (config, iter_num) through every signature:
+//   g_v2_prof_buf    — profiler buffer; set once in the kernel prologue.
+//   g_v2_prof_window — 1 while the current step is in the traced window;
+//   flipped
+//                      by worker 0's dispatcher at the iteration boundary (SMs
+//                      barrier-sync per iter, so at most one task of edge
+//                      fuzz).
 __device__ void *g_v2_prof_buf = nullptr;
 __device__ int volatile g_v2_prof_window = 0;
 
@@ -280,18 +270,10 @@ namespace runtime_v2 {
 
 using namespace mirage::runtime;
 
-// Clean v2 role runtime.
-//
-// Warp layout:
-//   W0-W3: compute
-//   W4:    loader
-//   W5:    mma
-//   W6:    storer
-//   W7:    dispatcher
-//
-// The runtime owns instruction-slot scheduling, graph dependency waiting,
-// event triggering, and generic SMEM page semaphores. Task-specific behavior
-// must live behind the generated role dispatcher.
+// v2 role runtime. Warp layout: W0-W3 compute, W4 loader, W5 mma, W6 storer,
+// W7 dispatcher. The runtime owns slot scheduling, dep waiting, event
+// triggering, and SMEM page semaphores; task-specific behavior lives behind the
+// generated role dispatcher.
 static constexpr int NUM_COMPUTE_WARPS = 4;
 static constexpr int LOADER_WARP = 4;
 static constexpr int MMA_WARP = 5;
@@ -319,12 +301,11 @@ static constexpr int NUM_INSTRUCTION_MBARS = 2;
 static constexpr int MAX_DYNAMIC_SEMAPHORES = 32;
 
 // Slot conventions for dynamic_semaphores[slot][i]:
-//   SEM_DEP_READY — compute warp 0 lane 0 spins on the cross-SM event
-//   counter, then arrives this semaphore. Other compute warps wait on it
-//   so they enter the compute body in lockstep with the dep being cleared.
-//   SEM_OP_BASE..MAX_DYNAMIC_SEMAPHORES-1 — op-private slots. Any task
-//   type that needs intra-task cross-warp coordination (e.g. linear's
-//   per-stage TMA→MMA→epilogue handshakes) uses these.
+//   SEM_DEP_READY — compute W0 lane 0 spins on the cross-SM event counter then
+//   arrives this; other compute warps wait, entering the body in lockstep with
+//   the dep clearing.
+//   SEM_OP_BASE.. — op-private slots for intra-task cross-warp coordination
+//   (e.g. linear's per-stage TMA→MMA→epilogue handshakes).
 static constexpr int SEM_DEP_READY = 0;
 static constexpr int SEM_OP_BASE = 1;
 
@@ -483,23 +464,16 @@ __device__ __noinline__ void wait_task_dependency_noinline(
   wait_task_dependency(config, task, iter_num);
 }
 
-// Compute-side dep-wait prefix, run by every task's compute body
-// (and by linear's loader/mma bodies too, since they share the body
-// string). Single-thread spin + per-slot SEM_DEP_READY mbarrier sync.
-//   - thread 0 globally spins on the cross-SM event counter, then arrives
-//     dynamic_semaphores[slot][SEM_DEP_READY].
-//   - Lane 0 of every warp running this body waits on the same semaphore.
-//   - __syncwarp() reconverges each warp's 32 lanes after its lane-0 wait.
-//
-// Wrapped __noinline__ so the multi-line body and its locals don't inflate
-// compute_warp_loop's register frame past the launch_bounds(256) ceiling
-// (same constraint that forced wait_task_dependency_noinline above).
-//
-// Phase: ring_phase(instruction_index) — same parity scheme as
-// instruction_arrived. SEM_DEP_READY is init-once at kernel start, then
-// arrived exactly once per slot use (either by the compute prefix here,
-// or by the dispatcher for tasks that skip the compute body — see
-// BEGIN_TASK_GRAPH special case in dispatcher_warp_loop).
+// Compute-side dep-wait prefix, run by every task's compute body (and linear's
+// loader/mma bodies, which share the body string). Sync:
+//   - thread 0 spins on the cross-SM event counter, then arrives
+//     dynamic_semaphores[slot][SEM_DEP_READY];
+//   - lane 0 of every warp running this body waits the same semaphore, then
+//     __syncwarp() reconverges each warp's 32 lanes.
+// __noinline__ so its locals don't push compute_warp_loop's register frame past
+// launch_bounds(256). Phase = ring_phase(instruction_index); SEM_DEP_READY is
+// init-once, then arrived exactly once per slot use (here, or by the dispatcher
+// for bodyless tasks — see BEGIN_TASK_GRAPH in dispatcher_warp_loop).
 __device__ __noinline__ void compute_dep_prefix(RuntimeConfig const &config,
                                                 TaskDesc const *task_desc,
                                                 RuntimeSMEM *rt,
@@ -538,13 +512,11 @@ __device__ __noinline__ void compute_dep_prefix(RuntimeConfig const &config,
 #endif
     mbar_arrive(&rt->dynamic_semaphores[slot][SEM_DEP_READY]);
   }
-  // All lanes wait the dependency semaphore directly. Do NOT gate this on
-  // lane 0 with a trailing __syncwarp(): on sm_100a that construct compiles
-  // to a WARPSYNC.COLLECTIVE region around the try-wait whose wake crawls
-  // ~5us per templated token at the quiet iteration head, delaying the
-  // FINISHED arrival of warps 1-3 and the task's event with it
-  // (~300us/step at bs16 after cascade; V2_TODO.md #17 has the full
-  // evidence chain).
+  // All lanes wait the dependency semaphore directly. Do NOT gate on lane 0
+  // with a trailing __syncwarp(): on sm_100a that compiles to a
+  // WARPSYNC.COLLECTIVE around the try-wait whose wake crawls ~5us/templated
+  // token at the quiet iteration head, delaying warps 1-3's FINISHED arrival
+  // and the task's event (~300us/step at bs16 after cascade; V2_TODO.md #17).
   mbar_wait(&rt->dynamic_semaphores[slot][SEM_DEP_READY], phase);
 }
 
@@ -708,15 +680,12 @@ __device__ __noinline__ void dispatcher_warp_loop(RuntimeSMEM *rt,
   // profiling track (dispatcher group): prepare/iter-barrier timing.
   MPK_V2_PROF_DECL(V2_PROF_GROUP_DISPATCHER, (lane_id == 0))
 
-  // Per-slot dedup: the last absolute sequence whose graph event we already
-  // triggered for this ring slot. This lets the dispatcher trigger events
-  // OUT OF ORDER — eagerly, as soon as a task's role warps finish — without
-  // ever double-counting. Out-of-order triggering is REQUIRED to avoid a
-  // deferred-trigger deadlock: an earlier compute task (next in this SM's
-  // ring) can block on a graph event whose producer is a LATER, already
-  // finished task on the same ring. The old in-order
-  // wait_finished_and_trigger_through could never reach that later producer,
-  // so its event never fired and the whole pipeline froze.
+  // Per-slot dedup: last absolute sequence whose graph event we triggered for
+  // this slot. Lets the dispatcher trigger OUT OF ORDER (eagerly, as role warps
+  // finish) without double-counting. Out-of-order is REQUIRED: an earlier
+  // compute task can block on an event whose producer is a LATER, already
+  // finished task on the same ring — the old in-order trigger never reached
+  // that producer, so the pipeline froze.
   int triggered_seq[INSTRUCTION_RING_SIZE];
 #pragma unroll
   for (int s = 0; s < INSTRUCTION_RING_SIZE; s++) {
@@ -855,30 +824,23 @@ __device__ __noinline__ void dispatcher_warp_loop(RuntimeSMEM *rt,
         }
         ::kernel::cp_async_fence();
         ::kernel::cp_async_wait<0>();
-        // The TaskDesc was copied via cp.async; role warps read it with normal
+        // TaskDesc was copied via cp.async; role warps read it with normal
         // loads after the INSTRUCTION_ARRIVED mbar. Publish those async writes
-        // to the generic proxy before the arrive. v1 got this implicitly from
+        // to the generic proxy before the arrive (v1 got this implicitly from
         // the
-        // __syncthreads after cp_async_wait; v2's warp-specialized handshake
-        // doesn't, and the PTX memory model requires the fence here.
+        // __syncthreads after cp_async_wait; v2's handshake doesn't, and the
+        // PTX memory model requires the fence).
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
       }
       __syncwarp();
 
-      // Op-declared per-instruction semaphore initialization. The body is
-      // emitted by codegen and runs single-threaded (lane 0) once per
-      // published instruction, before role warps wake. Empty for ops that
-      // don't declare any dynamic semaphores.
-      //
-      // ALSO: BEGIN_TASK_GRAPH skips the role-warp compute body entirely
-      // (the role-warp-loop macro early-returns from execute_task), so its
-      // slot's SEM_DEP_READY would never be arrived. To keep the
-      // ring_phase parity in sync for the next task at this slot,
-      // dispatcher arrives SEM_DEP_READY here on its behalf. The per-page
-      // parity needs the same protection — every task in the
-      // pipeline must arrive each page exactly once, otherwise consecutive
-      // tasks deadlock on page_finished. Dispatcher arrives all pages on
-      // BEGIN_TASK_GRAPH's behalf.
+      // Op-declared per-instruction semaphore init: codegen-emitted, lane-0,
+      // once per published instruction before role warps wake (empty for ops
+      // with no dynamic semaphores).
+      // BEGIN_TASK_GRAPH skips the role-warp compute body, so its SEM_DEP_READY
+      // and per-page parity would never be arrived; the dispatcher arrives both
+      // on its behalf to keep ring_phase/page parity in sync (else consecutive
+      // tasks deadlock on page_finished).
       if (lane_id == 0) {
         _execute_init_semaphores_v2(
             rt->task_slot(slot), config, rt, sequence, iter_num);
@@ -891,18 +853,13 @@ __device__ __noinline__ void dispatcher_warp_loop(RuntimeSMEM *rt,
       }
       __syncwarp();
 
-      // No more dispatcher-side dep wait — computes handle it themselves
-      // via wait_task_dependency_noinline in their compute prefix. The
-      // dispatcher is now pure fetch+publish.
-      //
-      // Intra-stream producer events (sequence S-1, S-2 in this same ring
-      // stream feeding this same SM's compute) get triggered at slot reuse
-      // via wait_slot_finished_eager(sequence - INSTRUCTION_RING_SIZE)
-      // above. That introduces up to RING-1 instructions of latency for
-      // intra-stream compute-producer chains; in practice these are rare
-      // because the worker queues round-robin tasks across SMs. If this turns
-      // out hot, event triggering could move into the storer warp to cut the
-      // latency.
+      // Dispatcher is pure fetch+publish; computes do their own dep wait via
+      // wait_task_dependency_noinline. Intra-stream producer events fire at
+      // slot reuse via wait_slot_finished_eager(sequence -
+      // INSTRUCTION_RING_SIZE) above — up to RING-1 instructions of latency for
+      // intra-stream compute-producer chains, but rare since worker queues
+      // round-robin tasks across SMs. If hot, move event triggering into the
+      // storer warp.
       if (lane_id == 0) {
         // Do not release role warps until the copied TaskDesc is visible in
         // shared memory. The block fence must happen before mbar_arrive
@@ -915,12 +872,10 @@ __device__ __noinline__ void dispatcher_warp_loop(RuntimeSMEM *rt,
       sequence++;
     }
 
-    // Drain all live ring slots for this worker before ending the decode
-    // iteration: block until each of the last RING tasks has finished (pumping
-    // eager triggers so cross-dependencies among them resolve), then a final
-    // eager sweep guarantees every published task's event has fired. This
-    // preserves the iteration boundary expected by prepare_next_batch and the
-    // global step/token state.
+    // Drain live ring slots before ending the decode iteration: block until the
+    // last RING tasks finish (pumping eager triggers so cross-deps resolve),
+    // then a final eager sweep ensures every published event fired. Preserves
+    // the iteration boundary prepare_next_batch and step/token state expect.
     if (lane_id == 0) {
       int lo = sequence - INSTRUCTION_RING_SIZE;
       if (lo < 0) {
