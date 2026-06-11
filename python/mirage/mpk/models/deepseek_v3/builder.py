@@ -295,31 +295,10 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_dense_num_workers(self, output_size=None):
         """Worker count for one fp8_gemm_dense_{smallm,mediumm} call.
 
-        Decode-only builds (`_use_prefill=False`) use the full worker pool.
-        Dual-dispatch builds cap at 80 so other tasks (ROPE / rmsnorm / KV
-        gather) can overlap the dense wave. When `output_size` is given the
-        count is further collapsed to the single-wave tile count
-        `ceil(M_max/128) * ceil(N/128)` (BN=128 fixed in the kernel; the
-        kernel strides output tiles by num_workers and idle CTAs
-        early-return, so this is byte-identical). FLOOR=24 because the
-        NVSHMEM barrier crashes at low worker counts.
-
-        `_fp8_dense_kv_b_proj` does NOT use this — its runtime_m_mode=1
-        large-M path requires the full `num_workers`.
+        Decode-only demo: always the full worker pool (the prefill-only
+        80-cap / single-wave tuning was removed with the prefill path).
         """
-        if not self._use_prefill:
-            return self.num_workers
-        base = min(80, self.num_workers)
-        if output_size is None:
-            return base
-        # M_max = compile-time mbt (runtime M is capped to active_rows at
-        # exec time, never larger).
-        FLOOR = 24
-        bn = 128
-        m_tiles = (self.max_num_batched_tokens + bn - 1) // bn
-        n_tiles = (output_size + bn - 1) // bn
-        single_wave = m_tiles * n_tiles
-        return min(base, max(single_wave, FLOOR))
+        return self.num_workers
 
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                     grid_dim, block_dim, residual=None, gate_mode: int = 0,
@@ -522,21 +501,6 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(self.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
-
-    def _fp8_sequence_buffers_for_reduction(
-        self, reduction_size: int, tag: str = "shared"
-    ):
-        """Sequence-rows FP8 input + scale pair for the chunked-prefill
-        kv_b projections. Rows = max_num_batched_requests * max_seq_length
-        padded up to a multiple of 128 (chunked-prefill TMA box BN_BOX=128;
-        unpadded rows OOB-NaN-fill the PV MMA)."""
-        _raw_rows = (self.mpk.max_num_batched_requests
-                     * self.mpk.max_seq_length)
-        rows = ((_raw_rows + 127) // 128) * 128
-        return self._fp8_quant_buffers(
-            rows, reduction_size,
-            f"fp8_seq_input_{reduction_size}_{tag}",
-            f"fp8_seq_scale_{reduction_size}_{tag}")
 
     def _fused_rmsnorm_quantize_qkv_a_tag(self, layer_idx: int) -> str:
         """Deterministic share_quantize_tag for the fused
@@ -927,56 +891,6 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             residual=residual,
             gate_mode=0,
-        )
-
-    def _fp8_dense_kv_b_proj(
-        self, ckv, weight, weight_scale, output, tag: str,
-        shared_quantize_tag: str = None,
-    ):
-        """Chunked-prefill kv_b_k / kv_b_v projection: quantize ckv_sep to
-        FP8 (sequence-rows buffer), then dense FP8 GEMM with
-        runtime_m_mode=1 (prefill-only, runtime-M).
-
-        shared_quantize_tag: kv_b_k and kv_b_v quantize the SAME ckv_sep
-        bytes — pass the same tag to both calls in a layer so only the
-        FIRST emits the quantize task and the second reuses the buffer.
-
-        The GEMM keeps the full `self.num_workers` (NOT the wave-collapsed
-        `_fp8_dense_num_workers`) — the runtime_m_mode=1 large-M path
-        crashes at lower worker counts.
-        """
-        if weight_scale is None:
-            raise ValueError("kv_b prefill projection requires FP8 weight scale.")
-        buf_tag = shared_quantize_tag if shared_quantize_tag is not None else tag
-        input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
-            self.kv_lora_rank, tag=buf_tag)
-        emit_quantize = True
-        if shared_quantize_tag is not None:
-            already_quantized = getattr(self, "_kv_b_quantized_tags", set())
-            if shared_quantize_tag in already_quantized:
-                emit_quantize = False
-            else:
-                already_quantized.add(shared_quantize_tag)
-                self._kv_b_quantized_tags = already_quantized
-        if emit_quantize:
-            self.mpk.quantize_fp8_layer(
-                input=ckv,
-                output_fp8=input_fp8,
-                output_scale=input_scale,
-                grid_dim=(input_fp8.dim(0), 1, 1),
-                block_dim=(128, 1, 1),
-                scale_ue8m0=False,
-                active_mode=1,
-            )
-        dsv3_tasks.fp8_gemm_dense_layer(
-            self.mpk,
-            input_fp8=input_fp8,
-            weight_fp8=weight,
-            input_scale=input_scale,
-            weight_scale=weight_scale,
-            output=output,
-            num_workers=self.num_workers,
-            runtime_m_mode=1,
         )
 
     def _silu_mul_fp8_linear(self, silu_input, silu_bf16_output, weight,
