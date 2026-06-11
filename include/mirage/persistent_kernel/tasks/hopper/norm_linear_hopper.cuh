@@ -197,6 +197,7 @@ __device__ __forceinline__ void
       int prefetch = (Kstages < num_k) ? Kstages : num_k;
       for (int i = 0; i < prefetch; i++) {
         if (threadIdx.x == 128) {
+          // printf("prefetch: %d\n", i);
         }
         int slot = i % Kstages;
         int tma_coords_in[2] = {i * TILE_SIZE, 0};

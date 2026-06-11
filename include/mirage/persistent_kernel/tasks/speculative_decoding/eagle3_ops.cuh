@@ -254,6 +254,37 @@ __device__ __forceinline__ void
   // Debug-instrumentation: atomically increment accept-rate histogram bin
   // for this iter's `ac`. `ac` lies in [1, K+1] (verify_strict guarantees);
   // bin 0 is reserved for "iters that ran the commit kernel" sanity counter.
+  //
+  // Measured values (B200 GPU 4, Qwen3-30B-A3B, prompt-len 39, gen-len ~400):
+  //   K=1: hist=[0,184,154]      → step-0 accept = 45.6%   (matches baseline)
+  //   K=2: hist=[0,259,41,18]    → step-0 accept = 18.6%   (vs expected ~46%)
+  //                              → step-1 cond = 30.5%
+  //                              → per-draft = 12.1%
+  //
+  // Root cause investigation (2026-05-22):
+  //   - NOT the Q_LEN_OVERRIDE=1+TAIL_OFFSET=K-step path: running K=2 step 0
+  //     with DEFAULT attention (mbt=3, no overrides) still gives 19.7% step 0
+  //   - NOT the argmax_partial_grid_dim=(workers,1,1) restriction: the argmax
+  //     kernel iterates num_active_tokens=mbt internally regardless of grid_y,
+  //     so all mbt slots are computed
+  //   - NOT cross-step state corruption: scatter writes are column-wise
+  //     (step k writes column k), step ordering serialized by MPK
+  //   - ROOT CAUSE ISOLATED (via device-side trace, 2026-05-23): the bug is
+  //     in `paged_attention_sm100` at MAX_TOKENS=3, NOT in the eagle3 commit
+  //     or scatter logic. Byte-comparing K=1 (mbt=2) vs K=2 (mbt=3) traces on
+  //     the same prompt: at iter 0 both produce argmax[0]=12 (identical), but
+  //     at iter 1 with identical `tokens[step]=12` input and identical past
+  //     K/V cache content (causal mask should make slot 0 independent of
+  //     slots 1, 2), K=1 produces argmax[0]=17 while K=2 produces
+  //     argmax[0]=525. The target main fwd's slot-0 attention output diverges
+  //     between MAX_TOKENS=2 and MAX_TOKENS=3 despite identical mathematical
+  //     inputs to slot 0. Candidate fix sites in attention_sm100.cuh:
+  //       (a) MMA_ITERS_M=2 garbage propagation: m=1 tile has -inf m_local
+  //           that may NaN-poison slot 0's accumulator path
+  //       (b) causal mask formula `col + iter*KV_TILE <= token_idx + seq_len
+  //           - num_tokens` (line 519) at MAX_TOKENS=3 with small seq_len
+  //       (c) cache write/read overlap when seq_len-num_tokens shifts left by
+  //           one position from mbt=2 to mbt=3
   if (t_id == 0 && accept_hist_ptr != nullptr) {
     int *hist = static_cast<int *>(accept_hist_ptr);
     atomicAdd(&hist[ac], 1);

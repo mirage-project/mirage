@@ -245,6 +245,27 @@ struct CollectiveEpilogue {
       Tensor tCgD = thr_mma.partition_C(gD); // (VEC,THR_M,THR_N)
       Tensor tCgC = thr_mma.partition_C(gC); // (VEC,THR_M,THR_N)
 
+#if 0
+    if (threadIdx.x == 128) {
+      printf("\n");
+      printf("dD: \n"); print(stride_d); printf("\n");
+      printf("dC: \n"); print(stride_c); printf("\n");
+      printf("problem_shape_MNKL: \n"); print(problem_shape_mnkl); printf("\n");
+      printf("blk_shape_MNK: \n"); print(blk_shape_MNK); printf("\n");
+      printf("blk_coord_mnkl: \n"); print(blk_coord_mnkl); printf("\n");
+      printf("thr_mma: \n"); print(thr_mma); printf("\n");
+      printf("mC_mnl: \n"); print(mC_mnl); printf("\n");
+      printf("mD_mnl: \n"); print(mD_mnl); printf("\n");
+      printf("gC_mnl: \n"); print(gC_mnl); printf("\n");
+      printf("gD_mnl: \n"); print(gD_mnl); printf("\n");
+      printf("gC: \n"); print(gC); printf("\n");
+      printf("gD: \n"); print(gD); printf("\n");
+      printf("tCgD: \n"); print(tCgD); printf("\n");
+      printf("tCgC: \n"); print(tCgC); printf("\n");
+      printf("\n");
+    }
+#endif
+
       static_assert(is_static<FrgLayout>::value,
                     "Accumulator layout must be static");
       CUTE_STATIC_ASSERT_V(

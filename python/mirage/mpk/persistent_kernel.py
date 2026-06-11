@@ -369,15 +369,10 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
-        kv_cache: Optional[dict] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
-        # Optional paged KV-cache pool registered at construction. New-API
-        # models (mirage.mpk.layers catalog) read their per-layer slice via
-        # ``self.get_kv_cache(layer_idx)``.
-        self._kv_cache = kv_cache
 
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
@@ -4635,62 +4630,6 @@ class PersistentKernel:
                 self.profiler_tensor, stem + ".perfetto-trace"
             )
             export_to_csv(self.profiler_tensor, stem + ".csv")
-
-    # ------------------------------------------------------------------
-    # Ported from dev-v8-rope-prefill-main (layers-catalog / new-API
-    # support): compile_scope + get_kv_cache + run_test_mode. These back
-    # the ``mirage.mpk.layers`` catalog models (qwen3/deepseek_v3
-    # ``modeling.py``) and the test-mode unit tests.
-    # ------------------------------------------------------------------
-
-    def compile_scope(self):
-        # Returning the free-function contextmanager (rather than implementing
-        # it inline) keeps the ContextVar binding logic in one place — see
-        # mirage.mpk.context.compile_scope. Imported lazily to avoid a hard
-        # import-time cycle (context.py only references PersistentKernel under
-        # TYPE_CHECKING).
-        from .context import compile_scope as _compile_scope
-        return _compile_scope(self)
-
-    def get_kv_cache(self, layer_idx: int):
-        # Returns the (k_slice, v_slice) torch tensors for one decoder
-        # layer's paged KV cache. The pool was registered into the PK
-        # at construction via ``kv_cache={"k_cache": ..., "v_cache": ...}``.
-        # New-API ``PagedAttention.compile()`` calls this then
-        # ``attach_input`` to convert to DTensors.
-        if self._kv_cache is None:
-            raise RuntimeError(
-                "PersistentKernel was constructed without kv_cache=; "
-                "pass kv_cache={'k_cache': k_pool, 'v_cache': v_pool} "
-                "where each pool has dim-0 == num_layers."
-            )
-        return self._kv_cache["k_cache"][layer_idx], self._kv_cache["v_cache"][layer_idx]
-
-    def run_test_mode(self):
-        """Test-mode execution: launch the task graph once.
-
-        Input/output tensors must be pre-attached via attach_input() before
-        compile(). After run_test_mode() returns, the output tensors contain the results.
-        """
-        assert self.test_mode, "run_test_mode() is only available in test mode"
-        assert self._is_compiled, "Must call compile() before run_test_mode()"
-
-        stream = torch.cuda.current_stream()
-        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
-        stream_ptr = 0
-        if hasattr(stream, "cuda_stream"):
-            try:
-                stream_ptr = int(stream.cuda_stream)
-            except Exception:
-                try:
-                    stream_ptr = int(stream.cuda_stream.value)
-                except Exception as e:
-                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
-        elif isinstance(stream, int):
-            stream_ptr = stream
-        else:
-            raise ValueError("Invalid stream object")
-        self.launch_func(stream_ptr)
 
     def __del__(self):
         if not self.__finalized__:
