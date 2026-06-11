@@ -1,121 +1,216 @@
 ---
 name: add-mpk-model
-description: Guide for adding a new model (e.g., Llama4, DeepSeek V3) to the MPK persistent kernel. Covers prerequisites check, demo structure, layer wiring, and testing.
+description: Guide for adding a new model (e.g., Llama4, DeepSeek V3) to the MPK persistent kernel. Enforces a bottom-up modular build: discover catalog, pick fused variants, build the smallest composite first, test it against its PyTorch reference, then climb upward.
 ---
 
-You are helping the user add a new model to MPK. This is a context + guidelines skill (not a step-by-step recipe) because model implementations vary significantly depending on architecture (dense vs MoE, GQA vs MLA, etc.).
+You are helping the user add a new model to MPK.
 
-## Prerequisites Check
+The **preferred path** is a `python/mirage/mpk/models/<model>/modeling.py` file that defines an `nn.Module` tree (each block is an `MPKModule` subclass composing catalog layers from `mirage.mpk.layers`), paired with a `demo/<model>/demo_new.py` driver. References: `python/mirage/mpk/models/qwen3/modeling.py` + `demo/qwen3/demo_new.py` (dense GQA + paged attention), and `python/mirage/mpk/models/deepseek_v3/modeling.py` + `demo/deepseek_v3/demo_new.py` (MLA + MoE).
 
-Before writing any model code, identify what the new model needs:
+The **legacy path** — a custom `GraphBuilder` subclass calling `pk.foo_layer()` methods directly — still works (see `python/mirage/mpk/models/deepseek_v3/builder.py` + `demo/deepseek_v3/demo.py`) but is not recommended for new models.
 
-1. **List the model's layers**: embedding, normalization, attention (what variant?), feed-forward (dense or MoE?), output head.
-2. **Check which layer methods already exist** in `python/mirage/mpk/persistent_kernel.py`. Search for `def *_layer` methods. Common ones: `embed_layer`, `rmsnorm_layer`, `linear_layer`, `silu_mul_layer`, `paged_attention_layer`, `moe_topk_softmax_routing_layer`, `moe_w13_linear_layer`, etc.
-3. **For any missing layers**: use the `/add-mpk-task` skill to add them first. Each missing layer requires implementing a CUDA task kernel and Python layer method.
-4. **Check the model's attention mechanism**: GQA (grouped-query attention) is standard for Qwen3/Llama. MLA (multi-latent attention) requires `mla_prefill_layer`/`mla_decode_layer`. Novel attention variants need new tasks.
-5. **Check weight naming**: You'll need to map HuggingFace weight names to MPK names for the weight shard loader.
+---
 
-## Where Model Code Lives
+## The Mandatory Workflow: Bottom-Up Modularity
 
-Model implementations live in `demo/<model_name>/`, NOT in `python/mirage/mpk/models/`. The `models/` directory holds only base infrastructure (`GraphBuilder`, `MirageModelConfig`, model registry).
+**Building a new model top-down (write the whole `ForCausalLM`, then run the end-to-end demo, then debug a failing token) is the wrong way.** When something is wrong, the failure surfaces hundreds of MB of tensor operations away from its cause and the search space is the whole model.
 
-```
-demo/<model_name>/
-  demo.py                    # End-to-end inference demo
-  models/                    # HuggingFace model files
-    modeling_<model>.py      # HF model definition (for reference)
-    configuration_<model>.py # HF config class
-  <model>_shard_loader.py    # Weight name mapping + sharding (if multi-GPU)
-```
+**Build bottom-up instead, with a numerical comparison at every level.** Each composite you write owns BOTH a `forward()` (eager PyTorch reference) and a `compile()` (MPK task registration), AND a test file that runs the composite standalone in `test_mode` and asserts `torch.testing.assert_close(forward_out, compile_out)`. You do not move up a level until the current level's test passes.
 
-**Reference implementations:**
-- `demo/qwen3/` — Canonical dense transformer model
-- `demo/deepseek_v3/` — MoE model (DeepSeek V3 with MLA + MoE)
+This makes every bug have one possible cause: the composite you just wrote.
 
-## How to Build the Demo
+### Stage 0 — Catalog discovery (no code yet)
 
-The demo script follows this pattern (see `demo/qwen3/demo.py`):
+1. List every layer the model uses: embedding, normalization, projection layers (q/k/v/o, gate/up/down), routing, expert linears, activation, attention, RoPE, lm_head, sampler.
+2. For each one, search `python/mirage/mpk/layers/` for a matching `MPKModule`. The catalog inventory is in the appendix below.
+3. **Pick the most fused variant available.** Examples:
+   - Prefer `LinearWithResidual` over `Linear` + `layers.add` when there's a residual.
+   - Prefer `MoEPermute` + `FP8GroupGEMM*` + `MoEUnpermute` (group-GEMM path) over `MoEW13FP8` + `MoEW2FP8` (per-expert path) on Blackwell when applicable.
+   - Use `PagedAttention` (handles prefill + decode in one task) instead of separate prefill/decode kernels.
+   - For MLA decode use `MLADecode` + `MLAReduce`. For chunked prefill use `MLAPrefillTP8Chunked`.
+4. Flag every layer that has NO catalog match. For each one, stop here and invoke `/add-mpk-task` to implement it first. **Do not start composing until every leaf you need exists in the catalog.**
+5. Write down (in a temporary scratch file or comments) the dependency tree you intend to build, e.g.:
 
-```python
-# 1. Parse args (model path, batching config, profiling flags)
-# 2. Load model config from HuggingFace
-# 3. Create MPKMetadata with runtime configuration
-metadata = MPKMetadata(
-    mode="offline",
-    model_name="org/Model-Name",
-    weight_from_model=True,
-    max_num_batched_tokens=...,
-    max_num_batched_requests=...,
-    page_size=..., max_num_pages=...,
-    # ...
-)
-# 4. Create MPK and build the computation graph
-mpk = MPK(metadata)
-mpk.build()    # Calls the model builder to wire layers
-# 5. Compile the megakernel
-mpk.compile()
-# 6. Load request and run inference
-mpk.load_new_request("Your prompt here")
-mpk()
-```
+   ```
+   Qwen3MLP  := Linear(gate+up via shuffle_tensors) → SiluMul → LinearWithResidual(down)
+   Qwen3Attention := Linear(qkv via shuffle_tensors) → PagedAttention → LinearWithResidual(o_proj)
+   Qwen3DecoderLayer := RMSNorm → Qwen3Attention → RMSNorm → Qwen3MLP
+   Qwen3Model := Embed → [DecoderLayer * N] → RMSNorm
+   Qwen3ForCausalLM := Qwen3Model → Linear(lm_head) → ArgmaxPartial → ArgmaxReduce
+   ```
 
-## Wiring Layers in the Builder
+Now you build this tree leaf-up.
 
-The builder (subclass of `GraphBuilder` or custom code in the demo) constructs the computation graph by calling layer methods on `PersistentKernel`:
+### Stage 1 — Smallest meaningful composite
+
+Pick the smallest composite in your tree that has a non-trivial PyTorch reference. For most LLMs this is the **MLP block** (3 linears + activation) or the **attention block** (qkv projection + attention + o projection + residual). Implement it as a single `MPKModule` subclass:
 
 ```python
-# Attach weight tensors from state dict
-w_norm = pk.attach_input(state_dict["model.layers.0.input_layernorm.weight"], name="layer_0_norm")
-w_qkv = pk.attach_input(qkv_weight, name="layer_0_wqkv")
+class MyMLP(MPKModule):
+    def __init__(self, config, *, prefix=""):
+        super().__init__(prefix=prefix)
+        # nn.Parameter weights — match HF state_dict naming via _load_from_state_dict
+        self.gate_proj_weight = nn.Parameter(...)
+        ...
 
-# Create intermediate buffers
-norm_out = pk.new_tensor(dims=(...), name="norm_out", io_category="cuda_tensor")
+    def _load_from_state_dict(self, state_dict, prefix, ...):
+        # Pop HF keys, copy into self.<name>_weight.
+        ...
 
-# Chain layer calls
-pk.rmsnorm_layer(input=x, weight=w_norm, output=norm_out, grid_dim=(...), block_dim=(...))
-pk.linear_layer(input=norm_out, weight=w_qkv, output=qkv_out, grid_dim=(...), block_dim=(...))
-pk.paged_attention_layer(...)
-# ... etc for each layer in the model
+    def forward(self, x, residual):
+        """Eager PyTorch reference — the correctness oracle for this composite."""
+        gate = F.linear(x, self.gate_proj_weight)
+        up   = F.linear(x, self.up_proj_weight)
+        silu = (F.silu(gate.float()) * up.float()).to(x.dtype)
+        return F.linear(silu, self.down_proj_weight) + residual
+
+    def compile(self, x_dt, *, residual_dt, output):
+        """MPK task wiring — compose catalog modules / pk primitives."""
+        pk = current_pk()
+        # ... see "Composing in compile()" below ...
+        return output
 ```
 
-### grid_dim / block_dim Selection
-
-- `block_dim`: Always `(128,1,1)` for Ampere, `(256,1,1)` for Hopper/Blackwell. Use `pk.target_cc >= 90` to choose.
-- `grid_dim`: Depends on the layer. For batch-parallel layers (rmsnorm, embedding): `(max_num_batched_tokens, 1, 1)`. For linear layers, use the `grid_for_rmsnorm_linear_layer()` helper from the Qwen3 demo.
-
-### Weight Shard Loader (Multi-GPU)
-
-If the model uses tensor parallelism, create a shard loader mapping HuggingFace weight names to MPK names with sharding types:
+Write a unit test alongside it:
 
 ```python
-mapping = {
-    "q_proj": {"name": "wq", "shard_type": [(ShardType.COL_PARALLEL,)]},
-    "o_proj": {"name": "wo", "shard_type": [(ShardType.ROW_PARALLEL,)]},
-    "input_layernorm": {"name": "attn_norm", "shard_type": [(ShardType.NONE,)]},
-    # ...
-}
+# tests/runtime_python/models/<model>/test_my_mlp.py
+def test_my_mlp_testmode():
+    cfg = SimpleNamespace(hidden_size=4096, intermediate_size=11008)
+    m   = MyMLP(cfg).to("cuda", torch.bfloat16)
+    x   = torch.randn(8, cfg.hidden_size, dtype=torch.bfloat16, device="cuda")
+    r   = torch.randn(8, cfg.hidden_size, dtype=torch.bfloat16, device="cuda") * 0.01
+    ref = m.forward(x, r)
+
+    # Build a tiny test-mode PK, attach inputs, call m.compile(), run.
+    num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
+    params = PersistentKernel.get_default_init_parameters()
+    params.update(test_mode=True, num_workers=num_workers,
+                  num_local_schedulers=num_schedulers,
+                  max_num_batched_tokens=8, max_num_batched_requests=8)
+    pk = PersistentKernel(**params)
+    x_dt = pk.attach_input(x, name="x")
+    r_dt = pk.attach_input(r, name="r")
+    out  = torch.zeros_like(ref)
+    with pk.compile_scope():
+        m.compile(x_dt, residual_dt=r_dt, output=out)
+    pk.compile(output_dir=os.path.dirname(__file__))
+    pk()
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 ```
 
-See `demo/qwen3/qwen3_shard_loader.py` for the complete pattern.
+Run it on a free GPU. **Don't proceed until it passes.** If the diff is large:
+- Check tensor layouts (especially fused `[gate|up]` halved layout for silu_mul, GQA-interleaved fused QKV for paged attention).
+- Check that the catalog modules' `forward()` and `compile()` themselves are consistent (catalog test at `tests/runtime_python/layers/test_<leaf>.py` should already PASS — if it doesn't, that's a catalog bug, not your composite's bug).
 
-## Attention Patterns
+### Stage 2 — Next level up: attention block, decoder layer
 
-- **Standard GQA** (Llama, Qwen3): Use `paged_attention_layer` or `paged_attention_split_kv_layer`.
-- **MLA** (DeepSeek V3): Use `mla_prefill_layer` / `mla_decode_layer`.
-- **Novel attention**: Implement as a new task via `/add-mpk-task`.
+After MLP passes, write `MyAttention`, then `MyDecoderLayer = RMSNorm → MyAttention → RMSNorm → MyMLP`. Same drill: both `forward()` and `compile()`, then a test that runs the whole decoder layer standalone and asserts numerical match. Use a tiny KV cache pool, 1-2 tokens, and `test_mode=True` so the runtime quits after one task graph iteration.
 
-## MoE Models
+For the test, you'll need to set up the meta-tensors (`qo_indptr_buffer`, `paged_kv_indptr_buffer`, etc.) that the attention kernel reads. See `demo/qwen3/demo_new.py` for the minimal viable setup; copy the meta-tensor block into your test.
 
-For Mixture-of-Experts models, the available layer methods are:
-- `moe_topk_softmax_routing_layer` — Router (top-k gating with softmax)
-- `moe_sigmoid_topk_routing_layer` — Router (sigmoid gating, DeepSeek V3 style)
-- `moe_w13_linear_layer` / `moe_w13_fp8_layer` — First expert linear (gate+up fused)
-- `moe_silu_mul_layer` — SiLU activation between expert linear layers
-- `moe_w2_linear_layer` / `moe_w2_fp8_layer` — Second expert linear (down projection)
-- `moe_mul_sum_add_layer` — Combine expert outputs with routing weights + residual
+### Stage 3 — Reduced-layer model
 
-## Verification
+Build `MyModel` and `MyForCausalLM`. Add a `--layers 0-3` flag to your `demo_new.py` that overrides `config.num_hidden_layers` before instantiation. Run with random or real weights. End-to-end smoke check: does `pk.compile()` finish? Does `pk()` finish without `cudaErrorIllegalAddress`? Are the output tokens finite?
 
-1. **Test individual layers** using test mode before wiring the full model. See `tests/runtime_python/test_mode/test_qwen3_mlp_testmode.py` for the canonical pattern — it tests gate+up linear, silu_mul, and down+residual individually and as a pipeline.
-2. **Compile test**: `mpk.compile(output_dir="./debug_output")` to inspect generated CUDA code and task graph JSON.
-3. **Correctness test**: Compare MPK output against a HuggingFace reference model on the same prompt. Outputs should match within bfloat16 tolerance (~1e-2 max abs error per token).
+### Stage 4 — Full model, full prompt
+
+Only after the reduced-layer smoke passes do you run the full model. Compare the generated token stream against the legacy `demo.py --use-mirage` driver (if it exists) on the same prompt. Outputs should match token-by-token.
+
+### Where to put tests
+
+- `tests/runtime_python/layers/test_<leaf>.py` — catalog leaf tests (already exist; you reuse them).
+- `tests/runtime_python/models/<model>/test_<composite>_testmode.py` — your composite tests.
+- `tests/runtime_python/test_mode/` — multi-block pipelines that don't correspond to a single composite.
+- The demo's `--skip-weight-load` + `--layers 0-3` flags are the stage-3 smoke.
+
+---
+
+## Composing in `compile()`
+
+Two patterns appear in every catalog composite:
+
+**Pattern A: chain catalog modules via their `compile()` methods.** Each returns a DTensor (or writes through `output=`). Pass it to the next.
+
+```python
+def compile(self, x_dt, *, residual_dt, output):
+    pk = current_pk()
+    mid    = self.gate_up.compile(x_dt)           # Linear (fused via shuffle_tensors)
+    activ  = self.silu_mul.compile(mid)
+    return self.down.compile(activ, residual=residual_dt, output=output)  # LinearWithResidual
+```
+
+**Pattern B: drop down to `pk.<primitive>` when the catalog doesn't cover the wiring.** Common case: `pk.shuffle_tensors(...)` to fuse two weight tensors at compile time before feeding them to a Linear. This is fine; the catalog is not exhaustive.
+
+```python
+def compile(self, x_dt, *, residual_dt, output):
+    pk = current_pk()
+    w_gate_dt = pk.attach_input(self.gate_proj_weight, name=f"{self.prefix}gate_proj_weight")
+    w_up_dt   = pk.attach_input(self.up_proj_weight,   name=f"{self.prefix}up_proj_weight")
+    num_tasks = _grid_for_linear(2 * self.intermediate_size)
+    w_gateup_dt = pk.shuffle_tensors(
+        inputs=[w_gate_dt, w_up_dt], shuffled_dim=0,
+        num_groups=num_tasks // 2, name=f"{self.prefix}gateup_proj",
+    )
+    mlp_mid = pk.new_tensor(
+        dims=(pk.max_num_batched_tokens, 2 * self.intermediate_size),
+        dtype=_mi_bf16, name=f"{self.prefix}per_layer_mlp_mid",
+    )
+    pk.linear_layer(input=x_dt, weight=w_gateup_dt, output=mlp_mid,
+                    grid_dim=(num_tasks, 1, 1), block_dim=(128, 1, 1))
+    ...
+```
+
+**Naming convention**: `prefix` strings use `_` separator (no dots — dots are illegal in C++ identifiers used as MPK tensor names). Build prefixes by concatenation: `f"{prefix}self_attn_"` etc.
+
+**Allocate per-layer intermediates** inside each `DecoderLayer.compile()` call. The old "shared across all 36 layers" pattern is no longer required (a kernel bug that forced it was fixed).
+
+---
+
+## `current_pk()` and `pk.compile_scope()`
+
+The `current_pk()` helper resolves the active `PersistentKernel` via a `contextvars.ContextVar`. It MUST be called inside a `with pk.compile_scope():` block at the model root — typically the demo driver. Calling `current_pk()` outside the scope raises a clear `RuntimeError`.
+
+```python
+# in demo_new.py
+pk = mi.PersistentKernel(...)
+input_tokens_dt = pk.attach_input(input_tokens, name="input_token")
+with pk.compile_scope():
+    model.compile(input_tokens_dt, output_tokens=output_tokens)  # current_pk() resolves inside
+pk.compile(output_dir=args.output_dir)
+```
+
+---
+
+## Driver responsibilities
+
+The `modeling.py` does NOT handle these — the driver does:
+
+- Allocating meta-tensors (`qo_indptr_buffer`, `paged_kv_indptr_buffer`, `paged_kv_indices_buffer`, `paged_kv_last_page_len_buffer`, `step`, `tokens`, `input_tokens`, `output_tokens`, `num_new_tokens`, `prompt_lengths`).
+- Allocating the KV cache pool. Shape depends on attention type:
+  - Standard GQA: `(num_layers, max_num_pages, page_size, num_kv_heads, head_dim)` for both `k_cache` and `v_cache`.
+  - MLA: single combined `(num_layers, max_num_pages, page_size, kv_lora_rank + qk_rope_head_dim)` pool registered as both `k_cache` and `v_cache` (the modeling slices it).
+- Constructing `PersistentKernel` with `meta_tensors=`, `kv_cache=`, `target_cc`, etc.
+- Tokenizing the prompt, populating `tokens` / `prompt_lengths`.
+- Loading HF weights, dequantizing FP8 if needed, any pre-shuffle/absorption that doesn't fit in `_load_from_state_dict`.
+- Pre-padding `lm_head.weight` to the argmax-partial grid stride (256-multiple).
+- Wrapping `model.compile()` in `with pk.compile_scope():`.
+- Running `pk()` and reading `tokens` for the decoded output.
+
+See `demo/qwen3/demo_new.py` for the full skeleton.
+
+---
+
+## File layout & reference implementations
+
+```
+python/mirage/mpk/models/<model>/modeling.py   # MPKModule tree
+demo/<model>/demo_new.py                       # driver
+```
+
+Read these references — your `modeling.py` should follow the same conventions verbatim (sub-block `prefix` chaining, `_load_from_state_dict` HF-key mapping, per-layer intermediate allocation inside each `DecoderLayer.compile()`):
+
+- **Dense GQA + paged attention**: `python/mirage/mpk/models/qwen3/modeling.py` + `demo/qwen3/demo_new.py`
+- **MLA + MoE + reduced-layer flag**: `python/mirage/mpk/models/deepseek_v3/modeling.py` + `demo/deepseek_v3/demo_new.py`
