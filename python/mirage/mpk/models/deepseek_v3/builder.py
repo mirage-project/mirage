@@ -782,7 +782,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.q_a_out, w_q_b_pe, s_q_b_pe, q_pe_3d,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
-            gate_mode=2 if self._use_prefill else 0,
+            gate_mode=0,
             share_quantize_tag=qb_share_tag,
             input_fp8_override=qb_input_fp8_ovr,
             input_scale_override=qb_input_scale_ovr,
@@ -795,7 +795,7 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             input_fp8_buf, input_scale_buf = (
                 self._fp8_mbt_buffers_for_reduction_f32scale(reduction_size))
-        gemm_runtime_m_mode = 3 if self._use_prefill else 0
+        gemm_runtime_m_mode = 0
         dsv3_tasks.fp8_gemm_dense_layer(
             self.mpk,
             input_fp8=input_fp8_buf,
@@ -881,7 +881,7 @@ class DeepSeekV3Builder(GraphBuilder):
         attn_out_scale_f32 = self._bmm_decode_o_buffers["attn_out_scale_f32"]
         attn_out_reduced = self._bmm_decode_o_buffers["attn_out_reduced"]
 
-        active_mode_o = 3 if self._use_prefill else 0  # decode-only gate
+        active_mode_o = 0  # decode-only
 
         # 1) quantize attn_out BF16 → FP8 + float32 128-group scale.
         # Input self.attn_out is (mbt, H*512) 2D; the 3D FP8 output has the
@@ -926,7 +926,7 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
             block_dim=(128, 1, 1),
             residual=residual,
-            gate_mode=2 if self._use_prefill else 0,
+            gate_mode=0,
         )
 
     def _fp8_dense_kv_b_proj(
@@ -1073,11 +1073,16 @@ class DeepSeekV3Builder(GraphBuilder):
         """Allocate intermediate computation buffers."""
         mbt = self.max_num_batched_tokens
 
-        # MBT caps prefill chunk size. Decode/verify work is bounded by
-        # MTP+1 tokens per request and should not force prefill kernels into
-        # the graph. Prompt tails with q_len > 8 still use the prefill path
-        # when MBT is a real chunk size; q_len <= 8 tails use decode kernels.
-        self._use_prefill = mbt > 8
+        # bs=1 decode-only demo: chunked prefill + KV-gather + paged attention
+        # have been removed (the prompt is consumed one token per step through
+        # the decode path, which appends to the contiguous per-layer KV buffer).
+        # mbt>8 would require the (removed) chunked-prefill kernels, so reject it
+        # explicitly (an assert would be stripped under python -O).
+        if mbt > 8:
+            raise ValueError(
+                "DeepSeek-V3 MPK demo is decode-only (chunked prefill removed); "
+                f"max_num_batched_tokens must be <= 8, got {mbt}.")
+        self._use_prefill = False
         # Direct-paged decode skips the dense KV gather copy. TP decode kernels
         # consume the runtime page table directly; TP1 still relies on physical
         # page order, so only enable that legacy shortcut for the single-request
@@ -1574,7 +1579,7 @@ class DeepSeekV3Builder(GraphBuilder):
             num_heads=self.num_local_q_heads,
             grid_dim=rope_q_grid,
             q_tile_size=self.max_num_batched_tokens,
-            phase_gate=2 if self._use_prefill else 0,
+            phase_gate=0,
         )
         if self._use_prefill:  # prefill-exclusive split (unabsorbed) ROPE-Q
             dsv3_tasks.deepseek_mla_rope_q_split_layer(
