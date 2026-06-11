@@ -11,7 +11,7 @@ catalog modules dispatch on ``SCALE_UE8M0``:
   output scale is **fp32**. Consumed by the MoE W13/W2 FP8 kernels.
 
 Both produce M-outermost scale layout; the FP8 group GEMM kernels want
-K-outermost, so a scale transpose used to be required in
+K-outermost, so a :class:`TransposeScale` insertion is required in
 between (UE8M0 variant only).
 """
 from __future__ import annotations

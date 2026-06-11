@@ -5,6 +5,8 @@ Each class wraps one SM100 prefill task. Kernels live under
 
 * :class:`MLAPrefillAbsorbed`           -> ``mla_prefill_absorbed_sm100`` (``mla_prefill_sm100.cuh`` absorbed branch)
 * :class:`MLAPrefillPlain`              -> ``mla_prefill_sm100``          (``mla_prefill_sm100.cuh``)
+* :class:`MLAPrefillUnified`            -> ``mla_unified_sm100``          (``mla_unified_sm100.cuh``)
+* :class:`MLAPrefillTP8`                -> ``mla_prefill_tp8_sm100``      (``mla_prefill_tp8_sm100.cuh``)
 * :class:`MLAPrefillTP8Chunked`         -> ``mla_prefill_tp8_chunked_sm100`` (``mla_prefill_tp8_chunked_sm100.cuh``)
 * :class:`MLAPrefillTP8ChunkedSplitK`   -> ``mla_prefill_tp8_chunked_splitk_sm100`` (``mla_prefill_tp8_chunked_splitk_sm100.cuh``)
 * :class:`MLAPrefillTP8ChunkedReduce`   -> ``mla_prefill_tp8_chunked_reduce_sm100``
@@ -211,11 +213,225 @@ class MLAPrefillPlain(_MLAPrefillBase):
 # ---------------------------------------------------------------------------
 # Unified prefill-and-decode dispatch
 # ---------------------------------------------------------------------------
+class MLAPrefillUnified(_MLAPrefillBase):
+    """Runtime prefill-vs-decode dispatch in one fused task (``mla_unified_sm100``).
+
+    Reads BOTH prefill inputs (NoPE/PE/ckv/kpe) and decode inputs
+    (TMA-attached fused Q, contiguous KV, partial-O, partial-LSE);
+    branches on runtime Q_LEN. Grid is computed internally — callers
+    MUST NOT pass ``grid_dim``.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        *,
+        q_len: int,
+        kv_len: int,
+        d_ckv: Optional[int] = None,
+        d_kpe: Optional[int] = None,
+        d_v: Optional[int] = None,
+        tp_size: int = 1,
+        decode_q_len: Optional[int] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(num_heads, prefix=prefix)
+        self.q_len = q_len
+        self.kv_len = kv_len
+        self.d_ckv = d_ckv
+        self.d_kpe = d_kpe
+        self.d_v = d_v
+        self.tp_size = tp_size
+        self.decode_q_len = decode_q_len
+
+    def auto_grid_dim(self, *_: DTensor) -> GridDim:
+        """Grid is computed inside ``compile()``; calling this raises."""
+        raise RuntimeError(
+            "MLAPrefillUnified computes grid internally — do not call "
+            "auto_grid_dim() and do not pass grid_dim to compile()."
+        )
+
+    def compile(
+        self,
+        q_nope: DTensor,
+        q_pe: DTensor,
+        ckv: DTensor,
+        kpe: DTensor,
+        output: DTensor,
+        q_input: DTensor,
+        kv_input: DTensor,
+        output_partial: DTensor,
+        output_lse: DTensor,
+        *,
+        grid_dim: Optional[GridDim] = None,
+        block_dim: Optional[BlockDim] = None,
+    ) -> DTensor:
+        """Register ``mla_unified_sm100`` — runtime prefill-vs-decode dispatch in one fused task.
+
+        Tensor contract:
+          q_nope:         (T_total, H*D_CKV=H*512) bf16, prefill NoPE Q (input_ptrs[0]).
+          q_pe:           (T_total, H*D_KPE=H*64)  bf16, prefill RoPE Q (input_ptrs[1]).
+          ckv:            (R*MPK_MAX_SEQ_LENGTH, D_CKV=512) bf16, prefill NoPE KV slab (input_ptrs[2]).
+          kpe:            (R*MPK_MAX_SEQ_LENGTH, D_KPE=64)  bf16, prefill RoPE KV slab (input_ptrs[3]).
+          output:         (T_total, H*D_V=H*512) bf16, prefill attn output (output_ptrs[0]).
+          q_input:        (R*decode_q_len*H, D_K=576) bf16, decode fused Q-latent, TMA-desc.
+          kv_input:       (R*KV_LEN, D_K=576) bf16, decode gathered KV slab, TMA-desc.
+          output_partial: (R*decode_q_len*NUM_SPLITS, H*D_V=H*512) bf16, decode partial-O (output_ptrs[1]).
+          output_lse:     (R*decode_q_len*NUM_SPLITS, H) fp32, decode partial-LSE (output_ptrs[2]).
+
+        Notes: branch on runtime ``Q_LEN`` (>8 prefill, else decode-split-K); grid computed internally
+        from tp_size/decode_q_len/kv_len — callers MUST NOT pass ``grid_dim``. Meta deps: ``qo_indptr_buffer``,
+        ``paged_kv_indptr_buffer``, ``paged_kv_indices_buffer``, ``paged_kv_last_page_len_buffer``, ``step``.
+        """
+        pk = current_pk()
+        if grid_dim is not None:
+            raise ValueError(
+                "MLAPrefillUnified.compile() does not accept grid_dim — "
+                "the task computes it internally."
+            )
+        if block_dim is None:
+            block_dim = (256, 1, 1)
+
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        num_heads = self.num_heads
+        q_len = self.q_len
+        kv_len = self.kv_len
+        tp_size = self.tp_size
+        d_ckv = self.d_ckv if self.d_ckv is not None else 512
+        d_kpe = self.d_kpe if self.d_kpe is not None else 64
+        d_v = self.d_v if self.d_v is not None else 512
+
+        num_splits = (kv_len + 128 - 1) // 128
+        decode_q_len = self.decode_q_len if self.decode_q_len is not None else q_len
+        decode_q_len = min(decode_q_len, 8)
+        if tp_size == 1:
+            hpb = num_heads // decode_q_len
+            if hpb < 1:
+                hpb = 1
+            while num_heads % hpb != 0:
+                hpb -= 1
+            num_groups = num_heads // hpb
+            x_mul = 1
+        elif tp_size == 2:
+            qpg = min(2, decode_q_len)
+            num_groups = (decode_q_len + qpg - 1) // qpg
+            x_mul = 1
+        elif tp_size == 4:
+            qpg = min(4, decode_q_len)
+            num_groups = (decode_q_len + qpg - 1) // qpg
+            x_mul = 2
+        elif tp_size == 8:
+            q_len_padded = (decode_q_len + 1) & ~1
+            qpg = 2
+            num_groups = (q_len_padded + qpg - 1) // qpg
+            x_mul = 1
+        else:
+            raise ValueError(f"Unsupported MLA unified tp_size={tp_size}")
+
+        num_q_blocks = (q_len + 64 - 1) // 64
+        decode_blocks_x = num_groups * num_splits * x_mul
+        grid_dim_u = (
+            max(num_heads, decode_blocks_x),
+            max(num_q_blocks, pk.max_num_batched_requests),
+            pk.max_num_batched_requests,
+        )
+        params = [
+            num_heads, decode_q_len, kv_len, num_splits,
+            tp_size, d_ckv, d_kpe, d_v,
+        ]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim_u, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ckv, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kpe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(kv_input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_partial, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_lse, (-1, -1, -1), -1, True)
+        pk.kn_graph.customized(
+            [q_nope, q_pe, ckv, kpe, output, q_input, kv_input,
+             output_partial, output_lse],
+            tb_graph,
+        )
+        pk.kn_graph.register_task(tb_graph, "mla_unified_sm100", params)
+        return output
 
 
 # ---------------------------------------------------------------------------
 # TP=8 unabsorbed prefill
 # ---------------------------------------------------------------------------
+class MLAPrefillTP8(_MLAPrefillBase):
+    """TP=8 unabsorbed prefill (``mla_prefill_tp8_sm100``).
+
+    16 heads per rank. Inputs (per-head shards): q_nope ``[B,S,H,128]``,
+    q_pe ``[B,S,H,64]``, k ``[B,S,192]``, v ``[B,S,128]``; output
+    ``[B,S,H,128]``. Grid dominates along H, BM=64.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        seq_len: int,
+        *,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(num_heads, prefix=prefix)
+        self.seq_len = seq_len
+
+    def auto_grid_dim(self, *_: DTensor) -> GridDim:
+        """Grid ``(H, ceil(seq_len/BM), max_num_batched_requests)`` with BM=64."""
+        pk = current_pk()
+        return (self.num_heads, (self.seq_len + 63) // 64, pk.max_num_batched_requests)
+
+    def default_block_dim(self) -> BlockDim:
+        return (128, 1, 1)
+
+    def compile(
+        self,
+        q_nope: DTensor,
+        q_pe: DTensor,
+        k: DTensor,
+        v: DTensor,
+        output: DTensor,
+        *,
+        grid_dim: Optional[GridDim] = None,
+        block_dim: Optional[BlockDim] = None,
+    ) -> DTensor:
+        """Register ``mla_prefill_tp8_sm100`` — TP=8 unabsorbed prefill (16 heads/rank).
+
+        Tensor contract:
+          q_nope: (B, S, H_rank, 128) bf16, per-head NoPE Q shard (input_ptrs[0]).
+          q_pe:   (B, S, H_rank, 64)  bf16, per-head RoPE Q shard (input_ptrs[1]).
+          k:      (B, S, 192) bf16, NoPE+RoPE concatenated K, TMA-desc (input_tma_desc_ptrs[2][0]).
+          v:      (B, S, 128) bf16, V per token, TMA-desc (input_tma_desc_ptrs[3][0]).
+          output: (B, S, H_rank, 128) bf16, attn output (output_ptrs[0]).
+
+        Notes: grid ``(H_rank, ceil(S/BM=64), max_num_batched_requests)``; ``seq_len <= 4096``.
+        request_id/kv_idx/merge_task_offset = head/q_block/batch.
+        """
+        pk = current_pk()
+        if grid_dim is None:
+            grid_dim = self.auto_grid_dim()
+        if block_dim is None:
+            block_dim = self.default_block_dim()
+
+        from ....core import CyTBGraph
+        from ....kernel import TBGraph
+
+        params = [self.num_heads, self.seq_len]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        pk.kn_graph.customized([q_nope, q_pe, k, v, output], tb_graph)
+        pk.kn_graph.register_task(tb_graph, "mla_prefill_tp8_sm100", params)
+        return output
 
 
 # ---------------------------------------------------------------------------

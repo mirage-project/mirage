@@ -65,7 +65,7 @@ class _MLAKVGatherBase(MPKModule):
 class MLAKVGatherStandard(_MLAKVGatherBase):
     """Append + materialise one concat slab ``(R * S_pad, D_K)``.
 
-    Task ``mla_kv_gather_sm100``. Consumed by ``mla_mtp_decode_sm100`` /
+    Task ``mla_kv_gather_sm100``. Consumed by ``mla_decode_sm100`` /
     ``mla_prefill_absorbed_sm100``. Slice-override kwargs read
     ``c_latent`` / ``k_pe`` from a wider parent buffer.
     """
