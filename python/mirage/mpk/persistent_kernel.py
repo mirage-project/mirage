@@ -372,12 +372,6 @@ class PersistentKernel:
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
 
         if test_mode:
-            # Auto-allocate any meta tensors the test author didn't provide so
-            # the kernel sees valid GPU pointers. Shapes are derived from the
-            # kernel-level params already on `self`. Defaults model "single
-            # prefill of max_num_batched_tokens tokens, content all zero" — the
-            # test author overrides any subset by setting them in
-            # `params["meta_tensors"]` before constructing PersistentKernel.
             self._apply_test_mode_meta_defaults()
 
         self.total_num_requests = self.meta_tensors["tokens"].shape[0]
@@ -437,6 +431,12 @@ class PersistentKernel:
             self.meta_tensors["num_new_tokens"] = torch.zeros(
                 1, dtype=torch.int32, device=device)
         if "qo_indptr_buffer" not in self.meta_tensors:
+            # Allocated as a valid (zero) GPU pointer only. Test mode skips
+            # prepare_next_batch(), so its VALUES are NOT auto-populated: a test
+            # that uses a token-parallel kernel (one that reads its active-token
+            # count from qo_indptr_buffer[max_num_batched_requests], e.g.
+            # silu_mul / argmax) must set qo_indptr_buffer itself in
+            # params["meta_tensors"], or that kernel will see 0 active tokens.
             self.meta_tensors["qo_indptr_buffer"] = torch.zeros(
                 self.max_num_batched_requests + 1,
                 dtype=torch.int32, device=device)

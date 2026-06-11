@@ -148,6 +148,12 @@ def test_gateup_silu_down():
     ref_out = (ref_silu @ w_down.float().T + residual.float()).to(dtype)
 
     # Build PersistentKernel
+    # silu_mul is token-parallel: it reads its active-token count from
+    # qo_indptr_buffer[max_num_batched_requests]. Test mode does not
+    # auto-populate meta tensor VALUES, so the test must supply it.
+    qo_indptr_buffer = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    qo_indptr_buffer[batch_size] = batch_size
+
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params["test_mode"] = True
@@ -157,6 +163,7 @@ def test_gateup_silu_down():
     params["world_size"] = 1
     params["max_num_batched_tokens"] = batch_size
     params["max_num_batched_requests"] = batch_size
+    params["meta_tensors"] = {"qo_indptr_buffer": qo_indptr_buffer}
     pk = PersistentKernel(**params)
 
     input_dt = pk.attach_input(input_act, name="input")
@@ -266,6 +273,9 @@ def test_gateup_silu():
     torch.cuda.synchronize()
 
     # Build PersistentKernel
+    # silu_mul is token-parallel: it reads its active-token count from
+    # qo_indptr_buffer[max_num_batched_requests]. Test mode does not
+    # auto-populate meta tensor VALUES, so the test must supply it.
     qo_indptr_buffer = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
     qo_indptr_buffer[batch_size] = batch_size
 
@@ -278,6 +288,7 @@ def test_gateup_silu():
     params["world_size"] = 1
     params["max_num_batched_tokens"] = batch_size
     params["max_num_batched_requests"] = batch_size
+    params["meta_tensors"] = {"qo_indptr_buffer": qo_indptr_buffer}
     pk = PersistentKernel(**params)
 
     input_dt = pk.attach_input(input_act, name="input")
