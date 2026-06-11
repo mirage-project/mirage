@@ -28,8 +28,18 @@ __global__ __launch_bounds__(NUM_THREADS) void mla_prefill_wrapper(
   int num_q_blocks_total = (S + BM - 1) / BM;
   int q_block =
       REVERSE_BLOCKS ? (num_q_blocks_total - 1 - blockIdx.y) : blockIdx.y;
-  kernel::mla_prefill_sm100_task_impl(
-      Q_nope, Q_pe, CKV, KPE, O, S, H, sm_scale_log2, blockIdx.x, q_block);
+  // Standalone test: Q_LEN == S (no history, single-chunk prefill).
+  kernel::mla_prefill_sm100_task_impl(Q_nope,
+                                      Q_pe,
+                                      CKV,
+                                      KPE,
+                                      O,
+                                      S,
+                                      /*Q_LEN=*/S,
+                                      H,
+                                      sm_scale_log2,
+                                      blockIdx.x,
+                                      q_block);
 }
 
 // Persistent state

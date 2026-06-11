@@ -1,3 +1,17 @@
+/* Copyright 2025 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
 
 #include <cstdint>
@@ -90,8 +104,8 @@ __device__ __forceinline__ cute::UMMA::SmemDescriptor
   // atom size = 8 x 128B on K axis
   // SBO = one atom step across MN
   // LBO = 0 because one swizzle atom on K axis inside a block
-  const uint32_t stride_byte_offset = 8 * BLOCK_K * sizeof(dtype_t);
-  const uint32_t leading_byte_offset = 0;
+  uint32_t const stride_byte_offset = 8 * BLOCK_K * sizeof(dtype_t);
+  uint32_t const leading_byte_offset = 0;
 
   return make_smem_desc(layout_type,
                         base_smem_ptr + mn_idx * BLOCK_K + k_idx,

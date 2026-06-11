@@ -501,6 +501,9 @@ if __name__ == "__main__":
             input_source=1,
         )
         x = y
+        target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
+        # A current workaround to use splitk for only B200 GPUs
+        use_splitk = (target_cc == 100)
         for i, layer in enumerate(model.model.layers):
             # if i > 0:
             #     break
@@ -632,6 +635,15 @@ if __name__ == "__main__":
                     output=attn_proj_out,
                     tiles_per_task=1,
                 )
+            elif use_splitk:
+                attn_proj_out = x
+                mpk.splitk_linear_layer(
+                    input=attn_out,
+                    weight=w,
+                    output=attn_proj_out,
+                    grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
+                    block_dim=(256, 1, 1),
+                )
             else:
                 mpk.linear_with_residual_layer(
                     input=attn_out,
@@ -728,6 +740,15 @@ if __name__ == "__main__":
                     residual=x,
                     output=mlp_out,
                     tiles_per_task=1,
+                )
+            elif use_splitk:
+                mlp_out = x
+                mpk.splitk_linear_layer(
+                    input=silu_mul_out,
+                    weight=w,
+                    output=mlp_out,
+                    grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
+                    block_dim=(256, 1, 1),
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -875,19 +896,19 @@ if __name__ == "__main__":
 
         end_idx = prev_pos + 1
         generated_ids = tokens[:, :end_idx]
+        tokens_generated = max(0, end_idx - prompt_len)
+        per_tok_ms = run_time / max(prompt_len + tokens_generated, 1)
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
         print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, cur_pos - prompt_len, run_time / (cur_pos - prompt_len)
+            "Prompt length {}, generate length {}, per-token latency {:.3f} ms".format(
+                prompt_len, tokens_generated, per_tok_ms
             )
         )
-        
+
         # -------- CI dumps outputs to json files ----------
         if save_path and rank == 0:
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
             slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
             token_ids = tokens[0, prompt_len:slice_end].tolist()
             out = {
@@ -918,8 +939,11 @@ if __name__ == "__main__":
         if total_num_requests > 1:
             print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
 
-        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
-              prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
+        tokens_generated = step.max().item() + 1 - prompt_lengths[0].item()
+        per_tok_ms = run_time / max(prompt_lengths[0].item() + tokens_generated, 1)
+
+        print("Prompt length {}, generate length {}, per-token latency: {:.3f} ms".format(
+              prompt_lengths[0], tokens_generated, per_tok_ms
             )
         )
 
@@ -933,7 +957,7 @@ if __name__ == "__main__":
             end_idx = step[0].item() + 1
             prompt_len = prompt_lengths[0].item()
             tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
+            per_tok_ms = per_tok_ms
             slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
             token_ids = tokens[0, prompt_len:slice_end].tolist()
             response_text = tokenizer.decode(tokens[0, :end_idx], skip_special_tokens=True)

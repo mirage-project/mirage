@@ -143,8 +143,113 @@ def reference_moe_w13(input_fp8, input_scale, weight_fp8, weight_scale,
     return output
 
 
+# W2 dimensions
+W2_OUTPUT_SIZE = K           # 7168: hidden_size is output dim for W2
+W2_REDUCTION_SIZE = 2048     # intermediate_size is reduction dim for W2
+W2_K_SCALE = W2_REDUCTION_SIZE // 128  # 16
+
+
+def reference_moe_w2(input_fp8_3d, input_scale_3d, weight_fp8, weight_scale,
+                      batch_size, token_to_experts, use_ue8m0=True):
+    """W2 reference: [B, topk, I] @ [E, K, I].T → [B, topk, K]."""
+    if use_ue8m0:
+        i_scale = float32_to_ue8m0_approx(input_scale_3d)
+        w_scale = float32_to_ue8m0_approx(weight_scale)
+    else:
+        i_scale = input_scale_3d
+        w_scale = weight_scale
+
+    # Dequantize 3D input [B, topk, I]
+    B, T, I = input_fp8_3d.shape
+    input_deq = dequantize_fp8(
+        input_fp8_3d.reshape(B * T, I), i_scale.reshape(B * T, I // 128)
+    ).reshape(B, T, I).bfloat16()
+
+    output = torch.zeros(BATCH_SIZE, NUM_TOPK, W2_OUTPUT_SIZE,
+                         dtype=torch.bfloat16, device=input_fp8_3d.device)
+
+    for i in range(batch_size):
+        for slot, e in enumerate(token_to_experts[i]):
+            w_deq = dequantize_fp8(weight_fp8[e], w_scale[e]).bfloat16()
+            output[i, slot] = (input_deq[i, slot:slot+1] @ w_deq.T).squeeze(0)
+
+    return output
+
+
+def run_w2_test(batch_size, seed=42, label=""):
+    """Run one W2 test case and verify correctness."""
+    device = torch.device("cuda")
+
+    torch.manual_seed(seed)
+    # Input: [B, topk, I] — the output of silu_mul
+    input_bf16 = torch.randn(BATCH_SIZE, NUM_TOPK, W2_REDUCTION_SIZE,
+                              device=device, dtype=torch.bfloat16)
+    input_fp8_3d, input_scale_3d = [], []
+    for i in range(BATCH_SIZE):
+        fp8_row, scale_row = quantize_to_fp8(input_bf16[i].float())
+        input_fp8_3d.append(fp8_row)
+        input_scale_3d.append(scale_row)
+    input_fp8_3d = torch.stack(input_fp8_3d, dim=0)     # [B, topk, I]
+    input_scale_3d = torch.stack(input_scale_3d, dim=0)  # [B, topk, I/128]
+
+    # Weight: [E, K, I]
+    weight_bf16 = torch.randn(NUM_EXPERTS, W2_OUTPUT_SIZE, W2_REDUCTION_SIZE,
+                               device=device, dtype=torch.bfloat16)
+    weight_fp8_list, weight_scale_list = [], []
+    for e in range(NUM_EXPERTS):
+        w_fp8, w_scale = quantize_to_fp8(weight_bf16[e].float())
+        weight_fp8_list.append(w_fp8)
+        weight_scale_list.append(w_scale)
+    weight_fp8 = torch.stack(weight_fp8_list, dim=0)
+    weight_scale = torch.stack(weight_scale_list, dim=0)
+
+    routing, mask, token_to_experts = make_routing(
+        batch_size, NUM_EXPERTS, NUM_TOPK, device, seed=seed)
+
+    output = torch.zeros(BATCH_SIZE, NUM_TOPK, W2_OUTPUT_SIZE,
+                         dtype=torch.bfloat16, device=device)
+
+    # Run kernel
+    t0 = time.time()
+    rk.fp8_moe_w2_gemm_test(
+        input_fp8_3d, input_scale_3d, weight_fp8, weight_scale,
+        routing, mask, output, 0)
+    kernel_ms = (time.time() - t0) * 1000.0
+
+    # Reference
+    ref = reference_moe_w2(input_fp8_3d, input_scale_3d, weight_fp8, weight_scale,
+                            batch_size, token_to_experts, use_ue8m0=True)
+
+    # Compare only routed tokens
+    max_abs = 0.0
+    max_rel = 0.0
+    num_compared = 0
+    for i in range(batch_size):
+        for slot, e in enumerate(token_to_experts[i]):
+            out_row = output[i, slot].float()
+            ref_row = ref[i, slot].float()
+            diff = (out_row - ref_row).abs()
+            abs_err = diff.max().item()
+            denom = ref_row.abs().max().item()
+            rel_err = abs_err / max(denom, 1e-6)
+            max_abs = max(max_abs, abs_err)
+            max_rel = max(max_rel, rel_err)
+            num_compared += 1
+
+    passed = (max_abs < 2.0 and max_rel < 0.05 and num_compared > 0)
+    status = "PASS" if passed else "FAIL"
+
+    print(f"  batch={batch_size:>2}  abs={max_abs:.4f}  rel={max_rel:.4f}  "
+          f"cmp={num_compared:>4}  {kernel_ms:.0f}ms  [{status}]  {label}")
+
+    if not passed:
+        print(f"    *** FAILED: max_abs={max_abs}, max_rel={max_rel}")
+
+    return passed
+
+
 # ================================================================
-# Test runner
+# Test runner (W13)
 # ================================================================
 def run_test(batch_size, seed=42, label="", use_2d=False, expert_stride=1, n_splits=1):
     """Run one test case and verify correctness."""
@@ -299,6 +404,18 @@ def main():
         ok = run_test(16, seed=seed,
                       label=f"seed={seed}", use_2d=True,
                       expert_stride=8, n_splits=16)
+        all_passed = all_passed and ok
+
+    # ================================================================
+    # Test 6: W2 single-CTA correctness
+    # W2: [B, topk, I] @ [E, K, I].T → [B, topk, K]
+    # ================================================================
+    print()
+    print("=" * 90)
+    print("Test 6: W2 Single-CTA correctness (W13_LINEAR=false)")
+    print("=" * 90)
+    for batch_size in [1, 4, 8, 16]:
+        ok = run_w2_test(batch_size, seed=500 + batch_size, label="W2-1CTA")
         all_passed = all_passed and ok
 
     # ================================================================

@@ -52,6 +52,7 @@ event_name_list = {
     201: "TASK_SCHD_EVENTS",
     202: "TASK_GET_EVENT",
     203: "TASK_GET_NEXT_TASK",
+    204: "TASK_SCHD_PREPARE_BATCH",
     230: "TASK_SM100_TASK_BEGIN",
     248: "TASK_MOE_W13_FP8_SM100",
     249: "TASK_MOE_W2_FP8_SM100",
@@ -66,12 +67,50 @@ event_name_list = {
     260: "TASK_MOE_TOPK_SOFTMAX_SM100",
     261: "TASK_MOE_MUL_SUM_ADD_SM100",
     262: "TASK_TENSOR_INIT",
+    263: "TASK_PAGED_ATTENTION_SPLIT_KV_SM100",
+    264: "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100",
+    265: "TASK_SAMPLING_SM100",
+    266: "TASK_MLA_DECODE_SM100",
+    267: "TASK_MLA_REDUCE_SM100",
+    268: "TASK_MLA_PREFILL_SM100",
+    269: "TASK_MLA_MTP_DECODE_SM100",
+    270: "TASK_MLA_MTP_REDUCE_SM100",
+    271: "TASK_MTP_VERIFY_STRICT",
+    272: "TASK_MTP_ACCEPT_COMMIT",
+    273: "TASK_MTP_TOKEN_SCATTER",
+    274: "TASK_MTP_PREPARE_VERIFY",
+    275: "TASK_QUANTIZE_FP8_SM100",
+    276: "TASK_LINEAR_FP8_SM100",
+    277: "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100",
+    278: "TASK_MLA_KV_GATHER_SM100",
     280: "TASK_MOE_TOPK_SIGMOID_SM100",
+    281: "TASK_ELEMENTWISE_ADD_SM100",
+    282: "TASK_SOFTMAX_GATHER_SM100",
+    283: "TASK_MTP_VERIFY_PROBABILISTIC",
+    284: "TASK_PROB_SCATTER_SM100",
+    285: "TASK_MTP_FLOAT_SCATTER",
+    286: "TASK_PROB_EXTRACT_SM100",
+    287: "TASK_MLA_MTP_DECODE_TP2_SM100",
+    288: "TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100",
+    289: "TASK_MLA_MTP_DECODE_TP4_SM100",
+    290: "TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100",
+    291: "TASK_MLA_MTP_DECODE_TP8_SM100",
+    292: "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100",
+    293: "TASK_MLA_KV_GATHER_SPLIT_SM100",
+    294: "TASK_MTP_BUILD_EMBED_INPUT",
     298: "TASK_SM100_TASK_END",
     301: "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT",
     302: "TASK_NVSHMEM_TILE_ALLREDUCE",
-    # v2 runtime pseudo-events (dispatcher/stall tracks, see runtime_v2.cuh)
-    204: "V2_PREPARE_BATCH",
+    # v2 runtime: linear (244/245), non-linear tasks (224-229), and the
+    # dispatcher/stall pseudo-events (see runtime_v2.cuh; 204 is shared).
+    244: "TASK_LINEAR_SM100_V2",
+    245: "TASK_LINEAR_WITH_RESIDUAL_SM100_V2",
+    224: "TASK_RMS_NORM_HOPPER_V2",
+    225: "TASK_SILU_MUL_V2",
+    226: "TASK_EMBEDDING_V2",
+    227: "TASK_ATTN_SM100_V2",
+    228: "TASK_ARGMAX_PARTIAL_SM100_V2",
+    229: "TASK_ARGMAX_REDUCE_SM100_V2",
     205: "V2_ITER_SYNC",
     206: "V2_GO_WAIT",
     207: "V2_DEP_WAIT",
@@ -82,15 +121,6 @@ event_name_list = {
     212: "V2_MAINLOOP_WAIT",
     213: "V2_EPILOGUE_WAIT",
     214: "V2_COMPUTE_DONE_WAIT",
-    # v2 linear task types
-    244: "TASK_LINEAR_SM100_V2",
-    245: "TASK_LINEAR_WITH_RESIDUAL_SM100_V2",
-    224: "TASK_RMS_NORM_HOPPER_V2",
-    225: "TASK_SILU_MUL_V2",
-    226: "TASK_EMBEDDING_V2",
-    227: "TASK_ATTN_SM100_V2",
-    228: "TASK_ARGMAX_PARTIAL_SM100_V2",
-    229: "TASK_ARGMAX_REDUCE_SM100_V2",
 }
 
 
@@ -101,10 +131,8 @@ class EventType(Enum):
 
 
 def decode_tag(tag, num_blocks, num_groups):
-    # layout (see profiler.h): [31:22 event_no][21:11 block_group]
-    #                          [10:2 event_idx][1:0 type]
-    event_no = tag >> 22
-    block_group_tag = (tag >> 11) & 0x7FF
+    event_no = tag >> 19
+    block_group_tag = (tag >> 11) & 0xFF
     event_idx = (tag >> 2) & 0x1FF
     event_type = tag & 0x3
     return (
@@ -116,83 +144,65 @@ def decode_tag(tag, num_blocks, num_groups):
     )
 
 
-def export_to_perfetto_trace(
-    profiler_buffer: torch.Tensor,
-    file_name: str,
-    task_graph=None,
-) -> None:
-    """task_graph (optional, v2): {"queues": per-SM task-position lists,
-    "task_types": task_type per position}. When given, role-track slices are
-    labeled with the global task index (..._t<pos>) so a slice can be looked
-    up in task_graph.json / the page-plan figure directly."""
+def _decode_events(profiler_buffer: torch.Tensor):
+    """Yield decoded events from an on-device profiler buffer.
 
+    First yield is a header tuple ("__header__", num_blocks, num_groups);
+    subsequent yields are (block_idx, group_idx, event_idx, event_no,
+    event_type, timestamp).
+    """
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
     num_blocks = int(num_blocks)
     num_groups = int(num_groups)
 
-    # Per-SM list of task positions that actually emit windows (everything
-    # except BEGIN_TASK_GRAPH(10)/TERMINATE(0)); trace window k on a role
-    # track = emitting[k % len] (profiling windows cover whole iterations).
-    emitting = None
-    if task_graph is not None:
-        tt = task_graph["task_types"]
-        emitting = [[p for p in q if tt[p] not in (0, 10)]
-                    for q in task_graph["queues"]]
-    win_counter = {}
+    yield ("__header__", num_blocks, num_groups)
+
+    # v2 buffers reserve a tail for accumulators/cursors; decoding those as
+    # events produces garbage slices stretching the timeline. Skip the tail
+    # (V2_PROF_TAIL_ENTRIES must match runtime_v2.cuh).
+    _end = len(profiler_buffer_host)
+    if num_groups >= 5:
+        _end -= V2_PROF_TAIL_ENTRIES
+    for i in range(1, _end):
+        if profiler_buffer_host[i] == 0:
+            continue
+
+        tag, timestamp = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
+        tag = int(tag)
+        timestamp = int(timestamp)
+        event_no, block_idx, group_idx, event_idx, event_type = decode_tag(
+            tag, num_blocks, num_groups
+        )
+        yield (block_idx, group_idx, event_idx, event_no, event_type, timestamp)
+
+
+def export_to_perfetto_trace(
+    profiler_buffer: torch.Tensor,
+    file_name: str,
+) -> None:
+    events = _decode_events(profiler_buffer)
+    _, num_blocks, num_groups = next(events)
 
     tgen = TraceGenerator(file_name)
-
-    # v2 emits one track per (SM, warp role) plus stall tracks (sub-slices
-    # inside a role's task window); names come from the shared layout module.
-    V2_ROLE_NAMES = ROLE_NAMES
 
     tid_map = {}
     track_map = {}
     for block_idx in range(num_blocks):
         pid = tgen.create_group(f"block_{block_idx}")
         for group_idx in range(num_groups):
-            if num_groups >= 5 and group_idx < len(V2_ROLE_NAMES):
-                gname = V2_ROLE_NAMES[group_idx]
+            # v2 (num_groups>=5): name tracks by warp role + stall track.
+            if num_groups >= 5 and group_idx < len(ROLE_NAMES):
+                gname = ROLE_NAMES[group_idx]
             else:
                 gname = f"group_{group_idx}"
             tid = pid.create_group(gname)
             tid_map[(block_idx, group_idx)] = tid
 
-    # numpy fast path: visit only nonzero entries (the buffer is sparse and
-    # iterating tens of millions of zeros in python dominates export time).
-    buf_np = profiler_buffer_host.numpy()
-    nz = buf_np.nonzero()[0]
-    nz = nz[nz >= 1]
-    if num_groups >= 5:
-        # v2 reserves the buffer tail for raw accumulators + emitter cursors
-        # (see V2_PROF_CURSOR_BASE in runtime_v2.cuh). Those are counters,
-        # not events — decoding them produces garbage slices at t~0 that
-        # stretch the whole timeline. Skip the tail (V2_PROF_TAIL_ENTRIES,
-        # from the shared layout module, matches the device side).
-        nz = nz[nz < len(buf_np) - V2_PROF_TAIL_ENTRIES]
-    for i in nz:
-        entry = int(buf_np[i])
-        tag = entry & 0xFFFFFFFF
-        timestamp = entry >> 32
-        event_no, block_idx, group_idx, event_idx, event_type = decode_tag(
-            tag, num_blocks, num_groups
-        )
-
-        # Unknown ids: junk/reserved entries (e.g. the v2 dep-spin
-        # accumulators at the buffer tail) or types missing from the dict —
-        # skip rather than crash the export.
-        if event_idx not in event_name_list or (block_idx, group_idx) not in tid_map:
-            continue
-        if (emitting is not None and group_idx < 4
-                and event_type == EventType.kBegin.value
-                and block_idx < len(emitting) and emitting[block_idx]):
-            k = win_counter.get((block_idx, group_idx), 0)
-            win_counter[(block_idx, group_idx)] = k + 1
-            pos = emitting[block_idx][k % len(emitting[block_idx])]
-            event = event_name_list[event_idx] + f"_t{pos}"
-        else:
-            event = event_name_list[event_idx] + f"_{event_no}"
+    for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
+        if event_idx not in event_name_list:
+            continue  # v2 reserved/unknown id — skip rather than KeyError
+        event = event_name_list[event_idx] + f"_{event_no}"
         tid = tid_map[(block_idx, group_idx)]
 
         if (block_idx, group_idx, event_idx) in track_map:
@@ -209,3 +219,73 @@ def export_to_perfetto_trace(
             track.instant(timestamp, event)
 
     tgen.flush()
+
+
+def export_to_csv(
+    profiler_buffer: torch.Tensor,
+    file_name: str,
+) -> None:
+    """Write one CSV row per fully-paired task event (and per kInstant event).
+
+    Columns: task_type_id, task_type_name, block_idx, group_idx, event_no,
+             begin_ts, end_ts, duration_ns.
+
+    Raises RuntimeError on a dangling BEGIN with no matching END (indicates
+    profiler buffer overflow or a code bug). Timestamps are raw 32-bit
+    %globaltimer_lo values; durations are computed modulo 2^32, so traces
+    longer than ~4.3s will be incorrect — same limitation as the perfetto
+    export.
+    """
+    events = _decode_events(profiler_buffer)
+    next(events)  # discard header
+
+    pending = {}  # (block, group, event_idx) -> (event_no, begin_ts)
+    rows = []
+
+    for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
+        key = (block_idx, group_idx, event_idx)
+        name = event_name_list.get(event_idx, f"UNKNOWN_{event_idx}")
+
+        if event_type == EventType.kBegin.value:
+            if key in pending:
+                prev_no, prev_ts = pending[key]
+                raise RuntimeError(
+                    f"dangling BEGIN: block={block_idx} group={group_idx} "
+                    f"event={name} event_no={prev_no} ts={prev_ts} has no END "
+                    f"before next BEGIN at event_no={event_no}"
+                )
+            pending[key] = (event_no, timestamp)
+        elif event_type == EventType.kEnd.value:
+            if key not in pending:
+                raise RuntimeError(
+                    f"END without matching BEGIN: block={block_idx} "
+                    f"group={group_idx} event={name} event_no={event_no}"
+                )
+            begin_no, begin_ts = pending.pop(key)
+            duration = (timestamp - begin_ts) & 0xFFFFFFFF
+            rows.append(
+                (event_idx, name, block_idx, group_idx, begin_no,
+                 begin_ts, timestamp, duration)
+            )
+        elif event_type == EventType.kInstant.value:
+            rows.append(
+                (event_idx, name, block_idx, group_idx, event_no,
+                 timestamp, timestamp, 0)
+            )
+
+    if pending:
+        (b, g, e), (no, ts) = next(iter(pending.items()))
+        name = event_name_list.get(e, f"UNKNOWN_{e}")
+        raise RuntimeError(
+            f"{len(pending)} dangling BEGIN event(s) with no matching END "
+            f"(profiler buffer likely overflowed). Example: block={b} "
+            f"group={g} event={name} event_no={no} ts={ts}"
+        )
+
+    with open(file_name, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "task_type_id", "task_type_name", "block_idx", "group_idx",
+            "event_no", "begin_ts", "end_ts", "duration_ns",
+        ])
+        writer.writerows(rows)

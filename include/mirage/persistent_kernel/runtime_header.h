@@ -49,8 +49,10 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #endif
 #else
 #if MPK_TARGET_CC >= 90
+// B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
+// (la_smem[MAX_SK*128]). Reduce dynamic budget to stay under total limit.
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+    207 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -76,7 +78,8 @@ typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
 int const MAX_OUTPUTS_PER_TASK = 3;
-int const MAX_NUM_WORKERS = 128;
+// B200 has 148 SMs — need more workers than the default 128
+int const MAX_NUM_WORKERS = 160;
 int const MAX_SMEM_REGIONS_PER_TASK = 16;
 // Must match v2_smem_planner.NUM_PAGES. The planner partitions a CTA's
 // dynamic SMEM into TASK_SMEM_PAGE_SIZE-sized pages; this is the per-task
@@ -129,6 +132,10 @@ enum TaskType {
   // SM100 Tasks
   TASK_SM100_TASK_BEGIN = 230, // SM100 start placeholder, not a real task
   TASK_SM100_TMA_START_TASK = 231,
+  TASK_COPY = 232,
+  TASK_CONCAT = 233,
+  TASK_EAGLE3_D2T_REMAP = 235,
+  TASK_EAGLE3_COMMIT = 236,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
   // v2 linear (blackwell_v2/linear_sm100_v2.cuh): Channel-based primitives.
@@ -154,6 +161,16 @@ enum TaskType {
   TASK_MLA_DECODE_SM100 = 266,
   TASK_MLA_REDUCE_SM100 = 267,
   TASK_MLA_PREFILL_SM100 = 268,
+  TASK_MLA_MTP_DECODE_SM100 = 269,
+  TASK_MLA_MTP_REDUCE_SM100 = 270,
+  TASK_MTP_VERIFY_STRICT = 271,
+  TASK_MTP_ACCEPT_COMMIT = 272,
+  TASK_MTP_TOKEN_SCATTER = 273,
+  TASK_MTP_PREPARE_VERIFY = 274,
+  TASK_QUANTIZE_FP8_SM100 = 275,
+  TASK_LINEAR_FP8_SM100 = 276,
+  TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 = 277,
+  TASK_MLA_KV_GATHER_SM100 = 278,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
   // v2 task-type IDs for the non-linear ops. linear v2 (244/245) lives inside
   // the SM100 TMA range (231-256) because it needs TMA; these tasks are
@@ -172,11 +189,32 @@ enum TaskType {
   TASK_ATTN_SM100_V2 = 227,
   TASK_ARGMAX_PARTIAL_SM100_V2 = 228,
   TASK_ARGMAX_REDUCE_SM100_V2 = 229,
+  TASK_ELEMENTWISE_ADD_SM100 = 281,
+  TASK_SOFTMAX_GATHER_SM100 = 282,
+  TASK_MTP_VERIFY_PROBABILISTIC = 283,
+  TASK_PROB_SCATTER_SM100 = 284,
+  TASK_MTP_FLOAT_SCATTER = 285,
+  TASK_PROB_EXTRACT_SM100 = 286,
+  // MLA-MTP TP variants (q1..q4, kv4096; ferret-derived, no-PDL):
+  TASK_MLA_MTP_DECODE_TP2_SM100 = 287,
+  TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 = 288,
+  TASK_MLA_MTP_DECODE_TP4_SM100 = 289,
+  TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 = 290,
+  TASK_MLA_MTP_DECODE_TP8_SM100 = 291,
+  TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
+  // KV gather variant that writes split CKV/KPE output (for chunked prefill):
+  TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
+  // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
+  // input tokens = shifted ground-truth prompt + current iter's argmax tail.
+  TASK_MTP_BUILD_EMBED_INPUT = 294,
+  // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
+  TASK_MLA_PREFILL_TP8_SM100 = 295,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
   TASK_GET_NEXT_TASK = 203,
+  TASK_SCHD_PREPARE_BATCH = 204,
   // Multi-GPU tasks
   TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
@@ -335,26 +373,81 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
-  int *step;                    // Metadata for LLM serving
-  long long *tokens;            // Metadata for LLM serving
-  long long *input_tokens;      // Metadata for LLM serving
-  long long *output_tokens;     // Metadata for LLM serving
-  long long eos_token_id;       // Metadata for LLM serving
-  int max_seq_length;           // Metadata for LLM serving
-  int *new_token_nums;          // Metadata for LLM serving
-  int *qo_indptr_buffer;        // Metadata for LLM serving (paged attention)
-  int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
+  int *step;                      // Metadata for LLM serving
+  long long *tokens;              // Metadata for LLM serving
+  long long *input_tokens;        // Metadata for LLM serving
+  long long *output_tokens;       // Metadata for LLM serving
+  long long eos_token_id;         // Metadata for LLM serving
+  int max_seq_length;             // Metadata for LLM serving
+  int *new_token_nums;            // Metadata for LLM serving
+  int *qo_indptr_buffer;          // Metadata for LLM serving (paged attention)
+  int *paged_kv_indptr_buffer;    // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_buffer;   // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_snapshot; // Scheduler snapshot for in-place compaction
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
-    defined(MODE_ONLINE_NOTOKEN)
+    defined(MODE_ONLINE_NOTOKEN) || defined(MODE_ONLINE_TEST) ||               \
+    defined(MODE_ONLINE_PINNED)
   int *prompt_length;     // Metadata for online/offline serving
   int *request_ids;       // Metadata for online/offline serving
   int *page_queue;        // Metadata for online/offline serving
   int *page_queue_head;   // Metadata for online/offline serving
-  int *page_queue_tail;   // Metadata for oneline/offline serving
-  int *next_request_id;   // Metadata for LLM serving
+  int *page_queue_tail;   // Metadata for online/offline serving
   int total_num_requests; // Metadata for LLM serving
+#endif
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
+    defined(MODE_ONLINE_NOTOKEN) || defined(MODE_ONLINE_TEST)
+  int *next_request_id; // Metadata for LLM serving (not used in PINNED mode)
+#endif
+#if defined(MODE_ONLINE_TEST)
+  // P3: written by the kernel when a request completes so Python can insert
+  // the final KV pages into the prefix cache.
+  // final_paged_kv_num_pages[request_id]                  : page count
+  // final_paged_kv_indices [request_id * MPK_MAX_NUM_PAGES + j] : page index j
+  int *final_paged_kv_num_pages;
+  int *final_paged_kv_indices;
+#endif
+#if defined(MODE_ONLINE_PINNED)
+  // Lock-free pinned request ring (capacity = MPK_PINNED_RING_CAPACITY,
+  // power-of-2) CPU is producer, GPU is consumer. Handshake: CPU writes data
+  // fields then sets ready=1 (release); GPU reads ready with acquire, consumes,
+  // then clears to 0.
+  int32_t volatile *pinned_req_ready; // 0=empty, 1=request ready
+  int32_t *pinned_req_request_id;
+  int32_t *pinned_req_prompt_len;
+  int32_t *pinned_req_initial_step; // reserved for prefix-cache (always 0 now)
+  // Lock-free pinned completion ring (capacity = MPK_PINNED_RING_CAPACITY)
+  // GPU is producer, CPU is consumer.
+  // Handshake: GPU writes data fields then sets ready=1 (release); CPU reads
+  // ready with acquire, processes, then clears to 0.
+  int32_t volatile *pinned_comp_ready; // 0=empty, 1=completion ready
+  int32_t *pinned_comp_request_id;
+  int32_t *pinned_comp_buffer_row;
+  int32_t *pinned_comp_final_step;
+  // GPU-private ring cursors — allocated with gpu_malloc, never touched by CPU.
+  int32_t *gpu_req_head;  // GPU consumer cursor into pinned request ring
+  int32_t *gpu_comp_tail; // GPU producer cursor into pinned completion ring
+  // CPU→GPU shutdown signal: CPU writes 1 to request kernel termination.
+  // GPU polls with ld.acquire.sys when the batch is empty.
+  int32_t volatile *pinned_shutdown; // 0=running, 1=shutdown requested
+  // Per-request step progress: GPU writes after each decode step so CPU can
+  // poll for streaming output without touching GPU memory.
+  int32_t *pinned_step; // [total_inflight], pinned, indexed by buffer row
+  // Pinned inbox: CPU writes prompt tokens here before submitting a request
+  // via the ring buffer. GPU copies from inbox to the allocated buffer row.
+  int64_t *pinned_inbox_tokens; // [MPK_PINNED_RING_CAPACITY * max_seq_length],
+                                // pinned (one inbox per ring slot)
+  // Pinned rid→row mapping: GPU writes pinned_rid_at_row[row] = rid when
+  // allocating a buffer row so CPU can discover which row its request is
+  // on by scanning rows, then poll pinned_step[row] for per-step streaming.
+  int32_t *pinned_rid_at_row; // [total_inflight], pinned
+  // Running queue rid tracking: request_rids[i] stores the original rid
+  // for active batch slot i (GPU device memory).
+  int *request_rids; // [MPK_MAX_NUM_BATCHED_REQUESTS]
+  // Free row pool — stack of available buffer row indices (GPU device
+  // memory).  Sized for max_num_batched_requests (no GPU waiting queue).
+  int *free_rows;    // [MPK_MAX_NUM_BATCHED_REQUESTS]
+  int *free_row_top; // stack pointer
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;

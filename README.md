@@ -115,7 +115,7 @@ Please let us know if you encounter any bugs or have any suggestions by [submitt
 A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org/abs/2405.05751). Please cite Mirage as:
 
 ``` bibtex
-@inproceedings {wu2024mirage,
+@inproceedings {wu2025mirage,
 title={Mirage: A Multi-Level Superoptimizer for Tensor Programs}, 
 author={Mengdi Wu and Xinhao Cheng and Shengyu Liu and Chunan Shi and Jianan Ji and Kit Ao and Praveen Velliengiri and Xupeng Miao and Oded Padon and Zhihao Jia},
 booktitle = {19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25)},
@@ -125,20 +125,19 @@ publisher = {USENIX Association},
 month = jul
 }
 
-@misc{cheng2025mpk,
-      title={Mirage Persistent Kernel: A Compiler and Runtime for Mega-Kernelizing Tensor Programs}, 
-      author={Xinhao Cheng and Zhihao Zhang and Yu Zhou and Jianan Ji and Jinchen Jiang and Zepeng Zhao and Ziruo Xiao and Zihao Ye and Yingyi Huang and Ruihang Lai and Hongyi Jin and Bohan Hou and Mengdi Wu and Yixin Dong and Anthony Yip and Zihao Ye and Songting Wang and Wenqin Yang and Xupeng Miao and Tianqi Chen and Zhihao Jia},
-      year={2025},
-      eprint={2512.22219},
-      archivePrefix={arXiv},
-      primaryClass={cs.DC},
-      url={https://arxiv.org/abs/2512.22219}, 
+@inproceedings{cheng2026mpk,
+title={MPK: A Compiler and Runtime for Mega-Kernelizing Tensor Programs}, 
+author={Xinhao Cheng and Zhihao Zhang and Yu Zhou and Jianan Ji and Jinchen Jiang and Zepeng Zhao and Ziruo Xiao and Zihao Ye and Yingyi Huang and Ruihang Lai and Hongyi Jin and Bohan Hou and Mengdi Wu and Yixin Dong and Anthony Yip and Zihao Ye and Songting Wang and Wenqin Yang and Xupeng Miao and Tianqi Chen and Zhihao Jia},
+year={2026},
+address={Seattle, WA},
+publisher = {USENIX Association},
+month = jul 
 }
 ```
 
 ## Publications
 
-- **Mirage Persistent Kernel: A Compiler and Runtime for Mega-Kernelizing Tensor Programs**. *Arxiv 2025*. [[arXiv]](https://arxiv.org/abs/2512.22219)
+- **MPK: A Compiler and Runtime for Mega-Kernelizing Tensor Programs**. *OSDI 2026*. [[arXiv]](https://arxiv.org/abs/2512.22219)
 - **Mirage: A Multi-Level Superoptimizer for Tensor Programs**. *OSDI 2025*. [[PDF]](https://www.usenix.org/system/files/osdi25-wu-mengdi.pdf)
 - **Identity Testing for Circuits with Exponentiation Gates**. *ITCS 2026* [[arXiv]](https://arxiv.org/pdf/2506.04529)
 

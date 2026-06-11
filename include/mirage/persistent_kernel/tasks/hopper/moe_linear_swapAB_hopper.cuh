@@ -351,7 +351,7 @@ __device__ __forceinline__ void
 
   if (warp_idx >= 4) {
     // DMA warp (4)
-    const uint32_t tid_in_wg = threadIdx.x % NUM_THREAD_PER_WARPGROUP;
+    uint32_t const tid_in_wg = threadIdx.x % NUM_THREAD_PER_WARPGROUP;
     cute::ThrCopy thr_copy_b = copyB.get_slice(tid_in_wg);
     cute::Tensor tBgB = thr_copy_b.partition_S(gB); // (ThrB, ThrTile_N)
     cute::Tensor tBsB = thr_copy_b.partition_D(
@@ -376,9 +376,9 @@ __device__ __forceinline__ void
           int tma_wr_ab_empty_phase =
               (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
-          bool peek_ab_empty_status = kernel::try_wait_barrier(
-              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-              tma_wr_ab_empty_phase);
+          bool peek_ab_empty_status =
+              try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+                               tma_wr_ab_empty_phase);
 
 #pragma unroll 3
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -440,7 +440,7 @@ __device__ __forceinline__ void
                 &shared_storage.b_full_mbar_ptr[smem_wr_buffer]);
 
             if (tma_wr_k_tile_next < k_tile_count) {
-              peek_ab_empty_status = kernel::try_wait_barrier(
+              peek_ab_empty_status = try_wait_barrier(
                   shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
                   tma_wr_ab_empty_phase_next);
             }
@@ -477,12 +477,12 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Peek full phase
-          bool peek_a_full_status = kernel::try_wait_barrier(
-              shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-              mma_rd_ab_full_phase);
-          bool peek_b_full_status = kernel::try_wait_barrier(
-              shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-              mma_rd_ab_full_phase);
+          bool peek_a_full_status =
+              try_wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+                               mma_rd_ab_full_phase);
+          bool peek_b_full_status =
+              try_wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+                               mma_rd_ab_full_phase);
 
           cute::Tensor accum = cute::partition_fragment_C(
               tiled_mma, cute::take<0, 2>(mma_tiler)); // (MMA,MMA_M,MMA_N)
@@ -532,10 +532,10 @@ __device__ __forceinline__ void
                   shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
             }
             if (mma_rd_k_tile_next < k_tile_count) {
-              peek_a_full_status = kernel::try_wait_barrier(
+              peek_a_full_status = try_wait_barrier(
                   shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
                   mma_rd_ab_full_phase_next);
-              peek_b_full_status = kernel::try_wait_barrier(
+              peek_b_full_status = try_wait_barrier(
                   shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
                   mma_rd_ab_full_phase_next);
             }

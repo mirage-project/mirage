@@ -38,7 +38,7 @@
 
 #pragma once
 
-#include "mirage/persistent_kernel/tasks/blackwell_v2/sm100_ptx.cuh"
+#include "mirage/persistent_kernel/tasks/blackwell/sm100_ptx.cuh"
 
 namespace mpk {
 namespace ch {

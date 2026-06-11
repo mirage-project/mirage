@@ -24,13 +24,13 @@ import json
 PAGE_SIZE = 16 * 1024
 NUM_PAGES = 14
 
-# CAPACITY_BYTES is the target's usable dynamic-SMEM budget -- the value the
-# megakernel passes to cudaFuncAttributeMaxDynamicSharedMemorySize, i.e. C++
-# MAX_DYNAMIC_SHARED_MEMORY_SIZE. That constant is #ifdef'd on arch/mode and
-# core.so is compiled arch-agnostic, so it CANNOT be emitted from there (it
-# would carry the wrong arch's value). It stays here; update it if the target's
-# SMEM budget changes. 225 KB Blackwell dynamic SMEM minus the 6 KB static
-# reserve (WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE).
+# CAPACITY_BYTES is the v2 page-allocator's placement budget. v2 uses its OWN
+# SMEM budget (launch_worker_v2 in runtime_v2.cuh requests 220 KB - reserve for
+# the worker kernel), NOT the shared MAX_DYNAMIC_SHARED_MEMORY_SIZE: the mpk
+# branch reduced that constant to leave room for MLA's ~16 KB static smem, but
+# v2's worker carries no MLA static. Placement headroom is 225 KB - reserve;
+# actual touched bytes stay within the kernel's allocation (proven on Qwen3).
+# Can't be emitted from core.so (arch/mode-#ifdef'd; core.so is arch-agnostic).
 CAPACITY_BYTES = 225 * 1024 - 6 * 1024
 
 

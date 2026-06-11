@@ -1,6 +1,7 @@
 name: mpk-qwen-ci
 on:
   push:
+    branches: [mpk]
   pull_request:
   workflow_dispatch:
 
@@ -10,15 +11,16 @@ concurrency:
 
 jobs:
   gpu-inference:
-    runs-on: [self-hosted, gpu, a100]
+    runs-on: [self-hosted, gpu, b200]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash -l {0}
 
     env:
-      HF_HOME: /home/haojia/hf_cache
-      TRANSFORMERS_CACHE: /home/haojia/hf_cache
-      HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
-      CUDA_VISIBLE_DEVICES: "0"
       CUBLAS_WORKSPACE_CONFIG: ":16:8"
       PYTHONUNBUFFERED: "1"
+      HF_HOME: "/raid/catalyst/models"
 
     steps:
       - name: Checkout
@@ -26,30 +28,55 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install Python deps
+      - name: Setup conda environment
         run: |
-          python -m pip install --upgrade pip
+          conda create -n mirage-ci-${{ github.run_id }} python=3.11 -y
+
+      - name: Install mirage
+        run: |
+          conda activate mirage-ci-${{ github.run_id }}
           pip install -e . -v
           pip install pytest
 
-      - name: Warm up HF cache (optional)
+      - name: Set Envs
         run: |
-          mkdir -p "$HF_HOME"
-          echo "HF cache at $HF_HOME"
-
-      - name: Set MIRAGE_HOME
-        run: echo "MIRAGE_HOME=$PWD" >> $GITHUB_ENV
+          echo "MIRAGE_HOME=$PWD" >> $GITHUB_ENV
+          CUDA_VISIBLE_DEVICES=$(bash scripts/find_idle_gpus.sh --num-gpus 1)
+          echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >> $GITHUB_ENV
 
       - name: Run Qwen3 Torch vs MPK comparison
+        timeout-minutes: 10
         env:
           MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
         run: |
+          conda activate mirage-ci-${{ github.run_id }}
           bash tests/ci-tests/run_ci_tests_qwen3.sh
+
+      - name: Run MPK batch size performance test
+        timeout-minutes: 30
+        env:
+          MIRAGE_HOME: ${{ env.MIRAGE_HOME }}
+        run: |
+          conda activate mirage-ci-${{ github.run_id }}
+          for r in 1 2 4 8; do
+            echo "::group::batch size $r"
+            python tests/ci-tests/run_batch_perf.py \
+              --max-num-batched-requests "$r" --ignore-eos
+            echo "::endgroup::"
+          done
+          python - <<'EOF'
+          import glob, json
+          print(f"{'requests':>9} {'tokens':>7} {'total_ms':>9} "
+                f"{'ms/token':>9} {'tokens/s':>9}")
+          for path in sorted(glob.glob("outputs/qwen3/batch_perf_*.json")):
+              with open(path) as f:
+                  m = json.load(f)
+              print(f"{m['max_num_batched_requests']:>9} "
+                    f"{m['max_num_batched_tokens']:>7} "
+                    f"{m['total_time_ms']:>9.1f} "
+                    f"{m['latency_ms_per_token']:>9.3f} "
+                    f"{m['throughput_tokens_per_s']:>9.1f}")
+          EOF
 
       - name: Upload artifacts on failure
         if: failure()
@@ -59,3 +86,9 @@ jobs:
           path: |
             outputs/
             logs/
+
+      - name: Clean up workspace
+        if: always()
+        run: |
+          conda env remove -n mirage-ci-${{ github.run_id }} -y
+          rm -rf "${{ github.workspace }}/*"

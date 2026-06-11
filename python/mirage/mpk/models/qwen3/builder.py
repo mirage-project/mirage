@@ -9,7 +9,7 @@ from ....core import bfloat16, int64
 
 from typing import Optional
 
-@register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-0.6B")
+@register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B", "Qwen3.5-0.8B")
 class Qwen3Builder(GraphBuilder):
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)

@@ -1015,7 +1015,11 @@ void worker_v2_kernel(RuntimeConfig config) {
 inline void launch_worker_v2(RuntimeConfig const &config,
                              int num_workers,
                              cudaStream_t stream) {
-  int smem = MAX_DYNAMIC_SHARED_MEMORY_SIZE;
+  // v2's worker kernel carries no MLA static SMEM (la_smem), so it keeps the
+  // full pre-MLA dynamic budget instead of the MLA-reduced
+  // MAX_DYNAMIC_SHARED_MEMORY_SIZE. MUST be >= v2_smem_planner.CAPACITY_BYTES
+  // so the kernel allocates every page the planner may place into.
+  int smem = 225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
   cudaFuncSetAttribute(worker_v2_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem);

@@ -63,9 +63,23 @@ KNChunkOp::KNChunkOp(Graph *_graph,
   for (size_t i = 0; i < chunk_size; ++i) {
     DTensor output_i = input;
     output_i.dim[dim] /= chunk_size;
+    // Each chunk is a freshly allocated contiguous tensor with its own
+    // shape; recompute row-major strides instead of inheriting input's.
+    // (Contrast with Graph::split, which produces views that DO inherit
+    // the parent's stride pattern.)
+    for (int d = output_i.num_dims - 1; d >= 0; d--) {
+      output_i.stride[d] = (d == output_i.num_dims - 1)
+                               ? 1
+                               : output_i.stride[d + 1] * output_i.dim[d + 1];
+    }
     output_i.owner_op = this;
     output_i.owner_ts_idx = i;
     output_i.guid = DTensor::next_guid++;
+    // Each chunk gets its own allocation; clear base_guid/view_offset so
+    // codegen doesn't route writes through input's parent IODesc when input
+    // is itself a view.
+    output_i.base_guid = 0;
+    output_i.view_offset = 0;
     kgraph->allocate(output_i);
     output_tensors.push_back(output_i);
   }

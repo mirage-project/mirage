@@ -287,7 +287,7 @@ __device__ __forceinline__ cute::UMMA::SmemDescriptor
   desc.version_ = 1;
   desc.lbo_mode_ = 0;
   desc.layout_type_ = 0; // SWIZZLE_NONE
-  const uint32_t uint_ptr = cute::cast_smem_ptr_to_uint(smem_ptr);
+  uint32_t const uint_ptr = cute::cast_smem_ptr_to_uint(smem_ptr);
   desc.start_address_ = static_cast<uint16_t>(uint_ptr >> 4);
   desc.base_offset_ = 0;
   desc.stride_byte_offset_ = 8; // 8 * 16 = 128 bytes between 32-element groups
@@ -320,7 +320,7 @@ __device__ __forceinline__ cute::UMMA::SmemDescriptor
 //
 // Must be called by all 32 threads of the warp simultaneously.
 __device__ __forceinline__ void fp8_utccp_warp_transpose(uint32_t *smem_ptr) {
-  const uint32_t lane_idx = cutlass::canonical_lane_idx();
+  uint32_t const lane_idx = cutlass::canonical_lane_idx();
   uint32_t values[4];
 // Phase 1: Read — each lane reads 4 non-contiguous elements
 #pragma unroll
@@ -603,8 +603,14 @@ __device__ __forceinline__ void
                           MMA_N,
                           bK>;
   extern __shared__ char shared_memory[];
+  // Align to 1024 bytes: SM100 UMMA with SWIZZLE_128B requires the smem
+  // buffer base to be aligned to at least 1024 bytes (the swizzle pattern
+  // repeats at 8 rows * 128B = 1024B). Without this, the UMMA descriptor's
+  // start_address interacts with absolute smem address bits, causing the
+  // hardware to misinterpret the swizzled layout when the dynamic smem base
+  // has non-zero bits in positions [7:9].
   uintptr_t aligned_smem =
-      (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
+      (reinterpret_cast<uintptr_t>(shared_memory) + 1023) / 1024 * 1024;
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
 
@@ -798,7 +804,7 @@ __device__ __forceinline__ void
   //   - Completion signaled by cpasync_barrier_arrive_noinc on b_full barrier
   //
   if (warp_idx == 5) {
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
 
     // total_k_tile_count tracks the cumulative K-tile index across ALL
     // work units, used to compute the rotating smem buffer index and
@@ -831,7 +837,7 @@ __device__ __forceinline__ void
           // Optimistic peek: try to check if the MMA warp has already consumed
           // this buffer (ab_empty). If yes, we can skip the blocking wait
           // below.
-          bool peek_ab_empty_status = kernel::try_wait_barrier(
+          bool peek_ab_empty_status = ::kernel::try_wait_barrier(
               shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
               tma_wr_ab_empty_phase);
 
@@ -922,7 +928,9 @@ __device__ __forceinline__ void
                 int row = byte_off / bK;
                 int col = byte_off % bK;
                 int32_t token_idx_n = n_tile * MMA_N + row;
-                int32_t topk_idx_n = tRoutingIndex(token_idx_n);
+                // Guard routing index read: MMA tile may exceed BATCH_SIZE
+                int32_t topk_idx_n =
+                    (token_idx_n < BATCH_SIZE) ? tRoutingIndex(token_idx_n) : 0;
 
                 // SWIZZLE_128B: swizzled = linear ^ ((row%8)*16)
                 int linear_off = row * bK + col;
@@ -965,7 +973,7 @@ __device__ __forceinline__ void
             // available (MMA warp consumed it). This overlaps barrier checking
             // with the current K-tile's TMA/cp.async execution.
             if (tma_wr_k_tile_next < k_tile_count) {
-              peek_ab_empty_status = kernel::try_wait_barrier(
+              peek_ab_empty_status = ::kernel::try_wait_barrier(
                   shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
                   tma_wr_ab_empty_phase_next);
             }
@@ -1015,9 +1023,9 @@ __device__ __forceinline__ void
     // Compute absolute TMEM column addresses for the three regions.
     // These are column indices within the TMEM allocation, used by UMMA
     // (accumulator destination) and UTCCP (scale factor destination).
-    const uint32_t tmem_base = shared_storage.tmem_base_ptr;
-    const uint32_t sfa_tmem = tmem_base + kTmemStartColOfSFA; // weight scales
-    const uint32_t sfb_tmem = tmem_base + kTmemStartColOfSFB; // input scales
+    uint32_t const tmem_base = shared_storage.tmem_base_ptr;
+    uint32_t const sfa_tmem = tmem_base + kTmemStartColOfSFA; // weight scales
+    uint32_t const sfb_tmem = tmem_base + kTmemStartColOfSFB; // input scales
 
     // UTCCP type: copies 4 columns x 32 rows x 128 bits from smem to TMEM.
     // "4x32dp128bit_1cta" = 4 columns, 32 depth, 128-bit data path, 1 CTA.
@@ -1080,7 +1088,7 @@ __device__ __forceinline__ void
     // Lane i holds the lo-word for stage i (i < NUM_AB_STAGE).
     // Stage offset = i * (MMA_M * bK * sizeof(uint8_t)) / 16  (in 16-byte
     // units)
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
     uint32_t a_desc_lo =
         (lane_idx < (uint32_t)NUM_AB_STAGE)
             ? (a_desc.lo + lane_idx * (MMA_M * bK * sizeof(uint8_t)) / 16)
@@ -1118,14 +1126,14 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Optimistic peeks: check if A/B/scales are already ready
-          bool peek_a = kernel::try_wait_barrier(
+          bool peek_a = ::kernel::try_wait_barrier(
               shared_storage.a_full_mbar_ptr[smem_rd_buf],
               mma_rd_ab_full_phase);
-          bool peek_b = kernel::try_wait_barrier(
+          bool peek_b = ::kernel::try_wait_barrier(
               shared_storage.b_full_mbar_ptr[smem_rd_buf],
               mma_rd_ab_full_phase);
           int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
-          bool peek_sf = kernel::try_wait_barrier(
+          bool peek_sf = ::kernel::try_wait_barrier(
               shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);
 
           // Wait for epilogue to finish reading the previous accumulator in
@@ -1221,8 +1229,8 @@ __device__ __forceinline__ void
                 // replicated), the choice doesn't matter for per-128-K
                 // quantization — but it would matter if finer-grained
                 // (per-32-K) quantization were used in the future.
-                const uint32_t sfa_id = k_sub;
-                const uint32_t sfb_id = k_sub;
+                uint32_t const sfa_id = k_sub;
+                uint32_t const sfb_id = k_sub;
                 // Build the runtime instruction descriptor with this sub-tile's
                 // scale factor byte selector. This modifies the base instr_desc
                 // to include sfa_id and sfb_id fields.
@@ -1282,15 +1290,15 @@ __device__ __forceinline__ void
 
             // Lookahead peek for the next K-tile's A/B/scale data
             if (mma_rd_k_tile_next < k_tile_count) {
-              peek_a = kernel::try_wait_barrier(
+              peek_a = ::kernel::try_wait_barrier(
                   shared_storage.a_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
-              peek_b = kernel::try_wait_barrier(
+              peek_b = ::kernel::try_wait_barrier(
                   shared_storage.b_full_mbar_ptr[smem_rd_buf_next],
                   mma_rd_ab_full_phase_next);
               int sf_phase_next =
                   (num_prev_k_blk + mma_rd_k_tile_next) / NUM_AB_STAGE % 2;
-              peek_sf = kernel::try_wait_barrier(
+              peek_sf = ::kernel::try_wait_barrier(
                   shared_storage.sf_ready_mbar_ptr[smem_rd_buf_next],
                   sf_phase_next);
               sf_phase = sf_phase_next;
@@ -1329,7 +1337,7 @@ __device__ __forceinline__ void
   // it with DMA loads and prior UMMA execution.
   //
   else if (warp_idx == 6) {
-    const uint32_t lane_idx = cutlass::canonical_lane_idx();
+    uint32_t const lane_idx = cutlass::canonical_lane_idx();
 
     int total_k_tile_count = 0;
     for (int activated_expert_offset = expert_offset;
@@ -1345,6 +1353,19 @@ __device__ __forceinline__ void
 
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
             int smem_buf = (num_prev_k_blk + k_tile) % NUM_AB_STAGE;
+
+            // FIX 2026-04-22: wait ab_empty BEFORE overwriting sfa/sfb_smem.
+            // Previously, scale warp wrote sfa/sfb_smem without waiting for
+            // MMA to finish UTCCP. At TP=4 w2 with mbt=64 (k_tile_count==
+            // NUM_AB_STAGE==8), scale warp could wrap back and overwrite
+            // sfa/sfb_smem[buf] while UTCCP was still reading. ab_empty is
+            // signaled by MMA's umma_arrive (tcgen05.commit) which waits for
+            // all tcgen05 ops (UMMA + UTCCP) to complete, so this correctly
+            // gates scale warp against the UTCCP read.
+            int sf_wr_ab_empty_phase =
+                (num_prev_k_blk + k_tile) / NUM_AB_STAGE % 2 ^ 1;
+            cute::wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_buf],
+                               sf_wr_ab_empty_phase);
 
             // ---- Load + convert + pack SFA (weight scales) ----
             uint32_t *sfa_buf = shared_storage.sfa_smem[smem_buf];
@@ -1365,7 +1386,9 @@ __device__ __forceinline__ void
               uint32_t ue8m0 = 0x7F; // default: UE8M0(1.0) for padding
               if (i < MMA_N) {
                 int32_t token_idx_n = n_tile * MMA_N + i;
-                int32_t topk_idx = tRoutingIndex(token_idx_n);
+                // Guard: MMA_N tile may exceed BATCH_SIZE
+                int32_t topk_idx =
+                    (token_idx_n < BATCH_SIZE) ? tRoutingIndex(token_idx_n) : 0;
                 if (token_idx_n < BATCH_SIZE && topk_idx > 0) {
                   float sf_val;
                   if constexpr (W13_LINEAR) {
@@ -1512,8 +1535,9 @@ __device__ __forceinline__ void
             int32_t m_idx =
                 m_tile * MMA_M + threadIdx.x;   // output row for this thread
             int32_t n_idx = n_tile * MMA_N + i; // token index
-            int32_t topk_idx = tRoutingIndex(n_idx); // routing check
-            if (n_idx < BATCH_SIZE && topk_idx > 0) {
+            // Guard: MMA_N tile may exceed BATCH_SIZE
+            int32_t topk_idx = (n_idx < BATCH_SIZE) ? tRoutingIndex(n_idx) : 0;
+            if (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE) {
               // topk_idx is 1-indexed in routing table, convert to 0-indexed
               mOutput(n_idx, topk_idx - 1, m_idx) = tCrC[i];
             }
@@ -1534,6 +1558,9 @@ __device__ __forceinline__ void
   // Only warp 0 performs the deallocation (matching the allocation).
   if (warp_idx == 0) {
     tmem_allocator.free(shared_storage.tmem_base_ptr, kNumTmemColsTotal);
+    // NOTE: intentionally no release_allocation_lock() here — MPK persistent
+    // kernels keep the TMEM allocator locked to warp 0 across tasks. See
+    // moe_linear_sm100.cuh "don't do relinquish for megakernel" comment.
   }
 } // end fp8_moe_group_gemm_sm100_task_impl
 
