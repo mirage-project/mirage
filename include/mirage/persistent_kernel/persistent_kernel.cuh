@@ -1614,7 +1614,15 @@ extern "C" void
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
-  global_runtime_config.split_worker_scheduler = true;
+  // Split mode launches worker_kernel and scheduler_kernel as TWO independent
+  // grids with no co-residency guarantee: 136 worker CTAs (1/SM at 227KB smem
+  // on a 148-SM B200) + 48 scheduler CTAs cannot all be resident, and a
+  // persistent worker that never becomes resident never fires its events ->
+  // the task graph wedges (probability grows with task count). The split path
+  // also does not support NVSHMEM (its own comment), yet nothing forced the
+  // single-kernel path under USE_NVSHMEM. Same fix as 54de0a31 (2026-04-30)
+  // on the dev-v8 line: always use the single collective launch.
+  global_runtime_config.split_worker_scheduler = false;
 
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
@@ -1796,6 +1804,19 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
   }
   int num_schedulers = global_runtime_config.num_local_schedulers +
                        global_runtime_config.num_remote_schedulers;
+#ifdef USE_NVSHMEM
+  // Fail-closed guard: the split path launches worker/scheduler as two plain
+  // (non-collective) grids, so NVSHMEM device-side rendezvous has no progress
+  // guarantee and persistent CTAs have no co-residency guarantee. Never let
+  // split + USE_NVSHMEM run silently.
+  if (global_runtime_config.split_worker_scheduler) {
+    fprintf(stderr,
+            "[MPK] split_worker_scheduler is unsupported with USE_NVSHMEM "
+            "(no co-residency/progress guarantee); forcing single collective "
+            "launch\n");
+    global_runtime_config.split_worker_scheduler = false;
+  }
+#endif
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
     printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);

@@ -729,8 +729,22 @@ void register_mugraph(
                 }
               } else {
                 assert(task_ids.size() == 1);
-                all_tasks[task_ids[0]].trigger_event =
+                EventId new_ev =
                     get_event_id(my_gpu_id, event_pos, nvshmem_event);
+                EventId old_ev = all_tasks[task_ids[0]].trigger_event;
+                if (old_ev != EVENT_INVALID_ID && old_ev != new_ev) {
+                  // A task has ONE trigger_event slot; a second distinct
+                  // event here means the earlier event keeps a num_triggers
+                  // count this task will never signal -> permanent wait.
+                  std::fprintf(stderr,
+                               "[TRIGGER_OVERWRITE] task=%zu type=%d "
+                               "old_event=%llx new_event=%llx\n",
+                               (size_t)task_ids[0],
+                               (int)all_tasks[task_ids[0]].task_type,
+                               (unsigned long long)old_ev,
+                               (unsigned long long)new_ev);
+                }
+                all_tasks[task_ids[0]].trigger_event = new_ev;
                 event_desc.num_triggers++;
               }
             }
