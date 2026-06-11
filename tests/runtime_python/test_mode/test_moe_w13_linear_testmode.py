@@ -113,7 +113,7 @@ def test_moe_w13_linear():
     pk.compile(output_dir=folder_path)
 
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # --- Compare ---

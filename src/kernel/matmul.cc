@@ -85,6 +85,10 @@ KNMatmulOp::KNMatmulOp(Graph *_kgraph, DTensor const &A, DTensor const &B)
   }
   C.dim[C.num_dims - 1] = B.dim[C.num_dims - 1];
   C.layout = mirage::layout::DmemRowMajor;
+  // Output is freshly allocated row-major, so compute strides from C.dim.
+  for (int i = C.num_dims - 1; i >= 0; i--) {
+    C.stride[i] = (i == C.num_dims - 1) ? 1 : C.stride[i + 1] * C.dim[i + 1];
+  }
   C.data_type = A.data_type;
   C.owner_op = this;
   C.owner_ts_idx = 0;

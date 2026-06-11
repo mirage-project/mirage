@@ -272,17 +272,19 @@ void register_mugraph(
   // tasks interleaved per fork event.
   std::vector<bool> bundle_emitted(ag.fork_groups.size(), false);
 
+  // Per-task tensor descriptor. The TBInputOp's stensor carries the per-task
+  // tile shape; strides come straight off the DTensor (set at new_input or
+  // view-construction time). Views thus need no parent lookup here.
   auto get_tensor_desc = [](tb::TBInputOp *const &tb_op) -> TensorDesc {
     TensorDesc desc;
     assert(tb_op->output_tensors.size() == 1);
     tb::STensor stensor = tb_op->output_tensors[0];
-    kn::KNInputOp *kernel_input_op =
-        static_cast<kn::KNInputOp *>(tb_op->dtensor.owner_op);
+    DTensor const &dt = tb_op->dtensor;
     desc.num_dims = stensor.num_dims;
     desc.data_type = stensor.data_type;
     for (int d = stensor.num_dims - 1; d >= 0; d--) {
       desc.dim[d] = stensor.dim[d];
-      desc.stride[d] = kernel_input_op->input_strides[d];
+      desc.stride[d] = dt.stride[d];
     }
     return desc;
   };
@@ -1454,10 +1456,15 @@ TaskGraphResult print_task_graph(
               off_t offset = 0;
               int num_dims = input_ops[i]->dtensor.num_dims;
               int3 input_map = input_ops[i]->input_map;
-              IODesc io_desc =
-                  io_configs.find(input_ops[i]->dtensor.guid)->second;
-              assert(input_ops[i]->dtensor.owner_op->op_type ==
-                     type::KN_INPUT_OP);
+              // For views, the IODesc lives under the root storage tensor's
+              // GUID; resolve_base_guid() returns the view's own guid for
+              // non-virtual tensors (no-op for the common path).
+              DTensor const &in_dt = input_ops[i]->dtensor;
+              size_t io_lookup_guid = in_dt.resolve_base_guid();
+              IODesc io_desc = io_configs.find(io_lookup_guid)->second;
+              if (!in_dt.is_virtual()) {
+                assert(in_dt.owner_op->op_type == type::KN_INPUT_OP);
+              }
               if (io_desc.type == IODesc::FusedTorchTensor) {
                 // Currently assert that we fuse the 0-th dim (i.e., 0)
                 int fused_group_size = 0;
@@ -1561,32 +1568,38 @@ TaskGraphResult print_task_graph(
                     {"dims", json_dims},
                     {"strides", json_strides}});
               } else {
-                // Non-fused case, use io_desc
+                // Non-fused case. Per-task block_size and stride both come
+                // off the input DTensor (in_dt). For views, in_dt.dim is
+                // the view's logical shape and in_dt.stride is the view's
+                // effective stride (= parent's stride for same-rank views,
+                // row-major from view dims for reshapes). No parent lookup
+                // needed at codegen time.
                 if (input_map.x >= 0) {
                   size_t block_size =
-                      io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
-                  offset +=
-                      block_size * bid.x * io_desc.tensor.stride[input_map.x];
+                      in_dt.dim[input_map.x] / bgraph.grid_dim.x;
+                  offset += block_size * bid.x * in_dt.stride[input_map.x];
                 }
                 if (input_map.y >= 0) {
                   size_t block_size =
-                      io_desc.tensor.dim[input_map.y] / bgraph.grid_dim.y;
-                  offset +=
-                      block_size * bid.y * io_desc.tensor.stride[input_map.y];
+                      in_dt.dim[input_map.y] / bgraph.grid_dim.y;
+                  offset += block_size * bid.y * in_dt.stride[input_map.y];
                 }
                 if (input_map.z >= 0) {
                   size_t block_size =
-                      io_desc.tensor.dim[input_map.z] / bgraph.grid_dim.z;
-                  offset +=
-                      block_size * bid.z * io_desc.tensor.stride[input_map.z];
+                      in_dt.dim[input_map.z] / bgraph.grid_dim.z;
+                  offset += block_size * bid.z * in_dt.stride[input_map.z];
                 }
+                // Byte offset within the root storage's allocation. For
+                // non-views, view_offset == 0 and this term is a no-op.
+                int64_t in_view_bytes = in_dt.view_offset;
                 tgbody.e("TensorDesc input$;", i);
                 tgbody.e("input$.base_ptr = static_cast<char*>($) + $;",
                          i,
                          io_desc.name,
                          offset * type::get_datatype_size(
                                       static_cast<type::DataType>(
-                                          io_desc.tensor.data_type)));
+                                          io_desc.tensor.data_type)) +
+                             in_view_bytes);
                 tgbody.e(
                     "input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
                 tgbody.e(
@@ -1604,15 +1617,16 @@ TaskGraphResult print_task_graph(
                   json_strides.push_back(task_desc.inputs[i].stride[d]);
                 }
                 tgbody.e("task_desc.inputs[$] = input$;", i, i);
-                json_task["inputs"].push_back(json{
-                    {"base_ptr", io_desc.name},
-                    {"offset",
-                     offset *
-                         type::get_datatype_size(static_cast<type::DataType>(
-                             io_desc.tensor.data_type))},
-                    {"data_type", task_desc.inputs[i].data_type},
-                    {"dims", json_dims},
-                    {"strides", json_strides}});
+                json_task["inputs"].push_back(
+                    json{{"base_ptr", io_desc.name},
+                         {"offset",
+                          offset * type::get_datatype_size(
+                                       static_cast<type::DataType>(
+                                           io_desc.tensor.data_type)) +
+                              in_view_bytes},
+                         {"data_type", task_desc.inputs[i].data_type},
+                         {"dims", json_dims},
+                         {"strides", json_strides}});
               }
             }
 
@@ -1623,35 +1637,39 @@ TaskGraphResult print_task_graph(
                 offset = my_gpu_id * input_ops[0]->dtensor.num_elements();
               }
               int3 output_map = output_ops[i]->input_map;
+              // Views as outputs (write-views) resolve to the parent storage's
+              // IODesc via base_guid; view_offset is added below.
+              DTensor const &out_dt = output_ops[i]->dtensor;
               IODesc io_desc =
-                  io_configs.find(output_ops[i]->dtensor.guid)->second;
+                  io_configs.find(out_dt.resolve_base_guid())->second;
               assert(io_desc.type != IODesc::FusedTorchTensor);
+              // Per-task offset uses the view's own dims and strides; see
+              // matching note on the input side.
               if (output_map.x >= 0) {
                 size_t block_size =
-                    io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
-                offset +=
-                    block_size * bid.x * io_desc.tensor.stride[output_map.x];
+                    out_dt.dim[output_map.x] / bgraph.grid_dim.x;
+                offset += block_size * bid.x * out_dt.stride[output_map.x];
               }
               if (output_map.y >= 0) {
                 size_t block_size =
-                    io_desc.tensor.dim[output_map.y] / bgraph.grid_dim.y;
-                offset +=
-                    block_size * bid.y * io_desc.tensor.stride[output_map.y];
+                    out_dt.dim[output_map.y] / bgraph.grid_dim.y;
+                offset += block_size * bid.y * out_dt.stride[output_map.y];
               }
               if (output_map.z >= 0) {
                 size_t block_size =
-                    io_desc.tensor.dim[output_map.z] / bgraph.grid_dim.z;
-                offset +=
-                    block_size * bid.z * io_desc.tensor.stride[output_map.z];
+                    out_dt.dim[output_map.z] / bgraph.grid_dim.z;
+                offset += block_size * bid.z * out_dt.stride[output_map.z];
               }
+              int64_t out_view_bytes = out_dt.view_offset;
 
               tgbody.e("TensorDesc output$;", i);
-              tgbody.e("output$.base_ptr = static_cast<char*>($) + $;",
-                       i,
-                       io_desc.name,
-                       offset *
-                           type::get_datatype_size(static_cast<type::DataType>(
-                               io_desc.tensor.data_type)));
+              tgbody.e(
+                  "output$.base_ptr = static_cast<char*>($) + $;",
+                  i,
+                  io_desc.name,
+                  offset * type::get_datatype_size(static_cast<type::DataType>(
+                               io_desc.tensor.data_type)) +
+                      out_view_bytes);
               tgbody.e(
                   "output$.num_dims = $;", i, task_desc.outputs[i].num_dims);
               tgbody.e(
@@ -1673,7 +1691,8 @@ TaskGraphResult print_task_graph(
                   {"base_ptr", io_desc.name},
                   {"offset",
                    offset * type::get_datatype_size(static_cast<type::DataType>(
-                                io_desc.tensor.data_type))},
+                                io_desc.tensor.data_type)) +
+                       out_view_bytes},
                   {"data_type", task_desc.outputs[i].data_type},
                   {"dims", json_dims},
                   {"strides", json_strides}});

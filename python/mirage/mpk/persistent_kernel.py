@@ -58,22 +58,6 @@ HARD_CODE = """
 
 extern std::string g_task_graph_json_path;
 
-// Stubs for host symbols from libnvshmem_device.a that collective_launch.cpp.o
-// references. We don't link the full device archive (it forces -rdc=true), so
-// Host-side stubs for symbols normally in libnvshmem_device.a.
-// We don't link the .a (it forces rdc=true → 255 regs on SM100a).
-// Init is done via nvshmemid_hostlib_init_attr + our callback.
-#ifdef NVSHMEM_NO_DEVICE_LIB
-// Stubs for host-side symbols from libnvshmem_device.a needed by collective_launch.cpp.o
-struct nvshmemi_device_only_state_stub { char data[1024]; };
-nvshmemi_device_only_state_stub nvshmemi_device_only_state;
-extern "C" {
-  void nvshmemi_finalize() {}
-  void _Z31nvshmemi_check_state_and_init_dv() {}
-  void* nvshmemi_get_device_state_ptrs() { return nullptr; }
-}
-#endif
-
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path;
   std::vector<void*> meta_tensors;
@@ -81,10 +65,10 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   std::vector<void*> model_tensor_ptrs;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
-  int allocate_nvshmem_teams, is_test_mode;
+  int allocate_nvshmem_teams;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLiiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &is_test_mode, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -106,7 +90,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor && !is_test_mode) {
+    if(!tensor) {
       PyErr_Format(PyExc_TypeError, "Failed to convert item %d (meta) to void pointer", i);
       return NULL;
     }
@@ -137,7 +121,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
   }
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, is_test_mode, model_tensor_names, model_tensor_ptrs);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs);
 
   Py_RETURN_NONE;
 }
@@ -269,19 +253,10 @@ def get_compile_command(
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
-
-    # rdc=true is the default on every NVSHMEM build. The old Blackwell
-    # rdc=false + self-contained-allreduce workaround (hand-rolled
-    # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
-    # because rdc=true previously inflated registers 166→255 on sm_100a) is
-    # kept behind MPK_RDC_FALSE=1 as a safety escape hatch — on CUDA 13.2 +
-    # NVSHMEM 3.6.5 the register-spill issue is gone (verified 2026-04-22 at
-    # TP=2 and TP=4 across mbt∈{1,64} and MTP spec∈{0,1,3}).
-    _rdc_false = os.environ.get("MPK_RDC_FALSE", "0") == "1" and target_cc >= 100
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if (not use_nvshmem or _rdc_false) else "-rdc=true",
+        "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -292,11 +267,6 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # Uncomment to enable verbose scheduler/worker/event debug prints from
-    # persistent_kernel.cuh (all gated on MPK_ENABLE_VERBOSE). Noisy; meant for
-    # local debugging only.
-    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -333,31 +303,11 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        if _rdc_false:
-            # Blackwell MPK_RDC_FALSE=1 escape hatch: self-contained allreduce,
-            # no libnvshmem_device.a (kept for regression isolation; see the
-            # block above for when this path is needed).
-            _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
-            _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
-            os.makedirs(_host_obj_dir, exist_ok=True)
-            _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
-            if not os.path.exists(_coll_obj):
-                import subprocess as _sp
-                _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
-            nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
-                             _coll_obj,
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
-        else:
-            # Default path: standard NVSHMEM link with device library +
-            # rdc=true. Used everywhere unless MPK_RDC_FALSE=1 on Blackwell.
-            nvshmem_flags = ["-DUSE_NVSHMEM",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        nvshmem_flags = ["-DUSE_NVSHMEM",
+                         "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
+                         "-Xlinker", "--disable-new-dtags",
+                         "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                         "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -483,14 +433,18 @@ class PersistentKernel:
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
 
         if test_mode:
-            # Skip all following checks
-            self.total_num_requests = 1
-            return
+            # Auto-allocate any meta tensors the test author didn't provide so
+            # the kernel sees valid GPU pointers. Shapes are derived from the
+            # kernel-level params already on `self`. Defaults model "single
+            # prefill of max_num_batched_tokens tokens, content all zero" — the
+            # test author overrides any subset by setting them in
+            # `params["meta_tensors"]` before constructing PersistentKernel.
+            self._apply_test_mode_meta_defaults()
 
-        self.total_num_requests = meta_tensors["tokens"].shape[0]
+        self.total_num_requests = self.meta_tensors["tokens"].shape[0]
 
         # Checks
-        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
+        assert self.max_seq_length == self.meta_tensors["tokens"].shape[1]
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
@@ -938,8 +892,17 @@ class PersistentKernel:
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
         strides = tuple([s for s in torch_tensor.stride()])
-        # Check layout: row-major or column-major (for FP8 scale tensors)
-        is_row_major = all(strides[d] == strides[d + 1] * dims[d + 1] for d in range(len(dims) - 1))
+        # Check layout: row-major (possibly with padded outer strides — supports
+        # slice views like q_nope_pe[:, :, :512] of a (mbt, H, 576) parent for
+        # the MPK_DSV3_BMM TMA-stride fuse) or column-major (FP8 scale tensors).
+        # Padded row-major: each outer stride covers AT LEAST a contiguous
+        # row at the next level (== for contig, > for slice view of a wider
+        # parent). Innermost stride must still be 1.
+        is_row_major = (
+            all(strides[d] >= strides[d + 1] * dims[d + 1]
+                for d in range(len(dims) - 1))
+            and strides[-1] == 1
+        )
         is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
         assert is_row_major or is_col_major, \
             f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
@@ -998,6 +961,29 @@ class PersistentKernel:
         assert shuffled_dim == 0
         t = self.kn_graph.shuffle_tensors(inputs, shuffled_dim, num_groups, name)
         return t
+
+    # ---- Virtual tensor (view) APIs ----------------------------------------
+    # These operators return DTensors that share memory with `input`. The
+    # returned view has its own GUID plus base_guid + view_offset metadata.
+    # The dependency analyzer treats any edge involving a view as a coarse
+    # barrier edge (one event per layer instead of GCD-based per-tile
+    # events); see docs / annotated_graph.cc for details.
+
+    def view(self, input: DTensor, new_shape: list) -> DTensor:
+        """Reshape into a new shape that has the same total element count.
+        Returns a single virtual DTensor."""
+        return self.kn_graph.view(input, list(new_shape))
+
+    def narrow(self, input: DTensor, dim: int, start: int, length: int) -> DTensor:
+        """Take a contiguous-window virtual DTensor of `input` along `dim`."""
+        return self.kn_graph.narrow(input, dim, start, length)
+
+    def split(self, input: DTensor, sizes_or_chunks, dim: int) -> list:
+        """Split `input` into multiple virtual DTensors along `dim`.
+
+        sizes_or_chunks may be an int (equal-size chunk count) or a list of
+        explicit sizes summing to `input.dim[dim]`."""
+        return self.kn_graph.split(input, sizes_or_chunks, dim)
 
     def embed_layer(
         self,
@@ -3009,10 +2995,6 @@ class PersistentKernel:
 
         import importlib.util
 
-        # Set MPK_SO_PATH so init_persistent_kernel() can load the module via
-        # cuLibraryLoadFromFile for nvshmemx_culibrary_init (NVSHMEM_NO_DEVICE_LIB mode).
-        os.environ["MPK_SO_PATH"] = so_path
-
         spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -3081,7 +3063,6 @@ class PersistentKernel:
             self.total_num_requests,
             self.eos_token_id,
             self.allocate_nvshmem_teams,
-            self.test_mode,
             model_tensor_names,
             model_tensor_ptrs,
             "",  # Empty JSON path = use __FILE__ based path during initial compile
@@ -3194,12 +3175,11 @@ class PersistentKernel:
             self.total_num_requests,
             self.eos_token_id,
             self.allocate_nvshmem_teams,
-            self.test_mode,
             model_tensor_names,
             model_tensor_ptrs,
             json_path,  # Pass the JSON path for kernel reuse
         )
-        
+
         self._is_compiled = True
 
     def __call__(self, **kwargs):
@@ -3222,42 +3202,17 @@ class PersistentKernel:
             raise ValueError("Invalid stream object")
         self.launch_func(stream_ptr)
         if self.profiler_tensor is not None:
-            from .profiler_persistent import export_to_perfetto_trace
-            
+            from .profiler_persistent import export_to_csv, export_to_perfetto_trace
+
             if self.trace_name:
-                trace_name = self.trace_name + ".perfetto-trace"
+                stem = self.trace_name
             else:
-                trace_name = f"mirage_{self.mpi_rank}.perfetto-trace"
+                stem = f"mirage_{self.mpi_rank}"
 
             export_to_perfetto_trace(
-                self.profiler_tensor, trace_name
+                self.profiler_tensor, stem + ".perfetto-trace"
             )
-
-    def run_test_mode(self):
-        """Test-mode execution: launch the task graph once.
-
-        Input/output tensors must be pre-attached via attach_input() before
-        compile(). After run_test_mode() returns, the output tensors contain the results.
-        """
-        assert self.test_mode, "run_test_mode() is only available in test mode"
-        assert self._is_compiled, "Must call compile() before run_test_mode()"
-
-        stream = torch.cuda.current_stream()
-        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
-        stream_ptr = 0
-        if hasattr(stream, "cuda_stream"):
-            try:
-                stream_ptr = int(stream.cuda_stream)
-            except Exception:
-                try:
-                    stream_ptr = int(stream.cuda_stream.value)
-                except Exception as e:
-                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
-        elif isinstance(stream, int):
-            stream_ptr = stream
-        else:
-            raise ValueError("Invalid stream object")
-        self.launch_func(stream_ptr)
+            export_to_csv(self.profiler_tensor, stem + ".csv")
 
     def __del__(self):
         if not self.__finalized__:
