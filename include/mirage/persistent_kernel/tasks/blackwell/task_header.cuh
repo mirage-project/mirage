@@ -36,6 +36,8 @@
 // so kernel::sm100_ptx is defined in the correct namespace
 #include "elementwise_add_sm100.cuh"
 #include "mHC_post.cuh"
+#include "mHC_pre.cuh"
+#include "mHC_post_pre.cuh"
 #include "mla_mtp_decode_sm100.cuh"
 #include "mla_mtp_decode_tp2_sm100.cuh"
 #include "mla_mtp_decode_tp4_sm100.cuh"

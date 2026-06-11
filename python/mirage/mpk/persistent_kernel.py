@@ -2196,7 +2196,63 @@ class PersistentKernel:
         self.kn_graph.customized([logits, token_ids, output_probs], tb_graph)
         self.kn_graph.register_task(tb_graph, "softmax_gather_sm100")
 
-    def hc_post_block(
+    def mHC_pre_block(
+        self,
+        x: DTensor,             # [bs, n, C]   bf16  (per-head residual stream)
+        hc_fn_padded: DTensor,  # [128, n*C]   bf16  (weight, padded rows)
+        hc_scale: DTensor,      # [3]          fp32
+        hc_base: DTensor,       # [mix_hc]     fp32
+        f_pre: DTensor,         # [bs, C]      bf16  (output)
+        h_post: DTensor,        # [bs, n]      fp32  (output: post-gate)
+        comb: DTensor,          # [bs, n, n]   fp32  (output: sinkhorn comb)
+        sinkhorn_iters: int = 20,
+        tokens_per_cta: int = 32,
+    ):
+        """High-level mHC hc_pre block: prenorm GEMM (k1) + sinkhorn tail (k2).
+
+        Dispatches k1 on the validated decode/prefill heuristic (token count):
+        bs < 256 -> CUDA-core GEMM (decode); else -> tcgen05 + TMA GEMM
+        (prefill). Both write the same bf16 mixes_pad + fp32 sqrsum scratch, so
+        the shared k2 tail consumes either. The [bs, n, C] residual `x` feeds
+        k1 directly (its task/TMA path folds the trailing dims to K=n*C, so no
+        separate 2D view is needed). The same bf16 [128, K] weight serves both
+        k1 paths.
+        """
+        assert self.target_cc == 100
+        assert x.num_dims == 3
+        bs = x.dim(0)
+        n = x.dim(1)
+        C = x.dim(2)
+        K = n * C
+        assert hc_fn_padded.dim(0) == 128 and hc_fn_padded.dim(1) == K
+
+        # k1 scratch (chained to k2 by the event graph via these tensors).
+        mixes_pad = self.new_tensor(
+            (bs, 128), dtype=bfloat16, name="hc_pre_mixes_pad")
+        sqrsum = self.new_tensor(
+            (bs,), dtype=float32, name="hc_pre_sqrsum")
+
+        DECODE_THRESH = 256
+        if bs < DECODE_THRESH:
+            self.mhc_pre_k1_decode_layer(x,
+                                  hc_fn_padded,
+                                  mixes_pad,
+                                  sqrsum,
+                                  grid_dim=(bs, 1, 1),
+                                  block_dim=(256, 1, 1))
+        else:
+            self.mhc_pre_k1_prefill_layer(x,
+                                          hc_fn_padded,
+                                          mixes_pad,
+                                          sqrsum)
+
+        self.mhc_pre_k2_layer(
+            mixes_pad, sqrsum, hc_scale, hc_base, x,
+            f_pre, h_post, comb,
+            grid_dim=(bs, 1, 1), block_dim=(256, 1, 1),
+            sinkhorn_repeat=sinkhorn_iters)
+
+    def mHC_post_block(
         self,
         x: DTensor,         # [bs, C]      bf16  (post-attn/ffn output)
         residual: DTensor,  # [bs, n, C]   bf16  (per-head residual stream)
@@ -2211,7 +2267,7 @@ class PersistentKernel:
             y = post.unsqueeze(-1) * x.unsqueeze(-2)
               + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)
         """
-        bs = residual.dim[0]
+        bs = residual.dim(0)
         # post task partitions over bs; one CTA per token by default.
         grid_x = bs if tokens_per_cta_grid is None else (
             bs // tokens_per_cta_grid)
@@ -2251,10 +2307,10 @@ class PersistentKernel:
         self.kn_graph.customized([residual, x, comb, post, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "mhc_post_sm100", [])
 
-    def mhc_pre_k1_layer(
+    def mhc_pre_k1_decode_layer(
         self,
-        residual: DTensor,   # [bs, K]        bf16  (K = n*C)
-        fn: DTensor,         # [MIX_HC, K]    fp32  (weight)
+        residual: DTensor,   # [bs, K] or [bs, n, C]  bf16  (K = n*C)
+        fn: DTensor,         # [>=MIX_HC, K]  bf16  (weight; padded [128,K] ok)
         mixes_pad: DTensor,  # [bs, MIX_PAD]  bf16  (output)
         sqrsum: DTensor,     # [bs]           fp32  (output)
         grid_dim: tuple,
@@ -2264,20 +2320,60 @@ class PersistentKernel:
 
         CUDA-core prenorm GEMM, one CTA per token (split_k=1, direct epilogue
         writes the final bf16 mixes_pad + fp32 sqrsum). Feeds mhc_pre_k2_layer.
+        The kernel reads bf16 weight rows 0..MIX_HC-1 (stride K), so the same
+        padded [128, K] bf16 weight as the prefill path can be passed directly.
+        residual may be [bs, K] or the [bs, n, C] stream (the task folds the
+        trailing dims to K = n*C).
         """
         assert self.target_cc == 100
-        assert residual.num_dims == 2
+        assert residual.num_dims == 2 or residual.num_dims == 3
         assert fn.num_dims == 2
         assert mixes_pad.num_dims == 2
         assert sqrsum.num_dims == 1
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(residual, (0, -1, -1), -1, True)
-        tb_graph.new_input(fn, (0, -1, -1), -1, True)
+        tb_graph.new_input(fn, (-1, -1, -1), -1, True)
         tb_graph.new_input(mixes_pad, (0, -1, -1), -1, True)
         tb_graph.new_input(sqrsum, (0, -1, -1), -1, True)
         self.kn_graph.customized([residual, fn, mixes_pad, sqrsum], tb_graph)
         self.kn_graph.register_task(tb_graph, "mhc_pre_k1_sm100", [])
+
+    # mHC prefill pre-k1: tcgen05 + TMA prenorm GEMM (the high-token-count path).
+    # Pinned to BLOCK_N=16 / BLOCK_K=64 / NUM_STAGES=2 (the TMA box dims encoded
+    # in tma.cuh match these). residual + fn carry TMA descriptors, so they use
+    # whole-tensor partition and the kernel slices its batch tile via metadata.
+    def mhc_pre_k1_prefill_layer(
+        self,
+        residual: DTensor,   # [bs, K] or [bs, n, C]  bf16  (K = n*C)
+        fn: DTensor,         # [128, K]       bf16  (weight, padded rows)
+        mixes_pad: DTensor,  # [bs, MIX_PAD]  bf16  (output)
+        sqrsum: DTensor,     # [bs]           fp32  (output)
+    ):
+        """mHC pre stage k1 (prefill): tcgen05 + TMA GEMM. Same mixes_pad +
+        sqrsum outputs as mhc_pre_k1_decode_layer, so it feeds the shared k2 tail.
+        residual may be [bs, K] or the [bs, n, C] stream (the TMA descriptor
+        folds the trailing dims to K = n*C).
+        """
+        assert self.target_cc == 100
+        assert residual.num_dims == 2 or residual.num_dims == 3
+        assert fn.num_dims == 2 and fn.dim(0) == 128
+        assert mixes_pad.num_dims == 2
+        assert sqrsum.num_dims == 1
+
+        BLOCK_N = 16
+        bs = residual.dim(0)
+        grid_dim = ((bs + BLOCK_N - 1) // BLOCK_N, 1, 1)
+        block_dim = (128 + 2 * 32, 1, 1)  # OUTPUT_PAD + 2 warps (launch bounds)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # residual + fn are TMA inputs: whole tensor (no grid partition).
+        tb_graph.new_input(residual, (-1, -1, -1), -1, True)
+        tb_graph.new_input(fn, (-1, -1, -1), -1, True)
+        tb_graph.new_input(mixes_pad, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sqrsum, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([residual, fn, mixes_pad, sqrsum], tb_graph)
+        self.kn_graph.register_task(tb_graph, "mhc_pre_k1_prefill_sm100", [])
 
     def mhc_pre_k2_layer(
         self,
@@ -2303,8 +2399,11 @@ class PersistentKernel:
         assert comb.num_dims == 3
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Token-partition the per-token tensors (dim 0); scale[3] and base[mix_hc]
+        # are shared constants -> whole-tensor (no per-token offset).
         for t in (mixes_pad, sqrsum, scale, base, x_orig, f_pre, h_post, comb):
-            tb_graph.new_input(t, (0, -1, -1), -1, True)
+            part = (-1, -1, -1) if (t is scale or t is base) else (0, -1, -1)
+            tb_graph.new_input(t, part, -1, True)
         self.kn_graph.customized(
             [mixes_pad, sqrsum, scale, base, x_orig, f_pre, h_post, comb],
             tb_graph)

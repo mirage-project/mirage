@@ -1281,6 +1281,50 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       assert(err == CUDA_SUCCESS);
       break;
     }
+    case TASK_MHC_PRE_K1_PREFILL_SM100: {
+      // 2D K-major bf16 descriptor with 128B swizzle, identical to the
+      // standalone init_2d_bf16_tmap. box = (BLOCK_K=64, rows): rows = OUT_PAD
+      // (128) for the weight (param 1), BLOCK_N (16) for the residual (param 0).
+      // The MPK prefill task is pinned to BLOCK_N=16 / BLOCK_K=64 / NUM_STAGES=2
+      // (near the benchmarked optimum), so these box dims are compile-time.
+      constexpr int BLOCK_K = 64;
+      constexpr int OUT_PAD = 128;
+      constexpr int BLOCK_N = 16;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+
+      // tensor_desc: param 0 = residual [batch, K] or [batch, n, C] (K=n*C),
+      // param 1 = fn [OUT_PAD, K]. Fold trailing dims so a 3D residual stream
+      // (no separate [bs,K] view needed) encodes identically to the 2D form.
+      uint64_t const rows = tensor_desc.dim[0];
+      uint64_t K = 1;
+      for (int d = 1; d < tensor_desc.num_dims; d++) {
+        K *= tensor_desc.dim[d];
+      }
+      uint32_t const box_rows = (param_id == 1) ? OUT_PAD : BLOCK_N;
+      uint64_t gd[2] = {K, rows};
+      uint64_t gs[1] = {K * 2}; // bytes per row
+      uint32_t bd[2] = {(uint32_t)BLOCK_K, box_rows};
+      uint32_t es[2] = {1, 1};
+      CUresult err2 = cuTensorMapEncodeTiled(tma_desc,
+                                             fmt,
+                                             2,
+                                             tensor_desc.base_ptr,
+                                             gd,
+                                             gs,
+                                             bd,
+                                             es,
+                                             interleave,
+                                             swizzle,
+                                             l2,
+                                             oob);
+      assert(err2 == CUDA_SUCCESS);
+      break;
+    }
     case TASK_MLA_MTP_DECODE_TP2_SM100:
     case TASK_MLA_MTP_DECODE_TP4_SM100:
     case TASK_MLA_MTP_DECODE_TP8_SM100: {
@@ -1614,6 +1658,15 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_MLA_PREFILL_TP8_SM100: {
       // Inputs: [0] Qn, [1] Qp, [2] K, [3] V. Only K and V use TMA.
       for (size_t param_id = 2; param_id < 4; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      break;
+    }
+    case TASK_MHC_PRE_K1_PREFILL_SM100: {
+      // Inputs: [0] residual [batch, K], [1] fn weight [OUT_PAD, K]. Both use a
+      // 2D K-major bf16 TMA descriptor (see fill_tma_desc_by_task case).
+      for (size_t param_id = 0; param_id < 2; param_id++) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }

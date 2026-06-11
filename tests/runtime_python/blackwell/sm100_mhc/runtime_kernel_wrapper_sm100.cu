@@ -12,38 +12,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// MPK/CuTe headers before CUDA/Torch (avoids cute::prefetch / UMMA clashes).
-#include "blackwell/task_header.cuh"
-#include "hopper/tma_2d.cuh"
 #include "runtime_header.h"
-#include "tma.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
 #include <cstdio>
 
-#include <cutlass/arch/barrier.h>
-#include <cutlass/cluster_launch.hpp>
-#include <cutlass/half.h>
-#include <cutlass/util/print_error.hpp>
-
 #include <cooperative_groups.h>
-#include <cute/algorithm/cooperative_copy.hpp>
-#include <cute/arch/cluster_sm90.hpp>
-#include <cute/arch/tmem_allocator_sm100.hpp>
-#include <cute/numeric/integral_constant.hpp>
-#include <cute/pointer_flagged.hpp>
-#include <cute/tensor.hpp>
 
 #include "blackwell/mHC_post.cuh"
 #include "blackwell/mHC_post_pre.cuh"
 #include "blackwell/mHC_pre.cuh"
 #include "blackwell/sinkhorn.cuh"
 #include <ATen/cuda/CUDAContext.h>
-#include <cutlass/bfloat16.h>
 
-using bf16_t = cutlass::bfloat16_t;
-using mpk_bf16 = cute::bfloat16_t;
+using bf16_t = __nv_bfloat16;
+
+#define MHC_CUDA_CHECK(e)                                                      \
+  do {                                                                         \
+    cudaError_t _err = (e);                                                    \
+    TORCH_CHECK(_err == cudaSuccess, "CUDA error: ",                           \
+                cudaGetErrorString(_err));                                     \
+  } while (0)
 
 namespace {
 
@@ -51,30 +41,16 @@ constexpr int ceil_div(int a, int b) {
   return (a + b - 1) / b;
 }
 
-constexpr int kDefaultNumCTAs = 148; // B200 SM count fallback
-constexpr int kBlockThreads = 256;
-
-// num_ctas == 0 means "use the device SM count" (cached after first query).
-int resolve_num_ctas(int num_ctas, int device) {
-  if (num_ctas > 0) {
-    return num_ctas;
-  }
-  static int cached_sm_count = -1;
-  if (cached_sm_count < 0) {
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
-    cached_sm_count = sm_count > 0 ? sm_count : kDefaultNumCTAs;
-  }
-  return cached_sm_count;
+static void check_tensor(const torch::Tensor &t,
+                         at::ScalarType dt,
+                         c10::IntArrayRef shape,
+                         const char *name) {
+  TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.scalar_type() == dt &&
+                  t.sizes() == shape,
+              name, " must be ", dt, " ", shape,
+              " CUDA contiguous, got ", t.sizes(), " ", t.scalar_type());
 }
 
-// ============================================================================
-// mHC_post: HC post + residual fusion with outer-product residual
-//   y[k, c] = post[k] * x[c] + sum_i comb[i, k] * residual[i, c]
-// ============================================================================
-
-// Each block owns TOKENS_PER_BLK tokens, its threads split into that many
-// contiguous sub-groups (one per token) so all threads stay busy at small C.
 template <typename T, int N, int C, int TOKENS_PER_BLK>
 __global__ __launch_bounds__(256) void mHC_post_kernel(void const *residual_ptr,
                                                        void const *x_ptr,
@@ -83,10 +59,9 @@ __global__ __launch_bounds__(256) void mHC_post_kernel(void const *residual_ptr,
                                                        void *output_ptr,
                                                        int num_tokens) {
   int const threads_per_token = blockDim.x / TOKENS_PER_BLK;
-  int const group = threadIdx.x / threads_per_token; // which token slot
-  int const lane = threadIdx.x % threads_per_token;  // index within slot
-  for (int64_t tile = blockIdx.x; tile * TOKENS_PER_BLK < num_tokens;
-       tile += gridDim.x) {
+  int const group = threadIdx.x / threads_per_token;
+  int const lane = threadIdx.x % threads_per_token;
+  for (int64_t tile = blockIdx.x; tile * TOKENS_PER_BLK < num_tokens; tile += gridDim.x) {
     int64_t token = tile * TOKENS_PER_BLK + group;
     if (token >= num_tokens) {
       continue;
@@ -97,10 +72,10 @@ __global__ __launch_bounds__(256) void mHC_post_kernel(void const *residual_ptr,
     float const *post = static_cast<float const *>(post_ptr) + token * N;
     T *output = static_cast<T *>(output_ptr) + token * N * C;
     kernel::mHC_post_task_impl<T,
-                               /*BATCH_SIZE=*/1,
-                               /*OUTPUT_SIZE=*/C,
-                               /*NUM_TOPK=*/N,
-                               /*OUTPUT_STRIDE=*/C>(
+                               1,
+                               C,
+                               N,
+                               C>(
         residual, x, comb, post, output, lane, threads_per_token);
   }
 }
@@ -115,7 +90,6 @@ void launch_mHC_post(T const *residual,
                      int c,
                      int num_ctas,
                      cudaStream_t stream) {
-  // Vectorized by 8 (uint4): work unit is a channel-vec, c_vec = C/8.
   (void)num_ctas;
   constexpr int VEC = 8;
   int const c_vec = c / VEC;
@@ -134,7 +108,6 @@ void launch_mHC_post(T const *residual,
         residual, x, comb, post, output, num_tokens);                          \
   } while (0)
 
-  // LAUNCH_POST(C, tokens_per_block) -- tokens/block picked to fill ~256 threads.
   switch (c) {
     case 128:
       LAUNCH_POST(128, 8);
@@ -162,41 +135,24 @@ void mHC_post(torch::Tensor residual,
               torch::Tensor comb,
               torch::Tensor post,
               torch::Tensor output,
-              int n,
-              int num_ctas_arg) {
+              int n) {
   TORCH_CHECK(residual.is_cuda() && residual.is_contiguous() &&
                   residual.scalar_type() == at::kBFloat16 &&
-                  residual.dim() == 3,
+                  residual.dim() == 3 && residual.size(1) == n,
               "residual must be bf16 [num_tokens, n, c] CUDA contiguous");
-  TORCH_CHECK(x.is_cuda() && x.is_contiguous() &&
-                  x.scalar_type() == at::kBFloat16 && x.dim() == 2,
-              "x must be bf16 [num_tokens, c] CUDA contiguous");
-  TORCH_CHECK(comb.is_cuda() && comb.is_contiguous() &&
-                  comb.scalar_type() == at::kFloat,
-              "comb must be float32 [num_tokens, n, n] CUDA contiguous");
-  TORCH_CHECK(post.is_cuda() && post.is_contiguous() &&
-                  post.scalar_type() == at::kFloat,
-              "post must be float32 [num_tokens, n] CUDA contiguous");
-  TORCH_CHECK(output.is_cuda() && output.is_contiguous() &&
-                  output.scalar_type() == at::kBFloat16,
-              "output must be bf16 [num_tokens, n, c] CUDA contiguous");
 
   int const num_tokens = static_cast<int>(residual.size(0));
-  TORCH_CHECK(residual.size(1) == n, "residual dim 1 must match n");
   int const c = static_cast<int>(residual.size(2));
-  TORCH_CHECK(x.sizes() == torch::IntArrayRef({num_tokens, c}),
-              "x shape mismatch");
-  TORCH_CHECK(comb.sizes() == torch::IntArrayRef({num_tokens, n, n}),
-              "comb shape mismatch");
-  TORCH_CHECK(post.sizes() == torch::IntArrayRef({num_tokens, n}),
-              "post shape mismatch");
-  TORCH_CHECK(output.sizes() == torch::IntArrayRef({num_tokens, n, c}),
-              "output shape mismatch");
 
-  int const num_ctas = resolve_num_ctas(num_ctas_arg, residual.get_device());
+  check_tensor(x, at::kBFloat16, {num_tokens, c}, "x");
+  check_tensor(comb, at::kFloat, {num_tokens, n, n}, "comb");
+  check_tensor(post, at::kFloat, {num_tokens, n}, "post");
+  check_tensor(output, at::kBFloat16, {num_tokens, n, c}, "output");
+
+  int num_ctas = 0;
+  cudaDeviceGetAttribute(&num_ctas, cudaDevAttrMultiProcessorCount, residual.get_device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(residual.get_device());
-  bf16_t const *residual_ptr =
-      reinterpret_cast<bf16_t const *>(residual.data_ptr());
+  bf16_t const *residual_ptr = reinterpret_cast<bf16_t const *>(residual.data_ptr());
   bf16_t const *x_ptr = reinterpret_cast<bf16_t const *>(x.data_ptr());
   bf16_t *output_ptr = reinterpret_cast<bf16_t *>(output.data_ptr());
 
@@ -243,17 +199,13 @@ void mHC_post(torch::Tensor residual,
       err == cudaSuccess, "mHC_post launch error: ", cudaGetErrorString(err));
 }
 
-// ============================================================================
-// K3 standalone: sinkhorn (4x4)
-// ============================================================================
-
 __global__ __launch_bounds__(256) void sinkhorn_sm100_kernel(
     float const *__restrict__ comb_res_mix,
     float *__restrict__ comb_res_mix_out,
     int num_tokens,
     int repeat,
     float eps) {
-  constexpr int token_stride = 16; // 4 * 4
+  constexpr int token_stride = 16;
   kernel::sinkhorn_task_impl<token_stride, token_stride>(
       comb_res_mix, comb_res_mix_out, num_tokens, repeat, eps);
 }
@@ -261,8 +213,7 @@ __global__ __launch_bounds__(256) void sinkhorn_sm100_kernel(
 void sinkhorn_sm100(torch::Tensor comb_res_mix,
                     torch::Tensor comb_res_mix_out,
                     int repeat,
-                    double eps,
-                    int num_ctas_arg) {
+                    double eps) {
   TORCH_CHECK(
       comb_res_mix.is_cuda() && comb_res_mix.is_contiguous() &&
           comb_res_mix.scalar_type() == at::kFloat && comb_res_mix.dim() == 3,
@@ -276,20 +227,20 @@ void sinkhorn_sm100(torch::Tensor comb_res_mix,
               "comb_res_mix_out shape/dtype mismatch");
   TORCH_CHECK(repeat >= 1, "repeat must be >= 1");
 
+  constexpr int THREADS_PER_BLOCK = 256;
   int const num_tokens = static_cast<int>(comb_res_mix.size(0));
   float const eps_f = static_cast<float>(eps);
   float const *input_ptr = comb_res_mix.data_ptr<float>();
   float *output_ptr = comb_res_mix_out.data_ptr<float>();
-  int const num_ctas =
-      resolve_num_ctas(num_ctas_arg, comb_res_mix.get_device());
-  cudaStream_t stream =
-      at::cuda::getCurrentCUDAStream(comb_res_mix.get_device());
+  int num_ctas = 0;
+  cudaDeviceGetAttribute(&num_ctas, cudaDevAttrMultiProcessorCount,
+                         comb_res_mix.get_device());
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream(comb_res_mix.get_device());
 
-  int const tokens_per_cta_floor = ceil_div(num_tokens, kBlockThreads);
-  int const grid =
-      tokens_per_cta_floor < num_ctas ? tokens_per_cta_floor : num_ctas;
+  int const tokens_per_cta_floor = ceil_div(num_tokens, THREADS_PER_BLOCK);
+  int const grid = tokens_per_cta_floor < num_ctas ? tokens_per_cta_floor : num_ctas;
   dim3 const grid_dim(grid > 0 ? grid : 1, 1, 1);
-  dim3 const block_dim(kBlockThreads, 1, 1);
+  dim3 const block_dim(THREADS_PER_BLOCK, 1, 1);
   sinkhorn_sm100_kernel<<<grid_dim, block_dim, 0, stream>>>(
       input_ptr, output_ptr, num_tokens, repeat, eps_f);
 
@@ -298,16 +249,6 @@ void sinkhorn_sm100(torch::Tensor comb_res_mix,
       err == cudaSuccess, "Sinkhorn launch error: ", cudaGetErrorString(err));
 }
 
-// ============================================================================
-// mHC_post_pre_v2: CUDA-core fused post + prenorm-GEMM, then split-k reduce +
-// k2 tail. 3 stages:
-//   [k1]     post + GEMM + sqrsum  (register new_r, no round-trip, split-k)
-//   [reduce] fold SPLIT_K partials -> mixes_pad (bf16) + sqrsum
-//   [k2]     RMS-fold + affines + sinkhorn + weighted sum -> f_pre/h_post/comb
-// FMA GEMM (tiny smem -> full occupancy); split-k fills the grid at low t.
-// ============================================================================
-
-// k2 tail kernel is defined later (shared with mHC_pre_k2).
 template <int N, int C, int RMS_HIDDEN, int TOKENS_PER_CTA>
 __global__ void mHC_pre_k2_kernel(void const *__restrict__ mixes_pad,
                                   void const *__restrict__ sqrsum,
@@ -322,7 +263,8 @@ __global__ void mHC_pre_k2_kernel(void const *__restrict__ mixes_pad,
                                   float sinkhorn_eps,
                                   float rms_eps);
 
-template <int N, int C, int MIX_HC, int BLOCK_THREADS, int SPLIT_K, int TPB = 1>
+template <int N, int C, int MIX_HC, int BLOCK_THREADS, int SPLIT_K,
+          int TPB = 1, int TILE_N = MIX_HC>
 __global__ __launch_bounds__(BLOCK_THREADS) void mHC_post_pre_k1_kernel(
     void const *__restrict__ residual,
     void const *__restrict__ x,
@@ -337,30 +279,33 @@ __global__ __launch_bounds__(BLOCK_THREADS) void mHC_post_pre_k1_kernel(
     int num_tokens) {
   int const token0 = blockIdx.x * TPB;
   int const i_ks = blockIdx.y;
+  int const i_nt = blockIdx.z;
   if (token0 >= num_tokens) {
     return;
   }
-  kernel::mHC_post_pre_k1_task_impl<mpk_bf16,
+  kernel::mHC_post_pre_k1_task_impl<bf16_t,
                                     N,
                                     C,
                                     MIX_HC,
                                     BLOCK_THREADS,
                                     SPLIT_K,
                                     128,
-                                    TPB>(
-      static_cast<mpk_bf16 const *>(residual),
-      static_cast<mpk_bf16 const *>(x),
+                                    TPB,
+                                    TILE_N>(
+      static_cast<bf16_t const *>(residual),
+      static_cast<bf16_t const *>(x),
       static_cast<float const *>(comb),
       static_cast<float const *>(post),
       static_cast<__nv_bfloat16 const *>(fn),
-      static_cast<mpk_bf16 *>(residual_out),
+      static_cast<bf16_t *>(residual_out),
       out_partial,
       sqr_partial,
       mixes_pad,
       sqrsum,
       num_tokens,
       token0,
-      i_ks);
+      i_ks,
+      i_nt);
 }
 
 template <int N, int MIX_HC, int MIX_PAD, int SPLIT_K>
@@ -378,11 +323,6 @@ __global__ void
       out_partial, sqr_partial, mixes_pad, sqrsum, num_tokens, token);
 }
 
-// Low-t k2 kernels defined here (before mHC_post_pre_v2) so NVCC can emit
-// the template instantiations referenced inside that function.
-
-// Low-t k2: one CTA per token (grid = num_tokens) to fill the SMs at small
-// batch, where the 32-tokens/CTA default leaves only ceil(t/32) blocks idle.
 template <int N, int C, int RMS_HIDDEN>
 __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_kernel(
     void const *__restrict__ mixes_pad,
@@ -397,13 +337,13 @@ __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_kernel(
     int sinkhorn_repeat,
     float sinkhorn_eps,
     float rms_eps) {
-  kernel::mHC_pre_k2_lowt_task_impl<mpk_bf16,
+  kernel::mHC_pre_k2_lowt_task_impl<bf16_t,
                                     N,
                                     C,
                                     RMS_HIDDEN,
-                                    /*BLOCK_THREADS=*/256,
-                                    /*MIX_STRIDE=*/128,
-                                    /*RDSPLIT_K=*/0>(mixes_pad,
+                                    256,
+                                    128,
+                                    0>(mixes_pad,
                                                      sqrsum,
                                                      scale_ptr,
                                                      base_ptr,
@@ -417,9 +357,6 @@ __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_kernel(
                                                      num_tokens);
 }
 
-// Fused low-t k2: reduces the k1 GEMM's split-k partials INLINE then runs the
-// tail, folding the separate reduce launch into k2 (3 launches -> 2 at low t).
-// mixes_ptr/sqrsum_ptr point at out_partial / sqr_partial.
 template <int N, int C, int RMS_HIDDEN, int SPLIT_K>
 __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_fused_kernel(
     void const *__restrict__ out_partial,
@@ -434,13 +371,13 @@ __global__ __launch_bounds__(256) void mHC_pre_k2_lowt_fused_kernel(
     int sinkhorn_repeat,
     float sinkhorn_eps,
     float rms_eps) {
-  kernel::mHC_pre_k2_lowt_task_impl<mpk_bf16,
+  kernel::mHC_pre_k2_lowt_task_impl<bf16_t,
                                     N,
                                     C,
                                     RMS_HIDDEN,
-                                    /*BLOCK_THREADS=*/256,
-                                    /*MIX_STRIDE=*/128,
-                                    /*RDSPLIT_K=*/SPLIT_K>(out_partial,
+                                    256,
+                                    128,
+                                    SPLIT_K>(out_partial,
                                                            sqr_partial,
                                                            scale_ptr,
                                                            base_ptr,
@@ -458,12 +395,12 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
                      torch::Tensor x_in,
                      torch::Tensor comb_in,
                      torch::Tensor post_in,
-                     torch::Tensor fn,            // [MIX_HC, N, C] fp32 weight
-                     torch::Tensor residual_next, // [tokens, N, C] bf16
-                     torch::Tensor out_partial,   // [SPLIT_K, tokens, MIX_HC]
-                     torch::Tensor sqr_partial,   // [SPLIT_K, tokens]
-                     torch::Tensor mixes_pad,     // [tokens, 128] bf16 scratch
-                     torch::Tensor sqrsum,        // [tokens] fp32 scratch
+                     torch::Tensor fn,
+                     torch::Tensor residual_next,
+                     torch::Tensor out_partial,
+                     torch::Tensor sqr_partial,
+                     torch::Tensor mixes_pad,
+                     torch::Tensor sqrsum,
                      torch::Tensor scale,
                      torch::Tensor base,
                      torch::Tensor f_pre,
@@ -476,56 +413,23 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
                      double sinkhorn_eps,
                      double rms_eps,
                      int tokens_per_cta,
-                     int k1_tpb = -1) {
+                     int tile_n) {
   TORCH_CHECK(n == 4, "post_pre_v2 hardcoded to n=4");
   constexpr int MIX_PAD = 128;
   int const num_tokens = static_cast<int>(residual_in.size(0));
   int const mix_hc = n * n + 2 * n;
-  TORCH_CHECK(residual_in.is_cuda() && residual_in.is_contiguous() &&
-                  residual_in.scalar_type() == at::kBFloat16 &&
-                  residual_in.dim() == 3 && residual_in.size(1) == n &&
-                  residual_in.size(2) == c,
-              "residual_in must be bf16 [tokens, n, c]");
-  TORCH_CHECK(x_in.is_cuda() && x_in.is_contiguous() &&
-                  x_in.scalar_type() == at::kBFloat16 &&
-                  x_in.sizes() == torch::IntArrayRef({num_tokens, c}),
-              "x_in must be bf16 [tokens, c]");
-  TORCH_CHECK(comb_in.is_cuda() && comb_in.is_contiguous() &&
-                  comb_in.scalar_type() == at::kFloat &&
-                  comb_in.sizes() == torch::IntArrayRef({num_tokens, n, n}),
-              "comb_in must be float32 [tokens, n, n]");
-  TORCH_CHECK(post_in.is_cuda() && post_in.is_contiguous() &&
-                  post_in.scalar_type() == at::kFloat &&
-                  post_in.sizes() == torch::IntArrayRef({num_tokens, n}),
-              "post_in must be float32 [tokens, n]");
-  TORCH_CHECK(fn.is_cuda() && fn.is_contiguous() &&
-                  fn.scalar_type() == at::kBFloat16 &&
-                  fn.sizes() == torch::IntArrayRef({mix_hc, n, c}),
-              "fn must be bfloat16 [mix_hc, n, c]");
-  TORCH_CHECK(residual_next.is_cuda() && residual_next.is_contiguous() &&
-                  residual_next.scalar_type() == at::kBFloat16 &&
-                  residual_next.dim() == 3 && residual_next.size(1) == n &&
-                  residual_next.size(2) == c,
-              "residual_next must be bf16 [tokens, n, c]");
-  TORCH_CHECK(out_partial.is_cuda() && out_partial.is_contiguous() &&
-                  out_partial.scalar_type() == at::kFloat &&
-                  out_partial.sizes() ==
-                      torch::IntArrayRef({split_k, num_tokens, mix_hc}),
-              "out_partial must be float32 [split_k, tokens, mix_hc]");
-  TORCH_CHECK(sqr_partial.is_cuda() && sqr_partial.is_contiguous() &&
-                  sqr_partial.scalar_type() == at::kFloat &&
-                  sqr_partial.sizes() ==
-                      torch::IntArrayRef({split_k, num_tokens}),
-              "sqr_partial must be float32 [split_k, tokens]");
-  TORCH_CHECK(mixes_pad.is_cuda() && mixes_pad.is_contiguous() &&
-                  mixes_pad.scalar_type() == at::kBFloat16 &&
-                  mixes_pad.sizes() ==
-                      torch::IntArrayRef({num_tokens, MIX_PAD}),
-              "mixes_pad must be bf16 [tokens, 128]");
-  TORCH_CHECK(sqrsum.is_cuda() && sqrsum.is_contiguous() &&
-                  sqrsum.scalar_type() == at::kFloat && sqrsum.dim() == 1 &&
-                  sqrsum.size(0) == num_tokens,
-              "sqrsum must be float32 [tokens]");
+  check_tensor(residual_in, at::kBFloat16, {num_tokens, n, c}, "residual_in");
+  check_tensor(x_in, at::kBFloat16, {num_tokens, c}, "x_in");
+  check_tensor(comb_in, at::kFloat, {num_tokens, n, n}, "comb_in");
+  check_tensor(post_in, at::kFloat, {num_tokens, n}, "post_in");
+  check_tensor(fn, at::kBFloat16, {mix_hc, n, c}, "fn");
+  check_tensor(
+      residual_next, at::kBFloat16, {num_tokens, n, c}, "residual_next");
+  check_tensor(
+      out_partial, at::kFloat, {split_k, num_tokens, mix_hc}, "out_partial");
+  check_tensor(sqr_partial, at::kFloat, {split_k, num_tokens}, "sqr_partial");
+  check_tensor(mixes_pad, at::kBFloat16, {num_tokens, MIX_PAD}, "mixes_pad");
+  check_tensor(sqrsum, at::kFloat, {num_tokens}, "sqrsum");
   TORCH_CHECK(c % split_k == 0, "c must be divisible by split_k");
   TORCH_CHECK(tokens_per_cta == 32 || tokens_per_cta == 64 ||
                   tokens_per_cta == 128,
@@ -543,31 +447,18 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
   float *sqrp_p = sqr_partial.data_ptr<float>();
   void *mixes_p = const_cast<void *>(mixes_pad.data_ptr());
   float *sqrsum_p = sqrsum.data_ptr<float>();
-  // BLOCK_THREADS is baked into the kernel template. BT=256 for SK<=8 (gives
-  // 16 warps covering C/SK elems, matching vLLM's GEMM throughput). BT=128
-  // for SK=16 (C/16=448 elems, 4 warps is sufficient). BT=64 for SK>=32
-  // (thin slices, 128 threads would waste occupancy).
 
-  // TPB: amortize fn weight reload across tokens; effective only when split_k==1
-  // (split_k expands the grid independently). Sweep results (B200, c=4096/7168):
-  //   t<512:  all TPBs identical (latency-bound, fn traffic not the bottleneck)
-  //   t>=512 c=4096: TPB=2 wins at all prefill sizes (TPB=4 reduces parallelism)
-  //   t>=512 c=7168: TPB=4 wins at most sizes (~10% over TPB=2); c scales fn
-  //                  traffic more, making larger reuse worth the parallelism cost
   int tpb;
-  if (k1_tpb > 0) {
-    tpb = k1_tpb; // caller-specified override (for tuning sweeps)
-  } else if (split_k == 1 && num_tokens >= 512) {
-    tpb = (c > 4096) ? 4 : 2;
-  } else {
-    tpb = 1;
-  }
+  if (split_k == 1 && num_tokens >= 512) tpb = (c > 4096) ? 4 : 2;
+  else tpb = 1;
 
-#define LAUNCH_FUSED(C_, SK_, TPB_, BT_)                                        \
+  TORCH_CHECK(mix_hc % tile_n == 0, "tile_n must divide mix_hc");
+
+#define LAUNCH_FUSED(C_, SK_, TPB_, BT_, TN_)                                  \
   do {                                                                         \
-    dim3 _fg((num_tokens + (TPB_)-1) / (TPB_), (SK_), 1);                      \
+    dim3 _fg((num_tokens + (TPB_)-1) / (TPB_), (SK_), (24 / (TN_)));           \
     dim3 _fb((BT_), 1, 1);                                                     \
-    mHC_post_pre_k1_kernel<4, C_, 24, BT_, SK_, TPB_>                           \
+    mHC_post_pre_k1_kernel<4, C_, 24, BT_, SK_, TPB_, TN_>                      \
         <<<_fg, _fb, 0, stream>>>(res_p,                                       \
                                   x_p,                                         \
                                   comb_p,                                      \
@@ -586,19 +477,28 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
     }                                                                          \
   } while (0)
 
+#define LAUNCH_FUSED_TN(C_, SK_, TPB_, BT_)                                    \
+  switch (tile_n) {                                                            \
+    case 24: LAUNCH_FUSED(C_, SK_, TPB_, BT_, 24); break;                      \
+    case 6:  LAUNCH_FUSED(C_, SK_, TPB_, BT_, 6);  break;                      \
+    case 1:  LAUNCH_FUSED(C_, SK_, TPB_, BT_, 1);  break;                      \
+    default: TORCH_CHECK(false, "Unsupported tile_n=", tile_n,                 \
+                         " (instantiated: 1, 6, 24)");                         \
+  }
+
 #define LAUNCH_FUSED_TPB(C_, SK_)                                              \
   switch (tpb) {                                                               \
     case 1:                                                                    \
-      LAUNCH_FUSED(C_, SK_, 1, 256);                                           \
+      LAUNCH_FUSED_TN(C_, SK_, 1, 256);                                        \
       break;                                                                   \
     case 2:                                                                    \
-      LAUNCH_FUSED(C_, SK_, 2, 256);                                           \
+      LAUNCH_FUSED_TN(C_, SK_, 2, 256);                                        \
       break;                                                                   \
     case 4:                                                                    \
-      LAUNCH_FUSED(C_, SK_, 4, 256);                                           \
+      LAUNCH_FUSED_TN(C_, SK_, 4, 256);                                        \
       break;                                                                   \
     case 8:                                                                    \
-      LAUNCH_FUSED(C_, SK_, 8, 256);                                           \
+      LAUNCH_FUSED_TN(C_, SK_, 8, 256);                                        \
       break;                                                                   \
     default:                                                                   \
       TORCH_CHECK(false, "bad tpb");                                           \
@@ -610,25 +510,25 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
       LAUNCH_FUSED_TPB(C_, 1);                                                 \
       break;                                                                   \
     case 2:                                                                    \
-      LAUNCH_FUSED(C_, 2, 1, 256);                                             \
+      LAUNCH_FUSED_TN(C_, 2, 1, 256);                                          \
       break;                                                                   \
     case 4:                                                                    \
-      LAUNCH_FUSED(C_, 4, 1, 256);                                             \
+      LAUNCH_FUSED_TN(C_, 4, 1, 256);                                          \
       break;                                                                   \
     case 8:                                                                    \
-      LAUNCH_FUSED(C_, 8, 1, 256);                                             \
+      LAUNCH_FUSED_TN(C_, 8, 1, 256);                                          \
       break;                                                                   \
     case 16:                                                                   \
-      LAUNCH_FUSED(C_, 16, 1, 128);                                            \
+      LAUNCH_FUSED_TN(C_, 16, 1, 128);                                         \
       break;                                                                   \
     case 32:                                                                   \
-      LAUNCH_FUSED(C_, 32, 1, 64);                                             \
+      LAUNCH_FUSED_TN(C_, 32, 1, 64);                                          \
       break;                                                                   \
     case 64:                                                                   \
-      LAUNCH_FUSED(C_, 64, 1, 64);                                             \
+      LAUNCH_FUSED_TN(C_, 64, 1, 64);                                          \
       break;                                                                   \
     case 128:                                                                  \
-      LAUNCH_FUSED(C_, 128, 1, 64);                                            \
+      LAUNCH_FUSED_TN(C_, 128, 1, 64);                                         \
       break;                                                                   \
     default:                                                                   \
       TORCH_CHECK(false, "Unsupported split_k=", split_k);                     \
@@ -652,6 +552,7 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
   }
 #undef DISPATCH_FUSED_SK
 #undef LAUNCH_FUSED_TPB
+#undef LAUNCH_FUSED_TN
 #undef LAUNCH_FUSED
 
   cudaError_t err = cudaGetLastError();
@@ -659,17 +560,15 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
               "mHC_post_pre_v2 fused launch error: ",
               cudaGetErrorString(err));
 
-  // ---- k2 tail ----
-  // Low-t path: one block per token (grid=num_tokens) fills SMs at decode
-  // and folds the split-k reduce inline (RDSPLIT_K). Falls back to the batched
-  // path at high token counts where one-block-per-token is wasteful.
-  int const k2_lowt_thresh = 32 * kDefaultNumCTAs;
+  int num_ctas = 0;
+  cudaDeviceGetAttribute(&num_ctas, cudaDevAttrMultiProcessorCount, residual_in.get_device());
+  int const k2_lowt_thresh = 32 * num_ctas;
   bool const use_lowt_k2 = (num_tokens < k2_lowt_thresh);
 
   size_t const k2_smem =
       tokens_per_cta * (4 * n + n * n + n * n + n) * sizeof(float) + 1024;
   int const tiles = ceil_div(num_tokens, tokens_per_cta);
-  int const grid = kDefaultNumCTAs < tiles ? kDefaultNumCTAs : tiles;
+  int const grid = num_ctas < tiles ? num_ctas : tiles;
   dim3 k2_grid(grid > 0 ? grid : 1, 1, 1);
   dim3 k2_block(256, 1, 1);
   void *scale_p = const_cast<float *>(scale.data_ptr<float>());
@@ -681,10 +580,6 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
   float sk_eps_f = static_cast<float>(sinkhorn_eps);
   float rms_eps_f = static_cast<float>(rms_eps);
 
-  // lowt fused: reduces split-k partials inline (RDSPLIT_K), saving the separate
-  // reduce launch. Only used when SK<=8: above that the 24*SK-wide register
-  // accumulation in warp 0 hurts occupancy more than it saves a kernel launch.
-  // For SK>8, the separate reduce (cheap at small t) + standard lowt k2 wins.
 #define LAUNCH_V2_K2_LOWT(C_, RH_, SK_)                                        \
   do {                                                                         \
     dim3 _lg(num_tokens, 1, 1);                                                \
@@ -717,7 +612,6 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
                                          sk_eps_f,                             \
                                          rms_eps_f);                           \
     } else {                                                                   \
-      /* SK>8: separate reduce already launched by LAUNCH_FUSED; read mixes */ \
       mHC_pre_k2_lowt_kernel<4, C_, RH_>                                       \
           <<<_lg, k2_block, 0, stream>>>(mixes_p,                              \
                                          sqrsum_p,                             \
@@ -737,7 +631,7 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
 #define LAUNCH_V2_K2(C_, RH_, TPC_)                                            \
   do {                                                                         \
     auto *kp = &mHC_pre_k2_kernel<4, C_, RH_, TPC_>;                           \
-    CUTE_CHECK_ERROR(cudaFuncSetAttribute(                                     \
+    MHC_CUDA_CHECK(cudaFuncSetAttribute(                                     \
         kp, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)k2_smem));       \
     kp<<<k2_grid, k2_block, k2_smem, stream>>>(mixes_p,                        \
                                                sqrsum_p,                       \
@@ -812,12 +706,6 @@ void mHC_post_pre_v2(torch::Tensor residual_in,
               cudaGetErrorString(err));
 }
 
-// ============================================================================
-// mHC_pre_k1_decode: CUDA-core pre_k1 (prenorm GEMM + sqrsum), no tensor cores.
-// Same outputs as the tcgen05 path, so it drop-in feeds the k2 tail. Wins at
-// low token count (no MMA/TMA setup cost); split_k fills the grid when t is few.
-// ============================================================================
-
 template <int MIX_HC,
           int K,
           int BLOCK_THREADS,
@@ -827,24 +715,24 @@ template <int MIX_HC,
 __global__ __launch_bounds__(BLOCK_THREADS) void mHC_pre_k1_cuda_core_kernel(
     void const *__restrict__ residual,
     __nv_bfloat16 const *__restrict__ fn,
-    float *__restrict__ out_partial, // used when SPLIT_K>1
-    float *__restrict__ sqr_partial, // used when SPLIT_K>1
-    void *__restrict__ mixes_pad,    // used when SPLIT_K==1 (direct write)
-    float *__restrict__ sqrsum,      // used when SPLIT_K==1
+    float *__restrict__ out_partial,
+    float *__restrict__ sqr_partial,
+    void *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
     int num_tokens) {
-  int const token0 = blockIdx.x * TPB; // first token of this CTA's group
+  int const token0 = blockIdx.x * TPB;
   int const i_ks = blockIdx.y;
   if (token0 >= num_tokens) {
     return;
   }
-  kernel::mHC_pre_k1_cuda_core_task_impl<mpk_bf16,
+  kernel::mHC_pre_k1_cuda_core_task_impl<bf16_t,
                                          MIX_HC,
                                          K,
                                          BLOCK_THREADS,
                                          SPLIT_K,
                                          MIX_PAD,
                                          TPB>(
-      static_cast<mpk_bf16 const *>(residual),
+      static_cast<bf16_t const *>(residual),
       fn,
       out_partial,
       sqr_partial,
@@ -870,8 +758,6 @@ __global__ void
       out_partial, sqr_partial, mixes_pad, sqrsum, num_tokens, token);
 }
 
-// residual [tokens,K] bf16, fn [MIX_HC,K] fp32 -> mixes_pad [tokens,128] bf16
-// + sqrsum [tokens] fp32. out_partial/sqr_partial: [split_k,tokens,*] scratch.
 void mHC_pre_k1_decode(torch::Tensor residual,
                        torch::Tensor fn,
                        torch::Tensor out_partial,
@@ -882,36 +768,18 @@ void mHC_pre_k1_decode(torch::Tensor residual,
                        int split_k) {
   TORCH_CHECK(n == 4, "pre_k1_cuda_core hardcoded to n=4");
   constexpr int MIX_PAD = 128;
-  int const mix_hc = n * n + 2 * n; // 24
+  int const mix_hc = n * n + 2 * n;
   int const num_tokens = static_cast<int>(residual.size(0));
   int const K = static_cast<int>(residual.size(1));
   TORCH_CHECK(residual.is_cuda() && residual.is_contiguous() &&
                   residual.scalar_type() == at::kBFloat16 &&
                   residual.dim() == 2,
               "residual must be bf16 [tokens, K]");
-  TORCH_CHECK(fn.is_cuda() && fn.is_contiguous() &&
-                  fn.scalar_type() == at::kBFloat16 && fn.dim() == 2 &&
-                  fn.size(0) == mix_hc && fn.size(1) == K,
-              "fn must be bfloat16 [mix_hc, K]");
-  TORCH_CHECK(out_partial.is_cuda() && out_partial.is_contiguous() &&
-                  out_partial.scalar_type() == at::kFloat &&
-                  out_partial.sizes() ==
-                      torch::IntArrayRef({split_k, num_tokens, mix_hc}),
-              "out_partial must be float32 [split_k, tokens, mix_hc]");
-  TORCH_CHECK(sqr_partial.is_cuda() && sqr_partial.is_contiguous() &&
-                  sqr_partial.scalar_type() == at::kFloat &&
-                  sqr_partial.sizes() ==
-                      torch::IntArrayRef({split_k, num_tokens}),
-              "sqr_partial must be float32 [split_k, tokens]");
-  TORCH_CHECK(mixes_pad.is_cuda() && mixes_pad.is_contiguous() &&
-                  mixes_pad.scalar_type() == at::kBFloat16 &&
-                  mixes_pad.sizes() ==
-                      torch::IntArrayRef({num_tokens, MIX_PAD}),
-              "mixes_pad must be bf16 [tokens, 128]");
-  TORCH_CHECK(sqrsum.is_cuda() && sqrsum.is_contiguous() &&
-                  sqrsum.scalar_type() == at::kFloat && sqrsum.dim() == 1 &&
-                  sqrsum.size(0) == num_tokens,
-              "sqrsum must be float32 [tokens]");
+  check_tensor(fn, at::kBFloat16, {mix_hc, K}, "fn");
+  check_tensor(out_partial, at::kFloat, {split_k, num_tokens, mix_hc}, "out_partial");
+  check_tensor(sqr_partial, at::kFloat, {split_k, num_tokens}, "sqr_partial");
+  check_tensor(mixes_pad, at::kBFloat16, {num_tokens, MIX_PAD}, "mixes_pad");
+  check_tensor(sqrsum, at::kFloat, {num_tokens}, "sqrsum");
   TORCH_CHECK(K % split_k == 0, "K must be divisible by split_k");
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(residual.get_device());
@@ -925,8 +793,6 @@ void mHC_pre_k1_decode(torch::Tensor residual,
   float *sqrsum_p = sqrsum.data_ptr<float>();
 
   dim3 block(BT, 1, 1);
-  // TPB amortizes the fn weight reload (L1 bottleneck at high T) but shrinks the
-  // grid; split_k fills the grid at low T. Opposed, so TPB>1 only at split_k==1.
   int tpb = 1;
   if (split_k == 1) {
     if (num_tokens >= 4096) {
@@ -942,8 +808,6 @@ void mHC_pre_k1_decode(torch::Tensor residual,
     mHC_pre_k1_cuda_core_kernel<24, K_, BT, SK_, MIX_PAD, TPB_>                \
         <<<grid, block, 0, stream>>>(                                          \
             res_p, fn_p, outp_p, sqrp_p, mixes_p, sqrsum_p, num_tokens);       \
-    /* SPLIT_K==1 writes mixes_pad+sqrsum directly in the GEMM epilogue, so    \
-       the separate reduce launch is only needed for split-k. */               \
     if ((SK_) > 1) {                                                           \
       mHC_pre_k1_cuda_core_reduce_kernel<24, MIX_PAD, SK_>                     \
           <<<dim3(num_tokens, 1, 1), dim3(32, 1, 1), 0, stream>>>(             \
@@ -991,16 +855,16 @@ void mHC_pre_k1_decode(torch::Tensor residual,
   }
 
   switch (K) {
-    case 512: // c=128
+    case 512:
       DISPATCH_PRE_K1_CUDA_SK(512);
       break;
-    case 4096: // c=1024
+    case 4096:
       DISPATCH_PRE_K1_CUDA_SK(4096);
       break;
-    case 16384: // c=4096
+    case 16384:
       DISPATCH_PRE_K1_CUDA_SK(16384);
       break;
-    case 28672: // c=7168 (DeepSeek V4 pro)
+    case 28672:
       DISPATCH_PRE_K1_CUDA_SK(28672);
       break;
     default:
@@ -1016,12 +880,6 @@ void mHC_pre_k1_decode(torch::Tensor residual,
               cudaGetErrorString(err));
 }
 
-// ============================================================================
-// mHC_pre_k1_prefill: raw-PTX tcgen05 pre_k1. Wins at high token count (MMA
-// setup amortizes). Same outputs as the decode path; bf16 kind::f16 MMA,
-// hand-written TMA/TMEM/mbarrier.
-// ============================================================================
-
 template <int K,
           int OUT_PAD,
           int BLOCK_N,
@@ -1035,8 +893,6 @@ void launch_pre_k1_tensor_core(void *residual_ptr,
                                int batch,
                                cudaStream_t stream) {
   CUtensorMap A_tmap{}, B_tmap{};
-  // A = weight fn [OUT_PAD, K]; B = residual [batch, K]. 128B swizzle pins the
-  // TMA box-K to 64 bf16, so the kernel issues BLOCK_K/64 loads/stage.
   ::init_2d_bf16_tmap(&A_tmap, weight_ptr, OUT_PAD, K, 64, OUT_PAD);
   ::init_2d_bf16_tmap(&B_tmap, residual_ptr, batch, K, 64, BLOCK_N);
 
@@ -1051,10 +907,8 @@ void launch_pre_k1_tensor_core(void *residual_ptr,
                                                                  BLOCK_K,
                                                                  MIX_HC,
                                                                  NUM_STAGES>;
-  // Opt in to >=48KB dynamic smem (the 48KB default is saturated by the driver
-  // reserve, so the boundary case needs the opt-in too).
   if (smem_bytes >= 48 * 1024) {
-    CUTE_CHECK_ERROR(cudaFuncSetAttribute(
+    MHC_CUDA_CHECK(cudaFuncSetAttribute(
         kp, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
   }
   dim3 grid((batch + BLOCK_N - 1) / BLOCK_N, 1, 1);
@@ -1068,17 +922,11 @@ void launch_pre_k1_tensor_core(void *residual_ptr,
       batch);
 }
 
-// Tunable tile configs, indexed by `cfg`. Each is (BLOCK_N, BLOCK_K,
-// NUM_STAGES). cfg=-1 selects the per-(K,batch) tuned default below.
-//   0: 16/64/4   1: 32/64/4   2: 32/128/3  3: 64/64/4
-//   4: 64/128/3  5: 128/64/3  6: 128/128/2 7: 16/128/4
-//   8: 32/256/2  9: 64/256/2
 void mHC_pre_k1_prefill(torch::Tensor residual,
                         torch::Tensor weight_padded,
                         torch::Tensor mixes_pad,
                         torch::Tensor sqrsum,
-                        int n,
-                        int cfg) {
+                        int n) {
   TORCH_CHECK(n == 4, "pre_k1_prefill hardcoded to n=4");
   constexpr int OUT_PAD = 128;
   int const batch = static_cast<int>(residual.size(0));
@@ -1087,18 +935,9 @@ void mHC_pre_k1_prefill(torch::Tensor residual,
                   residual.scalar_type() == at::kBFloat16 &&
                   residual.dim() == 2,
               "residual must be bf16 [batch, K]");
-  TORCH_CHECK(weight_padded.is_cuda() && weight_padded.is_contiguous() &&
-                  weight_padded.scalar_type() == at::kBFloat16 &&
-                  weight_padded.size(0) == OUT_PAD &&
-                  weight_padded.size(1) == K,
-              "weight_padded must be bf16 [128, K]");
-  TORCH_CHECK(mixes_pad.is_cuda() && mixes_pad.is_contiguous() &&
-                  mixes_pad.scalar_type() == at::kBFloat16 &&
-                  mixes_pad.sizes() == torch::IntArrayRef({batch, OUT_PAD}),
-              "mixes_pad must be bf16 [batch, 128]");
-  TORCH_CHECK(sqrsum.is_cuda() && sqrsum.is_contiguous() &&
-                  sqrsum.scalar_type() == at::kFloat && sqrsum.size(0) == batch,
-              "sqrsum must be float32 [batch]");
+  check_tensor(weight_padded, at::kBFloat16, {OUT_PAD, K}, "weight_padded");
+  check_tensor(mixes_pad, at::kBFloat16, {batch, OUT_PAD}, "mixes_pad");
+  check_tensor(sqrsum, at::kFloat, {batch}, "sqrsum");
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(residual.get_device());
   void *res_p = const_cast<void *>(residual.data_ptr());
@@ -1106,96 +945,34 @@ void mHC_pre_k1_prefill(torch::Tensor residual,
   void *mx_p = const_cast<void *>(mixes_pad.data_ptr());
   void *sq_p = const_cast<float *>(sqrsum.data_ptr<float>());
 
-  // Sweep is BLOCK_N x BLOCK_K = {16,32,64,128} x {64,128,256} at NS=2.
-  constexpr int SWEEP_NS = 2;
-  int sel = cfg;
-  if (sel < 0) {
-    // B200 tuned default: BN16/BK256 (cfg 2); at t>=4096 the K-tile's smem
-    // pressure bites, so drop to BK=128 (cfg 1).
-    sel = (batch >= 4096) ? 1 : 2;
-  }
-
-  // cfg 0..10 use SWEEP_NS=2; cfg 11+ trade stages for larger BK (BK=512 needs
-  // NS=1; BK=256/NS=3 spends the budget on a deeper pipeline).
-#define LAUNCH_CFG(K_, BN, BK)                                                 \
-  launch_pre_k1_tensor_core<K_, OUT_PAD, BN, BK, 24, SWEEP_NS>(                \
-      res_p, w_p, mx_p, sq_p, batch, stream)
-#define LAUNCH_CFG_NS(K_, BN, BK, NS)                                          \
-  launch_pre_k1_tensor_core<K_, OUT_PAD, BN, BK, 24, NS>(                      \
-      res_p, w_p, mx_p, sq_p, batch, stream)
-  // cfg 0..10 (BK<=256) valid for any K; large-BK probes need K%BK==0, so only
-  // the LARGE_K branch (K>=4096) instantiates them (LARGE=0 omits them).
-#define DISPATCH_CFG(K_, LARGE)                                                \
-  switch (sel) {                                                               \
-    case 0:                                                                    \
-      LAUNCH_CFG(K_, 16, 64);                                                  \
-      break;                                                                   \
-    case 1:                                                                    \
-      LAUNCH_CFG(K_, 16, 128);                                                 \
-      break;                                                                   \
-    case 2:                                                                    \
-      LAUNCH_CFG(K_, 16, 256);                                                 \
-      break;                                                                   \
-    case 3:                                                                    \
-      LAUNCH_CFG(K_, 32, 64);                                                  \
-      break;                                                                   \
-    case 4:                                                                    \
-      LAUNCH_CFG(K_, 32, 128);                                                 \
-      break;                                                                   \
-    case 5:                                                                    \
-      LAUNCH_CFG(K_, 32, 256);                                                 \
-      break;                                                                   \
-    case 6:                                                                    \
-      LAUNCH_CFG(K_, 64, 64);                                                  \
-      break;                                                                   \
-    case 7:                                                                    \
-      LAUNCH_CFG(K_, 64, 128);                                                 \
-      break;                                                                   \
-    case 8:                                                                    \
-      LAUNCH_CFG(K_, 64, 256);                                                 \
-      break;                                                                   \
-    case 9:                                                                    \
-      LAUNCH_CFG(K_, 128, 64);                                                 \
-      break;                                                                   \
-    case 10:                                                                   \
-      LAUNCH_CFG(K_, 128, 128);                                                \
-      break;                                                                   \
-      DISPATCH_LARGE_##LARGE(K_) default                                       \
-          : TORCH_CHECK(false, "Unsupported cfg=", sel, " for K=", K);         \
-  }
-#define DISPATCH_LARGE_0(K_)
-// BK=512 fits only at NS=1; BK=1024 is over the 224KB cap, so 512 is the max.
-#define DISPATCH_LARGE_1(K_)                                                   \
-  case 11:                                                                     \
-    LAUNCH_CFG_NS(K_, 16, 512, 1);                                             \
-    break;                                                                     \
-  case 12:                                                                     \
-    LAUNCH_CFG_NS(K_, 32, 512, 1);                                             \
-    break;                                                                     \
-  case 13:                                                                     \
-    LAUNCH_CFG_NS(K_, 16, 256, 3);                                             \
-    break;
+  constexpr int BN = 16, NS = 2;
+  int const BK = (batch >= 4096) ? 128 : 256;
+#define LAUNCH_PREFILL(K_)                                                     \
+  do {                                                                         \
+    if (BK == 128)                                                             \
+      launch_pre_k1_tensor_core<K_, OUT_PAD, BN, 128, 24, NS>(                 \
+          res_p, w_p, mx_p, sq_p, batch, stream);                             \
+    else                                                                       \
+      launch_pre_k1_tensor_core<K_, OUT_PAD, BN, 256, 24, NS>(                 \
+          res_p, w_p, mx_p, sq_p, batch, stream);                             \
+  } while (0)
   switch (K) {
     case 512:
-      DISPATCH_CFG(512, 0);
+      LAUNCH_PREFILL(512);
       break;
     case 4096:
-      DISPATCH_CFG(4096, 1);
+      LAUNCH_PREFILL(4096);
       break;
     case 16384:
-      DISPATCH_CFG(16384, 1);
+      LAUNCH_PREFILL(16384);
       break;
     case 28672:
-      DISPATCH_CFG(28672, 1);
+      LAUNCH_PREFILL(28672);
       break;
     default:
       TORCH_CHECK(false, "Unsupported K=", K);
   }
-#undef DISPATCH_CFG
-#undef DISPATCH_LARGE_0
-#undef DISPATCH_LARGE_1
-#undef LAUNCH_CFG
-#undef LAUNCH_CFG_NS
+#undef LAUNCH_PREFILL
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
               "mHC_pre_k1_prefill launch error: ",
@@ -1217,13 +994,13 @@ __global__ __launch_bounds__(256) void mHC_pre_k2_kernel(
     float sinkhorn_eps,
     float rms_eps) {
   extern __shared__ char smem_k2[];
-  kernel::mHC_pre_k2_task_impl<mpk_bf16,
+  kernel::mHC_pre_k2_task_impl<bf16_t,
                                N,
                                C,
                                RMS_HIDDEN,
                                TOKENS_PER_CTA,
-                               /*BLOCK_THREADS=*/256,
-                               /*MIX_STRIDE=*/128>(mixes_pad,
+                               256,
+                               128>(mixes_pad,
                                                    sqrsum,
                                                    scale_ptr,
                                                    base_ptr,
@@ -1236,78 +1013,6 @@ __global__ __launch_bounds__(256) void mHC_pre_k2_kernel(
                                                    rms_eps,
                                                    num_tokens,
                                                    smem_k2);
-}
-
-// Low-t k2: one CTA per token (grid = num_tokens) to fill the SMs at small
-// batch (the 32-tokens/CTA default leaves only ceil(t/32) blocks).
-template <int N, int C, int RMS_HIDDEN>
-__global__ __launch_bounds__(256) void mHC_pre_k2_lowt_kernel(
-    void const *__restrict__ mixes_pad,
-    void const *__restrict__ sqrsum,
-    void const *__restrict__ scale_ptr,
-    void const *__restrict__ base_ptr,
-    void const *__restrict__ x_orig_bf16,
-    void *__restrict__ f_pre,
-    void *__restrict__ h_post_out,
-    void *__restrict__ comb_out,
-    int num_tokens,
-    int sinkhorn_repeat,
-    float sinkhorn_eps,
-    float rms_eps) {
-  kernel::mHC_pre_k2_lowt_task_impl<mpk_bf16,
-                                    N,
-                                    C,
-                                    RMS_HIDDEN,
-                                    /*BLOCK_THREADS=*/256,
-                                    /*MIX_STRIDE=*/128>(mixes_pad,
-                                                        sqrsum,
-                                                        scale_ptr,
-                                                        base_ptr,
-                                                        x_orig_bf16,
-                                                        f_pre,
-                                                        h_post_out,
-                                                        comb_out,
-                                                        sinkhorn_repeat,
-                                                        sinkhorn_eps,
-                                                        rms_eps,
-                                                        num_tokens);
-}
-
-// Fused low-t k2: reduces the k1 split-k partials inline then runs the tail,
-// folding the reduce launch into k2 (3 launches -> 2). mixes_ptr/sqrsum_ptr
-// point at out_partial / sqr_partial.
-template <int N, int C, int RMS_HIDDEN, int SPLIT_K>
-__global__ __launch_bounds__(256) void mHC_pre_k2_lowt_fused_kernel(
-    void const *__restrict__ out_partial,
-    void const *__restrict__ sqr_partial,
-    void const *__restrict__ scale_ptr,
-    void const *__restrict__ base_ptr,
-    void const *__restrict__ x_orig_bf16,
-    void *__restrict__ f_pre,
-    void *__restrict__ h_post_out,
-    void *__restrict__ comb_out,
-    int num_tokens,
-    int sinkhorn_repeat,
-    float sinkhorn_eps,
-    float rms_eps) {
-  kernel::mHC_pre_k2_lowt_task_impl<mpk_bf16,
-                                    N,
-                                    C,
-                                    RMS_HIDDEN,
-                                    /*BLOCK_THREADS=*/256,
-                                    /*MIX_STRIDE=*/128,
-                                    /*RDSPLIT_K=*/SPLIT_K>(out_partial,
-                                                           sqr_partial,
-                                                           scale_ptr,
-                                                           base_ptr,
-                                                           x_orig_bf16,
-                                                           f_pre,
-                                                           h_post_out,
-                                                           comb_out,
-                                                           sinkhorn_repeat,
-                                                           sinkhorn_eps,
-                                                           rms_eps,
-                                                           num_tokens);
 }
 
 void mHC_pre_k2(torch::Tensor mixes_pad,
@@ -1324,29 +1029,28 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
                 int sinkhorn_repeat,
                 double sinkhorn_eps,
                 double rms_eps,
-                int num_ctas_arg,
-                int tokens_per_cta) {
+                int tokens_per_cta,
+                int force_path) {
   TORCH_CHECK(n == 4, "pre K2 hardcoded to n=4");
-  TORCH_CHECK(mixes_pad.is_cuda() && mixes_pad.is_contiguous() &&
-                  mixes_pad.dim() == 2 &&
-                  mixes_pad.scalar_type() == at::kBFloat16 &&
-                  mixes_pad.size(1) == 128,
+  TORCH_CHECK(mixes_pad.is_cuda() &&
+              mixes_pad.is_contiguous() &&
+              mixes_pad.dim() == 2 &&
+              mixes_pad.scalar_type() == at::kBFloat16 &&
+              mixes_pad.size(1) == 128,
               "mixes_pad must be bf16 [bs, 128] CUDA contiguous");
-  TORCH_CHECK(sqrsum.is_cuda() && sqrsum.is_contiguous() &&
-                  sqrsum.scalar_type() == at::kFloat && sqrsum.dim() == 1,
-              "sqrsum must be float32 [bs] CUDA contiguous");
-  TORCH_CHECK(tokens_per_cta == 32 || tokens_per_cta == 64 ||
-                  tokens_per_cta == 128,
+  TORCH_CHECK(tokens_per_cta == 32 ||
+              tokens_per_cta == 64 ||
+              tokens_per_cta == 128,
               "tokens_per_cta must be 32, 64, or 128");
 
   int const num_tokens = static_cast<int>(mixes_pad.size(0));
-  TORCH_CHECK(sqrsum.size(0) == num_tokens, "sqrsum bs mismatch");
+  check_tensor(sqrsum, at::kFloat, {num_tokens}, "sqrsum");
 
-  int const num_ctas = resolve_num_ctas(num_ctas_arg, mixes_pad.get_device());
+  int num_ctas = 0;
+  cudaDeviceGetAttribute(&num_ctas, cudaDevAttrMultiProcessorCount,
+                         mixes_pad.get_device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(mixes_pad.get_device());
 
-  // smem: TOKENS_PER_CTA * (4*N + N*N + N*N + N) floats for the tail buffers,
-  // plus the rms_scale[] array (+1024).
   size_t const smemBytes =
       tokens_per_cta * (4 * n + n * n + n * n + n) * sizeof(float) + 1024;
 
@@ -1369,7 +1073,7 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
 #define LAUNCH_PRE_K2(C_, RH_, TPC_)                                           \
   do {                                                                         \
     auto *kp = &mHC_pre_k2_kernel<4, C_, RH_, TPC_>;                           \
-    CUTE_CHECK_ERROR(cudaFuncSetAttribute(                                     \
+    MHC_CUDA_CHECK(cudaFuncSetAttribute(                                     \
         kp, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smemBytes));     \
     kp<<<grid_dim, block_dim, smemBytes, stream>>>(mixes_p,                    \
                                                    sq_p,                       \
@@ -1398,10 +1102,12 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
       break;                                                                   \
   }
 
-  // Below 32*SMs tokens the 32-tokens/CTA default under-fills the GPU; route to
-  // the one-CTA-per-token kernel (grid = num_tokens) instead.
-  int const k2_lowt_thresh = 32 * resolve_num_ctas(0, mixes_pad.get_device());
-  bool const use_lowt = (num_tokens < k2_lowt_thresh);
+  int const k2_lowt_thresh = 32 * num_ctas;
+  // force_path: 0 = auto (token-count heuristic), 1 = lowt (1 token/CTA),
+  // 2 = batched (tokens_per_cta tokens/CTA). For benchmarking the crossover.
+  bool const use_lowt = (force_path == 1) ? true
+                        : (force_path == 2) ? false
+                                            : (num_tokens < k2_lowt_thresh);
 
 #define LAUNCH_PRE_K2_LOWT(C_, RH_)                                            \
   do {                                                                         \
@@ -1430,7 +1136,6 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
     }                                                                          \
   } while (0)
 
-  // RMS_HIDDEN is the residual reduction dim K = n*c.
   TORCH_CHECK(rms_hidden == n * c, "rms_hidden must equal n*c");
   switch (c) {
     case 128:
@@ -1459,20 +1164,10 @@ void mHC_pre_k2(torch::Tensor mixes_pad,
       err == cudaSuccess, "mhc_pre_k2 launch error: ", cudaGetErrorString(err));
 }
 
-// ============================================================================
-// mHC_pre_k1: dispatch decode (CUDA-core) vs prefill (tcgen05) on token count.
-// Inputs: residual [tokens,K] bf16 + weight_padded [128,K] bf16; the decode
-// path derives the fp32 fn[mix_hc,K] + split-k scratch internally.
-//   tokens < CUDA_T_THRESH (~256) -> decode (FFMA + split-k)
-//   otherwise                     -> prefill (tcgen05); MMA setup cost amortizes
-// ============================================================================
 static int pick_cuda_split_k(int K, int num_tokens) {
-  // Two competing needs: fill the grid (tokens*split_k >= ~SM count) and keep
-  // each CTA's serial reduction long enough (K/split_k >= ~1024 elems). B200
-  // sweep optimum: ~512-1024 total CTAs, never below 1024 elems/CTA, cap 32.
   int grid_target =
       (num_tokens >= 1024) ? 1 : (1024 + num_tokens - 1) / num_tokens;
-  int const work_cap = (K >= 1024) ? (K / 1024) : 1; // don't go below ~1024/CTA
+  int const work_cap = (K >= 1024) ? (K / 1024) : 1;
   if (grid_target > work_cap) {
     grid_target = work_cap;
   }
@@ -1500,7 +1195,6 @@ void mHC_pre_k1(torch::Tensor residual,
 
   constexpr int CUDA_T_THRESH = 256;
   if (num_tokens < CUDA_T_THRESH) {
-    // CUDA-core path: needs bf16 fn[mix_hc,K] + split-k scratch.
     auto fn =
         weight_padded.slice(0, 0, mix_hc).to(torch::kBFloat16).contiguous();
     int const split_k = pick_cuda_split_k(K, num_tokens);
@@ -1511,16 +1205,10 @@ void mHC_pre_k1(torch::Tensor residual,
     mHC_pre_k1_decode(
         residual, fn, out_partial, sqr_partial, mixes_pad, sqrsum, n, split_k);
   } else {
-    mHC_pre_k1_prefill(
-        residual, weight_padded, mixes_pad, sqrsum, n, /*cfg=*/-1);
+    mHC_pre_k1_prefill(residual, weight_padded, mixes_pad, sqrsum, n);
   }
 }
 
-// ============================================================================
-// mHC_pre: full prenorm pipeline (k1 GEMM + k2 tail), min launches. Decode (low
-// t) fuses the GEMM's split-k reduce into k2 -> 2 launches instead of 3; prefill
-// (high t) is the standard k1 + k2.
-// ============================================================================
 template <int N, int C, int RMS_HIDDEN, int SPLIT_K>
 static void launch_pre_fused_k2(void *outp,
                                 void *sqrp,
@@ -1580,7 +1268,6 @@ void mHC_pre(torch::Tensor residual,
   bool const fused = (num_tokens < CUDA_T_THRESH);
 
   if (fused) {
-    // --- decode: GEMM (writes partials) + fused-reduce-k2 ---
     auto fn =
         weight_padded.slice(0, 0, mix_hc).to(torch::kBFloat16).contiguous();
     int const split_k = pick_cuda_split_k(K, num_tokens);
@@ -1588,13 +1275,12 @@ void mHC_pre(torch::Tensor residual,
         torch::TensorOptions().dtype(torch::kFloat32).device(residual.device());
     auto out_partial = torch::empty({split_k, num_tokens, mix_hc}, opts_f);
     auto sqr_partial = torch::empty({split_k, num_tokens}, opts_f);
-    // GEMM always writes partials (even split_k==1) for the fused k2 to reduce.
     void *res_p = const_cast<void *>(residual.data_ptr());
     __nv_bfloat16 *fn_p = reinterpret_cast<__nv_bfloat16 *>(fn.data_ptr());
     float *outp_p = out_partial.data_ptr<float>();
     float *sqrp_p = sqr_partial.data_ptr<float>();
-    void *mx_p = const_cast<void *>(mixes_pad.data_ptr()); // unused when SK>1
-    float *ss_p = sqrsum.data_ptr<float>();                // unused when SK>1
+    void *mx_p = const_cast<void *>(mixes_pad.data_ptr());
+    float *ss_p = sqrsum.data_ptr<float>();
     constexpr int BT = 128;
 
 #define PRE_GEMM(K_, SK_)                                                      \
@@ -1667,13 +1353,7 @@ void mHC_pre(torch::Tensor residual,
 #undef PRE_FUSEDK2
 #undef PRE_GEMM
   } else {
-    // --- prefill: standard k1 + k2 ---
-    mHC_pre_k1_prefill(residual,
-                       weight_padded,
-                       mixes_pad,
-                       sqrsum,
-                       n,
-                       /*cfg=*/-1);
+    mHC_pre_k1_prefill(residual, weight_padded, mixes_pad, sqrsum, n);
     mHC_pre_k2(mixes_pad,
                sqrsum,
                scale,
@@ -1688,18 +1368,17 @@ void mHC_pre(torch::Tensor residual,
                sinkhorn_repeat,
                sinkhorn_eps,
                rms_eps,
-               0,
-               tokens_per_cta);
+               tokens_per_cta,
+               /*force_path=*/0);
   }
   cudaError_t err = cudaGetLastError();
   TORCH_CHECK(
       err == cudaSuccess, "mHC_pre launch error: ", cudaGetErrorString(err));
 }
 
-} // namespace
+}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  // num_ctas=0 means "use device SM count". Caller can pin to 128 / 148 / etc.
   m.def("mHC_post",
         &mHC_post,
         py::arg("residual"),
@@ -1708,7 +1387,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("post"),
         py::arg("output"),
         py::arg("n"),
-        py::arg("num_ctas") = 0,
         "mHC post: y[k,c] = post[k]*x[c] + sum_i comb[i,k]*residual[i,c] "
         "(comb NOT transposed; matches torch hc_post)");
 
@@ -1720,10 +1398,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("mixes_pad"),
       py::arg("sqrsum"),
       py::arg("n"),
-      py::arg("cfg") = -1,
       "Prefill pre_k1 (raw-PTX tcgen05, no CUTLASS/CuTe): mixes = residual @ "
-      "fn.T + sqrsum, bf16 kind::f16 MMA. Same outputs as mHC_pre_k1. cfg=-1 "
-      "uses the tuned tile config; 0..9 force a (BLOCK_N,BLOCK_K,STAGES).");
+      "fn.T + sqrsum, bf16 kind::f16 MMA. Same outputs as mHC_pre_k1.");
 
   m.def("mHC_pre_k1_decode",
         &mHC_pre_k1_decode,
@@ -1763,10 +1439,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sinkhorn_eps") = 1e-9,
         py::arg("rms_eps") = 1e-6,
         py::arg("tokens_per_cta") = 32,
-        py::arg("k1_tpb") = -1,
+        py::arg("tile_n") = 24,
         "CUDA-core fused post + prenorm-GEMM (vLLM mhc_fused style) + split-k "
         "reduce + k2 tail. Outputs next layer f_pre / h_post / comb. "
-        "k1_tpb: tokens-per-block for k1 GEMM (-1 = heuristic).");
+        "tile_n: outputs computed per CTA, must be 1, 6, or 24 (see tile_n_for).");
 
   m.def("sinkhorn_sm100",
         &sinkhorn_sm100,
@@ -1774,7 +1450,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comb_res_mix_out"),
         py::arg("repeat") = 20,
         py::arg("eps") = 1e-9,
-        py::arg("num_ctas") = 0,
         "mHC K3: Sinkhorn-Knopp normalization (4x4)");
 
   m.def(
@@ -1828,8 +1503,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sinkhorn_repeat") = 20,
         py::arg("sinkhorn_eps") = 1e-9,
         py::arg("rms_eps") = 1e-6,
-        py::arg("num_ctas") = 0,
         py::arg("tokens_per_cta") = 32,
+        py::arg("force_path") = 0,
         "mHC pre K2 (vLLM split): rms-scale gemm output (via sqrsum) + "
-        "pre/post/comb mix (sinkhorn) + pre-weighted residual sum.");
+        "pre/post/comb mix (sinkhorn) + pre-weighted residual sum. "
+        "force_path: 0=auto, 1=lowt (1 tok/CTA), 2=batched (tokens_per_cta/CTA).");
 }

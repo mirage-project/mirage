@@ -385,6 +385,11 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.y;
               task.task_metadata.merge_task_offset = bid.z;
             }
+            // mHC pre k1 prefill: grid=(ceil(BATCH/BLOCK_N), 1, 1)
+            //   request_id = bid.x (batch tile index -> kernel's bid_n)
+            if (task_type == TASK_MHC_PRE_K1_PREFILL_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // MTP decode: grid=(sk, num_head_groups, B)
             // request_id=gi (head_group from bid.y), kv_idx=si (split from
             // bid.x) expert_offset stores hpb for TMA box dimension
@@ -1178,6 +1183,10 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
+    // mHC pre k1 prefill needs TMA descriptors (weight + residual maps).
+    code.e("if (task.at(\"task_type\") == TASK_MHC_PRE_K1_PREFILL_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
     // FP8 linear tasks need TMA (outside SM100_TMA range)
     code.e("if (task.at(\"task_type\") == TASK_LINEAR_FP8_SM100 || "
            "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {");
@@ -1820,6 +1829,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_SOFTMAX_GATHER_SM100] = "TASK_SOFTMAX_GATHER_SM100";
   task_type_to_name[TASK_MHC_POST_SM100] = "TASK_MHC_POST_SM100";
   task_type_to_name[TASK_MHC_PRE_K1_SM100] = "TASK_MHC_PRE_K1_SM100";
+  task_type_to_name[TASK_MHC_PRE_K1_PREFILL_SM100] =
+      "TASK_MHC_PRE_K1_PREFILL_SM100";
   task_type_to_name[TASK_MHC_PRE_K2_SM100] = "TASK_MHC_PRE_K2_SM100";
   task_type_to_name[TASK_MHC_POST_PRE_K1_SM100] = "TASK_MHC_POST_PRE_K1_SM100";
   task_type_to_name[TASK_MHC_POST_PRE_K2_SM100] = "TASK_MHC_POST_PRE_K2_SM100";

@@ -14,68 +14,41 @@
  */
 #pragma once
 
-// mHC fused post -> next-layer pre (CUDA-core), in two kernels:
-//
-//   mHC_post_pre_k1 : hc_post of the current layer + the next layer's prenorm
-//                     GEMM + sqrsum, fused so the post output never round-trips
-//                     through gmem. Mirrors vLLM's mhc_fused_tilelang.
-//                       new_r[j,h]        = post[j]*x[h] + sum_k
-//                       comb[k,j]*res[k,h] residual_out[j,h] = new_r[j,h] (next
-//                       residual) sqrsum[t]        += sum new_r^2 (RMS denom)
-//                       mixes[t,o]       += sum_jh fn[o,j,h]*new_r (= y @ fn.T)
-//                     plus a split-k reduce folding partials ->
-//                     mixes_pad+sqrsum.
-//
-//   mHC_post_pre_k2 : the pre tail (RMS-fold + pre/post sigmoid affines +
-//                     sinkhorn(4x4) + pre_mix-weighted residual sum) ->
-//                     f_pre / h_post / comb for the next layer. Forwards to the
-//                     shared mHC_pre_k2 implementation (identical math).
-//
-// k1's GEMM is a thread-level FMA loop: each thread owns a contiguous hidden
-// slice (h in [0,C)) for one token, computes new_r for all N heads in registers
-// and contracts against fn. mix_hc (=24) is too narrow for tensor cores, so
-// this matches vLLM's CUDA-core choice, avoids the pad-to-128 waste, keeps smem
-// tiny, and uses split-k over the hidden dim to fill the grid at low token
-// counts.
-//
-// These are two separate kernel launches (k1 writes mixes_pad+sqrsum to gmem;
-// k2 consumes them), since the GEMM and the sinkhorn tail have different grid /
-// thread shapes.
-
-#include "blackwell/mHC_pre.cuh"
+#include "mHC_pre.cuh"
 #include <cuda_bf16.h>
 
 namespace kernel {
 
-// ---- Stage k1: post + prenorm GEMM + sqrsum ----
-// TPB tokens share one block; fn[o,j,h] is loaded once and reused across all
-// TPB tokens, dividing the dominant fn L2->SM traffic by TPB. Mirrors the
-// pre_k1_cuda_core TPB design.
 template <typename T,
-          int N,      // hc_mult (4)
-          int C,      // hidden_size per head
-          int MIX_HC, // N*N + 2*N (24 for N=4)
+          int N,
+          int C,
+          int MIX_HC,
           int BLOCK_THREADS,
           int SPLIT_K,
           int MIX_PAD = 128,
-          int TPB = 1> // tokens processed per CTA
+          int TPB = 1,
+          int TILE_N = MIX_HC>
 __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
-    T const *__restrict__ residual,       // [tokens, N, C]
-    T const *__restrict__ x,              // [tokens, C]
-    float const *__restrict__ comb,       // [tokens, N, N]
-    float const *__restrict__ post,       // [tokens, N]
-    __nv_bfloat16 const *__restrict__ fn, // [MIX_HC, N, C]  (weight_t, bf16)
-    T *__restrict__ residual_out,         // [tokens, N, C]
-    float *__restrict__ out_partial,      // [SPLIT_K, tokens, MIX_HC] (SK>1)
-    float *__restrict__ sqr_partial,      // [SPLIT_K, tokens]         (SK>1)
-    void *__restrict__ mixes_pad,         // [tokens, MIX_PAD] bf16    (SK==1)
-    float *__restrict__ sqrsum,           // [tokens]                  (SK==1)
+    T const *__restrict__ residual,
+    T const *__restrict__ x,
+    float const *__restrict__ comb,
+    float const *__restrict__ post,
+    __nv_bfloat16 const *__restrict__ fn,
+    T *__restrict__ residual_out,
+    float *__restrict__ out_partial,
+    float *__restrict__ sqr_partial,
+    void *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
     int num_tokens,
-    int token0, // first token of this CTA's TPB-group
-    int i_ks) {
+    int token0,
+    int i_ks,
+    int i_nt) {
   constexpr bool DIRECT = (SPLIT_K == 1);
   constexpr int C_PER_SPLIT = C / SPLIT_K;
   static_assert(C % SPLIT_K == 0, "C must be divisible by SPLIT_K");
+  static_assert(MIX_HC % TILE_N == 0, "MIX_HC must be divisible by TILE_N");
+  bool const owns_side = (i_nt == 0);
+  int const o_base = i_nt * TILE_N;
   int const tid = threadIdx.x;
   int const lane = tid & 31;
   int const warp_id = tid >> 5;
@@ -83,7 +56,6 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
 
   int const ntok = (num_tokens - token0) < TPB ? (num_tokens - token0) : TPB;
 
-  // Hoist post / comb for all TPB tokens into registers.
   float pm[TPB][N];
   float cm[TPB][N][N];
 #pragma unroll
@@ -104,14 +76,13 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
     }
   }
 
-  // Per-token accumulators. fn loaded once per h, reused across all TPB tokens.
-  float acc[TPB][MIX_HC];
+  float acc[TPB][TILE_N];
   float sqr[TPB];
 #pragma unroll
   for (int t = 0; t < TPB; ++t) {
     sqr[t] = 0.0f;
 #pragma unroll
-    for (int o = 0; o < MIX_HC; ++o) {
+    for (int o = 0; o < TILE_N; ++o) {
       acc[t][o] = 0.0f;
     }
   }
@@ -121,18 +92,15 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
   for (int it = tid; it < C_PER_SPLIT; it += BLOCK_THREADS) {
     int const h = h_base + it;
 
-    // Load fn[o,j,h] once for this h; will be reused by all TPB tokens.
-    // fn layout: [MIX_HC, N, C] flattened -> fn[o*N*C + j*C + h].
-    float fn_oj[MIX_HC][N];
+    float fn_oj[TILE_N][N];
 #pragma unroll
-    for (int o = 0; o < MIX_HC; ++o) {
+    for (int o = 0; o < TILE_N; ++o) {
 #pragma unroll
       for (int j = 0; j < N; ++j) {
-        fn_oj[o][j] = __bfloat162float(fn[((int64_t)o * N + j) * C + h]);
+        fn_oj[o][j] = __bfloat162float(fn[((int64_t)(o_base + o) * N + j) * C + h]);
       }
     }
 
-    // Per-token: compute new_r, write residual_out, accumulate sqr and mixes.
 #pragma unroll
     for (int t = 0; t < TPB; ++t) {
       if (t < ntok) {
@@ -141,11 +109,11 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
         T const *x_t = x + (int64_t)tok * C;
         T *res_out_t = residual_out + (int64_t)tok * N * C;
 
-        float const xv = static_cast<float>(x_t[h]);
+        float const xv = __bfloat162float(x_t[h]);
         float rk[N];
 #pragma unroll
         for (int kk = 0; kk < N; ++kk) {
-          rk[kk] = static_cast<float>(res_t[kk * C + h]);
+          rk[kk] = __bfloat162float(res_t[kk * C + h]);
         }
         float new_r[N];
 #pragma unroll
@@ -156,11 +124,13 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
             v += cm[t][kk][j] * rk[kk];
           }
           new_r[j] = v;
-          res_out_t[j * C + h] = static_cast<T>(v);
-          sqr[t] += v * v;
+          if (owns_side) {
+            res_out_t[j * C + h] = __float2bfloat16(v);
+            sqr[t] += v * v;
+          }
         }
 #pragma unroll
-        for (int o = 0; o < MIX_HC; ++o) {
+        for (int o = 0; o < TILE_N; ++o) {
           float s = 0.0f;
 #pragma unroll
           for (int j = 0; j < N; ++j) {
@@ -172,32 +142,35 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
     }
   }
 
-  // Warp-reduce each token's accumulators.
 #pragma unroll
   for (int t = 0; t < TPB; ++t) {
 #pragma unroll
-    for (int o = 0; o < MIX_HC; ++o) {
+    for (int o = 0; o < TILE_N; ++o) {
 #pragma unroll
       for (int off = 16; off > 0; off >>= 1) {
         acc[t][o] += __shfl_xor_sync(0xffffffff, acc[t][o], off);
       }
     }
+    if (owns_side) {
 #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-      sqr[t] += __shfl_xor_sync(0xffffffff, sqr[t], off);
+      for (int off = 16; off > 0; off >>= 1) {
+        sqr[t] += __shfl_xor_sync(0xffffffff, sqr[t], off);
+      }
     }
   }
 
-  __shared__ float s_acc[TPB][NUM_WARPS][MIX_HC];
+  __shared__ float s_acc[TPB][NUM_WARPS][TILE_N];
   __shared__ float s_sqr[TPB][NUM_WARPS];
   if (lane == 0) {
 #pragma unroll
     for (int t = 0; t < TPB; ++t) {
 #pragma unroll
-      for (int o = 0; o < MIX_HC; ++o) {
+      for (int o = 0; o < TILE_N; ++o) {
         s_acc[t][warp_id][o] = acc[t][o];
       }
-      s_sqr[t][warp_id] = sqr[t];
+      if (owns_side) {
+        s_sqr[t][warp_id] = sqr[t];
+      }
     }
   }
   __syncthreads();
@@ -210,19 +183,20 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
         continue;
       }
       int const token = token0 + t;
-      if (lane < MIX_HC) {
+      if (lane < TILE_N) {
+        int const o = o_base + lane;
         float v = 0.0f;
 #pragma unroll
         for (int w = 0; w < NUM_WARPS; ++w) {
           v += s_acc[t][w][lane];
         }
         if (DIRECT) {
-          mixes[(int64_t)token * MIX_PAD + lane] = __float2bfloat16(v);
+          mixes[(int64_t)token * MIX_PAD + o] = __float2bfloat16(v);
         } else {
-          out_partial[((int64_t)i_ks * num_tokens + token) * MIX_HC + lane] = v;
+          out_partial[((int64_t)i_ks * num_tokens + token) * MIX_HC + o] = v;
         }
       }
-      if (lane == 0) {
+      if (owns_side && lane == 0) {
         float v2 = 0.0f;
 #pragma unroll
         for (int w = 0; w < NUM_WARPS; ++w) {
@@ -238,15 +212,12 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
   }
 }
 
-// k1 split-k reduce: fold SPLIT_K partials -> mixes_pad (bf16, padded to
-// MIX_PAD cols) + sqrsum. Launched as one block per token with >= MIX_HC
-// threads.
 template <int N, int MIX_HC, int MIX_PAD, int SPLIT_K>
 __device__ __forceinline__ void mHC_post_pre_k1_reduce_impl(
-    float const *__restrict__ out_partial, // [SPLIT_K, tokens, MIX_HC]
-    float const *__restrict__ sqr_partial, // [SPLIT_K, tokens]
-    void *__restrict__ mixes_pad,          // [tokens, MIX_PAD] bf16
-    float *__restrict__ sqrsum,            // [tokens]
+    float const *__restrict__ out_partial,
+    float const *__restrict__ sqr_partial,
+    void *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
     int num_tokens,
     int token) {
   __nv_bfloat16 *mixes = static_cast<__nv_bfloat16 *>(mixes_pad);
@@ -269,10 +240,6 @@ __device__ __forceinline__ void mHC_post_pre_k1_reduce_impl(
   }
 }
 
-// ---- Stage k2: pre tail (RMS-fold + affines + sinkhorn + weighted sum) ----
-// The math is identical to the standalone pre tail, so this forwards to the
-// shared mHC_pre_k2 implementation. Consumes k1's mixes_pad + sqrsum and the
-// next-layer residual (residual_out from k1), producing f_pre/h_post/comb.
 template <typename T_in,
           int N,
           int C,
@@ -317,4 +284,4 @@ __device__ __forceinline__ void
                                    token_base_override);
 }
 
-} // namespace kernel
+}

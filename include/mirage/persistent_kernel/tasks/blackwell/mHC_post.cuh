@@ -16,23 +16,6 @@
 #include "tasks/common/common_header.cuh"
 #include <cuda_bf16.h>
 
-// mHC post: HC Post + Residual Fusion.
-//
-// y[k, c] = post[k] * x[c] + sum_i comb[i, k] * residual[i, c]
-//
-// `comb` is the Sinkhorn-normalized combination matrix from hc_pre. The
-// contraction sums over the FIRST (row) index i -- i.e. column k of comb --
-// matching the torch model's hc_post (NOT transposed). Output channel k is
-// formed from all input residual channels i weighted by comb[i, k].
-//
-// Reads: residual[NUM_TOPK, OUTPUT_SIZE], x[OUTPUT_SIZE], post[NUM_TOPK],
-//        comb[NUM_TOPK*NUM_TOPK].
-// Writes: y[NUM_TOPK, OUTPUT_SIZE].
-//
-// Per output row k, the residual is the rank-1 outer product post[k] * x[c]
-// (computed inline) rather than a precomputed dense buffer; avoids the (n*C)
-// intermediate read/write.
-
 namespace kernel {
 
 template <typename T,
@@ -46,10 +29,6 @@ __device__ __forceinline__ void
                        void const *comb_ptr,
                        void const *post_ptr,
                        void *output_ptr,
-                       // Thread-group remap: `tid`/`nthreads` default to the
-                       // whole block, but a multi-token kernel passes the
-                       // sub-group's lane and size so several tokens share one
-                       // block. Caller offsets the pointers to its token.
                        int tid = -1,
                        int nthreads = 0) {
   int const t_id = (tid >= 0) ? tid : (int)threadIdx.x;
@@ -60,12 +39,7 @@ __device__ __forceinline__ void
   float const *__restrict__ d_post = static_cast<float const *>(post_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  // Channel-major + vectorized: each thread processes VEC=8 contiguous channels
-  // per step via 128-bit (uint4) loads/stores, computing all NUM_TOPK outputs
-  // from a single load of each residual vec. `residual` is read exactly once
-  // (the old k-major loop re-read it NUM_TOPK x); comb/post are hoisted to
-  // registers per row. VEC*sizeof(bf16) = 16 B -> one LDG.E.128 / STG.E.128.
-  constexpr int VEC = 8; // 8 bf16 = 16 B = uint4
+  constexpr int VEC = 8;
   static_assert(OUTPUT_SIZE % VEC == 0, "OUTPUT_SIZE must be a multiple of 8");
   int const c_vec_count = OUTPUT_SIZE / VEC;
 
@@ -88,7 +62,6 @@ __device__ __forceinline__ void
         d_output + (int64_t)row_idx * OUTPUT_STRIDE * NUM_TOPK;
 
     for (int v = t_id; v < c_vec_count; v += n_threads) {
-      // Load NUM_TOPK residual vecs (8 channels each) + the x vec, once.
       uint4 r_raw[NUM_TOPK];
 #pragma unroll
       for (int t = 0; t < NUM_TOPK; ++t) {
@@ -97,7 +70,6 @@ __device__ __forceinline__ void
       }
       uint4 x_raw = reinterpret_cast<uint4 const *>(x_row)[v];
 
-      // Unpack to fp32: r_f[t][e], x_f[e] for the VEC lanes.
       float r_f[NUM_TOPK][VEC];
       float x_f[VEC];
 #pragma unroll
@@ -122,7 +94,6 @@ __device__ __forceinline__ void
         }
       }
 
-      // Compute all NUM_TOPK outputs for the VEC lanes; pack + store as uint4.
 #pragma unroll
       for (int k = 0; k < NUM_TOPK; ++k) {
         float out_f[VEC];
@@ -131,7 +102,6 @@ __device__ __forceinline__ void
           float s = post_reg[k] * x_f[e];
 #pragma unroll
           for (int t = 0; t < NUM_TOPK; ++t) {
-            // comb[t, k] (row t, col k): untransposed torch hc_post convention.
             s += r_f[t][e] * comb_reg[t * NUM_TOPK + k];
           }
           out_f[e] = s;
@@ -148,4 +118,4 @@ __device__ __forceinline__ void
   }
 }
 
-} // namespace kernel
+}

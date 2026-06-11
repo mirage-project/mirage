@@ -1,19 +1,20 @@
 """mHC correctness (vs torch) + benchmark (vs vLLM) at DeepSeek-V4 shapes.
 
-Ops (n=4 fixed):
-  pre           ours mHC_pre (fused k1+k2)            vs vLLM pre
-  post          ours mHC_post                         vs vLLM mHC_post
-  post_pre      ours mHC_post_pre_v2 (fused)          vs vLLM fused
-  post_then_pre ours mHC_post THEN mHC_pre (separate) vs vLLM fused post_pre
+Modes (n=4 fixed):
+  pre    ours mHC_pre                      vs vLLM pre
+  post   ours mHC_post                     vs vLLM post
+  4way   post->pre four ways: ours_fused (mHC_post_pre_v2) | ours_2k (mHC_post
+         then mHC_pre) | vLLM fused (mhc_fused+tail) | vLLM 2k (pre + post)
+  all    pre + post + 4way (default)
 
 Configs: c=4096 (V4-Flash), c=7168 (V4-Pro);  t in {1..16384}.
 
 vLLM timings come from a .pt bundle produced by vllm/run_tilelang.py in the
 mhc_cmp env; this script auto-(re)generates it if missing.
 
-    python mhc_benchmark.py                 # correctness + benchmark, all ops
-    python mhc_benchmark.py --no-vllm       # correctness + ours-only timing
-    python mhc_benchmark.py --ops pre post  # subset
+    python mhc_benchmark.py                 # all modes, correctness + timing
+    python mhc_benchmark.py --mode 4way     # just the post->pre comparison
+    python mhc_benchmark.py --no-vllm       # ours-only timing + correctness
 """
 import argparse
 import os
@@ -25,7 +26,8 @@ import runtime_kernel_blackwell_mhc as rt
 
 DEV = "cuda"
 N = 4
-TS = (1, 2, 4, 8, 16, 32, 1024, 2048, 4096, 8192, 16384)
+TS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
+      1024, 2048, 4096, 8192, 16384)
 CS = {4096: "V4-Flash", 7168: "V4-Pro"}
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUNDLE = "/tmp/mhc_v4_sweep.pt"
@@ -33,7 +35,7 @@ MHC_CMP_PY = os.environ.get(
     "MHC_TILELANG_PYTHON", "/home/adityar2/miniconda3/envs/mhc_cmp/bin/python")
 
 
-def time_ms(fn, warmup=20, iters=80):
+def time_ms(fn, warmup=500, iters=100):
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -51,19 +53,43 @@ def relerr(a, b):
     return ((a - b).abs().max() / (b.abs().max() + 1e-9)).item()
 
 
-def split_k_for(K, nt, max_sk=None):
-    # max_sk: c>4096 can go to 64 (min slice=112 elems still useful);
-    # c<=4096 caps at 16 (slice=256 elems; 32 gives 128 which hurts).
-    if max_sk is None:
-        max_sk = 64 if K > 4096 else 16
-    target = 1 if nt >= 148 else (148 + nt - 1) // nt
-    sk = 1
-    for cand in (1, 2, 4, 8, 16, 32, 64, 128):
-        if cand > max_sk:
-            break
-        if K % cand == 0 and cand <= target:
-            sk = cand
-    return sk
+# ---------------------------------------------------------------------------
+# mHC_post_pre_v2 launch heuristics: tile_n (outputs/CTA) and split_k (hidden
+# splits). Both control how many CTAs the k1 GEMM launches, which on a 148-SM
+# B200 is the whole game: total CTAs ~= ceil(t/tpb) * split_k * (24/tile_n).
+#
+#   - Low t (decode): tokens alone leave the grid nearly empty, so split the
+#     work hard -- small tile_n widens the grid by 24/tile_n and split_k adds
+#     hidden-dim parallelism -- until ~the SM count is covered several times.
+#   - Prefill (t>=512): tokens already fill the grid many times over, so keep
+#     each CTA dense (tile_n=24) and use only light split_k.
+#
+# Co-tuned by joint (tile_n x split_k) sweep on B200 across c=4096/7168, all
+# t in 1..16384: this pair lands within 1.10x of the per-shape optimum and is
+# ~1.34x faster (geomean) than the previous tile_n=24-only schedule.
+# ---------------------------------------------------------------------------
+def split_k_for(c, nt):
+    if nt <= 2:
+        return 16 if c > 4096 else 8     # tiny t: split hard to fill the grid
+    if nt <= 8:
+        return 8
+    if nt <= 32:
+        return 4
+    if nt <= 64:
+        return 1
+    if nt <= 256:
+        return 2 if c > 4096 else 1
+    return 4 if c <= 4096 else 2         # prefill: light split keeps SMs busy
+
+
+def tile_n_for(c, nt):
+    if nt <= 2:
+        return 1                         # widest grid for the emptiest case
+    if nt <= 256:
+        return 6                         # mid band: 4x more CTAs than full width
+    if nt <= 1024 and c > 4096:
+        return 6                         # wide c still gains a wide grid here
+    return 24                            # prefill: dense per-CTA work
 
 
 def ref_pre(residual_2d, fn2d, scale, base, c, sk=20, he=1e-9, re_=1e-6):
@@ -142,14 +168,21 @@ def _postpre_inputs(nt, c, sk):
     return locals()
 
 
-def op_post_pre(nt, c, check, k1_tpb=-1, k1_sk=-1):
-    sk = k1_sk if k1_sk > 0 else split_k_for(c, nt)
+# Configs our mHC_post_pre_v2 instantiates: tile_n in {1,6,24} (divisors of
+# mix_hc=24 the kernel compiles), split_k in {1,2,4,8,16,32}. Mirrors vLLM's
+# tile_n x split_k sweep in run_tilelang.run_post_pre so both sides report their
+# own best config (apples-to-apples), not one tuned vs one fixed.
+POSTPRE_TILE_N = (24, 6, 1)
+POSTPRE_SPLIT_K = (1, 2, 4, 8, 16, 32)
+
+
+def _time_post_pre(nt, c, sk, tn, check):
     d = _postpre_inputs(nt, c, sk)
     call = lambda: rt.mHC_post_pre_v2(
         d["res"], d["x"], d["cin"], d["post"], d["fn"], d["rn"], d["op"], d["sp"],
         d["mp"], d["ss"], d["sc"], d["ba"], d["f"], d["hp"], d["cb"], N, c,
         split_k=sk, sinkhorn_repeat=20, sinkhorn_eps=1e-9, rms_eps=1e-6,
-        k1_tpb=k1_tpb)
+        tile_n=tn)
     err = float("nan")
     if check:
         call(); torch.cuda.synchronize()
@@ -159,6 +192,25 @@ def op_post_pre(nt, c, check, k1_tpb=-1, k1_sk=-1):
         err = max(relerr(d["rn"], rn_ref), relerr(d["f"], fr),
                   relerr(d["hp"], pr), relerr(d["cb"], cr))
     return time_ms(call), err
+
+
+def op_post_pre(nt, c, check, sweep=False):
+    if not sweep:
+        sk = split_k_for(c, nt)
+        tn = tile_n_for(c, nt)
+        t_ms, err = _time_post_pre(nt, c, sk, tn, check)
+        return t_ms, err, sk, tn
+    # Fair sweep: time every instantiated (tile_n, split_k); keep the fastest.
+    best = (float("inf"), float("nan"), -1, -1)
+    for tn in POSTPRE_TILE_N:
+        for sk in POSTPRE_SPLIT_K:
+            try:
+                t_ms, err = _time_post_pre(nt, c, sk, tn, check)
+            except Exception:
+                continue
+            if t_ms < best[0]:
+                best = (t_ms, err, sk, tn)
+    return best
 
 
 def op_post_then_pre(nt, c, check):
@@ -190,11 +242,11 @@ def op_post_then_pre(nt, c, check):
     return time_ms(call), err
 
 
+# Standalone ops timed against vLLM's same op. (op fn, vLLM bundle key.)
+# post_pre / post_then_pre are driven directly by run_4way, not via this table.
 OPS = {
     "pre": (op_pre, "pre"),
     "post": (op_post, "post"),
-    "post_pre": (op_post_pre, "post_pre"),
-    "post_then_pre": (op_post_then_pre, "post_pre"),
 }
 
 
@@ -222,43 +274,88 @@ def load_bundle():
     return v
 
 
+def run_single_op(op, vllm, check):
+    """pre / post on their own vs vLLM's same op. One line per shape:
+        t=    1  c=4096  mirage=  15.5us  vllm=  19.7us  speedup=1.27x
+    """
+    fn, vkey = OPS[op]
+    any_fail = False
+    for c in CS:
+        for nt in TS:
+            t_ms, err = fn(nt, c, check)
+            mirage_us = t_ms * 1000
+            line = f"t={nt:6d}  c={c:5d}  mirage={mirage_us:8.2f}us"
+            if vllm is not None:
+                vl = vllm[vkey].get((nt, c), float("nan")) * 1000
+                sp = vl / mirage_us if vl == vl else float("nan")
+                line += f"  vllm={vl:8.2f}us  speedup={sp:.2f}x"
+            if check:
+                ok = err < 2e-2
+                any_fail |= not ok
+                line += f"  relerr={err:.2e} {'OK' if ok else 'BAD'}"
+            print(line, flush=True)
+    return any_fail
+
+
+def run_4way(vllm, check, sweep=False):
+    """post->pre four ways. ours_fused = mHC_post_pre_v2 (single fused path);
+    ours_2k = mHC_post then mHC_pre (two kernels); vllm_fused = mhc_fused+tail;
+    vllm_2k = vLLM post + vLLM pre run separately (sum of the two timings).
+    Speedups are vs ours_fused. One line per shape. With sweep=True, ours_fused
+    picks its best (tile_n, split_k) per shape, matching vLLM's own sweep."""
+    any_fail = False
+    for c in CS:
+        for nt in TS:
+            tf_ms, ef, sk, tn = op_post_pre(nt, c, check, sweep=sweep)
+            t2_ms, e2 = op_post_then_pre(nt, c, check)
+            ours_f = tf_ms * 1000
+            ours_2 = t2_ms * 1000
+            line = (f"t={nt:6d}  c={c:5d}  tn={tn:2d} sk={sk:2d}  "
+                    f"ours_fused={ours_f:8.2f}us  ours_2k={ours_2:8.2f}us")
+            if vllm is not None:
+                vf = vllm["post_pre"].get((nt, c), float("nan")) * 1000
+                vp = vllm["pre"].get((nt, c), float("nan")) * 1000
+                vpo = vllm["post"].get((nt, c), float("nan")) * 1000
+                v2 = vp + vpo
+                line += (f"  vllm_fused={vf:8.2f}us  vllm_2k={v2:8.2f}us"
+                         f"  | best_ours/vllm_fused={vf/min(ours_f, ours_2):.2f}x")
+            if check:
+                ok = max(ef, e2) < 2e-2
+                any_fail |= not ok
+                line += f"  relerr={max(ef, e2):.2e} {'OK' if ok else 'BAD'}"
+            print(line, flush=True)
+    return any_fail
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ops", nargs="+", default=list(OPS), choices=list(OPS))
+    ap.add_argument("--mode", default="all",
+                    choices=["all", "pre", "post", "4way"],
+                    help="all = pre + post + 4way post_pre comparison")
     ap.add_argument("--no-vllm", action="store_true", help="skip vLLM comparison")
     ap.add_argument("--no-check", action="store_true", help="skip correctness")
+    ap.add_argument("--sweep-4way", action="store_true",
+                    help="ours_fused sweeps (tile_n, split_k) per shape and "
+                         "keeps the best, matching vLLM's own sweep (fair cmp)")
     args = ap.parse_args()
     torch.cuda.init()
 
     vllm = None if args.no_vllm else ensure_bundle()
+    check = not args.no_check
     any_fail = False
 
-    for c, name in CS.items():
-        print(f"\n################  c={c} ({name})  ################")
-        for op in args.ops:
-            fn, vkey = OPS[op]
-            vtag = "fused post_pre" if op == "post_then_pre" else vkey
-            hdr = f"{'t':>7s} | {'ours us':>9s}"
-            if not args.no_check:
-                hdr += f" {'relerr':>9s} {'ok':>3s}"
-            if vllm is not None:
-                hdr += f" | {'vLLM us':>9s} {'speedup':>8s}"
-            print(f"\n--- {op}" + (f"  (vLLM: {vtag})" if vllm is not None else "") + " ---")
-            print(hdr)
-            for nt in TS:
-                t_ms, err = fn(nt, c, not args.no_check)
-                line = f"{nt:7d} | {t_ms*1000:9.2f}"
-                if not args.no_check:
-                    ok = err < 2e-2
-                    any_fail |= not ok
-                    line += f" {err:9.2e} {'OK' if ok else 'BAD':>3s}"
-                if vllm is not None:
-                    vl = vllm[vkey].get((nt, c), float("nan")) * 1000
-                    sp = vl / (t_ms * 1000) if vl == vl else float("nan")
-                    line += f" | {vl:9.2f} {sp:7.2f}x"
-                print(line)
+    if args.mode in ("all", "pre"):
+        print("\n==================  pre  (ours mHC_pre vs vLLM pre)  ==============")
+        any_fail |= run_single_op("pre", vllm, check)
+    if args.mode in ("all", "post"):
+        print("\n==================  post (ours mHC_post vs vLLM post)  ============")
+        any_fail |= run_single_op("post", vllm, check)
+    if args.mode in ("all", "4way"):
+        print("\n========  post->pre: ours_fused vs ours_2k vs vllm_fused vs "
+              "vllm_2k  ========")
+        any_fail |= run_4way(vllm, check, sweep=args.sweep_4way)
 
-    if not args.no_check:
+    if check:
         print("\n", "ALL CORRECTNESS PASSED" if not any_fail else "SOME CORRECTNESS FAILED")
         sys.exit(1 if any_fail else 0)
 

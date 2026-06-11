@@ -2223,10 +2223,13 @@ int TaskRegister::register_mhc_post_sm100_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].dim[1] == num_topk);
   assert(output_ops[0]->output_tensors[0].dim[2] == output_size);
 
+  (void)bs_tile;
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::mHC_post_task_impl<bfloat16, $, $, $, $>(",
-         bs_tile,
+  // BATCH_SIZE=1: MPK pre-offsets the ptrs to this task's token (grid is one
+  // CTA per token, partition (0,-1,-1)), so each task processes exactly one
+  // token. Passing bs_tile (the full batch) would loop OOB past the slice.
+  code.e("kernel::mHC_post_task_impl<bfloat16, 1, $, $, $>(",
          output_size,
          num_topk,
          output_size);
@@ -2261,13 +2264,23 @@ int TaskRegister::register_mhc_pre_k1_sm100_task(
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
-  // residual: [bs, K]
-  assert(input_ops[0]->output_tensors[0].num_dims == 2);
-  int K = input_ops[0]->output_tensors[0].dim[1];
-  // fn: [MIX_HC, K]
+  // residual: the per-token reduction buffer, either [bs, K] (2D) or the
+  // [bs, n, C] residual stream (3D, K = n*C). The kernel only needs the flat
+  // K and a contiguous pointer, so accept both and fold the trailing dims.
+  {
+    auto const &rt = input_ops[0]->output_tensors[0];
+    assert(rt.num_dims == 2 || rt.num_dims == 3);
+  }
+  int K = 1;
+  for (int d = 1; d < input_ops[0]->output_tensors[0].num_dims; d++) {
+    K *= input_ops[0]->output_tensors[0].dim[d];
+  }
+  // fn: bf16 weight [fn_rows, K]. fn_rows may be the padded 128 (shared with
+  // the prefill path's [128,K] weight) or a tight MIX_HC; the kernel only reads
+  // rows 0..MIX_HC-1 (stride K), so any fn_rows >= MIX_HC works.
   assert(input_ops[1]->output_tensors[0].num_dims == 2);
-  int mix_hc = input_ops[1]->output_tensors[0].dim[0];
   assert(input_ops[1]->output_tensors[0].dim[1] == K);
+  int mix_hc = 24; // n=4: n*n + 2*n
   // mixes_pad: [bs, MIX_PAD]
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int mix_pad = output_ops[0]->output_tensors[0].dim[1];
@@ -2275,20 +2288,89 @@ int TaskRegister::register_mhc_pre_k1_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // <T, MIX_HC, K, BLOCK_THREADS, SPLIT_K, MIX_PAD, TPB>; split_k=1, TPB=1.
-  code.e("kernel::mHC_pre_k1_cuda_core_task_impl<bfloat16, $, $, 128, 1, $, 1>(",
+  // BLOCK_THREADS=256 to match the SM100 megakernel worker block size (the
+  // layer launches block_dim=(256,1,1)); a mismatch desyncs __syncthreads.
+  code.e("kernel::mHC_pre_k1_cuda_core_task_impl<bfloat16, $, $, 256, 1, $, 1>(",
          mix_hc,
          K,
          mix_pad);
   code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[0]),"); // res
-  code.e("    static_cast<float const *>(task_desc->input_ptrs[1]),"); // fn
+  code.e("    static_cast<__nv_bfloat16 const *>(task_desc->input_ptrs[1]),"); // fn (bf16)
   code.e("    nullptr,"); // out_partial (unused at split_k=1)
   code.e("    nullptr,"); // sqr_partial (unused at split_k=1)
   code.e("    task_desc->output_ptrs[0],"); // mixes_pad (void*)
   code.e("    static_cast<float *>(task_desc->output_ptrs[1]),"); // sqrsum
-  code.e("    gridDim.x,"); // num_tokens (one CTA per token)
-  code.e("    static_cast<int>(blockIdx.x),"); // token0
-  code.e("    0);");                            // i_ks
+  // blockIdx-agnostic: MPK pre-offsets the ptrs to this task's token slice, so
+  // this task processes exactly one token (num_tokens=1, token0=0). Using
+  // blockIdx/gridDim here is wrong -- they index the worker grid, not tokens.
+  code.e("    1,"); // num_tokens (this task = 1 token, ptrs pre-offset)
+  code.e("    0,"); // token0
+  code.e("    0);"); // i_ks
   return register_task_variant(TASK_MHC_PRE_K1_SM100, code.to_string());
+}
+
+// mHC pre stage k1 PREFILL: tcgen05 + TMA prenorm GEMM (high-token-count path).
+//   residual: [bs, K]      bf16  (input 0; TMA desc + gmem ptr for sqrsum)
+//   fn:       [OUT_PAD, K]  bf16  (input 1; TMA desc, padded weight)
+//   mixes_pad:[bs, MIX_PAD] bf16  (output 0)
+//   sqrsum:   [bs]          fp32  (output 1)
+// Pinned to BLOCK_N=16 / BLOCK_K=64 / NUM_STAGES=2 (the TMA box dims in tma.cuh
+// must match these). batch tile index bid_n arrives via task_metadata.
+int TaskRegister::register_mhc_pre_k1_prefill_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 2;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // residual: [bs, K] (2D) or [bs, n, C] (3D, K=n*C). Fold trailing dims; the
+  // TMA descriptor (tma.cuh) folds them identically, so no [bs,K] view needed.
+  {
+    auto const &rt = input_ops[0]->output_tensors[0];
+    assert(rt.num_dims == 2 || rt.num_dims == 3);
+  }
+  int batch = input_ops[0]->output_tensors[0].dim[0];
+  int K = 1;
+  for (int d = 1; d < input_ops[0]->output_tensors[0].num_dims; d++) {
+    K *= input_ops[0]->output_tensors[0].dim[d];
+  }
+  // fn weight: [OUT_PAD=128, K]
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  int out_pad = input_ops[1]->output_tensors[0].dim[0];
+  assert(out_pad == 128);
+  assert(input_ops[1]->output_tensors[0].dim[1] == K);
+  // mixes_pad: [bs, MIX_PAD]
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int mix_hc = 24; // n=4: n*n + 2*n
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // <REDUCTION_SIZE=K, OUTPUT_PAD=128, BLOCK_N=16, BLOCK_K=64, MIX_HC, NUM_STAGES=2>
+  code.e("kernel::pre_k1_tensor_core::mHC_pre_k1_prefill_sm100_task_impl<$, 128, "
+         "16, 64, $, 2>(",
+         K,
+         mix_hc);
+  // A_tmap = weight (input 1), B_tmap = residual (input 0).
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),"); // A=fn
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // B=residual
+  code.e("    static_cast<const "
+         "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // residual gmem
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // mixes
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),"); // sqrsum
+  code.e("    $,", batch);                                       // BATCH
+  code.e("    task_desc->task_metadata.request_id);");           // bid_n
+  return register_task_variant(TASK_MHC_PRE_K1_PREFILL_SM100, code.to_string());
 }
 
 // mHC pre stage k2 (sinkhorn tail): RMS-scale the k1 GEMM output, apply the
@@ -2348,7 +2430,11 @@ int TaskRegister::register_mhc_pre_k2_sm100_task(
   code.e("    $,", sinkhorn_repeat);
   code.e("    1e-9f,"); // sinkhorn_eps
   code.e("    1e-6f,"); // rms_eps
-  code.e("    gridDim.x);"); // num_tokens
+  // blockIdx-agnostic: MPK pre-offsets ptrs to this task's token, so process
+  // exactly token 0 of the slice (num_tokens=1, token_override=0). gridDim.x
+  // here is the worker grid, not the token count.
+  code.e("    1,");   // num_tokens (one token per task, ptrs pre-offset)
+  code.e("    0);");  // token_override
   return register_task_variant(TASK_MHC_PRE_K2_SM100, code.to_string());
 }
 

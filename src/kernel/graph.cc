@@ -675,6 +675,13 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 2, TASK_MHC_PRE_K1_SM100, variant_id);
+  } else if (name == "mhc_pre_k1_prefill_sm100") {
+    int variant_id = task_register->register_mhc_pre_k1_prefill_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs (residual, fn weight; both carry TMA descriptors), 2 outputs
+    // (mixes_pad, sqrsum).
+    task_config[op] =
+        std::make_tuple(2, 2, TASK_MHC_PRE_K1_PREFILL_SM100, variant_id);
   } else if (name == "mhc_pre_k2_sm100") {
     int variant_id = task_register->register_mhc_pre_k2_sm100_task(
         customized->bgraph, params);

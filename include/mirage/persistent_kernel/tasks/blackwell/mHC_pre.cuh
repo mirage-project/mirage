@@ -14,71 +14,35 @@
  */
 #pragma once
 
-// mHC pre: the full prenorm pipeline in one file, in two stages.
-//
-// pre_k1 -- prenorm GEMM (mixes = residual @ fn.T, mix_hc=24 wide) + per-token
-//   L2 (sqrsum). Two implementations; the host wrapper dispatches between them
-//   by a (tokens, hidden) heuristic:
-//     * mHC_pre_k1_cuda_core   -- CUDA-core FFMA + split-k, NO tensor cores.
-//     Wins at
-//                            low token count (decode): no MMA/TMA/TMEM setup to
-//                            amortize, split-k fills the grid.
-//     * mHC_pre_k1_tensor_core -- raw-PTX tcgen05 (kind::f16 MMA), no
-//     CUTLASS/CuTe.
-//                            Wins at higher token count (prefill).
-//   Both produce identical outputs (mixes_pad bf16 [tokens,128] + sqrsum fp32),
-//   so the k2 tail consumes either interchangeably. (The earlier CUTLASS/CuTe
-//   tcgen05 path was removed; mHC_pre_k1_tensor_core is bit-identical to it.)
-//
-// pre_k2 -- the tail (mhc_pre_big_fuse): RMS-fold of the gemm output + pre/post
-//   sigmoid affines + Sinkhorn(4x4) comb + pre_mix-weighted residual sum, all
-//   in smem, producing f_pre / h_post / comb.
-//
-// (Previously split across mHC_pre_k1.cuh and mHC_pre_k2.cuh; merged here with
-// no logic change.)
-
 #include <cstdint>
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-#include "blackwell/sm100_ptx.cuh"
-#include "tasks/common/common_header.cuh" // pre_k2
-// Borrow ONLY the MMA instruction-descriptor constant from CuTe (its kind::f16
-// bit layout is fiddly to hand-encode). The MMA/TMA/TMEM pipeline is raw PTX.
-#include <cute/arch/mma_sm100_desc.hpp>
-
-// ============================================================================
-// CUDA-core implementation (FFMA + split-k). One block per (token, k-split);
-// each block reduces its K-slice into per-split partials, a reduce kernel folds
-// them into mixes_pad + sqrsum.
-// ============================================================================
+#include "sm100_ptx.cuh"
+#include "tasks/common/common_header.cuh"
+#include <cassert>
 
 namespace kernel {
 
 template <typename T,
-          int MIX_HC, // N*N + 2*N (24 for N=4)
-          int K,      // reduction dim = N*C
+          int MIX_HC,
+          int K,
           int BLOCK_THREADS,
           int SPLIT_K,
-          int MIX_PAD = 128, // padded mixes_pad column count
-          int TPB = 1> // tokens processed per CTA (amortizes the fn reload)
+          int MIX_PAD = 128,
+          int TPB = 1>
 __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
-    T const *__restrict__ residual,  // [tokens, K]
-    __nv_bfloat16 const *__restrict__ fn, // [MIX_HC, K]  (weight, bf16)
-    float *__restrict__ out_partial, // [SPLIT_K, tokens, MIX_HC] (SPLIT_K>1)
-    float *__restrict__ sqr_partial, // [SPLIT_K, tokens]         (SPLIT_K>1)
-    void *__restrict__ mixes_pad,    // [tokens, MIX_PAD] bf16    (SPLIT_K==1)
-    float *__restrict__ sqrsum,      // [tokens]                  (SPLIT_K==1)
+    T const *__restrict__ residual,
+    __nv_bfloat16 const *__restrict__ fn,
+    float *__restrict__ out_partial,
+    float *__restrict__ sqr_partial,
+    void *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
     int num_tokens,
-    int token0, // first token of this CTA's TPB-group
+    int token0,
     int i_ks) {
-  // When SPLIT_K==1 each block already holds the complete reduction for its
-  // token(s), so it writes the FINAL bf16 mixes_pad + fp32 sqrsum directly,
-  // folding the separate reduce kernel into this epilogue (one fewer launch --
-  // matters at low token count where launch overhead dominates). SPLIT_K>1
-  // still writes fp32 partials for the reduce kernel to fold.
   constexpr bool DIRECT = (SPLIT_K == 1);
   constexpr int K_PER_SPLIT = K / SPLIT_K;
   static_assert(K % SPLIT_K == 0, "K must be divisible by SPLIT_K");
@@ -87,8 +51,6 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
   int const warp_id = tid >> 5;
   constexpr int NUM_WARPS = BLOCK_THREADS / 32;
 
-  // Per-token accumulators. fn is loaded ONCE per k-vec and reused across all
-  // TPB tokens, so the (dominant) fn L1 traffic is divided by TPB.
   float acc[TPB][MIX_HC];
   float sqr[TPB];
 #pragma unroll
@@ -112,7 +74,6 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
     int const k_vec_base = k_base / VEC;
     for (int v = tid; v < vec_count; v += BLOCK_THREADS) {
       int const k = (k_vec_base + v) * VEC;
-      // Load all TPB tokens' residual vecs for this k.
       float rv[TPB][VEC];
 #pragma unroll
       for (int t = 0; t < TPB; ++t) {
@@ -136,14 +97,12 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
 #pragma unroll
       for (int o = 0; o < MIX_HC; ++o) {
         __nv_bfloat16 const *fn_o = fn + (int64_t)o * K + k;
-        uint4 fw0 = reinterpret_cast<uint4 const *>(fn_o)[0];
-        uint4 fw1 = reinterpret_cast<uint4 const *>(fn_o)[1];
-        __nv_bfloat162 const *fb0 = reinterpret_cast<__nv_bfloat162 const *>(&fw0);
-        __nv_bfloat162 const *fb1 = reinterpret_cast<__nv_bfloat162 const *>(&fw1);
+        uint4 fw = reinterpret_cast<uint4 const *>(fn_o)[0];
+        __nv_bfloat162 const *fb = reinterpret_cast<__nv_bfloat162 const *>(&fw);
         float wf[VEC];
 #pragma unroll
         for (int e2 = 0; e2 < VEC / 2; ++e2) {
-          float2 f = __bfloat1622float2(e2 < 2 ? fb0[e2] : fb1[e2 - 2]);
+          float2 f = __bfloat1622float2(fb[e2]);
           wf[2 * e2 + 0] = f.x;
           wf[2 * e2 + 1] = f.y;
         }
@@ -163,18 +122,20 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
 #pragma unroll
       for (int t = 0; t < TPB; ++t) {
         if (t < ntok) {
-          float const rv = static_cast<float>(res0[(int64_t)t * K + k]);
+          float const rv = __bfloat162float(
+              *reinterpret_cast<__nv_bfloat16 const *>(&res0[(int64_t)t * K + k]));
           sqr[t] += rv * rv;
 #pragma unroll
           for (int o = 0; o < MIX_HC; ++o) {
-            acc[t][o] += __bfloat162float(fn[(int64_t)o * K + k]) * rv;
+            acc[t][o] += __bfloat162float(*reinterpret_cast<__nv_bfloat16 const *>(
+                             &fn[(int64_t)o * K + k])) *
+                         rv;
           }
         }
       }
     }
   }
 
-  // Warp-reduce each token's accumulators.
 #pragma unroll
   for (int t = 0; t < TPB; ++t) {
 #pragma unroll
@@ -204,8 +165,6 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
   }
   __syncthreads();
 
-  // warp 0: cross-warp reduce + write. SPLIT_K==1 -> final bf16/fp32 outputs;
-  // SPLIT_K>1 -> fp32 partials for the reduce kernel.
   if (warp_id == 0) {
     __nv_bfloat16 *mixes = static_cast<__nv_bfloat16 *>(mixes_pad);
 #pragma unroll
@@ -242,14 +201,12 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
   }
 }
 
-// Reduce SPLIT_K partials -> mixes_pad (bf16, padded to MIX_PAD cols) + sqrsum.
-// One block per token with >= MIX_HC threads.
 template <int MIX_HC, int MIX_PAD, int SPLIT_K>
 __device__ __forceinline__ void mHC_pre_k1_cuda_core_reduce_impl(
-    float const *__restrict__ out_partial, // [SPLIT_K, tokens, MIX_HC]
-    float const *__restrict__ sqr_partial, // [SPLIT_K, tokens]
-    void *__restrict__ mixes_pad,          // [tokens, MIX_PAD] bf16
-    float *__restrict__ sqrsum,            // [tokens]
+    float const *__restrict__ out_partial,
+    float const *__restrict__ sqr_partial,
+    void *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
     int num_tokens,
     int token) {
   __nv_bfloat16 *mixes = static_cast<__nv_bfloat16 *>(mixes_pad);
@@ -272,15 +229,8 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_reduce_impl(
   }
 }
 
-} // namespace kernel
+}
 
-// ============================================================================
-// Raw-PTX tcgen05 implementation (kind::f16 MMA + sqrsum). One CTA per BLOCK_N
-// batch tile; loops K in BLOCK_K chunks through a NUM_STAGES smem ring; reads
-// the TMEM accumulator in the epilogue. bf16, NOT block-scaled.
-// ============================================================================
-
-// 2D K-major bf16 TMA descriptor for a [rows, K] tile with 128B swizzle.
 inline void init_2d_bf16_tmap(CUtensorMap *tmap,
                               void const *ptr,
                               uint64_t rows,
@@ -289,7 +239,7 @@ inline void init_2d_bf16_tmap(CUtensorMap *tmap,
                               uint32_t block_rows) {
   constexpr uint32_t rank = 2;
   uint64_t globalDim[rank] = {K, rows};
-  uint64_t globalStrides[rank - 1] = {K * 2}; // bytes per row
+  uint64_t globalStrides[rank - 1] = {K * 2};
   uint32_t boxDim[rank] = {block_k, block_rows};
   uint32_t elementStrides[rank] = {1, 1};
   CUresult err = cuTensorMapEncodeTiled(tmap,
@@ -304,8 +254,10 @@ inline void init_2d_bf16_tmap(CUtensorMap *tmap,
                                         CU_TENSOR_MAP_SWIZZLE_128B,
                                         CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  TORCH_CHECK(
-      err == CUDA_SUCCESS, "init_2d_bf16_tmap encode failed: ", (int)err);
+  // assert (not TORCH_CHECK): this header is compiled into the megakernel too,
+  // which doesn't link torch. init_2d_bf16_tmap is a standalone-only host helper.
+  assert(err == CUDA_SUCCESS && "init_2d_bf16_tmap encode failed");
+  (void)err;
 }
 
 namespace kernel {
@@ -313,7 +265,7 @@ namespace pre_k1_tensor_core {
 
 using namespace ::kernel::sm100_ptx;
 
-constexpr int MMA_K = 16; // 16-bit tcgen05 MMA-K
+constexpr int MMA_K = 16;
 
 __device__ __forceinline__ uint64_t make_desc_bf16(int smem_addr) {
   constexpr uint64_t SBO = 8ULL * 128;
@@ -321,21 +273,24 @@ __device__ __forceinline__ uint64_t make_desc_bf16(int smem_addr) {
          (2ULL << 61);
 }
 
+// Shared GEMM core. blockIdx-agnostic: the batch-tile index `bid_n` is a
+// parameter (blockIdx.x in the standalone __global__, task metadata in the MPK
+// task), and the TMA maps come in by pointer so both the grid-constant and the
+// runtime-encoded descriptor flavours reuse this body verbatim.
 template <int REDUCTION_SIZE,
           int OUTPUT_PAD,
           int BLOCK_N,
           int BLOCK_K,
           int MIX_HC,
           int NUM_STAGES>
-__global__
-    __launch_bounds__(OUTPUT_PAD + 2 * 32) void mHC_pre_k1_tensor_core_kernel(
-        const __grid_constant__ CUtensorMap A_tmap, // weight fn [OUTPUT_PAD, K]
-        const __grid_constant__ CUtensorMap B_tmap, // residual  [BATCH,     K]
-        __nv_bfloat16 const
-            *__restrict__ residual,            // [BATCH, K] gmem (for sqrsum)
-        __nv_bfloat16 *__restrict__ mixes_pad, // [BATCH, OUTPUT_PAD] bf16
-        float *__restrict__ sqrsum,            // [BATCH] fp32
-        int BATCH) {
+__device__ __forceinline__ void mHC_pre_k1_tensor_core_core(
+    CUtensorMap const *A_tmap,
+    CUtensorMap const *B_tmap,
+    __nv_bfloat16 const *__restrict__ residual,
+    __nv_bfloat16 *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
+    int BATCH,
+    int bid_n) {
   static_assert(OUTPUT_PAD == 128, "tcgen05 MMA uses M=128");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K divisible by MMA_K");
   static_assert(REDUCTION_SIZE % BLOCK_K == 0, "K divisible by BLOCK_K");
@@ -348,7 +303,6 @@ __global__
   int const lane = tid & 31;
   constexpr int NUM_WARPS = OUTPUT_PAD / 32 + 2;
 
-  int const bid_n = blockIdx.x;
   int const off_n = bid_n * BLOCK_N;
 
   extern __shared__ __align__(1024) char smem_ptr[];
@@ -376,10 +330,6 @@ __global__
   constexpr int NUM_ITERS = REDUCTION_SIZE / BLOCK_K;
   int const tx_bytes = STAGE_BYTES;
 
-  // 128B swizzle pins the TMA box's contiguous-K dim to 64 bf16 (=128 B), so a
-  // BLOCK_K>64 stage is assembled from BLOCK_K/64 sub-loads of 64-wide tiles,
-  // laid out linearly in smem (each is a self-contained 128B-swizzle atom that
-  // the MMA descriptor offsets into by 64-elem steps).
   constexpr int K_ATOM = 64;
   constexpr int NUM_KSUB = BLOCK_K / K_ATOM;
   static_assert(BLOCK_K % K_ATOM == 0, "BLOCK_K must be a multiple of 64");
@@ -394,15 +344,14 @@ __global__
 #pragma unroll
     for (int s = 0; s < NUM_KSUB; ++s) {
       const int ka = off_k + s * K_ATOM;
-      tma_load_2d(A_smem + s * A_atom_bytes, &A_tmap, ka, 0, mbar, EVICT_LAST);
+      tma_load_2d(A_smem + s * A_atom_bytes, A_tmap, ka, 0, mbar, EVICT_LAST);
       tma_load_2d(
-          B_smem + s * B_atom_bytes, &B_tmap, ka, off_n, mbar, EVICT_FIRST);
+          B_smem + s * B_atom_bytes, B_tmap, ka, off_n, mbar, EVICT_FIRST);
     }
     mbarrier_arrive_expect_tx_tile_local(mbar, tx_bytes);
   };
 
   if (warp_id == NUM_WARPS - 2 && elect_sync()) {
-    // ---- TMA producer warp ----
     constexpr int PREFETCH = (NUM_ITERS < NUM_STAGES) ? NUM_ITERS : NUM_STAGES;
     for (int iter_k = 0; iter_k < PREFETCH; iter_k++) {
       issue_tma(iter_k, iter_k);
@@ -414,18 +363,11 @@ __global__
       issue_tma(iter_k, stage_id);
     }
   } else if (warp_id == NUM_WARPS - 1 && elect_sync()) {
-    // ---- MMA warp ----
     constexpr int MMA_N = BLOCK_N;
     constexpr int MMA_M = OUTPUT_PAD;
-    uint64_t const idescE =
-        cute::UMMA::make_runtime_instr_desc<cute::bfloat16_t,
-                                            cute::bfloat16_t,
-                                            float,
-                                            MMA_M,
-                                            MMA_N,
-                                            cute::UMMA::Major::K,
-                                            cute::UMMA::Major::K>();
-    uint32_t const i_desc = (uint32_t)(idescE >> 32);
+    constexpr uint32_t i_desc = (1U << 4) | (1U << 7) | (1U << 10) |
+                                ((uint32_t)(MMA_N >> 3) << 17) |
+                                ((uint32_t)(MMA_M >> 4) << 24);
     for (int iter_k = 0; iter_k < NUM_ITERS; iter_k++) {
       int const stage_id = iter_k % NUM_STAGES;
       int const tma_phase = (iter_k / NUM_STAGES) % 2;
@@ -434,8 +376,6 @@ __global__
 
       mbar_wait(tma_mbar + stage_id * 8, tma_phase);
 
-      // K-atoms are laid out as separate 64-wide swizzle tiles; within each,
-      // 64/MMA_K MMAs step by MMA_K*2 bytes.
       constexpr int MMA_PER_ATOM = K_ATOM / MMA_K;
 #pragma unroll
       for (int s = 0; s < NUM_KSUB; ++s) {
@@ -446,14 +386,13 @@ __global__
           uint64_t a_desc = make_desc_bf16(A_sub + k * MMA_K * 2);
           uint64_t b_desc = make_desc_bf16(B_sub + k * MMA_K * 2);
           int const acc = (iter_k == 0 && s == 0 && k == 0) ? 0 : 1;
-          tcgen05_mma(/*taddr=*/0, a_desc, b_desc, i_desc, acc);
+          tcgen05_mma(0, a_desc, b_desc, i_desc, acc);
         }
       }
       tcgen05_commit_arrive<1>(mma_mbar + stage_id * 8);
     }
     tcgen05_commit_arrive<1>(mainloop_mbar);
   } else if (tid < OUTPUT_PAD) {
-    // ---- Epilogue warps + sqrsum ----
     constexpr int NUM_EPI_WARPS = OUTPUT_PAD / 32;
     for (int n = warp_id; n < BLOCK_N; n += NUM_EPI_WARPS) {
       int const token = off_n + n;
@@ -490,9 +429,9 @@ __global__
         tcgen05_ld_32x32bx32(tmp, warp_id * 32, g * WIDTH);
       }
       asm volatile("tcgen05.wait::ld.sync.aligned;");
-      int const m = warp_id * 32 + lane; // output (mix) index
+      int const m = warp_id * 32 + lane;
       for (int i = 0; i < WIDTH; i++) {
-        int const n = g * WIDTH + i; // batch token within tile
+        int const n = g * WIDTH + i;
         int const token = off_n + n;
         if (token < BATCH && m < OUTPUT_PAD) {
           mixes_pad[(int64_t)token * OUTPUT_PAD + m] = __float2bfloat16(tmp[i]);
@@ -506,27 +445,60 @@ __global__
   }
 }
 
-} // namespace pre_k1_tensor_core
-} // namespace kernel
+// Standalone __global__ entry (test extension / host launch): grid-constant TMA
+// descriptors, batch tile from blockIdx.x. Thin wrapper over the shared core.
+template <int REDUCTION_SIZE,
+          int OUTPUT_PAD,
+          int BLOCK_N,
+          int BLOCK_K,
+          int MIX_HC,
+          int NUM_STAGES>
+__global__
+    __launch_bounds__(OUTPUT_PAD + 2 * 32) void mHC_pre_k1_tensor_core_kernel(
+        const __grid_constant__ CUtensorMap A_tmap,
+        const __grid_constant__ CUtensorMap B_tmap,
+        __nv_bfloat16 const *__restrict__ residual,
+        __nv_bfloat16 *__restrict__ mixes_pad,
+        float *__restrict__ sqrsum,
+        int BATCH) {
+  mHC_pre_k1_tensor_core_core<REDUCTION_SIZE,
+                              OUTPUT_PAD,
+                              BLOCK_N,
+                              BLOCK_K,
+                              MIX_HC,
+                              NUM_STAGES>(
+      &A_tmap, &B_tmap, residual, mixes_pad, sqrsum, BATCH, blockIdx.x);
+}
 
-// ============================================================================
-// pre K2 (mhc_pre_big_fuse): the prenorm tail.
-// ============================================================================
-// mHC pre K2 (vLLM-style split): mhc_pre_big_fuse.
-//
-// Consumes the un-normalized GEMM output `mixes` and the per-token `sqrsum`
-// produced by pre K1, and fuses:
-//   * RMS normalization of the gemm output (applied as a per-token scalar
-//     s[t] = rsqrt(sqrsum[t] / RMS_HIDDEN + rms_eps), folded into the K2
-//     affine since the GEMM is linear),
-//   * pre_mix / post_mix (sigmoid affines),
-//   * comb_mix via Sinkhorn (4x4),
-//   * pre_mix-weighted residual sum (layer_input).
-//
-// This is the K2+K3+K4 tail of mHC_hc_pre_post_fused.cuh, with the single
-// addition of the RMS scale folded into the K2 read so the tail sees the
-// normalized projection. Intermediate tensors (h_pre, h_res, comb) live
-// entirely in smem; `dyn_smem` sizing is identical to the fused tail.
+// MPK task entry: blockIdx-agnostic (`bid_n` comes from task metadata) and TMA
+// maps come in by pointer (runtime-encoded, via task_desc->input_tma_desc_ptrs).
+// __noinline__ to keep register pressure off the megakernel dispatch frame, per
+// the mla_prefill_tp8 precedent.
+template <int REDUCTION_SIZE,
+          int OUTPUT_PAD,
+          int BLOCK_N,
+          int BLOCK_K,
+          int MIX_HC,
+          int NUM_STAGES>
+__device__ __noinline__ void mHC_pre_k1_prefill_sm100_task_impl(
+    CUtensorMap const *A_tmap, // weight fn [OUTPUT_PAD, K]
+    CUtensorMap const *B_tmap, // residual  [BATCH,     K]
+    __nv_bfloat16 const *__restrict__ residual,
+    __nv_bfloat16 *__restrict__ mixes_pad,
+    float *__restrict__ sqrsum,
+    int BATCH,
+    int bid_n) {
+  mHC_pre_k1_tensor_core_core<REDUCTION_SIZE,
+                              OUTPUT_PAD,
+                              BLOCK_N,
+                              BLOCK_K,
+                              MIX_HC,
+                              NUM_STAGES>(
+      A_tmap, B_tmap, residual, mixes_pad, sqrsum, BATCH, bid_n);
+}
+
+}
+}
 
 namespace kernel {
 
@@ -551,9 +523,6 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
     float rms_eps,
     int num_tokens,
     char *dyn_smem,
-    // MPK-mode override: if >=0, run a single iteration at this fixed
-    // token_base (input pointers must already be offset by the caller).
-    // Standalone callers pass -1 for normal grid-stride behavior.
     int token_base_override = -1) {
   static_assert(N == 4, "pre K2 hardcoded to n=4");
   static_assert(BLOCK_THREADS % 32 == 0, "block size must be a warp multiple");
@@ -567,15 +536,12 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
   static_assert(SINKHORN_WARPS <= NUM_WARPS,
                 "not enough warps to cover the sinkhorn batch");
 
-  // Lay out the 4 smem buffers contiguously inside `dyn_smem`.
-  // Use 16-byte alignment for each block so float4 stores work.
   uintptr_t base_ptr_addr = reinterpret_cast<uintptr_t>(dyn_smem);
   base_ptr_addr = (base_ptr_addr + 15u) & ~uintptr_t(15);
   float *h_pre_arr = reinterpret_cast<float *>(base_ptr_addr);
   float *h_post_arr = h_pre_arr + TOKENS_PER_CTA * N;
   float *h_res_arr = h_post_arr + TOKENS_PER_CTA * N;
   float *comb_arr = h_res_arr + TOKENS_PER_CTA * N * N;
-  // Index helpers (row-major: arr[t][j] == arr[t * COLS + j]).
   auto h_pre = [h_pre_arr](int t, int j) -> float & {
     return h_pre_arr[t * N + j];
   };
@@ -608,7 +574,7 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
                             ? token_base_override
                             : (int)(blockIdx.x * TOKENS_PER_CTA);
   int const _tb_step = (token_base_override >= 0)
-                           ? num_tokens // single-iteration in MPK mode
+                           ? num_tokens
                            : (int)(gridDim.x * TOKENS_PER_CTA);
   for (int token_base = _tb_start; token_base < num_tokens;
        token_base += _tb_step) {
@@ -616,9 +582,6 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
                                      ? TOKENS_PER_CTA
                                      : num_tokens - token_base;
 
-    // Per-token RMS scale s[t] = rsqrt(mean(residual^2) + eps), shared by all
-    // mix columns of the token. Computed once into smem (reusing h_post's
-    // slot is unsafe, so use a tiny dedicated stack of registers via smem).
     __shared__ float rms_scale[TOKENS_PER_CTA];
     for (int t = threadIdx.x; t < tokens_this_iter; t += BLOCK_THREADS) {
       float const ms = sqrsum[token_base + t] / static_cast<float>(RMS_HIDDEN);
@@ -626,16 +589,13 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
     }
     __syncthreads();
 
-    // ---- Stage K2 (with RMS scale folded in) ----
     int const total_k2 = tokens_this_iter * MIX_HC;
     for (int idx = threadIdx.x; idx < total_k2; idx += BLOCK_THREADS) {
       int const t = idx / MIX_HC;
       int const j = idx % MIX_HC;
       int const token = token_base + t;
-      // Normalize the gemm output before the affine: y = (mix * s) * alpha
-      // + bias. Folding s here is exact because the GEMM is linear.
       float const mix =
-          static_cast<float>(mixes[token * MIX_ROW_STRIDE + j]) * rms_scale[t];
+          __bfloat162float(mixes[token * MIX_ROW_STRIDE + j]) * rms_scale[t];
       float const bias = base[j];
       float alpha;
       int region, local;
@@ -663,7 +623,6 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
     }
     __syncthreads();
 
-    // h_post coalesced gmem flush.
     {
       int const total_h_post = tokens_this_iter * N;
       for (int idx = threadIdx.x; idx < total_h_post; idx += BLOCK_THREADS) {
@@ -673,7 +632,6 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
       }
     }
 
-    // ---- Stage K3 (sinkhorn 4x4) ----
     int const k3_token = warp * 32 + lane;
     if (warp < SINKHORN_WARPS && k3_token < tokens_this_iter) {
       int const t = k3_token;
@@ -733,7 +691,7 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
       m33 = m33 * ri3 + sinkhorn_eps;
 
       int const steps = sinkhorn_repeat > 0 ? sinkhorn_repeat : 1;
-      int const dyn_steps = steps; // alias so the loop-exit check compiles in both paths
+      int const dyn_steps = steps;
 #pragma unroll 1
       for (int it = 0; it < steps; ++it) {
         float const cs0 = m00 + m10 + m20 + m30 + sinkhorn_eps;
@@ -807,9 +765,7 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
       *reinterpret_cast<float4 *>(comb_out + token * N * N + 12) =
           make_float4(m30, m31, m32, m33);
     }
-    // No sync between K3 and K4 (see static-smem variant for rationale).
 
-    // ---- Stage K4 (pre_mix-weighted residual sum) ----
     constexpr int VEC = 8;
     static_assert(C % VEC == 0, "C must be a multiple of 8");
     int const c_vec_count = C / VEC;
@@ -888,22 +844,6 @@ __device__ __forceinline__ void mHC_pre_k2_task_impl(
   }
 }
 
-// ----------------------------------------------------------------------------
-// Low-t k2: ONE CTA per token (grid = num_tokens), so the grid fills the SMs at
-// small batch -- the default k2 packs 32 tokens/CTA, giving only ceil(t/32)
-// blocks (e.g. 2 blocks at t=64 -> 12.5% occupancy, launch/serialization
-// bound). Here warp 0 does the token's affine + 4x4 sinkhorn into smem, then
-// the whole block vectorizes that token's C-wide pre_mix-weighted residual sum.
-// Identical math to mHC_pre_k2_task_impl; only the token->block mapping
-// differs.
-//
-// RDSPLIT_K: when 0, reads the pre-reduced mixes_pad (bf16) + sqrsum as usual.
-// When >0, reads the k1 GEMM's fp32 partials (out_partial[RDSPLIT_K,tokens,
-// MIX_HC] + sqr_partial[RDSPLIT_K,tokens]) and reduces them INLINE in warp 0 --
-// folding the separate reduce kernel into this k2, so the low-t pre runs in 2
-// launches (GEMM + this) instead of 3. mixes_ptr/sqrsum_ptr then point at
-// out_partial/sqr_partial.
-// ----------------------------------------------------------------------------
 template <typename T_in,
           int N,
           int C,
@@ -924,13 +864,18 @@ __device__ __forceinline__ void
                               int sinkhorn_repeat,
                               float sinkhorn_eps,
                               float rms_eps,
-                              int num_tokens) {
+                              int num_tokens,
+                              // MPK: pointers are pre-offset to one token's
+                              // slice, so the caller passes token_override=0
+                              // (and num_tokens=1). Standalone passes -1 to keep
+                              // the blockIdx.x = token mapping.
+                              int token_override = -1) {
   static_assert(N == 4, "pre K2 hardcoded to n=4");
   static_assert(C % 8 == 0, "C must be a multiple of 8");
   constexpr int MIX_HC = N * N + 2 * N;
   constexpr int MIX_ROW_STRIDE = (MIX_STRIDE == 0) ? MIX_HC : MIX_STRIDE;
 
-  int const token = blockIdx.x;
+  int const token = (token_override >= 0) ? token_override : (int)blockIdx.x;
   if (token >= num_tokens) {
     return;
   }
@@ -951,11 +896,9 @@ __device__ __forceinline__ void
   float const alpha_post = scale[1];
   float const alpha_res = scale[2];
 
-  // Per-token shared state: pre_mix weights (4) broadcast from warp 0 to K4.
   __shared__ float s_pre[N];
 
   if (warp == 0) {
-    // sqrsum: pre-reduced read, or inline reduce of the k1 sqr_partial.
     float sqr_val;
     if (RDSPLIT_K == 0) {
       sqr_val = sqrsum[token];
@@ -970,16 +913,13 @@ __device__ __forceinline__ void
     float const ms = sqr_val / static_cast<float>(RMS_HIDDEN);
     float const rms_scale = rsqrtf(ms + rms_eps);
 
-    // Affine over the MIX_HC=24 mixes: lanes 0..23 each handle one column.
-    // pre (j<N) -> sigmoid into s_pre; post (N<=j<2N) -> sigmoid*2 -> gmem;
-    // comb (j>=2N) -> raw logit into a register, gathered for sinkhorn below.
-    float h_res_local = 0.0f; // valid for comb lanes (j in [2N, MIX_HC))
+    float h_res_local = 0.0f;
     if (lane < MIX_HC) {
       int const j = lane;
-      // mix[j]: pre-reduced bf16 read, or inline fp32 reduce of out_partial.
       float mix_raw;
       if (RDSPLIT_K == 0) {
-        mix_raw = static_cast<float>(mixes[token * MIX_ROW_STRIDE + j]);
+        mix_raw = __bfloat162float(*reinterpret_cast<__nv_bfloat16 const *>(
+            &mixes[token * MIX_ROW_STRIDE + j]));
       } else {
         float const *out_partial = static_cast<float const *>(mixes_ptr);
         mix_raw = 0.0f;
@@ -1002,7 +942,6 @@ __device__ __forceinline__ void
         h_res_local = mix * alpha_res + bias;
       }
     }
-    // Gather the 16 comb logits (lanes 2N..2N+15) to lane 0 via shuffle.
     float cm[N * N];
 #pragma unroll
     for (int e = 0; e < N * N; ++e) {
@@ -1010,7 +949,6 @@ __device__ __forceinline__ void
     }
 
     if (lane == 0) {
-      // ---- Sinkhorn (4x4), identical to the batched path ----
       float m00 = cm[0], m01 = cm[1], m02 = cm[2], m03 = cm[3];
       float m10 = cm[4], m11 = cm[5], m12 = cm[6], m13 = cm[7];
       float m20 = cm[8], m21 = cm[9], m22 = cm[10], m23 = cm[11];
@@ -1055,7 +993,6 @@ __device__ __forceinline__ void
       m31 = m31 * ri3 + sinkhorn_eps;
       m32 = m32 * ri3 + sinkhorn_eps;
       m33 = m33 * ri3 + sinkhorn_eps;
-      // SINKHORN_REPEAT>0: compile-time unroll; 0: runtime count from arg.
       int const dyn_steps = (SINKHORN_REPEAT > 0) ? SINKHORN_REPEAT
                             : (sinkhorn_repeat > 0 ? sinkhorn_repeat : 1);
 #pragma unroll 1
@@ -1128,7 +1065,6 @@ __device__ __forceinline__ void
   }
   __syncthreads();
 
-  // ---- K4: whole block vectorizes this token's C-wide weighted sum ----
   float const w0 = s_pre[0], w1 = s_pre[1], w2 = s_pre[2], w3 = s_pre[3];
   constexpr int VEC = 8;
   int const c_vec_count = C / VEC;
@@ -1165,4 +1101,4 @@ __device__ __forceinline__ void
   }
 }
 
-} // namespace kernel
+}
