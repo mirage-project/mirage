@@ -2290,21 +2290,23 @@ int TaskRegister::register_mhc_pre_k1_sm100_task(
   // <T, MIX_HC, K, BLOCK_THREADS, SPLIT_K, MIX_PAD, TPB>; split_k=1, TPB=1.
   // BLOCK_THREADS=256 to match the SM100 megakernel worker block size (the
   // layer launches block_dim=(256,1,1)); a mismatch desyncs __syncthreads.
-  code.e("kernel::mHC_pre_k1_cuda_core_task_impl<bfloat16, $, $, 256, 1, $, 1>(",
-         mix_hc,
-         K,
-         mix_pad);
+  code.e(
+      "kernel::mHC_pre_k1_cuda_core_task_impl<bfloat16, $, $, 256, 1, $, 1>(",
+      mix_hc,
+      K,
+      mix_pad);
   code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[0]),"); // res
-  code.e("    static_cast<__nv_bfloat16 const *>(task_desc->input_ptrs[1]),"); // fn (bf16)
-  code.e("    nullptr,"); // out_partial (unused at split_k=1)
-  code.e("    nullptr,"); // sqr_partial (unused at split_k=1)
+  code.e(
+      "    static_cast<__nv_bfloat16 const *>(task_desc->input_ptrs[1]),"); // fn (bf16)
+  code.e("    nullptr,");                   // out_partial (unused at split_k=1)
+  code.e("    nullptr,");                   // sqr_partial (unused at split_k=1)
   code.e("    task_desc->output_ptrs[0],"); // mixes_pad (void*)
   code.e("    static_cast<float *>(task_desc->output_ptrs[1]),"); // sqrsum
   // blockIdx-agnostic: MPK pre-offsets the ptrs to this task's token slice, so
   // this task processes exactly one token (num_tokens=1, token0=0). Using
   // blockIdx/gridDim here is wrong -- they index the worker grid, not tokens.
-  code.e("    1,"); // num_tokens (this task = 1 token, ptrs pre-offset)
-  code.e("    0,"); // token0
+  code.e("    1,");  // num_tokens (this task = 1 token, ptrs pre-offset)
+  code.e("    0,");  // token0
   code.e("    0);"); // i_ks
   return register_task_variant(TASK_MHC_PRE_K1_SM100, code.to_string());
 }
@@ -2354,11 +2356,13 @@ int TaskRegister::register_mhc_pre_k1_prefill_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // <REDUCTION_SIZE=K, OUTPUT_PAD=128, BLOCK_N=16, BLOCK_K=64, MIX_HC, NUM_STAGES=2>
-  code.e("kernel::pre_k1_tensor_core::mHC_pre_k1_prefill_sm100_task_impl<$, 128, "
-         "16, 64, $, 2>(",
-         K,
-         mix_hc);
+  // <REDUCTION_SIZE=K, OUTPUT_PAD=128, BLOCK_N=16, BLOCK_K=64, MIX_HC,
+  // NUM_STAGES=2>
+  code.e(
+      "kernel::pre_k1_tensor_core::mHC_pre_k1_prefill_sm100_task_impl<$, 128, "
+      "16, 64, $, 2>(",
+      K,
+      mix_hc);
   // A_tmap = weight (input 1), B_tmap = residual (input 0).
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),"); // A=fn
@@ -2366,10 +2370,11 @@ int TaskRegister::register_mhc_pre_k1_prefill_sm100_task(
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // B=residual
   code.e("    static_cast<const "
          "__nv_bfloat16*>(task_desc->input_ptrs[0]),"); // residual gmem
-  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // mixes
-  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),"); // sqrsum
-  code.e("    $,", batch);                                       // BATCH
-  code.e("    task_desc->task_metadata.request_id);");           // bid_n
+  code.e(
+      "    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),"); // mixes
+  code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");      // sqrsum
+  code.e("    $,", batch);                                            // BATCH
+  code.e("    task_desc->task_metadata.request_id);");                // bid_n
   return register_task_variant(TASK_MHC_PRE_K1_PREFILL_SM100, code.to_string());
 }
 
@@ -2433,8 +2438,8 @@ int TaskRegister::register_mhc_pre_k2_sm100_task(
   // blockIdx-agnostic: MPK pre-offsets ptrs to this task's token, so process
   // exactly token 0 of the slice (num_tokens=1, token_override=0). gridDim.x
   // here is the worker grid, not the token count.
-  code.e("    1,");   // num_tokens (one token per task, ptrs pre-offset)
-  code.e("    0);");  // token_override
+  code.e("    1,");  // num_tokens (one token per task, ptrs pre-offset)
+  code.e("    0);"); // token_override
   return register_task_variant(TASK_MHC_PRE_K2_SM100, code.to_string());
 }
 
@@ -2489,9 +2494,9 @@ int TaskRegister::register_mhc_post_pre_k1_sm100_task(
   code.e("    static_cast<bfloat16 *>(task_desc->output_ptrs[0]),"); // res_next
   code.e("    static_cast<float *>(task_desc->output_ptrs[1]),"); // out_partial
   code.e("    static_cast<float *>(task_desc->output_ptrs[2]),"); // sqr_partial
-  code.e("    gridDim.x,"); // num_tokens
-  code.e("    static_cast<int>(blockIdx.x),"); // token
-  code.e("    0);");                           // i_ks
+  code.e("    gridDim.x,");                                       // num_tokens
+  code.e("    static_cast<int>(blockIdx.x),");                    // token
+  code.e("    0);");                                              // i_ks
   return register_task_variant(TASK_MHC_POST_PRE_K1_SM100, code.to_string());
 }
 
@@ -2540,8 +2545,8 @@ int TaskRegister::register_mhc_post_pre_k2_sm100_task(
   code.e("    task_desc->output_ptrs[1],"); // h_post
   code.e("    task_desc->output_ptrs[2],"); // comb
   code.e("    $,", sinkhorn_repeat);
-  code.e("    1e-9f,"); // sinkhorn_eps
-  code.e("    1e-6f,"); // rms_eps
+  code.e("    1e-9f,");      // sinkhorn_eps
+  code.e("    1e-6f,");      // rms_eps
   code.e("    gridDim.x);"); // num_tokens
   return register_task_variant(TASK_MHC_POST_PRE_K2_SM100, code.to_string());
 }

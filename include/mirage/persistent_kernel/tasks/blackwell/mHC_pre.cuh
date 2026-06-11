@@ -33,16 +33,16 @@ template <typename T,
           int SPLIT_K,
           int MIX_PAD = 128,
           int TPB = 1>
-__device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
-    T const *__restrict__ residual,
-    __nv_bfloat16 const *__restrict__ fn,
-    float *__restrict__ out_partial,
-    float *__restrict__ sqr_partial,
-    void *__restrict__ mixes_pad,
-    float *__restrict__ sqrsum,
-    int num_tokens,
-    int token0,
-    int i_ks) {
+__device__ __forceinline__ void
+    mHC_pre_k1_cuda_core_task_impl(T const *__restrict__ residual,
+                                   __nv_bfloat16 const *__restrict__ fn,
+                                   float *__restrict__ out_partial,
+                                   float *__restrict__ sqr_partial,
+                                   void *__restrict__ mixes_pad,
+                                   float *__restrict__ sqrsum,
+                                   int num_tokens,
+                                   int token0,
+                                   int i_ks) {
   constexpr bool DIRECT = (SPLIT_K == 1);
   constexpr int K_PER_SPLIT = K / SPLIT_K;
   static_assert(K % SPLIT_K == 0, "K must be divisible by SPLIT_K");
@@ -98,7 +98,8 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
       for (int o = 0; o < MIX_HC; ++o) {
         __nv_bfloat16 const *fn_o = fn + (int64_t)o * K + k;
         uint4 fw = reinterpret_cast<uint4 const *>(fn_o)[0];
-        __nv_bfloat162 const *fb = reinterpret_cast<__nv_bfloat162 const *>(&fw);
+        __nv_bfloat162 const *fb =
+            reinterpret_cast<__nv_bfloat162 const *>(&fw);
         float wf[VEC];
 #pragma unroll
         for (int e2 = 0; e2 < VEC / 2; ++e2) {
@@ -109,8 +110,9 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
 #pragma unroll
         for (int t = 0; t < TPB; ++t) {
           if (t < ntok) {
-            acc[t][o] += wf[0] * rv[t][0] + wf[1] * rv[t][1] + wf[2] * rv[t][2] +
-                         wf[3] * rv[t][3] + wf[4] * rv[t][4] + wf[5] * rv[t][5] +
+            acc[t][o] += wf[0] * rv[t][0] + wf[1] * rv[t][1] +
+                         wf[2] * rv[t][2] + wf[3] * rv[t][3] +
+                         wf[4] * rv[t][4] + wf[5] * rv[t][5] +
                          wf[6] * rv[t][6] + wf[7] * rv[t][7];
           }
         }
@@ -122,14 +124,16 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
 #pragma unroll
       for (int t = 0; t < TPB; ++t) {
         if (t < ntok) {
-          float const rv = __bfloat162float(
-              *reinterpret_cast<__nv_bfloat16 const *>(&res0[(int64_t)t * K + k]));
+          float const rv =
+              __bfloat162float(*reinterpret_cast<__nv_bfloat16 const *>(
+                  &res0[(int64_t)t * K + k]));
           sqr[t] += rv * rv;
 #pragma unroll
           for (int o = 0; o < MIX_HC; ++o) {
-            acc[t][o] += __bfloat162float(*reinterpret_cast<__nv_bfloat16 const *>(
-                             &fn[(int64_t)o * K + k])) *
-                         rv;
+            acc[t][o] +=
+                __bfloat162float(*reinterpret_cast<__nv_bfloat16 const *>(
+                    &fn[(int64_t)o * K + k])) *
+                rv;
           }
         }
       }
@@ -202,13 +206,13 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_task_impl(
 }
 
 template <int MIX_HC, int MIX_PAD, int SPLIT_K>
-__device__ __forceinline__ void mHC_pre_k1_cuda_core_reduce_impl(
-    float const *__restrict__ out_partial,
-    float const *__restrict__ sqr_partial,
-    void *__restrict__ mixes_pad,
-    float *__restrict__ sqrsum,
-    int num_tokens,
-    int token) {
+__device__ __forceinline__ void
+    mHC_pre_k1_cuda_core_reduce_impl(float const *__restrict__ out_partial,
+                                     float const *__restrict__ sqr_partial,
+                                     void *__restrict__ mixes_pad,
+                                     float *__restrict__ sqrsum,
+                                     int num_tokens,
+                                     int token) {
   __nv_bfloat16 *mixes = static_cast<__nv_bfloat16 *>(mixes_pad);
   int const o = threadIdx.x;
   if (o < MIX_HC) {
@@ -229,7 +233,7 @@ __device__ __forceinline__ void mHC_pre_k1_cuda_core_reduce_impl(
   }
 }
 
-}
+} // namespace kernel
 
 inline void init_2d_bf16_tmap(CUtensorMap *tmap,
                               void const *ptr,
@@ -255,7 +259,8 @@ inline void init_2d_bf16_tmap(CUtensorMap *tmap,
                                         CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   // assert (not TORCH_CHECK): this header is compiled into the megakernel too,
-  // which doesn't link torch. init_2d_bf16_tmap is a standalone-only host helper.
+  // which doesn't link torch. init_2d_bf16_tmap is a standalone-only host
+  // helper.
   assert(err == CUDA_SUCCESS && "init_2d_bf16_tmap encode failed");
   (void)err;
 }
@@ -283,14 +288,14 @@ template <int REDUCTION_SIZE,
           int BLOCK_K,
           int MIX_HC,
           int NUM_STAGES>
-__device__ __forceinline__ void mHC_pre_k1_tensor_core_core(
-    CUtensorMap const *A_tmap,
-    CUtensorMap const *B_tmap,
-    __nv_bfloat16 const *__restrict__ residual,
-    __nv_bfloat16 *__restrict__ mixes_pad,
-    float *__restrict__ sqrsum,
-    int BATCH,
-    int bid_n) {
+__device__ __forceinline__ void
+    mHC_pre_k1_tensor_core_core(CUtensorMap const *A_tmap,
+                                CUtensorMap const *B_tmap,
+                                __nv_bfloat16 const *__restrict__ residual,
+                                __nv_bfloat16 *__restrict__ mixes_pad,
+                                float *__restrict__ sqrsum,
+                                int BATCH,
+                                int bid_n) {
   static_assert(OUTPUT_PAD == 128, "tcgen05 MMA uses M=128");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K divisible by MMA_K");
   static_assert(REDUCTION_SIZE % BLOCK_K == 0, "K divisible by BLOCK_K");
@@ -337,13 +342,13 @@ __device__ __forceinline__ void mHC_pre_k1_tensor_core_core(
   constexpr int B_atom_bytes = BLOCK_N * K_ATOM * 2;
 
   auto issue_tma = [&](int iter_k, int stage_id) {
-    const int mbar = tma_mbar + stage_id * 8;
-    const int A_smem = smem + stage_id * STAGE_BYTES;
-    const int B_smem = A_smem + A_bytes;
-    const int off_k = iter_k * BLOCK_K;
+    int const mbar = tma_mbar + stage_id * 8;
+    int const A_smem = smem + stage_id * STAGE_BYTES;
+    int const B_smem = A_smem + A_bytes;
+    int const off_k = iter_k * BLOCK_K;
 #pragma unroll
     for (int s = 0; s < NUM_KSUB; ++s) {
-      const int ka = off_k + s * K_ATOM;
+      int const ka = off_k + s * K_ATOM;
       tma_load_2d(A_smem + s * A_atom_bytes, A_tmap, ka, 0, mbar, EVICT_LAST);
       tma_load_2d(
           B_smem + s * B_atom_bytes, B_tmap, ka, off_n, mbar, EVICT_FIRST);
@@ -455,8 +460,8 @@ template <int REDUCTION_SIZE,
           int NUM_STAGES>
 __global__
     __launch_bounds__(OUTPUT_PAD + 2 * 32) void mHC_pre_k1_tensor_core_kernel(
-        const __grid_constant__ CUtensorMap A_tmap,
-        const __grid_constant__ CUtensorMap B_tmap,
+        __grid_constant__ const CUtensorMap A_tmap,
+        __grid_constant__ const CUtensorMap B_tmap,
         __nv_bfloat16 const *__restrict__ residual,
         __nv_bfloat16 *__restrict__ mixes_pad,
         float *__restrict__ sqrsum,
@@ -471,7 +476,8 @@ __global__
 }
 
 // MPK task entry: blockIdx-agnostic (`bid_n` comes from task metadata) and TMA
-// maps come in by pointer (runtime-encoded, via task_desc->input_tma_desc_ptrs).
+// maps come in by pointer (runtime-encoded, via
+// task_desc->input_tma_desc_ptrs).
 // __noinline__ to keep register pressure off the megakernel dispatch frame, per
 // the mla_prefill_tp8 precedent.
 template <int REDUCTION_SIZE,
@@ -497,8 +503,8 @@ __device__ __noinline__ void mHC_pre_k1_prefill_sm100_task_impl(
       A_tmap, B_tmap, residual, mixes_pad, sqrsum, BATCH, bid_n);
 }
 
-}
-}
+} // namespace pre_k1_tensor_core
+} // namespace kernel
 
 namespace kernel {
 
@@ -509,21 +515,21 @@ template <typename T_in,
           int TOKENS_PER_CTA = 32,
           int BLOCK_THREADS = 256,
           int MIX_STRIDE = 0>
-__device__ __forceinline__ void mHC_pre_k2_task_impl(
-    void const *mixes_ptr,
-    void const *sqrsum_ptr,
-    void const *scale_ptr,
-    void const *base_ptr,
-    void const *x_ptr,
-    void *f_pre_ptr,
-    void *h_post_out_ptr,
-    void *comb_out_ptr,
-    int sinkhorn_repeat,
-    float sinkhorn_eps,
-    float rms_eps,
-    int num_tokens,
-    char *dyn_smem,
-    int token_base_override = -1) {
+__device__ __forceinline__ void
+    mHC_pre_k2_task_impl(void const *mixes_ptr,
+                         void const *sqrsum_ptr,
+                         void const *scale_ptr,
+                         void const *base_ptr,
+                         void const *x_ptr,
+                         void *f_pre_ptr,
+                         void *h_post_out_ptr,
+                         void *comb_out_ptr,
+                         int sinkhorn_repeat,
+                         float sinkhorn_eps,
+                         float rms_eps,
+                         int num_tokens,
+                         char *dyn_smem,
+                         int token_base_override = -1) {
   static_assert(N == 4, "pre K2 hardcoded to n=4");
   static_assert(BLOCK_THREADS % 32 == 0, "block size must be a warp multiple");
   static_assert(TOKENS_PER_CTA % 32 == 0,
@@ -867,8 +873,8 @@ __device__ __forceinline__ void
                               int num_tokens,
                               // MPK: pointers are pre-offset to one token's
                               // slice, so the caller passes token_override=0
-                              // (and num_tokens=1). Standalone passes -1 to keep
-                              // the blockIdx.x = token mapping.
+                              // (and num_tokens=1). Standalone passes -1 to
+                              // keep the blockIdx.x = token mapping.
                               int token_override = -1) {
   static_assert(N == 4, "pre K2 hardcoded to n=4");
   static_assert(C % 8 == 0, "C must be a multiple of 8");
@@ -993,8 +999,9 @@ __device__ __forceinline__ void
       m31 = m31 * ri3 + sinkhorn_eps;
       m32 = m32 * ri3 + sinkhorn_eps;
       m33 = m33 * ri3 + sinkhorn_eps;
-      int const dyn_steps = (SINKHORN_REPEAT > 0) ? SINKHORN_REPEAT
-                            : (sinkhorn_repeat > 0 ? sinkhorn_repeat : 1);
+      int const dyn_steps = (SINKHORN_REPEAT > 0)
+                                ? SINKHORN_REPEAT
+                                : (sinkhorn_repeat > 0 ? sinkhorn_repeat : 1);
 #pragma unroll 1
       for (int it = 0; it < dyn_steps; ++it) {
         float const ci0 = __frcp_rn(m00 + m10 + m20 + m30 + sinkhorn_eps);
@@ -1101,4 +1108,4 @@ __device__ __forceinline__ void
   }
 }
 
-}
+} // namespace kernel

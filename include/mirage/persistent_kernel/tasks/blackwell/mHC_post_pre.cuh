@@ -28,21 +28,21 @@ template <typename T,
           int MIX_PAD = 128,
           int TPB = 1,
           int TILE_N = MIX_HC>
-__device__ __forceinline__ void mHC_post_pre_k1_task_impl(
-    T const *__restrict__ residual,
-    T const *__restrict__ x,
-    float const *__restrict__ comb,
-    float const *__restrict__ post,
-    __nv_bfloat16 const *__restrict__ fn,
-    T *__restrict__ residual_out,
-    float *__restrict__ out_partial,
-    float *__restrict__ sqr_partial,
-    void *__restrict__ mixes_pad,
-    float *__restrict__ sqrsum,
-    int num_tokens,
-    int token0,
-    int i_ks,
-    int i_nt) {
+__device__ __forceinline__ void
+    mHC_post_pre_k1_task_impl(T const *__restrict__ residual,
+                              T const *__restrict__ x,
+                              float const *__restrict__ comb,
+                              float const *__restrict__ post,
+                              __nv_bfloat16 const *__restrict__ fn,
+                              T *__restrict__ residual_out,
+                              float *__restrict__ out_partial,
+                              float *__restrict__ sqr_partial,
+                              void *__restrict__ mixes_pad,
+                              float *__restrict__ sqrsum,
+                              int num_tokens,
+                              int token0,
+                              int i_ks,
+                              int i_nt) {
   constexpr bool DIRECT = (SPLIT_K == 1);
   constexpr int C_PER_SPLIT = C / SPLIT_K;
   static_assert(C % SPLIT_K == 0, "C must be divisible by SPLIT_K");
@@ -97,7 +97,8 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
     for (int o = 0; o < TILE_N; ++o) {
 #pragma unroll
       for (int j = 0; j < N; ++j) {
-        fn_oj[o][j] = __bfloat162float(fn[((int64_t)(o_base + o) * N + j) * C + h]);
+        fn_oj[o][j] =
+            __bfloat162float(fn[((int64_t)(o_base + o) * N + j) * C + h]);
       }
     }
 
@@ -213,13 +214,13 @@ __device__ __forceinline__ void mHC_post_pre_k1_task_impl(
 }
 
 template <int N, int MIX_HC, int MIX_PAD, int SPLIT_K>
-__device__ __forceinline__ void mHC_post_pre_k1_reduce_impl(
-    float const *__restrict__ out_partial,
-    float const *__restrict__ sqr_partial,
-    void *__restrict__ mixes_pad,
-    float *__restrict__ sqrsum,
-    int num_tokens,
-    int token) {
+__device__ __forceinline__ void
+    mHC_post_pre_k1_reduce_impl(float const *__restrict__ out_partial,
+                                float const *__restrict__ sqr_partial,
+                                void *__restrict__ mixes_pad,
+                                float *__restrict__ sqrsum,
+                                int num_tokens,
+                                int token) {
   __nv_bfloat16 *mixes = static_cast<__nv_bfloat16 *>(mixes_pad);
   int const o = threadIdx.x;
   if (o < MIX_HC) {
@@ -284,4 +285,4 @@ __device__ __forceinline__ void
                                    token_base_override);
 }
 
-}
+} // namespace kernel

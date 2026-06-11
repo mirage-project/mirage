@@ -1284,9 +1284,10 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_MHC_PRE_K1_PREFILL_SM100: {
       // 2D K-major bf16 descriptor with 128B swizzle, identical to the
       // standalone init_2d_bf16_tmap. box = (BLOCK_K=64, rows): rows = OUT_PAD
-      // (128) for the weight (param 1), BLOCK_N (16) for the residual (param 0).
-      // The MPK prefill task is pinned to BLOCK_N=16 / BLOCK_K=64 / NUM_STAGES=2
-      // (near the benchmarked optimum), so these box dims are compile-time.
+      // (128) for the weight (param 1), BLOCK_N (16) for the residual (param
+      // 0). The MPK prefill task is pinned to BLOCK_N=16 / BLOCK_K=64 /
+      // NUM_STAGES=2 (near the benchmarked optimum), so these box dims are
+      // compile-time.
       constexpr int BLOCK_K = 64;
       constexpr int OUT_PAD = 128;
       constexpr int BLOCK_N = 16;

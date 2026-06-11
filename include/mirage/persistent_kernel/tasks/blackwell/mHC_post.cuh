@@ -23,14 +23,13 @@ template <typename T,
           int OUTPUT_SIZE,
           int NUM_TOPK,
           int OUTPUT_STRIDE>
-__device__ __forceinline__ void
-    mHC_post_task_impl(void const *residual_ptr,
-                       void const *x_ptr,
-                       void const *comb_ptr,
-                       void const *post_ptr,
-                       void *output_ptr,
-                       int tid = -1,
-                       int nthreads = 0) {
+__device__ __forceinline__ void mHC_post_task_impl(void const *residual_ptr,
+                                                   void const *x_ptr,
+                                                   void const *comb_ptr,
+                                                   void const *post_ptr,
+                                                   void *output_ptr,
+                                                   int tid = -1,
+                                                   int nthreads = 0) {
   int const t_id = (tid >= 0) ? tid : (int)threadIdx.x;
   int const n_threads = (nthreads > 0) ? nthreads : (int)blockDim.x;
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
@@ -118,4 +117,4 @@ __device__ __forceinline__ void
   }
 }
 
-}
+} // namespace kernel
