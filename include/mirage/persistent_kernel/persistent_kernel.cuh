@@ -613,8 +613,16 @@ __device__ __forceinline__ bool
 
     int num_new_pages =
         (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-    config.paged_kv_last_page_len_buffer[num_reqs] =
-        (step + num_new_tokens) % MPK_PAGE_SIZE;
+    {
+      // A full last page must report PAGE_SIZE, not 0: kv_len is derived as
+      // (num_pages-1)*PAGE_SIZE + last_page_len, so a bare modulo shrinks
+      // kv_len by a whole page whenever step+num_new_tokens crosses an exact
+      // page multiple (negative history_len -> garbage attention metadata,
+      // observed as online-serving kernel hangs). Mirrors the offline path.
+      int _lpl = (step + num_new_tokens) % MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[num_reqs] =
+          (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+    }
 
     for (int j = 0; j < num_old_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
@@ -679,8 +687,12 @@ __device__ __forceinline__ bool
 
     int num_new_pages =
         (initial_step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-    config.paged_kv_last_page_len_buffer[num_reqs] =
-        (initial_step + num_new_tokens) % MPK_PAGE_SIZE;
+    {
+      // Same full-last-page guard as the compaction path above.
+      int _lpl = (initial_step + num_new_tokens) % MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[num_reqs] =
+          (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+    }
 
     for (int j = 0; j < num_new_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
