@@ -101,10 +101,13 @@ def fused_rmsnorm_quantize_fp8_layer(
     tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
     pk.kn_graph.customized(
         [input, weight, output_bf16, output_fp8, output_scale], tb_graph)
+    # The C++ register on this branch reads [process_dim, scale_ue8m0,
+    # emit_bf16]; slice offsets are carried by mpk.narrow views, not params.
+    assert in_offset_elems == 0 and out_offset_elems == 0, (
+        "offset params were dropped from the upstream task ABI; pass narrow "
+        "views instead")
     params = [
         process_dim,
-        in_offset_elems,
-        out_offset_elems,
         1 if scale_ue8m0 else 0,
         1 if emit_bf16 else 0,
     ]
@@ -144,6 +147,12 @@ def mla_kv_gather_unified_layer(
         c_latent_offset_elems != 0 or
         k_pe_row_stride is not None or
         k_pe_offset_elems != 0)
+    # The C++ register on this branch accepts 3 | 5 | 6 params:
+    # [d_k, d_v, ps] (+ [c_stride, k_stride] (+ [num_gather_splits])).
+    # Slice offsets are carried by the mpk.narrow views, not params.
+    assert c_latent_offset_elems == 0 and k_pe_offset_elems == 0, (
+        "offset params were dropped from the upstream task ABI; pass narrow "
+        "views instead")
     if num_gather_splits > 1:
         assert grid_dim[1] == num_gather_splits, (
             f"grid_dim.y ({grid_dim[1]}) must match num_gather_splits "
@@ -151,18 +160,14 @@ def mla_kv_gather_unified_layer(
         params = [
             d_k, d_v, page_size,
             c_latent_row_stride if c_latent_row_stride is not None else d_v,
-            c_latent_offset_elems,
             k_pe_row_stride if k_pe_row_stride is not None else 128,
-            k_pe_offset_elems,
             num_gather_splits,
         ]
     elif slice_override:
         params = [
             d_k, d_v, page_size,
             c_latent_row_stride if c_latent_row_stride is not None else d_v,
-            c_latent_offset_elems,
             k_pe_row_stride if k_pe_row_stride is not None else 128,
-            k_pe_offset_elems,
         ]
     else:
         params = [d_k, d_v, page_size]
@@ -313,14 +318,17 @@ def deepseek_mla_rope_k_layer(
     k_pe_row_stride: int = None,
     k_pe_offset: int = 0,
 ):
-    # k_pe_row_stride / k_pe_offset support running the K_PE rotation
-    # in-place on a slice of a wider buffer (e.g., qkv_a_out (mbt, 2176)
-    # where k_pe lives at cols [2048:2112)). Defaults preserve legacy.
+    # k_pe_row_stride supports running the K_PE rotation in-place on a slice
+    # of a wider buffer (e.g., qkv_a_out (mbt, 2176) where k_pe lives at cols
+    # [2048:2112)). The C++ register on this branch reads [q_tile] or
+    # [q_tile, k_pe_row_stride] — the slice offset comes from the narrow
+    # view's base pointer, NOT a param.
+    assert k_pe_offset == 0, (
+        "k_pe_offset was dropped from the upstream task ABI; pass a narrow "
+        "view instead")
     params = [q_tile_size]
-    if k_pe_row_stride is not None or k_pe_offset != 0:
-        if k_pe_row_stride is None:
-            k_pe_row_stride = 128
-        params = [q_tile_size, k_pe_row_stride, k_pe_offset]
+    if k_pe_row_stride is not None:
+        params = [q_tile_size, k_pe_row_stride]
     tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
     tb_graph.new_input(k_pe, (-1, -1, -1), -1, True)
     tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)

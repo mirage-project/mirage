@@ -1609,14 +1609,16 @@ class DeepSeekV3Builder(GraphBuilder):
         w_kv_a_ln = self.mpk.attach_input(
             torch_tensor=state_dict[f"{attn}kv_a_layernorm.weight"],
             name=f"layer_{layer_idx}_kv_a_layernorm")
+        # c_latent_out is an mpk.narrow view (offset baked into the view base
+        # pointer), so no explicit in/out offsets are needed — this matches
+        # the upstream rmsnorm_layer signature, which dropped the
+        # *_offset_elems params in favour of view-carried offsets.
         self.mpk.rmsnorm_layer(
             input=self.c_latent_out, weight=w_kv_a_ln,
             output=self.c_latent_out,
             grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
             block_dim=(128, 1, 1),
-            process_dim=self.kv_lora_rank,
-            in_offset_elems=self._qkv_a_c_latent_offset,
-            out_offset_elems=self._qkv_a_c_latent_offset)
+            process_dim=self.kv_lora_rank)
 
         # Step 6: MLA attention (KV gather + unified prefill/decode + reduce).
         # When `_use_prefill` is True, register one MLA main task that chooses
@@ -1638,13 +1640,12 @@ class DeepSeekV3Builder(GraphBuilder):
             layer_cache if self._direct_paged_decode_kv else self.contiguous_kv
         )
         # c_latent and k_pe live at offsets 1536 / 2048 of the 2176-wide
-        # qkv_a_out row. Pass row strides + offsets so the gather kernel
-        # reads the right slice for each input.
+        # qkv_a_out row. Row strides communicate the parent width; the slice
+        # offsets are carried by the mpk.narrow views themselves (the
+        # *_offset_elems params were dropped from the upstream gather API).
         kv_gather_slice_kwargs = dict(
             c_latent_row_stride=self._qkv_a_row_stride,
-            c_latent_offset_elems=self._qkv_a_c_latent_offset,
-            k_pe_row_stride=self._qkv_a_row_stride,
-            k_pe_offset_elems=self._qkv_a_k_pe_offset)
+            k_pe_row_stride=self._qkv_a_row_stride)
         if self._use_prefill:
             dsv3_tasks.mla_kv_gather_unified_layer(
                 self.mpk,
