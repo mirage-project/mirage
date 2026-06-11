@@ -17,7 +17,7 @@
 // op-private semaphore ordinals, host-safe MMA descriptor constants, and the
 // planner feed (make_smem_info). It is host-includable (no __device__ PTX) so
 // task_register.cc can call make_smem_info(), and the device side
-// (linear_device.cuh / linear_sm100_v2.cuh) includes it too, so host and device
+// (linear_ptx.cuh / linear_sm100_v2.cuh) includes it too, so host and device
 // share one set of constants. Declare these here, not in the .cuh.
 
 #pragma once
@@ -152,8 +152,8 @@ inline ::mirage::runtime::TaskSmemInfo make_smem_info() {
 // codegen can read — instead of being wired only in device code (make_wa).
 //
 // CONSUMED by three places (the table is live, not documentation):
-//   * linear_device.cuh linear_init()      — dispatcher's structural mbar init
-//   * linear_device.cuh reinit_for_role()  — per-role start-of-task re-init of
+//   * linear_ptx.cuh linear_init()      — dispatcher's structural mbar init
+//   * linear_ptx.cuh reinit_for_role()  — per-role start-of-task re-init of
 //     async edges (clears prior-slot strays; placement per reinit_*_by)
 //   * linear_sm100_v2.cuh make_wa()        — wires the Channel cursors' full/
 //     empty addresses (incl. A sharing W's mma empty edge)

@@ -22,7 +22,7 @@
 //   SmemRing - per-stage SMEM offsets, and optionally the page ids for
 //              cross-task page release.
 // Shapes, SMEM/SEM ordinals, and PTX wrappers all live in kernel::linear
-// (linear_spec.h + linear_device.cuh).
+// (linear_spec.h + linear_ptx.cuh).
 //
 // W and A share one empty edge (mma_mbar): the mma's single tcgen05.commit
 // per K-iteration frees both, so only the W cursor waits on it and A just
@@ -43,7 +43,7 @@
 
 #include "mirage/persistent_kernel/runtime_header.h"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/channel.cuh"
-#include "mirage/persistent_kernel/tasks/blackwell_v2/linear_device.cuh"
+#include "mirage/persistent_kernel/tasks/blackwell_v2/linear_ptx.cuh"
 
 namespace kernel {
 namespace linear_v2 {
