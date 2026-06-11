@@ -688,16 +688,6 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            # # GateUp: keep v1 (v2 variant hangs in mirage integration context —
-            # # still under investigation; v2 linear_v2 works standalone).
-            # mpk.linear_layer(
-            #     input=rmsnorm_out,
-            #     weight=w_gatedup,
-            #     output=mlp_mid,
-            #     grid_dim=(rmsnorm_num_tasks, 1, 1),
-            #     block_dim=(128, 1, 1),
-            # )
-
             if args.use_v2:
                 mpk.linear_layer_v2(
                     input=rmsnorm_out,
