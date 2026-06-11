@@ -29,8 +29,10 @@ demo/<model_name>/
 ```
 
 **Reference implementations:**
-- `demo/qwen3/` — Canonical dense transformer model
-- `demo/deepseek_v3/` — MoE model (DeepSeek V3 with MLA + MoE)
+- `demo/qwen3/demo.py` — Canonical dense transformer (Qwen3-8B)
+- `demo/qwen3/demo_30B_A3B.py` — MoE model (Qwen3-30B-A3B): top-k softmax routing + BF16 experts
+
+> Note: the DeepSeek V3 demo (`demo/deepseek_v3/`) was removed. Its building-block layers remain available — MLA: `mla_decode_layer`/`mla_reduce_layer`/`mla_prefill_layer`; FP8 MoE: `moe_w13_fp8_layer`/`moe_w2_fp8_layer`; sigmoid routing: `moe_topk_sigmoid_routing_layer` — but no in-tree model currently wires them.
 
 ## How to Build the Demo
 
@@ -101,14 +103,14 @@ See `demo/qwen3/qwen3_shard_loader.py` for the complete pattern.
 ## Attention Patterns
 
 - **Standard GQA** (Llama, Qwen3): Use `paged_attention_layer` or `paged_attention_split_kv_layer`.
-- **MLA** (DeepSeek V3): Use `mla_prefill_layer` / `mla_decode_layer`.
+- **MLA** (multi-latent attention, e.g. DeepSeek V3): Use `mla_prefill_layer` / `mla_decode_layer` / `mla_reduce_layer`. (These layers/kernels exist but have no in-tree model after DSV3 was removed.)
 - **Novel attention**: Implement as a new task via `/add-mpk-task`.
 
 ## MoE Models
 
 For Mixture-of-Experts models, the available layer methods are:
 - `moe_topk_softmax_routing_layer` — Router (top-k gating with softmax)
-- `moe_sigmoid_topk_routing_layer` — Router (sigmoid gating, DeepSeek V3 style)
+- `moe_topk_sigmoid_routing_layer` — Router (sigmoid gating, group-aware / DeepSeek V3 style)
 - `moe_w13_linear_layer` / `moe_w13_fp8_layer` — First expert linear (gate+up fused)
 - `moe_silu_mul_layer` — SiLU activation between expert linear layers
 - `moe_w2_linear_layer` / `moe_w2_fp8_layer` — Second expert linear (down projection)

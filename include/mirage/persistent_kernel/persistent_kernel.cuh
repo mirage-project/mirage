@@ -1229,6 +1229,28 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
+#ifdef MPK_TEST_MODE
+        // Test mode: run the task graph exactly once using the user-supplied
+        // meta tensors verbatim. Skip prepare_next_batch (which would recompute
+        // qo_indptr / paged_kv_* / input_tokens from step/prompt_lengths and
+        // clobber any forged runtime state). iteration_num stays at 1 for the
+        // single pass so event-counter thresholds (num_triggers * iteration_num)
+        // remain consistent.
+        if (iteration_num > 0) {
+          terminate_schedulers(config);
+        } else {
+          size_t last_task_id =
+              worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
+          st_relaxed_gpu_u64(
+              &config.worker_queues[next_worker]
+                                   [last_task_id % config.per_worker_queue_len],
+              compute_task_id(iteration_num + 1, 1 /*begin_task_graph*/));
+          atom_add_release_gpu_u64(
+              &config.worker_queue_last_ready_task_id[next_worker], 1);
+          next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
+                                                            : next_worker + 1;
+        }
+#else
 #ifdef MPK_ENABLE_PROFILING
         PROFILER_EVENT_START(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt);
 #endif
@@ -1271,6 +1293,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
+#endif // MPK_TEST_MODE
       } else if (e.event_type == EVENT_LAUNCH_DEPENDENT_TASKS) {
         iteration_num = iteration_num + 1;
         // assign event in a round-robin fashion
@@ -1765,7 +1788,15 @@ extern "C" void
                            cudaEventDisableTiming);
 #endif
 
+#ifdef MPK_TEST_MODE
+  // Test mode: do NOT run init_request_resources()/init_kernel, which would
+  // reset step[]=0, request_ids[]=-1, qo_indptr_buffer[]=0,
+  // paged_kv_indptr_buffer[]=0 and the page queue. Leaving it out preserves the
+  // user-supplied meta tensors so a forged runtime status reaches the kernel
+  // intact.
+#else
   init_request_resources();
+#endif
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();

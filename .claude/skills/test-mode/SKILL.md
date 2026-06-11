@@ -5,12 +5,14 @@ description: Guide for using MPK test mode to unit-test individual layers or mul
 
 # MPK Test Mode
 
-Test mode compiles and runs an MPK task graph **exactly once** and exits. It exercises the full pipeline — Python layer API, task registration, C++ code generation, nvcc compilation, runtime dispatch, and the persistent runtime's metadata setup (`init_kernel` + `prepare_next_batch`) — making it the primary tool for validating that a new layer or task works end-to-end.
+Test mode compiles and runs an MPK task graph **exactly once** and exits. It exercises the full pipeline — Python layer API, task registration, C++ code generation, nvcc compilation, and runtime dispatch — making it the primary tool for validating that a new layer or task works end-to-end. It runs the graph with the **user-supplied meta tensors used verbatim**, so a test can forge an arbitrary runtime status and the kernel sees exactly the values the test provides.
 
 Test mode is selected by setting `params["test_mode"] = True` at construction time. Internally this defines `-DMPK_TEST_MODE` for the launcher build, which:
-1. Auto-allocates any meta tensors the test author didn't pass (so paged-attention / embedding / sampling layers see valid `qo_indptr_buffer`, `paged_kv_*`, `input_tokens`, etc.).
-2. Lets `init_request_resources()` and `prepare_next_batch` run normally — the same code paths production uses.
-3. Forces `prepare_next_batch`'s always-finalize shortcut on iter 1, which returns false and terminates the scheduler after exactly one task-graph pass.
+1. Auto-allocates (as **valid zero-filled** GPU buffers) any of the 10 meta tensors the test author didn't pass, so every layer sees a non-null pointer. It does **not** populate meaningful values.
+2. **Skips `init_request_resources()`** (which would reset `step`/`request_ids`/`qo_indptr_buffer`/`paged_kv_*`/the page queue) and **skips `prepare_next_batch()`** (which in production fills those buffers). The user-supplied meta tensors therefore reach the kernels **unmodified** — a forged runtime status is preserved.
+3. Runs the task graph for exactly one pass, then terminates the schedulers.
+
+> **Each test owns its meta tensors.** Because `prepare_next_batch` does not run, a layer that reads a runtime value from a meta tensor sees only what the test put there. In particular, **token-parallel** kernels read their active-token count from `qo_indptr_buffer[max_num_batched_requests]` (the last entry) — notably `silu_mul` and `argmax`. If you use one of those and leave `qo_indptr_buffer` at its zero default, the kernel sees **0 active tokens** and silently writes nothing. Attention kernels additionally read `paged_kv_indptr_buffer`/`paged_kv_indices_buffer`/`paged_kv_last_page_len_buffer`. Set whatever your layer reads in `params["meta_tensors"]`. (Static-grid layers — `rmsnorm`, `linear`, `linear_with_residual`, the `moe_*` GEMMs — don't read these and need no meta setup.)
 
 ## Required: PyTorch Reference Comparison
 
@@ -79,18 +81,15 @@ pk.finalize()
 
 ## What Test Mode Actually Does
 
-The launcher's first scheduler event is always `EVENT_END_OF_TASK_GRAPH`, so `prepare_next_batch` fires *before* iter 0. Concretely:
+`prepare_kernel` seeds the first scheduler event, the task graph runs once, and the schedulers terminate after the pass. `init_request_resources()` and `prepare_next_batch()` are **not** called:
 
 ```
-init_kernel:           zero step / request_ids / qo_indptr / paged_kv_indptr; seed page_queue
-1st END_OF_TASK_GRAPH (iter_num=0): prepare_next_batch fills meta tensors for iter 0 → returns true
-iter 0:                the test — layer-under-test runs with valid meta tensors
-2nd END_OF_TASK_GRAPH (iter_num=1): prepare_next_batch finalizes (MPK_TEST_MODE always-finalize)
-                                    → no new prefills (next_request_id == total_num_requests)
-                                    → returns false → terminate
+init / launch:  meta tensors hold exactly the values the test supplied (no reset, no fill)
+one pass:       the layer(s) under test run, reading meta tensors verbatim
+terminate:      schedulers stop after the single pass
 ```
 
-So tests of meta-tensor-dependent layers (paged attention, MoE routing, embedding, sampling) work — they read the values that `prepare_next_batch` wrote.
+So to test a meta-tensor-dependent layer, **forge the meta tensors yourself** to describe the runtime status you want (e.g. a decode at an arbitrary step with a specific paged-KV layout). See `tests/runtime_python/test_mode/test_forge_meta_paged_attention_testmode.py` (forges `qo_indptr_buffer` / `paged_kv_*` across multi-page and non-contiguous layouts) and `test_qwen3_mlp_testmode.py` (sets `qo_indptr_buffer` so `silu_mul` sees the right active-token count).
 
 ## API Reference
 
@@ -107,10 +106,10 @@ Commonly overridden keys:
 | `num_local_schedulers` | 4 | Set from `mirage.get_configurations_from_gpu(0)` |
 | `max_num_batched_tokens` | 1 | Set to your test's batch size if the task kernel uses this compile-time constant |
 | `max_num_batched_requests` | 1 | Same as above |
-| `max_num_pages` / `page_size` / `max_seq_length` | 1 | Bump these so `prepare_next_batch` can fit your prefill (`max_num_pages * page_size >= prompt_length`) |
+| `max_num_pages` / `page_size` / `max_seq_length` | 1 | Bump these if your kernel's compile-time constants or your forged paged-KV layout need larger buffers |
 | `world_size` / `mpi_rank` | 1 / 0 | For multi-GPU tests; set from `mpi4py.MPI.COMM_WORLD` |
 | `use_cutlass_kernel` | False | Set `True` if your layer uses CUTLASS-based kernels |
-| `meta_tensors` | `{}` | Auto-defaulted; **override only the entries that drive your test scenario** (typically `prompt_lengths` and/or `tokens`) — see "Meta-Tensor Defaults" below |
+| `meta_tensors` | `{}` | Auto-defaulted to **zeros**; **set the entries your layer reads** (e.g. `qo_indptr_buffer` for token-parallel kernels, `paged_kv_*` for attention) — see "Meta-Tensor Defaults" below |
 
 ### `mirage.get_configurations_from_gpu(rank)`
 
@@ -154,38 +153,38 @@ Test mode auto-allocates any of the 10 meta tensors that you don't pass:
 | `tokens` | `(1, max_seq_length)` | `int64` | zeros |
 | `step` | `(total_num_requests,)` | `int32` | zeros |
 | `prompt_lengths` | `(total_num_requests,)` | `int32` | filled with `max_num_batched_tokens` |
-| `input_tokens` | `(max_num_batched_tokens,)` | `int64` | zeros (filled by `prepare_next_batch`) |
+| `input_tokens` | `(max_num_batched_tokens,)` | `int64` | zeros — **set it if your layer reads it** |
 | `output_tokens` | `(max_num_batched_tokens,)` | `int64` | zeros |
 | `num_new_tokens` | `(1,)` | `int32` | zeros |
-| `qo_indptr_buffer` | `(max_num_batched_requests + 1,)` | `int32` | zeros (filled by `prepare_next_batch`) |
-| `paged_kv_indptr_buffer` | `(max_num_batched_requests + 1,)` | `int32` | zeros (filled by `prepare_next_batch`) |
-| `paged_kv_indices_buffer` | `(max_num_pages,)` | `int32` | zeros (filled by `prepare_next_batch`) |
-| `paged_kv_last_page_len_buffer` | `(max_num_batched_requests,)` | `int32` | zeros (filled by `prepare_next_batch`) |
+| `qo_indptr_buffer` | `(max_num_batched_requests + 1,)` | `int32` | zeros — **set it if your layer reads it** |
+| `paged_kv_indptr_buffer` | `(max_num_batched_requests + 1,)` | `int32` | zeros — **set it if your layer reads it** |
+| `paged_kv_indices_buffer` | `(max_num_pages,)` | `int32` | zeros — **set it if your layer reads it** |
+| `paged_kv_last_page_len_buffer` | `(max_num_batched_requests,)` | `int32` | zeros — **set it if your layer reads it** |
 
 `total_num_requests` is derived from `tokens.shape[0]` (defaults to 1).
 
-**Override only what your test scenario requires.** Typical patterns:
+**Set exactly what your layer reads** — values are NOT derived for you (no `prepare_next_batch`). Typical patterns:
 
 ```python
-# Single prefill of length N (controls qo_indptr_buffer / paged_kv_* via prepare_next_batch)
-params["meta_tensors"] = {
-    "prompt_lengths": torch.tensor([N], dtype=torch.int32, device="cuda"),
-}
+# Token-parallel kernel (silu_mul / argmax): supply the active-token count in the
+# LAST entry of qo_indptr_buffer. Here: one request of `batch` active tokens.
+qo = torch.zeros(max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
+qo[max_num_batched_requests] = batch
+params["meta_tensors"] = {"qo_indptr_buffer": qo}
 
-# Specific prompt content (e.g. for embedding-layer tests that read input_tokens)
+# Paged attention: forge the full paged-KV layout for a decode over `seq_len`
+# positions laid out across physical pages `pkv_indices`
+# (see test_forge_meta_paged_attention_testmode.py).
 params["meta_tensors"] = {
-    "prompt_lengths": torch.tensor([N], dtype=torch.int32, device="cuda"),
-    "tokens": torch.tensor([[101, 7592, 2088, ...]], dtype=torch.int64, device="cuda"),
-}
-
-# Multi-request batch — total_num_requests inferred from tokens.shape[0]
-params["meta_tensors"] = {
-    "tokens": torch.zeros((4, max_seq_length), dtype=torch.int64, device="cuda"),
-    "prompt_lengths": torch.tensor([16, 8, 32, 4], dtype=torch.int32, device="cuda"),
+    "qo_indptr_buffer":              torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
+    "paged_kv_indptr_buffer":        torch.tensor([0, num_pages], dtype=torch.int32, device="cuda"),
+    "paged_kv_indices_buffer":       pkv_indices,                # physical page ids
+    "paged_kv_last_page_len_buffer": torch.tensor([last_page_len], dtype=torch.int32, device="cuda"),
+    "step":                          torch.tensor([seq_len - 1], dtype=torch.int32, device="cuda"),
 }
 ```
 
-The shape/dtype assertions that production runs through (e.g. `tokens.shape[1] == max_seq_length`, `prompt_lengths.dtype == int32`) all run in test mode too — defaults satisfy them by construction; user overrides will fail loudly if they don't match.
+The shape/dtype assertions that production runs through (e.g. `tokens.shape[1] == max_seq_length`, `qo_indptr_buffer.dtype == int32`) all run in test mode too — defaults satisfy them by construction; user overrides will fail loudly if they don't match.
 
 ## Multi-Layer Pipeline Example
 
@@ -316,7 +315,7 @@ For finer-grained analysis (per-worker breakdown, percentiles, outliers), `panda
 
 ## Constraints
 
-- **One execution pass** — the task graph runs once and `prepare_next_batch` returns false on its second call. No multi-iteration scheduling.
+- **One execution pass** — the task graph runs once, then the schedulers terminate. `init_request_resources()` / `prepare_next_batch()` are skipped (meta tensors are used verbatim); no multi-iteration scheduling.
 - **Meta tensors auto-allocated** — pass overrides only for entries your test scenario depends on. Defaults are sized from kernel-level params (`max_num_batched_tokens`, `max_num_batched_requests`, `max_num_pages`, `max_seq_length`, etc.), so bump those if your test needs larger buffers.
 - **`MPK_TEST_MODE` is a compile-time flag** — switching `test_mode` between True and False requires re-running `pk.compile()`; the same launcher .so isn't reusable across modes.
 
@@ -332,13 +331,12 @@ For finer-grained analysis (per-worker breakdown, percentiles, outliers), `panda
 **Incomplete task attributes:**
 - Ensure all required attributes for each task are correctly specified in the compilation logic in `runtime.cc`. Missing/incorrect attributes cause undefined behavior or compilation errors.
 
-**Kernel hangs / never terminates:**
-- Verify `total_num_requests` is set to match the number of in-flight test requests (typically 1, derived from `tokens.shape[0]`). If `next_request_id` never reaches `total_num_requests`, `prepare_next_batch` will keep returning true and iterations will not stop.
-- Verify the active `mode` is `"offline"` (the default). `MPK_TEST_MODE` is designed to layer on top of MODE_OFFLINE's `prepare_next_batch`; other modes are not supported.
-- The MPK runtime assumes occupying the entire GPU. If other processes are running, they can interfere with scheduling and cause hangs. Always check GPU availability before running. And if it hangs, kill and rerun on other idle GPUs.
+**Output is all zeros (no crash):**
+- A token-parallel kernel (e.g. `silu_mul`, `argmax`) likely read `qo_indptr_buffer[max_num_batched_requests] == 0` because the test didn't set it (test mode does not run `prepare_next_batch` to fill it). Supply `qo_indptr_buffer` with the active-token count in its last entry — see "Meta-Tensor Defaults".
 
-**Verifying that `prepare_next_batch` actually ran:**
-- After `pk()` returns, read back `pk.meta_tensors["step"][0]`. It should equal `prompt_lengths[0]` — `prepare_next_batch`'s Step 1.1 advances `step` by `num_tokens` on the second call. See `test_prepare_next_batch_testmode.py` for the canonical assertion.
+**Kernel hangs / never terminates:**
+- Verify the active `mode` is `"offline"` (the default); `MPK_TEST_MODE` is only wired for MODE_OFFLINE.
+- The MPK runtime assumes occupying the entire GPU. If other processes are running, they can interfere with scheduling and cause hangs. Always check GPU availability before running. And if it hangs, kill and rerun on other idle GPUs.
 
 ## Example Test Files
 

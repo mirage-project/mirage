@@ -51,8 +51,7 @@ class Eagle3Builder:
 
     After build_draft_loop the caller wires `eagle3.all_draft_ids` and
     `mpk.meta_tensors['output_tokens']` (target argmax) into the MTP verify
-    pipeline (mtp_prepare_verify_layer → mtp_verify_strict_layer →
-    mtp_accept_commit_layer).
+    pipeline.
     """
 
     def __init__(
