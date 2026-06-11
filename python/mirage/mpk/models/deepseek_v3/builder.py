@@ -2260,8 +2260,14 @@ class DeepSeekV3Builder(GraphBuilder):
             dims=(mbt, K), dtype=float8_e4m3,
             name=f"layer_{layer_idx}_new_moe_input_fp8",
             io_category="cuda_tensor")
+        # K-outer layout [K_PACKED, round4(mbt)]: the UE8M0 quantize writes
+        # word (packed_k * aligned_batch + row) with aligned_batch =
+        # round4(mbt) (task_register scale_outer_stride), so the allocation
+        # must cover the full K_PACKED x round4(mbt) footprint — the old
+        # (mbt, K_PACKED) shape under-allocated whenever mbt % 4 != 0
+        # (compute-sanitizer: 4B OOB writes 137B past a 56B allocation).
         new_moe_input_scale = self.mpk.new_tensor(
-            dims=(mbt, K_PACKED_K), dtype=uint32,
+            dims=(K_PACKED_K, ((mbt + 3) // 4) * 4), dtype=uint32,
             name=f"layer_{layer_idx}_new_moe_input_scale",
             io_category="cuda_tensor")
         new_moe_permuted_in_fp8 = self.mpk.new_tensor(

@@ -255,6 +255,35 @@ def _run_case(e_local, mbt, seed=42):
     print(f"  meta token_to_permuted match: {t2p_match}")
     print(f"  meta permuted_weights match:  {w_match}")
 
+    # --- Verify permuted_scale CONTENT against the producer's K-outer words.
+    #     This is the layout-discriminating check: the quantize producer
+    #     writes word (sf * round4(MBT) + token); act_scale_dg's strided view
+    #     indexes exactly those words, so permuted_scale[sf, row] must equal
+    #     act_scale_dg[token, sf] bit-for-bit. The old M-outer kernel read
+    #     (in_scale + t*K_PACKED) returns wrong/stale words for sf >= 1 and
+    #     fails this for every MBT (incl. MBT=1, where words 1..3 of each
+    #     packed quad are unwritten).
+    perm_scale_host = permuted_scale.cpu()
+    scale_dg_host = act_scale_dg.cpu()
+    scale_mismatches = 0
+    for t in range(mbt):
+        for k_slot in range(TOPK):
+            r = int(tok_to_perm[t, k_slot].item())
+            if r == 0:
+                continue  # not routed locally
+            r -= 1  # tok_to_perm is 1-indexed
+            for sf in range(k_packed):
+                got = int(perm_scale_host[sf, r].item())
+                want = int(scale_dg_host[t, sf].item())
+                if got != want:
+                    if scale_mismatches < 4:
+                        print(f"  scale mismatch t={t} row={r} sf={sf}: "
+                              f"got=0x{got:08x} want=0x{want:08x}")
+                    scale_mismatches += 1
+    scale_match = scale_mismatches == 0
+    print(f"  permuted_scale content match: {scale_match} "
+          f"({scale_mismatches} mismatches)")
+
     max_diff = (output.float() - ref.float()).abs().max().item()
     try:
         torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
@@ -262,7 +291,7 @@ def _run_case(e_local, mbt, seed=42):
     except AssertionError as e:
         out_ok = False
         print(e)
-    ok = out_ok and t2p_match and w_match
+    ok = out_ok and t2p_match and w_match and scale_match
     print(f"  output max_diff={max_diff:.6g}  {'PASS' if ok else 'FAIL'}")
 
     pk.finalize()

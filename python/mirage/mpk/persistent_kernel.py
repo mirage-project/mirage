@@ -2630,7 +2630,11 @@ class PersistentKernel:
         assert meta.dim(0) == 2
 
         K = input_fp8.dim(1)
-        K_PACKED = input_scale.dim(1)
+        # K_PACKED derives from K (128-wide groups, 4 UE8M0 bytes per uint32)
+        # rather than from input_scale's shape: the scale buffer is K-outer
+        # [K_PACKED, round4(MBT)] memory but callers may attach it under a
+        # transposed logical shape.
+        K_PACKED = ((K + 127) // 128 + 3) // 4
         MBT = input_fp8.dim(0)
         TOPK = topk_weights.dim(1)
         E_LOCAL = routing_indices.dim(0)

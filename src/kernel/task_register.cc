@@ -6317,7 +6317,10 @@ int TaskRegister::register_fp8_group_gemm_largem_compact_sm100_task(
 
 // moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.
 // Params (compile-time): [K, K_PACKED, MBT, TOPK, E_LOCAL, BM_PADDING]
-// Inputs (4): input_fp8 (mbt, K) u8, input_scale (mbt, K_PACKED) u32 UE8M0,
+// Inputs (4): input_fp8 (mbt, K) u8,
+//             input_scale [K_PACKED, round4(mbt)] u32 UE8M0 K-outer memory
+//             (word = sf * round4(mbt) + token; the logical attach shape may
+//             be the transposed view),
 //             topk_weights (mbt, TOPK) f32, routing_indices (E_LOCAL, MBT) i32
 // Outputs (3): permuted_fp8 (M_TOTAL, K) u8,
 //              permuted_scale (K_PACKED, M_TOTAL) u32 TRANSPOSED,

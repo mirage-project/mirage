@@ -204,10 +204,14 @@ __device__ __forceinline__ void
         dst_v[i] = src_v[i];
       }
 
-      // Transpose-pack the scale row.
-      uint32_t const *src_scale = in_scale + (size_t)t * K_PACKED;
+      // Transpose-pack the scale row. The UE8M0 quantize producer writes
+      // K-outer [K_PACKED, round4(MBT)] (word = sf * aligned_mbt + token);
+      // the old M-outer read (in_scale + t*K_PACKED) returned wrong/stale
+      // scales for every group >= 4 whenever MBT > 1.
+      constexpr int MBT_ALIGNED = ((MBT + 3) / 4) * 4;
       for (int sf = tid; sf < K_PACKED; sf += nthreads) {
-        out_scale[(size_t)sf * M_TOTAL + row] = src_scale[sf];
+        out_scale[(size_t)sf * M_TOTAL + row] =
+            in_scale[(size_t)sf * MBT_ALIGNED + t];
       }
 
       if (tid == 0) {
