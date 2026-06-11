@@ -93,7 +93,7 @@ __device__ __forceinline__ void ldm4t(uint32_t r[4], int a) {
       : "r"(a));
 }
 __device__ __forceinline__ void
-    hmma(const uint32_t A[4], const uint32_t B[2], float C[4]) {
+    hmma(uint32_t const A[4], uint32_t const B[2], float C[4]) {
   asm volatile(
       "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
       "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};\n"

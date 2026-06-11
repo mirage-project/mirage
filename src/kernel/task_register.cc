@@ -2410,25 +2410,9 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   code.e("    $,", batch_size);
   code.e("    task_desc->output_ptrs[1],");
   code.e("    task_desc->output_ptrs[2],");
-  code.e("    $,", local_expert_start);
-  code.e("    $,", local_expert_end);
-  code.e("    $f,", scaling_factor);
-  // P6 (2026-05-14): bound compute loop to runtime active tokens. The
-  // initial "broke correctness" reading was a misdiagnosis — the
-  // 19-layer DSv3 baseline already outputs all-zero tokens at
-  // profile_start_step=100 (verified by `git stash` baseline test:
-  // same all-zero output), so the regression I attributed to P6 was
-  // baseline noise. The kernel-side skip is safe: Phase 0 init zeroes
-  // the full [0, num_rows) routing range, downstream moe_permute's
-  // `slot_1idx > 0` filter treats padded slots as "no routing".
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
-  // cta_idx / num_ctas: the row-chunk loop must NOT key off blockIdx (= worker
-  // id under MPK). The logical task-instance index comes from
-  // task_metadata.request_id (set to bid.x in runtime.cc), and the instance
-  // count is the logical grid_dim.x. Single-CTA (decode) ⇒ request_id=0,
-  // grid_dim.x=1.
-  code.e("    task_desc->task_metadata.request_id,");
-  code.e("    $);", (int)bgraph.grid_dim.x);
+  code.e("    0,");
+  code.e("    $,", num_experts);
+  code.e("    $f);", scaling_factor);
   return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
 }
 
