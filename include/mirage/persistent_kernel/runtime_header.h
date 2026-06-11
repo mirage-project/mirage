@@ -155,13 +155,13 @@ enum TaskType {
   TASK_MLA_REDUCE_SM100 = 267,
   TASK_MLA_PREFILL_SM100 = 268,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
-  // v2 task-type IDs for the non-linear ops (linear v2 is 244/245). silu(282),
-  // embedding(283), and argmax(285/286) just re-emit the v1 kernel under the
-  // kernel::v2:: namespace through the v2 codegen path — near-identical bodies,
-  // only the dispatch differs. rmsnorm(281) is different: a real v2
-  // role-structured task (rmsnorm_v2::RmsNormTask::compute::run, compute/mma
-  // roles). attn(284) is reserved until the attention port. See the
-  // register_*_v2_task functions in task_register.cc.
+  // v2 task-type IDs for the non-linear ops (linear v2 is 244/245). These are
+  // all compute-only: each registers a single compute body (a free-function
+  // call under kernel::v2:: / kernel::rmsnorm_v2::) and the loader/mma/storer
+  // warps no-op for them via the role dispatcher's default case. Only linear
+  // (and later attention) uses the multi-role split. attn(284) is reserved
+  // until the attention port. See the register_*_v2_task functions in
+  // task_register.cc.
   TASK_RMS_NORM_HOPPER_V2 = 281,
   TASK_SILU_MUL_V2 = 282,
   TASK_EMBEDDING_V2 = 283,

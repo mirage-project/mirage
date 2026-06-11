@@ -24,7 +24,6 @@
 #include "../common/worker_config.h"
 #include "mirage/persistent_kernel/smem_buffer.cuh"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/rmsnorm_v2_spec.h"
-#include "mirage/persistent_kernel/tasks/blackwell_v2/task_interface.cuh"
 
 namespace kernel {
 namespace rmsnorm_v2 {
@@ -181,54 +180,6 @@ __device__ __noinline__ void rms_norm_task(
 	        }
 	    }
 }
-
-struct RmsNormLoader {
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *,
-      mirage::runtime::RuntimeConfig const &,
-      void *,
-      int) {}
-};
-
-struct RmsNormMma {
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *,
-      mirage::runtime::RuntimeConfig const &,
-      void *,
-      int) {}
-};
-
-struct RmsNormCompute {
-  template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *task_desc,
-      mirage::runtime::RuntimeConfig const &runtime_config,
-      void *runtime_smem,
-      int) {
-    rms_norm_task<T, BATCH_SIZE, HIDDEN_DIM>(
-        task_desc,
-        task_desc->input_ptrs[0],
-        task_desc->input_ptrs[1],
-        task_desc->output_ptrs[0],
-        1e-6f,
-        runtime_smem);
-  }
-};
-
-struct RmsNormStorer {
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *,
-      mirage::runtime::RuntimeConfig const &,
-      void *,
-      int) {}
-};
-
-struct RmsNormTask : public ::kernel::v2_task::TaskInterface {
-  using loader = RmsNormLoader;
-  using mma = RmsNormMma;
-  using compute = RmsNormCompute;
-  using storer = RmsNormStorer;
-};
 
 } // namespace rmsnorm_v2
 } // namespace kernel

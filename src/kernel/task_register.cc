@@ -89,11 +89,6 @@ void TaskRegister::register_v2_task_role_variant(
   variants[variant_id] = code;
 }
 
-void TaskRegister::register_variant_smem_size(runtime::TaskType type,
-                                              int variant_id, int size) {
-  register_variant_smem_info(type, variant_id, {size, 1});
-}
-
 void TaskRegister::register_variant_smem_info(runtime::TaskType type,
                                               int variant_id,
                                               TaskSmemInfo info) {
@@ -114,11 +109,6 @@ TaskSmemInfo TaskRegister::get_variant_smem_info(runtime::TaskType type,
   if (it == all_task_variant_smem_infos.end()) return {};
   if (variant_id < 0 || variant_id >= (int)it->second.size()) return {};
   return it->second[variant_id];
-}
-
-int TaskRegister::get_variant_smem_size(runtime::TaskType type,
-                                        int variant_id) const {
-  return get_variant_smem_info(type, variant_id).size;
 }
 
 int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
@@ -3777,10 +3767,9 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// v2 dispatch variants for the non-linear ops. Most re-emit the same kernel
-// call as their v1 peer but register under TASK_X_V2 so the task graph is
-// dispatched through v2 codegen; rmsnorm is the exception — a v2
-// role-structured task (RmsNormTask::compute::run).
+// v2 dispatch variants for the non-linear ops. Each registers a single compute
+// body (a free-function call) under TASK_X_V2 so the task graph is dispatched
+// through v2 codegen; the loader/mma/storer warps no-op for these tasks.
 // ─────────────────────────────────────────────────────────────────────────────
 
 int TaskRegister::register_rmsnorm_hopper_v2_task(
@@ -3802,12 +3791,14 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
   int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
   auto emit_rmsnorm_compute_body =
       [&](mirage::transpiler::CodeKeeper &c) {
-        c.e("kernel::rmsnorm_v2::RmsNormTask::compute::run<bfloat16, $, $>(",
+        c.e("kernel::rmsnorm_v2::rms_norm_task<bfloat16, $, $>(",
             batch_size, hidden_dim);
         c.e("    task_desc,");
-        c.e("    runtime_config,");
-        c.e("    runtime_smem,");
-        c.e("    instruction_index);");
+        c.e("    task_desc->input_ptrs[0],");
+        c.e("    task_desc->input_ptrs[1],");
+        c.e("    task_desc->output_ptrs[0],");
+        c.e("    1e-6f,");
+        c.e("    runtime_smem);");
       };
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();

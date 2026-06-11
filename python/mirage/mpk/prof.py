@@ -19,6 +19,9 @@ from collections import defaultdict
 
 # must match runtime_v2.cuh: misc(256) + cursors(1024) + spin(7*256) + suffix(256)
 V2_PROF_TAIL = (1048576 + 1) + 256 + 1024 + 7 * 256 + 256
+# offset of V2_PROF_MISC_BASE from the buffer end (misc sits below cursors,
+# spin and suffix): the per-SM drop counters live here.
+V2_PROF_MISC_FROM_END = 256 + 1024 + 7 * 256 + 256
 V2_PROF_NUM_BUCKETS = 7
 WINDOW_ITERS = 25
 
@@ -92,7 +95,7 @@ class Dump:
 
     def dropped(self):
         """Events dropped by the emitter's capacity guard, per SM."""
-        base = len(self.buf) - V2_PROF_TAIL
+        base = len(self.buf) - V2_PROF_MISC_FROM_END  # V2_PROF_MISC_BASE
         return self.buf[base:base + 128].astype(float)
 
 

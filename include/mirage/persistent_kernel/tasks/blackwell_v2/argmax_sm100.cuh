@@ -16,7 +16,6 @@
 #include "../common/utils.cuh"
 #include "mirage/persistent_kernel/smem_buffer.cuh"
 #include "mirage/persistent_kernel/tasks/blackwell_v2/argmax_v2_spec.h"
-#include "mirage/persistent_kernel/tasks/blackwell_v2/task_interface.cuh"
 
 #include <cutlass/arch/barrier.h>
 
@@ -192,55 +191,6 @@ __device__ __forceinline__ void
 	    }
 	  }
 	}
-
-struct ArgmaxLoader {
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *,
-      mirage::runtime::RuntimeConfig const &,
-      void *,
-      int) {
-    // Argmax has no GMEM-to-SMEM load stage today. If it later owns pages,
-    // wait/finish for those pages belongs here, not in the runtime.
-  }
-};
-
-struct ArgmaxMma {
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *,
-      mirage::runtime::RuntimeConfig const &,
-      void *,
-      int) {
-    // Argmax does not launch tensor-core work.
-  }
-};
-
-struct ArgmaxCompute {
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *,
-      mirage::runtime::RuntimeConfig const &,
-      void *,
-      int) {
-    // Argmax compute work is generated from TaskRegister variants because the
-    // concrete template parameters are model-specific.
-  }
-};
-
-struct ArgmaxStorer {
-  __device__ __forceinline__ static void
-  run(mirage::runtime::TaskDesc const *,
-      mirage::runtime::RuntimeConfig const &,
-      void *,
-      int) {
-    // Current argmax kernels write their result from the compute role.
-  }
-};
-
-struct ArgmaxTask : public ::kernel::v2_task::TaskInterface {
-  using loader = ArgmaxLoader;
-  using mma = ArgmaxMma;
-  using compute = ArgmaxCompute;
-  using storer = ArgmaxStorer;
-};
 
 } // namespace v2
 } // namespace kernel

@@ -201,16 +201,12 @@ public:
                                      int variant_id,
                                      TaskRoleVariantCode code);
 
-  // Register the total SMEM bytes a (TaskType, variant_id) consumes. Current
-  // v2 codegen publishes this as metadata while keeping executable task bases
-  // at offset 0. A future per-SM allocator can use these sizes for placement
-  // once every task body supports non-zero offsets.
-  void register_variant_smem_size(TaskType type, int variant_id, int size);
+  // Register the SMEM regions a (TaskType, variant_id) declares; the v2
+  // planner reads these to place each region in physical pages.
   void register_variant_smem_info(TaskType type,
                                   int variant_id,
                                   TaskSmemInfo info);
   TaskSmemInfo get_variant_smem_info(TaskType type, int variant_id) const;
-  int get_variant_smem_size(TaskType type, int variant_id) const;
 
 public:
   std::map<TaskType, std::vector<std::string>> all_task_variants;

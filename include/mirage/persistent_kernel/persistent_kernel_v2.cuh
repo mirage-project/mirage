@@ -117,22 +117,6 @@ inline void build_v2_plan(RuntimeConfig &config) {
            num_workers, total, total / num_workers, max_per_sm);
 }
 
-// ── Device kernel: advance per-iter state ──────────────────────────────────
-// Runs prepare_next_batch (paged KV bookkeeping + token append) once per iter
-// between worker_v2_kernel launches. Single block, single warp is enough —
-// prepare_next_batch is serial inner loops, ~tens of μs.
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) || defined(MODE_ONLINE_NOTOKEN)
-__global__ void v2_iter_advance_kernel(RuntimeConfig config,
-                                       int end_of_task_graph_event_pos) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-#ifdef MODE_ONLINE_NOTOKEN
-    (void)::prepare_next_batch(config, 0);
-#else
-    (void)::prepare_next_batch(config);
-#endif
-}
-#endif
-
 } // namespace runtime_v2
 } // namespace mirage
 

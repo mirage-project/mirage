@@ -17,7 +17,6 @@
 #include "mirage/persistent_kernel/mpk_atoms.cuh"
 #include "mirage/persistent_kernel/profiler.h"
 #include "mirage/persistent_kernel/runtime_header.h"
-#include "mirage/persistent_kernel/tasks/blackwell_v2/task_interface.cuh"
 #include "mirage/persistent_kernel/tasks/common/copy_sm80.cuh"
 #include <cuda_runtime.h>
 #include <stdint.h>

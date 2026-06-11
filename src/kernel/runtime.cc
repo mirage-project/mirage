@@ -1423,32 +1423,6 @@ TaskGraphResult print_task_graph(
   }
   code.e("}");
 
-  code.e("__device__ __forceinline__");
-  code.e("void _execute_task_with_runtime(TaskDesc const* task_desc,");
-  code.e("                                RuntimeConfig const &runtime_config,");
-  code.e("                                void *runtime_smem) {");
-  code.e("  (void)task_desc;");
-  code.e("  (void)runtime_config;");
-  code.e("  (void)runtime_smem;");
-  first_task = true;
-  for (auto const &task : task_register->all_task_variants) {
-    if (task_register->all_v2_task_role_variants.count(task.first) > 0) {
-      continue;
-    }
-    for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
-      std::string cond = first_task ? "if" : "else if";
-      assert(task_type_to_name.find(task.first) != task_type_to_name.end());
-      code.e("$ (task_desc->task_type == $ && task_desc->variant_id == $) {",
-             cond,
-             task_type_to_name[task.first],
-             variant_id);
-      code.e("$", task.second[variant_id]);
-      code.e("}");
-      first_task = false;
-    }
-  }
-  code.e("}");
-
   generate_v2_role_dispatch_code(code, task_type_to_name, *task_register);
 
   // Single source of the v2 SMEM page geometry: emit the unconditional
