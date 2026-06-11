@@ -539,7 +539,6 @@ if __name__ == "__main__":
                     input=rmsnorm_out,
                     weight=w_qkv,
                     output=attn_in,
-                    tiles_per_task=1,
                 )
             else:
                 mpk.linear_layer(
@@ -633,7 +632,6 @@ if __name__ == "__main__":
                     weight=w,
                     residual=x,
                     output=attn_proj_out,
-                    tiles_per_task=1,
                 )
             elif use_splitk:
                 attn_proj_out = x
@@ -705,7 +703,6 @@ if __name__ == "__main__":
                     input=rmsnorm_out,
                     weight=w_gatedup,
                     output=mlp_mid,
-                    tiles_per_task=1,
                 )
             else:
                 mpk.linear_layer(
@@ -739,7 +736,6 @@ if __name__ == "__main__":
                     weight=w,
                     residual=x,
                     output=mlp_out,
-                    tiles_per_task=1,
                 )
             elif use_splitk:
                 mlp_out = x
@@ -788,7 +784,6 @@ if __name__ == "__main__":
                 input=rmsnorm_out,
                 weight=w_proj,
                 output=argmax_in,
-                tiles_per_task=1,
             )
         else:
             mpk.linear_layer(

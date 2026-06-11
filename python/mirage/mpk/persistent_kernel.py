@@ -1865,18 +1865,19 @@ class PersistentKernel:
         weight: DTensor,
         output: DTensor,
         block_dim: tuple = (192, 1, 1),
-        tiles_per_task: int = 1,
     ):
         """v2 linear: Channel/TmemChannel-based kernel (linear_sm100_v2.cuh).
-        BLOCK_M=128. tiles_per_task=1 is one tile per task; >1 packs that many
-        contiguous tiles per task. grid_dim = ceil(N/128/tiles_per_task)."""
+        BLOCK_M=128, one 128-wide output tile per task (grid_dim = N/128). The
+        kernel's TILES_PER_TASK template is fixed at 1; packing >1 tile per task
+        is unimplemented (a partial last task deadlocks on slot reuse — see the
+        note in linear_sm100_v2.cuh)."""
         assert input.num_dims == 2
         assert weight.num_dims == 2
         assert output.num_dims == 2
         N = weight.dim(0)
         assert N % 128 == 0, f"linear_layer_v2 requires N divisible by 128, got {N}"
         num_tiles = N // 128
-        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
+        num_tasks = num_tiles
         grid_dim = (num_tasks, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input,  (-1, -1, -1), 1, True)
@@ -1884,7 +1885,7 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_sm100_v2",
-                                     [-1, 1, tiles_per_task])
+                                     [-1, 1, 1])
 
     def linear_with_residual_layer_v2(
         self,
@@ -1893,7 +1894,6 @@ class PersistentKernel:
         residual: DTensor,
         output: DTensor,
         block_dim: tuple = (192, 1, 1),
-        tiles_per_task: int = 1,
     ):
         """v2 linear + residual: Channel/TmemChannel kernel
         (linear_sm100_v2.cuh) with the HAS_RESIDUAL consumer path. Inputs are
@@ -1906,7 +1906,7 @@ class PersistentKernel:
         N = weight.dim(0)
         assert N % 128 == 0, f"linear_with_residual_layer_v2 requires N divisible by 128, got {N}"
         num_tiles = N // 128
-        num_tasks = (num_tiles + tiles_per_task - 1) // tiles_per_task
+        num_tasks = num_tiles
         grid_dim = (num_tasks, 1, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input,    (-1, -1, -1), 1, True)
@@ -1915,7 +1915,7 @@ class PersistentKernel:
         tb_graph.new_input(output,   (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100_v2",
-                                     [-1, 1, tiles_per_task])
+                                     [-1, 1, 1])
 
     def linear_with_residual_layer(
         self,
