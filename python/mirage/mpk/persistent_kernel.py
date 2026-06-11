@@ -3010,11 +3010,15 @@ class PersistentKernel:
             export_to_perfetto_trace(
                 self.profiler_tensor, stem + ".perfetto-trace"
             )
-            export_to_csv(self.profiler_tensor, stem + ".csv")
 
             if self.use_v2_runtime:
+                # v2's windowed profiler emits unpaired wait slices (dispatcher
+                # + stall tracks) that export_to_csv's strict begin/end pairing
+                # rejects; v2 analysis goes through prof.py instead.
                 from .prof import print_run_summary
                 print_run_summary(self.profiler_tensor)
+            else:
+                export_to_csv(self.profiler_tensor, stem + ".csv")
 
     def __del__(self):
         if not self.__finalized__:
