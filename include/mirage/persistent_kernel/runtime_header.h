@@ -173,13 +173,20 @@ enum TaskType {
   TASK_PROB_SCATTER_SM100 = 284,
   TASK_MTP_FLOAT_SCATTER = 285,
   TASK_PROB_EXTRACT_SM100 = 286,
-  // MLA-MTP TP variants (q1..q4, kv4096; ferret-derived, no-PDL):
+  // MLA-MTP TP variants (q1..q4, kv4096; ferret-derived, no-PDL).
+  // The TP2/TP4/TP8 decode MAIN tasks stay separate enums: tma.cuh derives
+  // the Q-box height (32/32-env/16) from the task_type, i.e. the TMA
+  // descriptor SHAPE is enum-coupled, which rules out a same-enum merge
+  // without redesigning the descriptor derivation.
   TASK_MLA_MTP_DECODE_TP2_SM100 = 287,
-  TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 = 288,
   TASK_MLA_MTP_DECODE_TP4_SM100 = 289,
-  TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 = 290,
   TASK_MLA_MTP_DECODE_TP8_SM100 = 291,
-  TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
+  // Unified TP reduce: one task for the TP2/TP4/TP8 split-KV reduces (they
+  // need no TMA and share scheduler metadata; the per-TP device function
+  // kernel::mla_mtp_tp{2,4,8}::*_reduce is selected at graph-build time by
+  // the tp argument and baked into the per-instance variant body).
+  // Retired values: 290 (TP4_REDUCE), 292 (TP8_REDUCE).
+  TASK_MLA_MTP_DECODE_TP_REDUCE_SM100 = 288,
   // KV gather variant that writes split CKV/KPE output (for chunked prefill):
   TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
   // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
@@ -196,16 +203,20 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 299,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
-  TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 306,
-  TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 307,
-  // SplitK decode variant of the dense FP8 GEMM. K is partitioned across
-  // SPLIT_K CTAs (per output tile) which atomically reduce-add their
-  // partial sums into a pre-zeroed BF16 output. Targets DSv3 decode
-  // O_proj (M=128 mbt, K=16384 = 32*512 absorbed, N=7168 hidden shard),
-  // where the stock kernel runs 56 tiles in 1 underutilized wave; with
-  // SPLIT_K=4 we run 224 tiles in 3 better-utilized waves, each tile
-  // doing K/4 work. Gated behind MPK_DSV3_DECODE_OPROJ_SPLITK=1.
-  TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 = 308,
+  // Unified dense FP8 GEMM task. One enum covers the whole family —
+  // smallm / mediumm tile flavors, the decode split-K variant, and the
+  // fp8out (epilogue-UE8M0-quantize) flavors. The flavor choice is made at
+  // graph-build time: each registered graph.cc name bakes the corresponding
+  // device function (kernel::fp8_gemm_dense_{smallm,mediumm}::…[,_fp8out],
+  // kernel::fp8_gemm_dense_decode_splitk::…) into its per-instance variant
+  // body, so the megakernel dispatches internally on (task_type,
+  // variant_id). Safe to share one enum because all five former enums had
+  // byte-identical TMA descriptor creation (tma.cuh built A/B descs from
+  // tensor metadata only, BK_BOX=OUTER_BOX=128 for every flavor) and
+  // identical scheduler metadata (request_id = bid.x).
+  // Retired values: 307 (MEDIUMM), 308 (DECODE_SPLITK), 318
+  // (SMALLM_FP8OUT), 319 (MEDIUMM_FP8OUT).
+  TASK_FP8_GEMM_DENSE_SM100 = 306,
   // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize. Replaces
   // the (RMSNorm bf16 -> Quantize fp8) two-task chain that feeds the qkv_a
   // FP8 dense GEMM. Saves one dispatch wave and one bf16 HBM round-trip
@@ -215,6 +226,10 @@ enum TaskType {
   // Fused block_scale MMA with UE8M0 scales. 5 TMA descriptors
   // (A, B, SFA, SFB, D output). Two variants share kernel body; differ
   // in (BN, NS) and corresponding TMA box dim.
+  // NOT merged into one enum: tma.cuh derives the B/SFB TMA box dim from
+  // the task_type (VARIANT_BN = smallm ? 64 : 128), i.e. the descriptor
+  // SHAPE is enum-coupled — the merge precondition (identical per-enum
+  // TMA descriptor shapes) does not hold.
   TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8 (K>4096, MPE<=8)
   TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6 (everything else)
   // Peripheral tasks that adapt the new grouped GEMM's pre-permuted
@@ -236,13 +251,6 @@ enum TaskType {
   // as TASK_FP8_GROUP_GEMM_LARGEM_SM100 (shares its TMA-desc dispatch); the
   // fine-tuned largem kernel stays byte-identical (PR #707 review split).
   TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100 = 317,
-  // D1 (2026-05-17): dense FP8 GEMM with epilogue UE8M0 quantize. Output is
-  // FP8 + packed UE8M0 scale (instead of bf16), eliminating the standalone
-  // per_token_group_quantize_fp8 task that follows q_b_nope in the
-  // MPK_DSV3_BMM=1 Q-up chain. Saves one dispatch + one BF16 HBM round-trip.
-  // Behind `MPK_DSV3_FUSED_QB_QUANTIZE=1`.
-  TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 = 318,
-  TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 = 319,
   // PR696 multi-CTA topk prefill path (default-OFF via MPK_DSV3_TOPK_MULTICTA).
   // The single-CTA topk does marker-init + compaction inline; the multi-CTA
   // variant cannot (cross-CTA marker-init race), so they become separate

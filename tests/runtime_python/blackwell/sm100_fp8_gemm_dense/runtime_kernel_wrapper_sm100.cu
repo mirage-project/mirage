@@ -45,7 +45,7 @@ void check_driver_success(CUresult result, char const *what) {
 
 // Build a 2-D TMA descriptor for an FP8 (uint8) row-major tensor.
 // Matches the production encoding in tma.cuh for
-// TASK_FP8_GEMM_DENSE_SMALLM_SM100:
+// TASK_FP8_GEMM_DENSE_SM100 (smallm flavor):
 //   gd  = {K, outer}   (gmem dims, inner-first)
 //   gs  = {K}          (gmem stride in bytes; fp8 so K bytes per row)
 //   bd  = {128, 128}   (smem box: BK x OUTER_BOX)
