@@ -84,12 +84,13 @@ __device__ __forceinline__ void
   int const warp_idx = thread_idx / WARP_SIZE;
   int const num_groups_per_block = blockDim.x / WARP_SIZE;
 
-  // Each CTA quantizes exactly ONE batch row, selected by blockIdx.x.
-  // Callers must launch grid_dim=(BATCH_SIZE, 1, 1) — one block per row.
-  // BATCH_SIZE is retained as a template parameter for callers to assert
-  // intent, but only blockIdx.x controls which row this CTA processes.
-  int const batch_idx = static_cast<int>(blockIdx.x);
-  int const row_base = batch_idx * GLOBAL_STRIDE;
+  // Under the MPK persistent runtime, blockIdx.x is the PHYSICAL worker id,
+  // not the task's batch row: a task dispatched to worker W quantizes row W
+  // regardless of which row its task pointers describe — corrupting rows and
+  // breaking run-to-run determinism. Fix: each task processes ALL rows
+  // (writes are identical across the redundant per-row task instances).
+  for (int batch_idx = 0; batch_idx < BATCH_SIZE; ++batch_idx) {
+  long const row_base = (long)batch_idx * GLOBAL_STRIDE;
 
 #pragma unroll
   for (int group_idx = warp_idx; group_idx < NUM_GROUPS_PER_ROW;
@@ -157,6 +158,7 @@ __device__ __forceinline__ void
           static_cast<SCALE_PACKED_T>(packed_scale);
     }
   }
+}  // for batch_idx (MPK row-identity fix)
 }
 
 } // namespace kernel
