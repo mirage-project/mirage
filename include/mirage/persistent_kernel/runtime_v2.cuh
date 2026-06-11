@@ -289,49 +289,6 @@ static constexpr int NUM_ROLE_WARPS = 7;
 static constexpr int NUM_WARPS = 8;
 static constexpr int NUM_THREADS = NUM_WARPS * 32;
 
-// --- setmaxnreg experiment (TODO #18 / MegaKernels register-split) ---------
-// 8 warps = 2 warpgroups: WG0 = warps 0-3 (computes), WG1 = warps 4-7
-// (loader/mma/storer/dispatcher). setmaxnreg.sync.aligned operates at
-// warpgroup granularity, so the inc/dec must be issued by every warp of a
-// warpgroup uniformly, at the top of its branch.
-// MPK_SETMAXNREG=0 turns it off. Values: multiples of 8, compute >= launch
-// baseline (inc), helper <= baseline (dec).
-#ifndef MPK_SETMAXNREG
-#define MPK_SETMAXNREG 0
-#endif
-#ifndef MPK_COMPUTE_REGS
-#define MPK_COMPUTE_REGS 256
-#endif
-#ifndef MPK_HELPER_REGS
-#define MPK_HELPER_REGS 64
-#endif
-// MPK_COMPUTE_REGS 0 => skip the compute inc entirely (dec-only test: helper
-// warps release registers, computes keep the launch baseline). Otherwise the
-// launch baseline must be < the inc target, which requires raising the
-// launch_bounds thread count (MPK_LB_THREADS) to lower the per-thread baseline.
-#ifndef MPK_LB_THREADS
-#define MPK_LB_THREADS NUM_THREADS
-#endif
-// Pad the launched block with extra (idle) warps to force the kernel past the
-// register-file ceiling, so setmaxnreg becomes REQUIRED to fit (the MegaKernels
-// regime). Extra warps (warp_id >= NUM_WARPS) just dec their registers and
-// return. Default = no padding.
-#ifndef MPK_LAUNCH_WARPS
-#define MPK_LAUNCH_WARPS NUM_WARPS
-#endif
-static constexpr int MPK_LAUNCH_THREADS = MPK_LAUNCH_WARPS * 32;
-#if MPK_SETMAXNREG && MPK_COMPUTE_REGS > 0
-#define MPK_SETMAXNREG_INC(N)                                                 \
-  asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(N))
-#else
-#define MPK_SETMAXNREG_INC(N)
-#endif
-#if MPK_SETMAXNREG
-#define MPK_SETMAXNREG_DEC(N)                                                 \
-  asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;" ::"n"(N))
-#else
-#define MPK_SETMAXNREG_DEC(N)
-#endif
 static constexpr int INSTRUCTION_RING_SIZE = 3;
 // Match Megakernel's page protocol: page availability is tracked by parity
 // semaphores keyed by the instruction index, not by runtime page ownership.
@@ -1014,24 +971,13 @@ __device__ __noinline__ void dispatcher_warp_loop(
   }
 }
 
-__global__ __launch_bounds__(MPK_LAUNCH_THREADS, 1)
+__global__ __launch_bounds__(NUM_THREADS, 1)
 void worker_v2_kernel(RuntimeConfig config) {
   __shared__ __align__(16) char rt_buf[sizeof(RuntimeSMEM)];
   RuntimeSMEM *rt = reinterpret_cast<RuntimeSMEM *>(rt_buf);
 
   int const warp_id = threadIdx.x / 32;
   int const lane_id = threadIdx.x % 32;
-
-#if defined(MPK_SETMAXNREG_EARLY) && MPK_SETMAXNREG
-  // CUTLASS convention: redistribute registers as the FIRST thing in the
-  // kernel, before any shared-memory ops or __syncthreads. Warpgroup-aligned:
-  // WG0 (computes) inc, all other warpgroups dec.
-  if (warp_id < NUM_COMPUTE_WARPS) {
-    MPK_SETMAXNREG_INC(MPK_COMPUTE_REGS);
-  } else {
-    MPK_SETMAXNREG_DEC(MPK_HELPER_REGS);
-  }
-#endif
 
 #ifdef MPK_ENABLE_PROFILING
   if (threadIdx.x == 0) {
@@ -1059,30 +1005,11 @@ void worker_v2_kernel(RuntimeConfig config) {
   }
   __syncthreads();
 
-#if defined(MPK_MEASURE_ROLE)
-  // Diagnostic: route ALL warps through one role so worker_v2_kernel's
-  // reported register count == that single role's footprint (per-role
-  // register measurement; the dispatch is otherwise fused into one blob).
-  if (MPK_MEASURE_ROLE == 0) compute_warp_loop(rt, config, lane_id);
-  else if (MPK_MEASURE_ROLE == 1) loader_warp_loop(rt, config, lane_id);
-  else if (MPK_MEASURE_ROLE == 2) mma_warp_loop(rt, config, lane_id);
-  else if (MPK_MEASURE_ROLE == 3) storer_warp_loop(rt, config, lane_id);
-  else if (MPK_MEASURE_ROLE == 4) dispatcher_warp_loop(rt, config, lane_id);
-  return;
-#endif
   if (warp_id < NUM_COMPUTE_WARPS) {
-    // WG0 (warps 0-3): all computes. Claim registers for the task bodies.
-#ifndef MPK_SETMAXNREG_EARLY
-    MPK_SETMAXNREG_INC(MPK_COMPUTE_REGS);
-#endif
+    // WG0 (warps 0-3): the compute warps run the task bodies.
     compute_warp_loop(rt, config, lane_id);
   } else {
-    // WG1 (warps 4-7): loader/mma/storer/dispatcher. Release registers
-    // back to the pool BEFORE splitting into per-role branches, so the
-    // setmaxnreg.dec is warpgroup-aligned across all four helper warps.
-#ifndef MPK_SETMAXNREG_EARLY
-    MPK_SETMAXNREG_DEC(MPK_HELPER_REGS);
-#endif
+    // WG1 (warps 4-7): loader/mma/storer/dispatcher.
     if (warp_id == LOADER_WARP) {
       loader_warp_loop(rt, config, lane_id);
     } else if (warp_id == MMA_WARP) {
@@ -1103,7 +1030,7 @@ inline void launch_worker_v2(RuntimeConfig const &config,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem);
   worker_v2_kernel<<<dim3(num_workers, 1, 1),
-                     dim3(MPK_LAUNCH_THREADS, 1, 1),
+                     dim3(NUM_THREADS, 1, 1),
                      smem,
                      stream>>>(config);
 }
