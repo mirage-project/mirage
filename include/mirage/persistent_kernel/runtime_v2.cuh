@@ -53,8 +53,8 @@ static constexpr int V2_PROF_GROUP_MMA_STALL = 7;
 static constexpr int V2_PROF_PREPARE_BATCH = 204;
 static constexpr int V2_PROF_ITER_SYNC = 205;
 static constexpr int V2_PROF_GO_WAIT = 206;
-static constexpr int V2_PROF_DEP_WAIT = 207;   // compute-stall: dep spin
-static constexpr int V2_PROF_PAGE_WAIT = 208;  // loader-stall: page prefix
+static constexpr int V2_PROF_DEP_WAIT = 207;  // compute-stall: dep spin
+static constexpr int V2_PROF_PAGE_WAIT = 208; // loader-stall: page prefix
 // Timed-wait ids (emitted by MPK_V2_TIMED_WAIT at synchronization points;
 // only waits > V2_PROF_WAIT_THRESHOLD_NS produce slices):
 static constexpr int V2_PROF_W_TMA_WAIT = 209;        // mma: TMA landed?
@@ -62,7 +62,7 @@ static constexpr int V2_PROF_MMA_EMPTY_WAIT = 210;    // loader: stage free?
 static constexpr int V2_PROF_TMEM_READY_WAIT = 211;   // compute: tmem addr
 static constexpr int V2_PROF_MAINLOOP_WAIT = 212;     // compute: MMA result
 static constexpr int V2_PROF_EPILOGUE_WAIT = 213;     // mma: tmem slot
-static constexpr int V2_PROF_COMPUTE_DONE_WAIT = 214;// mma tail
+static constexpr int V2_PROF_COMPUTE_DONE_WAIT = 214; // mma tail
 static constexpr unsigned long long V2_PROF_WAIT_THRESHOLD_NS = 2000;
 // Total profiler-buffer entries — MUST match demo.py's profiler_tensor size.
 // Sized for 8 tracks x 128 SMs x 25 windowed iters; the busiest track
@@ -89,8 +89,7 @@ static constexpr size_t V2_PROF_SUFFIX_BASE = V2_PROF_BUF_ENTRIES - 256;
 // DROPPED by the capacity guard (must be 0 in a healthy run — the checker
 // reports it). Everything from MISC_BASE on is reserved tail — the exporter
 // skips it (V2_PROF_TAIL_ENTRIES in profiler_persistent.py must match).
-static constexpr size_t V2_PROF_CURSOR_BASE =
-    V2_PROF_SPIN_BASE - 1024;
+static constexpr size_t V2_PROF_CURSOR_BASE = V2_PROF_SPIN_BASE - 1024;
 static constexpr size_t V2_PROF_MISC_BASE = V2_PROF_CURSOR_BASE - 256;
 // Event-trigger log: a single global ring recording every
 // trigger_task_event() fired inside the profiling window, packed as
@@ -113,13 +112,22 @@ __device__ __forceinline__ unsigned long long v2_prof_now_ns() {
 
 __device__ __forceinline__ int v2_prof_bucket(int task_type) {
   switch (task_type) {
-    case 244: case 245: return 0;   // linear v2 (+residual)
-    case 227: return 1;             // attention
-    case 224: return 2;             // rmsnorm
-    case 225: return 3;             // silu_mul
-    case 228: case 229: return 4;   // argmax
-    case 226: return 5;             // embedding
-    default:  return 6;
+    case 244:
+    case 245:
+      return 0; // linear v2 (+residual)
+    case 227:
+      return 1; // attention
+    case 224:
+      return 2; // rmsnorm
+    case 225:
+      return 3; // silu_mul
+    case 228:
+    case 229:
+      return 4; // argmax
+    case 226:
+      return 5; // embedding
+    default:
+      return 6;
   }
 }
 
@@ -144,10 +152,11 @@ __device__ __forceinline__ void v2_prof_emit(void *prof_buf,
     // capacity guard: never bleed into the reserved tail — but COUNT the
     // drop so the checker can flag a truncated trace.
     atomicAdd(reinterpret_cast<unsigned long long *>(
-                  &buf[V2_PROF_MISC_BASE + blockIdx.x]), 1ULL);
+                  &buf[V2_PROF_MISC_BASE + blockIdx.x]),
+              1ULL);
     return;
   }
-  uint32_t const event_no = (uint32_t)(k >> 1) & 0x3FF;  // pair counter
+  uint32_t const event_no = (uint32_t)(k >> 1) & 0x3FF; // pair counter
   tb::ProfilerEntry e;
   e.tag = tb::encode_tag(track, 0, 0) | (event_idx << tb::EVENT_IDX_SHIFT) |
           (event_no << tb::EVENT_NO_SHIFT) | event_type;
@@ -172,7 +181,8 @@ __device__ __forceinline__ void v2_prof_emit_pair(void *prof_buf,
   size_t const slot1 = slot0 + stride;
   if (slot1 >= V2_PROF_MISC_BASE) {
     atomicAdd(reinterpret_cast<unsigned long long *>(
-                  &buf[V2_PROF_MISC_BASE + blockIdx.x]), 2ULL);
+                  &buf[V2_PROF_MISC_BASE + blockIdx.x]),
+              2ULL);
     return;
   }
   uint32_t const event_no = (uint32_t)(k >> 1) & 0x3FF;
@@ -197,61 +207,63 @@ __device__ __forceinline__ void v2_prof_emit_pair(void *prof_buf,
 //                      iteration boundary (all SMs are barrier-synced per
 //                      iter, so at most one task of fuzz at the edges).
 __device__ void *g_v2_prof_buf = nullptr;
-__device__ volatile int g_v2_prof_window = 0;
+__device__ int volatile g_v2_prof_window = 0;
 
 // Snapshot the ambient window flag ONCE per task body (a volatile global
 // read per wait would put L2 traffic in hot loops for the whole run).
 // Required in scope before any MPK_V2_TIMED_WAIT.
-#define MPK_V2_PROF_SNAPSHOT()                                                \
-  bool const _mpk_prof_on =                                                   \
+#define MPK_V2_PROF_SNAPSHOT()                                                 \
+  bool const _mpk_prof_on =                                                    \
       (g_v2_prof_window != 0) && (g_v2_prof_buf != nullptr);
 
 // Time `expr` (a wait) and emit a stall slice if it exceeded the threshold.
 // Call from a SINGLE thread per (SM, group) — the designated writer of that
 // stall track.
-#define MPK_V2_TIMED_WAIT(group, ev, expr)                                    \
-  do {                                                                        \
-    if (_mpk_prof_on) {                                                       \
-      unsigned long long const _w0 = v2_prof_now_ns();                        \
-      expr;                                                                   \
-      unsigned long long const _w1 = v2_prof_now_ns();                        \
-      if (_w1 - _w0 > V2_PROF_WAIT_THRESHOLD_NS) {                            \
-        v2_prof_emit_pair(g_v2_prof_buf, (group), (ev), _w0, _w1);            \
-      }                                                                       \
-    } else {                                                                  \
-      expr;                                                                   \
-    }                                                                         \
+#define MPK_V2_TIMED_WAIT(group, ev, expr)                                     \
+  do {                                                                         \
+    if (_mpk_prof_on) {                                                        \
+      unsigned long long const _w0 = v2_prof_now_ns();                         \
+      expr;                                                                    \
+      unsigned long long const _w1 = v2_prof_now_ns();                         \
+      if (_w1 - _w0 > V2_PROF_WAIT_THRESHOLD_NS) {                             \
+        v2_prof_emit_pair(g_v2_prof_buf, (group), (ev), _w0, _w1);             \
+      }                                                                        \
+    } else {                                                                   \
+      expr;                                                                    \
+    }                                                                          \
   } while (0)
 #endif
 #ifdef MPK_ENABLE_PROFILING
-#define MPK_V2_PROF_DECL(grp, pred)                                           \
-  PROFILER_CLOSURE_PARAMS_DECL;                                               \
-  uint32_t _prof_ctr = 0;                                                     \
-  PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer), (grp),       \
-                V2_PROF_NUM_GROUPS, (pred));
-#define MPK_V2_PROF_IN_WINDOW(it)                                             \
+#define MPK_V2_PROF_DECL(grp, pred)                                            \
+  PROFILER_CLOSURE_PARAMS_DECL;                                                \
+  uint32_t _prof_ctr = 0;                                                      \
+  PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),               \
+                (grp),                                                         \
+                V2_PROF_NUM_GROUPS,                                            \
+                (pred));
+#define MPK_V2_PROF_IN_WINDOW(it)                                              \
   ((it) + V2_PROF_WINDOW_ITERS >= config.v2_max_iters)
-#define MPK_V2_PROF_START(ev)                                                 \
-  if (MPK_V2_PROF_IN_WINDOW(iter_num)) {                                      \
-    PROFILER_EVENT_START((ev), _prof_ctr);                                    \
+#define MPK_V2_PROF_START(ev)                                                  \
+  if (MPK_V2_PROF_IN_WINDOW(iter_num)) {                                       \
+    PROFILER_EVENT_START((ev), _prof_ctr);                                     \
   }
-#define MPK_V2_PROF_END(ev)                                                   \
-  if (MPK_V2_PROF_IN_WINDOW(iter_num)) {                                      \
-    PROFILER_EVENT_END((ev), _prof_ctr);                                      \
-    _prof_ctr++;                                                              \
+#define MPK_V2_PROF_END(ev)                                                    \
+  if (MPK_V2_PROF_IN_WINDOW(iter_num)) {                                       \
+    PROFILER_EVENT_END((ev), _prof_ctr);                                       \
+    _prof_ctr++;                                                               \
   }
 // Conditionally-timed wait: time `expr` only when `cond` (e.g. cold-start lap),
 // else run it plain. The cond/branch exists ONLY in profiling builds; the
 // non-profiling form (below) is a bare `expr`, textually identical to baseline
 // (sm100 codegen is sensitive to if/else around tcgen05 waits — see
 // sm100_branch_ima). Keeps the production hot loop free of #ifdef blocks.
-#define MPK_V2_TIMED_WAIT_IF(cond, group, ev, expr)                           \
-  do {                                                                        \
-    if (cond) {                                                               \
-      MPK_V2_TIMED_WAIT(group, ev, expr);                                     \
-    } else {                                                                  \
-      expr;                                                                   \
-    }                                                                         \
+#define MPK_V2_TIMED_WAIT_IF(cond, group, ev, expr)                            \
+  do {                                                                         \
+    if (cond) {                                                                \
+      MPK_V2_TIMED_WAIT(group, ev, expr);                                      \
+    } else {                                                                   \
+      expr;                                                                    \
+    }                                                                          \
   } while (0)
 #else
 #define MPK_V2_PROF_DECL(grp, pred)
@@ -314,7 +326,7 @@ static constexpr int MAX_DYNAMIC_SEMAPHORES = 32;
 //   type that needs intra-task cross-warp coordination (e.g. linear's
 //   per-stage TMA→MMA→epilogue handshakes) uses these.
 static constexpr int SEM_DEP_READY = 0;
-static constexpr int SEM_OP_BASE   = 1;
+static constexpr int SEM_OP_BASE = 1;
 
 __device__ __forceinline__ int smem_addr(void const *ptr) {
   return static_cast<int>(__cvta_generic_to_shared(ptr));
@@ -329,31 +341,32 @@ __device__ __forceinline__ bool mbar_poll(int addr, int phase) {
       "{\n\t.reg .pred P;\n\t"
       "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%1], %2, 1;\n\t"
       "selp.b32 %0, 1, 0, P;\n\t}"
-      : "=r"(ok) : "r"(addr), "r"(phase));
+      : "=r"(ok)
+      : "r"(addr), "r"(phase));
   return ok != 0;
 }
 
 __device__ __forceinline__ void mbar_init(uint64_t *mbar, int count) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;"
-               :: "r"(smem_addr(mbar)), "r"(count));
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(smem_addr(mbar)),
+               "r"(count));
 }
 
 __device__ __forceinline__ void mbar_arrive(uint64_t *mbar) {
   // plain mbarrier.arrive defaults to .release.cta, so role warps' .acquire
   // waits already synchronize-with this arrive.
-  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];"
-               :: "r"(smem_addr(mbar)) : "memory");
+  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" ::"r"(smem_addr(mbar))
+               : "memory");
 }
 
 __device__ __forceinline__ void mbar_wait(uint64_t *mbar, int phase) {
   int addr = smem_addr(mbar);
-  asm volatile(
-      "{\n\t.reg .pred P;\n\t"
-      "WAIT: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, [%0], %1, 0x989680;\n\t"
-      "@P bra DONE;\n\t"
-      "bra WAIT;\n\t"
-      "DONE:\n\t}"
-      :: "r"(addr), "r"(phase));
+  asm volatile("{\n\t.reg .pred P;\n\t"
+               "WAIT: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P, "
+               "[%0], %1, 0x989680;\n\t"
+               "@P bra DONE;\n\t"
+               "bra WAIT;\n\t"
+               "DONE:\n\t}" ::"r"(addr),
+               "r"(phase));
 }
 
 __device__ __forceinline__ size_t get_task_iteration_num(TaskId task_id) {
@@ -369,8 +382,7 @@ __device__ __forceinline__ bool is_nvshmem_event(EventId event_id) {
 }
 
 struct RuntimeSMEM {
-  uint64_t instruction_mbarriers[NUM_INSTRUCTION_MBARS]
-                                [INSTRUCTION_RING_SIZE];
+  uint64_t instruction_mbarriers[NUM_INSTRUCTION_MBARS][INSTRUCTION_RING_SIZE];
   uint64_t page_finished[MAX_SMEM_PAGES_PER_TASK][PAGE_SEMAPHORE_BITS];
   uint64_t dynamic_semaphores[INSTRUCTION_RING_SIZE][MAX_DYNAMIC_SEMAPHORES];
   __align__(16) char task_buf[INSTRUCTION_RING_SIZE][sizeof(TaskDesc)];
@@ -409,18 +421,20 @@ __device__ __forceinline__ void init_page_state(RuntimeSMEM *rt) {
   }
 }
 
-__device__ __forceinline__ void runtime_wait_page_ready(
-    RuntimeSMEM *rt, int physical_page, int instruction_index) {
-  #pragma unroll
+__device__ __forceinline__ void runtime_wait_page_ready(RuntimeSMEM *rt,
+                                                        int physical_page,
+                                                        int instruction_index) {
+#pragma unroll
   for (int bit = 0; bit < PAGE_SEMAPHORE_BITS; bit++) {
     int const phase = (instruction_index >> bit) & 1;
     mbar_wait(&rt->page_finished[physical_page][bit], phase);
   }
 }
 
-__device__ __forceinline__ void runtime_finish_page(
-    RuntimeSMEM *rt, int physical_page, int arrive_count = 1) {
-  #pragma unroll
+__device__ __forceinline__ void runtime_finish_page(RuntimeSMEM *rt,
+                                                    int physical_page,
+                                                    int arrive_count = 1) {
+#pragma unroll
   for (int bit = 0; bit < PAGE_SEMAPHORE_BITS; bit++) {
     for (int i = 0; i < arrive_count; i++) {
       mbar_arrive(&rt->page_finished[physical_page][bit]);
@@ -486,12 +500,11 @@ __device__ __noinline__ void wait_task_dependency_noinline(
 // arrived exactly once per slot use (either by the compute prefix here,
 // or by the dispatcher for tasks that skip the compute body — see
 // BEGIN_TASK_GRAPH special case in dispatcher_warp_loop).
-__device__ __noinline__ void compute_dep_prefix(
-    RuntimeConfig const &config,
-    TaskDesc const *task_desc,
-    RuntimeSMEM *rt,
-    int instruction_index,
-    int iter_num) {
+__device__ __noinline__ void compute_dep_prefix(RuntimeConfig const &config,
+                                                TaskDesc const *task_desc,
+                                                RuntimeSMEM *rt,
+                                                int instruction_index,
+                                                int iter_num) {
   int const slot = ring_slot(instruction_index);
   int const phase = ring_phase(instruction_index);
   if (threadIdx.x == 0) {
@@ -500,15 +513,19 @@ __device__ __noinline__ void compute_dep_prefix(
         config.profiler_buffer != nullptr && MPK_V2_PROF_IN_WINDOW(iter_num);
     unsigned long long const _t0 = v2_prof_now_ns();
     if (_in_win) {
-      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_COMPUTE_STALL,
-                   V2_PROF_DEP_WAIT, tb::EVENT_BEGIN);
+      v2_prof_emit(config.profiler_buffer,
+                   V2_PROF_GROUP_COMPUTE_STALL,
+                   V2_PROF_DEP_WAIT,
+                   tb::EVENT_BEGIN);
     }
 #endif
     wait_task_dependency(config, task_desc, iter_num);
 #ifdef MPK_ENABLE_PROFILING
     if (_in_win) {
-      v2_prof_emit(config.profiler_buffer, V2_PROF_GROUP_COMPUTE_STALL,
-                   V2_PROF_DEP_WAIT, tb::EVENT_END);
+      v2_prof_emit(config.profiler_buffer,
+                   V2_PROF_GROUP_COMPUTE_STALL,
+                   V2_PROF_DEP_WAIT,
+                   tb::EVENT_END);
       // aggregate accumulators (ns, bucketed by task type) — kept alongside
       // the trace events for table-style analysis without trace parsing.
       unsigned long long *_spin =
@@ -531,8 +548,8 @@ __device__ __noinline__ void compute_dep_prefix(
   mbar_wait(&rt->dynamic_semaphores[slot][SEM_DEP_READY], phase);
 }
 
-__device__ __forceinline__ void trigger_task_event(
-    RuntimeConfig const &config, TaskDesc const *task) {
+__device__ __forceinline__ void trigger_task_event(RuntimeConfig const &config,
+                                                   TaskDesc const *task) {
   EventId event_id = task->trigger_event;
   if (event_id == EVENT_INVALID_ID || is_nvshmem_event(event_id)) {
     return;
@@ -558,84 +575,84 @@ __device__ __forceinline__ void trigger_task_event(
 
 // Implemented by the generated v2 role dispatch code after this runtime header
 // is included.
-__device__ __forceinline__ void _execute_init_semaphores_v2(
-    TaskDesc const *task_desc,
-    RuntimeConfig const &config,
-    RuntimeSMEM *runtime_smem,
-    int instruction_index,
-    int iter_num);
+__device__ __forceinline__ void
+    _execute_init_semaphores_v2(TaskDesc const *task_desc,
+                                RuntimeConfig const &config,
+                                RuntimeSMEM *runtime_smem,
+                                int instruction_index,
+                                int iter_num);
 
-__device__ __forceinline__ void _execute_loader_task_v2(
-    TaskDesc const *task_desc,
-    RuntimeConfig const &config,
-    RuntimeSMEM *runtime_smem,
-    int instruction_index,
-    int iter_num);
+__device__ __forceinline__ void
+    _execute_loader_task_v2(TaskDesc const *task_desc,
+                            RuntimeConfig const &config,
+                            RuntimeSMEM *runtime_smem,
+                            int instruction_index,
+                            int iter_num);
 
-__device__ __forceinline__ void _execute_mma_task_v2(
-    TaskDesc const *task_desc,
-    RuntimeConfig const &config,
-    RuntimeSMEM *runtime_smem,
-    int instruction_index,
-    int iter_num);
+__device__ __forceinline__ void
+    _execute_mma_task_v2(TaskDesc const *task_desc,
+                         RuntimeConfig const &config,
+                         RuntimeSMEM *runtime_smem,
+                         int instruction_index,
+                         int iter_num);
 
-__device__ __forceinline__ void _execute_compute_task_v2(
-    TaskDesc const *task_desc,
-    RuntimeConfig const &config,
-    RuntimeSMEM *runtime_smem,
-    int instruction_index,
-    int iter_num);
+__device__ __forceinline__ void
+    _execute_compute_task_v2(TaskDesc const *task_desc,
+                             RuntimeConfig const &config,
+                             RuntimeSMEM *runtime_smem,
+                             int instruction_index,
+                             int iter_num);
 
-__device__ __forceinline__ void _execute_storer_task_v2(
-    TaskDesc const *task_desc,
-    RuntimeConfig const &config,
-    RuntimeSMEM *runtime_smem,
-    int instruction_index,
-    int iter_num);
+__device__ __forceinline__ void
+    _execute_storer_task_v2(TaskDesc const *task_desc,
+                            RuntimeConfig const &config,
+                            RuntimeSMEM *runtime_smem,
+                            int instruction_index,
+                            int iter_num);
 
-#define MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(loop_name, execute_task,              \
-                                        prof_group, prof_pred)               \
-  __device__ __noinline__ void loop_name(                                    \
-      RuntimeSMEM *rt, RuntimeConfig const &config, int lane_id) {           \
-    int const worker_id = blockIdx.x;                                        \
-    int const my_count = static_cast<int>(                                   \
-        config.v2_per_sm_task_offsets[worker_id + 1] -                       \
-        config.v2_per_sm_task_offsets[worker_id]);                           \
-    int sequence = 0;                                                        \
-    int iter_num = 0;                                                        \
-    int sequence_in_iter = 0;                                                \
-    /* profiling: one track per role. The compute loop runs on 4 warps,  */ \
-    /* so its predicate must select warp 0 lane 0 (threadIdx.x == 0);     */ \
-    /* single-warp roles use lane_id == 0.                                */ \
-    MPK_V2_PROF_DECL(prof_group, prof_pred)                                  \
-    while (true) {                                                           \
-      int const slot = ring_slot(sequence);                                  \
-      int const phase = ring_phase(sequence);                                \
-      if (lane_id == 0) {                                                    \
-        mbar_wait(&rt->instruction_mbarriers[MBAR_INSTRUCTION_ARRIVED][slot],\
-                  phase);                                                    \
-      }                                                                      \
-      __syncwarp();                                                          \
-      TaskDesc *task = rt->task_slot(slot);                                  \
-      if (task->task_type == TASK_TERMINATE) {                               \
-        return;                                                              \
-      }                                                                      \
-      if (task->task_type != TASK_BEGIN_TASK_GRAPH) {                        \
-        MPK_V2_PROF_START(task->task_type);                                  \
-        execute_task(task, config, rt, sequence, iter_num);                  \
-        MPK_V2_PROF_END(task->task_type);                                    \
-      }                                                                      \
-      if (lane_id == 0) {                                                    \
-        mbar_arrive(                                                         \
-            &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED][slot]);    \
-      }                                                                      \
-      sequence++;                                                            \
-      sequence_in_iter++;                                                    \
-      if (sequence_in_iter == my_count) {                                    \
-        sequence_in_iter = 0;                                                \
-        iter_num++;                                                          \
-      }                                                                      \
-    }                                                                        \
+#define MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(                                       \
+    loop_name, execute_task, prof_group, prof_pred)                            \
+  __device__ __noinline__ void loop_name(                                      \
+      RuntimeSMEM *rt, RuntimeConfig const &config, int lane_id) {             \
+    int const worker_id = blockIdx.x;                                          \
+    int const my_count =                                                       \
+        static_cast<int>(config.v2_per_sm_task_offsets[worker_id + 1] -        \
+                         config.v2_per_sm_task_offsets[worker_id]);            \
+    int sequence = 0;                                                          \
+    int iter_num = 0;                                                          \
+    int sequence_in_iter = 0;                                                  \
+    /* profiling: one track per role. The compute loop runs on 4 warps,  */    \
+    /* so its predicate must select warp 0 lane 0 (threadIdx.x == 0);     */   \
+    /* single-warp roles use lane_id == 0.                                */   \
+    MPK_V2_PROF_DECL(prof_group, prof_pred)                                    \
+    while (true) {                                                             \
+      int const slot = ring_slot(sequence);                                    \
+      int const phase = ring_phase(sequence);                                  \
+      if (lane_id == 0) {                                                      \
+        mbar_wait(&rt->instruction_mbarriers[MBAR_INSTRUCTION_ARRIVED][slot],  \
+                  phase);                                                      \
+      }                                                                        \
+      __syncwarp();                                                            \
+      TaskDesc *task = rt->task_slot(slot);                                    \
+      if (task->task_type == TASK_TERMINATE) {                                 \
+        return;                                                                \
+      }                                                                        \
+      if (task->task_type != TASK_BEGIN_TASK_GRAPH) {                          \
+        MPK_V2_PROF_START(task->task_type);                                    \
+        execute_task(task, config, rt, sequence, iter_num);                    \
+        MPK_V2_PROF_END(task->task_type);                                      \
+      }                                                                        \
+      if (lane_id == 0) {                                                      \
+        mbar_arrive(                                                           \
+            &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED][slot]);      \
+      }                                                                        \
+      sequence++;                                                              \
+      sequence_in_iter++;                                                      \
+      if (sequence_in_iter == my_count) {                                      \
+        sequence_in_iter = 0;                                                  \
+        iter_num++;                                                            \
+      }                                                                        \
+    }                                                                          \
   }
 
 MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(loader_warp_loop,
@@ -662,11 +679,11 @@ MIRAGE_V2_DEFINE_ROLE_WARP_LOOP(storer_warp_loop,
 
 #if defined(MODE_OFFLINE)
 __device__ __forceinline__ bool
-prepare_next_batch(mirage::runtime::RuntimeConfig const &config);
+    prepare_next_batch(mirage::runtime::RuntimeConfig const &config);
 #elif defined(MODE_ONLINE_NOTOKEN)
 __device__ __forceinline__ bool
-prepare_next_batch(mirage::runtime::RuntimeConfig const &config,
-                   size_t iteration_num);
+    prepare_next_batch(mirage::runtime::RuntimeConfig const &config,
+                       size_t iteration_num);
 #endif
 
 namespace mirage {
@@ -678,8 +695,9 @@ namespace runtime_v2 {
 // per-token latency scaled with max_seq_length instead of actual output length.
 __device__ unsigned int g_v2_gen_done = 0;
 
-__device__ __noinline__ void dispatcher_warp_loop(
-    RuntimeSMEM *rt, RuntimeConfig const &config, int lane_id) {
+__device__ __noinline__ void dispatcher_warp_loop(RuntimeSMEM *rt,
+                                                  RuntimeConfig const &config,
+                                                  int lane_id) {
   int const worker_id = blockIdx.x;
   int const num_workers = config.num_workers;
   size_t const my_offset = config.v2_per_sm_task_offsets[worker_id];
@@ -700,7 +718,7 @@ __device__ __noinline__ void dispatcher_warp_loop(
   // wait_finished_and_trigger_through could never reach that later producer,
   // so its event never fired and the whole pipeline froze.
   int triggered_seq[INSTRUCTION_RING_SIZE];
-  #pragma unroll
+#pragma unroll
   for (int s = 0; s < INSTRUCTION_RING_SIZE; s++) {
     triggered_seq[s] = -1;
   }
@@ -711,7 +729,9 @@ __device__ __noinline__ void dispatcher_warp_loop(
   // is reused at s + INSTRUCTION_RING_SIZE (> sequence), so this is safe.
   auto eager_trigger_inflight = [&]() {
     int lo = sequence - INSTRUCTION_RING_SIZE;
-    if (lo < 0) lo = 0;
+    if (lo < 0) {
+      lo = 0;
+    }
     for (int s = lo; s < sequence; s++) {
       int const slot = ring_slot(s);
       if (triggered_seq[slot] == s) {
@@ -735,10 +755,9 @@ __device__ __noinline__ void dispatcher_warp_loop(
       int const done_slot = ring_slot(done_sequence);
       int const done_phase = ring_phase(done_sequence);
       while (!mbar_poll(
-                 smem_addr(
-                     &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED]
-                                               [done_slot]),
-                 done_phase)) {
+          smem_addr(
+              &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED][done_slot]),
+          done_phase)) {
         eager_trigger_inflight();
       }
       eager_trigger_inflight();
@@ -772,7 +791,7 @@ __device__ __noinline__ void dispatcher_warp_loop(
 #endif
         MPK_V2_PROF_END(V2_PROF_PREPARE_BATCH);
 #ifdef MPK_ENABLE_PROFILING
-        _cont = true;  // profiling: run all iters, don't early-exit
+        _cont = true; // profiling: run all iters, don't early-exit
 #endif
         // Mirror v1: prepare_next_batch returns false when generation is done
         // (EOS or step >= max_seq_length). Publish it BEFORE the go-counter
@@ -801,10 +820,13 @@ __device__ __noinline__ void dispatcher_warp_loop(
     // observes it. Mirrors v1, which terminates on prepare_next_batch's return.
     {
       unsigned int _done = 0;
-      if (lane_id == 0)
-        _done = *reinterpret_cast<volatile unsigned int *>(&g_v2_gen_done);
+      if (lane_id == 0) {
+        _done = *reinterpret_cast<unsigned int volatile *>(&g_v2_gen_done);
+      }
       _done = __shfl_sync(0xffffffff, _done, 0);
-      if (_done) break;
+      if (_done) {
+        break;
+      }
     }
 
     for (size_t i = 0; i < my_count; i++) {
@@ -818,8 +840,7 @@ __device__ __noinline__ void dispatcher_warp_loop(
         wait_slot_finished_eager(sequence - INSTRUCTION_RING_SIZE);
       }
 
-      size_t const task_pos =
-          config.v2_per_sm_task_positions[my_offset + i];
+      size_t const task_pos = config.v2_per_sm_task_positions[my_offset + i];
       {
         // The dispatcher warp cooperatively copies one TaskDesc from the
         // compiled global task table into the shared-memory ring slot. The
@@ -835,8 +856,9 @@ __device__ __noinline__ void dispatcher_warp_loop(
         ::kernel::cp_async_fence();
         ::kernel::cp_async_wait<0>();
         // The TaskDesc was copied via cp.async; role warps read it with normal
-        // loads after the INSTRUCTION_ARRIVED mbar. Publish those async writes to
-        // the generic proxy before the arrive. v1 got this implicitly from the
+        // loads after the INSTRUCTION_ARRIVED mbar. Publish those async writes
+        // to the generic proxy before the arrive. v1 got this implicitly from
+        // the
         // __syncthreads after cp_async_wait; v2's warp-specialized handshake
         // doesn't, and the PTX memory model requires the fence here.
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -858,8 +880,8 @@ __device__ __noinline__ void dispatcher_warp_loop(
       // tasks deadlock on page_finished. Dispatcher arrives all pages on
       // BEGIN_TASK_GRAPH's behalf.
       if (lane_id == 0) {
-        _execute_init_semaphores_v2(rt->task_slot(slot), config, rt,
-                                    sequence, iter_num);
+        _execute_init_semaphores_v2(
+            rt->task_slot(slot), config, rt, sequence, iter_num);
         if (rt->task_slot(slot)->task_type == TASK_BEGIN_TASK_GRAPH) {
           mbar_arrive(&rt->dynamic_semaphores[slot][SEM_DEP_READY]);
           for (int p = 0; p < MAX_SMEM_PAGES_PER_TASK; p++) {
@@ -887,8 +909,7 @@ __device__ __noinline__ void dispatcher_warp_loop(
         // because role warps wake on that mbarrier and immediately read
         // rt->task_buf[slot].
         __threadfence_block();
-        mbar_arrive(
-            &rt->instruction_mbarriers[MBAR_INSTRUCTION_ARRIVED][slot]);
+        mbar_arrive(&rt->instruction_mbarriers[MBAR_INSTRUCTION_ARRIVED][slot]);
       }
       __syncwarp();
       sequence++;
@@ -902,15 +923,16 @@ __device__ __noinline__ void dispatcher_warp_loop(
     // global step/token state.
     if (lane_id == 0) {
       int lo = sequence - INSTRUCTION_RING_SIZE;
-      if (lo < 0) lo = 0;
+      if (lo < 0) {
+        lo = 0;
+      }
       for (int s = lo; s < sequence; s++) {
         int const slot = ring_slot(s);
         int const ph = ring_phase(s);
         while (!mbar_poll(
-                   smem_addr(
-                       &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED]
-                                                 [slot]),
-                   ph)) {
+            smem_addr(
+                &rt->instruction_mbarriers[MBAR_INSTRUCTION_FINISHED][slot]),
+            ph)) {
           eager_trigger_inflight();
         }
       }
@@ -918,8 +940,8 @@ __device__ __noinline__ void dispatcher_warp_loop(
     }
     __syncwarp();
 
-    // All workers must finish the current iteration before any worker starts the
-    // next prepare_next_batch. The system fence orders this worker's event
+    // All workers must finish the current iteration before any worker starts
+    // the next prepare_next_batch. The system fence orders this worker's event
     // updates before it increments the cross-worker iteration counter.
     __threadfence_system();
     if (lane_id == 0) {
@@ -947,8 +969,8 @@ __device__ __noinline__ void dispatcher_warp_loop(
     }
   }
 
-  // Publish a terminate instruction through the same instruction_arrived path so
-  // all role warps leave their role_warp_loop cleanly.
+  // Publish a terminate instruction through the same instruction_arrived path
+  // so all role warps leave their role_warp_loop cleanly.
   int const term_slot = ring_slot(sequence);
   if (sequence >= INSTRUCTION_RING_SIZE) {
     wait_slot_finished_eager(sequence - INSTRUCTION_RING_SIZE);
@@ -961,8 +983,8 @@ __device__ __noinline__ void dispatcher_warp_loop(
   }
 }
 
-__global__ __launch_bounds__(NUM_THREADS, 1)
-void worker_v2_kernel(RuntimeConfig config) {
+__global__ __launch_bounds__(NUM_THREADS,
+                             1) void worker_v2_kernel(RuntimeConfig config) {
   __shared__ __align__(16) char rt_buf[sizeof(RuntimeSMEM)];
   RuntimeSMEM *rt = reinterpret_cast<RuntimeSMEM *>(rt_buf);
 
@@ -1020,9 +1042,8 @@ inline void launch_worker_v2(RuntimeConfig const &config,
   // MAX_DYNAMIC_SHARED_MEMORY_SIZE. MUST be >= v2_smem_planner.CAPACITY_BYTES
   // so the kernel allocates every page the planner may place into.
   int smem = 225 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
-  cudaFuncSetAttribute(worker_v2_kernel,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem);
+  cudaFuncSetAttribute(
+      worker_v2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
   worker_v2_kernel<<<dim3(num_workers, 1, 1),
                      dim3(NUM_THREADS, 1, 1),
                      smem,

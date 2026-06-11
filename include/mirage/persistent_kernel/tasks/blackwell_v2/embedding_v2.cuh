@@ -20,8 +20,8 @@ namespace v2 {
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>
 __device__ __forceinline__ void
     embedding_kernel(void const *__restrict__ input_ptr,
-                            void const *__restrict__ embedding_ptr,
-                            void *__restrict__ output_ptr) {
+                     void const *__restrict__ embedding_ptr,
+                     void *__restrict__ output_ptr) {
   if (threadIdx.x >= CONSUMER_NUM_THREADS) {
     return;
   }
@@ -37,9 +37,9 @@ __device__ __forceinline__ void
   // because OUTPUT_DIM_SIZE elements are a multiple of 16B. Falls back to
   // the scalar copy otherwise.
   constexpr int VEC = 16 / sizeof(T);
-  bool const aligned =
-      ((reinterpret_cast<uintptr_t>(embedding) |
-        reinterpret_cast<uintptr_t>(output)) & 15) == 0;
+  bool const aligned = ((reinterpret_cast<uintptr_t>(embedding) |
+                         reinterpret_cast<uintptr_t>(output)) &
+                        15) == 0;
   if constexpr (CHUNK_SIZE % VEC == 0 && OUTPUT_DIM_SIZE % VEC == 0) {
     if (aligned) {
       constexpr int NVEC = CHUNK_SIZE / VEC;

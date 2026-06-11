@@ -604,7 +604,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "rmsnorm_hopper_v2") {
     int variant_id = task_register->register_rmsnorm_hopper_v2_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_RMS_NORM_HOPPER_V2, variant_id);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_RMS_NORM_HOPPER_V2, variant_id);
   } else if (name == "silu_mul_v2") {
     int variant_id =
         task_register->register_silu_mul_v2_task(customized->bgraph, params);

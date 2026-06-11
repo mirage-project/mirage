@@ -59,7 +59,8 @@ struct TaskRoleVariantCode {
   //     (emitted even if the task has no loader body of its own).
   //   - auto_compute_finish: codegen appends each compute with a call that
   //     releases the pages this task used. Set false for tasks that release
-  //     pages incrementally inside their body (e.g. linear, per pipeline stage).
+  //     pages incrementally inside their body (e.g. linear, per pipeline
+  //     stage).
   bool auto_loader_page_lifecycle = true;
   bool auto_compute_finish = true;
 };

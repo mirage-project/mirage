@@ -29,19 +29,19 @@ namespace rmsnorm_v2 {
 
 // Region ordinals — index into the regions[] make_smem_info() builds and the
 // smem_region_offset(...) calls in RmsNormBuffers.
-inline constexpr int REGION_INPUT  = 0;
+inline constexpr int REGION_INPUT = 0;
 inline constexpr int REGION_WEIGHT = 1;
 inline constexpr int REGION_OUTPUT = 2;
 inline constexpr int REGION_REDUCE = 3;
-inline constexpr int NUM_REGIONS   = 4;
+inline constexpr int NUM_REGIONS = 4;
 
-inline constexpr int ALIGN = 1024;  // keeps TMA-swizzle (128B) safe
+inline constexpr int ALIGN = 1024; // keeps TMA-swizzle (128B) safe
 
 // Raw (unpadded) per-region byte sizes. These are the single source for the
 // region sizes: the device SmemBuffer<> views in RmsNormBuffers compute from
 // the same two functions, so there's no second copy of the formula to drift.
 inline constexpr int raw_buffer_bytes(int t_size_bytes, int hidden_dim) {
-  return t_size_bytes * hidden_dim;  // input / weight / output
+  return t_size_bytes * hidden_dim; // input / weight / output
 }
 inline constexpr int raw_reduce_bytes(int num_threads) {
   return (int)sizeof(float) * num_threads;
@@ -54,17 +54,23 @@ inline constexpr int round_up(int n, int align) {
 // release_step is uniform across all four regions: the task holds every buffer
 // until the final store. Finer granularity would need splitting the kernel.
 inline ::mirage::runtime::TaskSmemInfo
-make_smem_info(int t_size_bytes, int hidden_dim, int num_threads) {
-  int const buf    = round_up(raw_buffer_bytes(t_size_bytes, hidden_dim), ALIGN);
+    make_smem_info(int t_size_bytes, int hidden_dim, int num_threads) {
+  int const buf = round_up(raw_buffer_bytes(t_size_bytes, hidden_dim), ALIGN);
   int const reduce = round_up(raw_reduce_bytes(num_threads), ALIGN);
 
   // Index by REGION_* so the ordinals are the single source of order: the
   // device addresses these same ordinals via smem_region_offset(REGION_*).
   ::mirage::runtime::TaskSmemInfo info{3 * buf + reduce, ALIGN, {}};
   info.regions.resize(NUM_REGIONS);
-  info.regions[REGION_INPUT]  = {"input",  buf,    ALIGN, -1, /*can_pack=*/true, /*release_step=*/2, /*contiguous=*/true};
-  info.regions[REGION_WEIGHT] = {"weight", buf,    ALIGN, -1, true, 2, true};
-  info.regions[REGION_OUTPUT] = {"output", buf,    ALIGN, -1, true, 2, true};
+  info.regions[REGION_INPUT] = {"input",
+                                buf,
+                                ALIGN,
+                                -1,
+                                /*can_pack=*/true,
+                                /*release_step=*/2,
+                                /*contiguous=*/true};
+  info.regions[REGION_WEIGHT] = {"weight", buf, ALIGN, -1, true, 2, true};
+  info.regions[REGION_OUTPUT] = {"output", buf, ALIGN, -1, true, 2, true};
   info.regions[REGION_REDUCE] = {"reduce", reduce, ALIGN, -1, true, 2, true};
   return info;
 }

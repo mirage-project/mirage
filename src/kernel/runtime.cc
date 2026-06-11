@@ -1105,10 +1105,12 @@ TaskGraphResult print_task_graph(
     code.e("#ifdef USE_RUNTIME_V2");
     code.e("if (json_task_graph.contains(\"v2_worker_task_queues\")) {");
     code.e("  ::mirage::runtime_v2::g_v2_worker_task_queues.clear();");
-    code.e("  for (json const &q : json_task_graph[\"v2_worker_task_queues\"]) {");
+    code.e(
+        "  for (json const &q : json_task_graph[\"v2_worker_task_queues\"]) {");
     code.e("    std::vector<size_t> queue;");
     code.e("    for (json const &t : q) queue.push_back(t.get<size_t>());");
-    code.e("    ::mirage::runtime_v2::g_v2_worker_task_queues.push_back(queue);");
+    code.e(
+        "    ::mirage::runtime_v2::g_v2_worker_task_queues.push_back(queue);");
     code.e("  }");
     code.e("}");
     code.e("#endif");
@@ -1128,7 +1130,8 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_offset\").get<int>();");
     code.e("if (task.contains(\"planned_smem_page_regions\")) {");
     code.e("int region_idx = 0;");
-    code.e("for (json const &region : task.at(\"planned_smem_page_regions\")) {");
+    code.e(
+        "for (json const &region : task.at(\"planned_smem_page_regions\")) {");
     code.e("if (region_idx >= MAX_SMEM_REGIONS_PER_TASK) {");
     code.e("  throw std::runtime_error(\"task declares more than \" "
            "\"MAX_SMEM_REGIONS_PER_TASK SMEM regions\");");

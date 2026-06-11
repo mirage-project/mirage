@@ -25,18 +25,23 @@ namespace kernel {
 // scratch arrays (one per warp, max 32 warps): idx i64 + val T.
 template <typename T>
 struct ArgmaxBuffers {
-    using IdxBuf = mirage::runtime_v2::SmemBuffer<::kernel::argmax_v2::raw_idx_bytes(),
-                                                  ::kernel::argmax_v2::IDX_ALIGN>;
-    using ValBuf = mirage::runtime_v2::SmemBuffer<::kernel::argmax_v2::raw_val_bytes(sizeof(T)),
-                                                  ::kernel::argmax_v2::VAL_ALIGN>;
+  using IdxBuf =
+      mirage::runtime_v2::SmemBuffer<::kernel::argmax_v2::raw_idx_bytes(),
+                                     ::kernel::argmax_v2::IDX_ALIGN>;
+  using ValBuf =
+      mirage::runtime_v2::SmemBuffer<::kernel::argmax_v2::raw_val_bytes(
+                                         sizeof(T)),
+                                     ::kernel::argmax_v2::VAL_ALIGN>;
 
-    IdxBuf idxs;
-    ValBuf vals;
+  IdxBuf idxs;
+  ValBuf vals;
 
-    __device__ explicit ArgmaxBuffers(
-        char *smem, mirage::runtime::TaskDesc const *task_desc)
-        : idxs(smem + task_desc->smem_region_offset(::kernel::argmax_v2::REGION_IDX)),
-          vals(smem + task_desc->smem_region_offset(::kernel::argmax_v2::REGION_VAL)) {}
+  __device__ explicit ArgmaxBuffers(char *smem,
+                                    mirage::runtime::TaskDesc const *task_desc)
+      : idxs(smem +
+             task_desc->smem_region_offset(::kernel::argmax_v2::REGION_IDX)),
+        vals(smem +
+             task_desc->smem_region_offset(::kernel::argmax_v2::REGION_VAL)) {}
 };
 
 // Cross-check: ArgmaxBuffers above and make_smem_info() in argmax_v2_spec.h
@@ -60,9 +65,8 @@ __device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val,
 }
 
 template <typename T>
-__device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
-                                                           long long &idx,
-                                                           mirage::runtime::TaskDesc const *task_desc) {
+__device__ __forceinline__ void block_reduce_max_idx_sm100(
+    T &val, long long &idx, mirage::runtime::TaskDesc const *task_desc) {
   // Buffer layout: 128-byte aligned idx scratch + tightly-packed val scratch.
   extern __shared__ char smem[];
   ArgmaxBuffers<T> bufs(smem, task_desc);
@@ -102,24 +106,24 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
   }
 }
 
-	template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
-	__device__ __forceinline__ void
-	    argmax_partial_sm100_kernel(void const *__restrict__ input_ptr,
-		                                void *__restrict__ output_val_ptr,
-		                                void *__restrict__ output_idx_ptr,
-		                                mirage::runtime::TaskDesc const *task_desc,
-		                                int num_active_tokens,
-		                                void *runtime_smem) {
-	  T const *__restrict__ input = static_cast<T const *>(input_ptr);
-	  T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
-	  long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
-	
-	  int tidx = threadIdx.x;
-	
-	  if (tidx < NUM_THREADS) {
-	
-	// TODO: try vectorize
-	#pragma unroll
+template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
+__device__ __forceinline__ void
+    argmax_partial_sm100_kernel(void const *__restrict__ input_ptr,
+                                void *__restrict__ output_val_ptr,
+                                void *__restrict__ output_idx_ptr,
+                                mirage::runtime::TaskDesc const *task_desc,
+                                int num_active_tokens,
+                                void *runtime_smem) {
+  T const *__restrict__ input = static_cast<T const *>(input_ptr);
+  T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
+  long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
+
+  int tidx = threadIdx.x;
+
+  if (tidx < NUM_THREADS) {
+
+// TODO: try vectorize
+#pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
       long long local_idx = -1;
@@ -136,30 +140,30 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
 
       if (tidx == 0) {
         output_val[batch_idx * NUM_PARTIAL_TASKS] = local_max;
-	        output_idx[batch_idx * NUM_PARTIAL_TASKS] = local_idx;
-	      }
-	    }
-	  }
-	}
+        output_idx[batch_idx * NUM_PARTIAL_TASKS] = local_idx;
+      }
+    }
+  }
+}
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
-	    argmax_reduce_sm100_kernel(void const *__restrict__ input_val_ptr,
-		                               void const *__restrict__ input_idx_ptr,
-		                               void *__restrict__ final_output_ptr,
-		                               mirage::runtime::TaskDesc const *task_desc,
-		                               int num_active_tokens,
-		                               void *runtime_smem) {
-	  T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
+    argmax_reduce_sm100_kernel(void const *__restrict__ input_val_ptr,
+                               void const *__restrict__ input_idx_ptr,
+                               void *__restrict__ final_output_ptr,
+                               mirage::runtime::TaskDesc const *task_desc,
+                               int num_active_tokens,
+                               void *runtime_smem) {
+  T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
   long long const *__restrict__ partial_idxs =
       static_cast<long long const *>(input_idx_ptr);
-	  long long *__restrict__ final_output =
-	      static_cast<long long *>(final_output_ptr);
-	
-	  int tidx = threadIdx.x;
-	  if (tidx < NUM_THREADS) {
-	// TODO: try vectorize
-	#pragma unroll
+  long long *__restrict__ final_output =
+      static_cast<long long *>(final_output_ptr);
+
+  int tidx = threadIdx.x;
+  if (tidx < NUM_THREADS) {
+// TODO: try vectorize
+#pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
       // Pack (chunk_index, relative_index) into a single 64-bit integer
@@ -186,11 +190,11 @@ __device__ __forceinline__ void
               winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
         } else {
           final_output[batch_idx] = -1;
-	        }
-	      }
-	    }
-	  }
-	}
+        }
+      }
+    }
+  }
+}
 
 } // namespace v2
 } // namespace kernel

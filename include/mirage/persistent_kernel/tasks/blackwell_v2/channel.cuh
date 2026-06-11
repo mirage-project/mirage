@@ -44,27 +44,27 @@ namespace mpk {
 namespace ch {
 
 using ::kernel::sm100_ptx::mbar_init;
-using ::kernel::sm100_ptx::mbar_wait;
 using ::kernel::sm100_ptx::mbar_tx;
+using ::kernel::sm100_ptx::mbar_wait;
 using ::kernel::sm100_ptx::tcgen05_commit;
 
 // plain synchronous arrival (not in sm100_ptx)
 __device__ __forceinline__ void mbar_arrive(int addr) {
-  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" ::"r"(addr)
-               : "memory");
+  asm volatile(
+      "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" ::"r"(addr)
+      : "memory");
 }
 
 // 3D TMA load — bytes land in SMEM @ dst, arrives mbar on completion.
-__device__ __forceinline__ void
-cp_async_bulk_tensor_3d(int dst, void const *tmap, int x, int y, int z,
-                        int mbar, uint64_t hint) {
-  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global."
-               "mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint "
-               "[%0], [%1, {%2, %3, %4}], [%5], %6;"
-               :
-               : "r"(dst), "l"(tmap), "r"(x), "r"(y), "r"(z), "r"(mbar),
-                 "l"(hint)
-               : "memory");
+__device__ __forceinline__ void cp_async_bulk_tensor_3d(
+    int dst, void const *tmap, int x, int y, int z, int mbar, uint64_t hint) {
+  asm volatile(
+      "cp.async.bulk.tensor.3d.shared::cluster.global."
+      "mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint "
+      "[%0], [%1, {%2, %3, %4}], [%5], %6;"
+      :
+      : "r"(dst), "l"(tmap), "r"(x), "r"(y), "r"(z), "r"(mbar), "l"(hint)
+      : "memory");
 }
 
 enum class By { Warp, Tma, Mma };
@@ -81,21 +81,25 @@ enum class By { Warp, Tma, Mma };
 // ────────────────────────────────────────────────────────────────────────────
 template <int DEPTH, By PROD, By CONS>
 struct Channel {
-  int full;                  // SMEM byte addr of full[0]  (stride 8)
-  int empty;                 // SMEM byte addr of empty[0] (stride 8)
+  int full;  // SMEM byte addr of full[0]  (stride 8)
+  int empty; // SMEM byte addr of empty[0] (stride 8)
 
-  static constexpr int  depth      = DEPTH;
+  static constexpr int depth = DEPTH;
   static constexpr bool prod_async = (PROD != By::Warp);
   static constexpr bool cons_async = (CONS != By::Warp);
 
-  __device__ int full_mbar (int s) const { return full  + s * 8; }
-  __device__ int empty_mbar(int s) const { return empty + s * 8; }
+  __device__ int full_mbar(int s) const {
+    return full + s * 8;
+  }
+  __device__ int empty_mbar(int s) const {
+    return empty + s * 8;
+  }
 
   // controller warp, once per task. empty_arrivals = #arrivers of the empty
   // edge (1 for an MMA-commit release, 4*32 for a 128-thread warp release).
   __device__ void init(int empty_arrivals) const {
     for (int s = 0; s < DEPTH; s++) {
-      mbar_init(full_mbar(s),  1);
+      mbar_init(full_mbar(s), 1);
       mbar_init(empty_mbar(s), empty_arrivals);
     }
   }
@@ -107,13 +111,17 @@ struct Channel {
   // hasn't issued any wait on these mbars yet (the producer's first arrive
   // is what unblocks the consumer's first wait), so the re-init is race-free.
   __device__ void reinit_full() const {
-    for (int s = 0; s < DEPTH; s++) mbar_init(full_mbar(s), 1);
+    for (int s = 0; s < DEPTH; s++) {
+      mbar_init(full_mbar(s), 1);
+    }
     asm volatile("fence.mbarrier_init.release.cluster;");
   }
 
   // Re-init only the EMPTY mbars (consumer's outbound).
   __device__ void reinit_empty(int empty_arrivals) const {
-    for (int s = 0; s < DEPTH; s++) mbar_init(empty_mbar(s), empty_arrivals);
+    for (int s = 0; s < DEPTH; s++) {
+      mbar_init(empty_mbar(s), empty_arrivals);
+    }
     asm volatile("fence.mbarrier_init.release.cluster;");
   }
 };
@@ -126,24 +134,41 @@ struct Channel {
 // `st` is read-only from outside; only the cursor advances it.
 template <class Ch>
 struct Producer {
-  Ch  ch;
+  Ch ch;
   int st = 0;
-  int ph = 1;          // pre-empty: slots start free; first DEPTH wait_frees pass
+  int ph = 1; // pre-empty: slots start free; first DEPTH wait_frees pass
 
-  __device__ int full_mbar() const { return ch.full_mbar(st); }
+  __device__ int full_mbar() const {
+    return ch.full_mbar(st);
+  }
 
   // Wait until the current slot is free to overwrite. Returns nothing — the
   // role looks up the SMEM address from the SmemRing at this stage.
-  __device__ void wait_free() { mbar_wait(ch.empty_mbar(st), ph); }
+  __device__ void wait_free() {
+    mbar_wait(ch.empty_mbar(st), ph);
+  }
 
-  __device__ void advance() { if (++st == Ch::depth) { st = 0; ph ^= 1; } }
+  __device__ void advance() {
+    if (++st == Ch::depth) {
+      st = 0;
+      ph ^= 1;
+    }
+  }
 
   // commit variants — pick by how the producer fills the slot.
-  __device__ void commit_warp() { mbar_arrive   (ch.full_mbar(st)); advance(); }
-  __device__ void commit_mma()  { tcgen05_commit(ch.full_mbar(st)); advance(); }
+  __device__ void commit_warp() {
+    mbar_arrive(ch.full_mbar(st));
+    advance();
+  }
+  __device__ void commit_mma() {
+    tcgen05_commit(ch.full_mbar(st));
+    advance();
+  }
   // commit_tma(): the cp.async.bulk the role issued already carries full_mbar,
   // so the TMA engine arrives it asynchronously; we only advance the cursor.
-  __device__ void commit_tma()  { advance(); }
+  __device__ void commit_tma() {
+    advance();
+  }
 };
 
 // ---- Consumer cursor (held by the warp(s) that drain the channel) ----------
@@ -152,20 +177,35 @@ struct Producer {
 // via ring.release_pages(c.st, rt) at the release point.
 template <class Ch>
 struct Consumer {
-  Ch  ch;
+  Ch ch;
   int st = 0;
   int ph = 0;
 
-  __device__ int full_mbar() const { return ch.full_mbar(st); }
+  __device__ int full_mbar() const {
+    return ch.full_mbar(st);
+  }
 
   // Wait until the current slot has data. Returns nothing — role indexes the
   // SmemRing for the read address.
-  __device__ void wait_full() { mbar_wait(ch.full_mbar(st), ph); }
+  __device__ void wait_full() {
+    mbar_wait(ch.full_mbar(st), ph);
+  }
 
-  __device__ void advance() { if (++st == Ch::depth) { st = 0; ph ^= 1; } }
+  __device__ void advance() {
+    if (++st == Ch::depth) {
+      st = 0;
+      ph ^= 1;
+    }
+  }
 
-  __device__ void release_warp() { mbar_arrive   (ch.empty_mbar(st)); advance(); }
-  __device__ void release_mma()  { tcgen05_commit(ch.empty_mbar(st)); advance(); }
+  __device__ void release_warp() {
+    mbar_arrive(ch.empty_mbar(st));
+    advance();
+  }
+  __device__ void release_mma() {
+    tcgen05_commit(ch.empty_mbar(st));
+    advance();
+  }
 };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -183,8 +223,10 @@ struct Consumer {
 //                   owning stage releases it (refcounted, so packed sub-page
 //                   stages that share a page are handled — partial release is a
 //                   no-op until the page is fully done).
-//   * acquire(s)  — wait the prior task's free of stage s's pages before writing.
-//   * owns(pg)    — does this ring own physical page pg (so a task-end sweep can
+//   * acquire(s)  — wait the prior task's free of stage s's pages before
+//   writing.
+//   * owns(pg)    — does this ring own physical page pg (so a task-end sweep
+//   can
 //                   free the pages NO ring owns — scratch/unused — in parallel,
 //                   each lane its own page, with no broadcast).
 // PAGES_PER_SLOT==0 → storage-only ring; all page methods compile to nothing
@@ -193,21 +235,28 @@ struct Consumer {
 template <int DEPTH, int PAGES_PER_SLOT = 0>
 struct SmemRing {
   int slot_offsets[DEPTH];
-  int pages[DEPTH][PAGES_PER_SLOT > 0 ? PAGES_PER_SLOT : 1];  // physical page ids
+  int pages[DEPTH]
+           [PAGES_PER_SLOT > 0 ? PAGES_PER_SLOT : 1]; // physical page ids
 
-  static constexpr int depth          = DEPTH;
+  static constexpr int depth = DEPTH;
   static constexpr int pages_per_slot = PAGES_PER_SLOT;
 
-  __device__ int slot_addr(int s) const { return slot_offsets[s]; }
+  __device__ int slot_addr(int s) const {
+    return slot_offsets[s];
+  }
 
   // Does this ring own physical page pg? (for the task-end sweep over pages no
   // ring owns). PAGES_PER_SLOT==0 → owns nothing.
   __device__ bool owns(int pg) const {
-    if constexpr (PAGES_PER_SLOT > 0)
+    if constexpr (PAGES_PER_SLOT > 0) {
       for (int s = 0; s < DEPTH; s++)
-        #pragma unroll
-        for (int p = 0; p < PAGES_PER_SLOT; p++)
-          if (pages[s][p] == pg) return true;
+#pragma unroll
+        for (int p = 0; p < PAGES_PER_SLOT; p++) {
+          if (pages[s][p] == pg) {
+            return true;
+          }
+        }
+    }
     return false;
   }
 
@@ -216,17 +265,22 @@ struct SmemRing {
   template <class RT, class FinishPageFn>
   __device__ void release(int s, RT *rt, FinishPageFn finish_page) const {
     if constexpr (PAGES_PER_SLOT > 0)
-      #pragma unroll
-      for (int p = 0; p < PAGES_PER_SLOT; p++) finish_page(rt, pages[s][p], 1);
+#pragma unroll
+      for (int p = 0; p < PAGES_PER_SLOT; p++) {
+        finish_page(rt, pages[s][p], 1);
+      }
   }
 
   template <class RT, class WaitPageFn>
-  __device__ void acquire(int s, RT *rt, int instruction_index,
+  __device__ void acquire(int s,
+                          RT *rt,
+                          int instruction_index,
                           WaitPageFn wait_page_ready) const {
     if constexpr (PAGES_PER_SLOT > 0)
-      #pragma unroll
-      for (int p = 0; p < PAGES_PER_SLOT; p++)
+#pragma unroll
+      for (int p = 0; p < PAGES_PER_SLOT; p++) {
         wait_page_ready(rt, pages[s][p], instruction_index);
+      }
   }
 };
 
@@ -239,33 +293,41 @@ struct SmemRing {
 // ────────────────────────────────────────────────────────────────────────────
 template <int SLOTS, By PROD, By CONS>
 struct TmemChannel {
-  int cols_per_slot;   // = TMEM columns per slot (e.g. BLOCK_N=16)
-  int full;            // SMEM byte addr of full[0]  (stride 8)
-  int empty;           // SMEM byte addr of empty[0] (stride 8)
+  int cols_per_slot; // = TMEM columns per slot (e.g. BLOCK_N=16)
+  int full;          // SMEM byte addr of full[0]  (stride 8)
+  int empty;         // SMEM byte addr of empty[0] (stride 8)
 
-  static constexpr int  slots      = SLOTS;
+  static constexpr int slots = SLOTS;
   static constexpr bool prod_async = (PROD != By::Warp);
   static constexpr bool cons_async = (CONS != By::Warp);
 
-  __device__ int full_mbar (int s) const { return full  + s * 8; }
-  __device__ int empty_mbar(int s) const { return empty + s * 8; }
+  __device__ int full_mbar(int s) const {
+    return full + s * 8;
+  }
+  __device__ int empty_mbar(int s) const {
+    return empty + s * 8;
+  }
 
   __device__ void init(int empty_arrivals) const {
     for (int s = 0; s < SLOTS; s++) {
-      mbar_init(full_mbar(s),  1);
+      mbar_init(full_mbar(s), 1);
       mbar_init(empty_mbar(s), empty_arrivals);
     }
   }
 
   // Re-init only the FULL mbars (TmemProducer's outbound).
   __device__ void reinit_full() const {
-    for (int s = 0; s < SLOTS; s++) mbar_init(full_mbar(s), 1);
+    for (int s = 0; s < SLOTS; s++) {
+      mbar_init(full_mbar(s), 1);
+    }
     asm volatile("fence.mbarrier_init.release.cluster;");
   }
 
   // Re-init only the EMPTY mbars (TmemConsumer's outbound).
   __device__ void reinit_empty(int empty_arrivals) const {
-    for (int s = 0; s < SLOTS; s++) mbar_init(empty_mbar(s), empty_arrivals);
+    for (int s = 0; s < SLOTS; s++) {
+      mbar_init(empty_mbar(s), empty_arrivals);
+    }
     asm volatile("fence.mbarrier_init.release.cluster;");
   }
 };
@@ -273,21 +335,36 @@ struct TmemChannel {
 template <class TCh>
 struct TmemProducer {
   TCh ch;
-  int taddr = 0;       // TMEM base column — set after tcgen05.alloc
+  int taddr = 0; // TMEM base column — set after tcgen05.alloc
   int st = 0;
   int ph = 1;
 
-  __device__ void set_taddr(int t) { taddr = t; }
+  __device__ void set_taddr(int t) {
+    taddr = t;
+  }
 
   __device__ int wait_free() {
     mbar_wait(ch.empty_mbar(st), ph);
     return taddr + st * ch.cols_per_slot;
   }
-  __device__ int full_mbar() const { return ch.full_mbar(st); }
-  __device__ void advance() { if (++st == TCh::slots) { st = 0; ph ^= 1; } }
+  __device__ int full_mbar() const {
+    return ch.full_mbar(st);
+  }
+  __device__ void advance() {
+    if (++st == TCh::slots) {
+      st = 0;
+      ph ^= 1;
+    }
+  }
 
-  __device__ void commit_mma()  { tcgen05_commit(ch.full_mbar(st)); advance(); }
-  __device__ void commit_warp() { mbar_arrive   (ch.full_mbar(st)); advance(); }
+  __device__ void commit_mma() {
+    tcgen05_commit(ch.full_mbar(st));
+    advance();
+  }
+  __device__ void commit_warp() {
+    mbar_arrive(ch.full_mbar(st));
+    advance();
+  }
 };
 
 template <class TCh>
@@ -297,16 +374,29 @@ struct TmemConsumer {
   int st = 0;
   int ph = 0;
 
-  __device__ void set_taddr(int t) { taddr = t; }
+  __device__ void set_taddr(int t) {
+    taddr = t;
+  }
 
   __device__ int wait_full() {
     mbar_wait(ch.full_mbar(st), ph);
     return taddr + st * ch.cols_per_slot;
   }
-  __device__ void advance() { if (++st == TCh::slots) { st = 0; ph ^= 1; } }
+  __device__ void advance() {
+    if (++st == TCh::slots) {
+      st = 0;
+      ph ^= 1;
+    }
+  }
 
-  __device__ void release_warp() { mbar_arrive   (ch.empty_mbar(st)); advance(); }
-  __device__ void release_mma()  { tcgen05_commit(ch.empty_mbar(st)); advance(); }
+  __device__ void release_warp() {
+    mbar_arrive(ch.empty_mbar(st));
+    advance();
+  }
+  __device__ void release_mma() {
+    tcgen05_commit(ch.empty_mbar(st));
+    advance();
+  }
 };
 
 } // namespace ch

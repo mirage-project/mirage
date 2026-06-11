@@ -715,11 +715,12 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // linear_sm100_v2.cuh's init_tmap in the standalone test.
       // Layout: [64 (col chunk), rows, K/64 (k-chunks)] with 128B swizzle.
       constexpr int BK = 64;
-      constexpr int BLOCK_K = 128;  // must match linear_sm100_v2.cuh
+      constexpr int BLOCK_K = 128; // must match linear_sm100_v2.cuh
       constexpr int BLOCK_M = 128;
       constexpr int BLOCK_N = 16;
       constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-      constexpr CUtensorMapInterleave interleave = CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
       constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
       constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
@@ -729,11 +730,22 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int K = tensor_desc.dim[1];
         uint64_t gd[3] = {(uint64_t)BK, (uint64_t)batch, (uint64_t)(K / BK)};
         uint64_t gs[2] = {(uint64_t)K * 2, 128};
-        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BLOCK_N, (uint32_t)(BLOCK_K / BK)};
+        uint32_t bd[3] = {
+            (uint32_t)BK, (uint32_t)BLOCK_N, (uint32_t)(BLOCK_K / BK)};
         uint32_t es[3] = {1, 1, 1};
-        CUresult err = cuTensorMapEncodeTiled(
-            tma_desc, fmt, 3, tensor_desc.base_ptr, gd, gs, bd, es,
-            interleave, swizzle, CU_TENSOR_MAP_L2_PROMOTION_L2_128B, oob);
+        CUresult err =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   fmt,
+                                   3,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   interleave,
+                                   swizzle,
+                                   CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                                   oob);
         assert(err == CUDA_SUCCESS);
       } else if (param_id == 1) {
         // Weight W: [N, K]. L2-promote when total size fits (< 96 MB).
@@ -742,14 +754,23 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         bool promote = ((size_t)N * K * 2 <= 96ULL * 1024 * 1024);
         uint64_t gd[3] = {(uint64_t)BK, (uint64_t)N, (uint64_t)(K / BK)};
         uint64_t gs[2] = {(uint64_t)K * 2, 128};
-        uint32_t bd[3] = {(uint32_t)BK, (uint32_t)BLOCK_M, (uint32_t)(BLOCK_K / BK)};
+        uint32_t bd[3] = {
+            (uint32_t)BK, (uint32_t)BLOCK_M, (uint32_t)(BLOCK_K / BK)};
         uint32_t es[3] = {1, 1, 1};
-        CUresult err = cuTensorMapEncodeTiled(
-            tma_desc, fmt, 3, tensor_desc.base_ptr, gd, gs, bd, es,
-            interleave, swizzle,
-            promote ? CU_TENSOR_MAP_L2_PROMOTION_L2_128B
-                    : CU_TENSOR_MAP_L2_PROMOTION_NONE,
-            oob);
+        CUresult err =
+            cuTensorMapEncodeTiled(tma_desc,
+                                   fmt,
+                                   3,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   interleave,
+                                   swizzle,
+                                   promote ? CU_TENSOR_MAP_L2_PROMOTION_L2_128B
+                                           : CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                   oob);
         assert(err == CUDA_SUCCESS);
       }
       // Residual (param_id==2) and output don't need TMA — linear_sm100_v2

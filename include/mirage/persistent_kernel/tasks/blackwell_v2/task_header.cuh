@@ -12,12 +12,12 @@
 // codegen-emitted role dispatch calls resolve. linear and rmsnorm have their
 // own namespaces (kernel::linear_v2 / kernel::rmsnorm_v2); the rest share
 // kernel::v2 — all distinct from the v1 (kernel::) versions.
+#include "argmax_sm100.cuh"    // kernel::v2
+#include "attention_sm100.cuh" // kernel::v2
+#include "embedding_v2.cuh"    // kernel::v2
+#include "linear_sm100_v2.cuh" // kernel::linear_v2 (Channel-based)
 #include "mirage/persistent_kernel/runtime_header.h"
-#include "linear_sm100_v2.cuh"        // kernel::linear_v2 (Channel-based)
-#include "rmsnorm_v2.cuh"             // kernel::rmsnorm_v2
-#include "rotary_embedding_v2.cuh"    // kernel::v2
-#include "norm_sm100.cuh"             // kernel::v2
-#include "attention_sm100.cuh"        // kernel::v2
-#include "argmax_sm100.cuh"           // kernel::v2
-#include "silu_mul_v2.cuh"            // kernel::v2
-#include "embedding_v2.cuh"           // kernel::v2
+#include "norm_sm100.cuh"          // kernel::v2
+#include "rmsnorm_v2.cuh"          // kernel::rmsnorm_v2
+#include "rotary_embedding_v2.cuh" // kernel::v2
+#include "silu_mul_v2.cuh"         // kernel::v2

@@ -14,8 +14,8 @@
  */
 
 #pragma once
-#include "norm_sm100.cuh"
 #include "mirage/persistent_kernel/smem_buffer.cuh"
+#include "norm_sm100.cuh"
 #include "tasks/ampere/mma.cuh"
 #include "tasks/common/common_header.cuh"
 // #include "../element_binary.cuh"
@@ -34,54 +34,65 @@ namespace v2 {
 // SMEM buffer layout for multitoken_paged_attention task. Defined at namespace
 // scope (C++ disallows static data members in function-local classes).
 // NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS — recomputed here.
-template <typename T, int NUM_QO_HEADS, int NUM_KV_HEADS, int HEAD_DIM,
-          int MAX_TOKENS, int KV_TILE_SIZE, int MMA_ITERS_M, int N_THREADS>
+template <typename T,
+          int NUM_QO_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int MAX_TOKENS,
+          int KV_TILE_SIZE,
+          int MMA_ITERS_M,
+          int N_THREADS>
 struct AttentionBuffersImpl {
-    static constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
+  static constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
-    using ZeroT  = mirage::runtime_v2::SmemBuffer<sizeof(T) * 8, 1>;
-    using QOT    = mirage::runtime_v2::SmemBuffer<sizeof(T) * MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM, 1>;
-    using KVT    = mirage::runtime_v2::SmemBuffer<sizeof(T) * KV_TILE_SIZE * HEAD_DIM, 1>;
-    using NormT  = mirage::runtime_v2::SmemBuffer<sizeof(float) * 4, sizeof(float)>;
-    using MDT    = mirage::runtime_v2::SmemBuffer<sizeof(float) * MMA_ITERS_M * N_THREADS * 2, 1>;
-    using OBufT  = mirage::runtime_v2::SmemBuffer<sizeof(float) * MMA_ITERS_M * N_THREADS * 64, 1>;
+  using ZeroT = mirage::runtime_v2::SmemBuffer<sizeof(T) * 8, 1>;
+  using QOT = mirage::runtime_v2::
+      SmemBuffer<sizeof(T) * MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM, 1>;
+  using KVT =
+      mirage::runtime_v2::SmemBuffer<sizeof(T) * KV_TILE_SIZE * HEAD_DIM, 1>;
+  using NormT =
+      mirage::runtime_v2::SmemBuffer<sizeof(float) * 4, sizeof(float)>;
+  using MDT = mirage::runtime_v2::
+      SmemBuffer<sizeof(float) * MMA_ITERS_M * N_THREADS * 2, 1>;
+  using OBufT = mirage::runtime_v2::
+      SmemBuffer<sizeof(float) * MMA_ITERS_M * N_THREADS * 64, 1>;
 
-    ZeroT zero;
-    QOT   s_q;
-    KVT   s_k, s_k_buffer, s_v, s_v_buffer;
-    QOT   s_o;
-    NormT s_q_norm_sum, s_k_norm_sum;
-    MDT   s_m_buffer, s_d_buffer;
-    OBufT s_o_buffer;
+  ZeroT zero;
+  QOT s_q;
+  KVT s_k, s_k_buffer, s_v, s_v_buffer;
+  QOT s_o;
+  NormT s_q_norm_sum, s_k_norm_sum;
+  MDT s_m_buffer, s_d_buffer;
+  OBufT s_o_buffer;
 
-    static constexpr int ZERO_OFFSET         = 0;
-    static constexpr int S_Q_OFFSET          = ZERO_OFFSET         + ZeroT::PADDED_BYTES;
-    static constexpr int S_K_OFFSET          = S_Q_OFFSET          + QOT::PADDED_BYTES;
-    static constexpr int S_K_BUFFER_OFFSET   = S_K_OFFSET          + KVT::PADDED_BYTES;
-    static constexpr int S_V_OFFSET          = S_K_BUFFER_OFFSET   + KVT::PADDED_BYTES;
-    static constexpr int S_V_BUFFER_OFFSET   = S_V_OFFSET          + KVT::PADDED_BYTES;
-    static constexpr int S_O_OFFSET          = S_V_BUFFER_OFFSET   + KVT::PADDED_BYTES;
-    static constexpr int S_Q_NORM_SUM_OFFSET = mirage::runtime_v2::round_up(
-        S_O_OFFSET + QOT::PADDED_BYTES, sizeof(float));
-    static constexpr int S_K_NORM_SUM_OFFSET = S_Q_NORM_SUM_OFFSET  + NormT::PADDED_BYTES;
-    static constexpr int S_M_BUFFER_OFFSET   = S_K_NORM_SUM_OFFSET  + NormT::PADDED_BYTES;
-    static constexpr int S_D_BUFFER_OFFSET   = S_M_BUFFER_OFFSET    + MDT::PADDED_BYTES;
-    static constexpr int S_O_BUFFER_OFFSET   = S_D_BUFFER_OFFSET    + MDT::PADDED_BYTES;
-    static constexpr int TOTAL_BYTES         = S_O_BUFFER_OFFSET    + OBufT::PADDED_BYTES;
+  static constexpr int ZERO_OFFSET = 0;
+  static constexpr int S_Q_OFFSET = ZERO_OFFSET + ZeroT::PADDED_BYTES;
+  static constexpr int S_K_OFFSET = S_Q_OFFSET + QOT::PADDED_BYTES;
+  static constexpr int S_K_BUFFER_OFFSET = S_K_OFFSET + KVT::PADDED_BYTES;
+  static constexpr int S_V_OFFSET = S_K_BUFFER_OFFSET + KVT::PADDED_BYTES;
+  static constexpr int S_V_BUFFER_OFFSET = S_V_OFFSET + KVT::PADDED_BYTES;
+  static constexpr int S_O_OFFSET = S_V_BUFFER_OFFSET + KVT::PADDED_BYTES;
+  static constexpr int S_Q_NORM_SUM_OFFSET = mirage::runtime_v2::round_up(
+      S_O_OFFSET + QOT::PADDED_BYTES, sizeof(float));
+  static constexpr int S_K_NORM_SUM_OFFSET =
+      S_Q_NORM_SUM_OFFSET + NormT::PADDED_BYTES;
+  static constexpr int S_M_BUFFER_OFFSET =
+      S_K_NORM_SUM_OFFSET + NormT::PADDED_BYTES;
+  static constexpr int S_D_BUFFER_OFFSET =
+      S_M_BUFFER_OFFSET + MDT::PADDED_BYTES;
+  static constexpr int S_O_BUFFER_OFFSET =
+      S_D_BUFFER_OFFSET + MDT::PADDED_BYTES;
+  static constexpr int TOTAL_BYTES = S_O_BUFFER_OFFSET + OBufT::PADDED_BYTES;
 
-    __device__ explicit AttentionBuffersImpl(char *smem)
-        : zero(smem + ZERO_OFFSET),
-          s_q(smem + S_Q_OFFSET),
-          s_k(smem + S_K_OFFSET),
-          s_k_buffer(smem + S_K_BUFFER_OFFSET),
-          s_v(smem + S_V_OFFSET),
-          s_v_buffer(smem + S_V_BUFFER_OFFSET),
-          s_o(smem + S_O_OFFSET),
-          s_q_norm_sum(smem + S_Q_NORM_SUM_OFFSET),
-          s_k_norm_sum(smem + S_K_NORM_SUM_OFFSET),
-          s_m_buffer(smem + S_M_BUFFER_OFFSET),
-          s_d_buffer(smem + S_D_BUFFER_OFFSET),
-          s_o_buffer(smem + S_O_BUFFER_OFFSET) {}
+  __device__ explicit AttentionBuffersImpl(char *smem)
+      : zero(smem + ZERO_OFFSET), s_q(smem + S_Q_OFFSET),
+        s_k(smem + S_K_OFFSET), s_k_buffer(smem + S_K_BUFFER_OFFSET),
+        s_v(smem + S_V_OFFSET), s_v_buffer(smem + S_V_BUFFER_OFFSET),
+        s_o(smem + S_O_OFFSET), s_q_norm_sum(smem + S_Q_NORM_SUM_OFFSET),
+        s_k_norm_sum(smem + S_K_NORM_SUM_OFFSET),
+        s_m_buffer(smem + S_M_BUFFER_OFFSET),
+        s_d_buffer(smem + S_D_BUFFER_OFFSET),
+        s_o_buffer(smem + S_O_BUFFER_OFFSET) {}
 };
 
 // NOTE(Jinchen): this task implements the paged attention where a causal mask
@@ -116,7 +127,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     float k_eps) {
   constexpr int COMPUTE_WARPGROUP_SYNC_BARRIER_ID = 6;
   constexpr int ROTARY_SYNC_BARRIER_ID = 7;
-  
+
   cutlass::arch::NamedBarrier wg_barrier(
       NUM_THREADS, /*bar-id*/ COMPUTE_WARPGROUP_SYNC_BARRIER_ID);
   int const wg_id = threadIdx.x / 128;
@@ -207,10 +218,14 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     ODmem o_dmem(d_output);
 
     // SMEM buffer layout — typed view, offsets resolved at compile time.
-    using AttentionBuffers = AttentionBuffersImpl<T, NUM_QO_HEADS, NUM_KV_HEADS,
-                                                  HEAD_DIM, MAX_TOKENS,
+    using AttentionBuffers = AttentionBuffersImpl<T,
+                                                  NUM_QO_HEADS,
+                                                  NUM_KV_HEADS,
+                                                  HEAD_DIM,
+                                                  MAX_TOKENS,
                                                   KV_TILE_SIZE,
-                                                  MMA_ITERS_M, NUM_THREADS>;
+                                                  MMA_ITERS_M,
+                                                  NUM_THREADS>;
     static_assert(AttentionBuffers::TOTAL_BYTES <=
                   mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
@@ -366,11 +381,11 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         // Q norm
         if (iter == 0) {
           ::kernel::v2::rms_norm_sm100<T,
-                         QOSmem,
-                         NUM_QO_PER_KV,
-                         HEAD_DIM,
-                         COMPUTE_WARPGROUP_SYNC_BARRIER_ID,
-                         ROTARY_SYNC_BARRIER_ID>(
+                                       QOSmem,
+                                       NUM_QO_PER_KV,
+                                       HEAD_DIM,
+                                       COMPUTE_WARPGROUP_SYNC_BARRIER_ID,
+                                       ROTARY_SYNC_BARRIER_ID>(
               q_smem,
               static_cast<T const *>(q_norm_weight_ptr),
               s_q_norm_sum,
@@ -386,11 +401,11 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         // K norm
         if (kv_tokens_to_process > 0) {
           ::kernel::v2::rms_norm_sm100<T,
-                         KVSmem,
-                         1,
-                         HEAD_DIM,
-                         COMPUTE_WARPGROUP_SYNC_BARRIER_ID,
-                         ROTARY_SYNC_BARRIER_ID>(
+                                       KVSmem,
+                                       1,
+                                       HEAD_DIM,
+                                       COMPUTE_WARPGROUP_SYNC_BARRIER_ID,
+                                       ROTARY_SYNC_BARRIER_ID>(
               k_smem,
               static_cast<T const *>(k_norm_weight_ptr),
               s_k_norm_sum,

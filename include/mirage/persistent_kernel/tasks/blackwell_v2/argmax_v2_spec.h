@@ -21,8 +21,8 @@ namespace argmax_v2 {
 
 // Region ordinals — index into the regions[] make_smem_info() builds and the
 // smem_region_offset(N) calls in ArgmaxBuffers (argmax_sm100.cuh).
-inline constexpr int REGION_IDX  = 0;
-inline constexpr int REGION_VAL  = 1;
+inline constexpr int REGION_IDX = 0;
+inline constexpr int REGION_VAL = 1;
 inline constexpr int NUM_REGIONS = 2;
 
 inline constexpr int IDX_ALIGN = 128;
@@ -31,15 +31,18 @@ inline constexpr int VAL_ALIGN = 16;
 // Raw (unpadded) per-region byte sizes — the single source for both the device
 // ArgmaxBuffers<T> view and make_smem_info(). Scratch holds 32 entries, one per
 // warp (max 32 warps per block).
-inline constexpr int raw_idx_bytes() { return (int)sizeof(long long) * 32; }
-inline constexpr int raw_val_bytes(int t_size_bytes) { return t_size_bytes * 32; }
+inline constexpr int raw_idx_bytes() {
+  return (int)sizeof(long long) * 32;
+}
+inline constexpr int raw_val_bytes(int t_size_bytes) {
+  return t_size_bytes * 32;
+}
 
 inline constexpr int round_up(int n, int align) {
   return (n + align - 1) & ~(align - 1);
 }
 
-inline ::mirage::runtime::TaskSmemInfo
-make_smem_info(int t_size_bytes) {
+inline ::mirage::runtime::TaskSmemInfo make_smem_info(int t_size_bytes) {
   int const idx = round_up(raw_idx_bytes(), IDX_ALIGN);
   int const val = round_up(raw_val_bytes(t_size_bytes), VAL_ALIGN);
   // Index by REGION_* so the ordinals are the single source of order: the
@@ -47,7 +50,13 @@ make_smem_info(int t_size_bytes) {
   // Both buffers are scratch held for the whole reduce — same release_step.
   ::mirage::runtime::TaskSmemInfo info{idx + val, IDX_ALIGN, {}};
   info.regions.resize(NUM_REGIONS);
-  info.regions[REGION_IDX] = {"idx", idx, IDX_ALIGN, -1, /*can_pack=*/true, /*release_step=*/1, /*contiguous=*/true};
+  info.regions[REGION_IDX] = {"idx",
+                              idx,
+                              IDX_ALIGN,
+                              -1,
+                              /*can_pack=*/true,
+                              /*release_step=*/1,
+                              /*contiguous=*/true};
   info.regions[REGION_VAL] = {"val", val, VAL_ALIGN, -1, true, 1, true};
   return info;
 }

@@ -56,7 +56,9 @@ struct SmemBuffer {
     return reinterpret_cast<T *>(base_);
   }
 
-  __device__ char *raw() const { return base_; }
+  __device__ char *raw() const {
+    return base_;
+  }
 };
 
 // Helper: chain offsets so each buffer in a struct gets the correct base.
@@ -71,10 +73,12 @@ struct SmemBuffer {
 //     SmemBuffer<32>   reduce;
 //
 //     static constexpr int INPUT_OFFSET  = 0;
-//     static constexpr int WEIGHT_OFFSET = INPUT_OFFSET  + decltype(input)::PADDED_BYTES;
-//     static constexpr int OUTPUT_OFFSET = WEIGHT_OFFSET + decltype(weight)::PADDED_BYTES;
-//     static constexpr int REDUCE_OFFSET = OUTPUT_OFFSET + decltype(output)::PADDED_BYTES;
-//     static constexpr int TOTAL_BYTES   = REDUCE_OFFSET + decltype(reduce)::PADDED_BYTES;
+//     static constexpr int WEIGHT_OFFSET = INPUT_OFFSET  +
+//     decltype(input)::PADDED_BYTES; static constexpr int OUTPUT_OFFSET =
+//     WEIGHT_OFFSET + decltype(weight)::PADDED_BYTES; static constexpr int
+//     REDUCE_OFFSET = OUTPUT_OFFSET + decltype(output)::PADDED_BYTES; static
+//     constexpr int TOTAL_BYTES   = REDUCE_OFFSET +
+//     decltype(reduce)::PADDED_BYTES;
 //
 //     __device__ explicit Buffers(char *smem)
 //         : input(smem + INPUT_OFFSET),
@@ -83,5 +87,5 @@ struct SmemBuffer {
 //           reduce(smem + REDUCE_OFFSET) {}
 //   };
 
-}  // namespace runtime_v2
-}  // namespace mirage
+} // namespace runtime_v2
+} // namespace mirage

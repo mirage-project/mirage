@@ -26,8 +26,7 @@ enum class V2Role {
   Storer,
 };
 
-std::string const &role_body(rt::TaskRoleVariantCode const &code,
-                             V2Role role) {
+std::string const &role_body(rt::TaskRoleVariantCode const &code, V2Role role) {
   switch (role) {
     case V2Role::InitSemaphores:
       return code.init_semaphores;
@@ -40,7 +39,7 @@ std::string const &role_body(rt::TaskRoleVariantCode const &code,
     case V2Role::Storer:
       return code.storer;
   }
-  __builtin_unreachable();  // switch covers every V2Role
+  __builtin_unreachable(); // switch covers every V2Role
 }
 
 // Page-lifecycle prefix at the start of every loader body
@@ -112,8 +111,10 @@ char const *kComputePageSuffix =
     "#ifdef MPK_ENABLE_PROFILING\n"
     "  if (_sfx_t0 != 0 && runtime_config.profiler_buffer != nullptr) {\n"
     "    unsigned long long *_sfx =\n"
-    "        static_cast<unsigned long long *>(runtime_config.profiler_buffer);\n"
-    "    _sfx[V2_PROF_SUFFIX_BASE + blockIdx.x] += v2_prof_now_ns() - _sfx_t0;\n"
+    "        static_cast<unsigned long long "
+    "*>(runtime_config.profiler_buffer);\n"
+    "    _sfx[V2_PROF_SUFFIX_BASE + blockIdx.x] += v2_prof_now_ns() - "
+    "_sfx_t0;\n"
     "    _sfx[V2_PROF_SUFFIX_BASE + 128 + blockIdx.x] += 1;\n"
     "  }\n"
     "#endif\n"
@@ -147,8 +148,7 @@ void emit_role_cases(
     assert(name_it != task_type_to_name.end());
     code.e("case $:", name_it->second);
     bool first_variant = true;
-    for (size_t variant_id = 0; variant_id < task.second.size();
-         variant_id++) {
+    for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
       rt::TaskRoleVariantCode const &variant = task.second[variant_id];
       std::string const &body = role_body(variant, role);
       // The loader case may need to emit a body even when the
@@ -158,9 +158,9 @@ void emit_role_cases(
       // on the user body, it does not synthesize one on its own).
       bool const auto_loader_prefix =
           (role == V2Role::Loader) && variant.auto_loader_page_lifecycle;
-      bool const auto_compute_suffix =
-          (role == V2Role::Compute) && variant.auto_compute_finish &&
-          !body.empty();
+      bool const auto_compute_suffix = (role == V2Role::Compute) &&
+                                       variant.auto_compute_finish &&
+                                       !body.empty();
       if (body.empty() && !auto_loader_prefix) {
         continue;
       }

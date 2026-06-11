@@ -48,8 +48,7 @@ namespace {
 // Per-slot SEM_DEP_READY is initialized once at kernel start in
 // worker_v2_kernel; ring_phase parity tracks slot reuse. Works because
 // EVERY v2 task type runs this prefix.
-inline void emit_dep_wait_compute_prefix(
-    mirage::transpiler::CodeKeeper &code) {
+inline void emit_dep_wait_compute_prefix(mirage::transpiler::CodeKeeper &code) {
   code.e("compute_dep_prefix(runtime_config, task_desc, runtime_smem, "
          "instruction_index, iter_num);");
 }
@@ -80,8 +79,9 @@ int TaskRegister::register_task_variant(runtime::TaskType type,
   return (int)(variants.size() - 1);
 }
 
-void TaskRegister::register_v2_task_role_variant(
-    runtime::TaskType type, int variant_id, TaskRoleVariantCode code) {
+void TaskRegister::register_v2_task_role_variant(runtime::TaskType type,
+                                                 int variant_id,
+                                                 TaskRoleVariantCode code) {
   auto &variants = all_v2_task_role_variants[type];
   if ((int)variants.size() <= variant_id) {
     variants.resize(variant_id + 1);
@@ -106,8 +106,12 @@ void TaskRegister::register_variant_smem_info(runtime::TaskType type,
 TaskSmemInfo TaskRegister::get_variant_smem_info(runtime::TaskType type,
                                                  int variant_id) const {
   auto it = all_task_variant_smem_infos.find(type);
-  if (it == all_task_variant_smem_infos.end()) return {};
-  if (variant_id < 0 || variant_id >= (int)it->second.size()) return {};
+  if (it == all_task_variant_smem_infos.end()) {
+    return {};
+  }
+  if (variant_id < 0 || variant_id >= (int)it->second.size()) {
+    return {};
+  }
   return it->second[variant_id];
 }
 
@@ -1829,16 +1833,22 @@ int TaskRegister::register_linear_sm100_v2_task(
     std::vector<int> const &params,
     bool with_residual) {
   int m_real_override = -1;
-  int split_k         = 1;
-  int tiles_per_task  = 1;
-  if (params.size() >= 1) m_real_override = params[0];
-  if (params.size() >= 2) split_k         = params[1];
-  if (params.size() >= 3) tiles_per_task  = params[2];
+  int split_k = 1;
+  int tiles_per_task = 1;
+  if (params.size() >= 1) {
+    m_real_override = params[0];
+  }
+  if (params.size() >= 2) {
+    split_k = params[1];
+  }
+  if (params.size() >= 3) {
+    tiles_per_task = params[2];
+  }
 
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs  = with_residual ? 3 : 2;
+  int num_inputs = with_residual ? 3 : 2;
   int num_outputs = 1;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -1850,7 +1860,7 @@ int TaskRegister::register_linear_sm100_v2_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
-  batch_size  = output_ops[0]->output_tensors[0].dim[0];
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
@@ -1863,7 +1873,7 @@ int TaskRegister::register_linear_sm100_v2_task(
          "linear_sm100_v2 requires unpartitioned output "
          "(tb_graph.new_input(output, (-1,-1,-1), ...)).");
   int const N_real = output_size;
-  int const K      = reduction_size;
+  int const K = reduction_size;
   int const m_real = (m_real_override > 0) ? m_real_override : batch_size;
   assert(m_real <= batch_size &&
          "m_real override must not exceed output tensor's dim[0].");
@@ -1876,9 +1886,9 @@ int TaskRegister::register_linear_sm100_v2_task(
                   : "nullptr";
 
   // Structural init synthesized from the CHANNELS table. op_sem_base_addr
-  // returns the shared int addr of this slot's SEM_OP_BASE (ordinal k at +k*8) —
-  // exactly the dyn_sem_base linear_init() expects. Byte-identical mbar set to the
-  // old inlined loops (verified against CHANNELS/ONESHOT_SEMS counts).
+  // returns the shared int addr of this slot's SEM_OP_BASE (ordinal k at +k*8)
+  // — exactly the dyn_sem_base linear_init() expects. Byte-identical mbar set
+  // to the old inlined loops (verified against CHANNELS/ONESHOT_SEMS counts).
   auto emit_v2_init = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("::kernel::linear::linear_init("
         "op_sem_base_addr(runtime_smem, instruction_index));");
@@ -1886,12 +1896,15 @@ int TaskRegister::register_linear_sm100_v2_task(
 
   auto emit_v2_loader = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("::kernel::linear_v2::linear_loader_task<$, 0, $>(",
-        split_k, tiles_per_task);
+        split_k,
+        tiles_per_task);
     c.e("    task_desc,");
     c.e("    runtime_smem,");
     c.e("    runtime_config,");
-    c.e("    static_cast<const CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
-    c.e("    static_cast<const CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+    c.e("    static_cast<const "
+        "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+    c.e("    static_cast<const "
+        "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
     c.e("    $, $,", N_real, K);
     c.e("    static_cast<int>(task_desc->task_metadata.task_offset) * $,",
         tiles_per_task);
@@ -1901,8 +1914,7 @@ int TaskRegister::register_linear_sm100_v2_task(
   };
 
   auto emit_v2_mma = [&](mirage::transpiler::CodeKeeper &c) {
-    c.e("::kernel::linear_v2::linear_mma_task<$, $>(",
-        split_k, tiles_per_task);
+    c.e("::kernel::linear_v2::linear_mma_task<$, $>(", split_k, tiles_per_task);
     c.e("    task_desc,");
     c.e("    runtime_smem,");
     c.e("    $, $,", N_real, K);
@@ -1913,7 +1925,10 @@ int TaskRegister::register_linear_sm100_v2_task(
 
   auto emit_v2_compute = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("::kernel::linear_v2::linear_compute_task<$, $, $, $>(",
-        true_or_false, m_real, split_k, tiles_per_task);
+        true_or_false,
+        m_real,
+        split_k,
+        tiles_per_task);
     c.e("    task_desc,");
     c.e("    static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
     c.e("    static_cast<const nv_bfloat16*>($),", residual_arg);
@@ -1929,8 +1944,8 @@ int TaskRegister::register_linear_sm100_v2_task(
   code.inc_indent();
   emit_v2_compute(code);
 
-  TaskType const tt = with_residual ? TASK_LINEAR_WITH_RESIDUAL_SM100_V2
-                                    : TASK_LINEAR_SM100_V2;
+  TaskType const tt =
+      with_residual ? TASK_LINEAR_WITH_RESIDUAL_SM100_V2 : TASK_LINEAR_SM100_V2;
   int variant = register_task_variant(tt, code.to_string());
 
   mirage::transpiler::CodeKeeper init_code;
@@ -1953,12 +1968,11 @@ int TaskRegister::register_linear_sm100_v2_task(
 
   // mma releases pages (auto_compute_finish=false). Loader keeps the
   // codegen page-lifecycle prefix (default) for cross-task page_ready waits.
-  TaskRoleVariantCode role_code{
-      /*init_semaphores=*/init_code.to_string(),
-      /*loader=*/loader_code.to_string(),
-      /*mma=*/mma_code.to_string(),
-      /*compute=*/compute_code.to_string(),
-      /*storer=*/""};
+  TaskRoleVariantCode role_code{/*init_semaphores=*/init_code.to_string(),
+                                /*loader=*/loader_code.to_string(),
+                                /*mma=*/mma_code.to_string(),
+                                /*compute=*/compute_code.to_string(),
+                                /*storer=*/""};
   role_code.auto_compute_finish = false;
   register_v2_task_role_variant(tt, variant, role_code);
 
@@ -4265,17 +4279,17 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
-  auto emit_rmsnorm_compute_body =
-      [&](mirage::transpiler::CodeKeeper &c) {
-        c.e("kernel::rmsnorm_v2::rms_norm_task<bfloat16, $, $>(",
-            batch_size, hidden_dim);
-        c.e("    task_desc,");
-        c.e("    task_desc->input_ptrs[0],");
-        c.e("    task_desc->input_ptrs[1],");
-        c.e("    task_desc->output_ptrs[0],");
-        c.e("    1e-6f,");
-        c.e("    runtime_smem);");
-      };
+  auto emit_rmsnorm_compute_body = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("kernel::rmsnorm_v2::rms_norm_task<bfloat16, $, $>(",
+        batch_size,
+        hidden_dim);
+    c.e("    task_desc,");
+    c.e("    task_desc->input_ptrs[0],");
+    c.e("    task_desc->input_ptrs[1],");
+    c.e("    task_desc->output_ptrs[0],");
+    c.e("    1e-6f,");
+    c.e("    runtime_smem);");
+  };
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   emit_rmsnorm_compute_body(code);
@@ -4283,7 +4297,8 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
   compute_code.inc_indent();
   emit_dep_wait_compute_prefix(compute_code);
   emit_rmsnorm_compute_body(compute_code);
-  int variant = register_task_variant(TASK_RMS_NORM_HOPPER_V2, code.to_string());
+  int variant =
+      register_task_variant(TASK_RMS_NORM_HOPPER_V2, code.to_string());
   // Only the compute needs the dep-wait (other roles are no-ops).
   // Drop the empty role bodies — they were calling empty `run` methods.
   register_v2_task_role_variant(
@@ -4300,15 +4315,15 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
   // same header the device-side RmsNormBuffers includes — so the planner and
   // the typed buffer view agree by construction.
   TaskSmemInfo smem_info = ::kernel::rmsnorm_v2::make_smem_info(
-      /*t_size_bytes=*/2,  // sizeof(bfloat16)
+      /*t_size_bytes=*/2, // sizeof(bfloat16)
       hidden_dim,
       /*num_threads=*/128);
   register_variant_smem_info(TASK_RMS_NORM_HOPPER_V2, variant, smem_info);
   return variant;
 }
 
-int TaskRegister::register_silu_mul_v2_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_silu_mul_v2_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params) {
   // Same parameter extraction as the v1 silu register; emits the hopper silu
   // kernel under kernel::v2:: plus the v2 dep-wait compute prefix.
   assert(params.size() == 0);
@@ -4338,7 +4353,10 @@ int TaskRegister::register_silu_mul_v2_task(
   mirage::transpiler::CodeKeeper code;
   auto emit_silu_body = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("kernel::v2::silu_mul_task_impl<bfloat16, $, $, $, $>(",
-        batch_size, output_size, input_stride, output_stride);
+        batch_size,
+        output_size,
+        input_stride,
+        output_stride);
     c.e("    task_desc->input_ptrs[0],");
     c.e("    task_desc->output_ptrs[0],");
     c.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
@@ -4364,8 +4382,8 @@ int TaskRegister::register_silu_mul_v2_task(
   return variant;
 }
 
-int TaskRegister::register_embedding_v2_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_embedding_v2_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params) {
   // Same parameter extraction as the v1 embedding register; emits the hopper
   // embedding kernel under kernel::v2:: plus the v2 dep-wait compute prefix.
   assert(params.size() == 1);
@@ -4390,7 +4408,9 @@ int TaskRegister::register_embedding_v2_task(
   int const params0 = params[0];
   auto emit_embedding_body = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("kernel::v2::embedding_kernel<bfloat16, $, $, $>(",
-        batch_size, output_size, output_stride);
+        batch_size,
+        output_size,
+        output_stride);
     if (params0 == 0) {
       c.e("    runtime_config.tokens + runtime_config.step[0], ");
     } else if (params0 == 1) {
@@ -4453,8 +4473,14 @@ int TaskRegister::register_paged_attention_sm100_v2_task(
   auto emit_attn_body = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("kernel::v2::multitoken_paged_attention_sm100_task_impl<bfloat16, $, "
         "$, $, $, $, $, $, $>(",
-        num_q_heads / num_kv_heads, 1, kv_stride, qkv_stride,
-        output_size, head_dim, max_seq_len, page_size);
+        num_q_heads / num_kv_heads,
+        1,
+        kv_stride,
+        qkv_stride,
+        output_size,
+        head_dim,
+        max_seq_len,
+        page_size);
     c.e("    task_desc->input_ptrs[0],");
     c.e("    task_desc->input_ptrs[1],");
     c.e("    task_desc->input_ptrs[2],");
@@ -4521,17 +4547,18 @@ int TaskRegister::register_argmax_partial_sm100_v2_task(
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int num_elements = input_ops[0]->output_tensors[0].dim[1];
   int num_partial_tasks = params[0];
-  auto emit_argmax_partial_body =
-      [&](mirage::transpiler::CodeKeeper &c) {
-        c.e("kernel::v2::argmax_partial_sm100_kernel<bfloat16, $, $, $>(",
-            batch_size, num_elements, num_partial_tasks);
-        c.e("    task_desc->input_ptrs[0],");
-        c.e("    task_desc->output_ptrs[0],");
-        c.e("    task_desc->output_ptrs[1],");
-        c.e("    task_desc,");
-        c.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
-        c.e("    runtime_smem);");
-      };
+  auto emit_argmax_partial_body = [&](mirage::transpiler::CodeKeeper &c) {
+    c.e("kernel::v2::argmax_partial_sm100_kernel<bfloat16, $, $, $>(",
+        batch_size,
+        num_elements,
+        num_partial_tasks);
+    c.e("    task_desc->input_ptrs[0],");
+    c.e("    task_desc->output_ptrs[0],");
+    c.e("    task_desc->output_ptrs[1],");
+    c.e("    task_desc,");
+    c.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+    c.e("    runtime_smem);");
+  };
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   emit_argmax_partial_body(code);
@@ -4544,8 +4571,8 @@ int TaskRegister::register_argmax_partial_sm100_v2_task(
   compute_code.inc_indent();
   emit_dep_wait_compute_prefix(compute_code);
   emit_argmax_partial_body(compute_code);
-  int variant = register_task_variant(TASK_ARGMAX_PARTIAL_SM100_V2,
-                                      code.to_string());
+  int variant =
+      register_task_variant(TASK_ARGMAX_PARTIAL_SM100_V2, code.to_string());
   register_v2_task_role_variant(
       TASK_ARGMAX_PARTIAL_SM100_V2,
       variant,
@@ -4556,7 +4583,7 @@ int TaskRegister::register_argmax_partial_sm100_v2_task(
                           /*storer=*/""});
   // SMEM layout owned by argmax_v2_spec.h (shared with the reduce variant).
   TaskSmemInfo smem_info = ::kernel::argmax_v2::make_smem_info(
-      /*t_size_bytes=*/2);  // bf16
+      /*t_size_bytes=*/2); // bf16
   register_variant_smem_info(TASK_ARGMAX_PARTIAL_SM100_V2, variant, smem_info);
   return variant;
 }
@@ -4581,7 +4608,9 @@ int TaskRegister::register_argmax_reduce_sm100_v2_task(
   int const params0 = params[0];
   auto emit_argmax_reduce_body = [&](mirage::transpiler::CodeKeeper &c) {
     c.e("kernel::v2::argmax_reduce_sm100_kernel<bfloat16, $, $, $>(",
-        batch_size, params0, num_parts);
+        batch_size,
+        params0,
+        num_parts);
     c.e("    task_desc->input_ptrs[0],");
     c.e("    task_desc->input_ptrs[1],");
     c.e("    task_desc->output_ptrs[0],");
@@ -4596,8 +4625,8 @@ int TaskRegister::register_argmax_reduce_sm100_v2_task(
   compute_code.inc_indent();
   emit_dep_wait_compute_prefix(compute_code);
   emit_argmax_reduce_body(compute_code);
-  int variant = register_task_variant(TASK_ARGMAX_REDUCE_SM100_V2,
-                                      code.to_string());
+  int variant =
+      register_task_variant(TASK_ARGMAX_REDUCE_SM100_V2, code.to_string());
   register_v2_task_role_variant(
       TASK_ARGMAX_REDUCE_SM100_V2,
       variant,
@@ -4608,7 +4637,7 @@ int TaskRegister::register_argmax_reduce_sm100_v2_task(
                           /*storer=*/""});
   // SMEM layout owned by argmax_v2_spec.h (shared with the partial variant).
   TaskSmemInfo smem_info = ::kernel::argmax_v2::make_smem_info(
-      /*t_size_bytes=*/2);  // bf16
+      /*t_size_bytes=*/2); // bf16
   register_variant_smem_info(TASK_ARGMAX_REDUCE_SM100_V2, variant, smem_info);
   return variant;
 }
