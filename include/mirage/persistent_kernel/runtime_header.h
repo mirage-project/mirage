@@ -155,10 +155,13 @@ enum TaskType {
   TASK_MLA_REDUCE_SM100 = 267,
   TASK_MLA_PREFILL_SM100 = 268,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
-  // v2 dispatch enums for non-linear Qwen3 tasks. Emit the same kernel calls
-  // as v1 (the blackwell_v2/ variants are near-identical), just through the
-  // v2 codegen path so the whole pipeline is dispatched uniformly. See
-  // register_X_v2_task functions in task_register.cc.
+  // v2 task-type IDs for the non-linear ops (linear v2 is 244/245). silu(282),
+  // embedding(283), and argmax(285/286) just re-emit the v1 kernel under the
+  // kernel::v2:: namespace through the v2 codegen path — near-identical bodies,
+  // only the dispatch differs. rmsnorm(281) is different: a real v2
+  // role-structured task (rmsnorm_v2::RmsNormTask::compute::run, compute/mma
+  // roles). attn(284) is reserved until the attention port. See the
+  // register_*_v2_task functions in task_register.cc.
   TASK_RMS_NORM_HOPPER_V2 = 281,
   TASK_SILU_MUL_V2 = 282,
   TASK_EMBEDDING_V2 = 283,

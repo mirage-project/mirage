@@ -31,7 +31,7 @@
 //           the dep-wait spin; gaps = waiting on instruction publish
 //   group 1 loader    (lane 0): page-prefix + loader body per task
 //   group 2 mma  (lane 0): mma body (linear: TMEM/MMA driving)
-//   group 3 storer    (lane 0): storer body (idle for Qwen3 tasks)
+//   group 3 storer    (lane 0): storer body (idle for the current tasks)
 //   group 4 dispatcher(lane 0): V2_PROF_PREPARE_BATCH (worker 0),
 //           V2_PROF_ITER_SYNC (end-of-iter barrier), V2_PROF_GO_WAIT
 // Only the LAST V2_PROF_WINDOW_ITERS decode steps are recorded: that's the
@@ -992,7 +992,7 @@ __device__ __noinline__ void dispatcher_warp_loop(
       // stream feeding this same SM's compute) get triggered at slot reuse
       // via wait_slot_finished_eager(sequence - INSTRUCTION_RING_SIZE)
       // above. That introduces up to RING-1 instructions of latency for
-      // intra-stream compute-producer chains; in Qwen3 these are rare
+      // intra-stream compute-producer chains; in practice these are rare
       // because the worker queues round-robin tasks across SMs. If this turns
       // out hot, event triggering could move into the storer warp to cut the
       // latency.

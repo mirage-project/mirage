@@ -3777,9 +3777,10 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// v2 dispatch variants for non-linear Qwen3 tasks.
-// Each emits the same kernel call as its v1 peer but registers under
-// TASK_X_V2 so the whole task graph is dispatched through v2 codegen.
+// v2 dispatch variants for the non-linear ops. Most re-emit the same kernel
+// call as their v1 peer but register under TASK_X_V2 so the task graph is
+// dispatched through v2 codegen; rmsnorm is the exception — a v2
+// role-structured task (RmsNormTask::compute::run).
 // ─────────────────────────────────────────────────────────────────────────────
 
 int TaskRegister::register_rmsnorm_hopper_v2_task(
@@ -3841,7 +3842,8 @@ int TaskRegister::register_rmsnorm_hopper_v2_task(
 
 int TaskRegister::register_silu_mul_v2_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // Mirrors register_silu_mul_task (not _hopper) — Qwen3 path on Blackwell.
+  // Same parameter extraction as the v1 silu register; emits the hopper silu
+  // kernel under kernel::v2:: plus the v2 dep-wait compute prefix.
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, input_stride = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops, output_ops;
@@ -3897,7 +3899,8 @@ int TaskRegister::register_silu_mul_v2_task(
 
 int TaskRegister::register_embedding_v2_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // Mirrors register_embedding_task (not _hopper) — Qwen3 path on Blackwell.
+  // Same parameter extraction as the v1 embedding register; emits the hopper
+  // embedding kernel under kernel::v2:: plus the v2 dep-wait compute prefix.
   assert(params.size() == 1);
   int batch_size = 0, output_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops, output_ops;

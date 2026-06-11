@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-// v2 linear for Qwen3 decode, built on the Channel primitives in channel.cuh.
+// v2 linear for decode, built on the Channel primitives in channel.cuh.
 //
 // Synchronization and storage are separate:
 //   Channel  - mbarriers only (full/empty edges). Its producer/consumer cursors
