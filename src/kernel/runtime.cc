@@ -467,9 +467,7 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.x;     // (gi*sk+si) or packed
               task.task_metadata.request_id = bid.y; // batch
             }
-            if (task_type == TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100) {
+            if (task_type == TASK_MLA_MTP_DECODE_TP_REDUCE_SM100) {
               task.task_metadata.kv_idx = bid.x;            // dv_block_idx
               task.task_metadata.request_id = bid.y;        // gi
               task.task_metadata.merge_task_offset = bid.z; // batch
@@ -501,11 +499,7 @@ void register_mugraph(
             // request_id is the worker index used by the persistent
             // tiling loop. Grouped variants share the same metadata
             // shape; m_indices selects the active expert per output tile.
-            if (task_type == TASK_FP8_GEMM_DENSE_SMALLM_SM100 ||
-                task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 ||
-                task_type == TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 ||
-                task_type == TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 ||
-                task_type == TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 ||
+            if (task_type == TASK_FP8_GEMM_DENSE_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100) {
@@ -729,8 +723,22 @@ void register_mugraph(
                 }
               } else {
                 assert(task_ids.size() == 1);
-                all_tasks[task_ids[0]].trigger_event =
+                EventId new_ev =
                     get_event_id(my_gpu_id, event_pos, nvshmem_event);
+                EventId old_ev = all_tasks[task_ids[0]].trigger_event;
+                if (old_ev != EVENT_INVALID_ID && old_ev != new_ev) {
+                  // A task has ONE trigger_event slot; a second distinct
+                  // event here means the earlier event keeps a num_triggers
+                  // count this task will never signal -> permanent wait.
+                  std::fprintf(stderr,
+                               "[TRIGGER_OVERWRITE] task=%zu type=%d "
+                               "old_event=%llx new_event=%llx\n",
+                               (size_t)task_ids[0],
+                               (int)all_tasks[task_ids[0]].task_type,
+                               (unsigned long long)old_ev,
+                               (unsigned long long)new_ev);
+                }
+                all_tasks[task_ids[0]].trigger_event = new_ev;
                 event_desc.num_triggers++;
               }
             }
@@ -1158,11 +1166,11 @@ TaskGraphResult print_task_graph(
   code.e("using namespace mirage::runtime;");
   // Global variable for runtime JSON path (for kernel reuse across directories)
   if (use_json_format) {
-  code.e("");
-  code.e("// Global variable for runtime JSON path (referenced by Python for "
-         "kernel reuse)");
-  code.e("std::string g_task_graph_json_path;");
-  code.e("");
+    code.e("");
+    code.e("// Global variable for runtime JSON path (referenced by Python for "
+           "kernel reuse)");
+    code.e("std::string g_task_graph_json_path;");
+    code.e("");
   }
   code.e("size_t get_event_id(int my_gpu_id, size_t event_pos, bool "
          "nvshmem_event) {");
@@ -1303,14 +1311,7 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_DENSE_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
-    code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SMALLM_SM100 || "
-           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 || "
-           "task.at(\"task_type\") == "
-           "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 || "
-           "task.at(\"task_type\") == "
-           "TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 || "
-           "task.at(\"task_type\") == "
-           "TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 || "
+    code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100 || "
            "task.at(\"task_type\") == "
@@ -1942,16 +1943,12 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
       "TASK_MLA_MTP_DECODE_TP2_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100] =
-      "TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP_REDUCE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP4_SM100] =
       "TASK_MLA_MTP_DECODE_TP4_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100] =
-      "TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP8_SM100] =
       "TASK_MLA_MTP_DECODE_TP8_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100] =
-      "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SPLIT_SM100] =
       "TASK_MLA_KV_GATHER_SPLIT_SM100";
@@ -1976,16 +1973,7 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_FP8_SWAPAB_SM100";
   task_type_to_name[TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100";
-  task_type_to_name[TASK_FP8_GEMM_DENSE_SMALLM_SM100] =
-      "TASK_FP8_GEMM_DENSE_SMALLM_SM100";
-  task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_SM100] =
-      "TASK_FP8_GEMM_DENSE_MEDIUMM_SM100";
-  task_type_to_name[TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100] =
-      "TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100";
-  task_type_to_name[TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100] =
-      "TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100";
-  task_type_to_name[TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100] =
-      "TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_SM100] = "TASK_FP8_GEMM_DENSE_SM100";
   task_type_to_name[TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100] =
       "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =

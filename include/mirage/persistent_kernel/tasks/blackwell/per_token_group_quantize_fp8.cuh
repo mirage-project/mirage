@@ -50,7 +50,7 @@ __device__ __forceinline__ uint8_t encode_ue8m0(float scale) {
   return static_cast<uint8_t>(ue8m0);
 }
 
-// 2026-05-12 (QKV-a fusion, H8): added OUTPUT_STRIDE to fix overflow when the
+// QKV-a fusion: added OUTPUT_STRIDE to fix overflow when the
 // INPUT is a column slice of a wider buffer (GLOBAL_STRIDE > HIDDEN_SIZE) but
 // the OUTPUT is sized for HIDDEN_SIZE per row. Default keeps legacy callers
 // (input and output share the same stride) unchanged.
@@ -77,7 +77,7 @@ __device__ __forceinline__ void
                                            int const row_idx,
                                            int const group_tile_idx,
                                            int const row_count_cap = -1) {
-  // B15 (2026-05-15): row_count_cap is an optional per-CTA row-count
+  // Row_count_cap is an optional per-CTA row-count
   // upper bound (used by NEW MoE silu_out quantize where the row axis
   // is permuted-expert layout and we want to cap by per-expert
   // actual_count). -1 sentinel = no cap (use BATCH_SIZE template).
@@ -130,7 +130,7 @@ __device__ __forceinline__ void
   // on the persistent runtime instead of overflowing the scheduler queue.
   int const task_idx = row_idx;
 
-  // C11 fast path (2026-05-17): when NUM_GROUPS_PER_ROW == 1 (typical K=128
+  // Fast path: when NUM_GROUPS_PER_ROW == 1 (typical K=128
   // case used by BMM Q-side q_nope quantize), the original serial-row loop
   // leaves num_groups_per_block-1 warps idle per row (1 group per row × 1
   // warp does the work, the rest sit idle). Restructure: each warp processes
@@ -208,7 +208,7 @@ __device__ __forceinline__ void
     if (batch_idx < 0 || batch_idx >= BATCH_SIZE) {
       return;
     }
-    // B15: optional per-CTA row-count cap (e.g., NEW MoE silu_out
+    // Optional per-CTA row-count cap (e.g., NEW MoE silu_out
     // quantize bounded by per-expert actual_count). For inactive
     // expert (cap=0) we don't even enter this body since the codegen
     // returns earlier; for active expert with actual_count K, we

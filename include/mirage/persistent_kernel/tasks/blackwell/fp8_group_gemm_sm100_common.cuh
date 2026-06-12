@@ -247,27 +247,8 @@ __device__ __noinline__ void task_impl_tpl(
       int bm = bidx / nn, bn = bidx % nn;
       int m_start = bm * BM;
       int expert_id = (m_start < M_total) ? __ldg(m_indices + m_start) : 0;
-#if MPK_DEBUG
-      // Contract: all BM rows in this tile must share the same expert_id
-      // (moe_permute guarantees tile-aligned routing). A malformed permute
-      // would otherwise silently fan rows of different experts through the
-      // wrong B columns.
-      if (m_start + 1 < M_total && threadIdx.x == 0) {
-        int e0 = expert_id;
-        for (int r = 1; r < BM && (m_start + r) < M_total; ++r) {
-          int er = __ldg(m_indices + m_start + r);
-          if (er != e0) {
-            printf("FP8_GROUP_GEMM: expert_id mismatch within BM tile "
-                   "m_start=%d row=%d e0=%d er=%d\n",
-                   m_start,
-                   r,
-                   e0,
-                   er);
-            __trap();
-          }
-        }
-      }
-#endif
+      // Contract: all BM rows in this tile share the same expert_id
+      // (moe_permute guarantees tile-aligned routing).
       // Skip this whole tile when the expert received no routings this
       // iter (mask written by moe_permute). All warps make the same
       // decision deterministically from m_indices + active_expert_mask

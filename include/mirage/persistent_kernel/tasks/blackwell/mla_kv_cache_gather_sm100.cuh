@@ -33,7 +33,7 @@
 
 namespace kernel {
 
-// 2026-05-12 (user #2 part-a) FuseTensor support: C_LATENT_ROW_STRIDE controls
+// (user #2 part-a) FuseTensor support: C_LATENT_ROW_STRIDE controls
 // the per-token stride of the c_latent input. Defaults to D_V (legacy
 // contiguous (mbt, D_V) buffer). For the QKV-a fused path c_latent lives at
 // cols [1536:2048) of a wider (mbt, 2176) qkv_a_out buffer, so pass
@@ -138,7 +138,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   }
 }
 
-// 2026-05-16 (C1): NUM_GATHER_SPLITS parameter parallelizes the sequential
+// (C1): NUM_GATHER_SPLITS parameter parallelizes the sequential
 // seq_pos loop in both phases across multiple CTAs. Each CTA handles a
 // strided subset of seq_pos values (seq_pos % NUM_GATHER_SPLITS == split_idx).
 // The partition is consistent between append (step 1) and gather (step 2):

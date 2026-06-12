@@ -482,15 +482,15 @@ static __device__ __forceinline__ uint32_t
 // Used when the team has no NVLS multicast resource — observed on NVSHMEM
 // 3.6.5 under MPK's team_split_strided setup where every team has
 // `nvls_rsc_base_ptr == NULL` on the device side (see TP=2 debug session
-// 2026-05-18). Reads this PE's local copy + every peer's heap mirror via
+// Reads this PE's local copy + every peer's heap mirror via
 // `peer_heap_base_p2p`, sums in bf16, stores. bf16 only (matches DSv3 AR
 // instantiation).
 template <typename T>
-static __device__ __forceinline__ void mpkar_p2p_reduce_v4_block(
-    int4 *__restrict__ dst,
-    void const *local_input_ptr,
-    nvshmemi_team_t *teami,
-    int nelems_v4) {
+static __device__ __forceinline__ void
+    mpkar_p2p_reduce_v4_block(int4 *__restrict__ dst,
+                              void const *local_input_ptr,
+                              nvshmemi_team_t *teami,
+                              int nelems_v4) {
   static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
                 "P2P AR fallback currently bf16 only.");
   int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
@@ -519,12 +519,12 @@ static __device__ __forceinline__ void mpkar_p2p_reduce_v4_block(
 }
 
 template <typename T>
-static __device__ __forceinline__ void mpkar_p2p_reduce_add_residual_v4_block(
-    int4 *__restrict__ dst,
-    void const *local_input_ptr,
-    int4 const *__restrict__ residual,
-    nvshmemi_team_t *teami,
-    int nelems_v4) {
+static __device__ __forceinline__ void
+    mpkar_p2p_reduce_add_residual_v4_block(int4 *__restrict__ dst,
+                                           void const *local_input_ptr,
+                                           int4 const *__restrict__ residual,
+                                           nvshmemi_team_t *teami,
+                                           int nelems_v4) {
   static_assert(cuda::std::is_same<T, __nv_bfloat16>::value,
                 "P2P AR fallback currently bf16 only.");
   int4 const *local_v4 = reinterpret_cast<int4 const *>(local_input_ptr);
@@ -670,7 +670,7 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
   // fall back to the P2P reduce that reads each peer's heap mirror directly.
   // mc_src is NULL whenever the team has no NVLS rsc (observed on NVSHMEM
   // 3.6.5 under MPK's team_split_strided setup — see TP=2 debug session
-  // 2026-05-18). The fallback uses peer_heap_base_p2p, which is populated by
+  // The fallback uses peer_heap_base_p2p, which is populated by
   // NVSHMEM for any p2p-connected GPU pair (no NVLS dependency).
   bool const use_nvls = (mc_src != nullptr);
   if constexpr (OUTPUT_SIZE == OUTPUT_STRIDE) {
@@ -692,9 +692,8 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
     }
   } else {
     for (int row = 0; row < num_active_rows; row++) {
-      void const *row_input =
-          static_cast<char const *>(input_ptr) +
-          row * STRIDE_V4 * (int)sizeof(int4);
+      void const *row_input = static_cast<char const *>(input_ptr) +
+                              row * STRIDE_V4 * (int)sizeof(int4);
       if constexpr (ADD_RESIDUAL) {
         if (use_nvls) {
           mpkar_nvls_reduce_add_residual_v4_block<T>(
@@ -703,18 +702,21 @@ __device__ __forceinline__ void nvshmem_tile_allreduce_impl(void *input_ptr,
               residual_v4 + row * STRIDE_V4,
               V4_PER_ROW);
         } else {
-          mpkar_p2p_reduce_add_residual_v4_block<T>(
-              dst_v4 + row * STRIDE_V4, row_input,
-              residual_v4 + row * STRIDE_V4, teami, V4_PER_ROW);
+          mpkar_p2p_reduce_add_residual_v4_block<T>(dst_v4 + row * STRIDE_V4,
+                                                    row_input,
+                                                    residual_v4 +
+                                                        row * STRIDE_V4,
+                                                    teami,
+                                                    V4_PER_ROW);
         }
       } else {
         if (use_nvls) {
           mpkar_nvls_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4,
-                                         src_mc_v4 + row * STRIDE_V4,
-                                         V4_PER_ROW);
+                                        src_mc_v4 + row * STRIDE_V4,
+                                        V4_PER_ROW);
         } else {
-          mpkar_p2p_reduce_v4_block<T>(dst_v4 + row * STRIDE_V4, row_input,
-                                       teami, V4_PER_ROW);
+          mpkar_p2p_reduce_v4_block<T>(
+              dst_v4 + row * STRIDE_V4, row_input, teami, V4_PER_ROW);
         }
       }
     }

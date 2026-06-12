@@ -162,16 +162,14 @@ public:
   // CTAs (z=2); TP=8 takes Q_LEN_real (Q_LEN padded to even).
   int register_mla_mtp_decode_tp2_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
-  int register_mla_mtp_decode_tp2_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_mla_mtp_decode_tp4_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
-  int register_mla_mtp_decode_tp4_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_mla_mtp_decode_tp8_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
-  int register_mla_mtp_decode_tp8_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  // Unified TP2/TP4/TP8 split-KV reduce (one TASK_MLA_MTP_DECODE_TP_REDUCE
+  // enum; tp in {2, 4, 8} picks the device function at graph-build time).
+  int register_mla_mtp_decode_tp_reduce_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params, int tp);
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
                                        bool scale_ue8m0);
@@ -187,16 +185,19 @@ public:
                                          std::vector<int> const &params);
   int register_linear_fp8_bmm_dense_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params);
-  int register_fp8_gemm_dense_smallm_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_mediumm_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  // Unified dense FP8 GEMM family (one TASK_FP8_GEMM_DENSE_SM100 enum).
+  // `mediumm` picks the smallm/mediumm tile flavor; the *_fp8out_* fn picks
+  // the epilogue-UE8M0-quantize flavor; decode_splitk is the split-K
+  // decode variant. All register variants under the same task type.
+  int register_fp8_gemm_dense_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params,
+                                         bool mediumm);
   int register_fp8_gemm_dense_decode_splitk_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_smallm_fp8out_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_gemm_dense_fp8out_sm100_task(
+      threadblock::Graph const &bgraph,
+      std::vector<int> const &params,
+      bool mediumm);
   int register_fused_rmsnorm_quantize_fp8_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_group_gemm_smallm_sm100_task(

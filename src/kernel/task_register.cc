@@ -6063,26 +6063,20 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   return self->register_task_variant(task_type, code.to_string());
 }
 
-int TaskRegister::register_fp8_gemm_dense_smallm_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_fp8_gemm_dense_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool mediumm) {
   (void)bgraph;
+  // smallm/mediumm share one TASK_FP8_GEMM_DENSE_SM100 enum; the tile
+  // flavor is baked into the per-instance variant body here.
   return register_fp8_gemm_dense_variant(
       this,
       params,
-      "fp8_gemm_dense_smallm",
-      "fp8_gemm_dense_smallm_sm100_task_impl",
-      TASK_FP8_GEMM_DENSE_SMALLM_SM100);
-}
-
-int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  (void)bgraph;
-  return register_fp8_gemm_dense_variant(
-      this,
-      params,
-      "fp8_gemm_dense_mediumm",
-      "fp8_gemm_dense_mediumm_sm100_task_impl",
-      TASK_FP8_GEMM_DENSE_MEDIUMM_SM100);
+      mediumm ? "fp8_gemm_dense_mediumm" : "fp8_gemm_dense_smallm",
+      mediumm ? "fp8_gemm_dense_mediumm_sm100_task_impl"
+              : "fp8_gemm_dense_smallm_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_SM100);
 }
 
 // D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but
@@ -6092,11 +6086,12 @@ int TaskRegister::register_fp8_gemm_dense_mediumm_sm100_task(
 // num_workers, optional runtime_m_mode); `scale_outer_stride` is derived
 // from N at codegen time (= N/128 = number of K-groups per row, since
 // BN=128 and we statically restrict the fused path to BN=128).
-static int register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
-                                                  std::vector<int> const &params,
-                                                  char const *namespace_name,
-                                                  char const *fn_name,
-                                                  TaskType task_type) {
+static int
+    register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
+                                           std::vector<int> const &params,
+                                           char const *namespace_name,
+                                           char const *fn_name,
+                                           TaskType task_type) {
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
@@ -6161,26 +6156,21 @@ static int register_fp8_gemm_dense_fp8out_variant(TaskRegister *self,
   return self->register_task_variant(task_type, code.to_string());
 }
 
-int TaskRegister::register_fp8_gemm_dense_smallm_fp8out_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_fp8_gemm_dense_fp8out_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool mediumm) {
   (void)bgraph;
+  // fp8out flavors also live under the unified TASK_FP8_GEMM_DENSE_SM100
+  // enum (TMA + scheduler metadata are identical; only the variant body
+  // and the graph.cc output tuple differ).
   return register_fp8_gemm_dense_fp8out_variant(
       this,
       params,
-      "fp8_gemm_dense_smallm",
-      "fp8_gemm_dense_smallm_fp8out_sm100_task_impl",
-      TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100);
-}
-
-int TaskRegister::register_fp8_gemm_dense_mediumm_fp8out_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  (void)bgraph;
-  return register_fp8_gemm_dense_fp8out_variant(
-      this,
-      params,
-      "fp8_gemm_dense_mediumm",
-      "fp8_gemm_dense_mediumm_fp8out_sm100_task_impl",
-      TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100);
+      mediumm ? "fp8_gemm_dense_mediumm" : "fp8_gemm_dense_smallm",
+      mediumm ? "fp8_gemm_dense_mediumm_fp8out_sm100_task_impl"
+              : "fp8_gemm_dense_smallm_fp8out_sm100_task_impl",
+      TASK_FP8_GEMM_DENSE_SM100);
 }
 
 // SplitK decode variant. params: [M, N, K, num_workers, SPLIT_K]. Always
@@ -6236,8 +6226,9 @@ int TaskRegister::register_fp8_gemm_dense_decode_splitk_sm100_task(
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    $);", num_workers);
   code.e("}");
-  return register_task_variant(TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100,
-                               code.to_string());
+  // Registered under the unified dense FP8 GEMM enum; the split-K body is
+  // just another graph-build-time variant of the family.
+  return register_task_variant(TASK_FP8_GEMM_DENSE_SM100, code.to_string());
 }
 
 // Shared codegen for both group GEMM variants (smallm/largem). Variant
@@ -6326,7 +6317,10 @@ int TaskRegister::register_fp8_group_gemm_largem_compact_sm100_task(
 
 // moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.
 // Params (compile-time): [K, K_PACKED, MBT, TOPK, E_LOCAL, BM_PADDING]
-// Inputs (4): input_fp8 (mbt, K) u8, input_scale (mbt, K_PACKED) u32 UE8M0,
+// Inputs (4): input_fp8 (mbt, K) u8,
+//             input_scale [K_PACKED, round4(mbt)] u32 UE8M0 K-outer memory
+//             (word = sf * round4(mbt) + token; the logical attach shape may
+//             be the transposed view),
 //             topk_weights (mbt, TOPK) f32, routing_indices (E_LOCAL, MBT) i32
 // Outputs (3): permuted_fp8 (M_TOTAL, K) u8,
 //              permuted_scale (K_PACKED, M_TOTAL) u32 TRANSPOSED,
@@ -7206,14 +7200,24 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   return register_task_variant(TASK_MLA_MTP_DECODE_TP2_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+// Unified TP2/TP4/TP8 split-KV reduce. One TASK_MLA_MTP_DECODE_TP_REDUCE
+// enum; `tp` selects the kernel::mla_mtp_tp{2,4,8}::*_reduce device
+// function at graph-build time (the merged enum is safe because the three
+// reduces need no TMA and share the scheduler-metadata branch).
+// Per-TP body differences preserved verbatim from the former fns:
+//   - qpg: TP2 = min(q_len, 2); TP4 = min(q_len, 4); TP8 = 2.
+//   - TP2/TP4 pass the runtime compact split count sk_rt_ (matching the
+//     mains); TP8's partial layout is static-num_splits based and its
+//     runtime Q_LEN is even-padded (q_len_padded_rt_).
+int TaskRegister::register_mla_mtp_decode_tp_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params, int tp) {
   assert(params.size() == 4);
+  assert(tp == 2 || tp == 4 || tp == 8);
   int num_groups = params[0];
-  int q_len = params[1];
+  int q_len = params[1]; // TP8: even-padded q_len
   int num_splits = params[2];
   int rd_dv = params[3];
-  int qpg = (q_len < 2) ? q_len : 2;
+  int qpg = (tp == 8) ? 2 : ((q_len < tp) ? q_len : tp);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -7234,22 +7238,35 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
   code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
-  code.e("  kernel::mla_mtp_tp2::mla_mtp_tp2_reduce(");
+  if (tp == 8) {
+    code.e("  int q_len_padded_rt_ = q_len_rt_ + (q_len_rt_ & 1);");
+  }
+  code.e("  kernel::mla_mtp_tp$::mla_mtp_tp$_reduce(", tp, tp);
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  // Match the main task's runtime compact split layout (sk_rt_). Passing
-  // compile-time num_splits read stale partial slots beyond sk_rt_; the
-  // main now also passes sk_rt_, so the two stay in sync for short context.
-  code.e("      sk_rt_,");
+  if (tp == 8) {
+    // See TP2 MTP reduce: TP8's partial layout is static-num_splits based.
+    code.e("      $,", num_splits);
+  } else {
+    // Match the main task's runtime compact split layout (sk_rt_). Passing
+    // compile-time num_splits read stale partial slots beyond sk_rt_; the
+    // main now also passes sk_rt_, so the two stay in sync for short
+    // context.
+    code.e("      sk_rt_,");
+  }
   code.e("      $,", num_groups);
-  code.e("      q_len_rt_,");
+  if (tp == 8) {
+    code.e("      q_len_padded_rt_,");
+  } else {
+    code.e("      q_len_rt_,");
+  }
   code.e("      $,", qpg);
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id,");
   code.e("      bi_);");
   code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100,
+  return register_task_variant(TASK_MLA_MTP_DECODE_TP_REDUCE_SM100,
                                code.to_string());
 }
 
@@ -7324,51 +7341,6 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   return register_task_variant(TASK_MLA_MTP_DECODE_TP4_SM100, code.to_string());
 }
 
-int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 4);
-  int num_groups = params[0];
-  int q_len = params[1];
-  int num_splits = params[2];
-  int rd_dv = params[3];
-  int qpg = (q_len < 4) ? q_len : 4;
-
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  // Dual-dispatch: pass runtime Q_LEN so reduce early-exit mirrors main.
-  code.e("{");
-  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
-  code.e("  int req_id_ = runtime_config.request_ids[bi_];");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
-  code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
-  code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
-  code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
-  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
-  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
-  code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
-  code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
-  code.e("  if (q_len_rt_ > 8) return;");
-  code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
-  code.e("  kernel::mla_mtp_tp4::mla_mtp_tp4_reduce(");
-  code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
-  code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
-  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  // Match the main task's runtime compact split layout.
-  code.e("      sk_rt_,");
-  code.e("      $,", num_groups);
-  code.e("      q_len_rt_,");
-  code.e("      $,", qpg);
-  code.e("      task_desc->task_metadata.kv_idx,");
-  code.e("      task_desc->task_metadata.request_id,");
-  code.e("      bi_);");
-  code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100,
-                               code.to_string());
-}
-
 int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 5);
@@ -7437,54 +7409,6 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.e("      task_desc->task_metadata.request_id);");
   code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_TP8_SM100, code.to_string());
-}
-
-int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 4);
-  int num_groups = params[0];
-  int q_len_padded = params[1];
-  int num_splits = params[2];
-  int rd_dv = params[3];
-  int qpg = 2;
-
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  // Dual-dispatch: pass runtime q_len_padded (even-padded runtime Q_LEN).
-  code.e("{");
-  code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
-  code.e("  int req_id_ = runtime_config.request_ids[bi_];");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
-  code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
-  code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
-  code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
-  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
-  code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
-  code.e("  int q_len_real_rt_ = qo_lp_ - qo_fp_;");
-  code.e("  if (q_len_real_rt_ < 1) q_len_real_rt_ = 1;");
-  code.e("  if (q_len_real_rt_ > 8) return;");
-  code.e("  if (q_len_real_rt_ > $) q_len_real_rt_ = $;",
-         q_len_padded,
-         q_len_padded);
-  code.e("  int q_len_padded_rt_ = q_len_real_rt_ + (q_len_real_rt_ & 1);");
-  code.e("  kernel::mla_mtp_tp8::mla_mtp_tp8_reduce(");
-  code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
-  code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
-  code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  // See TP2 MTP reduce: partial layout is static-num_splits based.
-  code.e("      $,", num_splits);
-  code.e("      $,", num_groups);
-  code.e("      q_len_padded_rt_,");
-  code.e("      $,", qpg);
-  code.e("      task_desc->task_metadata.kv_idx,");
-  code.e("      task_desc->task_metadata.request_id,");
-  code.e("      bi_);");
-  code.e("}");
-  return register_task_variant(TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100,
-                               code.to_string());
 }
 
 } // namespace runtime

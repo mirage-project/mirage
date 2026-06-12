@@ -339,7 +339,7 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   }
 
   __syncthreads();
-  // 2026-05-13: the consumer-warp output writes use st.relaxed.cta.global
+  // The consumer-warp output writes use st.relaxed.cta.global
   // which has CTA-scope semantics — fine when this kernel is launched
   // standalone (cudaLaunch acts as implicit fence between successive
   // launches), but in the MPK persistent megakernel the next task on a

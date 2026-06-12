@@ -49,10 +49,8 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #endif
 #else
 #if MPK_TARGET_CC >= 90
-// B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
-// (la_smem[MAX_SK*128]). FP8 group GEMM (NS=6, BN=128) needs ~216KB
-// dynamic SMEM, so we bump from 207 -> 222 to fit it. Stays under total
-// 228KB hardware limit when combined with the 6KB worker reserved static.
+// B200: 222KB dynamic smem (under the 228KB hardware total after the worker
+// reserved static; sized to fit the FP8 group GEMM NS=6/BN=128 ~216KB).
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     222 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
@@ -173,89 +171,32 @@ enum TaskType {
   TASK_PROB_SCATTER_SM100 = 284,
   TASK_MTP_FLOAT_SCATTER = 285,
   TASK_PROB_EXTRACT_SM100 = 286,
-  // MLA-MTP TP variants (q1..q4, kv4096; ferret-derived, no-PDL):
   TASK_MLA_MTP_DECODE_TP2_SM100 = 287,
-  TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 = 288,
   TASK_MLA_MTP_DECODE_TP4_SM100 = 289,
-  TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 = 290,
   TASK_MLA_MTP_DECODE_TP8_SM100 = 291,
-  TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
-  // KV gather variant that writes split CKV/KPE output (for chunked prefill):
+  // retired: 290, 292
+  TASK_MLA_MTP_DECODE_TP_REDUCE_SM100 = 288,
   TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
-  // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
-  // input tokens = shifted ground-truth prompt + current iter's argmax tail.
   TASK_MTP_BUILD_EMBED_INPUT = 294,
-  // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
-  // Unified DeepSeek MLA dispatcher: prefill or MTP decode by runtime Q_LEN.
   TASK_MLA_UNIFIED_SM100 = 296,
-  // Unified KV gather: appends once, then writes the prefill or decode layout
-  // selected by runtime Q_LEN.
   TASK_MLA_KV_GATHER_UNIFIED_SM100 = 297,
   TASK_MLA_PREFILL_TP8_CHUNKED_SM100 = 298,
   TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 299,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
-  TASK_FP8_GEMM_DENSE_SMALLM_SM100 = 306,
-  TASK_FP8_GEMM_DENSE_MEDIUMM_SM100 = 307,
-  // SplitK decode variant of the dense FP8 GEMM. K is partitioned across
-  // SPLIT_K CTAs (per output tile) which atomically reduce-add their
-  // partial sums into a pre-zeroed BF16 output. Targets DSv3 decode
-  // O_proj (M=128 mbt, K=16384 = 32*512 absorbed, N=7168 hidden shard),
-  // where the stock kernel runs 56 tiles in 1 underutilized wave; with
-  // SPLIT_K=4 we run 224 tiles in 3 better-utilized waves, each tile
-  // doing K/4 work. Gated behind MPK_DSV3_DECODE_OPROJ_SPLITK=1.
-  TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100 = 308,
-  // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize. Replaces
-  // the (RMSNorm bf16 -> Quantize fp8) two-task chain that feeds the qkv_a
-  // FP8 dense GEMM. Saves one dispatch wave and one bf16 HBM round-trip
-  // per layer. Behind `MPK_DSV3_FUSED_RMSNORM_QUANTIZE=1`.
+  // retired: 307, 308, 318, 319
+  TASK_FP8_GEMM_DENSE_SM100 = 306,
   TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100 = 309,
-  // Grouped FP8 GEMM for MoE (DSv3, cherry-picked from PR674 f24dcd85).
-  // Fused block_scale MMA with UE8M0 scales. 5 TMA descriptors
-  // (A, B, SFA, SFB, D output). Two variants share kernel body; differ
-  // in (BN, NS) and corresponding TMA box dim.
-  TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8 (K>4096, MPE<=8)
-  TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6 (everything else)
-  // Peripheral tasks that adapt the new grouped GEMM's pre-permuted
-  // input/output contract to the OLD MoE-builder format (routing_indices
-  // + mask + (mbt, K) input + (mbt, hidden) output). One CTA per local
-  // expert (PERMUTE) / per token (UNPERMUTE).
+  TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8
+  TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6
   TASK_MOE_PERMUTE_SM100 = 313,
   TASK_MOE_UNPERMUTE_SM100 = 314,
-  // Tiny helper to transpose packed UE8M0 scale (M, K_PACKED) →
-  // (K_PACKED, M); needed for the silu→W2 path because quantize_fp8 emits
-  // (M, K_PACKED) while the new fp8_group_gemm SFA expects (K_PACKED, M).
   TASK_TRANSPOSE_SCALE_SM100 = 315,
-  // Helper for the MPK_DSV3_BMM decode Q path: interleaves the BMM-absorbed
-  // q_nope (N, H, 512) with q_pe (N, H, 64) into per-head [nope|pe] layout
-  // (N, H, 576) that the MLA decode TMA expects.
   TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
-  // Compact-dispatch variant of the large-M FP8 group GEMM: loops only ACTIVE
-  // experts (decode skips ~97% idle tiles). Same TMA layout / runtime signature
-  // as TASK_FP8_GROUP_GEMM_LARGEM_SM100 (shares its TMA-desc dispatch); the
-  // fine-tuned largem kernel stays byte-identical (PR #707 review split).
   TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100 = 317,
-  // D1 (2026-05-17): dense FP8 GEMM with epilogue UE8M0 quantize. Output is
-  // FP8 + packed UE8M0 scale (instead of bf16), eliminating the standalone
-  // per_token_group_quantize_fp8 task that follows q_b_nope in the
-  // MPK_DSV3_BMM=1 Q-up chain. Saves one dispatch + one BF16 HBM round-trip.
-  // Behind `MPK_DSV3_FUSED_QB_QUANTIZE=1`.
-  TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100 = 318,
-  TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100 = 319,
-  // PR696 multi-CTA topk prefill path (default-OFF via MPK_DSV3_TOPK_MULTICTA).
-  // The single-CTA topk does marker-init + compaction inline; the multi-CTA
-  // variant cannot (cross-CTA marker-init race), so they become separate
-  // tasks: marker-init (active_expert_ids[0..LE)=-1, [LE]=0) BEFORE the
-  // multi-CTA topk (FUSE_COMPACTION=false), and a warp-ballot compaction
-  // AFTER. Slot 310 was the only free SM100 id; the init reuses the old END
-  // placeholder value 320 (END bumped to 321 — END is only a profiler name,
-  // never a range-check boundary, so this is safe).
   TASK_MOE_TOPK_COMPACT_SM100 = 310,
   TASK_MOE_TOPK_MARKER_INIT_SM100 = 320,
-  // Per-head FP8 BMM wrapping the DENSE block-scaled GEMM body (float32
-  // scales). Forward-compatible alternative to TASK_LINEAR_FP8_BMM_SM100
-  // (swapAB / UE8M0) for DSv3 decode BMM2. Behind MPK_DSV3_BMM_DENSE=1.
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
   TASK_SM100_TASK_END = 323, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,

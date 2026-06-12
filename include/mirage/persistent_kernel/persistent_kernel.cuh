@@ -1614,6 +1614,14 @@ extern "C" void
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
+  // split_worker_scheduler=true launches worker_kernel + scheduler_kernel as
+  // two independent grids; false fuses them into one collective launch. On a
+  // clean B200 box, split=true was verified to run TP8 EP2 (16L + full 61L,
+  // n=3/3, default 48 schedulers) without wedging, so it is re-enabled here.
+  // NOTE: the original rebase hang that motivated forcing false was not
+  // reproduced on a clean box and was not isolated to this flag (other fixes
+  // landed since); if a probabilistic wedge ever reappears under contention,
+  // this flag is the first thing to revisit.
   global_runtime_config.split_worker_scheduler = true;
 
   std::vector<FullTaskDesc> all_fulltasks;

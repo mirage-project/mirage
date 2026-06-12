@@ -99,7 +99,7 @@ __device__ __forceinline__ uint64_t mkdesc_sk(int a) {
 }
 
 // Atomic bf16x2 add: adds a packed pair of bf16 values to *ptr.
-// B36 (2026-05-15): SM100 PTX requires an explicit scope qualifier on
+// SM100 PTX requires an explicit scope qualifier on
 // `red.global` for inter-CTA atomic correctness. Without it the default
 // is `.cta`, which is undefined behavior across SMs and surfaces as
 // `cudaErrorLaunchFailure` for SplitK accumulating into the same output

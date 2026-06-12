@@ -34,7 +34,7 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
                                                      float eps,
                                                      int row_count_cap = -1) {
   // static_assert(BATCH_SIZE == 1);
-  // B34 (2026-05-15): row_count_cap (default -1 = disabled) lets the codegen
+  // Row_count_cap (default -1 = disabled) lets the codegen
   // shrink grid_dim from (mbt, 1, 1) to (mbt//8, 1, 1) so each CTA handles
   // BATCH_SIZE > 1 rows via the existing batch_idx loop. On decode iters
   // (active_rows=1), CTA 0 with BATCH_SIZE=8 must stop after the active row
@@ -93,7 +93,7 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
   float *reduce_smem = reinterpret_cast<float *>(smem + REDUCE_BUFFER_OFFSET);
 
   for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
-    // B34 active-rows gate: with grid_dim shrunk so BATCH_SIZE > 1, decode
+    // Active-rows gate: with grid_dim shrunk so BATCH_SIZE > 1, decode
     // iters (active_rows < BATCH_SIZE rows for CTA 0) must skip the
     // inactive tail so we don't normalize and write back stale bf16. The
     // remaining rows are left untouched, preserving last-iter content;

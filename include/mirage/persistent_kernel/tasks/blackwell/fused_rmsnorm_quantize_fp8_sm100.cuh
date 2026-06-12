@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 //
-// B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize kernel.
+// Fused RMSNorm + per-token-group FP8 quantize kernel.
 //
 // Replaces the two-task chain RMSnorm (5 us wave) -> Quantize (5 us wave)
 // that currently feeds the qkv_a FP8 dense GEMM (~32 us). The standalone

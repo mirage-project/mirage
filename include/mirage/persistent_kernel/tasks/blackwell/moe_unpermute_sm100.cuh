@@ -72,7 +72,7 @@ __device__ __forceinline__ void
   bf16 const *__restrict__ d_res = static_cast<bf16 const *>(residual_ptr);
   bf16 *__restrict__ d_out = static_cast<bf16 *>(output_ptr);
 
-  // B33 (2026-05-15): outer loop over ROWS_PER_TASK contiguous tokens so a
+  // Outer loop over ROWS_PER_TASK contiguous tokens so a
   // single CTA can cover multiple rows when the wrapper shrinks grid_dim
   // (e.g., 16 CTAs × 8 rows = 128 tokens with MBT=128). Default
   // ROWS_PER_TASK=1 is the legacy 1-CTA-per-token shape.
@@ -118,7 +118,7 @@ __device__ __forceinline__ void
 
     // Accumulate per-element: out[i] = residual[i]
     //                                + sum_k(d_in[rows[k]][i] * weights[k]).
-    // 2026-05-15 (B36-followup): hidden_partition splits the HIDDEN
+    // (B36-followup): hidden_partition splits the HIDDEN
     // axis across HIDDEN_SPLIT CTAs. Each CTA owns the range
     // [hid_start, hid_end). HIDDEN_SPLIT=1 keeps the legacy
     // single-CTA-owns-full-hidden shape.

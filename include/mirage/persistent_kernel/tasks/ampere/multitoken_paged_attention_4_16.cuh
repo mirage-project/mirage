@@ -96,12 +96,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
   int const seq_len = (num_pages - 1) * PAGE_SIZE +
                       paged_kv_last_page_len_buffer_ptr[request_id];
   // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
-  //  if(threadIdx.x == 0 && request_id == 0){
-  //    printf("small num_tokens %d, seq len%d, num_pages %d,
-  //    paged_kv_last_page_len_buffer_ptr[request_id], %d, request id %d\n",
-  //    num_tokens, seq_len, num_pages,
-  //    paged_kv_last_page_len_buffer_ptr[request_id], request_id);
-  // }
   // Load the paged KV indices into shared memory
   // We need to align the page_indices to 16 bytes because vectorized access is
   // used
@@ -120,10 +114,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
     for (int i = threadIdx.x; i < tail_pages; i += NUM_THREADS) {
       page_indices[tail_offset + i] =
           paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
-      // if(threadIdx.x == 0){
-      //   printf("page_indices[%d] = %d, %d, %d\n", tail_offset + i,
-      //   page_indices[tail_offset + i], first_page_pos, tail_offset, i);
-      // }
     }
   }
   __syncthreads();

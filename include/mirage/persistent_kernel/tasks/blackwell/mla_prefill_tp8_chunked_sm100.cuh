@@ -424,7 +424,7 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
     int const head,  // bid.x
     int const qb_in, // bid.y
     int const bat,   // bid.z
-    // FuseTensor support (2026-05-12 user #2 row-swap):
+    // FuseTensor support (row-swap):
     //   `qn_head_stride` / `qp_head_stride` = byte-stride (in bf16 elements)
     //     between consecutive heads' Qn/Qp data WITHIN ONE ROW. For legacy
     //     separate buffers this is D_QK_NOPE / D_QK_ROPE.

@@ -5,7 +5,7 @@
 
 namespace kernel {
 
-// 2026-05-12 (user #2 FuseTensor row-swap): when Q_ROW_STRIDE_OVERRIDE > 0,
+// (user #2 FuseTensor row-swap): when Q_ROW_STRIDE_OVERRIDE > 0,
 // the kernel addresses q_fused/q_split_pe with the row-swap layout instead
 // of the legacy [head, FUSED_HEAD_DIM] layout:
 //   addr = base + row * Q_ROW_STRIDE_OVERRIDE

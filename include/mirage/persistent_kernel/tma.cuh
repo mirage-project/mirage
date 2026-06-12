@@ -794,7 +794,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       bool is_fp8 = (tensor_desc.data_type == 930);    // DT_FLOAT8
 
       if (is_fp8 && param_id == 0) {
-        // A (input FP8): dim=[batch, K]. C20 (2026-05-17): gs from
+        // A (input FP8): dim=[batch, K]. gs from
         // stride[0] (FP8: 1 byte/elem) so views read the parent's row
         // stride, not the narrow slot width.
         int batch = tensor_desc.dim[0];
@@ -1614,16 +1614,12 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
-    case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
-    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
-    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100:
-    case TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100:
-    case TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100: {
+    case TASK_FP8_GEMM_DENSE_SM100: {
       // Dense FP8 GEMM TMA for A [M,K] and B [N,K], both row-major raw
       // e4m3 bytes. Scales are loaded directly, not through TMA. SplitK
       // variant uses the same descriptor — per-CTA K offset is encoded in
       // the runtime tile-index decomposition.
-      // C20 (2026-05-17): gmem row stride must come from
+      // The gmem row stride must come from
       // `tensor_desc.stride[0]` (in FP8 bytes), not dim[1]. For root
       // tensors the two are equal; for `mpk.narrow` views of e.g.
       // qkv_a_out, dim[1] = slot_width but stride[0] = parent_row_width,
@@ -2331,9 +2327,7 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
-    case TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100:
-    case TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100:
-    case TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100: {
+    case TASK_MLA_MTP_DECODE_TP_REDUCE_SM100: {
       // no TMA needed
       break;
     }
@@ -2354,11 +2348,7 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
-    case TASK_FP8_GEMM_DENSE_SMALLM_SM100:
-    case TASK_FP8_GEMM_DENSE_MEDIUMM_SM100:
-    case TASK_FP8_GEMM_DENSE_DECODE_SPLITK_SM100:
-    case TASK_FP8_GEMM_DENSE_SMALLM_FP8OUT_SM100:
-    case TASK_FP8_GEMM_DENSE_MEDIUMM_FP8OUT_SM100: {
+    case TASK_FP8_GEMM_DENSE_SM100: {
       // A_fp8 and B_fp8 use TMA; scale tensors are plain LDG inputs.
       // SplitK uses the same TMA layout (full K extent in descriptor;
       // per-CTA K offset baked into runtime tile indexing). FP8OUT

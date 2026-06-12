@@ -27,7 +27,7 @@ namespace kernel {
 // format the PR-674 fp8_group_gemm_smallm/largem_sm100 SFA/SFB TMA
 // descriptors expect).
 //
-// Multi-CTA fan-out (B13 2026-05-15): the single-CTA version was 53 μs
+// Multi-CTA fan-out: the single-CTA version was 53 μs
 // for the DSv3 NEW MoE silu_scale shape (M=16384, K_PACKED=2 → 32K
 // uint32 = 128 KB transfer). Split the M dimension across grid.x CTAs
 // — each CTA owns a contiguous chunk of M rows and does its own
