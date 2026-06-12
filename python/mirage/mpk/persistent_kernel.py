@@ -2518,11 +2518,20 @@ class PersistentKernel:
         tb_graph.new_input(sfa_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output]
+        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices]
+        # CRITICAL ORDERING (mirror of the 2026-06-07 fix in
+        # models/deepseek_v3/tasks.py::_fp8_group_gemm_layer_impl): the
+        # codegen reads input_ptrs[5] as the meta/active-mask buffer and
+        # output_ptrs[0] as D; graph.cc splits positionally (6 inputs when
+        # meta present, 1 output). meta MUST therefore register BEFORE
+        # output, else input[5]=output is read as the mask (all-zero ->
+        # every tile skipped -> NULL output) and the D TMA-store targets the
+        # tiny meta buffer. This duplicate had kept the pre-fix order.
         if meta is not None:
             tb_graph.new_input(meta, (-1, -1, -1), -1, True)
             operators.append(meta)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        operators.append(output)
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 

@@ -334,6 +334,13 @@ __device__ __noinline__ void task_impl_tpl(
   // ====== WARP 1: MMA ISSUE ======
   else if (wid == 1 && elect_one_sync()) {
     int gki = 0;
+    // Accumulator ring position must count PROCESSED tiles only (like gki),
+    // NOT raw `iter`: btf/bte arrivals happen only for processed tiles, so
+    // phasing the ring on `iter` desyncs wait-parity from actual completions
+    // whenever active_expert_mask skips tiles (mixed skip = mb_wait spins
+    // forever; all-skip / nullptr-mask paths never exposed it). pacc == iter
+    // exactly when nothing is skipped, so the legacy path is unchanged.
+    int pacc = 0;
     for (int iter = 0;; iter++) {
       int bidx = iter * num_workers + worker_idx;
       if (bidx >= total) {
@@ -348,8 +355,9 @@ __device__ __noinline__ void task_impl_tpl(
           continue;
         }
       }
-      int accum_idx = iter % NE;
-      int accum_ph = (iter / NE) & 1;
+      int accum_idx = pacc % NE;
+      int accum_ph = (pacc / NE) & 1;
+      pacc++;
       mb_wait(bte + accum_idx * 8, accum_ph ^ 1);
 
       for (int ki = 0; ki < nk; ki++, gki++) {
@@ -410,6 +418,9 @@ __device__ __noinline__ void task_impl_tpl(
   else if (wid >= 4) {
     int const ew = wid - 4;
     uint32_t tma_st = 0;
+    // Processed-tile counter for the accumulator ring — see warp 1: phasing
+    // btf/bte on raw `iter` deadlocks under a mixed active_expert_mask.
+    int pacc = 0;
     for (int iter = 0;; iter++) {
       int bidx = iter * num_workers + worker_idx;
       if (bidx >= total) {
@@ -424,8 +435,9 @@ __device__ __noinline__ void task_impl_tpl(
       }
       int om = m_start;
       int on = bn * BN;
-      int accum_idx = iter % NE;
-      int accum_ph = (iter / NE) & 1;
+      int accum_idx = pacc % NE;
+      int accum_ph = (pacc / NE) & 1;
+      pacc++;
       mb_wait(btf + accum_idx * 8, accum_ph);
       asm volatile("tcgen05.fence::after_thread_sync;");
       constexpr int NUM_N_ST = BN / STORE_BN;

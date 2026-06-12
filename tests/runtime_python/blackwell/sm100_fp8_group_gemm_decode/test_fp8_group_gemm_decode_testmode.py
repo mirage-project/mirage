@@ -77,12 +77,24 @@ def _w2_k(tp: int) -> int:
     return k
 
 
-def _run_case(label, tp, bs, E, MPE, K, N, seed=42):
-    """One grouped-GEMM config. M_total = E*MPE. Returns (passed, cos, rel, tag)."""
+def _run_case(label, tp, bs, E, MPE, K, N, seed=42, active_experts=None):
+    """One grouped-GEMM config. M_total = E*MPE. Returns (passed, cos, rel, tag).
+
+    active_experts: optional list of expert ids. When set, a production-style
+    meta buffer is passed (mask = row 1's first E int32s, see
+    _fp8_group_gemm_layer_impl) marking ONLY those experts active — the kernel
+    must skip every other expert's tiles (their output rows stay zero) WITHOUT
+    deadlocking. This pins the accumulator-ring regression (2026-06-12): the
+    btf/bte ring was phased on the raw tile-iter counter, which advances across
+    skipped tiles while arrivals only happen for processed ones — a scattered
+    mask + multi-tile-iter (total tiles >> num_workers) made mb_wait spin
+    forever. None = legacy nullptr-mask path (process every tile).
+    """
     M_total = E * MPE
     variant = "smallm" if (K > 4096 and MPE <= 8) else "largem"
     tag = (f"[{label}] tp={tp} bs={bs} E={E} MPE={MPE} M_total={M_total} "
-           f"K={K} N={N} ({variant})")
+           f"K={K} N={N} ({variant})"
+           + (f" mask={len(active_experts)}/{E}" if active_experts else ""))
     print(f"\n{'='*80}\n{tag}\n{'='*80}", flush=True)
 
     device = "cuda"
@@ -111,6 +123,21 @@ def _run_case(label, tp, bs, E, MPE, K, N, seed=42):
     ref = grouped_gemm_ref(a_fp8, sa_dec, b_fp8, sb_dec, m_indices)
     output = torch.zeros((M_total, N), device=device, dtype=torch.bfloat16)
 
+    meta = None
+    if active_experts is not None:
+        # Production meta layout (_fp8_group_gemm_layer_impl): 2D int32; the
+        # active-expert mask is the first E entries of ROW 1 (flat offset =
+        # meta.dim(1)). Width just needs >= E.
+        meta = torch.zeros((2, max(E, 8)), device=device, dtype=torch.int32)
+        active_idx = torch.tensor(sorted(active_experts), device=device,
+                                  dtype=torch.long)
+        meta[1, active_idx] = 1
+        # Reference: inactive experts' tiles are skipped -> their output rows
+        # keep the zero init.
+        inactive_row = (meta[1, :E] == 0)[m_indices.to(torch.long)]
+        ref = ref.clone()
+        ref[inactive_row] = 0
+
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params["test_mode"] = True
@@ -130,12 +157,14 @@ def _run_case(label, tp, bs, E, MPE, K, N, seed=42):
     sfb_dt = pk.attach_input(sfb_packed, name="sfb_packed")
     mi_dt = pk.attach_input(m_indices, name="m_indices")
     out_dt = pk.attach_input(output, name="output")
+    meta_dt = pk.attach_input(meta, name="meta") if meta is not None else None
 
     pk.fp8_group_gemm_layer(
         a_fp8=a_dt, b_fp8=b_dt,
         sfa_packed=sfa_dt, sfb_packed=sfb_dt,
         m_indices=mi_dt, output=out_dt,
         num_workers=num_workers,
+        meta=meta_dt,
     )
 
     compile_dir = os.path.join(
@@ -145,13 +174,22 @@ def _run_case(label, tp, bs, E, MPE, K, N, seed=42):
     pk()
     torch.cuda.synchronize()
 
-    zero_rows = (output.float().abs().sum(dim=1) == 0).nonzero(
-        as_tuple=True)[0]
+    row_is_zero = output.float().abs().sum(dim=1) == 0
+    if active_experts is not None:
+        # Masked case: inactive experts' rows MUST stay zero; active rows
+        # must be written. cos/rel are computed on the full matrix (zeros
+        # match the zeroed reference rows).
+        active_row = (meta[1, :E] == 1)[m_indices.to(torch.long)]
+        rows_ok = (not row_is_zero[active_row].any()) and \
+            row_is_zero[~active_row].all().item()
+    else:
+        rows_ok = not row_is_zero.any()
+    zero_rows = row_is_zero.nonzero(as_tuple=True)[0]
     cos = cosine_sim(output, ref)
     rel = rel_mean(output, ref)
     max_diff = (output.float() - ref.float()).abs().max().item()
     # grouped fp8: cosine > 0.99 OR rel <= 5% (decision-log fp8 tolerance).
-    passed = (cos > 0.99 or rel <= 0.05) and zero_rows.numel() == 0
+    passed = (cos > 0.99 or rel <= 0.05) and rows_ok
     print(f"  cos={cos:.6f} rel={rel*100:.4f}% max_abs_diff={max_diff:.4f} "
           f"zero_rows={zero_rows.numel()} -> "
           f"{'PASS' if passed else 'FAIL'}", flush=True)
@@ -194,6 +232,19 @@ def main():
     # A TP corner on smallm (tp=8 shrinks N) so smallm sees a sharded N too.
     results.append(_run_case("smallm", 8, 8, E=32, MPE=8,
                              K=HIDDEN, N=_w13_n(8)))
+
+    # ── MASKED largem (production active-skip path) ──
+    # Scattered 6-of-128 active experts + M_total=16384 ⇒ total tiles >>
+    # num_workers (multi-tile-iter) + mixed skip — the exact geometry of the
+    # 2026-06-12 accumulator-ring deadlock (this case HANGS on the pre-fix
+    # kernel). W13 and W2 shapes at tp=2.
+    _scattered = [3, 17, 42, 77, 101, 120]
+    results.append(_run_case("W13-mask", 2, 8, E=128, MPE=128,
+                             K=HIDDEN, N=_w13_n(2),
+                             active_experts=_scattered))
+    results.append(_run_case("W2-mask", 2, 8, E=128, MPE=128,
+                             K=_w2_k(2), N=HIDDEN,
+                             active_experts=_scattered))
 
     return _summary(results)
 
