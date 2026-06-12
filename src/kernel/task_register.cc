@@ -3950,7 +3950,9 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   assert(params.size() == 2);
   int num_heads = params[0];
   int seq_len = params[1];
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2, matching the chunked/decode MLA registers (audit #1).
+  float const _mscale_y = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_y * _mscale_y;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   mirage::transpiler::CodeKeeper code;
@@ -3992,7 +3994,15 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   int kv_len_max = params[2];
   int q_start = params[3];
   int qfused_mode = (params.size() == 5) ? params[4] : 0;
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2 on the attention scale, same as every decode MLA register:
+  // the DSv3 checkpoint serves with rope_scaling {yarn, factor=40,
+  // mscale_all_dim=1.0}; vLLM/SGLang apply yarn_get_mscale(40, 1.0)^2
+  // unconditionally and the cos/sin tables carry no mscale (ratio 1.0), so
+  // the whole correction belongs here. The bare 1/sqrt(192) this register
+  // used previously under-scaled prefill attention by 1.874x vs decode on
+  // the SAME cache (graph-audit finding #1, 2026-06-12).
+  float const mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * mscale * mscale;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
   // FuseTensor row-swap layout (2026-05-12 user #2 v2): when qfused_mode=1,
   // weight is rearranged at load time as [all_heads_nope; all_heads_pe]
@@ -4132,7 +4142,9 @@ int TaskRegister::register_mla_prefill_tp8_chunked_splitk_sm100_task(
   int q_start = params[3];
   int num_splits = params[4];
   int nqb = params[5];
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2, matching the chunked/decode MLA registers (audit #1).
+  float const _mscale_y = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_y * _mscale_y;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   mirage::transpiler::CodeKeeper code;
@@ -4172,7 +4184,9 @@ int TaskRegister::register_mla_prefill_tp8_chunked_reduce_sm100_task(
   int q_len = params[1];
   int num_splits = params[2];
   int nqb = params[3];
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2, matching the chunked/decode MLA registers (audit #1).
+  float const _mscale_y = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_y * _mscale_y;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();

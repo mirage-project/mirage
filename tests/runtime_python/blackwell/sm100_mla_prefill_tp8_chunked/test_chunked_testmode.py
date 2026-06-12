@@ -43,13 +43,10 @@ q_len`` the chunk loop runs over the full KV history (the "chunked" path).
   Q_nope [q_len, H, 128], Q_pe [q_len, H, 64], O [q_len, H, 128] (3D). A 4D
   [B, kv_len, H, 128] tensor would mis-resolve the TMA dims, so we keep 3D.
 
-* SCALE = BARE 1/sqrt(192), NOT YARN. The chunked-prefill task's codegen
-  (register_mla_prefill_tp8_chunked_sm100_task) hardcodes
-  ``sm_scale = 1/sqrtf(192)`` and does NOT multiply by the YARN ``mscale**2``
-  (= (0.1*ln(40)+1)**2 ~= 1.874) that every SIBLING MLA task (decode, absorbed,
-  mtp, the non-chunked tp8 prefill) applies. The reference uses the SAME bare
-  scale the kernel receives, so the comparison is valid. This non-YARN scale is
-  flagged as a finding (see decision log) — NOT a tolerance loosening.
+* SCALE = YARN mscale**2 (fixed 2026-06-12, graph-audit #1). The chunked
+  register now applies the same ``(0.1*ln(40)+1)**2 ~= 1.874`` factor as every
+  sibling MLA task and as vLLM/SGLang serving for the DSv3 yarn checkpoint;
+  the reference uses the identical YARN scale.
 
 * In test mode the chunked codegen takes the MPK_TEST_MODE branch, which passes
   q_len / kv_len / q_start as literal params (from ``mla_params``) — it does NOT
@@ -83,7 +80,7 @@ from pytorch_reference import (  # noqa: E402
     D_QK_NOPE,
     D_QK_ROPE,
     D_V,
-    bare_sm_scale,
+    yarn_sm_scale,
     mla_chunked_prefill_ref,
 )
 
@@ -132,7 +129,7 @@ def _run_case(tp, q_len, kv_len, tag, qfused_mode=0):
     H = NUM_Q_HEADS // tp
     q_start = kv_len - q_len  # chunk at the tail (DSV3 chunked-prefill usage)
     assert q_start >= 0, "q_len must be <= kv_len"
-    sm_scale = bare_sm_scale()
+    sm_scale = yarn_sm_scale()
 
     qn, qp, kn, kr, v, kn_real, kr_real, v_real = _make_inputs(
         q_len, kv_len, H, device, seed=0)

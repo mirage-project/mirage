@@ -38,16 +38,20 @@ D_V = 128
 
 
 def bare_sm_scale():
-    """The scale the chunked-prefill MPK task actually passes to the kernel."""
+    """The unadjusted 1/sqrt(d) scale (documentation/comparison only).
+
+    Since the 2026-06-12 graph-audit fix the chunked-prefill register applies
+    the YARN scale below, same as every sibling MLA task — use
+    ``yarn_sm_scale`` for kernel comparisons.
+    """
     return 1.0 / math.sqrt(D_QK)
 
 
 def yarn_sm_scale():
-    """The YARN-adjusted scale the SIBLING MLA tasks use (NOT this kernel).
-
-    Provided for documentation / comparison only — the chunked task does not
-    apply it.
-    """
+    """The scale the chunked-prefill MPK task passes to the kernel: YARN
+    mscale**2 for the DSv3 checkpoint (rope_scaling yarn, factor=40,
+    mscale_all_dim=1.0), matching the decode/absorbed/mtp siblings and
+    vLLM/SGLang serving behavior."""
     mscale = 0.1 * math.log(40.0) + 1.0
     return (1.0 / math.sqrt(D_QK)) * mscale * mscale
 
