@@ -32,6 +32,7 @@ Build-time configuration (fixed at graph-build time):
 """
 
 import math
+import os
 import torch
 from typing import Optional
 
@@ -200,9 +201,22 @@ class DeepSeekV3Builder(GraphBuilder):
         self._kv_gather_splits = 8
 
     def _decode_q_len(self) -> int:
-        """Decode-iter q_len. 1 = single-token decode (an MTP rebuild would
-        reintroduce spec_length here)."""
-        return 1
+        """Compile-time q capacity of the decode MLA tasks (grid q-groups +
+        the codegen's runtime-q_len clamp `if (q_len_rt_ > Q) q_len_rt_ = Q`).
+
+        Must cover the largest q_len a DECODE iteration can see, NOT just 1:
+        the scheduler feeds num_new_tokens = min(prompt_len - step, mbt), so
+        decode-only builds (mbt <= 8) consume the prompt in mbt-token chunks
+        and prefill-capable builds (mbt > 8) see a <= 8-token prompt TAIL
+        (the dual-dispatch decode gate is q_len <= 8). The old hardcoded 1
+        silently truncated every multi-token iteration to ONE query row
+        (rows 1..q_len-1 got zero attention and, with causal_limit derived
+        from Q_LEN=1, row 0 attended the whole chunk including its future) —
+        invisible at mbt=1, catastrophic at q_len 2..8.
+
+        mbt=1 still returns 1 (the validated decode build is byte-identical).
+        An MTP rebuild would take spec_length into account here too."""
+        return min(self.max_num_batched_tokens, 8)
 
     def build_from_model(self, model_name: str, model_path: str = None):
         raise NotImplementedError(
@@ -292,13 +306,49 @@ class DeepSeekV3Builder(GraphBuilder):
             f"fp8_input_v2_{reduction_size}_shared",
             f"fp8_scale_v2_{reduction_size}_shared")
 
+    def _fp8_sequence_buffers_for_reduction(
+        self, reduction_size: int, tag: str = "shared"
+    ):
+        """Sequence-rows FP8 input + scale pair for the chunked-prefill
+        kv_b projections. Rows = max_num_batched_requests * max_seq_length
+        padded up to a multiple of 128 (chunked-prefill TMA box BN_BOX=128;
+        unpadded rows OOB-NaN-fill the PV MMA)."""
+        _raw_rows = (self.mpk.max_num_batched_requests
+                     * self.mpk.max_seq_length)
+        rows = ((_raw_rows + 127) // 128) * 128
+        return self._fp8_quant_buffers(
+            rows, reduction_size,
+            f"fp8_seq_input_{reduction_size}_{tag}",
+            f"fp8_seq_scale_{reduction_size}_{tag}")
+
     def _fp8_dense_num_workers(self, output_size=None):
         """Worker count for one fp8_gemm_dense_{smallm,mediumm} call.
 
-        Decode-only demo: always the full worker pool (the prefill-only
-        80-cap / single-wave tuning was removed with the prefill path).
+        Decode-only builds (`_use_prefill=False`) use the full worker pool.
+        Dual-dispatch builds cap at 80 so other tasks (ROPE / rmsnorm / KV
+        append) can overlap the dense wave. When `output_size` is given the
+        count is further collapsed to the single-wave tile count
+        `ceil(M_max/128) * ceil(N/128)` (BN=128 fixed in the kernel; the
+        kernel strides output tiles by num_workers and idle CTAs
+        early-return, so this is byte-identical). FLOOR=24 because the
+        NVSHMEM barrier crashes at low worker counts.
+
+        `_fp8_dense_kv_b_proj` does NOT use this — its runtime_m_mode=1
+        large-M path requires the full `num_workers`.
         """
-        return self.num_workers
+        if not self._use_prefill:
+            return self.num_workers
+        base = min(80, self.num_workers)
+        if output_size is None:
+            return base
+        # M_max = compile-time mbt (runtime M is capped to active_rows at
+        # exec time, never larger).
+        FLOOR = 24
+        bn = 128
+        m_tiles = (self.max_num_batched_tokens + bn - 1) // bn
+        n_tiles = (output_size + bn - 1) // bn
+        single_wave = m_tiles * n_tiles
+        return min(base, max(single_wave, FLOOR))
 
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                     grid_dim, block_dim, residual=None, gate_mode: int = 0,
@@ -746,7 +796,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.q_a_out, w_q_b_pe, s_q_b_pe, q_pe_3d,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
-            gate_mode=0,
+            gate_mode=2 if self._use_prefill else 0,
             share_quantize_tag=qb_share_tag,
             input_fp8_override=qb_input_fp8_ovr,
             input_scale_override=qb_input_scale_ovr,
@@ -759,7 +809,7 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             input_fp8_buf, input_scale_buf = (
                 self._fp8_mbt_buffers_for_reduction_f32scale(reduction_size))
-        gemm_runtime_m_mode = 0
+        gemm_runtime_m_mode = 3 if self._use_prefill else 0
         dsv3_tasks.fp8_gemm_dense_layer(
             self.mpk,
             input_fp8=input_fp8_buf,
@@ -845,7 +895,7 @@ class DeepSeekV3Builder(GraphBuilder):
         attn_out_scale_f32 = self._bmm_decode_o_buffers["attn_out_scale_f32"]
         attn_out_reduced = self._bmm_decode_o_buffers["attn_out_reduced"]
 
-        active_mode_o = 0  # decode-only
+        active_mode_o = 3 if self._use_prefill else 0  # decode-only gate
 
         # 1) quantize attn_out BF16 → FP8 + float32 128-group scale.
         # Input self.attn_out is (mbt, H*512) 2D; the 3D FP8 output has the
@@ -890,7 +940,66 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
             block_dim=(128, 1, 1),
             residual=residual,
-            gate_mode=0,
+            gate_mode=2 if self._use_prefill else 0,
+        )
+
+    def _fp8_dense_kv_b_proj(
+        self, ckv, weight, weight_scale, output, tag: str,
+        shared_quantize_tag: str = None,
+        input_stride: int = None,
+    ):
+        """Chunked-prefill kv_b_k / kv_b_v projection: quantize the latent
+        rows to FP8 (sequence-rows buffer), then dense FP8 GEMM with
+        runtime_m_mode=1 (prefill-only; runtime M = the contiguous-cache KV
+        length step+q_len).
+
+        ckv is a NARROW VIEW of the per-layer contiguous KV buffer
+        ([rows, 576] → cols [0, 512)); `input_stride` carries the parent row
+        width because quantize_fp8_layer does NOT derive the stride from the
+        view (column-slice contract — defaults to the view width).
+
+        shared_quantize_tag: kv_b_k and kv_b_v quantize the SAME latent
+        bytes — pass the same tag to both calls in a layer so only the
+        FIRST emits the quantize task and the second reuses the buffer.
+
+        The GEMM keeps the full `self.num_workers` (NOT the wave-collapsed
+        `_fp8_dense_num_workers`) — the runtime_m_mode=1 large-M path
+        crashes at lower worker counts.
+        """
+        if weight_scale is None:
+            raise ValueError("kv_b prefill projection requires FP8 weight scale.")
+        buf_tag = shared_quantize_tag if shared_quantize_tag is not None else tag
+        input_fp8, input_scale = self._fp8_sequence_buffers_for_reduction(
+            self.kv_lora_rank, tag=buf_tag)
+        emit_quantize = True
+        if shared_quantize_tag is not None:
+            already_quantized = getattr(self, "_kv_b_quantized_tags", set())
+            if shared_quantize_tag in already_quantized:
+                emit_quantize = False
+            else:
+                already_quantized.add(shared_quantize_tag)
+                self._kv_b_quantized_tags = already_quantized
+        if emit_quantize:
+            self.mpk.quantize_fp8_layer(
+                input=ckv,
+                output_fp8=input_fp8,
+                output_scale=input_scale,
+                grid_dim=(input_fp8.dim(0), 1, 1),
+                block_dim=(128, 1, 1),
+                scale_ue8m0=False,
+                active_mode=1,
+                hidden_size_override=self.kv_lora_rank,
+                input_stride_override=input_stride,
+            )
+        dsv3_tasks.fp8_gemm_dense_layer(
+            self.mpk,
+            input_fp8=input_fp8,
+            weight_fp8=weight,
+            input_scale=input_scale,
+            weight_scale=weight_scale,
+            output=output,
+            num_workers=self.num_workers,
+            runtime_m_mode=1,
         )
 
     def _silu_mul_fp8_linear(self, silu_input, silu_bf16_output, weight,
@@ -987,25 +1096,39 @@ class DeepSeekV3Builder(GraphBuilder):
         """Allocate intermediate computation buffers."""
         mbt = self.max_num_batched_tokens
 
-        # bs=1 decode-only demo: chunked prefill + KV-gather + paged attention
-        # have been removed (the prompt is consumed one token per step through
-        # the decode path, which appends to the contiguous per-layer KV buffer).
-        # mbt>8 would require the (removed) chunked-prefill kernels, so reject it
-        # explicitly (an assert would be stripped under python -O).
-        if mbt > 8:
-            raise ValueError(
-                "DeepSeek-V3 MPK demo is decode-only (chunked prefill removed); "
-                f"max_num_batched_tokens must be <= 8, got {mbt}.")
-        self._use_prefill = False
-        print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
+        # bs=1 one-shot prefill: with mbt >= prompt_length the scheduler feeds
+        # the whole prompt in ONE step (num_new_tokens = min(prompt_len-step,
+        # mbt)) — there is no scheduler-visible chunk loop. The prefill tasks
+        # (unabsorbed q_b GEMMs / kv_b up-projection / chunked attention /
+        # prefill o_proj) dual-register alongside decode and gate on runtime
+        # Q_LEN (> 8 = prefill iter, <= 8 = decode iter). All KV flows through
+        # the per-layer contiguous buffer: the append task writes the new
+        # rows; prefill consumes them via narrow views (no paged cache, no
+        # gather).
+        self._use_prefill = mbt > 8
+        if self._use_prefill:
+            print(f"  [MLA path] MBT={mbt} → MLA prefill + runtime-gated decode")
+        else:
+            print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
 
         # RMSNorm output
-        self.rmsnorm_out = self.mpk.new_tensor(
-            dims=(mbt, self.hidden_size),
-            dtype=bfloat16,
-            name="rmsnorm_out",
-            io_category="cuda_tensor",
-        )
+        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
+            # Debug tap: host-visible (shared) rmsnorm output — with a
+            # single layer it retains the FINAL norm rows = the lm_head
+            # input, splitting MLP/AR-side from lm_head-side divergence.
+            import torch as _torch
+            self._rmsnorm_out_torch = _torch.zeros(
+                mbt, self.hidden_size, dtype=_torch.bfloat16, device="cuda")
+            self.rmsnorm_out = self.mpk.attach_input(
+                self._rmsnorm_out_torch, name="rmsnorm_out")
+            self.mpk._dsv3_rmsnorm_out_torch = self._rmsnorm_out_torch
+        else:
+            self.rmsnorm_out = self.mpk.new_tensor(
+                dims=(mbt, self.hidden_size),
+                dtype=bfloat16,
+                name="rmsnorm_out",
+                io_category="cuda_tensor",
+            )
 
         # MLA QKV-a fusion: one qkv_a_out (mbt, QKV_A_FUSED_N) buffer; the
         # fused FP8 GEMM writes q_a + c_latent + k_pe in one task and
@@ -1046,9 +1169,20 @@ class DeepSeekV3Builder(GraphBuilder):
             dtype=_torch.bfloat16, device="cuda")
         self.q_nope_pe = self.mpk.attach_input(
             self._q_nope_pe_torch, name="q_nope_pe")
-        # Decode consumes the absorbed [CKV, KPE] Q (q_nope_pe). The
-        # unabsorbed per-head split Q (q_nope/q_pe) was prefill-only and is
-        # removed with the prefill path.
+        # Decode consumes the absorbed [CKV, KPE] Q (q_nope_pe). Prefill
+        # consumes vLLM's original per-head split Q: [nope(128), rope(64)].
+        if self._use_prefill:
+            self.q_nope = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * QK_NOPE_HEAD_DIM),
+                dtype=bfloat16, name="q_nope", io_category="cuda_tensor",
+            )
+            self.q_pe = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * QK_ROPE_HEAD_DIM),
+                dtype=bfloat16, name="q_pe", io_category="cuda_tensor",
+            )
+        else:
+            self.q_nope = None
+            self.q_pe = None
         # kv_a outputs (c_latent + k_pe) are `mpk.narrow` views of the
         # fused qkv_a_out, mirroring q_a_out above (see the view note at
         # qkv_a_out).
@@ -1068,6 +1202,50 @@ class DeepSeekV3Builder(GraphBuilder):
             name="kv_combined",
             io_category="cuda_tensor",
         )
+        if self._use_prefill:
+            # Prefill-side buffers. Rows = max KV length padded to a multiple
+            # of 128 (chunked-prefill TMA box BN_BOX=128: unpadded rows OOB
+            # NaN-fill V/K SMEM, which propagates through hmma16 0*NaN=NaN).
+            # ZERO-INITIALIZED via attach_input(torch.zeros) — the kv_b GEMMs
+            # only write rows [0, step+q_len) each prefill iteration, so the
+            # tail rows the attention's BN=128 TMA windows can touch must be
+            # valid (zero) bf16, not pool garbage (masked scores still NaN-
+            # poison the PV product if V holds NaN bit patterns).
+            _raw_rows = (self.mpk.max_num_batched_requests
+                         * self.mpk.max_seq_length)
+            self._prefill_kv_rows = ((_raw_rows + 127) // 128) * 128
+            # `kpe_sep_v2` receives the identity-copy "phantom bridge"
+            # between the per-layer KV append and the chunked-prefill kernel
+            # — not real compute, purely to legalize the task graph (the
+            # append is a fork-producer and chunked_prefill a join-consumer;
+            # see the identity_layer call in the attention block for the
+            # case-3 rationale).
+            self._kpe_sep_v2_torch = _torch.zeros(
+                self._prefill_kv_rows, QK_ROPE_HEAD_DIM,
+                dtype=_torch.bfloat16, device="cuda")
+            self.kpe_sep_v2 = self.mpk.attach_input(
+                self._kpe_sep_v2_torch, name="kpe_sep_v2")
+            # Transient per-head K/V materialized by the kv_b up-projection
+            # GEMMs each prefill iteration (consumed by chunked attention,
+            # never part of the persistent cache — the cache stays the
+            # compressed latent in the per-layer contiguous KV buffer).
+            self._prefill_k_nope_torch = _torch.zeros(
+                self._prefill_kv_rows,
+                self.num_local_q_heads * QK_NOPE_HEAD_DIM,
+                dtype=_torch.bfloat16, device="cuda")
+            self.prefill_k_nope = self.mpk.attach_input(
+                self._prefill_k_nope_torch, name="prefill_k_nope")
+            self._prefill_v_torch = _torch.zeros(
+                self._prefill_kv_rows,
+                self.num_local_q_heads * V_HEAD_DIM,
+                dtype=_torch.bfloat16, device="cuda")
+            self.prefill_v = self.mpk.attach_input(
+                self._prefill_v_torch, name="prefill_v")
+        else:
+            self._prefill_kv_rows = None
+            self.kpe_sep_v2 = None
+            self.prefill_k_nope = None
+            self.prefill_v = None
         # MLA decode partial outputs (bf16 partials).
         # MLA kernel writes blocks at stride D_V*128 and LSE at stride 128.
         # TP kernels use split-K: each split handles one KV tile (128 tokens).
@@ -1107,12 +1285,35 @@ class DeepSeekV3Builder(GraphBuilder):
         # Attention output: [batch, num_local_q_heads * v_head_dim_absorbed]
         # v_head_dim = 512 (kv_lora_rank, after absorption)
         self.attn_out_buf = None
-        self.attn_out = self.mpk.new_tensor(
-            dims=(mbt, self.num_local_q_heads * self.v_head_dim),
-            dtype=bfloat16,
-            name="attn_out",
-            io_category="cuda_tensor",
-        )
+        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
+            # Debug tap: host-visible decode attention output (absorbed,
+            # pre-BMM-o). Shared across layers — meaningful with a single
+            # layer (LAYERS=0-0).
+            self._attn_out_torch = _torch.zeros(
+                mbt, self.num_local_q_heads * self.v_head_dim,
+                dtype=_torch.bfloat16, device="cuda")
+            self.attn_out = self.mpk.attach_input(
+                self._attn_out_torch, name="attn_out")
+            self.mpk._dsv3_attn_out_torch = self._attn_out_torch
+            self.mpk._dsv3_q_nope_pe_torch = self._q_nope_pe_torch
+        else:
+            self.attn_out = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * self.v_head_dim),
+                dtype=bfloat16,
+                name="attn_out",
+                io_category="cuda_tensor",
+            )
+        if self._use_prefill:
+            # Chunked-prefill attention output: per-head ORIGINAL v dim
+            # (128, before absorption). Consumed by the prefill o_proj.
+            self.attn_unabsorbed = self.mpk.new_tensor(
+                dims=(mbt, self.num_local_q_heads * V_HEAD_DIM),
+                dtype=bfloat16,
+                name="attn_unabsorbed",
+                io_category="cuda_tensor",
+            )
+        else:
+            self.attn_unabsorbed = None
         # O projection output (same as hidden_size)
         # When TP > 1, this feeds into nvshmem allreduce and must be in symmetric memory.
         _attn_proj_io = "nvshmem_tensor" if self._use_nvshmem else "cuda_tensor"
@@ -1360,6 +1561,33 @@ class DeepSeekV3Builder(GraphBuilder):
                                 qb_share_tag=qb_share_tag,
                                 qb_input_fp8_ovr=qb_input_fp8_ovr,
                                 qb_input_scale_ovr=qb_input_scale_ovr)
+        if self._use_prefill:  # prefill-exclusive unabsorbed q_b GEMMs
+            w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_nope.weight",
+                f"layer_{layer_idx}_q_b_nope")
+            self._fp8_linear(
+                self.q_a_out, w_q_b_nope, s_q_b_nope, self.q_nope,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_nope.dim(0)),
+                          1, 1),
+                block_dim=(128, 1, 1),
+                gate_mode=1,
+                share_quantize_tag=qb_share_tag,
+                input_fp8_override=qb_input_fp8_ovr,
+                input_scale_override=qb_input_scale_ovr,
+                **qb_slice_kwargs)
+            w_q_b_pe, s_q_b_pe = self._attach_fp8_weight(
+                state_dict, f"{attn}q_b_pe.weight",
+                f"layer_{layer_idx}_q_b_pe")
+            self._fp8_linear(
+                self.q_a_out, w_q_b_pe, s_q_b_pe, self.q_pe,
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_pe.dim(0)),
+                          1, 1),
+                block_dim=(128, 1, 1),
+                gate_mode=1,
+                share_quantize_tag=qb_share_tag,
+                input_fp8_override=qb_input_fp8_ovr,
+                input_scale_override=qb_input_scale_ovr,
+                **qb_slice_kwargs)
         # Step 4: kv_a (c_latent + k_pe) is produced by the fused qkv_a GEMM
         # above; no separate kv_a_proj_with_mqa GEMMs are emitted.
 
@@ -1380,8 +1608,20 @@ class DeepSeekV3Builder(GraphBuilder):
             num_heads=self.num_local_q_heads,
             grid_dim=rope_q_grid,
             q_tile_size=self.max_num_batched_tokens,
-            phase_gate=0,
+            phase_gate=2 if self._use_prefill else 0,
         )
+        if self._use_prefill:  # prefill-exclusive split (unabsorbed) ROPE-Q
+            dsv3_tasks.deepseek_mla_rope_q_split_layer(
+                self.mpk,
+                q_pe=self.q_pe,
+                cos_pos_embed=self.cos_pos_embed,
+                sin_pos_embed=self.sin_pos_embed,
+                num_heads=self.num_local_q_heads,
+                grid_dim=rope_q_grid,
+                q_tile_size=self.max_num_batched_tokens,
+                qfused_mode=0,
+                phase_gate=1,
+            )
         # k_pe lives at cols [2048:2112) inside the 2176-wide qkv_a_out;
         # pass row stride + offset so the ROPE kernel rotates the right slice.
         dsv3_tasks.deepseek_mla_rope_k_layer(
@@ -1431,14 +1671,31 @@ class DeepSeekV3Builder(GraphBuilder):
         # writes at row = sequence position and the decode kernels read via
         # their contiguous branch (page_indices == nullptr). No paged cache,
         # no gather.
-        mla_decode_kv = self.mpk.new_tensor(
-            dims=(self.mpk.max_num_batched_requests
-                  * self.mpk.max_seq_length,
-                  self.qk_head_dim),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_kv_contig",
-            io_category="cuda_tensor",
-        )
+        # Rows padded to a 128 multiple so the prefill views/TMA windows stay
+        # in-buffer (chunked TMA box BN=128); decode only reads [0, kv_len).
+        _kv_rows_raw = (self.mpk.max_num_batched_requests
+                        * self.mpk.max_seq_length)
+        _kv_rows_pad = ((_kv_rows_raw + 127) // 128) * 128
+        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
+            # Debug tap: host-visible per-layer compressed KV caches (for
+            # cross-run cache-content comparison; pairs with the demo-side
+            # MPK_DSV3_SAVE_LOGITS saver).
+            import torch as _torch
+            _kv_t = _torch.zeros(
+                _kv_rows_pad, self.qk_head_dim,
+                dtype=_torch.bfloat16, device="cuda")
+            mla_decode_kv = self.mpk.attach_input(
+                _kv_t, name=f"layer_{layer_idx}_kv_contig")
+            if not hasattr(self.mpk, "_dsv3_kv_torch"):
+                self.mpk._dsv3_kv_torch = {}
+            self.mpk._dsv3_kv_torch[layer_idx] = _kv_t
+        else:
+            mla_decode_kv = self.mpk.new_tensor(
+                dims=(_kv_rows_pad, self.qk_head_dim),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_kv_contig",
+                io_category="cuda_tensor",
+            )
         # c_latent and k_pe live at offsets 1536 / 2048 of the 2176-wide
         # qkv_a_out row. Row strides communicate the parent width; the slice
         # offsets are carried by the mpk.narrow views themselves (the
@@ -1460,8 +1717,114 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             **kv_gather_slice_kwargs,
         )
-        # Decode MLA main + reduce. tp_size picks the per-rank head-count
-        # variant.
+        if self._use_prefill:
+            # Prefill-EXCLUSIVE attention work, all fed straight from the
+            # per-layer contiguous KV buffer the append just wrote — the
+            # SAME compressed-latent cache decode reads. No gather, no
+            # second copy of the cache:
+            #   ckv_sep = kv_buf[:, 0:512)  (normalized latent, strided view)
+            #   kpe_sep = kv_buf[:, 512:576) (rotated k_pe, strided view)
+            ckv_sep = self.mpk.narrow(
+                mla_decode_kv, dim=1, start=0, length=self.kv_lora_rank)
+            kpe_sep = self.mpk.narrow(
+                mla_decode_kv, dim=1, start=self.kv_lora_rank,
+                length=QK_ROPE_HEAD_DIM)
+            # PHANTOM BRIDGE for the chunked-prefill kpe_sep dependency.
+            # `chunked_prefill` is a join-consumer (producers: split ROPE_Q,
+            # q_b GEMMs, kv_b_k/v GEMMs, append); the append is also a
+            # fork-producer (its other consumers: the kv_b quantize and the
+            # decode MLA main). A task has exactly ONE trigger_event slot,
+            # so being fork-producer AND join-producer at once is rejected
+            # by annotated_graph.cc as case-3. The identity copy
+            # `kpe_sep → kpe_sep_v2` (chunked_prefill reads kpe_sep_v2)
+            # breaks the append→join-consumer direct edge: the identity has
+            # a single producer (no join) and a single consumer (no fork),
+            # so both tasks become case-3-safe.
+            #
+            # grid_dim: identity_layer's dim_maps partition the LAST tensor
+            # dim across grid.x, which must DIVIDE the inner dim — kpe_sep's
+            # inner dim is 64 (rope), so (8,1,1) gives 8 cols per CTA.
+            self.mpk.identity_layer(
+                input=kpe_sep,
+                output=self.kpe_sep_v2,
+                grid_dim=(8, 1, 1),
+                block_dim=(128, 1, 1),
+                # Decode iters (Q_LEN<=8) skip the copy body: kpe_sep_v2
+                # keeps stale data, harmless because chunked_prefill
+                # doesn't read it on decode (its own Q_LEN gate).
+                gate_decode_q_len=True,
+            )
+            # kv_b_k/v dense GEMMs: up-project the WHOLE latent cache
+            # [0, step+q_len) into transient per-head k_nope/v.
+            w_kv_b_k, s_kv_b_k = self._attach_raw_fp8_weight(
+                state_dict, f"{attn}kv_b_k.weight",
+                f"layer_{layer_idx}_kv_b_k")
+            w_kv_b_v, s_kv_b_v = self._attach_raw_fp8_weight(
+                state_dict, f"{attn}kv_b_v.weight",
+                f"layer_{layer_idx}_kv_b_v")
+            # Share the FP8 quantize of the latent view between kv_b_k and
+            # kv_b_v (same input, same group_size): one quantize, two GEMM
+            # consumers. input_stride = the cache row width (576) — the
+            # quantize column-slice contract does NOT derive it from the view.
+            kv_b_shared_tag = f"layer_{layer_idx}_kv_b_shared"
+            self._fp8_dense_kv_b_proj(
+                ckv_sep, w_kv_b_k, s_kv_b_k, self.prefill_k_nope,
+                tag=f"layer_{layer_idx}_kv_b_k",
+                shared_quantize_tag=kv_b_shared_tag,
+                input_stride=self.qk_head_dim)
+            self._fp8_dense_kv_b_proj(
+                ckv_sep, w_kv_b_v, s_kv_b_v, self.prefill_v,
+                tag=f"layer_{layer_idx}_kv_b_v",
+                shared_quantize_tag=kv_b_shared_tag,
+                input_stride=self.qk_head_dim)
+            self.mpk.mla_prefill_tp8_chunked_layer(
+                q_nope=self.q_nope,
+                q_pe=self.q_pe,
+                k_nope=self.prefill_k_nope,
+                # k_rope comes from `kpe_sep_v2`, the phantom-bridged copy
+                # of the kv_buf rope view produced by the identity_layer
+                # above (case-3, see comment there).
+                k_rope=self.kpe_sep_v2,
+                v=self.prefill_v,
+                output=self.attn_unabsorbed,
+                mla_params=(
+                    self.num_local_q_heads,
+                    q_len_mla,
+                    kv_len_max,
+                    0,
+                ),
+                grid_dim=(
+                    self.num_local_q_heads,
+                    (q_len_mla + 63) // 64,
+                    self.mpk.max_num_batched_requests,
+                ),
+                block_dim=(128, 1, 1),
+                qfused_mode=0,
+            )
+            # NOOP graph-shaping bridge for the DECODE edge (case-3 again):
+            # the append already forks to {kv_b quantize, kpe identity}; the
+            # decode MLA main is a JOIN-consumer (q_nope_pe + kv_buf), and
+            # annotated_graph rejects a task that is fork-producer AND
+            # join-producer at once. Routing the decode read through a no-op
+            # identity (empty kernel body — the output is a full-range view
+            # of the same buffer, no data motion) makes every append
+            # consumer fork-only; the noop alone carries the join edge.
+            # Registration ORDER matters: the noop "writes" the kv_buf bytes
+            # graph-wise, so it must come AFTER the quantize/identity reads
+            # (their producer stays the append) and right BEFORE the decode.
+            kv_buf_decode = self.mpk.narrow(
+                mla_decode_kv, dim=1, start=0, length=self.qk_head_dim)
+            self.mpk.identity_layer(
+                input=mla_decode_kv,
+                output=kv_buf_decode,
+                grid_dim=(8, 1, 1),
+                block_dim=(128, 1, 1),
+                noop=True,
+            )
+            mla_decode_kv = kv_buf_decode
+        # Decode MLA main + reduce. Registered in BOTH prefill-capable and
+        # decode-only builds — the decode kernels' runtime Q_LEN gates skip
+        # prefill iters. tp_size picks the per-rank head-count variant.
         dsv3_tasks.mla_mtp_decode_layer(
             self.mpk,
             self.q_nope_pe, mla_decode_kv,
@@ -1481,13 +1844,42 @@ class DeepSeekV3Builder(GraphBuilder):
         # prefill attn_unabsorbed directly (gate_mode=1); decode goes
         # through the post-attn BMM path (`_bmm_decode_o_path`). Runtime
         # phase gates make exactly one branch write the residual output.
-        self.attn_proj_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_attn_proj_fused",
-            io_category="cuda_tensor",
-        )
-        # Decode o_proj via the post-attn BMM path.
+        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
+            # Debug tap (pairs with the per-layer KV tap): host-visible
+            # post-o_proj(+residual) output per layer.
+            import torch as _torch
+            _apo_t = _torch.zeros(
+                self.max_num_batched_tokens, self.hidden_size,
+                dtype=_torch.bfloat16, device="cuda")
+            self.attn_proj_out = self.mpk.attach_input(
+                _apo_t, name=f"layer_{layer_idx}_attn_proj_fused")
+            if not hasattr(self.mpk, "_dsv3_apo_torch"):
+                self.mpk._dsv3_apo_torch = {}
+            self.mpk._dsv3_apo_torch[layer_idx] = _apo_t
+        else:
+            self.attn_proj_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_attn_proj_fused",
+                io_category="cuda_tensor",
+            )
+        if self._use_prefill:
+            # Prefill-EXCLUSIVE unabsorbed o_proj (gate_mode=1).
+            w_o_prefill, s_o_prefill = self._attach_fp8_weight(
+                state_dict, f"{attn}o_proj_original.weight",
+                f"layer_{layer_idx}_o_proj_original")
+            self._fp8_linear(
+                self.attn_unabsorbed,
+                w_o_prefill,
+                s_o_prefill,
+                self.attn_proj_out,
+                grid_dim=(grid_for_rmsnorm_linear_layer(self.hidden_size), 1, 1),
+                block_dim=(128, 1, 1),
+                residual=self.x,
+                gate_mode=1,
+            )
+        # Decode o_proj via the post-attn BMM path (decode-gated on
+        # dual-dispatch builds via active_mode_o / gate_mode above).
         self._bmm_decode_o_path(state_dict, attn, layer_idx, residual=self.x)
 
     def _build_dense_mlp(self, layer_idx: int, state_dict: dict):
@@ -1549,12 +1941,23 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict, f"{prefix}mlp.down_proj.weight",
             f"layer_{layer_idx}_down_proj")
         # Per-layer output to avoid aliasing self.x ↔ self.mlp_out.
-        self.mlp_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_mlp_fused",
-            io_category="cuda_tensor",
-        )
+        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
+            import torch as _torch
+            _mlp_t = _torch.zeros(
+                self.max_num_batched_tokens, self.hidden_size,
+                dtype=_torch.bfloat16, device="cuda")
+            self.mlp_out = self.mpk.attach_input(
+                _mlp_t, name=f"layer_{layer_idx}_mlp_fused")
+            if not hasattr(self.mpk, "_dsv3_mlp_torch"):
+                self.mpk._dsv3_mlp_torch = {}
+            self.mpk._dsv3_mlp_torch[layer_idx] = _mlp_t
+        else:
+            self.mlp_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_mlp_fused",
+                io_category="cuda_tensor",
+            )
         self._silu_mul_fp8_linear(
             self.mlp_mid,
             self.silu_mul_out,
@@ -2366,10 +2769,23 @@ class DeepSeekV3Builder(GraphBuilder):
             )
             w_lm_head = self.w_lm_head
             self.lm_head_out_buf = None
-            lm_head_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, lm_head_vocab_size),
-                dtype=bfloat16, name="lm_head_out", io_category="cuda_tensor",
-            )
+            if os.environ.get("MPK_DSV3_ATTACH_LOGITS") == "1":
+                # Debug tap: host-visible logits buffer. After a run capped at
+                # exactly one generated token, the buffer retains the prompt
+                # positions' logits (row q_len-1 = the first generated token's
+                # distribution) — the numeric arbiter for prefill-vs-decode
+                # path comparisons. Zero-init, bound by pointer.
+                self._lm_head_out_torch = torch.zeros(
+                    self.max_num_batched_tokens, lm_head_vocab_size,
+                    dtype=torch.bfloat16, device="cuda")
+                lm_head_out = self.mpk.attach_input(
+                    self._lm_head_out_torch, name="lm_head_out")
+                self.mpk._dsv3_lm_head_out_torch = self._lm_head_out_torch
+            else:
+                lm_head_out = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, lm_head_vocab_size),
+                    dtype=bfloat16, name="lm_head_out", io_category="cuda_tensor",
+                )
             self.mpk.linear_layer(
                 input=self.rmsnorm_out, weight=w_lm_head, output=lm_head_out,
                 grid_dim=(lm_head_grid, 1, 1),
