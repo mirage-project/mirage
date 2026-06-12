@@ -734,7 +734,16 @@ __device__ __noinline__ void
     return;
   }
 
-  __shared__ float la_smem[MAX_SK * 128];
+  // la_smem lives in the megakernel's DYNAMIC shared region, NOT static
+  // __shared__: a static MAX_SK*128 float array (16KB at MAX_SK=32) pushes
+  // worker_kernel's static SMEM to ~23KB, and static + the 221KB dynamic
+  // allocation exceeds the SM100 per-CTA limit (232,448B) — the launch then
+  // fails for ANY megakernel whose graph contains this task (TP1 graphs +
+  // the reduce testmode suite; found 2026-06-12 as a silent eternal hang
+  // before the launch-error check existed). The dynamic region is unused by
+  // this task otherwise; capacity (MAX_SK*128*4 = 16KB <= 221KB) is fine.
+  extern __shared__ __align__(16) uint8_t mpk_dyn_smem_mtp_reduce[];
+  float *la_smem = reinterpret_cast<float *>(mpk_dyn_smem_mtp_reduce);
   int la_block_base = (bi * num_head_groups * sk + gi * sk) * 128;
   int la_total = sk * 128;
   for (int i = tid; i < la_total; i += NUM_THREADS_) {
