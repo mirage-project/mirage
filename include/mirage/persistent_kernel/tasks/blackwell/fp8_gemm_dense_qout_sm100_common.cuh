@@ -211,8 +211,12 @@ __device__ __forceinline__ void
   constexpr uint32_t idesc =
       (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
 
+  // Stage index + parity from a CONTINUOUS K-block counter — the per-tile
+  // `ki % NS` reset desyncs the mbarrier parity at tile boundaries whenever
+  // nk % NS != 0 on a multi-tile-iter task (the B36 bug; full note in
+  // fp8_gemm_dense_sm100_common.cuh).
   if (wid == 0 && elect_one_sync()) {
-    int ph = 0;
+    int gk = 0;
     for (int iter = 0;; iter++) {
       int bidx = iter * num_workers + worker_idx;
       if (bidx >= total) {
@@ -220,12 +224,10 @@ __device__ __forceinline__ void
       }
       int bm = bidx / nn, bn = bidx % nn;
       int om = bm * BM, on = bn * BN;
-      for (int ki = 0; ki < nk; ki++) {
-        int s = ki % NS;
-        mb_wait(be + s * 8, ph ^ 1);
-        if (s == NS - 1) {
-          ph ^= 1;
-        }
+      for (int ki = 0; ki < nk; ki++, gk++) {
+        int s = gk % NS;
+        int p = (gk / NS) & 1;
+        mb_wait(be + s * 8, p ^ 1);
         int as_ = sA(s);
         int bs_ = sBl(s);
         int mb = bf + s * 8;
@@ -235,7 +237,6 @@ __device__ __forceinline__ void
       }
     }
   } else if (wid == 1 && elect_one_sync()) {
-    int ph = 0;
     int gki = 0;
     for (int iter = 0;; iter++) {
       int bidx = iter * num_workers + worker_idx;
@@ -243,11 +244,9 @@ __device__ __forceinline__ void
         break;
       }
       for (int ki = 0; ki < nk; ki++, gki++) {
-        int s = ki % NS;
-        mb_wait(bf + s * 8, ph);
-        if (s == NS - 1) {
-          ph ^= 1;
-        }
+        int s = gki % NS;
+        int p = (gki / NS) & 1;
+        mb_wait(bf + s * 8, p);
         int ai = gki % NE;
         int ap = (gki / NE) & 1;
         mb_wait(bte + ai * 8, ap ^ 1);
