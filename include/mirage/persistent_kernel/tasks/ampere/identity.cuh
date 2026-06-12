@@ -16,11 +16,15 @@
 #include "tasks/common/common_header.cuh"
 namespace kernel {
 
+// IN_STRIDE / OUT_STRIDE may differ: the input can be a narrow view of a
+// wider row (e.g. the kpe_sep [rows, 64] slice of the 576-wide contiguous KV
+// buffer) while the output is a dense buffer.
 template <typename T,
           int OUTER_DIM_SIZE,
           int INNER_DIM_SIZE,
-          int OUTER_DIM_STRIDE,
-          int OUTPUT_SIZE>
+          int IN_STRIDE,
+          int OUTPUT_SIZE,
+          int OUT_STRIDE = IN_STRIDE>
 __device__ __forceinline__ void identity_task_impl(void const *input_ptr,
                                                    void *output_ptr) {
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
@@ -30,8 +34,8 @@ __device__ __forceinline__ void identity_task_impl(void const *input_ptr,
   for (int i = threadIdx.x; i < OUTER_DIM_SIZE * OUTPUT_SIZE; i += blockDim.x) {
     int outer_dim_idx = i / OUTPUT_SIZE;
     int inner_dim_idx = i % OUTPUT_SIZE;
-    d_output[outer_dim_idx * OUTER_DIM_STRIDE + inner_dim_idx] =
-        d_input[outer_dim_idx * OUTER_DIM_STRIDE + inner_dim_idx];
+    d_output[outer_dim_idx * OUT_STRIDE + inner_dim_idx] =
+        d_input[outer_dim_idx * IN_STRIDE + inner_dim_idx];
   }
 }
 

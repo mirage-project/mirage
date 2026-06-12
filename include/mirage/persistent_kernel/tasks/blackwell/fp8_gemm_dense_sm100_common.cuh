@@ -94,6 +94,11 @@ __device__ __forceinline__ uint64_t mkdesc(int a) {
   return denc(a) | (denc(1024) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
 }
 
+// C_row_stride: row stride (elements) of the OUTPUT buffer. Defaults to N
+// (dense row-major). Pass the parent row width when C is a narrow column
+// view of a wider buffer (e.g. the TP2 gate/up halves of mlp_mid) — at M=1
+// the stride never matters, but multi-row writes corrupt the parent buffer
+// if rows advance by N instead of the view stride.
 template <int BN, int NS, int NE>
 __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
                                               CUtensorMap const *tb_ptr,
@@ -104,7 +109,8 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
                                               int const N,
                                               int const K,
                                               int const worker_idx,
-                                              int const num_workers) {
+                                              int const num_workers,
+                                              int const C_row_stride = -1) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   constexpr int BM = 128, BK = 128, UK = 32;
   int const tid = threadIdx.x, wid = tid / 32;
@@ -294,7 +300,8 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
       }
 
       if (mi < M) {
-        __nv_bfloat16 *row = C + (long long)mi * N + on;
+        long long const c_stride = (C_row_stride > 0) ? C_row_stride : N;
+        __nv_bfloat16 *row = C + (long long)mi * c_stride + on;
 #pragma unroll
         for (int n = 0; n < BN; n += 16) {
           if (on + n + 15 < N) {
