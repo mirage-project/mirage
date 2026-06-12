@@ -240,13 +240,23 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // makes downstream moe_permute's `slot_1idx > 0` check correctly
   // treat them as "no routing".
   //
-  // Grid-stride over row-chunks. FUSE_COMPACTION=true + grid=(1,1,1) (the
-  // decode / default path) reduces exactly to the original single-CTA loop
-  // (blockIdx.x=0, gridDim.x=1 ⇒ row_base=0; +=ROWS_PER_CTA). The multi-CTA
-  // prefill path (FUSE_COMPACTION=false, grid of N CTAs) distributes the
-  // chunks across CTAs so the ~0.7 μs/row serial cost parallelizes.
-  for (int row_base = blockIdx.x * ROWS_PER_CTA; row_base < num_active_rows;
-       row_base += gridDim.x * ROWS_PER_CTA) {
+  // Row-chunk loop. MEGAKERNEL CONTEXT WARNING: inside the persistent
+  // megakernel, blockIdx.x is the executing WORKER's physical CTA id (and
+  // gridDim.x the worker count) — NOT a per-task grid coordinate. The fused
+  // single-CTA variant must therefore never key its chunking on
+  // blockIdx/gridDim: a task landing on worker w would silently process only
+  // rows [w*ROWS_PER_CTA, w*ROWS_PER_CTA+ROWS_PER_CTA) — at decode
+  // (num_active_rows=1) that means EMPTY routing whenever w != 0 (caught by
+  // the test-mode matrix 2026-06-12: worker 1 → 0/10 PASS, rows 8-15 only at
+  // bs=16). FUSE_COMPACTION=false keeps the grid-stride for STANDALONE
+  // multi-CTA launches only; before any megakernel use it must derive a
+  // virtual chunk index from task metadata instead (builder wiring for the
+  // multi-CTA prefill path is still pending).
+  int const chunk_base = FUSE_COMPACTION ? 0 : blockIdx.x * ROWS_PER_CTA;
+  int const chunk_stride =
+      FUSE_COMPACTION ? ROWS_PER_CTA : gridDim.x * ROWS_PER_CTA;
+  for (int row_base = chunk_base; row_base < num_active_rows;
+       row_base += chunk_stride) {
     // Multi-CTA path only: zero THIS chunk's slice of the routing buffer
     // (rows [row_base, row_hi) across all local experts) before computing it.
     // Single-CTA path did this upfront in Phase 0; here it must be per-chunk
@@ -265,14 +275,16 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
     int const thread_row = row_base + warp_base_row + thread_row_in_warp;
     // Warp mask: special case is for the THREADS_PER_ROW=16 / 2-rows-per-
     // warp config where the last (odd) row's upper half-warp needs masking.
-    // Keep using `num_rows` (= compile-time MBT, the stride dim) here, not
-    // `num_active_rows` — with `num_active_rows=1` and full-warp rows
-    // (THREADS_PER_ROW=32 as in DSv3) the `% 2` check would spuriously
-    // produce 0x0000ffff and break __shfl_sync below by leaving lanes
-    // 16..31 outside the mask while they still execute the shuffle.
-    uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
-                                   ? 0x0000ffff
-                                   : 0xffffffff;
+    // It must be compile-time gated on ROWS_PER_WARP==2: with full-warp rows
+    // (THREADS_PER_ROW=32, ROWS_PER_WARP=1, the DSv3 config) every row spans
+    // all 32 lanes, so a half mask is ALWAYS wrong — and an odd compile-time
+    // `num_rows` (e.g. MBT=1 in test mode) would otherwise spuriously produce
+    // 0x0000ffff for the last row and break the __shfl_sync reductions (UB:
+    // lanes 16..31 execute the shuffle while outside the mask).
+    uint32_t const warp_mask =
+        (ROWS_PER_WARP == 2 && num_rows % 2 == 1 && thread_row == num_rows - 1)
+            ? 0x0000ffff
+            : 0xffffffff;
 
     if (thread_row < num_active_rows) {
 
