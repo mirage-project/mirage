@@ -1444,43 +1444,6 @@ if __name__ == "__main__":
                 json.dump(out, f, indent=2)
             print(f"Saved tokens to {save_path}")
 
-        _logits_path = os.environ.get("MPK_DSV3_SAVE_LOGITS")
-        _kv_bufs = getattr(mpk, "_dsv3_kv_torch", None)
-        if _logits_path and _kv_bufs:
-            for _li, _buf in sorted(_kv_bufs.items()):
-                _p = f"{_logits_path}.kv{_li}.rank{rank}.pt"
-                torch.save(_buf.detach().cpu(), _p)
-            print(f"Saved {len(_kv_bufs)} per-layer KV caches "
-                  f"to {_logits_path}.kv*.rank{rank}.pt")
-        _apo_bufs = getattr(mpk, "_dsv3_apo_torch", None)
-        if _logits_path and _apo_bufs:
-            for _li, _buf in sorted(_apo_bufs.items()):
-                torch.save(_buf.detach().cpu(),
-                           f"{_logits_path}.apo{_li}.rank{rank}.pt")
-            print(f"Saved {len(_apo_bufs)} per-layer attn_proj_out "
-                  f"to {_logits_path}.apo*.rank{rank}.pt")
-        _mlp_bufs = getattr(mpk, "_dsv3_mlp_torch", None)
-        if _logits_path and _mlp_bufs:
-            for _li, _buf in sorted(_mlp_bufs.items()):
-                torch.save(_buf.detach().cpu(),
-                           f"{_logits_path}.mlp{_li}.rank{rank}.pt")
-        for _name, _attr in (("attn", "_dsv3_attn_out_torch"),
-                             ("q", "_dsv3_q_nope_pe_torch"),
-                             ("rms", "_dsv3_rmsnorm_out_torch")):
-            _buf = getattr(mpk, _attr, None)
-            if _logits_path and _buf is not None:
-                torch.save(_buf.detach().cpu(),
-                           f"{_logits_path}.{_name}.rank{rank}.pt")
-        _logits_buf = getattr(mpk, "_dsv3_lm_head_out_torch", None)
-        if _logits_path and _logits_buf is not None:
-            # Debug tap (pairs with MPK_DSV3_ATTACH_LOGITS=1): the buffer
-            # retains the LAST iteration's lm_head output rows. Cap the run
-            # at one generated token (max_seq_length = prompt_len + 1) so
-            # row q_len-1 is the first generated token's distribution.
-            _p = f"{_logits_path}.rank{rank}.pt"
-            torch.save(_logits_buf.detach().cpu(), _p)
-            print(f"Saved lm_head logits buffer to {_p}")
-
     else:
         raise RuntimeError("Pytorch ref is not allowed for now, which may cause OOM.")
         # Native PyTorch path (without Mirage)

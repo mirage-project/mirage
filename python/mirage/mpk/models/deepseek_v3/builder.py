@@ -1112,23 +1112,12 @@ class DeepSeekV3Builder(GraphBuilder):
             print(f"  [MLA path] Q_LEN={mbt} → MLA decode / MTP decode")
 
         # RMSNorm output
-        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
-            # Debug tap: host-visible (shared) rmsnorm output — with a
-            # single layer it retains the FINAL norm rows = the lm_head
-            # input, splitting MLP/AR-side from lm_head-side divergence.
-            import torch as _torch
-            self._rmsnorm_out_torch = _torch.zeros(
-                mbt, self.hidden_size, dtype=_torch.bfloat16, device="cuda")
-            self.rmsnorm_out = self.mpk.attach_input(
-                self._rmsnorm_out_torch, name="rmsnorm_out")
-            self.mpk._dsv3_rmsnorm_out_torch = self._rmsnorm_out_torch
-        else:
-            self.rmsnorm_out = self.mpk.new_tensor(
-                dims=(mbt, self.hidden_size),
-                dtype=bfloat16,
-                name="rmsnorm_out",
-                io_category="cuda_tensor",
-            )
+        self.rmsnorm_out = self.mpk.new_tensor(
+            dims=(mbt, self.hidden_size),
+            dtype=bfloat16,
+            name="rmsnorm_out",
+            io_category="cuda_tensor",
+        )
 
         # MLA QKV-a fusion: one qkv_a_out (mbt, QKV_A_FUSED_N) buffer; the
         # fused FP8 GEMM writes q_a + c_latent + k_pe in one task and
@@ -1285,24 +1274,12 @@ class DeepSeekV3Builder(GraphBuilder):
         # Attention output: [batch, num_local_q_heads * v_head_dim_absorbed]
         # v_head_dim = 512 (kv_lora_rank, after absorption)
         self.attn_out_buf = None
-        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
-            # Debug tap: host-visible decode attention output (absorbed,
-            # pre-BMM-o). Shared across layers — meaningful with a single
-            # layer (LAYERS=0-0).
-            self._attn_out_torch = _torch.zeros(
-                mbt, self.num_local_q_heads * self.v_head_dim,
-                dtype=_torch.bfloat16, device="cuda")
-            self.attn_out = self.mpk.attach_input(
-                self._attn_out_torch, name="attn_out")
-            self.mpk._dsv3_attn_out_torch = self._attn_out_torch
-            self.mpk._dsv3_q_nope_pe_torch = self._q_nope_pe_torch
-        else:
-            self.attn_out = self.mpk.new_tensor(
-                dims=(mbt, self.num_local_q_heads * self.v_head_dim),
-                dtype=bfloat16,
-                name="attn_out",
-                io_category="cuda_tensor",
-            )
+        self.attn_out = self.mpk.new_tensor(
+            dims=(mbt, self.num_local_q_heads * self.v_head_dim),
+            dtype=bfloat16,
+            name="attn_out",
+            io_category="cuda_tensor",
+        )
         if self._use_prefill:
             # Chunked-prefill attention output: per-head ORIGINAL v dim
             # (128, before absorption). Consumed by the prefill o_proj.
@@ -1716,26 +1693,12 @@ class DeepSeekV3Builder(GraphBuilder):
         _kv_rows_raw = (self.mpk.max_num_batched_requests
                         * self.mpk.max_seq_length)
         _kv_rows_pad = ((_kv_rows_raw + 127) // 128) * 128
-        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
-            # Debug tap: host-visible per-layer compressed KV caches (for
-            # cross-run cache-content comparison; pairs with the demo-side
-            # MPK_DSV3_SAVE_LOGITS saver).
-            import torch as _torch
-            _kv_t = _torch.zeros(
-                _kv_rows_pad, self.qk_head_dim,
-                dtype=_torch.bfloat16, device="cuda")
-            mla_decode_kv = self.mpk.attach_input(
-                _kv_t, name=f"layer_{layer_idx}_kv_contig")
-            if not hasattr(self.mpk, "_dsv3_kv_torch"):
-                self.mpk._dsv3_kv_torch = {}
-            self.mpk._dsv3_kv_torch[layer_idx] = _kv_t
-        else:
-            mla_decode_kv = self.mpk.new_tensor(
-                dims=(_kv_rows_pad, self.qk_head_dim),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_kv_contig",
-                io_category="cuda_tensor",
-            )
+        mla_decode_kv = self.mpk.new_tensor(
+            dims=(_kv_rows_pad, self.qk_head_dim),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_kv_contig",
+            io_category="cuda_tensor",
+        )
         # c_latent and k_pe live at offsets 1536 / 2048 of the 2176-wide
         # qkv_a_out row. Row strides communicate the parent width; the slice
         # offsets are carried by the mpk.narrow views themselves (the
@@ -1884,25 +1847,12 @@ class DeepSeekV3Builder(GraphBuilder):
         # prefill attn_unabsorbed directly (gate_mode=1); decode goes
         # through the post-attn BMM path (`_bmm_decode_o_path`). Runtime
         # phase gates make exactly one branch write the residual output.
-        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
-            # Debug tap (pairs with the per-layer KV tap): host-visible
-            # post-o_proj(+residual) output per layer.
-            import torch as _torch
-            _apo_t = _torch.zeros(
-                self.max_num_batched_tokens, self.hidden_size,
-                dtype=_torch.bfloat16, device="cuda")
-            self.attn_proj_out = self.mpk.attach_input(
-                _apo_t, name=f"layer_{layer_idx}_attn_proj_fused")
-            if not hasattr(self.mpk, "_dsv3_apo_torch"):
-                self.mpk._dsv3_apo_torch = {}
-            self.mpk._dsv3_apo_torch[layer_idx] = _apo_t
-        else:
-            self.attn_proj_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_attn_proj_fused",
-                io_category="cuda_tensor",
-            )
+        self.attn_proj_out = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_attn_proj_fused",
+            io_category="cuda_tensor",
+        )
         if self._use_prefill:
             # Prefill-EXCLUSIVE unabsorbed o_proj (gate_mode=1).
             w_o_prefill, s_o_prefill = self._attach_fp8_weight(
@@ -1981,23 +1931,12 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict, f"{prefix}mlp.down_proj.weight",
             f"layer_{layer_idx}_down_proj")
         # Per-layer output to avoid aliasing self.x ↔ self.mlp_out.
-        if os.environ.get("MPK_DSV3_ATTACH_KV0") == "1":
-            import torch as _torch
-            _mlp_t = _torch.zeros(
-                self.max_num_batched_tokens, self.hidden_size,
-                dtype=_torch.bfloat16, device="cuda")
-            self.mlp_out = self.mpk.attach_input(
-                _mlp_t, name=f"layer_{layer_idx}_mlp_fused")
-            if not hasattr(self.mpk, "_dsv3_mlp_torch"):
-                self.mpk._dsv3_mlp_torch = {}
-            self.mpk._dsv3_mlp_torch[layer_idx] = _mlp_t
-        else:
-            self.mlp_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_mlp_fused",
-                io_category="cuda_tensor",
-            )
+        self.mlp_out = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_mlp_fused",
+            io_category="cuda_tensor",
+        )
         self._silu_mul_fp8_linear(
             self.mlp_mid,
             self.silu_mul_out,
@@ -2822,23 +2761,10 @@ class DeepSeekV3Builder(GraphBuilder):
             )
             w_lm_head = self.w_lm_head
             self.lm_head_out_buf = None
-            if os.environ.get("MPK_DSV3_ATTACH_LOGITS") == "1":
-                # Debug tap: host-visible logits buffer. After a run capped at
-                # exactly one generated token, the buffer retains the prompt
-                # positions' logits (row q_len-1 = the first generated token's
-                # distribution) — the numeric arbiter for prefill-vs-decode
-                # path comparisons. Zero-init, bound by pointer.
-                self._lm_head_out_torch = torch.zeros(
-                    self.max_num_batched_tokens, lm_head_vocab_size,
-                    dtype=torch.bfloat16, device="cuda")
-                lm_head_out = self.mpk.attach_input(
-                    self._lm_head_out_torch, name="lm_head_out")
-                self.mpk._dsv3_lm_head_out_torch = self._lm_head_out_torch
-            else:
-                lm_head_out = self.mpk.new_tensor(
-                    dims=(self.max_num_batched_tokens, lm_head_vocab_size),
-                    dtype=bfloat16, name="lm_head_out", io_category="cuda_tensor",
-                )
+            lm_head_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, lm_head_vocab_size),
+                dtype=bfloat16, name="lm_head_out", io_category="cuda_tensor",
+            )
             self.mpk.linear_layer(
                 input=self.rmsnorm_out, weight=w_lm_head, output=lm_head_out,
                 grid_dim=(lm_head_grid, 1, 1),
