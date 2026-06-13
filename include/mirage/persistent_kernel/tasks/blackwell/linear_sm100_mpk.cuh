@@ -413,11 +413,17 @@ __device__ __noinline__ void
 
   __syncthreads(); // Wait for all threads until warp0 allocates TMEM
 
+  // One (m_tile, n_tile) tile per thread block. The grid is launched as
+  // (ceil_div(OUTPUT_SIZE, MMA_M), ceil_div(BATCH_SIZE, MMA_N), 1), so the
+  // m/n tile indices come from blockIdx, not threadIdx (all 256 threads in a
+  // block cooperate on the same tile).
+  const int m_tile = blockIdx.x;
+  const int n_tile = blockIdx.y;
   if (warp_idx == 5) {
     // TMA warp (1)
     int total_k_tile_count = 0;
-    for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-      for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+    // for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
+      // for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
 
         int num_prev_k_blk = total_k_tile_count;
         total_k_tile_count += k_tile_count;
@@ -480,8 +486,8 @@ __device__ __noinline__ void
 
         } // end for k_tile
 
-      } // end for n_tile
-    }
+    //   } // end for n_tile
+    // }
   } else if (warp_idx == 4) {
     // MMA warp (1)
 
@@ -491,8 +497,8 @@ __device__ __noinline__ void
 
     int total_k_tile_count = 0;
     int num_tiles_executed = 0;
-    for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-      for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+    // for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
+      // for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
 
         int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
         auto tCtAcc_Slice = tCtAcc(cute::_, cute::_, cute::_, acc_buf_idx);
@@ -562,8 +568,8 @@ __device__ __noinline__ void
             &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
         num_tiles_executed++;
 
-      } // end for n_tile
-    }
+    //   } // end for n_tile
+    // }
   } else if (warp_idx < 4) {
     // Epilogue warps (4)
 
@@ -608,8 +614,8 @@ __device__ __noinline__ void
     // } epilogue_wg_barrier.arrive_and_wait();
 
     int num_tiles_executed = 0;
-    for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-      for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+    // for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
+      // for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
         int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
         int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
         int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
@@ -717,8 +723,8 @@ __device__ __noinline__ void
         }
 
         num_tiles_executed++;
-      }
-    }
+    //   }
+    // }
     // wait all TMA stores to complete
     if (warp_idx == 0 && cute::elect_one_sync()) {
       cute::tma_store_wait<0>();

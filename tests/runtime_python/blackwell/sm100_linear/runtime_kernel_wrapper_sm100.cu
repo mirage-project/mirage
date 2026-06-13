@@ -260,7 +260,12 @@ void launch_linear_sm100_mpk(void *input_ptr,
       cute::make_tensor(cute::make_gmem_ptr(static_cast<T *>(residual_ptr)),
                         layout_Bias); // (Gemm_N, Gemm_M)
 
-  dim3 grid_dim(1, 1, 1);
+  // grid.x = number of M (output) tiles, grid.y = number of N (batch) tiles.
+  // The kernel maps m_tile=blockIdx.x onto OUTPUT_SIZE (step MMA_M) and
+  // n_tile=blockIdx.y onto BATCH_SIZE (step MMA_N).
+  const int grid_m = cute::ceil_div(OUTPUT_SIZE, MMA_M);
+  const int grid_n = cute::ceil_div(BATCH_SIZE, MMA_N);
+  dim3 grid_dim(grid_m, grid_n, 1);
   dim3 block_dim(256, 1, 1);
   dim3 cluster_dim(1, 1, 1);
   int smemBytes = 224 * 1024;
@@ -329,19 +334,42 @@ void linear_sm100_mpk_kernel(torch::Tensor input,
   void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
 
-  // const int BATCH_SIZE = input.size(0);
-  // const int OUTPUT_SIZE = output.size(1);
-  // const int REDUCTION_SIZE = weight.size(1);
+  // Shape is compile-time (the kernel is templated on it), so we dispatch over
+  // a fixed table of supported shapes selected by the runtime tensor sizes.
+  // This lets a single build cover the whole benchmark sweep.
+  const int batch = static_cast<int>(input.size(0));
+  const int reduction = static_cast<int>(input.size(1));
+  const int out = static_cast<int>(output.size(1));
 
-  constexpr int BATCH_SIZE = 1;
-  constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 768;
+#define DISPATCH_SHAPE(B, O, R)                                                 \
+  if (batch == (B) && out == (O) && reduction == (R)) {                        \
+    launch_linear_sm100_mpk<bfloat16, (B), (O), (R)>(                          \
+        input_ptr, weight_ptr, output_ptr, residual_ptr);                      \
+  } else
 
-  assert(input.size(1) == REDUCTION_SIZE);
-  assert(weight.size(0) == OUTPUT_SIZE);
+  // clang-format off
+  // default / small set
+  DISPATCH_SHAPE(1, 128, 768)
+  DISPATCH_SHAPE(8, 4096, 4096)
+  DISPATCH_SHAPE(16, 1024, 1024)
+  // square set (M=N=K, all multiples of MMA_M=128)
+  DISPATCH_SHAPE(128, 128, 128)
+  DISPATCH_SHAPE(512, 512, 512)
+  DISPATCH_SHAPE(1024, 1024, 1024)
+  DISPATCH_SHAPE(2048, 2048, 2048)
+  DISPATCH_SHAPE(4096, 4096, 4096)
+  // llama-3-8b projections
+  DISPATCH_SHAPE(1, 6144, 4096)   // qkv
+  DISPATCH_SHAPE(1, 14336, 4096)  // gate/up
+  DISPATCH_SHAPE(1, 4096, 14336)  // down
+  // clang-format on
+  {
+    printf("Unsupported shape: batch=%d out=%d reduction=%d\n",
+           batch, out, reduction);
+    return;
+  }
+#undef DISPATCH_SHAPE
 
-  launch_linear_sm100_mpk<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, output_ptr, residual_ptr);
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
@@ -569,7 +597,12 @@ void launch_linear_splitk_sm100(void *input_ptr,
       cute::make_tensor(cute::make_gmem_ptr(static_cast<T *>(residual_ptr)),
                         layout_Bias); // (Gemm_N, Gemm_M)
 
-  dim3 grid_dim(1, 1, 1);
+  // grid.x = number of M (output) tiles, grid.y = number of N (batch) tiles.
+  // The kernel maps m_tile=blockIdx.x onto OUTPUT_SIZE (step MMA_M) and
+  // n_tile=blockIdx.y onto BATCH_SIZE (step MMA_N).
+  const int grid_m = cute::ceil_div(OUTPUT_SIZE, MMA_M);
+  const int grid_n = cute::ceil_div(BATCH_SIZE, MMA_N);
+  dim3 grid_dim(grid_m, grid_n, 1);
   dim3 block_dim(256, 1, 1);
   dim3 cluster_dim(1, 1, 1);
   int smemBytes = 224 * 1024;
