@@ -6092,7 +6092,22 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   }
-  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  // NS = K-pipeline depth (async smem stages). Default 3. Deepening to 4-6
+  // hides more weight-TMA latency on the single-wave M=1 decode GEMMs (the L6
+  // single-wave-latency bottleneck) — numerically identical (bit-exact), so
+  // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
+  // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
+  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but NS7=224KB
+  // / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a silent
+  // fallback). So clamp [2,6]; this is a sweepable knob, not a blind bump.
+  int dense_ns = 3;
+  if (const char *e = std::getenv("MPK_DSV3_DENSE_NS")) {
+    int v = atoi(e);
+    if (v >= 2 && v <= 6) {
+      dense_ns = v;
+    }
+  }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, dense_ns);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
   code.e("    static_cast<const "
@@ -6206,7 +6221,22 @@ static int
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   }
-  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  // NS = K-pipeline depth (async smem stages). Default 3. Deepening to 4-6
+  // hides more weight-TMA latency on the single-wave M=1 decode GEMMs (the L6
+  // single-wave-latency bottleneck) — numerically identical (bit-exact), so
+  // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
+  // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
+  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but NS7=224KB
+  // / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a silent
+  // fallback). So clamp [2,6]; this is a sweepable knob, not a blind bump.
+  int dense_ns = 3;
+  if (const char *e = std::getenv("MPK_DSV3_DENSE_NS")) {
+    int v = atoi(e);
+    if (v >= 2 && v <= 6) {
+      dense_ns = v;
+    }
+  }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, dense_ns);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
   code.e("    static_cast<const "
