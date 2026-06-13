@@ -3353,6 +3353,25 @@ class PersistentKernel:
             # active_expert_mask[0..E_LOCAL-1] followed by
             # actual_count_per_expert[0..E_LOCAL-1] starting at meta row 1.
             e_local = max(1, input.dim(0) // bm_padding)
+            # CORRECTNESS INVARIANT (2026-06-13): the runtime offsets each
+            # CTA's input pointer by bid.x*rows_per_cta rows (input_map row
+            # partition), while the kernel derives my_expert=bid.x/
+            # ctas_per_expert and reads expert my_expert's W13 rows at
+            # my_expert*bm_padding. These align ONLY when rows_per_cta
+            # exactly divides bm_padding AND grid.x tiles the experts
+            # cleanly. A misaligned grid (e.g. grid.x=min(num_workers,
+            # m_total)=136 → rows_per_cta=120 ≠ bm_padding=128) makes
+            # silu_mul read the WRONG w13_out rows (inactive padding=0) →
+            # silu_out=0 → null routed MoE. Caller MUST pass grid.x =
+            # E_local * ctas_per_expert with bm_padding % rows_per_cta == 0.
+            assert (input.dim(0) % grid_dim[0] == 0
+                    and bm_padding % rows_per_cta == 0
+                    and grid_dim[0] == e_local * (bm_padding // rows_per_cta)), (
+                f"moe_silu_mul grid.x={grid_dim[0]} misaligns expert blocks: "
+                f"rows_per_cta={rows_per_cta} must divide bm_padding="
+                f"{bm_padding} and grid.x must equal E_local({e_local})*"
+                f"ctas_per_expert — else silu reads the wrong w13_out rows "
+                f"(null routed MoE).")
         params = [active_mask_offset, ctas_per_expert, e_local]
         # CRITICAL ORDERING (2026-05-14):
         # task_register.cc reads input_ptrs[0] as silu input and

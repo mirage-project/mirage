@@ -1462,6 +1462,46 @@ class DeepSeekV3Builder(GraphBuilder):
             out |= (ue_col.t() & 0xFF) << (j * 8)
         return out.to(torch.uint32).contiguous()
 
+    @staticmethod
+    def _requantize_moe_fp8_for_pow2(state_dict, wkey, skey):
+        """Re-quantize an FP8 MoE expert payload against the CEIL-pow2
+        (UE8M0) scales the grouped GEMM actually applies.
+
+        The SM100 grouped GEMM consumes UE8M0 weight scales — i.e.
+        2^ceil(log2(scale_inv)) per 128x128 block (`_float_to_ue8m0`,
+        matching the kernel-side `encode_ue8m0`) — via the hardware
+        block-scaled MMA. Checkpoint FP8 payloads, however, were quantized
+        by DeepSeek against the RAW fp32 scale_inv (0% of which are powers
+        of two; ceil factor mean 1.42x, max 2x). Packing ceiled scales
+        over raw-quantized bytes inflates every block by
+        2^ceil(log2 s)/s ∈ [1, 2) — measured 53% rel error / 1.51x norm on
+        the production largem GEMM with real layer-3 weights.
+
+        Fix: rescale the payload by s/2^ceil(log2 s) ∈ (0.5, 1] so
+        (payload, ceil-packed scale) is self-consistent:
+        q_new * 2^ceil(log2 s) ≈ q_old * s. Values only shrink, so no
+        overflow; cost is ≤1 original-grid ulp of extra rounding
+        (min-magnitude FP8 codes may flush to zero — same convention as
+        the test-suite quantizer). Scale tensors stay RAW (the packer
+        ceils them, which is now consistent), so the weight cache format
+        is unchanged. One-shot per key (sentinel guard) — re-applying
+        would compound the shrink.
+        """
+        sentinel = wkey + "._pow2_requantized"
+        if state_dict.get(sentinel) is not None:
+            return
+        w = state_dict[wkey]
+        s = state_dict[skey]
+        assert w.dtype == torch.float8_e4m3fn, (wkey, w.dtype)
+        E, N, K = w.shape
+        r = s.float() / torch.pow(
+            2.0, torch.ceil(torch.log2(s.float().clamp(min=1e-30))))
+        for e in range(E):  # per-expert to bound transient fp32 memory
+            rf = (r[e].repeat_interleave(128, 0)
+                      .repeat_interleave(128, 1)[:N, :K]).to(w.device)
+            w[e] = (w[e].float() * rf).to(torch.float8_e4m3fn)
+        state_dict[sentinel] = torch.tensor(True)
+
     def _attach_raw_fp8_weight(self, state_dict, key, name):
         """Attach checkpoint-style FP8 weight + float32 block scale
         (required). The dense FP8 GEMM consumes the original block-scale
@@ -2123,7 +2163,15 @@ class DeepSeekV3Builder(GraphBuilder):
         # num_active_tokens from the per-CTA STensor shape
         # (= m_total / grid.x rows per CTA), so the work is fully
         # parallel across SMs.
-        _silu_grid = min(self.mpk.num_workers, m_total)
+        # grid.x MUST equal num_local_experts so rows_per_cta == bm_padding
+        # (one CTA per expert), else the runtime's per-CTA row offset
+        # (bid.x * (m_total // grid.x)) drifts off the 128-row expert blocks
+        # and silu_mul reads/writes the WRONG w13_out rows (the wrapper's
+        # ctas_per_expert mapping only holds when bm_padding % rows_per_cta
+        # == 0 AND grid.x is a multiple of E_local). min(num_workers, m_total)
+        # = 136 at TP-EP gave rows_per_cta=120 → null routed-MoE.
+        _silu_grid = m_total // bm_pad
+
         self.mpk.moe_silu_mul_layer(
             input=new_moe_w13_out,
             output=new_moe_silu_out,
@@ -2156,6 +2204,8 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         # 7+8) Pack W2 weight scale + attach W2 weight + Group GEMM W2.
         w2_scale_key_for_pack = f"{prefix}experts.w2.weight_scale_inv"
+        self._requantize_moe_fp8_for_pow2(
+            state_dict, f"{prefix}experts.w2.weight", w2_scale_key_for_pack)
         w_experts_w2_new = self._safe_attach(
             state_dict[f"{prefix}experts.w2.weight"],
             f"layer_{layer_idx}_experts_w2")
@@ -2327,6 +2377,9 @@ class DeepSeekV3Builder(GraphBuilder):
         # Check if weights are FP8 (have scale_inv) or BF16 (post-dequant)
         w13_scale_key = f"{prefix}experts.w13.weight_scale_inv"
         use_fp8_experts = w13_scale_key in state_dict
+        if use_fp8_experts:
+            self._requantize_moe_fp8_for_pow2(
+                state_dict, f"{prefix}experts.w13.weight", w13_scale_key)
         w_experts_w13 = self._safe_attach(
             state_dict[f"{prefix}experts.w13.weight"],
             f"layer_{layer_idx}_experts_w13")
