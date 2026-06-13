@@ -367,21 +367,10 @@ if __name__ == "__main__":
             dtype=torch.int, device="cuda"
         )
 
-    if args.max_num_batched_tokens > 8:
-        # One-shot prefill constraint: a prompt longer than mbt would make the
-        # scheduler emit a SECOND prefill chunk (q_len > 8 at step > 0), and
-        # the split ROPE-Q position handling for step>0 prefill chunks is not
-        # yet validated. Prompts up to mbt + 8 are fine — the tail chunk has
-        # q_len <= 8 and runs through the (multi-token) decode path.
-        _max_pl = int(prompt_lengths.max().item())
-        if (_max_pl > args.max_num_batched_tokens + 8
-                and os.environ.get("MPK_DSV3_ALLOW_MULTICHUNK") != "1"):
-            raise ValueError(
-                f"prompt length {_max_pl} > max_num_batched_tokens "
-                f"({args.max_num_batched_tokens}) + 8: multi-chunk prefill is "
-                "guarded (set MPK_DSV3_ALLOW_MULTICHUNK=1 after validating; "
-                "see the 2026-06-13 oracle comparison) or raise "
-                "--max-num-batched-tokens to cover the prompt in one step.")
+    # Multi-chunk prefill (prompt longer than mbt → a second prefill chunk
+    # with q_len > 8 at step > 0) is supported: the split ROPE-Q position
+    # handling for step>0 prefill chunks was validated against the
+    # token-by-token oracle (KV exact across both chunks; 2026-06-13).
 
     step = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
     num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
