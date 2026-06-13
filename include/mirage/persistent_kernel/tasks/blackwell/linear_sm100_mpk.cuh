@@ -300,14 +300,16 @@ __device__ __noinline__ void
   //   cute::print("sC_epi:\t"); cute::print(sC_epi); cute::print("\n");
   // } __syncthreads();
 
-  // TMA bytes must match actual clamped box dims.
-  // When BATCH_SIZE < MMA_N, TMA input box is clamped to min(MMA_N,
-  // BATCH_SIZE). size<1>(mma_tiler)=bN corresponds to the input (B) TMA
-  // dimension. size<0>(mma_tiler)=bM corresponds to the weight (A) TMA
-  // dimension.
-  constexpr int kClampedBN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
+  // TMA transaction bytes must match the FULL declared box dims, not the
+  // GMEM-clamped extent. cp.async.bulk.tensor...complete_tx::bytes signals the
+  // full box size (boxDim product * elem_size) to the mbarrier even when rows
+  // are out-of-bounds (OOB rows are zero-filled but still counted). So when
+  // BATCH_SIZE < MMA_N the input box still contributes MMA_N*bK bytes.
+  // size<1>(mma_tiler)=bN=MMA_N is the input (B) box dim; size<0>=bM is the
+  // weight (A) box dim. (Clamping this to BATCH_SIZE under-counts and the
+  // consumer mbarrier never reaches the expected count -> deadlock.)
   int tma_transaction_bytes =
-      sizeof(T_) * kClampedBN * cute::size<2>(mma_tiler) +
+      sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler) +
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 
   constexpr int TILE_SIZE = 64;
