@@ -2,6 +2,28 @@
 
 Date: 2026-06-13 · Branch: `dflash-k26` (forked from `mpk`)
 
+## STATUS (achieved)
+Three alignment stages complete (single-card; tests in `tests/runtime_python/blackwell/sm100_dflash/`):
+- **Kernel**: `dflash_attention_sm100` (non-causal sliding-window split-KV GQA flash attn)
+  and `dflash_norm_rope_sm100` (per-head RMSNorm eps=1e-5 + YaRN NeoX RoPE) — each validated
+  standalone AND in the megakernel (test-mode), relmax < 0.003. Both wired through the full
+  MPK task lifecycle (8 files incl. `runtime.cc` task_type_to_name).
+- **Layer**: full draft `DecoderLayer` (input_layernorm → q/k/v proj → norm+rope → split-K3
+  attn → o_proj → residual → post_norm → SiLU-MLP → residual) aligned to HF dump
+  `out::layers.0`, relmax 0.0040.
+- **E2E (draft)**: full L=6 draft model forward aligned to reference `final_hidden`, relmax
+  0.0148 (3004 tasks, mbt=B). The draft's substantive output is `final_hidden`; token-emit via
+  the shared TARGET lm_head + verify are thin wrappers (target out of scope per oracle choice).
+- Reused linear (sm100/cutlass), rmsnorm, silu_mul validated against real-weight dumps.
+
+Remaining: TP=8 (PD); in-MPK context-KV materialize pass (currently torch-materialized as
+cache inputs); token-emit + verify wiring (needs the target lm_head).
+
+Key gotchas (see [[dflash-k26-infra]] memory): `use_cutlass_kernel=True` for large reductions;
+block_dim (256,1,1) on Blackwell; eps 1e-5; `new_tensor` (not attach_input) for graph
+intermediates; single-megakernel can't mix ctx_len-row & B-row token tensors → split-KV + mbt=B;
+force core.so relink after .cc edits.
+
 Goal: implement Kimi-K2.6 DFlash speculative-decoding **draft** support in MPK and complete
 three alignment stages — **kernel → layer → e2e** — single-card first, TP=8 as the final phase.
 

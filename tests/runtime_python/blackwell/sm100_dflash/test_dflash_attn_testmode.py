@@ -29,8 +29,10 @@ def run(B, ctx_len, sliding_window):
     ref = dflash_attention_core(q, k, v, sliding_window, NQ, NKV, D)
 
     q2 = q.reshape(B, NQ * D).contiguous()
-    k2 = k.reshape(T, NKV * D).contiguous()
-    v2 = v.reshape(T, NKV * D).contiguous()
+    ck2 = k[:ctx_len].reshape(ctx_len, NKV * D).contiguous()
+    cv2 = v[:ctx_len].reshape(ctx_len, NKV * D).contiguous()
+    bk2 = k[ctx_len:].reshape(B, NKV * D).contiguous()
+    bv2 = v[ctx_len:].reshape(B, NKV * D).contiguous()
     out = torch.zeros(B, NQ * D, dtype=dtype, device=device)
 
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
@@ -45,12 +47,12 @@ def run(B, ctx_len, sliding_window):
     pk = PersistentKernel(**params)
 
     q_dt = pk.attach_input(q2, name="q")
-    k_dt = pk.attach_input(k2, name="k")
-    v_dt = pk.attach_input(v2, name="v")
+    ck_dt = pk.attach_input(ck2, name="ck"); cv_dt = pk.attach_input(cv2, name="cv")
+    bk_dt = pk.attach_input(bk2, name="bk"); bv_dt = pk.attach_input(bv2, name="bv")
     o_dt = pk.attach_input(out, name="o")
     block_dim = (256, 1, 1) if pk.target_cc >= 90 else (128, 1, 1)
-    pk.dflash_attention_layer(q=q_dt, k=k_dt, v=v_dt, output=o_dt,
-                              grid_dim=(1, 1, 1), block_dim=block_dim,
+    pk.dflash_attention_layer(q=q_dt, ctx_k=ck_dt, ctx_v=cv_dt, blk_k=bk_dt, blk_v=bv_dt,
+                              output=o_dt, grid_dim=(1, 1, 1), block_dim=block_dim,
                               sliding_window=sliding_window, head_dim=D)
     pk.compile(output_dir=os.path.dirname(__file__))
     pk()
