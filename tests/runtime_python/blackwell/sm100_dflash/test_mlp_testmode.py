@@ -15,6 +15,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.utils import grid_for_rmsnorm_linear_layer
 
 sys.path.insert(0, os.path.dirname(__file__))
 from pytorch_reference import load_weight, linear, silu_mul  # noqa: E402
@@ -77,16 +78,17 @@ def main():
     params["num_local_schedulers"] = num_schedulers
     params["mpi_rank"] = 0
     params["world_size"] = 1
-    params["max_num_batched_tokens"] = S
+    params["max_num_batched_tokens"] = int(os.environ.get("MBT", str(S)))
     params["max_num_batched_requests"] = 1
     params["use_cutlass_kernel"] = True
     pk = PersistentKernel(**params)
 
-    gateup_tasks = grid_for_linear(2 * I)   # split for shuffle
-    down_tasks = grid_for_plain_linear(H)
+    # demo recipe (demo/qwen3/demo.py): grid_for_rmsnorm_linear_layer for gate_up
+    # (->96), shuffle num_groups = gateup_tasks//2, silu grid = gateup_tasks//2,
+    # down grid = H//64, linear_with_residual, block_dim (128,1,1).
+    gateup_tasks = grid_for_rmsnorm_linear_layer(2 * I)
+    down_tasks = H // 64
 
-    mlp_mid = torch.zeros(S, 2 * I, dtype=dtype, device=device)
-    silu_out = torch.zeros(S, I, dtype=dtype, device=device)
     mlp_out = torch.zeros(S, H, dtype=dtype, device=device)
 
     h_dt = pk.attach_input(h, name="mlp_in")
@@ -96,12 +98,13 @@ def main():
                                num_groups=gateup_tasks // 2, name="gateup_w")
     dw_dt = pk.attach_input(down_w.contiguous(), name="down_w")
     zero_res = torch.zeros(S, H, dtype=dtype, device=device)
-    mid_dt = pk.attach_input(mlp_mid, name="mlp_mid")
-    silu_dt = pk.attach_input(silu_out, name="silu_out")
+    # intermediates as graph tensors (MPK-allocated, dependency-tracked)
+    mid_dt = pk.new_tensor((S, 2 * I), name="mlp_mid")
+    silu_dt = pk.new_tensor((S, I), name="silu_out")
     res_dt = pk.attach_input(zero_res, name="zero_res")
     out_dt = pk.attach_input(mlp_out, name="mlp_out")
 
-    block_dim = (256, 1, 1) if pk.target_cc >= 90 else (128, 1, 1)
+    block_dim = (128, 1, 1)  # demo uses 128 for the MLP linears
     pk.linear_layer(input=h_dt, weight=gu_dt, output=mid_dt,
                     grid_dim=(gateup_tasks, 1, 1), block_dim=block_dim)
     pk.silu_mul_layer(input=mid_dt, output=silu_dt,
@@ -114,19 +117,12 @@ def main():
     pk()
     torch.cuda.synchronize()
 
-    # localize: intermediate gate_up (interleaved) and silu_out
-    import torch as _t
-    gi = gate_t.reshape(S, gateup_tasks // 2, I // (gateup_tasks // 2))
-    ui = up_t.reshape(S, gateup_tasks // 2, I // (gateup_tasks // 2))
-    mid_ref = _t.stack([gi, ui], dim=2).reshape(S, 2 * I)  # interleaved per group
-    mid_err = (mlp_mid.to(_t.float32) - mid_ref).abs().max().item()
-    silu_err = (silu_out.to(_t.float32) - act_t.to(_t.float32)).abs().max().item()
     err = (mlp_out.to(torch.float32) - ref_mlp).abs().max().item()
-    print(f"[MPK vs ref] gate_up(interleaved) maxerr {mid_err:.4f}")
-    print(f"[MPK vs ref] silu_out maxerr {silu_err:.4f}")
-    print(f"[MPK vs dump] mlp maxerr {err:.4f}")
+    refmax = ref_mlp.abs().max().item()
+    rel = err / max(refmax, 1e-6)
+    print(f"[MPK vs dump] mlp maxerr {err:.4f} relmax {rel:.5f} (refmax {refmax:.2f})")
     pk.finalize()
-    ok = err < 0.5
+    ok = rel < 0.02
     print("PASSED" if ok else "FAILED")
     assert ok
 
