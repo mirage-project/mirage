@@ -20,6 +20,8 @@ setup(
             depends=[
                 os.path.join(this_dir,
                              "../../../../include/mirage/persistent_kernel/tasks/blackwell/dflash_attention_sm100.cuh"),
+                os.path.join(this_dir,
+                             "../../../../include/mirage/persistent_kernel/tasks/blackwell/dflash_norm_rope_sm100.cuh"),
             ],
             define_macros=macros,
             include_dirs=[

@@ -4,3 +4,4 @@ test_rank0.cu
 task_graph_rank0.json
 mpk_launcher_rank0*.so
 __pycache__/
+kernel_metadata_rank0.json

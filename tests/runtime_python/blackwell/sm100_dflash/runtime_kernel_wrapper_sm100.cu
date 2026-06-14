@@ -5,8 +5,56 @@
 #include <torch/extension.h>
 
 #include "tasks/blackwell/dflash_attention_sm100.cuh"
+#include "tasks/blackwell/dflash_norm_rope_sm100.cuh"
 
 using bfloat16 = type::bfloat16_t;
+
+template <typename T, int NH, int D>
+__global__ void __launch_bounds__(256) dflash_norm_rope_k(void const *x,
+                                                          void const *w,
+                                                          void const *cos,
+                                                          void const *sin,
+                                                          void *o,
+                                                          int n,
+                                                          float eps) {
+  kernel::dflash_norm_rope_sm100<T, NH, D>(x, w, cos, sin, o, n, eps);
+}
+
+// x:[N,NH,D] w:[D] cos/sin:[N,D] o:[N,NH,D]
+void dflash_norm_rope(torch::Tensor x,
+                      torch::Tensor w,
+                      torch::Tensor cos,
+                      torch::Tensor sin,
+                      torch::Tensor o,
+                      float eps) {
+  int N = x.size(0);
+  int NH = x.size(1);
+  int D = x.size(2);
+  dim3 grid(1, 1, 1), block(256, 1, 1);
+  if (D == 128 && NH == 64) {
+    dflash_norm_rope_k<bfloat16, 64, 128><<<grid, block>>>(x.data_ptr(),
+                                                           w.data_ptr(),
+                                                           cos.data_ptr(),
+                                                           sin.data_ptr(),
+                                                           o.data_ptr(),
+                                                           N,
+                                                           eps);
+  } else if (D == 128 && NH == 8) {
+    dflash_norm_rope_k<bfloat16, 8, 128><<<grid, block>>>(x.data_ptr(),
+                                                          w.data_ptr(),
+                                                          cos.data_ptr(),
+                                                          sin.data_ptr(),
+                                                          o.data_ptr(),
+                                                          N,
+                                                          eps);
+  } else {
+    printf("dflash_norm_rope: unsupported NH=%d D=%d\n", NH, D);
+  }
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("dflash_norm_rope launch error: %s\n", cudaGetErrorString(err));
+  }
+}
 
 template <typename T, int NQ, int NKV, int D, int B>
 __global__ void __launch_bounds__(256) dflash_attn_kernel(void const *q,
@@ -62,4 +110,7 @@ void dflash_attn(torch::Tensor q,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "dflash_attn", &dflash_attn, "DFlash non-causal attention core (SM100)");
+  m.def("dflash_norm_rope",
+        &dflash_norm_rope,
+        "DFlash per-head RMSNorm + RoPE (SM100)");
 }

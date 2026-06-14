@@ -190,6 +190,10 @@ public:
                            std::vector<int> const &params);
   int register_eagle3_d2t_remap_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
+  int register_dflash_attention_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_dflash_norm_rope_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
   int register_eagle3_commit_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
   // SM100 tasks end

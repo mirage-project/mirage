@@ -454,6 +454,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_rmsnorm_linear_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR, variant_id);
+  } else if (name == "dflash_attention") {
+    int variant_id = task_register->register_dflash_attention_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DFLASH_ATTENTION_SM100, variant_id);
+  } else if (name == "dflash_norm_rope") {
+    int variant_id = task_register->register_dflash_norm_rope_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_DFLASH_NORM_ROPE_SM100, variant_id);
   } else if (name == "attention") {
     int variant_id =
         task_register->register_attention_task(customized->bgraph, params);

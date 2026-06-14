@@ -751,7 +751,54 @@ class PersistentKernel:
             tb_graph,
         )
         self.kn_graph.register_task(tb_graph, "attention", params)
-        
+
+    def dflash_attention_layer(
+        self,
+        q: DTensor,        # [B, q_size]   (q_norm + RoPE already applied)
+        k: DTensor,        # [total_kv, kv_size] (k_norm + RoPE applied; ctx++block)
+        v: DTensor,        # [total_kv, kv_size] (raw)
+        output: DTensor,   # [B, q_size]
+        grid_dim: tuple,   # (num_requests, 1, 1)
+        block_dim: tuple,
+        sliding_window: int = 0,
+        head_dim: int = 128,
+    ):
+        # DFlash non-causal block attention core (one task per request).
+        assert q.num_dims == 2
+        assert k.num_dims == 2 and v.num_dims == 2
+        assert output.num_dims == 2
+        params = [sliding_window, head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([q, k, v, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_attention", params)
+
+    def dflash_norm_rope_layer(
+        self,
+        x: DTensor,        # [N, num_heads*head_dim]
+        weight: DTensor,   # [head_dim]  (q_norm or k_norm)
+        cos: DTensor,      # [N, head_dim]
+        sin: DTensor,      # [N, head_dim]
+        output: DTensor,   # [N, num_heads*head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        head_dim: int = 128,
+    ):
+        # DFlash per-head RMSNorm (eps 1e-5) + NeoX RoPE.
+        assert x.num_dims == 2 and output.num_dims == 2
+        params = [head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([x, weight, cos, sin, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_norm_rope", params)
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]

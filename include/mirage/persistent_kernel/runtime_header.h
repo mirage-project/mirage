@@ -181,6 +181,10 @@ enum TaskType {
   TASK_MTP_BUILD_EMBED_INPUT = 294,
   // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
+  // DFlash non-causal block attention (correctness-first), SM100.
+  TASK_DFLASH_ATTENTION_SM100 = 296,
+  // DFlash per-head RMSNorm + RoPE, SM100.
+  TASK_DFLASH_NORM_ROPE_SM100 = 297,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

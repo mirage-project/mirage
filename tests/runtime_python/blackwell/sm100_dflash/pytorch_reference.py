@@ -48,6 +48,18 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def dflash_norm_rope(x, weight, cos, sin, eps=EPS):
+    """Per-head RMSNorm + NeoX RoPE. x:[N,H,d] weight:[d] cos/sin:[N,d] -> [N,H,d]."""
+    N, H, d = x.shape
+    xf = x.to(torch.float32)
+    var = xf.pow(2).mean(dim=-1, keepdim=True)
+    nv = xf * torch.rsqrt(var + eps) * weight.to(torch.float32)   # [N,H,d]
+    c = cos.to(torch.float32)[:, None, :]                          # [N,1,d]
+    s = sin.to(torch.float32)[:, None, :]
+    out = nv * c + rotate_half(nv) * s
+    return out.to(x.dtype)
+
+
 def dflash_attention_core(q, k, v, sliding_window, n_q, n_kv, d):
     """Attention CORE only (matches the dflash_attention_sm100 kernel scope).
 
