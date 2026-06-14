@@ -754,26 +754,29 @@ class PersistentKernel:
 
     def dflash_attention_layer(
         self,
-        q: DTensor,        # [B, q_size]   (q_norm + RoPE already applied)
-        k: DTensor,        # [total_kv, kv_size] (k_norm + RoPE applied; ctx++block)
-        v: DTensor,        # [total_kv, kv_size] (raw)
+        q: DTensor,        # [B, q_size]            (q_norm + RoPE applied)
+        ctx_k: DTensor,    # [ctx_len, kv_size]     (k_norm + RoPE; context cache)
+        ctx_v: DTensor,    # [ctx_len, kv_size]     (raw v; context cache)
+        blk_k: DTensor,    # [B, kv_size]           (k_norm + RoPE; this block)
+        blk_v: DTensor,    # [B, kv_size]           (raw v; this block)
         output: DTensor,   # [B, q_size]
         grid_dim: tuple,   # (num_requests, 1, 1)
         block_dim: tuple,
         sliding_window: int = 0,
         head_dim: int = 128,
     ):
-        # DFlash non-causal block attention core (one task per request).
-        assert q.num_dims == 2
-        assert k.num_dims == 2 and v.num_dims == 2
-        assert output.num_dims == 2
+        # DFlash non-causal block attention (split ctx/block KV; one task/request).
+        for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
+            assert t.num_dims == 2
         params = [sliding_window, head_dim]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q, (-1, -1, -1), -1, True)
-        tb_graph.new_input(k, (-1, -1, -1), -1, True)
-        tb_graph.new_input(v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ctx_k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ctx_v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blk_k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blk_v, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([q, k, v, output], tb_graph)
+        self.kn_graph.customized([q, ctx_k, ctx_v, blk_k, blk_v, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "dflash_attention", params)
 
     def dflash_norm_rope_layer(

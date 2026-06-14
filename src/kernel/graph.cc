@@ -458,7 +458,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id = task_register->register_dflash_attention_sm100_task(
         customized->bgraph, params);
     task_config[op] =
-        std::make_tuple(3, 1, TASK_DFLASH_ATTENTION_SM100, variant_id);
+        std::make_tuple(5, 1, TASK_DFLASH_ATTENTION_SM100, variant_id);
   } else if (name == "dflash_norm_rope") {
     int variant_id = task_register->register_dflash_norm_rope_sm100_task(
         customized->bgraph, params);

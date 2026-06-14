@@ -58,26 +58,30 @@ void dflash_norm_rope(torch::Tensor x,
 
 template <typename T, int NQ, int NKV, int D, int B>
 __global__ void __launch_bounds__(256) dflash_attn_kernel(void const *q,
-                                                          void const *k,
-                                                          void const *v,
+                                                          void const *ck,
+                                                          void const *cv,
+                                                          void const *bk,
+                                                          void const *bv,
                                                           void *o,
-                                                          int total_kv,
+                                                          int ctx_len,
                                                           int sliding_window) {
   kernel::dflash_attention_sm100<T, NQ, NKV, D, B>(
-      q, k, v, o, total_kv, sliding_window);
+      q, ck, cv, bk, bv, o, ctx_len, sliding_window);
 }
 
-// q:[B,NQ,D] k:[T,NKV,D] v:[T,NKV,D] o:[B,NQ,D]; one request -> grid (1,1,1).
+// q:[B,NQ,D] ctx_k/ctx_v:[ctx_len,NKV,D] blk_k/blk_v:[B,NKV,D] o:[B,NQ,D].
 void dflash_attn(torch::Tensor q,
-                 torch::Tensor k,
-                 torch::Tensor v,
+                 torch::Tensor ck,
+                 torch::Tensor cv,
+                 torch::Tensor bk,
+                 torch::Tensor bv,
                  torch::Tensor o,
                  int sliding_window) {
   int B = q.size(0);
   int NQ = q.size(1);
   int D = q.size(2);
-  int T = k.size(0);
-  int NKV = k.size(1);
+  int ctx_len = ck.size(0);
+  int NKV = ck.size(1);
   dim3 grid(1, 1, 1);
   dim3 block(256, 1, 1);
   auto launch = [&](auto bct) {
@@ -85,10 +89,12 @@ void dflash_attn(torch::Tensor q,
     if (NQ == 64 && NKV == 8 && D == 128) {
       dflash_attn_kernel<bfloat16, 64, 8, 128, BB>
           <<<grid, block>>>(q.data_ptr(),
-                            k.data_ptr(),
-                            v.data_ptr(),
+                            ck.data_ptr(),
+                            cv.data_ptr(),
+                            bk.data_ptr(),
+                            bv.data_ptr(),
                             o.data_ptr(),
-                            T,
+                            ctx_len,
                             sliding_window);
     } else {
       printf("dflash_attn: unsupported NQ=%d NKV=%d D=%d\n", NQ, NKV, D);

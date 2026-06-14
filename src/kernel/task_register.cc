@@ -125,14 +125,15 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_dflash_attention_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: [sliding_window, head_dim]
+  // params: [sliding_window, head_dim]; 5 inputs (q, ctx_k, ctx_v, blk_k,
+  // blk_v), 1 output.
   assert(params.size() == 2);
   int sliding_window = params[0];
   int head_dim = params[1];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 3;  // q, k, v
-  int num_outputs = 1; // attn_out
+  int num_inputs = 5;
+  int num_outputs = 1;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -142,12 +143,12 @@ int TaskRegister::register_dflash_attention_sm100_task(
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
-  // q/out: [B, q_size]; k/v: [total_kv, kv_size]
+  // q/out: [B, q_size]; ctx_k/ctx_v: [ctx_len, kv_size]; blk_k/blk_v: [B, kv]
   assert(output_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[1]->dtensor.num_dims == 2);
   int B = output_ops[0]->dtensor.dim[0];
   int q_size = output_ops[0]->dtensor.dim[1];
-  int total_kv = input_ops[1]->dtensor.dim[0];
+  int ctx_len = input_ops[1]->dtensor.dim[0];
   int kv_size = input_ops[1]->dtensor.dim[1];
   int num_q_heads = q_size / head_dim;
   int num_kv_heads = kv_size / head_dim;
@@ -159,10 +160,12 @@ int TaskRegister::register_dflash_attention_sm100_task(
          head_dim,
          B);
   code.e("    task_desc->input_ptrs[0],");  // q
-  code.e("    task_desc->input_ptrs[1],");  // k
-  code.e("    task_desc->input_ptrs[2],");  // v
+  code.e("    task_desc->input_ptrs[1],");  // ctx_k
+  code.e("    task_desc->input_ptrs[2],");  // ctx_v
+  code.e("    task_desc->input_ptrs[3],");  // blk_k
+  code.e("    task_desc->input_ptrs[4],");  // blk_v
   code.e("    task_desc->output_ptrs[0],"); // out
-  code.e("    $,", total_kv);
+  code.e("    $,", ctx_len);
   code.e("    $);", sliding_window);
   return register_task_variant(TASK_DFLASH_ATTENTION_SM100, code.to_string());
 }

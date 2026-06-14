@@ -25,7 +25,9 @@ def run_case(B, ctx_len, sliding_window, seed=0):
     v = torch.randn(T, NKV, D, dtype=dtype, device=device)
     o = torch.zeros(B, NQ, D, dtype=dtype, device=device)
 
-    rk.dflash_attn(q, k, v, o, sliding_window)
+    ck = k[:ctx_len].contiguous(); cv = v[:ctx_len].contiguous()
+    bk = k[ctx_len:].contiguous(); bv = v[ctx_len:].contiguous()
+    rk.dflash_attn(q, ck, cv, bk, bv, o, sliding_window)
     ref = dflash_attention_core(q, k, v, sliding_window, NQ, NKV, D)
 
     err = (o.float() - ref.float()).abs().max().item()
