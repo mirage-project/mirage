@@ -6046,10 +6046,15 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   active_rows as runtime M. Used for the decode-only branch of the
   //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
   //   valid on decode iters; prefill iters early-exit).
+  // runtime_m_mode=4 (2026-06-13): GEMV dual-dispatch partner. Skip when
+  //   active_rows==1 (the strict-M1 CUDA-core GEMV writes C at decode); run with
+  //   the active_rows cap when M>1 (prefill + prompt ingestion). Partitions the
+  //   M axis with the GEMV (which gates active_rows!=1) — no gap/overlap. Keyed
+  //   on active_rows (true M) not q_len, so it stays correct if bs>1 returns.
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
-  assert(runtime_m_mode >= 0 && runtime_m_mode <= 3);
+  assert(runtime_m_mode >= 0 && runtime_m_mode <= 4);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6078,6 +6083,17 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     }
     code.e("int active_rows_ = "
            "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
+  } else if (runtime_m_mode == 4) {
+    // GEMV dual-dispatch partner (MPK_DSV3_DENSE_GEMV): the strict-M1 CUDA-core
+    // GEMV writes C at active_rows==1 (decode); this dense GEMM handles M>1
+    // (prefill + prompt ingestion 2..8). Partitions the M (active_rows) axis
+    // with the GEMV's `active_rows!=1` gate — exactly one writer per M, no gap.
+    // Keyed on active_rows (true M), not q_len (which leaves 2..8 unwritten).
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("if (active_rows_ == 1) return;");
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   } else {
@@ -6160,6 +6176,54 @@ int TaskRegister::register_fp8_gemm_dense_sm100_task(
               : "fp8_gemm_dense_smallm_sm100_task_impl",
       TASK_FP8_GEMM_DENSE_SM100,
       out_row_stride);
+}
+
+// ferret v002 CUDA-core GEMV (M=1 decode), default-OFF lever MPK_DSV3_DENSE_GEMV.
+// RAW-pointer ABI: A/B arrive via input_ptrs[0]/[1] (NOT input_tma_desc_ptrs) —
+// the kernel declares them as CUtensorMap* but reinterpret_casts to raw FP8
+// internally (no TMA). runtime.cc MUST NOT create TMA descriptors for this task.
+// Template <BN, WPC> is per-shape (params[4]/[5]); blockDim = BN*WPC*32 is set
+// builder-side. Output C via output_ptrs[0] (store_in_dmem convention: 4 inputs
+// A,B,sa,sb + appended output). Numerically a GEMV → token-identical to the
+// tcgen05 dense GEMM (validated standalone qkv_a 1.74x / q_b 1.40x vs smallm<128,6>).
+int TaskRegister::register_fp8_gemm_dense_gemv_m1_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params) {
+  (void)bgraph;
+  // params: [M, N, K, num_workers, BN, WPC]
+  assert(params.size() == 6);
+  int N = params[1], K = params[2], num_workers = params[3];
+  int BN = params[4], WPC = params[5];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Decode-ONLY gate: this kernel is a strict M=1 GEMV (computes only row 0).
+  // Run iff exactly 1 active row (bs=1 decode). active_rows==0 (no token) OR
+  // >1 (prefill mbt>8) => skip, so it is safe even under dual-dispatch (the
+  // tcgen05 dense GEMM handles prefill; only one of the two writes C per iter).
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("if (active_rows_ != 1) return;");
+  code.e("kernel::fp8_gemm_dense_gemv_m1::fp8_gemm_dense_gemv_m1_sm100_task_impl"
+         "<$, $>(",
+         BN, WPC);
+  // A/B = RAW FP8 device pointers carried in input_ptrs[0]/[1]; the kernel sig
+  // takes CUtensorMap* and casts back to raw (no TMA descriptor dereference).
+  code.e("    reinterpret_cast<const "
+         "CUtensorMap*>(task_desc->input_ptrs[0]),");
+  code.e("    reinterpret_cast<const "
+         "CUtensorMap*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    1,"); // M = 1 (GEMV; kernel ignores via (void)M)
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,"); // worker_idx for the N-sweep
+  code.e("    $);", num_workers); // C_row_stride defaults to -1 (unused at M=1)
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_GEMV_M1_SM100,
+                               code.to_string());
 }
 
 // D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but

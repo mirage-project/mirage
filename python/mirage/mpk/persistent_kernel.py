@@ -3105,6 +3105,51 @@ class PersistentKernel:
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
+    def fp8_gemm_dense_gemv_m1_layer(self, input_fp8, weight_fp8, input_scale,
+                                     weight_scale, output, num_workers,
+                                     bn: int, wpc: int):
+        # ferret v002 CUDA-core GEMV (M=1 decode). Same A/B/sa/sb/output
+        # new_input plumbing as the dense GEMM, BUT: (1) A/B arrive RAW (the
+        # new task type is excluded from TMA-desc creation in runtime.cc), so
+        # the kernel reads input_ptrs[0]/[1] directly; (2) the kernel uses
+        # blockDim.x internally but the MPK megakernel worker is a FIXED 256
+        # threads (WORKER_NUM_THREADS, __launch_bounds__(256)) — the tb_graph
+        # block_dim below is logical metadata only and does NOT change the
+        # physical launch. So bn*wpc MUST be <= 8 (bn*wpc*32 <= 256); configs
+        # needing >256 threads (e.g. <8,2>=512, <32,1>=1024) SILENTLY ZERO
+        # their upper columns in-MPK (warps 8+ never run). USE <8,1> (256 thr,
+        # ferret v001-class ~1.34x qkv_a; cos=1.0 validated). (3) params carry
+        # BN/WPC so the codegen instantiates <BN,WPC>; bn*wpc<=8 is asserted.
+        # grid = num_workers (persistent N-slice sweep, request_id = worker idx).
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims in (2, 3)
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N, (out_flat_n, N)
+        block = bn * wpc * 32
+        params = [M, N, K, num_workers, bn, wpc]
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (block, 1, 1), 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_gemv_m1_sm100", params)
+
     # D1 (2026-05-17): variants that fuse per-128-col-group UE8M0 quantize
     # into the GEMM epilogue — output is FP8 + packed scale uint32 instead
     # of bf16. Eliminates the downstream per_token_group_quantize_fp8 task

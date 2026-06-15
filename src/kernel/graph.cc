@@ -864,6 +864,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, /*mediumm=*/false);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_gemv_m1_sm100") {
+    // ferret v002 CUDA-core GEMV (M=1 decode). Same (4 in, 1 out) shape as the
+    // dense GEMM, but its own enum so runtime.cc can route A/B as RAW pointers
+    // (input_ptrs[0]/[1]) instead of creating TMA descriptors.
+    int variant_id =
+        task_register->register_fp8_gemm_dense_gemv_m1_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_GEMV_M1_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_mediumm_sm100") {
     int variant_id = task_register->register_fp8_gemm_dense_sm100_task(
         customized->bgraph, params, /*mediumm=*/true);

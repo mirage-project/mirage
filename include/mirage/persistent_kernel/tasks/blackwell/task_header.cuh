@@ -35,6 +35,7 @@
 #include "fp8_gemm_dense_fp8out_sm100.cuh"
 #include "fp8_gemm_dense_mediumm_sm100.cuh"
 #include "fp8_gemm_dense_smallm_sm100.cuh"
+#include "fp8_gemm_dense_gemv_m1_sm100.cuh"
 #include "fp8_group_gemm_largem_compact_sm100.cuh"
 #include "fp8_group_gemm_largem_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"

@@ -497,6 +497,21 @@ class DeepSeekV3Builder(GraphBuilder):
                                else 3 if gate_mode == 2
                                else 0)
 
+        # GEMV dual-dispatch (MPK_DSV3_DENSE_GEMV, default-OFF → byte-identical
+        # default build). For ALWAYS-run (gate_mode==0) bf16 dense GEMMs whose
+        # shape fits the 256-thread <8,1> CUDA-core GEMV (K%512==0 — the kernel
+        # drops a K-tail otherwise; N%8==0 for BN=8), route M==1 (decode) to the
+        # GEMV and M>1 (prefill/ingest) to the tcgen05 dense GEMM via mode-4 —
+        # an exact M-axis partition (one writer per M; reviewer-validated, no
+        # q_len gap). gate_mode!=0 EXCLUDED (mode-4 would mis-fire vs the 2/3
+        # phase gates). Reuses the same FP8 input/scale + weight + output buffers.
+        _use_gemv = (os.environ.get("MPK_DSV3_DENSE_GEMV") == "1"
+                     and gate_mode == 0
+                     and weight.dim(1) % 512 == 0
+                     and weight.dim(0) % 8 == 0)
+        if _use_gemv:
+            gemm_runtime_m_mode = 4  # dense handles M>1; GEMV handles M==1
+
         if residual is None:
             dsv3_tasks.fp8_gemm_dense_layer(
                 self.mpk,
@@ -508,6 +523,12 @@ class DeepSeekV3Builder(GraphBuilder):
                 num_workers=dense_nw,
                 runtime_m_mode=gemm_runtime_m_mode,
             )
+            if _use_gemv:
+                self.mpk.fp8_gemm_dense_gemv_m1_layer(
+                    input_fp8=input_fp8, weight_fp8=weight,
+                    input_scale=input_scale, weight_scale=weight_scale,
+                    output=output, num_workers=self.mpk.num_workers,
+                    bn=8, wpc=1)
             return
 
         if self.world_size > 1:
@@ -524,6 +545,12 @@ class DeepSeekV3Builder(GraphBuilder):
                 num_workers=dense_nw,
                 runtime_m_mode=gemm_runtime_m_mode,
             )
+            if _use_gemv:
+                self.mpk.fp8_gemm_dense_gemv_m1_layer(
+                    input_fp8=input_fp8, weight_fp8=weight,
+                    input_scale=input_scale, weight_scale=weight_scale,
+                    output=partial, num_workers=self.mpk.num_workers,
+                    bn=8, wpc=1)
             self._allreduce_residual(partial, output, residual,
                                      gate_mode=gate_mode)
             return
@@ -544,6 +571,12 @@ class DeepSeekV3Builder(GraphBuilder):
             num_workers=dense_nw,
             runtime_m_mode=gemm_runtime_m_mode,
         )
+        if _use_gemv:
+            self.mpk.fp8_gemm_dense_gemv_m1_layer(
+                input_fp8=input_fp8, weight_fp8=weight,
+                input_scale=input_scale, weight_scale=weight_scale,
+                output=partial, num_workers=self.mpk.num_workers,
+                bn=8, wpc=1)
         self.mpk.elementwise_add_layer(
             input_a=partial,
             input_b=residual,
