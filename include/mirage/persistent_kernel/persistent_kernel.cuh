@@ -110,6 +110,14 @@ __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
 
+static __device__ __noinline__ void
+    execute_task_noinline(TaskDesc const *task_desc,
+                          RuntimeConfig const &runtime_config) {
+  // Keep execute_worker's queue/event state out of heavy task-body call frames
+  // so those callees can use the per-task register budget instead.
+  _execute_task(task_desc, runtime_config);
+}
+
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
   return (event_loc == 0);
@@ -990,7 +998,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                task_desc->task_type);
       }
 #endif
-      _execute_task(task_desc, config);
+      execute_task_noinline(task_desc, config);
     }
     __syncthreads();
 

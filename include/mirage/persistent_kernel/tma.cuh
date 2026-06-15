@@ -1957,6 +1957,15 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         constexpr int D_K = 576;
         int const total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
         int total_rows = total_elements / D_K; // B * Q_LEN * NUM_HEADS
+        // Empty-Q guard (TP1 bring-up; pre-existing): a registered task whose Q
+        // input is 0-sized at this config yields total_rows==0, which
+        // cuTensorMapEncodeTiled rejects (every globalDim must be >= 1). Emit a
+        // minimal valid 1-row descriptor instead — such a task performs 0 TMA
+        // row-loads, so the descriptor is never dereferenced. Non-empty tensors
+        // (all real decode rows, every TP2/4/8/TP8 path) are unaffected.
+        if (total_rows < 1) {
+          total_rows = 1;
+        }
         int d_k = D_K;
         int k_iters = d_k / BK;
         uint32_t const packed_mtp =
@@ -1975,6 +1984,15 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           if (hpb <= 0) {
             hpb = num_heads;
           }
+        }
+        // Keep the box height within the (possibly clamped) global rows so the
+        // empty-Q dummy descriptor stays valid (box height <= global rows). A
+        // no-op for real tasks where hpb (heads) <= total_rows by construction.
+        if (hpb > total_rows) {
+          hpb = total_rows;
+        }
+        if (hpb < 1) {
+          hpb = 1;
         }
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};

@@ -9,7 +9,7 @@ Architecture: 61 decoder layers with MLA attention and MoE MLP.
 
 Per-layer task chain (registered onto the megakernel graph):
   fused rmsnorm+quantize → fused qkv_a FP8 GEMM → q_a layernorm+quantize
-  → decode Q BMM chain (q_b_pe / q_b_nope-fp8out / BMM / assemble)
+  → decode absorbed q_b_proj FP8 GEMM
   [+ prefill q_b GEMMs] → ROPE q/k → kv_a layernorm → KV gather
   [+ phantom bridge + kv_b_k/v GEMMs + chunked prefill] → MLA decode
   (+ reduce) → decode O BMM chain (quantize / BMM / o_proj+residual)
@@ -27,8 +27,9 @@ Build-time configuration (fixed at graph-build time):
   tasks are both registered, and runtime Q_LEN gates (prefill: Q_LEN > 8,
   decode: Q_LEN <= 8) pick which one does work each iteration.
 - Weight forms: demo.py emits absorbed and unabsorbed weights at load
-  time (qkv_a fused, q_b_nope/q_b_pe split, kv_b_k/kv_b_v split, BMM
-  per-head forms, o_proj_original).
+  time (qkv_a fused, q_b_proj absorbed, q_b_nope/q_b_pe split,
+  kv_b_k/kv_b_v split, BMM per-head forms, fused o_proj and
+  o_proj_original).
 """
 
 import math
@@ -1181,10 +1182,10 @@ class DeepSeekV3Builder(GraphBuilder):
         self.q_a_out_buf = None
         # q_b output (after absorption): [batch, num_local_q_heads * qk_head_dim]
         self.q_nope_pe_buf = None
-        # Allocated as a 3D torch tensor so we can attach slice views
-        # (q_nope_pe[:, :, :512] for BMM output, q_nope_pe[:, :, 512:]
-        # for q_pe) and have the decode BMM write per-head [nope|pe]
-        # interleaved directly without an assemble task.
+        # Allocated as a 3D torch tensor so decode writes per-head
+        # [nope_512|pe_64] in the exact layout consumed by fused ROPE and
+        # MLA. The dormant BMM helper can still attach slice views if it is
+        # re-enabled.
         import torch as _torch
         self._q_nope_pe_torch = _torch.zeros(
             mbt, self.num_local_q_heads, self.qk_head_dim,
@@ -1604,13 +1605,27 @@ class DeepSeekV3Builder(GraphBuilder):
         qb_share_tag = q_a_fused_tag
         qb_input_fp8_ovr = q_a_fused_fp8_ovr
         qb_input_scale_ovr = q_a_fused_scale_ovr
-        # Decode Q path: runtime BMM-based absorption (five tasks instead of
-        # one monolithic absorbed-q_b FP8 GEMM; each task loads smaller
-        # per-head weights → less TMA traffic, better overlap potential).
-        self._bmm_decode_q_path(state_dict, attn, layer_idx, qb_slice_kwargs,
-                                qb_share_tag=qb_share_tag,
-                                qb_input_fp8_ovr=qb_input_fp8_ovr,
-                                qb_input_scale_ovr=qb_input_scale_ovr)
+        # Decode Q path: use the load-time absorbed q_b_proj dense GEMM.
+        # The per-head swapAB BMM chain (linear_fp8_bmm_layer dense=False)
+        # overflows ptxas register allocation in the full decode megakernel
+        # (C7600). The absorbed GEMM is the original math and writes the same
+        # fused [nope_512|pe_64] q_nope_pe tensor consumed by ROPE/MLA below.
+        w_q_b_proj, s_q_b_proj = self._attach_fp8_weight(
+            state_dict, f"{attn}q_b_proj.weight",
+            f"layer_{layer_idx}_q_b_proj_decode")
+        self._fp8_linear(
+            self.q_a_out,
+            w_q_b_proj,
+            s_q_b_proj,
+            self.q_nope_pe,
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_q_b_proj.dim(0)),
+                      1, 1),
+            block_dim=(128, 1, 1),
+            gate_mode=2 if self._use_prefill else 0,
+            share_quantize_tag=qb_share_tag,
+            input_fp8_override=qb_input_fp8_ovr,
+            input_scale_override=qb_input_scale_ovr,
+            **qb_slice_kwargs)
         if self._use_prefill:  # prefill-exclusive unabsorbed q_b GEMMs
             w_q_b_nope, s_q_b_nope = self._attach_fp8_weight(
                 state_dict, f"{attn}q_b_nope.weight",

@@ -5740,10 +5740,33 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   constexpr int MMA_M = 128;
-  constexpr int MMA_N = 16;
-  constexpr int num_ab_stages = 8;
-  constexpr int num_acc_stages = 2;
-  constexpr int num_c_stages = 4;
+  // MMA_N is the batch (N) tile. At bs=1 decode (batch_size==1) the default 16
+  // wastes ~half the tcgen05 epilogue TMEM->reg fragment (~MMA_M*MMA_N/threads
+  // FP32/thread) — a FIXED register consumer that, combined with the FP8 scale
+  // descriptors, overflows this __noinline__ task's ~216-reg budget under the
+  // megakernel __launch_bounds__(256,1) (ptxas C7600, deterministic across CUDA
+  // 13.0/13.2/13.3; stage cuts alone don't fix it). N=8 (still a valid mul-of-8
+  // tcgen05 N, ≥ batch) halves that fragment. Guard batch_size<=8 so prefill
+  // (batch up to 16) keeps N=16. Codex-vetted 2026-06-14; box JIT re-verify
+  // (C7600 gone + cos correct); fallback = absorbed decode Q+O (avoid the BMM).
+  int const MMA_N = (batch_size <= 8) ? 8 : 16;
+  // Stage config. The per-head BMM contracts over REDUCTION_SIZE = D_in with
+  // BLOCK_K=128, so k_tiles = ceil(D_in/128). At the decode o_proj / kv_b shape
+  // REDUCTION_SIZE=128 => 1 K-tile: there is NO intra-task K-depth to pipeline,
+  // so the default 8 AB stages are pure register/smem waste — and on sm100a
+  // (CUDA 13.x ptxas) they push this __noinline__ FP8 task past the megakernel's
+  // ~216-reg budget (ptxas C7600 "register allocation failed"). For the
+  // single-K-tile case use a shallow pipeline (perf-neutral at 1 K-tile / bs=1
+  // decode); KEEP the deep 8/2/4 for any multi-K-tile BMM (real K-latency to
+  // hide). Emitted as integer literals into the generated kernel (not used in a
+  // constexpr context here), so int-const is fine. Reviewed + Codex-vetted
+  // 2026-06-14; needs box JIT re-verify (C7600 gone + cos correct). Fallback
+  // ladder if C7600 persists: 2/1/1 -> 2/1/2 -> 1/1/1.
+  int const bmm_k_tiles = (reduction_size + 127) / 128;
+  bool const bmm_single_k_tile = (bmm_k_tiles <= 1);
+  int const num_ab_stages = bmm_single_k_tile ? 2 : 8;
+  int const num_acc_stages = bmm_single_k_tile ? 1 : 2;
+  int const num_c_stages = bmm_single_k_tile ? 1 : 4;
   constexpr int B = 3;
   constexpr int M = 3;
   constexpr int S = 3;

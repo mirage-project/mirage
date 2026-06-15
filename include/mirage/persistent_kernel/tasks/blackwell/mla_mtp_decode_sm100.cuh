@@ -180,13 +180,22 @@ __device__ __noinline__ void
   float row_max = -1e30f;
   float row_sum = 0.0f;
 
-  float o_save[128];
+  // o_save holds the pre-rescale O accumulator for the online-softmax merge
+  // across tiles; it is ONLY read/written on the multi-tile correction path
+  // (tile > t0). At SINGLE_TILE (num_splits>=tiles-per-split, the bs=1 decode
+  // contract for this TP1 kernel) that path is statically dead, but the
+  // unconditional [128] forced ptxas to reserve a 128-register payload that
+  // overflowed the megakernel's per-task budget (C7600 at 216 on CUDA 13.x).
+  // Match the TP2/4/8 kernels: size it to 1 when SINGLE_TILE so the dead path
+  // costs no registers. (TP1-only kernel; semantics-identical for both configs
+  // since the guards below already gate every o_save access on tile > t0.)
+  float o_save[SINGLE_TILE ? 1 : 128];
 
   for (int tile = t0; tile < t1; tile++) {
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
 
-    if (active && tile > t0) {
+    if (!SINGLE_TILE && active && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
         int addr = taddr + (tid << 16) + c;
         asm volatile(
@@ -457,7 +466,7 @@ __device__ __noinline__ void
     MLA_MTP_SYNC_ACTIVE();
 
     // Scale O[128:511] in TMEM
-    if (active && tile > t0) {
+    if (!SINGLE_TILE && active && tile > t0) {
       for (int c = TILE_S; c < D_V; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
@@ -515,7 +524,7 @@ __device__ __noinline__ void
 
     // PV Phase
     int V_buf_base = work_smem + 2 * TILE_BYTES;
-    int pv_acc_base = (tile > t0) ? 1 : 0;
+    int pv_acc_base = (!SINGLE_TILE && tile > t0) ? 1 : 0;
 
     MLA_MTP_SYNC_ACTIVE();
 
@@ -577,7 +586,7 @@ __device__ __noinline__ void
     if (active) {
       asm volatile("tcgen05.fence::after_thread_sync;");
     }
-    if (active && tile > t0) {
+    if (!SINGLE_TILE && active && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
