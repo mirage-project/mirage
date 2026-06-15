@@ -2895,7 +2895,11 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_moe_mul_sum_add_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 0);
+  bool rank_with_residual = true;
+  if (!params.empty()) {
+    assert(params.size() == 1);
+    rank_with_residual = (params[0] == 1);
+  }
   int batch_size = 0, num_experts_per_tok = 0, output_size = 0, input_stride,
       output_stride;
   std::vector<tb::TBInputOp *> input_ops;
@@ -2941,7 +2945,8 @@ int TaskRegister::register_moe_mul_sum_add_sm100_task(
          /*OUTPUT_STRIDE=*/output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
-  code.e("    task_desc->input_ptrs[2],");
+  code.e("    $,",
+         rank_with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_MOE_MUL_SUM_ADD_SM100, code.to_string());
 }
