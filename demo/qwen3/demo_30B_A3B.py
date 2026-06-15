@@ -623,7 +623,13 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_mid,
-                grid_dim=(10, 12, 1),
+                # grid.y must tile the per-rank (sharded) fused gate+up width.
+                # The SM100 kernel writes 128-col output tiles; sizing grid.y for
+                # the unsharded width makes surplus tasks overflow into the next
+                # top-k slot's columns with the wrong expert's weights, a
+                # write race that corrupts multi-GPU MoE output. For world_size=1
+                # this evaluates to the previous hard-coded value (12).
+                grid_dim=(10, fused_outdim_2 // world_size // 128, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_silu_mul_layer(
