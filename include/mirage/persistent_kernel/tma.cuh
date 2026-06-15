@@ -979,17 +979,23 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // the gmem tensor's stride[] array — for input/output that's the
       // H-spanning stride[0], for weight it's the within-head stride[1].
       constexpr int MMA_M_BMM = 128;
-      constexpr int MMA_N_BMM = 16;
       constexpr int BLOCK_K_BMM = 128;
       bool is_output_mpk = (param_id == (size_t)(task_desc.num_inputs));
       if (param_id == 0) {
         // input_fp8 -> kernel's TMA_B (B-side after swapAB).
         int batch = tensor_desc.dim[0];
+        // Box height must match the kernel's MMA_N tile clamped to the real
+        // batch rows. TMA transaction-byte accounting is EXACT (per phase): if
+        // the box credits more bytes than the kernel's expect_tx, ab_full is
+        // poisoned and the consumer (MMA) warps spin forever (the bs=1 swapAB
+        // BMM hang). Mirror the BF16 tma.cuh min(MMA_N, batch) clamp.
+        int const mma_n_bmm = (batch <= 8) ? 8 : 16;
+        int const b_box_rows = (mma_n_bmm < batch) ? mma_n_bmm : batch;
         int K = tensor_desc.dim[2];
         int row_stride = tensor_desc.stride[0]; // H * D_in
         uint64_t gd[5] = {(uint64_t)K, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)row_stride * 1, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)BLOCK_K_BMM, (uint32_t)MMA_N_BMM, 1, 1, 1};
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_BMM, (uint32_t)b_box_rows, 1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
             cuTensorMapEncodeTiled(tma_desc,
@@ -1040,11 +1046,16 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       } else if (is_output_mpk) {
         // output (BF16): dim=[N, H_per_task, D_out_per_task].
         int batch = tensor_desc.dim[0];
+        // Match the kernel's MMA_N tile clamped to real batch rows (same
+        // exact-tx reasoning as the B-input box above); a stale MMA_N=16 box
+        // here writes OOB rows into the kernel's MMA_N-row smem stage.
+        int const mma_n_bmm = (batch <= 8) ? 8 : 16;
+        int const out_box_rows = (mma_n_bmm < batch) ? mma_n_bmm : batch;
         int output_pt = tensor_desc.dim[2];
         int row_stride = tensor_desc.stride[0]; // H * D_out
         uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)row_stride * 2, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)MMA_M_BMM, (uint32_t)MMA_N_BMM, 1, 1, 1};
+        uint32_t bd[5] = {(uint32_t)MMA_M_BMM, (uint32_t)out_box_rows, 1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
             cuTensorMapEncodeTiled(tma_desc,
