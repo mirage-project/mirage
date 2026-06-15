@@ -504,6 +504,7 @@ void register_mugraph(
             // tiling loop. Grouped variants share the same metadata
             // shape; m_indices selects the active expert per output tile.
             if (task_type == TASK_FP8_GEMM_DENSE_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_FINEN_SM100 ||
                 task_type == TASK_FP8_GEMM_DENSE_GEMV_M1_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100 ||
@@ -1321,8 +1322,10 @@ TaskGraphResult print_task_graph(
     // carries A/B as RAW device pointers in input_ptrs[0]/[1], NOT TMA
     // descriptors. Do NOT add it. If TMA-creation is ever keyed off the
     // CUtensorMap* signature or the range is widened, EXCLUDE 307 explicitly —
-    // else the kernel reinterprets tensormap bytes as FP8 weights (garbage/IMA).
+    // else the kernel reinterprets tensormap bytes as FP8 weights
+    // (garbage/IMA).
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_FINEN_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100 || "
            "task.at(\"task_type\") == "
@@ -1988,6 +1991,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_FP8_GEMM_DENSE_SM100] = "TASK_FP8_GEMM_DENSE_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_GEMV_M1_SM100] =
       "TASK_FP8_GEMM_DENSE_GEMV_M1_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_FINEN_SM100] =
+      "TASK_FP8_GEMM_DENSE_FINEN_SM100";
   task_type_to_name[TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100] =
       "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =

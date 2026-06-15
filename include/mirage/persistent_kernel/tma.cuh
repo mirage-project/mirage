@@ -1625,6 +1625,40 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_FP8_GEMM_DENSE_FINEN_SM100: {
+      // fine-N: identical to the dense case EXCEPT the B weight descriptor
+      // (param_id==1) box height = BN(16) to match SMEM SB=BN*BK; the A input
+      // (param_id==0) keeps box=BM=128. MUST equal the codegen BN (=16).
+      constexpr int BK_BOX = 128;
+      int OUTER_BOX = (param_id == 1) ? 16 : 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+      int outer = tensor_desc.dim[0];
+      int K_local = tensor_desc.dim[1];
+      uint64_t row_stride_bytes = (uint64_t)tensor_desc.stride[0];
+      uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
+      uint64_t gs[1] = {row_stride_bytes};
+      uint32_t bd[2] = {BK_BOX, (uint32_t)OUTER_BOX};
+      uint32_t es[2] = {1, 1};
+      CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                            fmt,
+                                            2,
+                                            tensor_desc.base_ptr,
+                                            gd,
+                                            gs,
+                                            bd,
+                                            es,
+                                            interleave,
+                                            swizzle,
+                                            l2,
+                                            oob);
+      assert(err == CUDA_SUCCESS);
+      break;
+    }
     case TASK_FP8_GEMM_DENSE_SM100: {
       // Dense FP8 GEMM TMA for A [M,K] and B [N,K], both row-major raw
       // e4m3 bytes. Scales are loaded directly, not through TMA. SplitK
@@ -2377,6 +2411,7 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
+    case TASK_FP8_GEMM_DENSE_FINEN_SM100:
     case TASK_FP8_GEMM_DENSE_SM100: {
       // A_fp8 and B_fp8 use TMA; scale tensors are plain LDG inputs.
       // SplitK uses the same TMA layout (full K extent in descriptor;

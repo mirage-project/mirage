@@ -513,29 +513,81 @@ class DeepSeekV3Builder(GraphBuilder):
         if _use_gemv:
             gemm_runtime_m_mode = 4  # dense handles M>1; GEMV handles M==1
 
+        _use_finen = (os.environ.get("MPK_DSV3_DENSE_FINEN") == "1"
+                      and gate_mode == 0
+                      and weight.dim(0) <= 2304
+                      and weight.dim(0) % 16 == 0
+                      and weight.dim(1) % 512 == 0)
+        if _use_finen:
+            _use_gemv = False  # mutually exclusive; finen replaces the dense GEMM
+
         if residual is None:
-            dsv3_tasks.fp8_gemm_dense_layer(
-                self.mpk,
-                input_fp8=input_fp8,
-                weight_fp8=weight,
-                input_scale=input_scale,
-                weight_scale=weight_scale,
-                output=output,
-                num_workers=dense_nw,
-                runtime_m_mode=gemm_runtime_m_mode,
-            )
-            if _use_gemv:
-                self.mpk.fp8_gemm_dense_gemv_m1_layer(
+            if _use_finen:
+                self.mpk.fp8_gemm_dense_finen_layer(
                     input_fp8=input_fp8, weight_fp8=weight,
                     input_scale=input_scale, weight_scale=weight_scale,
-                    output=output, num_workers=self.mpk.num_workers,
-                    bn=8, wpc=1)
+                    output=output, num_workers=dense_nw)
+            else:
+                dsv3_tasks.fp8_gemm_dense_layer(
+                    self.mpk,
+                    input_fp8=input_fp8,
+                    weight_fp8=weight,
+                    input_scale=input_scale,
+                    weight_scale=weight_scale,
+                    output=output,
+                    num_workers=dense_nw,
+                    runtime_m_mode=gemm_runtime_m_mode,
+                )
+                if _use_gemv:
+                    self.mpk.fp8_gemm_dense_gemv_m1_layer(
+                        input_fp8=input_fp8, weight_fp8=weight,
+                        input_scale=input_scale, weight_scale=weight_scale,
+                        output=output, num_workers=self.mpk.num_workers,
+                        bn=8, wpc=1)
             return
 
         if self.world_size > 1:
             idx = getattr(self, "_tp_residual_linear_idx", 0)
             self._tp_residual_linear_idx = idx + 1
             partial = self._new_tp_partial(output, f"tp_v2_residual_partial_{idx}")
+            if _use_finen:
+                self.mpk.fp8_gemm_dense_finen_layer(
+                    input_fp8=input_fp8, weight_fp8=weight,
+                    input_scale=input_scale, weight_scale=weight_scale,
+                    output=partial, num_workers=dense_nw)
+            else:
+                dsv3_tasks.fp8_gemm_dense_layer(
+                    self.mpk,
+                    input_fp8=input_fp8,
+                    weight_fp8=weight,
+                    input_scale=input_scale,
+                    weight_scale=weight_scale,
+                    output=partial,
+                    num_workers=dense_nw,
+                    runtime_m_mode=gemm_runtime_m_mode,
+                )
+                if _use_gemv:
+                    self.mpk.fp8_gemm_dense_gemv_m1_layer(
+                        input_fp8=input_fp8, weight_fp8=weight,
+                        input_scale=input_scale, weight_scale=weight_scale,
+                        output=partial, num_workers=self.mpk.num_workers,
+                        bn=8, wpc=1)
+            self._allreduce_residual(partial, output, residual,
+                                     gate_mode=gate_mode)
+            return
+
+        # TP=1 path: dense GEMM into a partial buffer, then add residual.
+        partial = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, weight.dim(0)),
+            dtype=bfloat16, name=f"fp8_v2_partial_{id(weight)}",
+            io_category="cuda_tensor",
+        )
+        if _use_finen:
+            self.mpk.fp8_gemm_dense_finen_layer(
+                input_fp8=input_fp8, weight_fp8=weight,
+                input_scale=input_scale, weight_scale=weight_scale,
+                output=partial, num_workers=dense_nw)
+        else:
             dsv3_tasks.fp8_gemm_dense_layer(
                 self.mpk,
                 input_fp8=input_fp8,
@@ -552,32 +604,6 @@ class DeepSeekV3Builder(GraphBuilder):
                     input_scale=input_scale, weight_scale=weight_scale,
                     output=partial, num_workers=self.mpk.num_workers,
                     bn=8, wpc=1)
-            self._allreduce_residual(partial, output, residual,
-                                     gate_mode=gate_mode)
-            return
-
-        # TP=1 path: dense GEMM into a partial buffer, then add residual.
-        partial = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, weight.dim(0)),
-            dtype=bfloat16, name=f"fp8_v2_partial_{id(weight)}",
-            io_category="cuda_tensor",
-        )
-        dsv3_tasks.fp8_gemm_dense_layer(
-            self.mpk,
-            input_fp8=input_fp8,
-            weight_fp8=weight,
-            input_scale=input_scale,
-            weight_scale=weight_scale,
-            output=partial,
-            num_workers=dense_nw,
-            runtime_m_mode=gemm_runtime_m_mode,
-        )
-        if _use_gemv:
-            self.mpk.fp8_gemm_dense_gemv_m1_layer(
-                input_fp8=input_fp8, weight_fp8=weight,
-                input_scale=input_scale, weight_scale=weight_scale,
-                output=partial, num_workers=self.mpk.num_workers,
-                bn=8, wpc=1)
         self.mpk.elementwise_add_layer(
             input_a=partial,
             input_b=residual,

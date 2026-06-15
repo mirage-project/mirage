@@ -3659,9 +3659,10 @@ int TaskRegister::register_mla_decode_sm100_task(
   // identical to the page-table value but with no dependency on the paged
   // metadata. fp_ above is still emitted for the paged first_page_pos arg.
   code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
-  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
-         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
-         "runtime_config.qo_indptr_buffer[bi_]);");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -4430,9 +4431,10 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
   // identical to the page-table value but with no dependency on the paged
   // metadata. fp_ above is still emitted for the paged first_page_pos arg.
   code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
-  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
-         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
-         "runtime_config.qo_indptr_buffer[bi_]);");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -4504,9 +4506,10 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
   // identical to the page-table value but with no dependency on the paged
   // metadata. fp_ above is still emitted for the paged first_page_pos arg.
   code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
-  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
-         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
-         "runtime_config.qo_indptr_buffer[bi_]);");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -5754,14 +5757,14 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   // BLOCK_K=128, so k_tiles = ceil(D_in/128). At the decode o_proj / kv_b shape
   // REDUCTION_SIZE=128 => 1 K-tile: there is NO intra-task K-depth to pipeline,
   // so the default 8 AB stages are pure register/smem waste — and on sm100a
-  // (CUDA 13.x ptxas) they push this __noinline__ FP8 task past the megakernel's
-  // ~216-reg budget (ptxas C7600 "register allocation failed"). For the
-  // single-K-tile case use a shallow pipeline (perf-neutral at 1 K-tile / bs=1
-  // decode); KEEP the deep 8/2/4 for any multi-K-tile BMM (real K-latency to
-  // hide). Emitted as integer literals into the generated kernel (not used in a
-  // constexpr context here), so int-const is fine. Reviewed + Codex-vetted
-  // 2026-06-14; needs box JIT re-verify (C7600 gone + cos correct). Fallback
-  // ladder if C7600 persists: 2/1/1 -> 2/1/2 -> 1/1/1.
+  // (CUDA 13.x ptxas) they push this __noinline__ FP8 task past the
+  // megakernel's ~216-reg budget (ptxas C7600 "register allocation failed").
+  // For the single-K-tile case use a shallow pipeline (perf-neutral at 1 K-tile
+  // / bs=1 decode); KEEP the deep 8/2/4 for any multi-K-tile BMM (real
+  // K-latency to hide). Emitted as integer literals into the generated kernel
+  // (not used in a constexpr context here), so int-const is fine. Reviewed +
+  // Codex-vetted 2026-06-14; needs box JIT re-verify (C7600 gone + cos
+  // correct). Fallback ladder if C7600 persists: 2/1/1 -> 2/1/2 -> 1/1/1.
   int const bmm_k_tiles = (reduction_size + 127) / 128;
   bool const bmm_single_k_tile = (bmm_k_tiles <= 1);
   int const num_ab_stages = bmm_single_k_tile ? 2 : 8;
@@ -6047,7 +6050,9 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
                                            char const *namespace_name,
                                            char const *fn_name,
                                            TaskType task_type,
-                                           int out_row_stride = -1) {
+                                           int out_row_stride = -1,
+                                           int bn = 128,
+                                           int ns_default = 3) {
   // params: [M, N, K, num_workers, optional runtime_m_mode]
   // runtime_m_mode=0 (default): use min(compile-time M, active_rows) as
   //   runtime M, where active_rows = qo_indptr_buffer[MAX_NUM_BATCHED_REQUESTS]
@@ -6070,10 +6075,11 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
   //   valid on decode iters; prefill iters early-exit).
   // runtime_m_mode=4 (2026-06-13): GEMV dual-dispatch partner. Skip when
-  //   active_rows==1 (the strict-M1 CUDA-core GEMV writes C at decode); run with
-  //   the active_rows cap when M>1 (prefill + prompt ingestion). Partitions the
-  //   M axis with the GEMV (which gates active_rows!=1) — no gap/overlap. Keyed
-  //   on active_rows (true M) not q_len, so it stays correct if bs>1 returns.
+  //   active_rows==1 (the strict-M1 CUDA-core GEMV writes C at decode); run
+  //   with the active_rows cap when M>1 (prefill + prompt ingestion).
+  //   Partitions the M axis with the GEMV (which gates active_rows!=1) — no
+  //   gap/overlap. Keyed on active_rows (true M) not q_len, so it stays correct
+  //   if bs>1 returns.
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
@@ -6136,17 +6142,18 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   // single-wave-latency bottleneck) — numerically identical (bit-exact), so
   // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
   // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
-  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but NS7=224KB
-  // / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a silent
-  // fallback). So clamp [2,6]; this is a sweepable knob, not a blind bump.
-  int dense_ns = 3;
-  if (const char *e = std::getenv("MPK_DSV3_DENSE_NS")) {
+  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but
+  // NS7=224KB / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a
+  // silent fallback). So clamp [2,6]; this is a sweepable knob, not a blind
+  // bump.
+  int dense_ns = ns_default;
+  if (char const *e = std::getenv("MPK_DSV3_DENSE_NS")) {
     int v = atoi(e);
     if (v >= 2 && v <= 6) {
       dense_ns = v;
     }
   }
-  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, dense_ns);
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, bn, dense_ns);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
   code.e("    static_cast<const "
@@ -6201,17 +6208,48 @@ int TaskRegister::register_fp8_gemm_dense_sm100_task(
       out_row_stride);
 }
 
-// ferret v002 CUDA-core GEMV (M=1 decode), default-OFF lever MPK_DSV3_DENSE_GEMV.
-// RAW-pointer ABI: A/B arrive via input_ptrs[0]/[1] (NOT input_tma_desc_ptrs) —
-// the kernel declares them as CUtensorMap* but reinterpret_casts to raw FP8
-// internally (no TMA). runtime.cc MUST NOT create TMA descriptors for this task.
-// Template <BN, WPC> is per-shape (params[4]/[5]); blockDim = BN*WPC*32 is set
-// builder-side. Output C via output_ptrs[0] (store_in_dmem convention: 4 inputs
-// A,B,sa,sb + appended output). Numerically a GEMV → token-identical to the
-// tcgen05 dense GEMM (validated standalone qkv_a 1.74x / q_b 1.40x vs smallm<128,6>).
+// fine-N dense GEMM = the mediumm body re-tiled to BN=16 (single-CTA-per-tile,
+// NE=4 baked in the finen fn) + NS default 6. Standalone-validated (ferret
+// v003, qkv_a 34.8->20.5us 1.70x). default-OFF MPK_DSV3_DENSE_FINEN. The BN
+// here (16) MUST equal the tma.cuh TASK_FP8_GEMM_DENSE_FINEN_SM100 B-box (=16).
+int TaskRegister::register_fp8_gemm_dense_finen_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  int out_row_stride = -1;
+  {
+    std::vector<tb::TBInputOp *> ops;
+    for (auto const &op : bgraph.operators) {
+      if (op->op_type == mirage::type::TB_INPUT_OP) {
+        ops.push_back(static_cast<tb::TBInputOp *>(op));
+      }
+    }
+    if (!ops.empty()) {
+      kn::DTensor const &out = ops.back()->dtensor;
+      if (out.num_dims >= 2 && out.stride[0] > 0) {
+        out_row_stride = static_cast<int>(out.stride[0]);
+      }
+    }
+  }
+  return register_fp8_gemm_dense_variant(this,
+                                         params,
+                                         "fp8_gemm_dense_finen",
+                                         "fp8_gemm_dense_finen_sm100_task_impl",
+                                         TASK_FP8_GEMM_DENSE_FINEN_SM100,
+                                         out_row_stride,
+                                         /*bn=*/16,
+                                         /*ns_default=*/6);
+}
+
+// ferret v002 CUDA-core GEMV (M=1 decode), default-OFF lever
+// MPK_DSV3_DENSE_GEMV. RAW-pointer ABI: A/B arrive via input_ptrs[0]/[1] (NOT
+// input_tma_desc_ptrs) — the kernel declares them as CUtensorMap* but
+// reinterpret_casts to raw FP8 internally (no TMA). runtime.cc MUST NOT create
+// TMA descriptors for this task. Template <BN, WPC> is per-shape
+// (params[4]/[5]); blockDim = BN*WPC*32 is set builder-side. Output C via
+// output_ptrs[0] (store_in_dmem convention: 4 inputs A,B,sa,sb + appended
+// output). Numerically a GEMV → token-identical to the tcgen05 dense GEMM
+// (validated standalone qkv_a 1.74x / q_b 1.40x vs smallm<128,6>).
 int TaskRegister::register_fp8_gemm_dense_gemv_m1_sm100_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
   // params: [M, N, K, num_workers, BN, WPC]
   assert(params.size() == 6);
@@ -6227,9 +6265,11 @@ int TaskRegister::register_fp8_gemm_dense_gemv_m1_sm100_task(
   code.e("int active_rows_ = "
          "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
   code.e("if (active_rows_ != 1) return;");
-  code.e("kernel::fp8_gemm_dense_gemv_m1::fp8_gemm_dense_gemv_m1_sm100_task_impl"
-         "<$, $>(",
-         BN, WPC);
+  code.e(
+      "kernel::fp8_gemm_dense_gemv_m1::fp8_gemm_dense_gemv_m1_sm100_task_impl"
+      "<$, $>(",
+      BN,
+      WPC);
   // A/B = RAW FP8 device pointers carried in input_ptrs[0]/[1]; the kernel sig
   // takes CUtensorMap* and casts back to raw (no TMA descriptor dereference).
   code.e("    reinterpret_cast<const "
@@ -6242,7 +6282,8 @@ int TaskRegister::register_fp8_gemm_dense_gemv_m1_sm100_task(
   code.e("    1,"); // M = 1 (GEMV; kernel ignores via (void)M)
   code.e("    $,", N);
   code.e("    $,", K);
-  code.e("    task_desc->task_metadata.request_id,"); // worker_idx for the N-sweep
+  code.e(
+      "    task_desc->task_metadata.request_id,"); // worker_idx for the N-sweep
   code.e("    $);", num_workers); // C_row_stride defaults to -1 (unused at M=1)
   code.e("}");
   return register_task_variant(TASK_FP8_GEMM_DENSE_GEMV_M1_SM100,
@@ -6313,11 +6354,12 @@ static int
   // single-wave-latency bottleneck) — numerically identical (bit-exact), so
   // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
   // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
-  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but NS7=224KB
-  // / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a silent
-  // fallback). So clamp [2,6]; this is a sweepable knob, not a blind bump.
+  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but
+  // NS7=224KB / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a
+  // silent fallback). So clamp [2,6]; this is a sweepable knob, not a blind
+  // bump.
   int dense_ns = 3;
-  if (const char *e = std::getenv("MPK_DSV3_DENSE_NS")) {
+  if (char const *e = std::getenv("MPK_DSV3_DENSE_NS")) {
     int v = atoi(e);
     if (v >= 2 && v <= 6) {
       dense_ns = v;
@@ -7393,9 +7435,10 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   // identical to the page-table value but with no dependency on the paged
   // metadata. fp_ above is still emitted for the paged first_page_pos arg.
   code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
-  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
-         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
-         "runtime_config.qo_indptr_buffer[bi_]);");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7476,9 +7519,10 @@ int TaskRegister::register_mla_mtp_decode_tp_reduce_sm100_task(
   // identical to the page-table value but with no dependency on the paged
   // metadata. fp_ above is still emitted for the paged first_page_pos arg.
   code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
-  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
-         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
-         "runtime_config.qo_indptr_buffer[bi_]);");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7546,9 +7590,10 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   // identical to the page-table value but with no dependency on the paged
   // metadata. fp_ above is still emitted for the paged first_page_pos arg.
   code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
-  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
-         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
-         "runtime_config.qo_indptr_buffer[bi_]);");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7624,9 +7669,10 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   // identical to the page-table value but with no dependency on the paged
   // metadata. fp_ above is still emitted for the paged first_page_pos arg.
   code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
-  code.e("  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
-         "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
-         "runtime_config.qo_indptr_buffer[bi_]);");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);

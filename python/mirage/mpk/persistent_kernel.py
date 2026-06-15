@@ -3105,6 +3105,16 @@ class PersistentKernel:
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
+    def fp8_gemm_dense_finen_layer(self, input_fp8, weight_fp8, input_scale,
+                                   weight_scale, output, num_workers,
+                                   runtime_m_mode: int = 0):
+        # fine-N dense GEMM (mediumm body @ BN=16). Handles all M (correct at
+        # prefill M>1 too), so no dual-dispatch. default-OFF lever.
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_finen_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers, runtime_m_mode=runtime_m_mode)
+
     def fp8_gemm_dense_gemv_m1_layer(self, input_fp8, weight_fp8, input_scale,
                                      weight_scale, output, num_workers,
                                      bn: int, wpc: int):
