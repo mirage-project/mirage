@@ -194,6 +194,8 @@ public:
                                            std::vector<int> const &params);
   int register_dflash_norm_rope_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  int register_dflash_kv_store_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
   int register_eagle3_commit_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
   // SM100 tasks end

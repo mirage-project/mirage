@@ -802,6 +802,26 @@ class PersistentKernel:
         self.kn_graph.customized([x, weight, cos, sin, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "dflash_norm_rope", params)
 
+    def dflash_kv_store_layer(
+        self,
+        kv_in: DTensor,         # [num_tokens, num_kv_heads*head_dim] bf16
+        slot_mapping: DTensor,  # [num_tokens] int32 (absolute slot per token)
+        cache: DTensor,         # [num_pages, page_size, num_kv_heads, head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        head_dim: int = 128,
+    ):
+        # DFlash standalone paged KV-cache store (L4 materialize write/overwrite).
+        assert kv_in.num_dims == 2
+        assert cache.num_dims == 4
+        params = [head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(kv_in, (-1, -1, -1), -1, True)
+        tb_graph.new_input(slot_mapping, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cache, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([kv_in, slot_mapping, cache], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_kv_store", params)
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]

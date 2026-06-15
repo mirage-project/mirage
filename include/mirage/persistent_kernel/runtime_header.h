@@ -185,7 +185,9 @@ enum TaskType {
   TASK_DFLASH_ATTENTION_SM100 = 296,
   // DFlash per-head RMSNorm + RoPE, SM100.
   TASK_DFLASH_NORM_ROPE_SM100 = 297,
-  TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
+  // DFlash standalone paged KV-cache store (L4 materialize write), SM100.
+  TASK_DFLASH_KV_STORE_SM100 = 298,
+  TASK_SM100_TASK_END = 299, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

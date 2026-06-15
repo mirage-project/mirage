@@ -464,6 +464,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_DFLASH_NORM_ROPE_SM100, variant_id);
+  } else if (name == "dflash_kv_store") {
+    int variant_id = task_register->register_dflash_kv_store_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_DFLASH_KV_STORE_SM100, variant_id);
   } else if (name == "attention") {
     int variant_id =
         task_register->register_attention_task(customized->bgraph, params);

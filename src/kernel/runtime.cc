@@ -1803,6 +1803,7 @@ TaskGraphResult print_task_graph(
       "TASK_DFLASH_ATTENTION_SM100";
   task_type_to_name[TASK_DFLASH_NORM_ROPE_SM100] =
       "TASK_DFLASH_NORM_ROPE_SM100";
+  task_type_to_name[TASK_DFLASH_KV_STORE_SM100] = "TASK_DFLASH_KV_STORE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
