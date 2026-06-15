@@ -606,6 +606,18 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id = task_register->register_paged_attention_sm100_task(
         customized->bgraph, params);
     task_config[op] = std::make_tuple(7, 1, TASK_ATTN_SM100, variant_id);
+  } else if (name == "planned_dual_attention_sm100") {
+    int variant_id =
+        task_register->register_planned_dual_attention_sm100_task(
+            customized->bgraph, params);
+    int split_kv_enabled = params.size() >= 11 && params[10] > 0;
+    int num_inputs = split_kv_enabled ? 9 : 8;
+    int num_outputs = split_kv_enabled ? 2 : 1;
+    task_config[op] =
+        std::make_tuple(num_inputs,
+                        num_outputs,
+                        TASK_PLANNED_DUAL_ATTENTION_SM100,
+                        variant_id);
   } else if (name == "argmax_partial_sm100") {
     int variant_id = task_register->register_argmax_partial_sm100_task(
         customized->bgraph, params);
@@ -702,6 +714,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
+  } else if (name == "paged_attention_split_kv_merge_planned_sm100") {
+    int variant_id =
+        task_register->register_paged_attention_split_kv_merge_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        3, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
   } else if (name == "mla_decode_sm100") {
     int variant_id = task_register->register_mla_decode_sm100_task(
         customized->bgraph, params);
@@ -871,7 +889,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   }
 
   else {
-    printf("Unsupported task name: %s\n", name);
+    printf("Unsupported task name: %s\n", name.c_str());
     assert(false && "Unsupported task type");
   }
 }

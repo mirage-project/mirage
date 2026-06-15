@@ -25,7 +25,7 @@ class Qwen3Builder(GraphBuilder):
         self.rank = mpk.mpi_rank
         self.eos_token_id = 151645 # default eos token id for Qwen3
 
-    def build_from_config(self, 
+    def build_from_config(self,
                               model_config: MirageModelConfig):
         self.position_embeddings = model_config.position_embeddings
         
@@ -255,6 +255,24 @@ class Qwen3Builder(GraphBuilder):
         target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
         # A current workaround to use splitk for only B200 GPUs
         use_splitk = (target_cc == 100)
+        # SM100 uses planned attention; other backends use the per-request
+        # paged-attention path.
+        planned_kv_split_size = "auto" if target_cc == 100 else None
+        planned_num_buckets = None
+        planned_max_works = 1024
+        if target_cc == 100:
+            planned_num_buckets, planned_max_works, _ = (
+                self.mpk.resolve_attention_plan_shape(
+                    num_kv_heads=self.num_local_kv_heads,
+                    gqa_group=self.num_local_q_heads // self.num_local_kv_heads,
+                    num_buckets=None,
+                    max_works=planned_max_works,
+                    max_prefill_tokens_per_work=32,
+                    max_decode_tokens_per_work=8,
+                    consumer="dual",
+                    kv_split_size=planned_kv_split_size,
+                )
+            )
         for i in range(self.num_layers):
             prefix = f"model.layers.{i}."
             w_norm = self.mpk.attach_input(
@@ -360,18 +378,37 @@ class Qwen3Builder(GraphBuilder):
             #         block_dim=(128, 1, 1),
             #     )
             # else:
-            self.mpk.paged_attention_layer(
-                input=self.attn_in,
-                k_cache=k_cache,
-                v_cache=v_cache,
-                q_norm=w_q_norm,
-                k_norm=w_k_norm,
-                cos_pos_embed=self.cos_pos_embed,
-                sin_pos_embed=self.sin_pos_embed,
-                output=self.attn_out,
-                grid_dim=(self.mpk.max_num_batched_requests, self.num_local_kv_heads, 1),
-                block_dim=(128, 1, 1),
-            )
+            if target_cc == 100:
+                self.mpk.planning_paged_attention_layer(
+                    input=self.attn_in,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
+                    cos_pos_embed=self.cos_pos_embed,
+                    sin_pos_embed=self.sin_pos_embed,
+                    output=self.attn_out,
+                    num_buckets=planned_num_buckets,
+                    max_works=planned_max_works,
+                    max_prefill_tokens_per_work=32,
+                    max_decode_tokens_per_work=8,
+                    consumer="dual",
+                    prefill_threshold=16,
+                    kv_split_size=planned_kv_split_size,
+                )
+            else:
+                self.mpk.paged_attention_layer(
+                    input=self.attn_in,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
+                    cos_pos_embed=self.cos_pos_embed,
+                    sin_pos_embed=self.sin_pos_embed,
+                    output=self.attn_out,
+                    grid_dim=(self.mpk.max_num_batched_requests, self.num_local_kv_heads, 1),
+                    block_dim=(128, 1, 1),
+                )
             # add linear w/ residual
             self.w = self.mpk.attach_input(
                 torch_tensor=state_dict[f"{prefix}self_attn.o_proj.weight"], name=f"layer_{i}_o_proj"

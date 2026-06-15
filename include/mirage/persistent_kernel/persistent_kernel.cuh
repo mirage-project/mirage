@@ -140,7 +140,7 @@ __device__ __forceinline__ TaskId compute_task_id(size_t iteration_num,
   return ((iteration_num << 32) | position_index);
 }
 
-__global__ void init_kernel(RuntimeConfig config) {
+static __global__ void init_kernel(RuntimeConfig config) {
   assert(gridDim.x == 1);
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
@@ -186,8 +186,8 @@ __global__ void init_kernel(RuntimeConfig config) {
   }
 }
 
-__global__ void prepare_kernel(RuntimeConfig config,
-                               int end_of_task_graph_event_pos) {
+static __global__ void prepare_kernel(RuntimeConfig config,
+                                      int end_of_task_graph_event_pos) {
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
   for (int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -218,6 +218,43 @@ __global__ void prepare_kernel(RuntimeConfig config,
     config.sched_queue_last_ready_event_id[0] = 1;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Attention planner (SM100). The scheduler calls this on its single thread
+// right where it prepares the next iteration — reading qo_indptr /
+// paged_kv_indptr / last_page_len and writing the flat plan buffer the planned
+// consumers read. MPK_SCHED_PLANNER (and the MPK_SCHED_PLANNER_* template
+// params + buffer name) are defined by the Python builder whenever a model
+// uses planned attention; builds without planned attention compile the no-op
+// below. The planner is never a standalone task — running it here keeps it off
+// the task graph (one fewer CTA + event dependency per iteration).
+// attention_planner_sm100_core() is single-threaded with no __syncthreads,
+// which is exactly what the scheduler context requires.
+// ---------------------------------------------------------------------------
+#ifdef MPK_SCHED_PLANNER
+__device__ __forceinline__ void
+    mpk_run_attention_planner(RuntimeConfig const &config) {
+  if (config.attn_plan_buffer == nullptr) {
+    return;
+  }
+  kernel::attention_planner_sm100_core<MPK_SCHED_PLANNER_NUM_KV_HEADS,
+                                       MPK_SCHED_PLANNER_GQA_GROUP,
+                                       MPK_SCHED_PLANNER_NUM_BUCKETS,
+                                       MPK_SCHED_PLANNER_MAX_WORKS,
+                                       MPK_SCHED_PLANNER_P_Q_TILE,
+                                       MPK_SCHED_PLANNER_D_Q_TILE,
+                                       MPK_SCHED_PLANNER_PREFILL_THRESHOLD,
+                                       MPK_SCHED_PLANNER_KV_SPLIT_SIZE>(
+      config.attn_plan_buffer,
+      config.qo_indptr_buffer,
+      config.paged_kv_indptr_buffer,
+      config.paged_kv_last_page_len_buffer,
+      MPK_MAX_NUM_BATCHED_REQUESTS);
+}
+#else
+__device__ __forceinline__ void mpk_run_attention_planner(RuntimeConfig const &) {
+}
+#endif
 
 #ifdef MODE_OFFLINE
 // TODO: parallelize this processing
@@ -576,8 +613,16 @@ __device__ __forceinline__ bool
 
     int num_new_pages =
         (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-    config.paged_kv_last_page_len_buffer[num_reqs] =
-        (step + num_new_tokens) % MPK_PAGE_SIZE;
+    {
+      // A full last page must report PAGE_SIZE, not 0: kv_len is derived as
+      // (num_pages-1)*PAGE_SIZE + last_page_len, so a bare modulo shrinks
+      // kv_len by a whole page whenever step+num_new_tokens crosses an exact
+      // page multiple (negative history_len -> garbage attention metadata,
+      // observed as online-serving kernel hangs). Mirrors the offline path.
+      int _lpl = (step + num_new_tokens) % MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[num_reqs] =
+          (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+    }
 
     for (int j = 0; j < num_old_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
@@ -642,8 +687,12 @@ __device__ __forceinline__ bool
 
     int num_new_pages =
         (initial_step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-    config.paged_kv_last_page_len_buffer[num_reqs] =
-        (initial_step + num_new_tokens) % MPK_PAGE_SIZE;
+    {
+      // Same full-last-page guard as the compaction path above.
+      int _lpl = (initial_step + num_new_tokens) % MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[num_reqs] =
+          (_lpl == 0) ? MPK_PAGE_SIZE : _lpl;
+    }
 
     for (int j = 0; j < num_new_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
@@ -1246,6 +1295,13 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_PROFILING
           PROFILER_EVENT_END(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt++);
 #endif
+          // Merged planner: prepare_next_batch() just refreshed qo_indptr /
+          // paged_kv_indptr / last_page_len for the next iteration, so compute
+          // its attention plan now — on this single scheduler thread, before
+          // the next task graph (which contains the planned consumers) is
+          // launched. The __threadfence() inside the core plus the release
+          // store below make the plan visible to the worker CTAs.
+          mpk_run_attention_planner(config);
           // Launch task 1 (begin_task_graph) for the next iteration
           size_t last_task_id =
               worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
@@ -1372,8 +1428,8 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
   }
 }
 
-__global__ __launch_bounds__(WORKER_NUM_THREADS,
-                             1) void persistent_kernel(RuntimeConfig config) {
+static __global__ __launch_bounds__(
+    WORKER_NUM_THREADS, 1) void persistent_kernel(RuntimeConfig config) {
   persistent_checker(config);
   if (blockIdx.x < config.num_workers) {
     execute_worker(config);
@@ -1382,13 +1438,13 @@ __global__ __launch_bounds__(WORKER_NUM_THREADS,
   }
 }
 
-__global__ __launch_bounds__(WORKER_NUM_THREADS,
-                             1) void worker_kernel(RuntimeConfig config) {
+static __global__ __launch_bounds__(
+    WORKER_NUM_THREADS, 1) void worker_kernel(RuntimeConfig config) {
   worker_checker(config);
   execute_worker(config);
 }
 
-__global__ void scheduler_kernel(RuntimeConfig config) {
+static __global__ void scheduler_kernel(RuntimeConfig config) {
   scheduler_checker(config);
   execute_scheduler(config, 0);
 }
@@ -1476,13 +1532,24 @@ extern "C" void
   for (size_t i = 0; i < model_tensor_names.size(); i++) {
     global_model_tensors[model_tensor_names[i]] = model_tensor_ptrs[i];
   }
+#ifdef MPK_SCHED_PLANNER
+  // Merged planner: resolve the shared plan buffer (attached as a named torch
+  // tensor by planning_paged_attention_layer) so the scheduler can fill it.
+  {
+    auto _plan_it = global_model_tensors.find(MPK_SCHED_PLANNER_BUFFER_NAME);
+    global_runtime_config.attn_plan_buffer =
+        (_plan_it != global_model_tensors.end())
+            ? static_cast<int *>(_plan_it->second)
+            : nullptr;
+  }
+#endif
   // meta_tensors[0..10] are always required.
   // meta_tensors[11..22]: pinned ring pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 23);
+  assert(meta_tensors.size() == 23 || meta_tensors.size() == 24);
 #else
-  assert(meta_tensors.size() == 11);
+  assert(meta_tensors.size() == 11 || meta_tensors.size() == 12);
 #endif
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
@@ -1807,6 +1874,15 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                         global_runtime_config.prepare_done_event,
                         0);
 
+    cudaError_t worker_smem_attr_err =
+        cudaFuncSetAttribute(worker_kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    if (worker_smem_attr_err != cudaSuccess) {
+      printf("CUDA worker smem attribute error: %s\n",
+             cudaGetErrorString(worker_smem_attr_err));
+    }
+
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
@@ -1815,12 +1891,22 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                     global_runtime_config.worker_stream>>>(
         global_runtime_config);
+    cudaError_t worker_launch_err = cudaGetLastError();
+    if (worker_launch_err != cudaSuccess) {
+      printf("CUDA worker kernel launch error: %s\n",
+             cudaGetErrorString(worker_launch_err));
+    }
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
                        dim3(32, 1, 1),
                        0 /*smem*/,
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
+    cudaError_t scheduler_launch_err = cudaGetLastError();
+    if (scheduler_launch_err != cudaSuccess) {
+      printf("CUDA scheduler kernel launch error: %s\n",
+             cudaGetErrorString(scheduler_launch_err));
+    }
 
 #ifdef MODE_OFFLINE
     cudaEventRecord(global_runtime_config.worker_done_event,
@@ -1832,6 +1918,17 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
         default_stream, global_runtime_config.worker_done_event, 0);
     cudaStreamWaitEvent(
         default_stream, global_runtime_config.scheduler_done_event, 0);
+#ifdef MPK_TEST_MODE
+    // Test-mode callers commonly invoke run_test_mode() repeatedly without a
+    // host-side synchronize between launches. This launcher reuses global CUDA
+    // events for prepare/worker/scheduler ordering, so let the default stream
+    // consume the waits before a later launch can re-record those events.
+    cudaError_t sync_err = cudaStreamSynchronize(default_stream);
+    if (sync_err != cudaSuccess) {
+      printf("CUDA test-mode launch sync error: %s\n",
+             cudaGetErrorString(sync_err));
+    }
+#endif
 #endif
     printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
@@ -1860,6 +1957,10 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
 }
 
 extern "C" void finalize_persistent_kernel() {
+  cudaError_t sync_err = cudaDeviceSynchronize();
+  if (sync_err != cudaSuccess) {
+    printf("CUDA finalize sync error: %s\n", cudaGetErrorString(sync_err));
+  }
   gpu_free(global_runtime_config.worker_queue_last_ready_task_id);
   gpu_free(global_runtime_config.sched_queue_last_ready_event_id);
   gpu_free(global_runtime_config.sched_queue_next_free_event_id);

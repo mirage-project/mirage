@@ -335,11 +335,16 @@ void register_mugraph(
                 (task_type == TASK_PAGED_ATTENTION_2) ||
                 (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
-                (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
+                (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) ||
                 (task_type == TASK_ATTN_SM100)) {
-              // Note that we assume grid_dim.x corresponds to
-              // the request dimension
+              // grid_dim.x = batch_idx for the legacy attention tasks.
+              task.task_metadata.request_id = bid.x;
+            }
+            if (task_type == TASK_PLANNED_DUAL_ATTENTION_SM100) {
+              // Planned consumers use grid_dim.x as bucket_idx. They reuse
+              // request_id as the bucket metadata slot; no request-local
+              // runtime bookkeeping reads this field for planned consumers.
               task.task_metadata.request_id = bid.x;
             }
             // Set expert_offset for MoE tasks
@@ -1792,6 +1797,10 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_WITH_RESIDUAL_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_SM100] = "TASK_SPLITK_LINEAR_SM100";
   task_type_to_name[TASK_ATTN_SM100] = "TASK_ATTN_SM100";
+  task_type_to_name[TASK_ATTENTION_PLANNER_SM100] =
+      "TASK_ATTENTION_PLANNER_SM100";
+  task_type_to_name[TASK_PLANNED_DUAL_ATTENTION_SM100] =
+      "TASK_PLANNED_DUAL_ATTENTION_SM100";
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";

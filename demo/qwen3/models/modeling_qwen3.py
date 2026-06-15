@@ -211,17 +211,20 @@ class Qwen3Attention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.key_cache, self.value_cache = kv_cache
+        # NOTE: pages/page_size dims (shape[1], shape[2]) are taken from the
+        # actual allocated cache so the demo can sweep batch size / page size
+        # for profiling; only the layer/head/dim layout is asserted.
         assert kv_cache[0].shape == (
             config.num_hidden_layers,
-            16,
-            4096,
+            kv_cache[0].shape[1],
+            kv_cache[0].shape[2],
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
         assert kv_cache[1].shape == (
             config.num_hidden_layers,
-            16,
-            4096,
+            kv_cache[1].shape[1],
+            kv_cache[1].shape[2],
             self.num_key_value_heads // world_size,
             self.head_dim,
         )

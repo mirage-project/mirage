@@ -184,11 +184,13 @@ class LLMEngine:
         token_ids = self.tokenizer_manager.tokenize(prompt, use_template)
         prompt_len = len(token_ids)
 
-        rid = self._next_rid
-        self._next_rid += 1
-
         t = torch.tensor(token_ids, dtype=torch.int64)
+        # rid allocation must be inside the lock: a bare read-increment lets
+        # two concurrent submits draw the same rid, after which completion
+        # bookkeeping (keyed by rid) cross-wires the two requests.
         with self._submit_lock:
+            rid = self._next_rid
+            self._next_rid += 1
             self.runtime.submit(rid, t)
 
         if stream:

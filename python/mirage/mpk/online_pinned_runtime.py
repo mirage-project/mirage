@@ -109,30 +109,49 @@ class OnlinePinnedRuntime:
         True if the request was written to the ring, False if enqueued to
         the CPU waiting deque.
         """
-        prompt_len = token_ids.shape[0]
-
-        # Atomically claim the next ring slot.  Must be serialised with
-        # flush_waiting() so the two paths never grab the same slot.
-        with self._ring_lock:
-            slot = self._cpu_req_tail & self._mask
-            if self._req_ready[slot].item() != 0:
-                # Ring full — enqueue to CPU-side waiting.
-                with self._waiting_lock:
-                    self._waiting.append((rid, token_ids.clone(), initial_step))
+        # Lock order is ALWAYS waiting_lock -> ring_lock (flush_waiting uses the
+        # same order).  The slot is claimed, written, and published while the
+        # ring lock is held: a claimed-but-unpublished slot must never be
+        # visible to other threads.  The old claim/rollback scheme (claim under
+        # the lock, publish outside it, decrement the tail on a lost race)
+        # could leave a permanently unpublished slot when a concurrent
+        # submit()/flush_waiting() interleaved with the rollback.  The GPU
+        # drains the ring strictly in order and stops at the first ready==0
+        # slot, so such a hole deadlocks all admission behind it forever
+        # (observed as: in-flight requests keep completing, every request
+        # submitted after one point never starts).  The inbox copy is a
+        # pinned-host copy of at most max_seq_length tokens — microseconds —
+        # so holding the locks across it is fine.
+        with self._waiting_lock:
+            if self._waiting:
+                # Preserve FIFO: never jump ahead of already-waiting requests.
+                self._waiting.append((rid, token_ids.clone(), initial_step))
                 return False
-            self._cpu_req_tail += 1  # reserve slot
+            with self._ring_lock:
+                slot = self._cpu_req_tail & self._mask
+                if self._req_ready[slot].item() != 0:
+                    # Ring full — enqueue to CPU-side waiting.
+                    self._waiting.append((rid, token_ids.clone(), initial_step))
+                    return False
+                self._publish(slot, rid, token_ids, initial_step)
+                self._cpu_req_tail += 1
+                return True
 
-        # Copy prompt tokens to this slot's inbox.
+    def _publish(self, slot: int, rid: int, token_ids: torch.Tensor,
+                 initial_step: int) -> None:
+        """Write one ring entry (inbox tokens + header + ready flag).
+
+        Caller must hold ``_ring_lock``; ``ready`` is set last so the GPU's
+        ld.acquire on it observes a fully written entry.
+        """
+        prompt_len = token_ids.shape[0]
         with torch.cuda.stream(self._write_stream):
             self._inbox_tokens[slot, :prompt_len].copy_(token_ids, non_blocking=True)
         self._write_stream.synchronize()
-
-        # Publish ring entry.
         self._req_request_id[slot]   = rid
         self._req_prompt_len[slot]   = prompt_len
         self._req_initial_step[slot] = initial_step
         self._req_ready[slot] = 1
-        return True
 
     def flush_waiting(self) -> int:
         """Move one waiting request from the CPU deque into the ring, if possible.
@@ -141,34 +160,22 @@ class OnlinePinnedRuntime:
         Called from :meth:`drain_completions` so waiting requests are
         gradually fed into the ring as slots free up.
         """
-        # Reserve ring slot first (serialised with submit), then pop from
-        # the waiting deque.  This ordering prevents a lost request if the
-        # ring is full: we never remove a request from waiting unless we
-        # have a guaranteed ring slot.
-        with self._ring_lock:
-            slot = self._cpu_req_tail & self._mask
-            if self._req_ready[slot].item() != 0:
-                return 0  # ring still full
-            self._cpu_req_tail += 1  # reserve slot
-
+        # Lock order waiting_lock -> ring_lock, same as submit().  The deque is
+        # checked BEFORE touching the ring cursor, and the entry is popped only
+        # once a free slot is guaranteed, so a request can be neither lost nor
+        # left as an unpublished hole in the ring (see submit() for why a hole
+        # permanently deadlocks GPU-side admission).
         with self._waiting_lock:
             if not self._waiting:
-                # Rare: submit() drained the deque between our check and now.
-                # Put the reserved slot back.
-                with self._ring_lock:
-                    self._cpu_req_tail -= 1
                 return 0
-            rid, token_ids, initial_step = self._waiting.popleft()
-
-        prompt_len = token_ids.shape[0]
-        with torch.cuda.stream(self._write_stream):
-            self._inbox_tokens[slot, :prompt_len].copy_(token_ids, non_blocking=True)
-        self._write_stream.synchronize()
-        self._req_request_id[slot]   = rid
-        self._req_prompt_len[slot]   = prompt_len
-        self._req_initial_step[slot] = initial_step
-        self._req_ready[slot] = 1
-        return 1
+            with self._ring_lock:
+                slot = self._cpu_req_tail & self._mask
+                if self._req_ready[slot].item() != 0:
+                    return 0  # ring still full
+                rid, token_ids, initial_step = self._waiting.popleft()
+                self._publish(slot, rid, token_ids, initial_step)
+                self._cpu_req_tail += 1
+                return 1
 
     def drain_completions(self) -> List[Tuple[int, int, int]]:
         """Non-blocking poll: collect all newly completed requests.

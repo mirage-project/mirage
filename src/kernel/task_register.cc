@@ -1983,6 +1983,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   return register_task_variant(TASK_ATTN_SM100, code.to_string());
 }
 
+
 int TaskRegister::register_argmax_partial_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_partial_tasks
@@ -3328,8 +3329,8 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
-  assert(output_ops[0]->output_tensors[0].num_dims == 3); // lse
-  assert(output_ops[1]->output_tensors[0].num_dims == 3); // output_tmp
+  assert(output_ops[0]->output_tensors[0].num_dims == 2); // lse
+  assert(output_ops[1]->output_tensors[0].num_dims == 2); // output_tmp
 
   int qkv_stride = input_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
@@ -3350,22 +3351,17 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::multitoken_paged_attention_split_kv_task_impl<bfloat16, $, "
-         "$, $, $, $, $, "
-         "$, $, $, $, $, $, $>(",
+  code.e("kernel::multitoken_paged_attention_prefill_sm100_task_impl<bfloat16, $, "
+         "$, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
-         num_kv_heads,
          kv_stride,
          qkv_stride,
          output_size * num_kv_chunks, // o_stride should consider num_kv_chunks
          head_dim,
-         SEQ_LEN_PER_BLOCK,
          max_seq_len,
          page_size,
-         max_tokens,
-         "true", // PARTITION_KV
-         num_kv_chunks);
+         max_tokens);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -3383,8 +3379,13 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   code.e("    task_desc->input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f,");
+  code.e("    -1,");
+  code.e("    0,");
+  code.e("    task_desc->task_metadata.kv_idx,");
+  code.e("    $,", SEQ_LEN_PER_BLOCK);
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    task_desc->task_metadata.kv_idx);");
+  code.e("    task_desc->task_metadata.merge_task_offset,");
+  code.e("    $);", num_kv_heads);
   return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100,
                                code.to_string());
 }
@@ -3396,11 +3397,24 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
   // params[2]: max_seq_len
   // params[3]: page_size
   // params[4]: num_kv_heads
-  assert(params.size() == 5);
+  // params[5]: optional prefill threshold for selective planned split-KV
+  // params[6]: optional direct-unsplit-prefill flag. When set, the dual
+  // planned consumer writes non-split prefill requests directly to final
+  // output, so the merge task skips them.
+  // params[7]: optional merge mode:
+  //   0 = legacy one task per request/head
+  //   1 = static persistent split by request/head/split
+  //   2 = planned global work-queue merge
+  // params[8]: optional merge counter offset in plan buffer for mode 2
+  // params[9]: optional producer KV chunk size for mode 2 (kv_split_size);
+  //            the merge must mirror the producers' chunk geometry.
+  assert(params.size() == 5 || params.size() == 6 || params.size() == 7 ||
+         params.size() == 8 || params.size() == 9 || params.size() == 10);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 2;
+  int num_inputs = static_cast<int>(bgraph.operators.size()) - 1;
   int num_outputs = 1;
+  assert(num_inputs == 2 || num_inputs == 3);
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -3419,32 +3433,96 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
   int max_seq_len = params[2];
   int page_size = params[3];
   int num_kv_heads = params[4];
+  int prefill_threshold = (params.size() >= 6) ? params[5] : -1;
+  int direct_unsplit_prefill = (params.size() >= 7) ? params[6] : 0;
+  int merge_mode =
+      (params.size() >= 8) ? params[7] : (bgraph.grid_dim.z > 1 ? 1 : 0);
+  int merge_counter_offset =
+      (params.size() >= 9) ? params[8] : 2 * (bgraph.grid_dim.x + 1);
 
   int max_tokens = input_ops[0]->dtensor.dim[0];
   constexpr int SEQ_LEN_PER_BLOCK = 256;
+  // Mode-2 (planned) merges must use the SAME chunk size the planned
+  // producers split with (kv_split_size); the legacy 256 constant only
+  // matches the --split-kv-cache path. A mismatched chunk size doubles the
+  // merge's per-token lse/tmp stride and invents unwritten chunk slots
+  // (OOB reads / corrupted merges).
+  int planned_kv_chunk_size =
+      (params.size() >= 10) ? params[9] : SEQ_LEN_PER_BLOCK;
+  // params[10]: plan-buffer slot holding the planner's runtime split-gate flags
+  // (bit0 = prefill split on, bit1 = decode split on). 0 = legacy (both on).
+  int split_flags_offset = (params.size() >= 11) ? params[10] : 0;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
 
-  code.e("kernel::merge_splitkv<bfloat16, $, $, $, $, $, $, "
-         "$, $, $>(",
-         num_q_heads_per_kv,
-         1,
-         num_kv_heads,
-         head_dim,
-         max_tokens,
-         true,
-         (max_seq_len / SEQ_LEN_PER_BLOCK),
-         SEQ_LEN_PER_BLOCK,
-         page_size);
-  code.e("    task_desc->input_ptrs[0],");
-  code.e("    task_desc->input_ptrs[1],");
-  code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->task_metadata.request_id,");
-  code.e("    task_desc->output_ptrs[0],");
-  code.e("    task_desc->task_metadata.merge_task_offset);");
+  if (merge_mode == 2) {
+    assert(num_inputs == 3);
+    code.e("kernel::merge_splitkv_planned_persistent<bfloat16, $, $, $, $, "
+           "$, $, $, $, $, $, $>(",
+           num_q_heads_per_kv,
+           num_kv_heads,
+           head_dim,
+           max_tokens,
+           ((max_seq_len + planned_kv_chunk_size - 1) / planned_kv_chunk_size),
+           planned_kv_chunk_size,
+           page_size,
+           prefill_threshold,
+           direct_unsplit_prefill,
+           merge_counter_offset,
+           split_flags_offset);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->input_ptrs[1],");
+    code.e("    static_cast<int *>(task_desc->input_ptrs[2]),");
+    code.e("    runtime_config.qo_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+    code.e("    task_desc->output_ptrs[0]);");
+  } else if (merge_mode == 1) {
+    code.e("kernel::merge_splitkv_persistent<bfloat16, $, $, $, $, $, "
+           "$, $, $, $, $>(",
+           num_q_heads_per_kv,
+           num_kv_heads,
+           head_dim,
+           max_tokens,
+           bgraph.grid_dim.z,
+           ((max_seq_len + SEQ_LEN_PER_BLOCK - 1) / SEQ_LEN_PER_BLOCK),
+           SEQ_LEN_PER_BLOCK,
+           page_size,
+           prefill_threshold,
+           direct_unsplit_prefill);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->input_ptrs[1],");
+    code.e("    runtime_config.qo_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+    code.e("    task_desc->task_metadata.request_id,");
+    code.e("    task_desc->task_metadata.merge_task_offset,");
+    code.e("    task_desc->task_metadata.kv_idx,");
+    code.e("    task_desc->output_ptrs[0]);");
+  } else {
+    code.e("kernel::merge_splitkv<bfloat16, $, $, $, $, $, $, "
+           "$, $, $, $, $>(",
+           num_q_heads_per_kv,
+           1,
+           num_kv_heads,
+           head_dim,
+           max_tokens,
+           true,
+           ((max_seq_len + SEQ_LEN_PER_BLOCK - 1) / SEQ_LEN_PER_BLOCK),
+           SEQ_LEN_PER_BLOCK,
+           page_size,
+           prefill_threshold,
+           direct_unsplit_prefill);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->input_ptrs[1],");
+    code.e("    runtime_config.qo_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+    code.e("    task_desc->task_metadata.request_id,");
+    code.e("    task_desc->output_ptrs[0],");
+    code.e("    task_desc->task_metadata.merge_task_offset);");
+  }
   return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100,
                                code.to_string());
 }
@@ -4769,6 +4847,91 @@ int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
   code.e("      bi_);");
   code.e("}");
   return register_task_variant(TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100,
+                               code.to_string());
+}
+
+// ===========================================================================
+// Attention planner + planned-attention consumer tasks (issue #627).
+// ===========================================================================
+
+int TaskRegister::register_planned_dual_attention_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Same params as planned_prefill/decode: max_tokens here = max_prefill_tokens
+  // (decode kernel doesn't template on max_tokens since Q is always 1).
+  assert(params.size() >= 9 && params.size() <= 11);
+  int kv_split_size = (params.size() >= 10) ? params[9] : 0;
+  int num_kv_chunks = (params.size() >= 11) ? params[10] : 1;
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  int num_inputs = (kv_split_size > 0) ? 9 : 8;
+  int num_outputs = (kv_split_size > 0) ? 2 : 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int output_size = output_ops[0]->dtensor.dim[1];
+  int head_dim = output_size / (kv_split_size > 0 ?
+                                    (num_q_heads * num_kv_chunks) :
+                                    num_q_heads);
+  int kv_stride = head_dim * num_kv_heads;
+  int max_seq_len = params[4];
+  int page_size = params[5];
+  int max_tokens = params[6];
+  int num_buckets = params[7];
+  int max_works = params[8];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::planned_dual_attention_sm100_task_impl<bfloat16, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, $>(",
+         num_q_heads,
+         num_kv_heads,
+         kv_stride,
+         qkv_stride,
+         output_size,
+         head_dim,
+         max_seq_len,
+         page_size,
+         max_tokens,
+         num_buckets,
+         max_works,
+         kv_split_size,
+         num_kv_chunks);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->output_ptrs[0],");
+  if (kv_split_size > 0) {
+    code.e("    task_desc->output_ptrs[1],");
+  } else {
+    code.e("    task_desc->output_ptrs[0],");
+  }
+  if (kv_split_size > 0) {
+    code.e("    task_desc->input_ptrs[8],"); // lse
+  } else {
+    code.e("    nullptr,");
+  }
+  code.e("    static_cast<int const*>(task_desc->input_ptrs[7]),");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    $,", params[2] > 0);
+  code.e("    $,", params[3] > 0);
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->input_ptrs[4],");
+  code.e("    task_desc->input_ptrs[5],");
+  code.e("    task_desc->input_ptrs[6],");
+  code.e("    1e-6f,");
+  code.e("    1e-6f,");
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_PLANNED_DUAL_ATTENTION_SM100,
                                code.to_string());
 }
 

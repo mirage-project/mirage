@@ -114,7 +114,9 @@ if __name__ == "__main__":
     paged_kv_last_page_len_buffer = torch.zeros(
         args.max_num_batched_requests, dtype=torch.int32, device="cuda")
     
-    mirage_model_config = MirageModelConfig(with_lm_head=True)
+    mirage_model_config = MirageModelConfig(
+        with_lm_head=True,
+    )
     
     mpk_metadata = MPKMetadata(
         mode="offline",

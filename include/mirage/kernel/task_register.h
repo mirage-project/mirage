@@ -97,6 +97,8 @@ public:
                                  bool with_residual);
   int register_paged_attention_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
+  int register_planned_dual_attention_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_argmax_partial_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,

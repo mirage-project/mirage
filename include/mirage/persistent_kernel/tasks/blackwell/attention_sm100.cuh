@@ -65,7 +65,14 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *cos_ptr,
     void const *sin_ptr,
     float q_eps,
-    float k_eps) {
+    float k_eps,
+    int prefill_threshold = -1,
+    int kv_chunk_idx = -1,
+    int kv_chunk_size = 256,
+    void *lse_ptr = nullptr,
+    int flat_kv_head_idx = -1,
+    int flat_num_kv_heads = NUM_KV_HEADS,
+    int lse_num_kv_chunks = -1) {
   constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 6;
   constexpr int ROTARY_SYNC_BARRIER_ID = 7;
   cutlass::arch::NamedBarrier wg_barrier(
@@ -100,6 +107,12 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     int const num_tokens = (Q_LEN_OVERRIDE > 0)
                                ? Q_LEN_OVERRIDE
                                : (last_token_pos - first_token_pos);
+    int constexpr NUM_PACKED_Q_PER_TOKEN = NUM_QO_PER_KV;
+    int const packed_q = num_tokens * NUM_PACKED_Q_PER_TOKEN;
+    if ((prefill_threshold >= 0 && packed_q > prefill_threshold) ||
+        num_tokens > MAX_TOKENS) {
+      return;
+    }
 
     // NOTE(Jinchen): to simplify the implementation, we assume that the
     // metadata of the paged KV cache includes the new tokens, i.e., spaces are
@@ -108,9 +121,19 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     int const first_page_pos = paged_kv_indptr_buffer_ptr[request_id];
     int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
     int const num_pages = last_page_pos - first_page_pos;
-    int const seq_len = (num_pages - 1) * PAGE_SIZE +
-                        paged_kv_last_page_len_buffer_ptr[request_id] -
-                        TAIL_OFFSET;
+    int const full_seq_len = (num_pages - 1) * PAGE_SIZE +
+                             paged_kv_last_page_len_buffer_ptr[request_id] -
+                             TAIL_OFFSET;
+    int const history_len = full_seq_len - num_tokens;
+    int const split_start =
+        kv_chunk_idx >= 0 ? kv_chunk_idx * kv_chunk_size : 0;
+    int const split_end =
+        kv_chunk_idx >= 0 ? min(full_seq_len, split_start + kv_chunk_size)
+                          : full_seq_len;
+    if (split_start >= split_end) {
+      return;
+    }
+    int const seq_len = split_end - split_start;
     // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
 
     // Page indices are read directly from global memory (L2-cached)
@@ -123,8 +146,14 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     T const *__restrict__ d_v = d_k + HEAD_DIM;
     T *__restrict__ d_paged_k_cache = reinterpret_cast<T *>(paged_k_cache_ptr);
     T *__restrict__ d_paged_v_cache = reinterpret_cast<T *>(paged_v_cache_ptr);
+    int const partial_group_offset =
+        kv_chunk_idx >= 0
+            ? (kv_chunk_idx * flat_num_kv_heads + flat_kv_head_idx) *
+                  NUM_QO_PER_KV
+            : 0;
     T *__restrict__ d_output =
-        reinterpret_cast<T *>(output_ptr) + first_token_pos * O_STRIDE;
+        reinterpret_cast<T *>(output_ptr) + first_token_pos * O_STRIDE +
+        partial_group_offset * HEAD_DIM;
 
     // DTensors' layouts
     using QDmem =
@@ -238,26 +267,25 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       load_smem(q_smem(dst_row, dst_col), q_dmem(src_row, src_col));
     }
 
-    int page_idx_0 = page_indices[0];
 #pragma unroll
     for (int chunk_idx = threadIdx.x;
          chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
          chunk_idx += NUM_THREADS) {
       int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
       int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
-      if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
+      int global_pos = split_start + dst_row + cp_finished_seq_len;
+      if (global_pos < history_len) {
         // load from KV Cache
-        // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
-        // PAGE_SIZE];
-        int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
-        int src_row = page_idx_0 * PAGE_SIZE + page_offset;
+        int page_idx = page_indices[global_pos / PAGE_SIZE];
+        int page_offset = global_pos % PAGE_SIZE;
+        int src_row = page_idx * PAGE_SIZE + page_offset;
         load_smem(k_buffer_smem(dst_row, col),
                   paged_k_cache_dmem(src_row, col));
         load_smem(v_buffer_smem(dst_row, col),
                   paged_v_cache_dmem(src_row, col));
       } else {
         // load from QKV
-        int src_row = dst_row + cp_finished_seq_len - (seq_len - num_tokens);
+        int src_row = global_pos - history_len;
         load_smem(k_buffer_smem(dst_row, col), k_dmem(src_row, col));
         load_smem(v_buffer_smem(dst_row, col), v_dmem(src_row, col));
       }
@@ -291,30 +319,27 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                               ? min(seq_len - cp_finished_seq_len, KV_TILE_SIZE)
                               : 0;
       if (next_iter_len > 0) {
-        int page_idx = page_indices[cp_finished_seq_len / PAGE_SIZE];
-        // FIX: loop bound was `curr_iter_len` (stale first-iter value); should
-        // be `next_iter_len` (the tile being loaded). The original OOB-read
-        // QKV input for `dst_row >= next_iter_len`, which lands in
-        // unmapped memory at higher mbt values → illegal access. See plan
-        // /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
+        // The chunk loop below bounds dst_row by next_iter_len (the tile being
+        // loaded) and resolves the page per position from global_pos, so the
+        // pre-split-KV hoisted page_idx and its curr_iter_len bound (OOB at
+        // higher mbt) no longer apply.
 #pragma unroll
         for (int chunk_idx = threadIdx.x;
              chunk_idx < next_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
              chunk_idx += NUM_THREADS) {
           int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
           int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
-          if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
+          int global_pos = split_start + dst_row + cp_finished_seq_len;
+          if (global_pos < history_len) {
             // load from KV Cache
-            // int page_idx =
-            //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
-            int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
+            int page_idx = page_indices[global_pos / PAGE_SIZE];
+            int page_offset = global_pos % PAGE_SIZE;
             int src_row = page_idx * PAGE_SIZE + page_offset;
             load_smem(k_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
             load_smem(v_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
           } else {
             // load from QKV
-            int src_row =
-                dst_row + cp_finished_seq_len - (seq_len - num_tokens);
+            int src_row = global_pos - history_len;
             load_smem(k_smem(dst_row, col), k_dmem(src_row, col));
             load_smem(v_smem(dst_row, col), v_dmem(src_row, col));
           }
@@ -340,11 +365,11 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       }
       wg_barrier.arrive_and_wait();
 
-      int kv_tokens_to_process = min(
-          curr_iter_len,
-          max(iter * KV_TILE_SIZE + curr_iter_len - (seq_len - num_tokens), 0));
-      int first_kv_token_to_process =
-          iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
+      int tile_global_start = split_start + iter * KV_TILE_SIZE;
+      int tile_global_end = tile_global_start + curr_iter_len;
+      int new_begin = max(tile_global_start, history_len);
+      int new_end = min(tile_global_end, history_len + num_tokens);
+      int kv_tokens_to_process = max(new_end - new_begin, 0);
       if (qk_norm) {
         // Q norm
         if (iter == 0) {
@@ -361,10 +386,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
               num_tokens /*window_size*/,
               0 /*token_offset*/,
               rope,
-              static_cast<T const *>(cos_ptr) +
-                  (seq_len - num_tokens) * HEAD_DIM,
-              static_cast<T const *>(sin_ptr) +
-                  (seq_len - num_tokens) * HEAD_DIM);
+              static_cast<T const *>(cos_ptr) + history_len * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) + history_len * HEAD_DIM);
         }
         // K norm
         if (kv_tokens_to_process > 0) {
@@ -381,10 +404,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
               kv_tokens_to_process /*window_size*/,
               curr_iter_len - kv_tokens_to_process,
               rope,
-              static_cast<T const *>(cos_ptr) +
-                  first_kv_token_to_process * HEAD_DIM,
-              static_cast<T const *>(sin_ptr) +
-                  first_kv_token_to_process * HEAD_DIM);
+              static_cast<T const *>(cos_ptr) + new_begin * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) + new_begin * HEAD_DIM);
         }
       } else if (rope) {
         if (iter == 0) {
@@ -400,9 +421,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                                     CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
-                    (token_idx + seq_len - num_tokens) * HEAD_DIM,
+                    (token_idx + history_len) * HEAD_DIM,
                 static_cast<T const *>(sin_ptr) +
-                    (token_idx + seq_len - num_tokens) * HEAD_DIM,
+                    (token_idx + history_len) * HEAD_DIM,
                 token_idx);
           }
         }
@@ -419,9 +440,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                                     CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
-                    (token_idx + first_kv_token_to_process) * HEAD_DIM,
+                    (token_idx + new_begin) * HEAD_DIM,
                 static_cast<T const *>(sin_ptr) +
-                    (token_idx + first_kv_token_to_process) * HEAD_DIM,
+                    (token_idx + new_begin) * HEAD_DIM,
                 token_idx + curr_iter_len - kv_tokens_to_process);
           }
         }
@@ -431,16 +452,15 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
 
       // update the KV Cache
       if (kv_tokens_to_process > 0) {
-        int page_idx = page_indices[first_kv_token_to_process / PAGE_SIZE];
         for (int elem_idx = threadIdx.x;
              elem_idx < kv_tokens_to_process * HEAD_DIM;
              elem_idx += NUM_THREADS) {
           int token_idx = elem_idx / HEAD_DIM;
           int col = elem_idx % HEAD_DIM;
-          // int page_idx = page_indices[(token_idx + first_kv_token_to_process)
-          // / PAGE_SIZE];
-          int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
-          int src_row = (token_idx + first_kv_token_to_process) % KV_TILE_SIZE;
+          int global_pos = new_begin + token_idx;
+          int page_idx = page_indices[global_pos / PAGE_SIZE];
+          int page_offset = global_pos % PAGE_SIZE;
+          int src_row = global_pos - tile_global_start;
           int dst_row = page_idx * PAGE_SIZE + page_offset;
           paged_k_cache_dmem.at(dst_row, col) = k_smem.at(src_row, col);
           paged_v_cache_dmem.at(dst_row, col) = v_smem.at(src_row, col);
@@ -508,9 +528,10 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
           int col = (warp_idx << 4) + ((lane_idx & 0x3) << 1) +
                     ((frag_idx >> 2) << 3) + (frag_idx & 0x1);
           int token_idx = row / NUM_QO_PER_KV;
+          int global_col = split_start + col + iter * KV_TILE_SIZE;
           bool is_valid =
               (row < num_tokens * NUM_QO_PER_KV) &&
-              (col + iter * KV_TILE_SIZE <= token_idx + seq_len - num_tokens);
+              (global_col <= token_idx + history_len);
           x_frag_f[m][frag_idx] = is_valid ? x_frag_f[m][frag_idx] : -inf;
           m_local[m][(frag_idx & 0x3) >> 1] =
               max(m_local[m][(frag_idx & 0x3) >> 1], x_frag_f[m][frag_idx]);
@@ -675,6 +696,20 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                    other_o * expf(other_m - m_global);
       }
       o_smem.at(row, col) = bfloat16(o_global / d_global);
+      if (kv_chunk_idx >= 0 && lse_ptr != nullptr && col == 0) {
+        constexpr float log2e_const = 1.4426950408889634f;
+        int const num_kv_chunks =
+            lse_num_kv_chunks > 0
+                ? lse_num_kv_chunks
+                : (MAX_SEQ_LEN + kv_chunk_size - 1) / kv_chunk_size;
+        float *lse_out = reinterpret_cast<float *>(lse_ptr);
+        int token_idx = row / NUM_QO_PER_KV;
+        int head_idx = row % NUM_QO_PER_KV;
+        int offset = (first_token_pos + token_idx) * num_kv_chunks *
+                         flat_num_kv_heads * NUM_QO_PER_KV +
+                     partial_group_offset + head_idx;
+        lse_out[offset] = log2f(d_global) + m_global * log2e_const;
+      }
     }
     wg_barrier.arrive_and_wait();
 

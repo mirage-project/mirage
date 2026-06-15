@@ -23,7 +23,7 @@ class MirageModelConfig:
     state_dict: dict | None = None
     
     with_lm_head: bool = True
-    
+
     def info_as_string(self):
         info = f"Hidden size: {self.hidden_size if self.hidden_size is not None else 'None'}\n"
         info += f"Intermediate size: {self.intermediate_size if self.intermediate_size is not None else 'None'}\n"
