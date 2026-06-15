@@ -751,7 +751,77 @@ class PersistentKernel:
             tb_graph,
         )
         self.kn_graph.register_task(tb_graph, "attention", params)
-        
+
+    def dflash_attention_layer(
+        self,
+        q: DTensor,        # [B, q_size]            (q_norm + RoPE applied)
+        ctx_k: DTensor,    # [ctx_len, kv_size]     (k_norm + RoPE; context cache)
+        ctx_v: DTensor,    # [ctx_len, kv_size]     (raw v; context cache)
+        blk_k: DTensor,    # [B, kv_size]           (k_norm + RoPE; this block)
+        blk_v: DTensor,    # [B, kv_size]           (raw v; this block)
+        output: DTensor,   # [B, q_size]
+        grid_dim: tuple,   # (num_requests, 1, 1)
+        block_dim: tuple,
+        sliding_window: int = 0,
+        head_dim: int = 128,
+    ):
+        # DFlash non-causal block attention (split ctx/block KV; one task/request).
+        for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
+            assert t.num_dims == 2
+        params = [sliding_window, head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ctx_k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ctx_v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blk_k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blk_v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([q, ctx_k, ctx_v, blk_k, blk_v, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_attention", params)
+
+    def dflash_norm_rope_layer(
+        self,
+        x: DTensor,        # [N, num_heads*head_dim]
+        weight: DTensor,   # [head_dim]  (q_norm or k_norm)
+        cos: DTensor,      # [N, head_dim]
+        sin: DTensor,      # [N, head_dim]
+        output: DTensor,   # [N, num_heads*head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        head_dim: int = 128,
+    ):
+        # DFlash per-head RMSNorm (eps 1e-5) + NeoX RoPE.
+        assert x.num_dims == 2 and output.num_dims == 2
+        params = [head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([x, weight, cos, sin, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_norm_rope", params)
+
+    def dflash_kv_store_layer(
+        self,
+        kv_in: DTensor,         # [num_tokens, num_kv_heads*head_dim] bf16
+        slot_mapping: DTensor,  # [num_tokens] int32 (absolute slot per token)
+        cache: DTensor,         # [num_pages, page_size, num_kv_heads, head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        head_dim: int = 128,
+    ):
+        # DFlash standalone paged KV-cache store (L4 materialize write/overwrite).
+        assert kv_in.num_dims == 2
+        assert cache.num_dims == 4
+        params = [head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(kv_in, (-1, -1, -1), -1, True)
+        tb_graph.new_input(slot_mapping, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cache, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([kv_in, slot_mapping, cache], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_kv_store", params)
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]
