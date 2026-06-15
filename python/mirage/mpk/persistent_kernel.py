@@ -1751,7 +1751,17 @@ class PersistentKernel:
         tb_graph.new_input(output, (0, 1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
 
-        self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100")
+        # Under tensor parallelism the MoE output is row-parallel and followed by
+        # an allreduce. The residual must be added on exactly one rank, otherwise
+        # the allreduce sums it world_size times (double-counted residual). Mirror
+        # the rank-0-only guard used by linear_with_residual_layer; the SM100
+        # kernel skips the residual add when its pointer is null (params[0]==0).
+        params = []
+        enable_residual = 1
+        if self.world_size > 1 and self.mpi_rank != 0:
+            enable_residual = 0
+        params.append(enable_residual)
+        self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100", params)
 
     def splitk_linear_layer(
         self,
