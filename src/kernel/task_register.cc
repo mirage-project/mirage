@@ -2960,8 +2960,7 @@ int TaskRegister::register_moe_mul_sum_add_sm100_task(
          /*OUTPUT_STRIDE=*/output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
-  code.e("    $,",
-         rank_with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
+  code.e("    $,", rank_with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_MOE_MUL_SUM_ADD_SM100, code.to_string());
 }

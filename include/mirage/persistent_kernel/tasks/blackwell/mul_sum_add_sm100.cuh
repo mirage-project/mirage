@@ -33,9 +33,9 @@ __device__ __forceinline__ void
 
   for (int row_idx = 0; row_idx < BATCH_SIZE; ++row_idx) {
     for (int i = threadIdx.x; i < OUTPUT_SIZE; i += blockDim.x) {
-      float sum_val =
-          (d_residual != nullptr) ? float(d_residual[row_idx * OUTPUT_STRIDE + i])
-                                  : 0.0f;
+      float sum_val = (d_residual != nullptr)
+                          ? float(d_residual[row_idx * OUTPUT_STRIDE + i])
+                          : 0.0f;
 #pragma unroll
       for (int topk_idx = 0; topk_idx < NUM_TOPK; ++topk_idx) {
         T val = d_input[row_idx * OUTPUT_STRIDE * NUM_TOPK +
