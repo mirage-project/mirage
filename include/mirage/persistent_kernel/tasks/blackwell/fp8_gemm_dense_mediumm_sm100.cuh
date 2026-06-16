@@ -38,9 +38,11 @@ __device__ __noinline__ void
                                            int const N,
                                            int const K,
                                            int const worker_idx,
-                                           int const num_workers) {
+                                           int const num_workers,
+                                           int const C_row_stride = -1) {
   fp8_gemm_dense_common::task_impl_tpl<BN, NS, /*NE=*/4>(
-      ta_ptr, tb_ptr, sa, sb, C, M, N, K, worker_idx, num_workers);
+      ta_ptr, tb_ptr, sa, sb, C, M, N, K, worker_idx, num_workers,
+      C_row_stride);
 }
 
 template <int BN, int NS>

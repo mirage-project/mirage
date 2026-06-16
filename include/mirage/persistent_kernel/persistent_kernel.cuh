@@ -110,6 +110,14 @@ __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
 
+static __device__ __noinline__ void
+    execute_task_noinline(TaskDesc const *task_desc,
+                          RuntimeConfig const &runtime_config) {
+  // Keep execute_worker's queue/event state out of heavy task-body call frames
+  // so those callees can use the per-task register budget instead.
+  _execute_task(task_desc, runtime_config);
+}
+
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
   return (event_loc == 0);
@@ -990,7 +998,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                task_desc->task_type);
       }
 #endif
-      _execute_task(task_desc, config);
+      execute_task_noinline(task_desc, config);
     }
     __syncthreads();
 
@@ -1749,10 +1757,32 @@ extern "C" void
                cudaMemcpyHostToDevice);
   }
 
-  // Set configuration for kernels
-  cudaFuncSetAttribute(worker_kernel,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+  // Set configuration for kernels. The worker setAttribute FAILS (invalid
+  // argument) when the kernel's STATIC shared (the max over all compiled-in
+  // task branches) + MAX_DYNAMIC_SHARED_MEMORY_SIZE exceeds the per-CTA
+  // opt-in limit — and an unchecked failure here leads to the silent
+  // worker-launch failure / eternal-hang class (2026-06-12). Catch it at
+  // setup with a precise message.
+  {
+    cudaError_t aerr =
+        cudaFuncSetAttribute(worker_kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    if (aerr != cudaSuccess) {
+      cudaFuncAttributes fattr;
+      cudaFuncGetAttributes(&fattr, worker_kernel);
+      fprintf(stderr,
+              "FATAL: cudaFuncSetAttribute(worker_kernel, maxDynamicSmem=%d) "
+              "failed: %s. worker_kernel static shared = %zu bytes; "
+              "static + dynamic exceeds the per-CTA opt-in limit — a task "
+              "branch compiled into this megakernel declares too much static "
+              "__shared__ memory.\n",
+              MAX_DYNAMIC_SHARED_MEMORY_SIZE,
+              cudaGetErrorString(aerr),
+              fattr.sharedSizeBytes);
+      abort();
+    }
+  }
   cudaFuncSetAttribute(
       scheduler_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 1024);
   cudaFuncSetAttribute(persistent_kernel,
@@ -1823,12 +1853,40 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                     global_runtime_config.worker_stream>>>(
         global_runtime_config);
+    // A failed worker launch (e.g. static smem of a compiled-in task branch +
+    // MAX_DYNAMIC_SHARED_MEMORY_SIZE exceeding the per-CTA limit) is
+    // otherwise SILENT: the scheduler kernel launches fine and spins forever
+    // pushing tasks to workers that never started — an undebuggable hang
+    // (2026-06-12: TASK_MLA_MTP_REDUCE's 16KB static la_smem did exactly
+    // this). Fail loudly instead.
+    {
+      cudaError_t lerr = cudaGetLastError();
+      if (lerr != cudaSuccess) {
+        fprintf(stderr,
+                "FATAL: worker_kernel launch failed: %s (num_workers=%d, "
+                "dynamic smem=%d; check static+dynamic shared memory vs the "
+                "per-CTA limit)\n",
+                cudaGetErrorString(lerr),
+                global_runtime_config.num_workers,
+                MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+        abort();
+      }
+    }
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
                        dim3(32, 1, 1),
                        0 /*smem*/,
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
+    {
+      cudaError_t lerr = cudaGetLastError();
+      if (lerr != cudaSuccess) {
+        fprintf(stderr,
+                "FATAL: scheduler_kernel launch failed: %s\n",
+                cudaGetErrorString(lerr));
+        abort();
+      }
+    }
 
 #ifdef MODE_OFFLINE
     cudaEventRecord(global_runtime_config.worker_done_event,

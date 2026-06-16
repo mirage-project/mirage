@@ -185,8 +185,16 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 299,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
-  // retired: 307, 308, 318, 319
+  // retired: 318, 319
   TASK_FP8_GEMM_DENSE_SM100 = 306,
+  // ferret v002 CUDA-core GEMV (M=1 decode, RAW-ptr ABI via input_ptrs[0/1],
+  // NOT TMA descriptors; reuses retired gap 307). default-OFF
+  // MPK_DSV3_DENSE_GEMV.
+  TASK_FP8_GEMM_DENSE_GEMV_M1_SM100 = 307,
+  // fine-N dense GEMM (mediumm body @ BN=16): M=1 decode occupancy lever,
+  // default-OFF MPK_DSV3_DENSE_FINEN. TMA inputs (B-weight box=16). Reuses gap
+  // 308.
+  TASK_FP8_GEMM_DENSE_FINEN_SM100 = 308,
   TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100 = 309,
   TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8
   TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6
@@ -198,7 +206,9 @@ enum TaskType {
   TASK_MOE_TOPK_COMPACT_SM100 = 310,
   TASK_MOE_TOPK_MARKER_INIT_SM100 = 320,
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
-  TASK_SM100_TASK_END = 323, // SM100 end placeholder, not a real task
+  // bs=1 contiguous KV append (replaces paged-cache append + gather):
+  TASK_MLA_KV_APPEND_SM100 = 323,
+  TASK_SM100_TASK_END = 324, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

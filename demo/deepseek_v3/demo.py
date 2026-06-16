@@ -367,6 +367,11 @@ if __name__ == "__main__":
             dtype=torch.int, device="cuda"
         )
 
+    # Multi-chunk prefill (prompt longer than mbt → a second prefill chunk
+    # with q_len > 8 at step > 0) is supported: the split ROPE-Q position
+    # handling for step>0 prefill chunks was validated against the
+    # token-by-token oracle (KV exact across both chunks; 2026-06-13).
+
     step = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
     num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
 

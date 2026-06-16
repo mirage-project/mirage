@@ -2518,11 +2518,20 @@ class PersistentKernel:
         tb_graph.new_input(sfa_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
         tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output]
+        operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices]
+        # CRITICAL ORDERING (mirror of the 2026-06-07 fix in
+        # models/deepseek_v3/tasks.py::_fp8_group_gemm_layer_impl): the
+        # codegen reads input_ptrs[5] as the meta/active-mask buffer and
+        # output_ptrs[0] as D; graph.cc splits positionally (6 inputs when
+        # meta present, 1 output). meta MUST therefore register BEFORE
+        # output, else input[5]=output is read as the mask (all-zero ->
+        # every tile skipped -> NULL output) and the D TMA-store targets the
+        # tiny meta buffer. This duplicate had kept the pre-fix order.
         if meta is not None:
             tb_graph.new_input(meta, (-1, -1, -1), -1, True)
             operators.append(meta)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        operators.append(output)
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 
@@ -3096,6 +3105,61 @@ class PersistentKernel:
             input_fp8, weight_fp8, input_scale, weight_scale, output,
             num_workers, runtime_m_mode=runtime_m_mode)
 
+    def fp8_gemm_dense_finen_layer(self, input_fp8, weight_fp8, input_scale,
+                                   weight_scale, output, num_workers,
+                                   runtime_m_mode: int = 0):
+        # fine-N dense GEMM (mediumm body @ BN=16). Handles all M (correct at
+        # prefill M>1 too), so no dual-dispatch. default-OFF lever.
+        self._fp8_gemm_dense_layer_impl(
+            "fp8_gemm_dense_finen_sm100",
+            input_fp8, weight_fp8, input_scale, weight_scale, output,
+            num_workers, runtime_m_mode=runtime_m_mode)
+
+    def fp8_gemm_dense_gemv_m1_layer(self, input_fp8, weight_fp8, input_scale,
+                                     weight_scale, output, num_workers,
+                                     bn: int, wpc: int):
+        # ferret v002 CUDA-core GEMV (M=1 decode). Same A/B/sa/sb/output
+        # new_input plumbing as the dense GEMM, BUT: (1) A/B arrive RAW (the
+        # new task type is excluded from TMA-desc creation in runtime.cc), so
+        # the kernel reads input_ptrs[0]/[1] directly; (2) the kernel uses
+        # blockDim.x internally but the MPK megakernel worker is a FIXED 256
+        # threads (WORKER_NUM_THREADS, __launch_bounds__(256)) — the tb_graph
+        # block_dim below is logical metadata only and does NOT change the
+        # physical launch. So bn*wpc MUST be <= 8 (bn*wpc*32 <= 256); configs
+        # needing >256 threads (e.g. <8,2>=512, <32,1>=1024) SILENTLY ZERO
+        # their upper columns in-MPK (warps 8+ never run). USE <8,1> (256 thr,
+        # ferret v001-class ~1.34x qkv_a; cos=1.0 validated). (3) params carry
+        # BN/WPC so the codegen instantiates <BN,WPC>; bn*wpc<=8 is asserted.
+        # grid = num_workers (persistent N-slice sweep, request_id = worker idx).
+        assert input_fp8.num_dims in (2, 3)
+        assert weight_fp8.num_dims == 2
+        assert input_scale.num_dims == 2
+        assert weight_scale.num_dims == 2
+        assert output.num_dims in (2, 3)
+        M = input_fp8.dim(0)
+        K = (input_fp8.dim(1) if input_fp8.num_dims == 2
+             else input_fp8.dim(1) * input_fp8.dim(2))
+        N = weight_fp8.dim(0)
+        assert weight_fp8.dim(1) == K
+        assert output.dim(0) == M
+        out_flat_n = (output.dim(1) if output.num_dims == 2
+                      else output.dim(1) * output.dim(2))
+        assert out_flat_n == N, (out_flat_n, N)
+        block = bn * wpc * 32
+        params = [M, N, K, num_workers, bn, wpc]
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (block, 1, 1), 1, 64))
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input_fp8, weight_fp8, input_scale, weight_scale, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "fp8_gemm_dense_gemv_m1_sm100", params)
+
     # D1 (2026-05-17): variants that fuse per-128-col-group UE8M0 quantize
     # into the GEMM epilogue — output is FP8 + packed scale uint32 instead
     # of bf16. Eliminates the downstream per_token_group_quantize_fp8 task
@@ -3344,6 +3408,25 @@ class PersistentKernel:
             # active_expert_mask[0..E_LOCAL-1] followed by
             # actual_count_per_expert[0..E_LOCAL-1] starting at meta row 1.
             e_local = max(1, input.dim(0) // bm_padding)
+            # CORRECTNESS INVARIANT (2026-06-13): the runtime offsets each
+            # CTA's input pointer by bid.x*rows_per_cta rows (input_map row
+            # partition), while the kernel derives my_expert=bid.x/
+            # ctas_per_expert and reads expert my_expert's W13 rows at
+            # my_expert*bm_padding. These align ONLY when rows_per_cta
+            # exactly divides bm_padding AND grid.x tiles the experts
+            # cleanly. A misaligned grid (e.g. grid.x=min(num_workers,
+            # m_total)=136 → rows_per_cta=120 ≠ bm_padding=128) makes
+            # silu_mul read the WRONG w13_out rows (inactive padding=0) →
+            # silu_out=0 → null routed MoE. Caller MUST pass grid.x =
+            # E_local * ctas_per_expert with bm_padding % rows_per_cta == 0.
+            assert (input.dim(0) % grid_dim[0] == 0
+                    and bm_padding % rows_per_cta == 0
+                    and grid_dim[0] == e_local * (bm_padding // rows_per_cta)), (
+                f"moe_silu_mul grid.x={grid_dim[0]} misaligns expert blocks: "
+                f"rows_per_cta={rows_per_cta} must divide bm_padding="
+                f"{bm_padding} and grid.x must equal E_local({e_local})*"
+                f"ctas_per_expert — else silu reads the wrong w13_out rows "
+                f"(null routed MoE).")
         params = [active_mask_offset, ctas_per_expert, e_local]
         # CRITICAL ORDERING (2026-05-14):
         # task_register.cc reads input_ptrs[0] as silu input and

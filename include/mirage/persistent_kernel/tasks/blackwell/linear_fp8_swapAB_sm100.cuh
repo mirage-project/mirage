@@ -342,8 +342,16 @@ __device__ __noinline__ void
                                                cute::Int<NUM_ACC_STAGE>{}));
   auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
 
+  // TMA bytes must match the host-side BMM TMA descriptor's box height for B,
+  // i.e. the rows the TMA engine actually delivers. For decode (batch_size <
+  // MMA_N) the B globalDim is `batch` rows while the descriptor box is MMA_N,
+  // so only `min(batch, MMA_N)` rows are in-bounds and transferred. Counting
+  // the full MMA_N here over-states expect_tx -> ab_full's transaction count is
+  // never satisfied -> the consumer (MMA) warps spin on ab_full forever (the
+  // bs=1 swapAB BMM hang). Mirror the BF16 linear_sm100_mpk.cuh:303 clamp.
+  constexpr int kClampedBN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
   int tma_transaction_bytes =
-      sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler) +
+      sizeof(T_) * kClampedBN * cute::size<2>(mma_tiler) +
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 
   constexpr int TILE_SIZE = 128;

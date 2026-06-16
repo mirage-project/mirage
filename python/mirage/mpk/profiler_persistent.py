@@ -112,6 +112,8 @@ event_name_list = {
     304: "TASK_DEEPSEEK_MLA_ROPE_SM100",
     305: "TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100",
     306: "TASK_FP8_GEMM_DENSE_SM100",
+    307: "TASK_FP8_GEMM_DENSE_GEMV_M1_SM100",
+    308: "TASK_FP8_GEMM_DENSE_FINEN_SM100",
     309: "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100",
     311: "TASK_FP8_GROUP_GEMM_SMALLM_SM100",
     312: "TASK_FP8_GROUP_GEMM_LARGEM_SM100",
@@ -180,16 +182,33 @@ def export_to_perfetto_trace(
     tgen = TraceGenerator(file_name)
 
     tid_map = {}
+    pid_map = {}
     track_map = {}
+
+    def _get_tid(block_idx, group_idx):
+        # Lazily materialize the (block, group) track. The buffer header's
+        # num_blocks/num_groups can under-count the worker grid at higher TP
+        # (e.g. TP8 emitted events for block 48 while the header reported
+        # fewer), which previously KeyError'd. Create on demand instead.
+        key = (block_idx, group_idx)
+        tid = tid_map.get(key)
+        if tid is not None:
+            return tid
+        pid = pid_map.get(block_idx)
+        if pid is None:
+            pid = tgen.create_group(f"block_{block_idx}")
+            pid_map[block_idx] = pid
+        tid = pid.create_group(f"group_{group_idx}")
+        tid_map[key] = tid
+        return tid
+
     for block_idx in range(num_blocks):
-        pid = tgen.create_group(f"block_{block_idx}")
         for group_idx in range(num_groups):
-            tid = pid.create_group(f"group_{group_idx}")
-            tid_map[(block_idx, group_idx)] = tid
+            _get_tid(block_idx, group_idx)
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
         event = event_name_list.get(event_idx, f"UNKNOWN_{event_idx}") + f"_{event_no}"
-        tid = tid_map[(block_idx, group_idx)]
+        tid = _get_tid(block_idx, group_idx)
 
         if (block_idx, group_idx, event_idx) in track_map:
             track = track_map[(block_idx, group_idx, event_idx)]
@@ -227,6 +246,13 @@ def export_to_csv(
 
     pending = {}  # (block, group, event_idx) -> (event_no, begin_ts)
     rows = []
+    # A profile-start-step / single-graph capture clips begin/end pairs at the
+    # window edges: an END can appear whose BEGIN was before the window, and a
+    # BEGIN can be left open whose END is after it. Those boundary partials are
+    # expected, so skip them (don't abort the whole export); count them so a
+    # genuine buffer OVERFLOW (many dangling) still surfaces as a loud warning.
+    n_orphan_end = 0
+    n_redundant_begin = 0
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
         key = (block_idx, group_idx, event_idx)
@@ -234,19 +260,15 @@ def export_to_csv(
 
         if event_type == EventType.kBegin.value:
             if key in pending:
-                prev_no, prev_ts = pending[key]
-                raise RuntimeError(
-                    f"dangling BEGIN: block={block_idx} group={group_idx} "
-                    f"event={name} event_no={prev_no} ts={prev_ts} has no END "
-                    f"before next BEGIN at event_no={event_no}"
-                )
+                # Prior BEGIN never closed (its END fell outside the window);
+                # restart from this BEGIN rather than aborting.
+                n_redundant_begin += 1
             pending[key] = (event_no, timestamp)
         elif event_type == EventType.kEnd.value:
             if key not in pending:
-                raise RuntimeError(
-                    f"END without matching BEGIN: block={block_idx} "
-                    f"group={group_idx} event={name} event_no={event_no}"
-                )
+                # END whose BEGIN preceded the capture window — skip.
+                n_orphan_end += 1
+                continue
             begin_no, begin_ts = pending.pop(key)
             duration = (timestamp - begin_ts) & 0xFFFFFFFF
             rows.append(
@@ -259,13 +281,13 @@ def export_to_csv(
                  timestamp, timestamp, 0)
             )
 
-    if pending:
-        (b, g, e), (no, ts) = next(iter(pending.items()))
-        name = event_name_list.get(e, f"UNKNOWN_{e}")
-        raise RuntimeError(
-            f"{len(pending)} dangling BEGIN event(s) with no matching END "
-            f"(profiler buffer likely overflowed). Example: block={b} "
-            f"group={g} event={name} event_no={no} ts={ts}"
+    if n_orphan_end or n_redundant_begin or pending:
+        print(
+            f"[profiler csv] boundary partials skipped: {n_orphan_end} orphan "
+            f"END, {n_redundant_begin} re-opened BEGIN, {len(pending)} still-open "
+            f"BEGIN at EOF (expected for a mid-flight capture; a LARGE count "
+            f"relative to {len(rows)} complete events would indicate buffer "
+            f"overflow)."
         )
 
     with open(file_name, "w", newline="") as f:

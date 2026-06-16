@@ -979,17 +979,23 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // the gmem tensor's stride[] array — for input/output that's the
       // H-spanning stride[0], for weight it's the within-head stride[1].
       constexpr int MMA_M_BMM = 128;
-      constexpr int MMA_N_BMM = 16;
       constexpr int BLOCK_K_BMM = 128;
       bool is_output_mpk = (param_id == (size_t)(task_desc.num_inputs));
       if (param_id == 0) {
         // input_fp8 -> kernel's TMA_B (B-side after swapAB).
         int batch = tensor_desc.dim[0];
+        // Box height must match the kernel's MMA_N tile clamped to the real
+        // batch rows. TMA transaction-byte accounting is EXACT (per phase): if
+        // the box credits more bytes than the kernel's expect_tx, ab_full is
+        // poisoned and the consumer (MMA) warps spin forever (the bs=1 swapAB
+        // BMM hang). Mirror the BF16 tma.cuh min(MMA_N, batch) clamp.
+        int const mma_n_bmm = (batch <= 8) ? 8 : 16;
+        int const b_box_rows = (mma_n_bmm < batch) ? mma_n_bmm : batch;
         int K = tensor_desc.dim[2];
         int row_stride = tensor_desc.stride[0]; // H * D_in
         uint64_t gd[5] = {(uint64_t)K, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)row_stride * 1, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)BLOCK_K_BMM, (uint32_t)MMA_N_BMM, 1, 1, 1};
+        uint32_t bd[5] = {(uint32_t)BLOCK_K_BMM, (uint32_t)b_box_rows, 1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
             cuTensorMapEncodeTiled(tma_desc,
@@ -1040,11 +1046,16 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       } else if (is_output_mpk) {
         // output (BF16): dim=[N, H_per_task, D_out_per_task].
         int batch = tensor_desc.dim[0];
+        // Match the kernel's MMA_N tile clamped to real batch rows (same
+        // exact-tx reasoning as the B-input box above); a stale MMA_N=16 box
+        // here writes OOB rows into the kernel's MMA_N-row smem stage.
+        int const mma_n_bmm = (batch <= 8) ? 8 : 16;
+        int const out_box_rows = (mma_n_bmm < batch) ? mma_n_bmm : batch;
         int output_pt = tensor_desc.dim[2];
         int row_stride = tensor_desc.stride[0]; // H * D_out
         uint64_t gd[5] = {(uint64_t)output_pt, (uint64_t)batch, 1, 1, 1};
         uint64_t gs[4] = {(uint64_t)row_stride * 2, 0, 0, 0};
-        uint32_t bd[5] = {(uint32_t)MMA_M_BMM, (uint32_t)MMA_N_BMM, 1, 1, 1};
+        uint32_t bd[5] = {(uint32_t)MMA_M_BMM, (uint32_t)out_box_rows, 1, 1, 1};
         uint32_t es[5] = {1, 1, 1, 1, 1};
         CUresult result =
             cuTensorMapEncodeTiled(tma_desc,
@@ -1614,6 +1625,40 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_FP8_GEMM_DENSE_FINEN_SM100: {
+      // fine-N: identical to the dense case EXCEPT the B weight descriptor
+      // (param_id==1) box height = BN(16) to match SMEM SB=BN*BK; the A input
+      // (param_id==0) keeps box=BM=128. MUST equal the codegen BN (=16).
+      constexpr int BK_BOX = 128;
+      int OUTER_BOX = (param_id == 1) ? 16 : 128;
+      constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      constexpr CUtensorMapInterleave interleave =
+          CU_TENSOR_MAP_INTERLEAVE_NONE;
+      constexpr CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+      constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+      constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+      int outer = tensor_desc.dim[0];
+      int K_local = tensor_desc.dim[1];
+      uint64_t row_stride_bytes = (uint64_t)tensor_desc.stride[0];
+      uint64_t gd[2] = {(uint64_t)K_local, (uint64_t)outer};
+      uint64_t gs[1] = {row_stride_bytes};
+      uint32_t bd[2] = {BK_BOX, (uint32_t)OUTER_BOX};
+      uint32_t es[2] = {1, 1};
+      CUresult err = cuTensorMapEncodeTiled(tma_desc,
+                                            fmt,
+                                            2,
+                                            tensor_desc.base_ptr,
+                                            gd,
+                                            gs,
+                                            bd,
+                                            es,
+                                            interleave,
+                                            swizzle,
+                                            l2,
+                                            oob);
+      assert(err == CUDA_SUCCESS);
+      break;
+    }
     case TASK_FP8_GEMM_DENSE_SM100: {
       // Dense FP8 GEMM TMA for A [M,K] and B [N,K], both row-major raw
       // e4m3 bytes. Scales are loaded directly, not through TMA. SplitK
@@ -1946,6 +1991,15 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         constexpr int D_K = 576;
         int const total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
         int total_rows = total_elements / D_K; // B * Q_LEN * NUM_HEADS
+        // Empty-Q guard (TP1 bring-up; pre-existing): a registered task whose Q
+        // input is 0-sized at this config yields total_rows==0, which
+        // cuTensorMapEncodeTiled rejects (every globalDim must be >= 1). Emit a
+        // minimal valid 1-row descriptor instead — such a task performs 0 TMA
+        // row-loads, so the descriptor is never dereferenced. Non-empty tensors
+        // (all real decode rows, every TP2/4/8/TP8 path) are unaffected.
+        if (total_rows < 1) {
+          total_rows = 1;
+        }
         int d_k = D_K;
         int k_iters = d_k / BK;
         uint32_t const packed_mtp =
@@ -1964,6 +2018,15 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           if (hpb <= 0) {
             hpb = num_heads;
           }
+        }
+        // Keep the box height within the (possibly clamped) global rows so the
+        // empty-Q dummy descriptor stays valid (box height <= global rows). A
+        // no-op for real tasks where hpb (heads) <= total_rows by construction.
+        if (hpb > total_rows) {
+          hpb = total_rows;
+        }
+        if (hpb < 1) {
+          hpb = 1;
         }
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
@@ -2348,6 +2411,7 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
+    case TASK_FP8_GEMM_DENSE_FINEN_SM100:
     case TASK_FP8_GEMM_DENSE_SM100: {
       // A_fp8 and B_fp8 use TMA; scale tensors are plain LDG inputs.
       // SplitK uses the same TMA layout (full K extent in descriptor;

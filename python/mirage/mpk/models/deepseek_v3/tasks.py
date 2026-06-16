@@ -115,86 +115,38 @@ def fused_rmsnorm_quantize_fp8_layer(
         tb_graph, "fused_rmsnorm_quantize_fp8_sm100", params)
 
 
-def mla_kv_gather_unified_layer(
+def mla_kv_append_layer(
     pk,
     c_latent_new: DTensor,
     k_pe_new: DTensor,
-    paged_cache: DTensor,
-    contiguous_kv: DTensor,
-    ckv_sep: DTensor,
-    kpe_sep: DTensor,
+    kv_buf: DTensor,
     mla_params: tuple,
     grid_dim: tuple,
     block_dim: tuple,
     c_latent_row_stride: int = None,
-    c_latent_offset_elems: int = 0,
     k_pe_row_stride: int = None,
-    k_pe_offset_elems: int = 0,
-    num_gather_splits: int = 1,
 ):
-    """Append paged KV once, then materialize decode or prefill views.
+    """bs=1 contiguous KV append (no page table).
 
-    Stride/offset overrides let the kernel read c_latent / k_pe from a
-    wider parent buffer (QKV-a fused path). Defaults preserve legacy.
-
-    num_gather_splits > 1 fans the formerly-serial seq_pos loop in
-    append+gather phases over `num_gather_splits` CTAs (each CTA strides by
-    the split count). Caller must set `grid_dim[1] == num_gather_splits`.
+    Writes the new token rows' [c_latent(D_V) | k_pe(D_K-D_V)] into the
+    per-layer contiguous KV buffer at row = sequence position (single
+    sequence => logical position == physical row). Replaces the paged-cache
+    append + page gather; the MLA decode kernels read ``kv_buf`` directly via
+    their contiguous branch. ``kv_buf`` is tracked as the task output so the
+    decode task gets a same-iteration dependency edge.
     """
-    d_k, d_v, page_size = mla_params
-    slice_override = (
-        c_latent_row_stride is not None or
-        c_latent_offset_elems != 0 or
-        k_pe_row_stride is not None or
-        k_pe_offset_elems != 0)
-    # The C++ register on this branch accepts 3 | 5 | 6 params:
-    # [d_k, d_v, ps] (+ [c_stride, k_stride] (+ [num_gather_splits])).
-    # Slice offsets are carried by the mpk.narrow views, not params.
-    assert c_latent_offset_elems == 0 and k_pe_offset_elems == 0, (
-        "offset params were dropped from the upstream task ABI; pass narrow "
-        "views instead")
-    if num_gather_splits > 1:
-        assert grid_dim[1] == num_gather_splits, (
-            f"grid_dim.y ({grid_dim[1]}) must match num_gather_splits "
-            f"({num_gather_splits}) for the fan-out path.")
-        params = [
-            d_k, d_v, page_size,
-            c_latent_row_stride if c_latent_row_stride is not None else d_v,
-            k_pe_row_stride if k_pe_row_stride is not None else 128,
-            num_gather_splits,
-        ]
-    elif slice_override:
-        params = [
-            d_k, d_v, page_size,
-            c_latent_row_stride if c_latent_row_stride is not None else d_v,
-            k_pe_row_stride if k_pe_row_stride is not None else 128,
-        ]
-    else:
-        params = [d_k, d_v, page_size]
+    d_k, d_v = mla_params
+    params = [
+        d_k, d_v,
+        c_latent_row_stride if c_latent_row_stride is not None else d_v,
+        k_pe_row_stride if k_pe_row_stride is not None else 128,
+    ]
     tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    # With num_gather_splits>1 the kernel partitions seq_pos itself
-    # (strided by split_idx = grid.y). All CTAs read the same base
-    # pointers, so dim_maps must NOT slice any tensor along grid.y.
-    # Pre-existing single-split callers also work with all -1 since
-    # grid.y=1 makes slicing a no-op either way.
     tb_graph.new_input(c_latent_new, (-1, -1, -1), -1, True)
     tb_graph.new_input(k_pe_new, (-1, -1, -1), -1, True)
-    tb_graph.new_input(paged_cache, (-1, -1, -1), 1, True)
-    tb_graph.new_input(contiguous_kv, (-1, -1, -1), -1, True)
-    tb_graph.new_input(ckv_sep, (-1, -1, -1), -1, True)
-    tb_graph.new_input(kpe_sep, (-1, -1, -1), -1, True)
-    pk.kn_graph.customized(
-        [
-            c_latent_new,
-            k_pe_new,
-            paged_cache,
-            contiguous_kv,
-            ckv_sep,
-            kpe_sep,
-        ],
-        tb_graph,
-    )
-    pk.kn_graph.register_task(tb_graph, "mla_kv_gather_unified_sm100", params)
+    tb_graph.new_input(kv_buf, (-1, -1, -1), -1, True)
+    pk.kn_graph.customized([c_latent_new, k_pe_new, kv_buf], tb_graph)
+    pk.kn_graph.register_task(tb_graph, "mla_kv_append_sm100", params)
 
 
 def deepseek_mla_rope_q_layer(
@@ -344,57 +296,6 @@ def deepseek_mla_rope_k_layer(
         tb_graph,
     )
     pk.kn_graph.register_task(tb_graph, "deepseek_mla_rope_k_sm100", params)
-
-
-def mla_prefill_absorbed_layer(
-    pk,
-    q_nope_pe: DTensor,  # [S, H, D_CKV + D_KPE] flattened
-    kv: DTensor,         # [B * max_seq_len, D_CKV + D_KPE]
-    output: DTensor,     # [S, H, D_V]
-    mla_params: tuple,   # (num_heads, seq_len, d_ckv, d_kpe, d_v)
-    grid_dim: tuple,     # (H, num_q_blocks, B)
-    block_dim: tuple,    # (256, 1, 1)
-):
-    num_heads, seq_len, d_ckv, d_kpe, d_v = mla_params
-    params = [num_heads, seq_len, d_ckv, d_kpe, d_v]
-
-    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    tb_graph.new_input(q_nope_pe, (-1, -1, -1), -1, True)
-    tb_graph.new_input(kv, (-1, -1, -1), -1, True)
-    tb_graph.new_input(output, (-1, -1, -1), -1, True)
-    pk.kn_graph.customized([q_nope_pe, kv, output], tb_graph)
-    pk.kn_graph.register_task(tb_graph, "mla_prefill_absorbed_sm100", params)
-
-
-def mla_prefill_tp8_chunked_layer(
-    pk,
-    q_nope: DTensor,    # [B, q_len, H, 128] OR fused-Q [B, q_len, H, 192]
-    q_pe: DTensor,      # [B, q_len, H, 64]  OR same as q_nope if fused
-    k_nope: DTensor,    # [B, kv_len, H, 128]
-    k_rope: DTensor,    # [B, kv_len, 1, 64]
-    v: DTensor,         # [B, kv_len, H, 128]
-    output: DTensor,    # [B, q_len, H, 128]
-    mla_params: tuple,  # (num_heads, q_len, kv_len, q_start)
-    grid_dim: tuple,    # (H, ceil(q_len/64), B)
-    block_dim: tuple,   # (128, 1, 1)
-    qfused_mode: int = 0,  # 0 = legacy split q_nope/q_pe; 1 = fused
-):
-    num_heads, q_len, kv_len, q_start = mla_params
-    params = [num_heads, q_len, kv_len, q_start, qfused_mode]
-
-    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    tb_graph.new_input(q_nope, (-1, -1, -1), -1, True)
-    tb_graph.new_input(q_pe, (-1, -1, -1), -1, True)
-    tb_graph.new_input(k_nope, (-1, -1, -1), -1, True)
-    tb_graph.new_input(k_rope, (-1, -1, -1), -1, True)
-    tb_graph.new_input(v, (-1, -1, -1), -1, True)
-    tb_graph.new_input(output, (-1, -1, -1), -1, True)
-    pk.kn_graph.customized(
-        [q_nope, q_pe, k_nope, k_rope, v, output], tb_graph
-    )
-    pk.kn_graph.register_task(
-        tb_graph, "mla_prefill_tp8_chunked_sm100", params
-    )
 
 
 def mla_mtp_decode_layer(

@@ -192,6 +192,14 @@ public:
   int register_fp8_gemm_dense_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params,
                                          bool mediumm);
+  // ferret v002 CUDA-core GEMV (M=1 decode), raw-ptr ABI. params: [M,N,K,
+  // num_workers, BN, WPC]. default-OFF lever (MPK_DSV3_DENSE_GEMV).
+  int register_fp8_gemm_dense_gemv_m1_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  // fine-N dense GEMM (mediumm body @ BN=16, NS=6). default-OFF
+  // MPK_DSV3_DENSE_FINEN.
+  int register_fp8_gemm_dense_finen_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params);
   int register_fp8_gemm_dense_decode_splitk_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_gemm_dense_fp8out_sm100_task(
@@ -214,6 +222,8 @@ public:
                                           std::vector<int> const &params);
   int register_assemble_q_decode_sm100_task(threadblock::Graph const &bgraph,
                                             std::vector<int> const &params);
+  int register_mla_kv_append_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,

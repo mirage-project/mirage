@@ -864,11 +864,25 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, /*mediumm=*/false);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_gemv_m1_sm100") {
+    // ferret v002 CUDA-core GEMV (M=1 decode). Same (4 in, 1 out) shape as the
+    // dense GEMM, but its own enum so runtime.cc can route A/B as RAW pointers
+    // (input_ptrs[0]/[1]) instead of creating TMA descriptors.
+    int variant_id = task_register->register_fp8_gemm_dense_gemv_m1_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_GEMV_M1_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_mediumm_sm100") {
     int variant_id = task_register->register_fp8_gemm_dense_sm100_task(
         customized->bgraph, params, /*mediumm=*/true);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_finen_sm100") {
+    // fine-N (mediumm body @ BN=16). Own enum so tma.cuh uses B-box=16.
+    int variant_id = task_register->register_fp8_gemm_dense_finen_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_FINEN_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_decode_splitk_sm100") {
     int variant_id =
         task_register->register_fp8_gemm_dense_decode_splitk_sm100_task(
@@ -952,6 +966,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_ASSEMBLE_Q_DECODE_SM100, variant_id);
+  }
+  // bs=1 contiguous KV append (no page table). kv_buf is tracked as an
+  // output so the MLA decode task (which reads it the same iteration) gets a
+  // producer->consumer dependency edge.
+  else if (name == "mla_kv_append_sm100") {
+    int variant_id = task_register->register_mla_kv_append_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_KV_APPEND_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {

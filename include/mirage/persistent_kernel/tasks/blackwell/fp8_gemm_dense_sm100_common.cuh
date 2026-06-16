@@ -94,6 +94,11 @@ __device__ __forceinline__ uint64_t mkdesc(int a) {
   return denc(a) | (denc(1024) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
 }
 
+// C_row_stride: row stride (elements) of the OUTPUT buffer. Defaults to N
+// (dense row-major). Pass the parent row width when C is a narrow column
+// view of a wider buffer (e.g. the TP2 gate/up halves of mlp_mid) — at M=1
+// the stride never matters, but multi-row writes corrupt the parent buffer
+// if rows advance by N instead of the view stride.
 template <int BN, int NS, int NE>
 __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
                                               CUtensorMap const *tb_ptr,
@@ -104,7 +109,8 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
                                               int const N,
                                               int const K,
                                               int const worker_idx,
-                                              int const num_workers) {
+                                              int const num_workers,
+                                              int const C_row_stride = -1) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   constexpr int BM = 128, BK = 128, UK = 32;
   int const tid = threadIdx.x, wid = tid / 32;
@@ -158,8 +164,18 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   constexpr uint32_t idesc =
       (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
 
+  // Stage index + parity MUST come from a CONTINUOUS K-block counter (gk /
+  // gki), exactly like the accumulator ring below already does with
+  // gki % NE: the old `s = ki % NS` reset the stage cursor every TILE
+  // iteration while the mbarriers' real parity stream is continuous, so any
+  // multi-tile-iter task (total tiles > num_workers) with nk % NS != 0
+  // desynced at the tile boundary — synccheck "Barrier error. Missing wait"
+  // at mb_arrive_tx, then cudaErrorLaunchFailure (2026-06-13; this is the
+  // long-parked B36 multi-tile-iter bug — split-K merely forced
+  // multi-tile-iter early). For single-tile-iter or nk % NS == 0 the
+  // continuous form is bit-identical to the old sequence.
   if (wid == 0 && elect_one_sync()) {
-    int ph = 0;
+    int gk = 0;
     for (int iter = 0;; iter++) {
       int bidx = iter * num_workers + worker_idx;
       if (bidx >= total) {
@@ -167,12 +183,10 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
       }
       int bm = bidx / nn, bn = bidx % nn;
       int om = bm * BM, on = bn * BN;
-      for (int ki = 0; ki < nk; ki++) {
-        int s = ki % NS;
-        mb_wait(be + s * 8, ph ^ 1);
-        if (s == NS - 1) {
-          ph ^= 1;
-        }
+      for (int ki = 0; ki < nk; ki++, gk++) {
+        int s = gk % NS;
+        int p = (gk / NS) & 1;
+        mb_wait(be + s * 8, p ^ 1);
         int as_ = sA(s);
         int bs_ = sBl(s);
         int mb = bf + s * 8;
@@ -182,7 +196,6 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
       }
     }
   } else if (wid == 1 && elect_one_sync()) {
-    int ph = 0;
     int gki = 0;
     for (int iter = 0;; iter++) {
       int bidx = iter * num_workers + worker_idx;
@@ -190,11 +203,9 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
         break;
       }
       for (int ki = 0; ki < nk; ki++, gki++) {
-        int s = ki % NS;
-        mb_wait(bf + s * 8, ph);
-        if (s == NS - 1) {
-          ph ^= 1;
-        }
+        int s = gki % NS;
+        int p = (gki / NS) & 1;
+        mb_wait(bf + s * 8, p);
         int ai = gki % NE;
         int ap = (gki / NE) & 1;
         mb_wait(bte + ai * 8, ap ^ 1);
@@ -294,7 +305,8 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
       }
 
       if (mi < M) {
-        __nv_bfloat16 *row = C + (long long)mi * N + on;
+        long long const c_stride = (C_row_stride > 0) ? C_row_stride : N;
+        __nv_bfloat16 *row = C + (long long)mi * c_stride + on;
 #pragma unroll
         for (int n = 0; n < BN; n += 16) {
           if (on + n + 15 < N) {

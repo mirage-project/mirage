@@ -482,6 +482,10 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // bs=1 contiguous KV append: request_id = bid.x
+            if (task_type == TASK_MLA_KV_APPEND_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
             // Unified MLA KV gather: request_id = bid.x. When the builder
             // requests fan-out (grid_dim.y > 1), kv_idx carries the gather
             // split index so each CTA strides seq_pos by NUM_GATHER_SPLITS.
@@ -500,6 +504,8 @@ void register_mugraph(
             // tiling loop. Grouped variants share the same metadata
             // shape; m_indices selects the active expert per output tile.
             if (task_type == TASK_FP8_GEMM_DENSE_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_FINEN_SM100 ||
+                task_type == TASK_FP8_GEMM_DENSE_GEMV_M1_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100) {
@@ -1311,7 +1317,15 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_DENSE_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
+    // NOTE: TASK_FP8_GEMM_DENSE_GEMV_M1_SM100 (307) is DELIBERATELY ABSENT here
+    // (and from the SM100-TMA range [231,256]): it is a CUDA-core GEMV that
+    // carries A/B as RAW device pointers in input_ptrs[0]/[1], NOT TMA
+    // descriptors. Do NOT add it. If TMA-creation is ever keyed off the
+    // CUtensorMap* signature or the range is widened, EXCLUDE 307 explicitly —
+    // else the kernel reinterprets tensormap bytes as FP8 weights
+    // (garbage/IMA).
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_FINEN_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100 || "
            "task.at(\"task_type\") == "
@@ -1949,6 +1963,7 @@ TaskGraphResult print_task_graph(
       "TASK_MLA_MTP_DECODE_TP4_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP8_SM100] =
       "TASK_MLA_MTP_DECODE_TP8_SM100";
+  task_type_to_name[TASK_MLA_KV_APPEND_SM100] = "TASK_MLA_KV_APPEND_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SPLIT_SM100] =
       "TASK_MLA_KV_GATHER_SPLIT_SM100";
@@ -1974,6 +1989,10 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100";
   task_type_to_name[TASK_FP8_GEMM_DENSE_SM100] = "TASK_FP8_GEMM_DENSE_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_GEMV_M1_SM100] =
+      "TASK_FP8_GEMM_DENSE_GEMV_M1_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_FINEN_SM100] =
+      "TASK_FP8_GEMM_DENSE_FINEN_SM100";
   task_type_to_name[TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100] =
       "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =

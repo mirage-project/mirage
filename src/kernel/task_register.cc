@@ -489,13 +489,23 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->dtensor.layout == layout::DmemRowMajor);
   // Shape should be guranteed by higher-level APIs
 
-  int outer_dim_size = 1, inner_dim_size, outer_dim_stride, output_size;
+  int outer_dim_size = 1, inner_dim_size, output_size;
   for (int i = 0; i < input_ops[0]->dtensor.num_dims - 1; i++) {
     outer_dim_size *= input_ops[0]->dtensor.dim[i];
   }
   inner_dim_size =
       input_ops[0]->dtensor.dim[input_ops[0]->dtensor.num_dims - 1];
-  outer_dim_stride = inner_dim_size;
+  // Row strides from the dtensor stride channel (view-safe): the input may
+  // be a narrow view of a wider row (kpe_sep slice of the 576-wide KV
+  // buffer), so its stride can exceed inner_dim_size; the output is dense.
+  int in_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
+  int out_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
+  if (in_stride <= 0) {
+    in_stride = inner_dim_size;
+  }
+  if (out_stride <= 0) {
+    out_stride = inner_dim_size;
+  }
   output_size = output_ops[0]
                     ->output_tensors[0]
                     .dim[output_ops[0]->output_tensors[0].num_dims - 1];
@@ -518,11 +528,12 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
              "runtime_config.qo_indptr_buffer[0];");
       code.e("if (q_len_id_ <= 8) return;");
     }
-    code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
+    code.e("kernel::identity_task_impl<bfloat16, $, $, $, $, $>(",
            outer_dim_size,
            inner_dim_size,
-           outer_dim_stride,
-           output_size);
+           in_stride,
+           output_size,
+           out_stride);
     code.e("    task_desc->input_ptrs[0],");
     code.e("    task_desc->output_ptrs[0]);");
   }
@@ -3642,9 +3653,16 @@ int TaskRegister::register_mla_decode_sm100_task(
         "  int gi_ = task_desc->task_metadata.request_id;  // head group idx");
   }
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -3933,7 +3951,9 @@ int TaskRegister::register_mla_prefill_tp8_sm100_task(
   assert(params.size() == 2);
   int num_heads = params[0];
   int seq_len = params[1];
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2, matching the chunked/decode MLA registers (audit #1).
+  float const _mscale_y = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_y * _mscale_y;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   mirage::transpiler::CodeKeeper code;
@@ -3975,7 +3995,15 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   int kv_len_max = params[2];
   int q_start = params[3];
   int qfused_mode = (params.size() == 5) ? params[4] : 0;
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2 on the attention scale, same as every decode MLA register:
+  // the DSv3 checkpoint serves with rope_scaling {yarn, factor=40,
+  // mscale_all_dim=1.0}; vLLM/SGLang apply yarn_get_mscale(40, 1.0)^2
+  // unconditionally and the cos/sin tables carry no mscale (ratio 1.0), so
+  // the whole correction belongs here. The bare 1/sqrt(192) this register
+  // used previously under-scaled prefill attention by 1.874x vs decode on
+  // the SAME cache (graph-audit finding #1, 2026-06-12).
+  float const mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * mscale * mscale;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
   // FuseTensor row-swap layout (2026-05-12 user #2 v2): when qfused_mode=1,
   // weight is rearranged at load time as [all_heads_nope; all_heads_pe]
@@ -4052,11 +4080,12 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   code.e("if (!prompt_prefill_) return;");
   code.e("int q_blocks_ = (Q_LEN_ + 63) / 64;");
   code.e("if (task_desc->task_metadata.kv_idx >= q_blocks_) return;");
-  code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("int KV_LEN_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
-  code.e("int Q_START_ = KV_LEN_ - Q_LEN_;");
+  // bs=1 contiguous KV: step[req] is the pre-append KV length (the rows
+  // already in the per-layer contiguous buffer before this iteration), so
+  // this segment's queries start at step and attend [0, step + Q_LEN). Same
+  // step-based contract as the decode registers — no page table.
+  code.e("int Q_START_ = runtime_config.step[req_id_];");
+  code.e("int KV_LEN_ = Q_START_ + Q_LEN_;");
   if (qfused_mode == 1) {
     // Row-swap fused buffer: row stride = num_heads * 192;
     // Qp_ region starts at num_heads * D_QK_NOPE within the row.
@@ -4114,7 +4143,9 @@ int TaskRegister::register_mla_prefill_tp8_chunked_splitk_sm100_task(
   int q_start = params[3];
   int num_splits = params[4];
   int nqb = params[5];
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2, matching the chunked/decode MLA registers (audit #1).
+  float const _mscale_y = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_y * _mscale_y;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
 
   mirage::transpiler::CodeKeeper code;
@@ -4154,7 +4185,9 @@ int TaskRegister::register_mla_prefill_tp8_chunked_reduce_sm100_task(
   int q_len = params[1];
   int num_splits = params[2];
   int nqb = params[3];
-  float sm_scale = 1.0f / sqrtf(192.0f);
+  // YARN mscale^2, matching the chunked/decode MLA registers (audit #1).
+  float const _mscale_y = 0.1f * 1.0f * logf(40.0f) + 1.0f;
+  float sm_scale = (1.0f / sqrtf(192.0f)) * _mscale_y * _mscale_y;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4392,9 +4425,16 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.merge_task_offset & 0xffff;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -4460,9 +4500,16 @@ int TaskRegister::register_mla_mtp_reduce_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -4872,10 +4919,10 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
            "runtime_config.prompt_length[req_id_] && q_len_ > 8;");
     code.e("if (!prompt_prefill_) return;");
-    code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-    code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-    code.e("int seq_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-           "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+    // bs=1 contiguous KV: the request's full KV length = step[req] + q_len
+    // (pre-append rows + this iteration's new tokens). Same step-based
+    // contract as the attention/GEMM registers — no page table.
+    code.e("int seq_len_ = runtime_config.step[req_id_] + q_len_;");
     code.e("if (row_local_ < 0 || row_local_ >= seq_len_) return;");
   } else if (active_mode == 4) {
     // process_all_rows: no skip — every CTA quantizes its
@@ -5696,10 +5743,33 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   constexpr int MMA_M = 128;
-  constexpr int MMA_N = 16;
-  constexpr int num_ab_stages = 8;
-  constexpr int num_acc_stages = 2;
-  constexpr int num_c_stages = 4;
+  // MMA_N is the batch (N) tile. At bs=1 decode (batch_size==1) the default 16
+  // wastes ~half the tcgen05 epilogue TMEM->reg fragment (~MMA_M*MMA_N/threads
+  // FP32/thread) — a FIXED register consumer that, combined with the FP8 scale
+  // descriptors, overflows this __noinline__ task's ~216-reg budget under the
+  // megakernel __launch_bounds__(256,1) (ptxas C7600, deterministic across CUDA
+  // 13.0/13.2/13.3; stage cuts alone don't fix it). N=8 (still a valid mul-of-8
+  // tcgen05 N, ≥ batch) halves that fragment. Guard batch_size<=8 so prefill
+  // (batch up to 16) keeps N=16. Codex-vetted 2026-06-14; box JIT re-verify
+  // (C7600 gone + cos correct); fallback = absorbed decode Q+O (avoid the BMM).
+  int const MMA_N = (batch_size <= 8) ? 8 : 16;
+  // Stage config. The per-head BMM contracts over REDUCTION_SIZE = D_in with
+  // BLOCK_K=128, so k_tiles = ceil(D_in/128). At the decode o_proj / kv_b shape
+  // REDUCTION_SIZE=128 => 1 K-tile: there is NO intra-task K-depth to pipeline,
+  // so the default 8 AB stages are pure register/smem waste — and on sm100a
+  // (CUDA 13.x ptxas) they push this __noinline__ FP8 task past the
+  // megakernel's ~216-reg budget (ptxas C7600 "register allocation failed").
+  // For the single-K-tile case use a shallow pipeline (perf-neutral at 1 K-tile
+  // / bs=1 decode); KEEP the deep 8/2/4 for any multi-K-tile BMM (real
+  // K-latency to hide). Emitted as integer literals into the generated kernel
+  // (not used in a constexpr context here), so int-const is fine. Reviewed +
+  // Codex-vetted 2026-06-14; needs box JIT re-verify (C7600 gone + cos
+  // correct). Fallback ladder if C7600 persists: 2/1/1 -> 2/1/2 -> 1/1/1.
+  int const bmm_k_tiles = (reduction_size + 127) / 128;
+  bool const bmm_single_k_tile = (bmm_k_tiles <= 1);
+  int const num_ab_stages = bmm_single_k_tile ? 2 : 8;
+  int const num_acc_stages = bmm_single_k_tile ? 1 : 2;
+  int const num_c_stages = bmm_single_k_tile ? 1 : 4;
   constexpr int B = 3;
   constexpr int M = 3;
   constexpr int S = 3;
@@ -5979,7 +6049,10 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
                                            std::vector<int> const &params,
                                            char const *namespace_name,
                                            char const *fn_name,
-                                           TaskType task_type) {
+                                           TaskType task_type,
+                                           int out_row_stride = -1,
+                                           int bn = 128,
+                                           int ns_default = 3) {
   // params: [M, N, K, num_workers, optional runtime_m_mode]
   // runtime_m_mode=0 (default): use min(compile-time M, active_rows) as
   //   runtime M, where active_rows = qo_indptr_buffer[MAX_NUM_BATCHED_REQUESTS]
@@ -6001,10 +6074,16 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   active_rows as runtime M. Used for the decode-only branch of the
   //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
   //   valid on decode iters; prefill iters early-exit).
+  // runtime_m_mode=4 (2026-06-13): GEMV dual-dispatch partner. Skip when
+  //   active_rows==1 (the strict-M1 CUDA-core GEMV writes C at decode); run
+  //   with the active_rows cap when M>1 (prefill + prompt ingestion).
+  //   Partitions the M axis with the GEMV (which gates active_rows!=1) — no
+  //   gap/overlap. Keyed on active_rows (true M) not q_len, so it stays correct
+  //   if bs>1 returns.
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
-  assert(runtime_m_mode >= 0 && runtime_m_mode <= 3);
+  assert(runtime_m_mode >= 0 && runtime_m_mode <= 4);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6017,10 +6096,11 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
            "runtime_config.prompt_length[req_id_] && q_len_ > 8;");
     code.e("if (!prompt_prefill_) return;");
-    code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[0];");
-    code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
-    code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-           "runtime_config.paged_kv_last_page_len_buffer[0];");
+    // bs=1 contiguous KV: runtime M = the post-append KV length
+    // step[req] + q_len (the contiguous-cache rows the kv_b up-projection
+    // must cover). Same step-based contract as the attention registers — no
+    // page table.
+    code.e("int runtime_m_ = runtime_config.step[req_id_] + q_len_;");
   } else if (runtime_m_mode == 2 || runtime_m_mode == 3) {
     // Phase gate + active_rows cap. Mode 2 = prefill-only, 3 = decode-only.
     code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
@@ -6032,6 +6112,17 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     }
     code.e("int active_rows_ = "
            "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
+    code.e("if (runtime_m_ <= 0) return;");
+  } else if (runtime_m_mode == 4) {
+    // GEMV dual-dispatch partner (MPK_DSV3_DENSE_GEMV): the strict-M1 CUDA-core
+    // GEMV writes C at active_rows==1 (decode); this dense GEMM handles M>1
+    // (prefill + prompt ingestion 2..8). Partitions the M (active_rows) axis
+    // with the GEMV's `active_rows!=1` gate — exactly one writer per M, no gap.
+    // Keyed on active_rows (true M), not q_len (which leaves 2..8 unwritten).
+    code.e("int active_rows_ = "
+           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+    code.e("if (active_rows_ == 1) return;");
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   } else {
@@ -6046,7 +6137,23 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   }
-  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  // NS = K-pipeline depth (async smem stages). Default 3. Deepening to 4-6
+  // hides more weight-TMA latency on the single-wave M=1 decode GEMMs (the L6
+  // single-wave-latency bottleneck) — numerically identical (bit-exact), so
+  // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
+  // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
+  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but
+  // NS7=224KB / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a
+  // silent fallback). So clamp [2,6]; this is a sweepable knob, not a blind
+  // bump.
+  int dense_ns = ns_default;
+  if (char const *e = std::getenv("MPK_DSV3_DENSE_NS")) {
+    int v = atoi(e);
+    if (v >= 2 && v <= 6) {
+      dense_ns = v;
+    }
+  }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, bn, dense_ns);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
   code.e("    static_cast<const "
@@ -6058,7 +6165,12 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   code.e("    $,", N);
   code.e("    $,", K);
   code.e("    task_desc->task_metadata.request_id,");
-  code.e("    $);", num_workers);
+  code.e("    $,", num_workers);
+  // Output row stride (elements): the view-safe dtensor.stride[0] of the
+  // output. -1 sentinel = dense (kernel uses N). Only differs from N when
+  // the output is a narrow column view (e.g. the TP2 gate/up halves) —
+  // invisible at M=1, row-corrupting at multi-row without it.
+  code.e("    $);", out_row_stride);
   code.e("}");
   return self->register_task_variant(task_type, code.to_string());
 }
@@ -6067,7 +6179,23 @@ int TaskRegister::register_fp8_gemm_dense_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool mediumm) {
-  (void)bgraph;
+  // Output = the LAST tb-graph input op (store_in_dmem convention: 4 inputs
+  // + the output tensor appended). Use its view-safe row stride.
+  int out_row_stride = -1;
+  {
+    std::vector<tb::TBInputOp *> ops;
+    for (auto const &op : bgraph.operators) {
+      if (op->op_type == mirage::type::TB_INPUT_OP) {
+        ops.push_back(static_cast<tb::TBInputOp *>(op));
+      }
+    }
+    if (!ops.empty()) {
+      kn::DTensor const &out = ops.back()->dtensor;
+      if (out.num_dims >= 2 && out.stride[0] > 0) {
+        out_row_stride = static_cast<int>(out.stride[0]);
+      }
+    }
+  }
   // smallm/mediumm share one TASK_FP8_GEMM_DENSE_SM100 enum; the tile
   // flavor is baked into the per-instance variant body here.
   return register_fp8_gemm_dense_variant(
@@ -6076,7 +6204,90 @@ int TaskRegister::register_fp8_gemm_dense_sm100_task(
       mediumm ? "fp8_gemm_dense_mediumm" : "fp8_gemm_dense_smallm",
       mediumm ? "fp8_gemm_dense_mediumm_sm100_task_impl"
               : "fp8_gemm_dense_smallm_sm100_task_impl",
-      TASK_FP8_GEMM_DENSE_SM100);
+      TASK_FP8_GEMM_DENSE_SM100,
+      out_row_stride);
+}
+
+// fine-N dense GEMM = the mediumm body re-tiled to BN=16 (single-CTA-per-tile,
+// NE=4 baked in the finen fn) + NS default 6. Standalone-validated (ferret
+// v003, qkv_a 34.8->20.5us 1.70x). default-OFF MPK_DSV3_DENSE_FINEN. The BN
+// here (16) MUST equal the tma.cuh TASK_FP8_GEMM_DENSE_FINEN_SM100 B-box (=16).
+int TaskRegister::register_fp8_gemm_dense_finen_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  int out_row_stride = -1;
+  {
+    std::vector<tb::TBInputOp *> ops;
+    for (auto const &op : bgraph.operators) {
+      if (op->op_type == mirage::type::TB_INPUT_OP) {
+        ops.push_back(static_cast<tb::TBInputOp *>(op));
+      }
+    }
+    if (!ops.empty()) {
+      kn::DTensor const &out = ops.back()->dtensor;
+      if (out.num_dims >= 2 && out.stride[0] > 0) {
+        out_row_stride = static_cast<int>(out.stride[0]);
+      }
+    }
+  }
+  return register_fp8_gemm_dense_variant(this,
+                                         params,
+                                         "fp8_gemm_dense_finen",
+                                         "fp8_gemm_dense_finen_sm100_task_impl",
+                                         TASK_FP8_GEMM_DENSE_FINEN_SM100,
+                                         out_row_stride,
+                                         /*bn=*/16,
+                                         /*ns_default=*/6);
+}
+
+// ferret v002 CUDA-core GEMV (M=1 decode), default-OFF lever
+// MPK_DSV3_DENSE_GEMV. RAW-pointer ABI: A/B arrive via input_ptrs[0]/[1] (NOT
+// input_tma_desc_ptrs) — the kernel declares them as CUtensorMap* but
+// reinterpret_casts to raw FP8 internally (no TMA). runtime.cc MUST NOT create
+// TMA descriptors for this task. Template <BN, WPC> is per-shape
+// (params[4]/[5]); blockDim = BN*WPC*32 is set builder-side. Output C via
+// output_ptrs[0] (store_in_dmem convention: 4 inputs A,B,sa,sb + appended
+// output). Numerically a GEMV → token-identical to the tcgen05 dense GEMM
+// (validated standalone qkv_a 1.74x / q_b 1.40x vs smallm<128,6>).
+int TaskRegister::register_fp8_gemm_dense_gemv_m1_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  // params: [M, N, K, num_workers, BN, WPC]
+  assert(params.size() == 6);
+  int N = params[1], K = params[2], num_workers = params[3];
+  int BN = params[4], WPC = params[5];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  // Decode-ONLY gate: this kernel is a strict M=1 GEMV (computes only row 0).
+  // Run iff exactly 1 active row (bs=1 decode). active_rows==0 (no token) OR
+  // >1 (prefill mbt>8) => skip, so it is safe even under dual-dispatch (the
+  // tcgen05 dense GEMM handles prefill; only one of the two writes C per iter).
+  code.e("int active_rows_ = "
+         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
+  code.e("if (active_rows_ != 1) return;");
+  code.e(
+      "kernel::fp8_gemm_dense_gemv_m1::fp8_gemm_dense_gemv_m1_sm100_task_impl"
+      "<$, $>(",
+      BN,
+      WPC);
+  // A/B = RAW FP8 device pointers carried in input_ptrs[0]/[1]; the kernel sig
+  // takes CUtensorMap* and casts back to raw (no TMA descriptor dereference).
+  code.e("    reinterpret_cast<const "
+         "CUtensorMap*>(task_desc->input_ptrs[0]),");
+  code.e("    reinterpret_cast<const "
+         "CUtensorMap*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    1,"); // M = 1 (GEMV; kernel ignores via (void)M)
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e(
+      "    task_desc->task_metadata.request_id,"); // worker_idx for the N-sweep
+  code.e("    $);", num_workers); // C_row_stride defaults to -1 (unused at M=1)
+  code.e("}");
+  return register_task_variant(TASK_FP8_GEMM_DENSE_GEMV_M1_SM100,
+                               code.to_string());
 }
 
 // D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but
@@ -6115,10 +6326,11 @@ static int
     code.e("bool prompt_prefill_ = runtime_config.step[req_id_] < "
            "runtime_config.prompt_length[req_id_] && q_len_ > 8;");
     code.e("if (!prompt_prefill_) return;");
-    code.e("int fp_ = runtime_config.paged_kv_indptr_buffer[0];");
-    code.e("int lp_ = runtime_config.paged_kv_indptr_buffer[1];");
-    code.e("int runtime_m_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-           "runtime_config.paged_kv_last_page_len_buffer[0];");
+    // bs=1 contiguous KV: runtime M = the post-append KV length
+    // step[req] + q_len (the contiguous-cache rows the kv_b up-projection
+    // must cover). Same step-based contract as the attention registers — no
+    // page table.
+    code.e("int runtime_m_ = runtime_config.step[req_id_] + q_len_;");
   } else if (runtime_m_mode == 2 || runtime_m_mode == 3) {
     code.e("int q_len_ = runtime_config.qo_indptr_buffer[1] - "
            "runtime_config.qo_indptr_buffer[0];");
@@ -6137,7 +6349,23 @@ static int
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   }
-  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, 3);
+  // NS = K-pipeline depth (async smem stages). Default 3. Deepening to 4-6
+  // hides more weight-TMA latency on the single-wave M=1 decode GEMMs (the L6
+  // single-wave-latency bottleneck) — numerically identical (bit-exact), so
+  // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
+  // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
+  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but
+  // NS7=224KB / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a
+  // silent fallback). So clamp [2,6]; this is a sweepable knob, not a blind
+  // bump.
+  int dense_ns = 3;
+  if (char const *e = std::getenv("MPK_DSV3_DENSE_NS")) {
+    int v = atoi(e);
+    if (v >= 2 && v <= 6) {
+      dense_ns = v;
+    }
+  }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, dense_ns);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
   code.e("    static_cast<const "
@@ -6598,6 +6826,58 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_SM100, code.to_string());
+}
+
+int TaskRegister::register_mla_kv_append_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // bs=1 contiguous KV append: writes the new token rows' [c_latent|k_pe]
+  // straight into the per-layer contiguous KV buffer at row = sequence
+  // position (single sequence => logical position == physical row). Replaces
+  // the paged-cache append + page gather on the decode path.
+  // params:
+  //   [0] d_k (576), [1] d_v (512),
+  //   [2] c_latent_row_stride, [3] k_pe_row_stride (parent row width when the
+  //       inputs are mpk.narrow views of qkv_a_out)
+  assert(params.size() == 4);
+
+  int d_k = params[0];
+  int d_v = params[1];
+  int c_latent_row_stride = params[2];
+  int k_pe_row_stride = params[3];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int bi_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
+  code.e("  int q_len_ = runtime_config.qo_indptr_buffer[bi_ + 1] - qo_fp_;");
+  // prepare_next_batch advances step[] while FINALIZING the previous batch
+  // (Step 1) and only then admits this iteration's new tokens (Step 3), so at
+  // task-execution time step[rid] is the pre-append KV length — i.e. exactly
+  // the row where this iteration's first new token goes. step[] is indexed by
+  // request id; bi_ is the batch slot, so map through request_ids[].
+  code.e("  int rid_ = runtime_config.request_ids[bi_];");
+  code.e("  int row_start_ = (rid_ >= 0) ? runtime_config.step[rid_] : -1;");
+  code.e("  auto *c_latent_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $;",
+         c_latent_row_stride);
+  code.e("  auto *k_pe_new_ptr_ = static_cast<const "
+         "nv_bfloat16*>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $;",
+         k_pe_row_stride);
+  code.e("kernel::mla_kv_append_sm100_task_impl<$, $, $, $>(",
+         d_k,
+         d_v,
+         k_pe_row_stride,
+         c_latent_row_stride);
+  code.e("    c_latent_new_ptr_,");
+  code.e("    k_pe_new_ptr_,");
+  code.e("    task_desc->output_ptrs[0],"); // kv_buf
+  code.e("    row_start_,");
+  code.e("    q_len_);");
+  code.e("}");
+  return register_task_variant(TASK_MLA_KV_APPEND_SM100, code.to_string());
 }
 
 int TaskRegister::register_mla_kv_gather_split_sm100_task(
@@ -7149,9 +7429,16 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7226,9 +7513,16 @@ int TaskRegister::register_mla_mtp_decode_tp_reduce_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7290,9 +7584,16 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);
@@ -7362,9 +7663,16 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int req_id_ = runtime_config.request_ids[bi_];");
   code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  // bs=1 contiguous KV: KV length = absolute sequence position + this
+  // iteration's new tokens. step[req] is the pre-append length (advanced when
+  // the previous batch was finalized), so step + q_len == the total KV length,
+  // identical to the page-table value but with no dependency on the paged
+  // metadata. fp_ above is still emitted for the paged first_page_pos arg.
+  code.e("  int rid_kv_ = runtime_config.request_ids[bi_];");
+  code.e(
+      "  int kv_len_ = ((rid_kv_ >= 0) ? runtime_config.step[rid_kv_] : 0) + "
+      "(runtime_config.qo_indptr_buffer[bi_ + 1] - "
+      "runtime_config.qo_indptr_buffer[bi_]);");
   code.e("  int kvt_rt_ = (kv_len_ + 127) / 128;");
   code.e("  if (kvt_rt_ < 1) kvt_rt_ = 1;");
   code.e("  int sk_rt_ = kvt_rt_ < $ ? kvt_rt_ : $;", num_splits, num_splits);

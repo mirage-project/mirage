@@ -32,7 +32,9 @@
 #include "attention_sm100.cuh"
 #include "deepseek_mla_rope_sm100.cuh"
 #include "fp8_gemm_dense_decode_splitk_sm100.cuh"
+#include "fp8_gemm_dense_finen_sm100.cuh"
 #include "fp8_gemm_dense_fp8out_sm100.cuh"
+#include "fp8_gemm_dense_gemv_m1_sm100.cuh"
 #include "fp8_gemm_dense_mediumm_sm100.cuh"
 #include "fp8_gemm_dense_smallm_sm100.cuh"
 #include "fp8_group_gemm_largem_compact_sm100.cuh"
@@ -45,6 +47,7 @@
 #include "linear_fp8_sm100.cuh"
 #include "linear_fp8_swapAB_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
+#include "mla_kv_append_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"
 #include "mla_kv_cache_gather_split_sm100.cuh"
 // sm100_ptx.cuh must be included BEFORE mla_mtp_decode_sm100.cuh at top level
