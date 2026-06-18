@@ -199,9 +199,6 @@ enum TaskType {
   // Python layer): k1 = CUDA-core prenorm GEMM + sqrsum, k2 = sinkhorn tail.
   TASK_MHC_PRE_K1_SM100 = 296,
   TASK_MHC_PRE_K2_SM100 = 298,
-  // mHC fused (this layer's post folded into next layer's pre-GEMM) pipeline.
-  TASK_MHC_POST_PRE_K1_SM100 = 299,
-  TASK_MHC_POST_PRE_K2_SM100 = 303,
   // mHC pre k1 prefill: tcgen05 + TMA prenorm GEMM (the high-token-count path;
   // k1 = CUDA-core decode GEMM stays TASK_MHC_PRE_K1_SM100). Same mixes_pad +
   // sqrsum outputs, so it feeds the shared k2 tail interchangeably.

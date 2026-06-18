@@ -1832,8 +1832,6 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MHC_PRE_K1_PREFILL_SM100] =
       "TASK_MHC_PRE_K1_PREFILL_SM100";
   task_type_to_name[TASK_MHC_PRE_K2_SM100] = "TASK_MHC_PRE_K2_SM100";
-  task_type_to_name[TASK_MHC_POST_PRE_K1_SM100] = "TASK_MHC_POST_PRE_K1_SM100";
-  task_type_to_name[TASK_MHC_POST_PRE_K2_SM100] = "TASK_MHC_POST_PRE_K2_SM100";
   task_type_to_name[TASK_MTP_VERIFY_PROBABILISTIC] =
       "TASK_MTP_VERIFY_PROBABILISTIC";
   task_type_to_name[TASK_PROB_SCATTER_SM100] = "TASK_PROB_SCATTER_SM100";

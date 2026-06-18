@@ -117,10 +117,6 @@ public:
                                              std::vector<int> const &params);
   int register_mhc_pre_k2_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
-  int register_mhc_post_pre_k1_sm100_task(threadblock::Graph const &bgraph,
-                                          std::vector<int> const &params);
-  int register_mhc_post_pre_k2_sm100_task(threadblock::Graph const &bgraph,
-                                          std::vector<int> const &params);
   int register_mtp_verify_probabilistic_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
   int register_mtp_float_scatter_task(threadblock::Graph const &bgraph,
