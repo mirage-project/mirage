@@ -51,6 +51,12 @@ __global__
         type::bfloat16_t const *bias_ptr,
         int M,
         int N) {
+  // Tunables (formerly shared in sm100_ptx.cuh); function-local so each
+  // task owns them without colliding when several fp4 headers share a TU.
+  constexpr int WARP_SIZE = 32;
+  constexpr int MMA_K = 64;
+  constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ULL;
+  constexpr uint64_t EVICT_LAST = 0x14F0000000000000ULL;
   // Launch with cluster_dim=(2, 1, 1). Each CTA loads/stores a local 128-row
   // A slice; B is split across the peer CTAs as [2, N/2, K] matching
   // tcgen05.cta_group::2 operand partitioning.

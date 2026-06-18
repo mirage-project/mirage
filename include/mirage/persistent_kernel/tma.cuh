@@ -970,6 +970,103 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_LINEAR_NVFP4_SM100:
+    case TASK_LINEAR_MXFP4_SM100: {
+      // swapAB fp4 GEMM (NVFP4/MXFP4 share these layouts). Inputs: 0=weight A,
+      // 1=activation B (fp4 packed), 2=SFA, 3=SFB, [4=bias] (raw, no TMA).
+      // Output 0 = C (bf16). A/B: rank-3 16U4_ALIGN8B (init_AB_tmap_fp4);
+      // C: rank-2 bf16 (init_C_tmap_fp4). dim[1] is packed (K/2) -> logical K.
+      constexpr uint32_t BLOCK_M = 128;
+      bool is_output = (param_id == (size_t)(task_desc.num_inputs));
+
+      auto check = [](CUresult r, char const *what) {
+        if (r != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(r, &err);
+          std::cerr << "TMA fp4 " << what << " failed: " << err << std::endl;
+        }
+      };
+      // Batch tile, matching register_linear_*'s N-dependent occupancy formula.
+      auto mma_n = [&]() -> uint32_t {
+        int batch = (int)task_desc.inputs[1].dim[0];
+        int output_size = (int)task_desc.outputs[0].dim[1];
+        static int sm_count = 0;
+        if (sm_count == 0) {
+          cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0);
+        }
+        int budget = sm_count / ((output_size + 127) / 128);
+        int needed = (budget >= 1) ? (batch + budget - 1) / budget : 128;
+        return needed <= 8 ? 8 : needed <= 16 ? 16 : needed <= 32 ? 32
+               : needed <= 64                                     ? 64
+                                                                  : 128;
+      };
+
+      if (param_id == 0 || param_id == 1) { // A (tile_rows=BLOCK_M) / B (MMA_N)
+        uint64_t k = (uint64_t)tensor_desc.dim[1] * 2;
+        uint32_t tile_rows = (param_id == 0) ? BLOCK_M : mma_n();
+        uint64_t gd[3] = {256, (uint64_t)tensor_desc.dim[0], k / 256};
+        uint64_t gs[2] = {k / 2, 128};
+        uint32_t bd[3] = {256, tile_rows, 1};
+        uint32_t es[3] = {1, 1, 1};
+        check(cuTensorMapEncodeTiled(tma_desc, CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+                                     3, tensor_desc.base_ptr, gd, gs, bd, es,
+                                     CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                     CU_TENSOR_MAP_SWIZZLE_128B,
+                                     CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                     CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+              param_id == 0 ? "A" : "B");
+      } else if (is_output) { // C: globalDim={output,batch}, box={BLOCK_M,MMA_N}
+        uint64_t gd[2] = {(uint64_t)tensor_desc.dim[1],
+                          (uint64_t)tensor_desc.dim[0]};
+        uint64_t gs[1] = {(uint64_t)tensor_desc.stride[0] * sizeof(bfloat16)};
+        uint32_t bd[2] = {BLOCK_M, mma_n()};
+        uint32_t es[2] = {1, 1};
+        check(cuTensorMapEncodeTiled(tma_desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                     2, tensor_desc.base_ptr, gd, gs, bd, es,
+                                     CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                     CU_TENSOR_MAP_SWIZZLE_NONE,
+                                     CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                     CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+              "C");
+      }
+      break;
+    }
+    case TASK_LINEAR_NVFP4_1D2D_SM100:
+    case TASK_LINEAR_MXFP4_1D2D_SM100: {
+      // 1d2d 1SM fp4 GEMM. Only A (param 0) / B (param 1) use TMA; C is a raw
+      // gmem store. Same rank-3 fp4 layout as swapAB; tile_rows = BLOCK_M for A,
+      // BLOCK_N (largest of {128,64,32} dividing batch, matching the register
+      // function) for B.
+      if (param_id > 1) {
+        break; // SFA/SFB/bias: raw pointers
+      }
+      auto check = [](CUresult r, char const *what) {
+        if (r != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(r, &err);
+          std::cerr << "TMA fp4 1d2d " << what << " failed: " << err
+                    << std::endl;
+        }
+      };
+      uint64_t k = (uint64_t)tensor_desc.dim[1] * 2;
+      int batch = (int)tensor_desc.dim[0];
+      uint32_t tile_rows = (param_id == 0)             ? 128
+                           : (batch % 128 == 0)        ? 128
+                           : (batch % 64 == 0)         ? 64
+                                                       : 32;
+      uint64_t gd[3] = {256, (uint64_t)tensor_desc.dim[0], k / 256};
+      uint64_t gs[2] = {k / 2, 128};
+      uint32_t bd[3] = {256, tile_rows, 1};
+      uint32_t es[3] = {1, 1, 1};
+      check(cuTensorMapEncodeTiled(tma_desc, CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+                                   3, tensor_desc.base_ptr, gd, gs, bd, es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+            param_id == 0 ? "A" : "B");
+      break;
+    }
     case TASK_SPLITK_LINEAR_SM100: {
       int const cp_async_size = 64;
       size_t const smem_repeat_row = 1;
@@ -1622,6 +1719,29 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
+      break;
+    }
+    case TASK_LINEAR_NVFP4_SM100:
+    case TASK_LINEAR_MXFP4_SM100: {
+      // swapAB. Inputs: 0=weight A (fp4), 1=activation B (fp4), 2=SFA, 3=SFB,
+      //         [4=bias]. Only A/B use TMA; SFA/SFB/bias are raw pointers.
+      // Output: 0=C (bf16). NVFP4 and MXFP4 share the same fp4/bf16 layouts.
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.outputs[0], task_desc.num_inputs, 0); // C
+      break;
+    }
+    case TASK_LINEAR_NVFP4_1D2D_SM100:
+    case TASK_LINEAR_MXFP4_1D2D_SM100: {
+      // Same A/B fp4 TMA as swapAB; C is written directly to gmem (no TMA).
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
+      break;
+    }
+    case TASK_QUANTIZE_MXFP4_SM100: {
+      // No TMA (all I/O via raw pointers); sits in the auto-gate range so it
+      // reaches create_tma_desc_by_task, but there is nothing to build.
       break;
     }
     default:

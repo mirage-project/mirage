@@ -82,11 +82,6 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
                : "memory");
 }
 
-constexpr int WARP_SIZE = 32;
-constexpr int MMA_K = 64;
-constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ULL;
-constexpr uint64_t EVICT_LAST = 0x14F0000000000000ULL;
-
 __device__ __forceinline__ uint32_t cluster_ctaid_x() {
   uint32_t x;
   asm volatile("mov.u32 %0, %%cluster_ctaid.x;" : "=r"(x));

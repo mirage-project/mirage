@@ -17,18 +17,19 @@
 
 #include <cstdint>
 
-#include "blackwell/sm100_ptx.cuh"
-#include "common/bfloat16.h"
-
-#include <c10/util/Exception.h>
-#include <cuda.h>
-#include <cudaTypedefs.h>
-#include <cuda_runtime.h>
+#include "../common/bfloat16.h"
+#include "sm100_ptx.cuh"
 
 namespace kernel {
 
-using namespace ::kernel::sm100_ptx;
+namespace mxfp4_1d2d_detail {
 
+// Shared GEMM body (see linear_nvfp4_1d2d_sm100.cuh for the persistent
+// tile-loop / __global__ split rationale). A/B are TMA descriptors (by
+// pointer); SFA/SFB/C/bias are raw pointers (C written directly to gmem). MXFP4
+// deltas vs NVFP4: tcgen05_mma_mxfp4, the UE8M0 i_desc bit, and the SF byte/TMEM
+// constants. (tile_base, num_tasks) drive the persistent loop over the same
+// row-major (bid_m, bid_n) tile space as the standalone 2D grid.
 template <int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
@@ -37,17 +38,23 @@ template <int BATCH_SIZE,
           int BLOCK_K,
           int NUM_STAGES,
           bool C_N_MAJOR,
-          int EPI_BATCH_LA = 1>
-__global__
-    __launch_bounds__(BLOCK_M + 2 * 32) void linear_mxfp4_1d2d_sm100_kernel(
-        const __grid_constant__ CUtensorMap A_tmap,
-        const __grid_constant__ CUtensorMap B_tmap,
-        char const *SFA_ptr,
-        char const *SFB_ptr,
-        type::bfloat16_t *C_ptr,
-        type::bfloat16_t const *bias_ptr,
-        int M,
-        int N) {
+          int EPI_BATCH_LA>
+__device__ __forceinline__ void linear_mxfp4_1d2d_sm100_task_impl(
+    CUtensorMap const *A_tmap,
+    CUtensorMap const *B_tmap,
+    char const *SFA_ptr,
+    char const *SFB_ptr,
+    type::bfloat16_t *C_ptr,
+    type::bfloat16_t const *bias_ptr,
+    int M,
+    int N,
+    int tile_base,
+    int num_tasks) {
+  using namespace ::kernel::sm100_ptx;
+  constexpr int WARP_SIZE = 32;
+  constexpr int MMA_K = 64;
+  constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ULL;
+  constexpr uint64_t EVICT_LAST = 0x14F0000000000000ULL;
   static_assert(BLOCK_M == 128, "SM100 MXFP4 tcgen05 MMA uses BLOCK_M == 128");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K must be divisible by MMA_K");
   static_assert(REDUCTION_SIZE % BLOCK_K == 0,
@@ -65,10 +72,9 @@ __global__
   int const lane_id = tid % WARP_SIZE;
   int const warp_id = tid / WARP_SIZE;
 
-  int const bid_m = blockIdx.x;
-  int const bid_n = blockIdx.y;
-  int const off_m = bid_m * BLOCK_M;
-  int const off_n = bid_n * BLOCK_N;
+  int const num_m_tiles = M / BLOCK_M;
+  int const num_n_tiles = N / BLOCK_N;
+  int const num_tiles = num_m_tiles * num_n_tiles;
 
   constexpr int NUM_WARPS = BLOCK_M / WARP_SIZE + 2;
 
@@ -83,10 +89,13 @@ __global__
   constexpr int STAGE_SIZE = A_size + B_size + SFA_size + SFB_size;
 
 #pragma nv_diag_suppress static_var_with_dynamic_init
-  __shared__ int64_t mbars[NUM_STAGES * 2 + 1];
+  // Single accumulator + a 1-deep MMA<->epilogue handshake so each tile's MMA
+  // waits for the previous tile's epilogue to drain tmem (see NVFP4 1d2d).
+  __shared__ int64_t mbars[NUM_STAGES * 2 + 2];
   int const tma_mbar_addr = static_cast<int>(__cvta_generic_to_shared(mbars));
   int const mma_mbar_addr = tma_mbar_addr + NUM_STAGES * 8;
   int const mainloop_mbar_addr = mma_mbar_addr + NUM_STAGES * 8;
+  int const output_mbar_addr = mainloop_mbar_addr + 8;
 
   // SF TMEM region: 4 cols per MMA-K × MMA_PER_TILE MMA-Ks (same as NVFP4).
   constexpr int SFA_tmem = BLOCK_N;
@@ -94,9 +103,11 @@ __global__
       SFA_tmem + SF_TMEM_COLS_PER_MMA_K * (BLOCK_K / MMA_K);
 
   if (warp_id == 0 && elect_sync()) {
-    for (int i = 0; i < NUM_STAGES * 2 + 1; i++) {
+    for (int i = 0; i < NUM_STAGES * 2; i++) {
       mbar_init(tma_mbar_addr + i * 8, 1);
     }
+    mbar_init(mainloop_mbar_addr, 1);
+    mbar_init(output_mbar_addr, 1);
     asm volatile("fence.mbarrier_init.release.cluster;");
   } else if (warp_id == 1) {
     tmem_alloc<1, BLOCK_N * 2>(smem);
@@ -105,18 +116,16 @@ __global__
 
   constexpr int num_iters = REDUCTION_SIZE / BLOCK_K;
 
-  if (warp_id == NUM_WARPS - 2 && elect_sync()) {
-    uint64_t cache_A;
-    uint64_t cache_B;
-    if (M > N) {
-      cache_A = EVICT_FIRST;
-      cache_B = EVICT_LAST;
-    } else {
-      cache_A = EVICT_LAST;
-      cache_B = EVICT_FIRST;
-    }
+  auto decode_tile = [&](int t, int &off_m, int &off_n) {
+    off_m = (t % num_m_tiles) * BLOCK_M;
+    off_n = (t / num_m_tiles) * BLOCK_N;
+  };
 
-    auto issue_tma = [&](int iter_k, int stage_id) {
+  if (warp_id == NUM_WARPS - 2 && elect_sync()) {
+    uint64_t const cache_A = (M > N) ? EVICT_FIRST : EVICT_LAST;
+    uint64_t const cache_B = (M > N) ? EVICT_LAST : EVICT_FIRST;
+
+    auto issue_tma = [&](int off_m, int off_n, int iter_k, int stage_id) {
       const int mbar_addr = tma_mbar_addr + stage_id * 8;
       const int A_smem = smem + stage_id * STAGE_SIZE;
       const int B_smem = A_smem + A_size;
@@ -124,10 +133,8 @@ __global__
       const int SFB_smem = SFA_smem + SFA_size;
 
       const int off_k = iter_k * BLOCK_K;
-      tma_load<3, 1>(
-          A_smem, &A_tmap, 0, off_m, off_k / 256, mbar_addr, cache_A);
-      tma_load<3, 1>(
-          B_smem, &B_tmap, 0, off_n, off_k / 256, mbar_addr, cache_B);
+      tma_load<3, 1>(A_smem, A_tmap, 0, off_m, off_k / 256, mbar_addr, cache_A);
+      tma_load<3, 1>(B_smem, B_tmap, 0, off_n, off_k / 256, mbar_addr, cache_B);
 
       // SF atom = 128 rows × 64 K-elements = 512 B (same as NVFP4).
       const int rest_k = REDUCTION_SIZE / 64;
@@ -141,17 +148,19 @@ __global__
       mbarrier_arrive_expect_tx_tile_local(mbar_addr, STAGE_SIZE);
     };
 
-    constexpr int prefetch_iters =
-        (num_iters < NUM_STAGES) ? num_iters : NUM_STAGES;
-    for (int iter_k = 0; iter_k < prefetch_iters; iter_k++) {
-      issue_tma(iter_k, iter_k);
-    }
-
-    for (int iter_k = NUM_STAGES; iter_k < num_iters; iter_k++) {
-      int const stage_id = iter_k % NUM_STAGES;
-      int const mma_phase = (iter_k / NUM_STAGES - 1) % 2;
-      mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
-      issue_tma(iter_k, stage_id);
+    for (int t = tile_base, work_idx = 0; t < num_tiles;
+         t += num_tasks, work_idx++) {
+      int off_m, off_n;
+      decode_tile(t, off_m, off_n);
+      for (int iter_k = 0; iter_k < num_iters; iter_k++) {
+        int const pipeline_iter = work_idx * num_iters + iter_k;
+        int const stage_id = pipeline_iter % NUM_STAGES;
+        if (pipeline_iter >= NUM_STAGES) {
+          int const mma_phase = ((pipeline_iter - NUM_STAGES) / NUM_STAGES) % 2;
+          mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
+        }
+        issue_tma(off_m, off_n, iter_k, stage_id);
+      }
     }
   } else if (warp_id == NUM_WARPS - 1 && elect_sync()) {
     constexpr int MMA_N = BLOCK_N;
@@ -162,31 +171,42 @@ __global__
                                 ((uint32_t)MMA_N >> 3U << 17U) | (1U << 23U) |
                                 ((uint32_t)MMA_M >> 7U << 27U);
 
-    for (int iter_k = 0; iter_k < num_iters; iter_k++) {
-      int const stage_id = iter_k % NUM_STAGES;
-      int const tma_phase = (iter_k / NUM_STAGES) % 2;
-      mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
+    auto make_desc_AB = [](int addr) -> uint64_t {
+      const int SBO = 8 * 128;
+      return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) |
+             (2ULL << 61ULL);
+    };
+    auto make_desc_SF = [](int addr) -> uint64_t {
+      const int SBO = 8 * 16;
+      return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
+    };
 
-      int const A_smem = smem + stage_id * STAGE_SIZE;
-      int const B_smem = A_smem + A_size;
-      int const SFA_smem = B_smem + B_size;
-      int const SFB_smem = SFA_smem + SFA_size;
+    for (int t = tile_base, work_idx = 0; t < num_tiles;
+         t += num_tasks, work_idx++) {
+      int off_m, off_n;
+      decode_tile(t, off_m, off_n);
+      int const bid_m = off_m / BLOCK_M;
+      int const bid_n = off_n / BLOCK_N;
+      // Wait for the previous tile's epilogue to release the accumulator.
+      if (work_idx >= 1) {
+        mbar_wait(output_mbar_addr, (work_idx - 1) % 2);
+      }
 
-      auto make_desc_AB = [](int addr) -> uint64_t {
-        const int SBO = 8 * 128;
-        return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) |
-               (2ULL << 61ULL);
-      };
-      auto make_desc_SF = [](int addr) -> uint64_t {
-        const int SBO = 8 * 16;
-        return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
-      };
+      for (int iter_k = 0; iter_k < num_iters; iter_k++) {
+        int const stage_id = (work_idx * num_iters + iter_k) % NUM_STAGES;
+        int const tma_phase = ((work_idx * num_iters + iter_k) / NUM_STAGES) % 2;
+        mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
 
-      const uint64_t SF_desc = make_desc_SF(0);
-      const uint64_t SFA_desc =
-          SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
-      const uint64_t SFB_desc =
-          SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
+        int const A_smem = smem + stage_id * STAGE_SIZE;
+        int const B_smem = A_smem + A_size;
+        int const SFA_smem = B_smem + B_size;
+        int const SFB_smem = SFA_smem + SFA_size;
+
+        const uint64_t SF_desc = make_desc_SF(0);
+        const uint64_t SFA_desc =
+            SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
+        const uint64_t SFB_desc =
+            SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
 
       // One cp per atom = 1 MMA-K (same as NVFP4); 4 cp-output cols per MMA-K.
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
@@ -223,11 +243,17 @@ __global__
       }
 
       tcgen05_commit_arrive<1>(mma_mbar_addr + stage_id * 8);
-    }
+      }
 
-    tcgen05_commit_arrive<1>(mainloop_mbar_addr);
+      tcgen05_commit_arrive<1>(mainloop_mbar_addr);
+    }
   } else if (tid < BLOCK_M) {
-    mbar_wait(mainloop_mbar_addr, 0);
+   for (int t = tile_base, work_idx = 0; t < num_tiles;
+        t += num_tasks, work_idx++) {
+    int off_m, off_n;
+    decode_tile(t, off_m, off_n);
+
+    mbar_wait(mainloop_mbar_addr, work_idx % 2);
     asm volatile("tcgen05.fence::after_thread_sync;");
 
     auto epilogue_M_major = [&]() {
@@ -325,11 +351,65 @@ __global__
       epilogue_M_major();
     }
 
+    // Release the accumulator back to the MMA warp for the next tile.
+    asm volatile("tcgen05.fence::before_thread_sync;");
     asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
-    if (warp_id == 0) {
-      tmem_dealloc<1, BLOCK_N * 2>(0);
+    if (warp_id == 0 && elect_sync()) {
+      swapab_arrive_local(output_mbar_addr);
     }
+   }
+   asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
+   if (warp_id == 0) {
+     tmem_dealloc<1, BLOCK_N * 2>(0);
+   }
   }
 }
+
+// Standalone grid launcher: one output tile per block, A/B by value.
+template <int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          int BLOCK_M,
+          int BLOCK_N,
+          int BLOCK_K,
+          int NUM_STAGES,
+          bool C_N_MAJOR,
+          int EPI_BATCH_LA = 1>
+__global__
+    __launch_bounds__(BLOCK_M + 2 * 32) void linear_mxfp4_1d2d_sm100_kernel(
+        const __grid_constant__ CUtensorMap A_tmap,
+        const __grid_constant__ CUtensorMap B_tmap,
+        char const *SFA_ptr,
+        char const *SFB_ptr,
+        type::bfloat16_t *C_ptr,
+        type::bfloat16_t const *bias_ptr,
+        int M,
+        int N) {
+  int const tile = blockIdx.y * gridDim.x + blockIdx.x;
+  int const num_tasks = gridDim.x * gridDim.y;
+  linear_mxfp4_1d2d_sm100_task_impl<BATCH_SIZE,
+                                    OUTPUT_SIZE,
+                                    REDUCTION_SIZE,
+                                    BLOCK_M,
+                                    BLOCK_N,
+                                    BLOCK_K,
+                                    NUM_STAGES,
+                                    C_N_MAJOR,
+                                    EPI_BATCH_LA>(&A_tmap,
+                                                  &B_tmap,
+                                                  SFA_ptr,
+                                                  SFB_ptr,
+                                                  C_ptr,
+                                                  bias_ptr,
+                                                  M,
+                                                  N,
+                                                  tile,
+                                                  num_tasks);
+}
+
+} // namespace mxfp4_1d2d_detail
+
+using mxfp4_1d2d_detail::linear_mxfp4_1d2d_sm100_kernel;
+using mxfp4_1d2d_detail::linear_mxfp4_1d2d_sm100_task_impl;
 
 } // namespace kernel

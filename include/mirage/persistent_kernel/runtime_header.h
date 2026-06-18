@@ -194,6 +194,24 @@ enum TaskType {
   TASK_MTP_BUILD_EMBED_INPUT = 294,
   // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
+  // NVFP4 quantize (bf16 -> packed fp4 + ue4m3 scales) and NVFP4 swapAB linear
+  // GEMM. Both sit outside the SM100_TMA range, so the linear task is given an
+  // explicit create_tma_desc_by_task gate (it needs fp4 A/B + bf16 C TMA).
+  TASK_QUANTIZE_NVFP4_SM100 = 296,
+  TASK_LINEAR_NVFP4_SM100 = 297,
+  // NVFP4 1d2d 1SM linear GEMM (large-batch path). fp4 A/B via TMA; C is a raw
+  // gmem pointer (direct store, no TMA). Reuses slot 279.
+  TASK_LINEAR_NVFP4_1D2D_SM100 = 279,
+  // MXFP4 linear GEMM: swapAB (small batch) and 1d2d 1SM (large batch). Same
+  // structure as the NVFP4 tasks. Placed inside the SM100_TMA auto-gate range
+  // (231-256) so create_tma_desc_by_task runs automatically; swapAB needs A/B/C
+  // TMA, 1d2d needs A/B only (C is a raw gmem store).
+  TASK_LINEAR_MXFP4_SM100 = 250,
+  TASK_LINEAR_MXFP4_1D2D_SM100 = 232,
+  // MXFP4 quantizer (bf16 -> packed e2m1 + e8m0 scales). Inside the auto-gate
+  // range but uses NO TMA, so create_tma_desc_by_task has an explicit no-op
+  // case for it.
+  TASK_QUANTIZE_MXFP4_SM100 = 233,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

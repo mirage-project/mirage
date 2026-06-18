@@ -24,8 +24,11 @@
 
 namespace kernel {
 
+// Named distinctly from the FP8 quantizer's group_reduce_max (which is a
+// non-templated WARP_SIZE reduction in the same kernel:: namespace) so both can
+// coexist in the shared megakernel translation unit.
 template <int SUBWARP_SIZE>
-__device__ __forceinline__ float group_reduce_max(float val) {
+__device__ __forceinline__ float group_reduce_max_nvfp4(float val) {
 #pragma unroll
   for (int offset = SUBWARP_SIZE >> 1; offset > 0; offset >>= 1) {
     val = fmaxf(val, __shfl_xor_sync(0xffffffffu, val, offset, SUBWARP_SIZE));
@@ -62,8 +65,78 @@ __device__ __forceinline__ int swapab_nvfp4_scale_offset(int row_idx,
          within_32 * 16 + row_group * 4 + k_inner;
 }
 
-// One CTA handles one row. Launch over ceil_div(BATCH_SIZE, 128) * 128 rows so
-// padded rows can be filled with zero data and scale=1.
+// Quantizes a single logical row `row_idx`. `row_in`/`row_q` point at that
+// row's input / packed-output base (so absolute indexing is hoisted out);
+// `output_s_ptr` is the scale-tensor base (the scale write computes its own
+// absolute offset from `row_idx`). `valid_row` selects real vs padded rows.
+// Shared by the per-CTA __global__-style entry and the MPK whole-batch loop.
+template <int HIDDEN_SIZE, int GROUP_SIZE, int GLOBAL_STRIDE, typename T>
+__device__ __forceinline__ void
+    quantize_nvfp4_one_row(T const *__restrict__ row_in,
+                           uint8_t *__restrict__ row_q,
+                           void *__restrict__ output_s_ptr,
+                           int row_idx,
+                           bool valid_row,
+                           float eps,
+                           float min_4bit,
+                           float max_4bit,
+                           int scale_outer_stride,
+                           int mma_n) {
+  constexpr int WARP_SIZE = 32;
+  constexpr int SUBWARP_SIZE = GROUP_SIZE;
+  constexpr int GROUPS_PER_WARP = WARP_SIZE / SUBWARP_SIZE;
+  constexpr int NUM_GROUPS_PER_ROW = HIDDEN_SIZE / GROUP_SIZE;
+  auto *output_s = static_cast<uint8_t *>(output_s_ptr);
+
+  int const lane_idx = threadIdx.x & (WARP_SIZE - 1);
+  int const warp_idx = threadIdx.x / WARP_SIZE;
+  int const subwarp_idx = lane_idx / SUBWARP_SIZE;
+  int const sublane_idx = lane_idx % SUBWARP_SIZE;
+  int const groups_per_block = (blockDim.x / WARP_SIZE) * GROUPS_PER_WARP;
+  int const num_k_outer = NUM_GROUPS_PER_ROW / 4;
+
+#pragma unroll
+  for (int group_idx = warp_idx * GROUPS_PER_WARP + subwarp_idx;
+       group_idx < NUM_GROUPS_PER_ROW;
+       group_idx += groups_per_block) {
+    int const element_idx = group_idx * GROUP_SIZE + sublane_idx;
+    float const orig_val =
+        valid_row ? static_cast<float>(row_in[element_idx]) : 0.0f;
+    float const group_max =
+        group_reduce_max_nvfp4<SUBWARP_SIZE>(fmaxf(fabsf(orig_val), eps));
+    const cutlass::float_ue4m3_t scale_quant(valid_row ? group_max / max_4bit
+                                                       : 1.0f);
+    float const applied_scale = static_cast<float>(scale_quant);
+
+    if (sublane_idx == 0 && (mma_n == 0 || valid_row)) {
+      int sf_offset =
+          (mma_n > 0)
+              ? swapab_nvfp4_scale_offset(
+                    row_idx, group_idx, num_k_outer, mma_n)
+              : interleaved_nvfp4_scale_offset(
+                    row_idx, group_idx, num_k_outer, scale_outer_stride);
+      output_s[sf_offset] = scale_quant.raw();
+    }
+
+    const uint8_t nibble =
+        static_cast<uint8_t>(
+            cutlass::float_e2m1_t(
+                fminf(fmaxf(orig_val / applied_scale, min_4bit), max_4bit))
+                .raw()) &
+        0x0f;
+    const uint8_t pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
+
+    if ((sublane_idx & 1) == 0) {
+      row_q[group_idx * (GROUP_SIZE / 2) + (sublane_idx >> 1)] =
+          nibble | static_cast<uint8_t>(pair << 4);
+    }
+  }
+}
+
+// A single CTA quantizes the whole (padded) batch, looping over every row via
+// quantize_nvfp4_one_row. Shared by the MPK task (one worker CTA, no meaningful
+// blockIdx) and the standalone launcher (invoked with a 1-CTA grid). Padded rows
+// (>= batch_size, up to a multiple of 128) get zero data + scale=1.
 //
 // input_ptr:
 //   row-major [BATCH_SIZE, GLOBAL_STRIDE] input
@@ -106,69 +179,25 @@ __device__ __forceinline__ void
   static_assert(std::is_same_v<SCALE_T, uint8_t>,
                 "NVFP4 scales must be stored as ue4m3 bytes");
 
-  constexpr int WARP_SIZE = 32;
-  constexpr int SUBWARP_SIZE = GROUP_SIZE;
-  constexpr int GROUPS_PER_WARP = WARP_SIZE / SUBWARP_SIZE;
-  constexpr int NUM_GROUPS_PER_ROW = HIDDEN_SIZE / GROUP_SIZE;
   constexpr int OUTPUT_Q_STRIDE = GLOBAL_STRIDE / 2;
   int const padded_batch_size = ((batch_size + 127) / 128) * 128;
 
-  int const row_idx = blockIdx.x;
-  if (row_idx >= padded_batch_size) {
-    return;
-  }
-
   T const *input = static_cast<T const *>(input_ptr);
   auto *output_q = static_cast<PACKED_T *>(output_q_ptr);
-  auto *output_s = static_cast<SCALE_T *>(output_s_ptr);
 
-  int const lane_idx = threadIdx.x & (WARP_SIZE - 1);
-  int const warp_idx = threadIdx.x / WARP_SIZE;
-  int const subwarp_idx = lane_idx / SUBWARP_SIZE;
-  int const sublane_idx = lane_idx % SUBWARP_SIZE;
-  int const groups_per_block = (blockDim.x / WARP_SIZE) * GROUPS_PER_WARP;
-  bool const valid_row = row_idx < batch_size;
-
-  int const input_row_offset = row_idx * GLOBAL_STRIDE;
-  int const output_q_row_offset = row_idx * OUTPUT_Q_STRIDE;
-  int const num_k_outer = NUM_GROUPS_PER_ROW / 4;
-
-#pragma unroll
-  for (int group_idx = warp_idx * GROUPS_PER_WARP + subwarp_idx;
-       group_idx < NUM_GROUPS_PER_ROW;
-       group_idx += groups_per_block) {
-    int const element_idx = group_idx * GROUP_SIZE + sublane_idx;
-    float const orig_val =
-        valid_row ? static_cast<float>(input[input_row_offset + element_idx])
-                  : 0.0f;
-    float const group_max =
-        group_reduce_max<SUBWARP_SIZE>(fmaxf(fabsf(orig_val), eps));
-    const cutlass::float_ue4m3_t scale_quant(valid_row ? group_max / max_4bit
-                                                       : 1.0f);
-    float const applied_scale = static_cast<float>(scale_quant);
-
-    if (sublane_idx == 0 && (mma_n == 0 || valid_row)) {
-      int sf_offset =
-          (mma_n > 0)
-              ? swapab_nvfp4_scale_offset(
-                    row_idx, group_idx, num_k_outer, mma_n)
-              : interleaved_nvfp4_scale_offset(
-                    row_idx, group_idx, num_k_outer, scale_outer_stride);
-      output_s[sf_offset] = scale_quant.raw();
-    }
-
-    const uint8_t nibble =
-        static_cast<uint8_t>(
-            cutlass::float_e2m1_t(
-                fminf(fmaxf(orig_val / applied_scale, min_4bit), max_4bit))
-                .raw()) &
-        0x0f;
-    const uint8_t pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
-
-    if ((sublane_idx & 1) == 0) {
-      output_q[output_q_row_offset + group_idx * (GROUP_SIZE / 2) +
-               (sublane_idx >> 1)] = nibble | static_cast<uint8_t>(pair << 4);
-    }
+  for (int row = 0; row < padded_batch_size; row++) {
+    bool const valid_row = row < batch_size;
+    quantize_nvfp4_one_row<HIDDEN_SIZE, GROUP_SIZE, GLOBAL_STRIDE, T>(
+        input + (valid_row ? row : 0) * GLOBAL_STRIDE,
+        output_q + row * OUTPUT_Q_STRIDE,
+        output_s_ptr,
+        row,
+        valid_row,
+        eps,
+        min_4bit,
+        max_4bit,
+        scale_outer_stride,
+        mma_n);
   }
 }
 

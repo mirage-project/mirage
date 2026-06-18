@@ -2406,8 +2406,10 @@ std::vector<torch::Tensor>
   }
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  // quantize_nvfp4_sm100_task_impl now loops over the whole batch in one CTA
+  // (shared with the MPK task), so launch a single block.
   quantize_nvfp4_sm100_wrapper<float, HIDDEN_SIZE>
-      <<<dim3(padded_batch_size), dim3(QUANTIZE_THREADS), 0, stream>>>(
+      <<<dim3(1), dim3(QUANTIZE_THREADS), 0, stream>>>(
           static_cast<float const *>(input.data_ptr()),
           static_cast<uint8_t *>(output_q.data_ptr()),
           static_cast<uint8_t *>(output_s.data_ptr()),

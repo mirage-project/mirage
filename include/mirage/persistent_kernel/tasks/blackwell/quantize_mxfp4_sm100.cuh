@@ -117,19 +117,89 @@ __device__ __forceinline__ float decode_e8m0(uint8_t s) {
   return ldexpf(1.0f, unbiased);
 }
 
-// One CTA handles one row. Layout/API matches quantize_nvfp4_sm100_task_impl.
+// Quantizes a single logical row `row_idx` (mirrors quantize_nvfp4_one_row).
+// `row_in`/`row_q` point at that row's input / packed-output base; `output_s_ptr`
+// is the scale-tensor base (the scale write computes its own absolute offset
+// from `row_idx`). `valid_row` selects real vs padded rows. Shared by the
+// per-CTA entry and the MPK whole-batch loop.
+template <int HIDDEN_SIZE, int GROUP_SIZE, int GLOBAL_STRIDE, typename T>
+__device__ __forceinline__ void
+    quantize_mxfp4_one_row(T const *__restrict__ row_in,
+                           uint8_t *__restrict__ row_q,
+                           void *__restrict__ output_s_ptr,
+                           int row_idx,
+                           bool valid_row,
+                           float eps,
+                           float min_4bit,
+                           float max_4bit,
+                           int scale_outer_stride,
+                           int mma_n) {
+  constexpr int WARP_SIZE = 32;
+  constexpr int SUBWARP_SIZE = WARP_SIZE; // MXFP4: one full warp per group of 32
+  constexpr int GROUPS_PER_WARP = WARP_SIZE / SUBWARP_SIZE; // = 1
+  constexpr int NUM_GROUPS_PER_ROW = HIDDEN_SIZE / GROUP_SIZE;
+  auto *output_s = static_cast<uint8_t *>(output_s_ptr);
+
+  int const lane_idx = threadIdx.x & (WARP_SIZE - 1);
+  int const warp_idx = threadIdx.x / WARP_SIZE;
+  int const subwarp_idx = lane_idx / SUBWARP_SIZE; // == 0 (SUBWARP == WARP)
+  int const sublane_idx = lane_idx % SUBWARP_SIZE;
+  int const groups_per_block = (blockDim.x / WARP_SIZE) * GROUPS_PER_WARP;
+  int const num_k_outer = NUM_GROUPS_PER_ROW / 2; // 2 MXFP4 scales per 64-K atom
+
+#pragma unroll
+  for (int group_idx = warp_idx * GROUPS_PER_WARP + subwarp_idx;
+       group_idx < NUM_GROUPS_PER_ROW;
+       group_idx += groups_per_block) {
+    int const element_idx = group_idx * GROUP_SIZE + sublane_idx;
+    float const orig_val =
+        valid_row ? static_cast<float>(row_in[element_idx]) : 0.0f;
+    float const group_max =
+        group_reduce_max_mx<SUBWARP_SIZE>(fmaxf(fabsf(orig_val), eps));
+    // MXFP4 scale: smallest power of two such that group_max / scale <=
+    // max_4bit.
+    float const raw_scale = valid_row ? group_max / max_4bit : 1.0f;
+    const uint8_t scale_e8m0 = encode_e8m0(raw_scale);
+    float const applied_scale = decode_e8m0(scale_e8m0);
+
+    if (sublane_idx == 0 && (mma_n == 0 || valid_row)) {
+      int sf_offset =
+          (mma_n > 0)
+              ? swapab_mxfp4_scale_offset(
+                    row_idx, group_idx, num_k_outer, mma_n)
+              : interleaved_mxfp4_scale_offset(
+                    row_idx, group_idx, num_k_outer, scale_outer_stride);
+      output_s[sf_offset] = scale_e8m0;
+    }
+
+    float const inv_scale = applied_scale > 0.0f ? 1.0f / applied_scale : 0.0f;
+    const uint8_t nibble =
+        static_cast<uint8_t>(
+            cutlass::float_e2m1_t(
+                fminf(fmaxf(orig_val * inv_scale, min_4bit), max_4bit))
+                .raw()) &
+        0x0f;
+    const uint8_t pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
+
+    if ((sublane_idx & 1) == 0) {
+      row_q[group_idx * (GROUP_SIZE / 2) + (sublane_idx >> 1)] =
+          nibble | static_cast<uint8_t>(pair << 4);
+    }
+  }
+}
+
+// A single CTA quantizes the whole (padded) batch, looping over every row via
+// quantize_mxfp4_one_row. MPK dispatches one task per worker CTA with no
+// meaningful blockIdx, and the standalone launcher invokes this with a 1-CTA
+// grid; both share this one entry. Padded rows (>= batch_size, up to a multiple
+// of 128) get zero data + scale = 1. Layout/API matches
+// quantize_nvfp4_sm100_task_impl.
 //
-// input_ptr:
-//   row-major [BATCH_SIZE, GLOBAL_STRIDE] input
-// output_q_ptr:
-//   row-major [PADDED_BATCH_SIZE, GLOBAL_STRIDE / 2] packed MXFP4 (e2m1) bytes
-// output_s_ptr:
-//   interleaved scale bytes laid out like
-//   [PADDED_BATCH_SIZE / 128, HIDDEN_SIZE / 128, 32, 4, 4]
-//   (matches CUTLASS Sm1xxBlockScaledBasicChunk<SFVecSize=32>)
-// scale_outer_stride:
-//   byte stride between adjacent k_outer slices. Use 32 * 4 * 4 = 512 for
-//   contiguous storage — same atom size as NVFP4.
+// input_ptr:   row-major [BATCH_SIZE, GLOBAL_STRIDE] input
+// output_q_ptr: row-major [PADDED_BATCH_SIZE, GLOBAL_STRIDE/2] packed e2m1 bytes
+// output_s_ptr: interleaved scale bytes [PADDED_BATCH_SIZE/128, HIDDEN/128,
+//   32, 4, 4] (CUTLASS Sm1xxBlockScaledBasicChunk<SFVecSize=32>)
+// scale_outer_stride: 32*4*4 = 512 for contiguous storage (same atom as NVFP4).
 template <int HIDDEN_SIZE,
           int GROUP_SIZE,
           int GLOBAL_STRIDE,
@@ -161,74 +231,25 @@ __device__ __forceinline__ void
   static_assert(std::is_same_v<SCALE_T, uint8_t>,
                 "MXFP4 scales must be stored as e8m0 bytes");
 
-  constexpr int WARP_SIZE = 32;
-  constexpr int SUBWARP_SIZE =
-      WARP_SIZE; // MXFP4: one full warp per group of 32
-  constexpr int GROUPS_PER_WARP = WARP_SIZE / SUBWARP_SIZE; // = 1
-  constexpr int NUM_GROUPS_PER_ROW = HIDDEN_SIZE / GROUP_SIZE;
   constexpr int OUTPUT_Q_STRIDE = GLOBAL_STRIDE / 2;
   int const padded_batch_size = ((batch_size + 127) / 128) * 128;
 
-  int const row_idx = blockIdx.x;
-  if (row_idx >= padded_batch_size) {
-    return;
-  }
-
   T const *input = static_cast<T const *>(input_ptr);
   auto *output_q = static_cast<PACKED_T *>(output_q_ptr);
-  auto *output_s = static_cast<SCALE_T *>(output_s_ptr);
 
-  int const lane_idx = threadIdx.x & (WARP_SIZE - 1);
-  int const warp_idx = threadIdx.x / WARP_SIZE;
-  int const subwarp_idx = lane_idx / SUBWARP_SIZE; // == 0 (SUBWARP == WARP)
-  int const sublane_idx = lane_idx % SUBWARP_SIZE;
-  int const groups_per_block = (blockDim.x / WARP_SIZE) * GROUPS_PER_WARP;
-  bool const valid_row = row_idx < batch_size;
-
-  int const input_row_offset = row_idx * GLOBAL_STRIDE;
-  int const output_q_row_offset = row_idx * OUTPUT_Q_STRIDE;
-  int const num_k_outer =
-      NUM_GROUPS_PER_ROW / 2; // 2 MXFP4 scales per 64-K atom
-
-#pragma unroll
-  for (int group_idx = warp_idx * GROUPS_PER_WARP + subwarp_idx;
-       group_idx < NUM_GROUPS_PER_ROW;
-       group_idx += groups_per_block) {
-    int const element_idx = group_idx * GROUP_SIZE + sublane_idx;
-    float const orig_val =
-        valid_row ? static_cast<float>(input[input_row_offset + element_idx])
-                  : 0.0f;
-    float const group_max =
-        group_reduce_max_mx<SUBWARP_SIZE>(fmaxf(fabsf(orig_val), eps));
-    // MXFP4 scale: smallest power of two such that group_max / scale <=
-    // max_4bit.
-    float const raw_scale = valid_row ? group_max / max_4bit : 1.0f;
-    const uint8_t scale_e8m0 = encode_e8m0(raw_scale);
-    float const applied_scale = decode_e8m0(scale_e8m0);
-
-    if (sublane_idx == 0 && (mma_n == 0 || valid_row)) {
-      int sf_offset =
-          (mma_n > 0)
-              ? swapab_mxfp4_scale_offset(
-                    row_idx, group_idx, num_k_outer, mma_n)
-              : interleaved_mxfp4_scale_offset(
-                    row_idx, group_idx, num_k_outer, scale_outer_stride);
-      output_s[sf_offset] = scale_e8m0;
-    }
-
-    float const inv_scale = applied_scale > 0.0f ? 1.0f / applied_scale : 0.0f;
-    const uint8_t nibble =
-        static_cast<uint8_t>(
-            cutlass::float_e2m1_t(
-                fminf(fmaxf(orig_val * inv_scale, min_4bit), max_4bit))
-                .raw()) &
-        0x0f;
-    const uint8_t pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
-
-    if ((sublane_idx & 1) == 0) {
-      output_q[output_q_row_offset + group_idx * (GROUP_SIZE / 2) +
-               (sublane_idx >> 1)] = nibble | static_cast<uint8_t>(pair << 4);
-    }
+  for (int row = 0; row < padded_batch_size; row++) {
+    bool const valid_row = row < batch_size;
+    quantize_mxfp4_one_row<HIDDEN_SIZE, GROUP_SIZE, GLOBAL_STRIDE, T>(
+        input + (valid_row ? row : 0) * GLOBAL_STRIDE,
+        output_q + row * OUTPUT_Q_STRIDE,
+        output_s_ptr,
+        row,
+        valid_row,
+        eps,
+        min_4bit,
+        max_4bit,
+        scale_outer_stride,
+        mma_n);
   }
 }
 

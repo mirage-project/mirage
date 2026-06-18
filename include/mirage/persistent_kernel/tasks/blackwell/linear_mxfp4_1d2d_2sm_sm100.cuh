@@ -51,6 +51,12 @@ __global__
         type::bfloat16_t const *bias_ptr,
         int M,
         int N) {
+  // Tunables (formerly shared in sm100_ptx.cuh); function-local so each
+  // task owns them without colliding when several fp4 headers share a TU.
+  constexpr int WARP_SIZE = 32;
+  constexpr int MMA_K = 64;
+  constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ULL;
+  constexpr uint64_t EVICT_LAST = 0x14F0000000000000ULL;
   static_assert(BLOCK_M == 128, "2SM SM100 MXFP4 uses 128 rows per CTA");
   static_assert(BLOCK_N == 256, "2SM kernel requires BLOCK_N == 256");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K must be divisible by MMA_K");

@@ -21,34 +21,43 @@
 
 #pragma once
 
-#include "blackwell/sm100_ptx.cuh" // templated PTX primitives shared
-                                   // across 1d2d 1SM / 2SM / swapAB
+#include "../common/bfloat16.h"
+#include "sm100_ptx.cuh" // templated PTX primitives shared across fp4 kernels
 
 namespace kernel {
 
-using namespace ::kernel::sm100_ptx;
-
 namespace nvfp4_swapAB_detail {
 
-// swapab_arrive_local lives in sm100_ptx.cuh (in scope via the
-// using-directive).
-
+// Shared GEMM body. A/B/C are TMA descriptors (passed by pointer so both the
+// __global__ launcher and the MPK task can call it); SFA/SFB/bias are raw
+// pointers. (cta_idx, num_ctas) parametrize the persistent tile grid-stride:
+// the __global__ kernel passes (blockIdx.x, gridDim.x); an MPK single-CTA task
+// passes (0, 1) to sweep every tile itself.
 template <int MMA_N,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           int BLOCK_K,
           int NUM_STAGES,
           bool NOBIAS>
-__global__
-    __launch_bounds__(128 + 3 * 32) void linear_nvfp4_swapAB_sm100_kernel(
-        const __grid_constant__ CUtensorMap A_tmap,
-        const __grid_constant__ CUtensorMap B_tmap,
-        const __grid_constant__ CUtensorMap C_tmap,
-        char const *SFA_ptr,
-        char const *SFB_ptr,
-        type::bfloat16_t const *bias_ptr,
-        int M,
-        int N) {
+__device__ __forceinline__ void linear_nvfp4_swapAB_sm100_task_impl(
+    CUtensorMap const *A_tmap,
+    CUtensorMap const *B_tmap,
+    CUtensorMap const *C_tmap,
+    char const *SFA_ptr,
+    char const *SFB_ptr,
+    type::bfloat16_t const *bias_ptr,
+    int M,
+    int N,
+    int cta_idx,
+    int num_ctas) {
+  // Function-local so sm100_ptx primitives are in scope without leaking into
+  // kernel:: (other tasks in the shared megakernel TU define their own
+  // WARP_SIZE/MMA_K). Tunables are owned here for the same reason.
+  using namespace ::kernel::sm100_ptx;
+  constexpr int WARP_SIZE = 32;
+  constexpr int MMA_K = 64;
+  constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ULL;
+  constexpr uint64_t EVICT_LAST = 0x14F0000000000000ULL;
   static_assert(BLOCK_K == 256, "BLOCK_K must be 256");
   static_assert(BLOCK_K % MMA_K == 0, "BLOCK_K must be divisible by MMA_K");
   static_assert(REDUCTION_SIZE % BLOCK_K == 0,
@@ -60,8 +69,6 @@ __global__
 
   int const tid = threadIdx.x;
   int const warp_id = tid / WARP_SIZE;
-  int const cta_idx = static_cast<int>(blockIdx.x);
-  int const num_ctas = static_cast<int>(gridDim.x);
 
   int const num_out_tiles = OUTPUT_SIZE / BLOCK_M;
   int const num_batch_tiles = (M + MMA_N - 1) / MMA_N;
@@ -160,8 +167,8 @@ __global__
       const int SFB_smem = SFA_smem + SFA_size;
 
       const int off_k = iter_k * BLOCK_K;
-      tma_load<3, 1>(A_smem, &A_tmap, 0, off_m, off_k / 256, ab_mbar, cache_A);
-      tma_load<3, 1>(B_smem, &B_tmap, 0, off_n, off_k / 256, ab_mbar, cache_B);
+      tma_load<3, 1>(A_smem, A_tmap, 0, off_m, off_k / 256, ab_mbar, cache_A);
+      tma_load<3, 1>(B_smem, B_tmap, 0, off_n, off_k / 256, ab_mbar, cache_B);
 
       const char *SFA_src =
           SFA_ptr + ((off_m / 128) * rest_k + off_k / 64) * 512;
@@ -302,7 +309,7 @@ __global__
       tma_store_fence();
       asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
       if (warp_id == 0 && elect_sync()) {
-        tma_store_2d(out_smem_addr, &C_tmap, off_m, off_n);
+        tma_store_2d(out_smem_addr, C_tmap, off_m, off_n);
         tma_store_commit();
         tma_store_wait<0>();
       }
@@ -326,8 +333,44 @@ __global__
   }
 }
 
+// Standalone grid launcher: TMA descriptors arrive by value (__grid_constant__),
+// tiles are grid-strided over (blockIdx.x, gridDim.x).
+template <int MMA_N,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          int BLOCK_K,
+          int NUM_STAGES,
+          bool NOBIAS>
+__global__
+    __launch_bounds__(128 + 3 * 32) void linear_nvfp4_swapAB_sm100_kernel(
+        const __grid_constant__ CUtensorMap A_tmap,
+        const __grid_constant__ CUtensorMap B_tmap,
+        const __grid_constant__ CUtensorMap C_tmap,
+        char const *SFA_ptr,
+        char const *SFB_ptr,
+        type::bfloat16_t const *bias_ptr,
+        int M,
+        int N) {
+  linear_nvfp4_swapAB_sm100_task_impl<MMA_N,
+                                      OUTPUT_SIZE,
+                                      REDUCTION_SIZE,
+                                      BLOCK_K,
+                                      NUM_STAGES,
+                                      NOBIAS>(&A_tmap,
+                                              &B_tmap,
+                                              &C_tmap,
+                                              SFA_ptr,
+                                              SFB_ptr,
+                                              bias_ptr,
+                                              M,
+                                              N,
+                                              static_cast<int>(blockIdx.x),
+                                              static_cast<int>(gridDim.x));
+}
+
 } // namespace nvfp4_swapAB_detail
 
 using nvfp4_swapAB_detail::linear_nvfp4_swapAB_sm100_kernel;
+using nvfp4_swapAB_detail::linear_nvfp4_swapAB_sm100_task_impl;
 
 } // namespace kernel

@@ -1183,6 +1183,11 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
+    // NVFP4 linear tasks need fp4 A/B TMA (outside SM100_TMA range)
+    code.e("if (task.at(\"task_type\") == TASK_LINEAR_NVFP4_SM100 || "
+           "task.at(\"task_type\") == TASK_LINEAR_NVFP4_1D2D_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
     code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
@@ -1803,6 +1808,14 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MTP_PREPARE_VERIFY] = "TASK_MTP_PREPARE_VERIFY";
   task_type_to_name[TASK_MTP_BUILD_EMBED_INPUT] = "TASK_MTP_BUILD_EMBED_INPUT";
   task_type_to_name[TASK_QUANTIZE_FP8_SM100] = "TASK_QUANTIZE_FP8_SM100";
+  task_type_to_name[TASK_QUANTIZE_NVFP4_SM100] = "TASK_QUANTIZE_NVFP4_SM100";
+  task_type_to_name[TASK_LINEAR_NVFP4_SM100] = "TASK_LINEAR_NVFP4_SM100";
+  task_type_to_name[TASK_LINEAR_NVFP4_1D2D_SM100] =
+      "TASK_LINEAR_NVFP4_1D2D_SM100";
+  task_type_to_name[TASK_LINEAR_MXFP4_SM100] = "TASK_LINEAR_MXFP4_SM100";
+  task_type_to_name[TASK_LINEAR_MXFP4_1D2D_SM100] =
+      "TASK_LINEAR_MXFP4_1D2D_SM100";
+  task_type_to_name[TASK_QUANTIZE_MXFP4_SM100] = "TASK_QUANTIZE_MXFP4_SM100";
   task_type_to_name[TASK_LINEAR_FP8_SM100] = "TASK_LINEAR_FP8_SM100";
   task_type_to_name[TASK_LINEAR_FP8_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100";
