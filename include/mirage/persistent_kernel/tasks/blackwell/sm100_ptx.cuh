@@ -48,6 +48,32 @@ __device__ __forceinline__ void mbar_wait(int addr, int phase) {
                "r"(phase));
 }
 
+__device__ __forceinline__ void mbar_arrive(int addr) {
+  asm volatile(
+      "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" ::"r"(addr)
+      : "memory");
+}
+
+__device__ __forceinline__ void named_barrier_sync(int bar, int count) {
+  asm volatile("bar.sync %0, %1;" ::"r"(bar), "r"(count) : "memory");
+}
+
+__device__ __forceinline__ void tma_load_2d_cta(
+    int smem_addr, void const *desc, int c0, int c1, int mbar_addr) {
+  uint64_t desc_i = reinterpret_cast<uint64_t>(desc);
+  asm volatile(
+      "cp.async.bulk.tensor.5d.shared::cta.global.tile.mbarrier::complete_tx::"
+      "bytes [%0], [%1, {%3, %4, %5, %6, %7}], [%2];" ::"r"(smem_addr),
+      "l"(desc_i),
+      "r"(mbar_addr),
+      "r"(c0),
+      "r"(c1),
+      "r"(0),
+      "r"(0),
+      "r"(0)
+      : "memory");
+}
+
 __device__ __forceinline__ void mbar_tx(int addr, int bytes) {
   asm volatile(
       "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" ::
@@ -83,6 +109,96 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
   asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
                "cluster.b64 [%0];" ::"r"(mbar_addr)
                : "memory");
+}
+
+__device__ __forceinline__ void tcgen05_alloc(int addr_smem, int num_cols) {
+  asm volatile(
+      "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::"r"(
+          addr_smem),
+      "r"(num_cols));
+}
+
+__device__ __forceinline__ void tcgen05_dealloc(int taddr, int num_cols) {
+  asm volatile(
+      "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
+      "r"(num_cols));
+}
+
+__device__ __forceinline__ void tcgen05_relinquish_alloc_permit() {
+  asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;" ::
+                   : "memory");
+}
+
+__device__ __forceinline__ void tcgen05_fence_before() {
+  asm volatile("tcgen05.fence::before_thread_sync;");
+}
+
+__device__ __forceinline__ void tcgen05_fence_after() {
+  asm volatile("tcgen05.fence::after_thread_sync;");
+}
+
+__device__ __forceinline__ void tcgen05_ld_x16(int taddr, float (&out)[16]) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+               "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+               : "=f"(out[0]),
+                 "=f"(out[1]),
+                 "=f"(out[2]),
+                 "=f"(out[3]),
+                 "=f"(out[4]),
+                 "=f"(out[5]),
+                 "=f"(out[6]),
+                 "=f"(out[7]),
+                 "=f"(out[8]),
+                 "=f"(out[9]),
+                 "=f"(out[10]),
+                 "=f"(out[11]),
+                 "=f"(out[12]),
+                 "=f"(out[13]),
+                 "=f"(out[14]),
+                 "=f"(out[15])
+               : "r"(taddr));
+}
+
+template <int N>
+__device__ __forceinline__ void tcgen05_ld_cols(int taddr, float (&out)[N]) {
+  static_assert(N % 16 == 0, "tcgen05_ld_cols supports multiples of 16");
+#pragma unroll
+  for (int c = 0; c < N / 16; c++) {
+    float chunk[16];
+    tcgen05_ld_x16(taddr + c * 16, chunk);
+#pragma unroll
+    for (int i = 0; i < 16; i++) {
+      out[c * 16 + i] = chunk[i];
+    }
+  }
+}
+
+__device__ __forceinline__ void tcgen05_ld_wait() {
+  asm volatile("tcgen05.wait::ld.sync.aligned;");
+}
+
+__device__ __forceinline__ constexpr uint32_t make_idesc_f16(int mma_m,
+                                                             int mma_n) {
+  return (1U << 4) | (1U << 7) | (1U << 10) | ((uint32_t)(mma_n >> 3) << 17) |
+         ((uint32_t)(mma_m >> 4) << 24);
+}
+
+__device__ __forceinline__ void supergroup_tile_coord(int linear_idx,
+                                                      int num_m_tiles,
+                                                      int num_n_tiles,
+                                                      int group_m,
+                                                      int &m_tile,
+                                                      int &n_tile) {
+  int tiles_per_group = group_m * num_n_tiles;
+  int group_id = linear_idx / tiles_per_group;
+  int idx_in_group = linear_idx - group_id * tiles_per_group;
+  int first_m = group_id * group_m;
+  int rows_in_group = num_m_tiles - first_m;
+  if (rows_in_group > group_m) {
+    rows_in_group = group_m;
+  }
+  m_tile = first_m + (idx_in_group % rows_in_group);
+  n_tile = idx_in_group / rows_in_group;
 }
 
 } // namespace sm100_ptx

@@ -1837,19 +1837,12 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("TMA_OUT "
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
-  // Bias Tensor setup
-  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
-         "cute::make_stride($, cute::Int<1>{}));",
-         batch_size,
-         output_size,
-         output_stride);
-  code.e("cute::Tensor mBias = "
-         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
-         "$)), layout_Bias);",
+  code.e("cute::bfloat16_t const *mBias = "
+         "static_cast<cute::bfloat16_t const *>($);",
          (with_residual && rank_with_residual) ? "task_desc->input_ptrs[2]"
                                                : "nullptr");
   code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
-         "decltype(mBias), TMA_OUT, "
+         "TMA_OUT, "
          "$, $, $, $, $, $, $, "
          "$, $, $>(",
          MMA_M,
@@ -1865,6 +1858,7 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    mBias,");
+  code.e("    $,", output_stride);
   code.e("    tma_out); ");
 
   if (with_residual) {
@@ -1991,18 +1985,11 @@ int TaskRegister::register_splitk_linear_sm100_task(
   code.e("TMA_OUT "
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
-  // Bias Tensor setup
-  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
-         "cute::make_stride($, cute::Int<1>{}));",
-         batch_size,
-         output_size,
-         output_stride);
-  code.e("cute::Tensor mBias = "
-         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
-         "$)), layout_Bias);",
+  code.e("cute::bfloat16_t const *mBias = "
+         "static_cast<cute::bfloat16_t const *>($);",
          with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
   code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
-         "decltype(mBias), TMA_OUT, "
+         "TMA_OUT, "
          "$, $, $, $, $, $, $, "
          "$, $, $>(",
          MMA_M,
@@ -2018,6 +2005,7 @@ int TaskRegister::register_splitk_linear_sm100_task(
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    mBias,");
+  code.e("    $,", output_stride);
   code.e("    tma_out); ");
 
   return register_task_variant(TASK_SPLITK_LINEAR_SM100, code.to_string());

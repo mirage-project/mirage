@@ -129,7 +129,6 @@ __global__
   kernel::linear_sm100_mpk_task_impl<T,
                                      TMA_A,
                                      TMA_B,
-                                     BiasTensor,
                                      TMA_OUT,
                                      MMA_M,
                                      MMA_N,
@@ -140,7 +139,8 @@ __global__
                                      /*SplitK=*/false,
                                      NUM_AB_STAGE,
                                      NUM_ACC_STAGE,
-                                     NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out);
+                                     NUM_C_STAGE>(
+      tma_a, tma_b, mBias.data().get(), OUTPUT_SIZE, tma_out);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -438,7 +438,6 @@ __global__ __launch_bounds__(256, 1) void linear_splitk_sm100_wrapper(
   kernel::linear_sm100_mpk_task_impl<T,
                                      TMA_A,
                                      TMA_B,
-                                     BiasTensor,
                                      TMA_OUT,
                                      MMA_M,
                                      MMA_N,
@@ -449,7 +448,8 @@ __global__ __launch_bounds__(256, 1) void linear_splitk_sm100_wrapper(
                                      /*SplitK=*/true,
                                      NUM_AB_STAGE,
                                      NUM_ACC_STAGE,
-                                     NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out);
+                                     NUM_C_STAGE>(
+      tma_a, tma_b, mBias.data().get(), OUTPUT_SIZE, tma_out);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
