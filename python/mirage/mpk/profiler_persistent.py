@@ -121,8 +121,45 @@ event_name_list = {
     314: "TASK_MOE_UNPERMUTE_SM100",
     315: "TASK_TRANSPOSE_SCALE_SM100",
     316: "TASK_ASSEMBLE_Q_DECODE_SM100",
-    320: "TASK_SM100_TASK_END",
+    317: "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100",
+    310: "TASK_MOE_TOPK_COMPACT_SM100",
+    320: "TASK_MOE_TOPK_MARKER_INIT_SM100",
+    322: "TASK_LINEAR_FP8_BMM_DENSE_SM100",
+    323: "TASK_MLA_KV_APPEND_SM100",
+    324: "TASK_SM100_TASK_END",
 }
+
+
+def _augment_event_names_from_header():
+    """Self-sync `event_name_list` from the C++ enum in runtime_header.h so the
+    Python profiler can never silently drift behind a newly-added task type
+    (the cause of the historical UNKNOWN_322/323 + the 320-mislabel bug). Any
+    `TASK_<NAME> = <id>` in the header that is missing here is added; existing
+    entries are NOT overwritten (the literal above stays authoritative for the
+    handful of legacy ids whose header names differ). Best-effort: a missing
+    header (installed wheel) just leaves the literal map as-is."""
+    import os
+    import re
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "..", "include", "mirage",
+                     "persistent_kernel", "runtime_header.h"),
+        os.path.join(here, "include", "mirage", "persistent_kernel",
+                     "runtime_header.h"),
+    ]
+    for path in candidates:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            continue
+        for name, sid in re.findall(r"\b(TASK_[A-Z0-9_]+)\s*=\s*(\d+)", text):
+            event_name_list.setdefault(int(sid), name)
+        break
+
+
+_augment_event_names_from_header()
 
 
 class EventType(Enum):
