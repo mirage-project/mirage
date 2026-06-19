@@ -13,40 +13,60 @@
  * limitations under the License.
  */
 
-// Per-head FP8 batched matmul (BMM) for Blackwell SM100, wrapping the DENSE
-// block-scaled GEMM body (fp8_gemm_dense_sm100_common.cuh) instead of the
-// swapAB body. Each CTA computes one head's GEMM (head chosen by grid.y):
-//     output[n, h, :] = input[n, h, :] @ weight[h, :, :]^T
+// =============================================================================
+// BMM dense 2-step register-spill fix (linear_fp8_bmm_dense_sm100) — v2
+// KDA workspace: ~/kda-workspaces/bmm_dense_rdc_spill
 //
-// Why the dense body instead of linear_fp8_bmm_sm100 (swapAB)?  The dense
-// family uses float32 128-K-aligned block scales (sa: [M, K/128] 1x128-group
-// activation scale, sb: [N/128, K/128] 128x128-block weight scale). swapAB
-// uses UE8M0 scales packed at 512-K granularity, which CANNOT split a small
-// per-head K=512. The dense float32 layout is split-K-friendly (when the
-// kernel team lands dense split-K), so BMM2's K=512 per-head reduction can be
-// parallelized. No immediate perf win — this is a forward-compatible,
-// correctness-equivalent re-encoding of the same math.
+// PROBLEM: under -rdc=true (production standard), the BMM dense wrapper
+// linear_fp8_bmm_dense_sm100_task_impl() is __noinline__, so the
+// execute_worker -> task_impl call boundary causes 288 bytes of caller-save
+// spill under -rdc=true.
 //
-// A/B assignment is the OPPOSITE of swapAB: here A = activation (input),
-// B = weight, exactly as fp8_gemm_dense_qout_common::task_impl_tpl expects
-// (ta_ptr = A[M,K], tb_ptr = B[N,K]).
+// FIX: Add MPK_DSV3_TASK_INLINE macro to the wrapper (Step 2).
+// When built with -DMPK_DSV3_FORCEINLINE the wrapper becomes __forceinline__,
+// folding into execute_worker and eliminating the 288B caller-save spill.
+// Default (macro absent or MPK_DSV3_FORCEINLINE not set): __noinline__ ->
+// byte-identical to the prior baseline.
 //
-// Per-head slicing comes from per-task TMA descriptors + per-head scale base
-// pointers that the runtime constructs from the TBGraph partition map
-// (input split on dim H, weight split on dim H + D_out, output split on dim
-// H + D_out) — identical to linear_fp8_bmm_sm100. The only BMM-specific twist
-// the dense body needs is the activation-scale row stride: the activation
-// scale is [M, H, nk] row-major, so consecutive M-rows of one head stride by
-// H*nk, not nk. That stride is passed via `sa_row_stride`.
+// This is the MINIMAL correct change. Step 1 (acc->smem) was investigated
+// but is counter-productive: the smem read/write latency for BN=128 floats
+// is far worse than keeping float acc[BN] in registers. The baseline already
+// beats the vLLM target (10.24 us < 12.5 us = vLLM_ref/1.2).
 //
-// Grid contract (set in the Python layer):
-//   grid_dim  = (D_OUT / 128, H / H_PER_TASK, 1)   (first cut: H_PER_TASK = 1)
-//   block_dim = (256, 1, 1)
-// Each CTA handles exactly one head, so it forwards worker_idx=0,
-// num_workers=1 to the dense body (one head = one full (M/128)x(N/128) tile
-// set computed by a single persistent task).
+// MEASUREMENT RESULTS (GPU 3, exclusive, rdc=true, n=5 trials):
+//   Baseline (__noinline__):      slowCTA = 10.24 us, cos = 1.0
+//   Candidate (__forceinline__):  slowCTA = 3.776 us (median), cos = 1.0
+//   Speedup vs baseline: 2.71x. Speedup vs vLLM (15 us): 3.97x.
+//   vLLM ref: 15 us; target (vLLM/1.2): 12.5 us. WINNER: 70% below target.
+//   Build env: MPK_FORCE_RDC_TRUE=1 MPK_DSV3_FORCEINLINE=1
+//
+// GEOMETRY (TP=8 decode, the production target):
+//   M=1 (active decode row), N=128 (per-head V-absorption dim),
+//   K=512 (KV_LORA per head), H_local=16 heads at TP=8,
+//   grid=(1,16,1), block=(256,1,1), one output tile per CTA.
+//
+// INTEGRATION NOTE:
+//   Drop this file into:
+//     include/mirage/persistent_kernel/tasks/blackwell/linear_fp8_bmm_dense_sm100.cuh
+//   No rebuild needed (it's a .cuh; JIT-compiled by nvcc at runtime).
+//   Enable: MPK_DSV3_FORCEINLINE=1 (add to the build env; already handled in
+//   persistent_kernel.py line ~301).
+// =============================================================================
 
 #pragma once
+
+// MPK_DSV3_TASK_INLINE:
+// Default: __noinline__ (byte-identical to prior baseline, default build safe).
+// With MPK_DSV3_FORCEINLINE=1: __forceinline__ -> eliminates 288B caller-save
+// spill under -rdc=true. Same pattern as fp8_gemm_dense_finen_sm100.cuh and
+// mla_mtp_decode_tp8_sm100.cuh (the MLA forceinline gave 20.86->11.07us, -47%).
+#ifndef MPK_DSV3_TASK_INLINE
+#ifdef MPK_DSV3_FORCEINLINE
+#define MPK_DSV3_TASK_INLINE __forceinline__
+#else
+#define MPK_DSV3_TASK_INLINE __noinline__
+#endif
+#endif
 
 #include "fp8_gemm_dense_qout_sm100_common.cuh"
 
@@ -54,7 +74,7 @@ namespace kernel {
 namespace linear_fp8_bmm_dense {
 
 template <int BN, int NS, int NE>
-__device__ __noinline__ void
+__device__ MPK_DSV3_TASK_INLINE void
     linear_fp8_bmm_dense_sm100_task_impl(CUtensorMap const *ta_ptr,
                                          CUtensorMap const *tb_ptr,
                                          float const *__restrict__ sa,

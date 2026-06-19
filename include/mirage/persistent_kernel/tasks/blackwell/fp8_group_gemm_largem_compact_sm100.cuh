@@ -15,21 +15,32 @@
 
 // Grouped FP8 GEMM, compact-dispatch variant (W2 MoE down-projection).
 //
-// Motivation: MPK's incumbent kernel (fp8_group_gemm_largem_sm100) iterates
-// all E_local*nn tile slots per dispatch, checking active_expert_mask per tile.
-// At DSv3 TP=4 EP=2 decode (4/128 active experts), 54/56 iterations per
-// worker are cheap skips, wasting ~6.75 us per call. This variant builds a
-// compact active-expert list at kernel start (warp-ballot deterministic scan,
-// ~1 us) then loops only over num_active*nn tiles, eliminating all skips.
+// CANDIDATE C3: -rdc=true compatibility fix (warp-0 alloc/dealloc pattern)
 //
-// Performance (GPU B200, BN=128, NS=6, M=16384, K=1024, N=7168, 128 workers):
+// Changes vs baseline for -rdc=true compatibility:
+// 1. Remove setmaxnreg.dec/inc (C7504: ptxas silently ignores under -rdc=true)
+// 2. tcgen05.alloc moved to `if (wid == 0)` (warp 0 only, 32 threads) after
+//    __syncthreads(), followed by bar.sync 10, 256 + taddr = *tp.
+//    Rationale: MLA TP2 pattern (lines 208-225 of mla_mtp_decode_tp2_sm100.cuh):
+//    "All 32 threads of warp 0 issue tcgen05.alloc (sync.aligned requires the
+//    full warp to participate)." Plus: CuTe TMEM allocator requires alloc/dealloc
+//    from the SAME warp across all co-scheduled tasks; warp 0 is the convention.
+//    C1v2 (4-warp alloc) HUNG because tcgen05.alloc.sync.aligned is warp-level
+//    (not CTA-level); issuing it from 4 warps simultaneously hangs the hardware.
+// 3. tcgen05.dealloc moved to after the warp specialization if-else chain,
+//    inside `if (wid == 0)`, preceded by bar.sync 10, 256 (waits for all 256
+//    threads in 8 warps of B200 MPK worker to finish before dealloc).
+//    Original placement `if (ew == 1)` inside epilogue was a convergence violation
+//    (warp 5 waits for 128 threads but warps 0-3 already exited → deadlock under
+//    -rdc=true where dealloc.sync.aligned requires the warp to be convergent).
+//
+// bar.sync 10 with count=256 (all 256 threads in a B200 MPK worker).
+// bar.sync 6 is used for epilogue sync (count=128, epilogue warps 4-7 only).
+//
+// Original baseline performance (no -rdc=true):
 //   decode_4active:  18.46 us vs incumbent 28.67 us → 1.55x
 //   decode_16active: 36.90 us vs incumbent 45.09 us → 1.22x
 //   decode_32active: 61.47 us vs incumbent 67.74 us → 1.10x
-//
-// KERNEL_RESULT {"decode_4active": 407.0728, "decode_16active": 814.8517,
-// "decode_32active": 978.1615} KERNEL_RESULT_REFERENCE {"decode_4active":
-// 262.1440, "decode_16active": 666.8020, "decode_32active": 887.5995}
 
 #pragma once
 
@@ -140,7 +151,20 @@ inline constexpr int fp8_group_gemm_largem_compact_smem_size() {
 
 // ────────────────────────── Main device function
 // ──────────────────────────────
-__device__ __noinline__ void fp8_group_gemm_largem_compact_task_impl(
+// C5 attempt: test body forceinline gated on MPK_DSV3_FORCEINLINE (env-gated,
+// default __noinline__ for production megakernel safety). Under -rdc=true,
+// the caller-save at the _execute_task→task_impl boundary accounts for ~3us.
+// Forceinlining the body eliminates this at the cost of larger worker_kernel
+// register count (C7600 risk in full megakernel; safe in single-task gate).
+// The 2-step (body-reduce + forceinline) approach from memory:
+//   feedback_rdc_caller_save_forceinline_lever.md (MLA: 20.86→11.84us w/ -rdc=true)
+__device__
+#ifdef MPK_DSV3_FORCEINLINE
+  __forceinline__
+#else
+  __noinline__
+#endif
+void fp8_group_gemm_largem_compact_task_impl(
     CUtensorMap const *ta_ptr,
     CUtensorMap const *tb_ptr,
     CUtensorMap const *tsfa_ptr,
@@ -155,6 +179,9 @@ __device__ __noinline__ void fp8_group_gemm_largem_compact_task_impl(
     int const worker_idx,
     int const num_workers) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
+#ifdef MPK_FASTFWD_GEMM
+  return;  // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
+#endif
   constexpr int BM = 128, BK = 128, UK = 32;
   constexpr int SF_PER_LOAD = 4;
   constexpr int NE = 2;
@@ -232,14 +259,23 @@ __device__ __noinline__ void fp8_group_gemm_largem_compact_task_impl(
       detail::mb_init_impl(bte + i * 8, 128);
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
-  } else if (wid == 2) {
+  }
+  // C3: mbarrier init and prefetch are done. Sync before alloc.
+  __syncthreads();
+  // C3 FIX: tcgen05.alloc moved to warp 0 (mirroring mla_mtp_decode_tp2_sm100.cuh
+  // lines 208-223: "All 32 threads of warp 0 issue tcgen05.alloc; sync.aligned
+  // requires the full warp to participate"). Warp 0 convention is required by
+  // CuTe's TMEM allocator for inter-task consistency.
+  if (wid == 0) {
     int a = __cvta_generic_to_shared(tp);
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
             "r"(a),
         "r"(TCA));
   }
-  __syncthreads();
+  // CTA-wide sync so all warps see the allocated TMEM address before proceeding.
+  // Wait for all 256 threads (8 warps in B200 MPK worker) to see the alloc.
+  asm volatile("bar.sync 10, 256;");
   const uint32_t taddr = *tp;
 
   // ── COMPACT PROLOGUE: build deterministic sorted active-expert list ──
@@ -289,11 +325,8 @@ __device__ __noinline__ void fp8_group_gemm_largem_compact_task_impl(
 
   int const num_active = s_num_active;
 
-  if (wid < 4) {
-    asm volatile("setmaxnreg.dec.sync.aligned.u32 64;");
-  } else {
-    asm volatile("setmaxnreg.inc.sync.aligned.u32 216;");
-  }
+  // C3: setmaxnreg removed (C7504: ptxas silently ignores under -rdc=true;
+  // the ignored instructions caused register state inconsistency → crash).
 
   constexpr uint32_t base_idesc =
       ((uint32_t)(BN / 8) << 17) | (1u << 23) | ((uint32_t)(BM / 128) << 27);
@@ -533,11 +566,21 @@ __device__ __noinline__ void fp8_group_gemm_largem_compact_task_impl(
     if (ew == 0) {
       asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(0) : "memory");
     }
-    if (ew == 1) {
-      asm volatile(
-          "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
-          "r"(TCA));
-    }
+    // C3: tcgen05.dealloc REMOVED from here (ew==1 only = warp 5 only).
+    // Original placement was a convergence violation: warp 5 waited for all 128
+    // threads via .sync.aligned but warps 0-3 already exited the if-else chain
+    // and returned from the task function → deadlock under -rdc=true.
+  }
+  // C3 FIX: wait for ALL 128 threads (all warp loops have exited, all warps fall
+  // through the if-else chain to here). Then warp 0 does the dealloc (mirrors
+  // mla_mtp_decode_tp2_sm100.cuh lines 755-760: MLA_TP_SYNC_ACTIVE() + wid==0
+  // dealloc pattern).
+  // Wait for all 256 threads (8 warps) to finish their warp-specialized loops.
+  asm volatile("bar.sync 10, 256;");
+  if (wid == 0) {
+    asm volatile(
+        "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
+        "r"(TCA));
   }
 #endif // __CUDA_ARCH__ >= 1000
 }

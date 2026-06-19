@@ -23,6 +23,17 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+// MPK_DSV3_FORCEINLINE (default-OFF): this lean M=1 GEMV folds into execute_worker
+// (eliminating the -rdc=true caller-save) when forceinlined; default __noinline__
+// keeps the default build byte-identical. See persistent_kernel.cuh.
+#ifndef MPK_DSV3_TASK_INLINE
+#ifdef MPK_DSV3_FORCEINLINE
+#define MPK_DSV3_TASK_INLINE __forceinline__
+#else
+#define MPK_DSV3_TASK_INLINE __noinline__
+#endif
+#endif
+
 namespace kernel {
 namespace fp8_gemm_dense_gemv_m1 {
 
@@ -90,7 +101,7 @@ __host__ __device__ inline constexpr int fp8_gemm_dense_gemv_m1_smem_size(int K)
 // C_row_stride: unused for M=1; retained for ABI compatibility.
 
 template <int BN, int NS>
-__device__ __noinline__ void fp8_gemm_dense_gemv_m1_sm100_task_impl(
+__device__ MPK_DSV3_TASK_INLINE void fp8_gemm_dense_gemv_m1_sm100_task_impl(
     CUtensorMap const *ta_ptr,
     CUtensorMap const *tb_ptr,
     float const *__restrict__ sa,

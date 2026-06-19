@@ -255,7 +255,20 @@ def get_compile_command(
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if not use_nvshmem else "-rdc=true",
+        # Production TP8 builds -rdc=true (NVSHMEM requires it). -rdc=true compiles
+        # task bodies relocatable/per-function -> register-heavy decode kernels SPILL
+        # (dense ~312B, MLA ~216B, BMM2 ~288B); -rdc=false inlines them -> 0 spill, so
+        # a -rdc=false test-mode gate UNDER-predicts production. MPK_FORCE_RDC_TRUE=1
+        # makes the single-GPU faithful gate compile -rdc=true so slowCTA includes the
+        # spill = faithful to production. (root cause 6/18; see DECODE_ROADMAP.md.)
+        "-rdc=true" if (use_nvshmem or os.environ.get("MPK_FORCE_RDC_TRUE") == "1")
+        else "-rdc=false",
+        # MPK_MAXRREGCOUNT=N adds -maxrregcount=N (the per-thread register cap). Used
+        # by the kernel-agent robustness test: production runs DEFAULT (no cap, heavy
+        # spill under -rdc=true) = the realistic target; N=168 is the strict stress
+        # config (a kernel must not collapse when squeezed). Unset = ptxas default.
+        *(["-maxrregcount=" + os.environ["MPK_MAXRREGCOUNT"]]
+          if os.environ.get("MPK_MAXRREGCOUNT") else []),
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -266,6 +279,27 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
+    # DIAGNOSTIC (not for production): fast-forward the heavy GEMM bodies (early
+    # return → no compute, runtime still signals task-done → schedule/deps/timing
+    # preserved). tpot(MPK_FASTFWD_GEMM=1) vs baseline = upper bound of ALL
+    # GEMM-body tuning. If tpot barely drops, decode is schedule/bubble-bound.
+    if os.environ.get("MPK_FASTFWD_GEMM") == "1":
+        flags = flags + ["-DMPK_FASTFWD_GEMM"]
+    # DIAGNOSTIC: fast-forward EVERY compute task body at the worker-dispatch
+    # level, EXCEPT cross-rank NVSHMEM collectives (301/302/303 — skipping those
+    # deadlocks). Event-trigger still fires → schedule/deps preserved. The clean
+    # tpot(MPK_FASTFWD_NONAR=1) = AllReduce-body + pure scheduling/handoff floor.
+    # Subtract from baseline+GEMM-ff to split non-GEMM kernel-compute vs schedule.
+    if os.environ.get("MPK_FASTFWD_NONAR") == "1":
+        flags = flags + ["-DMPK_FASTFWD_NONAR"]
+    # MPK_DSV3_FORCEINLINE=1: selective forceinline of the LEAN decode task bodies
+    # (finen, ...) + the dispatch -> they fold into execute_worker, eliminating the
+    # -rdc=true worker_kernel caller-save (finen 11.23->8.10us, beats vLLM). Heavy
+    # bodies (MLA/group-GEMM/BMM2) keep __noinline__ so ptxas never overflows.
+    # Default-OFF (byte-identical default build); the production lever for lean
+    # decode kernels under -rdc=true (root cause + Codex #5, 6/18).
+    if os.environ.get("MPK_DSV3_FORCEINLINE") == "1":
+        flags = flags + ["-DMPK_DSV3_FORCEINLINE"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -1915,6 +1949,12 @@ class PersistentKernel:
         # TP4 can be compiled with a different RD_DV for ablation. Keep the
         # grid matched to the compiled coverage; standalone tests currently
         # show RD_DV=2 is fastest for KV=4096.
+        # NOTE (B1, 6/18): the TP8 reduce dispatches grid.x=ceil(d_v/2)=256 CTAs
+        # on 136 workers = 2 waves. Capping it to 128 needs a KERNEL change, not
+        # just this grid: mla_mtp_decode_tp8_sm100.cuh hardcodes `RD_DV=2`,
+        # `RD_TB=256` (each CTA writes exactly 2 V-elements via lane=tid>>7), so
+        # a 128-grid would leave V[256:512] unwritten (verified: cos 0.67 FAIL).
+        # Payoff is only ~2-3us/layer (the 2nd wave) -> deprioritized.
         rd_dv = _mla_tp4_rd_dv() if task_name == "mla_mtp_decode_tp4_reduce_sm100" else 2
 
         params = [num_groups, q_len, num_splits, rd_dv]
@@ -3108,8 +3148,18 @@ class PersistentKernel:
     def fp8_gemm_dense_finen_layer(self, input_fp8, weight_fp8, input_scale,
                                    weight_scale, output, num_workers,
                                    runtime_m_mode: int = 0):
-        # fine-N dense GEMM (mediumm body @ BN=16). Handles all M (correct at
-        # prefill M>1 too), so no dual-dispatch. default-OFF lever.
+        # fine-N CUDA-core GEMV. **Computes only ACTIVE-ROW 0**: the kernel does
+        # `(void)M`, reads A[1,K], writes C[col] = output row 0
+        # (fp8_gemm_dense_finen_sm100.cuh:180,290), and the codegen prepends a
+        # runtime `if (active_rows_ != 1) return;` guard. So it is correct ONLY
+        # when exactly 1 row is live (decode). It must therefore only REPLACE the
+        # dense GEMM in decode-only builds — the builder gates `_use_finen` on
+        # `max_num_batched_tokens == 1` (builder.py:547); at mbt>1 (prefill/batched)
+        # finen would early-return / row-drop, leaving the output uncomputed.
+        # (NB: the per-task gate test legitimately BUILDS this at bs>1 with 1 live
+        # row, so output.dim(0) is the buffer capacity, not the live count — a
+        # build-time `output.dim(0)==1` assert is WRONG here; the protections are
+        # the builder mbt==1 gate + the kernel's runtime active_rows guard.)
         self._fp8_gemm_dense_layer_impl(
             "fp8_gemm_dense_finen_sm100",
             input_fp8, weight_fp8, input_scale, weight_scale, output,

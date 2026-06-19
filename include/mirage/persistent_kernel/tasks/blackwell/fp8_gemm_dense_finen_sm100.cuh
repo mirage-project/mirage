@@ -97,6 +97,19 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+// MPK_DSV3_FORCEINLINE (default-OFF): this lean M=1 GEMV folds into execute_worker
+// (eliminating the -rdc=true caller-save; finen 11.23->8.10us beats vLLM) when
+// forceinlined. Default __noinline__ keeps the default build byte-identical. The
+// heavy task bodies do NOT use this, so worker_kernel never overflows ptxas. See
+// persistent_kernel.cuh::execute_task_noinline.
+#ifndef MPK_DSV3_TASK_INLINE
+#ifdef MPK_DSV3_FORCEINLINE
+#define MPK_DSV3_TASK_INLINE __forceinline__
+#else
+#define MPK_DSV3_TASK_INLINE __noinline__
+#endif
+#endif
+
 namespace kernel {
 namespace fp8_gemm_dense_finen {
 
@@ -161,24 +174,27 @@ __device__ __forceinline__ unsigned char const *
 
 // ---- Main task function ---------------------------------------------------
 //
-// 11-param finen ABI, identical order/types to the in-tree finen header. The
-// device body is a fixed-256-thread CUDA-core GEMV; BN/NS template params are
-// accepted (the codegen instantiates <16,6>) but NOT used for the thread map.
-template <int BN, int NS>
-__device__ __noinline__ void
+// 6-arg finen ABI. Under production -rdc=true the prior 11-arg ABI overflowed
+// the device register-arg window (6 LDL at entry + caller save/restore across
+// the _execute_task->finen relocatable call = the dominant decode spill).
+// N/K/num_workers are per-variant compile-time constants -> template params; M
+// and the output row stride (C_row_stride) are unused by the M=1 GEMV and are
+// dropped. The five operand pointers + the per-worker request_id stay as direct
+// args (no TaskDesc/runtime-header dependency — the task-header include order
+// can't satisfy it here). The GEMV math below is byte-identical -> cos
+// unchanged. The device body is a fixed-256-thread CUDA-core GEMV; BN/NS are
+// accepted (codegen instantiates <16,6,...>) but NOT used for the thread map.
+template <int BN, int NS, int N, int K, int num_workers>
+__device__ MPK_DSV3_TASK_INLINE void
     fp8_gemm_dense_finen_sm100_task_impl(CUtensorMap const *ta_ptr,
                                          CUtensorMap const *tb_ptr,
                                          float const *__restrict__ sa,
                                          float const *__restrict__ sb,
                                          __nv_bfloat16 *__restrict__ C,
-                                         int const M,
-                                         int const N,
-                                         int const K,
-                                         int const worker_idx,
-                                         int const num_workers,
-                                         int const C_row_stride = -1) {
-  (void)M;
-  (void)C_row_stride;
+                                         int const worker_idx) {
+#ifdef MPK_FASTFWD_GEMM
+  return;  // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
+#endif
 
   unsigned char const *Ag = gemv_tma_global(ta_ptr); // A[1,K] FP8 global
   unsigned char const *Bg = gemv_tma_global(tb_ptr); // B[N,K] FP8 global
