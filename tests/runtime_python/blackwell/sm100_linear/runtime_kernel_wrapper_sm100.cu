@@ -75,6 +75,8 @@ __global__
   constexpr int OUTPUT_TMA_CP_SIZE = 128;
   constexpr int OUTPUT_ATOM_REPEAT_COL = 1;
 
+  constexpr int CLAMPED_BN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
+
   using TMA_B =
       kernel::tma::tma_2d<bfloat16,
                           B,
@@ -82,7 +84,7 @@ __global__
                           S,
                           BATCH_SIZE,                /*GMEM_ROW_*/
                           REDUCTION_SIZE,            /*GMEM_COL_*/
-                          MMA_N,                     /*SMEM_ROW_*/
+                          CLAMPED_BN,                /*SMEM_ROW_*/
                           TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
                           REDUCTION_SIZE,            /*GMEM_STRIDE_ROW_*/
                           1,                         /*GMEM_STRIDE_COL_*/
@@ -113,7 +115,7 @@ __global__
                           S,
                           BATCH_SIZE,             /*GMEM_ROW_*/
                           OUTPUT_SIZE,            /*GMEM_COL_*/
-                          MMA_N,                  /*SMEM_ROW_*/
+                          CLAMPED_BN,             /*SMEM_ROW_*/
                           MMA_M,                  /*SMEM_COL_*/
                           OUTPUT_SIZE,            /*GMEM_STRIDE_ROW_*/
                           1,                      /*GMEM_STRIDE_COL_*/
@@ -157,6 +159,7 @@ void launch_linear_sm100_mpk(void *input_ptr,
 
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
+  constexpr int CLAMPED_BN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
 
   constexpr int TMA_CP_ASYNC_SIZE =
       64; // note that if swizzle 128 is used, 64 is maximal cp size
@@ -184,7 +187,7 @@ void launch_linear_sm100_mpk(void *input_ptr,
   uint64_t i_gmem_shape[2] = {static_cast<uint64_t>(BATCH_SIZE),
                               static_cast<uint64_t>(REDUCTION_SIZE)};
   uint64_t i_gmem_stride[2] = {1, static_cast<uint64_t>(REDUCTION_SIZE)};
-  uint32_t i_smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+  uint32_t i_smem_shape[2] = {static_cast<uint32_t>(CLAMPED_BN),
                               static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
 
   size_t i_smem_repeat_col =
@@ -220,7 +223,7 @@ void launch_linear_sm100_mpk(void *input_ptr,
   uint64_t o_gmem_shape[2] = {static_cast<uint64_t>(BATCH_SIZE),
                               static_cast<uint64_t>(OUTPUT_SIZE)};
   uint64_t o_gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
-  uint32_t o_smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+  uint32_t o_smem_shape[2] = {static_cast<uint32_t>(CLAMPED_BN),
                               static_cast<uint32_t>(MMA_M)};
   size_t o_smem_repeat_col = 1;
   mirage::runtime::fill_tma_desc<bfloat16, 0, M, S, 2>(
@@ -384,6 +387,8 @@ __global__ __launch_bounds__(256, 1) void linear_splitk_sm100_wrapper(
   constexpr int OUTPUT_TMA_CP_SIZE = 128;
   constexpr int OUTPUT_ATOM_REPEAT_COL = 1;
 
+  constexpr int CLAMPED_BN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
+
   using TMA_B =
       kernel::tma::tma_2d<bfloat16,
                           B,
@@ -391,7 +396,7 @@ __global__ __launch_bounds__(256, 1) void linear_splitk_sm100_wrapper(
                           S,
                           BATCH_SIZE,                /*GMEM_ROW_*/
                           REDUCTION_SIZE,            /*GMEM_COL_*/
-                          MMA_N,                     /*SMEM_ROW_*/
+                          CLAMPED_BN,                /*SMEM_ROW_*/
                           TMA_CP_ASYNC_SIZE,         /*SMEM_COL_*/
                           REDUCTION_SIZE,            /*GMEM_STRIDE_ROW_*/
                           1,                         /*GMEM_STRIDE_COL_*/
@@ -422,7 +427,7 @@ __global__ __launch_bounds__(256, 1) void linear_splitk_sm100_wrapper(
                           S,
                           BATCH_SIZE,             /*GMEM_ROW_*/
                           OUTPUT_SIZE,            /*GMEM_COL_*/
-                          MMA_N,                  /*SMEM_ROW_*/
+                          CLAMPED_BN,             /*SMEM_ROW_*/
                           MMA_M,                  /*SMEM_COL_*/
                           OUTPUT_SIZE,            /*GMEM_STRIDE_ROW_*/
                           1,                      /*GMEM_STRIDE_COL_*/
@@ -466,6 +471,7 @@ void launch_linear_splitk_sm100(void *input_ptr,
 
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
+  constexpr int CLAMPED_BN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
 
   constexpr int TMA_CP_ASYNC_SIZE =
       64; // note that if swizzle 128 is used, 64 is maximal cp size
@@ -493,7 +499,7 @@ void launch_linear_splitk_sm100(void *input_ptr,
   uint64_t i_gmem_shape[2] = {static_cast<uint64_t>(BATCH_SIZE),
                               static_cast<uint64_t>(REDUCTION_SIZE)};
   uint64_t i_gmem_stride[2] = {1, static_cast<uint64_t>(REDUCTION_SIZE)};
-  uint32_t i_smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+  uint32_t i_smem_shape[2] = {static_cast<uint32_t>(CLAMPED_BN),
                               static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
 
   size_t i_smem_repeat_col =
@@ -529,7 +535,7 @@ void launch_linear_splitk_sm100(void *input_ptr,
   uint64_t o_gmem_shape[2] = {static_cast<uint64_t>(BATCH_SIZE),
                               static_cast<uint64_t>(OUTPUT_SIZE)};
   uint64_t o_gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
-  uint32_t o_smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+  uint32_t o_smem_shape[2] = {static_cast<uint32_t>(CLAMPED_BN),
                               static_cast<uint32_t>(MMA_M)};
   size_t o_smem_repeat_col = 1;
   mirage::runtime::fill_tma_desc<bfloat16, 0, M, S, 2>(
