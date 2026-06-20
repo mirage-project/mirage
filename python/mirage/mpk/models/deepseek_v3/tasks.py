@@ -512,8 +512,30 @@ def _fp8_group_gemm_largem_layer(
     # Largem variant: BN=128, NS=6. Default for everything outside the
     # smallm niche (most MoE configs incl. all prefill MPE >= 16 and any
     # K <= 4096 layer like down_proj).
+    #
+    # MPK_DSV3_GG_COMPACT=1 (default-OFF, byte-identical default build): swap the
+    # incumbent for the COMPACT-dispatch kernel. SAME _fp8_group_gemm_layer_impl
+    # signature/I/O, only the registered task_name differs. WHY: the incumbent
+    # strides ALL 128 experts with `continue`-skip, so at the production ~5-active
+    # bs=1 decode the active experts land unevenly across workers -> a subset owns
+    # 2 tiles -> W13 slowCTA ~50us (measured, winner trace 6/19). Compact iterates
+    # ONLY num_active*nn tiles, evenly strided -> 1 tile/worker -> ~18us
+    # (gate-validated 18.46 vs incumbent 28.67us @4-active, cos 1.0). DANGER:
+    # compact HANGS at >=18-active (README_faithful_pertask); safe ONLY at the
+    # bs=1 decode operating point (~5-active). Confirm the active-count before
+    # enabling at higher batch.
+    import os
+    # MPK_DSV3_STABLE=1 = the verified-stable DECODE config: one flag turns on all the
+    # 6/20-verified wins (GG_COMPACT + ROUTER_GEMV + MLA_REDUCE_1WAVE + TOPK_PARALLEL =
+    # 12.88ms @ TP8 bs=1). DECODE-ONLY — compact HANGS at ≥18-active, so do NOT set STABLE
+    # for prefill. default-OFF = byte-identical. (A true env-less default still needs mbt
+    # plumbed to each gate + a box prefill-safety re-verify; tracked as a follow-up.)
+    _name = ("fp8_group_gemm_largem_compact_sm100"
+             if (os.environ.get("MPK_DSV3_GG_COMPACT") == "1"
+                 or os.environ.get("MPK_DSV3_STABLE") == "1")
+             else "fp8_group_gemm_largem_sm100")
     _fp8_group_gemm_layer_impl(
-        pk, "fp8_group_gemm_largem_sm100",
+        pk, _name,
         a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
         num_workers, meta=meta)
 

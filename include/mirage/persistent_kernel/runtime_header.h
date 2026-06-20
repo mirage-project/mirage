@@ -185,7 +185,10 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 299,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
-  // retired: 318, 319
+  // retired: 319
+  // BF16 CUDA-core GEMV for DSv3 router gate (hidden@W_gate.T→logits), raw-ptr
+  // ABI (no TMA). Default-OFF: MPK_DSV3_ROUTER_GEMV=1.
+  TASK_DSV3_ROUTER_GATE_GEMV_SM100 = 318,
   TASK_FP8_GEMM_DENSE_SM100 = 306,
   // ferret v002 CUDA-core GEMV (M=1 decode, RAW-ptr ABI via input_ptrs[0/1],
   // NOT TMA descriptors; reuses retired gap 307). default-OFF

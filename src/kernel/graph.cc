@@ -872,6 +872,14 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_GEMV_M1_SM100, variant_id);
+  } else if (name == "dsv3_router_gate_gemv_sm100") {
+    // ferret BF16 CUDA-core GEMV: hidden[M,K] @ W_gate[N,K]^T → logits[M,N].
+    // 2 real inputs (hidden, W_gate) + 1 real output (logits); raw-ptr ABI.
+    // Default-OFF: MPK_DSV3_ROUTER_GEMV=1 gated in builder.py at mbt==1.
+    int variant_id = task_register->register_dsv3_router_gate_gemv_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_DSV3_ROUTER_GATE_GEMV_SM100, variant_id);
   } else if (name == "fp8_gemm_dense_mediumm_sm100") {
     int variant_id = task_register->register_fp8_gemm_dense_sm100_task(
         customized->bgraph, params, /*mediumm=*/true);

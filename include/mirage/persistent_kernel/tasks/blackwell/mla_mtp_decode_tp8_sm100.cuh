@@ -1,6 +1,7 @@
 // MLA Multi-Token Decode for DeepSeek V3 on B200 (SM100a) — TP=8 (16 heads)
 //
-// v7 optimization (2026-06-18): register-spill resolution + forceinline under -rdc=true
+// v7 optimization (2026-06-18): register-spill resolution + forceinline under
+// -rdc=true
 //
 // Root cause: under -rdc=true (per-function compile, no inlining), the
 // worker_kernel reaches the hardware register cap and spills to local memory
@@ -15,14 +16,16 @@
 //   3. MAX_STAGES = 3 = max(NUM_QK_STAGES, NUM_PV_STAGES)
 //
 // STEP 2 — Forceinline the body into execute_worker:
-//   Added MPK_DSV3_TASK_INLINE macro (same pattern as fp8_gemm_dense_finen_sm100.cuh).
-//   When MPK_DSV3_FORCEINLINE=1, mla_mtp_tp8_main is __forceinline__ ->
-//   folds into _execute_task -> execute_task_noinline -> execute_worker ->
-//   eliminates the 624B caller-save across the relocatable call boundary.
-//   Default (MPK_DSV3_FORCEINLINE not set): __noinline__ (byte-identical default build).
+//   Added MPK_DSV3_TASK_INLINE macro (same pattern as
+//   fp8_gemm_dense_finen_sm100.cuh). When MPK_DSV3_FORCEINLINE=1,
+//   mla_mtp_tp8_main is __forceinline__ -> folds into _execute_task ->
+//   execute_task_noinline -> execute_worker -> eliminates the 624B caller-save
+//   across the relocatable call boundary. Default (MPK_DSV3_FORCEINLINE not
+//   set): __noinline__ (byte-identical default build).
 //
 // Build target: MPK_DSV3_FORCEINLINE=1 MPK_FORCE_RDC_TRUE=1
-// Expected: slowCTA <= ~12.5us (vs baseline 20.86us rdc=true; vLLM ref 15us / 1.2 = 12.5us)
+// Expected: slowCTA <= ~12.5us (vs baseline 20.86us rdc=true; vLLM ref 15us
+// / 1.2 = 12.5us)
 //
 // Invariants preserved:
 //   - bar.sync 12, 128 (CUTLASS user-range, NOT __syncthreads() / NOT id=1)
@@ -33,11 +36,13 @@
 // Measurements (catalyst@204.12.188.88, GPU 0, B200):
 //   Baseline -rdc=false: ~12.4 us KV=512 slowCTA (INVALID as verdict)
 //   Baseline -rdc=true:  ~20.86 us KV=512 slowCTA (the number to beat)
-//   v7 DEFAULT rdc=true (noinline):   ~20.80 us KV=512 (stages=3 correct, but spill still present)
-//   v7 FORCEINLINE rdc=true (TARGET): ~11.84 us KV=512 slowCTA — BEATS vLLM 15us by 26.8% (vs >=20% bar)
-//   v7 MPK_MAXRREGCOUNT=168 FORCEINLINE: ~10.78 us KV=512 (even faster with reg cap — ROBUST)
+//   v7 DEFAULT rdc=true (noinline):   ~20.80 us KV=512 (stages=3 correct, but
+//   spill still present) v7 FORCEINLINE rdc=true (TARGET): ~11.84 us KV=512
+//   slowCTA — BEATS vLLM 15us by 26.8% (vs >=20% bar) v7 MPK_MAXRREGCOUNT=168
+//   FORCEINLINE: ~10.78 us KV=512 (even faster with reg cap — ROBUST)
 //   cos=0.999995 all configs (KV=128,256,512) — FAR above 0.99 floor
-//   PROMOTED: slowCTA 11.84us < baseline 20.86us (1.76x speedup); beats vLLM 15us / 1.2 = 12.5us
+//   PROMOTED: slowCTA 11.84us < baseline 20.86us (1.76x speedup); beats vLLM
+//   15us / 1.2 = 12.5us
 
 #pragma once
 #include <cuda.h>
@@ -49,7 +54,8 @@
 // _execute_task → execute_task_noinline) so the MLA body folds into the
 // worker frame → no caller-save across the relocatable -rdc=true call.
 // Requires the body register count ≤ ~150 regs (STEP 1 above ensures this).
-// Same pattern as fp8_gemm_dense_finen_sm100.cuh / fp8_gemm_dense_gemv_m1_sm100.cuh.
+// Same pattern as fp8_gemm_dense_finen_sm100.cuh /
+// fp8_gemm_dense_gemv_m1_sm100.cuh.
 #ifndef MPK_DSV3_TASK_INLINE
 #ifdef MPK_DSV3_FORCEINLINE
 #define MPK_DSV3_TASK_INLINE __forceinline__
@@ -91,11 +97,22 @@ static constexpr int OSAVE_SMEM_BYTES = TB * TILE_S * sizeof(float);
 // Total smem: QK pipeline stages + o_save buffer + 1024 alignment padding
 // = 3*2*16384 + 64*1024 + 1024 = 98304 + 65536 + 1024 = 164864 (~161KB)
 // Budget: 205KB dynamic on B200 SM100a → PASS (44KB headroom).
-static constexpr int SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES
-                                + OSAVE_SMEM_BYTES + 1024;
+static constexpr int SMEM_SIZE =
+    NUM_QK_STAGES * 2 * TILE_BYTES + OSAVE_SMEM_BYTES + 1024;
 
 // Reduce kernel
+// MPK_DSV3_MLA_REDUCE_1WAVE (default-OFF, byte-identical default): RD_DV=4 →
+// each reduce CTA writes 4 V-elements (2 lanes × a 2-iter d-loop) so grid.x =
+// ceil(D_V=512 / 4) = 128 ≤ num_workers(136) = ONE scheduler wave instead of
+// the rd_dv=2 → 256-CTA two-wave bubble (~2-3µs/layer 2nd wave). Trade: 2×
+// per-CTA reduce work; net win only if the saved 2nd wave > the extra per-CTA
+// cost (uncertain at KV512 — verify on 8-GPU). The reduce body below loops d
+// over RD_DV/2 values so RD_DV=2 stays exactly the old single-d behavior.
+#ifdef MPK_DSV3_MLA_REDUCE_1WAVE
+static constexpr int RD_DV = 4;
+#else
 static constexpr int RD_DV = 2;
+#endif
 static constexpr int RD_TB = 256;
 
 // ============ PTX Helpers ============
@@ -225,7 +242,8 @@ __device__ MPK_DSV3_TASK_INLINE void mla_mtp_tp8_main(
   // Access: o_save_smem + tid * TILE_S * sizeof(float) + c * sizeof(float)
   // The QK staging area ends at work_smem + NUM_QK_STAGES * 2 * TILE_BYTES.
   int const qk_smem_end = work_smem + NUM_QK_STAGES * 2 * TILE_BYTES;
-  // Ensure 4-byte alignment (already guaranteed since TILE_BYTES is a multiple of 4)
+  // Ensure 4-byte alignment (already guaranteed since TILE_BYTES is a multiple
+  // of 4)
   int const o_save_smem_base = qk_smem_end;
   // Per-thread o_save smem pointer (32-bit smem address)
   int const o_save_tid_smem = o_save_smem_base + tid * TILE_S * sizeof(float);
@@ -312,13 +330,28 @@ __device__ MPK_DSV3_TASK_INLINE void mla_mtp_tp8_main(
         // Write 16 floats = 4 × 4-float stores using st.shared
         uint32_t const *up = (uint32_t const *)t16;
         asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(smem_off),
-                     "r"(up[0]), "r"(up[1]), "r"(up[2]), "r"(up[3]));
-        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(smem_off + 16),
-                     "r"(up[4]), "r"(up[5]), "r"(up[6]), "r"(up[7]));
-        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(smem_off + 32),
-                     "r"(up[8]), "r"(up[9]), "r"(up[10]), "r"(up[11]));
-        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(smem_off + 48),
-                     "r"(up[12]), "r"(up[13]), "r"(up[14]), "r"(up[15]));
+                     "r"(up[0]),
+                     "r"(up[1]),
+                     "r"(up[2]),
+                     "r"(up[3]));
+        asm volatile(
+            "st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(smem_off + 16),
+            "r"(up[4]),
+            "r"(up[5]),
+            "r"(up[6]),
+            "r"(up[7]));
+        asm volatile(
+            "st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(smem_off + 32),
+            "r"(up[8]),
+            "r"(up[9]),
+            "r"(up[10]),
+            "r"(up[11]));
+        asm volatile(
+            "st.shared.v4.b32 [%0], {%1,%2,%3,%4};" ::"r"(smem_off + 48),
+            "r"(up[12]),
+            "r"(up[13]),
+            "r"(up[14]),
+            "r"(up[15]));
       }
     }
 
@@ -849,46 +882,55 @@ __device__ __noinline__ void
 
   int const row = tid & 127;
   int const lane = tid >> 7;
-  int const d = dv_base + lane;
 
   int q_in_group = row / NUM_HEADS;
   int h = row % NUM_HEADS;
   int actual_q = gi * qpg + q_in_group;
 
-  if (actual_q >= Q_LEN || q_in_group >= qpg || d >= D_V) {
+  if (actual_q >= Q_LEN || q_in_group >= qpg) {
     return;
   }
 
   float const *la_ptr = La + (bi * num_groups * sk + gi * sk) * 128 + row;
-  nv_bfloat16 const *oa_ptr =
-      Oa + (bi * num_groups * sk + gi * sk) * D_V * 128 + d * 128 + row;
+  int const o_base = (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
 
-  if (sk == 1) {
-    int o_base = (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
-    O[o_base + d] = oa_ptr[0];
-    return;
+  // d-loop: each lane writes RD_DV/2 V-elements (d = dv_base+lane+ll*2). At
+  // RD_DV=2 this is exactly the old single-d body (1 iter); at RD_DV=4 each CTA
+  // covers 4 V-elements so grid.x halves to 128 = one wave (the bubble fix).
+#pragma unroll
+  for (int ll = 0; ll < RD_DV / 2; ll++) {
+    int const d = dv_base + lane + ll * 2;
+    if (d >= D_V) {
+      continue;
+    }
+    nv_bfloat16 const *oa_ptr =
+        Oa + (bi * num_groups * sk + gi * sk) * D_V * 128 + d * 128 + row;
+
+    if (sk == 1) {
+      O[o_base + d] = oa_ptr[0];
+      continue;
+    }
+
+    float maxVal = -1e30f, oldMaxVal = -1e30f;
+    float sumVal = 0.0f;
+    float acc = 0.0f;
+
+    for (int s = 0; s < sk; s++) {
+      float localMax = la_ptr[s * 128];
+      float oa_val = __bfloat162float(oa_ptr[(size_t)s * D_V * 128]);
+
+      maxVal = fmaxf(maxVal, localMax);
+      float corr0 = exp2f(oldMaxVal - maxVal);
+      float corr1 = exp2f(localMax - maxVal);
+      oldMaxVal = maxVal;
+
+      sumVal = sumVal * corr0 + corr1;
+      acc = acc * corr0 + oa_val * corr1;
+    }
+
+    float inv_sum = (sumVal > 0.0f) ? __frcp_rn(sumVal) : 0.0f;
+    O[o_base + d] = __float2bfloat16(acc * inv_sum);
   }
-
-  float maxVal = -1e30f, oldMaxVal = -1e30f;
-  float sumVal = 0.0f;
-  float acc = 0.0f;
-
-  for (int s = 0; s < sk; s++) {
-    float localMax = la_ptr[s * 128];
-    float oa_val = __bfloat162float(oa_ptr[(size_t)s * D_V * 128]);
-
-    maxVal = fmaxf(maxVal, localMax);
-    float corr0 = exp2f(oldMaxVal - maxVal);
-    float corr1 = exp2f(localMax - maxVal);
-    oldMaxVal = maxVal;
-
-    sumVal = sumVal * corr0 + corr1;
-    acc = acc * corr0 + oa_val * corr1;
-  }
-
-  float inv_sum = (sumVal > 0.0f) ? __frcp_rn(sumVal) : 0.0f;
-  int o_base = (bi * Q_LEN + actual_q) * NUM_HEADS * D_V + h * D_V;
-  O[o_base + d] = __float2bfloat16(acc * inv_sum);
 }
 
 } // namespace mla_mtp_tp8

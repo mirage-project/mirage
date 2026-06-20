@@ -6157,9 +6157,9 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     // ABI-shrink (-rdc=true relocatable spill fix): template-promote the
     // per-variant compile-time constants N/K/num_workers and drop the two
     // unused int args (M/runtime_m and the output row stride). The finen M=1
-    // GEMV keeps the five operand pointers + the per-worker request_id as direct
-    // args. This shrinks the task call from 11 args to 6, reducing the device
-    // register-arg overflow that the -rdc=true megakernel pays at the
+    // GEMV keeps the five operand pointers + the per-worker request_id as
+    // direct args. This shrinks the task call from 11 args to 6, reducing the
+    // device register-arg overflow that the -rdc=true megakernel pays at the
     // _execute_task->finen call (the entry-LDL + caller-save decode spill).
     // smallm/mediumm keep the 11-arg ABI below, so the default build (finen
     // gated MPK_DSV3_DENSE_FINEN) stays byte-identical.
@@ -6315,6 +6315,34 @@ int TaskRegister::register_fp8_gemm_dense_gemv_m1_sm100_task(
   code.e("    $);", num_workers); // C_row_stride defaults to -1 (unused at M=1)
   code.e("}");
   return register_task_variant(TASK_FP8_GEMM_DENSE_GEMV_M1_SM100,
+                               code.to_string());
+}
+
+// DSv3 router-gate BF16 GEMV (ferret workspace4/kernel.cuh v002).
+// Raw-pointer ABI (no TMA): hidden[M,K] @ W_gate[N,K]^T → logits[M,N] BF16.
+// 2 inputs (hidden, W_gate), 1 real output (logits) — NOT store_in_dmem.
+// params: [M, N, K, num_workers]. Grid = (num_workers,1,1), blockDim=512.
+// Default-OFF: MPK_DSV3_ROUTER_GEMV=1 (builder gates on mbt==1).
+int TaskRegister::register_dsv3_router_gate_gemv_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  // params: [M, N, K, num_workers]
+  assert(params.size() == 4);
+  int M = params[0], N = params[1], K = params[2], num_workers = params[3];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("kernel::dsv3_router_gate_gemv::dsv3_router_gate_gemv_task_impl(");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<const __nv_bfloat16*>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    $,", M);
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $);", num_workers);
+  code.e("}");
+  return register_task_variant(TASK_DSV3_ROUTER_GATE_GEMV_SM100,
                                code.to_string());
 }
 

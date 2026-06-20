@@ -269,6 +269,11 @@ def get_compile_command(
         # config (a kernel must not collapse when squeezed). Unset = ptxas default.
         *(["-maxrregcount=" + os.environ["MPK_MAXRREGCOUNT"]]
           if os.environ.get("MPK_MAXRREGCOUNT") else []),
+        # MPK_NVCC_RESOURCE_USAGE=1 adds --resource-usage (ptxas/nvlink -v): per-function
+        # register count + spill bytes. Diagnostic for the register-budget check; never
+        # committed default-on.
+        *(["--resource-usage"]
+          if os.environ.get("MPK_NVCC_RESOURCE_USAGE") == "1" else []),
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -300,6 +305,28 @@ def get_compile_command(
     # decode kernels under -rdc=true (root cause + Codex #5, 6/18).
     if os.environ.get("MPK_DSV3_FORCEINLINE") == "1":
         flags = flags + ["-DMPK_DSV3_FORCEINLINE"]
+    # MPK_DSV3_MLA_FINESPLIT=1: use TILE_S=32 (fine-split, 16 CTAs at KV=512)
+    # MLA TP8 decode kernel (ferret workspace8 v006) instead of the default
+    # TILE_S=128 (4 CTAs). Standalone: 1.51-1.55x faster; in-MPK transfer TBD.
+    # num_splits is also gated (see _mla_mtp_decode_tp_layer and
+    # _mla_mtp_reduce_tp_layer) so the grid matches the compiled TILE_S.
+    # Default-OFF (byte-identical default build); env-gated lever for A/B test.
+    if os.environ.get("MPK_DSV3_MLA_FINESPLIT") == "1":
+        flags = flags + ["-DMPK_DSV3_MLA_FINESPLIT"]
+    # MPK_DSV3_MLA_REDUCE_1WAVE=1: RD_DV=4 in the MLA TP8 reduce kernel → grid.x =
+    # ceil(D_V512/4)=128 ≤ workers = ONE wave (vs rd_dv=2 → 256-CTA two-wave bubble
+    # ~2-3µs/layer). reduce rd_dv (and grid) gated to match below. Default-OFF
+    # (byte-identical). A/B lever — verify on 8-GPU (the loop was benched slower at
+    # KV4096; KV512 saves the 2nd wave so net is TBD).
+    if (os.environ.get("MPK_DSV3_MLA_REDUCE_1WAVE") == "1"
+            or os.environ.get("MPK_DSV3_STABLE") == "1"):
+        flags = flags + ["-DMPK_DSV3_MLA_REDUCE_1WAVE"]
+    # MPK_DSV3_TOPK_PARALLEL=1: warp-parallel bitonic topk-sigmoid (ferret ws4,
+    # 2.88× std body, bit-exact) via the #ifdef in task_header.cuh. Default-OFF
+    # (byte-identical). in-MPK transfer TBD (co-residency, like MLA) — verify on box.
+    if (os.environ.get("MPK_DSV3_TOPK_PARALLEL") == "1"
+            or os.environ.get("MPK_DSV3_STABLE") == "1"):
+        flags = flags + ["-DMPK_DSV3_TOPK_PARALLEL"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -1904,11 +1931,20 @@ class PersistentKernel:
         else:  # TP=8
             qpg = 2
         num_groups = (q_len + qpg - 1) // qpg
+        # TILE_S=128 by default; TILE_S=32 when MPK_DSV3_MLA_FINESPLIT is set
+        # (TP=8 only — the gate applies when num_heads==16 / the finesplit
+        # macro changes which .cuh is compiled in task_header.cuh).
+        if (num_heads == 16
+                and num_splits_override is None
+                and os.environ.get("MPK_DSV3_MLA_FINESPLIT") == "1"):
+            mla_tile_s = 32
+        else:
+            mla_tile_s = 128
         num_splits = (
             num_splits_override
             if num_splits_override is not None
-            else (kv_len + 128 - 1) // 128
-        )  # TILE_S=128
+            else (kv_len + mla_tile_s - 1) // mla_tile_s
+        )
         # TP=4 packs the V split id into block_x → multiple tasks per split.
         x_mul = v_splits if has_v_split else 1
         grid_dim = (num_groups * num_splits * x_mul * head_groups,
@@ -1944,7 +1980,14 @@ class PersistentKernel:
         else:
             qpg = 2
         num_groups = (q_len + qpg - 1) // qpg
-        num_splits = (kv_len + 128 - 1) // 128
+        # Match the compiled TILE_S: TILE_S=32 when MPK_DSV3_MLA_FINESPLIT is
+        # set AND this is the TP=8 reduce (num_heads==16). The reduce's `sk`
+        # param must equal ceil(kv/TILE_S) for the kernel to iterate over the
+        # correct number of partial-output slots. Other TP variants are unaffected.
+        if num_heads == 16 and os.environ.get("MPK_DSV3_MLA_FINESPLIT") == "1":
+            num_splits = (kv_len + 32 - 1) // 32
+        else:
+            num_splits = (kv_len + 128 - 1) // 128
         d_v = 512
         # TP4 can be compiled with a different RD_DV for ablation. Keep the
         # grid matched to the compiled coverage; standalone tests currently
@@ -1955,7 +1998,8 @@ class PersistentKernel:
         # `RD_TB=256` (each CTA writes exactly 2 V-elements via lane=tid>>7), so
         # a 128-grid would leave V[256:512] unwritten (verified: cos 0.67 FAIL).
         # Payoff is only ~2-3us/layer (the 2nd wave) -> deprioritized.
-        rd_dv = _mla_tp4_rd_dv() if task_name == "mla_mtp_decode_tp4_reduce_sm100" else 2
+        rd_dv = (_mla_tp4_rd_dv() if task_name == "mla_mtp_decode_tp4_reduce_sm100"
+                 else (4 if os.environ.get("MPK_DSV3_MLA_REDUCE_1WAVE") == "1" else 2))
 
         params = [num_groups, q_len, num_splits, rd_dv]
         grid_dim = ((d_v + rd_dv - 1) // rd_dv,
@@ -3639,6 +3683,41 @@ class PersistentKernel:
             self.kn_graph.register_task(tb_graph, "linear")
         else:
             assert False, f"Unsupported compute capability: {self.target_cc}"
+
+    def dsv3_router_gate_gemv_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        num_workers: int,
+    ):
+        # ferret BF16 CUDA-core GEMV for DSv3 router gate.
+        # Computes: output[M, N] = input[M, K] @ weight[N, K]^T  (BF16 in/out).
+        # Raw-pointer ABI (no TMA). Grid = (num_workers, 1, 1), blockDim = 512.
+        # 2 real inputs (hidden, W_gate), 1 real output (logits) — NOT
+        # store_in_dmem for the output (downstream moe_topk_sigmoid reads it
+        # via output_ptrs[0], avoiding the null-output AG bug).
+        # Default-OFF: builder gates on MPK_DSV3_ROUTER_GEMV=1 and mbt==1.
+        assert input.num_dims == 2   # (M, K)
+        assert weight.num_dims == 2  # (N, K)
+        assert output.num_dims == 2  # (M, N)
+        M = input.dim(0)
+        K = input.dim(1)
+        N = weight.dim(0)
+        assert weight.dim(1) == K
+        assert output.dim(0) == M
+        assert output.dim(1) == N
+        params = [M, N, K, num_workers]
+        tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (512, 1, 1), 1, 64))
+        # 2 inputs, 1 real output: input→input_ptrs[0], weight→input_ptrs[1],
+        # output→output_ptrs[0]. All store_in_dmem=True so the tensor is
+        # passed by pointer; the (2,1) graph.cc tuple routes correctly.
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "dsv3_router_gate_gemv_sm100", params)
 
     def linear_with_residual_layer(
         self,
