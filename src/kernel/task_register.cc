@@ -16,6 +16,8 @@
 #include "mirage/kernel/operator.h"
 #include "mirage/transpiler/utils.h"
 
+#include <cstdlib>
+
 namespace mirage {
 namespace runtime {
 
@@ -4232,9 +4234,6 @@ int TaskRegister::register_mla_unified_sm100_task(
   int kvt = (kv_len + 128 - 1) / 128;
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
-  if (std::getenv("MPK_MLA_DISABLE_SINGLE_TILE")) {
-    single_tile = 0;
-  }
   bool const write_final = (num_splits == 1);
 
   int q_len_padded = (tp_size == 8) ? ((q_len + 1) & ~1) : q_len;
@@ -4723,7 +4722,8 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   c.inc_indent();
   emit_deepseek_phase_gate(c, gate_mode);
   if (with_residual) {
-    c.e("kernel::nvshmem_tile_allreduce_with_residual<__nv_bfloat16, $, $, $>(",
+    c.e("kernel::nvshmem_tile_allreduce_with_residual<__nv_bfloat16, $, $, "
+        "$>(",
         batch_size,
         output_size,
         output_stride);
@@ -5040,7 +5040,8 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int const num_inputs = 2;
+  assert(bgraph.operators.size() == 5 || bgraph.operators.size() == 6);
+  int const num_inputs = (bgraph.operators.size() == 6) ? 3 : 2;
   int const num_outputs = 3;
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
@@ -6074,16 +6075,10 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   active_rows as runtime M. Used for the decode-only branch of the
   //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
   //   valid on decode iters; prefill iters early-exit).
-  // runtime_m_mode=4 (2026-06-13): GEMV dual-dispatch partner. Skip when
-  //   active_rows==1 (the strict-M1 CUDA-core GEMV writes C at decode); run
-  //   with the active_rows cap when M>1 (prefill + prompt ingestion).
-  //   Partitions the M axis with the GEMV (which gates active_rows!=1) — no
-  //   gap/overlap. Keyed on active_rows (true M) not q_len, so it stays correct
-  //   if bs>1 returns.
   assert(params.size() == 4 || params.size() == 5);
   int M = params[0], N = params[1], K = params[2], num_workers = params[3];
   int runtime_m_mode = (params.size() == 5) ? params[4] : 0;
-  assert(runtime_m_mode >= 0 && runtime_m_mode <= 4);
+  assert(runtime_m_mode >= 0 && runtime_m_mode <= 3);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -6112,17 +6107,6 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     }
     code.e("int active_rows_ = "
            "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
-    code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
-    code.e("if (runtime_m_ <= 0) return;");
-  } else if (runtime_m_mode == 4) {
-    // GEMV dual-dispatch partner (MPK_DSV3_DENSE_GEMV): the strict-M1 CUDA-core
-    // GEMV writes C at active_rows==1 (decode); this dense GEMM handles M>1
-    // (prefill + prompt ingestion 2..8). Partitions the M (active_rows) axis
-    // with the GEMV's `active_rows!=1` gate — exactly one writer per M, no gap.
-    // Keyed on active_rows (true M), not q_len (which leaves 2..8 unwritten).
-    code.e("int active_rows_ = "
-           "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
-    code.e("if (active_rows_ == 1) return;");
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   } else {
@@ -6265,57 +6249,6 @@ int TaskRegister::register_fp8_gemm_dense_finen_sm100_task(
                                          out_row_stride,
                                          /*bn=*/16,
                                          /*ns_default=*/6);
-}
-
-// ferret v002 CUDA-core GEMV (M=1 decode), default-OFF lever
-// MPK_DSV3_DENSE_GEMV. RAW-pointer ABI: A/B arrive via input_ptrs[0]/[1] (NOT
-// input_tma_desc_ptrs) — the kernel declares them as CUtensorMap* but
-// reinterpret_casts to raw FP8 internally (no TMA). runtime.cc MUST NOT create
-// TMA descriptors for this task. Template <BN, WPC> is per-shape
-// (params[4]/[5]); blockDim = BN*WPC*32 is set builder-side. Output C via
-// output_ptrs[0] (store_in_dmem convention: 4 inputs A,B,sa,sb + appended
-// output). Numerically a GEMV → token-identical to the tcgen05 dense GEMM
-// (validated standalone qkv_a 1.74x / q_b 1.40x vs smallm<128,6>).
-int TaskRegister::register_fp8_gemm_dense_gemv_m1_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  (void)bgraph;
-  // params: [M, N, K, num_workers, BN, WPC]
-  assert(params.size() == 6);
-  int N = params[1], K = params[2], num_workers = params[3];
-  int BN = params[4], WPC = params[5];
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  code.e("{");
-  // Decode-ONLY gate: this kernel is a strict M=1 GEMV (computes only row 0).
-  // Run iff exactly 1 active row (bs=1 decode). active_rows==0 (no token) OR
-  // >1 (prefill mbt>8) => skip, so it is safe even under dual-dispatch (the
-  // tcgen05 dense GEMM handles prefill; only one of the two writes C per iter).
-  code.e("int active_rows_ = "
-         "runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];");
-  code.e("if (active_rows_ != 1) return;");
-  code.e(
-      "kernel::fp8_gemm_dense_gemv_m1::fp8_gemm_dense_gemv_m1_sm100_task_impl"
-      "<$, $>(",
-      BN,
-      WPC);
-  // A/B = RAW FP8 device pointers carried in input_ptrs[0]/[1]; the kernel sig
-  // takes CUtensorMap* and casts back to raw (no TMA descriptor dereference).
-  code.e("    reinterpret_cast<const "
-         "CUtensorMap*>(task_desc->input_ptrs[0]),");
-  code.e("    reinterpret_cast<const "
-         "CUtensorMap*>(task_desc->input_ptrs[1]),");
-  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
-  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
-  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  code.e("    1,"); // M = 1 (GEMV; kernel ignores via (void)M)
-  code.e("    $,", N);
-  code.e("    $,", K);
-  code.e(
-      "    task_desc->task_metadata.request_id,"); // worker_idx for the N-sweep
-  code.e("    $);", num_workers); // C_row_stride defaults to -1 (unused at M=1)
-  code.e("}");
-  return register_task_variant(TASK_FP8_GEMM_DENSE_GEMV_M1_SM100,
-                               code.to_string());
 }
 
 // DSv3 router-gate BF16 GEMV (ferret workspace4/kernel.cuh v002).
@@ -6597,6 +6530,67 @@ int TaskRegister::register_fp8_group_gemm_largem_compact_sm100_task(
       "fp8_group_gemm_largem_compact",
       "fp8_group_gemm_largem_compact_task_impl",
       TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100);
+}
+
+int TaskRegister::register_fp8_group_gemm_largem_compact_fused_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 9);
+  int M_total = params[0], N = params[1], K = params[2], E = params[3];
+  int num_workers = params[4];
+  int active_mask_offset = params[5];
+  int N_shared = params[6], K_shared = params[7];
+  int num_shared_tiles = params[8];
+  assert(E > 0);
+  assert(K_shared == K);
+  assert(num_shared_tiles == (N_shared + 127) / 128);
+  int shared_base = (active_mask_offset >= 0) ? 6 : 5;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::fp8_group_gemm_largem_compact::"
+         "fp8_group_gemm_largem_compact_task_impl(");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),"); // A
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),"); // B
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]),"); // SFA
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[3][0]),"); // SFB
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]),");  // D
+  code.e("    static_cast<const int*>(task_desc->input_ptrs[4]),"); // m_indices
+  if (active_mask_offset >= 0) {
+    code.e("    static_cast<const int*>(task_desc->input_ptrs[5]) + "
+           "$,",
+           active_mask_offset); // active_expert_mask
+  } else {
+    code.e("    nullptr,"); // no active mask supplied
+  }
+  code.e("    $,", M_total);
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    $,", E);
+  code.e("    task_desc->task_metadata.request_id,"); // worker_idx
+  code.e("    $,", num_workers);
+  code.e("    static_cast<const CUtensorMap*>("
+         "task_desc->input_tma_desc_ptrs[$][0]),",
+         shared_base); // shared A
+  code.e("    static_cast<const CUtensorMap*>("
+         "task_desc->input_tma_desc_ptrs[$][0]),",
+         shared_base + 1); // shared B
+  code.e("    static_cast<const CUtensorMap*>("
+         "task_desc->input_tma_desc_ptrs[$][0]),",
+         shared_base + 2); // shared SFA
+  code.e("    static_cast<const CUtensorMap*>("
+         "task_desc->input_tma_desc_ptrs[$][0]),",
+         shared_base + 3); // shared SFB
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->output_tma_desc_ptrs[1][0]),"); // td_sh
+  code.e("    $);", num_shared_tiles);
+  return register_task_variant(TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100,
+                               code.to_string());
 }
 
 // moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.

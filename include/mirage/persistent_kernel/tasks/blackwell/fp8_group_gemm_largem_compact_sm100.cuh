@@ -21,18 +21,20 @@
 // 1. Remove setmaxnreg.dec/inc (C7504: ptxas silently ignores under -rdc=true)
 // 2. tcgen05.alloc moved to `if (wid == 0)` (warp 0 only, 32 threads) after
 //    __syncthreads(), followed by bar.sync 10, 256 + taddr = *tp.
-//    Rationale: MLA TP2 pattern (lines 208-225 of mla_mtp_decode_tp2_sm100.cuh):
-//    "All 32 threads of warp 0 issue tcgen05.alloc (sync.aligned requires the
-//    full warp to participate)." Plus: CuTe TMEM allocator requires alloc/dealloc
-//    from the SAME warp across all co-scheduled tasks; warp 0 is the convention.
-//    C1v2 (4-warp alloc) HUNG because tcgen05.alloc.sync.aligned is warp-level
-//    (not CTA-level); issuing it from 4 warps simultaneously hangs the hardware.
+//    Rationale: MLA TP2 pattern (lines 208-225 of
+//    mla_mtp_decode_tp2_sm100.cuh): "All 32 threads of warp 0 issue
+//    tcgen05.alloc (sync.aligned requires the full warp to participate)." Plus:
+//    CuTe TMEM allocator requires alloc/dealloc from the SAME warp across all
+//    co-scheduled tasks; warp 0 is the convention. C1v2 (4-warp alloc) HUNG
+//    because tcgen05.alloc.sync.aligned is warp-level (not CTA-level); issuing
+//    it from 4 warps simultaneously hangs the hardware.
 // 3. tcgen05.dealloc moved to after the warp specialization if-else chain,
 //    inside `if (wid == 0)`, preceded by bar.sync 10, 256 (waits for all 256
 //    threads in 8 warps of B200 MPK worker to finish before dealloc).
-//    Original placement `if (ew == 1)` inside epilogue was a convergence violation
-//    (warp 5 waits for 128 threads but warps 0-3 already exited → deadlock under
-//    -rdc=true where dealloc.sync.aligned requires the warp to be convergent).
+//    Original placement `if (ew == 1)` inside epilogue was a convergence
+//    violation (warp 5 waits for 128 threads but warps 0-3 already exited →
+//    deadlock under -rdc=true where dealloc.sync.aligned requires the warp to
+//    be convergent).
 //
 // bar.sync 10 with count=256 (all 256 threads in a B200 MPK worker).
 // bar.sync 6 is used for epilogue sync (count=128, epilogue warps 4-7 only).
@@ -157,30 +159,38 @@ inline constexpr int fp8_group_gemm_largem_compact_smem_size() {
 // Forceinlining the body eliminates this at the cost of larger worker_kernel
 // register count (C7600 risk in full megakernel; safe in single-task gate).
 // The 2-step (body-reduce + forceinline) approach from memory:
-//   feedback_rdc_caller_save_forceinline_lever.md (MLA: 20.86→11.84us w/ -rdc=true)
+//   feedback_rdc_caller_save_forceinline_lever.md (MLA: 20.86→11.84us w/
+//   -rdc=true)
 __device__
 #ifdef MPK_DSV3_FORCEINLINE
-  __forceinline__
+    __forceinline__
 #else
-  __noinline__
+    __noinline__
 #endif
-void fp8_group_gemm_largem_compact_task_impl(
-    CUtensorMap const *ta_ptr,
-    CUtensorMap const *tb_ptr,
-    CUtensorMap const *tsfa_ptr,
-    CUtensorMap const *tsfb_ptr,
-    CUtensorMap const *td_ptr,
-    int const *__restrict__ m_indices,
-    int const *__restrict__ active_expert_mask,
-    int const M_total,
-    int const N,
-    int const K,
-    int const E,
-    int const worker_idx,
-    int const num_workers) {
+    void
+    fp8_group_gemm_largem_compact_task_impl(
+        CUtensorMap const *ta_ptr,
+        CUtensorMap const *tb_ptr,
+        CUtensorMap const *tsfa_ptr,
+        CUtensorMap const *tsfb_ptr,
+        CUtensorMap const *td_ptr,
+        int const *__restrict__ m_indices,
+        int const *__restrict__ active_expert_mask,
+        int const M_total,
+        int const N,
+        int const K,
+        int const E,
+        int const worker_idx,
+        int const num_workers,
+        CUtensorMap const *ta_sh = nullptr,
+        CUtensorMap const *tb_sh = nullptr,
+        CUtensorMap const *tsfa_sh = nullptr,
+        CUtensorMap const *tsfb_sh = nullptr,
+        CUtensorMap const *td_sh = nullptr,
+        int const num_shared_tiles = 0) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 #ifdef MPK_FASTFWD_GEMM
-  return;  // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
+  return; // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
 #endif
   constexpr int BM = 128, BK = 128, UK = 32;
   constexpr int SF_PER_LOAD = 4;
@@ -247,6 +257,13 @@ void fp8_group_gemm_largem_compact_task_impl(
     asm volatile("prefetch.tensormap [%0];" ::"l"(tsfa_ptr));
     asm volatile("prefetch.tensormap [%0];" ::"l"(tsfb_ptr));
     asm volatile("prefetch.tensormap [%0];" ::"l"(td_ptr));
+    if (num_shared_tiles > 0) {
+      asm volatile("prefetch.tensormap [%0];" ::"l"(ta_sh));
+      asm volatile("prefetch.tensormap [%0];" ::"l"(tb_sh));
+      asm volatile("prefetch.tensormap [%0];" ::"l"(tsfa_sh));
+      asm volatile("prefetch.tensormap [%0];" ::"l"(tsfb_sh));
+      asm volatile("prefetch.tensormap [%0];" ::"l"(td_sh));
+    }
   }
   if (wid == 1 && detail::elect_one_sync_impl()) {
     for (int i = 0; i < NS; i++) {
@@ -262,10 +279,10 @@ void fp8_group_gemm_largem_compact_task_impl(
   }
   // C3: mbarrier init and prefetch are done. Sync before alloc.
   __syncthreads();
-  // C3 FIX: tcgen05.alloc moved to warp 0 (mirroring mla_mtp_decode_tp2_sm100.cuh
-  // lines 208-223: "All 32 threads of warp 0 issue tcgen05.alloc; sync.aligned
-  // requires the full warp to participate"). Warp 0 convention is required by
-  // CuTe's TMEM allocator for inter-task consistency.
+  // C3 FIX: tcgen05.alloc moved to warp 0 (mirroring
+  // mla_mtp_decode_tp2_sm100.cuh lines 208-223: "All 32 threads of warp 0 issue
+  // tcgen05.alloc; sync.aligned requires the full warp to participate"). Warp 0
+  // convention is required by CuTe's TMEM allocator for inter-task consistency.
   if (wid == 0) {
     int a = __cvta_generic_to_shared(tp);
     asm volatile(
@@ -273,8 +290,9 @@ void fp8_group_gemm_largem_compact_task_impl(
             "r"(a),
         "r"(TCA));
   }
-  // CTA-wide sync so all warps see the allocated TMEM address before proceeding.
-  // Wait for all 256 threads (8 warps in B200 MPK worker) to see the alloc.
+  // CTA-wide sync so all warps see the allocated TMEM address before
+  // proceeding. Wait for all 256 threads (8 warps in B200 MPK worker) to see
+  // the alloc.
   asm volatile("bar.sync 10, 256;");
   const uint32_t taddr = *tp;
 
@@ -324,6 +342,13 @@ void fp8_group_gemm_largem_compact_task_impl(
   }
 
   int const num_active = s_num_active;
+  if (num_shared_tiles > 0) {
+    __threadfence(); // visibility guard: ensures shared silu_out written by
+                     // prior task is visible to this CTA before shared-down
+                     // tiles execute. Timing assumption: shared
+                     // gate_up+silu completes ~11us before W2 starts at bs=1
+                     // TP8; fence is required for memory model correctness.
+  }
 
   // C3: setmaxnreg removed (C7504: ptxas silently ignores under -rdc=true;
   // the ignored instructions caused register state inconsistency → crash).
@@ -333,14 +358,25 @@ void fp8_group_gemm_largem_compact_task_impl(
 
   // Resolve iteration index to (bm, bn) tile coordinates.
   // All warps use the same s_compact[] so tile assignments are consistent.
-  auto resolve = [&](int iter, int &bm, int &bn) -> int {
+  auto resolve =
+      [&](int iter, int &bm, int &bn, bool &is_shared, int &bn_sh) -> int {
     int bidx = iter * num_workers + worker_idx;
-    if (bidx >= num_active * nn) {
+    int total_tiles = num_active * nn + num_shared_tiles;
+    if (bidx >= total_tiles) {
       return 1; // break
     }
-    int ae = bidx / nn;
-    bn = bidx % nn;
-    bm = s_compact[ae]; // deterministic expert ID from sorted compact list
+    is_shared = (bidx >= num_active * nn);
+    if (!is_shared) {
+      int ae = bidx / nn;
+      bn = bidx % nn;
+      bm = s_compact[ae]; // deterministic expert ID from sorted compact list
+      bn_sh = 0;
+    } else {
+      int sh_bidx = bidx - num_active * nn;
+      bn_sh = sh_bidx % (num_shared_tiles > 0 ? num_shared_tiles : 1);
+      bm = 0;
+      bn = 0;
+    }
     return 0;
   };
 
@@ -348,17 +384,24 @@ void fp8_group_gemm_largem_compact_task_impl(
   if (wid == 0 && detail::elect_one_sync_impl()) {
     int gki = 0;
     for (int iter = 0;; iter++) {
-      int bm, bn;
-      int r = resolve(iter, bm, bn);
+      int bm, bn, bn_sh;
+      bool is_shared;
+      int r = resolve(iter, bm, bn, is_shared, bn_sh);
       if (r == 1) {
         break;
       }
       // m_indices[bm*BM] gives the true expert_id in MPK's permuted layout.
       // In the dense-padded layout used here, expert_id == bm.
       // For full MPK compatibility: use __ldg(m_indices + bm * BM) if needed.
-      int om = bm * BM;
-      int expert_id = (m_indices != nullptr) ? __ldg(m_indices + bm * BM) : bm;
-      int on_b = expert_id * N + bn * BN;
+      int om = is_shared ? 0 : bm * BM;
+      int expert_id = (m_indices != nullptr && !is_shared)
+                          ? __ldg(m_indices + bm * BM)
+                          : bm;
+      int on_b = is_shared ? bn_sh * BN : expert_id * N + bn * BN;
+      CUtensorMap const *ta_load = is_shared ? ta_sh : ta_ptr;
+      CUtensorMap const *tb_load = is_shared ? tb_sh : tb_ptr;
+      CUtensorMap const *tsfa_load = is_shared ? tsfa_sh : tsfa_ptr;
+      CUtensorMap const *tsfb_load = is_shared ? tsfb_sh : tsfb_ptr;
       for (int ki = 0; ki < nk; ki++, gki++) {
         int s = gki % NS;
         int ph = (gki / NS) & 1;
@@ -366,15 +409,15 @@ void fp8_group_gemm_largem_compact_task_impl(
         int mb = bf + s * 8;
         int as_ = __cvta_generic_to_shared(sA(s));
         int bs_ = __cvta_generic_to_shared(sB(s));
-        detail::tma_ld_impl(as_, ta_ptr, ki * BK, om, mb);
-        detail::tma_ld_impl(bs_, tb_ptr, ki * BK, on_b, mb);
+        detail::tma_ld_impl(as_, ta_load, ki * BK, om, mb);
+        detail::tma_ld_impl(bs_, tb_load, ki * BK, on_b, mb);
         int tx = SA + SB;
         if (ki % SF_PER_LOAD == 0) {
           int sfas_ = __cvta_generic_to_shared(sSFA(s));
           int sfbs_ = __cvta_generic_to_shared(sSFB(s));
           int sf_k = ki / SF_PER_LOAD;
-          detail::tma_ld_impl(sfas_, tsfa_ptr, om, sf_k, mb);
-          detail::tma_ld_impl(sfbs_, tsfb_ptr, on_b, sf_k, mb);
+          detail::tma_ld_impl(sfas_, tsfa_load, om, sf_k, mb);
+          detail::tma_ld_impl(sfbs_, tsfb_load, on_b, sf_k, mb);
           tx += SFA_SIZE + SFB_SIZE;
         }
         detail::mb_arrive_tx_impl(mb, tx);
@@ -395,8 +438,9 @@ void fp8_group_gemm_largem_compact_task_impl(
     };
     int gki = 0;
     for (int iter = 0;; iter++) {
-      int bm, bn;
-      int r = resolve(iter, bm, bn);
+      int bm, bn, bn_sh;
+      bool is_shared;
+      int r = resolve(iter, bm, bn, is_shared, bn_sh);
       if (r == 1) {
         break;
       }
@@ -419,8 +463,9 @@ void fp8_group_gemm_largem_compact_task_impl(
   else if (wid == 1 && detail::elect_one_sync_impl()) {
     int gki = 0, work = 0;
     for (int iter = 0;; iter++) {
-      int bm, bn;
-      int r = resolve(iter, bm, bn);
+      int bm, bn, bn_sh;
+      bool is_shared;
+      int r = resolve(iter, bm, bn, is_shared, bn_sh);
       if (r == 1) {
         break;
       }
@@ -491,13 +536,15 @@ void fp8_group_gemm_largem_compact_task_impl(
     uint32_t tma_st = 0;
     int work = 0;
     for (int iter = 0;; iter++) {
-      int bm, bn;
-      int r = resolve(iter, bm, bn);
+      int bm, bn, bn_sh;
+      bool is_shared;
+      int r = resolve(iter, bm, bn, is_shared, bn_sh);
       if (r == 1) {
         break;
       }
-      int om = bm * BM;
-      int on = bn * BN;
+      int om = is_shared ? 0 : bm * BM;
+      int on = is_shared ? bn_sh * BN : bn * BN;
+      CUtensorMap const *td_store = is_shared ? td_sh : td_ptr;
       int accum_idx = work % NE;
       int accum_ph = (work / NE) & 1;
       detail::mb_wait_impl(btf + accum_idx * 8, accum_ph);
@@ -548,7 +595,7 @@ void fp8_group_gemm_largem_compact_task_impl(
         asm volatile("fence.proxy.async.shared::cta;");
         asm volatile("bar.sync 6, 128;");
         if (ew == 0 && detail::elect_one_sync_impl()) {
-          uint64_t dd = reinterpret_cast<uint64_t>(td_ptr);
+          uint64_t dd = reinterpret_cast<uint64_t>(td_store);
           uint32_t sp = __cvta_generic_to_shared(sCD(tma_st));
           asm volatile(
               "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, "
@@ -571,11 +618,11 @@ void fp8_group_gemm_largem_compact_task_impl(
     // threads via .sync.aligned but warps 0-3 already exited the if-else chain
     // and returned from the task function → deadlock under -rdc=true.
   }
-  // C3 FIX: wait for ALL 128 threads (all warp loops have exited, all warps fall
-  // through the if-else chain to here). Then warp 0 does the dealloc (mirrors
-  // mla_mtp_decode_tp2_sm100.cuh lines 755-760: MLA_TP_SYNC_ACTIVE() + wid==0
-  // dealloc pattern).
-  // Wait for all 256 threads (8 warps) to finish their warp-specialized loops.
+  // C3 FIX: wait for ALL 128 threads (all warp loops have exited, all warps
+  // fall through the if-else chain to here). Then warp 0 does the dealloc
+  // (mirrors mla_mtp_decode_tp2_sm100.cuh lines 755-760: MLA_TP_SYNC_ACTIVE() +
+  // wid==0 dealloc pattern). Wait for all 256 threads (8 warps) to finish their
+  // warp-specialized loops.
   asm volatile("bar.sync 10, 256;");
   if (wid == 0) {
     asm volatile(

@@ -54,8 +54,7 @@
 // _execute_task → execute_task_noinline) so the MLA body folds into the
 // worker frame → no caller-save across the relocatable -rdc=true call.
 // Requires the body register count ≤ ~150 regs (STEP 1 above ensures this).
-// Same pattern as fp8_gemm_dense_finen_sm100.cuh /
-// fp8_gemm_dense_gemv_m1_sm100.cuh.
+// Same pattern as fp8_gemm_dense_finen_sm100.cuh.
 #ifndef MPK_DSV3_TASK_INLINE
 #ifdef MPK_DSV3_FORCEINLINE
 #define MPK_DSV3_TASK_INLINE __forceinline__

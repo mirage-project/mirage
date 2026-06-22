@@ -1755,7 +1755,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_FP8_GROUP_GEMM_SMALLM_SM100:
     case TASK_FP8_GROUP_GEMM_LARGEM_SM100:
-    case TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100: {
+    case TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100:
+    case TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100: {
       // 5 TMA descriptors: A (param 0), B (param 1), SFA (param 2),
       // SFB (param 3), D output (output param 0). param_id 4 (m_indices) is
       // direct LDG, not TMA. B/SFB box dim depends on BN: smallm uses BN=64
@@ -1897,15 +1898,17 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // expect_tx=4096 leaves the mbarrier permanently unsatisfied → megakernel
       // deadlock. Fix: gate bd[1] to TILE_S.)
       constexpr int BK = 64;
-      // Default TILE_S=128; override to 32 for the TP8 finesplit variant.
+      // Default TILE_S=128; finesplit (TILE_S=32) is the DEFAULT for the TP8
+      // decode build via the compile-time -DMPK_DSV3_MLA_FINESPLIT flag
+      // (get_compile_command adds it when mbt==1 && world_size==8), consistent
+      // with the kernel's #ifdef so the box bytes (TILE_S*BK*2) always match
+      // the kernel mbarrier expect_tx.
       int TILE_S = 128;
+#ifdef MPK_DSV3_MLA_FINESPLIT
       if (task_desc.task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
-        if (char const *env = std::getenv("MPK_DSV3_MLA_FINESPLIT")) {
-          if (env[0] == '1' && env[1] == '\0') {
-            TILE_S = 32;
-          }
-        }
+        TILE_S = 32;
       }
+#endif
       constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
       constexpr CUtensorMapInterleave interleave =
           CU_TENSOR_MAP_INTERLEAVE_NONE;
@@ -1917,16 +1920,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           (task_desc.task_type == TASK_MLA_MTP_DECODE_TP2_SM100)   ? 32
           : (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) ? 32
                                                                    : 16;
-      if (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) {
-        int head_groups = 1;
-        if (char const *env = std::getenv("MPK_MLA_TP4_HEAD_GROUPS")) {
-          head_groups = std::atoi(env);
-        }
-        if (head_groups == 1 || head_groups == 2 || head_groups == 4 ||
-            head_groups == 8) {
-          num_heads = 32 / head_groups;
-        }
-      }
       if (param_id == 0) {
         // Q: may be flat [mbt, num_heads*D_K] (2D) or per-head [mbt, num_heads,
         // D_K] (3D — produced when the upstream q_b GEMM emits the BMM
@@ -2134,15 +2127,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           }
         } else if (num_heads == 64) {
           q_box_rows = 32;
-        } else if (num_heads == 32) {
-          int head_groups = 1;
-          if (char const *env = std::getenv("MPK_MLA_TP4_HEAD_GROUPS")) {
-            head_groups = std::atoi(env);
-          }
-          if (head_groups == 1 || head_groups == 2 || head_groups == 4 ||
-              head_groups == 8) {
-            q_box_rows = 32 / head_groups;
-          }
         }
         uint64_t gd[3] = {
             (uint64_t)BK, (uint64_t)total_rows, (uint64_t)k_iters};
@@ -2447,6 +2431,31 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
+      break;
+    }
+    case TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100: {
+      // Base compact descriptors plus shared-down A/B/SFA/SFB and a second
+      // TMA-store output. Optional meta sits before the shared inputs, so the
+      // shared input base is the last four input slots.
+      assert(task_desc.num_inputs >= 9);
+      assert(task_desc.num_outputs == 2);
+      for (size_t param_id = 0; param_id < 4; param_id++) {
+        TensorDesc &tensor_desc = task_desc.inputs[param_id];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      }
+      size_t shared_base = task_desc.num_inputs - 4;
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.inputs[shared_base + 0], /*param_id=*/0, 0);
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.inputs[shared_base + 1], /*param_id=*/1, 0);
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.inputs[shared_base + 2], /*param_id=*/2, 0);
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.inputs[shared_base + 3], /*param_id=*/3, 0);
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.outputs[0], /*param_id=*/4, 0);
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.outputs[1], /*param_id=*/4, 0);
       break;
     }
     case TASK_FP8_GROUP_GEMM_SMALLM_SM100:

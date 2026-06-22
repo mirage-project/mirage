@@ -15,6 +15,7 @@
 #pragma once
 #include "../common/utils.cuh"
 #include "../common/worker_config.h"
+#include <cuda_bf16.h>
 namespace kernel {
 
 // ============================================================================

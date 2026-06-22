@@ -238,6 +238,14 @@ def reference_gemm_splitk(a_fp8, sa, b_fp8, sb, split_k: int):
 def cosine_sim(a: torch.Tensor, b: torch.Tensor) -> float:
     a_f = a.float().flatten()
     b_f = b.float().flatten()
+    # Guard (added 2026-06-16): a NaN/inf in either tensor poisons dot()+norm()
+    # to nan, which reads as a mysterious "cos=nan" and gets mistaken for a
+    # harness bug (cost a KDA GEMV several rounds). Return -2.0 (an impossible
+    # cosine) so the caller sees a clearly-invalid, non-passing sentinel it can
+    # diagnose — not a silent nan. The caller should classify the output for
+    # nan/inf BEFORE calling this (see the per-task test) for a named cause.
+    if not (torch.isfinite(a_f).all() and torch.isfinite(b_f).all()):
+        return -2.0
     return (torch.dot(a_f, b_f) / (a_f.norm() * b_f.norm() + 1e-12)).item()
 
 

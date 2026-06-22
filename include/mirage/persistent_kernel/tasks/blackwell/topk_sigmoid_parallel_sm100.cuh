@@ -38,12 +38,12 @@ namespace kernel {
 // included alongside topk_sigmoid_sm100.cuh (which defines its own
 // compile-time consts inside the function body as static constexpr).
 // ────────────────────────────────────────────────────────────────────────────
-static constexpr int _FBSIG_N_EXPERTS        = 256;
-static constexpr int _FBSIG_LOCAL_EXPERTS    = 32;
-static constexpr int _FBSIG_NUM_GROUPS       = 8;
+static constexpr int _FBSIG_N_EXPERTS = 256;
+static constexpr int _FBSIG_LOCAL_EXPERTS = 32;
+static constexpr int _FBSIG_NUM_GROUPS = 8;
 static constexpr int _FBSIG_EXPERTS_PER_GROUP = 32;
-static constexpr int _FBSIG_TOPK_GROUP       = 4;
-static constexpr int _FBSIG_TOPK_EXPERTS     = 8;
+static constexpr int _FBSIG_TOPK_GROUP = 4;
+static constexpr int _FBSIG_TOPK_EXPERTS = 8;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Active-expert ballot compaction.
@@ -52,20 +52,23 @@ static constexpr int _FBSIG_TOPK_EXPERTS     = 8;
 // avoid multiple-definition when both headers are compiled into the same TU.
 // Only warp 0 (threadIdx.x < 32) participates; all other threads are no-ops.
 // ────────────────────────────────────────────────────────────────────────────
-__device__ __forceinline__ void
-_fbsig_compact_active_experts(int *active_ids) {
+__device__ __forceinline__ void _fbsig_compact_active_experts(int *active_ids) {
   if (threadIdx.x < 32) {
-    int lane  = threadIdx.x;
+    int lane = threadIdx.x;
     int count = 0;
     for (int base = 0; base < _FBSIG_LOCAL_EXPERTS; base += 32) {
-      int le   = base + lane;
+      int le = base + lane;
       int mark = (le < _FBSIG_LOCAL_EXPERTS) ? active_ids[le] : -1;
       unsigned ballot = __ballot_sync(0xffffffffu, mark >= 0);
       int off = __popc(ballot & ((1u << lane) - 1));
-      if (mark >= 0) active_ids[count + off] = le;
+      if (mark >= 0) {
+        active_ids[count + off] = le;
+      }
       count += __popc(ballot);
     }
-    if (lane == 0) active_ids[_FBSIG_LOCAL_EXPERTS] = count;
+    if (lane == 0) {
+      active_ids[_FBSIG_LOCAL_EXPERTS] = count;
+    }
   }
 }
 
@@ -77,13 +80,14 @@ _fbsig_compact_active_experts(int *active_ids) {
 // ────────────────────────────────────────────────────────────────────────────
 __device__ __forceinline__ unsigned _fbsig_f2u_order(float f) {
   unsigned b = __float_as_uint(f);
-  return b ^ (((int)b >> 31) | 0x80000000u);   // monotonic float->uint
+  return b ^ (((int)b >> 31) | 0x80000000u); // monotonic float->uint
 }
 __device__ __forceinline__ float _fbsig_u2f_order(unsigned u) {
   unsigned b = (u & 0x80000000u) ? (u ^ 0x80000000u) : (~u);
   return __uint_as_float(b);
 }
-__device__ __forceinline__ unsigned long long _fbsig_mk_key(float val, int idx) {
+__device__ __forceinline__ unsigned long long _fbsig_mk_key(float val,
+                                                            int idx) {
   // smaller key = better: invert the order-uint so larger val -> smaller hi32;
   // lo32 = idx so equal values rank smaller-index first.
   return ((unsigned long long)(~_fbsig_f2u_order(val)) << 32) | (unsigned)idx;
@@ -97,15 +101,15 @@ __device__ __forceinline__ float _fbsig_key_val(unsigned long long k) {
 
 // Ascending bitonic sort of 32 keys (one per lane). lane 0 = smallest = best.
 __device__ __forceinline__ unsigned long long
-_fbsig_warp_bitonic32_asc(unsigned long long key) {
+    _fbsig_warp_bitonic32_asc(unsigned long long key) {
   int lane = threadIdx.x & 31;
-  #pragma unroll
+#pragma unroll
   for (int k = 2; k <= 32; k <<= 1) {
-    #pragma unroll
+#pragma unroll
     for (int j = k >> 1; j > 0; j >>= 1) {
       unsigned long long other = __shfl_xor_sync(0xffffffffu, key, j);
       bool ascending = ((lane & k) == 0);
-      bool lower     = (lane < (lane ^ j));
+      bool lower = (lane < (lane ^ j));
       unsigned long long mn = key < other ? key : other;
       unsigned long long mx = key < other ? other : key;
       key = (ascending == lower) ? mn : mx;
@@ -119,15 +123,15 @@ _fbsig_warp_bitonic32_asc(unsigned long long key) {
 // Precondition: input laid out as [asc8][desc8][asc8][desc8] (odd runs
 // reversed at gather). Produces a fully ascending 32; lane 0 = best.
 __device__ __forceinline__ unsigned long long
-_fbsig_warp_bmerge_8runs(unsigned long long key) {
+    _fbsig_warp_bmerge_8runs(unsigned long long key) {
   int lane = threadIdx.x & 31;
-  #pragma unroll
+#pragma unroll
   for (int k = 16; k <= 32; k <<= 1) {
-    #pragma unroll
+#pragma unroll
     for (int j = k >> 1; j > 0; j >>= 1) {
       unsigned long long other = __shfl_xor_sync(0xffffffffu, key, j);
       bool ascending = ((lane & k) == 0);
-      bool lower     = (lane < (lane ^ j));
+      bool lower = (lane < (lane ^ j));
       unsigned long long mn = key < other ? key : other;
       unsigned long long mx = key < other ? other : key;
       key = (ascending == lower) ? mn : mx;
@@ -162,49 +166,56 @@ template <typename T,
           int TOPK_EXPERTS,
           bool FUSE_COMPACTION = true>
 __device__ __forceinline__ void topk_sigmoid_task_impl(
-    void *__restrict__ input_ptr,                  // [num_rows, NUM_EXPERTS] BF16
-    void *__restrict__ bias_ptr,                   // [NUM_EXPERTS] float32
-    bool const *__restrict__ finished,             // nullptr for decode
-    void *__restrict__ output_ptr,                 // [num_rows, TOPK_EXPERTS] float32
-    int const num_rows,                            // MBT=128 (stride for routing buffer)
-    void *__restrict__ mpk_routing_indices_ptr,    // [LOCAL_EXPERTS, num_rows] int32
-    void *__restrict__ mpk_active_expert_ids_ptr,  // [LOCAL_EXPERTS+1] int32
+    void *__restrict__ input_ptr,      // [num_rows, NUM_EXPERTS] BF16
+    void *__restrict__ bias_ptr,       // [NUM_EXPERTS] float32
+    bool const *__restrict__ finished, // nullptr for decode
+    void *__restrict__ output_ptr,     // [num_rows, TOPK_EXPERTS] float32
+    int const num_rows,                // MBT=128 (stride for routing buffer)
+    void *__restrict__ mpk_routing_indices_ptr,   // [LOCAL_EXPERTS, num_rows]
+                                                  // int32
+    void *__restrict__ mpk_active_expert_ids_ptr, // [LOCAL_EXPERTS+1] int32
     int const start_expert,
     int const end_expert,
     float const routed_scaling_factor,
     int const num_active_rows) {
 
   // Cast void* to typed pointers (Mirage ABI uses void* at the boundary).
-  const __nv_bfloat16 *input   = static_cast<const __nv_bfloat16 *>(input_ptr);
-  const float         *bias    = static_cast<const float *>(bias_ptr);
-  float               *output  = static_cast<float *>(output_ptr);
-  int *routing_indices  = static_cast<int *>(mpk_routing_indices_ptr);
-  int *active_ids       = static_cast<int *>(mpk_active_expert_ids_ptr);
+  __nv_bfloat16 const *input = static_cast<__nv_bfloat16 const *>(input_ptr);
+  float const *bias = static_cast<float const *>(bias_ptr);
+  float *output = static_cast<float *>(output_ptr);
+  int *routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
+  int *active_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
 
   // `finished` is unused on the M=1 decode path (always nullptr); mirroring
   // the reference header's handling: the guard below is a no-op for nullptr.
   // (void)finished;   -- intentionally left named for ABI documentation.
 
-  __shared__ unsigned long long s_key[_FBSIG_NUM_GROUPS * _FBSIG_TOPK_EXPERTS]; // per-group sorted top-8
-  __shared__ float s_score[_FBSIG_N_EXPERTS];                            // unbiased sigmoid
+  __shared__ unsigned long long
+      s_key[_FBSIG_NUM_GROUPS * _FBSIG_TOPK_EXPERTS]; // per-group sorted top-8
+  __shared__ float s_score[_FBSIG_N_EXPERTS];         // unbiased sigmoid
   __shared__ float s_gscore[_FBSIG_NUM_GROUPS];
-  __shared__ int   s_sel[_FBSIG_TOPK_GROUP];
+  __shared__ int s_sel[_FBSIG_TOPK_GROUP];
 
-  int t    = threadIdx.x;
+  int t = threadIdx.x;
   int warp = t / 32;
   int lane = t % 32;
 
-  // Phase 1 loads hoisted FIRST so their global-latency overlaps Phase 0 stores.
+  // Phase 1 loads hoisted FIRST so their global-latency overlaps Phase 0
+  // stores.
   float lg = __bfloat162float(input[t]);
   float bz = bias[t];
 
   // Phase 0: init routing structs (parallel).
   int init_rows = (num_active_rows < num_rows) ? num_active_rows : num_rows;
   if (t < LOCAL_EXPERTS) {
-    for (int r = 0; r < init_rows; ++r) routing_indices[t * num_rows + r] = 0;
+    for (int r = 0; r < init_rows; ++r) {
+      routing_indices[t * num_rows + r] = 0;
+    }
     active_ids[t] = -1;
   }
-  if (t == 0) active_ids[LOCAL_EXPERTS] = 0;
+  if (t == 0) {
+    active_ids[LOCAL_EXPERTS] = 0;
+  }
 
   // Phase 1: sigmoid + bias (loads already issued above).
   float sc = 1.0f / (1.0f + __expf(-lg));
@@ -214,45 +225,58 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // Phase 5a (also yields group top-2): bitonic-sort each warp's 32 experts.
   // All 8 warps run this in parallel; lane 0 = smallest key = best expert.
   unsigned long long sk = _fbsig_warp_bitonic32_asc(_fbsig_mk_key(bi, t));
-  if (lane < _FBSIG_TOPK_EXPERTS) s_key[warp * _FBSIG_TOPK_EXPERTS + lane] = sk;
-  unsigned long long sk1 = __shfl_sync(0xffffffffu, sk, 1);  // all lanes participate
-  if (lane == 0) s_gscore[warp] = _fbsig_key_val(sk) + _fbsig_key_val(sk1);  // group top-2 sum
-  __syncthreads();                                          // sync #1
+  if (lane < _FBSIG_TOPK_EXPERTS) {
+    s_key[warp * _FBSIG_TOPK_EXPERTS + lane] = sk;
+  }
+  unsigned long long sk1 =
+      __shfl_sync(0xffffffffu, sk, 1); // all lanes participate
+  if (lane == 0) {
+    s_gscore[warp] =
+        _fbsig_key_val(sk) + _fbsig_key_val(sk1); // group top-2 sum
+  }
+  __syncthreads(); // sync #1
 
   // Phase 3 (warp 0 only, parallel): rank each group by score, pick top-4,
   // and compact the 4 selected group ids into s_sel[0..3].
   if (warp == 0) {
     float mygs = (lane < _FBSIG_NUM_GROUPS) ? s_gscore[lane] : -1e30f;
     int rank = 0;
-    #pragma unroll
+#pragma unroll
     for (int g = 0; g < _FBSIG_NUM_GROUPS; ++g) {
       float og = __shfl_sync(0xffffffffu, mygs, g);
-      bool better = (og > mygs) || (og == mygs && g < lane);   // lower-idx tie
-      if (better) rank++;
+      bool better = (og > mygs) || (og == mygs && g < lane); // lower-idx tie
+      if (better) {
+        rank++;
+      }
     }
     bool sel_me = (lane < _FBSIG_NUM_GROUPS) && (rank < _FBSIG_TOPK_GROUP);
     unsigned selmask = __ballot_sync(0xffffffffu, sel_me);
-    if (sel_me) s_sel[__popc(selmask & ((1u << lane) - 1))] = lane;
+    if (sel_me) {
+      s_sel[__popc(selmask & ((1u << lane) - 1))] = lane;
+    }
   }
 
   // Phase 5b: warp 0 gathers the 4 active groups' top-8 (32 keys, 1/lane) and
   // bitonic-sorts -> global top-8 in lanes 0..7.
   if (warp == 0) {
-    __syncwarp();                               // s_sel[] visible within warp 0
-    int r    = lane >> 3;
+    __syncwarp(); // s_sel[] visible within warp 0
+    int r = lane >> 3;
     int slot = lane & 7;
-    int gslot = (r & 1) ? (7 - slot) : slot;   // reverse odd runs -> [asc][desc][asc][desc]
+    int gslot = (r & 1) ? (7 - slot)
+                        : slot; // reverse odd runs -> [asc][desc][asc][desc]
     unsigned long long key = s_key[s_sel[r] * _FBSIG_TOPK_EXPERTS + gslot];
-    key = _fbsig_warp_bmerge_8runs(key);        // 9-stage merge of 4 sorted-8 runs
-    int   be   = _fbsig_key_idx(key);
-    float orig = s_score[be];                   // unbiased score of this winner
-    bool  win  = (lane < _FBSIG_TOPK_EXPERTS);
-    bool  node_uses = win && (be >= start_expert && be < end_expert);
+    key = _fbsig_warp_bmerge_8runs(key); // 9-stage merge of 4 sorted-8 runs
+    int be = _fbsig_key_idx(key);
+    float orig = s_score[be]; // unbiased score of this winner
+    bool win = (lane < _FBSIG_TOPK_EXPERTS);
+    bool node_uses = win && (be >= start_expert && be < end_expert);
 
     // weight_sum = sum of all 8 winners' scores (off-node included).
     float s = win ? orig : 0.f;
-    #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      s += __shfl_xor_sync(0xffffffffu, s, o);
+    }
     float inv = 1.0f / (s + 1e-20f);
 
     if (win) {
@@ -264,8 +288,8 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
       }
     }
   }
-  __syncthreads();                                          // sync #2
+  __syncthreads(); // sync #2
   _fbsig_compact_active_experts(active_ids);
 }
 
-}  // namespace kernel
+} // namespace kernel

@@ -97,11 +97,11 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
-// MPK_DSV3_FORCEINLINE (default-OFF): this lean M=1 GEMV folds into execute_worker
-// (eliminating the -rdc=true caller-save; finen 11.23->8.10us beats vLLM) when
-// forceinlined. Default __noinline__ keeps the default build byte-identical. The
-// heavy task bodies do NOT use this, so worker_kernel never overflows ptxas. See
-// persistent_kernel.cuh::execute_task_noinline.
+// MPK_DSV3_FORCEINLINE (default-OFF): this lean M=1 GEMV folds into
+// execute_worker (eliminating the -rdc=true caller-save; finen 11.23->8.10us
+// beats vLLM) when forceinlined. Default __noinline__ keeps the default build
+// byte-identical. The heavy task bodies do NOT use this, so worker_kernel never
+// overflows ptxas. See persistent_kernel.cuh::execute_task_noinline.
 #ifndef MPK_DSV3_TASK_INLINE
 #ifdef MPK_DSV3_FORCEINLINE
 #define MPK_DSV3_TASK_INLINE __forceinline__
@@ -193,7 +193,7 @@ __device__ MPK_DSV3_TASK_INLINE void
                                          __nv_bfloat16 *__restrict__ C,
                                          int const worker_idx) {
 #ifdef MPK_FASTFWD_GEMM
-  return;  // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
+  return; // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
 #endif
 
   unsigned char const *Ag = gemv_tma_global(ta_ptr); // A[1,K] FP8 global

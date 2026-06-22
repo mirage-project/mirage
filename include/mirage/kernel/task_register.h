@@ -192,9 +192,9 @@ public:
   int register_fp8_gemm_dense_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params,
                                          bool mediumm);
-  // ferret v002 CUDA-core GEMV (M=1 decode), raw-ptr ABI. params: [M,N,K,
-  // num_workers, BN, WPC]. default-OFF lever (MPK_DSV3_DENSE_GEMV).
-  int register_fp8_gemm_dense_gemv_m1_sm100_task(
+  // ferret BF16 CUDA-core GEMV for DSv3 router gate. params: [M,N,K,
+  // num_workers]. default-OFF lever (MPK_DSV3_ROUTER_GEMV).
+  int register_dsv3_router_gate_gemv_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   // fine-N dense GEMM (mediumm body @ BN=16, NS=6). default-OFF
   // MPK_DSV3_DENSE_FINEN.
@@ -213,6 +213,8 @@ public:
   int register_fp8_group_gemm_largem_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_group_gemm_largem_compact_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_group_gemm_largem_compact_fused_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_moe_permute_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);

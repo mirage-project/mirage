@@ -42,7 +42,7 @@ from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from . import tasks as dsv3_tasks
-from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64
+from ....core import bfloat16, float8_e4m3, float32, uint8, uint32, int32, int64
 
 
 # DeepSeek V3 architecture constants
@@ -138,38 +138,10 @@ def _tensor_parallel_allreduce_grid(output_size: int) -> tuple[int, int, int]:
         raise ValueError(
             "Tensor-parallel all-reduce expects a 128-aligned output "
             f"dimension, got {output_size}")
-    # MPK_DSV3_AR_RSCATTER=1 (default OFF, byte-identical when unset):
-    # De-redundify lever — collapse to a SINGLE CTA (grid=(1,1,1)) that runs ONE
-    # cross-GPU barrier and reduces the FULL hidden vector in one pass.
-    #
-    # Root cause of the 11µs AR cost: with grid=(56,1,1) and 56 private NVSHMEM
-    # teams, ALL 56 CTAs run their own full-world dissemination barrier concurrently
-    # (56 contending barriers on the psync pool), even though each CTA's slice work
-    # (128 elems / 16 int4) is tiny.  vLLM/SGLang = 1 barrier + sequential reduce =
-    # 6-8µs.  Collapsing to grid=1 gives 1 barrier + sequential reduce of all 7168
-    # elems on 128 threads (896 int4 / 128 threads = 7 iterations — trivial).
-    #
-    # No-deadlock argument: the MPK scheduler dispatches the AR task only after its
-    # dependent_event fires (all upstream linear-layer CTAs on THIS GPU have completed
-    # and written to the NVSHMEM symmetric buffer).  The corresponding AR CTA on each
-    # of the other 7 GPUs is similarly gated by its own upstream producers.  Since the
-    # persistent megakernel has all workers pre-launched on all GPUs, every GPU's AR
-    # CTA will reach mpkar_sync_block() once its producers finish — there is no CTA
-    # that can block another without eventually unblocking (no circular waits).  The
-    # only change vs the 56-team design is removing pipeline overlap (56 CTAs → 1 CTA
-    # means less dispatch parallelism with the next-layer producer), but at bs=1 decode
-    # the AR is on the critical path with no next-layer overlap anyway.
-    #
-    # MPK_DSV3_AR_TILE (default 128 = byte-identical): finer-grained tile control;
-    # AR_RSCATTER=1 is a shorthand for AR_TILE=output_size.  For intermediate values
-    # (512 → 14 CTAs, 1024 → 7 CTAs) use AR_TILE directly.
-    if int(os.environ.get("MPK_DSV3_AR_RSCATTER", "0")):
-        # Single-CTA fully-fused barrier + reduce.
-        return (1, 1, 1)
-    ar_tile = int(os.environ.get("MPK_DSV3_AR_TILE", "128"))
-    if ar_tile < 128 or output_size % ar_tile != 0:
-        ar_tile = 128
-    return (output_size // ar_tile, 1, 1)
+    # The AR grid mirrors the producer's 128-wide column tiles: the CTAs are
+    # PARALLEL (each reduces the full vector concurrently → fast wall), not
+    # redundant, so collapsing the grid would only serialize/slow the reduce.
+    return (output_size // 128, 1, 1)
 
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
@@ -389,8 +361,7 @@ class DeepSeekV3Builder(GraphBuilder):
                     share_quantize_tag: str = None,
                     input_fp8_override=None,
                     input_scale_override=None,
-                    no_wave_collapse: bool = False,
-                    num_workers_override: int = None):
+                    no_wave_collapse: bool = False):
         """Quantize BF16 input → FP8, then run the dense FP8 GEMM
         (fp8_gemm_dense_smallm/mediumm_sm100), optionally with TP
         allreduce + residual.
@@ -440,18 +411,6 @@ class DeepSeekV3Builder(GraphBuilder):
             BMM is templated on the per-head N-tile shape and the
             producing GEMM's grid must stay at the validated value
             (q_b_nope → q_nope_fp8 → BMM chain).
-        num_workers_override: hard-cap the dense FP8 GEMM persistent
-            worker grid to this value, replacing the `dense_nw` the
-            wave-collapse heuristic would pick. Default None = current
-            behavior (byte-identical). Used ONLY by the MoE worker-partition
-            path (`MPK_DSV3_MOE_PARTITION=1`) to shrink the shared-expert
-            GEMM grid (e.g. to 8) so it overlaps the capped routed group
-            GEMM on disjoint workers. The dense kernel grid is a persistent
-            (num_workers,1,1) that strides output tiles by num_workers with
-            idle-CTA early-return, so a smaller worker count drops NO tiles
-            (it just runs more iterations). Incompatible with the GEMV /
-            finen sidecar (those re-issue at the full worker count); this
-            raises if either is active so the cap can't be silently voided.
         """
         if weight_scale is None:
             # BF16 fallback for fixtures or pre-converted weights without
@@ -487,30 +446,6 @@ class DeepSeekV3Builder(GraphBuilder):
         dense_nw = (self._fp8_dense_num_workers()
                     if no_wave_collapse
                     else self._fp8_dense_num_workers(weight.dim(0)))
-        if num_workers_override is not None:
-            # MoE worker-partition cap. Validate range and forbid the
-            # GEMV/finen sidecars (they re-issue the GEMM at the full
-            # worker count, which would silently void the cap — see the
-            # _use_gemv branch below).
-            if not (1 <= num_workers_override <= self.mpk.num_workers):
-                raise ValueError(
-                    f"num_workers_override={num_workers_override} out of "
-                    f"range [1, {self.mpk.num_workers}]")
-            # finen is now DEFAULT-ON for decode-only builds (mbt==1), so match the
-            # same activation condition here — else default-on finen would silently
-            # combine with the partition and re-issue the GEMM at full num_workers,
-            # voiding the cap. (At mbt>1 finen is inactive, so don't block then.)
-            _finen_active = (os.environ.get("MPK_DSV3_DENSE_FINEN") == "1"
-                             and self.max_num_batched_tokens == 1)
-            if (os.environ.get("MPK_DSV3_DENSE_GEMV") == "1" or _finen_active):
-                raise RuntimeError(
-                    "num_workers_override is incompatible with "
-                    "MPK_DSV3_DENSE_GEMV / MPK_DSV3_DENSE_FINEN (the "
-                    "sidecar re-issues the GEMM at full num_workers, "
-                    "voiding the cap). Disable those flags (set "
-                    "MPK_DSV3_DENSE_FINEN=0) when using MPK_DSV3_MOE_PARTITION.")
-            dense_nw = num_workers_override
-
         reduction_size = weight.dim(1)
         if input_fp8_override is not None and input_scale_override is not None:
             input_fp8 = input_fp8_override
@@ -565,21 +500,6 @@ class DeepSeekV3Builder(GraphBuilder):
                                else 3 if gate_mode == 2
                                else 0)
 
-        # GEMV dual-dispatch (MPK_DSV3_DENSE_GEMV, default-OFF → byte-identical
-        # default build). For ALWAYS-run (gate_mode==0) bf16 dense GEMMs whose
-        # shape fits the 256-thread <8,1> CUDA-core GEMV (K%512==0 — the kernel
-        # drops a K-tail otherwise; N%8==0 for BN=8), route M==1 (decode) to the
-        # GEMV and M>1 (prefill/ingest) to the tcgen05 dense GEMM via mode-4 —
-        # an exact M-axis partition (one writer per M; reviewer-validated, no
-        # q_len gap). gate_mode!=0 EXCLUDED (mode-4 would mis-fire vs the 2/3
-        # phase gates). Reuses the same FP8 input/scale + weight + output buffers.
-        _use_gemv = (os.environ.get("MPK_DSV3_DENSE_GEMV") == "1"
-                     and gate_mode == 0
-                     and weight.dim(1) % 512 == 0
-                     and weight.dim(0) % 8 == 0)
-        if _use_gemv:
-            gemm_runtime_m_mode = 4  # dense handles M>1; GEMV handles M==1
-
         # finen (fine-N CUDA-core GEMV) is **M=1-ONLY** — it ignores M and writes
         # only C[col] = output row 0 (fp8_gemm_dense_finen_sm100.cuh:180,290). It is
         # 3.1× faster than mediumm at decode M=1 (faithful in-MPK gate 2026-06-18:
@@ -589,14 +509,14 @@ class DeepSeekV3Builder(GraphBuilder):
         # MPK_DSV3_DENSE_FINEN=0 to force mediumm. The mbt==1 guard is MANDATORY:
         # enabling finen when mbt>1 (prefill/batched) leaves output rows 1..M-1
         # UNWRITTEN (silent miscompute). e2e TP8 perf verdict pending (8×B200).
-        _use_finen = (os.environ.get("MPK_DSV3_DENSE_FINEN") == "1"
-                      and self.max_num_batched_tokens == 1
+        # 6/20: fine-N dense GEMM is the DEFAULT for decode (mbt==1 ⇒ M=1). Eligibility
+        # (N≤2304, N%16, K%512) + the MANDATORY mbt==1 guard unchanged (finen at mbt>1
+        # leaves rows 1..M-1 unwritten → silent miscompute, so prefill stays mediumm).
+        _use_finen = (self.max_num_batched_tokens == 1
                       and gate_mode == 0
                       and weight.dim(0) <= 2304
                       and weight.dim(0) % 16 == 0
                       and weight.dim(1) % 512 == 0)
-        if _use_finen:
-            _use_gemv = False  # mutually exclusive; finen replaces the dense GEMM
 
         if residual is None:
             if _use_finen:
@@ -615,12 +535,6 @@ class DeepSeekV3Builder(GraphBuilder):
                     num_workers=dense_nw,
                     runtime_m_mode=gemm_runtime_m_mode,
                 )
-                if _use_gemv:
-                    self.mpk.fp8_gemm_dense_gemv_m1_layer(
-                        input_fp8=input_fp8, weight_fp8=weight,
-                        input_scale=input_scale, weight_scale=weight_scale,
-                        output=output, num_workers=self.mpk.num_workers,
-                        bn=8, wpc=1)
             return
 
         if self.world_size > 1:
@@ -643,12 +557,6 @@ class DeepSeekV3Builder(GraphBuilder):
                     num_workers=dense_nw,
                     runtime_m_mode=gemm_runtime_m_mode,
                 )
-                if _use_gemv:
-                    self.mpk.fp8_gemm_dense_gemv_m1_layer(
-                        input_fp8=input_fp8, weight_fp8=weight,
-                        input_scale=input_scale, weight_scale=weight_scale,
-                        output=partial, num_workers=self.mpk.num_workers,
-                        bn=8, wpc=1)
             self._allreduce_residual(partial, output, residual,
                                      gate_mode=gate_mode)
             return
@@ -675,12 +583,6 @@ class DeepSeekV3Builder(GraphBuilder):
                 num_workers=dense_nw,
                 runtime_m_mode=gemm_runtime_m_mode,
             )
-            if _use_gemv:
-                self.mpk.fp8_gemm_dense_gemv_m1_layer(
-                    input_fp8=input_fp8, weight_fp8=weight,
-                    input_scale=input_scale, weight_scale=weight_scale,
-                    output=partial, num_workers=self.mpk.num_workers,
-                    bn=8, wpc=1)
         self.mpk.elementwise_add_layer(
             input_a=partial,
             input_b=residual,
@@ -769,7 +671,7 @@ class DeepSeekV3Builder(GraphBuilder):
             output_bf16=rmsnorm_out_bf16,
             output_fp8=input_fp8,
             output_scale=input_scale,
-            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            grid_dim=(self.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
             scale_ue8m0=False,
             emit_bf16=False,
@@ -849,7 +751,7 @@ class DeepSeekV3Builder(GraphBuilder):
             output_bf16=input_x,   # placeholder; emit_bf16=False skips write
             output_fp8=input_fp8,
             output_scale=input_scale,
-            grid_dim=_rmsnorm_grid(mbt),
+            grid_dim=(mbt, 1, 1),
             block_dim=(128, 1, 1),
             process_dim=reduction_size,
             in_offset_elems=in_offset_elems,
@@ -1141,14 +1043,9 @@ class DeepSeekV3Builder(GraphBuilder):
 
     def _silu_mul_fp8_linear(self, silu_input, silu_bf16_output, weight,
                              weight_scale, output, silu_grid_dim,
-                             linear_grid_dim, block_dim, residual=None,
-                             num_workers_override: int = None):
+                             linear_grid_dim, block_dim, residual=None):
         """SiLU-mul on the interleaved gate|up buffer, then `_fp8_linear`
         (down projection, optional residual).
-
-        num_workers_override: forwarded to `_fp8_linear` to cap the down
-        GEMM's worker grid (MoE worker-partition path). Default None =
-        byte-identical to today.
         """
         self.mpk.silu_mul_layer(
             input=silu_input,
@@ -1164,7 +1061,6 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=linear_grid_dim,
             block_dim=block_dim,
             residual=residual,
-            num_workers_override=num_workers_override,
         )
 
     def _precompute_rope_embeddings(self):
@@ -1388,10 +1284,12 @@ class DeepSeekV3Builder(GraphBuilder):
         #   ceil(max_seq_length / TILE_S)
         # Using TILE_S=128 when finesplit writes TILE_S=32 underestimates by 4×
         # → IMA on the overflowing ranks.
+        # 6/20: finesplit (TILE_S=32) is the DEFAULT for the TP8 decode build; the
+        # partial-O/LSE buffers must be sized for ceil(seq/32) splits to match.
         _mla_tile_s = (
             32
             if (self.world_size == 8
-                and os.environ.get("MPK_DSV3_MLA_FINESPLIT") == "1")
+                and self.max_num_batched_tokens == 1)
             else 128
         )
         mbr = self.mpk.max_num_batched_requests
@@ -2207,36 +2105,9 @@ class DeepSeekV3Builder(GraphBuilder):
                                   new_moe_w13_out, new_moe_silu_out,
                                   new_moe_silu_fp8,
                                   new_moe_silu_scale_Mfirst,
-                                  new_moe_silu_scale, new_moe_w2_out,
-                                  routed_num_workers=None,
-                                  prelude_tail=None,
-                                  after_w13=None, after_w2=None):
-        """Per-layer NEW MoE task dispatch. Tasks numbered 1..8 below.
-
-        MoE worker-partition hooks (all default None = byte-identical to
-        today; used ONLY by `MPK_DSV3_MOE_PARTITION=1` from `_build_moe_mlp`):
-          routed_num_workers: persistent worker count for BOTH group GEMMs
-            (W13 and W2). None → self.mpk.num_workers (current value). The
-            partition path passes 128 so the shared-expert GEMM (8 workers)
-            packs into the same 136-worker wave on disjoint workers. The
-            group-GEMM kernel strides tiles by num_workers with idle-CTA
-            early-return, so a smaller count drops NO output tiles.
-          prelude_tail: callable() invoked AFTER moe_permute is registered
-            and BEFORE the W13 group GEMM — i.e. the tail of the routed
-            "prelude". The partition path uses it to emit the shared-expert
-            input quantize here (it reads rmsnorm_out, has no dep on the
-            routed chain) so the shared gate_up GEMM is ready to overlap
-            W13 without an extra in-wave quantize task.
-          after_w13: callable() invoked RIGHT AFTER the W13 group GEMM is
-            registered (before moe_silu_mul) — the partition path registers
-            the shared gate_up GEMM here so it lands in the wave alongside
-            W13 on the freed workers.
-          after_w2: callable() invoked RIGHT AFTER the W2 group GEMM is
-            registered (before this method returns) — the partition path
-            registers the shared down (silu_mul + GEMM) here.
-        """
-        _routed_nw = (self.mpk.num_workers if routed_num_workers is None
-                      else routed_num_workers)
+                                  new_moe_silu_scale, new_moe_w2_out):
+        """Per-layer NEW MoE task dispatch. Tasks numbered 1..8 below."""
+        _routed_nw = self.mpk.num_workers
         # Pack W13 weight scale (always — needs to be attached for w13).
         s_w13_packed = self._pack_and_attach_moe_weight_scale(
             state_dict, w13_scale_key,
@@ -2281,12 +2152,8 @@ class DeepSeekV3Builder(GraphBuilder):
             meta=new_moe_meta,
             bm_padding=bm_pad,
             e_per_cta=_epc,
+            grid_dim_y=1,
         )
-        # 3.5) Prelude tail (MoE worker-partition only): emit the
-        # shared-expert input quantize here — end of the routed prelude,
-        # before W13 — so the shared gate_up GEMM is ready to overlap W13.
-        if prelude_tail is not None:
-            prelude_tail()
         # 4) Group GEMM W13.
         dsv3_tasks.fp8_group_gemm_layer(
             self.mpk,
@@ -2299,11 +2166,6 @@ class DeepSeekV3Builder(GraphBuilder):
             num_workers=_routed_nw,
             meta=new_moe_meta,
         )
-        # 4.5) After-W13 hook (MoE worker-partition only): register the
-        # shared-expert gate_up GEMM right after W13 so it packs into the
-        # same scheduler wave on the workers W13's cap (128) freed.
-        if after_w13 is not None:
-            after_w13()
         # 5) SiLU+MUL. With input_map=(0,-1,-1) the runtime partitions
         # dim 0 across grid.x CTAs and the C++ register pulls
         # num_active_tokens from the per-CTA STensor shape
@@ -2369,11 +2231,6 @@ class DeepSeekV3Builder(GraphBuilder):
             num_workers=_routed_nw,
             meta=new_moe_meta,
         )
-        # 8.5) After-W2 hook (MoE worker-partition only): register the
-        # shared-expert down (silu_mul + GEMM) right after W2 so it packs
-        # into the same scheduler wave on the workers W2's cap (128) freed.
-        if after_w2 is not None:
-            after_w2()
 
     def _build_shared_expert(self, layer_idx: int, prefix: str, state_dict: dict):
         """Register shared-expert dense FP8 path. Returns ``shared_residual``
@@ -2442,402 +2299,14 @@ class DeepSeekV3Builder(GraphBuilder):
             s_shared_down,
             shared_residual,
             silu_grid_dim=(shared_split, 1, 1),
-            # MPK_DSV3_SHARED_EXPERT_GRID (default off = byte-identical): cap the shared
-            # down-proj grid so it fits the W13 group-GEMM's temporal-idle workers (the
-            # fast-finishing CTAs) instead of contending the full pool — the user's packing
-            # idea. The shared down is DENSE (N=7168 > 2304, not finen) so the cap is
-            # conflict-free here (gate_up is finen → its grid can't be capped this way, the
-            # finen sidecar uses its own grid). The dense GEMM strides tiles by the grid so
-            # a smaller grid drops no output; correctness is box-gated by token-identity.
-            linear_grid_dim=(min(self.hidden_size // 64,
-                int(os.environ.get("MPK_DSV3_SHARED_EXPERT_GRID")
-                    or str(self.hidden_size // 64))), 1, 1),
+            # The megakernel already overlaps the shared-expert with W13 by
+            # default (prelaunch-all), so the shared-down GEMM runs at the full
+            # packing grid.
+            linear_grid_dim=(self.hidden_size // 64, 1, 1),
             block_dim=(128, 1, 1),
             residual=None,
         )
         return shared_residual
-
-    # Worker counts for the MoE worker-partition path (MPK_DSV3_MOE_PARTITION).
-    # 128 routed + 8 shared = 136 = num_workers (one scheduler wave). The
-    # group / dense GEMM kernels stride output tiles by num_workers with
-    # idle-CTA early-return, so these caps drop NO output tiles. Env-tunable
-    # for the worker-split sweep (MPK_DSV3_MOE_PART_WR / _WS); defaults = the
-    # projected best (routed@128 ‖ shared@8). Read at import; mpirun must -x them.
-    # `or` (not the get-default) so an EMPTY env value (the launcher exports
-    # the var as "" when unset) falls back to the default instead of int("").
-    _MOE_PARTITION_ROUTED_WORKERS = int(os.environ.get("MPK_DSV3_MOE_PART_WR") or "128")
-    _MOE_PARTITION_SHARED_WORKERS = int(os.environ.get("MPK_DSV3_MOE_PART_WS") or "8")
-
-    def _dispatch_moe_partitioned(
-            self, layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
-            K, K_intermediate, K_PACKED_K, K_PACKED_INT,
-            w13_scale_key, w_experts_w13,
-            moe_topk_weights, moe_routing_indices,
-            new_moe_input_fp8, new_moe_input_scale,
-            new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-            new_moe_meta,
-            new_moe_w13_out, new_moe_silu_out,
-            new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
-            new_moe_silu_scale, new_moe_w2_out):
-        """MoE worker-partition orchestration (MPK_DSV3_MOE_PARTITION=1 only).
-
-        Registers the SAME tasks as the default routed-chain +
-        `_build_shared_expert` + `moe_unpermute`, but interleaves the
-        shared-expert registration into the routed chain (so the scheduler
-        round-robins them onto disjoint worker FIFOs and they overlap) and
-        caps the GEMM grids: routed group GEMMs to 128 workers, shared dense
-        GEMMs to 8 (128 + 8 = num_workers = one wave). Computes the SAME
-        math; only the task ORDER and the GEMM worker counts differ from the
-        default. Returns ``shared_residual`` for the moe_unpermute finalize.
-
-        NOTE this path is HANG-PRONE (overlap scheduling) and is e2e-validated
-        on the 8xB200, NOT in the default build. The default build never
-        reaches here (env-gated).
-        """
-        routed_nw = self._MOE_PARTITION_ROUTED_WORKERS
-        shared_nw = self._MOE_PARTITION_SHARED_WORKERS
-        # Sanity: the partition only fits in one wave when routed + shared
-        # <= the worker pool. (At the production TP8 config num_workers=136.)
-        assert routed_nw + shared_nw <= self.mpk.num_workers, (
-            f"MoE partition needs routed({routed_nw}) + shared({shared_nw}) "
-            f"<= num_workers({self.mpk.num_workers})")
-        print(
-            f"  [MoE partition] layer {layer_idx}: routed group GEMMs "
-            f"num_workers={routed_nw}, shared-expert dense GEMMs "
-            f"num_workers={shared_nw} (sum {routed_nw + shared_nw} / "
-            f"{self.mpk.num_workers})")
-
-        # Shared-expert gate_up weight prep (identical math to
-        # _build_shared_expert; done up-front so the prelude quantize +
-        # gate_up GEMM closures can reference the attached weight). Kept here
-        # — NOT in the default _build_shared_expert — so the default path is
-        # byte-identical.
-        shared_prefix = f"{prefix}shared_experts."
-        shared_gate_w = state_dict[f"{shared_prefix}gate_proj.weight"]
-        shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
-        gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
-        has_shared_scale = gate_scale_key in state_dict
-        from ..utils import shuffle_tensors as _shuffle_tensors
-        out_dim_total = shared_gate_w.shape[0] + shared_up_w.shape[0]
-        linear_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
-        scale_dim_0 = shared_gate_w.shape[0] // 128
-        shared_split = min(linear_grid // 2, scale_dim_0)
-        while (shared_gate_w.shape[0] % shared_split != 0
-               or scale_dim_0 % shared_split != 0):
-            shared_split -= 1
-            if shared_split < 1:
-                shared_split = 1
-                break
-        fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
-        state_dict[f"{fused_key}.weight"] = _shuffle_tensors(
-            [shared_gate_w, shared_up_w], split=shared_split, dim=0)
-        if has_shared_scale:
-            shared_gate_s = state_dict[gate_scale_key]
-            shared_up_s = state_dict[
-                f"{shared_prefix}up_proj.weight_scale_inv"]
-            state_dict[f"{fused_key}.weight_scale_inv"] = _shuffle_tensors(
-                [shared_gate_s, shared_up_s], split=shared_split, dim=0)
-        w_shared_gate_up, s_shared_gate_up = self._attach_fp8_weight(
-            state_dict, f"{fused_key}.weight",
-            f"layer_{layer_idx}_shared_expert_gate_up")
-
-        # Shared state threaded gate_up-closure → down-closure.
-        st = {"shared_mid": None, "shared_residual": None}
-
-        # The shared gate_up GEMM reads rmsnorm_out with reduction K=hidden
-        # (=7168), the SAME shared f32-scale FP8 buffers the dense path uses.
-        # Pre-emit its input quantize in the prelude (prelude_tail, before
-        # W13) and pre-seed _fp8_quantize_emitted with a per-layer-unique tag
-        # so the gate_up _fp8_linear skips its internal quantize and reads the
-        # pre-quantized buffers — yielding a clean 128 + 8 wave (no extra
-        # quantize task riding in the W13 wave). The pre-emit replicates the
-        # bundled quantize byte-for-byte: same buffers, active_mode=0 (what
-        # _fp8_linear uses when a share_quantize_tag is set AND what gate_mode=0
-        # computes), scale_ue8m0=False, grid=(mbt,1,1), block=(128,1,1).
-        shared_reduction = w_shared_gate_up.dim(1)
-        gateup_tag = f"layer_{layer_idx}_shared_gateup_quantize"
-
-        def _shared_prelude_quantize():
-            input_fp8, input_scale = (
-                self._fp8_mbt_buffers_for_reduction_f32scale(shared_reduction))
-            self.mpk.quantize_fp8_layer(
-                input=self.rmsnorm_out,
-                output_fp8=input_fp8,
-                output_scale=input_scale,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-                scale_ue8m0=False,
-                active_mode=0,
-            )
-            already = getattr(self, "_fp8_quantize_emitted", set())
-            already.add(gateup_tag)
-            self._fp8_quantize_emitted = already
-
-        def _shared_gateup():
-            # Register the shared gate_up GEMM (input quantize already emitted
-            # in the prelude → share_quantize_tag makes _fp8_linear skip it).
-            shared_mid = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens,
-                      2 * self.moe_intermediate_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_shared_mid",
-                io_category="cuda_tensor",
-            )
-            self._fp8_linear(
-                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
-                shared_mid,
-                grid_dim=(grid_for_rmsnorm_linear_layer(
-                    w_shared_gate_up.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
-                share_quantize_tag=gateup_tag,
-                num_workers_override=shared_nw,
-            )
-            st["shared_mid"] = shared_mid
-
-        def _shared_down():
-            # silu_mul + down_proj (attach down weight + alloc shared_residual
-            # HERE — matching the default _build_shared_expert ordering, where
-            # both happen after the gate_up GEMM).
-            shared_silu_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.moe_intermediate_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_shared_silu",
-                io_category="cuda_tensor",
-            )
-            w_shared_down, s_shared_down = self._attach_fp8_weight(
-                state_dict, f"{shared_prefix}down_proj.weight",
-                f"layer_{layer_idx}_shared_expert_down")
-            shared_residual = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_shared_residual",
-                io_category="cuda_tensor",
-            )
-            self._silu_mul_fp8_linear(
-                st["shared_mid"],
-                shared_silu_out,
-                w_shared_down,
-                s_shared_down,
-                shared_residual,
-                silu_grid_dim=(shared_split, 1, 1),
-                linear_grid_dim=(self.hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-                residual=None,
-                num_workers_override=shared_nw,
-            )
-            st["shared_residual"] = shared_residual
-
-        self._new_moe_dispatch_inline(
-            layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
-            K, K_intermediate, K_PACKED_K, K_PACKED_INT,
-            w13_scale_key, w_experts_w13,
-            moe_topk_weights, moe_routing_indices,
-            new_moe_input_fp8, new_moe_input_scale,
-            new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-            new_moe_meta,
-            new_moe_w13_out, new_moe_silu_out,
-            new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
-            new_moe_silu_scale, new_moe_w2_out,
-            routed_num_workers=routed_nw,
-            prelude_tail=_shared_prelude_quantize,
-            after_w13=_shared_gateup,
-            after_w2=_shared_down)
-        self._new_moe_layer_w2_out = new_moe_w2_out
-        self._new_moe_layer_meta = new_moe_meta
-        assert st["shared_residual"] is not None, (
-            "MoE partition: _shared_down did not run (after_w2 hook missed)")
-        return st["shared_residual"]
-
-    def _dispatch_moe_partition_dynamic(
-            self, layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
-            K, K_intermediate, K_PACKED_K, K_PACKED_INT,
-            w13_scale_key, w_experts_w13,
-            moe_topk_weights, moe_routing_indices,
-            new_moe_input_fp8, new_moe_input_scale,
-            new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-            new_moe_meta,
-            new_moe_w13_out, new_moe_silu_out,
-            new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
-            new_moe_silu_scale, new_moe_w2_out):
-        """Dynamic MoE co-scheduling (MPK_DSV3_MOE_PARTITION_DYNAMIC=1 only).
-
-        Composable with MPK_DSV3_DENSE_FINEN=1.  Unlike the static
-        ``_dispatch_moe_partitioned`` path this variant does NOT cap the
-        routed-GEMM (W13/W2) worker count.  Both GEMMs keep full
-        ``num_workers`` so the FINEN sidecar can re-issue at the same count
-        without voiding a cap.
-
-        The shared-expert registration order is IDENTICAL to the static path
-        (same prelude_tail / after_w13 / after_w2 hooks): the tasks land in
-        the same scheduler queues alongside W13/W2 and the MPK scheduler's
-        dynamic pull (per-scheduler SHARED queue, work-stealing within the
-        group) naturally routes them to whichever workers finish their current
-        routed-GEMM tile early (e.g. workers assigned to an inactive-expert
-        block that early-returns).
-
-        The shared-expert GEMMs also keep full num_workers (no
-        ``num_workers_override``), which means:
-          - FINEN is allowed on the shared gate_up (N=512 <= 2304, mbt==1).
-          - The down projection (N=7168) uses the standard wave-collapsed
-            worker count.
-
-        SCHEDULER SAFETY NOTE: the shared-expert tasks depend only on
-        ``rmsnorm_out`` (the same upstream as W13, not on any output of
-        the routed chain).  The annotated graph therefore does NOT create a
-        dep-edge from W13 to the shared gate_up, so the shared gate_up is
-        ready to be dispatched at the SAME time as W13 — there is no
-        circular dependency and no deadlock risk from the co-scheduling.
-        The only ordering constraint is that W2 must finish before
-        moe_unpermute (that edge already exists in the default graph).
-
-        BOUND NOTE: the shared expert is small (M=1, N=512 gate_up then
-        N=7168 down at bs=1 decode).  At most a handful of workers do
-        meaningful shared-expert work, so the packing gain is bounded by
-        the shared-expert size.  The lever improves wall-span only when
-        the shared gate_up GEMM overlaps W13 — i.e. when W13 occupies
-        >1 scheduler tick and the freed slots are non-zero.  The perfetto
-        trace (W13 slowCTA vs shared-expert position timestamps) is the
-        discriminator.
-
-        HANG RISK: this path has the same overlap-scheduling hang potential
-        as the static partition path (CLAUDE.md "EVENT_LAUNCH_TASKS danger").
-        Validate on the 8xB200 box with the dedicated GPU-safety lease before
-        trusting the result.
-        """
-        print(
-            f"  [MoE partition dynamic] layer {layer_idx}: routed W13/W2 at "
-            f"full num_workers={self.mpk.num_workers}, shared-expert at full "
-            f"num_workers (dynamic scheduler interleaving, FINEN-compatible)")
-
-        # Shared-expert weight prep (identical to _dispatch_moe_partitioned).
-        shared_prefix = f"{prefix}shared_experts."
-        shared_gate_w = state_dict[f"{shared_prefix}gate_proj.weight"]
-        shared_up_w = state_dict[f"{shared_prefix}up_proj.weight"]
-        gate_scale_key = f"{shared_prefix}gate_proj.weight_scale_inv"
-        has_shared_scale = gate_scale_key in state_dict
-        from ..utils import shuffle_tensors as _shuffle_tensors
-        out_dim_total = shared_gate_w.shape[0] + shared_up_w.shape[0]
-        linear_grid = grid_for_rmsnorm_linear_layer(out_dim_total)
-        scale_dim_0 = shared_gate_w.shape[0] // 128
-        shared_split = min(linear_grid // 2, scale_dim_0)
-        while (shared_gate_w.shape[0] % shared_split != 0
-               or scale_dim_0 % shared_split != 0):
-            shared_split -= 1
-            if shared_split < 1:
-                shared_split = 1
-                break
-        fused_key = f"layer_{layer_idx}_shared_expert_gate_up"
-        state_dict[f"{fused_key}.weight"] = _shuffle_tensors(
-            [shared_gate_w, shared_up_w], split=shared_split, dim=0)
-        if has_shared_scale:
-            shared_gate_s = state_dict[gate_scale_key]
-            shared_up_s = state_dict[
-                f"{shared_prefix}up_proj.weight_scale_inv"]
-            state_dict[f"{fused_key}.weight_scale_inv"] = _shuffle_tensors(
-                [shared_gate_s, shared_up_s], split=shared_split, dim=0)
-        w_shared_gate_up, s_shared_gate_up = self._attach_fp8_weight(
-            state_dict, f"{fused_key}.weight",
-            f"layer_{layer_idx}_shared_expert_gate_up")
-
-        st = {"shared_mid": None, "shared_residual": None}
-
-        # Pre-emit shared-expert input quantize in the prelude (same as
-        # static partition) so the gate_up GEMM is ready before W13 executes.
-        # The reduction dim K=7168 = hidden_size; use the shared f32-scale
-        # FP8 buffers (same as the dense path).
-        shared_reduction = w_shared_gate_up.dim(1)
-        gateup_tag = f"layer_{layer_idx}_shared_gateup_quantize_dyn"
-
-        def _shared_prelude_quantize():
-            input_fp8, input_scale = (
-                self._fp8_mbt_buffers_for_reduction_f32scale(shared_reduction))
-            self.mpk.quantize_fp8_layer(
-                input=self.rmsnorm_out,
-                output_fp8=input_fp8,
-                output_scale=input_scale,
-                grid_dim=(self.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
-                scale_ue8m0=False,
-                active_mode=0,
-            )
-            already = getattr(self, "_fp8_quantize_emitted", set())
-            already.add(gateup_tag)
-            self._fp8_quantize_emitted = already
-
-        def _shared_gateup():
-            # Full-workers gate_up: num_workers_override=None → FINEN fires
-            # when eligible (N=512, mbt==1, gate_mode==0).
-            shared_mid = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens,
-                      2 * self.moe_intermediate_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_shared_mid",
-                io_category="cuda_tensor",
-            )
-            self._fp8_linear(
-                self.rmsnorm_out, w_shared_gate_up, s_shared_gate_up,
-                shared_mid,
-                grid_dim=(grid_for_rmsnorm_linear_layer(
-                    w_shared_gate_up.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
-                share_quantize_tag=gateup_tag,
-                # num_workers_override intentionally absent → full workers,
-                # FINEN-compatible.
-            )
-            st["shared_mid"] = shared_mid
-
-        def _shared_down():
-            shared_silu_out = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.moe_intermediate_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_shared_silu",
-                io_category="cuda_tensor",
-            )
-            w_shared_down, s_shared_down = self._attach_fp8_weight(
-                state_dict, f"{shared_prefix}down_proj.weight",
-                f"layer_{layer_idx}_shared_expert_down")
-            shared_residual = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_shared_residual",
-                io_category="cuda_tensor",
-            )
-            self._silu_mul_fp8_linear(
-                st["shared_mid"],
-                shared_silu_out,
-                w_shared_down,
-                s_shared_down,
-                shared_residual,
-                silu_grid_dim=(shared_split, 1, 1),
-                linear_grid_dim=(self.hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-                residual=None,
-                # num_workers_override intentionally absent → full workers.
-            )
-            st["shared_residual"] = shared_residual
-
-        # routed_num_workers=None → W13/W2 use full num_workers (FINEN safe).
-        self._new_moe_dispatch_inline(
-            layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
-            K, K_intermediate, K_PACKED_K, K_PACKED_INT,
-            w13_scale_key, w_experts_w13,
-            moe_topk_weights, moe_routing_indices,
-            new_moe_input_fp8, new_moe_input_scale,
-            new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-            new_moe_meta,
-            new_moe_w13_out, new_moe_silu_out,
-            new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
-            new_moe_silu_scale, new_moe_w2_out,
-            routed_num_workers=None,
-            prelude_tail=_shared_prelude_quantize,
-            after_w13=_shared_gateup,
-            after_w2=_shared_down)
-        self._new_moe_layer_w2_out = new_moe_w2_out
-        self._new_moe_layer_meta = new_moe_meta
-        assert st["shared_residual"] is not None, (
-            "MoE partition dynamic: _shared_down did not run "
-            "(after_w2 hook missed)")
-        return st["shared_residual"]
 
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):
         """Build MoE MLP for layers 3-60."""
@@ -2878,9 +2347,7 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         router_grid = min(grid_for_rmsnorm_linear_layer(w_gate.dim(0)),
                           w_gate.dim(0) // 8)
-        if ((os.environ.get("MPK_DSV3_ROUTER_GEMV") == "1"
-             or os.environ.get("MPK_DSV3_STABLE") == "1")
-                and self.max_num_batched_tokens == 1):
+        if self.max_num_batched_tokens == 1:
             # ferret BF16 CUDA-core GEMV replaces the tcgen05 linear_layer for
             # the router gate at bs=1 decode. Default-OFF: env unset ⇒ the
             # linear_layer path below (byte-identical baseline build).
@@ -3018,71 +2485,23 @@ class DeepSeekV3Builder(GraphBuilder):
             name=f"layer_{layer_idx}_new_moe_w2_out",
             io_category="cuda_tensor")
 
-        # MoE worker-partition (MPK_DSV3_MOE_PARTITION=1, default-OFF):
-        # overlap the routed-MoE and shared-expert sub-blocks on disjoint
-        # workers by interleaving shared-expert task registration into the
-        # routed chain (via _new_moe_dispatch_inline's prelude_tail /
-        # after_w13 / after_w2 hooks) and capping grids: routed group GEMMs
-        # 128 workers, shared-expert dense GEMMs 8 workers (128 + 8 = 136 =
-        # num_workers, one wave). Default-OFF → the else-branch below is the
-        # exact pre-existing code (byte-identical build).
-        #
-        # MPK_DSV3_MOE_PARTITION_DYNAMIC=1 (default-OFF): same same-wave
-        # co-scheduling as PARTITION but without the static worker cap —
-        # routed W13/W2 and shared-expert GEMMs both use full num_workers.
-        # The MPK scheduler's dynamic pull interleaves the shared-expert onto
-        # W13-freed workers naturally.  Composable with DENSE_FINEN=1 (no
-        # num_workers_override means no FINEN conflict).  Must NOT be set
-        # together with MPK_DSV3_MOE_PARTITION=1 (undefined ordering).
-        _moe_partition = os.environ.get("MPK_DSV3_MOE_PARTITION") == "1"
-        _moe_partition_dynamic = (
-            os.environ.get("MPK_DSV3_MOE_PARTITION_DYNAMIC") == "1")
-        if _moe_partition and _moe_partition_dynamic:
-            raise RuntimeError(
-                "MPK_DSV3_MOE_PARTITION and MPK_DSV3_MOE_PARTITION_DYNAMIC "
-                "must not both be set — pick one variant.")
-        if _moe_partition:
-            shared_residual = self._dispatch_moe_partitioned(
-                layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
-                K, K_intermediate, K_PACKED_K, K_PACKED_INT,
-                w13_scale_key, w_experts_w13,
-                moe_topk_weights, moe_routing_indices,
-                new_moe_input_fp8, new_moe_input_scale,
-                new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-                new_moe_meta,
-                new_moe_w13_out, new_moe_silu_out,
-                new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
-                new_moe_silu_scale, new_moe_w2_out)
-        elif _moe_partition_dynamic:
-            shared_residual = self._dispatch_moe_partition_dynamic(
-                layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
-                K, K_intermediate, K_PACKED_K, K_PACKED_INT,
-                w13_scale_key, w_experts_w13,
-                moe_topk_weights, moe_routing_indices,
-                new_moe_input_fp8, new_moe_input_scale,
-                new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-                new_moe_meta,
-                new_moe_w13_out, new_moe_silu_out,
-                new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
-                new_moe_silu_scale, new_moe_w2_out)
-        else:
-            self._new_moe_dispatch_inline(
-                layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
-                K, K_intermediate, K_PACKED_K, K_PACKED_INT,
-                w13_scale_key, w_experts_w13,
-                moe_topk_weights, moe_routing_indices,
-                new_moe_input_fp8, new_moe_input_scale,
-                new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
-                new_moe_meta,
-                new_moe_w13_out, new_moe_silu_out,
-                new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
-                new_moe_silu_scale, new_moe_w2_out)
-            self._new_moe_layer_w2_out = new_moe_w2_out
-            self._new_moe_layer_meta = new_moe_meta
+        self._new_moe_dispatch_inline(
+            layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
+            K, K_intermediate, K_PACKED_K, K_PACKED_INT,
+            w13_scale_key, w_experts_w13,
+            moe_topk_weights, moe_routing_indices,
+            new_moe_input_fp8, new_moe_input_scale,
+            new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
+            new_moe_meta,
+            new_moe_w13_out, new_moe_silu_out,
+            new_moe_silu_fp8, new_moe_silu_scale_Mfirst,
+            new_moe_silu_scale, new_moe_w2_out)
+        self._new_moe_layer_w2_out = new_moe_w2_out
+        self._new_moe_layer_meta = new_moe_meta
 
-            # ---- Shared Expert ----
-            shared_residual = self._build_shared_expert(
-                layer_idx, prefix, state_dict)
+        # ---- Shared Expert ----
+        shared_residual = self._build_shared_expert(
+            layer_idx, prefix, state_dict)
 
         # Final MoE contribution before transformer residual:
         #   routed_experts * topk_weights + shared_expert
@@ -3511,4 +2930,3 @@ class DeepSeekV3Builder(GraphBuilder):
                     grid_dim=(1, 1, 1),
                     block_dim=(128, 1, 1),
                 )
-

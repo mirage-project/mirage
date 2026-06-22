@@ -185,15 +185,10 @@ enum TaskType {
   TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 299,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
-  // retired: 319
   // BF16 CUDA-core GEMV for DSv3 router gate (hidden@W_gate.T→logits), raw-ptr
   // ABI (no TMA). Default-OFF: MPK_DSV3_ROUTER_GEMV=1.
   TASK_DSV3_ROUTER_GATE_GEMV_SM100 = 318,
   TASK_FP8_GEMM_DENSE_SM100 = 306,
-  // ferret v002 CUDA-core GEMV (M=1 decode, RAW-ptr ABI via input_ptrs[0/1],
-  // NOT TMA descriptors; reuses retired gap 307). default-OFF
-  // MPK_DSV3_DENSE_GEMV.
-  TASK_FP8_GEMM_DENSE_GEMV_M1_SM100 = 307,
   // fine-N dense GEMM (mediumm body @ BN=16): M=1 decode occupancy lever,
   // default-OFF MPK_DSV3_DENSE_FINEN. TMA inputs (B-weight box=16). Reuses gap
   // 308.
@@ -208,6 +203,7 @@ enum TaskType {
   TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100 = 317,
   TASK_MOE_TOPK_COMPACT_SM100 = 310,
   TASK_MOE_TOPK_MARKER_INIT_SM100 = 320,
+  TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100 = 321,
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
   // bs=1 contiguous KV append (replaces paged-cache append + gather):
   TASK_MLA_KV_APPEND_SM100 = 323,

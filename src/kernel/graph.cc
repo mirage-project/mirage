@@ -864,14 +864,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, /*mediumm=*/false);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
-  } else if (name == "fp8_gemm_dense_gemv_m1_sm100") {
-    // ferret v002 CUDA-core GEMV (M=1 decode). Same (4 in, 1 out) shape as the
-    // dense GEMM, but its own enum so runtime.cc can route A/B as RAW pointers
-    // (input_ptrs[0]/[1]) instead of creating TMA descriptors.
-    int variant_id = task_register->register_fp8_gemm_dense_gemv_m1_sm100_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_GEMV_M1_SM100, variant_id);
   } else if (name == "dsv3_router_gate_gemv_sm100") {
     // ferret BF16 CUDA-core GEMV: hidden[M,K] @ W_gate[N,K]^T → logits[M,N].
     // 2 real inputs (hidden, W_gate) + 1 real output (logits); raw-ptr ABI.
@@ -923,8 +915,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_fused_rmsnorm_quantize_fp8_sm100_task(
             customized->bgraph, params);
+    size_t const num_ops_fused = customized->bgraph.operators.size();
+    assert(num_ops_fused == 5 || num_ops_fused == 6);
+    int const num_inputs_fused = (num_ops_fused == 6) ? 3 : 2;
     task_config[op] = std::make_tuple(
-        2, 3, TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100, variant_id);
+        num_inputs_fused, 3, TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "fp8_group_gemm_smallm_sm100") {
     // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + optional 6th (meta for
     // per-expert active mask) + 1 output (D_bf16). All 4 first inputs +
@@ -949,6 +944,17 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
     task_config[op] = std::make_tuple(
         num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_largem_compact_fused_sm100") {
+    int variant_id =
+        task_register->register_fp8_group_gemm_largem_compact_fused_sm100_task(
+            customized->bgraph, params);
+    int base_inputs = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    int num_inputs_fused = base_inputs + 4;
+    task_config[op] =
+        std::make_tuple(num_inputs_fused,
+                        2,
+                        TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100,
+                        variant_id);
   } else if (name == "moe_permute_sm100") {
     // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
     // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).

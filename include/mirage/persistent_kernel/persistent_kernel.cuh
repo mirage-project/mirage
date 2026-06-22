@@ -115,9 +115,9 @@ __device__ __forceinline__ void
 // forceinlined under the same flag, via MPK_DSV3_TASK_INLINE) fold into the
 // worker frame -> no caller-save across the relocatable call (the dominant
 // -rdc=true decode penalty; finen 11.23->8.10us, beats vLLM). The HEAVY bodies
-// (MLA / group-GEMM / BMM2) keep __noinline__ so worker_kernel does not overflow
-// ptxas; switch branches are mutually exclusive so this is C7600-safe even in
-// the full megakernel. (Codex #5, root cause 6/18.)
+// (MLA / group-GEMM / BMM2) keep __noinline__ so worker_kernel does not
+// overflow ptxas; switch branches are mutually exclusive so this is C7600-safe
+// even in the full megakernel. (Codex #5, root cause 6/18.)
 static __device__
 #ifdef MPK_DSV3_FORCEINLINE
     __forceinline__

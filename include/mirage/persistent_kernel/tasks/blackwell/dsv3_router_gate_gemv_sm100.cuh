@@ -16,7 +16,8 @@
 //   This is the preferred raw-pointer GEMV ABI documented in task.yaml:
 //     task_impl(hidden, W_gate, logits, M, N, K, worker_idx, num_workers)
 //   No TMA descriptor is constructed; all loads are direct uint4 coalesced.
-//   The MPK dispatcher must route these as plain device pointers (input_ptrs[]).
+//   The MPK dispatcher must route these as plain device pointers
+//   (input_ptrs[]).
 //
 // CRASH-SAFETY NOTE (MLA-TP co-residency on B200):
 //   This kernel uses NO tcgen05, NO TMEM, NO mbarrier, NO cp.async, NO split-K.
@@ -43,10 +44,10 @@ namespace dsv3_router_gate_gemv {
 // Constants (tuned at v002: GRID_N=256, BLOCK=512 is the optimal config)
 // ---------------------------------------------------------------------------
 
-static constexpr int GEMV_BLOCK = 512;  // threads per CTA (16 warps)
-static constexpr int GEMV_N     = 256;  // total number of experts
-static constexpr int GEMV_K     = 7168; // hidden dimension
-static constexpr int GEMV_MAX_M = 4;    // maximum supported M (static wred sizing)
+static constexpr int GEMV_BLOCK = 512; // threads per CTA (16 warps)
+static constexpr int GEMV_N = 256;     // total number of experts
+static constexpr int GEMV_K = 7168;    // hidden dimension
+static constexpr int GEMV_MAX_M = 4; // maximum supported M (static wred sizing)
 
 // ---------------------------------------------------------------------------
 // Main task function
@@ -65,38 +66,38 @@ static constexpr int GEMV_MAX_M = 4;    // maximum supported M (static wred sizi
 //              standalone at GRID_N=256; MPK runtime value at ~136).
 // ---------------------------------------------------------------------------
 __device__ __noinline__ void
-dsv3_router_gate_gemv_task_impl(
-    __nv_bfloat16 const *__restrict__ hidden,
-    __nv_bfloat16 const *__restrict__ W_gate,
-    __nv_bfloat16 *__restrict__ logits,
-    int const M,
-    int const N,
-    int const K,
-    int const worker_idx,
-    int const num_workers)
-{
+    dsv3_router_gate_gemv_task_impl(__nv_bfloat16 const *__restrict__ hidden,
+                                    __nv_bfloat16 const *__restrict__ W_gate,
+                                    __nv_bfloat16 *__restrict__ logits,
+                                    int const M,
+                                    int const N,
+                                    int const K,
+                                    int const worker_idx,
+                                    int const num_workers) {
   using bf16 = __nv_bfloat16;
 
   // EPC = experts per CTA (ceiling divide so all N experts are covered).
   // At GRID_N=256, num_workers=256: EPC=1, TPE=512, WPE=16.
   // At num_workers=136 (MPK): EPC=2, TPE=256, WPE=8 (first ~120 workers);
   //   trailing workers guard e >= N below.
-  const int EPC    = (N + num_workers - 1) / num_workers;
-  const int TPE    = blockDim.x / EPC;   // threads per expert
-  const int WPE    = TPE / 32;           // warps per expert (>= 1)
-  const int tid    = threadIdx.x;
-  const int warp   = tid / 32;
-  const int lane   = tid % 32;
-  const int sub    = tid / TPE;          // expert index within this CTA (0..EPC-1)
-  const int subtid = tid % TPE;          // thread index inside sub-group (0..TPE-1)
-  const int e      = worker_idx * EPC + sub;  // global expert index
+  int const EPC = (N + num_workers - 1) / num_workers;
+  int const TPE = blockDim.x / EPC; // threads per expert
+  int const WPE = TPE / 32;         // warps per expert (>= 1)
+  int const tid = threadIdx.x;
+  int const warp = tid / 32;
+  int const lane = tid % 32;
+  int const sub = tid / TPE;    // expert index within this CTA (0..EPC-1)
+  int const subtid = tid % TPE; // thread index inside sub-group (0..TPE-1)
+  int const e = worker_idx * EPC + sub; // global expert index
 
   // Static shared memory for warp-level partial sums.
-  // Layout: wred[warp_idx * GEMV_MAX_M + m]. Sized for GEMV_BLOCK warps * MAX_M.
-  // At BLOCK=512: 16 warps * 4 rows = 64 floats = 256 bytes.
+  // Layout: wred[warp_idx * GEMV_MAX_M + m]. Sized for GEMV_BLOCK warps *
+  // MAX_M. At BLOCK=512: 16 warps * 4 rows = 64 floats = 256 bytes.
   __shared__ float wred[(GEMV_BLOCK / 32) * GEMV_MAX_M];
 
-  if (e >= N) return;  // guard trailing workers when N % num_workers != 0
+  if (e >= N) {
+    return; // guard trailing workers when N % num_workers != 0
+  }
 
   bf16 const *wrow = W_gate + (size_t)e * K;
 
@@ -108,27 +109,37 @@ dsv3_router_gate_gemv_task_impl(
 
   float acc[GEMV_MAX_M];
 #pragma unroll
-  for (int m = 0; m < GEMV_MAX_M; ++m) acc[m] = 0.f;
+  for (int m = 0; m < GEMV_MAX_M; ++m) {
+    acc[m] = 0.f;
+  }
 
-  union { uint4 v; bf16 h[8]; } wb, hb;
+  union {
+    uint4 v;
+    bf16 h[8];
+  } wb, hb;
 
   for (int base = subtid * 8; base < K; base += TPE * 8) {
     wb.v = *reinterpret_cast<uint4 const *>(wrow + base);
     for (int m = 0; m < M; ++m) {
       hb.v = *reinterpret_cast<uint4 const *>(hidden + (size_t)m * K + base);
 #pragma unroll
-      for (int t = 0; t < 8; ++t)
+      for (int t = 0; t < 8; ++t) {
         acc[m] += __bfloat162float(hb.h[t]) * __bfloat162float(wb.h[t]);
+      }
     }
   }
 
-  // --- Warp-level reduction (lane 0 holds the warp partial sum) ---------------
+  // --- Warp-level reduction (lane 0 holds the warp partial sum)
+  // ---------------
   for (int m = 0; m < M; ++m) {
     float a = acc[m];
 #pragma unroll
-    for (int o = 16; o > 0; o >>= 1)
+    for (int o = 16; o > 0; o >>= 1) {
       a += __shfl_down_sync(0xffffffffu, a, o);
-    if (lane == 0) wred[warp * GEMV_MAX_M + m] = a;
+    }
+    if (lane == 0) {
+      wred[warp * GEMV_MAX_M + m] = a;
+    }
   }
   __syncthreads();
 
@@ -138,13 +149,15 @@ dsv3_router_gate_gemv_task_impl(
     for (int m = 0; m < M; ++m) {
       float v = (lane < WPE) ? wred[(warp + lane) * GEMV_MAX_M + m] : 0.f;
 #pragma unroll
-      for (int o = 16; o > 0; o >>= 1)
+      for (int o = 16; o > 0; o >>= 1) {
         v += __shfl_down_sync(0xffffffffu, v, o);
-      if (lane == 0)
+      }
+      if (lane == 0) {
         logits[(size_t)m * N + e] = __float2bfloat16(v);
+      }
     }
   }
 }
 
-}  // namespace dsv3_router_gate_gemv
-}  // namespace kernel
+} // namespace dsv3_router_gate_gemv
+} // namespace kernel

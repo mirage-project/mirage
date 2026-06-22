@@ -401,6 +401,17 @@ static __device__ __forceinline__ void
       : "l"(mc_addr));
 }
 
+// multimem.st.global.v4.b32 -- broadcast 16 bytes to the multicast address.
+// Used by the reduce-scatter+all-gather variant for the all-gather phase.
+static __device__ __forceinline__ void mpkar_nvls_st_v4(
+    int4 const *mc_addr, uint32_t v0, uint32_t v1, uint32_t v2, uint32_t v3) {
+  asm("multimem.st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(mc_addr),
+      "r"(v0),
+      "r"(v1),
+      "r"(v2),
+      "r"(v3));
+}
+
 // f16: multimem.ld_reduce.global.add.acc::f32.v4.f16x2
 static __device__ __forceinline__ void
     mpkar_nvls_ld_reduce_f16_v4(uint32_t &r0,
@@ -610,6 +621,80 @@ static __device__ __forceinline__ void
           "r"(__float_as_uint(f4[1])),
           "r"(__float_as_uint(f4[2])),
           "r"(__float_as_uint(f4[3])));
+    }
+  }
+}
+
+template <int WORLD_SIZE>
+static __device__ __forceinline__ void
+    mpkar_nvls_rs_ag_bf16_v4_block(int4 *__restrict__ dst,
+                                   int4 const *__restrict__ mc_src,
+                                   int4 const *__restrict__ mc_dst,
+                                   int stride_v4,
+                                   int v4_per_row,
+                                   int num_rows,
+                                   int my_rank) {
+  static_assert(WORLD_SIZE > 0, "WORLD_SIZE must be positive.");
+  int const slice_v4 = v4_per_row / WORLD_SIZE;
+  int const slice_start = my_rank * slice_v4;
+  int const slice_end = slice_start + slice_v4;
+
+  // Phase RS: this rank reduces only its owned slice into the local output.
+  for (int row = 0; row < num_rows; row++) {
+    int const row_base = row * stride_v4;
+    for (int col = threadIdx.x + slice_start; col < slice_end;
+         col += blockDim.x) {
+      uint32_t u4[4];
+      int const idx = row_base + col;
+      mpkar_nvls_ld_reduce_bf16_v4(u4[0], u4[1], u4[2], u4[3], mc_src + idx);
+      asm("st.global.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(dst + idx),
+          "r"(u4[0]),
+          "r"(u4[1]),
+          "r"(u4[2]),
+          "r"(u4[3]));
+    }
+  }
+
+  // Phase AG: broadcast this rank's reduced slice to every peer's output.
+  for (int row = 0; row < num_rows; row++) {
+    int const row_base = row * stride_v4;
+    for (int col = threadIdx.x + slice_start; col < slice_end;
+         col += blockDim.x) {
+      int const idx = row_base + col;
+      int4 const val = dst[idx];
+      mpkar_nvls_st_v4(mc_dst + idx,
+                       static_cast<uint32_t>(val.x),
+                       static_cast<uint32_t>(val.y),
+                       static_cast<uint32_t>(val.z),
+                       static_cast<uint32_t>(val.w));
+    }
+  }
+
+  // Make the multicast stores visible before the caller's cross-rank barrier.
+  __threadfence_system();
+}
+
+static __device__ __forceinline__ void
+    mpkar_add_residual_bf16_v4_block(int4 *__restrict__ dst,
+                                     int4 const *__restrict__ residual,
+                                     int stride_v4,
+                                     int v4_per_row,
+                                     int num_rows) {
+  for (int row = 0; row < num_rows; row++) {
+    int const row_base = row * stride_v4;
+    for (int col = threadIdx.x; col < v4_per_row; col += blockDim.x) {
+      int const idx = row_base + col;
+      int4 acc = dst[idx];
+      int4 const r4 = residual[idx];
+      acc.x = mpkar_add_bf16x2(static_cast<uint32_t>(acc.x),
+                               static_cast<uint32_t>(r4.x));
+      acc.y = mpkar_add_bf16x2(static_cast<uint32_t>(acc.y),
+                               static_cast<uint32_t>(r4.y));
+      acc.z = mpkar_add_bf16x2(static_cast<uint32_t>(acc.z),
+                               static_cast<uint32_t>(r4.z));
+      acc.w = mpkar_add_bf16x2(static_cast<uint32_t>(acc.w),
+                               static_cast<uint32_t>(r4.w));
+      dst[idx] = acc;
     }
   }
 }

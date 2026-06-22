@@ -50,12 +50,15 @@ __device__ __forceinline__ unsigned long long int
     ld_acquire_gpu_u64(unsigned long long int *addr) {
   unsigned long long int val;
   // "memory" clobber is REQUIRED: the PTX ld.acquire gives hardware ordering,
-  // but without it the COMPILER may hoist later relaxed payload loads above this
-  // acquire (the producer publishes payload-then-flag; the consumer must read
-  // flag-then-payload). Missing here while every sys-scope/release sibling has
-  // it — a latent bug that -rdc=true codegen exposes as a worker/scheduler
+  // but without it the COMPILER may hoist later relaxed payload loads above
+  // this acquire (the producer publishes payload-then-flag; the consumer must
+  // read flag-then-payload). Missing here while every sys-scope/release sibling
+  // has it — a latent bug that -rdc=true codegen exposes as a worker/scheduler
   // queue-handoff spin-hang (whole-program -rdc=false happened to hide it).
-  asm volatile("ld.acquire.gpu.u64 %0, [%1];" : "=l"(val) : "l"(addr) : "memory");
+  asm volatile("ld.acquire.gpu.u64 %0, [%1];"
+               : "=l"(val)
+               : "l"(addr)
+               : "memory");
   return val;
 }
 
@@ -72,13 +75,19 @@ __device__ __forceinline__ unsigned long long int
 __device__ __forceinline__ unsigned long long int
     ld_relaxed_gpu_u64(unsigned long long int *addr) {
   unsigned long long int val;
-  asm volatile("ld.relaxed.gpu.u64 %0, [%1];" : "=l"(val) : "l"(addr) : "memory");
+  asm volatile("ld.relaxed.gpu.u64 %0, [%1];"
+               : "=l"(val)
+               : "l"(addr)
+               : "memory");
   return val;
 }
 
 __device__ __forceinline__ void st_relaxed_gpu_u64(unsigned long long int *addr,
                                                    unsigned long long int val) {
-  asm volatile("st.relaxed.gpu.u64 [%0], %1;" : : "l"(addr), "l"(val) : "memory");
+  asm volatile("st.relaxed.gpu.u64 [%0], %1;"
+               :
+               : "l"(addr), "l"(val)
+               : "memory");
 }
 
 // System-scope acquire load (int32): safe to use for pinned CPU↔GPU rings.

@@ -28,6 +28,8 @@ def fused_rmsnorm_quantize_fp8_layer(
     eps: float = 1e-6,  # accepted for API parity; kernel hardcodes 1e-6f
     epsilon: float = None,  # alias for `eps` to match older call sites
     group_size: int = 128,  # kernel currently asserts GROUP_SIZE == 128
+    scratch_ptr_tensor: DTensor = None,
+    optimized_grid_layout: bool = False,
 ):
     """Fused RMSNorm + per-token-group FP8 quantize.
 
@@ -80,9 +82,8 @@ def fused_rmsnorm_quantize_fp8_layer(
 
     tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
     # IMPORTANT: input order MUST match the C++ task_register reader.
-    # input_ptrs[0]=input, [1]=weight, [2]=output_bf16, [3]=output_fp8,
-    # [4]=output_scale. We pass outputs via `store_in_dmem=True` inputs
-    # so the (num_inputs, num_outputs) tuple in graph.cc is (5, 0).
+    # Default: input_ptrs[0]=input, [1]=weight; outputs are split by graph.cc.
+    # OPT: input_ptrs[2]=scratch_ptr_tensor, then the same three outputs.
     #
     # Per-CTA pointer offsetting via dim_maps:
     #   input / output_bf16 / output_fp8: row dim 0 → grid.x, so each
@@ -94,13 +95,20 @@ def fused_rmsnorm_quantize_fp8_layer(
     #     kernel reconstructs from task_idx = task_metadata.request_id.
     #     dim_maps stays (-1, -1, -1) so the kernel sees the buffer
     #     base pointer.
-    tb_graph.new_input(input, (0, -1, -1), 1, True)
+    row_map = (-1, -1, -1) if optimized_grid_layout else (0, -1, -1)
+    row_forloop_dim = -1 if optimized_grid_layout else 1
+    tb_graph.new_input(input, row_map, row_forloop_dim, True)
     tb_graph.new_input(weight, (-1, -1, -1), 0, True)
-    tb_graph.new_input(output_bf16, (0, -1, -1), 1, True)
-    tb_graph.new_input(output_fp8, (0, -1, -1), 1, True)
+    tensors = [input, weight]
+    if scratch_ptr_tensor is not None:
+        assert scratch_ptr_tensor.num_dims == 1
+        tb_graph.new_input(scratch_ptr_tensor, (-1, -1, -1), -1, True)
+        tensors.append(scratch_ptr_tensor)
+    tb_graph.new_input(output_bf16, row_map, row_forloop_dim, True)
+    tb_graph.new_input(output_fp8, row_map, row_forloop_dim, True)
     tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
-    pk.kn_graph.customized(
-        [input, weight, output_bf16, output_fp8, output_scale], tb_graph)
+    tensors.extend([output_bf16, output_fp8, output_scale])
+    pk.kn_graph.customized(tensors, tb_graph)
     # The C++ register on this branch reads [process_dim, scale_ue8m0,
     # emit_bf16]; slice offsets are carried by mpk.narrow views, not params.
     assert in_offset_elems == 0 and out_offset_elems == 0, (
@@ -493,6 +501,83 @@ def _fp8_group_gemm_layer_impl(
     pk.kn_graph.register_task(tb_graph, task_name, params)
 
 
+
+def _fp8_group_gemm_largem_compact_fused_layer(
+    pk,
+    a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+    num_workers, meta=None,
+    ta_sh_fp8=None, tb_sh_fp8=None, tsfa_sh=None, tsfb_sh=None,
+    shared_residual=None,
+    N_shared=7168, K_shared=256,
+):
+    """Fused compact W2 + shared-down GEMM.
+
+    The first five inputs and optional meta mirror _fp8_group_gemm_layer_impl.
+    Shared A/B/SFA/SFB are appended as extra inputs; routed D and shared D are
+    both graph outputs so task_register reads output_tma_desc_ptrs[0..1].
+    """
+    use_fused = all(x is not None for x in [
+        ta_sh_fp8, tb_sh_fp8, tsfa_sh, tsfb_sh, shared_residual
+    ])
+    if not use_fused:
+        _fp8_group_gemm_layer_impl(
+            pk, "fp8_group_gemm_largem_compact_sm100",
+            a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+            num_workers, meta=meta)
+        return
+
+    assert a_fp8.num_dims == 2
+    assert b_fp8.num_dims == 3
+    assert tb_sh_fp8.num_dims == 3
+    assert output.num_dims == 2
+    assert shared_residual.num_dims == 2
+    M_total = a_fp8.dim(0)
+    K = a_fp8.dim(1)
+    E = b_fp8.dim(0)
+    N = b_fp8.dim(1)
+    assert b_fp8.dim(2) == K
+    assert tb_sh_fp8.dim(0) == 1
+    assert tb_sh_fp8.dim(1) == N_shared
+    assert tb_sh_fp8.dim(2) == K_shared
+    assert K_shared == K
+    assert ta_sh_fp8.dim(1) == K_shared
+    assert shared_residual.dim(1) == N_shared
+    assert m_indices.dim(0) == M_total
+    if meta is None:
+        active_mask_offset = -1
+    else:
+        assert meta.num_dims == 2
+        active_mask_offset = meta.dim(1)
+
+    nn_shared = (N_shared + 127) // 128
+    params = [
+        M_total, N, K, E, num_workers, active_mask_offset,
+        N_shared, K_shared, nn_shared,
+    ]
+    grid_dim = (num_workers, 1, 1)
+    block_dim = (256, 1, 1)
+    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+    tb_graph.new_input(a_fp8, (-1, -1, -1), -1, True)
+    tb_graph.new_input(b_fp8, (-1, -1, -1), -1, True)
+    tb_graph.new_input(sfa_packed, (-1, -1, -1), -1, True)
+    tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
+    tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
+    operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices]
+    if meta is not None:
+        tb_graph.new_input(meta, (-1, -1, -1), -1, True)
+        operators.append(meta)
+    tb_graph.new_input(ta_sh_fp8, (-1, -1, -1), -1, True)
+    tb_graph.new_input(tb_sh_fp8, (-1, -1, -1), -1, True)
+    tb_graph.new_input(tsfa_sh, (-1, -1, -1), -1, True)
+    tb_graph.new_input(tsfb_sh, (-1, -1, -1), -1, True)
+    operators.extend([ta_sh_fp8, tb_sh_fp8, tsfa_sh, tsfb_sh])
+    tb_graph.new_input(output, (-1, -1, -1), -1, True)
+    tb_graph.new_input(shared_residual, (-1, -1, -1), -1, True)
+    operators.extend([output, shared_residual])
+    pk.kn_graph.customized(operators, tb_graph)
+    pk.kn_graph.register_task(
+        tb_graph, "fp8_group_gemm_largem_compact_fused_sm100", params)
+
 def _fp8_group_gemm_smallm_layer(
     pk, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
     num_workers, meta=None,
@@ -524,15 +609,11 @@ def _fp8_group_gemm_largem_layer(
     # compact HANGS at >=18-active (README_faithful_pertask); safe ONLY at the
     # bs=1 decode operating point (~5-active). Confirm the active-count before
     # enabling at higher batch.
-    import os
-    # MPK_DSV3_STABLE=1 = the verified-stable DECODE config: one flag turns on all the
-    # 6/20-verified wins (GG_COMPACT + ROUTER_GEMV + MLA_REDUCE_1WAVE + TOPK_PARALLEL =
-    # 12.88ms @ TP8 bs=1). DECODE-ONLY — compact HANGS at ≥18-active, so do NOT set STABLE
-    # for prefill. default-OFF = byte-identical. (A true env-less default still needs mbt
-    # plumbed to each gate + a box prefill-safety re-verify; tracked as a follow-up.)
+    # 6/20: compact large-M group-GEMM is the DEFAULT for the decode build (mbt==1,
+    # ~5-active). It HANGS at ≥18-active, so the prefill/batched build (mbt>1) stays on
+    # the incumbent largem. mbt is read off the PersistentKernel (pk.max_num_batched_tokens).
     _name = ("fp8_group_gemm_largem_compact_sm100"
-             if (os.environ.get("MPK_DSV3_GG_COMPACT") == "1"
-                 or os.environ.get("MPK_DSV3_STABLE") == "1")
+             if pk.max_num_batched_tokens == 1
              else "fp8_group_gemm_largem_sm100")
     _fp8_group_gemm_layer_impl(
         pk, _name,
@@ -571,6 +652,7 @@ def moe_permute_sm100_layer(
     meta: DTensor,
     bm_padding: int = 128,
     e_per_cta: int = 1,
+    grid_dim_y: int = 1,
 ):
     """MoE expand-permute-sort task — peripheral glue for the PR-674
     grouped FP8 GEMM. See moe_permute_sm100.cuh for the exact contract.
@@ -639,7 +721,8 @@ def moe_permute_sm100_layer(
     # E_PER_CTA experts per CTA → (E_LOCAL / E_PER_CTA) CTAs. Each CTA
     # derives its expert range from task_metadata.expert_offset (= bid.x,
     # the CTA index) inside the kernel.
-    grid_dim = (E_LOCAL // e_per_cta, 1, 1)
+    assert grid_dim_y >= 1, "grid_dim_y must be >= 1"
+    grid_dim = (E_LOCAL // e_per_cta, grid_dim_y, 1)
     block_dim = (128, 1, 1)
     tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
     tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
