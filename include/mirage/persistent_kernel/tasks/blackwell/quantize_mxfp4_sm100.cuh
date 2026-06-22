@@ -118,10 +118,10 @@ __device__ __forceinline__ float decode_e8m0(uint8_t s) {
 }
 
 // Quantizes a single logical row `row_idx` (mirrors quantize_nvfp4_one_row).
-// `row_in`/`row_q` point at that row's input / packed-output base; `output_s_ptr`
-// is the scale-tensor base (the scale write computes its own absolute offset
-// from `row_idx`). `valid_row` selects real vs padded rows. Shared by the
-// per-CTA entry and the MPK whole-batch loop.
+// `row_in`/`row_q` point at that row's input / packed-output base;
+// `output_s_ptr` is the scale-tensor base (the scale write computes its own
+// absolute offset from `row_idx`). `valid_row` selects real vs padded rows.
+// Shared by the per-CTA entry and the MPK whole-batch loop.
 template <int HIDDEN_SIZE, int GROUP_SIZE, int GLOBAL_STRIDE, typename T>
 __device__ __forceinline__ void
     quantize_mxfp4_one_row(T const *__restrict__ row_in,
@@ -135,7 +135,8 @@ __device__ __forceinline__ void
                            int scale_outer_stride,
                            int mma_n) {
   constexpr int WARP_SIZE = 32;
-  constexpr int SUBWARP_SIZE = WARP_SIZE; // MXFP4: one full warp per group of 32
+  constexpr int SUBWARP_SIZE =
+      WARP_SIZE; // MXFP4: one full warp per group of 32
   constexpr int GROUPS_PER_WARP = WARP_SIZE / SUBWARP_SIZE; // = 1
   constexpr int NUM_GROUPS_PER_ROW = HIDDEN_SIZE / GROUP_SIZE;
   auto *output_s = static_cast<uint8_t *>(output_s_ptr);
@@ -145,7 +146,8 @@ __device__ __forceinline__ void
   int const subwarp_idx = lane_idx / SUBWARP_SIZE; // == 0 (SUBWARP == WARP)
   int const sublane_idx = lane_idx % SUBWARP_SIZE;
   int const groups_per_block = (blockDim.x / WARP_SIZE) * GROUPS_PER_WARP;
-  int const num_k_outer = NUM_GROUPS_PER_ROW / 2; // 2 MXFP4 scales per 64-K atom
+  int const num_k_outer =
+      NUM_GROUPS_PER_ROW / 2; // 2 MXFP4 scales per 64-K atom
 
 #pragma unroll
   for (int group_idx = warp_idx * GROUPS_PER_WARP + subwarp_idx;
@@ -159,7 +161,7 @@ __device__ __forceinline__ void
     // MXFP4 scale: smallest power of two such that group_max / scale <=
     // max_4bit.
     float const raw_scale = valid_row ? group_max / max_4bit : 1.0f;
-    const uint8_t scale_e8m0 = encode_e8m0(raw_scale);
+    uint8_t const scale_e8m0 = encode_e8m0(raw_scale);
     float const applied_scale = decode_e8m0(scale_e8m0);
 
     if (sublane_idx == 0 && (mma_n == 0 || valid_row)) {
@@ -173,13 +175,13 @@ __device__ __forceinline__ void
     }
 
     float const inv_scale = applied_scale > 0.0f ? 1.0f / applied_scale : 0.0f;
-    const uint8_t nibble =
+    uint8_t const nibble =
         static_cast<uint8_t>(
             cutlass::float_e2m1_t(
                 fminf(fmaxf(orig_val * inv_scale, min_4bit), max_4bit))
                 .raw()) &
         0x0f;
-    const uint8_t pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
+    uint8_t const pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
 
     if ((sublane_idx & 1) == 0) {
       row_q[group_idx * (GROUP_SIZE / 2) + (sublane_idx >> 1)] =
@@ -196,8 +198,9 @@ __device__ __forceinline__ void
 // quantize_nvfp4_sm100_task_impl.
 //
 // input_ptr:   row-major [BATCH_SIZE, GLOBAL_STRIDE] input
-// output_q_ptr: row-major [PADDED_BATCH_SIZE, GLOBAL_STRIDE/2] packed e2m1 bytes
-// output_s_ptr: interleaved scale bytes [PADDED_BATCH_SIZE/128, HIDDEN/128,
+// output_q_ptr: row-major [PADDED_BATCH_SIZE, GLOBAL_STRIDE/2] packed e2m1
+// bytes output_s_ptr: interleaved scale bytes [PADDED_BATCH_SIZE/128,
+// HIDDEN/128,
 //   32, 4, 4] (CUTLASS Sm1xxBlockScaledBasicChunk<SFVecSize=32>)
 // scale_outer_stride: 32*4*4 = 512 for contiguous storage (same atom as NVFP4).
 template <int HIDDEN_SIZE,

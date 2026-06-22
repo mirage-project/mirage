@@ -2281,9 +2281,9 @@ void launch_linear_nvfp4_swapAB_sm100(void *input_ptr,
         A_tmap,
         B_tmap,
         C_tmap,
-        reinterpret_cast<const char *>(weight_sf_ptr),
-        reinterpret_cast<const char *>(input_sf_ptr),
-        static_cast<const type::bfloat16_t *>(residual_ptr),
+        reinterpret_cast<char const *>(weight_sf_ptr),
+        reinterpret_cast<char const *>(input_sf_ptr),
+        static_cast<type::bfloat16_t const *>(residual_ptr),
         logical_batch_size,
         OUTPUT_SIZE);
     CUTE_CHECK_ERROR(cudaGetLastError());
@@ -2456,10 +2456,11 @@ std::vector<torch::Tensor>
     case 8192:
       return launch_quantize_nvfp4_sm100<8192>(input, mma_n);
     default:
-      TORCH_CHECK(false,
-                  "quantize_nvfp4_sm100 supports K in {128, 256, 384, 512, "
-                  "768, 1024, 1536, 2048, 3072, 4096, 6144, 7168, 8192}. Got K=",
-                  hidden_size);
+      TORCH_CHECK(
+          false,
+          "quantize_nvfp4_sm100 supports K in {128, 256, 384, 512, "
+          "768, 1024, 1536, 2048, 3072, 4096, 6144, 7168, 8192}. Got K=",
+          hidden_size);
   }
 }
 

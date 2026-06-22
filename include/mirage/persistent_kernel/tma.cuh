@@ -42,13 +42,14 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
       std::is_same_v<T, type::bfloat16_t> ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
       : std::is_same_v<T, cutlass::bfloat16_t>
           ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
-      : std::is_same_v<T, cutlass::half_t>     ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
-      : std::is_same_v<T, __half>              ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
-      : std::is_same_v<T, float>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
-      : std::is_same_v<T, double>              ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
-      : std::is_same_v<T, cutlass::float_ue4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cutlass::float_e4m3_t>   ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cutlass::float_e5m2_t>   ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::half_t> ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+      : std::is_same_v<T, __half>          ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+      : std::is_same_v<T, float>           ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
+      : std::is_same_v<T, double>          ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
+      : std::is_same_v<T, cutlass::float_ue4m3_t>
+          ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_e4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_e5m2_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
       : std::is_same_v<T, cutlass::float_e2m1_t>
           ? CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
       : std::is_same_v<T, cutlass::float_ue8m0_t>
@@ -990,9 +991,11 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         }
         int budget = sm_count / ((output_size + 127) / 128);
         int needed = (budget >= 1) ? (batch + budget - 1) / budget : 128;
-        return needed <= 8 ? 8 : needed <= 16 ? 16 : needed <= 32 ? 32
-               : needed <= 64                                     ? 64
-                                                                  : 128;
+        return needed <= 8    ? 8
+               : needed <= 16 ? 16
+               : needed <= 32 ? 32
+               : needed <= 64 ? 64
+                              : 128;
       };
 
       if (param_id == 0 || param_id == 1) { // A (tile_rows=BLOCK_M) / B (MMA_N)
@@ -1002,21 +1005,34 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gs[2] = {k / 2, 128};
         uint32_t bd[3] = {256, tile_rows, 1};
         uint32_t es[3] = {1, 1, 1};
-        check(cuTensorMapEncodeTiled(tma_desc, CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
-                                     3, tensor_desc.base_ptr, gd, gs, bd, es,
+        check(cuTensorMapEncodeTiled(tma_desc,
+                                     CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+                                     3,
+                                     tensor_desc.base_ptr,
+                                     gd,
+                                     gs,
+                                     bd,
+                                     es,
                                      CU_TENSOR_MAP_INTERLEAVE_NONE,
                                      CU_TENSOR_MAP_SWIZZLE_128B,
                                      CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
               param_id == 0 ? "A" : "B");
-      } else if (is_output) { // C: globalDim={output,batch}, box={BLOCK_M,MMA_N}
+      } else if (is_output) { // C: globalDim={output,batch},
+                              // box={BLOCK_M,MMA_N}
         uint64_t gd[2] = {(uint64_t)tensor_desc.dim[1],
                           (uint64_t)tensor_desc.dim[0]};
         uint64_t gs[1] = {(uint64_t)tensor_desc.stride[0] * sizeof(bfloat16)};
         uint32_t bd[2] = {BLOCK_M, mma_n()};
         uint32_t es[2] = {1, 1};
-        check(cuTensorMapEncodeTiled(tma_desc, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-                                     2, tensor_desc.base_ptr, gd, gs, bd, es,
+        check(cuTensorMapEncodeTiled(tma_desc,
+                                     CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                     2,
+                                     tensor_desc.base_ptr,
+                                     gd,
+                                     gs,
+                                     bd,
+                                     es,
                                      CU_TENSOR_MAP_INTERLEAVE_NONE,
                                      CU_TENSOR_MAP_SWIZZLE_NONE,
                                      CU_TENSOR_MAP_L2_PROMOTION_NONE,
@@ -1040,16 +1056,22 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       };
       uint64_t k = (uint64_t)tensor_desc.dim[1] * 2;
       int batch = (int)tensor_desc.dim[0];
-      uint32_t tile_rows = (param_id == 0)             ? 128
-                           : (batch % 128 == 0)        ? 128
-                           : (batch % 64 == 0)         ? 64
-                                                       : 32;
+      uint32_t tile_rows = (param_id == 0)      ? 128
+                           : (batch % 128 == 0) ? 128
+                           : (batch % 64 == 0)  ? 64
+                                                : 32;
       uint64_t gd[3] = {256, (uint64_t)tensor_desc.dim[0], k / 256};
       uint64_t gs[2] = {k / 2, 128};
       uint32_t bd[3] = {256, tile_rows, 1};
       uint32_t es[3] = {1, 1, 1};
-      check(cuTensorMapEncodeTiled(tma_desc, CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
-                                   3, tensor_desc.base_ptr, gd, gs, bd, es,
+      check(cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+                                   3,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
                                    CU_TENSOR_MAP_INTERLEAVE_NONE,
                                    CU_TENSOR_MAP_SWIZZLE_128B,
                                    CU_TENSOR_MAP_L2_PROMOTION_NONE,

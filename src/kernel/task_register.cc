@@ -4320,9 +4320,11 @@ int TaskRegister::register_linear_fp8_sm100_task(
 }
 
 static int round_to_swapab_tile(int needed) {
-  return needed <= 8 ? 8 : needed <= 16 ? 16 : needed <= 32 ? 32
-         : needed <= 64                                     ? 64
-                                                            : 128;
+  return needed <= 8    ? 8
+         : needed <= 16 ? 16
+         : needed <= 32 ? 32
+         : needed <= 64 ? 64
+                        : 128;
 }
 
 static int nvfp4_swapab_mma_n(int batch_size, int output_size) {
@@ -4436,7 +4438,7 @@ int TaskRegister::register_linear_nvfp4_sm100_task(
   code.e("    static_cast<CUtensorMap const*>("
          "task_desc->input_tma_desc_ptrs[1][0]),"); // B (activation)
   code.e("    static_cast<CUtensorMap const*>("
-         "task_desc->output_tma_desc_ptrs[0][0]),"); // C
+         "task_desc->output_tma_desc_ptrs[0][0]),");                 // C
   code.e("    static_cast<char const*>(task_desc->input_ptrs[2]),"); // SFA
   code.e("    static_cast<char const*>(task_desc->input_ptrs[3]),"); // SFB
   if (with_bias) {
@@ -4463,8 +4465,9 @@ int TaskRegister::register_linear_nvfp4_1d2d_sm100_task(
   constexpr int BLOCK_M = 128;
   constexpr int BLOCK_K = 256;
   // BLOCK_N: largest of {128,64,32} dividing the batch (must match tma.cuh).
-  int block_n =
-      (batch_size % 128 == 0) ? 128 : (batch_size % 64 == 0) ? 64 : 32;
+  int block_n = (batch_size % 128 == 0)  ? 128
+                : (batch_size % 64 == 0) ? 64
+                                         : 32;
   int num_stages = 6;
   int epi_batch_la = (block_n == 128) ? 2 : 1;
 
@@ -4523,7 +4526,7 @@ int TaskRegister::register_linear_mxfp4_sm100_task(
   code.e("    static_cast<CUtensorMap const*>("
          "task_desc->input_tma_desc_ptrs[1][0]),"); // B (activation)
   code.e("    static_cast<CUtensorMap const*>("
-         "task_desc->output_tma_desc_ptrs[0][0]),"); // C
+         "task_desc->output_tma_desc_ptrs[0][0]),");                 // C
   code.e("    static_cast<char const*>(task_desc->input_ptrs[2]),"); // SFA
   code.e("    static_cast<char const*>(task_desc->input_ptrs[3]),"); // SFB
   if (with_bias) {
@@ -4532,7 +4535,8 @@ int TaskRegister::register_linear_mxfp4_sm100_task(
   } else {
     code.e("    static_cast<type::bfloat16_t const*>(nullptr),");
   }
-  code.e("    $, $, 0, 1);", batch_size, output_size); // M, N, cta_idx, num_ctas
+  code.e(
+      "    $, $, 0, 1);", batch_size, output_size); // M, N, cta_idx, num_ctas
   return register_task_variant(TASK_LINEAR_MXFP4_SM100, code.to_string());
 }
 
@@ -4548,8 +4552,9 @@ int TaskRegister::register_linear_mxfp4_1d2d_sm100_task(
   int reduction_size = input_ops[0]->dtensor.dim[1] * 2;
   constexpr int BLOCK_M = 128;
   constexpr int BLOCK_K = 256;
-  int block_n =
-      (batch_size % 128 == 0) ? 128 : (batch_size % 64 == 0) ? 64 : 32;
+  int block_n = (batch_size % 128 == 0)  ? 128
+                : (batch_size % 64 == 0) ? 64
+                                         : 32;
   int num_stages = 6;
   int epi_batch_la = (block_n == 128) ? 2 : 1;
 
@@ -4576,7 +4581,8 @@ int TaskRegister::register_linear_mxfp4_1d2d_sm100_task(
   } else {
     code.e("    static_cast<type::bfloat16_t const*>(nullptr),");
   }
-  code.e("    $, $, 0, 1);", output_size, batch_size); // M, N, tile_base, ntasks
+  code.e(
+      "    $, $, 0, 1);", output_size, batch_size); // M, N, tile_base, ntasks
   return register_task_variant(TASK_LINEAR_MXFP4_1D2D_SM100, code.to_string());
 }
 

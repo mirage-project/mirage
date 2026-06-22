@@ -43,11 +43,11 @@ template <int REDUCTION_SIZE,
           bool HAS_BIAS>
 __global__
     __launch_bounds__(BLOCK_M + 4 * 32) void linear_nvfp4_1d2d_2sm_sm100_kernel(
-        const __grid_constant__ CUtensorMap A_tmap,
-        const __grid_constant__ CUtensorMap B_tmap,
-        const __grid_constant__ CUtensorMap C_tmap,
-        const __grid_constant__ CUtensorMap SFA_tmap,
-        const __grid_constant__ CUtensorMap SFB_tmap,
+        __grid_constant__ const CUtensorMap A_tmap,
+        __grid_constant__ const CUtensorMap B_tmap,
+        __grid_constant__ const CUtensorMap C_tmap,
+        __grid_constant__ const CUtensorMap SFA_tmap,
+        __grid_constant__ const CUtensorMap SFB_tmap,
         type::bfloat16_t const *bias_ptr,
         int M,
         int N) {
@@ -146,16 +146,16 @@ __global__
   cluster_sync();
 
   constexpr int NUM_ITERS = REDUCTION_SIZE / BLOCK_K;
-  const uint64_t cache_A = (M > N) ? EVICT_FIRST : EVICT_LAST;
-  const uint64_t cache_B = (M > N) ? EVICT_LAST : EVICT_FIRST;
+  uint64_t const cache_A = (M > N) ? EVICT_FIRST : EVICT_LAST;
+  uint64_t const cache_B = (M > N) ? EVICT_LAST : EVICT_FIRST;
 
   auto make_desc_AB = [](int addr) -> uint64_t {
-    const int SBO = 8 * 128;
+    int const SBO = 8 * 128;
     return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) |
            (2ULL << 61ULL);
   };
   auto make_desc_SF = [](int addr) -> uint64_t {
-    const int SBO = 8 * 16;
+    int const SBO = 8 * 16;
     return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
   };
 
@@ -164,7 +164,7 @@ __global__
     for (int output_tile = cluster_idx, work_idx = 0;
          output_tile < num_output_tiles;
          output_tile += num_clusters, work_idx++) {
-      const PersistentTile tile = map_supergroup_tile(
+      PersistentTile const tile = map_supergroup_tile(
           output_tile, num_m_tiles, num_n_tiles, SUPERGROUP_SIZE);
       int const off_m = (tile.row_block * 2 + cta_group_m) * BLOCK_M;
       int const off_n = tile.col_block * BLOCK_N;
@@ -199,7 +199,7 @@ __global__
     for (int output_tile = cluster_idx, work_idx = 0;
          output_tile < num_output_tiles;
          output_tile += num_clusters, work_idx++) {
-      const PersistentTile tile = map_supergroup_tile(
+      PersistentTile const tile = map_supergroup_tile(
           output_tile, num_m_tiles, num_n_tiles, SUPERGROUP_SIZE);
       int const off_m = (tile.row_block * 2 + cta_group_m) * BLOCK_M;
       int const off_n = tile.col_block * BLOCK_N;
@@ -213,7 +213,7 @@ __global__
         int const SFA_smem = A_smem + A_size + B_size;
         int const SFB_smem = SFA_smem + SFA_size;
         int const off_k = iter_k * BLOCK_K;
-        const uint16_t self_mask = static_cast<uint16_t>(1u << cta_group_m);
+        uint16_t const self_mask = static_cast<uint16_t>(1u << cta_group_m);
 
         if (pipeline_iter >= NUM_STAGES) {
           mbar_wait(mma_mbar_addr + stage_id * 8, mma_phase);
@@ -253,7 +253,7 @@ __global__
       for (int output_tile = cluster_idx, work_idx = 0;
            output_tile < num_output_tiles;
            output_tile += num_clusters, work_idx++) {
-        const PersistentTile tile = map_supergroup_tile(
+        PersistentTile const tile = map_supergroup_tile(
             output_tile, num_m_tiles, num_n_tiles, SUPERGROUP_SIZE);
         int const tile_n = tile.col_block;
         mbar_wait(output_mbar_addr, (work_idx - 1) % 2);
@@ -268,8 +268,8 @@ __global__
           int const B_smem = A_smem + A_size;
           int const SFA_smem = B_smem + B_size;
           int const SFB_smem = SFA_smem + SFA_size;
-          const uint64_t SFA_desc = make_desc_SF(SFA_smem);
-          const uint64_t SFB_desc = make_desc_SF(SFB_smem);
+          uint64_t const SFA_desc = make_desc_SF(SFA_smem);
+          uint64_t const SFB_desc = make_desc_SF(SFB_smem);
 
           auto copy_scale_k = [&](int k) {
             uint64_t sfa_desc =
@@ -334,7 +334,7 @@ __global__
     for (int output_tile = cluster_idx, work_idx = 0;
          output_tile < num_output_tiles;
          output_tile += num_clusters, work_idx++) {
-      const PersistentTile tile = map_supergroup_tile(
+      PersistentTile const tile = map_supergroup_tile(
           output_tile, num_m_tiles, num_n_tiles, SUPERGROUP_SIZE);
       int const off_m = (tile.row_block * 2 + cta_group_m) * BLOCK_M;
       int const off_n = tile.col_block * BLOCK_N;
@@ -343,8 +343,8 @@ __global__
       asm volatile("tcgen05.fence::after_thread_sync;");
 
       auto epilogue_M_major = [&]() {
-        const int tmem_row_base = cta_group_m * BLOCK_M;
-        const int out_smem_addr = smem + STAGE_SIZE * NUM_STAGES;
+        int const tmem_row_base = cta_group_m * BLOCK_M;
+        int const out_smem_addr = smem + STAGE_SIZE * NUM_STAGES;
         type::bfloat16_t *out_smem = reinterpret_cast<type::bfloat16_t *>(
             smem_ptr + STAGE_SIZE * NUM_STAGES);
 
@@ -363,8 +363,8 @@ __global__
           }
         };
 
-        auto store_subtile = [&](const float *src, int n) {
-          const int buffer_id = n % EPI_NUM_D_TILES;
+        auto store_subtile = [&](float const *src, int n) {
+          int const buffer_id = n % EPI_NUM_D_TILES;
           // Wait for an smem buffer to free up.
           if (n >= EPI_NUM_D_TILES) {
             if (warp_id == 0 && elect_sync()) {
@@ -376,7 +376,7 @@ __global__
           type::bfloat16_t *out_smem_tile =
               out_smem + buffer_id * EPI_TILE_N * BLOCK_M;
           if constexpr (HAS_BIAS) {
-            const type::bfloat16_t *bias_row =
+            type::bfloat16_t const *bias_row =
                 bias_ptr + (off_n + n * EPI_TILE_N) * M + off_m + tid;
             for (int i = 0; i < EPI_TILE_N; i++) {
               type::bfloat16_t acc_bf16(src[i]);

@@ -173,7 +173,7 @@ __device__ __forceinline__ void tma_load_3d_multicast(int dst,
 }
 
 __device__ __forceinline__ void mbarrier_arrive_to_cta0(int mbar_addr) {
-  const uint32_t mbar_cta0 = map_shared_to_cta(mbar_addr, 0);
+  uint32_t const mbar_cta0 = map_shared_to_cta(mbar_addr, 0);
   asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];"
                :
                : "r"(mbar_cta0)
@@ -226,7 +226,7 @@ __device__ __forceinline__ void tma_load(int dst,
         : "memory");
   } else {
     static_assert(SM == 2, "SM must be 1 or 2");
-    const uint32_t mbar_cta0 = map_shared_to_cta(mbar_addr, 0);
+    uint32_t const mbar_cta0 = map_shared_to_cta(mbar_addr, 0);
     asm volatile("cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global."
                  "mbarrier::complete_tx::bytes.L2::cache_hint "
                  "[%0], [%1, {%2, %3, %4}], [%5], %6;"
@@ -253,7 +253,7 @@ __device__ __forceinline__ void
 
 __device__ __forceinline__ void
     mbarrier_arrive_expect_tx_tile_cluster(int mbar_addr, int expected_tx) {
-  const uint32_t mapped_mbar = map_shared_to_cta(mbar_addr, 0);
+  uint32_t const mapped_mbar = map_shared_to_cta(mbar_addr, 0);
   asm volatile("mbarrier.arrive.expect_tx.shared::cluster.b64 "
                "_, [%0], %1;"
                :

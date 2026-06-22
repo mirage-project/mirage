@@ -27,9 +27,9 @@ namespace mxfp4_1d2d_detail {
 // Shared GEMM body (see linear_nvfp4_1d2d_sm100.cuh for the persistent
 // tile-loop / __global__ split rationale). A/B are TMA descriptors (by
 // pointer); SFA/SFB/C/bias are raw pointers (C written directly to gmem). MXFP4
-// deltas vs NVFP4: tcgen05_mma_mxfp4, the UE8M0 i_desc bit, and the SF byte/TMEM
-// constants. (tile_base, num_tasks) drive the persistent loop over the same
-// row-major (bid_m, bid_n) tile space as the standalone 2D grid.
+// deltas vs NVFP4: tcgen05_mma_mxfp4, the UE8M0 i_desc bit, and the SF
+// byte/TMEM constants. (tile_base, num_tasks) drive the persistent loop over
+// the same row-major (bid_m, bid_n) tile space as the standalone 2D grid.
 template <int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
@@ -39,17 +39,17 @@ template <int BATCH_SIZE,
           int NUM_STAGES,
           bool C_N_MAJOR,
           int EPI_BATCH_LA>
-__device__ __forceinline__ void linear_mxfp4_1d2d_sm100_task_impl(
-    CUtensorMap const *A_tmap,
-    CUtensorMap const *B_tmap,
-    char const *SFA_ptr,
-    char const *SFB_ptr,
-    type::bfloat16_t *C_ptr,
-    type::bfloat16_t const *bias_ptr,
-    int M,
-    int N,
-    int tile_base,
-    int num_tasks) {
+__device__ __forceinline__ void
+    linear_mxfp4_1d2d_sm100_task_impl(CUtensorMap const *A_tmap,
+                                      CUtensorMap const *B_tmap,
+                                      char const *SFA_ptr,
+                                      char const *SFB_ptr,
+                                      type::bfloat16_t *C_ptr,
+                                      type::bfloat16_t const *bias_ptr,
+                                      int M,
+                                      int N,
+                                      int tile_base,
+                                      int num_tasks) {
   using namespace ::kernel::sm100_ptx;
   constexpr int WARP_SIZE = 32;
   constexpr int MMA_K = 64;
@@ -126,21 +126,21 @@ __device__ __forceinline__ void linear_mxfp4_1d2d_sm100_task_impl(
     uint64_t const cache_B = (M > N) ? EVICT_LAST : EVICT_FIRST;
 
     auto issue_tma = [&](int off_m, int off_n, int iter_k, int stage_id) {
-      const int mbar_addr = tma_mbar_addr + stage_id * 8;
-      const int A_smem = smem + stage_id * STAGE_SIZE;
-      const int B_smem = A_smem + A_size;
-      const int SFA_smem = B_smem + B_size;
-      const int SFB_smem = SFA_smem + SFA_size;
+      int const mbar_addr = tma_mbar_addr + stage_id * 8;
+      int const A_smem = smem + stage_id * STAGE_SIZE;
+      int const B_smem = A_smem + A_size;
+      int const SFA_smem = B_smem + B_size;
+      int const SFB_smem = SFA_smem + SFA_size;
 
-      const int off_k = iter_k * BLOCK_K;
+      int const off_k = iter_k * BLOCK_K;
       tma_load<3, 1>(A_smem, A_tmap, 0, off_m, off_k / 256, mbar_addr, cache_A);
       tma_load<3, 1>(B_smem, B_tmap, 0, off_n, off_k / 256, mbar_addr, cache_B);
 
       // SF atom = 128 rows × 64 K-elements = 512 B (same as NVFP4).
-      const int rest_k = REDUCTION_SIZE / 64;
-      const char *SFA_src =
+      int const rest_k = REDUCTION_SIZE / 64;
+      char const *SFA_src =
           SFA_ptr + ((off_m / 128) * rest_k + off_k / 64) * SF_BYTES_PER_K_TILE;
-      const char *SFB_src =
+      char const *SFB_src =
           SFB_ptr + ((off_n / 128) * rest_k + off_k / 64) * SF_BYTES_PER_K_TILE;
       tma_load_bulk(SFA_smem, SFA_src, SFA_size, mbar_addr, cache_A);
       tma_load_bulk(SFB_smem, SFB_src, SFB_size, mbar_addr, cache_B);
@@ -172,12 +172,12 @@ __device__ __forceinline__ void linear_mxfp4_1d2d_sm100_task_impl(
                                 ((uint32_t)MMA_M >> 7U << 27U);
 
     auto make_desc_AB = [](int addr) -> uint64_t {
-      const int SBO = 8 * 128;
+      int const SBO = 8 * 128;
       return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) |
              (2ULL << 61ULL);
     };
     auto make_desc_SF = [](int addr) -> uint64_t {
-      const int SBO = 8 * 16;
+      int const SBO = 8 * 16;
       return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
     };
 
@@ -194,7 +194,8 @@ __device__ __forceinline__ void linear_mxfp4_1d2d_sm100_task_impl(
 
       for (int iter_k = 0; iter_k < num_iters; iter_k++) {
         int const stage_id = (work_idx * num_iters + iter_k) % NUM_STAGES;
-        int const tma_phase = ((work_idx * num_iters + iter_k) / NUM_STAGES) % 2;
+        int const tma_phase =
+            ((work_idx * num_iters + iter_k) / NUM_STAGES) % 2;
         mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
 
         int const A_smem = smem + stage_id * STAGE_SIZE;
@@ -202,166 +203,169 @@ __device__ __forceinline__ void linear_mxfp4_1d2d_sm100_task_impl(
         int const SFA_smem = B_smem + B_size;
         int const SFB_smem = SFA_smem + SFA_size;
 
-        const uint64_t SF_desc = make_desc_SF(0);
-        const uint64_t SFA_desc =
+        uint64_t const SF_desc = make_desc_SF(0);
+        uint64_t const SFA_desc =
             SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
-        const uint64_t SFB_desc =
+        uint64_t const SFB_desc =
             SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
 
-      // One cp per atom = 1 MMA-K (same as NVFP4); 4 cp-output cols per MMA-K.
-      for (int k = 0; k < BLOCK_K / MMA_K; k++) {
-        uint64_t sfa_desc =
-            SFA_desc + static_cast<uint64_t>(k) * (SF_BYTES_PER_K_TILE >> 4ULL);
-        uint64_t sfb_desc =
-            SFB_desc + static_cast<uint64_t>(k) * (SF_BYTES_PER_K_TILE >> 4ULL);
-        tcgen05_cp_fp4<1>(SFA_tmem + k * SF_TMEM_COLS_PER_MMA_K, sfa_desc);
-        tcgen05_cp_fp4<1>(SFB_tmem + k * SF_TMEM_COLS_PER_MMA_K, sfb_desc);
-      }
-
-      for (int k1 = 0; k1 < BLOCK_K / 256; k1++) {
-        for (int k2 = 0; k2 < 256 / MMA_K; k2++) {
-          uint64_t a_desc = make_desc_AB(A_smem + k1 * BLOCK_M * 128 + k2 * 32);
-          uint64_t b_desc = make_desc_AB(B_smem + k1 * BLOCK_N * 128 + k2 * 32);
-
-          int const k_sf = k1 * 4 + k2;
-          // 4 TMEM cols per MMA-K (same stride as NVFP4); MXFP4 vec::2X only
-          // reads the first 2 of those 4 cols, but the addressing stride
-          // stays 4.
-          int const scale_A_tmem = SFA_tmem + k_sf * SF_TMEM_COLS_PER_MMA_K +
-                                   (bid_m % (128 / BLOCK_M)) * (BLOCK_M / 32);
-          int const scale_B_tmem = SFB_tmem + k_sf * SF_TMEM_COLS_PER_MMA_K +
-                                   (bid_n % (128 / BLOCK_N)) * (BLOCK_N / 32);
-
-          int const enable_input_d = (k1 == 0 && k2 == 0) ? iter_k : 1;
-          tcgen05_mma_mxfp4<1>(a_desc,
-                               b_desc,
-                               i_desc,
-                               scale_A_tmem,
-                               scale_B_tmem,
-                               enable_input_d);
+        // One cp per atom = 1 MMA-K (same as NVFP4); 4 cp-output cols per
+        // MMA-K.
+        for (int k = 0; k < BLOCK_K / MMA_K; k++) {
+          uint64_t sfa_desc = SFA_desc + static_cast<uint64_t>(k) *
+                                             (SF_BYTES_PER_K_TILE >> 4ULL);
+          uint64_t sfb_desc = SFB_desc + static_cast<uint64_t>(k) *
+                                             (SF_BYTES_PER_K_TILE >> 4ULL);
+          tcgen05_cp_fp4<1>(SFA_tmem + k * SF_TMEM_COLS_PER_MMA_K, sfa_desc);
+          tcgen05_cp_fp4<1>(SFB_tmem + k * SF_TMEM_COLS_PER_MMA_K, sfb_desc);
         }
-      }
 
-      tcgen05_commit_arrive<1>(mma_mbar_addr + stage_id * 8);
+        for (int k1 = 0; k1 < BLOCK_K / 256; k1++) {
+          for (int k2 = 0; k2 < 256 / MMA_K; k2++) {
+            uint64_t a_desc =
+                make_desc_AB(A_smem + k1 * BLOCK_M * 128 + k2 * 32);
+            uint64_t b_desc =
+                make_desc_AB(B_smem + k1 * BLOCK_N * 128 + k2 * 32);
+
+            int const k_sf = k1 * 4 + k2;
+            // 4 TMEM cols per MMA-K (same stride as NVFP4); MXFP4 vec::2X only
+            // reads the first 2 of those 4 cols, but the addressing stride
+            // stays 4.
+            int const scale_A_tmem = SFA_tmem + k_sf * SF_TMEM_COLS_PER_MMA_K +
+                                     (bid_m % (128 / BLOCK_M)) * (BLOCK_M / 32);
+            int const scale_B_tmem = SFB_tmem + k_sf * SF_TMEM_COLS_PER_MMA_K +
+                                     (bid_n % (128 / BLOCK_N)) * (BLOCK_N / 32);
+
+            int const enable_input_d = (k1 == 0 && k2 == 0) ? iter_k : 1;
+            tcgen05_mma_mxfp4<1>(a_desc,
+                                 b_desc,
+                                 i_desc,
+                                 scale_A_tmem,
+                                 scale_B_tmem,
+                                 enable_input_d);
+          }
+        }
+
+        tcgen05_commit_arrive<1>(mma_mbar_addr + stage_id * 8);
       }
 
       tcgen05_commit_arrive<1>(mainloop_mbar_addr);
     }
   } else if (tid < BLOCK_M) {
-   for (int t = tile_base, work_idx = 0; t < num_tiles;
-        t += num_tasks, work_idx++) {
-    int off_m, off_n;
-    decode_tile(t, off_m, off_n);
+    for (int t = tile_base, work_idx = 0; t < num_tiles;
+         t += num_tasks, work_idx++) {
+      int off_m, off_n;
+      decode_tile(t, off_m, off_n);
 
-    mbar_wait(mainloop_mbar_addr, work_idx % 2);
-    asm volatile("tcgen05.fence::after_thread_sync;");
+      mbar_wait(mainloop_mbar_addr, work_idx % 2);
+      asm volatile("tcgen05.fence::after_thread_sync;");
 
-    auto epilogue_M_major = [&]() {
-      constexpr int WIDTH = (BLOCK_N < 64) ? BLOCK_N : 64;
-      constexpr int NUM_SUBTILES = BLOCK_N / WIDTH;
-      constexpr int BATCH =
-          (EPI_BATCH_LA <= NUM_SUBTILES && NUM_SUBTILES % EPI_BATCH_LA == 0)
-              ? EPI_BATCH_LA
-              : 1;
+      auto epilogue_M_major = [&]() {
+        constexpr int WIDTH = (BLOCK_N < 64) ? BLOCK_N : 64;
+        constexpr int NUM_SUBTILES = BLOCK_N / WIDTH;
+        constexpr int BATCH =
+            (EPI_BATCH_LA <= NUM_SUBTILES && NUM_SUBTILES % EPI_BATCH_LA == 0)
+                ? EPI_BATCH_LA
+                : 1;
 
-      auto load_subtile = [&](float *dst, int n) {
-        if constexpr (WIDTH == 128) {
-          tcgen05_ld_32x32bx128(dst, warp_id * 32, n * WIDTH);
-        }
-        if constexpr (WIDTH == 64) {
-          tcgen05_ld_32x32bx64(dst, warp_id * 32, n * WIDTH);
-        }
-        if constexpr (WIDTH == 32) {
-          tcgen05_ld_32x32bx32(dst, warp_id * 32, n * WIDTH);
-        }
-      };
+        auto load_subtile = [&](float *dst, int n) {
+          if constexpr (WIDTH == 128) {
+            tcgen05_ld_32x32bx128(dst, warp_id * 32, n * WIDTH);
+          }
+          if constexpr (WIDTH == 64) {
+            tcgen05_ld_32x32bx64(dst, warp_id * 32, n * WIDTH);
+          }
+          if constexpr (WIDTH == 32) {
+            tcgen05_ld_32x32bx32(dst, warp_id * 32, n * WIDTH);
+          }
+        };
 
-      auto store_subtile = [&](const float *src, int n) {
-        for (int i = 0; i < WIDTH; i++) {
-          const int row = off_n + n * WIDTH + i;
-          const int col = off_m + tid;
-          const int offset = row * M + col;
-          type::bfloat16_t acc_bf16(src[i]);
-          if (bias_ptr != nullptr) {
-            C_ptr[offset] =
-                type::bfloat16_t(float(acc_bf16) + float(bias_ptr[offset]));
-          } else {
-            C_ptr[offset] = acc_bf16;
+        auto store_subtile = [&](float const *src, int n) {
+          for (int i = 0; i < WIDTH; i++) {
+            int const row = off_n + n * WIDTH + i;
+            int const col = off_m + tid;
+            int const offset = row * M + col;
+            type::bfloat16_t acc_bf16(src[i]);
+            if (bias_ptr != nullptr) {
+              C_ptr[offset] =
+                  type::bfloat16_t(float(acc_bf16) + float(bias_ptr[offset]));
+            } else {
+              C_ptr[offset] = acc_bf16;
+            }
+          }
+        };
+
+        for (int g = 0; g < NUM_SUBTILES; g += BATCH) {
+          float tmp_batch[BATCH][WIDTH];
+#pragma unroll
+          for (int b = 0; b < BATCH; b++) {
+            load_subtile(tmp_batch[b], g + b);
+          }
+          asm volatile("tcgen05.wait::ld.sync.aligned;");
+#pragma unroll
+          for (int b = 0; b < BATCH; b++) {
+            store_subtile(tmp_batch[b], g + b);
           }
         }
       };
 
-      for (int g = 0; g < NUM_SUBTILES; g += BATCH) {
-        float tmp_batch[BATCH][WIDTH];
-#pragma unroll
-        for (int b = 0; b < BATCH; b++) {
-          load_subtile(tmp_batch[b], g + b);
-        }
-        asm volatile("tcgen05.wait::ld.sync.aligned;");
-#pragma unroll
-        for (int b = 0; b < BATCH; b++) {
-          store_subtile(tmp_batch[b], g + b);
-        }
-      }
-    };
+      auto epilogue_N_major = [&]() {
+        for (int m = 0; m < 32 / 16; m++) {
+          float tmp[BLOCK_N / 2];
+          if constexpr (BLOCK_N == 128) {
+            tcgen05_ld_16x256bx16(tmp, warp_id * 32 + m * 16, 0);
+          }
+          if constexpr (BLOCK_N == 64) {
+            tcgen05_ld_16x256bx8(tmp, warp_id * 32 + m * 16, 0);
+          }
+          if constexpr (BLOCK_N == 32) {
+            tcgen05_ld_16x256bx4(tmp, warp_id * 32 + m * 16, 0);
+          }
+          asm volatile("tcgen05.wait::ld.sync.aligned;");
 
-    auto epilogue_N_major = [&]() {
-      for (int m = 0; m < 32 / 16; m++) {
-        float tmp[BLOCK_N / 2];
-        if constexpr (BLOCK_N == 128) {
-          tcgen05_ld_16x256bx16(tmp, warp_id * 32 + m * 16, 0);
-        }
-        if constexpr (BLOCK_N == 64) {
-          tcgen05_ld_16x256bx8(tmp, warp_id * 32 + m * 16, 0);
-        }
-        if constexpr (BLOCK_N == 32) {
-          tcgen05_ld_16x256bx4(tmp, warp_id * 32 + m * 16, 0);
-        }
-        asm volatile("tcgen05.wait::ld.sync.aligned;");
-
-        for (int i = 0; i < BLOCK_N / 8; i++) {
-          const int row = off_m + warp_id * 32 + m * 16 + lane_id / 4;
-          const int col = off_n + i * 8 + (lane_id % 4) * 2;
-          const int off0 = (row + 0) * N + col;
-          const int off1 = (row + 8) * N + col;
-          type::bfloat16_t a00(tmp[i * 4 + 0]), a01(tmp[i * 4 + 1]);
-          type::bfloat16_t a10(tmp[i * 4 + 2]), a11(tmp[i * 4 + 3]);
-          if (bias_ptr != nullptr) {
-            C_ptr[off0 + 0] =
-                type::bfloat16_t(float(a00) + float(bias_ptr[off0 + 0]));
-            C_ptr[off0 + 1] =
-                type::bfloat16_t(float(a01) + float(bias_ptr[off0 + 1]));
-            C_ptr[off1 + 0] =
-                type::bfloat16_t(float(a10) + float(bias_ptr[off1 + 0]));
-            C_ptr[off1 + 1] =
-                type::bfloat16_t(float(a11) + float(bias_ptr[off1 + 1]));
-          } else {
-            C_ptr[off0 + 0] = a00;
-            C_ptr[off0 + 1] = a01;
-            C_ptr[off1 + 0] = a10;
-            C_ptr[off1 + 1] = a11;
+          for (int i = 0; i < BLOCK_N / 8; i++) {
+            int const row = off_m + warp_id * 32 + m * 16 + lane_id / 4;
+            int const col = off_n + i * 8 + (lane_id % 4) * 2;
+            int const off0 = (row + 0) * N + col;
+            int const off1 = (row + 8) * N + col;
+            type::bfloat16_t a00(tmp[i * 4 + 0]), a01(tmp[i * 4 + 1]);
+            type::bfloat16_t a10(tmp[i * 4 + 2]), a11(tmp[i * 4 + 3]);
+            if (bias_ptr != nullptr) {
+              C_ptr[off0 + 0] =
+                  type::bfloat16_t(float(a00) + float(bias_ptr[off0 + 0]));
+              C_ptr[off0 + 1] =
+                  type::bfloat16_t(float(a01) + float(bias_ptr[off0 + 1]));
+              C_ptr[off1 + 0] =
+                  type::bfloat16_t(float(a10) + float(bias_ptr[off1 + 0]));
+              C_ptr[off1 + 1] =
+                  type::bfloat16_t(float(a11) + float(bias_ptr[off1 + 1]));
+            } else {
+              C_ptr[off0 + 0] = a00;
+              C_ptr[off0 + 1] = a01;
+              C_ptr[off1 + 0] = a10;
+              C_ptr[off1 + 1] = a11;
+            }
           }
         }
-      }
-    };
+      };
 
-    if constexpr (C_N_MAJOR) {
-      epilogue_N_major();
-    } else {
-      epilogue_M_major();
+      if constexpr (C_N_MAJOR) {
+        epilogue_N_major();
+      } else {
+        epilogue_M_major();
+      }
+
+      // Release the accumulator back to the MMA warp for the next tile.
+      asm volatile("tcgen05.fence::before_thread_sync;");
+      asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
+      if (warp_id == 0 && elect_sync()) {
+        swapab_arrive_local(output_mbar_addr);
+      }
     }
-
-    // Release the accumulator back to the MMA warp for the next tile.
-    asm volatile("tcgen05.fence::before_thread_sync;");
     asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
-    if (warp_id == 0 && elect_sync()) {
-      swapab_arrive_local(output_mbar_addr);
+    if (warp_id == 0) {
+      tmem_dealloc<1, BLOCK_N * 2>(0);
     }
-   }
-   asm volatile("bar.sync 1, %0;" : : "r"(BLOCK_M) : "memory");
-   if (warp_id == 0) {
-     tmem_dealloc<1, BLOCK_N * 2>(0);
-   }
   }
 }
 
@@ -377,8 +381,8 @@ template <int BATCH_SIZE,
           int EPI_BATCH_LA = 1>
 __global__
     __launch_bounds__(BLOCK_M + 2 * 32) void linear_mxfp4_1d2d_sm100_kernel(
-        const __grid_constant__ CUtensorMap A_tmap,
-        const __grid_constant__ CUtensorMap B_tmap,
+        __grid_constant__ const CUtensorMap A_tmap,
+        __grid_constant__ const CUtensorMap B_tmap,
         char const *SFA_ptr,
         char const *SFB_ptr,
         type::bfloat16_t *C_ptr,

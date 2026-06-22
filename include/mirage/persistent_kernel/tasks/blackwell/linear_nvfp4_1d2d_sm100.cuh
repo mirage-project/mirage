@@ -25,29 +25,29 @@ namespace kernel {
 namespace nvfp4_1d2d_detail {
 
 // Shared GEMM body. A/B arrive as TMA descriptors (by pointer); SFA/SFB/C/bias
-// are raw pointers (C is written directly to gmem, no TMA store). The standalone
-// launcher maps one output tile per block via a 2D grid (bid_m=output/BLOCK_M,
-// bid_n=batch/BLOCK_N); here (tile_base, num_tasks) drive a persistent loop over
-// that same tile space in row-major (bid_m, bid_n) order, so the __global__
-// launcher passes (linear blockIdx, total blocks) and an MPK single-CTA task
-// passes (0, 1) to sweep every tile itself.
+// are raw pointers (C is written directly to gmem, no TMA store). The
+// standalone launcher maps one output tile per block via a 2D grid
+// (bid_m=output/BLOCK_M, bid_n=batch/BLOCK_N); here (tile_base, num_tasks)
+// drive a persistent loop over that same tile space in row-major (bid_m, bid_n)
+// order, so the __global__ launcher passes (linear blockIdx, total blocks) and
+// an MPK single-CTA task passes (0, 1) to sweep every tile itself.
 template <int REDUCTION_SIZE,
           int BLOCK_M,
           int BLOCK_N,
           int BLOCK_K,
           int NUM_STAGES,
           int EPI_BATCH_LA>
-__device__ __forceinline__ void linear_nvfp4_1d2d_sm100_task_impl(
-    CUtensorMap const *A_tmap,
-    CUtensorMap const *B_tmap,
-    char const *SFA_ptr,
-    char const *SFB_ptr,
-    type::bfloat16_t *C_ptr,
-    type::bfloat16_t const *bias_ptr,
-    int M,
-    int N,
-    int tile_base,
-    int num_tasks) {
+__device__ __forceinline__ void
+    linear_nvfp4_1d2d_sm100_task_impl(CUtensorMap const *A_tmap,
+                                      CUtensorMap const *B_tmap,
+                                      char const *SFA_ptr,
+                                      char const *SFB_ptr,
+                                      type::bfloat16_t *C_ptr,
+                                      type::bfloat16_t const *bias_ptr,
+                                      int M,
+                                      int N,
+                                      int tile_base,
+                                      int num_tasks) {
   using namespace ::kernel::sm100_ptx;
   constexpr int WARP_SIZE = 32;
   constexpr int MMA_K = 64;
@@ -112,13 +112,13 @@ __device__ __forceinline__ void linear_nvfp4_1d2d_sm100_task_impl(
   };
 
   auto make_desc_AB = [](int addr) -> uint64_t {
-    const int SBO = 8 * 128;
+    int const SBO = 8 * 128;
     return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) |
            (2ULL << 61ULL);
   };
 
   auto make_desc_SF = [](int addr) -> uint64_t {
-    const int SBO = 8 * 16;
+    int const SBO = 8 * 16;
     return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
   };
 
@@ -127,20 +127,20 @@ __device__ __forceinline__ void linear_nvfp4_1d2d_sm100_task_impl(
     uint64_t const cache_B = (M > N) ? EVICT_LAST : EVICT_FIRST;
 
     auto issue_tma = [&](int off_m, int off_n, int iter_k, int stage_id) {
-      const int mbar_addr = tma_mbar_addr + stage_id * 8;
-      const int A_smem = smem + stage_id * STAGE_SIZE;
-      const int B_smem = A_smem + A_size;
-      const int SFA_smem = B_smem + B_size;
-      const int SFB_smem = SFA_smem + SFA_size;
-      const int off_k = iter_k * BLOCK_K;
+      int const mbar_addr = tma_mbar_addr + stage_id * 8;
+      int const A_smem = smem + stage_id * STAGE_SIZE;
+      int const B_smem = A_smem + A_size;
+      int const SFA_smem = B_smem + B_size;
+      int const SFB_smem = SFA_smem + SFA_size;
+      int const off_k = iter_k * BLOCK_K;
 
       tma_load<3, 1>(A_smem, A_tmap, 0, off_m, off_k / 256, mbar_addr, cache_A);
       tma_load<3, 1>(B_smem, B_tmap, 0, off_n, off_k / 256, mbar_addr, cache_B);
 
-      const int rest_k = REDUCTION_SIZE / 64;
-      const char *SFA_src =
+      int const rest_k = REDUCTION_SIZE / 64;
+      char const *SFA_src =
           SFA_ptr + ((off_m / 128) * rest_k + off_k / 64) * 512;
-      const char *SFB_src =
+      char const *SFB_src =
           SFB_ptr + ((off_n / 128) * rest_k + off_k / 64) * 512;
 
       tma_load_bulk(SFA_smem, SFA_src, SFA_size, mbar_addr, cache_A);
@@ -191,10 +191,10 @@ __device__ __forceinline__ void linear_nvfp4_1d2d_sm100_task_impl(
         int const SFA_smem = B_smem + B_size;
         int const SFB_smem = SFA_smem + SFA_size;
 
-        const uint64_t SF_desc = make_desc_SF(0);
-        const uint64_t SFA_desc =
+        uint64_t const SF_desc = make_desc_SF(0);
+        uint64_t const SFA_desc =
             SF_desc + (static_cast<uint64_t>(SFA_smem) >> 4ULL);
-        const uint64_t SFB_desc =
+        uint64_t const SFB_desc =
             SF_desc + (static_cast<uint64_t>(SFB_smem) >> 4ULL);
 
         mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
@@ -259,11 +259,11 @@ __device__ __forceinline__ void linear_nvfp4_1d2d_sm100_task_impl(
         }
       };
 
-      auto store_subtile = [&](const float *src, int n) {
+      auto store_subtile = [&](float const *src, int n) {
         for (int i = 0; i < WIDTH; i++) {
-          const int row = off_n + n * WIDTH + i;
-          const int col = off_m + tid;
-          const int offset = row * M + col;
+          int const row = off_n + n * WIDTH + i;
+          int const col = off_m + tid;
+          int const offset = row * M + col;
           type::bfloat16_t acc_bf16(src[i]);
           if (bias_ptr != nullptr) {
             C_ptr[offset] = acc_bf16 + bias_ptr[offset];
@@ -309,8 +309,8 @@ template <int REDUCTION_SIZE,
           int EPI_BATCH_LA = 1>
 __global__
     __launch_bounds__(BLOCK_M + 2 * 32) void linear_nvfp4_1d2d_sm100_kernel(
-        const __grid_constant__ CUtensorMap A_tmap,
-        const __grid_constant__ CUtensorMap B_tmap,
+        __grid_constant__ const CUtensorMap A_tmap,
+        __grid_constant__ const CUtensorMap B_tmap,
         char const *SFA_ptr,
         char const *SFB_ptr,
         type::bfloat16_t *C_ptr,

@@ -104,7 +104,7 @@ __device__ __forceinline__ void
         valid_row ? static_cast<float>(row_in[element_idx]) : 0.0f;
     float const group_max =
         group_reduce_max_nvfp4<SUBWARP_SIZE>(fmaxf(fabsf(orig_val), eps));
-    const cutlass::float_ue4m3_t scale_quant(valid_row ? group_max / max_4bit
+    cutlass::float_ue4m3_t const scale_quant(valid_row ? group_max / max_4bit
                                                        : 1.0f);
     float const applied_scale = static_cast<float>(scale_quant);
 
@@ -118,13 +118,13 @@ __device__ __forceinline__ void
       output_s[sf_offset] = scale_quant.raw();
     }
 
-    const uint8_t nibble =
+    uint8_t const nibble =
         static_cast<uint8_t>(
             cutlass::float_e2m1_t(
                 fminf(fmaxf(orig_val / applied_scale, min_4bit), max_4bit))
                 .raw()) &
         0x0f;
-    const uint8_t pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
+    uint8_t const pair = __shfl_xor_sync(0xffffffffu, nibble, 1, SUBWARP_SIZE);
 
     if ((sublane_idx & 1) == 0) {
       row_q[group_idx * (GROUP_SIZE / 2) + (sublane_idx >> 1)] =
@@ -135,7 +135,8 @@ __device__ __forceinline__ void
 
 // A single CTA quantizes the whole (padded) batch, looping over every row via
 // quantize_nvfp4_one_row. Shared by the MPK task (one worker CTA, no meaningful
-// blockIdx) and the standalone launcher (invoked with a 1-CTA grid). Padded rows
+// blockIdx) and the standalone launcher (invoked with a 1-CTA grid). Padded
+// rows
 // (>= batch_size, up to a multiple of 128) get zero data + scale=1.
 //
 // input_ptr:

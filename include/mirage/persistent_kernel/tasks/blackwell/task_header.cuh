@@ -36,11 +36,11 @@
 #include "linear_nvfp4_1d2d_sm100.cuh"
 #include "linear_nvfp4_swapAB_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
-#include "quantize_mxfp4_sm100.cuh"
-#include "quantize_nvfp4_sm100.cuh"
 #include "mla_dispatch_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"
 #include "mla_kv_cache_gather_split_sm100.cuh"
+#include "quantize_mxfp4_sm100.cuh"
+#include "quantize_nvfp4_sm100.cuh"
 // sm100_ptx.cuh must be included BEFORE mla_mtp_decode_sm100.cuh at top level
 // so kernel::sm100_ptx is defined in the correct namespace
 #include "elementwise_add_sm100.cuh"

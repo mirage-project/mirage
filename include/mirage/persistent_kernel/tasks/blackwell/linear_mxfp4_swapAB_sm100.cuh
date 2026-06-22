@@ -37,17 +37,17 @@ template <int MMA_N,
           int BLOCK_K,
           int NUM_STAGES,
           bool NOBIAS>
-__device__ __forceinline__ void linear_mxfp4_swapAB_sm100_task_impl(
-    CUtensorMap const *A_tmap,
-    CUtensorMap const *B_tmap,
-    CUtensorMap const *C_tmap,
-    char const *SFA_ptr,
-    char const *SFB_ptr,
-    type::bfloat16_t const *bias_ptr,
-    int M,
-    int N,
-    int cta_idx,
-    int num_ctas) {
+__device__ __forceinline__ void
+    linear_mxfp4_swapAB_sm100_task_impl(CUtensorMap const *A_tmap,
+                                        CUtensorMap const *B_tmap,
+                                        CUtensorMap const *C_tmap,
+                                        char const *SFA_ptr,
+                                        char const *SFB_ptr,
+                                        type::bfloat16_t const *bias_ptr,
+                                        int M,
+                                        int N,
+                                        int cta_idx,
+                                        int num_ctas) {
   using namespace ::kernel::sm100_ptx;
   constexpr int WARP_SIZE = 32;
   constexpr int MMA_K = 64;
@@ -135,35 +135,35 @@ __device__ __forceinline__ void linear_mxfp4_swapAB_sm100_task_impl(
   constexpr int rest_k = REDUCTION_SIZE / 64; // atoms per row (same as NVFP4)
 
   auto decode_tile = [&](int t, int &off_m, int &off_n, int &batch_tile) {
-    const int out_tile = t / num_batch_tiles;
+    int const out_tile = t / num_batch_tiles;
     batch_tile = t % num_batch_tiles;
     off_m = out_tile * BLOCK_M;
     off_n = batch_tile * MMA_N;
   };
 
   if (warp_id == TMA_WARP && elect_sync()) {
-    const uint64_t cache_A = EVICT_LAST;
-    const uint64_t cache_B = EVICT_FIRST;
+    uint64_t const cache_A = EVICT_LAST;
+    uint64_t const cache_B = EVICT_FIRST;
 
     auto issue_tma = [&](int iter_k,
                          int stage_id,
                          int off_m,
                          int off_n,
                          int batch_tile) {
-      const int ab_mbar = tma_mbar_addr + stage_id * 8;
-      const int A_smem = smem + stage_id * STAGE_SIZE;
-      const int B_smem = A_smem + A_size;
-      const int SFA_smem = B_smem + B_size;
-      const int SFB_smem = SFA_smem + SFA_size;
+      int const ab_mbar = tma_mbar_addr + stage_id * 8;
+      int const A_smem = smem + stage_id * STAGE_SIZE;
+      int const B_smem = A_smem + A_size;
+      int const SFA_smem = B_smem + B_size;
+      int const SFB_smem = SFA_smem + SFA_size;
 
-      const int off_k = iter_k * BLOCK_K;
+      int const off_k = iter_k * BLOCK_K;
       tma_load<3, 1>(A_smem, A_tmap, 0, off_m, off_k / 256, ab_mbar, cache_A);
       tma_load<3, 1>(B_smem, B_tmap, 0, off_n, off_k / 256, ab_mbar, cache_B);
 
       // SF atom = 128 rows × 64 K-elements = 512 B (same as NVFP4).
-      const char *SFA_src =
+      char const *SFA_src =
           SFA_ptr + ((off_m / 128) * rest_k + off_k / 64) * SF_BYTES_PER_K_TILE;
-      const char *SFB_src =
+      char const *SFB_src =
           SFB_ptr + (batch_tile * rest_k + off_k / 64) * SF_BYTES_PER_K_TILE;
       tma_load_bulk(SFA_smem, SFA_src, SFA_size, ab_mbar, cache_A);
       tma_load_bulk(SFB_smem, SFB_src, SFB_size, ab_mbar, cache_B);
@@ -193,12 +193,12 @@ __device__ __forceinline__ void linear_mxfp4_swapAB_sm100_task_impl(
                                 ((uint32_t)MMA_M >> 7U << 27U);
 
     auto make_desc_AB = [](int addr) -> uint64_t {
-      const int SBO = 8 * 128;
+      int const SBO = 8 * 128;
       return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL) |
              (2ULL << 61ULL);
     };
     auto make_desc_SF = [](int addr) -> uint64_t {
-      const int SBO = 8 * 16;
+      int const SBO = 8 * 16;
       return desc_enc(addr) | (desc_enc(SBO) << 32ULL) | (1ULL << 46ULL);
     };
 
@@ -222,8 +222,8 @@ __device__ __forceinline__ void linear_mxfp4_swapAB_sm100_task_impl(
         int const SFA_smem = B_smem + B_size;
         int const SFB_smem = SFA_smem + SFA_size;
 
-        const uint64_t SFA_desc = make_desc_SF(SFA_smem);
-        const uint64_t SFB_desc = make_desc_SF(SFB_smem);
+        uint64_t const SFA_desc = make_desc_SF(SFA_smem);
+        uint64_t const SFB_desc = make_desc_SF(SFB_smem);
 
         mbar_wait(tma_mbar_addr + stage_id * 8, tma_phase);
 
@@ -349,9 +349,9 @@ template <int MMA_N,
           bool NOBIAS>
 __global__
     __launch_bounds__(128 + 3 * 32) void linear_mxfp4_swapAB_sm100_kernel(
-        const __grid_constant__ CUtensorMap A_tmap,
-        const __grid_constant__ CUtensorMap B_tmap,
-        const __grid_constant__ CUtensorMap C_tmap,
+        __grid_constant__ const CUtensorMap A_tmap,
+        __grid_constant__ const CUtensorMap B_tmap,
+        __grid_constant__ const CUtensorMap C_tmap,
         char const *SFA_ptr,
         char const *SFB_ptr,
         type::bfloat16_t const *bias_ptr,
