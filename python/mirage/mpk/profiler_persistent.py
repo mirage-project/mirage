@@ -122,25 +122,19 @@ def decode_tag(tag, num_blocks, num_groups):
     )
 
 
-def export_to_perfetto_trace(
-    profiler_buffer: torch.Tensor,
-    file_name: str,
-) -> None:
+def _decode_events(profiler_buffer: torch.Tensor):
+    """Yield decoded events from an on-device profiler buffer.
 
+    First yield is a header tuple ("__header__", num_blocks, num_groups);
+    subsequent yields are (block_idx, group_idx, event_idx, event_no,
+    event_type, timestamp).
+    """
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
     num_blocks = int(num_blocks)
     num_groups = int(num_groups)
 
-    tgen = TraceGenerator(file_name)
-
-    tid_map = {}
-    track_map = {}
-    for block_idx in range(num_blocks):
-        pid = tgen.create_group(f"block_{block_idx}")
-        for group_idx in range(num_groups):
-            tid = pid.create_group(f"group_{group_idx}")
-            tid_map[(block_idx, group_idx)] = tid
+    yield ("__header__", num_blocks, num_groups)
 
     for i in range(1, len(profiler_buffer_host)):
         if profiler_buffer_host[i] == 0:
@@ -152,7 +146,27 @@ def export_to_perfetto_trace(
         event_no, block_idx, group_idx, event_idx, event_type = decode_tag(
             tag, num_blocks, num_groups
         )
+        yield (block_idx, group_idx, event_idx, event_no, event_type, timestamp)
 
+
+def export_to_perfetto_trace(
+    profiler_buffer: torch.Tensor,
+    file_name: str,
+) -> None:
+    events = _decode_events(profiler_buffer)
+    _, num_blocks, num_groups = next(events)
+
+    tgen = TraceGenerator(file_name)
+
+    tid_map = {}
+    track_map = {}
+    for block_idx in range(num_blocks):
+        pid = tgen.create_group(f"block_{block_idx}")
+        for group_idx in range(num_groups):
+            tid = pid.create_group(f"group_{group_idx}")
+            tid_map[(block_idx, group_idx)] = tid
+
+    for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
         event = event_name_list[event_idx] + f"_{event_no}"
         tid = tid_map[(block_idx, group_idx)]
 
@@ -170,3 +184,73 @@ def export_to_perfetto_trace(
             track.instant(timestamp, event)
 
     tgen.flush()
+
+
+def export_to_csv(
+    profiler_buffer: torch.Tensor,
+    file_name: str,
+) -> None:
+    """Write one CSV row per fully-paired task event (and per kInstant event).
+
+    Columns: task_type_id, task_type_name, block_idx, group_idx, event_no,
+             begin_ts, end_ts, duration_ns.
+
+    Raises RuntimeError on a dangling BEGIN with no matching END (indicates
+    profiler buffer overflow or a code bug). Timestamps are raw 32-bit
+    %globaltimer_lo values; durations are computed modulo 2^32, so traces
+    longer than ~4.3s will be incorrect — same limitation as the perfetto
+    export.
+    """
+    events = _decode_events(profiler_buffer)
+    next(events)  # discard header
+
+    pending = {}  # (block, group, event_idx) -> (event_no, begin_ts)
+    rows = []
+
+    for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
+        key = (block_idx, group_idx, event_idx)
+        name = event_name_list.get(event_idx, f"UNKNOWN_{event_idx}")
+
+        if event_type == EventType.kBegin.value:
+            if key in pending:
+                prev_no, prev_ts = pending[key]
+                raise RuntimeError(
+                    f"dangling BEGIN: block={block_idx} group={group_idx} "
+                    f"event={name} event_no={prev_no} ts={prev_ts} has no END "
+                    f"before next BEGIN at event_no={event_no}"
+                )
+            pending[key] = (event_no, timestamp)
+        elif event_type == EventType.kEnd.value:
+            if key not in pending:
+                raise RuntimeError(
+                    f"END without matching BEGIN: block={block_idx} "
+                    f"group={group_idx} event={name} event_no={event_no}"
+                )
+            begin_no, begin_ts = pending.pop(key)
+            duration = (timestamp - begin_ts) & 0xFFFFFFFF
+            rows.append(
+                (event_idx, name, block_idx, group_idx, begin_no,
+                 begin_ts, timestamp, duration)
+            )
+        elif event_type == EventType.kInstant.value:
+            rows.append(
+                (event_idx, name, block_idx, group_idx, event_no,
+                 timestamp, timestamp, 0)
+            )
+
+    if pending:
+        (b, g, e), (no, ts) = next(iter(pending.items()))
+        name = event_name_list.get(e, f"UNKNOWN_{e}")
+        raise RuntimeError(
+            f"{len(pending)} dangling BEGIN event(s) with no matching END "
+            f"(profiler buffer likely overflowed). Example: block={b} "
+            f"group={g} event={name} event_no={no} ts={ts}"
+        )
+
+    with open(file_name, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "task_type_id", "task_type_name", "block_idx", "group_idx",
+            "event_no", "begin_ts", "end_ts", "duration_ns",
+        ])
+        writer.writerows(rows)

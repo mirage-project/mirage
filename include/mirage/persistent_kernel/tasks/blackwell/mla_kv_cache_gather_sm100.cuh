@@ -110,18 +110,42 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   // Step 2: Gather all pages into contiguous buffer
   // For each sequence position, copy D_K elements from the paged cache
   // to the contiguous buffer
-  for (int seq_pos = 0; seq_pos < seq_len; seq_pos++) {
-    int const page_idx = page_indices[seq_pos / PAGE_SIZE];
-    int const pos_in_page = seq_pos % PAGE_SIZE;
-    T const *src = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
-    T *dst = contiguous_kv + seq_pos * D_K;
-
-    // Vectorized copy: D_K=576 / 8 = 72 uint4 loads, with 128 threads
-    for (int d = tid * 8; d < D_K; d += NUM_THREADS * 8) {
-      if (d + 8 <= D_K) {
-        *reinterpret_cast<uint4 *>(dst + d) =
-            *reinterpret_cast<uint4 const *>(src + d);
+  { // Flat (seq_pos x d8) copy with 4-way ILP: the row-major two-level loop
+    // ran one round per seq_pos with only D_K/8 lanes active and a dependent
+    // load->store chain per iteration (latency-bound, ~2.5x slower measured
+    // on GB300 at seq_len ~100). Flattening puts every thread to work each
+    // round; batching 4 loads before the stores breaks the latency chain.
+    int const UNITS_PER_ROW = D_K / 8;
+    long const total_units = (long)seq_len * UNITS_PER_ROW;
+    long u = tid;
+    for (; u + 3L * NUM_THREADS < total_units; u += 4L * NUM_THREADS) {
+      uint4 v[4];
+      T *dsts[4];
+#pragma unroll
+      for (int k = 0; k < 4; ++k) {
+        long const uu = u + (long)k * NUM_THREADS;
+        int const seq_pos = (int)(uu / UNITS_PER_ROW);
+        int const d = (int)(uu % UNITS_PER_ROW) * 8;
+        int const page_idx = page_indices[seq_pos / PAGE_SIZE];
+        int const pos_in_page = seq_pos % PAGE_SIZE;
+        v[k] = *reinterpret_cast<uint4 const *>(
+            paged_cache + (long)(page_idx * PAGE_SIZE + pos_in_page) * D_K + d);
+        dsts[k] = contiguous_kv + (long)seq_pos * D_K + d;
       }
+#pragma unroll
+      for (int k = 0; k < 4; ++k) {
+        *reinterpret_cast<uint4 *>(dsts[k]) = v[k];
+      }
+    }
+    for (; u < total_units; u += NUM_THREADS) {
+      int const seq_pos = (int)(u / UNITS_PER_ROW);
+      int const d = (int)(u % UNITS_PER_ROW) * 8;
+      int const page_idx = page_indices[seq_pos / PAGE_SIZE];
+      int const pos_in_page = seq_pos % PAGE_SIZE;
+      *reinterpret_cast<uint4 *>(contiguous_kv + (long)seq_pos * D_K + d) =
+          *reinterpret_cast<uint4 const *>(
+              paged_cache + (long)(page_idx * PAGE_SIZE + pos_in_page) * D_K +
+              d);
     }
   }
 }

@@ -26,22 +26,6 @@ HARD_CODE = """
 
 extern std::string g_task_graph_json_path;
 
-// Stubs for host symbols from libnvshmem_device.a that collective_launch.cpp.o
-// references. We don't link the full device archive (it forces -rdc=true), so
-// Host-side stubs for symbols normally in libnvshmem_device.a.
-// We don't link the .a (it forces rdc=true → 255 regs on SM100a).
-// Init is done via nvshmemid_hostlib_init_attr + our callback.
-#ifdef NVSHMEM_NO_DEVICE_LIB
-// Stubs for host-side symbols from libnvshmem_device.a needed by collective_launch.cpp.o
-struct nvshmemi_device_only_state_stub { char data[1024]; };
-nvshmemi_device_only_state_stub nvshmemi_device_only_state;
-extern "C" {
-  void nvshmemi_finalize() {}
-  void _Z31nvshmemi_check_state_and_init_dv() {}
-  void* nvshmemi_get_device_state_ptrs() { return nullptr; }
-}
-#endif
-
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path;
   std::vector<void*> meta_tensors;
@@ -49,10 +33,10 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   std::vector<void*> model_tensor_ptrs;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
-  int allocate_nvshmem_teams, is_test_mode;
+  int allocate_nvshmem_teams;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLiiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &is_test_mode, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -74,7 +58,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor && !is_test_mode) {
+    if(!tensor) {
       PyErr_Format(PyExc_TypeError, "Failed to convert item %d (meta) to void pointer", i);
       return NULL;
     }
@@ -105,7 +89,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
   }
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, is_test_mode, model_tensor_names, model_tensor_ptrs);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs);
 
   Py_RETURN_NONE;
 }
@@ -237,19 +221,10 @@ def get_compile_command(
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
-
-    # rdc=true is the default on every NVSHMEM build. The old Blackwell
-    # rdc=false + self-contained-allreduce workaround (hand-rolled
-    # nvshmemi_device_state_d + nvshmemid_hostlib_init_attr callback, needed
-    # because rdc=true previously inflated registers 166→255 on sm_100a) is
-    # kept behind MPK_RDC_FALSE=1 as a safety escape hatch — on CUDA 13.2 +
-    # NVSHMEM 3.6.5 the register-spill issue is gone (verified 2026-04-22 at
-    # TP=2 and TP=4 across mbt∈{1,64} and MTP spec∈{0,1,3}).
-    _rdc_false = os.environ.get("MPK_RDC_FALSE", "0") == "1" and target_cc >= 100
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        "-rdc=false" if (not use_nvshmem or _rdc_false) else "-rdc=true",
+        "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -260,11 +235,6 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # Uncomment to enable verbose scheduler/worker/event debug prints from
-    # persistent_kernel.cuh (all gated on MPK_ENABLE_VERBOSE). Noisy; meant for
-    # local debugging only.
-    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
-
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -290,6 +260,10 @@ def get_compile_command(
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
 
+    spec_cfg = getattr(mpk, 'spec_decode_config', None)
+    if spec_cfg is not None and getattr(spec_cfg, 'method', None) == 'eagle3':
+        flags = flags + ["-DMPK_SPEC_DECODE"]
+
     if use_nvshmem:
         nvshmem_cmd = [
             f"-I{nvshmem_inc_path}",
@@ -297,31 +271,11 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        if _rdc_false:
-            # Blackwell MPK_RDC_FALSE=1 escape hatch: self-contained allreduce,
-            # no libnvshmem_device.a (kept for regression isolation; see the
-            # block above for when this path is needed).
-            _dev_a = os.path.join(nvshmem_lib_path, "libnvshmem_device.a")
-            _host_obj_dir = os.path.join(os.path.dirname(py_so_path), "nvshmem_host_objs")
-            os.makedirs(_host_obj_dir, exist_ok=True)
-            _coll_obj = os.path.join(_host_obj_dir, "collective_launch.cpp.o")
-            if not os.path.exists(_coll_obj):
-                import subprocess as _sp
-                _sp.check_call(["ar", "x", _dev_a, "collective_launch.cpp.o"], cwd=_host_obj_dir)
-            nvshmem_flags = ["-DUSE_NVSHMEM", "-DNVSHMEM_NO_DEVICE_LIB",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lmpi",
-                             _coll_obj,
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
-        else:
-            # Default path: standard NVSHMEM link with device library +
-            # rdc=true. Used everywhere unless MPK_RDC_FALSE=1 on Blackwell.
-            nvshmem_flags = ["-DUSE_NVSHMEM",
-                             "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
-                             "-Xlinker", "--disable-new-dtags",
-                             "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
-                             "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
+        nvshmem_flags = ["-DUSE_NVSHMEM",
+                         "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi",
+                         "-Xlinker", "--disable-new-dtags",
+                         "-Xlinker", f"-rpath", "-Xlinker", nvshmem_lib_path,
+                         "-Xlinker", f"-rpath", "-Xlinker", mpi_lib_path]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -418,14 +372,18 @@ class PersistentKernel:
         self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
 
         if test_mode:
-            # Skip all following checks
-            self.total_num_requests = 1
-            return
+            # Auto-allocate any meta tensors the test author didn't provide so
+            # the kernel sees valid GPU pointers. Shapes are derived from the
+            # kernel-level params already on `self`. Defaults model "single
+            # prefill of max_num_batched_tokens tokens, content all zero" — the
+            # test author overrides any subset by setting them in
+            # `params["meta_tensors"]` before constructing PersistentKernel.
+            self._apply_test_mode_meta_defaults()
 
-        self.total_num_requests = meta_tensors["tokens"].shape[0]
+        self.total_num_requests = self.meta_tensors["tokens"].shape[0]
 
         # Checks
-        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
+        assert self.max_seq_length == self.meta_tensors["tokens"].shape[1]
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
@@ -448,7 +406,52 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
-    
+
+    def _apply_test_mode_meta_defaults(self):
+        # Allocate any missing meta tensors with shapes derived from the
+        # kernel-level params. Mirrors the production wiring in
+        # demo/qwen3/demo.py (qo/paged_kv buffers sized to max_num_*).
+        # `total_num_requests` is taken from `tokens.shape[0]` after this
+        # function runs, so default `tokens` to a single-request buffer.
+        device = "cuda"
+        if "tokens" not in self.meta_tensors:
+            self.meta_tensors["tokens"] = torch.zeros(
+                1, self.max_seq_length, dtype=torch.int64, device=device)
+        n_req = self.meta_tensors["tokens"].shape[0]
+        if "step" not in self.meta_tensors:
+            self.meta_tensors["step"] = torch.zeros(
+                n_req, dtype=torch.int32, device=device)
+        if "prompt_lengths" not in self.meta_tensors:
+            # Default to a single prefill that fills one iter's batched-token
+            # budget. Test authors override for decode/multi-request scenarios.
+            self.meta_tensors["prompt_lengths"] = torch.full(
+                (n_req,), self.max_num_batched_tokens,
+                dtype=torch.int32, device=device)
+        if "input_tokens" not in self.meta_tensors:
+            self.meta_tensors["input_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "output_tokens" not in self.meta_tensors:
+            self.meta_tensors["output_tokens"] = torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.int64, device=device)
+        if "num_new_tokens" not in self.meta_tensors:
+            self.meta_tensors["num_new_tokens"] = torch.zeros(
+                1, dtype=torch.int32, device=device)
+        if "qo_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["qo_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indptr_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indptr_buffer"] = torch.zeros(
+                self.max_num_batched_requests + 1,
+                dtype=torch.int32, device=device)
+        if "paged_kv_indices_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_indices_buffer"] = torch.zeros(
+                self.max_num_pages, dtype=torch.int32, device=device)
+        if "paged_kv_last_page_len_buffer" not in self.meta_tensors:
+            self.meta_tensors["paged_kv_last_page_len_buffer"] = torch.zeros(
+                self.max_num_batched_requests,
+                dtype=torch.int32, device=device)
+
     @classmethod
     def get_default_init_parameters(cls):
         return {
@@ -528,8 +531,17 @@ class PersistentKernel:
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
         strides = tuple([s for s in torch_tensor.stride()])
-        # Check layout: row-major or column-major (for FP8 scale tensors)
-        is_row_major = all(strides[d] == strides[d + 1] * dims[d + 1] for d in range(len(dims) - 1))
+        # Check layout: row-major (possibly with padded outer strides — supports
+        # slice views like q_nope_pe[:, :, :512] of a (mbt, H, 576) parent for
+        # the MPK_DSV3_BMM TMA-stride fuse) or column-major (FP8 scale tensors).
+        # Padded row-major: each outer stride covers AT LEAST a contiguous
+        # row at the next level (== for contig, > for slice view of a wider
+        # parent). Innermost stride must still be 1.
+        is_row_major = (
+            all(strides[d] >= strides[d + 1] * dims[d + 1]
+                for d in range(len(dims) - 1))
+            and strides[-1] == 1
+        )
         is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
         assert is_row_major or is_col_major, \
             f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
@@ -588,6 +600,29 @@ class PersistentKernel:
         assert shuffled_dim == 0
         t = self.kn_graph.shuffle_tensors(inputs, shuffled_dim, num_groups, name)
         return t
+
+    # ---- Virtual tensor (view) APIs ----------------------------------------
+    # These operators return DTensors that share memory with `input`. The
+    # returned view has its own GUID plus base_guid + view_offset metadata.
+    # The dependency analyzer treats any edge involving a view as a coarse
+    # barrier edge (one event per layer instead of GCD-based per-tile
+    # events); see docs / annotated_graph.cc for details.
+
+    def view(self, input: DTensor, new_shape: list) -> DTensor:
+        """Reshape into a new shape that has the same total element count.
+        Returns a single virtual DTensor."""
+        return self.kn_graph.view(input, list(new_shape))
+
+    def narrow(self, input: DTensor, dim: int, start: int, length: int) -> DTensor:
+        """Take a contiguous-window virtual DTensor of `input` along `dim`."""
+        return self.kn_graph.narrow(input, dim, start, length)
+
+    def split(self, input: DTensor, sizes_or_chunks, dim: int) -> list:
+        """Split `input` into multiple virtual DTensors along `dim`.
+
+        sizes_or_chunks may be an int (equal-size chunk count) or a list of
+        explicit sizes summing to `input.dim[dim]`."""
+        return self.kn_graph.split(input, sizes_or_chunks, dim)
 
     def embed_layer(
         self,
@@ -716,7 +751,77 @@ class PersistentKernel:
             tb_graph,
         )
         self.kn_graph.register_task(tb_graph, "attention", params)
-        
+
+    def dflash_attention_layer(
+        self,
+        q: DTensor,        # [B, q_size]            (q_norm + RoPE applied)
+        ctx_k: DTensor,    # [ctx_len, kv_size]     (k_norm + RoPE; context cache)
+        ctx_v: DTensor,    # [ctx_len, kv_size]     (raw v; context cache)
+        blk_k: DTensor,    # [B, kv_size]           (k_norm + RoPE; this block)
+        blk_v: DTensor,    # [B, kv_size]           (raw v; this block)
+        output: DTensor,   # [B, q_size]
+        grid_dim: tuple,   # (num_requests, 1, 1)
+        block_dim: tuple,
+        sliding_window: int = 0,
+        head_dim: int = 128,
+    ):
+        # DFlash non-causal block attention (split ctx/block KV; one task/request).
+        for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
+            assert t.num_dims == 2
+        params = [sliding_window, head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ctx_k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ctx_v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blk_k, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blk_v, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([q, ctx_k, ctx_v, blk_k, blk_v, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_attention", params)
+
+    def dflash_norm_rope_layer(
+        self,
+        x: DTensor,        # [N, num_heads*head_dim]
+        weight: DTensor,   # [head_dim]  (q_norm or k_norm)
+        cos: DTensor,      # [N, head_dim]
+        sin: DTensor,      # [N, head_dim]
+        output: DTensor,   # [N, num_heads*head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        head_dim: int = 128,
+    ):
+        # DFlash per-head RMSNorm (eps 1e-5) + NeoX RoPE.
+        assert x.num_dims == 2 and output.num_dims == 2
+        params = [head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([x, weight, cos, sin, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_norm_rope", params)
+
+    def dflash_kv_store_layer(
+        self,
+        kv_in: DTensor,         # [num_tokens, num_kv_heads*head_dim] bf16
+        slot_mapping: DTensor,  # [num_tokens] int32 (absolute slot per token)
+        cache: DTensor,         # [num_pages, page_size, num_kv_heads, head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        head_dim: int = 128,
+    ):
+        # DFlash standalone paged KV-cache store (L4 materialize write/overwrite).
+        assert kv_in.num_dims == 2
+        assert cache.num_dims == 4
+        params = [head_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(kv_in, (-1, -1, -1), -1, True)
+        tb_graph.new_input(slot_mapping, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cache, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([kv_in, slot_mapping, cache], tb_graph)
+        self.kn_graph.register_task(tb_graph, "dflash_kv_store", params)
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]
@@ -800,6 +905,9 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        enable_qk_norm: bool = True,
+        q_len_override: int = 0,
+        tail_offset: int = 0,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -820,13 +928,14 @@ class PersistentKernel:
             assert cos_pos_embed.dim(1) == head_dim
             assert sin_pos_embed.dim(1) == head_dim
             rotary_embed = 1
-        qk_norm = 0
-        if q_norm is not None or k_norm is not None:
-            assert q_norm.num_dims == 1  # (head_dim)
-            assert k_norm.num_dims == 1  # (head_dim)
-            qk_norm = 1
-            assert q_norm.dim(0) == head_dim
-            assert k_norm.dim(0) == head_dim
+        assert q_norm is not None and k_norm is not None, (
+            "q_norm/k_norm must be valid DTensors; pass a dummy + "
+            "enable_qk_norm=False when norm is disabled")
+        assert q_norm.num_dims == 1  # (head_dim)
+        assert k_norm.num_dims == 1  # (head_dim)
+        assert q_norm.dim(0) == head_dim
+        assert k_norm.dim(0) == head_dim
+        qk_norm = 1 if enable_qk_norm else 0
 
         # params[0]: num_q_heads
         # params[1]: num_kv_heads
@@ -834,7 +943,12 @@ class PersistentKernel:
         # params[3]: rotary_embed
         # params[4]: max_seq_len
         # params[5]: page_size
-        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size]
+        # params[6]: q_len_override (only included if non-zero; for Eagle3 K>1 chain)
+        # params[7]: tail_offset    (only included if non-zero; for Eagle3 K>1 chain)
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+                  self.max_seq_length, self.page_size]
+        if q_len_override != 0 or tail_offset != 0:
+            params.extend([q_len_override, tail_offset])
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -1836,7 +1950,17 @@ class PersistentKernel:
         tb_graph.new_input(output, (0, 1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
 
-        self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100")
+        # Under tensor parallelism the MoE output is row-parallel and followed by
+        # an allreduce. The residual must be added on exactly one rank, otherwise
+        # the allreduce sums it world_size times (double-counted residual). Mirror
+        # the rank-0-only guard used by linear_with_residual_layer; the SM100
+        # kernel skips the residual add when its pointer is null (params[0]==0).
+        params = []
+        enable_residual = 1
+        if self.world_size > 1 and self.mpi_rank != 0:
+            enable_residual = 0
+        params.append(enable_residual)
+        self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100", params)
 
     def splitk_linear_layer(
         self,
@@ -2453,6 +2577,111 @@ class PersistentKernel:
              new_position, final_output, num_new_tokens], tb_graph)
         self.kn_graph.register_task(tb_graph, "mtp_accept_commit", params)
 
+    # === Eagle3 layers ===
+    def copy_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Generic memcpy: dst[i,j] = src[i,j] for a 2D bf16 tensor.
+
+        Used by Eagle3 to capture target's intermediate hidden states into
+        dedicated aux buffers.
+        """
+        assert input.num_dims == 2
+        assert output.num_dims == 2
+        assert input.dim(0) == output.dim(0)
+        assert input.dim(1) == output.dim(1)
+        batch_size = input.dim(0)
+        hidden_dim = input.dim(1)
+        params = [batch_size, hidden_dim]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "copy", params)
+
+    def concat_layer(
+        self,
+        inputs: list,      # list of N (batch, hidden_dim) DTensors
+        output: DTensor,   # (batch, N * hidden_dim)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Concatenate N (B,H) tensors along dim 1 into (B, N*H)."""
+        n = len(inputs)
+        assert n >= 1
+        assert all(t.num_dims == 2 for t in inputs)
+        assert output.num_dims == 2
+        batch_size = inputs[0].dim(0)
+        hidden_dim = inputs[0].dim(1)
+        assert all(t.dim(0) == batch_size and t.dim(1) == hidden_dim
+                   for t in inputs)
+        assert output.dim(0) == batch_size
+        assert output.dim(1) == n * hidden_dim
+        params = [batch_size, hidden_dim, n]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        for t in inputs:
+            tb_graph.new_input(t, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([*inputs, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "concat", params)
+
+    def eagle3_commit_layer(
+        self,
+        target_argmax: DTensor,     # (batch, 1) int64 — from argmax_reduce (= output_token DTensor)
+        draft_tokens_new: DTensor,  # (batch, K) int64 — this iter's drafts (scatter output)
+        accepted_count: DTensor,    # (batch, 1) int32 — from verify_strict (1st output)
+        tokens_buffer: DTensor,     # (max_requests, max_seq_len) int64 — written in-place
+        num_new_tokens: DTensor,    # (max_requests,) int32 — OUTPUT (= accept_count)
+        drafts_prev: DTensor,       # (max_requests, K) int64 — attach_input cross-iter snapshot dst
+        accept_hist: DTensor,       # (K+2,) int32 — debug: atomicAdd histogram of ac values
+        grid_dim: tuple,
+        block_dim: tuple,
+        num_draft_tokens: int,      # K
+        batch_size: int,            # mbt
+        max_seq_len: int,
+    ):
+        params = [num_draft_tokens, batch_size, max_seq_len]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(target_argmax, (-1, -1, -1), -1, True)
+        tb_graph.new_input(draft_tokens_new, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accepted_count, (-1, -1, -1), -1, True)
+        tb_graph.new_input(tokens_buffer, (-1, -1, -1), -1, True)
+        tb_graph.new_input(accept_hist, (-1, -1, -1), -1, True)
+        tb_graph.new_input(num_new_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(drafts_prev, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [target_argmax, draft_tokens_new, accepted_count, tokens_buffer,
+             accept_hist, num_new_tokens, drafts_prev],
+            tb_graph)
+        self.kn_graph.register_task(tb_graph, "eagle3_commit", params)
+
+    def eagle3_d2t_remap_layer(
+        self,
+        hot_token: DTensor,      # (batch, 1) int64 — argmax over draft logits
+        d2t_table: DTensor,      # (draft_vocab_real,) int64
+        target_token: DTensor,   # (batch, 1) int64 — output
+        grid_dim: tuple,
+        block_dim: tuple,
+        draft_vocab_real: int,   # = d2t_table.dim(0); argmax indices ≥ this come from
+                                 # lm_head's padded rows and must be sentinel-mapped to 0
+    ):
+        assert hot_token.num_dims == 2
+        assert d2t_table.num_dims == 1
+        assert target_token.num_dims == 2
+        assert hot_token.dim(0) == target_token.dim(0)
+        batch_size = hot_token.dim(0)
+        params = [batch_size, draft_vocab_real]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(hot_token, (-1, -1, -1), -1, True)
+        tb_graph.new_input(d2t_table, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_token, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([hot_token, d2t_table, target_token], tb_graph)
+        self.kn_graph.register_task(tb_graph, "eagle3_d2t_remap", params)
+
     def compile(
         self,
         **kwargs,
@@ -2614,10 +2843,6 @@ class PersistentKernel:
 
         import importlib.util
 
-        # Set MPK_SO_PATH so init_persistent_kernel() can load the module via
-        # cuLibraryLoadFromFile for nvshmemx_culibrary_init (NVSHMEM_NO_DEVICE_LIB mode).
-        os.environ["MPK_SO_PATH"] = so_path
-
         spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -2686,7 +2911,6 @@ class PersistentKernel:
             self.total_num_requests,
             self.eos_token_id,
             self.allocate_nvshmem_teams,
-            self.test_mode,
             model_tensor_names,
             model_tensor_ptrs,
             "",  # Empty JSON path = use __FILE__ based path during initial compile
@@ -2799,12 +3023,11 @@ class PersistentKernel:
             self.total_num_requests,
             self.eos_token_id,
             self.allocate_nvshmem_teams,
-            self.test_mode,
             model_tensor_names,
             model_tensor_ptrs,
             json_path,  # Pass the JSON path for kernel reuse
         )
-        
+
         self._is_compiled = True
 
     def __call__(self, **kwargs):
@@ -2827,42 +3050,17 @@ class PersistentKernel:
             raise ValueError("Invalid stream object")
         self.launch_func(stream_ptr)
         if self.profiler_tensor is not None:
-            from .profiler_persistent import export_to_perfetto_trace
-            
+            from .profiler_persistent import export_to_csv, export_to_perfetto_trace
+
             if self.trace_name:
-                trace_name = self.trace_name + ".perfetto-trace"
+                stem = self.trace_name
             else:
-                trace_name = f"mirage_{self.mpi_rank}.perfetto-trace"
+                stem = f"mirage_{self.mpi_rank}"
 
             export_to_perfetto_trace(
-                self.profiler_tensor, trace_name
+                self.profiler_tensor, stem + ".perfetto-trace"
             )
-
-    def run_test_mode(self):
-        """Test-mode execution: launch the task graph once.
-
-        Input/output tensors must be pre-attached via attach_input() before
-        compile(). After run_test_mode() returns, the output tensors contain the results.
-        """
-        assert self.test_mode, "run_test_mode() is only available in test mode"
-        assert self._is_compiled, "Must call compile() before run_test_mode()"
-
-        stream = torch.cuda.current_stream()
-        # Convert torch.cuda.Stream to raw pointer (integer) for the C launcher
-        stream_ptr = 0
-        if hasattr(stream, "cuda_stream"):
-            try:
-                stream_ptr = int(stream.cuda_stream)
-            except Exception:
-                try:
-                    stream_ptr = int(stream.cuda_stream.value)
-                except Exception as e:
-                    raise ValueError(f"Invalid stream object: {stream} is of type {type(stream)}: {e}")
-        elif isinstance(stream, int):
-            stream_ptr = stream
-        else:
-            raise ValueError("Invalid stream object")
-        self.launch_func(stream_ptr)
+            export_to_csv(self.profiler_tensor, stem + ".csv")
 
     def __del__(self):
         if not self.__finalized__:

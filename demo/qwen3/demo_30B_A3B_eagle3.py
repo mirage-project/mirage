@@ -8,8 +8,9 @@ import os
 
 # ! Caveat
 # If you want to run this script, you should do this manual modification:
-# Change `include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh` line 43
-# from `int MAX_TOKENS = 8` to `int MAX_TOKENS = 1`.
+# Change `include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh` line 49
+# from `int MAX_TOKENS = 8` to `int MAX_TOKENS = 6`.
+# (MAX_TOKENS must be >= mbt = K+1; the default 8 overflows smem, 6 covers K<=5.)
 # And this demo currently cannot run with multigpu.
 
 # print limitation
@@ -94,6 +95,19 @@ if __name__ == "__main__":
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
     parser.add_argument("--splitk-gate", action="store_true", help="Use split-k gating linear")
+    parser.add_argument(
+        "--eagle3", action="store_true",
+        help="Enable Eagle3 speculative decoding (overrides --spec-decode)",
+    )
+    parser.add_argument(
+        "--eagle3-draft-path", type=str,
+        default="lmsys/SGLang-EAGLE3-Qwen3-30B-A3B-Instruct-2507-SpecForge-Nex",
+        help="HF repo or local path for the Eagle3 draft model",
+    )
+    parser.add_argument(
+        "--num-draft-steps", type=int, default=4,
+        help="K: number of Eagle3 draft tokens generated per iteration",
+    )
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -246,11 +260,26 @@ if __name__ == "__main__":
         else:
             profiler_tensor = None
             
-        spec_decode_config = mi.mpk.spec_decode_class(
-            args.spec_decode,
-            ngram_size=args.ngram_size,
-            spec_length=args.spec_length,
-        )
+        if args.eagle3:
+            # Eagle3: spec_length = K (draft tokens per iter). The main fwd's
+            # mbt must equal K+1 so the next iter can verify K draft + 1 main
+            # token in one pass. Enforce here.
+            assert args.max_num_batched_tokens == args.num_draft_steps + 1, (
+                f"Eagle3 requires max_num_batched_tokens == num_draft_steps + 1; "
+                f"got mbt={args.max_num_batched_tokens}, K={args.num_draft_steps}")
+            assert world_size == 1, "Eagle3 v1 supports only world_size=1"
+            spec_decode_config = mi.mpk.spec_decode_class(
+                "eagle3",
+                spec_length=args.num_draft_steps,
+                draft_model_path=args.eagle3_draft_path,
+                rejection_sample_method="strict",
+            )
+        else:
+            spec_decode_config = mi.mpk.spec_decode_class(
+                args.spec_decode,
+                ngram_size=args.ngram_size,
+                spec_length=args.spec_length,
+            )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         qo_indptr_buffer = torch.empty(
@@ -341,6 +370,35 @@ if __name__ == "__main__":
             name="attn_proj_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
+
+        # === Eagle3 aux buffers (allocated once; written by copy_layer at
+        # capture indices in the for-i loop below) ===
+        if args.eagle3:
+            num_main_layers = model.config.num_hidden_layers
+            eagle3_capture_layer_ids = [
+                2, num_main_layers // 2, num_main_layers - 3,
+            ]
+            print(f"Eagle3 aux capture layer ids = {eagle3_capture_layer_ids} "
+                  f"(out of {num_main_layers} layers)")
+            eagle3_aux_h0 = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens, hidden_size),
+                dtype=mi.bfloat16, name="eagle3_aux_h0",
+                io_category="cuda_tensor",
+            )
+            eagle3_aux_h1 = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens, hidden_size),
+                dtype=mi.bfloat16, name="eagle3_aux_h1",
+                io_category="cuda_tensor",
+            )
+            eagle3_aux_h2 = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens, hidden_size),
+                dtype=mi.bfloat16, name="eagle3_aux_h2",
+                io_category="cuda_tensor",
+            )
+            eagle3_aux_buffers = [eagle3_aux_h0, eagle3_aux_h1, eagle3_aux_h2]
+        else:
+            eagle3_capture_layer_ids = []
+            eagle3_aux_buffers = []
         allreduce_buf = mpk.new_tensor(
             dims=(world_size, args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
@@ -444,10 +502,12 @@ if __name__ == "__main__":
         )
         argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
 
-        # add spec tokens layer
-        if spec_decode_config:
+        # add spec tokens layer (legacy: only for promptlookup; Eagle3 is wired
+        # separately after argmax below — it shares the target's input_tokens
+        # path and doesn't need a draft_forward_layer_dispatcher pre-pass).
+        if spec_decode_config and spec_decode_config.method == "promptlookup":
             spec_tokens = mpk.draft_forward_layer_dispatcher(
-                spec_decode_config = spec_decode_config, 
+                spec_decode_config = spec_decode_config,
                 tokens = all_tokens,
                 grid_dim=(96, 1, 1),
                 block_dim=(256, 1, 1),
@@ -457,17 +517,30 @@ if __name__ == "__main__":
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )
-        
+        # Stable handle to the embed table for Eagle3 (the local `w` variable
+        # gets clobbered by per-layer projection weights inside the loop below).
+        w_embed_table = w
+
         mpk.embed_layer(
-            input=x, 
-            weight=w, 
-            output=y, 
-            grid_dim=(1, 1, 1), 
+            input=x,
+            weight=w,
+            output=y,
+            grid_dim=(1, 1, 1),
             block_dim=(256, 1, 1),
             input_source=1,
         )
         x = y
         for i, layer in enumerate(model.model.layers):
+            # Eagle3 aux capture: copy the pre-layer hidden into the
+            # corresponding aux buffer before the layer runs. Matches sglang's
+            # qwen2.py:362 semantics (capture before layer i, after the
+            # previous layer's residual add).
+            if args.eagle3 and i in eagle3_capture_layer_ids:
+                slot = eagle3_capture_layer_ids.index(i)
+                mpk.copy_layer(
+                    input=x, output=eagle3_aux_buffers[slot],
+                    grid_dim=(1, 1, 1), block_dim=(256, 1, 1),
+                )
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,
@@ -516,7 +589,9 @@ if __name__ == "__main__":
                 torch_tensor=value_cache_torch[i], name=f"layer_{i}_v_cache"
             )
             # TODO: Later attention kernels should be merged as one
-            if spec_decode_config:
+            # Eagle3 uses paged_attention (same as no-spec-decode path); only
+            # promptlookup needs the extend variant for its multi-token verify.
+            if spec_decode_config and spec_decode_config.method == "promptlookup":
                 mpk.single_batch_extend_attention_layer(
                     input=attn_in,
                     k_cache=k_cache,
@@ -623,13 +698,7 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_mid,
-                # grid.y must tile the per-rank (sharded) fused gate+up width.
-                # The SM100 kernel writes 128-col output tiles; sizing grid.y for
-                # the unsharded width makes surplus tasks overflow into the next
-                # top-k slot's columns with the wrong expert's weights, a
-                # write race that corrupts multi-GPU MoE output. For world_size=1
-                # this evaluates to the previous hard-coded value (12).
-                grid_dim=(10, fused_outdim_2 // world_size // 128, 1),
+                grid_dim=(10, 12, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_silu_mul_layer(
@@ -688,8 +757,8 @@ if __name__ == "__main__":
         )
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
-            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-                                       spec_decode_config.spec_length + 1, 
+            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)),
+                                       spec_decode_config.spec_length + 1,
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
@@ -707,7 +776,121 @@ if __name__ == "__main__":
             grid_dim=argmax_reduce_grid_dim,
             block_dim=(256, 1, 1),
         )
-        if spec_decode_config:
+        if args.eagle3:
+            # === Eagle3 draft + verify wiring ===
+            #
+            # Cross-iter draft snapshot design:
+            # - eagle3_drafts_prev is an attach_input tensor (MPK does NOT
+            #   track its writers as task graph edges).
+            # - verify_strict reads drafts_prev. MPK only sees other deps for
+            #   verify (argmax_out from argmax_reduce, accepted_count out).
+            # - eagle3_commit writes drafts_prev at end of iter (its
+            #   draft_tokens_new input is this iter's scatter output).
+            # - Across iters, MPK guarantees iter N tasks complete before
+            #   iter N+1 starts, so iter N+1's verify reads iter N's snapshot.
+            #
+            # At iter 0 the drafts_prev buffer is zero-initialized → verify
+            # accepts 0 tokens, commits only the 1 bonus token. Prefill must
+            # therefore be handled by pre-seeding `tokens` with the prompt
+            # before the first mpk() call (existing demo pattern).
+            from mirage.mpk.models.eagle3.builder import (
+                Eagle3Builder, load_eagle3_draft,
+            )
+
+            print(f"Loading Eagle3 draft from {args.eagle3_draft_path}...")
+            draft_sd, draft_cfg = load_eagle3_draft(args.eagle3_draft_path)
+            eagle3 = Eagle3Builder(
+                mpk=mpk,
+                draft_state_dict=draft_sd,
+                draft_config=draft_cfg,
+                target_hidden_size=hidden_size,
+                target_w_embed=w_embed_table,  # shared target embed_tokens DTensor
+                cos_pos_embed=cos_pos_embed,
+                sin_pos_embed=sin_pos_embed,
+                num_draft_steps=args.num_draft_steps,
+                use_aux_norm=False,
+            )
+
+            mbt_e = args.max_num_batched_tokens
+            K = args.num_draft_steps
+            accepted_count = mpk.new_tensor(
+                dims=(mbt_e, 1), dtype=mi.int32,
+                name="eagle3_accepted_count", io_category="cuda_tensor",
+            )
+            verified_output = mpk.new_tensor(
+                dims=(mbt_e, K + 1), dtype=mi.int64,
+                name="eagle3_verified_output", io_category="cuda_tensor",
+            )
+            # Cross-iter snapshot buffer: written by commit at end of iter N,
+            # read by verify_strict at start of iter N+1. Shape (mbt, K) to
+            # match all_draft_ids / verify's read pattern: draft[bid*K + k].
+            eagle3_drafts_prev_buf = torch.zeros(
+                (mbt_e, K), dtype=torch.int64, device="cuda")
+            eagle3_drafts_prev = mpk.attach_input(
+                torch_tensor=eagle3_drafts_prev_buf,
+                name="eagle3_drafts_prev",
+            )
+
+            # Unified Eagle3 draft path: verify_strict registers first (its
+            # accepted_count is wired into the draft loop even though the K=1
+            # path's attention kernel doesn't consume ac yet — keeps the API
+            # ready for the K>1 decode-chain extension). The draft attention
+            # is the new flat-cache `eagle3_draft_chain_step_attn` kernel with
+            # NUM_TOKENS=mbt, USE_AC_OFFSET=False — writes mbt KV at positions
+            # [step, step+mbt-1] every iter, naturally covering prefill and
+            # decode through the "N tokens in → N KV writes out" contract.
+            # K>1 prefill (NUM_TOKENS=K+1 > 2 with NUM_Q_PER_KV=8) is gated by
+            # a static_assert in the kernel until the MMA m-loop extension.
+            mpk.mtp_verify_strict_layer(
+                draft_token_ids=eagle3_drafts_prev,
+                target_token_ids=argmax_out,
+                accepted_count=accepted_count,
+                output_tokens=verified_output,
+                grid_dim=(mbt_e, 1, 1),
+                block_dim=(128, 1, 1),
+                num_draft_tokens=K,
+            )
+            eagle3.build_draft_loop(
+                aux_h0=eagle3_aux_h0,
+                aux_h1=eagle3_aux_h1,
+                aux_h2=eagle3_aux_h2,
+                target_argmax_token=argmax_out,
+                accepted_count=accepted_count,
+            )
+
+            # Single-edge-per-pair design: pass argmax_out (from argmax_reduce)
+            # instead of verified_output (from verify_strict, which also
+            # produces accepted_count). commit also snapshots drafts_new into
+            # the attach_input drafts_prev buffer (for next iter's verify).
+            d_tokens = mpk.attach_input(
+                torch_tensor=tokens, name="eagle3_commit_tokens")
+            d_num_new = mpk.attach_input(
+                torch_tensor=num_new_tokens, name="eagle3_commit_num_new")
+            # Debug: per-iter accept-rate histogram (bin 0 reserved; bins 1..K+1
+            # hold counts for ac=1..K+1) + trace tail. Layout:
+            #   [0..K+1]: histogram bins
+            #   [K+2]:    trace counter (atomicAdd writer index)
+            #   [K+3..]:  per-iter records of size 2K+2 ints:
+            #             (ac, argmax[0..K], old_drafts_prev[0..K-1])
+            # Capped at 16 iters in the kernel. Sized to 256 ints for headroom.
+            accept_hist_buf = torch.zeros(256, dtype=torch.int32, device="cuda")
+            d_accept_hist = mpk.attach_input(
+                torch_tensor=accept_hist_buf, name="eagle3_accept_hist")
+            mpk.eagle3_commit_layer(
+                target_argmax=argmax_out,
+                draft_tokens_new=eagle3._attach_cache["eagle3_all_draft_ids"],
+                accepted_count=accepted_count,
+                tokens_buffer=d_tokens,
+                num_new_tokens=d_num_new,
+                drafts_prev=eagle3_drafts_prev,
+                accept_hist=d_accept_hist,
+                grid_dim=(mpk.max_num_batched_requests, 1, 1),
+                block_dim=(128, 1, 1),
+                num_draft_tokens=K,
+                batch_size=mbt_e,  # all_draft_ids is (mbt, K) — unified path
+                max_seq_len=args.max_seq_length,
+            )
+        elif spec_decode_config:
             verify_out = mpk.verify_layer_dispatcher(
                 spec_decode_config = spec_decode_config,
                 spec_tokens = spec_tokens,
@@ -805,6 +988,30 @@ if __name__ == "__main__":
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
-        pass
+        if args.eagle3:
+            buf = accept_hist_buf.cpu().tolist()
+            hist = buf[:K + 2]
+            total_iters = sum(hist[1:K + 2])  # bins 1..K+1
+            print(f"[eagle3-debug] accept_hist (bin i = #iters with ac=i): {hist}")
+            if total_iters > 0:
+                # Per-step accept rates. For K=2: ac=1 means 0 drafts accepted,
+                # ac=2 means draft 0 accepted, ac=3 means both accepted.
+                step_accepts = [sum(hist[s + 2 : K + 2]) for s in range(K)]
+                step_rates = [a / total_iters for a in step_accepts]
+                per_draft = sum(step_accepts) / (K * total_iters)
+                print(f"[eagle3-debug] total iters: {total_iters}")
+                for s in range(K):
+                    print(f"[eagle3-debug] step {s} accept rate: {step_rates[s]:.3f} ({step_accepts[s]}/{total_iters})")
+                print(f"[eagle3-debug] per-draft accept rate: {per_draft:.3f}")
+            # Dump per-iter trace: (ac, argmax[0..K], old_drafts_prev[0..K-1])
+            trace_count = min(buf[K + 2], 16)
+            record_size = 2 * K + 2
+            print(f"[eagle3-debug] trace_count={trace_count} record_size={record_size}")
+            for it in range(trace_count):
+                base = K + 3 + it * record_size
+                ac = buf[base + 0]
+                argmax = buf[base + 1 : base + 1 + (K + 1)]
+                old_drafts = buf[base + 1 + (K + 1) : base + 1 + (K + 1) + K]
+                print(f"[eagle3-debug] iter {it}: ac={ac} argmax={argmax} old_drafts_prev={old_drafts}")
     if world_size > 1:
         dist.destroy_process_group()

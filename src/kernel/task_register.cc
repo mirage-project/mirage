@@ -123,6 +123,126 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_RMS_NORM, code.to_string());
 }
 
+int TaskRegister::register_dflash_attention_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [sliding_window, head_dim]; 5 inputs (q, ctx_k, ctx_v, blk_k,
+  // blk_v), 1 output.
+  assert(params.size() == 2);
+  int sliding_window = params[0];
+  int head_dim = params[1];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 5;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // q/out: [B, q_size]; ctx_k/ctx_v: [ctx_len, kv_size]; blk_k/blk_v: [B, kv]
+  assert(output_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[1]->dtensor.num_dims == 2);
+  int B = output_ops[0]->dtensor.dim[0];
+  int q_size = output_ops[0]->dtensor.dim[1];
+  int ctx_len = input_ops[1]->dtensor.dim[0];
+  int kv_size = input_ops[1]->dtensor.dim[1];
+  int num_q_heads = q_size / head_dim;
+  int num_kv_heads = kv_size / head_dim;
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::dflash_attention_sm100<bfloat16, $, $, $, $>(",
+         num_q_heads,
+         num_kv_heads,
+         head_dim,
+         B);
+  code.e("    task_desc->input_ptrs[0],");  // q
+  code.e("    task_desc->input_ptrs[1],");  // ctx_k
+  code.e("    task_desc->input_ptrs[2],");  // ctx_v
+  code.e("    task_desc->input_ptrs[3],");  // blk_k
+  code.e("    task_desc->input_ptrs[4],");  // blk_v
+  code.e("    task_desc->output_ptrs[0],"); // out
+  code.e("    $,", ctx_len);
+  code.e("    $);", sliding_window);
+  return register_task_variant(TASK_DFLASH_ATTENTION_SM100, code.to_string());
+}
+
+int TaskRegister::register_dflash_norm_rope_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [head_dim]; eps hardcoded 1e-5 (DFlash). 4 inputs (x, weight, cos,
+  // sin), 1 output.
+  assert(params.size() == 1);
+  int head_dim = params[0];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 4;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->dtensor.num_dims == 2);
+  int num_tokens = output_ops[0]->dtensor.dim[0];
+  int width = output_ops[0]->dtensor.dim[1];
+  int num_heads = width / head_dim;
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e(
+      "kernel::dflash_norm_rope_sm100<bfloat16, $, $>(", num_heads, head_dim);
+  code.e("    task_desc->input_ptrs[0],");  // x
+  code.e("    task_desc->input_ptrs[1],");  // weight
+  code.e("    task_desc->input_ptrs[2],");  // cos
+  code.e("    task_desc->input_ptrs[3],");  // sin
+  code.e("    task_desc->output_ptrs[0],"); // out
+  code.e("    $,", num_tokens);
+  code.e("    1e-5f);");
+  return register_task_variant(TASK_DFLASH_NORM_ROPE_SM100, code.to_string());
+}
+
+int TaskRegister::register_dflash_kv_store_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [head_dim]. 2 inputs (kv_in [num_tokens, NKV*D], slot_mapping
+  // [num_tokens] int32), 1 output (cache [num_pages, page_size, NKV, D]).
+  assert(params.size() == 1);
+  int head_dim = params[0];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int num_tokens = input_ops[0]->dtensor.dim[0];
+  assert(output_ops[0]->dtensor.num_dims == 4);
+  int page_size = output_ops[0]->dtensor.dim[1];
+  int num_kv_heads = output_ops[0]->dtensor.dim[2];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e(
+      "kernel::dflash_kv_store_sm100<bfloat16, $, $>(", num_kv_heads, head_dim);
+  code.e("    task_desc->input_ptrs[0],");  // kv_in
+  code.e("    task_desc->input_ptrs[1],");  // slot_mapping (int32)
+  code.e("    task_desc->output_ptrs[0],"); // cache
+  code.e("    $,", num_tokens);
+  code.e("    $);", page_size);
+  return register_task_variant(TASK_DFLASH_KV_STORE_SM100, code.to_string());
+}
+
 int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
   assert(params.size() == 0);
@@ -1911,8 +2031,9 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
-  // params[6]: max_tokens
-  assert(params.size() == 6);
+  // params[6]: q_len_override (optional, default 0)
+  // params[7]: tail_offset    (optional, default 0)
+  assert(params.size() == 6 || params.size() == 8);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -1937,6 +2058,8 @@ int TaskRegister::register_paged_attention_sm100_task(
   int kv_stride = head_dim * num_kv_heads;
   int max_seq_len = params[4];
   int page_size = params[5];
+  int q_len_override = (params.size() >= 7) ? params[6] : 0;
+  int tail_offset = (params.size() >= 8) ? params[7] : 0;
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -1945,9 +2068,10 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // Pass Q_LEN_OVERRIDE, TAIL_OFFSET, and MAX_TOKENS explicitly.
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $, $>(",
+         "$, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -1956,6 +2080,8 @@ int TaskRegister::register_paged_attention_sm100_task(
          head_dim,
          max_seq_len,
          page_size,
+         q_len_override,
+         tail_offset,
          max_tokens);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
@@ -2904,7 +3030,11 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_moe_mul_sum_add_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 0);
+  bool rank_with_residual = true;
+  if (!params.empty()) {
+    assert(params.size() == 1);
+    rank_with_residual = (params[0] == 1);
+  }
   int batch_size = 0, num_experts_per_tok = 0, output_size = 0, input_stride,
       output_stride;
   std::vector<tb::TBInputOp *> input_ops;
@@ -2950,7 +3080,7 @@ int TaskRegister::register_moe_mul_sum_add_sm100_task(
          /*OUTPUT_STRIDE=*/output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
-  code.e("    task_desc->input_ptrs[2],");
+  code.e("    $,", rank_with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_MOE_MUL_SUM_ADD_SM100, code.to_string());
 }
@@ -4685,6 +4815,87 @@ int TaskRegister::register_mtp_build_embed_input_task(
   code.e("    runtime_config.step,");       // step (global)
   code.e("    task_desc->task_metadata.request_id);");
   return register_task_variant(TASK_MTP_BUILD_EMBED_INPUT, code.to_string());
+}
+
+// ============ Eagle3 tasks ============
+
+int TaskRegister::register_copy_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params) {
+  // params[0]: batch_size, params[1]: hidden_dim
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int hidden_dim = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::copy_layer_kernel<bfloat16, $, $>(", batch_size, hidden_dim);
+  code.e("    task_desc->input_ptrs[0],");   // src
+  code.e("    task_desc->output_ptrs[0]);"); // dst
+  return register_task_variant(TASK_COPY, code.to_string());
+}
+
+int TaskRegister::register_concat_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params) {
+  // params[0]: batch_size, params[1]: hidden_dim, params[2]: N (num inputs)
+  assert(params.size() == 3);
+  int batch_size = params[0];
+  int hidden_dim = params[1];
+  int n = params[2];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // Concat N (B,H) inputs (input_ptrs[0..N-1]) along dim 1 → (B, N*H).
+  code.e(
+      "kernel::concat_kernel<bfloat16, $, $, $>(", batch_size, hidden_dim, n);
+  code.e("    task_desc->input_ptrs,");      // input_ptrs[0..N-1]
+  code.e("    task_desc->output_ptrs[0]);"); // output (N*H)
+  return register_task_variant(TASK_CONCAT, code.to_string());
+}
+
+int TaskRegister::register_eagle3_d2t_remap_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: batch_size, params[1]: draft_vocab_real (unpadded)
+  assert(params.size() == 2);
+  int batch_size = params[0];
+  int draft_vocab_real = params[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e(
+      "kernel::eagle3_d2t_remap_kernel<$, $>(", batch_size, draft_vocab_real);
+  code.e("    task_desc->input_ptrs[0],");   // hot_token
+  code.e("    task_desc->input_ptrs[1],");   // d2t table
+  code.e("    task_desc->output_ptrs[0]);"); // target_token
+  return register_task_variant(TASK_EAGLE3_D2T_REMAP, code.to_string());
+}
+
+int TaskRegister::register_eagle3_commit_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // params[0]: K (= num_draft_steps), params[1]: batch_size,
+  // params[2]: max_seq_len
+  // Matches mtp_prepare_verify pattern: tokens_buffer / step as INPUT
+  // (kernel writes through them), num_new_tokens as OUTPUT.
+  assert(params.size() == 3);
+  int K = params[0];
+  int batch_size = params[1];
+  int max_seq_len = params[2];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::eagle3_commit_kernel<$, $, $>(", K, batch_size, max_seq_len);
+  code.e("    task_desc->input_ptrs[3],"); // tokens_buffer
+  code.e("    task_desc->input_ptrs[0],"); // target_argmax (from argmax_reduce)
+  code.e("    task_desc->input_ptrs[1],"); // draft_tokens_new (from scatter)
+  code.e(
+      "    task_desc->input_ptrs[2],"); // accepted_count (from verify_strict)
+  code.e("    runtime_config.step,");   // step (global)
+  code.e("    runtime_config.prompt_length,"); // prompt_length (global)
+  code.e("    task_desc->output_ptrs[0],");    // new_token_nums
+  code.e(
+      "    task_desc->output_ptrs[1],"); // drafts_prev (attach_input snapshot)
+  code.e("    task_desc->input_ptrs[4],"); // accept_hist (attach_input; debug)
+  code.e("    task_desc->task_metadata.request_id);"); // request_id
+  return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }
 
 // ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============

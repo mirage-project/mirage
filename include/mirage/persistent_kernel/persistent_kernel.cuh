@@ -235,6 +235,29 @@ __device__ __forceinline__ bool
       int qo_indptr = config.qo_indptr_buffer[i];
       int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
       int prompt_len = config.prompt_length[request_id];
+#ifdef MPK_SPEC_DECODE
+      // Eagle3 / spec-decode path
+      int step_advance;
+      if (step >= prompt_len) {
+        // Decode: step += accepted_count (eagle3_commit writes this; 0 means
+        // commit hasn't run yet at first iter, fall back to 1 to make progress)
+        step_advance = config.new_token_nums[request_id];
+        if (step_advance < 1) {
+          step_advance = 1;
+        }
+      } else {
+        // Prefill: fall back to original semantics
+        for (int j = 0; j < num_tokens; j++) {
+          if (step + j + 1 >= prompt_len &&
+              step + j + 1 < config.max_seq_length) {
+            config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
+                config.output_tokens[qo_indptr + j];
+          }
+        }
+        step_advance = num_tokens;
+      }
+      config.step[request_id] = step + step_advance;
+#else
       for (int j = 0; j < num_tokens; j++) {
         if (step + j + 1 >= prompt_len &&
             step + j + 1 < config.max_seq_length) {
@@ -243,13 +266,15 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
-#ifdef MPK_ENABLE_PROFILING
+      int step_advance = num_tokens;
+#endif
+#if defined(MPK_ENABLE_PROFILING) || defined(MPK_TEST_MODE)
       if (true)
 #else
-      if ((step + num_tokens + 1 >= config.max_seq_length) ||
+      if ((step + step_advance + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
-                          num_tokens] == config.eos_token_id) &&
-           (step + num_tokens >= prompt_len)))
+                          step_advance] == config.eos_token_id) &&
+           (step + step_advance >= prompt_len)))
 #endif
       {
         // Request is done
@@ -292,7 +317,14 @@ __device__ __forceinline__ bool
             min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       } else {
         // Decode requests
+#ifdef MPK_SPEC_DECODE
+        // Eagle3 / spec-decode: feed K+1 candidate tokens (1 bonus + K drafts)
+        // per decode iter. mbt is compile-time set to K+1.
+        num_new_tokens = min(MPK_MAX_NUM_BATCHED_TOKENS,
+                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+#else
         num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+#endif
       }
       // Move tokens to input_tokens
       for (int j = 0; j < num_new_tokens; j++) {
@@ -909,18 +941,12 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
             get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
         if (is_nvshmem_event(event_id)) {
-#if defined(USE_NVSHMEM) && !defined(NVSHMEM_NO_DEVICE_LIB)
+#if defined(USE_NVSHMEM)
           nvshmem_signal_wait_until(
               reinterpret_cast<uint64_t *>(
                   &config.all_event_counters[event_index]),
               NVSHMEM_CMP_EQ,
               needed_counts);
-#elif defined(USE_NVSHMEM)
-          // NVSHMEM_NO_DEVICE_LIB: spin-wait equivalent
-          while (ld_acquire_sys_u64(&config.all_event_counters[event_index]) <
-                 needed_counts) {
-            __nanosleep(10);
-          }
 #endif
         } else {
           while (actual_counts < needed_counts) {
@@ -1203,29 +1229,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
-#ifdef MPK_TEST_MODE
-        // Test mode: run task graph exactly once, then terminate.
-        // iteration_num stays at 1 throughout the single pass so that
-        // event counter thresholds (num_triggers * iteration_num) are
-        // consistent: each event fires exactly num_triggers times.
-        if (iteration_num > 0) {
-          printf("[SCHD] Single pass finished, terminating schedulers.\n");
-          terminate_schedulers(config);
-        } else {
-          size_t last_task_id =
-              worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
-          st_relaxed_gpu_u64(
-              &config.worker_queues[next_worker]
-                                   [last_task_id % config.per_worker_queue_len],
-              compute_task_id(iteration_num + 1, 1 /*begin_task_graph*/));
-          atom_add_release_gpu_u64(
-              &config.worker_queue_last_ready_task_id[next_worker], 1);
-          next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
-                                                            : next_worker + 1;
-        }
-#else // MPK_TEST_MODE
-
-        // Check if we want to continue
 #ifdef MPK_ENABLE_PROFILING
         PROFILER_EVENT_START(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt);
 #endif
@@ -1268,7 +1271,6 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
-#endif // MPK_TEST_MODE
       } else if (e.event_type == EVENT_LAUNCH_DEPENDENT_TASKS) {
         iteration_num = iteration_num + 1;
         // assign event in a round-robin fashion
@@ -1410,24 +1412,6 @@ void gpu_free(void *ptr) {
 #endif
 }
 
-#ifdef NVSHMEM_NO_DEVICE_LIB
-// Callback for hostlib init: return pointer to our __managed__ device state.
-// nvshmemi_device_state_d is __managed__ (defined in allreduce.cuh, same TU),
-// so &nvshmemi_device_state_d is a valid host pointer that maps to device
-// memory.
-static int mpk_nvshmem_device_init_cb(void **dev_state_ptr,
-                                      void **transport_dev_state_ptr) {
-  // nvshmemi_device_state_d is __managed__ (defined in allreduce.cuh, same TU).
-  // Host library will cudaMemcpy the state to this address.
-  *dev_state_ptr = (void *)&nvshmemi_device_state_d;
-  if (transport_dev_state_ptr) {
-    *transport_dev_state_ptr = nullptr;
-  }
-  printf("MPK: device_init_cb OK, managed_ptr=%p\n", &nvshmemi_device_state_d);
-  return 0;
-}
-#endif
-
 // The following function will be generated by the transpiler
 static void
     _init_persistent_kernel(std::vector<FullTaskDesc> &all_tasks,
@@ -1484,7 +1468,6 @@ extern "C" void
                            int total_num_requests,
                            long long eos_token_id,
                            int allocate_nvshmem_teams,
-                           int is_test_mode,
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs) {
   // Build global model tensors map from parallel vectors
@@ -1560,30 +1543,8 @@ extern "C" void
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
   nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
   attr.mpi_comm = &mpi_comm;
-#ifdef NVSHMEM_NO_DEVICE_LIB
-  // rdc=false mode: call nvshmemid_hostlib_init_attr directly with our own
-  // callback that returns the device pointer for nvshmemi_device_state_d.
-  // The host library will cudaMemcpy the state to this address.
-  {
-    int provided;
-    nvshmemi_version_t ver = {NVSHMEM_VENDOR_MAJOR_VERSION,
-                              NVSHMEM_VENDOR_MINOR_VERSION,
-                              NVSHMEM_VENDOR_PATCH_VERSION};
-    int status = nvshmemid_hostlib_init_attr(NVSHMEM_THREAD_SERIALIZED,
-                                             &provided,
-                                             NVSHMEMX_INIT_WITH_MPI_COMM,
-                                             &attr,
-                                             ver,
-                                             mpk_nvshmem_device_init_cb);
-    if (status != 0) {
-      printf("MPK: nvshmemid_hostlib_init_attr failed: %d\n", status);
-    }
-  }
-  MPI_Barrier(MPI_COMM_WORLD);
-#else
   nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
   nvshmem_barrier_all();
-#endif
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   printf("MPK: Rank%d is Ready. Worldsize=%d\n", mype, npes);
@@ -1804,14 +1765,7 @@ extern "C" void
                            cudaEventDisableTiming);
 #endif
 
-  if (is_test_mode) {
-    printf(
-        "MPK is running in test mode. The persistent kernel will run exactly "
-        "one pass of the task graph, then terminate.\n");
-    printf("Skipping request resource initialization.\n");
-  } else {
-    init_request_resources();
-  }
+  init_request_resources();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();

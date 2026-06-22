@@ -78,7 +78,7 @@ def _run_one_config(batch_size, hidden, tag):
     pk.compile(output_dir=folder_path)
 
     print(f"[{tag}] Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     ref_a = torch_rmsnorm(x_input, w_a)

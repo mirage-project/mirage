@@ -1739,9 +1739,17 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
       break;
     }
+    case TASK_QUANTIZE_NVFP4_SM100:
     case TASK_QUANTIZE_MXFP4_SM100: {
       // No TMA (all I/O via raw pointers); sits in the auto-gate range so it
       // reaches create_tma_desc_by_task, but there is nothing to build.
+      break;
+    }
+    // Eagle3 kernels don't need TMA.
+    case TASK_COPY:
+    case TASK_CONCAT:
+    case TASK_EAGLE3_D2T_REMAP:
+    case TASK_EAGLE3_COMMIT: {
       break;
     }
     default:

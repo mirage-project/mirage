@@ -454,6 +454,21 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_rmsnorm_linear_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR, variant_id);
+  } else if (name == "dflash_attention") {
+    int variant_id = task_register->register_dflash_attention_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(5, 1, TASK_DFLASH_ATTENTION_SM100, variant_id);
+  } else if (name == "dflash_norm_rope") {
+    int variant_id = task_register->register_dflash_norm_rope_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_DFLASH_NORM_ROPE_SM100, variant_id);
+  } else if (name == "dflash_kv_store") {
+    int variant_id = task_register->register_dflash_kv_store_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_DFLASH_KV_STORE_SM100, variant_id);
   } else if (name == "attention") {
     int variant_id =
         task_register->register_attention_task(customized->bgraph, params);
@@ -868,6 +883,30 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_MTP_BUILD_EMBED_INPUT, variant_id);
+  }
+  // Eagle3 tasks
+  else if (name == "copy") {
+    int variant_id =
+        task_register->register_copy_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_COPY, variant_id);
+  } else if (name == "concat") {
+    // params[2] = N (number of (B,H) inputs concatenated along dim 1).
+    int n = params[2];
+    int variant_id =
+        task_register->register_concat_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(n, 1, TASK_CONCAT, variant_id);
+  } else if (name == "eagle3_d2t_remap") {
+    int variant_id = task_register->register_eagle3_d2t_remap_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_EAGLE3_D2T_REMAP, variant_id);
+  } else if (name == "eagle3_commit") {
+    int variant_id =
+        task_register->register_eagle3_commit_task(customized->bgraph, params);
+    // Inputs:  argmax_out, draft_tokens_new, accepted_count, tokens_buffer,
+    //          accept_hist (attach_input, kernel writes via atomicAdd; debug)
+    // Outputs: new_token_nums, drafts_prev (cross-iter snapshot)
+    // (step / prompt_length read from runtime_config)
+    task_config[op] = std::make_tuple(5, 2, TASK_EAGLE3_COMMIT, variant_id);
   }
   // Multi-GPU tasks
   else if (name == "nvshmem_allgather_strided_put") {

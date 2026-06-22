@@ -25,6 +25,9 @@
 #endif
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
+#include "dflash_attention_sm100.cuh"
+#include "dflash_kv_store_sm100.cuh"
+#include "dflash_norm_rope_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
 #include "linear_fp8_1d2d_sm100.cuh"
 #include "linear_fp8_sm100.cuh"
@@ -56,6 +59,7 @@
 #include "sm100_ptx.cuh"
 #include "softmax_gather_sm100.cuh"
 #include "tasks/common/sampling.cuh"
+#include "tasks/speculative_decoding/eagle3_ops.cuh"
 #include "tasks/speculative_decoding/mtp_token_ops.cuh"
 #include "tasks/speculative_decoding/target_verify_mtp.cuh"
 #include "tensor_init.cuh"

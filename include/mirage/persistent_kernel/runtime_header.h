@@ -19,25 +19,8 @@
 #include <cuda_runtime.h>
 
 #ifdef USE_NVSHMEM
-#if defined(MIRAGE_GRACE_BLACKWELL)
-// Blackwell (SM100a): include only host API + types.
-// Device-side allreduce is self-contained in tasks/blackwell/allreduce.cuh
-// to avoid rdc=true register inflation (166 vs 255 regs).
-//
-// Define nvshmemi_device_state_d BEFORE any NVSHMEM headers so that any
-// transitively-included device code (proxy_device.cuh etc.) can resolve it.
-// In standard NVSHMEM this comes from libnvshmem_device.a, but we skip that
-// library to avoid rdc=true.
-#include "device_host/nvshmem_types.h"
-#ifdef NVSHMEM_NO_DEVICE_LIB
-__managed__ nvshmemi_device_host_state_t nvshmemi_device_state_d;
-#endif
-#include <nvshmem_host.h>
-#else
-// Hopper/Ampere: use standard NVSHMEM includes (rdc=true is fine on SM90).
 #include <nvshmem.h>
 #include <nvshmemx.h>
-#endif
 #endif
 
 namespace mirage {
@@ -143,6 +126,10 @@ enum TaskType {
   // SM100 Tasks
   TASK_SM100_TASK_BEGIN = 230, // SM100 start placeholder, not a real task
   TASK_SM100_TMA_START_TASK = 231,
+  TASK_COPY = 232,
+  TASK_CONCAT = 233,
+  TASK_EAGLE3_D2T_REMAP = 235,
+  TASK_EAGLE3_COMMIT = 236,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
   TASK_SPLITK_LINEAR_SM100 = 251,
@@ -194,25 +181,33 @@ enum TaskType {
   TASK_MTP_BUILD_EMBED_INPUT = 294,
   // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
+  // DFlash non-causal block attention (correctness-first), SM100.
+  TASK_DFLASH_ATTENTION_SM100 = 296,
+  // DFlash per-head RMSNorm + RoPE, SM100.
+  TASK_DFLASH_NORM_ROPE_SM100 = 297,
+  // DFlash standalone paged KV-cache store (L4 materialize write), SM100.
+  TASK_DFLASH_KV_STORE_SM100 = 298,
   // NVFP4 quantize (bf16 -> packed fp4 + ue4m3 scales) and NVFP4 swapAB linear
-  // GEMM. Both sit outside the SM100_TMA range, so the linear task is given an
-  // explicit create_tma_desc_by_task gate (it needs fp4 A/B + bf16 C TMA).
-  TASK_QUANTIZE_NVFP4_SM100 = 296,
-  TASK_LINEAR_NVFP4_SM100 = 297,
+  // GEMM. Placed inside the SM100_TMA auto-gate range (231-256) so
+  // create_tma_desc_by_task runs automatically; the quantizer uses NO TMA so it
+  // has an explicit no-op case, and the linear builds fp4 A/B + bf16 C TMA.
+  TASK_QUANTIZE_NVFP4_SM100 = 237,
+  TASK_LINEAR_NVFP4_SM100 = 238,
   // NVFP4 1d2d 1SM linear GEMM (large-batch path). fp4 A/B via TMA; C is a raw
-  // gmem pointer (direct store, no TMA). Reuses slot 279.
+  // gmem pointer (direct store, no TMA). Sits outside the auto-gate range, so it
+  // has an explicit create_tma_desc_by_task gate in runtime.cc. Reuses slot 279.
   TASK_LINEAR_NVFP4_1D2D_SM100 = 279,
   // MXFP4 linear GEMM: swapAB (small batch) and 1d2d 1SM (large batch). Same
   // structure as the NVFP4 tasks. Placed inside the SM100_TMA auto-gate range
   // (231-256) so create_tma_desc_by_task runs automatically; swapAB needs A/B/C
   // TMA, 1d2d needs A/B only (C is a raw gmem store).
   TASK_LINEAR_MXFP4_SM100 = 250,
-  TASK_LINEAR_MXFP4_1D2D_SM100 = 232,
+  TASK_LINEAR_MXFP4_1D2D_SM100 = 234,
   // MXFP4 quantizer (bf16 -> packed e2m1 + e8m0 scales). Inside the auto-gate
   // range but uses NO TMA, so create_tma_desc_by_task has an explicit no-op
   // case for it.
-  TASK_QUANTIZE_MXFP4_SM100 = 233,
-  TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
+  TASK_QUANTIZE_MXFP4_SM100 = 239,
+  TASK_SM100_TASK_END = 299, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
