@@ -822,8 +822,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "linear_nvfp4_sm100") {
     int variant_id = task_register->register_linear_nvfp4_sm100_task(
         customized->bgraph, params);
-    // params[0]==1 adds a bias input (5 inputs); else 4. Must match the
-    // new_input() count in linear_nvfp4_layer.
     bool with_bias = (params.size() == 1 && params[0] == 1);
     task_config[op] = std::make_tuple(
         with_bias ? 5 : 4, 1, TASK_LINEAR_NVFP4_SM100, variant_id);

@@ -17,7 +17,6 @@
 #include "runtime_header.h"
 #include "tasks/common/common_header.cuh"
 #include <cuda.h>
-#include <cute/numeric/numeric_types.hpp> // cute::float_e2m1_t, float_ue4m3_t, sizeof_bits
 #include <cutlass/float8.h>
 #include <cutlass/numeric_types.h>
 #include <type_traits>
@@ -25,7 +24,6 @@
 namespace mirage {
 namespace runtime {
 
-using namespace cute;
 using bfloat16 = type::bfloat16_t;
 
 // NOTE(Yu): Assume smem_stride is always 1, so we don't pass it as an argument
@@ -48,10 +46,10 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
       : std::is_same_v<T, __half>              ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
       : std::is_same_v<T, float>               ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
       : std::is_same_v<T, double>              ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
-      : std::is_same_v<T, cute::float_ue4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cutlass::float_e4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cutlass::float_e5m2_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
-      : std::is_same_v<T, cute::float_e2m1_t>
+      : std::is_same_v<T, cutlass::float_ue4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_e4m3_t>   ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_e5m2_t>   ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_e2m1_t>
           ? CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
       : std::is_same_v<T, cutlass::float_ue8m0_t>
           ? CU_TENSOR_MAP_DATA_TYPE_UINT8
@@ -86,7 +84,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[3] = 1;
     gmem_prob_shape[4] = 1;
     gmem_prob_stride[0] = 1;
-    gmem_prob_stride[1] = gmem_stride[1] * cute::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[1] = gmem_stride[1] * cutlass::sizeof_bits<T>::value / 8;
     gmem_prob_stride[2] = 0;
     gmem_prob_stride[3] = 0;
     gmem_prob_stride[4] = 0;
@@ -97,8 +95,8 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[3] = 1;
     gmem_prob_shape[4] = 1;
     gmem_prob_stride[0] = 1;
-    gmem_prob_stride[1] = gmem_stride[1] * cute::sizeof_bits<T>::value / 8;
-    gmem_prob_stride[2] = gmem_stride[2] * cute::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[1] = gmem_stride[1] * cutlass::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[2] = gmem_stride[2] * cutlass::sizeof_bits<T>::value / 8;
     gmem_prob_stride[3] = 0;
     gmem_prob_stride[4] = 0;
   } else if constexpr (NDIM == 4) {
@@ -108,9 +106,9 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[3] = gmem_shape[0];
     gmem_prob_shape[4] = 1;
     gmem_prob_stride[0] = 1;
-    gmem_prob_stride[1] = gmem_stride[1] * cute::sizeof_bits<T>::value / 8;
-    gmem_prob_stride[2] = gmem_stride[2] * cute::sizeof_bits<T>::value / 8;
-    gmem_prob_stride[3] = gmem_stride[3] * cute::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[1] = gmem_stride[1] * cutlass::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[2] = gmem_stride[2] * cutlass::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[3] = gmem_stride[3] * cutlass::sizeof_bits<T>::value / 8;
     gmem_prob_stride[4] = 0;
   } else {
     assert(false);
@@ -972,10 +970,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_LINEAR_NVFP4_SM100:
     case TASK_LINEAR_MXFP4_SM100: {
-      // swapAB fp4 GEMM (NVFP4/MXFP4 share these layouts). Inputs: 0=weight A,
-      // 1=activation B (fp4 packed), 2=SFA, 3=SFB, [4=bias] (raw, no TMA).
-      // Output 0 = C (bf16). A/B: rank-3 16U4_ALIGN8B (init_AB_tmap_fp4);
-      // C: rank-2 bf16 (init_C_tmap_fp4). dim[1] is packed (K/2) -> logical K.
       constexpr uint32_t BLOCK_M = 128;
       bool is_output = (param_id == (size_t)(task_desc.num_inputs));
 
@@ -986,7 +980,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           std::cerr << "TMA fp4 " << what << " failed: " << err << std::endl;
         }
       };
-      // Batch tile, matching register_linear_*'s N-dependent occupancy formula.
+
       auto mma_n = [&]() -> uint32_t {
         int batch = (int)task_desc.inputs[1].dim[0];
         int output_size = (int)task_desc.outputs[0].dim[1];
@@ -1033,12 +1027,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     }
     case TASK_LINEAR_NVFP4_1D2D_SM100:
     case TASK_LINEAR_MXFP4_1D2D_SM100: {
-      // 1d2d 1SM fp4 GEMM. Only A (param 0) / B (param 1) use TMA; C is a raw
-      // gmem store. Same rank-3 fp4 layout as swapAB; tile_rows = BLOCK_M for A,
-      // BLOCK_N (largest of {128,64,32} dividing batch, matching the register
-      // function) for B.
       if (param_id > 1) {
-        break; // SFA/SFB/bias: raw pointers
+        break;
       }
       auto check = [](CUresult r, char const *what) {
         if (r != CUDA_SUCCESS) {
@@ -1723,9 +1713,6 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_LINEAR_NVFP4_SM100:
     case TASK_LINEAR_MXFP4_SM100: {
-      // swapAB. Inputs: 0=weight A (fp4), 1=activation B (fp4), 2=SFA, 3=SFB,
-      //         [4=bias]. Only A/B use TMA; SFA/SFB/bias are raw pointers.
-      // Output: 0=C (bf16). NVFP4 and MXFP4 share the same fp4/bf16 layouts.
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
       create_tma_desc_for_tensor(
@@ -1734,15 +1721,12 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_LINEAR_NVFP4_1D2D_SM100:
     case TASK_LINEAR_MXFP4_1D2D_SM100: {
-      // Same A/B fp4 TMA as swapAB; C is written directly to gmem (no TMA).
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
       create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
       break;
     }
     case TASK_QUANTIZE_NVFP4_SM100:
     case TASK_QUANTIZE_MXFP4_SM100: {
-      // No TMA (all I/O via raw pointers); sits in the auto-gate range so it
-      // reaches create_tma_desc_by_task, but there is nothing to build.
       break;
     }
     // Eagle3 kernels don't need TMA.

@@ -4319,18 +4319,12 @@ int TaskRegister::register_linear_fp8_sm100_task(
   }
 }
 
-// Round a needed batch-tile height up to a supported swapAB tile {8..128}.
 static int round_to_swapab_tile(int needed) {
   return needed <= 8 ? 8 : needed <= 16 ? 16 : needed <= 32 ? 32
          : needed <= 64                                     ? 64
                                                             : 128;
 }
 
-// Pick the swapAB MMA_N tile. N-dependent via a one-wave occupancy budget (see
-// swapab_mma_n in the NVFP4 wrapper): a larger N consumes more SMs through the
-// output dim, shrinking the per-N batch-tile budget and forcing a wider MMA_N.
-// The quantize and linear tasks MUST agree on this or the per-tile SF layout
-// mismatches (illegal access), so both derive it from the same (batch, output).
 static int nvfp4_swapab_mma_n(int batch_size, int output_size) {
   static int sm_count = 0;
   if (sm_count == 0) {
@@ -4341,9 +4335,6 @@ static int nvfp4_swapab_mma_n(int batch_size, int output_size) {
   return round_to_swapab_tile(needed);
 }
 
-// Recover the quantizer's MMA_N from the user-allocated scale tensor's leading
-// dim (num_n_tiles): interleaved (1d2d) => ceil(batch/128) => mma_n=0; swapAB =>
-// ceil(batch/MMA_N) => round back to a supported tile.
 static int nvfp4_mma_n_from_scale(int batch_size, int num_n_tiles) {
   if (num_n_tiles <= (batch_size + 127) / 128) {
     return 0; // interleaved (also the single-128-tile case)
@@ -4351,8 +4342,6 @@ static int nvfp4_mma_n_from_scale(int batch_size, int num_n_tiles) {
   return round_to_swapab_tile((batch_size + num_n_tiles - 1) / num_n_tiles);
 }
 
-// Split bgraph.operators (all TB_INPUT_OP) into the first num_inputs inputs and
-// the remaining outputs, in registration order.
 static void nvfp4_split_ops(threadblock::Graph const &bgraph,
                             int num_inputs,
                             int num_outputs,
@@ -4369,10 +4358,6 @@ static void nvfp4_split_ops(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_quantize_nvfp4_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // In: bf16 [batch, hidden]. Out: packed fp4 [batch, hidden/2] + ue4m3 scales.
-  // The scale layout (swapAB MMA_N vs interleaved) is inferred from the
-  // user-allocated scale tensor's leading dim, which already encodes the
-  // downstream GEMM's tiling. See nvfp4_mma_n_from_scale.
   assert(params.size() == 0);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   nvfp4_split_ops(bgraph, 1, 2, input_ops, output_ops);
@@ -4398,8 +4383,6 @@ int TaskRegister::register_quantize_nvfp4_sm100_task(
 
 int TaskRegister::register_quantize_mxfp4_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // Same wiring as register_quantize_nvfp4_sm100_task (scale layout / MMA_N
-  // inferred from output_scale.dim[0]); MXFP4 uses GROUP_SIZE=32 and e8m0 scales.
   assert(params.size() == 0);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   nvfp4_split_ops(bgraph, 1, 2, input_ops, output_ops);
@@ -4425,8 +4408,6 @@ int TaskRegister::register_quantize_mxfp4_sm100_task(
 
 int TaskRegister::register_linear_nvfp4_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // Inputs: weight_fp4 [output, K], input_fp4 [batch, K], SFA, SFB, [bias].
-  // Output: C bf16 [batch, output]. SwapAB: weight->A (MMA_M=128), batch->MMA_N.
   bool with_bias = (params.size() == 1 && params[0] == 1);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
@@ -4471,10 +4452,6 @@ int TaskRegister::register_linear_nvfp4_sm100_task(
 
 int TaskRegister::register_linear_nvfp4_1d2d_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // Large-batch 1d2d 1SM path. Same inputs as swapAB: weight_fp4 [output, K],
-  // input_fp4 [batch, K], SFA, SFB, [bias]; output C bf16 [batch, output].
-  // Kernel dims: M=output_size (A/weight rows), N=batch_size. C is written via
-  // a raw gmem pointer (no TMA store).
   bool with_bias = (params.size() == 1 && params[0] == 1);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
@@ -4520,8 +4497,6 @@ int TaskRegister::register_linear_nvfp4_1d2d_sm100_task(
 
 int TaskRegister::register_linear_mxfp4_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // MXFP4 swapAB (small-batch). Identical wiring to NVFP4 swapAB; only the
-  // kernel impl differs (UE8M0 scales / scale_vec::2X).
   bool with_bias = (params.size() == 1 && params[0] == 1);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
@@ -4563,8 +4538,6 @@ int TaskRegister::register_linear_mxfp4_sm100_task(
 
 int TaskRegister::register_linear_mxfp4_1d2d_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // MXFP4 1d2d 1SM (large-batch). Identical wiring to NVFP4 1d2d. Kernel dims:
-  // M=output_size, N=batch_size; C written via raw gmem pointer (no TMA).
   bool with_bias = (params.size() == 1 && params[0] == 1);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
@@ -4582,9 +4555,6 @@ int TaskRegister::register_linear_mxfp4_1d2d_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // Template: <BATCH_SIZE=0, OUTPUT_SIZE=0, REDUCTION_SIZE, BLOCK_M, BLOCK_N,
-  // BLOCK_K, NUM_STAGES, C_N_MAJOR=false, EPI_BATCH_LA> (BATCH/OUTPUT are
-  // compile-time-unused; dims come in as runtime args).
   code.e("kernel::linear_mxfp4_1d2d_sm100_task_impl<0, 0, $, $, $, $, $, "
          "false, $>(",
          reduction_size,

@@ -81,7 +81,7 @@ def test_quantize_mxfp4(batch_size, hidden_size, mma_n):
     print("Compiling...")
     pk.compile(output_dir=os.path.dirname(__file__))
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     # Compare the real (non-padded) packed rows, and only the scale bytes the

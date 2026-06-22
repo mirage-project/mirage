@@ -1185,9 +1185,6 @@ TaskGraphResult print_task_graph(
            "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
-    // NVFP4 1d2d linear needs fp4 A/B TMA but sits outside the SM100_TMA range,
-    // so it needs an explicit gate. (TASK_LINEAR_NVFP4_SM100 / quantize tasks
-    // are inside the auto-gate range above and must NOT be double-gated here.)
     code.e("if (task.at(\"task_type\") == TASK_LINEAR_NVFP4_1D2D_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");

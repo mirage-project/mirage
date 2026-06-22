@@ -105,7 +105,7 @@ def test_linear_mxfp4(batch_size, output_size=256, reduction_size=512):
     print("Compiling...")
     pk.compile(output_dir=os.path.dirname(__file__))
     print("Running...")
-    pk.run_test_mode()
+    pk()
     torch.cuda.synchronize()
 
     print(f"MPK output[0, :8]: {output[0, :8]}")
