@@ -485,6 +485,9 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   if (FUSE_COMPACTION && mpk_active_expert_ids != nullptr) {
     compact_active_experts_ballot<LOCAL_EXPERTS>(mpk_active_expert_ids);
   }
+  // MPK signals task completion from thread 0; publish routing zeros
+  // and compacted mask writes made by all CTA threads before consumers run.
+  asm volatile("membar.gl;" ::: "memory");
 }
 
 } // namespace kernel

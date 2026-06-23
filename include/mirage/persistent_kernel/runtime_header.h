@@ -76,7 +76,7 @@ unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
 unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
-int const MAX_INPUTS_PER_TASK = 7;
+int const MAX_INPUTS_PER_TASK = 14;
 int const MAX_OUTPUTS_PER_TASK = 3;
 // B200 has 148 SMs — need more workers than the default 128
 int const MAX_NUM_WORKERS = 160;
@@ -207,7 +207,8 @@ enum TaskType {
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
   // bs=1 contiguous KV append (replaces paged-cache append + gather):
   TASK_MLA_KV_APPEND_SM100 = 323,
-  TASK_SM100_TASK_END = 324, // SM100 end placeholder, not a real task
+  TASK_FFN_MLP_MEGAKERNEL_SM100 = 324,
+  TASK_SM100_TASK_END = 325, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

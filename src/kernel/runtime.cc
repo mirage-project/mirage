@@ -516,6 +516,11 @@ void register_mugraph(
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // FFN mega-task: grid=(num_workers, 1, 1). merge_task_offset
+            // is the logical CTA id consumed in place of blockIdx.x.
+            if (task_type == TASK_FFN_MLP_MEGAKERNEL_SM100) {
+              task.task_metadata.merge_task_offset = bid.x;
+            }
             // SiLU + Mul (NEW MoE 2D path): grid=(num_workers, 1, 1).
             // Each CTA owns one BM=BM_PADDING-row slice of the permuted
             // buffer, so request_id = bid.x identifies the expert this
@@ -1168,6 +1173,7 @@ TaskGraphResult print_task_graph(
   mirage::transpiler::CodeKeeper tgbody;
   tgbody.inc_indent();
   code.e("#include \"persistent_kernel.cuh\"");
+  code.e("#include \"tasks/blackwell/ffn_mlp_megakernel_sm100.cuh\"");
   if (use_json_format) {
     code.e("#include <nlohmann/json.hpp>");
     code.e("#include <fstream>");
@@ -2008,6 +2014,8 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100] =
       "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100";
+  task_type_to_name[TASK_FFN_MLP_MEGAKERNEL_SM100] =
+      "TASK_FFN_MLP_MEGAKERNEL_SM100";
   task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";
   task_type_to_name[TASK_MOE_UNPERMUTE_SM100] = "TASK_MOE_UNPERMUTE_SM100";
   task_type_to_name[TASK_TRANSPOSE_SCALE_SM100] = "TASK_TRANSPOSE_SCALE_SM100";

@@ -6593,6 +6593,20 @@ int TaskRegister::register_fp8_group_gemm_largem_compact_fused_sm100_task(
                                code.to_string());
 }
 
+int TaskRegister::register_ffn_mlp_megakernel_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 0);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::ffn_mlp_megakernel_sm100::"
+         "ffn_mlp_megakernel_sm100_task_impl(");
+  code.e("    task_desc,");
+  code.e("    task_desc->task_metadata.merge_task_offset,");
+  code.e("    runtime_config);");
+  return register_task_variant(TASK_FFN_MLP_MEGAKERNEL_SM100, code.to_string());
+}
+
 // moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.
 // Params (compile-time): [K, K_PACKED, MBT, TOPK, E_LOCAL, BM_PADDING]
 // Inputs (4): input_fp8 (mbt, K) u8,

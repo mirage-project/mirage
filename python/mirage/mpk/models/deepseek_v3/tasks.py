@@ -368,6 +368,49 @@ def mla_mtp_reduce_layer(
             "(expected 1, 2, 4, or 8)")
 
 
+def ffn_mlp_megakernel_layer(
+    pk,
+    hidden: DTensor,
+    w13: DTensor,
+    w13_scale_fp32: DTensor,
+    w2: DTensor,
+    w2_scale_fp32: DTensor,
+    moe_mask: DTensor,
+    moe_routing_indices: DTensor,
+    moe_topk_weights: DTensor,
+    wgu_raw: DTensor,
+    wgu_scale: DTensor,
+    wdn: DTensor,
+    wdn_scale: DTensor,
+    out: DTensor,
+    barrier_scratch: DTensor,
+    grid_dim: tuple = (136, 1, 1),
+    block_dim: tuple = (512, 1, 1),
+):
+    tensors = [
+        hidden,
+        w13,
+        w13_scale_fp32,
+        w2,
+        w2_scale_fp32,
+        moe_mask,
+        moe_routing_indices,
+        moe_topk_weights,
+        wgu_raw,
+        wgu_scale,
+        wdn,
+        wdn_scale,
+        out,
+        barrier_scratch,
+    ]
+    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+    for tensor in tensors:
+        tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+    tb_graph.new_input(out, (-1, -1, -1), -1, True)
+    pk.kn_graph.customized(tensors + [out], tb_graph)
+    pk.kn_graph.register_task(tb_graph, "ffn_mlp_megakernel_sm100", [])
+
+
 def _fp8_group_gemm_layer_impl(
     pk,
     task_name: str,

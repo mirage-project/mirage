@@ -290,6 +290,9 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   }
   __syncthreads(); // sync #2
   _fbsig_compact_active_experts(active_ids);
+  // MPK signals task completion from thread 0; publish routing zeros
+  // and compacted mask writes made by all CTA threads before consumers run.
+  asm volatile("membar.gl;" ::: "memory");
 }
 
 } // namespace kernel

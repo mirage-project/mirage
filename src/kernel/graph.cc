@@ -955,6 +955,13 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
                         2,
                         TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100,
                         variant_id);
+  } else if (name == "ffn_mlp_megakernel_sm100") {
+    int variant_id = task_register->register_ffn_mlp_megakernel_sm100_task(
+        customized->bgraph, params);
+    // First 14 slots preserve the binding-map input_ptrs ABI. The duplicate
+    // output slot tracks the bf16 out write for the MPK dependency graph.
+    task_config[op] =
+        std::make_tuple(14, 1, TASK_FFN_MLP_MEGAKERNEL_SM100, variant_id);
   } else if (name == "moe_permute_sm100") {
     // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
     // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).

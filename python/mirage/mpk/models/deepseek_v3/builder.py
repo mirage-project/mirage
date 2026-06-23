@@ -64,6 +64,9 @@ MOE_INTERMEDIATE_SIZE = 2048    # Per-expert intermediate (routed + shared)
 NUM_EXPERTS = 256
 NUM_EXPERTS_PER_TOK = 8
 NUM_SHARED_EXPERTS = 1
+# Binding-map scratch total for TP8/EP2 decode: 2xuint32 barrier plus
+# MAX_ACTIVE=8 routed intermediates and shared-expert intermediates.
+FFN_MLP_MEGAKERNEL_SCRATCH_BYTES = 79472  # +W2_N*4 (28672) for phase-3 fp32 out_acc
 FIRST_MOE_LAYER = 3
 VOCAB_SIZE = 129280
 RMS_NORM_EPS = 1e-6
@@ -2098,6 +2101,7 @@ class DeepSeekV3Builder(GraphBuilder):
                                   K_PACKED_K, K_PACKED_INT,
                                   w13_scale_key, w_experts_w13,
                                   moe_topk_weights, moe_routing_indices,
+                                  moe_mask,
                                   new_moe_input_fp8, new_moe_input_scale,
                                   new_moe_permuted_in_fp8,
                                   new_moe_permuted_in_scale,
@@ -2108,6 +2112,102 @@ class DeepSeekV3Builder(GraphBuilder):
                                   new_moe_silu_scale, new_moe_w2_out):
         """Per-layer NEW MoE task dispatch. Tasks numbered 1..8 below."""
         _routed_nw = self.mpk.num_workers
+        if os.environ.get("MPK_DSV3_FFN_MEGAKERNEL") == "1":
+            # The fused FFN mega-task hardcodes NUM_WORKERS=136 + grid=(136,1,1) in
+            # the .cuh (the grid_barrier participant count). A non-136 worker count
+            # breaks the 136-CTA<->136-worker bijection -> permanent barrier deadlock.
+            assert self.mpk.num_workers == 136, (
+                f"MPK_DSV3_FFN_MEGAKERNEL needs num_workers==136 (B200); got "
+                f"{self.mpk.num_workers}. Derive grid+NUM_WORKERS from num_workers first.")
+            # The routing gather reads moe_routing_indices[expert*num_rows+0],
+            # valid only at num_rows==mbt==1 (decode). Prefill (mbt>1) -> wrong slot.
+            assert self.max_num_batched_tokens == 1, (
+                f"MPK_DSV3_FFN_MEGAKERNEL is decode-only (mbt==1); got "
+                f"{self.max_num_batched_tokens}.")
+            # ROOT-CAUSE FIX: experts.w13/w2 PAYLOADS are requantized for the
+            # CEIL-pow2 (UE8M0) scale (_requantize_moe_fp8_for_pow2), but the scale
+            # tensor stays RAW. So the mega-task must dequantize with
+            # 2^ceil(log2(scale_inv)), NOT the raw scale_inv — else every 128-block
+            # is off by s/2^ceil(log2 s) in (0.5,1] (~53% rel error per the
+            # requantize docstring). The chain's group-GEMM applies the UE8M0 scale;
+            # the mega-task uses the fp32 path, so bake the pow2 value here.
+            self._requantize_moe_fp8_for_pow2(
+                state_dict, f"{prefix}experts.w13.weight", w13_scale_key)
+            _w13s = state_dict[w13_scale_key].float().clamp_min(1e-30)
+            w13_scale_fp32 = self._safe_attach(
+                torch.pow(2.0, torch.ceil(torch.log2(_w13s))).contiguous(),
+                f"layer_{layer_idx}_experts_w13_scale_fp32")
+            w2_weight_key = f"{prefix}experts.w2.weight"
+            w2_scale_key = f"{prefix}experts.w2.weight_scale_inv"
+            self._requantize_moe_fp8_for_pow2(
+                state_dict, w2_weight_key, w2_scale_key)
+            w_experts_w2_new = self._safe_attach(
+                state_dict[w2_weight_key],
+                f"layer_{layer_idx}_experts_w2")
+            _w2s = state_dict[w2_scale_key].float().clamp_min(1e-30)
+            w2_scale_fp32 = self._safe_attach(
+                torch.pow(2.0, torch.ceil(torch.log2(_w2s))).contiguous(),
+                f"layer_{layer_idx}_experts_w2_scale_fp32")
+
+            shared_prefix = f"{prefix}shared_experts."
+            from ..utils import shuffle_tensors as _shuffle_tensors
+            wgu_raw_tensor = _shuffle_tensors(
+                [state_dict[f"{shared_prefix}gate_proj.weight"],
+                 state_dict[f"{shared_prefix}up_proj.weight"]],
+                split=1, dim=0).contiguous()
+            wgu_raw = self._safe_attach(
+                wgu_raw_tensor,
+                f"layer_{layer_idx}_shared_expert_gate_up_raw")
+            wgu_scale_tensor = _shuffle_tensors(
+                [state_dict[f"{shared_prefix}gate_proj.weight_scale_inv"],
+                 state_dict[f"{shared_prefix}up_proj.weight_scale_inv"]],
+                split=1, dim=0).to(torch.float32).contiguous()
+            wgu_scale = self._safe_attach(
+                wgu_scale_tensor,
+                f"layer_{layer_idx}_shared_expert_gate_up_raw_scale_fp32")
+            wdn = self._safe_attach(
+                state_dict[f"{shared_prefix}down_proj.weight"],
+                f"layer_{layer_idx}_shared_expert_down")
+            wdn_scale = self._safe_attach(
+                state_dict[f"{shared_prefix}down_proj.weight_scale_inv"]
+                .to(torch.float32).contiguous(),
+                f"layer_{layer_idx}_shared_expert_down_scale_fp32")
+
+            assert FFN_MLP_MEGAKERNEL_SCRATCH_BYTES % 2 == 0
+            barrier_scratch = self.mpk.new_tensor(
+                dims=(1, FFN_MLP_MEGAKERNEL_SCRATCH_BYTES // 2),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_ffn_mlp_megakernel_scratch",
+                io_category="cuda_tensor")
+            self.mpk.tensor_init_layer(
+                target=barrier_scratch,
+                dummy=self.rmsnorm_out,
+                grid_dim=(1, 1, 1),
+                block_dim=(128, 1, 1),
+                dummy_input_map=(-1, -1, -1),
+                target_input_map=(-1, -1, -1),
+            )
+            dsv3_tasks.ffn_mlp_megakernel_layer(
+                self.mpk,
+                hidden=self.rmsnorm_out,
+                w13=w_experts_w13,
+                w13_scale_fp32=w13_scale_fp32,
+                w2=w_experts_w2_new,
+                w2_scale_fp32=w2_scale_fp32,
+                moe_mask=moe_mask,
+                moe_routing_indices=moe_routing_indices,
+                moe_topk_weights=moe_topk_weights,
+                wgu_raw=wgu_raw,
+                wgu_scale=wgu_scale,
+                wdn=wdn,
+                wdn_scale=wdn_scale,
+                out=new_moe_w2_out,
+                barrier_scratch=barrier_scratch,
+                grid_dim=(136, 1, 1),
+                block_dim=(512, 1, 1),
+            )
+            return
+
         # Pack W13 weight scale (always — needs to be attached for w13).
         s_w13_packed = self._pack_and_attach_moe_weight_scale(
             state_dict, w13_scale_key,
@@ -2399,7 +2499,9 @@ class DeepSeekV3Builder(GraphBuilder):
         # Check if weights are FP8 (have scale_inv) or BF16 (post-dequant)
         w13_scale_key = f"{prefix}experts.w13.weight_scale_inv"
         use_fp8_experts = w13_scale_key in state_dict
-        if use_fp8_experts:
+        use_ffn_mlp_megakernel = (
+            os.environ.get("MPK_DSV3_FFN_MEGAKERNEL") == "1")
+        if use_fp8_experts and not use_ffn_mlp_megakernel:
             self._requantize_moe_fp8_for_pow2(
                 state_dict, f"{prefix}experts.w13.weight", w13_scale_key)
         w_experts_w13 = self._safe_attach(
@@ -2480,16 +2582,20 @@ class DeepSeekV3Builder(GraphBuilder):
             dims=(K_PACKED_INT, m_total), dtype=uint32,
             name=f"layer_{layer_idx}_new_moe_silu_scale",
             io_category="cuda_tensor")
-        new_moe_w2_out = self.mpk.new_tensor(
-            dims=(m_total, N_w2), dtype=bfloat16,
-            name=f"layer_{layer_idx}_new_moe_w2_out",
-            io_category="cuda_tensor")
+        if use_ffn_mlp_megakernel:
+            new_moe_w2_out = moe_output
+        else:
+            new_moe_w2_out = self.mpk.new_tensor(
+                dims=(m_total, N_w2), dtype=bfloat16,
+                name=f"layer_{layer_idx}_new_moe_w2_out",
+                io_category="cuda_tensor")
 
         self._new_moe_dispatch_inline(
             layer_idx, prefix, state_dict, mbt, bm_pad, m_total,
             K, K_intermediate, K_PACKED_K, K_PACKED_INT,
             w13_scale_key, w_experts_w13,
             moe_topk_weights, moe_routing_indices,
+            moe_mask,
             new_moe_input_fp8, new_moe_input_scale,
             new_moe_permuted_in_fp8, new_moe_permuted_in_scale,
             new_moe_meta,
@@ -2498,6 +2604,9 @@ class DeepSeekV3Builder(GraphBuilder):
             new_moe_silu_scale, new_moe_w2_out)
         self._new_moe_layer_w2_out = new_moe_w2_out
         self._new_moe_layer_meta = new_moe_meta
+        if use_ffn_mlp_megakernel:
+            self.mlp_out = moe_output
+            return
 
         # ---- Shared Expert ----
         shared_residual = self._build_shared_expert(

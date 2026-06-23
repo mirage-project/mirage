@@ -2621,6 +2621,50 @@ class PersistentKernel:
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 
+    def ffn_mlp_megakernel_layer(
+        self,
+        hidden,
+        w13,
+        w13_scale_fp32,
+        w2,
+        w2_scale_fp32,
+        moe_mask,
+        moe_routing_indices,
+        moe_topk_weights,
+        wgu_raw,
+        wgu_scale,
+        wdn,
+        wdn_scale,
+        out,
+        barrier_scratch,
+        grid_dim=(136, 1, 1),
+        block_dim=(512, 1, 1),
+    ):
+        tensors = [
+            hidden,
+            w13,
+            w13_scale_fp32,
+            w2,
+            w2_scale_fp32,
+            moe_mask,
+            moe_routing_indices,
+            moe_topk_weights,
+            wgu_raw,
+            wgu_scale,
+            wdn,
+            wdn_scale,
+            out,
+            barrier_scratch,
+        ]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        for tensor in tensors:
+            tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+        tb_graph.new_input(out, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(tensors + [out], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "ffn_mlp_megakernel_sm100", [])
+
+
     def fp8_group_gemm_smallm_layer(
         self, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
         num_workers, meta=None,
