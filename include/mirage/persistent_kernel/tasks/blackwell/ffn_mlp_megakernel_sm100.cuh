@@ -265,7 +265,7 @@ __device__ __forceinline__ Scratch make_scratch(uint8_t *base) {
 #define MPK_FFN_RBX_W13 8
 #endif
 #ifndef MPK_FFN_RBX_W2
-#define MPK_FFN_RBX_W2 8
+#define MPK_FFN_RBX_W2 16 // ferret workspace2: wider row block for the short-K W2
 #endif
 #ifndef MPK_FFN_RBX_SH
 #define MPK_FFN_RBX_SH 4
@@ -340,6 +340,108 @@ __device__ __forceinline__ void
 #pragma unroll
       for (int b = 0; b < 4; b++)
         acc += f8((av >> (b * 8)) & 0xff) * f8((w >> (b * 8)) & 0xff);
+      y[r] += acc * sc;
+    }
+  }
+#pragma unroll
+  for (int r = 0; r < RBX; r++) {
+    float v = y[r];
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+      v += __shfl_down_sync(0xffffffffu, v, o);
+    if (lane == 0)
+      y_out[r] = v;
+  }
+}
+
+// ---- ferret workspace2 (59->41.34µs): cp.async software-pipelined warp GEMV ----
+// At M=1 the FP8 weights are read once (pure streaming); with launch_bounds(256,1)
+// the SM holds only 8 warps -> too few to hide HBM latency by warp-switching, so it
+// is hidden by a STAGES-deep cp.async pipeline that prefetches the NEXT K-group's
+// weight tile into per-warp smem while the MAC runs on the current tile (cp.async
+// loads don't block the issuing thread on the L1TEX scoreboard — that was 56% of
+// the warp stalls). f8x4 vectorizes the FP8->float convert (4x fewer ops). Math/
+// fold order is byte-identical to dgemv_block_warp (ascending group/byte, left-fold).
+__device__ __forceinline__ void cpasync4(uint32_t smem_addr, void const *gptr) {
+  asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(smem_addr),
+               "l"(gptr));
+}
+__device__ __forceinline__ void cpasync_commit() {
+  asm volatile("cp.async.commit_group;\n");
+}
+template <int N> __device__ __forceinline__ void cpasync_wait() {
+  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+}
+__device__ __forceinline__ void f8x4(uint32_t v, float &f0, float &f1, float &f2,
+                                     float &f3) {
+  __half2_raw lo =
+      __nv_cvt_fp8x2_to_halfraw2((__nv_fp8x2_storage_t)(v & 0xffff), __NV_E4M3);
+  __half2_raw hi = __nv_cvt_fp8x2_to_halfraw2(
+      (__nv_fp8x2_storage_t)((v >> 16) & 0xffff), __NV_E4M3);
+  f0 = __half2float(*(__half *)&lo.x);
+  f1 = __half2float(*(__half *)&lo.y);
+  f2 = __half2float(*(__half *)&hi.x);
+  f3 = __half2float(*(__half *)&hi.y);
+}
+template <int RBX, int STAGES>
+__device__ __forceinline__ void
+    dgemv_cpa(uint8_t const *__restrict__ a_fp8,
+              float const *__restrict__ a_scale,
+              uint8_t const *__restrict__ w_fp8, // expert base
+              float const *__restrict__ w_scale_row, int K, int KG, int n0,
+              int lane, uint32_t *wbuf_base, float *y_out) {
+  uint32_t const *a4 = reinterpret_cast<uint32_t const *>(a_fp8);
+  uint32_t const *w4 =
+      reinterpret_cast<uint32_t const *>(w_fp8 + static_cast<size_t>(n0) * K);
+  int Kw = K / 4;
+  float y[RBX];
+#pragma unroll
+  for (int r = 0; r < RBX; r++)
+    y[r] = 0.f;
+  uint32_t const sbase = __cvta_generic_to_shared(wbuf_base);
+  uint32_t const STRIDE = (uint32_t)(RBX * 32 * 4);
+  int pf = (STAGES - 1 < KG) ? (STAGES - 1) : KG;
+#pragma unroll
+  for (int s = 0; s < STAGES - 1; s++) {
+    if (s < pf) {
+      uint32_t b = sbase + (uint32_t)s * STRIDE;
+#pragma unroll
+      for (int r = 0; r < RBX; r++)
+        cpasync4(b + (uint32_t)((r * 32 + lane) * 4),
+                 &w4[static_cast<size_t>(r) * Kw + static_cast<size_t>(s) * 32 +
+                     lane]);
+    }
+    cpasync_commit();
+  }
+  for (int g = 0; g < KG; g++) {
+    int gp = g + (STAGES - 1);
+    if (gp < KG) {
+      uint32_t b = sbase + (uint32_t)(gp % STAGES) * STRIDE;
+#pragma unroll
+      for (int r = 0; r < RBX; r++)
+        cpasync4(b + (uint32_t)((r * 32 + lane) * 4),
+                 &w4[static_cast<size_t>(r) * Kw +
+                     static_cast<size_t>(gp) * 32 + lane]);
+    }
+    cpasync_commit();
+    cpasync_wait<STAGES - 1>();
+    __syncwarp();
+    uint32_t cur = sbase + (uint32_t)(g % STAGES) * STRIDE;
+    uint32_t av = a4[g * 32 + lane];
+    float sc = a_scale[g] * __ldg(&w_scale_row[g]);
+    float a0, a1, a2, a3;
+    f8x4(av, a0, a1, a2, a3);
+#pragma unroll
+    for (int r = 0; r < RBX; r++) {
+      uint32_t w;
+      uint32_t saddr = cur + (uint32_t)((r * 32 + lane) * 4);
+      asm volatile("ld.shared.u32 %0, [%1];\n" : "=r"(w) : "r"(saddr));
+      float w0, w1, w2, w3;
+      f8x4(w, w0, w1, w2, w3);
+      float acc = a0 * w0;
+      acc += a1 * w1;
+      acc += a2 * w2;
+      acc += a3 * w3;
       y[r] += acc * sc;
     }
   }
@@ -448,8 +550,17 @@ __device__ __noinline__ void ffn_mlp_megakernel_sm100_task_impl(
   // dynamic-smem convention (other tasks declare __align__(1024)); a smaller
   // alignment on this aliased extern array can lower the shared base alignment and
   // misalign other tasks' 1024-aligned (TMA / AR) accesses.
-  uint8_t *s_a = s_smem;
-  float *s_as = reinterpret_cast<float *>(s_smem + HIDDEN);
+  // Layout: [ per-warp cp.async weight-staging | activation s_a | s_as ].
+  // WBUF: each warp owns WBUF_W uint32 = UNITS_MAX*32; UNITS_MAX = max RBX*STAGES
+  // over all GEMVs = max(W13 8*4, shGU 4*4, W2 16*2, shDN 4*2) = 32. ~40KB total
+  // (dynamic pool is 221KB).
+  constexpr int MPK_FFN_UNITS_MAX = 32;
+  constexpr int MPK_FFN_WBUF_W = MPK_FFN_UNITS_MAX * 32; // uint32 per warp
+  uint32_t *s_wbuf = reinterpret_cast<uint32_t *>(s_smem);
+  uint32_t *my_wbuf = s_wbuf + static_cast<size_t>(wlocal) * MPK_FFN_WBUF_W;
+  uint8_t *s_a =
+      s_smem + static_cast<size_t>(nwl) * MPK_FFN_WBUF_W * sizeof(uint32_t);
+  float *s_as = reinterpret_cast<float *>(s_a + HIDDEN);
   for (int g = wlocal; g < KG1; g += nwl) {
     quant_group_warp<__nv_bfloat16>(hidden, s_a, s_as, g, lane);
   }
@@ -476,8 +587,8 @@ __device__ __noinline__ void ffn_mlp_megakernel_sm100_task_impl(
       float const *ws = w13_scale + static_cast<size_t>(e) * NB1 * KG1 +
                         static_cast<size_t>(n0 / GRP) * KG1;
       float yb[MPK_FFN_RBX_W13];
-      dgemv_blk<MPK_FFN_RBX_W13, MPK_FFN_GU_W13>(
-          s_a, s_as, wb, ws, HIDDEN, KG1, n0, lane, yb);
+      dgemv_cpa<MPK_FFN_RBX_W13, 4>(
+          s_a, s_as, wb, ws, HIDDEN, KG1, n0, lane, my_wbuf, yb);
       if (lane == 0) {
 #pragma unroll
         for (int r = 0; r < MPK_FFN_RBX_W13; r++) {
@@ -488,8 +599,8 @@ __device__ __noinline__ void ffn_mlp_megakernel_sm100_task_impl(
       int n0 = (idx - n13) * MPK_FFN_RBX_SH;
       float const *ws = wgu_s + static_cast<size_t>(n0 / GRP) * KG_SHGU;
       float yb[MPK_FFN_RBX_SH];
-      dgemv_blk<MPK_FFN_RBX_SH, MPK_FFN_GU_SHGU>(
-          s_a, s_as, wgu, ws, SH_GU_K, KG_SHGU, n0, lane, yb);
+      dgemv_cpa<MPK_FFN_RBX_SH, 4>(
+          s_a, s_as, wgu, ws, SH_GU_K, KG_SHGU, n0, lane, my_wbuf, yb);
       if (lane == 0) {
 #pragma unroll
         for (int r = 0; r < MPK_FFN_RBX_SH; r++) {
@@ -575,9 +686,9 @@ __device__ __noinline__ void ffn_mlp_megakernel_sm100_task_impl(
       float const *ws = w2_scale + static_cast<size_t>(e) * NB2 * KG2 +
                         static_cast<size_t>(n0 / GRP) * KG2;
       float yb[MPK_FFN_RBX_W2];
-      dgemv_blk<MPK_FFN_RBX_W2, MPK_FFN_GU_W2>(
+      dgemv_cpa<MPK_FFN_RBX_W2, 2>(
           sc.i_fp8 + static_cast<size_t>(slot) * W2_K, sc.i_scale + slot * KG2,
-          wb, ws, W2_K, KG2, n0, lane, yb);
+          wb, ws, W2_K, KG2, n0, lane, my_wbuf, yb);
       if (lane == 0) {
 #pragma unroll
         for (int r = 0; r < MPK_FFN_RBX_W2; r++) {
@@ -588,8 +699,8 @@ __device__ __noinline__ void ffn_mlp_megakernel_sm100_task_impl(
       int n0 = (idx - n2) * MPK_FFN_RBX_SH;
       float const *ws = wdn_s + static_cast<size_t>(n0 / GRP) * KG_SHDN;
       float yb[MPK_FFN_RBX_SH];
-      dgemv_blk<MPK_FFN_RBX_SH, MPK_FFN_GU_SHDN>(
-          sc.si_fp8, sc.si_scale, wdn, ws, SH_DN_K, KG_SHDN, n0, lane, yb);
+      dgemv_cpa<MPK_FFN_RBX_SH, 2>(
+          sc.si_fp8, sc.si_scale, wdn, ws, SH_DN_K, KG_SHDN, n0, lane, my_wbuf, yb);
       if (lane == 0) {
 #pragma unroll
         for (int r = 0; r < MPK_FFN_RBX_SH; r++) {
