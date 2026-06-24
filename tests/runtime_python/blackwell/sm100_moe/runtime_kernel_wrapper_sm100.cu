@@ -592,14 +592,18 @@ __global__ __launch_bounds__(256) void mul_sum_add_sm100_wrapper(
 }
 
 void mul_sum_add_sm100_kernel(torch::Tensor input,
-                              torch::Tensor residual,
+                              c10::optional<at::Tensor> residual,
                               torch::Tensor weight,
                               torch::Tensor output) {
 
   using T = bfloat16;
 
+  // A null residual (residual=None) exercises the rank-0-only residual guard
+  // used under tensor parallelism: non-zero ranks pass a null residual so the
+  // skip connection is added on exactly one rank before the allreduce.
+  bool has_residual = residual.has_value();
   void *input_ptr = input.data_ptr();
-  void *residual_ptr = residual.data_ptr();
+  void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
   void *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
@@ -610,7 +614,9 @@ void mul_sum_add_sm100_kernel(torch::Tensor input,
 
   assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK &&
          input.size(2) == OUTPUT_SIZE);
-  assert(residual.size(0) == BATCH_SIZE && residual.size(1) == OUTPUT_SIZE);
+  if (has_residual) {
+    assert(residual->size(0) == BATCH_SIZE && residual->size(1) == OUTPUT_SIZE);
+  }
   assert(weight.size(0) == BATCH_SIZE && weight.size(1) == NUM_TOPK);
   assert(output.size(0) == BATCH_SIZE && output.size(1) == OUTPUT_SIZE);
 
