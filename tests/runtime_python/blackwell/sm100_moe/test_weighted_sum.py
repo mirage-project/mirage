@@ -25,7 +25,7 @@ for output_size in output_sizes:
     torch_topk_weights = F.softmax(topk_expert_score, dim=1, dtype=torch.float)
     output = torch.zeros(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         
-    # mpk impl
+    # mpk impl (with residual)
     runtime_kernel_blackwell.mul_sum_add_sm100(x, residual, torch_topk_weights, output)
     # reference impl
     torch_out = x.to(torch.float) * torch_topk_weights.unsqueeze(-1)
@@ -38,7 +38,34 @@ for output_size in output_sizes:
         rtol=1e-2,
         atol=1e-2,
     )
-    print("Test passed!")
+    print("Test passed (with residual)!")
+
+    # Regression test for the double-counted MoE residual fix (PR #722):
+    # under tensor parallelism the MoE output is row-parallel and followed by an
+    # allreduce, so the residual must be added on exactly one rank. Non-zero
+    # ranks pass a null residual (residual=None) and the kernel must add 0
+    # instead of the skip connection. Passing None here drives the same null
+    # d_residual pointer path and must yield the weighted sum WITHOUT residual.
+    output_no_res = torch.zeros(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
+    runtime_kernel_blackwell.mul_sum_add_sm100(x, None, torch_topk_weights, output_no_res)
+    torch_out_no_res = x.to(torch.float) * torch_topk_weights.unsqueeze(-1)
+    torch_out_no_res = torch_out_no_res.sum(dim=1).to(torch.bfloat16)
+
+    torch.testing.assert_close(
+        output_no_res,
+        torch_out_no_res,
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    # The two outputs must differ by exactly the residual; this guards against a
+    # regression where every rank adds the residual (double-counting it).
+    torch.testing.assert_close(
+        (output.to(torch.float) - output_no_res.to(torch.float)),
+        residual.to(torch.float),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    print("Test passed (null residual / TP rank-0 guard)!")
 
     # Warm-up
     for _ in range(16):
