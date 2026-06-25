@@ -312,6 +312,14 @@ def get_compile_command(
     # byte-identical default build). Used to localize the attn recurrence bug.
     if os.environ.get("MPK_ATTN_DBG") == "1":
         flags = flags + ["-DMPK_ATTN_DBG"]
+    # Attention FAST levers (barrier-removal, .cuh default ON=1 inside the attn-mega).
+    # MPK_DSV3_ATTN_FAST=0 compiles the proven-correct 8-barrier baseline for A/B.
+    if os.environ.get("MPK_DSV3_ATTN_FAST") == "0":
+        flags = flags + ["-DMPK_DSV3_ATTN_FAST=0"]
+    # FFN-full FAST levers (v019: packed-half2 GEMV + cp.async y13 + parallel argmax,
+    # .cuh default ON). MPK_DSV3_FFN_FAST=0 = the proven v015 scalar path for A/B.
+    if os.environ.get("MPK_DSV3_FFN_FAST") == "0":
+        flags = flags + ["-DMPK_DSV3_FFN_FAST=0"]
     # MLA_REDUCE_1WAVE (rd_dv=4 / 128-CTA 1-wave reduce) HELD OFF pending a box A/B
     # token-identity check: the 12.20ms campaign-best ran FINESPLIT-ON +
     # REDUCE_1WAVE-OFF (the 6/20 partial-gate bug never compiled the flag), so the

@@ -118,6 +118,33 @@ namespace attn_block_megakernel_sm100 {
 // Flash MLA KV-split: up to MLA_SPLITS splits per head.
 #define MLA_SPLITS 8
 
+// ---- BARRIER-REMOVAL LEVERS (ported from ferret workspace6 v131, 87->64.5us
+// cold; the 5 levers each remove/merge a grid.sync). MPK_DSV3_ATTN_FAST is a
+// SUB-flag of MPK_DSV3_ATTN_MEGAKERNEL (this whole file is only compiled when
+// the mega-task is built), defaulted ON so the fast path is the default WITHIN
+// the mega-task; set -DMPK_DSV3_ATTN_FAST=0 to fall back to the proven-correct
+// 9-barrier baseline (commit 52ed6e64) for A/B. The DEFAULT FULL build
+// (MPK_DSV3_ATTN_MEGAKERNEL unset) is byte-identical regardless — none of this
+// is compiled in. The five levers (all gated together, matching ferret v131
+// which ships them all-on):
+//   1. HIDDEN_BLOCK_LOCAL — quant hidden[7168] block-local into s_act, removes
+//      the quant_hidden->qkv_a barrier (a block __syncthreads replaces it).
+//   2. QA_BLOCK_LOCAL     — q_a_layernorm+requant block-local into s_qbdeq,
+//      removes the q_a_layernorm->q_b barrier.
+//   3. OPROJ_BLOCK_QUANT  — g_red UE8M0 quant block-local into s_odeq, removes
+//      the quant_gred->o_proj barrier (merges the old quant+o_proj two-barrier
+//      pair into one — the W_UV->* publish barrier is KEPT).
+//   4. MLA_ATOMIC_MERGE   — per-head atomicAdd completion counter; the LAST
+//      split-block of head h runs that head's merge in-place (device-scope
+//      __threadfence release/acquire), removes the MLA-partial->merge barrier.
+//   5. WUV_HEAD_SPINWAIT  — per-head .release.gpu/.acquire.gpu readiness flag;
+//      W_UV row-blocks spin-wait per head, removes the merge->W_UV barrier.
+// Levers 4/5 use DEVICE-scope ordering (intra-GPU, one rank's 16 heads) — NOT
+// .sys — which is correct and required (the heads are all on this rank).
+#ifndef MPK_DSV3_ATTN_FAST
+#define MPK_DSV3_ATTN_FAST 1
+#endif
+
 // ---- Per-stage debug taps (default-OFF; compile with -DMPK_ATTN_DBG) --------
 // Enable: add -DMPK_ATTN_DBG to the megakernel nvcc flags (e.g. via the
 // extra-defines env the runtime forwards), then run with the demo. At decode
@@ -208,6 +235,16 @@ struct AttnScratch {
   float *g_mla_acc;      // un-normalized sum(p*V)         [16*8*512 = 65536]
   float *g_mla_m;        // partial row-max                   [16*8    = 128]
   float *g_mla_l;        // partial exp-sum                   [16*8    = 128]
+  // MLA_ATOMIC_MERGE (lever 4): per-head finished-split counter. Zeroed BEFORE
+  // the q_b->MLA barrier (that barrier's __threadfence publishes the zeros to
+  // every CTA); the LAST split-block of head h (atomicAdd return == nsp-1) runs
+  // the in-place merge -> drops the partial->merge barrier.            [16]
+  int *g_head_done;
+  // WUV_HEAD_SPINWAIT (lever 5): per-head "merge done, W_UV may read"
+  // readiness flag. Zeroed alongside g_head_done before the SAME barrier; the
+  // merge sets it (device release), the W_UV row-blocks spin-wait (device
+  // acquire) -> drops the merge->W_UV barrier.                          [16]
+  int *g_head_wuv_ready;
 };
 
 static constexpr int ATTN_BARRIER_BYTES = 2 * (int)sizeof(uint32_t);
@@ -232,11 +269,19 @@ static constexpr int ATTN_SCRATCH_BYTES =
     /*g_mla_acc*/ K_HLOCAL * MLA_SPLITS * K_KVLORA * 4 +
     /*g_mla_m*/ K_HLOCAL * MLA_SPLITS * 4 +
     /*g_mla_l*/ K_HLOCAL * MLA_SPLITS * 4 +
-    /*16B pad slack between 15 sections*/ 16 * 16 +
+    /*g_head_done (lever 4)*/ K_HLOCAL * 4 +
+    /*g_head_wuv_ready (lever 5)*/ K_HLOCAL * 4 +
+    /*16B pad slack between 17 sections*/ 17 * 16 +
     /* +8 so the TOTAL is a multiple of 16 → the scratch tensor's element count
        (bytes/2 bf16) is a multiple of 8, required by tensor_init's 16B-vec
        zero-init static_assert. Keep the total a multiple of 16. */
     8;
+
+// The builder allocates ATTN_BLOCK_MEGAKERNEL_SCRATCH_BYTES (currently 434864).
+// Keep this constant a multiple of 16 (the tensor_init 16B-vec zero-init
+// static_assert needs it) and in sync with that builder value.
+static_assert(ATTN_SCRATCH_BYTES % 16 == 0,
+              "ATTN_SCRATCH_BYTES must be a multiple of 16");
 
 __device__ __forceinline__ AttnScratch attn_make_scratch(uint8_t *base) {
   size_t off = ATTN_BARRIER_BYTES;
@@ -286,6 +331,12 @@ __device__ __forceinline__ AttnScratch attn_make_scratch(uint8_t *base) {
   off = attn_au16(off);
   sc.g_mla_l = reinterpret_cast<float *>(base + off);
   off += (size_t)K_HLOCAL * MLA_SPLITS * 4;
+  off = attn_au16(off);
+  sc.g_head_done = reinterpret_cast<int *>(base + off);
+  off += (size_t)K_HLOCAL * 4;
+  off = attn_au16(off);
+  sc.g_head_wuv_ready = reinterpret_cast<int *>(base + off);
+  off += (size_t)K_HLOCAL * 4;
   return sc;
 }
 
@@ -757,6 +808,354 @@ __device__ __forceinline__ void quant_ue8m0_grid(
   }
 }
 
+#if MPK_DSV3_ATTN_FAST
+// ---- FAST-lever block-local quant + smem-sourced GEMV helpers (ported from
+// ferret workspace6 v131; the quant math is BYTE-IDENTICAL to the grid versions
+// above — same UE8M0 amax/448 per-128-group; the GEMVs read activation from
+// SHARED instead of global; the WEIGHT scale (Wsc) read is adapted to the MPK
+// per-128-ROW-BLOCK fp32 weight_scale_inv format used everywhere in this file,
+// `__ldg(&sn[t][g])`, NOT ferret's per-row UE8M0 uint32 decode). ---------------
+
+// Lever 1: block-cooperative UE8M0 quant of bf16 hidden[0:n] -> block-local
+// SHARED s_deq (dequantized fp32, byte-identical to quant_hidden_grid's `deq`
+// output). Every block quantizes the SAME hidden into its own s_deq (redundant
+// but no block idles) so the quant_hidden->qkv_a grid barrier is removed: the
+// trailing __syncthreads publishes s_deq within the block before qkv_a reads it.
+// Does NOT write g_hf8/g_hsc (the qkv_a GEMV reads the fp32 deq path only).
+__device__ __forceinline__ void
+    quant_hidden_block_smem(__nv_bfloat16 const *__restrict__ hidden,
+                            float *__restrict__ s_deq,
+                            int n,
+                            int warpl,
+                            int lane) {
+  int ng = n / K_GRP;
+  for (int gx = warpl; gx < ng; gx += NWARP) {
+    __nv_bfloat16 const *h = hidden + gx * K_GRP;
+    float v[4];
+    float mx = 1e-10f;
+    __nv_bfloat162 const *h2 =
+        reinterpret_cast<__nv_bfloat162 const *>(h) + lane * 2;
+    float2 a0 = __bfloat1622float2(h2[0]);
+    float2 a1 = __bfloat1622float2(h2[1]);
+    v[0] = a0.x;
+    v[1] = a0.y;
+    v[2] = a1.x;
+    v[3] = a1.y;
+#pragma unroll
+    for (int t = 0; t < 4; t++) {
+      mx = fmaxf(mx, fabsf(v[t]));
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    }
+    float ys = fmaxf(mx / K_FP8MAX, 1e-10f);
+    float yq = k_dec_ue8m0(k_enc_ue8m0(ys));
+    float *d = s_deq + gx * K_GRP + lane * 4;
+#pragma unroll
+    for (int t = 0; t < 4; t++) {
+      float q = fminf(fmaxf(v[t] / yq, -K_FP8MAX), K_FP8MAX);
+      d[t] = (float)__nv_fp8_e4m3(q) * yq;
+    }
+  }
+  __syncthreads();
+}
+
+// Lever 3: block-cooperative UE8M0 quant of src[0:n] -> block-local SHARED
+// s_deq (dequantized values, byte-identical to quant_ue8m0_grid). Every block
+// quantizes the SAME src so the quant_gred->o_proj grid barrier is removed (the
+// trailing __syncthreads publishes s_deq within the block before o_proj reads).
+__device__ __forceinline__ void
+    quant_ue8m0_block_smem(float const *__restrict__ src,
+                           float *__restrict__ s_deq,
+                           int n,
+                           int warpl,
+                           int lane) {
+  int ng = n / K_GRP;
+  for (int gx = warpl; gx < ng; gx += NWARP) {
+    float const *s = src + gx * K_GRP + lane * 4;
+    float4 a = *reinterpret_cast<float4 const *>(s);
+    float v[4] = {a.x, a.y, a.z, a.w};
+    float mx = 1e-10f;
+#pragma unroll
+    for (int t = 0; t < 4; t++) {
+      mx = fmaxf(mx, fabsf(v[t]));
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    }
+    float ys = fmaxf(mx / K_FP8MAX, 1e-10f);
+    float yq = k_dec_ue8m0(k_enc_ue8m0(ys));
+    float *d = s_deq + gx * K_GRP + lane * 4;
+#pragma unroll
+    for (int t = 0; t < 4; t++) {
+      float q = fminf(fmaxf(v[t] / yq, -K_FP8MAX), K_FP8MAX);
+      d[t] = (float)__nv_fp8_e4m3(q) * yq;
+    }
+  }
+  __syncthreads();
+}
+
+// Lever 2 companion: q_b cp.async GEMV + fused YaRN rope that sources its
+// ACTIVATION from block-local SHARED s_adeq (already-dequantized q_a_normed).
+// Byte-identical to gemv_grid_cpa_qb_rope_t EXCEPT the activation source
+// (shared, via ld.shared.v4.f32) — the weight stream, MAC, rope, and Wsc read
+// (MPK per-128-block fp32 `__ldg(&sn[t][g])`) are identical. Lets the caller
+// drop the q_a_layernorm->q_b grid barrier.
+template <int RBT, int STAGES>
+__device__ __forceinline__ void gemv_grid_cpa_qb_rope_smem_t(
+    float const *__restrict__ s_adeq,
+    __nv_fp8_e4m3 const *__restrict__ W,
+    float const *__restrict__ Wsc,
+    float *__restrict__ out,
+    int N,
+    int K,
+    __nv_bfloat16 const *__restrict__ cos_sin,
+    int pos,
+    int gwarp,
+    int gwarps,
+    int lane,
+    uint4 *__restrict__ wbuf) {
+  int KGg = K / K_GRP;
+  int nU = K / 16;
+  int SS = nU >> 5;
+  int nblk = (N + RBT - 1) / RBT;
+  const uint32_t sbase = __cvta_generic_to_shared(wbuf);
+  const uint32_t abase = __cvta_generic_to_shared(s_adeq);
+  const uint32_t STRIDE = (uint32_t)(RBT * 32 * 16);
+  for (int blk = gwarp; blk < nblk; blk += gwarps) {
+    int n0 = blk * RBT;
+    int rb = (n0 + RBT <= N) ? RBT : (N - n0);
+    uint4 const *Wn[RBT];
+    float const *sn[RBT];
+#pragma unroll
+    for (int t = 0; t < RBT; t++) {
+      int n = (n0 + t < N) ? n0 + t : N - 1;
+      Wn[t] = reinterpret_cast<uint4 const *>(W + (size_t)n * K);
+      sn[t] = Wsc + (size_t)(n >> 7) * KGg; // row n's 128-block scale-row
+    }
+    float acc[RBT];
+#pragma unroll
+    for (int t = 0; t < RBT; t++) {
+      acc[t] = 0.f;
+    }
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; s++) {
+      if (s < SS) {
+        uint32_t b = sbase + (uint32_t)s * STRIDE;
+#pragma unroll
+        for (int t = 0; t < RBT; t++) {
+          k_cpa16(b + (uint32_t)((t * 32 + lane) * 16), &Wn[t][s * 32 + lane]);
+        }
+      }
+      k_cpa_commit();
+    }
+    for (int ss = 0; ss < SS; ss++) {
+      int sp = ss + (STAGES - 1);
+      if (sp < SS) {
+        uint32_t b = sbase + (uint32_t)(sp % STAGES) * STRIDE;
+#pragma unroll
+        for (int t = 0; t < RBT; t++) {
+          k_cpa16(b + (uint32_t)((t * 32 + lane) * 16), &Wn[t][sp * 32 + lane]);
+        }
+      }
+      k_cpa_commit();
+      k_cpa_wait<STAGES - 1>();
+      __syncwarp();
+      int u = ss * 32 + lane;
+      int g = (u * 16) >> 7;
+      uint32_t aoff = abase + (uint32_t)(u * 16) * 4u;
+      float4 av0, av1, av2, av3;
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av0.x), "=f"(av0.y), "=f"(av0.z), "=f"(av0.w)
+                   : "r"(aoff));
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av1.x), "=f"(av1.y), "=f"(av1.z), "=f"(av1.w)
+                   : "r"(aoff + 16u));
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av2.x), "=f"(av2.y), "=f"(av2.z), "=f"(av2.w)
+                   : "r"(aoff + 32u));
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av3.x), "=f"(av3.y), "=f"(av3.z), "=f"(av3.w)
+                   : "r"(aoff + 48u));
+      __half2 ah[8];
+      ah[0] = __floats2half2_rn(av0.x, av0.y);
+      ah[1] = __floats2half2_rn(av0.z, av0.w);
+      ah[2] = __floats2half2_rn(av1.x, av1.y);
+      ah[3] = __floats2half2_rn(av1.z, av1.w);
+      ah[4] = __floats2half2_rn(av2.x, av2.y);
+      ah[5] = __floats2half2_rn(av2.z, av2.w);
+      ah[6] = __floats2half2_rn(av3.x, av3.y);
+      ah[7] = __floats2half2_rn(av3.z, av3.w);
+      uint32_t cur = sbase + (uint32_t)(ss % STAGES) * STRIDE;
+#pragma unroll
+      for (int t = 0; t < RBT; t++) {
+        uint4 raw = k_lds_u4(cur + (uint32_t)((t * 32 + lane) * 16));
+        float wsc = __ldg(&sn[t][g]);
+        acc[t] += k_mac_u4(ah, raw) * wsc;
+      }
+    }
+    k_cpa_wait<0>();
+    __syncwarp();
+    float sv[RBT];
+#pragma unroll
+    for (int t = 0; t < RBT; t++) {
+      float s = acc[t];
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) {
+        s += __shfl_down_sync(0xffffffffu, s, o);
+      }
+      sv[t] = s;
+    }
+    if (lane == 0) {
+#pragma unroll
+      for (int t = 0; t < RBT; t++) {
+        sv[t] = k_bf16(sv[t]);
+      }
+#pragma unroll
+      for (int t = 0; t < RBT; t++) {
+        int n = n0 + t;
+        if (n >= N) {
+          continue;
+        }
+        int off = n % K_QKHEAD;
+        if (off >= 512) {
+          int peo = off - 512;
+          if ((peo & 1) == 0 && t + 1 < RBT) {
+            float c = __bfloat162float(cos_sin[pos * K_COSSIN_STRIDE + peo]);
+            float s = __bfloat162float(
+                cos_sin[pos * K_COSSIN_STRIDE + K_COSSIN_SINOFF + peo]);
+            float q0 = sv[t], q1 = sv[t + 1];
+            sv[t] = k_bf16(q0 * c - q1 * s);
+            sv[t + 1] = k_bf16(q1 * c + q0 * s);
+          }
+        }
+      }
+#pragma unroll
+      for (int t = 0; t < RBT; t++) {
+        if (t < rb) {
+          out[n0 + t] = sv[t];
+        }
+      }
+    }
+  }
+}
+
+// Lever 3 companion: o_proj cp.async GEMV (fused residual add) that sources its
+// ACTIVATION from block-local SHARED s_adeq (already-dequantized g_red).
+// Byte-identical to gemv_grid_cpa_oproj_t EXCEPT the activation source. Lets the
+// caller drop the quant_gred->o_proj grid barrier.
+template <int RBT, int STAGES>
+__device__ __forceinline__ void gemv_grid_cpa_oproj_smem_t(
+    float const *__restrict__ s_adeq,
+    __nv_fp8_e4m3 const *__restrict__ W,
+    float const *__restrict__ Wsc,
+    __nv_bfloat16 const *__restrict__ resid,
+    __nv_bfloat16 *__restrict__ out,
+    int N,
+    int K,
+    int gwarp,
+    int gwarps,
+    int lane,
+    uint4 *__restrict__ wbuf) {
+  int KGg = K / K_GRP;
+  int nU = K / 16;
+  int SS = nU >> 5;
+  int nblk = (N + RBT - 1) / RBT;
+  const uint32_t sbase = __cvta_generic_to_shared(wbuf);
+  const uint32_t abase = __cvta_generic_to_shared(s_adeq);
+  const uint32_t STRIDE = (uint32_t)(RBT * 32 * 16);
+  for (int blk = gwarp; blk < nblk; blk += gwarps) {
+    int n0 = blk * RBT;
+    int rb = (n0 + RBT <= N) ? RBT : (N - n0);
+    uint4 const *Wn[RBT];
+    float const *sn[RBT];
+#pragma unroll
+    for (int t = 0; t < RBT; t++) {
+      int n = (n0 + t < N) ? n0 + t : N - 1;
+      Wn[t] = reinterpret_cast<uint4 const *>(W + (size_t)n * K);
+      sn[t] = Wsc + (size_t)(n >> 7) * KGg; // row n's 128-block scale-row
+    }
+    float acc[RBT];
+#pragma unroll
+    for (int t = 0; t < RBT; t++) {
+      acc[t] = 0.f;
+    }
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; s++) {
+      if (s < SS) {
+        uint32_t b = sbase + (uint32_t)s * STRIDE;
+#pragma unroll
+        for (int t = 0; t < RBT; t++) {
+          k_cpa16(b + (uint32_t)((t * 32 + lane) * 16), &Wn[t][s * 32 + lane]);
+        }
+      }
+      k_cpa_commit();
+    }
+    for (int ss = 0; ss < SS; ss++) {
+      int sp = ss + (STAGES - 1);
+      if (sp < SS) {
+        uint32_t b = sbase + (uint32_t)(sp % STAGES) * STRIDE;
+#pragma unroll
+        for (int t = 0; t < RBT; t++) {
+          k_cpa16(b + (uint32_t)((t * 32 + lane) * 16), &Wn[t][sp * 32 + lane]);
+        }
+      }
+      k_cpa_commit();
+      k_cpa_wait<STAGES - 1>();
+      __syncwarp();
+      int u = ss * 32 + lane;
+      int g = (u * 16) >> 7;
+      uint32_t aoff = abase + (uint32_t)(u * 16) * 4u;
+      float4 av0, av1, av2, av3;
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av0.x), "=f"(av0.y), "=f"(av0.z), "=f"(av0.w)
+                   : "r"(aoff));
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av1.x), "=f"(av1.y), "=f"(av1.z), "=f"(av1.w)
+                   : "r"(aoff + 16u));
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av2.x), "=f"(av2.y), "=f"(av2.z), "=f"(av2.w)
+                   : "r"(aoff + 32u));
+      asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                   : "=f"(av3.x), "=f"(av3.y), "=f"(av3.z), "=f"(av3.w)
+                   : "r"(aoff + 48u));
+      __half2 ah[8];
+      ah[0] = __floats2half2_rn(av0.x, av0.y);
+      ah[1] = __floats2half2_rn(av0.z, av0.w);
+      ah[2] = __floats2half2_rn(av1.x, av1.y);
+      ah[3] = __floats2half2_rn(av1.z, av1.w);
+      ah[4] = __floats2half2_rn(av2.x, av2.y);
+      ah[5] = __floats2half2_rn(av2.z, av2.w);
+      ah[6] = __floats2half2_rn(av3.x, av3.y);
+      ah[7] = __floats2half2_rn(av3.z, av3.w);
+      uint32_t cur = sbase + (uint32_t)(ss % STAGES) * STRIDE;
+#pragma unroll
+      for (int t = 0; t < RBT; t++) {
+        uint4 raw = k_lds_u4(cur + (uint32_t)((t * 32 + lane) * 16));
+        float wsc = __ldg(&sn[t][g]);
+        acc[t] += k_mac_u4(ah, raw) * wsc;
+      }
+    }
+    k_cpa_wait<0>();
+    __syncwarp();
+#pragma unroll
+    for (int t = 0; t < RBT; t++) {
+      float s = acc[t];
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) {
+        s += __shfl_down_sync(0xffffffffu, s, o);
+      }
+      if (lane == 0 && t < rb) {
+        out[n0 + t] =
+            __float2bfloat16(k_bf16(s + __bfloat162float(resid[n0 + t])));
+      }
+    }
+  }
+}
+#endif // MPK_DSV3_ATTN_FAST
+
 // ===========================================================================
 //  FLASH MLA partial: block (h,split) computes the un-normalized softmax over
 //  its KV sub-range [r0,r1). All 256 threads cooperate. (VERBATIM; reads
@@ -943,7 +1342,10 @@ __device__ __noinline__ void
 
 // S10+S11 FUSED: FLASH MLA merge that ALSO quantizes its own head's 512
 // attn_out INLINE. (VERBATIM; reads scratch g_mla_*, writes g_attn +
-// g_attn_deq.)
+// g_attn_deq.) When MPK_DSV3_ATTN_FAST (lever 5, WUV_HEAD_SPINWAIT), it ALSO
+// publishes the per-head "g_attn_deq[h] is ready" flag (device release) so the
+// W_UV stage can spin-wait per head instead of a merge->W_UV grid barrier;
+// g_head_wuv_ready is the [16] flag array (nullptr when the lever is off).
 __device__ __noinline__ void
     mla_merge_quant(float *__restrict__ g_attn,
                     float *__restrict__ g_attn_deq,
@@ -953,7 +1355,9 @@ __device__ __noinline__ void
                     float *__restrict__ s_attn,
                     float *__restrict__ red8,
                     int h,
-                    int nsp) {
+                    int nsp,
+                    int *__restrict__ g_head_wuv_ready) {
+  (void)g_head_wuv_ready;
   int tid = threadIdx.x, lane = tid & 31, warpl = tid >> 5;
   float const *mrow = &g_mla_m[h * MLA_SPLITS];
   float const *lrow = &g_mla_l[h * MLA_SPLITS];
@@ -1006,6 +1410,32 @@ __device__ __noinline__ void
       dq[j] = (float)__nv_fp8_e4m3(vq) * ys;
     }
   }
+#if MPK_DSV3_ATTN_FAST
+  // Lever 5 (WUV_HEAD_SPINWAIT): publish "head h's g_attn_deq is ready" to the
+  // W_UV stage (replaces the merge->W_UV grid barrier).
+  // CRITICAL (ferret v131 line 1147; reviewer+Codex-vetted): the dequant loop
+  // above is MULTI-WARP — warps 0..3 (threads 0..127) each wrote a 128-wide
+  // slice of g_attn_deq[h]. tid0's __threadfence orders only tid0's OWN prior
+  // accesses, so WITHOUT this __syncthreads tid0 could flip the flag before
+  // warps 1..3 even issue their g_attn_deq stores -> a consumer CTA that
+  // acquires the flag reads lanes 0..31 fresh but 32..127 STALE from a previous
+  // decode step (scratch persists). This block-wide __syncthreads makes all 4
+  // V-group warps' g_attn_deq[h] writes complete (and, via the barrier, visible
+  // to tid0) BEFORE tid0 publishes. Then tid0 does a DEVICE-scope release (PTX
+  // st.release.gpu + belt-and-suspenders __threadfence, which transitively
+  // orders the OTHER warps' now-syncthreads-published stores) so all of head h's
+  // deq is visible to other CTAs BEFORE the flag flips to 1. DEVICE scope is
+  // correct (all 16 heads live on this rank's GPU; .sys is NOT needed). The
+  // "memory" clobber stops the compiler sinking a g_attn_deq store past the flag.
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    __threadfence(); // device release
+    asm volatile("st.global.release.gpu.u32 [%0], %1;\n" ::"l"(
+                     &g_head_wuv_ready[h]),
+                 "r"(1)
+                 : "memory");
+  }
+#endif
 }
 
 // ===========================================================================
@@ -1020,14 +1450,51 @@ __device__ __noinline__ void
                  float *__restrict__ g_red,
                  int gwarp,
                  int gwarps,
-                 int lane) {
+                 int lane,
+                 int *__restrict__ g_head_wuv_ready) {
+  (void)g_head_wuv_ready;
   int nU = K_KVLORA / 16;     // 32 uint4 per W row
   int KGv = K_KVLORA / K_GRP; // 4
   int rows_per_head = K_VHEAD / RB;
   int nblk = K_HLOCAL * rows_per_head;
+#if MPK_DSV3_ATTN_FAST
+  // Lever 5: remember the head whose readiness we already acquired. The
+  // grid-stride visits blocks of one head consecutively (blk/rows_per_head), so
+  // each warp spins at most once per head.
+  int last_h = -1;
+#endif
   for (int blk = gwarp; blk < nblk; blk += gwarps) {
     int h = blk / rows_per_head;
     int nr0 = (blk % rows_per_head) * RB;
+#if MPK_DSV3_ATTN_FAST
+    // Lever 5 (WUV_HEAD_SPINWAIT): per-head merge->W_UV spin-wait (replaces the
+    // merge->W_UV grid barrier). Lane 0 spins on g_head_wuv_ready[h] with a
+    // DEVICE-scope ACQUIRE load (PTX ld.acquire.gpu — device-coherent, NOT
+    // __ldg/.nc so it never reads a stale cached value across decode steps);
+    // once it observes 1 the matching producer release makes g_attn_deq[h]
+    // visible. The "memory" clobber stops the compiler hoisting g_attn_deq
+    // reads above the wait; __threadfence is belt-and-suspenders; __syncwarp
+    // hands the acquire ordering to lanes 1..31 (all 32 lanes share blk, so h
+    // is warp-uniform and the branch is non-divergent). No deadlock: the
+    // merge-blocks make unconditional progress so every flag is eventually set.
+    if (h != last_h) {
+      if (lane == 0) {
+        int rdy = 0;
+        while (rdy == 0) {
+          asm volatile("ld.global.acquire.gpu.u32 %0, [%1];\n"
+                       : "=r"(rdy)
+                       : "l"(&g_head_wuv_ready[h])
+                       : "memory");
+          if (rdy == 0) {
+            __nanosleep(64);
+          }
+        }
+        __threadfence(); // device acquire (belt-and-suspenders)
+      }
+      __syncwarp(); // broadcast acquire ordering to all lanes
+      last_h = h;
+    }
+#endif
     float const *ar = &g_attn_deq[h * K_KVLORA];
     float const *sc = kvbv_s + (size_t)h * KGv;
     uint4 const *Wh = reinterpret_cast<uint4 const *>(
@@ -1206,6 +1673,25 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   float *s_score = reinterpret_cast<float *>(s_smem + soff);
   // (s_score holds 512 floats = the per-head scores; also reused as s_attn in
   // mla_merge_quant — both are <=512 floats, block-local.)
+  soff += attn_au16((size_t)512 * sizeof(float));
+#if MPK_DSV3_ATTN_FAST
+  // Levers 1-3 block-local activation buffer (28KB f32). ALIASED across three
+  // NON-OVERLAPPING phases (exactly as ferret v131): qkv_a reads s_act[0:7168]
+  // (dequant hidden), q_b reads s_act[0:1536] (q_a_layernorm deq), o_proj reads
+  // s_act[0:2048] (g_red deq). One buffer subsumes the prior per-phase buffers.
+  // 16-aligned (the smem-sourced GEMVs read it via ld.shared.v4.f32). Total
+  // dynamic smem now ~158KB << the B200 ~216KB pool (bps stays 1). The whole
+  // extern array is __align__(1024) (megakernel convention), s_act lands at a
+  // 16-aligned offset which the v4.f32 / float4 reads require.
+  float *s_act = reinterpret_cast<float *>(s_smem + soff);
+  float *s_qbdeq = s_act; // q_b phase reuses the front of s_act
+  float *s_odeq = s_act;  // o_proj phase reuses the front of s_act
+  soff += attn_au16((size_t)K_HIDDEN * sizeof(float));
+  // Lever 4: "this block is head h's last split" flag (block-local, set by tid0
+  // after the per-head atomicAdd, broadcast to the block via __syncthreads).
+  __shared__ int s_mla_last;
+#endif
+  (void)soff;
 
   int tid = threadIdx.x, lane = tid & 31, warpl = tid >> 5;
   uint4 *my_wbuf = s_wbuf + (size_t)warpl * CPA_RING_U4;
@@ -1321,6 +1807,24 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
 
   // ===================== S2: quantize hidden + qkv_a GEMM
   // =====================
+#if MPK_DSV3_ATTN_FAST
+  // Lever 1 (HIDDEN_BLOCK_LOCAL): every block quantizes hidden[7168]
+  // block-cooperatively ONCE into block-local SHARED s_act (the trailing
+  // __syncthreads inside replaces the quant_hidden->qkv_a grid barrier), then
+  // qkv_a reads s_act. Byte-identical UE8M0 dequant to quant_hidden_grid's deq.
+  quant_hidden_block_smem(hidden, s_act, K_HIDDEN, warpl, lane);
+  gemv_grid_cpa_t<2, 6>(s_act, // qkv_a reads BLOCK-LOCAL s_act (no grid barrier)
+                        qkv_a_w,
+                        qkv_a_s,
+                        sc.g_qkva,
+                        K_QKVAN,
+                        K_HIDDEN,
+                        gwarp,
+                        gwarps,
+                        lane,
+                        my_wbuf);
+  attn_grid_barrier(barrier, ATTN_NUM_WORKERS); // qkv_a -> layernorm (KEPT)
+#else
   quant_hidden_grid(
       hidden, sc.g_hdeq, sc.g_hf8, sc.g_hsc, K_HIDDEN, gwarp, gwarps, lane);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
@@ -1335,6 +1839,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                         lane,
                         my_wbuf);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
+#endif
   // tap S2: qkv_a_out [2176] = [q_a(1536) | c_latent(512) | k_pe(64) | pad(64)]
   ATTN_DBG_TAP("qkv_a_out", out, sc.g_qkva, K_QKVAN, step, worker_idx);
   // DECISIVE: tap the RAW per-slice GEMV outputs BEFORE any norm — q_a slice
@@ -1388,6 +1893,63 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
     }
 #endif
     int ngq = K_QLORA / K_GRP; // 12
+#if MPK_DSV3_ATTN_FAST
+    // Lever 2 (QA_BLOCK_LOCAL): every block computes ALL 12 groups (warp w owns
+    // groups {w, w+NWARP}) of q_a_layernorm+UE8M0-requant into block-local
+    // SHARED s_qbdeq (dequantized values, byte-identical to the grid-strided
+    // g_qbdeq below). q_b then reads s_qbdeq from shared -> drops the
+    // layernorm->q_b grid barrier (a block __syncthreads, issued before q_b
+    // below, replaces it). The global g_qbdeq/g_qbf8/g_qbsc are written ONLY
+    // under MPK_ATTN_DBG so the q_a_normed tap still works; the default-fast
+    // build skips them (q_b sources s_qbdeq).
+    for (int g = warpl; g < ngq; g += NWARP) {
+      float const *src = sc.g_qkva + g * K_GRP;
+      __nv_bfloat16 const *w = q_a_ln_w + g * K_GRP;
+      float nv[4];
+      float mx = 1e-10f;
+#pragma unroll
+      for (int t = 0; t < 4; t++) {
+        int j = lane + t * 32;
+        float v = k_bf16(src[j] * q_rcp * __bfloat162float(w[j]));
+        nv[t] = v;
+        mx = fmaxf(mx, fabsf(v));
+      }
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) {
+        float ot = __shfl_xor_sync(0xffffffffu, mx, o);
+        mx = fmaxf(mx, ot);
+      }
+      float ys = fmaxf(mx / K_FP8MAX, 1e-10f);
+      float yq = k_dec_ue8m0(k_enc_ue8m0(ys));
+      float *d = s_qbdeq + g * K_GRP; // BLOCK-LOCAL shared (q_b reads this)
+#pragma unroll
+      for (int t = 0; t < 4; t++) {
+        int j = lane + t * 32;
+        float qv = fminf(fmaxf(nv[t] / yq, -K_FP8MAX), K_FP8MAX);
+        d[j] = (float)__nv_fp8_e4m3(qv) * yq;
+      }
+#ifdef MPK_ATTN_DBG
+      // Mirror to the global g_qbdeq (and g_qbf8/g_qbsc) for the q_a_normed tap
+      // only — DEBUG-gated so the default-fast build stays clean. Block 0 only
+      // (identical across blocks) to avoid 136x redundant global writes.
+      if (worker_idx == 0) {
+        float *dg = sc.g_qbdeq + g * K_GRP;
+        __nv_fp8_e4m3 *d8 = sc.g_qbf8 + g * K_GRP;
+#pragma unroll
+        for (int t = 0; t < 4; t++) {
+          int j = lane + t * 32;
+          float qv = fminf(fmaxf(nv[t] / yq, -K_FP8MAX), K_FP8MAX);
+          __nv_fp8_e4m3 qf = __nv_fp8_e4m3(qv);
+          d8[j] = qf;
+          dg[j] = (float)qf * yq;
+        }
+        if (lane == 0) {
+          sc.g_qbsc[g] = yq;
+        }
+      }
+#endif
+    }
+#else
     for (int g = gwarp; g < ngq; g += gwarps) {
       float const *src = sc.g_qkva + g * K_GRP;
       __nv_bfloat16 const *w = q_a_ln_w + g * K_GRP;
@@ -1421,6 +1983,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
         sc.g_qbsc[g] = yq;
       }
     }
+#endif
     // kv_a_layernorm -> kv_cache row [0:512). grid-strided over 512 elements.
     for (int i = gtid; i < K_KVLORA; i += gthreads) {
       float v = k_bf16(sc.g_qkva[K_QLORA + i] * kv_rcp *
@@ -1449,7 +2012,22 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
       }
     }
   }
+#if MPK_DSV3_ATTN_FAST
+  // Lever 2 (QA_BLOCK_LOCAL): the layernorm->q_b grid barrier is DROPPED — only
+  // a block __syncthreads is needed before q_b reads block-local s_qbdeq (the
+  // q_a_layernorm+requant above was block-cooperative into s_qbdeq). The
+  // kv_a_layernorm/rope writes to kv_cache feed MLA, which is published
+  // cross-block by the q_b->MLA grid barrier below. Under MPK_ATTN_DBG we KEEP
+  // the grid barrier so the kv_cache HISTORY taps below see published cross-CTA
+  // writes (debug build only — the default-fast/perf build uses __syncthreads).
+#ifdef MPK_ATTN_DBG
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
+#else
+  __syncthreads();
+#endif
+#else
+  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
+#endif
   // tap S3/S5: q_a_normed-dequant (q_b input) [1536]; the appended kv_cache row
   // [c_latent(512) | k_pe_rot(64)] is tapped from the live buffer for this
   // step.
@@ -1546,6 +2124,40 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
 
   // ===================== S4+S6 FUSED: q_b GEMM + rope -> g_qpe
   // ================
+#if MPK_DSV3_ATTN_FAST
+  // Lever 2: q_b reads its activation from block-local SHARED s_qbdeq (no
+  // layernorm->q_b grid barrier). Byte-identical GEMV+rope math.
+  gemv_grid_cpa_qb_rope_smem_t<8, 4>(s_qbdeq,
+                                     q_b_w,
+                                     q_b_s,
+                                     sc.g_qpe,
+                                     K_HLOCAL * K_QKHEAD,
+                                     K_QLORA,
+                                     cos_sin,
+                                     pos,
+                                     gwarp,
+                                     gwarps,
+                                     lane,
+                                     my_wbuf);
+  // === HAZARD #1: ZERO-BEFORE-BARRIER ===================================
+  // Levers 4 & 5: zero the per-head completion counters AND readiness flags
+  // BEFORE the q_b->MLA grid barrier below. That barrier's __threadfence (inside
+  // attn_grid_barrier) is what publishes these zero stores to EVERY CTA, so the
+  // MLA partials that follow see a FRESHLY-ZEROED count for THIS decode step.
+  // These arrays live in the per-task SCRATCH (persist across steps and are NOT
+  // re-zeroed by anything else), so without this explicit pre-barrier zero a
+  // stale count from the previous step would make the "last split"
+  // (atomicAdd == nsp-1) fire early or never -> wrong merge / hang. The zero
+  // MUST stay on the producer side of the barrier; do NOT move it past it.
+  if (gtid < K_HLOCAL) {
+    sc.g_head_done[gtid] = 0;
+    sc.g_head_wuv_ready[gtid] = 0;
+  }
+  attn_grid_barrier(barrier,
+                    ATTN_NUM_WORKERS); // q_b->MLA: publishes g_qpe, kv_cache,
+                                       // AND the zeroed flags (the barrier's
+                                       // __threadfence does the cross-CTA pub)
+#else
   gemv_grid_cpa_qb_rope_t<8, 4>(sc.g_qbdeq,
                                 q_b_w,
                                 q_b_s,
@@ -1559,6 +2171,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                                 lane,
                                 my_wbuf);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
+#endif
   // tap S4/S6: q_nope_pe post-rope [16*576] (the MLA query). Print head-0's
   // nope-start (first 4) + a checksum over all 16 heads.
   ATTN_DBG_TAP(
@@ -1592,6 +2205,76 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   }
   int tile = (KV + nsp - 1) / nsp;
   int ntask = K_HLOCAL * nsp;
+#if MPK_DSV3_ATTN_FAST
+  // === HAZARD #2: ntask = 16*nsp <= 16*MLA_SPLITS = 128 < ATTN_NUM_WORKERS(136)
+  // So every worker runs AT MOST ONE partial task (idx=blockIdx.x guarded by
+  // idx<ntask), the per-head atomic counter is incremented exactly nsp times
+  // (once per split-block of head h), and ALL of a head's partials run before
+  // any W_UV spinner can need that head (all <=128 partial-blocks are among the
+  // 136 workers; the producers make unconditional progress). Holds for nsp<=8
+  // i.e. KV up to MLA_SPLITS*64 per the tile math.
+  // Lever 4 (MLA_ATOMIC_MERGE): one partial per block; the LAST split-block of
+  // head h (atomicAdd return == nsp-1) runs that head's merge IN-PLACE -> drops
+  // the partial->merge grid barrier. Memory ordering (device-scope release/
+  // acquire message-passing): producer writers store g_mla_acc -> mla_partial's
+  // trailing __syncthreads (block barrier folds all 256 threads' stores into
+  // tid0) -> tid0 __threadfence (device release) -> atomicAdd. Consumer (last
+  // block): __threadfence (device acquire, after observing the final count) ->
+  // __syncthreads (hand the acquired ordering to the other 255 threads) -> merge
+  // reads g_mla_acc from the OTHER split-blocks. DEVICE scope (NOT .sys): all
+  // heads/splits are on this rank's GPU.
+  {
+    int idx = worker_idx;
+    if (idx < ntask) {
+      int h = idx / nsp, sp = idx % nsp;
+      int r0 = sp * tile, r1 = r0 + tile;
+      if (r1 > KV) {
+        r1 = KV;
+      }
+      mla_partial(kv_cache,
+                  sc.g_qpe,
+                  sc.g_mla_acc,
+                  sc.g_mla_m,
+                  sc.g_mla_l,
+                  s_score,
+                  red8,
+                  h,
+                  sp,
+                  r0,
+                  r1,
+                  sm,
+                  step); // ends with __syncthreads (publishes acc into tid0)
+      if (threadIdx.x == 0) {
+        __threadfence(); // device release (publish g_mla_acc)
+        int old = atomicAdd(&sc.g_head_done[h], 1);
+        s_mla_last = (old == nsp - 1) ? 1 : 0;
+        if (s_mla_last) {
+          __threadfence(); // device acquire (this block sees all splits' acc)
+        }
+      }
+      __syncthreads(); // broadcast s_mla_last + hand the acquire to all threads
+      if (s_mla_last) {
+        // S10+S11 FUSED: this last-split block merges head h's nsp partials AND
+        // quantizes its 512 attn elems in-block; mla_merge_quant ALSO sets
+        // g_head_wuv_ready[h]=1 (device release) at its end (lever 5).
+        mla_merge_quant(sc.g_attn,
+                        sc.g_attn_deq,
+                        sc.g_mla_acc,
+                        sc.g_mla_m,
+                        sc.g_mla_l,
+                        s_score,
+                        red8,
+                        h,
+                        nsp,
+                        sc.g_head_wuv_ready);
+      }
+    }
+  }
+  // Lever 5 (WUV_HEAD_SPINWAIT): NO grid barrier here — wuv_bmm_grid spin-waits
+  // per head on g_head_wuv_ready[h]. The merge-blocks make unconditional
+  // progress so every flag is eventually set (no deadlock). The attn_out tap
+  // (reads g_attn cross-block) is RELOCATED to after the W_UV->o_proj barrier.
+#else
   for (int idx = worker_idx; idx < ntask; idx += ATTN_NUM_WORKERS) {
     int h = idx / nsp, sp = idx % nsp;
     int r0 = sp * tile, r1 = r0 + tile;
@@ -1623,20 +2306,62 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                     s_score,
                     red8,
                     h,
-                    nsp);
+                    nsp,
+                    /*g_head_wuv_ready=*/nullptr);
   }
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
   // tap S9/S10/S11: MLA attn_out [16*512] (head-0 first 4 + 16-head checksum).
   ATTN_DBG_TAP(
       "attn_out", out, sc.g_attn, K_HLOCAL * K_KVLORA, step, worker_idx);
+#endif
 
   // ===================== S12 W_UV BMM -> g_red ===============================
-  wuv_bmm_grid(sc.g_attn_deq, kvbv_w, kvbv_s, sc.g_red, gwarp, gwarps, lane);
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
+  wuv_bmm_grid(sc.g_attn_deq,
+               kvbv_w,
+               kvbv_s,
+               sc.g_red,
+               gwarp,
+               gwarps,
+               lane,
+#if MPK_DSV3_ATTN_FAST
+               sc.g_head_wuv_ready
+#else
+               nullptr
+#endif
+  );
+  attn_grid_barrier(barrier, ATTN_NUM_WORKERS); // W_UV -> * (KEPT: publishes
+                                                // g_red from all warps)
+#if MPK_DSV3_ATTN_FAST
+  // tap S9/S10/S11 RELOCATED here: the W_UV->* barrier above guarantees every
+  // head's merge completed (W_UV consumed g_attn_deq), so g_attn is fully
+  // visible cross-CTA now.
+  ATTN_DBG_TAP(
+      "attn_out", out, sc.g_attn, K_HLOCAL * K_KVLORA, step, worker_idx);
+#endif
   // tap S12: W_UV BMM out attn_out_reduced [2048].
   ATTN_DBG_TAP("wuv_reduced", out, sc.g_red, K_OIN, step, worker_idx);
 
   // ===================== S13: quantize g_red + o_proj GEMM + residual ========
+#if MPK_DSV3_ATTN_FAST
+  // Lever 3 (OPROJ_BLOCK_QUANT): g_red (visible cross-CTA after the W_UV->*
+  // barrier above) is quantized block-cooperatively ONCE into block-local
+  // SHARED s_odeq (the trailing __syncthreads inside replaces the
+  // quant_gred->o_proj grid barrier), then o_proj reads s_odeq. Byte-identical
+  // UE8M0 quant to quant_ue8m0_grid. This merges the old two-barrier pair
+  // (W_UV->quant + quant->o_proj) down to the single W_UV->* barrier above.
+  quant_ue8m0_block_smem(sc.g_red, s_odeq, K_OIN, warpl, lane);
+  gemv_grid_cpa_oproj_smem_t<8, 4>(s_odeq,
+                                   oproj_w,
+                                   oproj_s,
+                                   residual,
+                                   out,
+                                   K_HIDDEN,
+                                   K_OIN,
+                                   gwarp,
+                                   gwarps,
+                                   lane,
+                                   my_wbuf);
+#else
   quant_ue8m0_grid(sc.g_red, sc.g_odeq, K_OIN, gwarp, gwarps, lane);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
   gemv_grid_cpa_oproj_t<8, 4>(sc.g_odeq,
@@ -1650,6 +2375,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                               gwarps,
                               lane,
                               my_wbuf);
+#endif
   // tap S13: final attn_proj_out [7168] (o_proj + residual, pre-AR) — the FULL
   // vector (the prior version was a worker-subset bug that summed only out[0]).
 #ifdef MPK_ATTN_DBG
