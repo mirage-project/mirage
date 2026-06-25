@@ -308,6 +308,10 @@ def get_compile_command(
         flags = flags + ["-DMPK_DSV3_FORCEINLINE", "-DMPK_DSV3_TOPK_PARALLEL"]
     if _tp8_decode:
         flags = flags + ["-DMPK_DSV3_MLA_FINESPLIT"]
+    # Debug-only: compile-in the attn-block-megakernel per-stage taps (default-OFF;
+    # byte-identical default build). Used to localize the attn recurrence bug.
+    if os.environ.get("MPK_ATTN_DBG") == "1":
+        flags = flags + ["-DMPK_ATTN_DBG"]
     # MLA_REDUCE_1WAVE (rd_dv=4 / 128-CTA 1-wave reduce) HELD OFF pending a box A/B
     # token-identity check: the 12.20ms campaign-best ran FINESPLIT-ON +
     # REDUCE_1WAVE-OFF (the 6/20 partial-gate bug never compiled the flag), so the
@@ -2663,6 +2667,120 @@ class PersistentKernel:
         self.kn_graph.customized(tensors + [out], tb_graph)
         self.kn_graph.register_task(
             tb_graph, "ffn_mlp_megakernel_sm100", [])
+
+
+    def ffn_full_megakernel_layer(
+        self,
+        hidden,
+        w13,
+        w13_scale_fp32,
+        w2,
+        w2_scale_fp32,
+        rmsnorm_weight,
+        router_gate_weight,
+        bias,
+        wgu_raw,
+        wgu_scale,
+        wdn,
+        wdn_scale,
+        out,
+        barrier_scratch,
+        local_expert_start: int,
+        num_local_experts: int,
+        routed_scaling_factor: float = 2.5,
+        grid_dim=(136, 1, 1),
+        block_dim=(512, 1, 1),
+    ):
+        # FULLY-fused FFN mega-task (analog of ffn_mlp_megakernel_layer): one
+        # task absorbs rmsnorm + router-gate-GEMV + topk-sigmoid + the whole
+        # MoE chain. 14 input slots = the HARD MAX_INPUTS_PER_TASK cap. Vs the
+        # COLD FFN, slots 5/6/7 carry rmsnorm_weight/router_gate_weight/bias
+        # (the routing is computed INTERNALLY, so the topk outputs are not
+        # inputs). `out` is the single tracked output (written through the
+        # output slot). `local_expert_start`/`num_local_experts` define this
+        # EP rank's local expert range for the internal topk -> local filter;
+        # they are emitted as literals into the dispatch snippet (the range is
+        # rank-specific, not a compile-time constant).
+        import struct
+
+        scaling_bits = struct.unpack(
+            "i", struct.pack("f", routed_scaling_factor))[0]
+        tensors = [
+            hidden,
+            w13,
+            w13_scale_fp32,
+            w2,
+            w2_scale_fp32,
+            rmsnorm_weight,
+            router_gate_weight,
+            bias,
+            wgu_raw,
+            wgu_scale,
+            wdn,
+            wdn_scale,
+            out,
+            barrier_scratch,
+        ]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        for tensor in tensors:
+            tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+        tb_graph.new_input(out, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(tensors + [out], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "ffn_full_megakernel_sm100",
+            [local_expert_start, num_local_experts, scaling_bits])
+
+
+    def attn_block_megakernel_layer(
+        self,
+        hidden,
+        qkv_a_w,
+        qkv_a_s,
+        ln_weights,
+        q_b_w,
+        q_b_s,
+        cos_sin,
+        kv_cache,
+        kvbv_w,
+        kvbv_s,
+        oproj_w,
+        oproj_s,
+        residual,
+        out,
+        scratch,
+        grid_dim=(136, 1, 1),
+        block_dim=(256, 1, 1),
+    ):
+        # Fused decode-attention megakernel (analog of ffn_mlp_megakernel_layer).
+        # 14 input slots = the HARD MAX_INPUTS_PER_TASK cap: the two layernorm
+        # weights are pre-concatenated into `ln_weights` ([q_a_ln|kv_a_ln]) and
+        # cos/sin into `cos_sin` ([cos|sin] per row). `out` is the single
+        # tracked output; kv_cache is read+written in place through its input
+        # slot (a root cuda_tensor's input/output descriptors resolve to the
+        # same physical address, so the in-place KV write persists across steps).
+        tensors = [
+            hidden,
+            qkv_a_w,
+            qkv_a_s,
+            ln_weights,
+            q_b_w,
+            q_b_s,
+            cos_sin,
+            kv_cache,
+            kvbv_w,
+            kvbv_s,
+            oproj_w,
+            oproj_s,
+            residual,
+            scratch,
+        ]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        for tensor in tensors:
+            tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+        tb_graph.new_input(out, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(tensors + [out], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph, "attn_block_megakernel_sm100", [])
 
 
     def fp8_group_gemm_smallm_layer(

@@ -6607,6 +6607,52 @@ int TaskRegister::register_ffn_mlp_megakernel_sm100_task(
   return register_task_variant(TASK_FFN_MLP_MEGAKERNEL_SM100, code.to_string());
 }
 
+int TaskRegister::register_ffn_full_megakernel_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  // params = [local_expert_start, num_local_experts, routed_scaling_factor_bits]
+  // — the EP-local expert range + the topk scaling, emitted as literals into the
+  // dispatch snippet (the rank's local range is not a compile-time constant).
+  assert(params.size() == 3);
+  int local_expert_start = params[0];
+  int num_local_experts = params[1];
+  float scaling_factor;
+  memcpy(&scaling_factor, &params[2], sizeof(float));
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::ffn_full_megakernel_sm100::"
+         "ffn_full_megakernel_sm100_task_impl(");
+  code.e("    task_desc,");
+  code.e("    task_desc->task_metadata.merge_task_offset,");
+  code.e("    $,", local_expert_start);
+  code.e("    $,", num_local_experts);
+  // Emit the float as a hex bit-pattern via __uint_as_float so the literal is
+  // exact (no decimal round-trip) — matches the topk_sigmoid scaling handling.
+  {
+    uint32_t bits;
+    memcpy(&bits, &scaling_factor, sizeof(uint32_t));
+    code.e("    __uint_as_float($u),", bits);
+  }
+  code.e("    runtime_config);");
+  return register_task_variant(TASK_FFN_FULL_MEGAKERNEL_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_attn_block_megakernel_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  assert(params.size() == 0);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::attn_block_megakernel_sm100::"
+         "attn_block_megakernel_sm100_task_impl(");
+  code.e("    task_desc,");
+  code.e("    task_desc->task_metadata.merge_task_offset,");
+  code.e("    runtime_config);");
+  return register_task_variant(TASK_ATTN_BLOCK_MEGAKERNEL_SM100,
+                               code.to_string());
+}
+
 // moe_permute_sm100 — see moe_permute_sm100.cuh for the contract.
 // Params (compile-time): [K, K_PACKED, MBT, TOPK, E_LOCAL, BM_PADDING]
 // Inputs (4): input_fp8 (mbt, K) u8,

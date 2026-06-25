@@ -518,7 +518,17 @@ void register_mugraph(
             }
             // FFN mega-task: grid=(num_workers, 1, 1). merge_task_offset
             // is the logical CTA id consumed in place of blockIdx.x.
-            if (task_type == TASK_FFN_MLP_MEGAKERNEL_SM100) {
+            if (task_type == TASK_FFN_MLP_MEGAKERNEL_SM100 ||
+                task_type == TASK_FFN_FULL_MEGAKERNEL_SM100) {
+              task.task_metadata.merge_task_offset = bid.x;
+            }
+            // Attention mega-task: grid=(num_workers, 1, 1). Same convention
+            // as the FFN mega-task — merge_task_offset is the logical CTA id
+            // (worker_idx) consumed in place of blockIdx.x. The decode
+            // position is sourced inside the task from runtime_config.step[0]
+            // (the same source mla_mtp_decode uses), so no extra metadata
+            // (request_id/kv_idx) is set here.
+            if (task_type == TASK_ATTN_BLOCK_MEGAKERNEL_SM100) {
               task.task_metadata.merge_task_offset = bid.x;
             }
             // SiLU + Mul (NEW MoE 2D path): grid=(num_workers, 1, 1).
@@ -1174,6 +1184,8 @@ TaskGraphResult print_task_graph(
   tgbody.inc_indent();
   code.e("#include \"persistent_kernel.cuh\"");
   code.e("#include \"tasks/blackwell/ffn_mlp_megakernel_sm100.cuh\"");
+  code.e("#include \"tasks/blackwell/ffn_full_megakernel_sm100.cuh\"");
+  code.e("#include \"tasks/blackwell/attn_block_megakernel_sm100.cuh\"");
   if (use_json_format) {
     code.e("#include <nlohmann/json.hpp>");
     code.e("#include <fstream>");
@@ -2016,6 +2028,10 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100";
   task_type_to_name[TASK_FFN_MLP_MEGAKERNEL_SM100] =
       "TASK_FFN_MLP_MEGAKERNEL_SM100";
+  task_type_to_name[TASK_FFN_FULL_MEGAKERNEL_SM100] =
+      "TASK_FFN_FULL_MEGAKERNEL_SM100";
+  task_type_to_name[TASK_ATTN_BLOCK_MEGAKERNEL_SM100] =
+      "TASK_ATTN_BLOCK_MEGAKERNEL_SM100";
   task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";
   task_type_to_name[TASK_MOE_UNPERMUTE_SM100] = "TASK_MOE_UNPERMUTE_SM100";
   task_type_to_name[TASK_TRANSPOSE_SCALE_SM100] = "TASK_TRANSPOSE_SCALE_SM100";

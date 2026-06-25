@@ -208,7 +208,13 @@ enum TaskType {
   // bs=1 contiguous KV append (replaces paged-cache append + gather):
   TASK_MLA_KV_APPEND_SM100 = 323,
   TASK_FFN_MLP_MEGAKERNEL_SM100 = 324,
-  TASK_SM100_TASK_END = 325, // SM100 end placeholder, not a real task
+  // Fused decode-attention megakernel (env-gated MPK_DSV3_ATTN_MEGAKERNEL=1).
+  // Uses the free 319 slot so TASK_SM100_TASK_END need not shift.
+  TASK_ATTN_BLOCK_MEGAKERNEL_SM100 = 319,
+  // Fully-fused FFN megakernel (env-gated MPK_DSV3_FFN_FULL_MEGAKERNEL=1):
+  // absorbs rmsnorm + router-gate-GEMV + topk-sigmoid + the whole MoE chain.
+  TASK_FFN_FULL_MEGAKERNEL_SM100 = 325,
+  TASK_SM100_TASK_END = 326, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,

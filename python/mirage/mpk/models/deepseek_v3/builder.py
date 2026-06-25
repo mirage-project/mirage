@@ -67,6 +67,22 @@ NUM_SHARED_EXPERTS = 1
 # Binding-map scratch total for TP8/EP2 decode: 2xuint32 barrier plus
 # MAX_ACTIVE=8 routed intermediates and shared-expert intermediates.
 FFN_MLP_MEGAKERNEL_SCRATCH_BYTES = 79472  # +W2_N*4 (28672) for phase-3 fp32 out_acc
+# FULLY-fused FFN mega-task scratch (rmsnorm+router+topk+MoE). MUST equal the
+# kernel's kernel::ffn_full_megakernel_sm100::SCRATCH_BYTES (computed there as the
+# %16-rounded sum of: 8B barrier + rmsnorm_out[7168]bf16 + a_fp8[7168] +
+# a_scale[56]f32 + logits[256]bf16 + inter[8*512]f32 + y13[8*1024]f32 +
+# i_fp8[8*512] + i_scale[8*4]f32 + sg[512]f32 + si_fp8[256] + si_scale[2]f32 +
+# out_acc[7168]f32 = 106608). %16 == 0 so bytes/2 bf16 element count is %8 (the
+# tensor_init 16B-vec zero-init static_assert).
+FFN_FULL_MEGAKERNEL_SCRATCH_BYTES = 106608
+# Attention mega-task scratch (TP8 decode, 16 local heads): 2xuint32 barrier +
+# all inter-stage activations the ferret kernel kept in __device__ globals
+# (g_hdeq/g_hf8/.../g_mla_acc), 16-byte aligned per section. MUST equal the
+# kernel's kernel::attn_block_megakernel_sm100::ATTN_SCRATCH_BYTES (verified at
+# build time: attn_make_scratch reaches 434464; 434720 carries 256B slack).
+# MUST be a multiple of 16: the scratch tensor's element count (bytes/2 bf16) must
+# be a multiple of 8 for tensor_init's 16B-vec zero-init static_assert.
+ATTN_BLOCK_MEGAKERNEL_SCRATCH_BYTES = 434720
 FIRST_MOE_LAYER = 3
 VOCAB_SIZE = 129280
 RMS_NORM_EPS = 1e-6
@@ -1549,10 +1565,227 @@ class DeepSeekV3Builder(GraphBuilder):
             state_dict[scale_key].float().contiguous(), f"{name}_scale")
         return w, s
 
+    def _build_mla_attention_megakernel(self, layer_idx: int,
+                                        state_dict: dict):
+        """Env-gated (MPK_DSV3_ATTN_MEGAKERNEL=1) fused decode-attention.
+
+        Registers ONE megakernel task (attn_block_megakernel_sm100) in place
+        of the ~13-task decode attention chain. The kernel runs the whole
+        block (qkv_a -> q_a_ln + kv_a_ln -> q_b -> YaRN rope -> kv_append ->
+        MLA decode -> reduce -> W_UV BMM -> o_proj + residual) on a 136-CTA
+        cooperative grid synced by the MPK atomic grid_barrier. Decode-only:
+        the kernel is hard-wired to the bs=1 M=1 TP8 decode geometry.
+
+        REUSES the SAME weight tensors the chain binds. Writes the per-layer
+        attn_proj_out (pre-AR; +residual fused). The post-attn rmsnorm + MLP/
+        MoE and the AllReduce stay OUTSIDE this task (unchanged).
+        """
+        assert self.mpk.num_workers == 136, (
+            "MPK_DSV3_ATTN_MEGAKERNEL needs num_workers==136 (B200 148-SM); "
+            f"got {self.mpk.num_workers}. The kernel's grid_barrier participant "
+            "count (ATTN_NUM_WORKERS) is hard-wired to 136.")
+        assert self.max_num_batched_tokens == 1, (
+            "MPK_DSV3_ATTN_MEGAKERNEL is a bs=1 / M=1 decode kernel; got "
+            f"mbt={self.max_num_batched_tokens}.")
+        assert self.world_size == 8, (
+            "MPK_DSV3_ATTN_MEGAKERNEL is hard-wired to TP8 (16 local q-heads, "
+            f"K_HLOCAL=16); got world_size={self.world_size}.")
+        # The kernel hardcodes step = runtime_config.step[0], so it is only
+        # correct for the single-active-request decode (row 0). Guard it.
+        assert self.mpk.max_num_batched_requests == 1, (
+            "MPK_DSV3_ATTN_MEGAKERNEL sources the decode position from "
+            "step[0]; it requires max_num_batched_requests==1, got "
+            f"{self.mpk.max_num_batched_requests}.")
+        prefix = f"model.layers.{layer_idx}."
+        attn = f"{prefix}self_attn."
+
+        # --- bf16 RMSNorm of the layer input (input_layernorm) -> `hidden` ---
+        # The kernel's S2 quantizes a BF16 RMSNorm'd hidden itself, so it needs
+        # the bf16 norm output. The default path's fused rmsnorm+qkv_a-quant
+        # task runs with emit_bf16=False (its bf16 out is unused), so we emit a
+        # dedicated per-layer bf16 RMSNorm here. (Minor: the caller's fused
+        # task still runs but its outputs are unread on this path — the main
+        # agent can gate it out later for a small efficiency win.)
+        w_input_ln = self.mpk.attach_input(
+            torch_tensor=state_dict[f"{prefix}input_layernorm.weight"],
+            name=f"layer_{layer_idx}_attnmega_input_layernorm")
+        hidden_bf16 = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_attnmega_hidden_bf16",
+            io_category="cuda_tensor")
+        self.mpk.rmsnorm_layer(
+            input=self.x, weight=w_input_ln, output=hidden_bf16,
+            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+            block_dim=(128, 1, 1),
+            process_dim=self.hidden_size)
+
+        # --- weights (SAME tensors the chain binds) -------------------------
+        # qkv_a_proj: fp8 (2176,7168) + f32 per-128-block scale_inv (17,56). The
+        # kernel's GEMV reads this fp32 [N/128,K/128] scale as a plain fp32
+        # (Wsc[(n>>7)*nk + g]), the SAME format the production
+        # fp8_gemm_dense_finen GEMV uses — RESOLVED, no reconcile needed.
+        w_qkv_a, s_qkv_a = self._attach_fp8_weight(
+            state_dict, f"{attn}qkv_a_proj.weight",
+            f"layer_{layer_idx}_attnmega_qkv_a_proj")
+        # q_a_layernorm (1536,) + kv_a_layernorm (512,) bf16, CONCATENATED into
+        # one ln_weights (2048,) buffer (the kernel reads q_a_ln at [0:1536) and
+        # kv_a_ln at [1536:2048)) to stay under MAX_INPUTS_PER_TASK=14.
+        ln_weights_pt = torch.cat([
+            state_dict[f"{attn}q_a_layernorm.weight"].to(torch.bfloat16),
+            state_dict[f"{attn}kv_a_layernorm.weight"].to(torch.bfloat16),
+        ], dim=0).contiguous()
+        w_ln = self.mpk.attach_input(
+            torch_tensor=ln_weights_pt,
+            name=f"layer_{layer_idx}_attnmega_ln_weights")
+        # q_b_proj ABSORBED decode form: fp8 (9216=16*576,1536) + f32 (72,12).
+        w_q_b, s_q_b = self._attach_fp8_weight(
+            state_dict, f"{attn}q_b_proj.weight",
+            f"layer_{layer_idx}_attnmega_q_b_proj")
+        # W_UV per-head BMM: kv_b_v_bmm_dense fp8 (16,128,512) + f32 (16,1,4).
+        # The (16,1,4) f32 scale MATCHES the kernel's `const float* kvbv_s`.
+        w_kvv, s_kvv = self._attach_bmm_weight_pair(
+            state_dict, f"{attn}kv_b_v_bmm_dense.weight",
+            f"{attn}kv_b_v_bmm_dense.weight_scale_inv",
+            f"layer_{layer_idx}_attnmega_kv_b_v_bmm_dense")
+        # o_proj_original: fp8 (7168,2048) + f32 (56,16).
+        w_o, s_o = self._attach_fp8_weight(
+            state_dict, f"{attn}o_proj_original.weight",
+            f"layer_{layer_idx}_attnmega_o_proj_original")
+
+        # --- flat contiguous KV buffer (the kernel both reads history rows
+        # [0,step) and writes the current row [step]). Rows padded to a 128
+        # multiple (same as the chain's mla_decode_kv). The megakernel is the
+        # SOLE writer of this buffer (S3/S5 do the kv_append internally), so no
+        # separate mla_kv_append task is registered — avoids a multi-writer
+        # case-3 on the same buffer. ---------------------------------------
+        _kv_rows_raw = (self.mpk.max_num_batched_requests
+                        * self.mpk.max_seq_length)
+        _kv_rows_pad = ((_kv_rows_raw + 127) // 128) * 128
+        mla_decode_kv = self.mpk.new_tensor(
+            dims=(_kv_rows_pad, self.qk_head_dim),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_attnmega_kv_contig",
+            io_category="cuda_tensor")
+
+        # --- cos/sin CONCATENATED into one cos_sin (max_seq, 128) buffer:
+        # [cos(64) | sin(64)] per row (the kernel reads cos at
+        # cos_sin[pos*128 + d], sin at cos_sin[pos*128 + 64 + d]). Layer-
+        # independent → built once and cached on self. ---------------------
+        if not hasattr(self, "_attnmega_cos_sin"):
+            cos_sin_pt = torch.cat(
+                [self._rope_cos_buf, self._rope_sin_buf],
+                dim=1).contiguous()  # (max_seq, 128) bf16, on cuda
+            self._attnmega_cos_sin_pt = cos_sin_pt  # keep alive (raw ptr)
+            self._attnmega_cos_sin = self.mpk.attach_input(
+                torch_tensor=cos_sin_pt, name="attnmega_cos_sin")
+
+        # --- per-layer output (pre-AR attn proj + residual) -----------------
+        self.attn_proj_out = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_attnmega_attn_proj_fused",
+            io_category="cuda_tensor")
+
+        # --- scratch (barrier + all inter-stage activations) ----------------
+        # %16 (not just %2): the scratch tensor's element count (bytes/2) must be a
+        # multiple of 8 for tensor_init's 16B-vec zero-init (the compile-time assert
+        # that bit the first attn-megakernel build).
+        assert ATTN_BLOCK_MEGAKERNEL_SCRATCH_BYTES % 16 == 0
+        attn_scratch = self.mpk.new_tensor(
+            dims=(1, ATTN_BLOCK_MEGAKERNEL_SCRATCH_BYTES // 2),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_attn_block_megakernel_scratch",
+            io_category="cuda_tensor")
+        # Zero the barrier counters (and the rest) before first use, exactly as
+        # the FFN mega-task does for its barrier_scratch.
+        self.mpk.tensor_init_layer(
+            target=attn_scratch,
+            dummy=hidden_bf16,
+            grid_dim=(1, 1, 1),
+            block_dim=(128, 1, 1),
+            dummy_input_map=(-1, -1, -1),
+            target_input_map=(-1, -1, -1),
+        )
+
+        # --- TP RowParallel o_proj combine (THE TP>1 correctness fix) -------
+        # o_proj_original.weight is sharded on dim=1 (the contraction dim) =>
+        # RowParallel => each rank's o_proj produces a FULL-hidden [7168]
+        # PARTIAL from ONLY its local head subset. These per-rank partials MUST
+        # be summed (AllReduce) across ranks, then the residual added EXACTLY
+        # ONCE. The chain does this inside its o_proj _fp8_linear (the world_size
+        # >1 branch). The fused-residual o_proj epilogue in the megakernel is
+        # only correct at world_size==1 (single rank, all 64 heads local); at
+        # TP>1 it leaves every rank holding (its-heads-only + residual), missing
+        # (N-1)/N of the heads -> garbage. So at TP>1: the kernel writes a
+        # residual-FREE partial (we bind a persistent ZERO buffer as its
+        # `residual`, so out[n] = o_proj_dot + 0), then allreduce_layer sums the
+        # partials AND adds the real residual once.
+        if self.world_size > 1:
+            # one persistent zero [mbt, hidden] buffer (zeroed once, never
+            # rewritten) so the megakernel's fused-residual epilogue adds 0 and
+            # the partial is residual-free. Shared across all attn-mega layers.
+            if not hasattr(self, "_attnmega_zero_resid"):
+                self._attnmega_zero_resid = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, self.hidden_size),
+                    dtype=bfloat16,
+                    name="attnmega_zero_resid",
+                    io_category="cuda_tensor")
+                # zero it once (the tensor_init task) using a dep-only dummy.
+                self.mpk.tensor_init_layer(
+                    target=self._attnmega_zero_resid,
+                    dummy=hidden_bf16,
+                    grid_dim=(1, 1, 1),
+                    block_dim=(128, 1, 1),
+                    dummy_input_map=(-1, -1, -1),
+                    target_input_map=(-1, -1, -1),
+                )
+            oproj_partial = self._new_tp_partial(
+                self.attn_proj_out,
+                f"layer_{layer_idx}_attnmega_oproj_partial")
+            mega_out = oproj_partial
+            mega_residual = self._attnmega_zero_resid
+        else:
+            mega_out = self.attn_proj_out
+            mega_residual = self.x
+
+        dsv3_tasks.attn_block_megakernel_layer(
+            self.mpk,
+            hidden=hidden_bf16,
+            qkv_a_w=w_qkv_a,
+            qkv_a_s=s_qkv_a,
+            ln_weights=w_ln,
+            q_b_w=w_q_b,
+            q_b_s=s_q_b,
+            cos_sin=self._attnmega_cos_sin,
+            kv_cache=mla_decode_kv,
+            kvbv_w=w_kvv,
+            kvbv_s=s_kvv,
+            oproj_w=w_o,
+            oproj_s=s_o,
+            residual=mega_residual,
+            out=mega_out,
+            scratch=attn_scratch,
+            grid_dim=(136, 1, 1),
+            block_dim=(256, 1, 1),
+        )
+
+        if self.world_size > 1:
+            # Sum the per-rank residual-free o_proj partials across ranks AND
+            # add the real residual (self.x) exactly once -> attn_proj_out.
+            # gate_mode=0: the megakernel runs every decode iter (decode-only
+            # build, _use_prefill is False at mbt=1).
+            self._allreduce_residual(
+                oproj_partial, self.attn_proj_out, self.x, gate_mode=0)
+
     def _build_mla_attention_layer(self, layer_idx: int, state_dict: dict):
         """Build MLA attention for one decoder layer (FP8 weights)."""
         prefix = f"model.layers.{layer_idx}."
         attn = f"{prefix}self_attn."
+
+        if os.environ.get("MPK_DSV3_ATTN_MEGAKERNEL") == "1":
+            self._build_mla_attention_megakernel(layer_idx, state_dict)
+            return
 
         # One fused FP8 GEMM emits the full qkv_a_out (mbt, 2176): cols
         # [0:1536) = q_a, [1536:2048) = c_latent, [2048:2112) = k_pe,
@@ -2408,9 +2641,168 @@ class DeepSeekV3Builder(GraphBuilder):
         )
         return shared_residual
 
+    def _build_moe_mlp_ffn_full(self, layer_idx, prefix, state_dict):
+        """Register the FULLY-fused FFN mega-task in place of the whole decode
+        MoE chain (MPK_DSV3_FFN_FULL_MEGAKERNEL=1). See _build_moe_mlp."""
+        from ..utils import shuffle_tensors as _shuffle_tensors
+
+        # --- config guards: the kernel hard-codes the TP8 EP2 per-rank shapes.
+        assert self.mpk.num_workers == 136, (
+            "MPK_DSV3_FFN_FULL_MEGAKERNEL needs num_workers==136 (B200); got "
+            f"{self.mpk.num_workers}. The 136-CTA<->136-worker bijection is the "
+            "grid_barrier participant count; a non-136 count deadlocks.")
+        assert self.max_num_batched_tokens == 1, (
+            "MPK_DSV3_FFN_FULL_MEGAKERNEL is decode-only (mbt==1); got "
+            f"{self.max_num_batched_tokens}.")
+        assert self.num_local_experts == 128, (
+            "FFN-FULL kernel hard-codes E_LOCAL=128 (TP8 EP2); got "
+            f"num_local_experts={self.num_local_experts}.")
+        assert self.hidden_size == 7168, (
+            f"FFN-FULL kernel hard-codes HIDDEN=7168; got {self.hidden_size}.")
+        assert self.routed_moe_intermediate_size == 512, (
+            "FFN-FULL kernel hard-codes W2_K=512 (routed inter); got "
+            f"{self.routed_moe_intermediate_size}.")
+        assert NUM_EXPERTS == 256, (
+            f"FFN-FULL kernel hard-codes ROUTER_N=256; got {NUM_EXPERTS}.")
+
+        w13_scale_key = f"{prefix}experts.w13.weight_scale_inv"
+        if w13_scale_key not in state_dict:
+            raise RuntimeError(
+                "DeepSeek V3 routed MoE requires FP8 expert weights "
+                f"({w13_scale_key} missing from the state_dict).")
+
+        # --- W13 / W2: requantize the PAYLOAD for the CEIL-pow2 (UE8M0) scale,
+        # then bake the pow2 fp32 scale the kernel multiplies by (same as the
+        # COLD FFN gate). The kernel applies a plain fp32 scale, NOT the raw
+        # scale_inv, so the value must be 2^ceil(log2(scale_inv)).
+        self._requantize_moe_fp8_for_pow2(
+            state_dict, f"{prefix}experts.w13.weight", w13_scale_key)
+        w_experts_w13 = self._safe_attach(
+            state_dict[f"{prefix}experts.w13.weight"],
+            f"layer_{layer_idx}_experts_w13")
+        _w13s = state_dict[w13_scale_key].float().clamp_min(1e-30)
+        w13_scale_fp32 = self._safe_attach(
+            torch.pow(2.0, torch.ceil(torch.log2(_w13s))).contiguous(),
+            f"layer_{layer_idx}_experts_w13_scale_fp32")
+
+        w2_weight_key = f"{prefix}experts.w2.weight"
+        w2_scale_key = f"{prefix}experts.w2.weight_scale_inv"
+        self._requantize_moe_fp8_for_pow2(state_dict, w2_weight_key, w2_scale_key)
+        w_experts_w2 = self._safe_attach(
+            state_dict[w2_weight_key], f"layer_{layer_idx}_experts_w2")
+        _w2s = state_dict[w2_scale_key].float().clamp_min(1e-30)
+        w2_scale_fp32 = self._safe_attach(
+            torch.pow(2.0, torch.ceil(torch.log2(_w2s))).contiguous(),
+            f"layer_{layer_idx}_experts_w2_scale_fp32")
+
+        # --- shared expert: gate_up shuffled to a plain [gate;up] concat (the
+        # kernel assumes gate=[0:256],up=[256:512] contiguous), pow2 scale.
+        shared_prefix = f"{prefix}shared_experts."
+        wgu_raw = self._safe_attach(
+            _shuffle_tensors(
+                [state_dict[f"{shared_prefix}gate_proj.weight"],
+                 state_dict[f"{shared_prefix}up_proj.weight"]],
+                split=1, dim=0).contiguous(),
+            f"layer_{layer_idx}_shared_expert_gate_up_raw")
+        wgu_scale = self._safe_attach(
+            _shuffle_tensors(
+                [state_dict[f"{shared_prefix}gate_proj.weight_scale_inv"],
+                 state_dict[f"{shared_prefix}up_proj.weight_scale_inv"]],
+                split=1, dim=0).to(torch.float32).contiguous(),
+            f"layer_{layer_idx}_shared_expert_gate_up_raw_scale_fp32")
+        wdn = self._safe_attach(
+            state_dict[f"{shared_prefix}down_proj.weight"],
+            f"layer_{layer_idx}_shared_expert_down")
+        wdn_scale = self._safe_attach(
+            state_dict[f"{shared_prefix}down_proj.weight_scale_inv"]
+            .to(torch.float32).contiguous(),
+            f"layer_{layer_idx}_shared_expert_down_scale_fp32")
+
+        # --- front-stage inputs that the chain consumed as separate tasks:
+        #   rmsnorm weight (post_attention_layernorm.weight, bf16) — the kernel
+        #     rms-norms self.x internally (the chain's separate rmsnorm_layer in
+        #     build_layers still runs but writes an unused self.rmsnorm_out).
+        #   router gate weight (gate.weight, bf16 [256,7168]).
+        #   e_score_correction_bias (fp32 [256]) — kernel reads `float const*`.
+        rmsnorm_weight = self._safe_attach(
+            state_dict[f"{prefix.split('mlp.')[0]}post_attention_layernorm.weight"],
+            f"layer_{layer_idx}_ffn_full_rmsnorm_w")
+        router_gate_weight = self._safe_attach(
+            state_dict[f"{prefix}gate.weight"],
+            f"layer_{layer_idx}_ffn_full_router_gate_w")
+        bias = self._safe_attach(
+            state_dict[f"{prefix}gate.e_score_correction_bias"]
+            .float().contiguous(),
+            f"layer_{layer_idx}_ffn_full_router_bias")
+
+        # --- output (pre-AR MoE output) — same alloc as the chain's moe_output.
+        _moe_io = "nvshmem_tensor" if self._use_nvshmem else "cuda_tensor"
+        moe_output = self.mpk.new_tensor(
+            dims=(self.max_num_batched_tokens, self.hidden_size),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_moe_output",
+            io_category=_moe_io)
+
+        # --- barrier + globals scratch (zero head via tensor_init).
+        assert FFN_FULL_MEGAKERNEL_SCRATCH_BYTES % 2 == 0
+        barrier_scratch = self.mpk.new_tensor(
+            dims=(1, FFN_FULL_MEGAKERNEL_SCRATCH_BYTES // 2),
+            dtype=bfloat16,
+            name=f"layer_{layer_idx}_ffn_full_megakernel_scratch",
+            io_category="cuda_tensor")
+        self.mpk.tensor_init_layer(
+            target=barrier_scratch,
+            dummy=self.x,
+            grid_dim=(1, 1, 1),
+            block_dim=(128, 1, 1),
+            dummy_input_map=(-1, -1, -1),
+            target_input_map=(-1, -1, -1),
+        )
+
+        # routed_scaling_factor: DSv3 default 2.5 (matches the chain's
+        # moe_topk_sigmoid_routing_layer default).
+        dsv3_tasks.ffn_full_megakernel_layer(
+            self.mpk,
+            hidden=self.x,             # PRE-rmsnorm residual stream
+            w13=w_experts_w13,
+            w13_scale_fp32=w13_scale_fp32,
+            w2=w_experts_w2,
+            w2_scale_fp32=w2_scale_fp32,
+            rmsnorm_weight=rmsnorm_weight,
+            router_gate_weight=router_gate_weight,
+            bias=bias,
+            wgu_raw=wgu_raw,
+            wgu_scale=wgu_scale,
+            wdn=wdn,
+            wdn_scale=wdn_scale,
+            out=moe_output,
+            barrier_scratch=barrier_scratch,
+            local_expert_start=self.local_expert_start,
+            num_local_experts=self.num_local_experts,
+            routed_scaling_factor=2.5,
+            grid_dim=(136, 1, 1),
+            block_dim=(512, 1, 1),
+        )
+        self.mlp_out = moe_output
+
     def _build_moe_mlp(self, layer_idx: int, state_dict: dict):
         """Build MoE MLP for layers 3-60."""
         prefix = f"model.layers.{layer_idx}.mlp."
+
+        # ============================================================
+        # FULLY-fused FFN mega-task (MPK_DSV3_FFN_FULL_MEGAKERNEL=1).
+        # Default-OFF: env unset -> the chain below (byte-identical baseline).
+        # This ONE task REPLACES the entire decode MoE chain: post-attn rmsnorm
+        # (computed internally from self.x) + router-gate-GEMV + topk-sigmoid +
+        # permute + W13/W2 group-GEMM + silu + the COLD FFN. It binds the
+        # PRE-rmsnorm hidden (self.x), the rmsnorm weight, the router gate
+        # weight + bias, and the requantized W13/W2/shared weights, and produces
+        # the pre-AR MoE output (moe_output); the 2 AllReduces around it are
+        # untouched (added in build_layers after this returns).
+        # ============================================================
+        if os.environ.get("MPK_DSV3_FFN_FULL_MEGAKERNEL") == "1":
+            self._build_moe_mlp_ffn_full(layer_idx, prefix, state_dict)
+            return
 
         # Router
         w_gate = self.mpk.attach_input(

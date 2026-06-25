@@ -218,6 +218,10 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_ffn_mlp_megakernel_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
+  int register_ffn_full_megakernel_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params);
+  int register_attn_block_megakernel_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_moe_permute_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
   int register_moe_unpermute_sm100_task(threadblock::Graph const &bgraph,

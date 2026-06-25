@@ -962,6 +962,33 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // output slot tracks the bf16 out write for the MPK dependency graph.
     task_config[op] =
         std::make_tuple(14, 1, TASK_FFN_MLP_MEGAKERNEL_SM100, variant_id);
+  } else if (name == "ffn_full_megakernel_sm100") {
+    int variant_id = task_register->register_ffn_full_megakernel_sm100_task(
+        customized->bgraph, params);
+    // FULLY-fused FFN (rmsnorm+router+topk+MoE). Same 14-input/1-output ABI as
+    // the COLD FFN, but slots 5/6/7 carry rmsnorm_weight/router_gate_w/bias
+    // (the routing is computed internally) instead of the topk outputs.
+    //   inputs: [0] hidden(pre-rmsnorm) [1] w13 [2] w13_scale [3] w2
+    //           [4] w2_scale [5] rmsnorm_weight [6] router_gate_w [7] bias
+    //           [8] wgu_raw [9] wgu_scale [10] wdn [11] wdn_scale
+    //           [12] out(store_in_dmem) [13] scratch
+    //   output: [0] out (tracked bf16 moe_output write).
+    task_config[op] =
+        std::make_tuple(14, 1, TASK_FFN_FULL_MEGAKERNEL_SM100, variant_id);
+  } else if (name == "attn_block_megakernel_sm100") {
+    int variant_id = task_register->register_attn_block_megakernel_sm100_task(
+        customized->bgraph, params);
+    // 14 inputs + 1 output. The two layernorm weights and cos/sin are each
+    // concatenated into one input buffer to fit the 14-input cap.
+    //   inputs:  [0] hidden [1] qkv_a_w [2] qkv_a_s [3] ln_weights [4] q_b_w
+    //            [5] q_b_s [6] cos_sin [7] kv_cache [8] kvbv_w [9] kvbv_s
+    //            [10] oproj_w [11] oproj_s [12] residual [13] scratch.
+    //   output:  [0] out (attn_proj_out). kv_cache is read+written in place via
+    //            input_ptrs[7] (same physical buffer as any binding — a root
+    //            cuda_tensor's input and output descriptors resolve to one
+    //            address; the write persists across decode steps).
+    task_config[op] =
+        std::make_tuple(14, 1, TASK_ATTN_BLOCK_MEGAKERNEL_SM100, variant_id);
   } else if (name == "moe_permute_sm100") {
     // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
     // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).
@@ -1118,6 +1145,24 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   else {
     printf("Unsupported task name: %s\n", name);
     assert(false && "Unsupported task type");
+  }
+  // Loud guard: a task whose declared input/output count exceeds the fixed
+  // TaskDesc arrays silently overflows inputs[]/outputs[] into adjacent fields
+  // at runtime (a silent wrong-result, not a crash). Fail at build instead.
+  {
+    auto const &cfg = task_config[op];
+    int n_in = std::get<0>(cfg);
+    int n_out = std::get<1>(cfg);
+    if (n_in > MAX_INPUTS_PER_TASK || n_out > MAX_OUTPUTS_PER_TASK) {
+      printf("Task %s declares %d inputs / %d outputs, exceeds "
+             "MAX_INPUTS_PER_TASK=%d / MAX_OUTPUTS_PER_TASK=%d\n",
+             name.c_str(),
+             n_in,
+             n_out,
+             MAX_INPUTS_PER_TASK,
+             MAX_OUTPUTS_PER_TASK);
+      assert(false && "task input/output count exceeds TaskDesc capacity");
+    }
   }
 }
 
