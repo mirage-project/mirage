@@ -207,13 +207,19 @@ enum TaskType {
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
   // bs=1 contiguous KV append (replaces paged-cache append + gather):
   TASK_MLA_KV_APPEND_SM100 = 323,
-  TASK_FFN_MLP_MEGAKERNEL_SM100 = 324,
-  // Fused decode-attention megakernel (env-gated MPK_DSV3_ATTN_MEGAKERNEL=1).
+  // (slot 324 retired: the older partially-fused ffn_mlp_megakernel experiment,
+  //  superseded by TASK_FFN_FULL_MEGAKERNEL_SM100.)
+  // Fused decode-attention megakernel (the default decode attention path).
   // Uses the free 319 slot so TASK_SM100_TASK_END need not shift.
   TASK_ATTN_BLOCK_MEGAKERNEL_SM100 = 319,
-  // Fully-fused FFN megakernel (env-gated MPK_DSV3_FFN_FULL_MEGAKERNEL=1):
-  // absorbs rmsnorm + router-gate-GEMV + topk-sigmoid + the whole MoE chain.
+  // Fully-fused FFN megakernel (the default decode MoE-FFN path): absorbs
+  // rmsnorm + router-gate-GEMV + topk-sigmoid + the whole MoE chain.
   TASK_FFN_FULL_MEGAKERNEL_SM100 = 325,
+  // Fully-fused DENSE-MLP megakernel (env-gated MPK_DSV3_DENSE_MLP_MEGAKERNEL=1):
+  // dense layers 0-2 = post-attn RMSNorm + W13(gate+up) GEMV + silu(gate)*up +
+  // W2(down) GEMV -> bf16 (pre-AllReduce). Uses the free 307 slot so
+  // TASK_SM100_TASK_END need not shift.
+  TASK_DSV3_DENSE_MLP_FUSED_SM100 = 307,
   TASK_SM100_TASK_END = 326, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

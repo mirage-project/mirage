@@ -518,8 +518,15 @@ void register_mugraph(
             }
             // FFN mega-task: grid=(num_workers, 1, 1). merge_task_offset
             // is the logical CTA id consumed in place of blockIdx.x.
-            if (task_type == TASK_FFN_MLP_MEGAKERNEL_SM100 ||
-                task_type == TASK_FFN_FULL_MEGAKERNEL_SM100) {
+            if (task_type == TASK_FFN_FULL_MEGAKERNEL_SM100) {
+              task.task_metadata.merge_task_offset = bid.x;
+            }
+            // Dense-MLP mega-task: grid=(num_workers=136, 1, 1). Same
+            // convention as the FFN mega-task — merge_task_offset is the
+            // logical CTA id (worker_idx) consumed in place of blockIdx.x
+            // (the kernel's full-grid barrier has 136 participants). bs=1
+            // decode, no per-position metadata (request_id/kv_idx) needed.
+            if (task_type == TASK_DSV3_DENSE_MLP_FUSED_SM100) {
               task.task_metadata.merge_task_offset = bid.x;
             }
             // Attention mega-task: grid=(num_workers, 1, 1). Same convention
@@ -1183,8 +1190,8 @@ TaskGraphResult print_task_graph(
   mirage::transpiler::CodeKeeper tgbody;
   tgbody.inc_indent();
   code.e("#include \"persistent_kernel.cuh\"");
-  code.e("#include \"tasks/blackwell/ffn_mlp_megakernel_sm100.cuh\"");
   code.e("#include \"tasks/blackwell/ffn_full_megakernel_sm100.cuh\"");
+  code.e("#include \"tasks/blackwell/dsv3_dense_mlp_fused_sm100.cuh\"");
   code.e("#include \"tasks/blackwell/attn_block_megakernel_sm100.cuh\"");
   if (use_json_format) {
     code.e("#include <nlohmann/json.hpp>");
@@ -2026,10 +2033,10 @@ TaskGraphResult print_task_graph(
       "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100";
   task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100] =
       "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100";
-  task_type_to_name[TASK_FFN_MLP_MEGAKERNEL_SM100] =
-      "TASK_FFN_MLP_MEGAKERNEL_SM100";
   task_type_to_name[TASK_FFN_FULL_MEGAKERNEL_SM100] =
       "TASK_FFN_FULL_MEGAKERNEL_SM100";
+  task_type_to_name[TASK_DSV3_DENSE_MLP_FUSED_SM100] =
+      "TASK_DSV3_DENSE_MLP_FUSED_SM100";
   task_type_to_name[TASK_ATTN_BLOCK_MEGAKERNEL_SM100] =
       "TASK_ATTN_BLOCK_MEGAKERNEL_SM100";
   task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";

@@ -2633,50 +2633,6 @@ class PersistentKernel:
         self.kn_graph.customized(operators, tb_graph)
         self.kn_graph.register_task(tb_graph, task_name, params)
 
-    def ffn_mlp_megakernel_layer(
-        self,
-        hidden,
-        w13,
-        w13_scale_fp32,
-        w2,
-        w2_scale_fp32,
-        moe_mask,
-        moe_routing_indices,
-        moe_topk_weights,
-        wgu_raw,
-        wgu_scale,
-        wdn,
-        wdn_scale,
-        out,
-        barrier_scratch,
-        grid_dim=(136, 1, 1),
-        block_dim=(512, 1, 1),
-    ):
-        tensors = [
-            hidden,
-            w13,
-            w13_scale_fp32,
-            w2,
-            w2_scale_fp32,
-            moe_mask,
-            moe_routing_indices,
-            moe_topk_weights,
-            wgu_raw,
-            wgu_scale,
-            wdn,
-            wdn_scale,
-            out,
-            barrier_scratch,
-        ]
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        for tensor in tensors:
-            tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
-        tb_graph.new_input(out, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(tensors + [out], tb_graph)
-        self.kn_graph.register_task(
-            tb_graph, "ffn_mlp_megakernel_sm100", [])
-
-
     def ffn_full_megakernel_layer(
         self,
         hidden,
@@ -2699,7 +2655,7 @@ class PersistentKernel:
         grid_dim=(136, 1, 1),
         block_dim=(512, 1, 1),
     ):
-        # FULLY-fused FFN mega-task (analog of ffn_mlp_megakernel_layer): one
+        # FULLY-fused FFN mega-task (analog of ffn_full_megakernel_layer): one
         # task absorbs rmsnorm + router-gate-GEMV + topk-sigmoid + the whole
         # MoE chain. 14 input slots = the HARD MAX_INPUTS_PER_TASK cap. Vs the
         # COLD FFN, slots 5/6/7 carry rmsnorm_weight/router_gate_weight/bias
@@ -2759,7 +2715,7 @@ class PersistentKernel:
         grid_dim=(136, 1, 1),
         block_dim=(256, 1, 1),
     ):
-        # Fused decode-attention megakernel (analog of ffn_mlp_megakernel_layer).
+        # Fused decode-attention megakernel (analog of ffn_full_megakernel_layer).
         # 14 input slots = the HARD MAX_INPUTS_PER_TASK cap: the two layernorm
         # weights are pre-concatenated into `ln_weights` ([q_a_ln|kv_a_ln]) and
         # cos/sin into `cos_sin` ([cos|sin] per row). `out` is the single

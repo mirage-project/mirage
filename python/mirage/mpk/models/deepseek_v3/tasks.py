@@ -368,49 +368,6 @@ def mla_mtp_reduce_layer(
             "(expected 1, 2, 4, or 8)")
 
 
-def ffn_mlp_megakernel_layer(
-    pk,
-    hidden: DTensor,
-    w13: DTensor,
-    w13_scale_fp32: DTensor,
-    w2: DTensor,
-    w2_scale_fp32: DTensor,
-    moe_mask: DTensor,
-    moe_routing_indices: DTensor,
-    moe_topk_weights: DTensor,
-    wgu_raw: DTensor,
-    wgu_scale: DTensor,
-    wdn: DTensor,
-    wdn_scale: DTensor,
-    out: DTensor,
-    barrier_scratch: DTensor,
-    grid_dim: tuple = (136, 1, 1),
-    block_dim: tuple = (512, 1, 1),
-):
-    tensors = [
-        hidden,
-        w13,
-        w13_scale_fp32,
-        w2,
-        w2_scale_fp32,
-        moe_mask,
-        moe_routing_indices,
-        moe_topk_weights,
-        wgu_raw,
-        wgu_scale,
-        wdn,
-        wdn_scale,
-        out,
-        barrier_scratch,
-    ]
-    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    for tensor in tensors:
-        tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
-    tb_graph.new_input(out, (-1, -1, -1), -1, True)
-    pk.kn_graph.customized(tensors + [out], tb_graph)
-    pk.kn_graph.register_task(tb_graph, "ffn_mlp_megakernel_sm100", [])
-
-
 def ffn_full_megakernel_layer(
     pk,
     hidden: DTensor,
@@ -467,6 +424,54 @@ def ffn_full_megakernel_layer(
         [local_expert_start, num_local_experts, scaling_bits])
 
 
+def dsv3_dense_mlp_fused_layer(
+    pk,
+    hidden: DTensor,
+    w13: DTensor,
+    w13_scale_fp32: DTensor,
+    w2: DTensor,
+    w2_scale_fp32: DTensor,
+    rmsnorm_weight: DTensor,
+    scratch: DTensor,
+    out: DTensor,
+    grid_dim: tuple = (136, 1, 1),
+    block_dim: tuple = (256, 1, 1),
+):
+    # Fused DENSE-MLP decode mega-task (DSv3 dense layers 0-2): one task absorbs
+    # post-attn RMSNorm + W13(gate+up) GEMV + silu(gate)*up (384-chunk
+    # interleave) + W2(down) GEMV -> bf16. Unlike the FFN-full mega-task there
+    # is NO router / topk / EP filter / shared-expert, so only 7 input slots:
+    #   inputs: [0] hidden(pre-rmsnorm bf16) [1] w13 [2] w13_scale(RAW f32)
+    #           [3] w2 [4] w2_scale(RAW f32) [5] rmsnorm_weight [6] scratch
+    #   output: [0] out (W2 GEMV result, bf16, PRE-AllReduce/residual — the
+    #           RowParallel down_proj AllReduce + residual stay OUTSIDE this
+    #           task, exactly as the unfused dense chain feeds _allreduce_residual).
+    # WEIGHT scales are RAW float32 [N/128, K/128] (NOT UE8M0/pow2 — the dense
+    # path uses scale_ue8m0=False); the kernel UE8M0-rounds only the ACTIVATION
+    # scales internally. ACTIVATION quant differs from the unfused chain's raw-f32
+    # (the fused kernel uses UE8M0 per its contract), so this is high-cosine
+    # equivalent (>=0.999), NOT bit-identical to the chain.
+    # merge_task_offset is the worker_idx (the 136-CTA full-grid barrier
+    # participant count); block_dim=256 is the MPK production worker (the kernel
+    # derives its thread partition from blockDim.x). NO literal params — the
+    # shapes are compile-time constants in the .cuh.
+    tensors = [
+        hidden,
+        w13,
+        w13_scale_fp32,
+        w2,
+        w2_scale_fp32,
+        rmsnorm_weight,
+        scratch,
+    ]
+    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+    for tensor in tensors:
+        tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+    tb_graph.new_input(out, (-1, -1, -1), -1, True)
+    pk.kn_graph.customized(tensors + [out], tb_graph)
+    pk.kn_graph.register_task(tb_graph, "dsv3_dense_mlp_fused_sm100", [])
+
+
 def attn_block_megakernel_layer(
     pk,
     hidden: DTensor,
@@ -487,7 +492,7 @@ def attn_block_megakernel_layer(
     grid_dim: tuple = (136, 1, 1),
     block_dim: tuple = (256, 1, 1),
 ):
-    # Fused decode-attention megakernel (analog of ffn_mlp_megakernel_layer).
+    # Fused decode-attention megakernel (analog of ffn_full_megakernel_layer).
     # 14 input slots = the HARD MAX_INPUTS_PER_TASK cap: the two layernorm
     # weights are pre-concatenated into `ln_weights` ([q_a_ln|kv_a_ln]) and
     # cos/sin into `cos_sin` ([cos|sin] per row). `out` is the single tracked

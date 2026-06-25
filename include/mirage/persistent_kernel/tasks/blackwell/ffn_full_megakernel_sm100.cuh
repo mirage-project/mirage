@@ -17,10 +17,9 @@
 
 // ============================================================================
 // FFN FULL MEGAKERNEL — DSv3 decode MoE-FFN, FULLY fused (bs=1, M=1, TP8 EP2
-// per-rank). EXTENDS the landed COLD FFN mega-task
-// (ffn_mlp_megakernel_sm100.cuh) by fusing FOUR front stages IN FRONT of the
-// FFN body, so the routing is computed INTERNALLY (active_experts/weights are
-// derived, NOT inputs):
+// per-rank). This is THE default decode MoE-FFN path: it fuses FOUR front
+// stages IN FRONT of the FFN body, so the routing is computed INTERNALLY
+// (active_experts/weights are derived, NOT inputs):
 //   (A) input RMSNorm   (PRE-rmsnorm bf16 hidden -> bf16 normed, the boundary)
 //   (B) router gate-GEMV (bf16 normed . bf16 W_gate, fp32 accum -> bf16 logits)
 //   (C) topk-sigmoid group routing -> EP-LOCAL active_experts + weights
@@ -28,14 +27,15 @@
 //          -> requant -> W2 + weighted atomicAdd; shared gate_up -> silu
 //          ->down)
 //
-// This kernel REPLACES the whole decode MoE chain (rmsnorm + router-gate-GEMV +
-// topk-sigmoid + permute + W13/W2 group-GEMM + silu + the COLD FFN). It is
-// gated by MPK_DSV3_FFN_FULL_MEGAKERNEL=1 in the builder (default-OFF; the
-// default build is byte-identical).
+// This kernel REPLACES the whole per-task decode MoE chain (rmsnorm +
+// router-gate-GEMV + topk-sigmoid + permute + W13/W2 group-GEMM + silu). The
+// builder selects it for the bs=1 TP8/EP2/B200 decode geometry
+// (_use_ffn_full_megakernel); all other configs (prefill mbt>8, non-TP8) fall
+// through to the per-task chain.
 //
 // PORTED FROM: scratch/megakernels/ffn_fullyfused_ferret_v015_cold62us_ACTIVE8
-// .cuh (fused_moe_full). MODELED ON THE MPK ABI of the landed COLD FFN
-// (ffn_mlp_megakernel_sm100.cuh) — the ground truth for: GridBarrier +
+// .cuh (fused_moe_full). The MPK ABI (the now-retired partially-fused COLD FFN
+// predecessor was the original ground truth) covers: GridBarrier +
 // grid_barrier, extern __shared__ __align__(1024) dynamic smem, the per-task
 // Scratch, input_ptrs binding, fp32 out_acc + bf16 convert, the dynamic-smem
 // layout, the SCRATCH_BYTES %16 rule, output_ptrs[0]-only write.
@@ -48,11 +48,15 @@
 // 4->8 already + STAGES_W13 2->4; (3) packed half2 inner dot (W13/W2/shGU) + W2
 // 4B->16B path; (4) parallel per-group top-8 argmax in Phase C. The DYNAMIC
 // active_count + EP-LOCAL filter, the atomic grid_barrier, the per-task
-// Scratch, input-binding order, SCRATCH_BYTES, and extern __align__(1024) are
-// PRESERVED from v015 (the in-MPK-correct ABI). The y13 staging REUSES the
-// per-warp s_wbuf (no new Scratch region) so SCRATCH_BYTES is unchanged
-// (106608); WBUF_U4 is grown + re-asserted to cover the 16B-W2 stage AND the
-// whole-block y13 staging. See the FFN-FAST lever comments below.
+// Scratch, input-binding order, and extern __align__(1024) are PRESERVED from
+// v015 (the in-MPK-correct ABI). The y13 staging REUSES the per-warp s_wbuf (no
+// new Scratch region); WBUF_U4 is grown + re-asserted to cover the 16B-W2 stage
+// AND the whole-block y13 staging. See the FFN-FAST lever comments below.
+// NOTE: SCRATCH_BYTES is 106624 (not v015's 106608) — the FAST y13 staging reads
+// the GLOBAL y13 section via cp.async.cg-16, which requires y13 16B-aligned, so
+// every Scratch section start is now 16B-aligned (was contiguous-after-8B-barrier
+// → %16==8 → misaligned-y13 crash). The +16 is two 8B section pads, not a new
+// region.
 //
 // THREE STRUCTURAL ADAPTATIONS vs the standalone fused_moe_full:
 //  1. DYNAMIC active_count, EP-LOCAL-FILTERED (NOT compile-time ACTIVE=8). The
@@ -86,7 +90,7 @@
 #include <math.h>
 #include <stdint.h>
 
-// ---- MPK grid barrier (VERBATIM from ffn_mlp_megakernel_sm100.cuh) ----------
+// ---- MPK grid barrier (the standard megakernel grid_barrier pattern) -------
 struct FfnFullGridBarrier {
   unsigned int *count; // [1] arrivals in the current generation
   unsigned int *gen;   // [1] generation (sense) counter
@@ -171,6 +175,19 @@ static constexpr int NB_SHDN = SH_DN_N / GRP; // 56
 // ============================================================================
 static constexpr int BARRIER_BYTES = 2 * static_cast<int>(sizeof(uint32_t));
 
+// Round a running byte offset up to 16. EVERY scratch section start is 16B
+// aligned via this (matching the attn megakernel's attn_au16 convention) so a
+// 16-byte vector access into ANY section (e.g. the FAST `cp.async.cg ...,16`
+// staging of `y13`) lands on a 16B boundary. WITHOUT this, the 8-byte BARRIER
+// shifts every section to byte-offset %16==8, and the y13 cp.async.cg-16 read
+// (cp.async requires natural 16B source alignment) is a misaligned global
+// access → cudaErrorMisalignedAddress (surfaced asynchronously at the next
+// nvshmem barrier). make_scratch() and SCRATCH_BYTES_RAW MUST use this in
+// lock-step so the constant equals make_scratch's high-water mark exactly.
+__device__ __host__ __forceinline__ constexpr int ffn_full_au16(int x) {
+  return (x + 15) & ~15;
+}
+
 struct Scratch {
   __nv_bfloat16 *rmsnorm_out; // [HIDDEN]   bf16 normed (the boundary)
   uint8_t *a_fp8;             // [HIDDEN]
@@ -186,9 +203,10 @@ struct Scratch {
   float *out_acc;  // [W2_N] fp32 accumulator (-> bf16 out)
 };
 
-// Region byte sizes (each contiguous, no inter-section pad — every region's
-// byte size is a multiple of 4 or 2 and we round the TOTAL up to 16). This MUST
-// match make_scratch() pointer arithmetic AND the builder SCRATCH_BYTES.
+// Region byte sizes (every region's byte size is a multiple of 4 or 2). Each
+// section START is rounded up to 16 (ffn_full_au16) — so SCRATCH_BYTES_RAW
+// below MUST accumulate them with the SAME per-section align as make_scratch,
+// or the constant would disagree with the kernel's high-water mark.
 static constexpr int SC_RMSNORM = HIDDEN * 2;          // bf16
 static constexpr int SC_AFP8 = HIDDEN;                 // 7168
 static constexpr int SC_ASCALE = KG1 * 4;              // 224
@@ -202,53 +220,95 @@ static constexpr int SC_SIFP8 = SH_DN_K;               // 256
 static constexpr int SC_SISCALE = KG_SHDN * 4;         // 8
 static constexpr int SC_OUTACC = W2_N * 4;             // 28672
 
+// High-water mark of make_scratch(): barrier, then each section's start
+// 16B-aligned (ffn_full_au16) before adding its size. MUST mirror make_scratch
+// exactly. (Only RMSNORM and OUTACC actually take an 8B pad; the others are
+// already 16-aligned by their predecessors' sizes.)
 static constexpr int SCRATCH_BYTES_RAW =
-    BARRIER_BYTES + SC_RMSNORM + SC_AFP8 + SC_ASCALE + SC_LOGITS + SC_INTER +
-    SC_Y13 + SC_IFP8 + SC_ISCALE + SC_SG + SC_SIFP8 + SC_SISCALE + SC_OUTACC;
+    ffn_full_au16(
+        ffn_full_au16(
+            ffn_full_au16(
+                ffn_full_au16(
+                    ffn_full_au16(
+                        ffn_full_au16(
+                            ffn_full_au16(
+                                ffn_full_au16(
+                                    ffn_full_au16(
+                                        ffn_full_au16(
+                                            ffn_full_au16(
+                                                ffn_full_au16(BARRIER_BYTES) +
+                                                SC_RMSNORM) +
+                                            SC_AFP8) +
+                                        SC_ASCALE) +
+                                    SC_LOGITS) +
+                                SC_INTER) +
+                            SC_Y13) +
+                        SC_IFP8) +
+                    SC_ISCALE) +
+                SC_SG) +
+            SC_SIFP8) +
+        SC_SISCALE) +
+    SC_OUTACC;
 // Round the TOTAL up to 16 (tensor_init zero-init uses 16B vec stores; the
 // builder allocates bytes/2 bf16 and asserts %16==0 on the byte count).
 static constexpr int SCRATCH_BYTES = (SCRATCH_BYTES_RAW + 15) & ~15;
-// CONTRACT: must equal builder.py FFN_FULL_MEGAKERNEL_SCRATCH_BYTES. The v019
-// FAST merge adds NO new Scratch region (the y13 cp.async staging reuses the
-// dynamic-smem per-warp s_wbuf), so this stays 106608 — pinned here so a future
-// Scratch edit that drifts from the builder constant fails at compile time.
-static_assert(SCRATCH_BYTES == 106608,
+// CONTRACT: must equal builder.py FFN_FULL_MEGAKERNEL_SCRATCH_BYTES. Per-section
+// 16B alignment (the misaligned-y13-cp.async fix) raised this from 106608 to
+// 106624 (+16: an 8B pad before rmsnorm_out and before out_acc) — pinned here so
+// a future Scratch edit that drifts from the builder constant fails at compile
+// time.
+static_assert(SCRATCH_BYTES == 106624,
               "FFN-FULL SCRATCH_BYTES changed — update builder.py "
               "FFN_FULL_MEGAKERNEL_SCRATCH_BYTES to match.");
 
 __device__ __forceinline__ Scratch make_scratch(uint8_t *base) {
-  uint8_t *p = base + BARRIER_BYTES;
+  // Track the offset (not the raw pointer) so each section START is rounded up
+  // to 16 — keeps every section (incl. y13, read as cp.async.cg-16) 16B
+  // aligned regardless of the 8B barrier. MUST mirror SCRATCH_BYTES_RAW.
+  int off = BARRIER_BYTES;
   Scratch sc;
-  sc.rmsnorm_out = reinterpret_cast<__nv_bfloat16 *>(p);
-  p += SC_RMSNORM;
-  sc.a_fp8 = p;
-  p += SC_AFP8;
-  sc.a_scale = reinterpret_cast<float *>(p);
-  p += SC_ASCALE;
-  sc.logits = reinterpret_cast<__nv_bfloat16 *>(p);
-  p += SC_LOGITS;
-  sc.inter = reinterpret_cast<float *>(p);
-  p += SC_INTER;
-  sc.y13 = reinterpret_cast<float *>(p);
-  p += SC_Y13;
-  sc.i_fp8 = p;
-  p += SC_IFP8;
-  sc.i_scale = reinterpret_cast<float *>(p);
-  p += SC_ISCALE;
-  sc.sg = reinterpret_cast<float *>(p);
-  p += SC_SG;
-  sc.si_fp8 = p;
-  p += SC_SIFP8;
-  sc.si_scale = reinterpret_cast<float *>(p);
-  p += SC_SISCALE;
-  sc.out_acc = reinterpret_cast<float *>(p);
-  p += SC_OUTACC;
+  off = ffn_full_au16(off);
+  sc.rmsnorm_out = reinterpret_cast<__nv_bfloat16 *>(base + off);
+  off += SC_RMSNORM;
+  off = ffn_full_au16(off);
+  sc.a_fp8 = base + off;
+  off += SC_AFP8;
+  off = ffn_full_au16(off);
+  sc.a_scale = reinterpret_cast<float *>(base + off);
+  off += SC_ASCALE;
+  off = ffn_full_au16(off);
+  sc.logits = reinterpret_cast<__nv_bfloat16 *>(base + off);
+  off += SC_LOGITS;
+  off = ffn_full_au16(off);
+  sc.inter = reinterpret_cast<float *>(base + off);
+  off += SC_INTER;
+  off = ffn_full_au16(off);
+  sc.y13 = reinterpret_cast<float *>(base + off);
+  off += SC_Y13;
+  off = ffn_full_au16(off);
+  sc.i_fp8 = base + off;
+  off += SC_IFP8;
+  off = ffn_full_au16(off);
+  sc.i_scale = reinterpret_cast<float *>(base + off);
+  off += SC_ISCALE;
+  off = ffn_full_au16(off);
+  sc.sg = reinterpret_cast<float *>(base + off);
+  off += SC_SG;
+  off = ffn_full_au16(off);
+  sc.si_fp8 = base + off;
+  off += SC_SIFP8;
+  off = ffn_full_au16(off);
+  sc.si_scale = reinterpret_cast<float *>(base + off);
+  off += SC_SISCALE;
+  off = ffn_full_au16(off);
+  sc.out_acc = reinterpret_cast<float *>(base + off);
+  off += SC_OUTACC;
   return sc;
 }
 
 // ============================================================================
-//  Canonical device helpers (VERBATIM from the COLD FFN; uniquely scoped in
-//  this namespace so no ODR clash with ffn_mlp_megakernel_sm100).
+//  Canonical device helpers (uniquely scoped in this namespace so there is no
+//  ODR clash with the other megakernel task impls in the same test.cu).
 // ============================================================================
 __device__ __forceinline__ uint32_t bitcast_f2u(float f) {
   return __float_as_uint(f);
@@ -756,7 +816,7 @@ __device__ __forceinline__ float
 }
 
 // ============================================================================
-//  MPK task entry. Mirrors ffn_mlp_megakernel_sm100_task_impl: TaskDesc +
+//  MPK task entry. The standard megakernel task ABI: TaskDesc +
 //  merge_task_offset (logical CTA id == blockIdx.x set by the scheduler) +
 //  runtime_config (unused here — the routing is computed internally).
 //

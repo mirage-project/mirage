@@ -6593,20 +6593,6 @@ int TaskRegister::register_fp8_group_gemm_largem_compact_fused_sm100_task(
                                code.to_string());
 }
 
-int TaskRegister::register_ffn_mlp_megakernel_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  (void)bgraph;
-  assert(params.size() == 0);
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  code.e("kernel::ffn_mlp_megakernel_sm100::"
-         "ffn_mlp_megakernel_sm100_task_impl(");
-  code.e("    task_desc,");
-  code.e("    task_desc->task_metadata.merge_task_offset,");
-  code.e("    runtime_config);");
-  return register_task_variant(TASK_FFN_MLP_MEGAKERNEL_SM100, code.to_string());
-}
-
 int TaskRegister::register_ffn_full_megakernel_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
@@ -6635,6 +6621,25 @@ int TaskRegister::register_ffn_full_megakernel_sm100_task(
   }
   code.e("    runtime_config);");
   return register_task_variant(TASK_FFN_FULL_MEGAKERNEL_SM100,
+                               code.to_string());
+}
+
+int TaskRegister::register_dsv3_dense_mlp_fused_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  (void)bgraph;
+  // Fused DENSE-MLP decode mega-task. No literal params: the kernel reads its
+  // 7 input pointers (hidden/w13/w13_scale/w2/w2_scale/rmsnorm_weight/scratch)
+  // from task_desc->input_ptrs[0..6] and writes output_ptrs[0]; the shapes are
+  // compile-time constants in the .cuh (HIDDEN=7168, W13_N=4608, W2_K=2304).
+  assert(params.size() == 0);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::dsv3_dense_mlp::"
+         "dsv3_dense_mlp_fused_task_impl(");
+  code.e("    task_desc,");
+  code.e("    task_desc->task_metadata.merge_task_offset,");
+  code.e("    runtime_config);");
+  return register_task_variant(TASK_DSV3_DENSE_MLP_FUSED_SM100,
                                code.to_string());
 }
 

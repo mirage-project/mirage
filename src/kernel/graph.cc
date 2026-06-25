@@ -955,13 +955,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
                         2,
                         TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100,
                         variant_id);
-  } else if (name == "ffn_mlp_megakernel_sm100") {
-    int variant_id = task_register->register_ffn_mlp_megakernel_sm100_task(
-        customized->bgraph, params);
-    // First 14 slots preserve the binding-map input_ptrs ABI. The duplicate
-    // output slot tracks the bf16 out write for the MPK dependency graph.
-    task_config[op] =
-        std::make_tuple(14, 1, TASK_FFN_MLP_MEGAKERNEL_SM100, variant_id);
   } else if (name == "ffn_full_megakernel_sm100") {
     int variant_id = task_register->register_ffn_full_megakernel_sm100_task(
         customized->bgraph, params);
@@ -975,6 +968,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     //   output: [0] out (tracked bf16 moe_output write).
     task_config[op] =
         std::make_tuple(14, 1, TASK_FFN_FULL_MEGAKERNEL_SM100, variant_id);
+  } else if (name == "dsv3_dense_mlp_fused_sm100") {
+    int variant_id = task_register->register_dsv3_dense_mlp_fused_sm100_task(
+        customized->bgraph, params);
+    // Fused DENSE-MLP decode (rmsnorm + W13 GEMV + silu_mul + W2 GEMV). The
+    // kernel reads 7 input pointers + writes output_ptrs[0]:
+    //   inputs: [0] hidden(pre-rmsnorm bf16) [1] w13 [2] w13_scale(raw f32)
+    //           [3] w2 [4] w2_scale(raw f32) [5] rmsnorm_weight [6] scratch
+    //   output: [0] out (W2 GEMV result, bf16, pre-AllReduce/residual).
+    task_config[op] =
+        std::make_tuple(7, 1, TASK_DSV3_DENSE_MLP_FUSED_SM100, variant_id);
   } else if (name == "attn_block_megakernel_sm100") {
     int variant_id = task_register->register_attn_block_megakernel_sm100_task(
         customized->bgraph, params);

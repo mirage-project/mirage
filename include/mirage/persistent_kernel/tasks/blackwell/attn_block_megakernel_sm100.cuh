@@ -16,7 +16,7 @@
 // MPK port of the ferret fused DSv3 decode ATTENTION BLOCK megakernel
 // (scratch/megakernels/attn_block_ferret_v126_cold87us_grid136.cuh, 87us cold,
 // grid=136, correct vs its own gate). The attention analog of the FFN mega-task
-// (ffn_mlp_megakernel_sm100.cuh). One task runs the WHOLE decode attention:
+// (ffn_full_megakernel_sm100.cuh). One task runs the WHOLE decode attention:
 //   input was rmsnorm'd by the prior task -> qkv_a GEMV -> q_a_ln + kv_a_ln ->
 //   q_b GEMV -> YaRN rope(q,k) -> kv_append -> MLA decode (flash, KV-split) ->
 //   reduce -> W_UV per-head BMM -> o_proj + residual.
@@ -59,7 +59,7 @@
 #include <cstdio> // device printf for the per-stage debug taps (default-OFF)
 #endif
 
-// ---- MPK grid barrier (VERBATIM from ffn_mlp_megakernel_sm100.cuh) ----------
+// ---- MPK grid barrier (VERBATIM from ffn_full_megakernel_sm100.cuh) ----------
 struct AttnGridBarrier {
   unsigned int *count; // [1] arrivals in the current generation
   unsigned int *gen;   // [1] generation (sense) counter
@@ -119,14 +119,12 @@ namespace attn_block_megakernel_sm100 {
 #define MLA_SPLITS 8
 
 // ---- BARRIER-REMOVAL LEVERS (ported from ferret workspace6 v131, 87->64.5us
-// cold; the 5 levers each remove/merge a grid.sync). MPK_DSV3_ATTN_FAST is a
-// SUB-flag of MPK_DSV3_ATTN_MEGAKERNEL (this whole file is only compiled when
-// the mega-task is built), defaulted ON so the fast path is the default WITHIN
-// the mega-task; set -DMPK_DSV3_ATTN_FAST=0 to fall back to the proven-correct
-// 9-barrier baseline (commit 52ed6e64) for A/B. The DEFAULT FULL build
-// (MPK_DSV3_ATTN_MEGAKERNEL unset) is byte-identical regardless — none of this
-// is compiled in. The five levers (all gated together, matching ferret v131
-// which ships them all-on):
+// cold; the 5 levers each remove/merge a grid.sync). MPK_DSV3_ATTN_FAST is
+// defaulted ON, so the fast path is the default WITHIN the attn-block
+// megakernel (which is itself the default decode attention path); set
+// -DMPK_DSV3_ATTN_FAST=0 to fall back to the proven-correct 9-barrier baseline
+// (commit 52ed6e64) for A/B regression isolation. The five levers (all gated
+// together, matching ferret v131 which ships them all-on):
 //   1. HIDDEN_BLOCK_LOCAL — quant hidden[7168] block-local into s_act, removes
 //      the quant_hidden->qkv_a barrier (a block __syncthreads replaces it).
 //   2. QA_BLOCK_LOCAL     — q_a_layernorm+requant block-local into s_qbdeq,
@@ -1568,7 +1566,7 @@ __device__ __forceinline__ float rms_rcp_block(float const *__restrict__ src,
 }
 
 // ===========================================================================
-//  MPK task entry. Mirrors ffn_mlp_megakernel_sm100_task_impl: TaskDesc +
+//  MPK task entry. Mirrors ffn_full_megakernel_sm100_task_impl: TaskDesc +
 //  merge_task_offset (the logical CTA id, == blockIdx.x set by the scheduler)
 //  + runtime_config (for step[0]).
 //
