@@ -1649,6 +1649,16 @@ class DeepSeekV3Builder(GraphBuilder):
         prefix = f"model.layers.{layer_idx}."
         attn = f"{prefix}self_attn."
 
+        # MPK_DSV3_ATTN_PHASE0_FUSION (default-OFF; byte-identical default build
+        # when UNSET): fold the LIVE front input_layernorm RMSNorm (the separate
+        # `rmsnorm_layer(self.x -> hidden_bf16)` task below) INTO the attn-mega
+        # as a Phase-0 — the kernel consumes self.x RAW (input[0]) and norms it
+        # internally with input_ln (prepended into ln_weights). Propagates to the
+        # kernel as -D MPK_DSV3_ATTN_PHASE0 (persistent_kernel.py JIT flags,
+        # gated on the SAME env condition so the builder ABI + compiled kernel
+        # agree). Box-validation (poison-fill + tpot Δ) is the next step.
+        _attn_phase0 = (os.environ.get("MPK_DSV3_ATTN_PHASE0_FUSION") == "1")
+
         # --- bf16 RMSNorm of the layer input (input_layernorm) -> `hidden` ---
         # The kernel's S2 quantizes a BF16 RMSNorm'd hidden itself, so it needs
         # the bf16 norm output. The default path's fused rmsnorm+qkv_a-quant
@@ -1656,19 +1666,31 @@ class DeepSeekV3Builder(GraphBuilder):
         # dedicated per-layer bf16 RMSNorm here. (Minor: the caller's fused
         # task still runs but its outputs are unread on this path — the main
         # agent can gate it out later for a small efficiency win.)
-        w_input_ln = self.mpk.attach_input(
-            torch_tensor=state_dict[f"{prefix}input_layernorm.weight"],
-            name=f"layer_{layer_idx}_attnmega_input_layernorm")
-        hidden_bf16 = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name=f"layer_{layer_idx}_attnmega_hidden_bf16",
-            io_category="cuda_tensor")
-        self.mpk.rmsnorm_layer(
-            input=self.x, weight=w_input_ln, output=hidden_bf16,
-            grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
-            block_dim=(128, 1, 1),
-            process_dim=self.hidden_size)
+        #
+        # Phase-0 fold: when _attn_phase0, we SKIP this rmsnorm_layer (the kernel
+        # does the RMSNorm in Phase-0) AND the hidden_bf16 alloc AND the
+        # w_input_ln attach (the input_layernorm weight is fed to the kernel via
+        # the ln_weights concat below, which reads the state_dict directly — so a
+        # separate attach would be an attached-but-unread orphan graph input).
+        # input[0] is rebound to self.x (raw) below.
+        if not _attn_phase0:
+            w_input_ln = self.mpk.attach_input(
+                torch_tensor=state_dict[f"{prefix}input_layernorm.weight"],
+                name=f"layer_{layer_idx}_attnmega_input_layernorm")
+            hidden_bf16 = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name=f"layer_{layer_idx}_attnmega_hidden_bf16",
+                io_category="cuda_tensor")
+            self.mpk.rmsnorm_layer(
+                input=self.x, weight=w_input_ln, output=hidden_bf16,
+                grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
+                block_dim=(128, 1, 1),
+                process_dim=self.hidden_size)
+        # `mega_hidden` is the tensor bound to the kernel's input[0]: the
+        # pre-normed hidden_bf16 (default) or RAW self.x (Phase-0). Also reused
+        # as the dep-only `dummy` for the tensor_init tasks below.
+        mega_hidden = self.x if _attn_phase0 else hidden_bf16
 
         # --- weights (SAME tensors the chain binds) -------------------------
         # qkv_a_proj: fp8 (2176,7168) + f32 per-128-block scale_inv (17,56). The
@@ -1681,10 +1703,30 @@ class DeepSeekV3Builder(GraphBuilder):
         # q_a_layernorm (1536,) + kv_a_layernorm (512,) bf16, CONCATENATED into
         # one ln_weights (2048,) buffer (the kernel reads q_a_ln at [0:1536) and
         # kv_a_ln at [1536:2048)) to stay under MAX_INPUTS_PER_TASK=14.
-        ln_weights_pt = torch.cat([
-            state_dict[f"{attn}q_a_layernorm.weight"].to(torch.bfloat16),
-            state_dict[f"{attn}kv_a_layernorm.weight"].to(torch.bfloat16),
-        ], dim=0).contiguous()
+        #
+        # Phase-0 fold: PREPEND input_layernorm so ln_weights becomes
+        # [input_ln(7168) | q_a_ln(1536) | kv_a_ln(512)] = (9216,). The kernel's
+        # Phase-0 RMSNorm reads input_ln at [0:7168); q_a/kv_a shift past it
+        # (this MUST match the kernel's static_assert'd offsets:
+        # input_ln=0, q_a_ln=K_HIDDEN=7168, kv_a_ln=K_HIDDEN+K_QLORA=8704).
+        _ln_parts = []
+        if _attn_phase0:
+            _ln_parts.append(
+                state_dict[f"{prefix}input_layernorm.weight"].to(torch.bfloat16))
+        _ln_parts.append(
+            state_dict[f"{attn}q_a_layernorm.weight"].to(torch.bfloat16))
+        _ln_parts.append(
+            state_dict[f"{attn}kv_a_layernorm.weight"].to(torch.bfloat16))
+        ln_weights_pt = torch.cat(_ln_parts, dim=0).contiguous()
+        if _attn_phase0:
+            assert ln_weights_pt.numel() == (self.hidden_size + 1536 + 512), (
+                "Phase-0 ln_weights must be [input_ln(7168)|q_a_ln(1536)|"
+                f"kv_a_ln(512)]=9216-d; got {ln_weights_pt.numel()} "
+                "(kernel offsets are static_assert'd to this exact layout).")
+        else:
+            assert ln_weights_pt.numel() == (1536 + 512), (
+                "Default ln_weights must be [q_a_ln(1536)|kv_a_ln(512)]=2048-d; "
+                f"got {ln_weights_pt.numel()}.")
         w_ln = self.mpk.attach_input(
             torch_tensor=ln_weights_pt,
             name=f"layer_{layer_idx}_attnmega_ln_weights")
@@ -1777,7 +1819,7 @@ class DeepSeekV3Builder(GraphBuilder):
             "MPK_DSV3_POISON_TENSORINIT_AFTER_STEP0") == "1") and not _skip_ti
         self.mpk.tensor_init_layer(
             target=attn_scratch,
-            dummy=hidden_bf16,
+            dummy=mega_hidden,
             grid_dim=(1, 1, 1),
             block_dim=(128, 1, 1),
             dummy_input_map=(-1, -1, -1),
@@ -1812,7 +1854,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 # zero it once (the tensor_init task) using a dep-only dummy.
                 self.mpk.tensor_init_layer(
                     target=self._attnmega_zero_resid,
-                    dummy=hidden_bf16,
+                    dummy=mega_hidden,
                     grid_dim=(1, 1, 1),
                     block_dim=(128, 1, 1),
                     dummy_input_map=(-1, -1, -1),
@@ -1829,7 +1871,7 @@ class DeepSeekV3Builder(GraphBuilder):
 
         dsv3_tasks.attn_block_megakernel_layer(
             self.mpk,
-            hidden=hidden_bf16,
+            hidden=mega_hidden,  # self.x (RAW) under Phase-0; else hidden_bf16
             qkv_a_w=w_qkv_a,
             qkv_a_s=s_qkv_a,
             ln_weights=w_ln,

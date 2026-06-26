@@ -859,6 +859,146 @@ __device__ __forceinline__ void
   __syncthreads();
 }
 
+#if MPK_DSV3_ATTN_PHASE0
+// Phase-0 DEEP-FUSION helper (default-OFF; compiled only under
+// -DMPK_DSV3_ATTN_PHASE0). FOLDS the LIVE front input_layernorm RMSNorm
+// (the separate `rmsnorm_layer(self.x -> hidden_bf16)` task) INTO this kernel:
+// the attn-mega consumes self.x RAW (the residual-stream input, `self_x`) and
+// RMS-norms it block-locally as a Phase-0 before the UE8M0 quant.
+//
+// It is `quant_hidden_block_smem` with ONE addition: a block-collective
+// RMSNorm pre-pass that REPRODUCES the exact reduction tree of the task it
+// replaces. The separate front task that this fold removes is
+// `rmsnorm_layer(self.x -> hidden_bf16)`, which on B200 (target_cc>=90)
+// dispatches to rms_norm_hopper_impl (rmsnorm_hopper.cuh). To keep the fold as
+// bit-faithful as feasible (sub-ULP fp32-reduction drift can flip a knife-edge
+// bf16 rounding -> token divergence over 61 layers, the same reason R1 mandates
+// rsqrtf over 1.0f/sqrtf), the reduction here mirrors rmsnorm_hopper EXACTLY:
+//   - fp32 promote of every element;
+//   - intra-warp partial via __shfl_XOR_sync (matches rmsnorm_hopper:150-153);
+//   - cross-warp combine of the NWARP partials via a warp-0 __shfl_XOR_sync
+//     TREE (matches rmsnorm_hopper:158-165), NOT a sequential Σ red8[i];
+//   - rms_rcp = rsqrtf(ss/n + K_EPS), K_EPS=1e-6f (matches eps + rsqrt).
+// The per-element normed value normed[j]=bf16(float(self_x[j])*rms_rcp*
+// float(input_ln_w[j])) is rounded to bf16 ONCE, exactly as rms_norm_hopper_impl
+// writes hidden_bf16 (output=(T)val) and the old quant then read float(bf16).
+// The UE8M0 amax/448 per-128-group quant body is byte-identical to
+// quant_hidden_block_smem above — ONLY the quantized value changes from raw
+// input[0] to the freshly-normed value. Every block computes the SAME ss and
+// the SAME s_deq redundantly (no block idles), so NO grid barrier is added (the
+// trailing __syncthreads publishes s_deq within the block before qkv_a reads
+// it, exactly as quant_hidden_block_smem does). `red8` is the caller's per-warp
+// reduction scratch (the SAME [NWARP] buffer rms_rcp_block uses).
+//
+// REDUCTION-GROUPING is bit-identical by construction (NOT a drift source):
+// at the production constants (HIDDEN=7168, NTHREAD=256, bf16 -> CHUNK_SIZE=4,
+// TILE_SIZE=1024, NUM_TILES=7), rms_norm_hopper_impl's tiled accumulation visits
+// element `tid + 256*(4*for_idx + m)` (for_idx in [0,7), m in [0,4)), and
+// `4*for_idx+m` enumerates 0..27 monotonically == this helper's flat
+// `for(i=tid;i<7168;i+=NTHREAD)` set AND ORDER. So per-thread partials, the
+// tree, the product association, eps, rsqrt, and the single bf16 round all match
+// rms_norm_hopper_impl exactly (verified from first principles + Codex +
+// ablation-logic-reviewer, 2026-06-25).
+//
+// NOTE: this is still a MATH-CHANGING lever — the fused kernel and the two-task
+// chain are NOT provably byte/token identical. The ONLY possible residual is
+// FMA-contraction differences from fusing the rmsnorm + quant into ONE
+// compilation unit (the compiler may contract the v*v accumulate / x*(rms_rcp*w)
+// differently than the standalone rmsnorm_hopper translation unit) — a MAYBE,
+// not a guaranteed last-ULP bound. It MUST therefore be gated by a NUMERIC
+// (cosine) correctness check on the box, NOT a token-identity A/B (token streams
+// are run-to-run nondeterministic on this TP8/EP2 decode path — the FFN
+// cross-CTA FP atomicAdd — so token-identity is an unreliable safety gate here).
+__device__ __forceinline__ void rmsnorm_quant_hidden_block_smem(
+    __nv_bfloat16 const *__restrict__ self_x,
+    __nv_bfloat16 const *__restrict__ input_ln_w,
+    float *__restrict__ s_deq,
+    float *__restrict__ red8,
+    int n,
+    int warpl,
+    int lane) {
+  int tid = threadIdx.x;
+  // --- Phase-0 RMSNorm reduction: ss = Σ(float(self_x[i]))² over [0:n], fp32,
+  // block-collective. Reduction tree matches rms_norm_hopper_impl exactly. ---
+  float ps = 0.f;
+  for (int i = tid; i < n; i += NTHREAD) {
+    float v = __bfloat162float(self_x[i]);
+    ps += v * v;
+  }
+  // intra-warp xor-shuffle (rmsnorm_hopper:150-153).
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    ps += __shfl_xor_sync(0xffffffffu, ps, o);
+  }
+  if ((tid & 31) == 0) {
+    red8[tid >> 5] = ps;
+  }
+  __syncthreads();
+  // cross-warp combine of the NWARP partials inside warp 0 via an xor-shuffle
+  // TREE, then broadcast through red8[0] (rmsnorm_hopper:158-165). Computing the
+  // combine in warp 0 only (not redundantly per-thread) preserves the canonical
+  // associativity order.
+  float ss = (tid < NWARP) ? red8[tid] : 0.f;
+#pragma unroll
+  for (int o = NWARP / 2; o > 0; o >>= 1) {
+    ss += __shfl_xor_sync(0xffffffffu, ss, o);
+  }
+  if (tid == 0) {
+    red8[0] = ss;
+  }
+  __syncthreads();
+  ss = red8[0]; // uniform across the block
+  __syncthreads(); // re-converge before red8 is reused by a later phase
+  // rsqrtf (NOT 1.0f/sqrtf) + K_EPS=1e-6f + fp32 promote — matches the canonical
+  // rms_norm_hopper_impl exactly.
+  float rms_rcp = rsqrtf(ss / (float)n + K_EPS);
+
+  // --- UE8M0 per-128-group quant of the NORMED value (body byte-identical to
+  // quant_hidden_block_smem; only the source value is normalized). ---
+  int ng = n / K_GRP;
+  for (int gx = warpl; gx < ng; gx += NWARP) {
+    __nv_bfloat16 const *h = self_x + gx * K_GRP;
+    __nv_bfloat16 const *w = input_ln_w + gx * K_GRP;
+    float v[4];
+    float mx = 1e-10f;
+    __nv_bfloat162 const *h2 =
+        reinterpret_cast<__nv_bfloat162 const *>(h) + lane * 2;
+    __nv_bfloat162 const *w2 =
+        reinterpret_cast<__nv_bfloat162 const *>(w) + lane * 2;
+    float2 a0 = __bfloat1622float2(h2[0]);
+    float2 a1 = __bfloat1622float2(h2[1]);
+    float2 g0 = __bfloat1622float2(w2[0]);
+    float2 g1 = __bfloat1622float2(w2[1]);
+    // normed = bf16(x * (rms_rcp * w)) — fp32 math, single bf16 round. The
+    // product ASSOCIATION matches rms_norm_hopper_impl's `val *= rms_rcp * w`
+    // (i.e. x * (rms_rcp * w), NOT (x*rms_rcp)*w) to minimize fp32 drift vs the
+    // task this fold replaces. The quant below then consumes float(this bf16),
+    // identical to how quant_hidden_block_smem consumed the bf16 hidden.
+    v[0] = __bfloat162float(__float2bfloat16(a0.x * (rms_rcp * g0.x)));
+    v[1] = __bfloat162float(__float2bfloat16(a0.y * (rms_rcp * g0.y)));
+    v[2] = __bfloat162float(__float2bfloat16(a1.x * (rms_rcp * g1.x)));
+    v[3] = __bfloat162float(__float2bfloat16(a1.y * (rms_rcp * g1.y)));
+#pragma unroll
+    for (int t = 0; t < 4; t++) {
+      mx = fmaxf(mx, fabsf(v[t]));
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    }
+    float ys = fmaxf(mx / K_FP8MAX, 1e-10f);
+    float yq = k_dec_ue8m0(k_enc_ue8m0(ys));
+    float *d = s_deq + gx * K_GRP + lane * 4;
+#pragma unroll
+    for (int t = 0; t < 4; t++) {
+      float q = fminf(fmaxf(v[t] / yq, -K_FP8MAX), K_FP8MAX);
+      d[t] = (float)__nv_fp8_e4m3(q) * yq;
+    }
+  }
+  __syncthreads();
+}
+#endif // MPK_DSV3_ATTN_PHASE0
+
 // Lever 3: block-cooperative UE8M0 quant of src[0:n] -> block-local SHARED
 // s_deq (dequantized values, byte-identical to quant_ue8m0_grid). Every block
 // quantizes the SAME src so the quant_gred->o_proj grid barrier is removed (the
@@ -1584,6 +1724,9 @@ __device__ __forceinline__ float rms_rcp_block(float const *__restrict__ src,
 //    [1]  qkv_a_w    (fp8)                                        (2176,7168)
 //    [2]  qkv_a_s    (fp32 per-128-block [N/128,K/128] = [17,56])
 //    [3]  ln_weights (bf16 [q_a_ln(1536) | kv_a_ln(512)])            (2048,)
+//         — under -DMPK_DSV3_ATTN_PHASE0 this is PREPENDED with input_ln so it
+//           becomes [input_ln(7168) | q_a_ln(1536) | kv_a_ln(512)] = (9216,)
+//           and the kernel RMS-norms the RAW self.x (input[0]) in Phase-0.
 //    [4]  q_b_w      (fp8 absorbed)                               (9216,1536)
 //    [5]  q_b_s      (fp32 per-128-block [72,12])
 //    [6]  cos_sin    (bf16 [cos(64) | sin(64)] per row)        (max_seq,128)
@@ -1604,12 +1747,41 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   __nv_fp8_e4m3 const *qkv_a_w =
       static_cast<__nv_fp8_e4m3 const *>(task_desc->input_ptrs[1]);
   float const *qkv_a_s = static_cast<float const *>(task_desc->input_ptrs[2]);
-  // ln_weights = [q_a_layernorm(1536) | kv_a_layernorm(512)] (concatenated to
-  // save an input slot under the 14-cap).
+  // ln_weights layout depends on the Phase-0 deep-fusion flag.
   __nv_bfloat16 const *ln_weights =
       static_cast<__nv_bfloat16 const *>(task_desc->input_ptrs[3]);
-  __nv_bfloat16 const *q_a_ln_w = ln_weights;
+#if MPK_DSV3_ATTN_PHASE0
+  // Phase-0 DEEP-FUSION (default-OFF): the builder PREPENDS input_layernorm so
+  // ln_weights = [input_ln(7168) | q_a_ln(1536) | kv_a_ln(512)] = 9216-d. The
+  // Phase-0 RMSNorm reads input_ln_w at [0:7168); q_a/kv_a shift past it.
+  //   input_ln_w = ln_weights        (offset 0)
+  //   q_a_ln_w   = ln_weights + 7168 (offset K_HIDDEN)
+  //   kv_a_ln_w  = ln_weights + 8704 (offset K_HIDDEN + K_QLORA)
+  // R3 (codex's top non-sync footgun): assert the concatenation offsets at
+  // compile time. The kernel only sees a raw pointer (no runtime length), so a
+  // static_assert on the layout constants is the strongest available guard —
+  // the builder MUST cat exactly [input_ln(K_HIDDEN) | q_a_ln(K_QLORA) |
+  // kv_a_ln(K_KVLORA)] in this order for these offsets to be valid.
+  static_assert(K_HIDDEN == 7168 && K_QLORA == 1536 && K_KVLORA == 512,
+                "Phase-0 ln_weights layout [input_ln(7168)|q_a_ln(1536)|"
+                "kv_a_ln(512)]=9216 — these constants pin the concat offsets; "
+                "the builder ln_weights_pt MUST match this exact order/size.");
+  static_assert((K_HIDDEN + K_QLORA + K_KVLORA) == 9216,
+                "Phase-0 ln_weights total length must be 9216-d.");
+  __nv_bfloat16 const *input_ln_w = ln_weights;                  // offset 0
+  __nv_bfloat16 const *q_a_ln_w = ln_weights + K_HIDDEN;         // offset 7168
+  __nv_bfloat16 const *kv_a_ln_w =
+      ln_weights + K_HIDDEN + K_QLORA;                           // offset 8704
+  (void)input_ln_w; // consumed by rmsnorm_quant_hidden_block_smem in S2
+#else
+  // Default (Phase-0 OFF): ln_weights = [q_a_ln(1536) | kv_a_ln(512)] (no
+  // input_ln — the separate rmsnorm_layer task pre-normalizes hidden).
+  static_assert((K_QLORA + K_KVLORA) == 2048,
+                "Default ln_weights total length must be 2048-d "
+                "([q_a_ln(1536)|kv_a_ln(512)]).");
+  __nv_bfloat16 const *q_a_ln_w = ln_weights;            // offset 0
   __nv_bfloat16 const *kv_a_ln_w = ln_weights + K_QLORA; // offset 1536
+#endif
   __nv_fp8_e4m3 const *q_b_w =
       static_cast<__nv_fp8_e4m3 const *>(task_desc->input_ptrs[4]);
   float const *q_b_s = static_cast<float const *>(task_desc->input_ptrs[5]);
@@ -1810,7 +1982,15 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // block-cooperatively ONCE into block-local SHARED s_act (the trailing
   // __syncthreads inside replaces the quant_hidden->qkv_a grid barrier), then
   // qkv_a reads s_act. Byte-identical UE8M0 dequant to quant_hidden_grid's deq.
+#if MPK_DSV3_ATTN_PHASE0
+  // Phase-0 DEEP-FUSION (default-OFF): `hidden` (input[0]) is the RAW
+  // residual-stream self.x; RMS-norm it block-locally with input_ln_w FIRST,
+  // then quant into s_act. NO grid barrier added (block-local, same as below).
+  rmsnorm_quant_hidden_block_smem(
+      hidden /*=raw self.x*/, input_ln_w, s_act, red8, K_HIDDEN, warpl, lane);
+#else
   quant_hidden_block_smem(hidden, s_act, K_HIDDEN, warpl, lane);
+#endif
   gemv_grid_cpa_t<2, 6>(s_act, // qkv_a reads BLOCK-LOCAL s_act (no grid barrier)
                         qkv_a_w,
                         qkv_a_s,
@@ -1823,6 +2003,10 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                         my_wbuf);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS); // qkv_a -> layernorm (KEPT)
 #else
+#if MPK_DSV3_ATTN_PHASE0
+#error                                                                          \
+    "MPK_DSV3_ATTN_PHASE0 (Phase-0 RMSNorm fold) is only implemented on the FAST path (MPK_DSV3_ATTN_FAST=1, the default). With FAST=0 the builder feeds RAW self.x but this baseline path does not normalize it -> wrong. Do not combine MPK_DSV3_ATTN_PHASE0_FUSION=1 with MPK_DSV3_ATTN_FAST=0."
+#endif
   quant_hidden_grid(
       hidden, sc.g_hdeq, sc.g_hf8, sc.g_hsc, K_HIDDEN, gwarp, gwarps, lane);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);

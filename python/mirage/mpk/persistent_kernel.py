@@ -316,6 +316,19 @@ def get_compile_command(
     # MPK_DSV3_ATTN_FAST=0 compiles the proven-correct 8-barrier baseline for A/B.
     if os.environ.get("MPK_DSV3_ATTN_FAST") == "0":
         flags = flags + ["-DMPK_DSV3_ATTN_FAST=0"]
+    # Attention PHASE-0 DEEP-FUSION (default-OFF; when UNSET the default device
+    # SASS is UNCHANGED — all new kernel code is #if MPK_DSV3_ATTN_PHASE0-gated,
+    # verified SASS-diff=0; note only the cubin's debug-line metadata shifts under
+    # -lineinfo, which is irrelevant to execution): folds the LIVE front
+    # input_layernorm RMSNorm into the attn-mega as a Phase-0 (the kernel norms
+    # RAW self.x internally). MUST be gated on the SAME env condition the builder
+    # uses (MPK_DSV3_ATTN_PHASE0_FUSION) so the compiled kernel's ln_weights
+    # layout/ABI agrees with the builder's concat — a partial gate (flag set,
+    # builder not, or vice-versa) is a silent miscompile. The -D goes through this
+    # JIT flags list (NOT MPK_EXTRA_NVCC_DEFINES — see memory
+    # feedback_nvcc_flag_vs_builder_grid_mismatch).
+    if os.environ.get("MPK_DSV3_ATTN_PHASE0_FUSION") == "1":
+        flags = flags + ["-DMPK_DSV3_ATTN_PHASE0"]
     # FFN-full FAST levers (v019: packed-half2 GEMV + cp.async y13 + parallel argmax,
     # .cuh default ON). MPK_DSV3_FFN_FAST=0 = the proven v015 scalar path for A/B.
     if os.environ.get("MPK_DSV3_FFN_FAST") == "0":
