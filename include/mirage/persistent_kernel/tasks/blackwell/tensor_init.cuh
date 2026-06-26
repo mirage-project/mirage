@@ -46,4 +46,49 @@ __device__ __forceinline__ void
   }
 } // tensor_init_zero_sm100_task_impl
 
+// POISON-fill variant — DIAGNOSTIC ONLY (MPK_DSV3_POISON_TENSORINIT_AFTER_STEP0).
+// Writes a sentinel bit pattern (bf16 NaN 0x7FC0 in every 16-bit lane) instead
+// of zero. Used to safety-test the SKIP_TENSORINIT_AFTER_STEP0 lever: on a
+// decode step>=1 we write poison into the ACTIVATION regions the skip would have
+// left untouched; if the skip premise holds (every activation region is
+// overwritten-before-read / zeroed-inside-the-kernel) the poison never reaches
+// the logits and the output is clean; if any region is read-before-write on some
+// step, the poison (NaN / huge garbage int) propagates -> deterministic NaN /
+// garbage output, which is IMMUNE to the FP-atomicAdd run-to-run nondeterminism
+// that makes the token-identity gate inconclusive.
+//
+// SKIP_HEAD_BYTES: leave the first SKIP_HEAD_BYTES of the buffer UNTOUCHED. This
+// is mandatory for the attn-block megakernel scratch: its first 16 bytes hold
+// the sense-reversing grid-barrier counter/gen (ATTN_BARRIER_BYTES=8 + pad to
+// 16). That counter is SELF-MAINTAINED across steps (the last arriver resets it
+// to 0); the SKIP lever PRESERVES that self-maintained 0, so poison must NOT
+// clobber it (clobbering it would hang the barrier deterministically — a FALSE
+// POSITIVE that is unrelated to whether the activation regions are stale-read-
+// safe). SKIP_HEAD_BYTES must be a multiple of 16 (16B-vec store granularity).
+template <int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE,
+          int SKIP_HEAD_BYTES = 0>
+__device__ __forceinline__ void
+    tensor_init_poison_sm100_task_impl(void *target_ptr) {
+  using bf16 = cute::bfloat16_t;
+  static_assert(OUTPUT_SIZE % 8 == 0,
+                "tensor_init: OUTPUT_SIZE must be multiple of 8 (16B vec)");
+  static_assert(SKIP_HEAD_BYTES % 16 == 0,
+                "tensor_init poison: SKIP_HEAD_BYTES must be multiple of 16");
+  bf16 *base = static_cast<bf16 *>(target_ptr);
+  constexpr int VEC = 8; // 8 bf16 = 16 bytes
+  constexpr int VEC_PER_ROW = OUTPUT_SIZE / VEC;
+  constexpr int VEC_SKIP = SKIP_HEAD_BYTES / 16; // 16B vecs to preserve at head
+  // 0x7FC0 = bf16 quiet-NaN; packed twice per 32-bit lane.
+  int const lane = 0x7FC07FC0;
+  int4 const poison = {lane, lane, lane, lane};
+#pragma unroll
+  for (int row = 0; row < BATCH_SIZE; ++row) {
+    int4 *row_ptr = reinterpret_cast<int4 *>(base + row * OUTPUT_STRIDE);
+    int const start = (row == 0) ? VEC_SKIP : 0;
+    for (int i = start + threadIdx.x; i < VEC_PER_ROW; i += blockDim.x) {
+      row_ptr[i] = poison;
+    }
+  }
+} // tensor_init_poison_sm100_task_impl
+
 } // namespace kernel

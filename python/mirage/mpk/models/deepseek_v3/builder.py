@@ -1749,6 +1749,32 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor")
         # Zero the barrier counters (and the rest) before first use, exactly as
         # the FFN mega-task does for its barrier_scratch.
+        # MPK_DSV3_SKIP_TENSORINIT_AFTER_STEP0 (default-OFF, byte-identical when
+        # unset): make this per-step zero a runtime no-op on decode steps>=1.
+        # SAFE here because the attn-block megakernel's sense/generation grid
+        # barrier self-maintains (last arriver resets count before flipping gen;
+        # gen is change-based, never needs reset) and every scratch activation
+        # region is dead / fully-overwritten-before-read / read-only-at-written-
+        # indices (g_mla_acc s<nsp, nsp clamped to 8 => ntask<=128<136) /
+        # zeroed-inside-the-kernel (g_head_done, g_head_wuv_ready before B2). The
+        # only thing this per-step zero protected was the cudaMalloc step-0
+        # garbage (step 0 STILL zeroes). PREMISE for the skip staying safe: the
+        # kernel keeps EXACTLY 136 CTAs hitting all 3 barriers each step with no
+        # early-return, and this scratch stays per-layer-distinct. Verified by
+        # first-principles + Codex + ablation-logic-reviewer; gate on a >=3-step
+        # token-identity A/B before flipping the default.
+        _skip_ti = (os.environ.get(
+            "MPK_DSV3_SKIP_TENSORINIT_AFTER_STEP0") == "1")
+        # MPK_DSV3_POISON_TENSORINIT_AFTER_STEP0 (default-OFF, DIAGNOSTIC): on
+        # decode steps>=1 fill the scratch with a NaN sentinel instead of either
+        # zeroing or skipping. Safety-tests the skip lever: if the skip premise
+        # (every region overwritten-before-read / barrier self-resets) holds, the
+        # poison never reaches the logits -> clean output; if any region is read-
+        # before-write, the NaN propagates -> deterministic NaN/garbage (or hang),
+        # IMMUNE to the FP-atomicAdd nondeterminism that makes token-identity an
+        # inconclusive safety gate on this path. Mutually exclusive with the skip.
+        _poison_ti = (os.environ.get(
+            "MPK_DSV3_POISON_TENSORINIT_AFTER_STEP0") == "1") and not _skip_ti
         self.mpk.tensor_init_layer(
             target=attn_scratch,
             dummy=hidden_bf16,
@@ -1756,6 +1782,8 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             dummy_input_map=(-1, -1, -1),
             target_input_map=(-1, -1, -1),
+            skip_after_step0=_skip_ti,
+            poison_after_step0=_poison_ti,
         )
 
         # --- TP RowParallel o_proj combine (THE TP>1 correctness fix) -------
@@ -3257,13 +3285,25 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=state_dict[f"{prefix}post_attention_layernorm.weight"],
                 name=f"layer_{i}_post_attn_layernorm",
             )
-            # Post-attention RMSNorm. On the fused decode path the FFN-full
-            # megakernel rms-norms self.x internally (Phase A, same eps 1e-6),
-            # so this self.rmsnorm_out write is an unread dead write for MoE
-            # layers there; it is still live for dense layers 0-2 (which read
-            # self.rmsnorm_out) and for the prefill/compat MoE chain. Emitted
-            # unconditionally (a prior env-gated skip was box-measured NULL on
-            # perf and broke token-identity, so it was reverted).
+            # Post-attention RMSNorm, emitted unconditionally. On the fused
+            # decode path the FFN-full / dense-MLP megakernels rms-norm self.x
+            # INTERNALLY (Phase A, eps 1e-6), so this self.rmsnorm_out write is
+            # a dead write for those layers; it stays LIVE for dense layers 0-2
+            # (unfused chain), the prefill/compat MoE chain, and (via the shared
+            # buffer) the final-norm -> lm_head tail.
+            #
+            # NOTE (2026-06-25 investigation, scaffolding removed): a direct skip
+            # of the dead write was tried and reverted — it measured NULL on perf
+            # + token-differ, BUT the token-differ was later traced to BASELINE
+            # NONDETERMINISM (ffn_full cross-CTA atomicAdd FP non-assoc, two
+            # identical runs diverge from token ~10), so the "broke token-
+            # identity" verdict is REFUTED. A per-layer dedicated buffer
+            # (to decouple the dead write from the shared producer set) was also
+            # tried and proven a graph NO-OP — the post-attn rmsnorm is already
+            # terminal on the shared buffer (DAG-dump: skip-off == skip-on). The
+            # skip's real graph perturbation is dropping self.x's fork
+            # cardinality 2->1. Any re-test must use the poison-fill / distri-
+            # butional gate (token-identity is dead on this nondeterministic path).
             self.mpk.rmsnorm_layer(
                 input=self.x, weight=w_post_norm, output=self.rmsnorm_out,
                 grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),

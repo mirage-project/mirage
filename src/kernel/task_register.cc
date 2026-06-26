@@ -2186,7 +2186,20 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   //   input_ops[0]  = linear_input  (dummy dep, not read)
   //   output_ops[0] = linear_output (the tile zeroed by the kernel)
   //   output_ops[1] = linear_input  (dummy dep edge, not written)
-  assert(params.size() == 0);
+  // params: empty (default, unguarded — byte-identical to the historical
+  //   codegen) OR [1] => skip_after_step0: wrap the zero-fill in a runtime
+  //   `if (runtime_config.step[0] == 0)` guard so it is a NO-OP on every decode
+  //   step after the first. ONLY safe for a self-maintaining grid-barrier
+  //   scratch (see tensor_init_layer's docstring). The guarded form is a
+  //   DISTINCT code string => a distinct deduped variant, so other tensor_init
+  //   callers and the default build are unaffected.
+  // params: [] default (unguarded, byte-identical), [1] => skip_after_step0,
+  //   [2] => poison_after_step0 (DIAGNOSTIC: zero on step 0, write NaN sentinel
+  //   on steps>=1 instead of skipping — safety-tests the skip premise; see
+  //   tensor_init_poison_sm100_task_impl).
+  assert(params.size() == 0 || params.size() == 1);
+  bool skip_after_step0 = (params.size() == 1 && params[0] == 1);
+  bool poison_after_step0 = (params.size() == 1 && params[0] == 2);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -2211,11 +2224,50 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  if (skip_after_step0 || poison_after_step0) {
+    // Step-0-only zero (MPK_DSV3_SKIP_TENSORINIT_AFTER_STEP0): the target is a
+    // self-maintaining grid-barrier scratch — the cudaMalloc'd buffer is
+    // garbage at step 0 (must zero), but the sense/gen barrier resets its own
+    // count each barrier and every activation region is overwritten before read
+    // each step, so steps>=1 need no re-zero. `runtime_config` is the
+    // _execute_task parameter in scope here. ALL participating CTAs evaluate the
+    // SAME runtime_config.step[0] (step is per-launch, not per-CTA), so this is
+    // not a divergent skip; the whole task is uniformly a no-op on steps>=1.
+    code.e("if (runtime_config.step[0] == 0) {");
+  }
   code.e("kernel::tensor_init_zero_sm100_task_impl<$, $, $>(",
          /*BATCH_SIZE=*/batch_size,
          /*OUTPUT_SIZE=*/output_size,
          /*OUTPUT_STRIDE=*/output_stride);
   code.e("    task_desc->output_ptrs[0]);");
+  if (skip_after_step0 || poison_after_step0) {
+    // close the `if (step==0)` block (the step-0 zero) for BOTH guarded forms.
+    code.e("}");
+  }
+  if (poison_after_step0) {
+    // Diagnostic poison (MPK_DSV3_POISON_TENSORINIT_AFTER_STEP0): on every
+    // decode step>=1, fill the scratch with a NaN sentinel instead of skipping.
+    // Tests the skip lever's premise — if any region is read-before-write on a
+    // step, the poison reaches the logits => deterministic NaN/garbage (or a
+    // barrier hang), immune to FP-atomicAdd nondeterminism.
+    // SKIP_HEAD_BYTES=16 = attn_au16(ATTN_BARRIER_BYTES) = attn_au16(8): the
+    // attn-block scratch's first 16B hold the sense-reversing grid-barrier
+    // count(@0)+gen(@4) + 8B align-pad; the first activation (g_hdeq) starts at
+    // byte 16 (attn_block_megakernel_sm100.cuh: AttnScratch / attn_make_scratch).
+    // That counter is SELF-MAINTAINED across steps (last arriver resets it to 0),
+    // which the SKIP lever PRESERVES — so the poison must NOT clobber it, else the
+    // barrier hangs deterministically (a false positive unrelated to whether the
+    // activation regions are stale-read-safe). DIAGNOSTIC-ONLY: this hard-coded 16
+    // is correct ONLY for the attn-block scratch; another scratch (dense-MLP /
+    // FFN-full) would need its own poison wiring + head size.
+    code.e("else {");
+    code.e("kernel::tensor_init_poison_sm100_task_impl<$, $, $, 16>(",
+           /*BATCH_SIZE=*/batch_size,
+           /*OUTPUT_SIZE=*/output_size,
+           /*OUTPUT_STRIDE=*/output_stride);
+    code.e("    task_desc->output_ptrs[0]);");
+    code.e("}");
+  }
   return register_task_variant(TASK_TENSOR_INIT, code.to_string());
 }
 

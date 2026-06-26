@@ -2104,6 +2104,8 @@ class PersistentKernel:
         block_dim: tuple,
         dummy_input_map: tuple,
         target_input_map: tuple,
+        skip_after_step0: bool = False,
+        poison_after_step0: bool = False,
     ):
         """Zero-fill `target` using a custom kernel.
 
@@ -2120,6 +2122,21 @@ class PersistentKernel:
         the CTA count does not affect downstream consumers. Saves the splitk
         prepend-tensor_init from launching grid_y replicates of the same zero
         tile.
+
+        `skip_after_step0` (default False, byte-identical when False): when True,
+        the generated tensor_init becomes a RUNTIME NO-OP on every decode step
+        whose `runtime_config.step[0] != 0` (it still fully zeroes on step 0).
+        ONLY valid for a target whose downstream kernel SELF-MAINTAINS its
+        contents across decode steps within one persistent-kernel launch — i.e.
+        a sense/generation grid-barrier scratch whose counters reset themselves
+        each barrier and whose activation regions are all overwritten before
+        read every step (the fused attn-block megakernel scratch). Do NOT set
+        this for a target that is read-before-write on any step (e.g. an
+        accumulator the next kernel adds into). A wrong skip silently leaves
+        stale data / a non-zero barrier counter -> miscompare or megakernel
+        deadlock. Passing it flips the tensor_init to a SEPARATE codegen variant
+        (the step-guarded one) so other unflagged tensor_init callers are
+        unaffected and the default build stays byte-identical.
         """
         gx, gy, gz = grid_dim
         if target_input_map[1] == -1 and gy > 1:
@@ -2137,7 +2154,20 @@ class PersistentKernel:
         tb_graph.new_input(dummy, dummy_input_map, -1, True)
         self.kn_graph.customized([dummy, target, dummy], tb_graph)
 
-        self.kn_graph.register_task(tb_graph, "tensor_init")
+        # params[0]==1 => emit the step-0-guarded variant (skip on steps>=1).
+        # params[0]==2 => DIAGNOSTIC poison variant (zero step 0, NaN sentinel on
+        #   steps>=1) — safety-tests the skip premise (poison_after_step0).
+        # Omit params entirely otherwise so the code string is byte-identical to
+        # the historical unguarded tensor_init (no new variant for the default).
+        assert not (skip_after_step0 and poison_after_step0), \
+            "tensor_init: skip_after_step0 and poison_after_step0 are mutually exclusive"
+        if poison_after_step0:
+            params = [2]
+        elif skip_after_step0:
+            params = [1]
+        else:
+            params = None
+        self.kn_graph.register_task(tb_graph, "tensor_init", params)
     
     def moe_topk_softmax_routing_layer(
         self,
