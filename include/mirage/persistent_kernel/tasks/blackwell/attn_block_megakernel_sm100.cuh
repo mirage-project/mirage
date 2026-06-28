@@ -143,6 +143,24 @@ namespace attn_block_megakernel_sm100 {
 #define MPK_DSV3_ATTN_FAST 1
 #endif
 
+// W0 TAIL LIGHTEN lever (default-OFF). The rope(k_pe) + kv_cache append before
+// the q_b->MLA grid barrier is, in the default path, a single-thread serial tail
+// run by worker_idx==0/tid==0 alone — the per-position load-balance discriminator
+// flagged worker 0 as the fixed straggler all 135 other workers wait on at that
+// barrier. When 1 (via -DMPK_DSV3_ATTN_W0_TAIL_LIGHTEN on the JIT flags), the 32
+// independent rope PAIRS are distributed across worker-0's threads 0..31 (one pair
+// per thread) so worker 0 is no longer the sole serial writer. PURE who-writes-it
+// change: each pair pr reads only g_qkva[2048+2pr], g_qkva[2048+2pr+1] and writes
+// only kv_cache[...+512+2pr], [...+512+2pr+1] — disjoint per pair, no cross-pair
+// dependence, no read of the partially-written output. The published
+// kv_cache[step][512:576) is BIT-IDENTICAL (same float ops, same k_bf16 rounding,
+// same intra-pair order). Still on worker 0 only => no new cross-CTA coordination;
+// the existing q_b->MLA grid_barrier (count 136, fences ALL threads) publishes it.
+// Default 0 => default device SASS byte-identical (the branch is compiled out).
+#ifndef MPK_DSV3_ATTN_W0_TAIL_LIGHTEN
+#define MPK_DSV3_ATTN_W0_TAIL_LIGHTEN 0
+#endif
+
 // ---- Per-stage debug taps (default-OFF; compile with -DMPK_ATTN_DBG) --------
 // Enable: add -DMPK_ATTN_DBG to the megakernel nvcc flags (e.g. via the
 // extra-defines env the runtime forwards), then run with the demo. At decode
@@ -2173,6 +2191,38 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
       kv_cache[(size_t)step * K_QKHEAD + i] = __float2bfloat16(v);
     }
     // rope(k_pe) on g_qkva[2048:2112) + append to kv_cache[step][512:576).
+#if MPK_DSV3_ATTN_W0_TAIL_LIGHTEN
+    // W0 TAIL LIGHTEN (default-OFF): distribute the 32 independent rope PAIRS
+    // across worker-0's threads 0..31 (one pair per thread) instead of the serial
+    // single-thread loop below. Each pair is fully local — it reads only its own
+    // two g_qkva elements and writes only its own two kv_cache elements — so this
+    // is a who-writes-it change: BIT-IDENTICAL to the serial path (same float
+    // ops, same k_bf16 rounding, same intra-pair order; only parallelized ACROSS
+    // pairs). Stays on worker 0 only (no new cross-CTA coordination); the q_b->MLA
+    // grid_barrier below (count 136, fences all threads) publishes the result.
+    if (worker_idx == 0 && tid < K_QKROPE / 2) {
+      int pr = tid;
+      int d0 = pr * 2, d1 = d0 + 1;
+      float c = __bfloat162float(cos_sin[pos * K_COSSIN_STRIDE + d0]);
+      float s = __bfloat162float(
+          cos_sin[pos * K_COSSIN_STRIDE + K_COSSIN_SINOFF + d0]);
+      float k0 = sc.g_qkva[2048 + d0], k1 = sc.g_qkva[2048 + d1];
+      kv_cache[(size_t)step * K_QKHEAD + 512 + d0] =
+          __float2bfloat16(k_bf16(k0 * c - k1 * s));
+      kv_cache[(size_t)step * K_QKHEAD + 512 + d1] =
+          __float2bfloat16(k_bf16(k1 * c + k0 * s));
+#ifdef MPK_DSV3_ATTN_W0_TAIL_POISON
+      // DIAGNOSTIC (default-OFF): overwrite the just-written k_pe slice with NaN.
+      // The q_b->MLA barrier publishes it; if MLA consumes the k_pe (it scores
+      // attention with it), the tokens go garbage -> proves consumption + that
+      // this lightened path produces the bytes MLA reads. (No effect on the
+      // default/non-poison build.)
+      __nv_bfloat16 nanbf = __float2bfloat16(__int_as_float(0x7fc00000));
+      kv_cache[(size_t)step * K_QKHEAD + 512 + d0] = nanbf;
+      kv_cache[(size_t)step * K_QKHEAD + 512 + d1] = nanbf;
+#endif
+    }
+#else
     if (worker_idx == 0 && tid == 0) {
       float kpe[K_QKROPE];
 #pragma unroll
@@ -2193,6 +2243,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
         kv_cache[(size_t)step * K_QKHEAD + 512 + i] = __float2bfloat16(kpe[i]);
       }
     }
+#endif
   }
 #if MPK_DSV3_ATTN_FAST
   // Lever 2 (QA_BLOCK_LOCAL): the layernorm->q_b grid barrier is DROPPED — only

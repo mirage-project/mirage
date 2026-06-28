@@ -329,10 +329,40 @@ def get_compile_command(
     # feedback_nvcc_flag_vs_builder_grid_mismatch).
     if os.environ.get("MPK_DSV3_ATTN_PHASE0_FUSION") == "1":
         flags = flags + ["-DMPK_DSV3_ATTN_PHASE0"]
+    # W0 TAIL LIGHTEN (default-OFF; byte-identical default build — all new code is
+    # #if MPK_DSV3_ATTN_W0_TAIL_LIGHTEN-gated inside the attn-mega): the rope(k_pe)
+    # + kv_cache append before the q_b->MLA grid barrier is a single-thread serial
+    # tail run by worker_idx==0/tid==0 alone (the per-position load-balance
+    # discriminator flagged worker 0 as the fixed straggler). This DISTRIBUTES the
+    # 32 independent rope pairs across worker-0's threads 0..31 (one pair each), so
+    # worker 0 is no longer the sole serial writer. Pure who-writes-it change: the
+    # published kv_cache[step][512:576) is bit-identical (same float ops, same
+    # k_bf16 rounding, same intra-pair order; only parallelized ACROSS the 32
+    # disjoint pairs). Grid-barrier participant count stays 136. The -D goes through
+    # this JIT flags list (NOT MPK_EXTRA_NVCC_DEFINES — see memory
+    # feedback_nvcc_flag_vs_builder_grid_mismatch). No builder/ABI change.
+    if os.environ.get("MPK_DSV3_ATTN_W0_TAIL_LIGHTEN") == "1":
+        flags = flags + ["-DMPK_DSV3_ATTN_W0_TAIL_LIGHTEN"]
+    # DIAGNOSTIC (default-OFF): after the rope(k_pe) write, poison the published
+    # kv_cache[step][512:576) k_pe slice with NaN to PROVE the MLA attention
+    # consumes it (poison => NaN scores => garbage tokens). Confirms the lightened
+    # who-writes-it path actually produces the consumed bytes. Only meaningful
+    # together with MPK_DSV3_ATTN_W0_TAIL_LIGHTEN=1.
+    if os.environ.get("MPK_DSV3_ATTN_W0_TAIL_POISON") == "1":
+        flags = flags + ["-DMPK_DSV3_ATTN_W0_TAIL_POISON"]
     # FFN-full FAST levers (v019: packed-half2 GEMV + cp.async y13 + parallel argmax,
     # .cuh default ON). MPK_DSV3_FFN_FAST=0 = the proven v015 scalar path for A/B.
     if os.environ.get("MPK_DSV3_FFN_FAST") == "0":
         flags = flags + ["-DMPK_DSV3_FFN_FAST=0"]
+    # FFN_FAST_ROUTING: Phase B cp.async pipelined router GEMV (default OFF).
+    # Replaces the scalar router_partial<4> (NCU long_scoreboard-bound) with
+    # router_partial_cpa<4,4> using cp.async weight staging + packed bf162->float2.
+    # Enable: MPK_DSV3_FFN_FAST_ROUTING=1. Math NEAR-identical / sub-ULP (NOT
+    # bit-identical): packed bf162 pairwise dot vs scalar left-fold -> fp32
+    # non-associative; distributional-correctness gate PASS. Default OFF so
+    # the default build is byte-identical to the v019 baseline.
+    if os.environ.get("MPK_DSV3_FFN_FAST_ROUTING") == "1":
+        flags = flags + ["-DMPK_DSV3_FFN_FAST_ROUTING=1"]
     # MLA_REDUCE_1WAVE (rd_dv=4 / 128-CTA 1-wave reduce) HELD OFF pending a box A/B
     # token-identity check: the 12.20ms campaign-best ran FINESPLIT-ON +
     # REDUCE_1WAVE-OFF (the 6/20 partial-gate bug never compiled the flag), so the
