@@ -41,8 +41,7 @@
 // layout, the SCRATCH_BYTES %16 rule, output_ptrs[0]-only write.
 //
 // v019 SPEED MERGE (ferret workspace5, 46.18us cold ACTIVE=4, 9.35x vs chain,
-// correctness EXACT — gated by MPK_DSV3_FFN_FAST, default ON;
-// -DMPK_DSV3_FFN_FAST=0 falls back to the v015 scalar path). The merged levers
+// correctness EXACT). The merged levers
 // are GEMV/compute SPEED levers ONLY (the reduce/topk/silu MATH is
 // byte-identical to v015): (1) cp.async y13 staging in Phase 2; (2) RBX_W13
 // 4->8 already + STAGES_W13 2->4; (3) packed half2 inner dot (W13/W2/shGU) + W2
@@ -52,24 +51,24 @@
 // v015 (the in-MPK-correct ABI). The y13 staging REUSES the per-warp s_wbuf (no
 // new Scratch region); WBUF_U4 is grown + re-asserted to cover the 16B-W2 stage
 // AND the whole-block y13 staging. See the FFN-FAST lever comments below.
-// NOTE: SCRATCH_BYTES is 106624 (not v015's 106608) — the FAST y13 staging reads
-// the GLOBAL y13 section via cp.async.cg-16, which requires y13 16B-aligned, so
-// every Scratch section start is now 16B-aligned (was contiguous-after-8B-barrier
-// → %16==8 → misaligned-y13 crash). The +16 is two 8B section pads, not a new
-// region.
+// NOTE: SCRATCH_BYTES is 106624 (not v015's 106608) — the FAST y13 staging
+// reads the GLOBAL y13 section via cp.async.cg-16, which requires y13
+// 16B-aligned, so every Scratch section start is now 16B-aligned (was
+// contiguous-after-8B-barrier → %16==8 → misaligned-y13 crash). The +16 is two
+// 8B section pads, not a new region.
 //
-// MPK_DSV3_FFN_FAST_ROUTING (default OFF — set to 1 to enable): Phase B router
-// GEMV fast path. Replaces the scalar router_partial<4> (NCU long_scoreboard
-// 17.82 cyc/issue, HBM latency exposed) with router_partial_cpa<4,4>: cp.async
-// STAGES=4 pipeline for weight loads + packed __nv_bfloat162 inner dot (2
-// muls/instr vs 8 scalar bf16->float + 8 fmul). The activation (s_norm) is in
-// SMEM so it contributes zero HBM latency; only the 256×7168 weight matrix is
-// staged. Math NEAR-identical, NOT bit-identical: same slice offsets + uint4
-// decomposition order, but the packed bf162 dot sums pairwise (p0+p1) vs the
-// scalar left-fold (acc+=p0; acc+=p1) -> fp32 non-associative -> sub-ULP.
-// Uses the existing per-warp my_wbuf as the ring buffer (WBUF_U4=1024
-// uint4/warp >> 128 uint4 needed). TP8-alignment-safe: row stride = 14336B
-// (16B-aligned), slice offset = sp×3584B (16B-aligned), extern smem stays
+// Fast Phase B router GEMV path. Replaces the scalar router_partial<4> (NCU
+// long_scoreboard 17.82 cyc/issue, HBM latency exposed) with
+// router_partial_cpa<4,4>: cp.async STAGES=4 pipeline for weight loads + packed
+// __nv_bfloat162 inner dot (2 muls/instr vs 8 scalar bf16->float + 8 fmul). The
+// activation (s_norm) is in SMEM so it contributes zero HBM latency; only the
+// 256×7168 weight matrix is staged. Math NEAR-identical, NOT bit-identical:
+// same slice offsets + uint4 decomposition order, but the packed bf162 dot sums
+// pairwise (p0+p1) vs the scalar left-fold (acc+=p0; acc+=p1) -> fp32
+// non-associative -> sub-ULP. Uses the existing per-warp my_wbuf as the ring
+// buffer (WBUF_U4=1024 uint4/warp >> 128 uint4 needed). TP8-alignment-safe: row
+// stride = 14336B (16B-aligned), slice offset = sp×3584B (16B-aligned), extern
+// smem stays
 // __align__(1024). The cp.async is flushed (cpasync_wait<0>) before the
 // grid_barrier. Target: router Phase B slowCTA from ~8.88µs → ~3µs at W=128.
 //
@@ -267,11 +266,11 @@ static constexpr int SCRATCH_BYTES_RAW =
 // Round the TOTAL up to 16 (tensor_init zero-init uses 16B vec stores; the
 // builder allocates bytes/2 bf16 and asserts %16==0 on the byte count).
 static constexpr int SCRATCH_BYTES = (SCRATCH_BYTES_RAW + 15) & ~15;
-// CONTRACT: must equal builder.py FFN_FULL_MEGAKERNEL_SCRATCH_BYTES. Per-section
-// 16B alignment (the misaligned-y13-cp.async fix) raised this from 106608 to
-// 106624 (+16: an 8B pad before rmsnorm_out and before out_acc) — pinned here so
-// a future Scratch edit that drifts from the builder constant fails at compile
-// time.
+// CONTRACT: must equal builder.py FFN_FULL_MEGAKERNEL_SCRATCH_BYTES.
+// Per-section 16B alignment (the misaligned-y13-cp.async fix) raised this from
+// 106608 to 106624 (+16: an 8B pad before rmsnorm_out and before out_acc) —
+// pinned here so a future Scratch edit that drifts from the builder constant
+// fails at compile time.
 static_assert(SCRATCH_BYTES == 106624,
               "FFN-FULL SCRATCH_BYTES changed — update builder.py "
               "FFN_FULL_MEGAKERNEL_SCRATCH_BYTES to match.");
@@ -367,9 +366,7 @@ __device__ __forceinline__ float silu_fast(float x) {
 // ============================================================================
 //  FFN-FAST levers (ported from ferret workspace5 v019; default ON). These are
 //  GEMV/compute SPEED levers only — the reduce/topk/silu MATH is byte-identical
-//  to the proven v015 path. Gated by MPK_DSV3_FFN_FAST so an A/B fallback to
-//  the v015 scalar path (the committed-correct baseline) is one -D away:
-//    -DMPK_DSV3_FFN_FAST=0  -> v015 scalar dgemv_cpa16/dgemv_cpa + global y13.
+//  to the proven v015 path.
 //  v019 wins folded in (each a kernel-BODY speed lever, NOT a math change):
 //   (1) cp.async y13 staging in Phase 2 (-5.1us): the cold y13 global readback
 //       is handed to the LSU as one coalesced cp.async.cg run + ONE wait, so
@@ -388,11 +385,7 @@ __device__ __forceinline__ float silu_fast(float x) {
 //  DEAD (do NOT add): tcgen05 (1/16-util at M=1), STAGES_W13=5 (+1us),
 //  CTA round-robin W13 (+1.5us).
 // ============================================================================
-#ifndef MPK_DSV3_FFN_FAST
-#define MPK_DSV3_FFN_FAST 1
-#endif
 
-#if MPK_DSV3_FFN_FAST
 // FP8(e4m3)->__half2 for one packed uint32 (4 fp8) -> two half2, via the
 // hardware F2FP.E4M3 path (cvt.rn.f16x2.e4m3x2; bf16x2 is NOT supported on
 // sm_100). e4m3 magnitudes reach 448 so the raw fp16 PRODUCT (~448^2) would
@@ -418,7 +411,6 @@ __device__ __forceinline__ void ffn_full_f8x16_h2(uint4 v, __half2 b[8]) {
 }
 // NOTE: the PACKED-half2 GEMV (dgemv_cpa16_h2) is defined just after dgemv_cpa
 // below (it needs the cpasync* helpers defined there).
-#endif // MPK_DSV3_FFN_FAST
 
 template <typename T>
 __device__ __forceinline__ void
@@ -672,7 +664,6 @@ __device__ __forceinline__ void dgemv_cpa(uint8_t const *__restrict__ a_fp8,
   }
 }
 
-#if MPK_DSV3_FFN_FAST
 // PACKED-half2 uint4 (16B) cp.async.cg pipelined GEMV (FAST: W13 + W2 + shGU).
 // Same cp.async staging + ascending-group/ascending-byte/left-fold order as the
 // scalar dgemv_cpa16 (byte-for-byte the SAME fp32 accumulation order -> cosine
@@ -784,7 +775,6 @@ __device__ __forceinline__ void
     }
   }
 }
-#endif // MPK_DSV3_FFN_FAST
 
 // Router split-K partial GEMV (bf16 . bf16, fp32 accum). Each (expert, split)
 // warp accumulates the dot of normed . W_gate[e] over its K-slice; the grid-
@@ -831,10 +821,7 @@ __device__ __forceinline__ float
 }
 
 // ============================================================================
-//  MPK_DSV3_FFN_FAST_ROUTING — Phase B fast router GEMV + Phase C bitonic topk.
-//  Default OFF (this is a new lever; gated separately from MPK_DSV3_FFN_FAST
-//  so either can be toggled independently). Set MPK_DSV3_FFN_FAST_ROUTING=1
-//  to enable BOTH the fast router Phase B and the bitonic Phase C topk.
+//  Fast routing — Phase B fast router GEMV + Phase C bitonic topk.
 //
 //  Phase B fast (router_partial_cpa):
 //    Problem: router_partial issues HBM loads in a serial stride-32 loop with
@@ -847,10 +834,11 @@ __device__ __forceinline__ float
 //    NEAR-identical to router_partial<KSPLIT> (NOT byte-identical) — same slice
 //    offsets + uint4 decomposition order (x/y/z/w), but the packed bf162 dot
 //    sums pairwise (p0+p1) vs the scalar left-fold (acc+=p0; acc+=p1) -> fp32
-//    non-associative -> sub-ULP. Load ordering also differs (cp.async vs __ldg).
-//    WBUF fit: KSPLIT=4 -> Kc=1792 bf16 = 7168 bytes per slice = 448 uint4.
-//    Ring: STAGES=4 * 32 lanes * 1 uint4/lane = 128 uint4/stage per warp.
-//    Total: 128*4 = 512 uint4 = 8192 bytes. WBUF_U4=1024 uint4/warp (16384 B)
+//    non-associative -> sub-ULP. Load ordering also differs (cp.async vs
+//    __ldg). WBUF fit: KSPLIT=4 -> Kc=1792 bf16 = 7168 bytes per slice = 448
+//    uint4. Ring: STAGES=4 * 32 lanes * 1 uint4/lane = 128 uint4/stage per
+//    warp. Total: 128*4 = 512 uint4 = 8192 bytes. WBUF_U4=1024 uint4/warp
+//    (16384 B)
 //    >> 512 uint4 -> fits. Stage stride = 32 uint4 per stage (one lane per
 //    uint4).
 //
@@ -862,7 +850,7 @@ __device__ __forceinline__ float
 //    reducing barrier count from ~8 synchronization rounds to 3 (one per
 //    bitonic merge step across warp boundaries). NOTE: within the megakernel,
 //    Phase C runs block-locally (no grid_barrier needed) so __syncthreads is
-//    safe here. The existing MPK_DSV3_FFN_FAST Phase C already does the
+//    safe here. The fast Phase C path already does the
 //    parallel per-group top-8 + warp-0 merge which is equivalent benefit.
 //    FAST_ROUTING Phase C replaces the serial warp-0 merge of 64 candidates
 //    (2/lane, TOPK_EXPERTS rounds of shfl) with a direct bitonic sort of all 64
@@ -870,24 +858,19 @@ __device__ __forceinline__ float
 //    unrolled, no shuffles needed — all values in registers of warp 0's 32
 //    lanes, 2 per lane).
 // ============================================================================
-#ifndef MPK_DSV3_FFN_FAST_ROUTING
-#define MPK_DSV3_FFN_FAST_ROUTING 0
-#endif
-
-#if MPK_DSV3_FFN_FAST_ROUTING
 
 // cp.async pipelined router partial GEMV (bf16 . bf16, fp32 accum).
 // STAGES ring buffer in wbuf_base (MUST be >= STAGES*32 uint4 per warp).
 // Activation (normed) is in SMEM -> read directly. Weight (wr) is in HBM ->
 // staged via cp.async.cg (16B coalesced, one uint4 per lane per stage).
 // Math NEAR-identical to router_partial<KSPLIT> (sub-ULP, NOT byte-identical):
-// same slice, but pairwise bf162 dot (p0+p1) vs scalar left-fold -> fp32 non-assoc.
-// ALIGNMENT: wr row start = e*ROUTER_K*2 bytes; ROUTER_K=7168, e<256. Each
-// row is 14336 bytes, and base=sp*(ROUTER_K/KSPLIT)*2 = sp*3584 bytes offset
-// within the row. 3584 % 16 == 0 (3584/16=224) -> ALWAYS 16B-aligned. ✓
-// The activation normed (s_norm in SMEM) is at s_norm+base: base=sp*Kc in
-// bf16 elements; Kc=1792; SMEM base must be 16B-aligned (s_norm is
-// FFN_FULL_AU16-aligned in the layout above -> guaranteed 16B-aligned). ✓
+// same slice, but pairwise bf162 dot (p0+p1) vs scalar left-fold -> fp32
+// non-assoc. ALIGNMENT: wr row start = e*ROUTER_K*2 bytes; ROUTER_K=7168,
+// e<256. Each row is 14336 bytes, and base=sp*(ROUTER_K/KSPLIT)*2 = sp*3584
+// bytes offset within the row. 3584 % 16 == 0 (3584/16=224) -> ALWAYS
+// 16B-aligned. ✓ The activation normed (s_norm in SMEM) is at s_norm+base:
+// base=sp*Kc in bf16 elements; Kc=1792; SMEM base must be 16B-aligned (s_norm
+// is FFN_FULL_AU16-aligned in the layout above -> guaranteed 16B-aligned). ✓
 template <int KSPLIT, int STAGES>
 __device__ __forceinline__ float
     router_partial_cpa(__nv_bfloat16 const *__restrict__ normed,
@@ -989,8 +972,6 @@ __device__ __forceinline__ float
 __device__ __forceinline__ void router_cpa_drain() {
   cpasync_wait<0>();
 }
-
-#endif // MPK_DSV3_FFN_FAST_ROUTING
 
 // ============================================================================
 //  MPK task entry. The standard megakernel task ABI: TaskDesc +
@@ -1097,7 +1078,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   constexpr int RBX_W13 = 8;
   constexpr int RBX_W2 = 16;
   constexpr int RBX_SH = 4;
-#if MPK_DSV3_FFN_FAST
   // v019 FAST path STAGES (deeper W13 pipeline; W2 on the 16B half2 path):
   //   W13 16B half2 STAGES=4 ; shGU 16B half2 STAGES=2 ;
   //   W2  16B half2 STAGES=2 ; shDN 4B scalar STAGES=3.
@@ -1144,14 +1124,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   // The constexpr sizing above assumes nwl==NWL_CT; verify the runtime worker
   // warp count matches (TPB=256 -> 8). A mismatch would under-size the staging.
   assert(nwl == NWL_CT);
-#else
-  // v015 baseline: W13/shGU 16B scalar STAGES=2 ; W2/shDN 4B scalar STAGES=3.
-  constexpr size_t WBUF_U4 = (size_t)RBX_W13 * 32 * 2; // uint4/warp (W13 path)
-  static_assert(WBUF_U4 * 16 >= (size_t)RBX_SH * 32 * 2 * 16 &&
-                    WBUF_U4 * 16 >= (size_t)RBX_W2 * 32 * 3 * 4 &&
-                    WBUF_U4 * 16 >= (size_t)RBX_SH * 32 * 3 * 4,
-                "FFN-FULL per-warp wbuf too small for a GEMV stage buffer");
-#endif
 
   extern __shared__ __align__(1024) uint8_t s_smem[];
 #define FFN_FULL_AU16(x) (((x) + 15u) & ~((size_t)15u))
@@ -1203,7 +1175,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   float *s_gactw = reinterpret_cast<float *>(s_smem + off); // [TOPK_EXPERTS]
   off += (size_t)TOPK_EXPERTS * sizeof(float);
   off = FFN_FULL_AU16(off);
-#if MPK_DSV3_FFN_FAST
   // FAST lever (4): per-group local top-8 staging for the parallel argmax
   // (NUM_GROUPS warps x TOPK_EXPERTS winners). value + index.
   float *s_top8v = reinterpret_cast<float *>(s_smem + off);
@@ -1212,7 +1183,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   int *s_top8i = reinterpret_cast<int *>(s_smem + off);
   off += (size_t)NUM_GROUPS * TOPK_EXPERTS * sizeof(int);
   off = FFN_FULL_AU16(off);
-#endif
   // per-warp RMSNorm reduction scratch (one float per warp).
   float *s_red = reinterpret_cast<float *>(s_smem + off);
   off += (size_t)nwl * sizeof(float);
@@ -1286,7 +1256,7 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   //  each warp's fp32 partial -> sc.inter[e*RKSPLIT + sp]. s_norm is
   //  block-local but identical across blocks.
   //
-  //  MPK_DSV3_FFN_FAST_ROUTING Phase B: replaces the scalar router_partial
+  //  Fast Phase B: replaces the scalar router_partial
   //  with router_partial_cpa (cp.async pipelined weight loads + packed
   //  bf162 inner dot). Uses my_wbuf as the staging ring (WBUF_U4 >> needed).
   //  The ring is flushed (cpasync_wait<0>) before the grid_barrier.
@@ -1294,7 +1264,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   {
     int t = gwarp;
     int ntask = ROUTER_N * RKSPLIT;
-#if MPK_DSV3_FFN_FAST_ROUTING
     // FAST: cp.async pipelined weight loads + packed bf162 inner dot.
     // STAGES=4: hides ~300+ cycle HBM latency across 7 super-steps of 32 uint4.
     // my_wbuf reuse: WBUF_U4 uint4/warp >> STAGES*32=128 uint4 needed. Safe.
@@ -1310,17 +1279,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
       }
     }
     router_cpa_drain(); // flush any pending cp.async before grid_barrier
-#else
-    for (; t < ntask; t += gwarps) {
-      int e = t / RKSPLIT, sp = t % RKSPLIT;
-      __nv_bfloat16 const *wr =
-          router_gate_w + static_cast<size_t>(e) * ROUTER_K;
-      float acc = router_partial<RKSPLIT>(s_norm, wr, sp, lane);
-      if (lane == 0) {
-        sc.inter[e * RKSPLIT + sp] = acc;
-      }
-    }
-#endif
   }
   ffn_full_grid_barrier(barrier, NUM_WORKERS); // router partials visible
 
@@ -1403,7 +1361,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
     }
   }
   __syncthreads();
-#if MPK_DSV3_FFN_FAST
   // FAST lever (4): GLOBAL top-8 via PARALLEL per-group top-8 + warp-0 merge.
   // Instead of warp 0 serially scanning all 256 biased values 8 times (8
   // dependent rounds over 8 values/lane on ONE warp while 7 idle), ALL 8 warps
@@ -1496,57 +1453,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
       }
     }
   }
-#else
-  // 8x argmax via warp 0 (32 lanes, 8 values/lane). Lower-index tie-break.
-  // Winner masked after each round. Weight = UNBIASED sig; normalize over the
-  // GLOBAL-8 sum * routed_scaling_factor (production topk_sigmoid math).
-  if (wlocal == 0) {
-    int const PER = NUM_EXPERTS / 32; // 8 per lane
-    float lv[PER];
-    int idxbase = lane * PER;
-#pragma unroll
-    for (int j = 0; j < PER; j++) {
-      lv[j] = s_biased[idxbase + j];
-    }
-    float wsum = 0.f;
-#pragma unroll
-    for (int k = 0; k < TOPK_EXPERTS; k++) {
-      float bv = -1e30f;
-      int bi = NUM_EXPERTS;
-#pragma unroll
-      for (int j = 0; j < PER; j++) {
-        if (lv[j] > bv || (lv[j] == bv && (idxbase + j) < bi)) {
-          bv = lv[j];
-          bi = idxbase + j;
-        }
-      }
-#pragma unroll
-      for (int o = 16; o > 0; o >>= 1) {
-        float ov = __shfl_xor_sync(0xffffffffu, bv, o);
-        int oi = __shfl_xor_sync(0xffffffffu, bi, o);
-        if (ov > bv || (ov == bv && oi < bi)) {
-          bv = ov;
-          bi = oi;
-        }
-      }
-      if (lane == 0) {
-        s_gacte[k] = bi;
-        s_gactw[k] = s_sig[bi];
-      }
-      wsum += s_sig[bi];
-      if (bi >= idxbase && bi < idxbase + PER) {
-        lv[bi - idxbase] = -10000.f;
-      }
-    }
-    if (lane == 0) {
-      float inv = 1.0f / (wsum + 1e-20f);
-#pragma unroll
-      for (int k = 0; k < TOPK_EXPERTS; k++) {
-        s_gactw[k] = s_gactw[k] * inv * routed_scaling_factor;
-      }
-    }
-  }
-#endif
   __syncthreads(); // s_gacte/s_gactw visible to all warps in this block
 
   // ====================================================================
@@ -1604,13 +1510,8 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
       float const *ws = w13_scale + static_cast<size_t>(e) * NB1 * KG1 +
                         static_cast<size_t>(n0 / GRP) * KG1;
       float yb[RBX_W13];
-#if MPK_DSV3_FFN_FAST
       dgemv_cpa16_h2<RBX_W13, ST_W13>(
           s_a, s_as, wb, ws, HIDDEN, KG1, n0, lane, my_wbuf, yb);
-#else
-      dgemv_cpa16<RBX_W13, 2>(
-          s_a, s_as, wb, ws, HIDDEN, KG1, n0, lane, my_wbuf, yb);
-#endif
       if (lane == 0) {
 #pragma unroll
         for (int r = 0; r < RBX_W13; r++) {
@@ -1621,13 +1522,8 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
       int n0 = (idx - n13) * RBX_SH;
       float const *ws = wgu_s + static_cast<size_t>(n0 / GRP) * KG_SHGU;
       float yb[RBX_SH];
-#if MPK_DSV3_FFN_FAST
       dgemv_cpa16_h2<RBX_SH, ST_SH13>(
           s_a, s_as, wgu, ws, SH_GU_K, KG_SHGU, n0, lane, my_wbuf, yb);
-#else
-      dgemv_cpa16<RBX_SH, 2>(
-          s_a, s_as, wgu, ws, SH_GU_K, KG_SHGU, n0, lane, my_wbuf, yb);
-#endif
       if (lane == 0) {
 #pragma unroll
         for (int r = 0; r < RBX_SH; r++) {
@@ -1647,7 +1543,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   //  each block fills its FULL block-local s_ifp8. blk0 persists to global.
   // ====================================================================
   int const ng = active_count * KG2;
-#if MPK_DSV3_FFN_FAST
   // FAST lever (1): stage the routed y13 (active_count*W13_N floats) into the
   // (idle-here) whole-block s_wbuf via ONE coalesced cp.async.cg 16B run + ONE
   // wait, so the silu reads from FAST smem and the cold y13 global round-trip
@@ -1699,35 +1594,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
       s_ifp8[static_cast<size_t>(slot) * W2_K + i] = to_f8(v[t] * inv);
     }
   }
-#else
-  for (int gg = wlocal; gg < ng; gg += nwl) {
-    int slot = gg / KG2;
-    int g = gg % KG2;
-    float const *y = sc.y13 + static_cast<size_t>(slot) * W13_N;
-    float v[4], amax = 0.f;
-#pragma unroll
-    for (int t = 0; t < 4; t++) {
-      int i = g * GRP + lane * 4 + t;
-      float val = silu_fast(y[i]) * y[512 + i];
-      v[t] = val;
-      amax = fmaxf(amax, fabsf(val));
-    }
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-      amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-    }
-    float s = quant_scale(amax);
-    float inv = 1.f / s;
-    if (lane == 0) {
-      s_iscale[slot * KG2 + g] = s;
-    }
-#pragma unroll
-    for (int t = 0; t < 4; t++) {
-      int i = g * GRP + lane * 4 + t;
-      s_ifp8[static_cast<size_t>(slot) * W2_K + i] = to_f8(v[t] * inv);
-    }
-  }
-#endif
   if (do_shared) {
     for (int g = wlocal; g < KG_SHDN; g += nwl) {
       float v[4], amax = 0.f;
@@ -1790,7 +1656,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
       float const *ws = w2_scale + static_cast<size_t>(e) * NB2 * KG2 +
                         static_cast<size_t>(n0 / GRP) * KG2;
       float yb[RBX_W2];
-#if MPK_DSV3_FFN_FAST
       // FAST lever (3): W2 on the 16B packed-half2 path (W2_K=512 -> SS=1; the
       // half2 group index lane>>3 maps to the SAME 4 K-groups as the 4B path).
       dgemv_cpa16_h2<RBX_W2, ST_W2>(s_ifp8 + static_cast<size_t>(slot) * W2_K,
@@ -1803,18 +1668,6 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
                                     lane,
                                     my_wbuf,
                                     yb);
-#else
-      dgemv_cpa<RBX_W2, 3>(s_ifp8 + static_cast<size_t>(slot) * W2_K,
-                           s_iscale + slot * KG2,
-                           wb,
-                           ws,
-                           W2_K,
-                           KG2,
-                           n0,
-                           lane,
-                           my_wbuf4,
-                           yb);
-#endif
       if (lane == 0) {
 #pragma unroll
         for (int r = 0; r < RBX_W2; r++) {

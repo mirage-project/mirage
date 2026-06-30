@@ -1649,48 +1649,18 @@ class DeepSeekV3Builder(GraphBuilder):
         prefix = f"model.layers.{layer_idx}."
         attn = f"{prefix}self_attn."
 
-        # MPK_DSV3_ATTN_PHASE0_FUSION (default-OFF; byte-identical default build
-        # when UNSET): fold the LIVE front input_layernorm RMSNorm (the separate
-        # `rmsnorm_layer(self.x -> hidden_bf16)` task below) INTO the attn-mega
-        # as a Phase-0 — the kernel consumes self.x RAW (input[0]) and norms it
-        # internally with input_ln (prepended into ln_weights). Propagates to the
-        # kernel as -D MPK_DSV3_ATTN_PHASE0 (persistent_kernel.py JIT flags,
-        # gated on the SAME env condition so the builder ABI + compiled kernel
-        # agree). Box-validation (poison-fill + tpot Δ) is the next step.
-        _attn_phase0 = (os.environ.get("MPK_DSV3_ATTN_PHASE0_FUSION") == "1")
-
-        # --- bf16 RMSNorm of the layer input (input_layernorm) -> `hidden` ---
-        # The kernel's S2 quantizes a BF16 RMSNorm'd hidden itself, so it needs
-        # the bf16 norm output. The default path's fused rmsnorm+qkv_a-quant
-        # task runs with emit_bf16=False (its bf16 out is unused), so we emit a
-        # dedicated per-layer bf16 RMSNorm here. (Minor: the caller's fused
-        # task still runs but its outputs are unread on this path — the main
-        # agent can gate it out later for a small efficiency win.)
-        #
-        # Phase-0 fold: when _attn_phase0, we SKIP this rmsnorm_layer (the kernel
-        # does the RMSNorm in Phase-0) AND the hidden_bf16 alloc AND the
-        # w_input_ln attach (the input_layernorm weight is fed to the kernel via
-        # the ln_weights concat below, which reads the state_dict directly — so a
-        # separate attach would be an attached-but-unread orphan graph input).
-        # input[0] is rebound to self.x (raw) below.
-        if not _attn_phase0:
-            w_input_ln = self.mpk.attach_input(
-                torch_tensor=state_dict[f"{prefix}input_layernorm.weight"],
-                name=f"layer_{layer_idx}_attnmega_input_layernorm")
-            hidden_bf16 = self.mpk.new_tensor(
-                dims=(self.max_num_batched_tokens, self.hidden_size),
-                dtype=bfloat16,
-                name=f"layer_{layer_idx}_attnmega_hidden_bf16",
-                io_category="cuda_tensor")
-            self.mpk.rmsnorm_layer(
-                input=self.x, weight=w_input_ln, output=hidden_bf16,
-                grid_dim=_rmsnorm_grid(self.max_num_batched_tokens),
-                block_dim=(128, 1, 1),
-                process_dim=self.hidden_size)
-        # `mega_hidden` is the tensor bound to the kernel's input[0]: the
-        # pre-normed hidden_bf16 (default) or RAW self.x (Phase-0). Also reused
-        # as the dep-only `dummy` for the tensor_init tasks below.
-        mega_hidden = self.x if _attn_phase0 else hidden_bf16
+        # Phase-0 RMSNorm DEEP-FUSION (HARD-WIRED ON): the LIVE front
+        # input_layernorm RMSNorm is folded INTO the attn-mega as a Phase-0 — the
+        # kernel consumes self.x RAW (input[0]) and norms it internally with
+        # input_ln (prepended into the ln_weights concat below). No separate
+        # rmsnorm_layer / hidden_bf16 alloc / input_layernorm attach is emitted
+        # (those would be dead / orphan graph inputs). The kernel half is the
+        # unconditional Phase-0 path in attn_block_megakernel_sm100.cuh; the
+        # ln_weights layout here MUST match its static_assert'd offsets. Box-
+        # validated (poison-fill + tpot Δ −0.164ms/tok).
+        # `mega_hidden` is the tensor bound to the kernel's input[0] = RAW self.x;
+        # also reused as the dep-only `dummy` for the tensor_init task below.
+        mega_hidden = self.x
 
         # --- weights (SAME tensors the chain binds) -------------------------
         # qkv_a_proj: fp8 (2176,7168) + f32 per-128-block scale_inv (17,56). The
@@ -1709,24 +1679,15 @@ class DeepSeekV3Builder(GraphBuilder):
         # Phase-0 RMSNorm reads input_ln at [0:7168); q_a/kv_a shift past it
         # (this MUST match the kernel's static_assert'd offsets:
         # input_ln=0, q_a_ln=K_HIDDEN=7168, kv_a_ln=K_HIDDEN+K_QLORA=8704).
-        _ln_parts = []
-        if _attn_phase0:
-            _ln_parts.append(
-                state_dict[f"{prefix}input_layernorm.weight"].to(torch.bfloat16))
-        _ln_parts.append(
-            state_dict[f"{attn}q_a_layernorm.weight"].to(torch.bfloat16))
-        _ln_parts.append(
-            state_dict[f"{attn}kv_a_layernorm.weight"].to(torch.bfloat16))
-        ln_weights_pt = torch.cat(_ln_parts, dim=0).contiguous()
-        if _attn_phase0:
-            assert ln_weights_pt.numel() == (self.hidden_size + 1536 + 512), (
-                "Phase-0 ln_weights must be [input_ln(7168)|q_a_ln(1536)|"
-                f"kv_a_ln(512)]=9216-d; got {ln_weights_pt.numel()} "
-                "(kernel offsets are static_assert'd to this exact layout).")
-        else:
-            assert ln_weights_pt.numel() == (1536 + 512), (
-                "Default ln_weights must be [q_a_ln(1536)|kv_a_ln(512)]=2048-d; "
-                f"got {ln_weights_pt.numel()}.")
+        ln_weights_pt = torch.cat([
+            state_dict[f"{prefix}input_layernorm.weight"].to(torch.bfloat16),
+            state_dict[f"{attn}q_a_layernorm.weight"].to(torch.bfloat16),
+            state_dict[f"{attn}kv_a_layernorm.weight"].to(torch.bfloat16),
+        ], dim=0).contiguous()
+        assert ln_weights_pt.numel() == (self.hidden_size + 1536 + 512), (
+            "Phase-0 ln_weights must be [input_ln(7168)|q_a_ln(1536)|"
+            f"kv_a_ln(512)]=9216-d; got {ln_weights_pt.numel()} "
+            "(kernel offsets are static_assert'd to this exact layout).")
         w_ln = self.mpk.attach_input(
             torch_tensor=ln_weights_pt,
             name=f"layer_{layer_idx}_attnmega_ln_weights")
@@ -1791,32 +1752,19 @@ class DeepSeekV3Builder(GraphBuilder):
             io_category="cuda_tensor")
         # Zero the barrier counters (and the rest) before first use, exactly as
         # the FFN mega-task does for its barrier_scratch.
-        # MPK_DSV3_SKIP_TENSORINIT_AFTER_STEP0 (default-OFF, byte-identical when
-        # unset): make this per-step zero a runtime no-op on decode steps>=1.
-        # SAFE here because the attn-block megakernel's sense/generation grid
-        # barrier self-maintains (last arriver resets count before flipping gen;
-        # gen is change-based, never needs reset) and every scratch activation
-        # region is dead / fully-overwritten-before-read / read-only-at-written-
-        # indices (g_mla_acc s<nsp, nsp clamped to 8 => ntask<=128<136) /
-        # zeroed-inside-the-kernel (g_head_done, g_head_wuv_ready before B2). The
-        # only thing this per-step zero protected was the cudaMalloc step-0
-        # garbage (step 0 STILL zeroes). PREMISE for the skip staying safe: the
+        # Skip-after-step-0 (HARD-WIRED ON): make this per-step zero a runtime
+        # no-op on decode steps>=1. SAFE here because the attn-block megakernel's
+        # sense/generation grid barrier self-maintains (last arriver resets count
+        # before flipping gen; gen is change-based, never needs reset) and every
+        # scratch activation region is dead / fully-overwritten-before-read /
+        # read-only-at-written-indices (g_mla_acc s<nsp, nsp clamped to 8 =>
+        # ntask<=128<136) / zeroed-inside-the-kernel (g_head_done,
+        # g_head_wuv_ready before B2). The only thing this per-step zero protected
+        # was the cudaMalloc step-0 garbage (step 0 STILL zeroes). PREMISE: the
         # kernel keeps EXACTLY 136 CTAs hitting all 3 barriers each step with no
-        # early-return, and this scratch stays per-layer-distinct. Verified by
-        # first-principles + Codex + ablation-logic-reviewer; gate on a >=3-step
-        # token-identity A/B before flipping the default.
-        _skip_ti = (os.environ.get(
-            "MPK_DSV3_SKIP_TENSORINIT_AFTER_STEP0") == "1")
-        # MPK_DSV3_POISON_TENSORINIT_AFTER_STEP0 (default-OFF, DIAGNOSTIC): on
-        # decode steps>=1 fill the scratch with a NaN sentinel instead of either
-        # zeroing or skipping. Safety-tests the skip lever: if the skip premise
-        # (every region overwritten-before-read / barrier self-resets) holds, the
-        # poison never reaches the logits -> clean output; if any region is read-
-        # before-write, the NaN propagates -> deterministic NaN/garbage (or hang),
-        # IMMUNE to the FP-atomicAdd nondeterminism that makes token-identity an
-        # inconclusive safety gate on this path. Mutually exclusive with the skip.
-        _poison_ti = (os.environ.get(
-            "MPK_DSV3_POISON_TENSORINIT_AFTER_STEP0") == "1") and not _skip_ti
+        # early-return, and this scratch stays per-layer-distinct. Box-validated
+        # by NaN poison-fill (the poison never reached the logits => every region
+        # is overwritten-before-read), first-principles + Codex + reviewer.
         self.mpk.tensor_init_layer(
             target=attn_scratch,
             dummy=mega_hidden,
@@ -1824,8 +1772,7 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             dummy_input_map=(-1, -1, -1),
             target_input_map=(-1, -1, -1),
-            skip_after_step0=_skip_ti,
-            poison_after_step0=_poison_ti,
+            skip_after_step0=True,
         )
 
         # --- TP RowParallel o_proj combine (THE TP>1 correctness fix) -------
@@ -1871,7 +1818,7 @@ class DeepSeekV3Builder(GraphBuilder):
 
         dsv3_tasks.attn_block_megakernel_layer(
             self.mpk,
-            hidden=mega_hidden,  # self.x (RAW) under Phase-0; else hidden_bf16
+            hidden=mega_hidden,  # = self.x (RAW); normed in the kernel Phase-0
             qkv_a_w=w_qkv_a,
             qkv_a_s=s_qkv_a,
             ln_weights=w_ln,

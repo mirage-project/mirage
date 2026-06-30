@@ -59,7 +59,8 @@
 #include <cstdio> // device printf for the per-stage debug taps (default-OFF)
 #endif
 
-// ---- MPK grid barrier (VERBATIM from ffn_full_megakernel_sm100.cuh) ----------
+// ---- MPK grid barrier (VERBATIM from ffn_full_megakernel_sm100.cuh)
+// ----------
 struct AttnGridBarrier {
   unsigned int *count; // [1] arrivals in the current generation
   unsigned int *gen;   // [1] generation (sense) counter
@@ -118,13 +119,9 @@ namespace attn_block_megakernel_sm100 {
 // Flash MLA KV-split: up to MLA_SPLITS splits per head.
 #define MLA_SPLITS 8
 
-// ---- BARRIER-REMOVAL LEVERS (ported from ferret workspace6 v131, 87->64.5us
-// cold; the 5 levers each remove/merge a grid.sync). MPK_DSV3_ATTN_FAST is
-// defaulted ON, so the fast path is the default WITHIN the attn-block
-// megakernel (which is itself the default decode attention path); set
-// -DMPK_DSV3_ATTN_FAST=0 to fall back to the proven-correct 9-barrier baseline
-// (commit 52ed6e64) for A/B regression isolation. The five levers (all gated
-// together, matching ferret v131 which ships them all-on):
+// ---- BARRIER-REMOVAL FAST PATH (ported from ferret workspace6 v131,
+// 87->64.5us cold; the 5 changes each remove/merge a grid.sync). The five
+// changes match ferret v131, which ships them all on:
 //   1. HIDDEN_BLOCK_LOCAL — quant hidden[7168] block-local into s_act, removes
 //      the quant_hidden->qkv_a barrier (a block __syncthreads replaces it).
 //   2. QA_BLOCK_LOCAL     — q_a_layernorm+requant block-local into s_qbdeq,
@@ -139,27 +136,20 @@ namespace attn_block_megakernel_sm100 {
 //      W_UV row-blocks spin-wait per head, removes the merge->W_UV barrier.
 // Levers 4/5 use DEVICE-scope ordering (intra-GPU, one rank's 16 heads) — NOT
 // .sys — which is correct and required (the heads are all on this rank).
-#ifndef MPK_DSV3_ATTN_FAST
-#define MPK_DSV3_ATTN_FAST 1
-#endif
 
-// W0 TAIL LIGHTEN lever (default-OFF). The rope(k_pe) + kv_cache append before
-// the q_b->MLA grid barrier is, in the default path, a single-thread serial tail
-// run by worker_idx==0/tid==0 alone — the per-position load-balance discriminator
-// flagged worker 0 as the fixed straggler all 135 other workers wait on at that
-// barrier. When 1 (via -DMPK_DSV3_ATTN_W0_TAIL_LIGHTEN on the JIT flags), the 32
-// independent rope PAIRS are distributed across worker-0's threads 0..31 (one pair
-// per thread) so worker 0 is no longer the sole serial writer. PURE who-writes-it
-// change: each pair pr reads only g_qkva[2048+2pr], g_qkva[2048+2pr+1] and writes
-// only kv_cache[...+512+2pr], [...+512+2pr+1] — disjoint per pair, no cross-pair
-// dependence, no read of the partially-written output. The published
-// kv_cache[step][512:576) is BIT-IDENTICAL (same float ops, same k_bf16 rounding,
-// same intra-pair order). Still on worker 0 only => no new cross-CTA coordination;
-// the existing q_b->MLA grid_barrier (count 136, fences ALL threads) publishes it.
-// Default 0 => default device SASS byte-identical (the branch is compiled out).
-#ifndef MPK_DSV3_ATTN_W0_TAIL_LIGHTEN
-#define MPK_DSV3_ATTN_W0_TAIL_LIGHTEN 0
-#endif
+// W0 tail lighten. The rope(k_pe) + kv_cache append before the q_b->MLA grid
+// barrier used to be a single-thread serial tail run by worker_idx==0/tid==0
+// alone. The per-position load-balance discriminator flagged worker 0 as the
+// fixed straggler all 135 other workers wait on at that barrier. The 32
+// independent rope PAIRS are distributed across worker-0's threads 0..31 (one
+// pair per thread) so worker 0 is no longer the sole serial writer. PURE
+// who-writes-it change: each pair pr reads only g_qkva[2048+2pr],
+// g_qkva[2048+2pr+1] and writes only kv_cache[...+512+2pr], [...+512+2pr+1] —
+// disjoint per pair, no cross-pair dependence, no read of the partially-written
+// output. The published kv_cache[step][512:576) is BIT-IDENTICAL to the serial
+// path (same float ops, same k_bf16 rounding, same intra-pair order). Still on
+// worker 0 only => no new cross-CTA coordination; the existing q_b->MLA
+// grid_barrier (count 136, fences ALL threads) publishes it.
 
 // ---- Per-stage debug taps (default-OFF; compile with -DMPK_ATTN_DBG) --------
 // Enable: add -DMPK_ATTN_DBG to the megakernel nvcc flags (e.g. via the
@@ -406,17 +396,48 @@ __device__ __forceinline__ uint32_t k_lds_u32(uint32_t saddr) {
 }
 
 // MAC one uint4 (16 fp8 weights) against pre-converted activation half2[8].
+//
+// SCALAR-ILP MAC path.
+// SASS diagnosis (cuobjdump -sass on the qkv_a N=2176 K=7168 RBT=2 STAGES=6
+// instantiation, CUDA 13.2 sm_100a; 40 regs, 0 spill stores/loads): the
+// production body is scalar-FP issue/throughput-pressure bound — NOT spill-
+// bound, NOT accumulate-serialized (the acc[t] FFMA chain is only SS=14 deep
+// with 2 rows interleaved). The `s += __low2float(p) + __high2float(p)` idiom
+// compiles each of the 8 half2 products into 2x `HADD2.F32 .H0_H0/.H1_H1`
+// (widen each fp16 lane to fp32) + FADD — ~39% of the warp's fp-pipe insts
+// (448 of ~1148/block) are HADD2.F32 doing nothing but widening. With 1 warp/SM
+// that scalar work is unhidden. NOTE: the consumer-vs-load split (this widen
+// work dominating the ~15us body over the ~5.4us load floor) rests on the prior
+// %globaltimer 5.4-vs-20.7us measurement, NOT on this static SASS alone; the
+// fp8->half2 CONVERT (F2FP) is left UNTOUCHED by this lever, so it sets an
+// Amdahl ceiling on the achievable cut.
+//
+// The lever accumulates the 8 products in 2 INDEPENDENT half2 partial sums
+// (group-4 each) via __hfma2, widening ONCE at the end. SASS-verified on the
+// standalone qkv_a kernel: HADD2.F32 96->24, FADD 115->37, HMUL2 24->0 (folded
+// into HFMA2 27->50); F2FP converts unchanged; still 40 regs / 0 spill.
+// NUMERICS (host fp16 emulation, full K=7168 row, e4m3 weights, unit-scale
+// decode activations, 20000 rows): max |err| 0.0157 vs typical |out| RMS 9.9
+// (~0.16%, on par with e4m3 quant noise), ZERO fp16 overflows. It is NOT
+// bit-equivalent (fp16 inner accumulation + reassociation, like the existing
+// pairwise-vs-leftfold note) and CAN overflow fp16 for abnormally large
+// activations (>~18); the box logit-cosine quality gate covers this path.
 __device__ __forceinline__ float k_mac_u4(__half2 const *__restrict__ ah,
                                           uint4 raw) {
   __nv_fp8x2_storage_t const *wp =
       reinterpret_cast<__nv_fp8x2_storage_t const *>(&raw);
-  float s = 0.f;
+  // Two independent half2 partial sums (group-4 each) so the compiler keeps two
+  // HFMA2 chains in flight (depth 4, not 8) and the final widen is a single
+  // float-reduce of 4 lanes instead of 16 per-product HADD2.F32 widens.
+  __half2 h0 = __float2half2_rn(0.f);
+  __half2 h1 = __float2half2_rn(0.f);
 #pragma unroll
-  for (int j = 0; j < 8; j++) {
-    __half2 p = __hmul2(ah[j], k_fp8x2_to_h2(wp[j]));
-    s += __low2float(p) + __high2float(p);
+  for (int j = 0; j < 4; j++) {
+    h0 = __hfma2(ah[j], k_fp8x2_to_h2(wp[j]), h0);
+    h1 = __hfma2(ah[j + 4], k_fp8x2_to_h2(wp[j + 4]), h1);
   }
-  return s;
+  return __low2float(h0) + __high2float(h0) + __low2float(h1) +
+         __high2float(h1);
 }
 
 // ===========================================================================
@@ -824,20 +845,20 @@ __device__ __forceinline__ void quant_ue8m0_grid(
   }
 }
 
-#if MPK_DSV3_ATTN_FAST
 // ---- FAST-lever block-local quant + smem-sourced GEMV helpers (ported from
 // ferret workspace6 v131; the quant math is BYTE-IDENTICAL to the grid versions
 // above — same UE8M0 amax/448 per-128-group; the GEMVs read activation from
 // SHARED instead of global; the WEIGHT scale (Wsc) read is adapted to the MPK
 // per-128-ROW-BLOCK fp32 weight_scale_inv format used everywhere in this file,
-// `__ldg(&sn[t][g])`, NOT ferret's per-row UE8M0 uint32 decode). ---------------
+// `__ldg(&sn[t][g])`, NOT ferret's per-row UE8M0 uint32 decode).
+// ---------------
 
 // Lever 1: block-cooperative UE8M0 quant of bf16 hidden[0:n] -> block-local
 // SHARED s_deq (dequantized fp32, byte-identical to quant_hidden_grid's `deq`
 // output). Every block quantizes the SAME hidden into its own s_deq (redundant
 // but no block idles) so the quant_hidden->qkv_a grid barrier is removed: the
-// trailing __syncthreads publishes s_deq within the block before qkv_a reads it.
-// Does NOT write g_hf8/g_hsc (the qkv_a GEMV reads the fp32 deq path only).
+// trailing __syncthreads publishes s_deq within the block before qkv_a reads
+// it. Does NOT write g_hf8/g_hsc (the qkv_a GEMV reads the fp32 deq path only).
 __device__ __forceinline__ void
     quant_hidden_block_smem(__nv_bfloat16 const *__restrict__ hidden,
                             float *__restrict__ s_deq,
@@ -877,9 +898,7 @@ __device__ __forceinline__ void
   __syncthreads();
 }
 
-#if MPK_DSV3_ATTN_PHASE0
-// Phase-0 DEEP-FUSION helper (default-OFF; compiled only under
-// -DMPK_DSV3_ATTN_PHASE0). FOLDS the LIVE front input_layernorm RMSNorm
+// Phase-0 DEEP-FUSION helper. FOLDS the LIVE front input_layernorm RMSNorm
 // (the separate `rmsnorm_layer(self.x -> hidden_bf16)` task) INTO this kernel:
 // the attn-mega consumes self.x RAW (the residual-stream input, `self_x`) and
 // RMS-norms it block-locally as a Phase-0 before the UE8M0 quant.
@@ -898,35 +917,32 @@ __device__ __forceinline__ void
 //     TREE (matches rmsnorm_hopper:158-165), NOT a sequential Σ red8[i];
 //   - rms_rcp = rsqrtf(ss/n + K_EPS), K_EPS=1e-6f (matches eps + rsqrt).
 // The per-element normed value normed[j]=bf16(float(self_x[j])*rms_rcp*
-// float(input_ln_w[j])) is rounded to bf16 ONCE, exactly as rms_norm_hopper_impl
-// writes hidden_bf16 (output=(T)val) and the old quant then read float(bf16).
-// The UE8M0 amax/448 per-128-group quant body is byte-identical to
-// quant_hidden_block_smem above — ONLY the quantized value changes from raw
-// input[0] to the freshly-normed value. Every block computes the SAME ss and
-// the SAME s_deq redundantly (no block idles), so NO grid barrier is added (the
-// trailing __syncthreads publishes s_deq within the block before qkv_a reads
-// it, exactly as quant_hidden_block_smem does). `red8` is the caller's per-warp
-// reduction scratch (the SAME [NWARP] buffer rms_rcp_block uses).
+// float(input_ln_w[j])) is rounded to bf16 ONCE, exactly as
+// rms_norm_hopper_impl writes hidden_bf16 (output=(T)val) and the old quant
+// then read float(bf16). The UE8M0 amax/448 per-128-group quant body is
+// byte-identical to quant_hidden_block_smem above — ONLY the quantized value
+// changes from raw input[0] to the freshly-normed value. Every block computes
+// the SAME ss and the SAME s_deq redundantly (no block idles), so NO grid
+// barrier is added (the trailing __syncthreads publishes s_deq within the block
+// before qkv_a reads it, exactly as quant_hidden_block_smem does). `red8` is
+// the caller's per-warp reduction scratch (the SAME [NWARP] buffer
+// rms_rcp_block uses).
 //
 // REDUCTION-GROUPING is bit-identical by construction (NOT a drift source):
 // at the production constants (HIDDEN=7168, NTHREAD=256, bf16 -> CHUNK_SIZE=4,
-// TILE_SIZE=1024, NUM_TILES=7), rms_norm_hopper_impl's tiled accumulation visits
-// element `tid + 256*(4*for_idx + m)` (for_idx in [0,7), m in [0,4)), and
-// `4*for_idx+m` enumerates 0..27 monotonically == this helper's flat
+// TILE_SIZE=1024, NUM_TILES=7), rms_norm_hopper_impl's tiled accumulation
+// visits element `tid + 256*(4*for_idx + m)` (for_idx in [0,7), m in [0,4)),
+// and `4*for_idx+m` enumerates 0..27 monotonically == this helper's flat
 // `for(i=tid;i<7168;i+=NTHREAD)` set AND ORDER. So per-thread partials, the
-// tree, the product association, eps, rsqrt, and the single bf16 round all match
-// rms_norm_hopper_impl exactly (verified from first principles + Codex +
+// tree, the product association, eps, rsqrt, and the single bf16 round all
+// match rms_norm_hopper_impl exactly (verified from first principles + Codex +
 // ablation-logic-reviewer, 2026-06-25).
 //
-// NOTE: this is still a MATH-CHANGING lever — the fused kernel and the two-task
-// chain are NOT provably byte/token identical. The ONLY possible residual is
-// FMA-contraction differences from fusing the rmsnorm + quant into ONE
-// compilation unit (the compiler may contract the v*v accumulate / x*(rms_rcp*w)
-// differently than the standalone rmsnorm_hopper translation unit) — a MAYBE,
-// not a guaranteed last-ULP bound. It MUST therefore be gated by a NUMERIC
-// (cosine) correctness check on the box, NOT a token-identity A/B (token streams
-// are run-to-run nondeterministic on this TP8/EP2 decode path — the FFN
-// cross-CTA FP atomicAdd — so token-identity is an unreliable safety gate here).
+// NOTE: this fused path and the two-task chain are NOT provably byte/token
+// identical. The remaining possible residual is FMA-contraction differences
+// from fusing rmsnorm + quant into ONE compilation unit. Correctness is covered
+// by the numeric box cosine check, not a token-identity A/B (token streams are
+// run-to-run nondeterministic on this TP8/EP2 decode path).
 __device__ __forceinline__ void rmsnorm_quant_hidden_block_smem(
     __nv_bfloat16 const *__restrict__ self_x,
     __nv_bfloat16 const *__restrict__ input_ln_w,
@@ -953,9 +969,9 @@ __device__ __forceinline__ void rmsnorm_quant_hidden_block_smem(
   }
   __syncthreads();
   // cross-warp combine of the NWARP partials inside warp 0 via an xor-shuffle
-  // TREE, then broadcast through red8[0] (rmsnorm_hopper:158-165). Computing the
-  // combine in warp 0 only (not redundantly per-thread) preserves the canonical
-  // associativity order.
+  // TREE, then broadcast through red8[0] (rmsnorm_hopper:158-165). Computing
+  // the combine in warp 0 only (not redundantly per-thread) preserves the
+  // canonical associativity order.
   float ss = (tid < NWARP) ? red8[tid] : 0.f;
 #pragma unroll
   for (int o = NWARP / 2; o > 0; o >>= 1) {
@@ -965,10 +981,10 @@ __device__ __forceinline__ void rmsnorm_quant_hidden_block_smem(
     red8[0] = ss;
   }
   __syncthreads();
-  ss = red8[0]; // uniform across the block
+  ss = red8[0];    // uniform across the block
   __syncthreads(); // re-converge before red8 is reused by a later phase
-  // rsqrtf (NOT 1.0f/sqrtf) + K_EPS=1e-6f + fp32 promote — matches the canonical
-  // rms_norm_hopper_impl exactly.
+  // rsqrtf (NOT 1.0f/sqrtf) + K_EPS=1e-6f + fp32 promote — matches the
+  // canonical rms_norm_hopper_impl exactly.
   float rms_rcp = rsqrtf(ss / (float)n + K_EPS);
 
   // --- UE8M0 per-128-group quant of the NORMED value (body byte-identical to
@@ -1015,7 +1031,6 @@ __device__ __forceinline__ void rmsnorm_quant_hidden_block_smem(
   }
   __syncthreads();
 }
-#endif // MPK_DSV3_ATTN_PHASE0
 
 // Lever 3: block-cooperative UE8M0 quant of src[0:n] -> block-local SHARED
 // s_deq (dequantized values, byte-identical to quant_ue8m0_grid). Every block
@@ -1060,19 +1075,19 @@ __device__ __forceinline__ void
 // (MPK per-128-block fp32 `__ldg(&sn[t][g])`) are identical. Lets the caller
 // drop the q_a_layernorm->q_b grid barrier.
 template <int RBT, int STAGES>
-__device__ __forceinline__ void gemv_grid_cpa_qb_rope_smem_t(
-    float const *__restrict__ s_adeq,
-    __nv_fp8_e4m3 const *__restrict__ W,
-    float const *__restrict__ Wsc,
-    float *__restrict__ out,
-    int N,
-    int K,
-    __nv_bfloat16 const *__restrict__ cos_sin,
-    int pos,
-    int gwarp,
-    int gwarps,
-    int lane,
-    uint4 *__restrict__ wbuf) {
+__device__ __forceinline__ void
+    gemv_grid_cpa_qb_rope_smem_t(float const *__restrict__ s_adeq,
+                                 __nv_fp8_e4m3 const *__restrict__ W,
+                                 float const *__restrict__ Wsc,
+                                 float *__restrict__ out,
+                                 int N,
+                                 int K,
+                                 __nv_bfloat16 const *__restrict__ cos_sin,
+                                 int pos,
+                                 int gwarp,
+                                 int gwarps,
+                                 int lane,
+                                 uint4 *__restrict__ wbuf) {
   int KGg = K / K_GRP;
   int nU = K / 16;
   int SS = nU >> 5;
@@ -1200,21 +1215,21 @@ __device__ __forceinline__ void gemv_grid_cpa_qb_rope_smem_t(
 
 // Lever 3 companion: o_proj cp.async GEMV (fused residual add) that sources its
 // ACTIVATION from block-local SHARED s_adeq (already-dequantized g_red).
-// Byte-identical to gemv_grid_cpa_oproj_t EXCEPT the activation source. Lets the
-// caller drop the quant_gred->o_proj grid barrier.
+// Byte-identical to gemv_grid_cpa_oproj_t EXCEPT the activation source. Lets
+// the caller drop the quant_gred->o_proj grid barrier.
 template <int RBT, int STAGES>
-__device__ __forceinline__ void gemv_grid_cpa_oproj_smem_t(
-    float const *__restrict__ s_adeq,
-    __nv_fp8_e4m3 const *__restrict__ W,
-    float const *__restrict__ Wsc,
-    __nv_bfloat16 const *__restrict__ resid,
-    __nv_bfloat16 *__restrict__ out,
-    int N,
-    int K,
-    int gwarp,
-    int gwarps,
-    int lane,
-    uint4 *__restrict__ wbuf) {
+__device__ __forceinline__ void
+    gemv_grid_cpa_oproj_smem_t(float const *__restrict__ s_adeq,
+                               __nv_fp8_e4m3 const *__restrict__ W,
+                               float const *__restrict__ Wsc,
+                               __nv_bfloat16 const *__restrict__ resid,
+                               __nv_bfloat16 *__restrict__ out,
+                               int N,
+                               int K,
+                               int gwarp,
+                               int gwarps,
+                               int lane,
+                               uint4 *__restrict__ wbuf) {
   int KGg = K / K_GRP;
   int nU = K / 16;
   int SS = nU >> 5;
@@ -1310,7 +1325,6 @@ __device__ __forceinline__ void gemv_grid_cpa_oproj_smem_t(
     }
   }
 }
-#endif // MPK_DSV3_ATTN_FAST
 
 // ===========================================================================
 //  FLASH MLA partial: block (h,split) computes the un-normalized softmax over
@@ -1498,10 +1512,9 @@ __device__ __noinline__ void
 
 // S10+S11 FUSED: FLASH MLA merge that ALSO quantizes its own head's 512
 // attn_out INLINE. (VERBATIM; reads scratch g_mla_*, writes g_attn +
-// g_attn_deq.) When MPK_DSV3_ATTN_FAST (lever 5, WUV_HEAD_SPINWAIT), it ALSO
-// publishes the per-head "g_attn_deq[h] is ready" flag (device release) so the
-// W_UV stage can spin-wait per head instead of a merge->W_UV grid barrier;
-// g_head_wuv_ready is the [16] flag array (nullptr when the lever is off).
+// g_attn_deq.) In the fast WUV_HEAD_SPINWAIT path, it ALSO publishes the
+// per-head "g_attn_deq[h] is ready" flag (device release) so the W_UV stage
+// can spin-wait per head instead of a merge->W_UV grid barrier.
 __device__ __noinline__ void
     mla_merge_quant(float *__restrict__ g_attn,
                     float *__restrict__ g_attn_deq,
@@ -1513,7 +1526,6 @@ __device__ __noinline__ void
                     int h,
                     int nsp,
                     int *__restrict__ g_head_wuv_ready) {
-  (void)g_head_wuv_ready;
   int tid = threadIdx.x, lane = tid & 31, warpl = tid >> 5;
   float const *mrow = &g_mla_m[h * MLA_SPLITS];
   float const *lrow = &g_mla_l[h * MLA_SPLITS];
@@ -1566,7 +1578,6 @@ __device__ __noinline__ void
       dq[j] = (float)__nv_fp8_e4m3(vq) * ys;
     }
   }
-#if MPK_DSV3_ATTN_FAST
   // Lever 5 (WUV_HEAD_SPINWAIT): publish "head h's g_attn_deq is ready" to the
   // W_UV stage (replaces the merge->W_UV grid barrier).
   // CRITICAL (ferret v131 line 1147; reviewer+Codex-vetted): the dequant loop
@@ -1579,19 +1590,19 @@ __device__ __noinline__ void
   // V-group warps' g_attn_deq[h] writes complete (and, via the barrier, visible
   // to tid0) BEFORE tid0 publishes. Then tid0 does a DEVICE-scope release (PTX
   // st.release.gpu + belt-and-suspenders __threadfence, which transitively
-  // orders the OTHER warps' now-syncthreads-published stores) so all of head h's
-  // deq is visible to other CTAs BEFORE the flag flips to 1. DEVICE scope is
-  // correct (all 16 heads live on this rank's GPU; .sys is NOT needed). The
-  // "memory" clobber stops the compiler sinking a g_attn_deq store past the flag.
+  // orders the OTHER warps' now-syncthreads-published stores) so all of head
+  // h's deq is visible to other CTAs BEFORE the flag flips to 1. DEVICE scope
+  // is correct (all 16 heads live on this rank's GPU; .sys is NOT needed). The
+  // "memory" clobber stops the compiler sinking a g_attn_deq store past the
+  // flag.
   __syncthreads();
   if (threadIdx.x == 0) {
     __threadfence(); // device release
-    asm volatile("st.global.release.gpu.u32 [%0], %1;\n" ::"l"(
-                     &g_head_wuv_ready[h]),
-                 "r"(1)
-                 : "memory");
+    asm volatile(
+        "st.global.release.gpu.u32 [%0], %1;\n" ::"l"(&g_head_wuv_ready[h]),
+        "r"(1)
+        : "memory");
   }
-#endif
 }
 
 // ===========================================================================
@@ -1608,21 +1619,17 @@ __device__ __noinline__ void
                  int gwarps,
                  int lane,
                  int *__restrict__ g_head_wuv_ready) {
-  (void)g_head_wuv_ready;
   int nU = K_KVLORA / 16;     // 32 uint4 per W row
   int KGv = K_KVLORA / K_GRP; // 4
   int rows_per_head = K_VHEAD / RB;
   int nblk = K_HLOCAL * rows_per_head;
-#if MPK_DSV3_ATTN_FAST
   // Lever 5: remember the head whose readiness we already acquired. The
   // grid-stride visits blocks of one head consecutively (blk/rows_per_head), so
   // each warp spins at most once per head.
   int last_h = -1;
-#endif
   for (int blk = gwarp; blk < nblk; blk += gwarps) {
     int h = blk / rows_per_head;
     int nr0 = (blk % rows_per_head) * RB;
-#if MPK_DSV3_ATTN_FAST
     // Lever 5 (WUV_HEAD_SPINWAIT): per-head merge->W_UV spin-wait (replaces the
     // merge->W_UV grid barrier). Lane 0 spins on g_head_wuv_ready[h] with a
     // DEVICE-scope ACQUIRE load (PTX ld.acquire.gpu — device-coherent, NOT
@@ -1650,7 +1657,6 @@ __device__ __noinline__ void
       __syncwarp(); // broadcast acquire ordering to all lanes
       last_h = h;
     }
-#endif
     float const *ar = &g_attn_deq[h * K_KVLORA];
     float const *sc = kvbv_s + (size_t)h * KGv;
     uint4 const *Wh = reinterpret_cast<uint4 const *>(
@@ -1730,21 +1736,20 @@ __device__ __forceinline__ float rms_rcp_block(float const *__restrict__ src,
 //
 //  input_ptrs ABI — 14 slots, the HARD MAX_INPUTS_PER_TASK cap. To fit 14 (vs
 //  the natural 16+) the two bf16 layernorm weights are CONCATENATED into one
-//  `ln_weights` buffer ([q_a_ln(1536) | kv_a_ln(512)]) and cos/sin into one
-//  `cos_sin` buffer ([cos(64) | sin(64)] per max_seq row); `out` is NOT an
+//  `ln_weights` buffer ([input_ln(7168) | q_a_ln(1536) | kv_a_ln(512)]) and
+//  cos/sin into one `cos_sin` buffer ([cos(64) | sin(64)] per max_seq row);
+//  `out` is NOT an
 //  input slot (the kernel writes output_ptrs[0] only). See the builder wrapper.
 //  Weight scales (qkv_a_s/q_b_s/oproj_s) are the MPK per-128-ROW-BLOCK,
 //  per-128-K-group fp32 weight_scale_inv [N/128, K/128] (row-major) that
 //  _attach_fp8_weight produces — the SAME format the production
 //  fp8_gemm_dense_finen GEMV reads (plain fp32, no UE8M0 decode). kvbv_s is the
 //  per-head fp32 [H,1,4] kv_b_v_bmm_dense scale.
-//    [0]  hidden     (bf16, the RMSNorm'd layer input)               (1,7168)
+//    [0]  hidden     (bf16, raw residual-stream self.x)              (1,7168)
 //    [1]  qkv_a_w    (fp8)                                        (2176,7168)
 //    [2]  qkv_a_s    (fp32 per-128-block [N/128,K/128] = [17,56])
-//    [3]  ln_weights (bf16 [q_a_ln(1536) | kv_a_ln(512)])            (2048,)
-//         — under -DMPK_DSV3_ATTN_PHASE0 this is PREPENDED with input_ln so it
-//           becomes [input_ln(7168) | q_a_ln(1536) | kv_a_ln(512)] = (9216,)
-//           and the kernel RMS-norms the RAW self.x (input[0]) in Phase-0.
+//    [3]  ln_weights (bf16 [input_ln(7168) | q_a_ln(1536) | kv_a_ln(512)])
+//                      (9216,)
 //    [4]  q_b_w      (fp8 absorbed)                               (9216,1536)
 //    [5]  q_b_s      (fp32 per-128-block [72,12])
 //    [6]  cos_sin    (bf16 [cos(64) | sin(64)] per row)        (max_seq,128)
@@ -1765,11 +1770,10 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   __nv_fp8_e4m3 const *qkv_a_w =
       static_cast<__nv_fp8_e4m3 const *>(task_desc->input_ptrs[1]);
   float const *qkv_a_s = static_cast<float const *>(task_desc->input_ptrs[2]);
-  // ln_weights layout depends on the Phase-0 deep-fusion flag.
+  // ln_weights uses the Phase-0 deep-fusion layout.
   __nv_bfloat16 const *ln_weights =
       static_cast<__nv_bfloat16 const *>(task_desc->input_ptrs[3]);
-#if MPK_DSV3_ATTN_PHASE0
-  // Phase-0 DEEP-FUSION (default-OFF): the builder PREPENDS input_layernorm so
+  // Phase-0 DEEP-FUSION: the builder PREPENDS input_layernorm so
   // ln_weights = [input_ln(7168) | q_a_ln(1536) | kv_a_ln(512)] = 9216-d. The
   // Phase-0 RMSNorm reads input_ln_w at [0:7168); q_a/kv_a shift past it.
   //   input_ln_w = ln_weights        (offset 0)
@@ -1786,20 +1790,11 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                 "the builder ln_weights_pt MUST match this exact order/size.");
   static_assert((K_HIDDEN + K_QLORA + K_KVLORA) == 9216,
                 "Phase-0 ln_weights total length must be 9216-d.");
-  __nv_bfloat16 const *input_ln_w = ln_weights;                  // offset 0
-  __nv_bfloat16 const *q_a_ln_w = ln_weights + K_HIDDEN;         // offset 7168
+  __nv_bfloat16 const *input_ln_w = ln_weights;          // offset 0
+  __nv_bfloat16 const *q_a_ln_w = ln_weights + K_HIDDEN; // offset 7168
   __nv_bfloat16 const *kv_a_ln_w =
-      ln_weights + K_HIDDEN + K_QLORA;                           // offset 8704
+      ln_weights + K_HIDDEN + K_QLORA; // offset 8704
   (void)input_ln_w; // consumed by rmsnorm_quant_hidden_block_smem in S2
-#else
-  // Default (Phase-0 OFF): ln_weights = [q_a_ln(1536) | kv_a_ln(512)] (no
-  // input_ln — the separate rmsnorm_layer task pre-normalizes hidden).
-  static_assert((K_QLORA + K_KVLORA) == 2048,
-                "Default ln_weights total length must be 2048-d "
-                "([q_a_ln(1536)|kv_a_ln(512)]).");
-  __nv_bfloat16 const *q_a_ln_w = ln_weights;            // offset 0
-  __nv_bfloat16 const *kv_a_ln_w = ln_weights + K_QLORA; // offset 1536
-#endif
   __nv_fp8_e4m3 const *q_b_w =
       static_cast<__nv_fp8_e4m3 const *>(task_desc->input_ptrs[4]);
   float const *q_b_s = static_cast<float const *>(task_desc->input_ptrs[5]);
@@ -1862,7 +1857,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // (s_score holds 512 floats = the per-head scores; also reused as s_attn in
   // mla_merge_quant — both are <=512 floats, block-local.)
   soff += attn_au16((size_t)512 * sizeof(float));
-#if MPK_DSV3_ATTN_FAST
   // Levers 1-3 block-local activation buffer (28KB f32). ALIASED across three
   // NON-OVERLAPPING phases (exactly as ferret v131): qkv_a reads s_act[0:7168]
   // (dequant hidden), q_b reads s_act[0:1536] (q_a_layernorm deq), o_proj reads
@@ -1878,7 +1872,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // Lever 4: "this block is head h's last split" flag (block-local, set by tid0
   // after the per-head atomicAdd, broadcast to the block via __syncthreads).
   __shared__ int s_mla_last;
-#endif
   (void)soff;
 
   int tid = threadIdx.x, lane = tid & 31, warpl = tid >> 5;
@@ -1995,51 +1988,27 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
 
   // ===================== S2: quantize hidden + qkv_a GEMM
   // =====================
-#if MPK_DSV3_ATTN_FAST
   // Lever 1 (HIDDEN_BLOCK_LOCAL): every block quantizes hidden[7168]
   // block-cooperatively ONCE into block-local SHARED s_act (the trailing
   // __syncthreads inside replaces the quant_hidden->qkv_a grid barrier), then
   // qkv_a reads s_act. Byte-identical UE8M0 dequant to quant_hidden_grid's deq.
-#if MPK_DSV3_ATTN_PHASE0
-  // Phase-0 DEEP-FUSION (default-OFF): `hidden` (input[0]) is the RAW
+  // Phase-0 DEEP-FUSION: `hidden` (input[0]) is the RAW
   // residual-stream self.x; RMS-norm it block-locally with input_ln_w FIRST,
   // then quant into s_act. NO grid barrier added (block-local, same as below).
   rmsnorm_quant_hidden_block_smem(
       hidden /*=raw self.x*/, input_ln_w, s_act, red8, K_HIDDEN, warpl, lane);
-#else
-  quant_hidden_block_smem(hidden, s_act, K_HIDDEN, warpl, lane);
-#endif
-  gemv_grid_cpa_t<2, 6>(s_act, // qkv_a reads BLOCK-LOCAL s_act (no grid barrier)
-                        qkv_a_w,
-                        qkv_a_s,
-                        sc.g_qkva,
-                        K_QKVAN,
-                        K_HIDDEN,
-                        gwarp,
-                        gwarps,
-                        lane,
-                        my_wbuf);
+  gemv_grid_cpa_t<2, 6>(
+      s_act, // qkv_a reads BLOCK-LOCAL s_act (no grid barrier)
+      qkv_a_w,
+      qkv_a_s,
+      sc.g_qkva,
+      K_QKVAN,
+      K_HIDDEN,
+      gwarp,
+      gwarps,
+      lane,
+      my_wbuf);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS); // qkv_a -> layernorm (KEPT)
-#else
-#if MPK_DSV3_ATTN_PHASE0
-#error                                                                          \
-    "MPK_DSV3_ATTN_PHASE0 (Phase-0 RMSNorm fold) is only implemented on the FAST path (MPK_DSV3_ATTN_FAST=1, the default). With FAST=0 the builder feeds RAW self.x but this baseline path does not normalize it -> wrong. Do not combine MPK_DSV3_ATTN_PHASE0_FUSION=1 with MPK_DSV3_ATTN_FAST=0."
-#endif
-  quant_hidden_grid(
-      hidden, sc.g_hdeq, sc.g_hf8, sc.g_hsc, K_HIDDEN, gwarp, gwarps, lane);
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-  gemv_grid_cpa_t<2, 6>(sc.g_hdeq,
-                        qkv_a_w,
-                        qkv_a_s,
-                        sc.g_qkva,
-                        K_QKVAN,
-                        K_HIDDEN,
-                        gwarp,
-                        gwarps,
-                        lane,
-                        my_wbuf);
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-#endif
   // tap S2: qkv_a_out [2176] = [q_a(1536) | c_latent(512) | k_pe(64) | pad(64)]
   ATTN_DBG_TAP("qkv_a_out", out, sc.g_qkva, K_QKVAN, step, worker_idx);
   // DECISIVE: tap the RAW per-slice GEMV outputs BEFORE any norm — q_a slice
@@ -2093,15 +2062,14 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
     }
 #endif
     int ngq = K_QLORA / K_GRP; // 12
-#if MPK_DSV3_ATTN_FAST
     // Lever 2 (QA_BLOCK_LOCAL): every block computes ALL 12 groups (warp w owns
     // groups {w, w+NWARP}) of q_a_layernorm+UE8M0-requant into block-local
     // SHARED s_qbdeq (dequantized values, byte-identical to the grid-strided
     // g_qbdeq below). q_b then reads s_qbdeq from shared -> drops the
     // layernorm->q_b grid barrier (a block __syncthreads, issued before q_b
     // below, replaces it). The global g_qbdeq/g_qbf8/g_qbsc are written ONLY
-    // under MPK_ATTN_DBG so the q_a_normed tap still works; the default-fast
-    // build skips them (q_b sources s_qbdeq).
+    // under MPK_ATTN_DBG so the q_a_normed tap still works; the normal
+    // perf build skips them (q_b sources s_qbdeq).
     for (int g = warpl; g < ngq; g += NWARP) {
       float const *src = sc.g_qkva + g * K_GRP;
       __nv_bfloat16 const *w = q_a_ln_w + g * K_GRP;
@@ -2130,7 +2098,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
       }
 #ifdef MPK_ATTN_DBG
       // Mirror to the global g_qbdeq (and g_qbf8/g_qbsc) for the q_a_normed tap
-      // only — DEBUG-gated so the default-fast build stays clean. Block 0 only
+      // only — DEBUG-gated so the normal perf build stays clean. Block 0 only
       // (identical across blocks) to avoid 136x redundant global writes.
       if (worker_idx == 0) {
         float *dg = sc.g_qbdeq + g * K_GRP;
@@ -2149,41 +2117,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
       }
 #endif
     }
-#else
-    for (int g = gwarp; g < ngq; g += gwarps) {
-      float const *src = sc.g_qkva + g * K_GRP;
-      __nv_bfloat16 const *w = q_a_ln_w + g * K_GRP;
-      float nv[4];
-      float mx = 1e-10f;
-#pragma unroll
-      for (int t = 0; t < 4; t++) {
-        int j = lane + t * 32;
-        float v = k_bf16(src[j] * q_rcp * __bfloat162float(w[j]));
-        nv[t] = v;
-        mx = fmaxf(mx, fabsf(v));
-      }
-#pragma unroll
-      for (int o = 16; o > 0; o >>= 1) {
-        float ot = __shfl_xor_sync(0xffffffffu, mx, o);
-        mx = fmaxf(mx, ot);
-      }
-      float ys = fmaxf(mx / K_FP8MAX, 1e-10f);
-      float yq = k_dec_ue8m0(k_enc_ue8m0(ys));
-      float *d = sc.g_qbdeq + g * K_GRP;
-      __nv_fp8_e4m3 *d8 = sc.g_qbf8 + g * K_GRP;
-#pragma unroll
-      for (int t = 0; t < 4; t++) {
-        int j = lane + t * 32;
-        float qv = fminf(fmaxf(nv[t] / yq, -K_FP8MAX), K_FP8MAX);
-        __nv_fp8_e4m3 qf = __nv_fp8_e4m3(qv);
-        d8[j] = qf;
-        d[j] = (float)qf * yq;
-      }
-      if (lane == 0) {
-        sc.g_qbsc[g] = yq;
-      }
-    }
-#endif
     // kv_a_layernorm -> kv_cache row [0:512). grid-strided over 512 elements.
     for (int i = gtid; i < K_KVLORA; i += gthreads) {
       float v = k_bf16(sc.g_qkva[K_QLORA + i] * kv_rcp *
@@ -2191,15 +2124,15 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
       kv_cache[(size_t)step * K_QKHEAD + i] = __float2bfloat16(v);
     }
     // rope(k_pe) on g_qkva[2048:2112) + append to kv_cache[step][512:576).
-#if MPK_DSV3_ATTN_W0_TAIL_LIGHTEN
-    // W0 TAIL LIGHTEN (default-OFF): distribute the 32 independent rope PAIRS
-    // across worker-0's threads 0..31 (one pair per thread) instead of the serial
-    // single-thread loop below. Each pair is fully local — it reads only its own
-    // two g_qkva elements and writes only its own two kv_cache elements — so this
-    // is a who-writes-it change: BIT-IDENTICAL to the serial path (same float
-    // ops, same k_bf16 rounding, same intra-pair order; only parallelized ACROSS
-    // pairs). Stays on worker 0 only (no new cross-CTA coordination); the q_b->MLA
-    // grid_barrier below (count 136, fences all threads) publishes the result.
+    // W0 tail lighten: distribute the 32 independent rope PAIRS
+    // across worker-0's threads 0..31 (one pair per thread) instead of the
+    // serial single-thread loop below. Each pair is fully local — it reads only
+    // its own two g_qkva elements and writes only its own two kv_cache elements
+    // — so this is a who-writes-it change: BIT-IDENTICAL to the serial path
+    // (same float ops, same k_bf16 rounding, same intra-pair order; only
+    // parallelized ACROSS pairs). Stays on worker 0 only (no new cross-CTA
+    // coordination); the q_b->MLA grid_barrier below (count 136, fences all
+    // threads) publishes the result.
     if (worker_idx == 0 && tid < K_QKROPE / 2) {
       int pr = tid;
       int d0 = pr * 2, d1 = d0 + 1;
@@ -2211,55 +2144,19 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
           __float2bfloat16(k_bf16(k0 * c - k1 * s));
       kv_cache[(size_t)step * K_QKHEAD + 512 + d1] =
           __float2bfloat16(k_bf16(k1 * c + k0 * s));
-#ifdef MPK_DSV3_ATTN_W0_TAIL_POISON
-      // DIAGNOSTIC (default-OFF): overwrite the just-written k_pe slice with NaN.
-      // The q_b->MLA barrier publishes it; if MLA consumes the k_pe (it scores
-      // attention with it), the tokens go garbage -> proves consumption + that
-      // this lightened path produces the bytes MLA reads. (No effect on the
-      // default/non-poison build.)
-      __nv_bfloat16 nanbf = __float2bfloat16(__int_as_float(0x7fc00000));
-      kv_cache[(size_t)step * K_QKHEAD + 512 + d0] = nanbf;
-      kv_cache[(size_t)step * K_QKHEAD + 512 + d1] = nanbf;
-#endif
     }
-#else
-    if (worker_idx == 0 && tid == 0) {
-      float kpe[K_QKROPE];
-#pragma unroll
-      for (int i = 0; i < K_QKROPE; i++) {
-        kpe[i] = sc.g_qkva[2048 + i];
-      }
-#pragma unroll
-      for (int pr = 0; pr < K_QKROPE / 2; pr++) {
-        int d0 = pr * 2, d1 = d0 + 1;
-        float c = __bfloat162float(cos_sin[pos * K_COSSIN_STRIDE + d0]);
-        float s = __bfloat162float(
-            cos_sin[pos * K_COSSIN_STRIDE + K_COSSIN_SINOFF + d0]);
-        float k0 = kpe[d0], k1 = kpe[d1];
-        kpe[d0] = k_bf16(k0 * c - k1 * s);
-        kpe[d1] = k_bf16(k1 * c + k0 * s);
-      }
-      for (int i = 0; i < K_QKROPE; i++) {
-        kv_cache[(size_t)step * K_QKHEAD + 512 + i] = __float2bfloat16(kpe[i]);
-      }
-    }
-#endif
   }
-#if MPK_DSV3_ATTN_FAST
   // Lever 2 (QA_BLOCK_LOCAL): the layernorm->q_b grid barrier is DROPPED — only
   // a block __syncthreads is needed before q_b reads block-local s_qbdeq (the
   // q_a_layernorm+requant above was block-cooperative into s_qbdeq). The
   // kv_a_layernorm/rope writes to kv_cache feed MLA, which is published
   // cross-block by the q_b->MLA grid barrier below. Under MPK_ATTN_DBG we KEEP
   // the grid barrier so the kv_cache HISTORY taps below see published cross-CTA
-  // writes (debug build only — the default-fast/perf build uses __syncthreads).
+  // writes (debug build only — the normal perf build uses __syncthreads).
 #ifdef MPK_ATTN_DBG
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
 #else
   __syncthreads();
-#endif
-#else
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
 #endif
   // tap S3/S5: q_a_normed-dequant (q_b input) [1536]; the appended kv_cache row
   // [c_latent(512) | k_pe_rot(64)] is tapped from the live buffer for this
@@ -2357,7 +2254,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
 
   // ===================== S4+S6 FUSED: q_b GEMM + rope -> g_qpe
   // ================
-#if MPK_DSV3_ATTN_FAST
   // Lever 2: q_b reads its activation from block-local SHARED s_qbdeq (no
   // layernorm->q_b grid barrier). Byte-identical GEMV+rope math.
   gemv_grid_cpa_qb_rope_smem_t<8, 4>(s_qbdeq,
@@ -2374,14 +2270,14 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                                      my_wbuf);
   // === HAZARD #1: ZERO-BEFORE-BARRIER ===================================
   // Levers 4 & 5: zero the per-head completion counters AND readiness flags
-  // BEFORE the q_b->MLA grid barrier below. That barrier's __threadfence (inside
-  // attn_grid_barrier) is what publishes these zero stores to EVERY CTA, so the
-  // MLA partials that follow see a FRESHLY-ZEROED count for THIS decode step.
-  // These arrays live in the per-task SCRATCH (persist across steps and are NOT
-  // re-zeroed by anything else), so without this explicit pre-barrier zero a
-  // stale count from the previous step would make the "last split"
-  // (atomicAdd == nsp-1) fire early or never -> wrong merge / hang. The zero
-  // MUST stay on the producer side of the barrier; do NOT move it past it.
+  // BEFORE the q_b->MLA grid barrier below. That barrier's __threadfence
+  // (inside attn_grid_barrier) is what publishes these zero stores to EVERY
+  // CTA, so the MLA partials that follow see a FRESHLY-ZEROED count for THIS
+  // decode step. These arrays live in the per-task SCRATCH (persist across
+  // steps and are NOT re-zeroed by anything else), so without this explicit
+  // pre-barrier zero a stale count from the previous step would make the "last
+  // split" (atomicAdd == nsp-1) fire early or never -> wrong merge / hang. The
+  // zero MUST stay on the producer side of the barrier; do NOT move it past it.
   if (gtid < K_HLOCAL) {
     sc.g_head_done[gtid] = 0;
     sc.g_head_wuv_ready[gtid] = 0;
@@ -2390,21 +2286,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                     ATTN_NUM_WORKERS); // q_b->MLA: publishes g_qpe, kv_cache,
                                        // AND the zeroed flags (the barrier's
                                        // __threadfence does the cross-CTA pub)
-#else
-  gemv_grid_cpa_qb_rope_t<8, 4>(sc.g_qbdeq,
-                                q_b_w,
-                                q_b_s,
-                                sc.g_qpe,
-                                K_HLOCAL * K_QKHEAD,
-                                K_QLORA,
-                                cos_sin,
-                                pos,
-                                gwarp,
-                                gwarps,
-                                lane,
-                                my_wbuf);
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-#endif
   // tap S4/S6: q_nope_pe post-rope [16*576] (the MLA query). Print head-0's
   // nope-start (first 4) + a checksum over all 16 heads.
   ATTN_DBG_TAP(
@@ -2438,14 +2319,13 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   }
   int tile = (KV + nsp - 1) / nsp;
   int ntask = K_HLOCAL * nsp;
-#if MPK_DSV3_ATTN_FAST
-  // === HAZARD #2: ntask = 16*nsp <= 16*MLA_SPLITS = 128 < ATTN_NUM_WORKERS(136)
-  // So every worker runs AT MOST ONE partial task (idx=blockIdx.x guarded by
-  // idx<ntask), the per-head atomic counter is incremented exactly nsp times
-  // (once per split-block of head h), and ALL of a head's partials run before
-  // any W_UV spinner can need that head (all <=128 partial-blocks are among the
-  // 136 workers; the producers make unconditional progress). Holds for nsp<=8
-  // i.e. KV up to MLA_SPLITS*64 per the tile math.
+  // === HAZARD #2: ntask = 16*nsp <= 16*MLA_SPLITS = 128 <
+  // ATTN_NUM_WORKERS(136) So every worker runs AT MOST ONE partial task
+  // (idx=blockIdx.x guarded by idx<ntask), the per-head atomic counter is
+  // incremented exactly nsp times (once per split-block of head h), and ALL of
+  // a head's partials run before any W_UV spinner can need that head (all <=128
+  // partial-blocks are among the 136 workers; the producers make unconditional
+  // progress). Holds for nsp<=8 i.e. KV up to MLA_SPLITS*64 per the tile math.
   // Lever 4 (MLA_ATOMIC_MERGE): one partial per block; the LAST split-block of
   // head h (atomicAdd return == nsp-1) runs that head's merge IN-PLACE -> drops
   // the partial->merge grid barrier. Memory ordering (device-scope release/
@@ -2453,9 +2333,9 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // trailing __syncthreads (block barrier folds all 256 threads' stores into
   // tid0) -> tid0 __threadfence (device release) -> atomicAdd. Consumer (last
   // block): __threadfence (device acquire, after observing the final count) ->
-  // __syncthreads (hand the acquired ordering to the other 255 threads) -> merge
-  // reads g_mla_acc from the OTHER split-blocks. DEVICE scope (NOT .sys): all
-  // heads/splits are on this rank's GPU.
+  // __syncthreads (hand the acquired ordering to the other 255 threads) ->
+  // merge reads g_mla_acc from the OTHER split-blocks. DEVICE scope (NOT .sys):
+  // all heads/splits are on this rank's GPU.
   {
     int idx = worker_idx;
     if (idx < ntask) {
@@ -2507,46 +2387,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // per head on g_head_wuv_ready[h]. The merge-blocks make unconditional
   // progress so every flag is eventually set (no deadlock). The attn_out tap
   // (reads g_attn cross-block) is RELOCATED to after the W_UV->o_proj barrier.
-#else
-  for (int idx = worker_idx; idx < ntask; idx += ATTN_NUM_WORKERS) {
-    int h = idx / nsp, sp = idx % nsp;
-    int r0 = sp * tile, r1 = r0 + tile;
-    if (r1 > KV) {
-      r1 = KV;
-    }
-    mla_partial(kv_cache,
-                sc.g_qpe,
-                sc.g_mla_acc,
-                sc.g_mla_m,
-                sc.g_mla_l,
-                s_score,
-                red8,
-                h,
-                sp,
-                r0,
-                r1,
-                sm,
-                step);
-  }
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-  // S10+S11 FUSED merge+quant (1 block/head; 16 of 136 blocks active).
-  for (int h = worker_idx; h < K_HLOCAL; h += ATTN_NUM_WORKERS) {
-    mla_merge_quant(sc.g_attn,
-                    sc.g_attn_deq,
-                    sc.g_mla_acc,
-                    sc.g_mla_m,
-                    sc.g_mla_l,
-                    s_score,
-                    red8,
-                    h,
-                    nsp,
-                    /*g_head_wuv_ready=*/nullptr);
-  }
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-  // tap S9/S10/S11: MLA attn_out [16*512] (head-0 first 4 + 16-head checksum).
-  ATTN_DBG_TAP(
-      "attn_out", out, sc.g_attn, K_HLOCAL * K_KVLORA, step, worker_idx);
-#endif
 
   // ===================== S12 W_UV BMM -> g_red ===============================
   wuv_bmm_grid(sc.g_attn_deq,
@@ -2556,26 +2396,18 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                gwarp,
                gwarps,
                lane,
-#if MPK_DSV3_ATTN_FAST
-               sc.g_head_wuv_ready
-#else
-               nullptr
-#endif
-  );
+               sc.g_head_wuv_ready);
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS); // W_UV -> * (KEPT: publishes
                                                 // g_red from all warps)
-#if MPK_DSV3_ATTN_FAST
   // tap S9/S10/S11 RELOCATED here: the W_UV->* barrier above guarantees every
   // head's merge completed (W_UV consumed g_attn_deq), so g_attn is fully
   // visible cross-CTA now.
   ATTN_DBG_TAP(
       "attn_out", out, sc.g_attn, K_HLOCAL * K_KVLORA, step, worker_idx);
-#endif
   // tap S12: W_UV BMM out attn_out_reduced [2048].
   ATTN_DBG_TAP("wuv_reduced", out, sc.g_red, K_OIN, step, worker_idx);
 
   // ===================== S13: quantize g_red + o_proj GEMM + residual ========
-#if MPK_DSV3_ATTN_FAST
   // Lever 3 (OPROJ_BLOCK_QUANT): g_red (visible cross-CTA after the W_UV->*
   // barrier above) is quantized block-cooperatively ONCE into block-local
   // SHARED s_odeq (the trailing __syncthreads inside replaces the
@@ -2594,21 +2426,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                                    gwarps,
                                    lane,
                                    my_wbuf);
-#else
-  quant_ue8m0_grid(sc.g_red, sc.g_odeq, K_OIN, gwarp, gwarps, lane);
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-  gemv_grid_cpa_oproj_t<8, 4>(sc.g_odeq,
-                              oproj_w,
-                              oproj_s,
-                              residual,
-                              out,
-                              K_HIDDEN,
-                              K_OIN,
-                              gwarp,
-                              gwarps,
-                              lane,
-                              my_wbuf);
-#endif
   // tap S13: final attn_proj_out [7168] (o_proj + residual, pre-AR) — the FULL
   // vector (the prior version was a worker-subset bug that summed only out[0]).
 #ifdef MPK_ATTN_DBG

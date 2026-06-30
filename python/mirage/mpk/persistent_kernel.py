@@ -312,57 +312,14 @@ def get_compile_command(
     # byte-identical default build). Used to localize the attn recurrence bug.
     if os.environ.get("MPK_ATTN_DBG") == "1":
         flags = flags + ["-DMPK_ATTN_DBG"]
-    # Attention FAST levers (barrier-removal, .cuh default ON=1 inside the attn-mega).
-    # MPK_DSV3_ATTN_FAST=0 compiles the proven-correct 8-barrier baseline for A/B.
-    if os.environ.get("MPK_DSV3_ATTN_FAST") == "0":
-        flags = flags + ["-DMPK_DSV3_ATTN_FAST=0"]
-    # Attention PHASE-0 DEEP-FUSION (default-OFF; when UNSET the default device
-    # SASS is UNCHANGED — all new kernel code is #if MPK_DSV3_ATTN_PHASE0-gated,
-    # verified SASS-diff=0; note only the cubin's debug-line metadata shifts under
-    # -lineinfo, which is irrelevant to execution): folds the LIVE front
-    # input_layernorm RMSNorm into the attn-mega as a Phase-0 (the kernel norms
-    # RAW self.x internally). MUST be gated on the SAME env condition the builder
-    # uses (MPK_DSV3_ATTN_PHASE0_FUSION) so the compiled kernel's ln_weights
-    # layout/ABI agrees with the builder's concat — a partial gate (flag set,
-    # builder not, or vice-versa) is a silent miscompile. The -D goes through this
-    # JIT flags list (NOT MPK_EXTRA_NVCC_DEFINES — see memory
-    # feedback_nvcc_flag_vs_builder_grid_mismatch).
-    if os.environ.get("MPK_DSV3_ATTN_PHASE0_FUSION") == "1":
-        flags = flags + ["-DMPK_DSV3_ATTN_PHASE0"]
-    # W0 TAIL LIGHTEN (default-OFF; byte-identical default build — all new code is
-    # #if MPK_DSV3_ATTN_W0_TAIL_LIGHTEN-gated inside the attn-mega): the rope(k_pe)
-    # + kv_cache append before the q_b->MLA grid barrier is a single-thread serial
-    # tail run by worker_idx==0/tid==0 alone (the per-position load-balance
-    # discriminator flagged worker 0 as the fixed straggler). This DISTRIBUTES the
-    # 32 independent rope pairs across worker-0's threads 0..31 (one pair each), so
-    # worker 0 is no longer the sole serial writer. Pure who-writes-it change: the
-    # published kv_cache[step][512:576) is bit-identical (same float ops, same
-    # k_bf16 rounding, same intra-pair order; only parallelized ACROSS the 32
-    # disjoint pairs). Grid-barrier participant count stays 136. The -D goes through
-    # this JIT flags list (NOT MPK_EXTRA_NVCC_DEFINES — see memory
-    # feedback_nvcc_flag_vs_builder_grid_mismatch). No builder/ABI change.
-    if os.environ.get("MPK_DSV3_ATTN_W0_TAIL_LIGHTEN") == "1":
-        flags = flags + ["-DMPK_DSV3_ATTN_W0_TAIL_LIGHTEN"]
-    # DIAGNOSTIC (default-OFF): after the rope(k_pe) write, poison the published
-    # kv_cache[step][512:576) k_pe slice with NaN to PROVE the MLA attention
-    # consumes it (poison => NaN scores => garbage tokens). Confirms the lightened
-    # who-writes-it path actually produces the consumed bytes. Only meaningful
-    # together with MPK_DSV3_ATTN_W0_TAIL_LIGHTEN=1.
-    if os.environ.get("MPK_DSV3_ATTN_W0_TAIL_POISON") == "1":
-        flags = flags + ["-DMPK_DSV3_ATTN_W0_TAIL_POISON"]
-    # FFN-full FAST levers (v019: packed-half2 GEMV + cp.async y13 + parallel argmax,
-    # .cuh default ON). MPK_DSV3_FFN_FAST=0 = the proven v015 scalar path for A/B.
-    if os.environ.get("MPK_DSV3_FFN_FAST") == "0":
-        flags = flags + ["-DMPK_DSV3_FFN_FAST=0"]
-    # FFN_FAST_ROUTING: Phase B cp.async pipelined router GEMV (default OFF).
-    # Replaces the scalar router_partial<4> (NCU long_scoreboard-bound) with
-    # router_partial_cpa<4,4> using cp.async weight staging + packed bf162->float2.
-    # Enable: MPK_DSV3_FFN_FAST_ROUTING=1. Math NEAR-identical / sub-ULP (NOT
-    # bit-identical): packed bf162 pairwise dot vs scalar left-fold -> fp32
-    # non-associative; distributional-correctness gate PASS. Default OFF so
-    # the default build is byte-identical to the v019 baseline.
-    if os.environ.get("MPK_DSV3_FFN_FAST_ROUTING") == "1":
-        flags = flags + ["-DMPK_DSV3_FFN_FAST_ROUTING=1"]
+    # DSv3 decode FAST megakernels: the box-validated attention + FFN-full wins
+    # (ATTN_FAST barrier-removal + Phase-0 RMSNorm deep-fusion + W0-tail-lighten +
+    # GEMV scalar-ILP consumer; FFN_FAST packed-half2 GEMV + FFN_FAST_ROUTING
+    # cp.async router) are now the SINGLE hard-wired code path inside the attn-
+    # block / FFN-full megakernels (no #if/#else fallback, no env selection). The
+    # Phase-0 RMSNorm fold's builder side (RAW self.x fed to the attn-mega +
+    # ln_weights concat) is likewise unconditional in builder.py. Nothing to add
+    # to the JIT flags here for those levers anymore.
     # MLA_REDUCE_1WAVE (rd_dv=4 / 128-CTA 1-wave reduce) HELD OFF pending a box A/B
     # token-identity check: the 12.20ms campaign-best ran FINESPLIT-ON +
     # REDUCE_1WAVE-OFF (the 6/20 partial-gate bug never compiled the flag), so the
@@ -2148,7 +2105,6 @@ class PersistentKernel:
         dummy_input_map: tuple,
         target_input_map: tuple,
         skip_after_step0: bool = False,
-        poison_after_step0: bool = False,
     ):
         """Zero-fill `target` using a custom kernel.
 
@@ -2198,18 +2154,9 @@ class PersistentKernel:
         self.kn_graph.customized([dummy, target, dummy], tb_graph)
 
         # params[0]==1 => emit the step-0-guarded variant (skip on steps>=1).
-        # params[0]==2 => DIAGNOSTIC poison variant (zero step 0, NaN sentinel on
-        #   steps>=1) — safety-tests the skip premise (poison_after_step0).
         # Omit params entirely otherwise so the code string is byte-identical to
-        # the historical unguarded tensor_init (no new variant for the default).
-        assert not (skip_after_step0 and poison_after_step0), \
-            "tensor_init: skip_after_step0 and poison_after_step0 are mutually exclusive"
-        if poison_after_step0:
-            params = [2]
-        elif skip_after_step0:
-            params = [1]
-        else:
-            params = None
+        # the historical unguarded tensor_init (other unflagged callers).
+        params = [1] if skip_after_step0 else None
         self.kn_graph.register_task(tb_graph, "tensor_init", params)
     
     def moe_topk_softmax_routing_layer(
@@ -4650,7 +4597,7 @@ class PersistentKernel:
         hard_code = HARD_CODE
         with open(cuda_code_path, "w") as f:
             f.write(results["cuda_code"] + hard_code)
-            
+
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
             shutil.copy(cuda_code_path, os.path.join(output_dir, f"test_rank{self.mpi_rank}.cu"))
