@@ -617,8 +617,30 @@ class Qwen3Builder(GraphBuilder):
             # else:
             argmax_partial_grid_dim = (self.mpk.num_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
+
+            # Constrained decoding (xgrammar): mask the logits with the
+            # CPU-produced token bitmask before argmax. Only in online_pinned
+            # mode (per-step CPU rendezvous) and only when enabled at build
+            # time; gated at runtime by pinned_constrained_flag (free when off).
+            argmax_input = self.argmax_in
+            if (self.mpk.mode == "online_pinned"
+                    and getattr(self.mpk, "enable_constrained_decoding", False)):
+                self.masked_logits = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, self.padded_vocab_size),
+                    dtype=bfloat16,
+                    name="masked_logits",
+                    io_category="cuda_tensor",
+                )
+                self.mpk.apply_token_bitmask_layer(
+                    logits=self.argmax_in,
+                    output=self.masked_logits,
+                    grid_dim=(1, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                argmax_input = self.masked_logits
+
             self.mpk.argmax_partial_layer(
-                input=self.argmax_in,
+                input=argmax_input,
                 output=(self.argmax_part_value, self.argmax_part_index),
                 grid_dim=argmax_partial_grid_dim,
                 block_dim=(128, 1, 1),

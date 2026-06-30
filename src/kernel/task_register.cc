@@ -2209,6 +2209,47 @@ int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_SAMPLING_SM100, code.to_string());
 }
 
+int TaskRegister::register_apply_token_bitmask_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Constrained-decoding logit masking (xgrammar). Reads raw logits (input[0]),
+  // writes masked logits to a distinct output[0] consumed by argmax/sampling.
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int vocab_size = input_ops[0]->output_tensors[0].dim[1];
+  int bitmask_words = (vocab_size + 31) / 32;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::apply_token_bitmask_sm100_kernel<bfloat16, $>(", batch_size);
+  code.e("    task_desc->input_ptrs[0],");  // raw logits
+  code.e("    task_desc->output_ptrs[0],"); // masked logits (distinct)
+  code.e("    runtime_config.pinned_token_bitmask,");
+  code.e("    runtime_config.pinned_mask_seq,");
+  code.e("    runtime_config.pinned_constrained_flag,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.step,");
+  code.e("    $,", vocab_size);
+  code.e("    $,", bitmask_words);
+  code.e("    $);", batch_size);
+  return register_task_variant(TASK_APPLY_TOKEN_BITMASK_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
                                             std::vector<int> const &params) {
   assert(params.size() == 0);

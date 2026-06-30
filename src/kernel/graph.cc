@@ -635,6 +635,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_sampling_sm100_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SAMPLING_SM100, variant_id);
+  } else if (name == "apply_token_bitmask_sm100") {
+    int variant_id = task_register->register_apply_token_bitmask_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_APPLY_TOKEN_BITMASK_SM100, variant_id);
   } else if (name == "tensor_init") {
     int variant_id =
         task_register->register_tensor_init_task(customized->bgraph, params);
@@ -886,7 +891,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   }
 
   else {
-    printf("Unsupported task name: %s\n", name);
+    // name is a std::string — use c_str() (passing std::string to %s is UB and
+    // prints garbage, which previously masked "missing task_config" errors).
+    printf("Unsupported task name: %s\n", name.c_str());
     assert(false && "Unsupported task type");
   }
 }

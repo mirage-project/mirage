@@ -38,6 +38,15 @@ class RunnerConfig:
     pinned_ring_capacity: int = 8
     """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""
 
+    vocab_size: Optional[int] = None
+    """Vocabulary size (logit dim). Sizes the constrained-decoding (xgrammar)
+    token bitmask. MUST match the model's *padded* logit dimension (the width
+    of the logits buffer the masking task sees, e.g. 153600 for Qwen3)."""
+
+    enable_constrained_decoding: bool = False
+    """Build the apply_token_bitmask masking layer into the graph (online_pinned
+    only). Runtime constrained/unconstrained is then a flag flip."""
+
     tensor_parallel_size: int = 1
     """Number of GPUs for tensor parallelism (matches ``mpirun -n`` count)."""
 
@@ -90,6 +99,7 @@ class ModelRunner:
             model_path=config.model_path,
             model_config=MirageModelConfig(with_lm_head=True),
             use_cutlass_kernel=config.use_cutlass_kernel,
+            enable_constrained_decoding=config.enable_constrained_decoding,
             **self.meta_tensors,
         )
         self.mpk = MPK(mpk_meta)
@@ -180,4 +190,15 @@ class ModelRunner:
             pinned_step=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
             pinned_inbox_tokens=torch.zeros(cap, config.max_seq_length, dtype=torch.int64).pin_memory(),
             pinned_rid_at_row=torch.full((n_req,), -1, dtype=torch.int32).pin_memory(),
+            # ── Constrained decoding (xgrammar) ─────────────────────────────
+            # bitmask: per buffer row, ceil(vocab/32) packed int32 words.
+            # Init to all-ones (-1 == 0xFFFFFFFF) so the default ("every token
+            # allowed") is a safe no-op even if the flag is left on.
+            # mask_seq / flag init to 0 (off).
+            pinned_token_bitmask=torch.full(
+                (n_req, ((config.vocab_size or 32) + 31) // 32),
+                -1, dtype=torch.int32,
+            ).pin_memory(),
+            pinned_mask_seq=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
+            pinned_constrained_flag=torch.zeros(1, dtype=torch.int32).pin_memory(),
         )

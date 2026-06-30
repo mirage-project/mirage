@@ -1450,6 +1450,9 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[20]: pinned_step
 // meta_tensors[21]: pinned_inbox_tokens
 // meta_tensors[22]: pinned_rid_at_row
+// meta_tensors[23]: pinned_token_bitmask     (constrained decoding)
+// meta_tensors[24]: pinned_mask_seq          (constrained decoding)
+// meta_tensors[25]: pinned_constrained_flag  (constrained decoding)
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
@@ -1480,7 +1483,7 @@ extern "C" void
   // meta_tensors[11..22]: pinned ring pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 23);
+  assert(meta_tensors.size() == 26);
 #else
   assert(meta_tensors.size() == 11);
 #endif
@@ -1525,6 +1528,12 @@ extern "C" void
       static_cast<int64_t *>(meta_tensors[21]);
   global_runtime_config.pinned_rid_at_row =
       static_cast<int32_t *>(meta_tensors[22]);
+  global_runtime_config.pinned_token_bitmask =
+      static_cast<int32_t *>(meta_tensors[23]);
+  global_runtime_config.pinned_mask_seq =
+      static_cast<int32_t volatile *>(meta_tensors[24]);
+  global_runtime_config.pinned_constrained_flag =
+      static_cast<int32_t volatile *>(meta_tensors[25]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;

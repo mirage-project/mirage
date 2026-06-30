@@ -160,6 +160,9 @@ enum TaskType {
   TASK_LINEAR_FP8_SM100 = 276,
   TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 = 277,
   TASK_MLA_KV_GATHER_SM100 = 278,
+  // Constrained decoding: mask logits in place with a CPU-produced token
+  // bitmask (xgrammar). Flag-gated; no-op when constrained decoding is off.
+  TASK_APPLY_TOKEN_BITMASK_SM100 = 279,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
   TASK_ELEMENTWISE_ADD_SM100 = 281,
   TASK_SOFTMAX_GATHER_SM100 = 282,
@@ -393,6 +396,18 @@ struct RuntimeConfig {
   // allocating a buffer row so CPU can discover which row its request is
   // on by scanning rows, then poll pinned_step[row] for per-step streaming.
   int32_t *pinned_rid_at_row; // [total_inflight], pinned
+  // ── Constrained decoding (xgrammar) ─────────────────────────────────────
+  // CPU writes a packed token bitmask (bit j set ⇒ token j allowed) per
+  // buffer row, then publishes pinned_mask_seq[row] = step it is valid for.
+  // The apply_token_bitmask task waits (ld.acquire.sys) until the published
+  // seq matches the row's current decode step, then masks logits in place.
+  // All three are pinned (CPU-writable, GPU-readable). When
+  // pinned_constrained_flag[0] == 0 the masking task is a no-op (unconstrained
+  // decode pays nothing); switching the flag at runtime toggles constrained
+  // vs unconstrained decoding on the same compiled kernel.
+  int32_t *pinned_token_bitmask; // [total_inflight * ceil(vocab/32)], pinned
+  int32_t volatile *pinned_mask_seq; // [total_inflight], pinned
+  int32_t volatile *pinned_constrained_flag; // [1], pinned: 0=off, 1=on
   // Running queue rid tracking: request_rids[i] stores the original rid
   // for active batch slot i (GPU device memory).
   int *request_rids; // [MPK_MAX_NUM_BATCHED_REQUESTS]
