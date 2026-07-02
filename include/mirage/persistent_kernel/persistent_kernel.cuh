@@ -622,7 +622,8 @@ __device__ __forceinline__ bool
     // exposes the previous occupant's progress/mask. mask_seq is set below the
     // first step so the masking task waits for this request's fresh mask.
     st_release_sys_i32(&config.pinned_step[row], (int32_t)initial_step);
-    st_release_sys_i32(&config.pinned_mask_seq[row], (int32_t)(initial_step - 1));
+    st_release_sys_i32(&config.pinned_mask_seq[row],
+                       (int32_t)(initial_step - 1));
     // CPU discovers the row by scanning pinned_rid_at_row.
     config.pinned_rid_at_row[row] = (int32_t)new_rid;
 

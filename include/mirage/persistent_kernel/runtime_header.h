@@ -406,7 +406,7 @@ struct RuntimeConfig {
   // decode pays nothing); switching the flag at runtime toggles constrained
   // vs unconstrained decoding on the same compiled kernel.
   int32_t *pinned_token_bitmask; // [total_inflight * ceil(vocab/32)], pinned
-  int32_t volatile *pinned_mask_seq; // [total_inflight], pinned
+  int32_t volatile *pinned_mask_seq;         // [total_inflight], pinned
   int32_t volatile *pinned_constrained_flag; // [1], pinned: 0=off, 1=on
   // Running queue rid tracking: request_rids[i] stores the original rid
   // for active batch slot i (GPU device memory).
