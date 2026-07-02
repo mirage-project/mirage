@@ -312,6 +312,17 @@ def get_compile_command(
     # byte-identical default build). Used to localize the attn recurrence bug.
     if os.environ.get("MPK_ATTN_DBG") == "1":
         flags = flags + ["-DMPK_ATTN_DBG"]
+    # Candidate-2 AllReduce: NVLS one-shot + per-tile (per-CTA) flat arrival
+    # gate replacing the radix-8 dissemination barrier (default-OFF ⇒ default
+    # build byte-identical). The builder reads the SAME env var to allocate the
+    # symmetric flags buffer + bind the per-tile task, so the whole path (JIT
+    # -D + task graph) activates together or not at all. mpirun caveat: this is
+    # a codegen-gated var — the launcher MUST forward it explicitly with
+    # `-x MPK_DSV3_AR_NVLS_PERTILE` (see feedback_mpirun_x_env_gap: the generic
+    # -x list omits MPK_DSV3_* so the lever silently runs at the DEFAULT
+    # baseline otherwise).
+    if os.environ.get("MPK_DSV3_AR_NVLS_PERTILE") == "1":
+        flags = flags + ["-DMPK_DSV3_AR_NVLS_PERTILE"]
     # DSv3 decode FAST megakernels: the box-validated attention + FFN-full wins
     # (ATTN_FAST barrier-removal + Phase-0 RMSNorm deep-fusion + W0-tail-lighten +
     # GEMV scalar-ILP consumer; FFN_FAST packed-half2 GEMV + FFN_FAST_ROUTING
@@ -2105,6 +2116,7 @@ class PersistentKernel:
         dummy_input_map: tuple,
         target_input_map: tuple,
         skip_after_step0: bool = False,
+        poison_after_step0: bool = False,
     ):
         """Zero-fill `target` using a custom kernel.
 
@@ -2156,7 +2168,12 @@ class PersistentKernel:
         # params[0]==1 => emit the step-0-guarded variant (skip on steps>=1).
         # Omit params entirely otherwise so the code string is byte-identical to
         # the historical unguarded tensor_init (other unflagged callers).
-        params = [1] if skip_after_step0 else None
+        if poison_after_step0:
+            params = [2]  # GATE-ONLY poison-fill correctness variant
+        elif skip_after_step0:
+            params = [1]
+        else:
+            params = None
         self.kn_graph.register_task(tb_graph, "tensor_init", params)
     
     def moe_topk_softmax_routing_layer(
@@ -3872,6 +3889,7 @@ class PersistentKernel:
         block_dim: tuple,
         residual: DTensor = None,
         gate_mode: int = 0,
+        pertile_flags: DTensor = None,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size)
@@ -3892,12 +3910,22 @@ class PersistentKernel:
         if residual is not None:
             tensors["residual"] = residual
         params = [self.world_size, self.mpi_rank]
-        if gate_mode:
+        # Candidate-2 per-tile flat-gate NVLS path (default-OFF). When the
+        # builder passes a symmetric flags buffer we activate the per-tile
+        # variant: params[2]=gate_mode (0 if unused), params[3]=1 signals
+        # per-tile, and the flags buffer becomes the LAST task input.
+        pertile = pertile_flags is not None
+        if gate_mode or pertile:
             if getattr(best_implementation, "name", "") != "nvshmem_tile_allreduce":
                 raise RuntimeError(
-                    "Gated allreduce is currently implemented only for "
+                    "Gated/per-tile allreduce is currently implemented only for "
                     "nvshmem_tile_allreduce.")
+            # params[2] must always be present when params[3] is, so the C++
+            # register can positionally read params[3]. Emit gate_mode (0 ok).
             params.append(gate_mode)
+        if pertile:
+            params.append(1)  # params[3]: per-tile mode
+            tensors["pertile_flags"] = pertile_flags
         best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim,
                                            block_dim=block_dim, params=params)
 

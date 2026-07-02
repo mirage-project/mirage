@@ -326,6 +326,11 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
     def _allreduce_residual(self, partial, output, residual, gate_mode: int = 0):
+        # Candidate-2 per-tile flat-gate NVLS path is activated by passing the
+        # symmetric flags buffer (allocated only when the env is set), which
+        # switches the strategy to the *_pertile task variant. When the buffer
+        # is None (default) the call is byte-identical to before.
+        pertile_flags = getattr(self, "ar_pertile_flags", None)
         self.mpk.allreduce_layer(
             input=partial,
             buffer=self.allreduce_buf,
@@ -334,6 +339,7 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=_tensor_parallel_allreduce_grid(output.dim(1)),
             block_dim=(128, 1, 1),
             gate_mode=gate_mode,
+            pertile_flags=pertile_flags,
         )
 
     def _fp8_quant_buffers(self, rows: int, reduction_size: int,
@@ -1457,6 +1463,24 @@ class DeepSeekV3Builder(GraphBuilder):
                 name="allreduce_out",
                 io_category=_allreduce_io,
             )
+            # Candidate-2 per-tile AllReduce: symmetric uint64 arrival-flag
+            # buffer (default-OFF, only allocated when MPK_DSV3_AR_NVLS_PERTILE
+            # is set AND we have NVSHMEM+TP>1, so the default task graph is
+            # unchanged). Layout: 2 gates (start,end) x GRID CTAs x world_size.
+            # GRID = hidden_size/128 mirrors _tensor_parallel_allreduce_grid.
+            # int64 used as uint64 monotonic epoch slots. Zeroed at kernel init
+            # (runtime.cc name-gated cudaMemset on "ar_pertile_flags").
+            self.ar_pertile_flags = None
+            if (self._use_nvshmem
+                    and os.environ.get("MPK_DSV3_AR_NVLS_PERTILE") == "1"):
+                _ar_grid = self.hidden_size // 128
+                _n_slots = 2 * _ar_grid * self.world_size
+                self.ar_pertile_flags = self.mpk.new_tensor(
+                    dims=(1, _n_slots),
+                    dtype=int64,
+                    name="ar_pertile_flags",
+                    io_category="nvshmem_tensor",
+                )
 
         # Argmax
         self.argmax_part_value = self.mpk.new_tensor(
@@ -2867,6 +2891,43 @@ class DeepSeekV3Builder(GraphBuilder):
             dtype=bfloat16,
             name=f"layer_{layer_idx}_ffn_full_megakernel_scratch",
             io_category="cuda_tensor")
+        # Skip-after-step-0 lever (MPK_DSV3_FFN_FOLD_TENSORINIT=1, default-OFF):
+        # make this per-step zero a runtime no-op on decode steps>=1 (step 0
+        # STILL zeroes, for the cudaMalloc garbage). The default build (env unset)
+        # is byte-identical — `skip_after_step0=False` emits the historical
+        # unguarded tensor_init.
+        #
+        # SAFE by the SAME first-principles argument that box-validated the
+        # ATTN-block megakernel's skip_after_step0 (builder ~L1768), because the
+        # FFN-full scratch is STRUCTURALLY IDENTICAL:
+        #   * the barrier head (count/gen) self-maintains — the sense/generation
+        #     grid_barrier (ffn_full_grid_barrier) has the LAST arriver reset
+        #     `count=0` (then __threadfence, then bump `gen`) every barrier, so
+        #     after step N's 3rd barrier count==0 for step N+1; `gen` is
+        #     change-based and never needs a reset. The MPK task-boundary
+        #     release/acquire queue protocol fences count=0 before step N+1's
+        #     first atomicAdd (Codex-verified via persistent_kernel.cuh queue).
+        #   * out_acc (the fp32 expert accumulator, [0,W2_N)) is FULLY zeroed
+        #     IN-KERNEL at Phase 0 every step (ffn_full_megakernel_sm100.cuh
+        #     ~L1241: `for(i=gtid; i<W2_N; ...) sc.out_acc[i]=0`), covering
+        #     inactive rows too, before any expert atomicAdd — so the final
+        #     `out[i]=out_acc[i]` bf16 convert never reads a stale row.
+        #   * every other global (rmsnorm_out/a_fp8/a_scale/logits/inter/y13/
+        #     i_fp8/i_scale/sg/si_fp8/si_scale) is written-before-read within the
+        #     kernel each step (verified: `inter`/`y13`/`sg` reads are bounded by
+        #     the count actually written this step; the tail is stale-but-unread).
+        # It also removes the concurrent per-step zero WORK the hopper launches;
+        # the no-op tensor_init task/event REMAINS in the graph (this is a body/
+        # write elimination on steps>=1, NOT a task-graph deletion). A true
+        # in-kernel fold of the barrier head is UNSAFE (chicken-and-egg: cannot
+        # use the grid barrier to order the zeroing of the barrier itself), so
+        # skip_after_step0 is the correct realization. Box-A/B validation
+        # (poison-fill + coherence-in-envelope) pending before default-ON.
+        _ffn_fold_tensorinit = (
+            os.environ.get("MPK_DSV3_FFN_FOLD_TENSORINIT") == "1")
+        # GATE-ONLY correctness harness: poison barrier_scratch data on steps>=1.
+        _ffn_fold_poison = (
+            os.environ.get("MPK_DSV3_FFN_FOLD_TENSORINIT_POISON") == "1")
         self.mpk.tensor_init_layer(
             target=barrier_scratch,
             dummy=self.x,
@@ -2874,6 +2935,8 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             dummy_input_map=(-1, -1, -1),
             target_input_map=(-1, -1, -1),
+            skip_after_step0=_ffn_fold_tensorinit,
+            poison_after_step0=_ffn_fold_poison,
         )
 
         # routed_scaling_factor: DSv3 default 2.5 (matches the chain's

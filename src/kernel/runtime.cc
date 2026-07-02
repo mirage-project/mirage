@@ -1438,6 +1438,15 @@ TaskGraphResult print_task_graph(
         }
         code.e("void *$ = nvshmem_malloc($);", desc.name, size);
         code.e("assert($ != nullptr);", desc.name);
+        // Candidate-2 per-tile AllReduce arrival flags MUST start zeroed:
+        // the flat-gate consumer waits `slot >= epoch` with epoch starting at
+        // 1, so a garbage slot could spuriously pass. nvshmem_malloc does NOT
+        // zero (unlike calloc), so zero-init the flags buffer here. Name
+        // convention: the builder names it "ar_pertile_flags".
+        if (std::string(desc.name).find("ar_pertile_flags") !=
+            std::string::npos) {
+          code.e("CUDA_CHECK(cudaMemset($, 0, $));", desc.name, size);
+        }
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }

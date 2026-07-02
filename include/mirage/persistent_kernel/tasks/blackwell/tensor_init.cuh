@@ -46,4 +46,30 @@ __device__ __forceinline__ void
   }
 } // tensor_init_zero_sm100_task_impl
 
+// GATE-ONLY (poison-fill correctness gate for the skip-after-step0 lever):
+// byte-fill the buffer with 0xff (=> NaN for fp32/bf16/fp16, toxic for fp8/int)
+// STARTING at POISON_OFFSET_BYTES (spare the barrier head [0,16)), leaving the
+// self-maintaining grid-barrier counters intact. Used INSTEAD of the step0 zero
+// on decode steps>=1 to prove every DATA region is overwritten-before-read: if
+// the buffer is truly self-maintaining, the poison is destroyed before use and
+// decode stays coherent; a read-before-write propagates NaN -> collapse.
+// TOTAL_BYTES / POISON_OFFSET_BYTES are byte counts; base is bf16-typed only
+// because the caller allocates the buffer as bf16 (bytes/2 elements).
+template <int TOTAL_BYTES, int POISON_OFFSET_BYTES>
+__device__ __forceinline__ void
+    tensor_init_poison_sm100_task_impl(void *target_ptr) {
+  static_assert(POISON_OFFSET_BYTES % 16 == 0,
+                "poison offset must be 16B aligned");
+  static_assert(TOTAL_BYTES % 16 == 0, "poison total must be 16B aligned");
+  uint8_t *base = static_cast<uint8_t *>(target_ptr);
+  int4 const poison = {(int)0xffffffff, (int)0xffffffff, (int)0xffffffff,
+                       (int)0xffffffff};
+  constexpr int VEC0 = POISON_OFFSET_BYTES / 16;
+  constexpr int VEC_TOTAL = TOTAL_BYTES / 16;
+  int4 *vp = reinterpret_cast<int4 *>(base);
+  for (int i = VEC0 + threadIdx.x; i < VEC_TOTAL; i += blockDim.x) {
+    vp[i] = poison;
+  }
+} // tensor_init_poison_sm100_task_impl
+
 } // namespace kernel

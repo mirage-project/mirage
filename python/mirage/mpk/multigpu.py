@@ -195,11 +195,17 @@ class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
     
     def register_tasks(self, mpk, tensors: Dict, grid_dim: Tuple,
                       block_dim: Tuple, params: List[int]) -> None:
-        assert len(params) in (2, 3), (
-            "params should contain [world_size, rank] plus optional gate mode")
+        assert len(params) in (2, 3, 4), (
+            "params should contain [world_size, rank] plus optional gate mode "
+            "(params[2]) and optional per-tile mode flag (params[3])")
         input_tensor = tensors.pop("input")
         output_tensor = tensors.pop("output")
         residual_tensor = tensors.pop("residual", None)
+        # Candidate-2: symmetric per-tile arrival-flag buffer (uint64 slots).
+        # NOT partitioned per-CTA — every CTA needs the WHOLE flags buffer
+        # (it indexes by [cta, pe]), so input_map is broadcast (-1,-1,-1),
+        # offset -1.
+        pertile_flags = tensors.pop("pertile_flags", None)
         # if len(tensors) > 0:
         #     print(f"{self} Unused tensors: {tensors.keys()}")
 
@@ -208,7 +214,29 @@ class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
         if residual_tensor is not None:
             tb_graph.new_input(residual_tensor, (1, -1, -1), -1, True)
         tb_graph.new_input(output_tensor, (1, -1, -1), -1, True)
-        if residual_tensor is None:
+        # Flags input goes AFTER the output so the C++ register (which splits
+        # inputs vs the single output by count) treats it as the LAST reduction
+        # input. Order of tb_graph.new_input for inputs must be:
+        #   [reduce_input, (residual), pertile_flags, output]
+        # so we insert the flags input BEFORE the output. Re-do the ordering:
+        ordered_inputs = [input_tensor]
+        if residual_tensor is not None:
+            ordered_inputs.append(residual_tensor)
+        if pertile_flags is not None:
+            # rebuild tb_graph with the flags input placed before output
+            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            tb_graph.new_input(input_tensor, (1, -1, -1), -1, True)
+            if residual_tensor is not None:
+                tb_graph.new_input(residual_tensor, (1, -1, -1), -1, True)
+            tb_graph.new_input(pertile_flags, (-1, -1, -1), -1, True)
+            tb_graph.new_input(output_tensor, (1, -1, -1), -1, True)
+            ordered_inputs.append(pertile_flags)
+        if pertile_flags is not None:
+            mpk.kn_graph.customized(ordered_inputs + [output_tensor], tb_graph)
+            task_name = ("nvshmem_tile_allreduce_pertile_with_residual"
+                         if residual_tensor is not None
+                         else "nvshmem_tile_allreduce_pertile")
+        elif residual_tensor is None:
             mpk.kn_graph.customized([input_tensor, output_tensor], tb_graph)
             task_name = "nvshmem_tile_allreduce"
         else:
